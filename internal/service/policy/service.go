@@ -201,8 +201,20 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 			return CompileResult{}, fmt.Errorf("prepare signer: %w", err)
 		}
 	}
+	// Parse the policy graph once for the whole Compile. Each
+	// target re-uses the typed result via CompileTarget; previously
+	// perTargetRules called ParseGraph inside the loop, doing 4×
+	// the JSON unmarshal + 4× the schema validation per compile.
+	// Devin Review #3312781265 flagged this. The typed result is
+	// nil-tolerant downstream: if the graph is opaque (legacy
+	// PR6-era bytes that don't satisfy the typed schema), we fall
+	// back to the verbatim-rules path for every target.
+	var typed *Graph
+	if parsed, parseErr := ParseGraph(graph.Graph); parseErr == nil {
+		typed = &parsed
+	}
 	for _, target := range allTargets {
-		payload, err := encodeBundlePayload(target, graph, compiledAt)
+		payload, err := encodeBundlePayloadFor(target, graph, typed, compiledAt)
 		if err != nil {
 			return CompileResult{}, fmt.Errorf("encode %s bundle: %w", target, err)
 		}
@@ -284,7 +296,26 @@ type bundlePayload struct {
 // behaviour and forward the verbatim `rules` sub-document so
 // receivers still see a real bundle.
 func encodeBundlePayload(target repository.PolicyBundleTarget, g repository.PolicyGraph, compiledAt time.Time) ([]byte, error) {
-	rules, defaultAction := perTargetRules(target, g.Graph)
+	// Single-shot helper: parse the graph here so external callers
+	// (today: the determinism test in compile_test.go) get the same
+	// bytes Compile would produce. Compile itself uses
+	// encodeBundlePayloadFor with a graph it has already parsed
+	// once for the whole compile run.
+	var typed *Graph
+	if parsed, err := ParseGraph(g.Graph); err == nil {
+		typed = &parsed
+	}
+	return encodeBundlePayloadFor(target, g, typed, compiledAt)
+}
+
+// encodeBundlePayloadFor renders a deterministic, MessagePack-encoded
+// bundle. typed may be nil — when it is, the function falls back to
+// the verbatim-rules path so opaque legacy graphs still produce a
+// real bundle. Compile parses the graph once and threads the typed
+// result through every per-target call, replacing the 4× ParseGraph
+// per Compile that Devin Review #3312781265 flagged.
+func encodeBundlePayloadFor(target repository.PolicyBundleTarget, g repository.PolicyGraph, typed *Graph, compiledAt time.Time) ([]byte, error) {
+	rules, defaultAction := perTargetRulesFromParsed(target, g.Graph, typed)
 	p := bundlePayload{
 		SchemaVersion: 1,
 		Target:        string(target),
@@ -303,21 +334,21 @@ func encodeBundlePayload(target repository.PolicyBundleTarget, g repository.Poli
 	return msgpack.Marshal(&p)
 }
 
-// perTargetRules computes the canonical (rules, default_action)
-// pair for a given target. The typed compiler is preferred; the
-// fallback path keeps PR6's bytes-faithful behaviour so any
-// pre-existing opaque graph still compiles to a real bundle.
-func perTargetRules(target repository.PolicyBundleTarget, raw json.RawMessage) (json.RawMessage, string) {
-	g, err := ParseGraph(raw)
-	if err != nil {
+// perTargetRulesFromParsed is the post-refactor per-target helper:
+// when typed != nil it uses the already-parsed graph (no JSON work);
+// when typed == nil it falls back to the verbatim-rules path. The
+// fallback is the same shape as the pre-refactor perTargetRules
+// behaviour for an unparseable graph.
+func perTargetRulesFromParsed(target repository.PolicyBundleTarget, raw json.RawMessage, typed *Graph) (json.RawMessage, string) {
+	if typed == nil {
 		return normaliseRules(raw), extractDefaultAction(raw)
 	}
-	selected := g.CompileTarget(target)
+	selected := typed.CompileTarget(target)
 	rules, err := EncodeRules(selected)
 	if err != nil {
-		return normaliseRules(raw), string(g.DefaultAction)
+		return normaliseRules(raw), string(typed.DefaultAction)
 	}
-	return rules, string(g.DefaultAction)
+	return rules, string(typed.DefaultAction)
 }
 
 // normaliseRules canonicalises the JSON sub-document under "rules"
