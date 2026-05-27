@@ -150,14 +150,24 @@ type NATS struct {
 
 // Postgres carries database connection config.
 type Postgres struct {
-	Host            string
-	Port            int
-	User            string
-	Password        string
-	Database        string
-	SSLMode         string
-	MaxOpenConns    int
-	MaxIdleConns    int
+	Host         string
+	Port         int
+	User         string
+	Password     string
+	Database     string
+	SSLMode      string
+	MaxOpenConns int
+	// MinConns is the **floor** on the pgxpool connection pool — the
+	// pool eagerly creates and maintains at least this many
+	// connections in the background. This is **NOT** the
+	// database/sql `MaxIdleConns` ceiling: pgxpool does not expose an
+	// idle-connection ceiling, instead retiring excess connections
+	// after `MaxConnIdleTime`. We deliberately name the field
+	// `MinConns` and the env var `PG_MIN_CONNS` to match the pgx
+	// semantic so an operator setting `PG_MIN_CONNS=5` gets the
+	// floor they're asking for, not the inverted ceiling implied by
+	// the older `PG_MAX_IDLE_CONNS` name.
+	MinConns        int
 	ConnMaxLifetime time.Duration
 	ConnTimeout     time.Duration
 	// AppRole is the Postgres role the application connects as
@@ -445,7 +455,7 @@ func Load() (Config, error) {
 		{"HTTP_PORT", 8080, &cfg.HTTP.Port},
 		{"PG_PORT", 5432, &cfg.Postgres.Port},
 		{"PG_MAX_OPEN_CONNS", 20, &cfg.Postgres.MaxOpenConns},
-		{"PG_MAX_IDLE_CONNS", 5, &cfg.Postgres.MaxIdleConns},
+		{"PG_MIN_CONNS", 2, &cfg.Postgres.MinConns},
 		{"NATS_MAX_RECONNECTS", -1, &cfg.NATS.MaxReconnects},
 		{"NATS_REPLICAS", 1, &cfg.NATS.Replicas},
 		{"NATS_FETCH_BATCH_SIZE", 50, &cfg.NATS.FetchBatchSize},
@@ -614,8 +624,11 @@ func (c Config) validate() error {
 	if c.Postgres.MaxOpenConns < 1 || c.Postgres.MaxOpenConns > 10_000 {
 		return fmt.Errorf("PG_MAX_OPEN_CONNS out of range [1,10000]: %d", c.Postgres.MaxOpenConns)
 	}
-	if c.Postgres.MaxIdleConns < 0 || c.Postgres.MaxIdleConns > c.Postgres.MaxOpenConns {
-		return fmt.Errorf("PG_MAX_IDLE_CONNS out of range [0,%d]: %d", c.Postgres.MaxOpenConns, c.Postgres.MaxIdleConns)
+	// PG_MIN_CONNS is the floor on idle connections eagerly
+	// maintained by pgxpool. It must be in [0, PG_MAX_OPEN_CONNS]:
+	// MinConns > MaxConns would deadlock the pool acquire loop.
+	if c.Postgres.MinConns < 0 || c.Postgres.MinConns > c.Postgres.MaxOpenConns {
+		return fmt.Errorf("PG_MIN_CONNS out of range [0,%d]: %d", c.Postgres.MaxOpenConns, c.Postgres.MinConns)
 	}
 	switch c.Postgres.SSLMode {
 	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
@@ -628,6 +641,26 @@ func (c Config) validate() error {
 	if c.NATS.PublishRetryAttempts < 0 {
 		return fmt.Errorf("NATS_PUBLISH_RETRY_ATTEMPTS must be >= 0, got %d", c.NATS.PublishRetryAttempts)
 	}
+	// NATS_CONNECT_TIMEOUT is wired to nats.Timeout() for the initial
+	// dial. The nats.go client treats 0 as "no deadline" — the dial
+	// will block forever waiting on a flapping server — so we reject
+	// it here to match the operator's almost-certain intent.
+	if c.NATS.ConnectTimeout <= 0 {
+		return fmt.Errorf("NATS_CONNECT_TIMEOUT must be > 0, got %s", c.NATS.ConnectTimeout)
+	}
+	// NATS_REQUEST_TIMEOUT is the per-request deadline used by
+	// nats.Conn.RequestWithContext and JetStream Publish opts. A zero
+	// value gives an infinite request deadline; same reason as above.
+	if c.NATS.RequestTimeout <= 0 {
+		return fmt.Errorf("NATS_REQUEST_TIMEOUT must be > 0, got %s", c.NATS.RequestTimeout)
+	}
+	// NATS_DEDUP_WINDOW: zero is explicitly NOT rejected. The
+	// JetStream documentation defines `Duplicates: 0` as "dedup
+	// disabled" and that is a legitimate operator opt-out (e.g.
+	// when an at-least-once consumer is paired with idempotent
+	// downstream writes). We document the semantics in
+	// .env.example so an operator who picks 0 knows what they're
+	// turning off.
 	switch c.NATS.Storage {
 	case "file", "memory":
 	default:
@@ -649,6 +682,22 @@ func (c Config) validate() error {
 	}
 	if c.Webhook.MaxDelay < c.Webhook.InitialDelay {
 		return fmt.Errorf("WEBHOOK_MAX_DELAY (%s) must be >= WEBHOOK_INITIAL_DELAY (%s)", c.Webhook.MaxDelay, c.Webhook.InitialDelay)
+	}
+	// WEBHOOK_DELIVERY_TIMEOUT is mapped to the per-attempt
+	// http.Client.Timeout. Go's net/http treats 0 as "no timeout",
+	// which against an unresponsive subscriber would pin a worker
+	// goroutine + connection indefinitely and exhaust the delivery
+	// pool. Reject 0 explicitly so the strict parser's 0s acceptance
+	// can't slip through.
+	if c.Webhook.DeliveryTimeout <= 0 {
+		return fmt.Errorf("WEBHOOK_DELIVERY_TIMEOUT must be > 0, got %s", c.Webhook.DeliveryTimeout)
+	}
+	// AUTH_ACCESS_TOKEN_TTL <= 0 makes every issued token already
+	// expired, which would silently lock every operator out of the
+	// console. Forbid here so the strict parser's lenient acceptance
+	// of "0s" is caught at boot rather than at first sign-in.
+	if c.Auth.AccessTokenTTL <= 0 {
+		return fmt.Errorf("AUTH_ACCESS_TOKEN_TTL must be > 0, got %s", c.Auth.AccessTokenTTL)
 	}
 	if c.Auth.JWTSecret == "" && c.Environment.IsProduction() {
 		return errors.New("AUTH_JWT_SECRET must be set in production environments")

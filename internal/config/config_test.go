@@ -47,7 +47,7 @@ func clearAll(t *testing.T) {
 		"NATS_DEDUP_WINDOW", "NATS_REPLICAS", "NATS_STORAGE",
 		"NATS_FETCH_BATCH_SIZE", "NATS_FETCH_MAX_WAIT", "NATS_STREAM_PREFIX",
 		"PG_HOST", "PG_PORT", "PG_USER", "PG_PASSWORD", "PG_DATABASE", "PG_SSLMODE",
-		"PG_MAX_OPEN_CONNS", "PG_MAX_IDLE_CONNS", "PG_CONN_MAX_LIFETIME", "PG_CONN_TIMEOUT", "PG_APP_ROLE",
+		"PG_MAX_OPEN_CONNS", "PG_MIN_CONNS", "PG_CONN_MAX_LIFETIME", "PG_CONN_TIMEOUT", "PG_APP_ROLE",
 		"RATE_LIMIT_ENABLED", "RATE_LIMIT_RATE", "RATE_LIMIT_BURST",
 		"RATE_LIMIT_CLEANUP_INTERVAL", "RATE_LIMIT_IDLE_TTL", "RATE_LIMIT_TRUSTED_PROXIES",
 		"CORS_ALLOWED_ORIGINS", "CORS_ALLOWED_METHODS", "CORS_ALLOWED_HEADERS", "CORS_MAX_AGE",
@@ -551,10 +551,10 @@ func TestPostgresPoolBounds(t *testing.T) {
 	clearAll(t)
 	withEnv(t, map[string]string{
 		"PG_MAX_OPEN_CONNS": "5",
-		"PG_MAX_IDLE_CONNS": "10",
+		"PG_MIN_CONNS":      "10",
 	})
 	if _, err := Load(); err == nil {
-		t.Fatal("expected error when PG_MAX_IDLE_CONNS > PG_MAX_OPEN_CONNS")
+		t.Fatal("expected error when PG_MIN_CONNS > PG_MAX_OPEN_CONNS")
 	}
 
 	clearAll(t)
@@ -626,7 +626,7 @@ func TestStrictNumericRejectsTypo(t *testing.T) {
 		{"NATS_REPLICAS", "two"},
 		{"RATE_LIMIT_BURST", "ten"},
 		{"WEBHOOK_MAX_RETRIES", "six"},
-		{"PG_MAX_IDLE_CONNS", "five"},
+		{"PG_MIN_CONNS", "five"},
 		{"HTTP_SHUTDOWN_TIMEOUT", "10seconds"},
 		{"NATS_REQUEST_TIMEOUT", "5sec"},
 		{"NATS_CONNECT_TIMEOUT", "five_seconds"},
@@ -815,5 +815,55 @@ func TestValidateRejectsZeroPGConnTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "PG_CONN_TIMEOUT") {
 		t.Errorf("error should mention PG_CONN_TIMEOUT: %v", err)
+	}
+}
+
+// TestValidateRejectsZeroTimeouts checks that the cluster of
+// timeout-style durations rejects `0s` at boot. Each of these maps to
+// a third-party client API (nats.Timeout, http.Client.Timeout, JWT TTL)
+// where 0 is silently treated as "no deadline" / "already expired",
+// which is operationally hostile. The strict env parser accepts "0s"
+// without error, so validate() is the only line of defence.
+func TestValidateRejectsZeroTimeouts(t *testing.T) {
+	cases := []struct {
+		name   string
+		envKey string
+		want   string
+	}{
+		{"NATS_CONNECT_TIMEOUT", "NATS_CONNECT_TIMEOUT", "NATS_CONNECT_TIMEOUT"},
+		{"NATS_REQUEST_TIMEOUT", "NATS_REQUEST_TIMEOUT", "NATS_REQUEST_TIMEOUT"},
+		{"WEBHOOK_DELIVERY_TIMEOUT", "WEBHOOK_DELIVERY_TIMEOUT", "WEBHOOK_DELIVERY_TIMEOUT"},
+		{"AUTH_ACCESS_TOKEN_TTL", "AUTH_ACCESS_TOKEN_TTL", "AUTH_ACCESS_TOKEN_TTL"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			clearAll(t)
+			withEnv(t, map[string]string{tc.envKey: "0s"})
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected validation error for %s=0s", tc.envKey)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error should mention %s: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// TestValidateAcceptsZeroNATSDedupWindow documents the intentional
+// asymmetry with the other NATS durations: NATS_DEDUP_WINDOW=0 disables
+// JetStream's per-stream deduplication entirely, which is a legitimate
+// operator opt-out when the downstream consumer is idempotent. We
+// keep this test to lock in that we do NOT regress into rejecting 0.
+func TestValidateAcceptsZeroNATSDedupWindow(t *testing.T) {
+	clearAll(t)
+	withEnv(t, map[string]string{"NATS_DEDUP_WINDOW": "0s"})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with NATS_DEDUP_WINDOW=0s should succeed, got %v", err)
+	}
+	if cfg.NATS.DedupWindow != 0 {
+		t.Errorf("NATS.DedupWindow = %v, want 0", cfg.NATS.DedupWindow)
 	}
 }

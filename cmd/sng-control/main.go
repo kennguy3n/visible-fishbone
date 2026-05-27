@@ -150,8 +150,14 @@ func openPostgres(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres DSN: %w", err)
 	}
+	// pgxpool has no `MaxIdleConns` ceiling (excess idle connections
+	// are retired by MaxConnIdleTime); the closest knob is MinConns
+	// which is a *floor* the pool eagerly maintains. Wire our
+	// MinConns config field straight through — the field name and
+	// the env var (PG_MIN_CONNS) match the pgx semantic so the
+	// operator's intent and the pool's behaviour can't drift.
 	poolCfg.MaxConns = int32(cfg.Postgres.MaxOpenConns)
-	poolCfg.MinConns = int32(cfg.Postgres.MaxIdleConns)
+	poolCfg.MinConns = int32(cfg.Postgres.MinConns)
 	poolCfg.MaxConnLifetime = cfg.Postgres.ConnMaxLifetime
 	poolCfg.ConnConfig.ConnectTimeout = cfg.Postgres.ConnTimeout
 
