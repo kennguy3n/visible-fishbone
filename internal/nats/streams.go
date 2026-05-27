@@ -22,8 +22,18 @@ import (
 )
 
 // Stream suffixes. The final stream name is
-// `<StreamPrefix>_<suffix>` (e.g. "SNG_TELEMETRY") so multiple SNG
-// control planes can share a NATS cluster without colliding.
+// `<StreamPrefix>_<suffix>` (e.g. "SNG_TELEMETRY").
+//
+// IMPORTANT: StreamPrefix isolates *stream names* but NOT subject
+// namespaces — the subject patterns in DefaultStreams
+// (`sng.*.telemetry.>` etc.) are hard-coded, not parameterised by
+// prefix. Two SNG control planes pointed at the same NATS account
+// would both attempt to claim `sng.*.telemetry.>` and JetStream
+// would reject the second because subject sets are not allowed to
+// overlap across streams. To run multiple control planes on the
+// same NATS infrastructure, deploy each in its own JetStream
+// *domain* (or NATS account); StreamPrefix is then only a
+// readability aid for distinguishing stream names across domains.
 const (
 	StreamSuffixTelemetry = "TELEMETRY"
 	StreamSuffixPolicy    = "POLICY"

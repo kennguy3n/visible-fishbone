@@ -272,3 +272,262 @@ func TestService_TransientWriteFailureIsRetried(t *testing.T) {
 		t.Errorf("expected at least 1 HotWriteFails (the simulated failure), got %d", m.HotWriteFails)
 	}
 }
+
+// recordingDLQ implements telemetry.DLQPublisher and records every
+// publish for assertion. Used to verify undecodable payloads are
+// preserved in the DLQ.
+type recordingDLQ struct {
+	mu      sync.Mutex
+	calls   []dlqCall
+	failNTH int
+	count   atomic.Int32
+}
+
+type dlqCall struct {
+	subject  string
+	data     []byte
+	headers  map[string]string
+	delivery uint64
+	cause    string
+}
+
+func (r *recordingDLQ) PublishToDLQ(
+	_ context.Context,
+	subject string,
+	data []byte,
+	headers map[string]string,
+	delivery uint64,
+	cause error,
+) error {
+	n := r.count.Add(1)
+	if r.failNTH > 0 && int(n) <= r.failNTH {
+		return errors.New("simulated DLQ publish failure")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	copyData := append([]byte(nil), data...)
+	copyHdr := make(map[string]string, len(headers))
+	for k, v := range headers {
+		copyHdr[k] = v
+	}
+	r.calls = append(r.calls, dlqCall{
+		subject: subject, data: copyData, headers: copyHdr,
+		delivery: delivery, cause: cause.Error(),
+	})
+	return nil
+}
+
+func (r *recordingDLQ) Snapshot() []dlqCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]dlqCall, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
+
+// TestService_UndecodablePayloadRoutedToDLQ is the regression test
+// for the PR5 review finding that observed msg.Term() silently
+// dropping bad payloads instead of routing them to the DLQ stream.
+// The fix is the WithDLQ + routeBadPayloadToDLQ path. This test:
+//
+//  1. Wires a recordingDLQ onto the service.
+//  2. Publishes a deliberately-malformed payload (not msgpack) onto
+//     the telemetry subject via a raw nats.Conn publish so it skips
+//     the typed publisher's schema validation.
+//  3. Verifies the DLQ publisher received the exact raw bytes +
+//     subject + decode error string.
+//  4. Verifies the hot writer never saw the bad event (no decoded
+//     envelope to write).
+//  5. Verifies the DLQPublished counter is incremented.
+func TestService_UndecodablePayloadRoutedToDLQ(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	svc, err := telemetry.New(js, cfg,
+		telemetry.Config{Durable: "tlm-dlq", DedupRingSize: 16},
+		hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dlq := &recordingDLQ{}
+	svc.WithDLQ(dlq)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Publish raw garbage to the telemetry subject — bypasses the
+	// typed publisher and forces the consumer's decode path to
+	// fail. We go through the publisher's Publish() not
+	// PublishEnvelope so no schema validation happens upstream.
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	garbage := []byte{0xff, 0xfe, 0xfd, 0xfc, 0xfb}
+	tenantID := uuid.New().String()
+	subject := "sng." + tenantID + ".telemetry.garbage"
+	if err := pub.Publish(ctx, subject, garbage, sngnats.PublishOptions{
+		MessageID: "bad-" + uuid.NewString(),
+		Headers: map[string]string{
+			sngnats.HeaderTenantID:   tenantID,
+			sngnats.HeaderEventClass: "garbage",
+			sngnats.HeaderEnqueuedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		},
+	}); err != nil {
+		t.Fatalf("publish garbage: %v", err)
+	}
+
+	// Wait for the consumer to receive + dispatch the bad payload.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(dlq.Snapshot()) == 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	_ = svc.Stop(stopCtx)
+
+	calls := dlq.Snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("DLQ publisher received %d calls, want 1 (bad payloads must be preserved)", len(calls))
+	}
+	call := calls[0]
+	if call.subject != subject {
+		t.Errorf("DLQ origin subject = %q, want %q", call.subject, subject)
+	}
+	if string(call.data) != string(garbage) {
+		t.Errorf("DLQ payload bytes mismatch: got %x, want %x", call.data, garbage)
+	}
+	if call.cause == "" {
+		t.Errorf("DLQ cause must be non-empty (decoder error string)")
+	}
+	if call.headers[sngnats.HeaderTenantID] != tenantID {
+		t.Errorf("DLQ tenant header lost: got %q, want %q", call.headers[sngnats.HeaderTenantID], tenantID)
+	}
+	if got := len(hot.Snapshot()); got != 0 {
+		t.Errorf("hot writer must NOT receive bad payloads, got %d events", got)
+	}
+	m := svc.MetricsSnapshot()
+	if m.DecodeErrors < 1 {
+		t.Errorf("expected DecodeErrors >= 1, got %d", m.DecodeErrors)
+	}
+	if m.DLQPublished != 1 {
+		t.Errorf("expected DLQPublished = 1, got %d", m.DLQPublished)
+	}
+	if m.DLQPublishFail != 0 {
+		t.Errorf("expected DLQPublishFail = 0, got %d", m.DLQPublishFail)
+	}
+}
+
+// TestService_UndecodablePayloadDegradedModeWhenNoDLQ verifies that
+// when no DLQ publisher is wired, the service still terminates bad
+// payloads (so JetStream doesn't redeliver them forever) and records
+// the DecodeErrors counter, but DLQPublished stays at 0 — this is
+// the explicit "degraded mode" path that the WithDLQ docstring
+// warns about.
+func TestService_UndecodablePayloadDegradedModeWhenNoDLQ(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	svc, err := telemetry.New(js, cfg,
+		telemetry.Config{Durable: "tlm-dlq-degraded", DedupRingSize: 16},
+		hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	// Intentionally do NOT call WithDLQ.
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	garbage := []byte{0x00, 0x01, 0x02}
+	subject := "sng." + uuid.NewString() + ".telemetry.garbage"
+	if err := pub.Publish(ctx, subject, garbage, sngnats.PublishOptions{
+		MessageID: "bad-degraded-" + uuid.NewString(),
+	}); err != nil {
+		t.Fatalf("publish garbage: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if svc.MetricsSnapshot().DecodeErrors >= 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	_ = svc.Stop(stopCtx)
+
+	m := svc.MetricsSnapshot()
+	if m.DecodeErrors < 1 {
+		t.Errorf("expected DecodeErrors >= 1, got %d", m.DecodeErrors)
+	}
+	if m.DLQPublished != 0 {
+		t.Errorf("expected DLQPublished = 0 in degraded mode, got %d", m.DLQPublished)
+	}
+	if m.Nacked < 1 {
+		t.Errorf("expected Nacked >= 1, got %d", m.Nacked)
+	}
+}
+
+// TestService_DLQPublishFailureCounted verifies the metric is
+// incremented when the DLQ publish itself fails, and the original
+// message is still terminated (we don't want to spin retrying the
+// DLQ when it's unhealthy).
+func TestService_DLQPublishFailureCounted(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	svc, err := telemetry.New(js, cfg,
+		telemetry.Config{Durable: "tlm-dlq-fail", DedupRingSize: 16},
+		hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	// failNTH=999 — every publish fails for the duration of the test.
+	dlq := &recordingDLQ{failNTH: 999}
+	svc.WithDLQ(dlq)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	subject := "sng." + uuid.NewString() + ".telemetry.garbage"
+	if err := pub.Publish(ctx, subject, []byte{0xde, 0xad}, sngnats.PublishOptions{
+		MessageID: "bad-fail-" + uuid.NewString(),
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if svc.MetricsSnapshot().DLQPublishFail >= 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	_ = svc.Stop(stopCtx)
+
+	m := svc.MetricsSnapshot()
+	if m.DLQPublishFail < 1 {
+		t.Errorf("expected DLQPublishFail >= 1, got %d", m.DLQPublishFail)
+	}
+	if m.DLQPublished != 0 {
+		t.Errorf("expected DLQPublished = 0 when every publish fails, got %d", m.DLQPublished)
+	}
+}

@@ -142,10 +142,17 @@ type NATS struct {
 	Storage              string // "file" or "memory"
 	FetchBatchSize       int
 	FetchMaxWait         time.Duration
-	// StreamPrefix is prepended to every JetStream stream name so
-	// multiple SNG control planes can share a NATS cluster without
-	// colliding (useful in shared-cell deployments). Defaults to
-	// "SNG".
+	// StreamPrefix is prepended to every JetStream stream name
+	// (e.g. "SNG_TELEMETRY"). It isolates *stream names* only;
+	// subject patterns (`sng.*.telemetry.>`, etc.) are hard-coded
+	// and NOT parameterised by prefix. To run multiple SNG control
+	// planes on the same NATS infrastructure, deploy each in its
+	// own JetStream domain or NATS account — StreamPrefix is then
+	// a readability aid for telling stream names apart across
+	// domains, not a multi-tenancy primitive on a shared account.
+	// See `nats.DefaultStreams` for the exact subject patterns and
+	// why overlap rejection in JetStream makes single-account
+	// sharing impractical. Defaults to "SNG".
 	StreamPrefix string
 }
 
@@ -666,8 +673,18 @@ func (c Config) validate() error {
 	if c.NATS.URL == "" {
 		return errors.New("NATS_URL must be set")
 	}
-	if c.NATS.PublishRetryAttempts < 0 {
-		return fmt.Errorf("NATS_PUBLISH_RETRY_ATTEMPTS must be >= 0, got %d", c.NATS.PublishRetryAttempts)
+	// NATS_PUBLISH_RETRY_ATTEMPTS is the total publish attempt budget
+	// (first try + retries). The publisher's fallback chain
+	// (opts.MaxAttempts → opts.MaxRetries → cfg.PublishRetryAttempts →
+	// hard-coded 3) uses `<= 0` as the "unset, fall through" sentinel
+	// at every level. Allowing 0 here would mean operators who
+	// explicitly set 0 to express "single attempt, no retries" would
+	// silently get the hard-coded default of 3 instead — their
+	// configuration ignored. Require >= 1 so the validator and the
+	// publisher agree on what "set" means. Operators wanting a single
+	// attempt set this to 1.
+	if c.NATS.PublishRetryAttempts < 1 {
+		return fmt.Errorf("NATS_PUBLISH_RETRY_ATTEMPTS must be >= 1 (set to 1 for a single attempt with no retries), got %d", c.NATS.PublishRetryAttempts)
 	}
 	// NATS_CONNECT_TIMEOUT is wired to nats.Timeout() for the initial
 	// dial. The nats.go client treats 0 as "no deadline" — the dial

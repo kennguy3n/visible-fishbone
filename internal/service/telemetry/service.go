@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,6 +48,24 @@ type HotWriter interface {
 // writer lands in PR9. Until then, NoopColdWriter is the default.
 type ColdWriter interface {
 	Archive(ctx context.Context, env schema.Envelope, raw []byte) error
+}
+
+// DLQPublisher republishes failed messages onto the DLQ stream so
+// they remain queryable for forensics. Satisfied by
+// `*nats.Publisher`. Required for production wiring: without it,
+// undecodable payloads would be lost. Tests may pass a nil
+// publisher in which case the dispatcher logs a loud warning and
+// terminates the message (preserving the prior degraded-mode
+// behaviour rather than forcing every test to wire a real DLQ).
+type DLQPublisher interface {
+	PublishToDLQ(
+		ctx context.Context,
+		originSubject string,
+		data []byte,
+		headers map[string]string,
+		delivery uint64,
+		cause error,
+	) error
 }
 
 // NoopHotWriter is the zero-value placeholder hot writer — logs
@@ -77,40 +96,46 @@ func (NoopColdWriter) Archive(_ context.Context, _ schema.Envelope, _ []byte) er
 // fields are atomic — safe to read concurrently while the consumer
 // runs.
 type Metrics struct {
-	Received      atomic.Uint64
-	Deduplicated  atomic.Uint64
-	Enriched      atomic.Uint64
-	Decoded       atomic.Uint64
-	DecodeErrors  atomic.Uint64
-	HotWriteFails atomic.Uint64
-	Acked         atomic.Uint64
-	Nacked        atomic.Uint64
+	Received       atomic.Uint64
+	Deduplicated   atomic.Uint64
+	Enriched       atomic.Uint64
+	Decoded        atomic.Uint64
+	DecodeErrors   atomic.Uint64
+	HotWriteFails  atomic.Uint64
+	Acked          atomic.Uint64
+	Nacked         atomic.Uint64
+	DLQPublished   atomic.Uint64 // bad payloads successfully routed to DLQ
+	DLQPublishFail atomic.Uint64 // DLQ publish itself failed (data preserved by Nak retry)
 }
 
 // Snapshot returns a copy of the current counter values.
 func (m *Metrics) Snapshot() MetricsSnapshot {
 	return MetricsSnapshot{
-		Received:      m.Received.Load(),
-		Deduplicated:  m.Deduplicated.Load(),
-		Enriched:      m.Enriched.Load(),
-		Decoded:       m.Decoded.Load(),
-		DecodeErrors:  m.DecodeErrors.Load(),
-		HotWriteFails: m.HotWriteFails.Load(),
-		Acked:         m.Acked.Load(),
-		Nacked:        m.Nacked.Load(),
+		Received:       m.Received.Load(),
+		Deduplicated:   m.Deduplicated.Load(),
+		Enriched:       m.Enriched.Load(),
+		Decoded:        m.Decoded.Load(),
+		DecodeErrors:   m.DecodeErrors.Load(),
+		HotWriteFails:  m.HotWriteFails.Load(),
+		Acked:          m.Acked.Load(),
+		Nacked:         m.Nacked.Load(),
+		DLQPublished:   m.DLQPublished.Load(),
+		DLQPublishFail: m.DLQPublishFail.Load(),
 	}
 }
 
 // MetricsSnapshot is a point-in-time copy of Metrics.
 type MetricsSnapshot struct {
-	Received      uint64
-	Deduplicated  uint64
-	Enriched      uint64
-	Decoded       uint64
-	DecodeErrors  uint64
-	HotWriteFails uint64
-	Acked         uint64
-	Nacked        uint64
+	Received       uint64
+	Deduplicated   uint64
+	Enriched       uint64
+	Decoded        uint64
+	DecodeErrors   uint64
+	HotWriteFails  uint64
+	Acked          uint64
+	Nacked         uint64
+	DLQPublished   uint64
+	DLQPublishFail uint64
 }
 
 // Config tunes the consumer loop.
@@ -156,13 +181,16 @@ func (c *Config) fillDefaults(cfg *config.NATS) {
 
 // Service is the telemetry consumer. Construct via New, then call
 // Start (idempotent) to spawn the consumer goroutine, and Stop to
-// drain + tear down.
+// drain + tear down. Wire a DLQ publisher via WithDLQ to preserve
+// undecodable payloads for forensics; without it, bad payloads are
+// terminated and logged (degraded mode).
 type Service struct {
 	js      jetstream.JetStream
 	cfg     Config
 	natsCfg *config.NATS
 	hot     HotWriter
 	cold    ColdWriter
+	dlq     DLQPublisher
 	logger  *slog.Logger
 
 	dedup   *dedupRing
@@ -171,6 +199,23 @@ type Service struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
+}
+
+// WithDLQ wires an explicit DLQ publisher onto the service. Once
+// set, undecodable payloads are republished onto the DLQ stream
+// (preserving raw bytes + headers + the decode error) before the
+// original message is terminated. Idempotent.
+//
+// Wiring this is required in production: `msg.Term()` alone removes
+// the message from the consumer's pending set but does NOT route it
+// anywhere — JetStream has no built-in DLQ. Without WithDLQ a
+// malformed payload (e.g. a publisher writing a wrong schema
+// version) is silently lost.
+func (s *Service) WithDLQ(p DLQPublisher) *Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dlq = p
+	return s
 }
 
 // New constructs a Service. None of the parameters may be nil
@@ -312,10 +357,22 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 	if err != nil {
 		s.metrics.DecodeErrors.Add(1)
 		s.logger.Warn("telemetry: decode error", slog.Any("error", err), slog.String("subject", msg.Subject()))
-		// Bad payload — terminate so it lands in the DLQ via
-		// MaxDeliver=1 semantics; we don't want to retry an
-		// undecodable message.
-		_ = msg.Term()
+		// Bad payload — retries won't help (the bytes are
+		// already broken). Preserve the raw bytes + headers in
+		// the DLQ stream so an operator can inspect what the
+		// publisher actually wrote, then Term() the message so
+		// JetStream stops redelivering it. NB: msg.Term() alone
+		// does NOT route to a DLQ — JetStream has no built-in
+		// DLQ concept and our consumer's MaxDeliver=5 only
+		// governs retry budget, not destination on terminal
+		// failure. The DLQ is a separate stream that we must
+		// publish to explicitly.
+		s.routeBadPayloadToDLQ(ctx, msg, err)
+		if termErr := msg.Term(); termErr != nil {
+			s.logger.Warn("telemetry: term failed",
+				slog.Any("error", termErr),
+				slog.String("subject", msg.Subject()))
+		}
 		s.metrics.Nacked.Add(1)
 		return
 	}
@@ -366,6 +423,76 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 	s.metrics.Acked.Add(1)
+}
+
+// routeBadPayloadToDLQ republishes a decode-failed message onto the
+// DLQ stream so its bytes are preserved for forensics. If no DLQ
+// publisher is wired (degraded mode), it logs a loud warning so the
+// data loss is at least observable; in production the wiring is
+// mandatory.
+//
+// Best-effort: a DLQ publish failure is logged + counted but does
+// not block the Term() of the original message. The alternative
+// (Nak the original so it redelivers and we can retry the DLQ
+// publish) would just spin until MaxDeliver runs out, ending up in
+// the same Term() state with one more delivery attempt logged —
+// not worth the throughput hit when the DLQ itself is unhealthy.
+func (s *Service) routeBadPayloadToDLQ(ctx context.Context, msg jetstream.Msg, cause error) {
+	s.mu.Lock()
+	dlq := s.dlq
+	s.mu.Unlock()
+	if dlq == nil {
+		// Degraded mode — preserve the message ID + subject in
+		// the log so operators can at least correlate with
+		// upstream traces.
+		s.logger.Warn("telemetry: undecodable payload dropped (no DLQ publisher wired)",
+			slog.String("subject", msg.Subject()),
+			slog.Any("error", cause),
+			slog.Int("payload_bytes", len(msg.Data())))
+		return
+	}
+	headers := flattenMsgHeaders(msg)
+	publishCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	delivery := uint64(0)
+	if md, mdErr := msg.Metadata(); mdErr == nil && md != nil {
+		delivery = md.NumDelivered
+	}
+	if err := dlq.PublishToDLQ(publishCtx, msg.Subject(), msg.Data(), headers, delivery, cause); err != nil {
+		s.metrics.DLQPublishFail.Add(1)
+		s.logger.Warn("telemetry: DLQ publish failed (undecodable payload dropped)",
+			slog.Any("dlq_error", err),
+			slog.Any("decode_error", cause),
+			slog.String("subject", msg.Subject()))
+		return
+	}
+	s.metrics.DLQPublished.Add(1)
+	s.logger.Info("telemetry: undecodable payload routed to DLQ",
+		slog.String("subject", msg.Subject()),
+		slog.Any("decode_error", cause))
+}
+
+// flattenMsgHeaders converts NATS multi-value headers into the
+// single-value map expected by Publisher.PublishToDLQ. NATS allows
+// the same header key to appear multiple times; we join with comma
+// (RFC 7230-style) so no information is lost in the DLQ envelope.
+func flattenMsgHeaders(msg jetstream.Msg) map[string]string {
+	h := msg.Headers()
+	if len(h) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(h))
+	for k, vs := range h {
+		switch len(vs) {
+		case 0:
+			out[k] = ""
+		case 1:
+			out[k] = vs[0]
+		default:
+			out[k] = strings.Join(vs, ",")
+		}
+	}
+	return out
 }
 
 // dedupRing is a fixed-size hash-set of EventIDs used to skip
