@@ -60,6 +60,12 @@ func Auth(cfg *config.Auth, keys APIKeyLookup) func(http.Handler) http.Handler {
 				ctx = withAuthSubject(ctx, info.Subject)
 				if info.TenantID != uuid.Nil {
 					ctx = withTenantID(ctx, info.TenantID)
+					// Late-bind tenant_id onto the outer Logging
+					// middleware's RequestMeta so the access log
+					// can observe it after the handler returns.
+					// See RequestMeta's doc comment for the
+					// rationale.
+					RequestMetaFromContext(ctx).SetTenantID(info.TenantID)
 				}
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -93,15 +99,18 @@ func Auth(cfg *config.Auth, keys APIKeyLookup) func(http.Handler) http.Handler {
 			}
 
 			ctx := r.Context()
+			meta := RequestMetaFromContext(ctx)
 			if sub, _ := claims["sub"].(string); sub != "" {
 				ctx = withAuthSubject(ctx, sub)
 				if uid, parseErr := uuid.Parse(sub); parseErr == nil {
 					ctx = withUserID(ctx, uid)
+					meta.SetUserID(uid)
 				}
 			}
 			if tid, _ := claims["tenant_id"].(string); tid != "" {
 				if u, parseErr := uuid.Parse(tid); parseErr == nil {
 					ctx = withTenantID(ctx, u)
+					meta.SetTenantID(u)
 				}
 			}
 			next.ServeHTTP(w, r.WithContext(ctx))

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -124,5 +126,79 @@ func TestCreateClaimTokenBelowMinimum(t *testing.T) {
 				t.Errorf("error code should be invalid_argument, got: %s", rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestCreateClaimTokenChunkedBody is the regression test for the
+// PR6 round-3 Devin Review finding: when a client sends the body
+// with Transfer-Encoding: chunked, r.ContentLength is -1, not the
+// byte count. The previous guard `r.ContentLength > 0` silently
+// skipped DecodeJSON in that case, so a client streaming
+// `{"ttl_seconds": 600}` over chunked encoding got the
+// compiled-in default TTL applied with NO error and no log line.
+//
+// The fix is `r.ContentLength != 0` plus an io.EOF guard for the
+// empty-chunked-body case (preserving the "body is optional"
+// contract). This test wires httptest with a chunked body and
+// asserts the requested TTL is honoured.
+func TestCreateClaimTokenChunkedBody(t *testing.T) {
+	t.Parallel()
+	h, tenantID := newTestDeviceHandler(t)
+
+	// httptest.NewRequest forces ContentLength when given a
+	// *bytes.Reader; using an io.Pipe + goroutine writer makes
+	// the Go http server treat the body as chunked
+	// (ContentLength = -1). io.NopCloser around a *bytes.Buffer
+	// also yields ContentLength = -1.
+	body := io.NopCloser(bytes.NewBufferString(`{"ttl_seconds":600}`))
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID.String()+"/claim-tokens", body)
+	req.ContentLength = -1
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Transfer-Encoding", "chunked")
+	req.SetPathValue("tenant_id", tenantID.String())
+
+	rec := httptest.NewRecorder()
+	h.createClaimToken(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+	var resp ClaimTokenCreateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	exp, err := time.Parse(time.RFC3339Nano, resp.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse expires_at %q: %v", resp.ExpiresAt, err)
+	}
+	// Caller requested 600s; allow a 30s slack for test
+	// scheduling, but the value MUST be ~600s, not the handler's
+	// default of 24h (would round to ~86400s).
+	dur := time.Until(exp)
+	if dur < 9*time.Minute || dur > 11*time.Minute {
+		t.Errorf("expires_at %s implies TTL %v, want ~10m (requested 600s); the body was silently ignored",
+			resp.ExpiresAt, dur)
+	}
+}
+
+// TestCreateClaimTokenChunkedEmptyBody covers the boundary where a
+// chunked transfer carries zero bytes — the decoder hits io.EOF
+// immediately, and the handler must treat that as "no body" (apply
+// defaults) rather than 400 malformed-body.
+func TestCreateClaimTokenChunkedEmptyBody(t *testing.T) {
+	t.Parallel()
+	h, tenantID := newTestDeviceHandler(t)
+
+	body := io.NopCloser(bytes.NewBuffer(nil))
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID.String()+"/claim-tokens", body)
+	req.ContentLength = -1
+	req.Header.Set("Transfer-Encoding", "chunked")
+	req.SetPathValue("tenant_id", tenantID.String())
+
+	rec := httptest.NewRecorder()
+	h.createClaimToken(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
 	}
 }

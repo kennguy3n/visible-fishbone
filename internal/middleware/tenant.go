@@ -44,6 +44,11 @@ func RequireTenant(pathParam string) func(http.Handler) http.Handler {
 			// cases we bind the path tenant onto the context so
 			// downstream handlers can scope queries.
 			ctx := withTenantID(r.Context(), pid)
+			// Late-bind onto the outer Logging meta too — for
+			// platform_admin requests the JWT had no tenant_id
+			// claim, so Auth left the meta's tenant_id empty;
+			// this is the first place we know it.
+			RequestMetaFromContext(ctx).SetTenantID(pid)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

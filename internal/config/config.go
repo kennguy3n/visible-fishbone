@@ -634,6 +634,25 @@ func Load() (Config, error) {
 		return cfg, errors.Join(strictErrs...)
 	}
 
+	// Detect retired environment variables and fail loudly so an
+	// operator upgrading the binary cannot silently fall back to
+	// the default while their old setting is ignored. The previous
+	// `WEBHOOK_MAX_RETRIES=N` meant "N retries on top of the first
+	// attempt" (i.e. N+1 total). The new `WEBHOOK_MAX_ATTEMPTS=N`
+	// means "N total deliveries". Silently reading only the new
+	// name would turn a previously-set `WEBHOOK_MAX_RETRIES=6`
+	// (= 7 attempts) into the default `WEBHOOK_MAX_ATTEMPTS=6`
+	// (= 6 attempts) — a behaviour change the operator never
+	// consented to. Refusing to boot forces a conscious migration
+	// (`WEBHOOK_MAX_ATTEMPTS=7` if they want the old behaviour).
+	if v, ok := os.LookupEnv("WEBHOOK_MAX_RETRIES"); ok {
+		return cfg, fmt.Errorf(
+			"WEBHOOK_MAX_RETRIES is no longer supported (was found: %q); "+
+				"rename to WEBHOOK_MAX_ATTEMPTS and add 1 to preserve the "+
+				"previous behaviour (old: N retries on top of the first "+
+				"attempt = N+1 total; new: N total deliveries)", v)
+	}
+
 	if err := cfg.validate(); err != nil {
 		return cfg, err
 	}

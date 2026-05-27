@@ -1,6 +1,9 @@
 package handler
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -61,10 +64,34 @@ func (h *DeviceHandler) createClaimToken(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req ClaimTokenCreateRequest
-	// Body is optional for this endpoint.
-	if r.ContentLength > 0 {
-		if !DecodeJSON(w, r, &req) {
-			return
+	// Body is optional for this endpoint, but we MUST attempt to
+	// decode whenever the client may have sent one.
+	//
+	// r.ContentLength is:
+	//   *  > 0  for fixed-length bodies (Content-Length header set)
+	//   *  0    when the client explicitly sent no body
+	//   * -1    when the body is sent with Transfer-Encoding: chunked
+	//          (Content-Length unknown until the chunk stream ends)
+	//
+	// The previous guard `r.ContentLength > 0` silently ignored the
+	// chunked case — a client streaming `{"ttl_seconds": 120}` over
+	// chunked encoding would get the compiled-in default TTL applied
+	// silently, with NO error and no log line. `!= 0` covers both
+	// fixed-length and chunked bodies; an empty chunked body is then
+	// handled by treating io.EOF from the JSON decoder as
+	// "client sent no body" rather than as a 400 malformed-body
+	// error (which would break the "body is optional" contract).
+	if r.ContentLength != 0 {
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			if errors.Is(err, io.EOF) {
+				// chunked transfer with zero bytes — treat as
+				// "no body", apply server defaults.
+			} else {
+				WriteError(w, http.StatusBadRequest, "invalid_body", err.Error())
+				return
+			}
 		}
 	}
 	ttl := h.claimTokenTTL
