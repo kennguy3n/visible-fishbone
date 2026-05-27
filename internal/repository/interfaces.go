@@ -258,3 +258,61 @@ type PolicyRepository interface {
 	GetBundle(ctx context.Context, tenantID, id uuid.UUID) (PolicyBundle, error)
 	GetLatestBundle(ctx context.Context, tenantID uuid.UUID, target PolicyBundleTarget) (PolicyBundle, error)
 }
+
+// --- Policy signing keys --------------------------------------------------
+
+// PolicySigningKeyRepository owns the policy_signing_keys table.
+// The table is tenant-scoped and protected by RLS — drivers set the
+// `sng.tenant_id` GUC for every call.
+//
+// Rotation is performed as a single transaction in the driver: the
+// previous active key is updated to status='rotated' and the new key
+// is inserted with status='active'. The partial unique index on
+// (tenant_id) WHERE status='active' makes the operation race-safe;
+// a concurrent rotation by another worker will be rejected by the
+// constraint and surface as ErrConflict, letting the caller retry.
+type PolicySigningKeyRepository interface {
+	// Create inserts a new key. The caller is responsible for
+	// computing the (public, private) Ed25519 pair and the stable
+	// short KeyID. New keys are inserted with status='active'.
+	// Returns ErrConflict if another active key already exists for
+	// this tenant — use Rotate to atomically replace it.
+	Create(ctx context.Context, tenantID uuid.UUID, k PolicySigningKey) (PolicySigningKey, error)
+	// CreateIfNoHistory inserts a new active key only when the
+	// tenant has no signing-key history at all. Used by the
+	// brand-new-tenant bootstrap path in EnsureKey to enforce the
+	// revocation-incident invariant atomically: once any key has
+	// ever existed for a tenant (active, rotated, or revoked),
+	// auto-provisioning is refused — an admin must explicitly
+	// Create or Rotate to resume signing. The existence check and
+	// the insert run inside a single transaction so a concurrent
+	// "create then revoke" on another connection cannot slip a
+	// fresh key past the guard. Returns ErrConflict when history
+	// exists.
+	CreateIfNoHistory(ctx context.Context, tenantID uuid.UUID, k PolicySigningKey) (PolicySigningKey, error)
+	// GetActive returns the unique active key for the tenant.
+	// Returns ErrNotFound if no key has ever been provisioned for
+	// this tenant.
+	GetActive(ctx context.Context, tenantID uuid.UUID) (PolicySigningKey, error)
+	// GetByKeyID returns a key by its stable short KeyID,
+	// independent of status. Receivers and the bundle distribution
+	// endpoint use this to fetch the public key for any historical
+	// bundle.
+	GetByKeyID(ctx context.Context, tenantID uuid.UUID, keyID string) (PolicySigningKey, error)
+	// List returns the full rotation history for a tenant, ordered
+	// by activated_at DESC. Used by the public-key publication
+	// endpoint and the rotation audit trail.
+	List(ctx context.Context, tenantID uuid.UUID) ([]PolicySigningKey, error)
+	// Rotate atomically transitions the current active key to
+	// status='rotated' and inserts the new key with status='active'.
+	// Returns ErrNotFound if no active key exists for the tenant —
+	// callers should use Create for the first-ever key.
+	Rotate(ctx context.Context, tenantID uuid.UUID, newKey PolicySigningKey, at time.Time) (PolicySigningKey, error)
+	// Revoke transitions a key to status='revoked'. A key can be
+	// revoked from either 'active' or 'rotated' state. If revoking
+	// the currently active key, the tenant has no active key until
+	// Create or Rotate provisions a new one — bundle compilation
+	// will fail with a clear error in the meantime, which is the
+	// intended behaviour for a compromised-key incident.
+	Revoke(ctx context.Context, tenantID uuid.UUID, keyID string, at time.Time) (PolicySigningKey, error)
+}

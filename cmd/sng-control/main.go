@@ -179,6 +179,7 @@ func buildRouter(
 	claimRepo := store.NewClaimTokenRepository()
 	auditRepo := store.NewAuditLogRepository()
 	policyRepo := store.NewPolicyRepository()
+	policyKeyRepo := store.NewPolicySigningKeyRepository()
 	webhookEndpointRepo := store.NewWebhookEndpointRepository()
 	webhookDeliveryRepo := store.NewWebhookDeliveryRepository()
 
@@ -187,25 +188,16 @@ func buildRouter(
 	identitySvc := identity.New(deviceRepo, claimRepo, auditRepo, logger)
 	rbacSvc := rbac.New(roleRepo, auditRepo, logger)
 	auditSvc := audit.New(auditRepo)
-	// Policy signing key — for now use an ephemeral signer so the
-	// service is functional out-of-box; production deployments
-	// MUST inject a KMS-backed signer (config option lands in PR8).
-	//
-	// Fail boot on signer init error. ed25519.GenerateKey only
-	// returns an error when crypto/rand.Reader fails, which means
-	// the OS entropy pool is broken — in that state we cannot
-	// safely sign anything later either. The previous code path
-	// (log + signer=nil + continue) would have let the service
-	// come up emitting nil-signed policy bundles; edge agents
-	// correctly refuse those, so the system would be silently
-	// degraded with enforcement disabled everywhere. Failing the
-	// boot makes that condition observable immediately rather
-	// than as a fleet-wide enforcement gap discovered later.
-	signer, err := policy.NewEphemeralSigner()
-	if err != nil {
-		return nil, nil, fmt.Errorf("policy signer init: %w", err)
-	}
-	policySvc := policy.New(policyRepo, auditRepo, signer)
+	// Policy signing keys. PR7 replaced the PR6 process-wide
+	// ephemeral signer with a tenant-scoped, database-backed key
+	// store: each tenant has its own Ed25519 keypair, lazily
+	// created on first compile, rotatable via the management
+	// endpoint, and revocable when compromised. The KeyService
+	// satisfies the policy.Signer contract, so the rest of the
+	// policy service is unchanged. PR8 will plug a KMS-backed
+	// PrivateKeyWrapper in via policy.WithKeyWrapper.
+	policyKeySvc := policy.NewKeyService(policyKeyRepo, auditRepo)
+	policySvc := policy.New(policyRepo, auditRepo, policyKeySvc, policy.WithLogger(logger))
 	webhookSvc := webhook.New(webhookEndpointRepo, webhookDeliveryRepo, auditRepo, logger)
 
 	// Translate the operator-facing config.Webhook knobs into the
@@ -245,7 +237,7 @@ func buildRouter(
 		Sites:       handler.NewSiteHandler(siteSvc),
 		Devices:     handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL),
 		RBAC:        handler.NewRBACHandler(rbacSvc),
-		Policy:      handler.NewPolicyHandler(policySvc),
+		Policy:      handler.NewPolicyHandler(policySvc, policyKeySvc),
 		Audit:       handler.NewAuditHandler(auditSvc),
 		Webhooks:    handler.NewWebhookHandler(webhookSvc),
 		Health:      health,
