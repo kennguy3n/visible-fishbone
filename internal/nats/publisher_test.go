@@ -159,6 +159,95 @@ func TestPublisher_DLQ(t *testing.T) {
 	_ = msg.Ack()
 }
 
+// TestPublisher_DLQ_PreservesOriginEnqueuedAtAndMessageID is the
+// regression test for the Devin Review finding that PublishToDLQ
+// was silently losing the source publish timestamp and source
+// message ID. Publish() unconditionally stamps fresh canonical
+// HeaderEnqueuedAt + HeaderMessageID values, and its merge step
+// skips already-set keys — so unless PublishToDLQ explicitly moves
+// the upstream values into distinct headers before calling Publish,
+// they're irrecoverable on the DLQ side.
+//
+// This test publishes a DLQ message with a synthetic upstream
+// envelope that carries HeaderEnqueuedAt + HeaderMessageID, then
+// asserts that:
+//
+//  1. The DLQ message's HeaderEnqueuedAt is FRESH (fresh DLQ
+//     timestamp, not the upstream one — DLQ consumer lag for the
+//     DLQ stream itself must remain meaningful).
+//  2. The DLQ message's HeaderOriginEnqueuedAt carries the
+//     upstream value verbatim.
+//  3. The DLQ message's HeaderOriginMessageID carries the upstream
+//     ID verbatim (the DLQ envelope's own X-SNG-Message-ID is
+//     "dlq-"-prefixed for dedup identity, so the original needs
+//     its own slot).
+func TestPublisher_DLQ_PreservesOriginEnqueuedAtAndMessageID(t *testing.T) {
+	t.Parallel()
+	_, js := startEmbeddedNATS(t)
+	cfg := defaultNATSConfig()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg), 0); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	pub := sngnats.NewPublisher(js, cfg, "test")
+
+	// Synthetic upstream envelope — what a consumer pulled off the
+	// telemetry stream right before deciding to route it to the DLQ.
+	upstreamID := "msg-abc-123"
+	// Use a timestamp guaranteed to differ from the DLQ-publish
+	// time by more than the timer's resolution.
+	upstreamEnqueued := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	headers := map[string]string{
+		sngnats.HeaderMessageID:  upstreamID,
+		sngnats.HeaderEnqueuedAt: upstreamEnqueued,
+		sngnats.HeaderTenantID:   "t1",
+		sngnats.HeaderEventClass: "flow",
+	}
+	if err := pub.PublishToDLQ(ctx, "sng.t1.telemetry.flow", []byte("payload"),
+		headers, 5, context.DeadlineExceeded); err != nil {
+		t.Fatalf("dlq: %v", err)
+	}
+
+	cons, err := js.CreateOrUpdateConsumer(ctx, "TEST_DLQ", jetstream.ConsumerConfig{
+		Name:          "dlq-origin-test",
+		Durable:       "dlq-origin-test",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		DeliverPolicy: jetstream.DeliverAllPolicy,
+	})
+	if err != nil {
+		t.Fatalf("create consumer: %v", err)
+	}
+	msg, err := cons.Next(jetstream.FetchMaxWait(3 * time.Second))
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	defer func() { _ = msg.Ack() }()
+
+	if got := msg.Headers().Get(sngnats.HeaderOriginEnqueuedAt); got != upstreamEnqueued {
+		t.Errorf("HeaderOriginEnqueuedAt = %q, want %q (upstream timestamp lost)", got, upstreamEnqueued)
+	}
+	if got := msg.Headers().Get(sngnats.HeaderOriginMessageID); got != upstreamID {
+		t.Errorf("HeaderOriginMessageID = %q, want %q (upstream id lost)", got, upstreamID)
+	}
+	dlqEnqueued := msg.Headers().Get(sngnats.HeaderEnqueuedAt)
+	if dlqEnqueued == "" {
+		t.Errorf("HeaderEnqueuedAt missing on DLQ message — DLQ stream's own lag analysis depends on it")
+	}
+	if dlqEnqueued == upstreamEnqueued {
+		t.Errorf("HeaderEnqueuedAt should be the FRESH DLQ-publish timestamp, not the upstream one (got %q)", dlqEnqueued)
+	}
+	// Cross-check: DLQ-side EnqueuedAt should parse as recent (within
+	// the last minute), not the 2h-ago upstream one.
+	parsed, err := time.Parse(time.RFC3339Nano, dlqEnqueued)
+	if err != nil {
+		t.Fatalf("parse DLQ enqueued: %v", err)
+	}
+	if time.Since(parsed) > time.Minute {
+		t.Errorf("DLQ enqueued timestamp %v is more than 1m old — looks like the upstream value leaked through", parsed)
+	}
+}
+
 // TestPublisher_DLQ_StableDedupOnMissingMessageID verifies that
 // PublishToDLQ deduplicates DLQ writes by message content when the
 // source message lacks HeaderMessageID (an externally-produced

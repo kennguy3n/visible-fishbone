@@ -220,6 +220,20 @@ func (p *Publisher) PublishToDLQ(
 	if cause != nil {
 		hdrs[HeaderError] = cause.Error()
 	}
+	// Preserve forensically valuable upstream metadata BEFORE handing
+	// `hdrs` to Publish(). Publish() unconditionally stamps fresh
+	// canonical values for HeaderEnqueuedAt and HeaderMessageID and
+	// its merge step skips already-set keys — so if we don't move
+	// these into distinct headers here, the DLQ envelope will silently
+	// lose the original publish timestamp and the original dedup ID.
+	// We need both for cross-boundary latency analysis and for joining
+	// DLQ records back to the source stream during incident triage.
+	if v := headers[HeaderEnqueuedAt]; v != "" {
+		hdrs[HeaderOriginEnqueuedAt] = v
+	}
+	if v := headers[HeaderMessageID]; v != "" {
+		hdrs[HeaderOriginMessageID] = v
+	}
 
 	// Re-use the original dedup ID prefixed with "dlq-" so a flapping
 	// consumer doesn't write duplicate DLQ rows for the same source

@@ -50,4 +50,25 @@ const (
 	// HeaderOriginSubject is the subject of the message before it
 	// was routed to the DLQ.
 	HeaderOriginSubject = "X-SNG-Origin-Subject"
+
+	// HeaderOriginEnqueuedAt preserves the original publisher's
+	// HeaderEnqueuedAt value when a message is republished to the
+	// DLQ. The DLQ publish itself stamps a fresh HeaderEnqueuedAt
+	// (so DLQ consumer-lag stays meaningful for the DLQ stream
+	// itself), but operators investigating an exhausted-delivery
+	// incident need the original publish timestamp to compute
+	// end-to-end latency / time-to-fail across the boundary —
+	// without this, the original timestamp would be silently lost
+	// the moment a message hit the DLQ.
+	HeaderOriginEnqueuedAt = "X-SNG-Origin-Enqueued-At"
+
+	// HeaderOriginMessageID preserves the source message's
+	// X-SNG-Message-ID when republished to the DLQ. The DLQ
+	// envelope itself uses a "dlq-"-prefixed MessageID for its
+	// own dedup identity, so a consumer reading from the DLQ
+	// can no longer recover the upstream identifier directly
+	// from X-SNG-Message-ID. This header makes the original ID
+	// explicit so DLQ tooling can join back to the source
+	// stream without string-prefix stripping.
+	HeaderOriginMessageID = "X-SNG-Origin-Message-ID"
 )
