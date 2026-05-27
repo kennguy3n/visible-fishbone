@@ -1,8 +1,10 @@
 package policy
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -269,5 +271,38 @@ func TestPassthroughWrapper(t *testing.T) {
 	}
 	if string(unwrapped) != string(seed) {
 		t.Errorf("roundtrip mismatch")
+	}
+}
+
+// TestPolicySigningKey_JSONMarshalOmitsPrivateKey is the
+// defence-in-depth check pinning the `json:"-"` tag on
+// `repository.PolicySigningKey.PrivateKey`. Handlers project to
+// `PolicySigningKeyResponse` today, but a future refactor that
+// accidentally passes the raw struct through `WriteJSON` /
+// `json.Marshal` must NOT leak the seed onto the wire. This test
+// is the wire-side invariant; the tag itself is the structural
+// guarantee.
+func TestPolicySigningKey_JSONMarshalOmitsPrivateKey(t *testing.T) {
+	t.Parallel()
+	k := repository.PolicySigningKey{
+		ID:         uuid.New(),
+		TenantID:   uuid.New(),
+		KeyID:      "deadbeefdeadbeef",
+		Algorithm:  "ed25519",
+		PublicKey:  bytes.Repeat([]byte{0xAA}, 32),
+		PrivateKey: bytes.Repeat([]byte{0xBB}, 32),
+		Status:     repository.PolicySigningKeyStatusActive,
+	}
+	out, err := json.Marshal(k)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"PrivateKey"`)) || bytes.Contains(out, []byte(`"private_key"`)) {
+		t.Errorf("PrivateKey leaked into JSON: %s", out)
+	}
+	// Sanity-check that the wrapper field is still present so the
+	// guard doesn't accidentally hide unrelated fields.
+	if !bytes.Contains(out, []byte(`"PublicKey"`)) {
+		t.Errorf("expected PublicKey in marshalled output, got %s", out)
 	}
 }

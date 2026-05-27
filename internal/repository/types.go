@@ -391,13 +391,20 @@ const (
 // short identifier (e.g. a UUID truncated to 16 hex chars) so the
 // bundle envelope can carry it without leaking the full database
 // row id.
+//
+// PrivateKey carries the `json:"-"` tag as a defence-in-depth guard
+// against accidental serialisation. Every handler today projects
+// via `toPolicySigningKeyResponse` which omits the field, but
+// tagging the struct itself means a future refactor that passes
+// the raw `PolicySigningKey` through `json.Marshal` / `WriteJSON`
+// cannot leak the seed onto the wire.
 type PolicySigningKey struct {
 	ID          uuid.UUID
 	TenantID    uuid.UUID
 	KeyID       string
 	Algorithm   string
 	PublicKey   []byte
-	PrivateKey  []byte
+	PrivateKey  []byte `json:"-"`
 	Status      PolicySigningKeyStatus
 	ActivatedAt time.Time
 	RotatedAt   *time.Time

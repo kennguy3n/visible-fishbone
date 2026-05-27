@@ -86,12 +86,31 @@ func (s *Service) GetCurrentGraph(ctx context.Context, tenantID uuid.UUID) (repo
 
 // PutGraph stores a new policy graph version for the tenant. The
 // version number is auto-incremented by the repository if zero.
+//
+// Validation runs in two layers:
+//
+//  1. `json.Valid` rejects syntactically broken documents.
+//  2. `ParseGraph` runs the PR7 typed-schema check (valid verbs /
+//     domains / targets, subject + predicate name uniqueness, rule
+//     id uniqueness, subject_refs / predicate_refs resolvable
+//     against the declared subjects / predicates).
+//
+// Failing the typed check returns a wrapped
+// `repository.ErrInvalidArgument` so the handler renders 400. This
+// is the "operators get schema validation at PUT time rather than
+// at compile time" contract advertised in graph.go. Unknown
+// top-level fields are silently ignored (Go's default
+// `json.Unmarshal` behaviour) so callers can extend the document
+// with PR8+ metadata without touching the validator.
 func (s *Service) PutGraph(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, raw json.RawMessage) (repository.PolicyGraph, error) {
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
 	}
 	if !json.Valid(raw) {
 		return repository.PolicyGraph{}, fmt.Errorf("invalid graph json: %w", repository.ErrInvalidArgument)
+	}
+	if _, err := ParseGraph(raw); err != nil {
+		return repository.PolicyGraph{}, err
 	}
 	g := repository.PolicyGraph{
 		Graph: raw,
