@@ -436,6 +436,19 @@ paths:
     get:
       tags: [policy]
       summary: Publish a signing key's public half for bundle verification
+      description: |
+        Returns the public half of the signing key that produced a
+        given bundle's `kid`. Receivers verifying a bundle pulled
+        from this tenant resolve the `kid` here.
+
+        When the deployment is running in file-backed signing mode
+        (POLICY_SIGNING_KEY_PATH set), the file-backed signer's kid
+        and the literal 'active' both resolve to the same uniform
+        key for every tenant — the file-backed signer is
+        process-global. The same response (key_id, public_key,
+        status='active') is returned across all tenant scopes.
+        Other key_ids fall through to the DB-backed rotation history
+        so historical (pre-file-backed) bundles still resolve.
       responses:
         "200":
           description: public key
