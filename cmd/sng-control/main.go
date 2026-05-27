@@ -107,7 +107,10 @@ func run() error {
 		return nil
 	}))
 
-	router, webhookWorker := buildRouter(&cfg, logger, pool, health)
+	router, webhookWorker, err := buildRouter(&cfg, logger, pool, health)
+	if err != nil {
+		return fmt.Errorf("build router: %w", err)
+	}
 
 	// Start the webhook delivery worker before the HTTP server so
 	// queued deliveries from a previous run start draining
@@ -158,12 +161,16 @@ func run() error {
 // webhook delivery worker (so main can start/stop it alongside the
 // HTTP server). Kept in one place so the dependency graph is
 // readable; production wiring + tests share the same factory.
+//
+// An error from this constructor is fatal at boot: a missing
+// policy signer would silently emit unsigned bundles that edge
+// agents (correctly) refuse, breaking enforcement everywhere.
 func buildRouter(
 	cfg *config.Config,
 	logger *slog.Logger,
 	pool *pgxpool.Pool,
 	health *handler.Health,
-) (http.Handler, *webhook.DeliveryWorker) {
+) (http.Handler, *webhook.DeliveryWorker, error) {
 	store := postgres.NewStore(pool)
 
 	tenantRepo := store.NewTenantRepository()
@@ -184,32 +191,61 @@ func buildRouter(
 	// Policy signing key — for now use an ephemeral signer so the
 	// service is functional out-of-box; production deployments
 	// MUST inject a KMS-backed signer (config option lands in PR8).
+	//
+	// Fail boot on signer init error. ed25519.GenerateKey only
+	// returns an error when crypto/rand.Reader fails, which means
+	// the OS entropy pool is broken — in that state we cannot
+	// safely sign anything later either. The previous code path
+	// (log + signer=nil + continue) would have let the service
+	// come up emitting nil-signed policy bundles; edge agents
+	// correctly refuse those, so the system would be silently
+	// degraded with enforcement disabled everywhere. Failing the
+	// boot makes that condition observable immediately rather
+	// than as a fleet-wide enforcement gap discovered later.
 	signer, err := policy.NewEphemeralSigner()
 	if err != nil {
-		logger.Error("sng-control: ephemeral policy signer init failed", slog.Any("error", err))
-		signer = nil
+		return nil, nil, fmt.Errorf("policy signer init: %w", err)
 	}
 	policySvc := policy.New(policyRepo, auditRepo, signer)
 	webhookSvc := webhook.New(webhookEndpointRepo, webhookDeliveryRepo, auditRepo, logger)
 
+	// Translate the operator-facing config.Webhook knobs into the
+	// worker's internal WorkerConfig. The previous wiring passed
+	// an empty WorkerConfig{}, which silently fell back to the
+	// worker package's compiled-in defaults — meaning the
+	// WEBHOOK_* environment variables were validated at boot but
+	// never reached the live worker. Names differ across the two
+	// layers because the config struct is the public API
+	// (deliberately stable across worker refactors) while the
+	// worker fields evolved with the implementation.
 	webhookWorker := webhook.NewDeliveryWorker(
-		webhookDeliveryRepo, webhookEndpointRepo,
-		nil, webhook.WorkerConfig{}, logger,
+		webhookDeliveryRepo, webhookEndpointRepo, nil,
+		webhook.WorkerConfig{
+			BatchSize:         cfg.Webhook.BatchSize,
+			PollInterval:      cfg.Webhook.PollInterval,
+			RequestTimeout:    cfg.Webhook.DeliveryTimeout,
+			MaxAttempts:       cfg.Webhook.MaxRetries,
+			BackoffBase:       cfg.Webhook.InitialDelay,
+			BackoffMax:        cfg.Webhook.MaxDelay,
+			ProcessingTimeout: cfg.Webhook.ProcessingTimeout,
+		},
+		logger,
 	)
 
 	router := handler.NewRouter(handler.RouterDeps{
-		Config:   cfg,
-		Logger:   logger,
-		Tenants:  handler.NewTenantHandler(tenantSvc),
-		Sites:    handler.NewSiteHandler(siteSvc),
-		Devices:  handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.HTTP.ReadTimeout),
-		RBAC:     handler.NewRBACHandler(rbacSvc),
-		Policy:   handler.NewPolicyHandler(policySvc),
-		Audit:    handler.NewAuditHandler(auditSvc),
-		Webhooks: handler.NewWebhookHandler(webhookSvc),
-		Health:   health,
+		Config:      cfg,
+		Logger:      logger,
+		Tenants:     handler.NewTenantHandler(tenantSvc),
+		Sites:       handler.NewSiteHandler(siteSvc),
+		Devices:     handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL),
+		RBAC:        handler.NewRBACHandler(rbacSvc),
+		Policy:      handler.NewPolicyHandler(policySvc),
+		Audit:       handler.NewAuditHandler(auditSvc),
+		Webhooks:    handler.NewWebhookHandler(webhookSvc),
+		Health:      health,
+		OpenAPISpec: handler.NewOpenAPIHandler(),
 	})
-	return router, webhookWorker
+	return router, webhookWorker, nil
 }
 
 // newLogger constructs the process-wide structured logger.

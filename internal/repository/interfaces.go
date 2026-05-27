@@ -218,9 +218,28 @@ type WebhookDeliveryRepository interface {
 	// attempt metadata. Called by the delivery worker after each
 	// attempt.
 	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status WebhookDeliveryStatus, attempt int, lastErr string, responseStatus int, nextRetry time.Time) error
-	// ListPending returns deliveries that are due for retry.
-	// Ordered by next_retry_at ASC. Limit caps the batch size.
-	ListPending(ctx context.Context, limit int) ([]WebhookDelivery, error)
+	// ListPending atomically claims a batch of due-for-retry
+	// deliveries. Each returned row is transitioned from 'pending'
+	// to 'processing' inside the same statement that selects it,
+	// so concurrent workers cannot double-claim the same row.
+	//
+	// processingTimeout is the recovery window for rows stuck in
+	// 'processing' (i.e. a previous worker crashed before
+	// transitioning out of the state). Rows whose last_attempt_at
+	// is older than now-processingTimeout are also re-claimable;
+	// the postgres implementation includes them in the WHERE clause
+	// of the atomic UPDATE and the memory implementation does the
+	// same in its critical section. Set to 0 to never re-claim
+	// stuck rows (use only in tests where a crash mid-tick is
+	// impossible).
+	//
+	// Limit caps the batch size; rows are ordered by next_retry_at
+	// ASC so the oldest due delivery is dispatched first. Returned
+	// rows carry the post-claim status ('processing'); callers must
+	// transition them to delivered / pending / exhausted via
+	// UpdateStatus, otherwise they remain in 'processing' until the
+	// stuck-row window elapses.
+	ListPending(ctx context.Context, limit int, processingTimeout time.Duration) ([]WebhookDelivery, error)
 }
 
 // --- Policy ---------------------------------------------------------------

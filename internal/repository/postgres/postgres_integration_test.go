@@ -432,8 +432,10 @@ func TestPostgres_Integration(t *testing.T) {
 
 		// ListPending uses the system-role GUC bypass to cross
 		// tenants — the worker must see the row even though no
-		// per-tenant context is set.
-		pending, err := dr.ListPending(bgCtx(), 10)
+		// per-tenant context is set. processingTimeout=5m is
+		// the production default; the row is freshly pending so
+		// the reaper window is irrelevant for this assertion.
+		pending, err := dr.ListPending(bgCtx(), 10, 5*time.Minute)
 		if err != nil {
 			t.Fatalf("ListPending: %v", err)
 		}
@@ -444,6 +446,11 @@ func TestPostgres_Integration(t *testing.T) {
 		for _, p := range pending {
 			if p.ID == del.ID {
 				found = true
+				// The atomic-claim invariant flips the
+				// returned row to 'processing'.
+				if p.Status != repository.WebhookDeliveryStatusProcessing {
+					t.Errorf("claimed row status = %v, want processing", p.Status)
+				}
 				break
 			}
 		}

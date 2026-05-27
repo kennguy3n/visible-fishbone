@@ -277,37 +277,79 @@ func (r *WebhookDeliveryRepository) UpdateStatus(
 	return nil
 }
 
-// ListPending returns deliveries due for retry (status=pending and
-// next_retry_at <= now). Limit caps the batch size. Ordering is
-// NextRetryAt ASC, ID ASC for tie-break.
-func (r *WebhookDeliveryRepository) ListPending(ctx context.Context, limit int) ([]repository.WebhookDelivery, error) {
+// ListPending atomically claims a batch of due-for-retry
+// deliveries — the in-memory mirror of the postgres atomic UPDATE.
+// See WebhookDeliveryRepository.ListPending on the interface for
+// the full contract.
+//
+// Two cases produce a claim:
+//
+//  1. status=pending AND next_retry_at <= now — the normal due-row
+//     case.
+//  2. status=processing AND processingTimeout > 0 AND
+//     last_attempt_at < now - processingTimeout — the stuck-row
+//     reaper case for rows whose previous worker crashed before
+//     transitioning out of 'processing'.
+//
+// In both cases the row is transitioned to 'processing' and
+// last_attempt_at is stamped to `now` inside the critical section.
+// The returned slice is a clone so the caller can mutate freely.
+func (r *WebhookDeliveryRepository) ListPending(ctx context.Context, limit int, processingTimeout time.Duration) ([]repository.WebhookDelivery, error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return nil, err
 	}
 	if limit <= 0 {
 		limit = 32
 	}
-	r.s.mu.RLock()
-	defer r.s.mu.RUnlock()
+	// The atomic-claim semantics require the write lock — we
+	// transition the source row to 'processing' inside the same
+	// critical section that selects it, mirroring the postgres
+	// UPDATE...RETURNING.
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
 	now := r.s.clock()
-	out := make([]repository.WebhookDelivery, 0)
+	candidates := make([]repository.WebhookDelivery, 0)
 	for _, d := range r.s.webhookDeliveries {
-		if d.Status != repository.WebhookDeliveryStatusPending {
+		switch d.Status {
+		case repository.WebhookDeliveryStatusPending:
+			if d.NextRetryAt.After(now) {
+				continue
+			}
+		case repository.WebhookDeliveryStatusProcessing:
+			if processingTimeout <= 0 {
+				continue
+			}
+			if d.LastAttemptAt == nil {
+				continue
+			}
+			if d.LastAttemptAt.After(now.Add(-processingTimeout)) {
+				continue
+			}
+		default:
 			continue
 		}
-		if d.NextRetryAt.After(now) {
-			continue
-		}
-		out = append(out, cloneDelivery(d))
+		candidates = append(candidates, d)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].NextRetryAt.Equal(out[j].NextRetryAt) {
-			return out[i].ID.String() < out[j].ID.String()
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].NextRetryAt.Equal(candidates[j].NextRetryAt) {
+			return candidates[i].ID.String() < candidates[j].ID.String()
 		}
-		return out[i].NextRetryAt.Before(out[j].NextRetryAt)
+		return candidates[i].NextRetryAt.Before(candidates[j].NextRetryAt)
 	})
-	if len(out) > limit {
-		out = out[:limit]
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	out := make([]repository.WebhookDelivery, 0, len(candidates))
+	for _, src := range candidates {
+		stored, ok := r.s.webhookDeliveries[src.ID]
+		if !ok {
+			continue
+		}
+		stored.Status = repository.WebhookDeliveryStatusProcessing
+		t := now
+		stored.LastAttemptAt = &t
+		r.s.webhookDeliveries[stored.ID] = stored
+		out = append(out, cloneDelivery(stored))
 	}
 	return out, nil
 }

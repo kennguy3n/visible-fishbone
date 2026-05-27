@@ -18,14 +18,17 @@ func NewTenantHandler(svc *tenant.Service) *TenantHandler {
 	return &TenantHandler{svc: svc}
 }
 
-// Register attaches the handler routes to a mux.
+// Register attaches the handler routes to a mux. Path parameters
+// are deliberately spelled `tenant_id` (not `id`) so the
+// router-level TenantScope middleware applies uniformly to every
+// route under /api/v1/tenants/{tenant_id}/...
 func (h *TenantHandler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/v1/tenants", h.create)
-	mux.HandleFunc("GET /api/v1/tenants", h.list)
-	mux.HandleFunc("GET /api/v1/tenants/{id}", h.get)
-	mux.HandleFunc("PATCH /api/v1/tenants/{id}", h.update)
-	mux.HandleFunc("POST /api/v1/tenants/{id}/suspend", h.suspend)
-	mux.HandleFunc("DELETE /api/v1/tenants/{id}", h.delete)
+	MountTenantScoped(mux, "POST /api/v1/tenants", h.create)
+	MountTenantScoped(mux, "GET /api/v1/tenants", h.list)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}", h.get)
+	MountTenantScoped(mux, "PATCH /api/v1/tenants/{tenant_id}", h.update)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/suspend", h.suspend)
+	MountTenantScoped(mux, "DELETE /api/v1/tenants/{tenant_id}", h.delete)
 }
 
 // TenantCreateRequest is the JSON body for POST /tenants.
@@ -114,7 +117,7 @@ func (h *TenantHandler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TenantHandler) get(w http.ResponseWriter, r *http.Request) {
-	id, ok := PathUUID(w, r, "id")
+	id, ok := PathUUID(w, r, "tenant_id")
 	if !ok {
 		return
 	}
@@ -126,7 +129,7 @@ func (h *TenantHandler) get(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, toTenantResponse(t))
 }
 
-// TenantUpdateRequest is the JSON body for PATCH /tenants/{id}.
+// TenantUpdateRequest is the JSON body for PATCH /tenants/{tenant_id}.
 type TenantUpdateRequest struct {
 	Name     string          `json:"name,omitempty"`
 	Region   string          `json:"region,omitempty"`
@@ -135,7 +138,7 @@ type TenantUpdateRequest struct {
 }
 
 func (h *TenantHandler) update(w http.ResponseWriter, r *http.Request) {
-	id, ok := PathUUID(w, r, "id")
+	id, ok := PathUUID(w, r, "tenant_id")
 	if !ok {
 		return
 	}
@@ -169,7 +172,7 @@ func (h *TenantHandler) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TenantHandler) suspend(w http.ResponseWriter, r *http.Request) {
-	id, ok := PathUUID(w, r, "id")
+	id, ok := PathUUID(w, r, "tenant_id")
 	if !ok {
 		return
 	}
@@ -182,7 +185,7 @@ func (h *TenantHandler) suspend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TenantHandler) delete(w http.ResponseWriter, r *http.Request) {
-	id, ok := PathUUID(w, r, "id")
+	id, ok := PathUUID(w, r, "tenant_id")
 	if !ok {
 		return
 	}

@@ -4,9 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/google/uuid"
-
-	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/site"
 )
@@ -26,11 +23,11 @@ func NewSiteHandler(svc *site.Service) *SiteHandler {
 // Register attaches routes; routes inherit RequireTenant from the
 // router-level chain.
 func (h *SiteHandler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/v1/tenants/{tenant_id}/sites", h.create)
-	mux.HandleFunc("GET /api/v1/tenants/{tenant_id}/sites", h.list)
-	mux.HandleFunc("GET /api/v1/tenants/{tenant_id}/sites/{id}", h.get)
-	mux.HandleFunc("PATCH /api/v1/tenants/{tenant_id}/sites/{id}", h.update)
-	mux.HandleFunc("DELETE /api/v1/tenants/{tenant_id}/sites/{id}", h.delete)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/sites", h.create)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/sites", h.list)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/sites/{id}", h.get)
+	MountTenantScoped(mux, "PATCH /api/v1/tenants/{tenant_id}/sites/{id}", h.update)
+	MountTenantScoped(mux, "DELETE /api/v1/tenants/{tenant_id}/sites/{id}", h.delete)
 }
 
 // SiteCreateRequest is the JSON body for POST /sites.
@@ -193,13 +190,4 @@ func (h *SiteHandler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// actorFromCtx returns *uuid.UUID from the auth context (nil if no user).
-func actorFromCtx(r *http.Request) *uuid.UUID {
-	u := middleware.UserIDFromContext(r.Context())
-	if u == uuid.Nil {
-		return nil
-	}
-	return &u
 }
