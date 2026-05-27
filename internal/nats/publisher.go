@@ -128,7 +128,7 @@ func (p *Publisher) Publish(ctx context.Context, subject string, data []byte, op
 	}
 	msg.Header.Set(HeaderEnqueuedAt, time.Now().UTC().Format(time.RFC3339Nano))
 	for k, v := range opts.Headers {
-		if _, exists := msg.Header[k]; !exists {
+		if msg.Header.Get(k) == "" {
 			msg.Header.Set(k, v)
 		}
 	}
@@ -180,16 +180,18 @@ func (p *Publisher) PublishEnvelope(ctx context.Context, env schema.Envelope, op
 	if subject == "" {
 		subject = SubjectForTelemetry(env.TenantID.String(), string(env.EventClass))
 	}
-	if opts.Headers == nil {
-		opts.Headers = map[string]string{}
+	hdrs := make(map[string]string, len(opts.Headers)+5)
+	for k, v := range opts.Headers {
+		hdrs[k] = v
 	}
-	opts.Headers[HeaderTenantID] = env.TenantID.String()
-	opts.Headers[HeaderDeviceID] = env.DeviceID.String()
+	hdrs[HeaderTenantID] = env.TenantID.String()
+	hdrs[HeaderDeviceID] = env.DeviceID.String()
 	if env.SiteID != nil {
-		opts.Headers[HeaderSiteID] = env.SiteID.String()
+		hdrs[HeaderSiteID] = env.SiteID.String()
 	}
-	opts.Headers[HeaderEventClass] = string(env.EventClass)
-	opts.Headers[HeaderPlatform] = string(env.Platform)
+	hdrs[HeaderEventClass] = string(env.EventClass)
+	hdrs[HeaderPlatform] = string(env.Platform)
+	opts.Headers = hdrs
 	if opts.MessageID == "" {
 		opts.MessageID = env.EventID.String()
 	}

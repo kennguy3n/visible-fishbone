@@ -137,6 +137,7 @@ func DefaultStreams(cfg *config.NATS) []StreamSpec {
 			Retention:   jetstream.LimitsPolicy,
 			Storage:     storage,
 			MaxAge:      30 * 24 * time.Hour,
+			DedupWindow: dedup,
 			Replicas:    replicas,
 			Discard:     jetstream.DiscardOld,
 			Description: "SNG control plane: dead-letter queue for failed messages",
