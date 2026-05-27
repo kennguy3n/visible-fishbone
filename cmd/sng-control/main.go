@@ -69,8 +69,17 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("jetstream: %w", err)
 	}
-	ensureCtx, ensureCancel := context.WithTimeout(rootCtx, cfg.NATS.RequestTimeout)
-	err = sngnats.EnsureStreams(ensureCtx, js, sngnats.DefaultStreams(&cfg.NATS))
+	// Use a generous overall budget (numStreams * per-stream timeout * 2)
+	// so even a fully-degraded NATS that consumes the per-stream budget
+	// can still report errors per-stream rather than collapsing the
+	// whole bootstrap on a single context deadline.
+	streams := sngnats.DefaultStreams(&cfg.NATS)
+	overall := time.Duration(len(streams)) * 2 * cfg.NATS.RequestTimeout
+	if overall <= 0 {
+		overall = 30 * time.Second
+	}
+	ensureCtx, ensureCancel := context.WithTimeout(rootCtx, overall)
+	err = sngnats.EnsureStreams(ensureCtx, js, streams, cfg.NATS.RequestTimeout)
 	ensureCancel()
 	if err != nil {
 		return fmt.Errorf("ensure streams: %w", err)

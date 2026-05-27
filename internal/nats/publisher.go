@@ -32,9 +32,27 @@ type PublishOptions struct {
 	// Timeout applied to each publish attempt. <=0 means use the
 	// publisher's configured default.
 	Timeout time.Duration
-	// MaxRetries overrides the publisher's default. 0/negative
-	// fall back to the publisher default.
+	// MaxAttempts is the total number of publish attempts
+	// (including the first — NOT additional retries after the
+	// first). 0/negative falls back to the publisher's configured
+	// PublishRetryAttempts, then to a hard-coded default of 3.
+	// Named to match its semantic (total tries) rather than the
+	// older `MaxRetries` which was misleading.
+	MaxAttempts int
+	// MaxRetries is a deprecated alias for MaxAttempts. If both
+	// are set, MaxAttempts wins. Retained for back-compat with
+	// any external callers staged on the older API; will be
+	// removed in a future PR.
+	//
+	// Deprecated: use MaxAttempts.
 	MaxRetries int
+	// Subject overrides the destination subject. When zero, the
+	// envelope's canonical telemetry subject is used (see
+	// SubjectForTelemetry). Callers wanting to route an envelope
+	// onto the events or policy stream pass an explicit subject
+	// here instead of calling Publish() directly so the canonical
+	// header set is still applied.
+	Subject string
 	// RetryDelay overrides the publisher's default. <=0 falls
 	// back to the publisher default.
 	RetryDelay time.Duration
@@ -68,7 +86,10 @@ func (p *Publisher) Publish(ctx context.Context, subject string, data []byte, op
 		return errors.New("nats: jetstream not connected")
 	}
 
-	maxAttempts := opts.MaxRetries
+	maxAttempts := opts.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = opts.MaxRetries
+	}
 	if maxAttempts <= 0 {
 		maxAttempts = p.cfg.PublishRetryAttempts
 	}
@@ -155,7 +176,10 @@ func (p *Publisher) PublishEnvelope(ctx context.Context, env schema.Envelope, op
 	if err != nil {
 		return err
 	}
-	subject := SubjectForTelemetry(env.TenantID.String(), string(env.EventClass))
+	subject := opts.Subject
+	if subject == "" {
+		subject = SubjectForTelemetry(env.TenantID.String(), string(env.EventClass))
+	}
 	if opts.Headers == nil {
 		opts.Headers = map[string]string{}
 	}

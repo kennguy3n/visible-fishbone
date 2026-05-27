@@ -59,7 +59,7 @@ func startNATS(t *testing.T) (jetstream.JetStream, *config.NATS) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg)); err != nil {
+	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg), 0); err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
 	return js, cfg
@@ -210,3 +210,65 @@ func TestService_DedupRingDropsDuplicates(t *testing.T) {
 }
 
 func uuidNew() string { return uuid.NewString() }
+
+// TestService_TransientWriteFailureIsRetried is the regression test
+// for the PR5 dedup-ring data-loss bug. Before the fix, the EventID
+// was added to the dedup ring *before* hot.Write, so a transient
+// write failure followed by JetStream redelivery would treat the
+// redelivered copy as a duplicate and silently ack it without ever
+// writing to the hot store — permanent data loss.
+//
+// The fix is to record dedup only after a successful write. This
+// test publishes a single envelope, fails the first write (the
+// captureWriter.failNTH=1 path returns an error), and asserts the
+// service eventually writes the event after JetStream redelivers.
+func TestService_TransientWriteFailureIsRetried(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{failNTH: 1}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	svc, err := telemetry.New(js, cfg,
+		telemetry.Config{Durable: "tlm-retry", DedupRingSize: 16},
+		hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	env := schema.Envelope{
+		SchemaVersion: schema.SchemaVersion, EventID: uuid.New(),
+		TenantID: uuid.New(), DeviceID: uuid.New(),
+		Timestamp:  time.Now().UTC(),
+		EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
+		Payload: newPayload(t),
+	}
+	if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// First delivery fails (failNTH=1) → Nak with 2s delay → JetStream
+	// redelivers → second attempt succeeds → write recorded.
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(hot.Snapshot()) == 1 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	_ = svc.Stop(stopCtx)
+
+	if got := len(hot.Snapshot()); got != 1 {
+		t.Fatalf("expected 1 event after redelivery, got %d (dedup-before-write data loss regression?)", got)
+	}
+	m := svc.MetricsSnapshot()
+	if m.HotWriteFails < 1 {
+		t.Errorf("expected at least 1 HotWriteFails (the simulated failure), got %d", m.HotWriteFails)
+	}
+}

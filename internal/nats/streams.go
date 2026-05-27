@@ -179,10 +179,32 @@ func EnsureStream(ctx context.Context, js jetstream.JetStream, spec StreamSpec) 
 
 // EnsureStreams ensures every spec exists. Errors aggregate so one
 // bad stream doesn't prevent inspecting failures in the others.
-func EnsureStreams(ctx context.Context, js jetstream.JetStream, specs []StreamSpec) error {
+//
+// If perStreamTimeout > 0, each stream's create/update call is
+// bounded by its own fresh WithTimeout derived from ctx. This
+// guarantees that a slow JetStream cluster (e.g. the first stream
+// taking 4s to update) cannot exhaust a single shared deadline and
+// leave later streams with no budget. If perStreamTimeout <= 0,
+// every call inherits ctx unchanged (use this for tests where ctx
+// is already a per-call WithTimeout).
+//
+// The caller is responsible for using a sufficiently long overall
+// ctx to accommodate (numStreams * perStreamTimeout) in the
+// worst case. We don't enforce this because the alternative
+// (multiplying internally) makes the per-stream knob misleading.
+func EnsureStreams(ctx context.Context, js jetstream.JetStream, specs []StreamSpec, perStreamTimeout time.Duration) error {
 	var errs []error
 	for _, spec := range specs {
-		if _, err := EnsureStream(ctx, js, spec); err != nil {
+		streamCtx := ctx
+		var cancel context.CancelFunc
+		if perStreamTimeout > 0 {
+			streamCtx, cancel = context.WithTimeout(ctx, perStreamTimeout)
+		}
+		_, err := EnsureStream(streamCtx, js, spec)
+		if cancel != nil {
+			cancel()
+		}
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -258,7 +280,7 @@ func SubjectForPolicy(tenantID, kind string) string {
 
 // DLQSubjectFor wraps the original subject in the DLQ namespace,
 // e.g. DLQSubjectFor("sng.abc.telemetry.flow") →
-// "sng.dlq.sng.abc.telemetry.flow". The full original subject is
+// "sngdlq.sng.abc.telemetry.flow". The full original subject is
 // preserved so the DLQ consumer can route to the original handler.
 func DLQSubjectFor(originSubject string) string {
 	return SubjectDLQPrefix + "." + originSubject

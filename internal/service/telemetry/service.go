@@ -316,7 +316,15 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 	}
 	s.metrics.Decoded.Add(1)
 
-	if s.dedup.SeenOrAdd(env.EventID) {
+	// Read-only dedup check: only suppress redelivery if we have
+	// previously processed this EventID through to a successful
+	// hot write. We deliberately do NOT add to the ring before
+	// hot.Write — a transient writer failure followed by
+	// redelivery would otherwise be silently dropped (the
+	// redelivered copy would look like a duplicate and get acked
+	// without ever being written). See PR5 review finding
+	// BUG_pr-review-job-22734e9d8a4f4b9cbc7782ec198361ca_0001.
+	if s.dedup.Seen(env.EventID) {
 		s.metrics.Deduplicated.Add(1)
 		_ = msg.Ack()
 		s.metrics.Acked.Add(1)
@@ -343,6 +351,10 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 			slog.Any("error", err),
 			slog.String("event_id", env.EventID.String()))
 	}
+	// Only record dedup *after* the hot write succeeded. This way
+	// a subsequent redelivery of a transient-failure message is
+	// allowed to retry the write rather than being silently acked.
+	s.dedup.Add(env.EventID)
 	s.metrics.Enriched.Add(1)
 	if err := msg.Ack(); err != nil {
 		s.logger.Warn("telemetry: ack failed", slog.Any("error", err))
@@ -374,15 +386,46 @@ func newDedupRing(capacity int) *dedupRing {
 	}
 }
 
-// SeenOrAdd reports whether id has been seen recently. If not, it
-// is added and the oldest entry evicted to make room.
+// Seen reports whether id has been recorded as a successfully
+// processed event. It does NOT mutate the ring — use Add to record.
+//
+// Splitting the check from the insertion is what guarantees we never
+// silently swallow a redelivery whose previous attempt failed before
+// reaching Add (see dispatch()).
+func (r *dedupRing) Seen(id uuid.UUID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.seen[id]
+	return ok
+}
+
+// Add records id as processed, evicting the oldest entry to make
+// room. Idempotent — adding the same id twice is a no-op.
+func (r *dedupRing) Add(id uuid.UUID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.seen[id]; ok {
+		return
+	}
+	if old := r.ring[r.head]; old != uuid.Nil {
+		delete(r.seen, old)
+	}
+	r.ring[r.head] = id
+	r.seen[id] = struct{}{}
+	r.head = (r.head + 1) % r.cap
+}
+
+// SeenOrAdd is retained for tests/back-compat. It is equivalent to
+// `if r.Seen(id) { return true } else { r.Add(id); return false }`
+// but runs under a single lock. New code SHOULD use Seen + Add
+// explicitly so the failure-mode invariant is visible at the call
+// site.
 func (r *dedupRing) SeenOrAdd(id uuid.UUID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.seen[id]; ok {
 		return true
 	}
-	// Evict the slot we're about to overwrite, if it's populated.
 	if old := r.ring[r.head]; old != uuid.Nil {
 		delete(r.seen, old)
 	}

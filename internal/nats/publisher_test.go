@@ -18,7 +18,7 @@ func TestPublisher_PublishAndConsume(t *testing.T) {
 	cfg := defaultNATSConfig()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg)); err != nil {
+	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg), 0); err != nil {
 		t.Fatalf("ensure streams: %v", err)
 	}
 	pub := sngnats.NewPublisher(js, cfg, "sng-control")
@@ -89,7 +89,7 @@ func TestPublisher_DedupSameMsgID(t *testing.T) {
 	cfg := defaultNATSConfig()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg)); err != nil {
+	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg), 0); err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
 	pub := sngnats.NewPublisher(js, cfg, "test")
@@ -120,7 +120,7 @@ func TestPublisher_DLQ(t *testing.T) {
 	cfg := defaultNATSConfig()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg)); err != nil {
+	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg), 0); err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
 	pub := sngnats.NewPublisher(js, cfg, "test")

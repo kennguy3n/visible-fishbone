@@ -79,11 +79,11 @@ func TestEnsureStreams_Idempotent(t *testing.T) {
 	defer cancel()
 
 	specs := sngnats.DefaultStreams(cfg)
-	if err := sngnats.EnsureStreams(ctx, js, specs); err != nil {
+	if err := sngnats.EnsureStreams(ctx, js, specs, 0); err != nil {
 		t.Fatalf("first ensure: %v", err)
 	}
 	// Re-apply: must be idempotent (Update path).
-	if err := sngnats.EnsureStreams(ctx, js, specs); err != nil {
+	if err := sngnats.EnsureStreams(ctx, js, specs, 0); err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
 	// Verify every stream exists.
@@ -100,7 +100,7 @@ func TestEnsureConsumer(t *testing.T) {
 	cfg := defaultNATSConfig()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg)); err != nil {
+	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg), 0); err != nil {
 		t.Fatalf("ensure streams: %v", err)
 	}
 	cons, err := sngnats.EnsureConsumer(ctx, js, sngnats.ConsumerSpec{
