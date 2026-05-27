@@ -43,6 +43,16 @@ type WorkerConfig struct {
 	BackoffBase time.Duration
 	// BackoffMax is the per-attempt backoff ceiling. Default 1h.
 	BackoffMax time.Duration
+	// SignatureHeader is the HTTP header name carrying the
+	// `v1=<hex>` HMAC-SHA256 signature on each delivery. Operators
+	// override this via WEBHOOK_SIGNATURE_HEADER when their
+	// downstream verifier expects a non-default name (e.g.
+	// `X-Acme-Webhook-Sig`); the previous wiring loaded that env
+	// var at boot, validated it, and then silently ignored it at
+	// delivery time because this field was missing — subscribers
+	// looking for the custom header would reject every signature
+	// as missing. Default `X-SNG-Signature`.
+	SignatureHeader string
 	// ProcessingTimeout is the stuck-row recovery window passed to
 	// WebhookDeliveryRepository.ListPending. Rows that a previous
 	// worker claimed (status='processing') but never transitioned
@@ -82,6 +92,9 @@ func (c *WorkerConfig) defaults() {
 	}
 	if c.ProcessingTimeout <= 0 {
 		c.ProcessingTimeout = 5 * time.Minute
+	}
+	if c.SignatureHeader == "" {
+		c.SignatureHeader = "X-SNG-Signature"
 	}
 }
 
@@ -300,7 +313,7 @@ func (w *DeliveryWorker) post(
 	req.Header.Set("X-Sng-Event", d.EventType)
 	req.Header.Set("X-Sng-Delivery-Id", d.ID.String())
 	req.Header.Set("X-Sng-Timestamp", timestamp)
-	req.Header.Set("X-Sng-Signature", "v1="+sig)
+	req.Header.Set(w.cfg.SignatureHeader, "v1="+sig)
 
 	resp, err := w.client.Do(req)
 	if err != nil {

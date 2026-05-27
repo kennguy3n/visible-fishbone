@@ -227,6 +227,13 @@ func buildRouter(
 			BackoffBase:       cfg.Webhook.InitialDelay,
 			BackoffMax:        cfg.Webhook.MaxDelay,
 			ProcessingTimeout: cfg.Webhook.ProcessingTimeout,
+			// WEBHOOK_SIGNATURE_HEADER is loaded + validated at
+			// boot but used to be silently dropped here, so a
+			// subscriber configured to look for a non-default
+			// header (e.g. `X-Acme-Webhook-Sig`) saw every
+			// signature as missing. Threading the value into
+			// WorkerConfig restores the operator-facing contract.
+			SignatureHeader: cfg.Webhook.SignatureHeader,
 		},
 		logger,
 	)

@@ -182,31 +182,68 @@ func (r *TenantRepository) List(ctx context.Context, page repository.Page) (repo
 	return res, nil
 }
 
-func (r *TenantRepository) Update(ctx context.Context, t repository.Tenant) (repository.Tenant, error) {
-	if t.ID == uuid.Nil {
+func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repository.TenantPatch) (repository.Tenant, error) {
+	if id == uuid.Nil {
 		return repository.Tenant{}, repository.ErrInvalidArgument
 	}
-	// Build a sparse UPDATE that only touches the columns the
-	// caller provided. Using COALESCE on every column would clobber
-	// rows where the caller deliberately wanted to clear an
-	// optional field (e.g. region), so we send a NULL probe per
-	// column and skip ones the caller left blank.
+	// Build a sparse UPDATE that drives each column off a
+	// `<param> IS NULL` probe: when the caller passes a nil
+	// pointer the parameter binds to SQL NULL and the CASE keeps
+	// the existing value; otherwise the supplied value is
+	// applied verbatim, *including* the empty string. The
+	// previous implementation used `COALESCE(NULLIF($x, ''),
+	// col)` which collapsed "absent" and "clear" into the same
+	// `''` wire value and made it impossible to PATCH the
+	// optional Region column back to empty once it had been
+	// set — exactly the bug the round-4 review flagged.
 	const q = `
 		UPDATE tenants
-		SET name     = COALESCE(NULLIF($2, ''), name),
-		    slug     = COALESCE(NULLIF($3, ''), slug),
-		    status   = COALESCE(NULLIF($4, ''), status),
-		    region   = COALESCE(NULLIF($5, ''), region),
-		    tier     = COALESCE(NULLIF($6, ''), tier),
-		    settings = COALESCE($7::jsonb, settings)
+		SET name     = CASE WHEN $2::text IS NULL THEN name     ELSE $2::text END,
+		    slug     = CASE WHEN $3::text IS NULL THEN slug     ELSE $3::text END,
+		    status   = CASE WHEN $4::text IS NULL THEN status   ELSE $4::text END,
+		    region   = CASE WHEN $5::text IS NULL THEN region   ELSE $5::text END,
+		    tier     = CASE WHEN $6::text IS NULL THEN tier     ELSE $6::text END,
+		    settings = CASE WHEN $7::jsonb IS NULL THEN settings ELSE $7::jsonb END
 		WHERE id = $1::uuid
 		RETURNING ` + tenantSelectColumns
-	var settings any
-	if len(t.Settings) > 0 {
-		settings = []byte(t.Settings)
+	var (
+		nameArg   any
+		slugArg   any
+		statusArg any
+		regionArg any
+		tierArg   any
+		settings  any
+	)
+	if patch.Name != nil {
+		nameArg = *patch.Name
+	}
+	if patch.Slug != nil {
+		slugArg = *patch.Slug
+	}
+	if patch.Status != nil {
+		statusArg = string(*patch.Status)
+	}
+	if patch.Region != nil {
+		regionArg = *patch.Region
+	}
+	if patch.Tier != nil {
+		tierArg = string(*patch.Tier)
+	}
+	if patch.Settings != nil {
+		// An explicit empty payload (`json.RawMessage{}`) means
+		// "clear to SQL NULL is not the operator's intent" — we
+		// store the literal empty JSON object instead so the
+		// column remains valid JSONB. A genuine "reset to {}"
+		// is therefore expressible by the caller; a "wipe the
+		// column to NULL" requires a separate schema operation.
+		payload := *patch.Settings
+		if len(payload) == 0 {
+			payload = []byte("{}")
+		}
+		settings = []byte(payload)
 	}
 	out, err := scanTenant(r.s.pool.QueryRow(ctx, q,
-		t.ID, t.Name, t.Slug, string(t.Status), t.Region, string(t.Tier), settings,
+		id, nameArg, slugArg, statusArg, regionArg, tierArg, settings,
 	))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.Tenant{}, repository.ErrNotFound

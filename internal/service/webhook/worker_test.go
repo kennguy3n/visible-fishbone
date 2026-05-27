@@ -452,3 +452,94 @@ func TestDeliver_MissingSigningSecretFailsAttempt(t *testing.T) {
 		t.Errorf("attempts = %d, want 1", got.Attempts)
 	}
 }
+
+// TestDeliver_UsesConfiguredSignatureHeader is the regression test
+// for the PR6 round-4 Devin Review finding: WEBHOOK_SIGNATURE_HEADER
+// was loaded, defaulted, and validated at boot, but the previous
+// WorkerConfig did not have a SignatureHeader field and the
+// worker's post() helper hardcoded "X-Sng-Signature". An operator
+// who set WEBHOOK_SIGNATURE_HEADER=X-Acme-Webhook-Sig got their
+// value accepted at boot but silently ignored at delivery time;
+// the downstream subscriber looked for the configured header,
+// found it missing, and rejected the signature on every event.
+//
+// This test seeds a worker with a non-default SignatureHeader,
+// observes the actual HTTP request, and asserts the configured
+// header carried the v1 signature AND that the default header was
+// NOT also set (so we'd catch the "set both" regression too).
+func TestDeliver_UsesConfiguredSignatureHeader(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	const customHeader = "X-Acme-Webhook-Sig"
+
+	var (
+		gotCustom  string
+		gotDefault string
+		gotBody    []byte
+		gotTS      string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCustom = r.Header.Get(customHeader)
+		gotDefault = r.Header.Get("X-Sng-Signature")
+		gotTS = r.Header.Get("X-Sng-Timestamp")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	wkr, store, tenantID := newTestWorker(t, now, WorkerConfig{
+		BatchSize: 1, MaxAttempts: 1,
+		BackoffBase: time.Second, BackoffMax: time.Minute,
+		SignatureHeader: customHeader,
+	})
+
+	endpointRepo := memory.NewWebhookEndpointRepository(store)
+	deliveryRepo := memory.NewWebhookDeliveryRepository(store)
+	secret := []byte("test-secret-for-custom-header-test")
+	ep, err := endpointRepo.Create(context.Background(), tenantID, repository.WebhookEndpoint{
+		URL: srv.URL, Events: []string{"tenant.created"},
+		SigningSecret: secret,
+		Status:        repository.WebhookEndpointStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("seed endpoint: %v", err)
+	}
+	if _, err := deliveryRepo.Create(context.Background(), tenantID, repository.WebhookDelivery{
+		EndpointID:  ep.ID,
+		EventType:   "tenant.created",
+		Payload:     json.RawMessage(`{"k":"v"}`),
+		Status:      repository.WebhookDeliveryStatusPending,
+		NextRetryAt: now,
+	}); err != nil {
+		t.Fatalf("seed delivery: %v", err)
+	}
+
+	if _, err := wkr.ProcessPending(context.Background()); err != nil {
+		t.Fatalf("ProcessPending: %v", err)
+	}
+
+	if gotCustom == "" {
+		t.Fatalf("custom signature header %q was not set; worker dropped operator config", customHeader)
+	}
+	if gotDefault != "" {
+		t.Errorf("default header X-Sng-Signature also leaked = %q (worker should emit ONLY the configured header)",
+			gotDefault)
+	}
+	want := computeExpectedSignatureV1(t, secret, gotTS, gotBody)
+	if gotCustom != want {
+		t.Errorf("%s = %q, want %q", customHeader, gotCustom, want)
+	}
+}
+
+// TestWorkerConfig_DefaultsSignatureHeader confirms an empty
+// SignatureHeader falls back to "X-SNG-Signature" so callers that
+// don't set the field keep the historical behaviour.
+func TestWorkerConfig_DefaultsSignatureHeader(t *testing.T) {
+	t.Parallel()
+	c := WorkerConfig{}
+	c.defaults()
+	if c.SignatureHeader != "X-SNG-Signature" {
+		t.Errorf("SignatureHeader default = %q, want %q",
+			c.SignatureHeader, "X-SNG-Signature")
+	}
+}

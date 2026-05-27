@@ -85,14 +85,17 @@ func (svc *Service) List(ctx context.Context, page repository.Page) (repository.
 	return svc.tenants.List(ctx, page)
 }
 
-// Update applies a partial update to the tenant's mutable fields
-// (name, region, tier, settings). Empty strings in the input are
-// treated as "no change" by the repository layer.
-func (svc *Service) Update(ctx context.Context, t repository.Tenant) (repository.Tenant, error) {
-	if t.ID == uuid.Nil {
+// Update applies a sparse patch to the tenant's mutable fields
+// (name, region, tier, settings). See repository.TenantPatch for
+// the per-field semantics — in short: nil pointer leaves the
+// column untouched, non-nil pointer applies the value including
+// the zero value, which is how operators clear optional fields
+// like Region.
+func (svc *Service) Update(ctx context.Context, id uuid.UUID, patch repository.TenantPatch) (repository.Tenant, error) {
+	if id == uuid.Nil {
 		return repository.Tenant{}, fmt.Errorf("tenant ID is required: %w", repository.ErrInvalidArgument)
 	}
-	updated, err := svc.tenants.Update(ctx, t)
+	updated, err := svc.tenants.Update(ctx, id, patch)
 	if err != nil {
 		return repository.Tenant{}, err
 	}

@@ -3,6 +3,8 @@ package handler
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,8 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/config"
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
@@ -200,5 +205,107 @@ func TestCreateClaimTokenChunkedEmptyBody(t *testing.T) {
 	h.createClaimToken(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCreateClaimTokenStampsAuthenticatedActor is the regression
+// test for the PR6 round-4 Devin Review finding: createClaimToken
+// hardcoded `nil` as the audited actor instead of resolving the
+// authenticated user via actorFromCtx(r). The result was that
+// every claim token ever issued through the API was attributed to
+// "<nil>" in the audit log and on the ClaimToken.CreatedBy field —
+// destroying the audit trail of which operator minted which
+// enrolment credential.
+//
+// We exercise the full real path: build a valid HS256 JWT, run it
+// through the real middleware.Auth so the user UUID lands in
+// r.Context() the same way it does in production, then call the
+// handler and read the persisted ClaimToken back from the in-memory
+// claim-token repo via its hash to confirm CreatedBy was populated.
+func TestCreateClaimTokenStampsAuthenticatedActor(t *testing.T) {
+	t.Parallel()
+
+	// Build the stack manually (instead of using
+	// newTestDeviceHandler) so we keep handles on the claim-token
+	// repo and the seeded tenant ID — newTestDeviceHandler hides
+	// both behind its return signature.
+	store := memory.NewStore()
+	tenants := memory.NewTenantRepository(store)
+	tn, err := tenants.Create(context.Background(), repository.Tenant{
+		Name: "Test", Slug: "test",
+		Status: repository.TenantStatusActive,
+		Tier:   repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	tokenRepo := memory.NewClaimTokenRepository(store)
+	identitySvc := identity.New(
+		memory.NewDeviceRepository(store),
+		tokenRepo,
+		memory.NewAuditLogRepository(store),
+		nil,
+	)
+	h := NewDeviceHandler(identitySvc, memory.NewDeviceRepository(store), 0)
+
+	// Mint a JWT that the auth middleware will accept and decode
+	// into the request context.
+	secret := []byte("test-secret-actor-attribution")
+	userID := uuid.New()
+	claims := jwt.MapClaims{
+		"iss": "sng-control",
+		"aud": "sng-control",
+		"sub": userID.String(),
+		"exp": time.Now().Add(time.Hour).Unix(),
+	}
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secret)
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
+	authCfg := &config.Auth{
+		JWTSecret:   string(secret),
+		JWTIssuer:   "sng-control",
+		JWTAudience: "sng-control",
+	}
+
+	// Run the request through middleware.Auth -> handler so we
+	// exercise the exact production path that hydrates UserID in
+	// the context.
+	authed := middleware.Auth(authCfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("tenant_id", tn.ID.String())
+		h.createClaimToken(w, r)
+	}))
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tn.ID.String()+"/claim-tokens", nil)
+	req.Header.Set("Authorization", "Bearer "+signed)
+	rec := httptest.NewRecorder()
+	authed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Decode the plaintext, hash it, and look the row up in the
+	// repo to confirm CreatedBy was persisted as the authenticated
+	// user — proving the handler forwarded actorFromCtx(r) instead
+	// of nil.
+	var resp ClaimTokenCreateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(resp.Token)
+	if err != nil {
+		t.Fatalf("decode plaintext: %v", err)
+	}
+	hash := sha256.Sum256(raw)
+	stored, err := tokenRepo.GetByHash(context.Background(), tn.ID, hash[:])
+	if err != nil {
+		t.Fatalf("GetByHash: %v", err)
+	}
+	if stored.CreatedBy == nil {
+		t.Fatal("ClaimToken.CreatedBy is nil; handler did not forward the authenticated actor (regression of PR6 round-4 finding)")
+	}
+	if *stored.CreatedBy != userID {
+		t.Errorf("ClaimToken.CreatedBy = %v, want %v (handler stamped the wrong actor)",
+			*stored.CreatedBy, userID)
 	}
 }
