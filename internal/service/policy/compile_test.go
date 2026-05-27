@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -202,4 +203,88 @@ func TestCompile_Determinism(t *testing.T) {
 		}
 	}
 	_ = uuid.Nil // silence unused import on some toolchains
+}
+
+// TestService_PutGraph_RejectsInvalidTypedSchema verifies that
+// PutGraph enforces the typed-graph contract at write time. Prior
+// to PR7 Round 2, PutGraph accepted any syntactically-valid JSON
+// and only surfaced schema violations implicitly at compile time
+// (rules silently fell back to the PR6 broadcast-all-rules path
+// when ParseGraph failed). That divergence was inconsistent with
+// the documented contract in graph.go (~"operators get schema
+// validation at PUT time rather than at compile time"). This test
+// pins the corrected behaviour: invalid verbs, domains, targets,
+// missing rule ids, duplicate ids, and unresolved subject/predicate
+// references must all be rejected with ErrInvalidArgument.
+func TestService_PutGraph_RejectsInvalidTypedSchema(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(s)
+	tnt, err := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "t", Slug: "t", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	policyRepo := memory.NewPolicyRepository(s)
+	keyRepo := memory.NewPolicySigningKeyRepository(s)
+	keys := NewKeyService(keyRepo, nil)
+	svc := New(policyRepo, nil, keys)
+
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"invalid_default_action_verb", `{"default_action":"yeet"}`},
+		{"invalid_rule_domain", `{"default_action":"deny","rules":[{"id":"r1","domain":"not-a-real-domain","verb":"allow"}]}`},
+		{"invalid_rule_verb", `{"default_action":"deny","rules":[{"id":"r1","domain":"ztna","verb":"yeet"}]}`},
+		{"missing_rule_id", `{"default_action":"deny","rules":[{"domain":"ztna","verb":"allow"}]}`},
+		{"duplicate_rule_id", `{"default_action":"deny","rules":[{"id":"r1","domain":"ztna","verb":"allow"},{"id":"r1","domain":"dlp","verb":"log"}]}`},
+		{"invalid_target", `{"default_action":"deny","rules":[{"id":"r1","domain":"ztna","verb":"allow","targets":["not-a-target"]}]}`},
+		{"unresolved_subject_ref", `{"default_action":"deny","subjects":[{"name":"alice","kind":"user"}],"rules":[{"id":"r1","domain":"ztna","verb":"allow","subject_refs":["bob"]}]}`},
+		{"duplicate_subject_name", `{"default_action":"deny","subjects":[{"name":"alice","kind":"user"},{"name":"alice","kind":"user"}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.PutGraph(context.Background(), tnt.ID, nil, json.RawMessage(tc.raw))
+			if err == nil {
+				t.Fatalf("want error, got nil")
+			}
+			if !errors.Is(err, repository.ErrInvalidArgument) {
+				t.Fatalf("want ErrInvalidArgument, got %v", err)
+			}
+		})
+	}
+}
+
+// TestService_PutGraph_AcceptsValidTypedSchema is the positive
+// counterpart to ensure the new validator hasn't introduced
+// false-positive rejections for legitimate graphs (empty doc,
+// default-only, fully-populated typed graph with subjects /
+// predicates / rules / targets).
+func TestService_PutGraph_AcceptsValidTypedSchema(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(s)
+	tnt, _ := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "t", Slug: "t", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	policyRepo := memory.NewPolicyRepository(s)
+	keyRepo := memory.NewPolicySigningKeyRepository(s)
+	keys := NewKeyService(keyRepo, nil)
+	svc := New(policyRepo, nil, keys)
+
+	cases := []string{
+		`{}`,
+		`{"default_action":"deny"}`,
+		`{"default_action":"allow","rules":[{"id":"r1","domain":"ngfw","verb":"deny"}]}`,
+		`{"default_action":"deny","subjects":[{"name":"alice","kind":"user"}],"predicates":[{"name":"hours"}],"rules":[{"id":"r1","domain":"ztna","verb":"allow","subject_refs":["alice"],"predicate_refs":["hours"],"targets":["edge","cloud"]}]}`,
+		// Unknown top-level fields ignored (PR8+ forward compat).
+		`{"default_action":"deny","metadata":{"author":"ken","version":2}}`,
+	}
+	for i, raw := range cases {
+		if _, err := svc.PutGraph(context.Background(), tnt.ID, nil, json.RawMessage(raw)); err != nil {
+			t.Errorf("case %d (%q): unexpected error: %v", i, raw, err)
+		}
+	}
 }
