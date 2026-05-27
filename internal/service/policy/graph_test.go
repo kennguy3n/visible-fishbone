@@ -50,6 +50,40 @@ func TestParseGraph_Valid(t *testing.T) {
 	}
 }
 
+func TestParseGraph_PreservesUnknownRuleFields(t *testing.T) {
+	t.Parallel()
+	// The contract advertised on Rule.Extra is that unknown
+	// rule fields survive a parse/compile round-trip. Without
+	// Rule.UnmarshalJSON, the json:"-" tag would drop them
+	// silently. Compile the rule for its routing target and
+	// confirm the unknown key reappears in the encoded output.
+	// Use compact JSON so the Extra round-trip can be compared
+	// byte-for-byte without normalising whitespace (Extra values
+	// are stored as raw bytes from the input document).
+	raw := json.RawMessage(`{"rules":[{"id":"r1","domain":"ngfw","verb":"deny","vendor_specific":{"acme":7}}]}`)
+	g, err := ParseGraph(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(g.Rules) != 1 {
+		t.Fatalf("rule count: %d", len(g.Rules))
+	}
+	extra, ok := g.Rules[0].Extra["vendor_specific"]
+	if !ok {
+		t.Fatalf("vendor_specific dropped from Extra: %+v", g.Rules[0].Extra)
+	}
+	if string(extra) != `{"acme":7}` {
+		t.Errorf("Extra value mangled: %s", extra)
+	}
+	encoded, err := EncodeRules(g.Rules)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"vendor_specific":{"acme":7}`) {
+		t.Errorf("vendor_specific not in encoded output: %s", encoded)
+	}
+}
+
 func TestParseGraph_Invalid(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

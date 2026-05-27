@@ -312,6 +312,36 @@ func TestPolicy_SigningKey_LifecycleEndToEnd(t *testing.T) {
 	}
 }
 
+// TestPolicy_GetPublicKey_ActiveAliasNoLazyCreate confirms the
+// public-key publication endpoint never side-effects a key into
+// existence. Hitting /public-key with keyID="active" on a tenant
+// that has never rotated must return 404, not 201/200 — otherwise
+// any unauthenticated client could provoke key generation.
+func TestPolicy_GetPublicKey_ActiveAliasNoLazyCreate(t *testing.T) {
+	t.Parallel()
+	h, tnt := newTestPolicyHandler(t)
+	tid := tnt.ID.String()
+	rec := doRequest(t, h, http.MethodGet,
+		"/api/v1/tenants/"+tid+"/policy/signing-keys/active/public-key",
+		nil, tid, "", "active")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	// And after rotation, the same call must succeed and return
+	// the freshly-active key.
+	if rec := doRequest(t, h, http.MethodPost,
+		"/api/v1/tenants/"+tid+"/policy/signing-keys/rotate",
+		nil, tid, "", ""); rec.Code != http.StatusCreated {
+		t.Fatalf("rotate: %d", rec.Code)
+	}
+	rec = doRequest(t, h, http.MethodGet,
+		"/api/v1/tenants/"+tid+"/policy/signing-keys/active/public-key",
+		nil, tid, "", "active")
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 after rotate, got %d", rec.Code)
+	}
+}
+
 // TestPolicy_BundleDownload_BadTarget rejects unknown target names.
 func TestPolicy_BundleDownload_BadTarget(t *testing.T) {
 	t.Parallel()

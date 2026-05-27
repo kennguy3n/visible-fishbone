@@ -420,8 +420,12 @@ func (h *PolicyHandler) getPublicKey(w http.ResponseWriter, r *http.Request) {
 		k   repository.PolicySigningKey
 		err error
 	)
+	// Fetching the public key must never have the side effect of
+	// minting a new key. GetActiveNoCreate surfaces ErrNotFound
+	// for callers that hit /public-key on a tenant that has not
+	// yet rotated/provisioned a key.
 	if keyID == "active" {
-		k, err = h.keys.GetActive(r.Context(), tenantID)
+		k, err = h.keys.GetActiveNoCreate(r.Context(), tenantID)
 	} else {
 		k, err = h.keys.GetByKeyID(r.Context(), tenantID, keyID)
 	}
