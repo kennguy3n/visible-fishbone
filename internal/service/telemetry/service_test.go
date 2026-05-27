@@ -479,6 +479,142 @@ func TestService_UndecodablePayloadDegradedModeWhenNoDLQ(t *testing.T) {
 	}
 }
 
+// blockingDLQ blocks each PublishToDLQ call on an external channel
+// signal, capturing the dispatch context for assertion. Used to
+// race a shutdown-triggered runCtx cancellation against an
+// in-flight DLQ publish and prove the publish's own context is
+// independent of runCtx (i.e. that we honour the fix for
+// BUG_pr-review-job-e48f3945205448b7a0d5ed4548989fd6_0001).
+type blockingDLQ struct {
+	entered chan struct{}
+	release chan struct{}
+	// entryErr is the ctx.Err() observed on entry to PublishToDLQ.
+	// Buffered so we can read it from the test goroutine.
+	entryErr chan error
+	exitErr  chan error
+}
+
+func newBlockingDLQ() *blockingDLQ {
+	return &blockingDLQ{
+		entered:  make(chan struct{}, 1),
+		release:  make(chan struct{}),
+		entryErr: make(chan error, 1),
+		exitErr:  make(chan error, 1),
+	}
+}
+
+func (b *blockingDLQ) PublishToDLQ(
+	ctx context.Context,
+	_ string,
+	_ []byte,
+	_ map[string]string,
+	_ uint64,
+	_ error,
+) error {
+	b.entryErr <- ctx.Err()
+	b.entered <- struct{}{}
+	<-b.release
+	b.exitErr <- ctx.Err()
+	return nil
+}
+
+// TestService_DLQPublishSurvivesShutdown is the regression test for
+// the PR5 review finding observing that
+// routeBadPayloadToDLQ derived its publish context from the
+// dispatch loop's runCtx. When Stop() races with a bad-payload
+// dispatch, runCtx cancellation would expire the publish context
+// immediately, fail the DLQ publish, and then proceed to Term()
+// the message — losing forensic bytes. The fix derives publishCtx
+// from context.Background() so it survives shutdown.
+//
+// The test wires a blockingDLQ that pauses the dispatch goroutine
+// mid-publish, asks the service to Stop (cancelling runCtx), then
+// releases the DLQ. The assertions verify ctx.Err() is nil both on
+// entry and exit of the publish — proving publishCtx is independent
+// of runCtx.
+func TestService_DLQPublishSurvivesShutdown(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	svc, err := telemetry.New(js, cfg,
+		telemetry.Config{Durable: "tlm-dlq-shutdown", DedupRingSize: 16},
+		hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dlq := newBlockingDLQ()
+	svc.WithDLQ(dlq)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	subject := "sng." + uuid.NewString() + ".telemetry.garbage"
+	if err := pub.Publish(ctx, subject, []byte{0xff, 0xee, 0xdd}, sngnats.PublishOptions{
+		MessageID: "bad-shutdown-" + uuid.NewString(),
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// Wait for the dispatch to enter the DLQ publish.
+	select {
+	case <-dlq.entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("dispatch did not enter DLQ within 15s")
+	}
+
+	// Trigger shutdown — cancels runCtx while the DLQ publish is
+	// suspended on dlq.release.
+	stopErrCh := make(chan error, 1)
+	go func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		stopErrCh <- svc.Stop(stopCtx)
+	}()
+	// Give Stop() time to invoke cancel() on runCtx. Without this
+	// the race might not actually trigger.
+	time.Sleep(200 * time.Millisecond)
+
+	// publishCtx must NOT have been cancelled, because the fix
+	// derives it from context.Background() rather than runCtx.
+	select {
+	case got := <-dlq.entryErr:
+		if got != nil {
+			t.Errorf("ctx.Err() on DLQ entry = %v, want nil (publishCtx must be background-derived)", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("never received entryErr")
+	}
+
+	// Release the DLQ publish — should complete successfully even
+	// though runCtx has been cancelled.
+	close(dlq.release)
+	select {
+	case got := <-dlq.exitErr:
+		if got != nil {
+			t.Errorf("ctx.Err() on DLQ exit = %v, want nil (publishCtx must survive runCtx cancellation)", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("never received exitErr")
+	}
+	if err := <-stopErrCh; err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	// The publish succeeded — metrics confirm.
+	m := svc.MetricsSnapshot()
+	if m.DLQPublished != 1 {
+		t.Errorf("expected DLQPublished = 1, got %d", m.DLQPublished)
+	}
+	if m.DLQPublishFail != 0 {
+		t.Errorf("expected DLQPublishFail = 0, got %d", m.DLQPublishFail)
+	}
+}
+
 // TestService_DLQPublishFailureCounted verifies the metric is
 // incremented when the DLQ publish itself fails, and the original
 // message is still terminated (we don't want to spin retrying the

@@ -367,7 +367,7 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 		// governs retry budget, not destination on terminal
 		// failure. The DLQ is a separate stream that we must
 		// publish to explicitly.
-		s.routeBadPayloadToDLQ(ctx, msg, err)
+		s.routeBadPayloadToDLQ(msg, err)
 		if termErr := msg.Term(); termErr != nil {
 			s.logger.Warn("telemetry: term failed",
 				slog.Any("error", termErr),
@@ -437,7 +437,20 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 // publish) would just spin until MaxDeliver runs out, ending up in
 // the same Term() state with one more delivery attempt logged —
 // not worth the throughput hit when the DLQ itself is unhealthy.
-func (s *Service) routeBadPayloadToDLQ(ctx context.Context, msg jetstream.Msg, cause error) {
+//
+// The publish context is deliberately derived from
+// context.Background() rather than the dispatch loop's runCtx.
+// runCtx is cancelled by Stop() during graceful shutdown; if the
+// shutdown signal lands while a bad-payload dispatch is in flight,
+// inheriting runCtx would expire `publishCtx` immediately, fail
+// the DLQ publish, and then proceed to Term() the message —
+// permanently removing it from JetStream with NO forensic copy.
+// Decoupling from runCtx lets the DLQ publish complete on its own
+// 2-second budget independent of shutdown; the worst case under a
+// genuinely unresponsive DLQ is that Stop() waits an extra ~2s for
+// the dispatch goroutine to drain, which is well within the
+// shutdown SLA.
+func (s *Service) routeBadPayloadToDLQ(msg jetstream.Msg, cause error) {
 	s.mu.Lock()
 	dlq := s.dlq
 	s.mu.Unlock()
@@ -452,7 +465,7 @@ func (s *Service) routeBadPayloadToDLQ(ctx context.Context, msg jetstream.Msg, c
 		return
 	}
 	headers := flattenMsgHeaders(msg)
-	publishCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	publishCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	delivery := uint64(0)
 	if md, mdErr := msg.Metadata(); mdErr == nil && md != nil {
