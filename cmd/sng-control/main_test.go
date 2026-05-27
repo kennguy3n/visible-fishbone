@@ -34,7 +34,10 @@ func TestRedactURL(t *testing.T) {
 		if got != c.want {
 			t.Errorf("redactURL(%q) = %q, want %q", c.in, got, c.want)
 		}
-		if strings.Contains(got, "hunter2") || strings.Contains(got, "token") && c.want != got {
+		// Guard against the precedence trap: `A || B && C` is parsed
+		// as `A || (B && C)` in Go. Use explicit parens so both
+		// substrings are guarded by the same `c.want != got` clause.
+		if (strings.Contains(got, "hunter2") || strings.Contains(got, "token")) && c.want != got {
 			t.Errorf("redactURL(%q) leaked secret: %q", c.in, got)
 		}
 	}
@@ -89,6 +92,34 @@ func TestBuildNATSTLSOptions_InsecureFlag(t *testing.T) {
 	}
 }
 
+func TestBuildNATSTLSOptions_GoodMTLS(t *testing.T) {
+	certPath, keyPath := writeTempCertKey(t)
+	opts, err := buildNATSTLSOptions(&config.NATS{TLSCertFile: certPath, TLSKeyFile: keyPath})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Implementation invariant: regardless of how many TLS fields
+	// are set, buildNATSTLSOptions threads them all through a
+	// single nats.Secure() option so the CA + cert/key are
+	// loaded exactly once at boot.
+	if len(opts) != 1 {
+		t.Fatalf("expected exactly one nats.Option, got %d", len(opts))
+	}
+}
+
+func TestBuildNATSTLSOptions_BadMTLSKey(t *testing.T) {
+	certPath, _ := writeTempCertKey(t)
+	dir := t.TempDir()
+	badKey := filepath.Join(dir, "bogus.key")
+	if err := os.WriteFile(badKey, []byte("not a key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildNATSTLSOptions(&config.NATS{TLSCertFile: certPath, TLSKeyFile: badKey})
+	if err == nil {
+		t.Fatal("expected error for malformed client key")
+	}
+}
+
 func TestBuildNATSTLSOptions_BadCAContent(t *testing.T) {
 	dir := t.TempDir()
 	bogus := filepath.Join(dir, "ca.pem")
@@ -99,6 +130,54 @@ func TestBuildNATSTLSOptions_BadCAContent(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when CA file does not contain valid PEM")
 	}
+}
+
+// writeTempCertKey generates a throwaway self-signed leaf certificate
+// and its corresponding PKCS#8 private key in PEM, returning the
+// (certPath, keyPath) pair. Used to exercise the mTLS code path.
+func writeTempCertKey(t *testing.T) (string, string) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "test-client"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "client.crt")
+	keyPath := filepath.Join(dir, "client.key")
+	cf, err := os.Create(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cf.Close() }()
+	if err := pem.Encode(cf, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+		t.Fatal(err)
+	}
+	kf, err := os.Create(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = kf.Close() }()
+	if err := pem.Encode(kf, &pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}); err != nil {
+		t.Fatal(err)
+	}
+	return certPath, keyPath
 }
 
 // writeTempCA generates a throwaway self-signed cert in PEM format

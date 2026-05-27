@@ -181,7 +181,13 @@ func openNATS(cfg *config.Config, logger *slog.Logger) (*nats.Conn, error) {
 		nats.Name(cfg.NATS.Name),
 		nats.ReconnectWait(cfg.NATS.ReconnectWait),
 		nats.MaxReconnects(cfg.NATS.MaxReconnects),
-		nats.Timeout(cfg.NATS.RequestTimeout),
+		// nats.Timeout sets the connect dial deadline, NOT a
+		// per-request deadline. Wire the dedicated
+		// NATS_CONNECT_TIMEOUT here so operators can tune dial
+		// latency budgets independently from per-request deadlines
+		// (NATS_REQUEST_TIMEOUT, consumed when we start issuing
+		// JetStream RequestWithContext / PublishOpts in PR 4).
+		nats.Timeout(cfg.NATS.ConnectTimeout),
 	}
 	if cfg.NATS.User != "" || cfg.NATS.Password != "" {
 		opts = append(opts, nats.UserInfo(cfg.NATS.User, cfg.NATS.Password))
@@ -214,9 +220,9 @@ func openNATS(cfg *config.Config, logger *slog.Logger) (*nats.Conn, error) {
 }
 
 // buildNATSTLSOptions converts the TLS-related env-driven config into
-// nats.Option values applied at connect time. Returning a configured
-// *tls.Config (rather than relying on nats.Secure() with the default
-// system roots) lets us:
+// nats.Option values applied at connect time. It builds a single
+// *tls.Config from the env config and threads it through
+// nats.Secure(). This lets us:
 //   - pin a tenant-supplied CA file (NATS_TLS_CA),
 //   - present a client certificate for mTLS
 //     (NATS_TLS_CERT + NATS_TLS_KEY),
@@ -228,10 +234,14 @@ func openNATS(cfg *config.Config, logger *slog.Logger) (*nats.Conn, error) {
 // only (CA but no client cert), or mTLS (cert+key) layered on top of
 // a custom CA, or mTLS with the system pool. We do not require
 // the URL scheme to be tls://: the nats.go client triggers TLS
-// whenever any of these options are present, and a tls:// URL still
-// works because the TLS config layers on top.
+// whenever the connect-time options carry a tls.Config, and a tls://
+// URL still works because the TLS config layers on top.
+//
+// Both the CA file and the cert/key pair are read and parsed exactly
+// once here, at boot, so any malformed file fails the process before
+// the first connect attempt — and we avoid the TOCTOU window where
+// nats.go would read the CA file a second time at handshake time.
 func buildNATSTLSOptions(n *config.NATS) ([]nats.Option, error) {
-	var opts []nats.Option
 	hasCert := n.TLSCertFile != "" && n.TLSKeyFile != ""
 	hasCA := n.TLSCAFile != ""
 
@@ -242,23 +252,12 @@ func buildNATSTLSOptions(n *config.NATS) ([]nats.Option, error) {
 		return nil, errors.New("NATS_TLS_CERT and NATS_TLS_KEY must both be set or both empty")
 	}
 
-	if hasCA {
-		opts = append(opts, nats.RootCAs(n.TLSCAFile))
+	if !hasCA && !hasCert && !n.TLSInsecure {
+		return nil, nil
 	}
-	if hasCert {
-		opts = append(opts, nats.ClientCert(n.TLSCertFile, n.TLSKeyFile))
-	}
-	if n.TLSInsecure {
-		// nats.Secure layers on top of any RootCAs/ClientCert above
-		// because the nats.go client merges all TLS-related options
-		// into a single tls.Config at handshake time.
-		opts = append(opts, nats.Secure(&tls.Config{
-			InsecureSkipVerify: true, //nolint:gosec // gated by config.validate(): prod refuses true
-			MinVersion:         tls.VersionTLS12,
-		}))
-	}
-	// Eagerly load the CA to validate it parses at boot rather than
-	// at first connection attempt.
+
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+
 	if hasCA {
 		pem, err := os.ReadFile(n.TLSCAFile)
 		if err != nil {
@@ -268,8 +267,23 @@ func buildNATSTLSOptions(n *config.NATS) ([]nats.Option, error) {
 		if !pool.AppendCertsFromPEM(pem) {
 			return nil, fmt.Errorf("NATS_TLS_CA %q: no PEM certificates found", n.TLSCAFile)
 		}
+		tlsCfg.RootCAs = pool
 	}
-	return opts, nil
+
+	if hasCert {
+		kp, err := tls.LoadX509KeyPair(n.TLSCertFile, n.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load NATS_TLS_CERT/NATS_TLS_KEY: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{kp}
+	}
+
+	if n.TLSInsecure {
+		// Gated by config.validate(): production refuses true.
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec
+	}
+
+	return []nats.Option{nats.Secure(tlsCfg)}, nil
 }
 
 // redactURL strips userinfo from a URL string so it is safe to emit

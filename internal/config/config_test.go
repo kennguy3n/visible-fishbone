@@ -42,7 +42,7 @@ func clearAll(t *testing.T) {
 		"HTTP_HOST", "HTTP_PORT", "HTTP_READ_TIMEOUT", "HTTP_READ_HEADER_TIMEOUT", "HTTP_WRITE_TIMEOUT", "HTTP_SHUTDOWN_TIMEOUT",
 		"NATS_URL", "NATS_NAME", "NATS_USER", "NATS_PASSWORD", "NATS_TOKEN", "NATS_CREDS_FILE",
 		"NATS_TLS_CA", "NATS_TLS_CERT", "NATS_TLS_KEY", "NATS_TLS_INSECURE",
-		"NATS_RECONNECT_WAIT", "NATS_MAX_RECONNECTS", "NATS_REQUEST_TIMEOUT",
+		"NATS_RECONNECT_WAIT", "NATS_MAX_RECONNECTS", "NATS_CONNECT_TIMEOUT", "NATS_REQUEST_TIMEOUT",
 		"NATS_PUBLISH_RETRY_ATTEMPTS", "NATS_PUBLISH_RETRY_DELAY",
 		"NATS_DEDUP_WINDOW", "NATS_REPLICAS", "NATS_STORAGE",
 		"NATS_FETCH_BATCH_SIZE", "NATS_FETCH_MAX_WAIT", "NATS_STREAM_PREFIX",
@@ -115,6 +115,15 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.NATS.StreamPrefix != "SNG" {
 		t.Errorf("NATS.StreamPrefix = %q", cfg.NATS.StreamPrefix)
 	}
+	// ConnectTimeout and RequestTimeout are independent fields, so
+	// both should default to 5s. If a future change makes them
+	// share state we want the test to fail loudly.
+	if cfg.NATS.ConnectTimeout != 5*time.Second {
+		t.Errorf("NATS.ConnectTimeout = %v, want 5s", cfg.NATS.ConnectTimeout)
+	}
+	if cfg.NATS.RequestTimeout != 5*time.Second {
+		t.Errorf("NATS.RequestTimeout = %v, want 5s", cfg.NATS.RequestTimeout)
+	}
 	if cfg.Postgres.SSLMode != "disable" {
 		t.Errorf("Postgres.SSLMode = %q", cfg.Postgres.SSLMode)
 	}
@@ -155,18 +164,45 @@ func TestProductionRequiresJWTSecret(t *testing.T) {
 }
 
 func TestProductionRequiresPGSSL(t *testing.T) {
-	clearAll(t)
-	withEnv(t, map[string]string{
-		"ENVIRONMENT":     "prod",
-		"AUTH_JWT_SECRET": "supersecret",
-		"PG_SSLMODE":      "disable",
-	})
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected validation error for disable sslmode in prod")
+	// Production requires a sslmode that GUARANTEES TLS. `disable`
+	// is plaintext; `allow` and `prefer` accept silent downgrades
+	// to plaintext if the server doesn't insist on TLS. Only
+	// `require`, `verify-ca`, and `verify-full` are acceptable in
+	// prod. This test covers all three rejected modes and the
+	// three accepted modes so a future relaxation of the rule
+	// can't slip through unnoticed.
+	rejected := []string{"disable", "allow", "prefer"}
+	accepted := []string{"require", "verify-ca", "verify-full"}
+
+	for _, mode := range rejected {
+		t.Run("rejected_"+mode, func(t *testing.T) {
+			clearAll(t)
+			withEnv(t, map[string]string{
+				"ENVIRONMENT":     "prod",
+				"AUTH_JWT_SECRET": "supersecret",
+				"PG_SSLMODE":      mode,
+			})
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected validation error for %q sslmode in prod", mode)
+			}
+			if !strings.Contains(err.Error(), "PG_SSLMODE") {
+				t.Errorf("error should mention PG_SSLMODE: %v", err)
+			}
+		})
 	}
-	if !strings.Contains(err.Error(), "PG_SSLMODE") {
-		t.Errorf("error should mention PG_SSLMODE: %v", err)
+	for _, mode := range accepted {
+		t.Run("accepted_"+mode, func(t *testing.T) {
+			clearAll(t)
+			withEnv(t, map[string]string{
+				"ENVIRONMENT":     "prod",
+				"AUTH_JWT_SECRET": "supersecret",
+				"PG_SSLMODE":      mode,
+			})
+			if _, err := Load(); err != nil {
+				t.Fatalf("did not expect error for %q sslmode in prod: %v", mode, err)
+			}
+		})
 	}
 }
 
@@ -593,6 +629,7 @@ func TestStrictNumericRejectsTypo(t *testing.T) {
 		{"PG_MAX_IDLE_CONNS", "five"},
 		{"HTTP_SHUTDOWN_TIMEOUT", "10seconds"},
 		{"NATS_REQUEST_TIMEOUT", "5sec"},
+		{"NATS_CONNECT_TIMEOUT", "five_seconds"},
 		{"NATS_DEDUP_WINDOW", "forever"},
 		{"AUTH_ACCESS_TOKEN_TTL", "lifetime"},
 		{"RATE_LIMIT_RATE", "thirty"},

@@ -110,18 +110,29 @@ func (h HTTP) Addr() string {
 
 // NATS contains all NATS / JetStream connection settings.
 type NATS struct {
-	URL                  string
-	Name                 string
-	User                 string
-	Password             string
-	Token                string
-	CredsFile            string
-	TLSCAFile            string
-	TLSCertFile          string
-	TLSKeyFile           string
-	TLSInsecure          bool
-	ReconnectWait        time.Duration
-	MaxReconnects        int
+	URL           string
+	Name          string
+	User          string
+	Password      string
+	Token         string
+	CredsFile     string
+	TLSCAFile     string
+	TLSCertFile   string
+	TLSKeyFile    string
+	TLSInsecure   bool
+	ReconnectWait time.Duration
+	MaxReconnects int
+	// ConnectTimeout is the dial timeout for the initial TCP / TLS
+	// handshake against the NATS server, mapped to nats.Timeout().
+	// Defaults to 5s and is intentionally separate from
+	// RequestTimeout so operators can tune dial latency budgets
+	// without affecting per-request deadlines.
+	ConnectTimeout time.Duration
+	// RequestTimeout is the per-request deadline used for
+	// JetStream request-reply calls (nats.Conn.RequestWithContext,
+	// nats.JetStream PublishOpts, etc.). It is NOT used for the
+	// initial connection dial — that is ConnectTimeout. Defaults
+	// to 5s.
 	RequestTimeout       time.Duration
 	PublishRetryAttempts int
 	PublishRetryDelay    time.Duration
@@ -328,54 +339,42 @@ func Load() (Config, error) {
 			Level:  getStr("LOG_LEVEL", "info"),
 			Format: getStr("LOG_FORMAT", "json"),
 		},
+		// Non-load-bearing fields parsed leniently (defaults are safe
+		// on typo). Load-bearing numeric fields (ports, timeouts,
+		// pool sizes, retry budgets, rate-limit knobs) are NOT set
+		// here — they're populated by the strictInts / strictDurations /
+		// strictFloats tables below so the strict tables are the
+		// single source of truth for both the default and the env
+		// var name. This eliminates the dual-parse subtlety where
+		// a new strict-worthy field could be added to the lenient
+		// block and silently fall back to the default on typo.
 		HTTP: HTTP{
-			Host:              getStr("HTTP_HOST", "0.0.0.0"),
-			Port:              getInt("HTTP_PORT", 8080),
-			ReadTimeout:       getDuration("HTTP_READ_TIMEOUT", 15*time.Second),
-			ReadHeaderTimeout: getDuration("HTTP_READ_HEADER_TIMEOUT", 5*time.Second),
-			WriteTimeout:      getDuration("HTTP_WRITE_TIMEOUT", 30*time.Second),
-			ShutdownTimeout:   getDuration("HTTP_SHUTDOWN_TIMEOUT", 10*time.Second),
+			Host: getStr("HTTP_HOST", "0.0.0.0"),
 		},
 		NATS: NATS{
-			URL:                  getStr("NATS_URL", "nats://127.0.0.1:4222"),
-			Name:                 getStr("NATS_NAME", "sng-control"),
-			User:                 getStr("NATS_USER", ""),
-			Password:             getStr("NATS_PASSWORD", ""),
-			Token:                getStr("NATS_TOKEN", ""),
-			CredsFile:            getStr("NATS_CREDS_FILE", ""),
-			TLSCAFile:            getStr("NATS_TLS_CA", ""),
-			TLSCertFile:          getStr("NATS_TLS_CERT", ""),
-			TLSKeyFile:           getStr("NATS_TLS_KEY", ""),
-			TLSInsecure:          getBool("NATS_TLS_INSECURE", false),
-			ReconnectWait:        getDuration("NATS_RECONNECT_WAIT", 2*time.Second),
-			MaxReconnects:        getInt("NATS_MAX_RECONNECTS", -1),
-			RequestTimeout:       getDuration("NATS_REQUEST_TIMEOUT", 5*time.Second),
-			PublishRetryAttempts: getInt("NATS_PUBLISH_RETRY_ATTEMPTS", 3),
-			PublishRetryDelay:    getDuration("NATS_PUBLISH_RETRY_DELAY", 200*time.Millisecond),
-			DedupWindow:          getDuration("NATS_DEDUP_WINDOW", 2*time.Minute),
-			Replicas:             getInt("NATS_REPLICAS", 1),
-			Storage:              getStr("NATS_STORAGE", "file"),
-			FetchBatchSize:       getInt("NATS_FETCH_BATCH_SIZE", 50),
-			FetchMaxWait:         getDuration("NATS_FETCH_MAX_WAIT", 200*time.Millisecond),
-			StreamPrefix:         getStr("NATS_STREAM_PREFIX", "SNG"),
+			URL:          getStr("NATS_URL", "nats://127.0.0.1:4222"),
+			Name:         getStr("NATS_NAME", "sng-control"),
+			User:         getStr("NATS_USER", ""),
+			Password:     getStr("NATS_PASSWORD", ""),
+			Token:        getStr("NATS_TOKEN", ""),
+			CredsFile:    getStr("NATS_CREDS_FILE", ""),
+			TLSCAFile:    getStr("NATS_TLS_CA", ""),
+			TLSCertFile:  getStr("NATS_TLS_CERT", ""),
+			TLSKeyFile:   getStr("NATS_TLS_KEY", ""),
+			TLSInsecure:  getBool("NATS_TLS_INSECURE", false),
+			Storage:      getStr("NATS_STORAGE", "file"),
+			StreamPrefix: getStr("NATS_STREAM_PREFIX", "SNG"),
 		},
 		Postgres: Postgres{
-			Host:            getStr("PG_HOST", "127.0.0.1"),
-			Port:            getInt("PG_PORT", 5432),
-			User:            getStr("PG_USER", "sng"),
-			Password:        getStr("PG_PASSWORD", "sng"),
-			Database:        getStr("PG_DATABASE", "sng"),
-			SSLMode:         getStr("PG_SSLMODE", "disable"),
-			MaxOpenConns:    getInt("PG_MAX_OPEN_CONNS", 20),
-			MaxIdleConns:    getInt("PG_MAX_IDLE_CONNS", 5),
-			ConnMaxLifetime: getDuration("PG_CONN_MAX_LIFETIME", time.Hour),
-			ConnTimeout:     getDuration("PG_CONN_TIMEOUT", 5*time.Second),
-			AppRole:         getStr("PG_APP_ROLE", "sng_app"),
+			Host:     getStr("PG_HOST", "127.0.0.1"),
+			User:     getStr("PG_USER", "sng"),
+			Password: getStr("PG_PASSWORD", "sng"),
+			Database: getStr("PG_DATABASE", "sng"),
+			SSLMode:  getStr("PG_SSLMODE", "disable"),
+			AppRole:  getStr("PG_APP_ROLE", "sng_app"),
 		},
 		RateLimit: RateLimit{
 			Enabled:         getBool("RATE_LIMIT_ENABLED", true),
-			Rate:            getFloat("RATE_LIMIT_RATE", 30.0),
-			Burst:           getInt("RATE_LIMIT_BURST", 60),
 			CleanupInterval: getDuration("RATE_LIMIT_CLEANUP_INTERVAL", time.Minute),
 			IdleTTL:         getDuration("RATE_LIMIT_IDLE_TTL", 10*time.Minute),
 			TrustedProxies:  getStr("RATE_LIMIT_TRUSTED_PROXIES", ""),
@@ -387,18 +386,13 @@ func Load() (Config, error) {
 			MaxAge:         getDuration("CORS_MAX_AGE", time.Hour),
 		},
 		Webhook: Webhook{
-			MaxRetries:      getInt("WEBHOOK_MAX_RETRIES", 6),
-			InitialDelay:    getDuration("WEBHOOK_INITIAL_DELAY", time.Second),
-			MaxDelay:        getDuration("WEBHOOK_MAX_DELAY", 5*time.Minute),
-			DeliveryTimeout: getDuration("WEBHOOK_DELIVERY_TIMEOUT", 10*time.Second),
 			SignatureHeader: getStr("WEBHOOK_SIGNATURE_HEADER", "X-SNG-Signature"),
 		},
 		Auth: Auth{
-			JWTSecret:      getStr("AUTH_JWT_SECRET", ""),
-			JWTIssuer:      getStr("AUTH_JWT_ISSUER", "sng-control"),
-			JWTAudience:    getStr("AUTH_JWT_AUDIENCE", "sng-control"),
-			AccessTokenTTL: getDuration("AUTH_ACCESS_TOKEN_TTL", time.Hour),
-			APIKeyHeader:   getStr("AUTH_API_KEY_HEADER", "X-SNG-API-Key"),
+			JWTSecret:    getStr("AUTH_JWT_SECRET", ""),
+			JWTIssuer:    getStr("AUTH_JWT_ISSUER", "sng-control"),
+			JWTAudience:  getStr("AUTH_JWT_AUDIENCE", "sng-control"),
+			APIKeyHeader: getStr("AUTH_API_KEY_HEADER", "X-SNG-API-Key"),
 		},
 		Telemetry: Telemetry{
 			OTLPEndpoint:   getStr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
@@ -444,6 +438,7 @@ func Load() (Config, error) {
 		{"HTTP_SHUTDOWN_TIMEOUT", 10 * time.Second, &cfg.HTTP.ShutdownTimeout},
 		{"PG_CONN_TIMEOUT", 5 * time.Second, &cfg.Postgres.ConnTimeout},
 		{"PG_CONN_MAX_LIFETIME", time.Hour, &cfg.Postgres.ConnMaxLifetime},
+		{"NATS_CONNECT_TIMEOUT", 5 * time.Second, &cfg.NATS.ConnectTimeout},
 		{"NATS_REQUEST_TIMEOUT", 5 * time.Second, &cfg.NATS.RequestTimeout},
 		{"NATS_RECONNECT_WAIT", 2 * time.Second, &cfg.NATS.ReconnectWait},
 		{"NATS_DEDUP_WINDOW", 2 * time.Minute, &cfg.NATS.DedupWindow},
@@ -598,8 +593,22 @@ func (c Config) validate() error {
 	if c.Environment.IsProduction() && c.NATS.TLSInsecure {
 		return errors.New("NATS_TLS_INSECURE must be false in production environments")
 	}
-	if c.Environment.IsProduction() && c.Postgres.SSLMode == "disable" {
-		return errors.New("PG_SSLMODE must not be 'disable' in production environments")
+	if c.Environment.IsProduction() {
+		// In production we require a sslmode that guarantees TLS.
+		// `disable` is unencrypted; `allow` attempts plaintext
+		// first and only upgrades if the server insists; `prefer`
+		// attempts TLS but silently falls back to plaintext if
+		// TLS fails. Only `require`, `verify-ca`, and
+		// `verify-full` provide a hard guarantee that the
+		// connection is encrypted (verify-ca / verify-full also
+		// authenticate the server). The validator runs after the
+		// generic enum whitelist above, so any value reaching
+		// here is already a recognised mode.
+		switch c.Postgres.SSLMode {
+		case "require", "verify-ca", "verify-full":
+		default:
+			return fmt.Errorf("PG_SSLMODE must be one of require|verify-ca|verify-full in production environments, got %q", c.Postgres.SSLMode)
+		}
 	}
 	return nil
 }
@@ -613,20 +622,10 @@ func getStr(key, def string) string {
 	return def
 }
 
-func getInt(key string, def int) int {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		n, err := strconv.Atoi(v)
-		if err == nil {
-			return n
-		}
-	}
-	return def
-}
-
-// getIntStrict is the variant of getInt used for critical settings
-// where a typo or stray whitespace must fail boot rather than
-// silently fall back to a default that may differ from the
-// operator's intent.
+// getIntStrict is the only int-parsing helper exposed by this
+// package: every int-valued setting is critical enough that a typo
+// must fail boot rather than silently fall back to a default that
+// may differ from the operator's intent.
 func getIntStrict(key string, def int) (int, error) {
 	v, ok := os.LookupEnv(key)
 	if !ok || v == "" {
@@ -670,16 +669,6 @@ func getBool(key string, def bool) bool {
 		b, err := strconv.ParseBool(v)
 		if err == nil {
 			return b
-		}
-	}
-	return def
-}
-
-func getFloat(key string, def float64) float64 {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		f, err := strconv.ParseFloat(v, 64)
-		if err == nil {
-			return f
 		}
 	}
 	return def
