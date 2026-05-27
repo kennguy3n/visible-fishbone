@@ -410,6 +410,18 @@ const (
 // entropy and is uniformly random, putting it well outside the
 // reach of any offline cracker even against SHA-256.
 //
+// `Hash` carries the `json:"-"` tag as a defence-in-depth guard
+// against accidental serialisation — the same pattern applied to
+// `PolicySigningKey.PrivateKey`. Every handler today projects via
+// `toAPIKeyResponse` which omits the field, but tagging the struct
+// itself means a future refactor that passes the raw `TenantAPIKey`
+// through `json.Marshal` / `WriteJSON` cannot leak the hash onto
+// the wire. Even though the hash is computationally infeasible to
+// invert (256-bit-entropy preimage), leaking it would let an
+// attacker with a suspected plaintext verify the match offline
+// without hitting the API — a class of probe we cut off at the type
+// level rather than relying on every handler to remember the rule.
+//
 // `Subject` is the human-readable actor name used in audit log
 // entries (e.g. "ci-bot"). It is NOT a permission scope.
 type TenantAPIKey struct {
@@ -417,7 +429,7 @@ type TenantAPIKey struct {
 	TenantID   uuid.UUID
 	Name       string
 	Subject    string
-	Hash       []byte
+	Hash       []byte `json:"-"`
 	Status     TenantAPIKeyStatus
 	ExpiresAt  *time.Time
 	LastUsedAt *time.Time
