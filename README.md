@@ -170,6 +170,7 @@ capture, posture, and tunnel primitives.
 | [`PROPOSAL.md`](./PROPOSAL.md) | Product design proposal — competitive baseline, SME constraints, capability scope, reference architecture, AI / data / security model, commercial model, phased roadmap, risk register |
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | System architecture — topology diagrams, control plane services, edge VM internals, endpoint client internals, telemetry pipeline, data tiering, security model, SN360 integration points, wire protocol |
 | [`PROGRESS.md`](./PROGRESS.md) | Phased delivery roadmap — status per phase (Foundation, Secure Edge MVP, Unified Operations, Data Protection Expansion, Advanced Automation, Hardware Packaging), exit criteria, changelog |
+| [`docs/deploy.md`](./docs/deploy.md) | Control-plane deployment runbook — PostgreSQL role hierarchy, RLS GUC contract, migration runner privileges, rollout and rollback, health checks, backup considerations, connection-pool configuration |
 
 ## License
 
