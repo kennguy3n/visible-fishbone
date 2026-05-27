@@ -29,8 +29,8 @@ identity, policy graph, telemetry pipeline, and signing trust root.
 
 | Product | Repository | Scope |
 |---|---|---|
-| **ShieldNet Access** | [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform) | Multi-tenant control plane: identity, RBAC, signed rule distribution (TRDS), IOC distribution (IOCFS), software-inventory (SIS), Wazuh-based correlation, compliance, alert forwarding |
-| **ShieldNet Defense** | [`sn360-es`](https://github.com/kennguy3n/sn360-es) | Email security for GWS / O365: tiered ML phishing / BEC detection, banners, quarantine, post-delivery remediation, end-user education |
+| **ShieldNet Defense** | [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform) | Multi-tenant control plane: identity, RBAC, signed rule distribution (TRDS), IOC distribution (IOCFS), software-inventory (SIS), Wazuh-based correlation, compliance, alert forwarding | [`sn360-es`](https://github.com/kennguy3n/sn360-es) | Email security for GWS / O365: tiered ML phishing / BEC detection, banners, quarantine, post-delivery remediation, end-user education |
+| **ShieldNet Access** |  [`cautious-fishstick`] (https://github.com/kennguy3n/cautious-fishstick) | ZTNA with SaaS Adapters and PAM |
 | **ShieldNet Gateway** | [`visible-fishbone`](https://github.com/kennguy3n/visible-fishbone) — this repo | Network security gateway: NGFW + IDS/IPS, SWG + DNS, ZTNA + VPN replacement, SD-WAN, edge VM appliance + lightweight endpoint client |
 
 ## Core Capabilities
