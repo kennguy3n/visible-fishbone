@@ -224,7 +224,7 @@ func buildRouter(
 			BatchSize:         cfg.Webhook.BatchSize,
 			PollInterval:      cfg.Webhook.PollInterval,
 			RequestTimeout:    cfg.Webhook.DeliveryTimeout,
-			MaxAttempts:       cfg.Webhook.MaxRetries,
+			MaxAttempts:       cfg.Webhook.MaxAttempts,
 			BackoffBase:       cfg.Webhook.InitialDelay,
 			BackoffMax:        cfg.Webhook.MaxDelay,
 			ProcessingTimeout: cfg.Webhook.ProcessingTimeout,
