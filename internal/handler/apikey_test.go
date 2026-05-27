@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -128,11 +129,10 @@ func TestAPIKeyHandler_RevokedKeyRejectsAuth(t *testing.T) {
 	// path works end-to-end before we revoke.
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/tenants/"+tenantID.String()+"/api-keys/"+created.ID, nil)
 	req.Header.Set("X-SNG-API-Key", created.Plaintext)
-	rr := &responseRecorder{}
-	rr.reset()
+	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 with valid API key, got %d: %s", rr.Code, rr.body)
+		t.Fatalf("expected 200 with valid API key, got %d: %s", rr.Code, rr.Body.String())
 	}
 
 	// Revoke and try again — should be 401.
@@ -142,10 +142,10 @@ func TestAPIKeyHandler_RevokedKeyRejectsAuth(t *testing.T) {
 	}
 	req2, _ := http.NewRequest(http.MethodGet, "/api/v1/tenants/"+tenantID.String()+"/api-keys", nil)
 	req2.Header.Set("X-SNG-API-Key", created.Plaintext)
-	rr.reset()
-	router.ServeHTTP(rr, req2)
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("revoked key should return 401, got %d: %s", rr.Code, rr.body)
+	rr2 := httptest.NewRecorder()
+	router.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked key should return 401, got %d: %s", rr2.Code, rr2.Body.String())
 	}
 }
 
@@ -190,33 +190,3 @@ func TestAPIKeyHandler_RejectsBadExpiresAt(t *testing.T) {
 		t.Fatalf("expected 400, got %d", rr.Code)
 	}
 }
-
-// responseRecorder is a minimal http.ResponseWriter that captures
-// status + body without pulling in httptest. We use it for the
-// raw API-key-as-credential test because httptest.ResponseRecorder
-// shares helpers with the JWT-bearing helper above.
-type responseRecorder struct {
-	Code   int
-	body   string
-	header http.Header
-}
-
-func (r *responseRecorder) reset() {
-	r.Code = 0
-	r.body = ""
-	r.header = http.Header{}
-}
-
-func (r *responseRecorder) Header() http.Header {
-	if r.header == nil {
-		r.header = http.Header{}
-	}
-	return r.header
-}
-
-func (r *responseRecorder) Write(b []byte) (int, error) {
-	r.body += string(b)
-	return len(b), nil
-}
-
-func (r *responseRecorder) WriteHeader(c int) { r.Code = c }
