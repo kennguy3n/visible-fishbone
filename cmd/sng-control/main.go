@@ -21,9 +21,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
+	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
 )
 
 func main() {
@@ -62,6 +64,19 @@ func run() error {
 			logger.Warn("sng-control: nats drain error", slog.Any("error", err))
 		}
 	}()
+
+	js, err := jetstream.New(nc)
+	if err != nil {
+		return fmt.Errorf("jetstream: %w", err)
+	}
+	ensureCtx, ensureCancel := context.WithTimeout(rootCtx, cfg.NATS.RequestTimeout)
+	err = sngnats.EnsureStreams(ensureCtx, js, sngnats.DefaultStreams(&cfg.NATS))
+	ensureCancel()
+	if err != nil {
+		return fmt.Errorf("ensure streams: %w", err)
+	}
+	logger.Info("sng-control: jetstream streams ensured",
+		slog.String("prefix", cfg.NATS.StreamPrefix))
 
 	health := handler.NewHealth(2 * time.Second)
 	health.Register("postgres", handler.PingerFunc(func(ctx context.Context) error {
