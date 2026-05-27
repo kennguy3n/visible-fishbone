@@ -691,3 +691,129 @@ func TestLoadDotEnvInlineCommentsAndExport(t *testing.T) {
 		}
 	}
 }
+
+// TestStrictBoolRejectsTypos guards the security-/correctness-adjacent
+// boolean fields. Both NATS_TLS_INSECURE and RATE_LIMIT_ENABLED can
+// flip the operator's intent in either direction on a silent
+// fall-back to the default; strict parsing must reject any value
+// strconv.ParseBool refuses.
+func TestStrictBoolRejectsTypos(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string // substring of error message
+	}{
+		{
+			name: "NATS_TLS_INSECURE typo",
+			env:  map[string]string{"NATS_TLS_INSECURE": "yes"},
+			want: "NATS_TLS_INSECURE",
+		},
+		{
+			name: "RATE_LIMIT_ENABLED typo",
+			env:  map[string]string{"RATE_LIMIT_ENABLED": "no"},
+			want: "RATE_LIMIT_ENABLED",
+		},
+		{
+			name: "NATS_TLS_INSECURE garbage",
+			env:  map[string]string{"NATS_TLS_INSECURE": "trueeee"},
+			want: "NATS_TLS_INSECURE",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			clearAll(t)
+			withEnv(t, c.env)
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected strict-bool error for %v", c.env)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error should mention %s: %v", c.want, err)
+			}
+		})
+	}
+}
+
+// TestStrictBoolAcceptsCanonicalValues confirms strconv.ParseBool's
+// documented value set still flows through Load() into the
+// destination fields. Belt-and-braces: a future refactor that
+// switched to a custom parser could quietly tighten the accepted set.
+func TestStrictBoolAcceptsCanonicalValues(t *testing.T) {
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"1", true}, {"t", true}, {"T", true}, {"TRUE", true}, {"true", true}, {"True", true},
+		{"0", false}, {"f", false}, {"F", false}, {"FALSE", false}, {"false", false}, {"False", false},
+	}
+	for _, c := range cases {
+		t.Run("RATE_LIMIT_ENABLED="+c.val, func(t *testing.T) {
+			clearAll(t)
+			withEnv(t, map[string]string{"RATE_LIMIT_ENABLED": c.val})
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.RateLimit.Enabled != c.want {
+				t.Errorf("RateLimit.Enabled = %v, want %v", cfg.RateLimit.Enabled, c.want)
+			}
+		})
+	}
+}
+
+// TestDSNConnectTimeoutCeil documents the libpq fallback contract:
+// connect_timeout is rendered as integer seconds and libpq treats
+// 0 as "wait forever". Any positive sub-second duration MUST round
+// up to at least 1s; non-positive values render as 0 but are
+// rejected by validate() so cannot escape Load() in practice.
+func TestDSNConnectTimeoutCeil(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want string // substring of DSN
+	}{
+		{500 * time.Millisecond, "connect_timeout=1"},
+		{time.Second, "connect_timeout=1"},
+		{1500 * time.Millisecond, "connect_timeout=2"},
+		{5 * time.Second, "connect_timeout=5"},
+		{5500 * time.Millisecond, "connect_timeout=6"},
+		// Non-positive values render 0 (libpq=infinite). validate()
+		// blocks this at boot; the rendering itself is still
+		// well-defined so a Postgres{} literal in unit tests is
+		// deterministic.
+		{0, "connect_timeout=0"},
+		{-1 * time.Second, "connect_timeout=0"},
+	}
+	for _, c := range cases {
+		t.Run(c.in.String(), func(t *testing.T) {
+			p := Postgres{
+				Host:        "h",
+				Port:        5432,
+				User:        "u",
+				Password:    "p",
+				Database:    "d",
+				SSLMode:     "disable",
+				ConnTimeout: c.in,
+			}
+			dsn := p.DSN()
+			if !strings.Contains(dsn, c.want) {
+				t.Errorf("DSN %q missing %q (in=%v)", dsn, c.want, c.in)
+			}
+		})
+	}
+}
+
+// TestValidateRejectsZeroPGConnTimeout protects against a manually
+// constructed Config (or a future Load() refactor) that lets a
+// non-positive ConnTimeout reach the pgxpool / libpq fallback,
+// where 0 is silently treated as "wait forever".
+func TestValidateRejectsZeroPGConnTimeout(t *testing.T) {
+	clearAll(t)
+	withEnv(t, map[string]string{"PG_CONN_TIMEOUT": "0s"})
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected validation error for PG_CONN_TIMEOUT=0")
+	}
+	if !strings.Contains(err.Error(), "PG_CONN_TIMEOUT") {
+		t.Errorf("error should mention PG_CONN_TIMEOUT: %v", err)
+	}
+}

@@ -196,8 +196,31 @@ func (p Postgres) DSN() string {
 	writePair("password", p.Password)
 	writePair("dbname", p.Database)
 	writePair("sslmode", p.SSLMode)
-	writePair("connect_timeout", strconv.Itoa(int(p.ConnTimeout.Seconds())))
+	writePair("connect_timeout", strconv.Itoa(connectTimeoutSeconds(p.ConnTimeout)))
 	return b.String()
+}
+
+// connectTimeoutSeconds renders ConnTimeout as the integer-seconds value
+// libpq expects for connect_timeout. libpq treats `connect_timeout=0`
+// as "wait indefinitely", so any positive sub-second duration must be
+// rounded up to 1s rather than truncated to 0 — otherwise an operator
+// who sets PG_CONN_TIMEOUT=500ms ends up with a libpq connect path
+// that never times out. Non-positive values are written as 0
+// explicitly (libpq's documented "infinite" semantic); validate() in
+// turn rejects ConnTimeout <= 0 so this branch is unreachable from
+// Load() but covers manually-constructed configs.
+func connectTimeoutSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 0
+	}
+	s := int(d / time.Second)
+	if d%time.Second != 0 {
+		s++
+	}
+	if s < 1 {
+		s = 1
+	}
+	return s
 }
 
 // libpqQuote returns a libpq keyword/value-safe rendering of v.
@@ -361,9 +384,12 @@ func Load() (Config, error) {
 			TLSCAFile:    getStr("NATS_TLS_CA", ""),
 			TLSCertFile:  getStr("NATS_TLS_CERT", ""),
 			TLSKeyFile:   getStr("NATS_TLS_KEY", ""),
-			TLSInsecure:  getBool("NATS_TLS_INSECURE", false),
 			Storage:      getStr("NATS_STORAGE", "file"),
 			StreamPrefix: getStr("NATS_STREAM_PREFIX", "SNG"),
+			// TLSInsecure is populated by the strictBools table below so
+			// that a typo (NATS_TLS_INSECURE=yes) fails boot rather than
+			// silently keeping the secure default — same single-source-of-
+			// truth rule that governs strict ints / durations / floats.
 		},
 		Postgres: Postgres{
 			Host:     getStr("PG_HOST", "127.0.0.1"),
@@ -374,10 +400,10 @@ func Load() (Config, error) {
 			AppRole:  getStr("PG_APP_ROLE", "sng_app"),
 		},
 		RateLimit: RateLimit{
-			Enabled:         getBool("RATE_LIMIT_ENABLED", true),
 			CleanupInterval: getDuration("RATE_LIMIT_CLEANUP_INTERVAL", time.Minute),
 			IdleTTL:         getDuration("RATE_LIMIT_IDLE_TTL", 10*time.Minute),
 			TrustedProxies:  getStr("RATE_LIMIT_TRUSTED_PROXIES", ""),
+			// Enabled is populated by the strictBools table below.
 		},
 		CORS: CORS{
 			AllowedOrigins: parseCSV(getStr("CORS_ALLOWED_ORIGINS", "")),
@@ -456,6 +482,27 @@ func Load() (Config, error) {
 	}{
 		{"RATE_LIMIT_RATE", 30.0, &cfg.RateLimit.Rate},
 	}
+	// Boolean fields parsed strictly. Both entries below toggle
+	// security- or correctness-adjacent behaviour:
+	//   - NATS_TLS_INSECURE skips TLS verification (CA pinning is the
+	//     whole point of that field), so an operator-intended
+	//     "true" that lands here as the default "false" silently
+	//     leaves the connection unverified — and the inverse silently
+	//     leaves a self-signed dev cluster broken. Both are bad.
+	//   - RATE_LIMIT_ENABLED gates the rate-limit middleware. An
+	//     operator-intended "false" (load test, debug) that lands as
+	//     the default "true" silently denies traffic; the inverse
+	//     silently disables protection.
+	// Fail boot on any value strconv.ParseBool refuses so the
+	// operator's intent is never silently overridden by a default.
+	strictBools := []struct {
+		key string
+		def bool
+		dst *bool
+	}{
+		{"NATS_TLS_INSECURE", false, &cfg.NATS.TLSInsecure},
+		{"RATE_LIMIT_ENABLED", true, &cfg.RateLimit.Enabled},
+	}
 
 	var strictErrs []error
 	for _, s := range strictInts {
@@ -476,6 +523,14 @@ func Load() (Config, error) {
 	}
 	for _, s := range strictFloats {
 		v, err := getFloatStrict(s.key, s.def)
+		if err != nil {
+			strictErrs = append(strictErrs, err)
+			continue
+		}
+		*s.dst = v
+	}
+	for _, s := range strictBools {
+		v, err := getBoolStrict(s.key, s.def)
 		if err != nil {
 			strictErrs = append(strictErrs, err)
 			continue
@@ -534,6 +589,14 @@ func (c Config) validate() error {
 	}
 	if c.Postgres.Port <= 0 || c.Postgres.Port > 65535 {
 		return fmt.Errorf("PG_PORT out of range: %d", c.Postgres.Port)
+	}
+	// libpq's connect_timeout DSN field is rendered as integer seconds
+	// (ceil for sub-second values), and libpq treats 0 as "infinite".
+	// Reject non-positive durations here so neither the libpq fallback
+	// nor the pgx dial path can race to infinity behind an operator's
+	// back.
+	if c.Postgres.ConnTimeout <= 0 {
+		return fmt.Errorf("PG_CONN_TIMEOUT must be > 0, got %s", c.Postgres.ConnTimeout)
 	}
 	if c.Postgres.Host == "" {
 		return errors.New("PG_HOST must be set")
@@ -664,14 +727,25 @@ func getFloatStrict(key string, def float64) (float64, error) {
 	return f, nil
 }
 
-func getBool(key string, def bool) bool {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		b, err := strconv.ParseBool(v)
-		if err == nil {
-			return b
-		}
+// getBoolStrict is the bool twin of getIntStrict. We deliberately
+// do not ship a lenient getBool helper: every boolean field consumed
+// by Load() is either security-adjacent (e.g. NATS_TLS_INSECURE) or
+// gates a load-bearing middleware (e.g. RATE_LIMIT_ENABLED), so a
+// silent fall-back to the default on a typo like
+// NATS_TLS_INSECURE=yes could mask the operator's intent in either
+// direction. strconv.ParseBool already accepts the documented set
+// {1, t, T, TRUE, true, True, 0, f, F, FALSE, false, False} — any
+// value outside that set is a config error, not a "be lenient" case.
+func getBoolStrict(key string, def bool) (bool, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def, nil
 	}
-	return def
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("config: %s=%q is not a valid boolean (accepted: true/false/1/0): %w", key, v, err)
+	}
+	return b, nil
 }
 
 func getDuration(key string, def time.Duration) time.Duration {
