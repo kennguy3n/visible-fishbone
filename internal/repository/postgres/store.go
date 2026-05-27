@@ -106,6 +106,33 @@ func (s *Store) withTenantRO(ctx context.Context, tenantID string, fn func(tx pg
 	return nil
 }
 
+// withSystem runs `fn` inside a transaction that signals
+// system-level access via `sng.system_role='true'`. RLS policies
+// that reference this GUC allow cross-tenant reads/writes. This is
+// the only path workers and background jobs should use to drain
+// per-tenant queues without a tenant context; do NOT use it from
+// per-request handler code.
+//
+// The GUC, like sng.tenant_id, is transaction-local — it cannot
+// leak onto pooled connections after commit/rollback.
+func (s *Store) withSystem(ctx context.Context, fn func(tx pgx.Tx) error) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin system tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SELECT set_config('sng.system_role', 'true', true)"); err != nil {
+		return fmt.Errorf("set system context: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit system tx: %w", err)
+	}
+	return nil
+}
+
 // pgErr unwraps a pgconn.PgError if present; nil otherwise.
 func pgErr(err error) *pgconn.PgError {
 	var pe *pgconn.PgError

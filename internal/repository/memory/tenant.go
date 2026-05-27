@@ -100,41 +100,44 @@ func (r *TenantRepository) List(ctx context.Context, page repository.Page) (repo
 	}), nil
 }
 
-func (r *TenantRepository) Update(ctx context.Context, t repository.Tenant) (repository.Tenant, error) {
+func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repository.TenantPatch) (repository.Tenant, error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.Tenant{}, err
 	}
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
-	existing, ok := r.s.tenants[t.ID]
+	existing, ok := r.s.tenants[id]
 	if !ok {
 		return repository.Tenant{}, repository.ErrNotFound
 	}
-	if t.Slug != "" && t.Slug != existing.Slug {
-		for id, other := range r.s.tenants {
-			if id == t.ID {
+	if patch.Slug != nil && *patch.Slug != "" && *patch.Slug != existing.Slug {
+		for otherID, other := range r.s.tenants {
+			if otherID == id {
 				continue
 			}
-			if other.Slug == t.Slug && other.DeletedAt == nil {
+			if other.Slug == *patch.Slug && other.DeletedAt == nil {
 				return repository.Tenant{}, repository.ErrConflict
 			}
 		}
-		existing.Slug = t.Slug
+		existing.Slug = *patch.Slug
 	}
-	if t.Name != "" {
-		existing.Name = t.Name
+	if patch.Name != nil && *patch.Name != "" {
+		existing.Name = *patch.Name
 	}
-	if t.Region != "" {
-		existing.Region = t.Region
+	// Region is intentionally allowed to be cleared (zero value
+	// applied when the caller passes a non-nil *string of ""), so
+	// no zero-value guard here. See the TenantPatch docstring.
+	if patch.Region != nil {
+		existing.Region = *patch.Region
 	}
-	if t.Tier != "" {
-		existing.Tier = t.Tier
+	if patch.Tier != nil && *patch.Tier != "" {
+		existing.Tier = *patch.Tier
 	}
-	if t.Settings != nil {
-		existing.Settings = cloneJSON(t.Settings)
+	if patch.Settings != nil {
+		existing.Settings = cloneJSON(*patch.Settings)
 	}
-	if t.Status != "" {
-		existing.Status = t.Status
+	if patch.Status != nil && *patch.Status != "" {
+		existing.Status = *patch.Status
 	}
 	existing.UpdatedAt = r.s.clock()
 	r.s.tenants[existing.ID] = existing

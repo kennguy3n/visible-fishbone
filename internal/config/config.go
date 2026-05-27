@@ -341,17 +341,53 @@ type CORS struct {
 	MaxAge         time.Duration
 }
 
-// Webhook holds outbound webhook delivery configuration.
+// Webhook holds outbound webhook delivery configuration. These
+// values feed directly into the webhook.WorkerConfig at
+// buildRouter time, so the operator's environment-variable knobs
+// reach the live worker rather than the worker silently running on
+// its compiled-in defaults (the PR6 review observed the previous
+// wiring passed a zero-valued WorkerConfig).
 type Webhook struct {
-	// MaxRetries is the maximum number of delivery attempts before
-	// a webhook is marked exhausted.
-	MaxRetries int
+	// MaxAttempts is the TOTAL number of delivery attempts (first
+	// try + retries) before a webhook is marked exhausted. Default
+	// 6 — i.e. 1 initial delivery + 5 retries. Operators wanting a
+	// single attempt with no retries set this to 1. Named
+	// `MaxAttempts` (env `WEBHOOK_MAX_ATTEMPTS`) to match the
+	// worker.WorkerConfig.MaxAttempts semantic exactly; the older
+	// `MaxRetries` name conflated "attempts" with "retries after
+	// the first" and made off-by-one delivery counts likely. The
+	// validator below requires >= 1 so the publisher's fallback
+	// chain (which uses <= 0 as the "unset, fall through" sentinel)
+	// cannot silently override an operator's explicit value.
+	MaxAttempts int
 	// InitialDelay is the first retry delay; subsequent delays are
-	// exponentially backed off up to MaxDelay.
+	// exponentially backed off up to MaxDelay. Default 1s.
 	InitialDelay time.Duration
-	MaxDelay     time.Duration
+	// MaxDelay is the per-attempt backoff ceiling. Default 5m.
+	MaxDelay time.Duration
 	// DeliveryTimeout is the per-attempt HTTP client timeout.
+	// Default 10s.
 	DeliveryTimeout time.Duration
+	// BatchSize caps the number of pending deliveries the worker
+	// fetches per scheduling tick. A larger value increases
+	// throughput on a backlog; a smaller value reduces per-tick
+	// latency for new deliveries when the queue is shallow.
+	// Default 32.
+	BatchSize int
+	// PollInterval is the wait between scans of the pending queue
+	// when the previous tick produced no work. Default 1s.
+	PollInterval time.Duration
+	// ProcessingTimeout is the stuck-row recovery window. A
+	// worker that crashes mid-delivery leaves its claimed rows in
+	// `status='processing'`; the next ListPending re-claims them
+	// once their last_attempt_at is older than
+	// `now - ProcessingTimeout`. Choose to be safely longer than
+	// the worst-case in-flight delivery (DeliveryTimeout +
+	// scheduler overhead): too short and a single slow upstream
+	// causes the same delivery to be dispatched twice, too long
+	// and a true crash stalls the queue for that duration.
+	// Default 5m.
+	ProcessingTimeout time.Duration
 	// SignatureHeader is the HTTP header carrying the HMAC-SHA256
 	// signature. Defaults to "X-SNG-Signature".
 	SignatureHeader string
@@ -370,6 +406,14 @@ type Auth struct {
 	JWTAudience string
 	// AccessTokenTTL is how long control-plane access tokens last.
 	AccessTokenTTL time.Duration
+	// ClaimTokenTTL is the default lifetime of a fresh one-time
+	// device-enrollment claim token (POST /claim-tokens) when the
+	// API caller does not specify ttl_seconds explicitly. This is
+	// the operator's window to install the agent on the new device
+	// and have it call /devices/enroll before the token expires;
+	// shorter is more secure, longer reduces operator friction.
+	// Defaults to 24h, must be > 0.
+	ClaimTokenTTL time.Duration
 	// APIKeyHeader is the HTTP header carrying API keys for
 	// machine-to-machine authentication (defaults to
 	// "X-SNG-API-Key").
@@ -496,7 +540,8 @@ func Load() (Config, error) {
 		{"NATS_FETCH_BATCH_SIZE", 50, &cfg.NATS.FetchBatchSize},
 		{"NATS_PUBLISH_RETRY_ATTEMPTS", 3, &cfg.NATS.PublishRetryAttempts},
 		{"RATE_LIMIT_BURST", 60, &cfg.RateLimit.Burst},
-		{"WEBHOOK_MAX_RETRIES", 6, &cfg.Webhook.MaxRetries},
+		{"WEBHOOK_MAX_ATTEMPTS", 6, &cfg.Webhook.MaxAttempts},
+		{"WEBHOOK_BATCH_SIZE", 32, &cfg.Webhook.BatchSize},
 	}
 	strictDurations := []struct {
 		key string
@@ -518,7 +563,10 @@ func Load() (Config, error) {
 		{"WEBHOOK_INITIAL_DELAY", time.Second, &cfg.Webhook.InitialDelay},
 		{"WEBHOOK_MAX_DELAY", 5 * time.Minute, &cfg.Webhook.MaxDelay},
 		{"WEBHOOK_DELIVERY_TIMEOUT", 10 * time.Second, &cfg.Webhook.DeliveryTimeout},
+		{"WEBHOOK_POLL_INTERVAL", time.Second, &cfg.Webhook.PollInterval},
+		{"WEBHOOK_PROCESSING_TIMEOUT", 5 * time.Minute, &cfg.Webhook.ProcessingTimeout},
 		{"AUTH_ACCESS_TOKEN_TTL", time.Hour, &cfg.Auth.AccessTokenTTL},
+		{"AUTH_CLAIM_TOKEN_TTL", 24 * time.Hour, &cfg.Auth.ClaimTokenTTL},
 	}
 	strictFloats := []struct {
 		key string
@@ -584,6 +632,25 @@ func Load() (Config, error) {
 	}
 	if len(strictErrs) > 0 {
 		return cfg, errors.Join(strictErrs...)
+	}
+
+	// Detect retired environment variables and fail loudly so an
+	// operator upgrading the binary cannot silently fall back to
+	// the default while their old setting is ignored. The previous
+	// `WEBHOOK_MAX_RETRIES=N` meant "N retries on top of the first
+	// attempt" (i.e. N+1 total). The new `WEBHOOK_MAX_ATTEMPTS=N`
+	// means "N total deliveries". Silently reading only the new
+	// name would turn a previously-set `WEBHOOK_MAX_RETRIES=6`
+	// (= 7 attempts) into the default `WEBHOOK_MAX_ATTEMPTS=6`
+	// (= 6 attempts) — a behaviour change the operator never
+	// consented to. Refusing to boot forces a conscious migration
+	// (`WEBHOOK_MAX_ATTEMPTS=7` if they want the old behaviour).
+	if v, ok := os.LookupEnv("WEBHOOK_MAX_RETRIES"); ok {
+		return cfg, fmt.Errorf(
+			"WEBHOOK_MAX_RETRIES is no longer supported (was found: %q); "+
+				"rename to WEBHOOK_MAX_ATTEMPTS and add 1 to preserve the "+
+				"previous behaviour (old: N retries on top of the first "+
+				"attempt = N+1 total; new: N total deliveries)", v)
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -722,8 +789,18 @@ func (c Config) validate() error {
 			return fmt.Errorf("RATE_LIMIT_BURST must be > 0 when enabled, got %d", c.RateLimit.Burst)
 		}
 	}
-	if c.Webhook.MaxRetries < 0 {
-		return fmt.Errorf("WEBHOOK_MAX_RETRIES must be >= 0, got %d", c.Webhook.MaxRetries)
+	// WEBHOOK_MAX_ATTEMPTS is the total delivery-attempt budget
+	// (first try + retries). The worker's defaults() function uses
+	// `<= 0` as the "unset, fall through to package default"
+	// sentinel, which means an operator who set MaxAttempts=0 to
+	// express "single attempt, no retries" would silently get the
+	// hard-coded default of 8 instead — their configuration ignored.
+	// Require >= 1 (same pattern as NATS_PUBLISH_RETRY_ATTEMPTS) so
+	// the validator and the worker agree on what "set" means.
+	// Operators wanting a single attempt with no retries set this
+	// to 1.
+	if c.Webhook.MaxAttempts < 1 {
+		return fmt.Errorf("WEBHOOK_MAX_ATTEMPTS must be >= 1 (set to 1 for a single attempt with no retries), got %d", c.Webhook.MaxAttempts)
 	}
 	if c.Webhook.InitialDelay <= 0 {
 		return fmt.Errorf("WEBHOOK_INITIAL_DELAY must be > 0, got %s", c.Webhook.InitialDelay)
@@ -740,12 +817,30 @@ func (c Config) validate() error {
 	if c.Webhook.DeliveryTimeout <= 0 {
 		return fmt.Errorf("WEBHOOK_DELIVERY_TIMEOUT must be > 0, got %s", c.Webhook.DeliveryTimeout)
 	}
+	if c.Webhook.BatchSize <= 0 {
+		return fmt.Errorf("WEBHOOK_BATCH_SIZE must be > 0, got %d", c.Webhook.BatchSize)
+	}
+	if c.Webhook.PollInterval <= 0 {
+		return fmt.Errorf("WEBHOOK_POLL_INTERVAL must be > 0, got %s", c.Webhook.PollInterval)
+	}
+	// WEBHOOK_PROCESSING_TIMEOUT <= DeliveryTimeout would let the
+	// stuck-row reaper steal a row from a worker that's still
+	// inside its HTTP call — double-delivery hazard. Force the
+	// reaper window to be strictly larger than the per-attempt
+	// timeout so a genuinely in-flight delivery cannot be
+	// reclaimed under any race.
+	if c.Webhook.ProcessingTimeout <= c.Webhook.DeliveryTimeout {
+		return fmt.Errorf("WEBHOOK_PROCESSING_TIMEOUT (%s) must be > WEBHOOK_DELIVERY_TIMEOUT (%s) to prevent stuck-row reaper from racing in-flight deliveries", c.Webhook.ProcessingTimeout, c.Webhook.DeliveryTimeout)
+	}
 	// AUTH_ACCESS_TOKEN_TTL <= 0 makes every issued token already
 	// expired, which would silently lock every operator out of the
 	// console. Forbid here so the strict parser's lenient acceptance
 	// of "0s" is caught at boot rather than at first sign-in.
 	if c.Auth.AccessTokenTTL <= 0 {
 		return fmt.Errorf("AUTH_ACCESS_TOKEN_TTL must be > 0, got %s", c.Auth.AccessTokenTTL)
+	}
+	if c.Auth.ClaimTokenTTL <= 0 {
+		return fmt.Errorf("AUTH_CLAIM_TOKEN_TTL must be > 0, got %s", c.Auth.ClaimTokenTTL)
 	}
 	if c.Auth.JWTSecret == "" && c.Environment.IsProduction() {
 		return errors.New("AUTH_JWT_SECRET must be set in production environments")

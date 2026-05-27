@@ -51,9 +51,10 @@ func clearAll(t *testing.T) {
 		"RATE_LIMIT_ENABLED", "RATE_LIMIT_RATE", "RATE_LIMIT_BURST",
 		"RATE_LIMIT_CLEANUP_INTERVAL", "RATE_LIMIT_IDLE_TTL", "RATE_LIMIT_TRUSTED_PROXIES",
 		"CORS_ALLOWED_ORIGINS", "CORS_ALLOWED_METHODS", "CORS_ALLOWED_HEADERS", "CORS_MAX_AGE",
-		"WEBHOOK_MAX_RETRIES", "WEBHOOK_INITIAL_DELAY", "WEBHOOK_MAX_DELAY",
+		"WEBHOOK_MAX_ATTEMPTS", "WEBHOOK_MAX_RETRIES", "WEBHOOK_INITIAL_DELAY", "WEBHOOK_MAX_DELAY",
 		"WEBHOOK_DELIVERY_TIMEOUT", "WEBHOOK_SIGNATURE_HEADER",
-		"AUTH_JWT_SECRET", "AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "AUTH_ACCESS_TOKEN_TTL", "AUTH_API_KEY_HEADER",
+		"WEBHOOK_BATCH_SIZE", "WEBHOOK_POLL_INTERVAL", "WEBHOOK_PROCESSING_TIMEOUT",
+		"AUTH_JWT_SECRET", "AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "AUTH_ACCESS_TOKEN_TTL", "AUTH_CLAIM_TOKEN_TTL", "AUTH_API_KEY_HEADER",
 		"OTEL_EXPORTER_OTLP_ENDPOINT", "SERVICE_VERSION",
 	}
 	for _, k := range keys {
@@ -132,6 +133,19 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Webhook.SignatureHeader != "X-SNG-Signature" {
 		t.Errorf("Webhook.SignatureHeader = %q", cfg.Webhook.SignatureHeader)
+	}
+	// Worker-tunable defaults must match the values documented on
+	// Webhook (and consumed by the worker via the buildRouter
+	// translation in cmd/sng-control/main.go). A regression here
+	// means the strict-table default and the docstring drifted.
+	if cfg.Webhook.BatchSize != 32 {
+		t.Errorf("Webhook.BatchSize = %d, want 32", cfg.Webhook.BatchSize)
+	}
+	if cfg.Webhook.PollInterval != time.Second {
+		t.Errorf("Webhook.PollInterval = %s, want 1s", cfg.Webhook.PollInterval)
+	}
+	if cfg.Webhook.ProcessingTimeout != 5*time.Minute {
+		t.Errorf("Webhook.ProcessingTimeout = %s, want 5m", cfg.Webhook.ProcessingTimeout)
 	}
 }
 
@@ -662,7 +676,7 @@ func TestStrictNumericRejectsTypo(t *testing.T) {
 		{"HTTP_PORT", "80a"},
 		{"NATS_REPLICAS", "two"},
 		{"RATE_LIMIT_BURST", "ten"},
-		{"WEBHOOK_MAX_RETRIES", "six"},
+		{"WEBHOOK_MAX_ATTEMPTS", "six"},
 		{"PG_MIN_CONNS", "five"},
 		{"HTTP_SHUTDOWN_TIMEOUT", "10seconds"},
 		{"NATS_REQUEST_TIMEOUT", "5sec"},
@@ -681,6 +695,34 @@ func TestStrictNumericRejectsTypo(t *testing.T) {
 				t.Fatalf("error %q should mention %s", err.Error(), c.key)
 			}
 		})
+	}
+}
+
+// TestLoad_RejectsRetiredWebhookMaxRetries — when an operator
+// upgrades the binary while leaving `WEBHOOK_MAX_RETRIES=N` in
+// their environment, Load() must refuse to boot with a clear
+// message rather than silently falling back to the
+// `WEBHOOK_MAX_ATTEMPTS` default (which has different semantics —
+// "N retries on top of the first" vs "N total deliveries").
+// Forcing the operator to ack the rename prevents a stealth
+// behavioural change at upgrade time.
+func TestLoad_RejectsRetiredWebhookMaxRetries(t *testing.T) {
+	clearAll(t)
+	tmp := t.TempDir()
+	wd, _ := os.Getwd()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	t.Setenv("WEBHOOK_MAX_RETRIES", "6")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() succeeded with retired WEBHOOK_MAX_RETRIES set; want error")
+	}
+	if !strings.Contains(err.Error(), "WEBHOOK_MAX_RETRIES") ||
+		!strings.Contains(err.Error(), "WEBHOOK_MAX_ATTEMPTS") {
+		t.Errorf("error %q does not name both the retired and replacement variables", err)
 	}
 }
 
@@ -885,6 +927,30 @@ func TestValidateRejectsZeroTimeouts(t *testing.T) {
 				t.Errorf("error should mention %s: %v", tc.want, err)
 			}
 		})
+	}
+}
+
+// TestValidateRejectsWebhookProcessingTimeoutShorterThanDelivery
+// locks in the cross-field invariant: the worker's stuck-row
+// reaper window must be strictly larger than the per-attempt HTTP
+// timeout. If the inequality is violated the reaper can steal a
+// row from a worker that's still inside its outbound HTTP call,
+// producing a duplicate webhook delivery downstream. We reject at
+// boot so the operator is forced to fix the misconfiguration
+// rather than discover it as a subscriber-side dedup bug under
+// load.
+func TestValidateRejectsWebhookProcessingTimeoutShorterThanDelivery(t *testing.T) {
+	clearAll(t)
+	withEnv(t, map[string]string{
+		"WEBHOOK_DELIVERY_TIMEOUT":   "30s",
+		"WEBHOOK_PROCESSING_TIMEOUT": "15s",
+	})
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("expected validation error when WEBHOOK_PROCESSING_TIMEOUT < WEBHOOK_DELIVERY_TIMEOUT")
+	}
+	if !strings.Contains(err.Error(), "WEBHOOK_PROCESSING_TIMEOUT") || !strings.Contains(err.Error(), "WEBHOOK_DELIVERY_TIMEOUT") {
+		t.Errorf("error should reference both knobs: %v", err)
 	}
 }
 

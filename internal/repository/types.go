@@ -54,6 +54,37 @@ type Tenant struct {
 	DeletedAt *time.Time
 }
 
+// TenantPatch is the input to TenantRepository.Update. Each field
+// is a pointer so the caller can distinguish three states per
+// field:
+//
+//   - nil               — caller did not touch this field; the
+//     stored value is preserved as-is.
+//   - non-nil, zero     — caller wants the field cleared (Region
+//     to empty string, Settings to empty JSON, etc.). This is
+//     the case the previous "Update(Tenant)" signature could not
+//     express: an empty `Tenant.Region` was ambiguous between
+//     "absent" and "clear", and was always interpreted as
+//     "absent", so once an operator set a Region they could only
+//     ever change it, never remove it.
+//   - non-nil, non-zero — caller wants the field set to that
+//     value.
+//
+// Fields that are never legitimately empty (Name, Slug, Status,
+// Tier) keep a string/enum payload because clearing them would
+// move the row into an invalid state the service-layer Create
+// validation already rejects. They use the historical
+// "absent = nil pointer" sparse-PATCH convention for symmetry
+// with the optional fields below.
+type TenantPatch struct {
+	Name     *string
+	Slug     *string
+	Status   *TenantStatus
+	Region   *string
+	Tier     *TenantTier
+	Settings *json.RawMessage
+}
+
 // SiteTemplate enumerates the supported site enforcement templates.
 // Mirrors the CHECK constraint on `sites.template`.
 type SiteTemplate string
@@ -230,6 +261,68 @@ type AuditEntry struct {
 	ResourceID   *uuid.UUID
 	Details      json.RawMessage
 	CreatedAt    time.Time
+}
+
+// WebhookEndpointStatus enumerates the lifecycle states.
+type WebhookEndpointStatus string
+
+const (
+	WebhookEndpointStatusActive   WebhookEndpointStatus = "active"
+	WebhookEndpointStatusDisabled WebhookEndpointStatus = "disabled"
+)
+
+// WebhookEndpoint is a per-tenant webhook subscription.
+type WebhookEndpoint struct {
+	ID       uuid.UUID
+	TenantID uuid.UUID
+	URL      string
+	Events   []string
+	// SigningSecret is the plaintext HMAC-SHA256 key used by the
+	// delivery worker to sign outbound bodies. Receivers verify
+	// signatures with this same value, which is emitted exactly
+	// once on Create. At-rest protection is delegated to disk
+	// encryption / TDE per the migration comment.
+	SigningSecret []byte
+	Status        WebhookEndpointStatus
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// WebhookDeliveryStatus enumerates delivery attempt states.
+type WebhookDeliveryStatus string
+
+const (
+	WebhookDeliveryStatusPending WebhookDeliveryStatus = "pending"
+	// WebhookDeliveryStatusProcessing is the exclusive-ownership
+	// state a delivery transitions into when a worker claims it via
+	// ListPending. While in this state no other worker will pick
+	// the row up — both via the atomic-claim UPDATE in the postgres
+	// repo and via the equivalent in-memory transition in the
+	// memory repo. On worker crash the row stays in 'processing'
+	// until ListPending's stuck-row reaper window elapses, at
+	// which point it is re-claimed by another worker. See
+	// migrations/003_webhook_processing.up.sql for the database
+	// schema rationale.
+	WebhookDeliveryStatusProcessing WebhookDeliveryStatus = "processing"
+	WebhookDeliveryStatusDelivered  WebhookDeliveryStatus = "delivered"
+	WebhookDeliveryStatusFailed     WebhookDeliveryStatus = "failed"
+	WebhookDeliveryStatusExhausted  WebhookDeliveryStatus = "exhausted"
+)
+
+// WebhookDelivery is a single delivery attempt record.
+type WebhookDelivery struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	EndpointID     uuid.UUID
+	EventType      string
+	Payload        json.RawMessage
+	Status         WebhookDeliveryStatus
+	Attempts       int
+	LastAttemptAt  *time.Time
+	LastError      string
+	NextRetryAt    time.Time
+	ResponseStatus int
+	CreatedAt      time.Time
 }
 
 // PolicyGraph is a versioned tenant policy graph. The `Graph` blob

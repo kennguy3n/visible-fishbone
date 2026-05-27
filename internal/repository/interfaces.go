@@ -91,7 +91,12 @@ type TenantRepository interface {
 	Get(ctx context.Context, id uuid.UUID) (Tenant, error)
 	GetBySlug(ctx context.Context, slug string) (Tenant, error)
 	List(ctx context.Context, page Page) (PageResult[Tenant], error)
-	Update(ctx context.Context, t Tenant) (Tenant, error)
+	// Update applies a sparse, explicit-clear PATCH. See the
+	// TenantPatch docstring for the per-field semantics: a nil
+	// pointer leaves the column untouched; a non-nil pointer
+	// applies the value (including the zero value, which is how
+	// operators clear optional fields like Region).
+	Update(ctx context.Context, id uuid.UUID, patch TenantPatch) (Tenant, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status TenantStatus) (Tenant, error)
 	// TransitionStatus atomically changes the tenant status only if
 	// the current status matches `from`. Returns ErrForbidden if the
@@ -192,6 +197,54 @@ type AuditFilter struct {
 type AuditLogRepository interface {
 	Append(ctx context.Context, tenantID uuid.UUID, e AuditEntry) (AuditEntry, error)
 	List(ctx context.Context, tenantID uuid.UUID, filter AuditFilter, page Page) (PageResult[AuditEntry], error)
+}
+
+// --- Webhooks -------------------------------------------------------------
+
+// WebhookEndpointRepository owns webhook_endpoints.
+type WebhookEndpointRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, ep WebhookEndpoint) (WebhookEndpoint, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (WebhookEndpoint, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[WebhookEndpoint], error)
+	Update(ctx context.Context, tenantID uuid.UUID, ep WebhookEndpoint) (WebhookEndpoint, error)
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+	// ListActive returns all active endpoints that subscribe to at
+	// least one of the given event types. Used by the delivery
+	// worker to fan out events.
+	ListActive(ctx context.Context, tenantID uuid.UUID, eventTypes []string) ([]WebhookEndpoint, error)
+}
+
+// WebhookDeliveryRepository owns webhook_deliveries.
+type WebhookDeliveryRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, d WebhookDelivery) (WebhookDelivery, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (WebhookDelivery, error)
+	List(ctx context.Context, tenantID uuid.UUID, endpointID *uuid.UUID, page Page) (PageResult[WebhookDelivery], error)
+	// UpdateStatus transitions the delivery to a new status with
+	// attempt metadata. Called by the delivery worker after each
+	// attempt.
+	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status WebhookDeliveryStatus, attempt int, lastErr string, responseStatus int, nextRetry time.Time) error
+	// ListPending atomically claims a batch of due-for-retry
+	// deliveries. Each returned row is transitioned from 'pending'
+	// to 'processing' inside the same statement that selects it,
+	// so concurrent workers cannot double-claim the same row.
+	//
+	// processingTimeout is the recovery window for rows stuck in
+	// 'processing' (i.e. a previous worker crashed before
+	// transitioning out of the state). Rows whose last_attempt_at
+	// is older than now-processingTimeout are also re-claimable;
+	// the postgres implementation includes them in the WHERE clause
+	// of the atomic UPDATE and the memory implementation does the
+	// same in its critical section. Set to 0 to never re-claim
+	// stuck rows (use only in tests where a crash mid-tick is
+	// impossible).
+	//
+	// Limit caps the batch size; rows are ordered by next_retry_at
+	// ASC so the oldest due delivery is dispatched first. Returned
+	// rows carry the post-claim status ('processing'); callers must
+	// transition them to delivered / pending / exhausted via
+	// UpdateStatus, otherwise they remain in 'processing' until the
+	// stuck-row window elapses.
+	ListPending(ctx context.Context, limit int, processingTimeout time.Duration) ([]WebhookDelivery, error)
 }
 
 // --- Policy ---------------------------------------------------------------
