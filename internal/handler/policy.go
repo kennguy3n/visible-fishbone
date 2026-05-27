@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -17,8 +19,8 @@ import (
 // endpoints. The signing-key surface is the PR7 addition: per-tenant
 // Ed25519 keypair management, public-key publication, and an
 // agent-pull endpoint for compiled bundles that honours
-// HEAD / If-None-Match / If-Modified-Since so receivers don't
-// re-download a bundle they already cache.
+// HEAD / If-None-Match so receivers don't re-download a bundle they
+// already cache.
 type PolicyHandler struct {
 	svc  *policy.Service
 	keys *policy.KeyService
@@ -237,12 +239,18 @@ func (h *PolicyHandler) downloadBundle(w http.ResponseWriter, r *http.Request) {
 	if b.KeyID != "" {
 		w.Header().Set("X-Sng-Policy-Key-Id", b.KeyID)
 	}
-	// Conditional-request handling.
+	// Conditional-request handling. RFC 7232 §3.2 mandates weak
+	// comparison for If-None-Match, so a client that fishes back
+	// our strong ETag wrapped as W/"…" still gets the 304.
 	if match := r.Header.Get("If-None-Match"); match != "" && etagMatches(match, etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 	w.Header().Set("Content-Type", bundleContentType)
+	// HEAD must advertise the same Content-Length GET would return
+	// (RFC 7231 §4.3.2) so polling agents can size their next GET
+	// without an extra round-trip.
+	w.Header().Set("Content-Length", strconv.Itoa(len(b.Bundle)))
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -251,15 +259,18 @@ func (h *PolicyHandler) downloadBundle(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b.Bundle)
 }
 
-// etagMatches implements a minimal RFC 7232 If-None-Match parser:
-// "*" matches anything; otherwise we split on comma and compare
-// against the strong ETag we just rendered. We deliberately do not
-// strip the W/ prefix because all our ETags are strong.
+// etagMatches implements an RFC 7232 §3.2 If-None-Match parser:
+// "*" matches anything; otherwise we split on comma, strip any
+// W/ prefix (weak comparison is mandatory for If-None-Match), and
+// compare against the strong ETag we just rendered.
 func etagMatches(headerVal, etag string) bool {
 	if headerVal == "*" {
 		return true
 	}
 	for _, tok := range splitCommaTrim(headerVal) {
+		if strings.HasPrefix(tok, "W/") || strings.HasPrefix(tok, "w/") {
+			tok = tok[2:]
+		}
 		if tok == etag {
 			return true
 		}

@@ -174,43 +174,60 @@ func (s *KeyService) Revoke(ctx context.Context, tenantID uuid.UUID, actorID *uu
 	return saved, nil
 }
 
-// GetActive returns the unique active key for the tenant, lazily
-// creating one when no key has ever been provisioned. The lazy
-// path lets the policy service compile bundles for a brand-new
-// tenant without requiring an explicit admin call first — the
-// initial key is provisioned on the first compile.
+// GetActive returns the unique active key for the tenant.
+// Propagates ErrNotFound when the tenant has no active key — the
+// caller must explicitly provision (via CreateInitial / Rotate)
+// or pre-flight with EnsureKey for the brand-new-tenant case.
 //
-// Callers that DO NOT want the lazy-create behaviour (e.g. the
-// admin handler distinguishing "no key yet → create initial" from
-// "active key already exists → rotate") should use
-// GetActiveNoCreate, which returns ErrNotFound verbatim.
+// PR7 historically had this method lazy-create on ErrNotFound but
+// that conflated two distinct states — "no key yet" and "key was
+// revoked" — and silently bypassed the revocation incident
+// semantics. Lazy-create is now scoped to EnsureKey, which only
+// provisions when the tenant has no key history at all.
 func (s *KeyService) GetActive(ctx context.Context, tenantID uuid.UUID) (repository.PolicySigningKey, error) {
-	active, err := s.repo.GetActive(ctx, tenantID)
-	if err == nil {
-		return active, nil
-	}
-	if !errors.Is(err, repository.ErrNotFound) {
-		return repository.PolicySigningKey{}, err
-	}
-	created, err := s.CreateInitial(ctx, tenantID, nil)
-	if err != nil {
-		// Race: another goroutine provisioned the key between
-		// our GetActive and CreateInitial. Re-read and return.
-		if errors.Is(err, repository.ErrConflict) {
-			return s.repo.GetActive(ctx, tenantID)
-		}
-		return repository.PolicySigningKey{}, err
-	}
-	return created, nil
+	return s.repo.GetActive(ctx, tenantID)
 }
 
-// GetActiveNoCreate returns the unique active key for the tenant
-// without the lazy-create fallback, propagating ErrNotFound when no
-// key has been provisioned. Use this when the caller's branch logic
-// depends on the existence of a key (e.g. "create initial vs.
-// rotate" in the admin handler).
+// GetActiveNoCreate is an alias for GetActive preserved for call
+// sites that documented the no-lazy-create intent explicitly. Both
+// methods are now equivalent; prefer GetActive in new code.
 func (s *KeyService) GetActiveNoCreate(ctx context.Context, tenantID uuid.UUID) (repository.PolicySigningKey, error) {
 	return s.repo.GetActive(ctx, tenantID)
+}
+
+// EnsureKey guarantees the tenant has an active signing key,
+// provisioning a fresh one only when the tenant has never had any
+// signing key (brand-new tenant onboarding). When the tenant has
+// historical keys but none currently active (every key revoked or
+// rotated-and-not-replaced), EnsureKey refuses to lazy-create and
+// returns ErrNotFound — this is the documented revocation-incident
+// behaviour: an admin must explicitly Rotate (or CreateInitial via
+// the admin handler) to resume compilation. Idempotent when an
+// active key already exists.
+func (s *KeyService) EnsureKey(ctx context.Context, tenantID uuid.UUID) error {
+	if _, err := s.repo.GetActive(ctx, tenantID); err == nil {
+		return nil
+	} else if !errors.Is(err, repository.ErrNotFound) {
+		return err
+	}
+	// No active key. Distinguish brand-new tenant (safe to
+	// auto-provision) from revoked / rotated-without-replacement
+	// (must NOT auto-provision — admin rotation required).
+	history, err := s.repo.List(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	if len(history) > 0 {
+		return fmt.Errorf("policy: no active signing key (admin rotation required after revocation): %w", repository.ErrNotFound)
+	}
+	if _, err := s.CreateInitial(ctx, tenantID, nil); err != nil {
+		if errors.Is(err, repository.ErrConflict) {
+			// Race: a concurrent caller provisioned the key.
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // GetByKeyID returns a key by its stable short identifier, used by
@@ -229,17 +246,18 @@ func (s *KeyService) List(ctx context.Context, tenantID uuid.UUID) ([]repository
 }
 
 // Sign produces an Ed25519 signature over data using the active
-// tenant key.  Returns ErrNotFound when the tenant has no active
-// key (e.g. the active key was just revoked without a replacement
-// being provisioned).
+// tenant key. Returns ErrNotFound (via repo.GetActive) when the
+// tenant has no active key — Sign never lazy-creates, so revoking
+// the active key causes the next Sign call to fail until an admin
+// explicitly rotates. Callers that want first-compile bootstrap on
+// a brand-new tenant should call EnsureKey before Sign.
 func (s *KeyService) Sign(ctx context.Context, tenantID uuid.UUID, data []byte) (signature []byte, keyID string, err error) {
-	active, err := s.GetActive(ctx, tenantID)
+	active, err := s.repo.GetActive(ctx, tenantID)
 	if err != nil {
 		return nil, "", err
 	}
-	if active.Status == repository.PolicySigningKeyStatusRevoked {
-		return nil, "", fmt.Errorf("policy: active key revoked: %w", repository.ErrForbidden)
-	}
+	// active.Status is guaranteed to be 'active' by repo.GetActive's
+	// WHERE clause; no defensive status check needed here.
 	seed, err := s.wrapper.Unwrap(ctx, tenantID, active.PrivateKey)
 	if err != nil {
 		return nil, "", fmt.Errorf("unwrap key: %w", err)
@@ -281,10 +299,14 @@ func (s *KeyService) appendAudit(ctx context.Context, tenantID uuid.UUID, actorI
 }
 
 // newKeyID returns a 16-character lowercase hex identifier derived
-// from a fresh UUID. Short enough to embed in the bundle envelope
-// without bloating the wire size, long enough that collisions
-// across a tenant's rotation history are vanishingly unlikely
-// (≈80 bits of entropy).
+// from a fresh UUID v4. Short enough to embed in the bundle
+// envelope without bloating the wire size, long enough that
+// collisions across a tenant's rotation history are vanishingly
+// unlikely. We take the first 8 bytes of the UUID; UUID v4 places
+// 4 version bits (0100) in byte 6, so the effective entropy is
+// ≈60 bits (64 random bits minus the 4 version bits). 60 bits is
+// far more than sufficient — even at one rotation per second for
+// a century, the birthday-bound collision probability is < 2^-30.
 func newKeyID() string {
 	u := uuid.New()
 	b := u[:]

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -83,18 +84,12 @@ type byteReader struct {
 
 func (r *byteReader) Read(p []byte) (int, error) {
 	if r.off >= len(r.b) {
-		return 0, errEOF
+		return 0, io.EOF
 	}
 	n := copy(p, r.b[r.off:])
 	r.off += n
 	return n, nil
 }
-
-var errEOF = errReadErr("EOF")
-
-type errReadErr string
-
-func (e errReadErr) Error() string { return string(e) }
 
 func bytesReader(b []byte) *byteReader { return &byteReader{b: b} }
 
@@ -184,6 +179,70 @@ func TestPolicy_BundleDownload_HEAD(t *testing.T) {
 	}
 	if rec.Body.Len() != 0 {
 		t.Errorf("HEAD response has body: %d bytes", rec.Body.Len())
+	}
+	// RFC 7231 §4.3.2: HEAD response MUST advertise the same
+	// Content-Length that GET would return so polling agents can
+	// size their next GET without an extra round-trip.
+	if cl := rec.Header().Get("Content-Length"); cl == "" || cl == "0" {
+		t.Errorf("HEAD Content-Length: want non-zero, got %q", cl)
+	}
+}
+
+// TestPolicy_BundleDownload_WeakETagMatches verifies RFC 7232 §3.2
+// weak comparison: an If-None-Match header carrying our strong
+// ETag wrapped as W/"…" must still produce a 304 response.
+func TestPolicy_BundleDownload_WeakETagMatches(t *testing.T) {
+	t.Parallel()
+	h, tnt := newTestPolicyHandler(t)
+	tid := tnt.ID.String()
+	if rec := doRequest(t, h, http.MethodPut,
+		"/api/v1/tenants/"+tid+"/policy", []byte(`{"default_action":"deny"}`),
+		tid, "", ""); rec.Code != http.StatusCreated {
+		t.Fatalf("put graph: %d", rec.Code)
+	}
+	if rec := doRequest(t, h, http.MethodPost,
+		"/api/v1/tenants/"+tid+"/policy/compile",
+		nil, tid, "", ""); rec.Code != http.StatusAccepted {
+		t.Fatalf("compile: %d", rec.Code)
+	}
+	urlPath := "/api/v1/tenants/" + tid + "/policy/bundles/edge/payload"
+
+	// First GET captures the strong ETag.
+	rec := doRequest(t, h, http.MethodGet, urlPath, nil, tid, "edge", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first GET: %d", rec.Code)
+	}
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("first GET missing ETag")
+	}
+
+	// Repeat with If-None-Match wrapped as a weak validator —
+	// expect 304.
+	for _, prefix := range []string{"W/", "w/"} {
+		req := httptest.NewRequest(http.MethodGet, urlPath, nil)
+		req.SetPathValue("tenant_id", tid)
+		req.SetPathValue("target_type", "edge")
+		req.Header.Set("If-None-Match", prefix+etag)
+		w := httptest.NewRecorder()
+		h.downloadBundle(w, req)
+		if w.Code != http.StatusNotModified {
+			t.Errorf("If-None-Match %s%s: want 304, got %d", prefix, etag, w.Code)
+		}
+		if w.Body.Len() != 0 {
+			t.Errorf("304 has body: %d bytes", w.Body.Len())
+		}
+	}
+
+	// Star matches anything.
+	req := httptest.NewRequest(http.MethodGet, urlPath, nil)
+	req.SetPathValue("tenant_id", tid)
+	req.SetPathValue("target_type", "edge")
+	req.Header.Set("If-None-Match", "*")
+	w := httptest.NewRecorder()
+	h.downloadBundle(w, req)
+	if w.Code != http.StatusNotModified {
+		t.Errorf(`If-None-Match "*": want 304, got %d`, w.Code)
 	}
 }
 

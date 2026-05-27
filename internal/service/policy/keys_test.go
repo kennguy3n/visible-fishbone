@@ -58,19 +58,74 @@ func TestKeyService_CreateInitial_ConflictsOnSecondCall(t *testing.T) {
 	}
 }
 
-func TestKeyService_GetActive_LazyCreate(t *testing.T) {
+func TestKeyService_GetActive_NoLazyCreate(t *testing.T) {
 	t.Parallel()
 	svc, _, tid := newTestKeyService(t)
-	first, err := svc.GetActive(context.Background(), tid)
-	if err != nil {
-		t.Fatalf("get active (lazy): %v", err)
+	if _, err := svc.GetActive(context.Background(), tid); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("want ErrNotFound on fresh tenant, got %v", err)
 	}
-	second, err := svc.GetActive(context.Background(), tid)
+	// After explicit provisioning, GetActive returns the key.
+	created, err := svc.CreateInitial(context.Background(), tid, nil)
 	if err != nil {
-		t.Fatalf("get active again: %v", err)
+		t.Fatalf("create: %v", err)
 	}
-	if first.KeyID != second.KeyID {
-		t.Errorf("lazy create not stable: %q vs %q", first.KeyID, second.KeyID)
+	active, err := svc.GetActive(context.Background(), tid)
+	if err != nil {
+		t.Fatalf("get active post-create: %v", err)
+	}
+	if active.KeyID != created.KeyID {
+		t.Errorf("want %q, got %q", created.KeyID, active.KeyID)
+	}
+}
+
+// TestKeyService_EnsureKey_BrandNewTenant covers the
+// first-compile-on-fresh-tenant bootstrap path: EnsureKey
+// auto-provisions when the tenant has never had any signing key.
+func TestKeyService_EnsureKey_BrandNewTenant(t *testing.T) {
+	t.Parallel()
+	svc, _, tid := newTestKeyService(t)
+	if err := svc.EnsureKey(context.Background(), tid); err != nil {
+		t.Fatalf("ensure (brand-new): %v", err)
+	}
+	// Idempotent: second call doesn't create a duplicate.
+	if err := svc.EnsureKey(context.Background(), tid); err != nil {
+		t.Fatalf("ensure (idempotent): %v", err)
+	}
+	keys, err := svc.List(context.Background(), tid)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Errorf("want 1 key after idempotent ensures, got %d", len(keys))
+	}
+}
+
+// TestKeyService_EnsureKey_RefusesAfterRevocation is the
+// load-bearing invariant: EnsureKey must NOT auto-provision when
+// the tenant has historical keys but none active. Revoking the
+// active key must halt compilation until an admin explicitly
+// rotates — otherwise the revocation-incident escape hatch
+// silently re-opens itself on the next compile request.
+func TestKeyService_EnsureKey_RefusesAfterRevocation(t *testing.T) {
+	t.Parallel()
+	svc, _, tid := newTestKeyService(t)
+	k, err := svc.CreateInitial(context.Background(), tid, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := svc.Revoke(context.Background(), tid, nil, k.KeyID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	err = svc.EnsureKey(context.Background(), tid)
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Errorf("want ErrNotFound after revocation, got %v", err)
+	}
+	keys, err := svc.List(context.Background(), tid)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Errorf("EnsureKey lazy-created a replacement after revocation: %d keys", len(keys))
 	}
 }
 
@@ -109,6 +164,12 @@ func TestKeyService_Rotate_ReplacesActive(t *testing.T) {
 	}
 }
 
+// TestKeyService_Revoke_PreventsSigning is the security-critical
+// invariant for the revocation-incident response: after the admin
+// revokes the active key, Sign MUST return ErrNotFound until a new
+// key is explicitly provisioned. Before this was fixed, Sign
+// lazy-created a fresh key via GetActive and happily proceeded,
+// silently bypassing the incident response.
 func TestKeyService_Revoke_PreventsSigning(t *testing.T) {
 	t.Parallel()
 	svc, _, tid := newTestKeyService(t)
@@ -119,12 +180,21 @@ func TestKeyService_Revoke_PreventsSigning(t *testing.T) {
 	if _, err := svc.Revoke(context.Background(), tid, nil, k.KeyID); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	// Signing with no active key now provisions a fresh one via
-	// lazy-create. The lazy-created key MUST be different from
-	// the revoked one.
+	_, _, err = svc.Sign(context.Background(), tid, []byte("payload"))
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Errorf("want ErrNotFound after revocation, got %v", err)
+	}
+	// Sanity: an explicit admin Rotate restores signing.
+	newKey, err := svc.CreateInitial(context.Background(), tid, nil)
+	if err != nil {
+		t.Fatalf("recreate initial post-revoke: %v", err)
+	}
 	_, kid, err := svc.Sign(context.Background(), tid, []byte("payload"))
 	if err != nil {
-		t.Fatalf("sign post-revoke: %v", err)
+		t.Fatalf("sign post-recovery: %v", err)
+	}
+	if kid != newKey.KeyID {
+		t.Errorf("sign returned wrong key id: %q vs %q", kid, newKey.KeyID)
 	}
 	if kid == k.KeyID {
 		t.Errorf("sign reused revoked key id %q", kid)
