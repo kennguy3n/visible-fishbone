@@ -3,6 +3,7 @@ package apikey
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -261,5 +262,44 @@ func TestList_ReturnsCreatedDesc(t *testing.T) {
 		if out[i-1].CreatedAt.Before(out[i].CreatedAt) {
 			t.Fatalf("list not desc by created_at: %v then %v", out[i-1].CreatedAt, out[i].CreatedAt)
 		}
+	}
+}
+
+// TestTenantAPIKey_JSONMarshalOmitsHash is the defence-in-depth
+// check pinning the `json:"-"` tag on `repository.TenantAPIKey.Hash`.
+// Handlers project to `APIKeyResponse` today, but a future refactor
+// that accidentally passes the raw struct through `WriteJSON` /
+// `json.Marshal` must NOT leak the SHA-256 hash onto the wire.
+// Even though the hash is computationally infeasible to invert at
+// 256 bits of preimage entropy, leaking it would let an attacker
+// with a suspected plaintext verify the match offline without
+// hitting the API — a class of probe we cut off at the type level.
+// This test mirrors TestPolicySigningKey_JSONMarshalOmitsPrivateKey
+// in internal/service/policy/keys_test.go.
+func TestTenantAPIKey_JSONMarshalOmitsHash(t *testing.T) {
+	t.Parallel()
+	k := repository.TenantAPIKey{
+		ID:       uuid.New(),
+		TenantID: uuid.New(),
+		Name:     "ci-prod",
+		Subject:  "bot:ci",
+		Hash:     bytes.Repeat([]byte{0xCC}, 32),
+		Status:   repository.TenantAPIKeyStatusActive,
+	}
+	out, err := json.Marshal(k)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"Hash"`)) || bytes.Contains(out, []byte(`"hash"`)) {
+		t.Errorf("Hash leaked into JSON: %s", out)
+	}
+	// Sanity-check that the public projection fields are still
+	// present so the guard doesn't accidentally hide unrelated
+	// fields.
+	if !bytes.Contains(out, []byte(`"Name"`)) {
+		t.Errorf("expected Name in marshalled output, got %s", out)
+	}
+	if !bytes.Contains(out, []byte(`"Subject"`)) {
+		t.Errorf("expected Subject in marshalled output, got %s", out)
 	}
 }
