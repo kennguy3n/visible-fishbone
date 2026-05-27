@@ -33,6 +33,11 @@ func (s *Store) NewAuditLogRepository() *AuditLogRepository { return &AuditLogRe
 // NewPolicyRepository binds the Store to repository.PolicyRepository.
 func (s *Store) NewPolicyRepository() *PolicyRepository { return &PolicyRepository{s: s} }
 
+// NewPolicySigningKeyRepository binds the Store to repository.PolicySigningKeyRepository.
+func (s *Store) NewPolicySigningKeyRepository() *PolicySigningKeyRepository {
+	return &PolicySigningKeyRepository{s: s}
+}
+
 // NewWebhookEndpointRepository binds the Store to repository.WebhookEndpointRepository.
 func (s *Store) NewWebhookEndpointRepository() *WebhookEndpointRepository {
 	return &WebhookEndpointRepository{s: s}
@@ -47,14 +52,15 @@ func (s *Store) NewWebhookDeliveryRepository() *WebhookDeliveryRepository {
 // file means a single grep tells us "did the postgres package
 // implement every interface?" without scanning eight files.
 var (
-	_ repository.TenantRepository          = (*TenantRepository)(nil)
-	_ repository.SiteRepository            = (*SiteRepository)(nil)
-	_ repository.UserRepository            = (*UserRepository)(nil)
-	_ repository.DeviceRepository          = (*DeviceRepository)(nil)
-	_ repository.RoleRepository            = (*RoleRepository)(nil)
-	_ repository.ClaimTokenRepository      = (*ClaimTokenRepository)(nil)
-	_ repository.AuditLogRepository        = (*AuditLogRepository)(nil)
-	_ repository.PolicyRepository          = (*PolicyRepository)(nil)
-	_ repository.WebhookEndpointRepository = (*WebhookEndpointRepository)(nil)
-	_ repository.WebhookDeliveryRepository = (*WebhookDeliveryRepository)(nil)
+	_ repository.TenantRepository           = (*TenantRepository)(nil)
+	_ repository.SiteRepository             = (*SiteRepository)(nil)
+	_ repository.UserRepository             = (*UserRepository)(nil)
+	_ repository.DeviceRepository           = (*DeviceRepository)(nil)
+	_ repository.RoleRepository             = (*RoleRepository)(nil)
+	_ repository.ClaimTokenRepository       = (*ClaimTokenRepository)(nil)
+	_ repository.AuditLogRepository         = (*AuditLogRepository)(nil)
+	_ repository.PolicyRepository           = (*PolicyRepository)(nil)
+	_ repository.PolicySigningKeyRepository = (*PolicySigningKeyRepository)(nil)
+	_ repository.WebhookEndpointRepository  = (*WebhookEndpointRepository)(nil)
+	_ repository.WebhookDeliveryRepository  = (*WebhookDeliveryRepository)(nil)
 )
