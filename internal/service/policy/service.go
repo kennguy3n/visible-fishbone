@@ -40,6 +40,21 @@ type Signer interface {
 	Sign(ctx context.Context, tenantID uuid.UUID, data []byte) (signature []byte, keyID string, err error)
 }
 
+// KeyEnsurer is an optional extension of Signer that lets a signer
+// pre-flight before a compile run — e.g. provisioning the very
+// first key for a brand-new tenant so the per-target Sign loop
+// doesn't fail on ErrNotFound. The PR7 KeyService implements this
+// interface; EphemeralSigner / KeySigner do not (their key is
+// loaded eagerly at construction).
+//
+// Compile type-asserts on this interface and skips the pre-flight
+// when the signer doesn't provide it. EnsureKey MUST be idempotent
+// and MUST NOT auto-provision when the tenant has had keys before
+// but none are currently active (revocation-incident state).
+type KeyEnsurer interface {
+	EnsureKey(ctx context.Context, tenantID uuid.UUID) error
+}
+
 // Service is the policy service.
 type Service struct {
 	repo   repository.PolicyRepository
@@ -135,6 +150,18 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 	}
 	if s.signer == nil {
 		return CompileResult{}, errors.New("policy: signer not configured")
+	}
+
+	// Pre-flight: ensure the tenant has an active signing key.
+	// KeyService provisions on first use for a brand-new tenant,
+	// but refuses to auto-create when the active key was just
+	// revoked (signalling an incident response in progress) — see
+	// KeyService.EnsureKey. Signers without persistent state (e.g.
+	// EphemeralSigner) skip this step.
+	if ensurer, ok := s.signer.(KeyEnsurer); ok {
+		if err := ensurer.EnsureKey(ctx, tenantID); err != nil {
+			return CompileResult{}, fmt.Errorf("ensure signing key: %w", err)
+		}
 	}
 
 	compiledAt := time.Now().UTC()
