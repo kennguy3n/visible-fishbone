@@ -27,6 +27,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
+	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
@@ -182,22 +183,68 @@ func buildRouter(
 	policyKeyRepo := store.NewPolicySigningKeyRepository()
 	webhookEndpointRepo := store.NewWebhookEndpointRepository()
 	webhookDeliveryRepo := store.NewWebhookDeliveryRepository()
+	apiKeyRepo := store.NewTenantAPIKeyRepository()
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
 	identitySvc := identity.New(deviceRepo, claimRepo, auditRepo, logger)
 	rbacSvc := rbac.New(roleRepo, auditRepo, logger)
 	auditSvc := audit.New(auditRepo)
-	// Policy signing keys. PR7 replaced the PR6 process-wide
-	// ephemeral signer with a tenant-scoped, database-backed key
-	// store: each tenant has its own Ed25519 keypair, lazily
-	// created on first compile, rotatable via the management
-	// endpoint, and revocable when compromised. The KeyService
-	// satisfies the policy.Signer contract, so the rest of the
-	// policy service is unchanged. PR8 will plug a KMS-backed
-	// PrivateKeyWrapper in via policy.WithKeyWrapper.
-	policyKeySvc := policy.NewKeyService(policyKeyRepo, auditRepo)
-	policySvc := policy.New(policyRepo, auditRepo, policyKeySvc, policy.WithLogger(logger))
+	apiKeySvc := apikey.New(apiKeyRepo, auditRepo, apikey.WithLogger(logger))
+
+	// Policy signing — PR8 introduces two operator-controlled
+	// alternates to the PR7 DB-backed KeyService:
+	//   1. POLICY_SIGNING_KEY_PATH: when set, every bundle is
+	//      signed with the file-loaded Ed25519 key (single key,
+	//      all tenants). Rotation is out-of-band (CD pipeline
+	//      replaces the file + restarts the process). The
+	//      DB-backed KeyService is still constructed so the
+	//      rotation / public-key endpoints keep working for
+	//      operators that swap modes between restarts.
+	//   2. POLICY_KEY_WRAP_MASTER_*: when set, the KeyService
+	//      wraps each tenant's seed under AES-256-GCM at rest
+	//      so the policy_signing_keys.private_key column carries
+	//      ciphertext (defence in depth on top of TDE / disk
+	//      encryption).
+	// They are independent — you can use either, both, or
+	// neither. The policy.Service surface (Signer interface) is
+	// the same in all cases.
+	keyOpts := []policy.KeyOption{}
+	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
+		return nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
+	} else if len(master) > 0 {
+		w, err := policy.NewAESGCMWrapper(master)
+		if err != nil {
+			return nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
+		}
+		keyOpts = append(keyOpts, policy.WithKeyWrapper(w))
+		logger.Info("policy: AES-256-GCM at-rest wrap enabled for signing seeds")
+	}
+	policyKeySvc := policy.NewKeyService(policyKeyRepo, auditRepo, keyOpts...)
+	var policySigner policy.Signer = policyKeySvc
+	var fileSigner *policy.KeySigner
+	if cfg.Policy.SigningKeyPath != "" {
+		ks, err := policy.LoadKeySignerFromFile(cfg.Policy.SigningKeyPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("policy signing key: %w", err)
+		}
+		policySigner = ks
+		fileSigner = ks
+		logger.Info("policy: using file-backed signing key (DB rotation endpoints remain available but will not take effect until POLICY_SIGNING_KEY_PATH is unset; /public-key endpoint serves this key uniformly for all tenants)",
+			slog.String("path", cfg.Policy.SigningKeyPath),
+			slog.String("key_id", ks.KeyID()))
+	}
+	policySvc := policy.New(policyRepo, auditRepo, policySigner, policy.WithLogger(logger))
+
+	// When the file-backed signer is active, expose its public key
+	// through the existing /signing-keys/{kid}/public-key endpoint
+	// so receivers can resolve bundle `kid`s through the same
+	// protocol surface used for DB-backed bundles. The DB-backed
+	// rotation history remains accessible by its own kids.
+	policyHandlerOpts := []handler.PolicyHandlerOption{}
+	if fileSigner != nil {
+		policyHandlerOpts = append(policyHandlerOpts, handler.WithFileBackedSigner(fileSigner))
+	}
 	webhookSvc := webhook.New(webhookEndpointRepo, webhookDeliveryRepo, auditRepo, logger)
 
 	// Translate the operator-facing config.Webhook knobs into the
@@ -231,19 +278,42 @@ func buildRouter(
 	)
 
 	router := handler.NewRouter(handler.RouterDeps{
-		Config:      cfg,
-		Logger:      logger,
-		Tenants:     handler.NewTenantHandler(tenantSvc),
-		Sites:       handler.NewSiteHandler(siteSvc),
-		Devices:     handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL),
-		RBAC:        handler.NewRBACHandler(rbacSvc),
-		Policy:      handler.NewPolicyHandler(policySvc, policyKeySvc),
-		Audit:       handler.NewAuditHandler(auditSvc),
-		Webhooks:    handler.NewWebhookHandler(webhookSvc),
-		Health:      health,
-		OpenAPISpec: handler.NewOpenAPIHandler(),
+		Config:       cfg,
+		Logger:       logger,
+		Tenants:      handler.NewTenantHandler(tenantSvc),
+		Sites:        handler.NewSiteHandler(siteSvc),
+		Devices:      handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL),
+		RBAC:         handler.NewRBACHandler(rbacSvc),
+		Policy:       handler.NewPolicyHandler(policySvc, policyKeySvc, policyHandlerOpts...),
+		Audit:        handler.NewAuditHandler(auditSvc),
+		Webhooks:     handler.NewWebhookHandler(webhookSvc),
+		APIKeys:      handler.NewAPIKeyHandler(apiKeySvc),
+		APIKeyLookup: apiKeySvc,
+		Health:       health,
+		OpenAPISpec:  handler.NewOpenAPIHandler(),
 	})
 	return router, webhookWorker, nil
+}
+
+// loadPolicyKeyWrapMaster resolves the AES-GCM master key from
+// config. Returns (nil, nil) when neither knob is set, so callers
+// can detect "no wrap configured" without checking for a sentinel.
+//
+// We accept the master via env-style (base64 in
+// POLICY_KEY_WRAP_MASTER_B64) and file-based (POLICY_KEY_WRAP_MASTER_FILE)
+// to support both Kubernetes Secret mounts (file) and HashiCorp
+// Vault / 12-factor (env) deployments.
+func loadPolicyKeyWrapMaster(cfg *config.Config) ([]byte, error) {
+	if cfg.Policy.KeyWrapMasterB64 != "" {
+		// Reuse the policy package's decoder so the accept-list of
+		// base64 dialects (std, raw, url, raw-url) stays in one
+		// place.
+		return policy.DecodeAESGCMMasterB64(cfg.Policy.KeyWrapMasterB64)
+	}
+	if cfg.Policy.KeyWrapMasterFile != "" {
+		return policy.LoadAESGCMMasterFromFile(cfg.Policy.KeyWrapMasterFile)
+	}
+	return nil, nil
 }
 
 // newLogger constructs the process-wide structured logger.

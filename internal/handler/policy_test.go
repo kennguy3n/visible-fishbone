@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -410,5 +411,138 @@ func TestPolicy_BundleDownload_BadTarget(t *testing.T) {
 		nil, tnt.ID.String(), "sky", "")
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+// newTestPolicyHandlerWithFileSigner is a variant of
+// newTestPolicyHandler that registers a file-backed *KeySigner so
+// the /public-key endpoint can resolve its kid. Used by the
+// file-backed-resolution tests below.
+func newTestPolicyHandlerWithFileSigner(t *testing.T, fileSigner *policy.KeySigner) (*PolicyHandler, repository.Tenant) {
+	t.Helper()
+	store := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(store)
+	tnt, err := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "Acme", Slug: "acme",
+		Status: repository.TenantStatusActive,
+		Tier:   repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	policyRepo := memory.NewPolicyRepository(store)
+	keyRepo := memory.NewPolicySigningKeyRepository(store)
+	auditRepo := memory.NewAuditLogRepository(store)
+	keys := policy.NewKeyService(keyRepo, auditRepo)
+	var svc *policy.Service
+	if fileSigner != nil {
+		svc = policy.New(policyRepo, auditRepo, fileSigner)
+	} else {
+		svc = policy.New(policyRepo, auditRepo, keys)
+	}
+	return NewPolicyHandler(svc, keys, WithFileBackedSigner(fileSigner)), tnt
+}
+
+// TestPolicy_GetPublicKey_FileBackedSignerResolvesKid is the
+// PR8-round-3 regression test for the file-backed-signer kid
+// resolution flag. When POLICY_SIGNING_KEY_PATH is set, the
+// /public-key endpoint must serve the file-backed signer's public
+// half for both `key_id == <derived-kid>` and `key_id == "active"`
+// — without ever hitting the DB-backed rotation history — so
+// receivers verifying a bundle pulled from any tenant can resolve
+// its kid through the same protocol surface used for DB-backed
+// bundles. No out-of-band public-key distribution required.
+func TestPolicy_GetPublicKey_FileBackedSignerResolvesKid(t *testing.T) {
+	t.Parallel()
+	// Deterministic test key — a fixed 32-byte seed expands to a
+	// reproducible Ed25519 keypair so the assertions below can pin
+	// exact bytes.
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(0x42)
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	pub := priv.Public().(ed25519.PublicKey)
+	ks := policy.NewKeySigner(priv)
+
+	h, tnt := newTestPolicyHandlerWithFileSigner(t, ks)
+	tid := tnt.ID.String()
+
+	// 1. Resolution by derived kid succeeds and returns the expected
+	//    public key bytes.
+	rec := doRequest(t, h, http.MethodGet,
+		"/api/v1/tenants/"+tid+"/policy/signing-keys/"+ks.KeyID()+"/public-key",
+		nil, tid, "", ks.KeyID())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("by-kid lookup: expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp PolicyPublicKeyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode by-kid response: %v", err)
+	}
+	if resp.KeyID != ks.KeyID() {
+		t.Errorf("KeyID mismatch: got %q want %q", resp.KeyID, ks.KeyID())
+	}
+	if resp.Algorithm != "ed25519" {
+		t.Errorf("Algorithm: got %q want ed25519", resp.Algorithm)
+	}
+	if resp.Status != string(repository.PolicySigningKeyStatusActive) {
+		t.Errorf("Status: got %q want active", resp.Status)
+	}
+	got, err := base64.StdEncoding.DecodeString(resp.PublicKey)
+	if err != nil {
+		t.Fatalf("decode public key b64: %v", err)
+	}
+	if !bytes.Equal(got, pub) {
+		t.Errorf("PublicKey bytes mismatch:\ngot  %x\nwant %x", got, pub)
+	}
+
+	// 2. Resolution by "active" alias returns the same key (file-backed
+	//    signer is the active signer regardless of DB state).
+	rec = doRequest(t, h, http.MethodGet,
+		"/api/v1/tenants/"+tid+"/policy/signing-keys/active/public-key",
+		nil, tid, "", "active")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("by-active lookup: expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var respActive PolicyPublicKeyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &respActive); err != nil {
+		t.Fatalf("decode by-active response: %v", err)
+	}
+	if respActive.KeyID != ks.KeyID() {
+		t.Errorf("active KeyID mismatch: got %q want %q", respActive.KeyID, ks.KeyID())
+	}
+	if respActive.PublicKey != resp.PublicKey {
+		t.Errorf("active vs by-kid PublicKey diverged: %q vs %q", respActive.PublicKey, resp.PublicKey)
+	}
+}
+
+// TestPolicy_GetPublicKey_FileBackedSigner_UnknownKidFallsThrough
+// confirms that resolution requests for a kid that doesn't match
+// the file-backed signer fall through to the DB-backed rotation
+// history rather than 404-ing immediately. This preserves access
+// to historical bundles signed by an earlier DB-backed key before
+// the operator switched the deployment to file-backed mode.
+func TestPolicy_GetPublicKey_FileBackedSigner_UnknownKidFallsThrough(t *testing.T) {
+	t.Parallel()
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(0x99)
+	}
+	ks := policy.NewKeySigner(ed25519.NewKeyFromSeed(seed))
+
+	h, tnt := newTestPolicyHandlerWithFileSigner(t, ks)
+	tid := tnt.ID.String()
+
+	// Resolving a kid that doesn't match the file-backed signer
+	// must fall through to the DB-backed path. Since the tenant
+	// has no DB-backed key yet, the response is 404 (NOT 500 / not
+	// the file-backed key's data).
+	otherKid := "0000111122223333"
+	rec := doRequest(t, h, http.MethodGet,
+		"/api/v1/tenants/"+tid+"/policy/signing-keys/"+otherKid+"/public-key",
+		nil, tid, "", otherKid)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown-kid fallthrough: expected 404, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
