@@ -598,8 +598,26 @@ func (p *preparedKeySigner) Sign(data []byte) ([]byte, string) {
 
 // deriveKeyID maps a public key to a stable short identifier. The
 // shape — first 16 hex chars of SHA-256(public) — matches the
-// PR7 KeyService convention so log filters and receiver-side
+// PR7 KeyService.newKeyID convention so log filters and receiver-side
 // verification code are uniform across signer implementations.
+//
+// The two derivations use intentionally different sources:
+//
+//   - KeyService.newKeyID(): first 8 bytes of a fresh UUID v4
+//     (≈60 bits of entropy, fresh per rotation)
+//   - KeySigner.deriveKeyID(): first 8 bytes of SHA-256(public)
+//     (64 bits of effective entropy, deterministic in the public
+//     key so it's stable across restarts of the same file-backed
+//     deployment)
+//
+// The shape (16 hex chars) is the same so log filters and the
+// receiver's verification code don't need to know which signer
+// produced a given kid. Cross-mode collision probability between
+// a file-backed kid and a DB-backed kid is bounded by the lower
+// entropy source (≈2⁻⁶⁰ per pair); across a tenant with ~1000
+// historical DB rotations plus 1 file-backed key, by birthday-style
+// reasoning the probability of any collision is ~10⁻¹⁵ —
+// astronomically negligible.
 func deriveKeyID(pub ed25519.PublicKey) string {
 	sum := sha256.Sum256(pub)
 	return hex.EncodeToString(sum[:8])

@@ -493,6 +493,14 @@ func (s *KeyService) appendAudit(ctx context.Context, tenantID uuid.UUID, actorI
 // ≈60 bits (64 random bits minus the 4 version bits). 60 bits is
 // far more than sufficient — even at one rotation per second for
 // a century, the birthday-bound collision probability is < 2^-30.
+//
+// The companion file-backed signer derives its kid as
+// `hex(sha256(public)[:8])` (see policy.deriveKeyID); both
+// derivations land in the same 16-hex-char shape on purpose so
+// the receiver's verification code and operator log filters do
+// not need to know which signer produced a given kid. Cross-mode
+// collision probability is bounded by the lower entropy source
+// (≈2⁻⁶⁰ per pair); negligible in practice.
 func newKeyID() string {
 	u := uuid.New()
 	b := u[:]
