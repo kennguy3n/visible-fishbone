@@ -848,8 +848,8 @@ components:
       type: object
       required: [name, subject]
       properties:
-        name: { type: string, description: human-readable label, e.g. "ci-prod" }
-        subject: { type: string, description: stable identity injected into auth context, e.g. "bot:ci" }
+        name: { type: string, description: "human-readable label, e.g. ci-prod" }
+        subject: { type: string, description: "stable identity injected into auth context, e.g. bot:ci" }
         expires_at:
           type: string
           format: date-time
