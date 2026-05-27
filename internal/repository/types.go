@@ -54,6 +54,37 @@ type Tenant struct {
 	DeletedAt *time.Time
 }
 
+// TenantPatch is the input to TenantRepository.Update. Each field
+// is a pointer so the caller can distinguish three states per
+// field:
+//
+//   - nil               — caller did not touch this field; the
+//     stored value is preserved as-is.
+//   - non-nil, zero     — caller wants the field cleared (Region
+//     to empty string, Settings to empty JSON, etc.). This is
+//     the case the previous "Update(Tenant)" signature could not
+//     express: an empty `Tenant.Region` was ambiguous between
+//     "absent" and "clear", and was always interpreted as
+//     "absent", so once an operator set a Region they could only
+//     ever change it, never remove it.
+//   - non-nil, non-zero — caller wants the field set to that
+//     value.
+//
+// Fields that are never legitimately empty (Name, Slug, Status,
+// Tier) keep a string/enum payload because clearing them would
+// move the row into an invalid state the service-layer Create
+// validation already rejects. They use the historical
+// "absent = nil pointer" sparse-PATCH convention for symmetry
+// with the optional fields below.
+type TenantPatch struct {
+	Name     *string
+	Slug     *string
+	Status   *TenantStatus
+	Region   *string
+	Tier     *TenantTier
+	Settings *json.RawMessage
+}
+
 // SiteTemplate enumerates the supported site enforcement templates.
 // Mirrors the CHECK constraint on `sites.template`.
 type SiteTemplate string

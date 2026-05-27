@@ -58,8 +58,8 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/Tenant" }
                   next_cursor: { type: string }
-  /tenants/{id}:
-    parameters: [ { $ref: "#/components/parameters/TenantID" } ]
+  /tenants/{tenant_id}:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     get:
       tags: [tenants]
       summary: Get tenant by id
@@ -82,8 +82,8 @@ paths:
       summary: Soft-delete tenant
       responses:
         "204": { description: deleted }
-  /tenants/{id}/suspend:
-    parameters: [ { $ref: "#/components/parameters/TenantID" } ]
+  /tenants/{tenant_id}/suspend:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     post:
       tags: [tenants]
       summary: Suspend tenant
@@ -411,11 +411,15 @@ components:
       in: header
       name: X-SNG-API-Key
   parameters:
-    TenantID:
-      in: path
-      name: id
-      required: true
-      schema: { type: string, format: uuid }
+    # All tenant-scoped routes use `{tenant_id}` uniformly so the
+    # Go router's RequireTenant middleware (which keys off the
+    # literal path-segment name `tenant_id`) can be applied with a
+    # single MountTenantScoped wrapper. Generated SDKs end up with
+    # a consistent `tenant_id` parameter name on every tenant
+    # method, including the top-level `/tenants/{tenant_id}` CRUD
+    # routes — a previous revision used `{id}` here, which
+    # produced confusingly-named `id` parameters on a handful of
+    # methods.
     TenantPathID:
       in: path
       name: tenant_id

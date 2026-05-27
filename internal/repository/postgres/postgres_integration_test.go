@@ -58,13 +58,38 @@ func TestPostgres_Integration(t *testing.T) {
 			t.Errorf("dup slug: want ErrConflict got %v", err)
 		}
 
-		// update name
-		updated, err := repo.Update(bgCtx(), repository.Tenant{ID: tnt.ID, Name: "Renamed"})
+		// update name (sparse PATCH: only Name is set; other
+		// columns must be preserved exactly).
+		newName := "Renamed"
+		updated, err := repo.Update(bgCtx(), tnt.ID, repository.TenantPatch{Name: &newName})
 		if err != nil {
 			t.Fatalf("update: %v", err)
 		}
 		if updated.Name != "Renamed" {
 			t.Errorf("update name: %q", updated.Name)
+		}
+
+		// Round-trip the explicit-clear contract for Region:
+		// set it, then PATCH with `Region = &""` and verify
+		// the stored value is empty. This is the Postgres-side
+		// counterpart of the memory repo's TenantPatch test —
+		// the COALESCE(NULLIF(...,'') based predecessor query
+		// silently dropped the clear and left the column intact.
+		region := "us-east-2"
+		seeded, err := repo.Update(bgCtx(), tnt.ID, repository.TenantPatch{Region: &region})
+		if err != nil {
+			t.Fatalf("update region: %v", err)
+		}
+		if seeded.Region != region {
+			t.Fatalf("seed region: %q", seeded.Region)
+		}
+		empty := ""
+		cleared, err := repo.Update(bgCtx(), tnt.ID, repository.TenantPatch{Region: &empty})
+		if err != nil {
+			t.Fatalf("clear region: %v", err)
+		}
+		if cleared.Region != "" {
+			t.Errorf("clear region: want empty, got %q (the COALESCE-based predecessor silently dropped this PATCH)", cleared.Region)
 		}
 
 		// suspend then delete

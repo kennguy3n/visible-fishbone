@@ -111,7 +111,16 @@ func (h *DeviceHandler) createClaimToken(w http.ResponseWriter, r *http.Request)
 		ttl = time.Duration(req.TTLSeconds) * time.Second
 	}
 
-	res, err := h.identity.GenerateClaimToken(r.Context(), tenantID, ttl, nil)
+	// Stamp the audited actor on the issued token. The
+	// identity service threads this through to both
+	// `ClaimToken.CreatedBy` (so the row carries provenance) and
+	// the `claim_token.created` audit log entry. Passing `nil`
+	// here silently drops the link between the request's
+	// authenticated principal and the credential they minted,
+	// breaking forensic trace of "who issued this enrolment
+	// token" — exactly the question an investigator asks when an
+	// enrolment is later abused.
+	res, err := h.identity.GenerateClaimToken(r.Context(), tenantID, ttl, actorFromCtx(r))
 	if err != nil {
 		WriteRepositoryError(w, err)
 		return

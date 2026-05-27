@@ -171,7 +171,7 @@ func TestDelete_RejectsAlreadyDeleted(t *testing.T) {
 func TestUpdate_RequiresID(t *testing.T) {
 	t.Parallel()
 	svc, _ := newSvc(t)
-	_, err := svc.Update(context.Background(), repository.Tenant{})
+	_, err := svc.Update(context.Background(), uuid.Nil, repository.TenantPatch{})
 	if !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Errorf("err = %v", err)
 	}

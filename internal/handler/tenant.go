@@ -130,9 +130,25 @@ func (h *TenantHandler) get(w http.ResponseWriter, r *http.Request) {
 }
 
 // TenantUpdateRequest is the JSON body for PATCH /tenants/{tenant_id}.
+//
+// Region is a *string (not string) on purpose: it is the only
+// optional, operator-settable text field on a tenant, and using a
+// pointer is the only way to distinguish "field absent — leave
+// alone" (nil) from "field set to empty — clear the value"
+// (non-nil pointing at ""). Without this distinction an operator
+// who set a Region by mistake during onboarding could never
+// remove it again through the API; the only recourse would be a
+// manual DB UPDATE, which defeats the point of having a PATCH
+// endpoint.
+//
+// Name and Tier deliberately stay as plain strings because the
+// service-layer Create rejects empty values for both, so the
+// "clear to empty" interpretation is not a valid state for those
+// fields — the zero-value "" can therefore be safely repurposed
+// as the "field absent" sentinel without losing expressivity.
 type TenantUpdateRequest struct {
 	Name     string          `json:"name,omitempty"`
-	Region   string          `json:"region,omitempty"`
+	Region   *string         `json:"region,omitempty"`
 	Tier     string          `json:"tier,omitempty"`
 	Settings json.RawMessage `json:"settings,omitempty"`
 }
@@ -146,24 +162,31 @@ func (h *TenantHandler) update(w http.ResponseWriter, r *http.Request) {
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
-	existing, err := h.svc.Get(r.Context(), id)
-	if err != nil {
-		WriteRepositoryError(w, err)
-		return
-	}
+	// Translate the wire-format request into a repository
+	// TenantPatch: every non-zero / non-nil field becomes a
+	// non-nil patch pointer, and the *string Region passes
+	// through verbatim so a caller that sent `"region": ""` can
+	// clear the column. The previous code populated a full
+	// repository.Tenant by merging the request onto the
+	// stored row and called svc.Update with it; that pattern
+	// (a) silently dropped Region clears at the repo layer, and
+	// (b) required an extra Get round-trip even when nothing
+	// non-trivial was being changed.
+	patch := repository.TenantPatch{}
 	if req.Name != "" {
-		existing.Name = req.Name
+		n := req.Name
+		patch.Name = &n
 	}
-	if req.Region != "" {
-		existing.Region = req.Region
-	}
+	patch.Region = req.Region
 	if req.Tier != "" {
-		existing.Tier = repository.TenantTier(req.Tier)
+		t := repository.TenantTier(req.Tier)
+		patch.Tier = &t
 	}
 	if len(req.Settings) > 0 {
-		existing.Settings = req.Settings
+		s := req.Settings
+		patch.Settings = &s
 	}
-	updated, err := h.svc.Update(r.Context(), existing)
+	updated, err := h.svc.Update(r.Context(), id, patch)
 	if err != nil {
 		WriteRepositoryError(w, err)
 		return

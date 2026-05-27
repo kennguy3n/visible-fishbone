@@ -91,7 +91,12 @@ type TenantRepository interface {
 	Get(ctx context.Context, id uuid.UUID) (Tenant, error)
 	GetBySlug(ctx context.Context, slug string) (Tenant, error)
 	List(ctx context.Context, page Page) (PageResult[Tenant], error)
-	Update(ctx context.Context, t Tenant) (Tenant, error)
+	// Update applies a sparse, explicit-clear PATCH. See the
+	// TenantPatch docstring for the per-field semantics: a nil
+	// pointer leaves the column untouched; a non-nil pointer
+	// applies the value (including the zero value, which is how
+	// operators clear optional fields like Region).
+	Update(ctx context.Context, id uuid.UUID, patch TenantPatch) (Tenant, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status TenantStatus) (Tenant, error)
 	// TransitionStatus atomically changes the tenant status only if
 	// the current status matches `from`. Returns ErrForbidden if the
