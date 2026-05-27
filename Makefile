@@ -145,21 +145,27 @@ docker-logs:
 
 # --- Migrations ------------------------------------------------------------
 
-# Migration tooling lands in PR 2 (golang-migrate v4 driven by an
-# embedded `sng-migrate` command). These placeholders document the
-# eventual interface.
+# Migration tooling: golang-migrate v4 driven by the embedded
+# `cmd/sng-migrate` binary. The binary reads PG_* env vars from the
+# same .env that sng-control consumes, so a single `direnv allow`
+# (or `set -a; source .env; set +a`) is enough to wire everything.
+
+.PHONY: build-migrate
+build-migrate:
+	@mkdir -p $(BIN_DIR)
+	$(GO) build -o $(BIN_DIR)/sng-migrate ./cmd/sng-migrate
 
 .PHONY: migrate-up
-migrate-up:
-	@echo "migrate-up: migration runner lands in PR 2"
+migrate-up: build-migrate
+	$(BIN_DIR)/sng-migrate up
 
 .PHONY: migrate-down
-migrate-down:
-	@echo "migrate-down: migration runner lands in PR 2"
+migrate-down: build-migrate
+	$(BIN_DIR)/sng-migrate down 1
 
 .PHONY: migrate-status
-migrate-status:
-	@echo "migrate-status: migration runner lands in PR 2"
+migrate-status: build-migrate
+	$(BIN_DIR)/sng-migrate status
 
 .PHONY: clean
 clean:
