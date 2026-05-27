@@ -348,9 +348,18 @@ type CORS struct {
 // its compiled-in defaults (the PR6 review observed the previous
 // wiring passed a zero-valued WorkerConfig).
 type Webhook struct {
-	// MaxRetries is the maximum number of delivery attempts before
-	// a webhook is marked exhausted. Default 6.
-	MaxRetries int
+	// MaxAttempts is the TOTAL number of delivery attempts (first
+	// try + retries) before a webhook is marked exhausted. Default
+	// 6 — i.e. 1 initial delivery + 5 retries. Operators wanting a
+	// single attempt with no retries set this to 1. Named
+	// `MaxAttempts` (env `WEBHOOK_MAX_ATTEMPTS`) to match the
+	// worker.WorkerConfig.MaxAttempts semantic exactly; the older
+	// `MaxRetries` name conflated "attempts" with "retries after
+	// the first" and made off-by-one delivery counts likely. The
+	// validator below requires >= 1 so the publisher's fallback
+	// chain (which uses <= 0 as the "unset, fall through" sentinel)
+	// cannot silently override an operator's explicit value.
+	MaxAttempts int
 	// InitialDelay is the first retry delay; subsequent delays are
 	// exponentially backed off up to MaxDelay. Default 1s.
 	InitialDelay time.Duration
@@ -531,7 +540,7 @@ func Load() (Config, error) {
 		{"NATS_FETCH_BATCH_SIZE", 50, &cfg.NATS.FetchBatchSize},
 		{"NATS_PUBLISH_RETRY_ATTEMPTS", 3, &cfg.NATS.PublishRetryAttempts},
 		{"RATE_LIMIT_BURST", 60, &cfg.RateLimit.Burst},
-		{"WEBHOOK_MAX_RETRIES", 6, &cfg.Webhook.MaxRetries},
+		{"WEBHOOK_MAX_ATTEMPTS", 6, &cfg.Webhook.MaxAttempts},
 		{"WEBHOOK_BATCH_SIZE", 32, &cfg.Webhook.BatchSize},
 	}
 	strictDurations := []struct {
@@ -761,8 +770,18 @@ func (c Config) validate() error {
 			return fmt.Errorf("RATE_LIMIT_BURST must be > 0 when enabled, got %d", c.RateLimit.Burst)
 		}
 	}
-	if c.Webhook.MaxRetries < 0 {
-		return fmt.Errorf("WEBHOOK_MAX_RETRIES must be >= 0, got %d", c.Webhook.MaxRetries)
+	// WEBHOOK_MAX_ATTEMPTS is the total delivery-attempt budget
+	// (first try + retries). The worker's defaults() function uses
+	// `<= 0` as the "unset, fall through to package default"
+	// sentinel, which means an operator who set MaxAttempts=0 to
+	// express "single attempt, no retries" would silently get the
+	// hard-coded default of 8 instead — their configuration ignored.
+	// Require >= 1 (same pattern as NATS_PUBLISH_RETRY_ATTEMPTS) so
+	// the validator and the worker agree on what "set" means.
+	// Operators wanting a single attempt with no retries set this
+	// to 1.
+	if c.Webhook.MaxAttempts < 1 {
+		return fmt.Errorf("WEBHOOK_MAX_ATTEMPTS must be >= 1 (set to 1 for a single attempt with no retries), got %d", c.Webhook.MaxAttempts)
 	}
 	if c.Webhook.InitialDelay <= 0 {
 		return fmt.Errorf("WEBHOOK_INITIAL_DELAY must be > 0, got %s", c.Webhook.InitialDelay)

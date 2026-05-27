@@ -10,6 +10,13 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 )
 
+// claimTokenMinTTLSeconds is the minimum value accepted for
+// `ttl_seconds` on POST /claim-tokens. It must stay in sync with
+// the `minimum: 60` constraint declared in api/openapi.yaml — the
+// previous handler accepted any positive value, silently violating
+// the published contract.
+const claimTokenMinTTLSeconds = 60
+
 // DeviceHandler exposes the device enrolment and listing endpoints.
 type DeviceHandler struct {
 	identity *identity.Service
@@ -62,6 +69,18 @@ func (h *DeviceHandler) createClaimToken(w http.ResponseWriter, r *http.Request)
 	}
 	ttl := h.claimTokenTTL
 	if req.TTLSeconds > 0 {
+		// Enforce the OpenAPI-published minimum (60s) here so the
+		// handler matches the documented contract. The lower bound
+		// exists for operational sanity — sub-minute tokens are
+		// practically useless (the operator can't reasonably install
+		// the agent and have it call /devices/enroll before the
+		// token expires) and would just generate noise in the audit
+		// log without ever producing a successful enrollment.
+		if req.TTLSeconds < claimTokenMinTTLSeconds {
+			WriteError(w, http.StatusBadRequest, "invalid_argument",
+				"ttl_seconds must be >= 60 (OpenAPI contract)")
+			return
+		}
 		ttl = time.Duration(req.TTLSeconds) * time.Second
 	}
 
