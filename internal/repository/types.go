@@ -232,6 +232,57 @@ type AuditEntry struct {
 	CreatedAt    time.Time
 }
 
+// WebhookEndpointStatus enumerates the lifecycle states.
+type WebhookEndpointStatus string
+
+const (
+	WebhookEndpointStatusActive   WebhookEndpointStatus = "active"
+	WebhookEndpointStatusDisabled WebhookEndpointStatus = "disabled"
+)
+
+// WebhookEndpoint is a per-tenant webhook subscription.
+type WebhookEndpoint struct {
+	ID       uuid.UUID
+	TenantID uuid.UUID
+	URL      string
+	Events   []string
+	// SigningSecret is the plaintext HMAC-SHA256 key used by the
+	// delivery worker to sign outbound bodies. Receivers verify
+	// signatures with this same value, which is emitted exactly
+	// once on Create. At-rest protection is delegated to disk
+	// encryption / TDE per the migration comment.
+	SigningSecret []byte
+	Status        WebhookEndpointStatus
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// WebhookDeliveryStatus enumerates delivery attempt states.
+type WebhookDeliveryStatus string
+
+const (
+	WebhookDeliveryStatusPending   WebhookDeliveryStatus = "pending"
+	WebhookDeliveryStatusDelivered WebhookDeliveryStatus = "delivered"
+	WebhookDeliveryStatusFailed    WebhookDeliveryStatus = "failed"
+	WebhookDeliveryStatusExhausted WebhookDeliveryStatus = "exhausted"
+)
+
+// WebhookDelivery is a single delivery attempt record.
+type WebhookDelivery struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	EndpointID     uuid.UUID
+	EventType      string
+	Payload        json.RawMessage
+	Status         WebhookDeliveryStatus
+	Attempts       int
+	LastAttemptAt  *time.Time
+	LastError      string
+	NextRetryAt    time.Time
+	ResponseStatus int
+	CreatedAt      time.Time
+}
+
 // PolicyGraph is a versioned tenant policy graph. The `Graph` blob
 // is the JSON-serialized typed policy model (see internal/service/
 // policy for the shape).

@@ -1,0 +1,649 @@
+openapi: 3.1.0
+info:
+  title: ShieldNet Gateway Control Plane API
+  description: |
+    REST API for ShieldNet Gateway (SNG) — multi-tenant control plane.
+    All operator endpoints are mounted under `/api/v1`. Auth is
+    either a bearer JWT (operator console) or `X-SNG-API-Key`
+    (machine-to-machine).
+  version: "0.1.0"
+  contact:
+    name: ShieldNet Gateway Team
+servers:
+  - url: https://control.shieldnet.example/api/v1
+    description: Production
+  - url: http://localhost:8080/api/v1
+    description: Local dev
+security:
+  - BearerJWT: []
+  - APIKey: []
+tags:
+  - name: tenants
+  - name: sites
+  - name: devices
+  - name: rbac
+  - name: policy
+  - name: audit
+  - name: webhooks
+paths:
+  /tenants:
+    post:
+      tags: [tenants]
+      summary: Create a tenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantCreateRequest"
+      responses:
+        "201": { $ref: "#/components/responses/Tenant" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [tenants]
+      summary: List tenants
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: page of tenants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Tenant" }
+                  next_cursor: { type: string }
+  /tenants/{id}:
+    parameters: [ { $ref: "#/components/parameters/TenantID" } ]
+    get:
+      tags: [tenants]
+      summary: Get tenant by id
+      responses:
+        "200": { $ref: "#/components/responses/Tenant" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [tenants]
+      summary: Update tenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantUpdateRequest"
+      responses:
+        "200": { $ref: "#/components/responses/Tenant" }
+    delete:
+      tags: [tenants]
+      summary: Soft-delete tenant
+      responses:
+        "204": { description: deleted }
+  /tenants/{id}/suspend:
+    parameters: [ { $ref: "#/components/parameters/TenantID" } ]
+    post:
+      tags: [tenants]
+      summary: Suspend tenant
+      responses:
+        "200": { $ref: "#/components/responses/Tenant" }
+  /tenants/{tenant_id}/sites:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [sites]
+      summary: List sites
+      responses:
+        "200":
+          description: page of sites
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Site" }
+                  next_cursor: { type: string }
+    post:
+      tags: [sites]
+      summary: Create site
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SiteCreateRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/Site" }
+  /tenants/{tenant_id}/sites/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - $ref: "#/components/parameters/ResourceID"
+    get:
+      tags: [sites]
+      summary: Get site
+      responses:
+        "200": { $ref: "#/components/responses/Site" }
+    patch:
+      tags: [sites]
+      summary: Update site
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SiteUpdateRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/Site" }
+    delete:
+      tags: [sites]
+      summary: Delete site
+      responses:
+        "204": { description: deleted }
+  /tenants/{tenant_id}/claim-tokens:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [devices]
+      summary: Generate a single-use claim token for device enrolment
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ttl_seconds: { type: integer, minimum: 60 }
+      responses:
+        "201":
+          description: token created (plaintext returned once)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClaimToken" }
+  /tenants/{tenant_id}/devices/enroll:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [devices]
+      summary: Redeem claim token and enrol a device
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceEnrollRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/Device" }
+        "404": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/devices:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [devices]
+      summary: List enrolled devices
+      parameters:
+        - in: query
+          name: platform
+          schema: { $ref: "#/components/schemas/DevicePlatform" }
+        - in: query
+          name: status
+          schema: { type: string, enum: [pending, active, retired] }
+        - in: query
+          name: site_id
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: page of devices
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Device" }
+                  next_cursor: { type: string }
+  /tenants/{tenant_id}/devices/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - $ref: "#/components/parameters/ResourceID"
+    get:
+      tags: [devices]
+      summary: Get device by id
+      responses:
+        "200": { $ref: "#/components/responses/Device" }
+  /tenants/{tenant_id}/roles:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [rbac]
+      summary: List roles
+      responses:
+        "200":
+          description: roles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Role" }
+    post:
+      tags: [rbac]
+      summary: Create custom role
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RoleCreateRequest" }
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Role" }
+  /tenants/{tenant_id}/users/{user_id}/roles:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - in: path
+        name: user_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [rbac]
+      summary: Assign role to user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RoleAssignRequest" }
+      responses:
+        "204": { description: assigned }
+  /tenants/{tenant_id}/users/{user_id}/roles/{role_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - in: path
+        name: user_id
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: role_id
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [rbac]
+      summary: Revoke role
+      responses:
+        "204": { description: revoked }
+  /tenants/{tenant_id}/policy:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [policy]
+      summary: Get latest policy graph
+      responses:
+        "200":
+          description: graph
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyGraph" }
+    put:
+      tags: [policy]
+      summary: Publish a new policy graph version
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "201":
+          description: graph
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyGraph" }
+  /tenants/{tenant_id}/policy/compile:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [policy]
+      summary: Compile the latest graph into signed bundles
+      responses:
+        "202":
+          description: compile result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyCompileResult" }
+  /tenants/{tenant_id}/policy/bundles/{target_type}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - in: path
+        name: target_type
+        required: true
+        schema:
+          type: string
+          enum: [edge, endpoint, cloud, mobile]
+    get:
+      tags: [policy]
+      summary: Fetch latest signed bundle for a target
+      responses:
+        "200":
+          description: bundle (bytes are base64-encoded)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyBundle" }
+  /tenants/{tenant_id}/audit-log:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [audit]
+      summary: List audit entries (append-only)
+      parameters:
+        - in: query
+          name: resource_type
+          schema: { type: string }
+        - in: query
+          name: action
+          schema: { type: string }
+        - in: query
+          name: actor_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: page of audit entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEntry" }
+                  next_cursor: { type: string }
+  /tenants/{tenant_id}/webhooks:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [webhooks]
+      summary: Register an outbound webhook endpoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookCreateRequest" }
+      responses:
+        "201":
+          description: registered (secret returned once)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookEndpoint" }
+    get:
+      tags: [webhooks]
+      summary: List webhook endpoints
+      responses:
+        "200":
+          description: list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/WebhookEndpoint" }
+  /tenants/{tenant_id}/webhooks/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - $ref: "#/components/parameters/ResourceID"
+    delete:
+      tags: [webhooks]
+      summary: Unregister webhook
+      responses:
+        "204": { description: removed }
+components:
+  securitySchemes:
+    BearerJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    APIKey:
+      type: apiKey
+      in: header
+      name: X-SNG-API-Key
+  parameters:
+    TenantID:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, format: uuid }
+    TenantPathID:
+      in: path
+      name: tenant_id
+      required: true
+      schema: { type: string, format: uuid }
+    ResourceID:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, format: uuid }
+    After:
+      in: query
+      name: after
+      schema: { type: string }
+    Limit:
+      in: query
+      name: limit
+      schema: { type: integer, minimum: 1, maximum: 200 }
+  responses:
+    Tenant:
+      description: tenant
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Tenant" }
+    Site:
+      description: site
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Site" }
+    Device:
+      description: device
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Device" }
+    Error:
+      description: error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { }
+    DevicePlatform:
+      type: string
+      enum: [windows, macos, linux, ios, android]
+    TenantCreateRequest:
+      type: object
+      required: [name, tier]
+      properties:
+        name: { type: string }
+        slug: { type: string }
+        region: { type: string }
+        tier: { type: string, enum: [starter, professional, enterprise] }
+        settings: { type: object }
+    TenantUpdateRequest:
+      type: object
+      properties:
+        name: { type: string }
+        region: { type: string }
+        tier: { type: string, enum: [starter, professional, enterprise] }
+        settings: { type: object }
+    Tenant:
+      type: object
+      required: [id, name, slug, status, tier, settings, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        status: { type: string, enum: [active, suspended, deleted] }
+        region: { type: string }
+        tier: { type: string, enum: [starter, professional, enterprise] }
+        settings: { type: object }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SiteCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        slug: { type: string }
+        template: { type: string, enum: [branch, hub, cloud_only, home_office] }
+        config: { type: object }
+    SiteUpdateRequest:
+      type: object
+      properties:
+        name: { type: string }
+        template: { type: string, enum: [branch, hub, cloud_only, home_office] }
+        config: { type: object }
+    Site:
+      type: object
+      required: [id, tenant_id, name, slug, template, config, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        template: { type: string, enum: [branch, hub, cloud_only, home_office] }
+        config: { type: object }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ClaimToken:
+      type: object
+      required: [id, token, expires_at]
+      properties:
+        id: { type: string, format: uuid }
+        token: { type: string, description: plaintext, shown once }
+        expires_at: { type: string, format: date-time }
+    DeviceEnrollRequest:
+      type: object
+      required: [claim_token, name, platform, public_key_ed25519]
+      properties:
+        claim_token: { type: string }
+        name: { type: string }
+        platform: { $ref: "#/components/schemas/DevicePlatform" }
+        public_key_ed25519: { type: string }
+        posture: { type: object }
+    Device:
+      type: object
+      required: [id, tenant_id, name, platform, status, posture, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        site_id: { type: string, format: uuid }
+        name: { type: string }
+        platform: { $ref: "#/components/schemas/DevicePlatform" }
+        public_key_ed25519: { type: string }
+        enrolled_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        status: { type: string, enum: [pending, active, retired] }
+        posture: { type: object }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Role:
+      type: object
+      required: [id, name, permissions, scope]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        permissions:
+          type: array
+          items: { type: string }
+        scope: { type: string, enum: [platform, msp, tenant, site] }
+    RoleCreateRequest:
+      type: object
+      required: [name, scope, permissions]
+      properties:
+        name: { type: string }
+        scope: { type: string, enum: [platform, msp, tenant, site] }
+        permissions:
+          type: array
+          items: { type: string }
+    RoleAssignRequest:
+      type: object
+      required: [role_id]
+      properties:
+        role_id: { type: string, format: uuid }
+        scope_id: { type: string, format: uuid }
+    PolicyGraph:
+      type: object
+      required: [id, tenant_id, version, graph, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        version: { type: integer }
+        graph: { type: object }
+        compiled_at: { type: string, format: date-time }
+        compiler_version: { type: string }
+        created_at: { type: string, format: date-time }
+    PolicyBundle:
+      type: object
+      required: [id, policy_graph_id, target_type, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        policy_graph_id: { type: string, format: uuid }
+        target_type: { type: string, enum: [edge, endpoint, cloud, mobile] }
+        bundle: { type: string, description: base64 of MessagePack payload }
+        signature: { type: string, description: base64 of Ed25519 signature }
+        created_at: { type: string, format: date-time }
+    PolicyCompileResult:
+      type: object
+      required: [graph_id, compiled_at, bundles]
+      properties:
+        graph_id: { type: string, format: uuid }
+        compiled_at: { type: string, format: date-time }
+        bundles:
+          type: array
+          items: { $ref: "#/components/schemas/PolicyBundle" }
+    AuditEntry:
+      type: object
+      required: [id, tenant_id, action, resource_type, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        actor_id: { type: string, format: uuid }
+        action: { type: string }
+        resource_type: { type: string }
+        resource_id: { type: string, format: uuid }
+        details: { type: object }
+        created_at: { type: string, format: date-time }
+    WebhookCreateRequest:
+      type: object
+      required: [url, events]
+      properties:
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { type: string }
+    WebhookEndpoint:
+      type: object
+      required: [id, tenant_id, url, events, status, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        url: { type: string }
+        events:
+          type: array
+          items: { type: string }
+        secret: { type: string, description: only returned at create time }
+        status: { type: string, enum: [active, disabled] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
