@@ -53,7 +53,7 @@ func run() error {
 	}
 	defer pool.Close()
 
-	nc, err := openNATS(&cfg, logger)
+	nc, err := openNATS(rootCtx, &cfg, logger)
 	if err != nil {
 		return fmt.Errorf("nats: %w", err)
 	}
@@ -180,9 +180,9 @@ func openPostgres(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 
 // openNATS connects to the NATS cluster and verifies JetStream is
 // reachable. The control plane is not useful without JetStream, so
-// a missing stream context fails boot rather than degrading
-// silently.
-func openNATS(cfg *config.Config, logger *slog.Logger) (*nats.Conn, error) {
+// a JetStream-disabled or unreachable cluster fails boot rather than
+// degrading silently at first publish time.
+func openNATS(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*nats.Conn, error) {
 	opts := []nats.Option{
 		nats.Name(cfg.NATS.Name),
 		nats.ReconnectWait(cfg.NATS.ReconnectWait),
@@ -215,9 +215,25 @@ func openNATS(cfg *config.Config, logger *slog.Logger) (*nats.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
-	if _, err := nc.JetStream(); err != nil {
+	js, err := nc.JetStream()
+	if err != nil {
 		nc.Close()
-		return nil, fmt.Errorf("jetstream: %w", err)
+		return nil, fmt.Errorf("jetstream client: %w", err)
+	}
+	// nc.JetStream() above only constructs a *client-side* JetStream
+	// context — it does NOT round-trip to the server, so a NATS cluster
+	// without JetStream enabled would pass this check and only fail at
+	// first publish/consumer-create. Force a real server round-trip by
+	// calling AccountInfo. nats.go maps the "no responders" reply that
+	// a JetStream-disabled server returns to ErrJetStreamNotEnabled, so
+	// operators get a clear boot-time error rather than a flapping
+	// readiness probe later. We budget the call against the dedicated
+	// NATS_REQUEST_TIMEOUT so a hung server can't pin boot forever.
+	jsCtx, cancel := context.WithTimeout(ctx, cfg.NATS.RequestTimeout)
+	defer cancel()
+	if _, err := js.AccountInfo(nats.Context(jsCtx)); err != nil {
+		nc.Close()
+		return nil, fmt.Errorf("jetstream account info: %w", err)
 	}
 	logger.Info("sng-control: nats connected",
 		slog.String("url", redactURL(cfg.NATS.URL)),
@@ -292,15 +308,46 @@ func buildNATSTLSOptions(n *config.NATS) ([]nats.Option, error) {
 	return []nats.Option{nats.Secure(tlsCfg)}, nil
 }
 
-// redactURL strips userinfo from a URL string so it is safe to emit
-// in logs. Operators who embed `nats://user:password@host:4222`
+// redactURL strips userinfo from a NATS URL string so it is safe to
+// emit in logs. Operators who embed `nats://user:password@host:4222`
 // instead of using the dedicated NATS_USER/NATS_PASSWORD fields
 // should still not leak their secret through info-level boot logs.
 //
-// Invalid URLs are returned unchanged after redacting an obvious
-// `@`-suffixed userinfo prefix so we still never emit the original
-// secret.
+// NATS_URL legitimately accepts a *comma-separated* list of server
+// URLs (e.g. `nats://u:p@h1:4222,nats://u:p@h2:4222`) which is the
+// idiomatic way to spell a NATS cluster. url.Parse on the joined
+// string would see a single garbled host and could leak credentials
+// from every entry after the first, so we split the list, redact
+// each segment independently with redactSingleURL, and rejoin.
 func redactURL(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	if !strings.Contains(raw, ",") {
+		return redactSingleURL(raw)
+	}
+	parts := strings.Split(raw, ",")
+	for i, p := range parts {
+		trim := strings.TrimSpace(p)
+		red := redactSingleURL(trim)
+		// Preserve any whitespace padding around the original
+		// entry — a copy-paste from a YAML list often carries a
+		// leading space and we don't want the redacted log to look
+		// gratuitously different from what the operator typed.
+		if lead := leadingSpaces(p); lead != "" {
+			red = lead + red
+		}
+		if trail := trailingSpaces(p); trail != "" {
+			red += trail
+		}
+		parts[i] = red
+	}
+	return strings.Join(parts, ",")
+}
+
+// redactSingleURL is the single-URL redactor extracted from redactURL
+// so the comma-separated branch can reuse it per-segment.
+func redactSingleURL(raw string) string {
 	if raw == "" {
 		return raw
 	}
@@ -316,4 +363,23 @@ func redactURL(raw string) string {
 		}
 	}
 	return raw
+}
+
+func leadingSpaces(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] != ' ' && s[i] != '\t' {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+func trailingSpaces(s string) string {
+	for i := len(s); i > 0; i-- {
+		c := s[i-1]
+		if c != ' ' && c != '\t' {
+			return s[i:]
+		}
+	}
+	return s
 }

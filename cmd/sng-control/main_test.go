@@ -28,6 +28,25 @@ func TestRedactURL(t *testing.T) {
 		{"nats://user:hunter2@host:4222", "nats://user:xxxxx@host:4222"},
 		{"nats://user@host:4222", "nats://user@host:4222"},
 		{"nats://:token@host:4222", "nats://:xxxxx@host:4222"},
+		// NATS_URL legitimately accepts a comma-separated server
+		// list. Each segment must be redacted independently;
+		// url.Parse on the joined string would garble it and leak
+		// every non-first credential. Cover all three shapes the
+		// nats.go client accepts.
+		{
+			"nats://u:hunter2@h1:4222,nats://u:hunter3@h2:4222",
+			"nats://u:xxxxx@h1:4222,nats://u:xxxxx@h2:4222",
+		},
+		{
+			"nats://u:hunter2@h1:4222, nats://u:hunter3@h2:4222",
+			"nats://u:xxxxx@h1:4222, nats://u:xxxxx@h2:4222",
+		},
+		// Mixed creds: only one segment carries userinfo; the other
+		// must be left intact (we don't fabricate a redaction).
+		{
+			"nats://u:hunter2@h1:4222,nats://h2:4222",
+			"nats://u:xxxxx@h1:4222,nats://h2:4222",
+		},
 	}
 	for _, c := range cases {
 		got := redactURL(c.in)
@@ -37,7 +56,11 @@ func TestRedactURL(t *testing.T) {
 		// Guard against the precedence trap: `A || B && C` is parsed
 		// as `A || (B && C)` in Go. Use explicit parens so both
 		// substrings are guarded by the same `c.want != got` clause.
-		if (strings.Contains(got, "hunter2") || strings.Contains(got, "token")) && c.want != got {
+		// Also check `hunter3` for the multi-URL leak cases.
+		leak := strings.Contains(got, "hunter2") ||
+			strings.Contains(got, "hunter3") ||
+			strings.Contains(got, "token")
+		if leak && c.want != got {
 			t.Errorf("redactURL(%q) leaked secret: %q", c.in, got)
 		}
 	}
