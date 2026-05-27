@@ -14,6 +14,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -176,6 +177,33 @@ type Postgres struct {
 	// SELECT/INSERT/UPDATE on tenant-scoped tables to this role
 	// only.
 	AppRole string
+}
+
+// MigrationURL returns a `pgx5://` URL suitable for passing to
+// golang-migrate/v4's pgx/v5 database driver.
+//
+// The migrate library uses URL parsing (net/url) rather than libpq
+// keyword/value strings, so we render the components with the
+// standard `userinfo@host:port/dbname?query` shape and let
+// `url.URL.String()` percent-escape any awkward characters. SSL mode
+// and connect timeout are carried as query parameters; the latter
+// is documented by golang-migrate as `x-connect-timeout`.
+func (p Postgres) MigrationURL() string {
+	u := url.URL{
+		Scheme: "pgx5",
+		User:   url.UserPassword(p.User, p.Password),
+		Host:   fmt.Sprintf("%s:%d", p.Host, p.Port),
+		Path:   "/" + p.Database,
+	}
+	q := u.Query()
+	if p.SSLMode != "" {
+		q.Set("sslmode", p.SSLMode)
+	}
+	if p.ConnTimeout > 0 {
+		q.Set("connect_timeout", strconv.Itoa(connectTimeoutSeconds(p.ConnTimeout)))
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // DSN returns a libpq keyword/value connection string.

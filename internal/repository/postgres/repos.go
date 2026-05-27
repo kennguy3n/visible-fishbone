@@ -1,0 +1,48 @@
+package postgres
+
+import (
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
+)
+
+// Each repository constructor returns the typed implementation
+// bound to the shared Store. They live in this file so the
+// type-assertion lines below sit next to one another — a single
+// place to read when verifying interface compliance.
+
+// NewTenantRepository binds the Store to repository.TenantRepository.
+func (s *Store) NewTenantRepository() *TenantRepository { return &TenantRepository{s: s} }
+
+// NewSiteRepository binds the Store to repository.SiteRepository.
+func (s *Store) NewSiteRepository() *SiteRepository { return &SiteRepository{s: s} }
+
+// NewUserRepository binds the Store to repository.UserRepository.
+func (s *Store) NewUserRepository() *UserRepository { return &UserRepository{s: s} }
+
+// NewDeviceRepository binds the Store to repository.DeviceRepository.
+func (s *Store) NewDeviceRepository() *DeviceRepository { return &DeviceRepository{s: s} }
+
+// NewRoleRepository binds the Store to repository.RoleRepository.
+func (s *Store) NewRoleRepository() *RoleRepository { return &RoleRepository{s: s} }
+
+// NewClaimTokenRepository binds the Store to repository.ClaimTokenRepository.
+func (s *Store) NewClaimTokenRepository() *ClaimTokenRepository { return &ClaimTokenRepository{s: s} }
+
+// NewAuditLogRepository binds the Store to repository.AuditLogRepository.
+func (s *Store) NewAuditLogRepository() *AuditLogRepository { return &AuditLogRepository{s: s} }
+
+// NewPolicyRepository binds the Store to repository.PolicyRepository.
+func (s *Store) NewPolicyRepository() *PolicyRepository { return &PolicyRepository{s: s} }
+
+// Compile-time interface compliance asserts. Keeping these in this
+// file means a single grep tells us "did the postgres package
+// implement every interface?" without scanning eight files.
+var (
+	_ repository.TenantRepository     = (*TenantRepository)(nil)
+	_ repository.SiteRepository       = (*SiteRepository)(nil)
+	_ repository.UserRepository       = (*UserRepository)(nil)
+	_ repository.DeviceRepository     = (*DeviceRepository)(nil)
+	_ repository.RoleRepository       = (*RoleRepository)(nil)
+	_ repository.ClaimTokenRepository = (*ClaimTokenRepository)(nil)
+	_ repository.AuditLogRepository   = (*AuditLogRepository)(nil)
+	_ repository.PolicyRepository     = (*PolicyRepository)(nil)
+)

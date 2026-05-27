@@ -1,0 +1,253 @@
+package postgres
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
+)
+
+// TenantRepository owns the tenants table in Postgres.
+type TenantRepository struct{ s *Store }
+
+const tenantSelectColumns = `
+	id, name, slug, status, COALESCE(region, ''), tier,
+	settings, created_at, updated_at, deleted_at
+`
+
+func scanTenant(row pgx.Row) (repository.Tenant, error) {
+	var (
+		t       repository.Tenant
+		region  string
+		setBuf  []byte
+		deleted *deletedAtScan
+	)
+	deleted = &deletedAtScan{}
+	if err := row.Scan(
+		&t.ID, &t.Name, &t.Slug, &t.Status, &region, &t.Tier,
+		&setBuf, &t.CreatedAt, &t.UpdatedAt, deleted,
+	); err != nil {
+		return repository.Tenant{}, err
+	}
+	t.Region = region
+	t.Settings = json.RawMessage(setBuf)
+	if deleted.Valid {
+		ts := deleted.Time
+		t.DeletedAt = &ts
+	}
+	return t, nil
+}
+
+func (r *TenantRepository) Create(ctx context.Context, t repository.Tenant) (repository.Tenant, error) {
+	if t.Slug == "" {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	if t.ID == uuid.Nil {
+		t.ID = uuid.New()
+	}
+	if t.Status == "" {
+		t.Status = repository.TenantStatusActive
+	}
+	if len(t.Settings) == 0 {
+		t.Settings = json.RawMessage(`{}`)
+	}
+
+	// Tenant Create does NOT use withTenant — the tenant doesn't
+	// exist yet, so there is nothing for the RLS GUC to scope to.
+	// We open a tx anyway because callers (e.g. tenant service)
+	// will commonly seed audit-log rows that DO require the GUC.
+	tx, err := r.s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	const q = `
+		INSERT INTO tenants (id, name, slug, status, region, tier, settings)
+		VALUES ($1::uuid, $2, $3, $4, NULLIF($5, ''), $6, $7::jsonb)
+		RETURNING ` + tenantSelectColumns
+	row := tx.QueryRow(ctx, q, t.ID, t.Name, t.Slug, t.Status, t.Region, t.Tier, []byte(t.Settings))
+	out, err := scanTenant(row)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return repository.Tenant{}, repository.ErrConflict
+		}
+		if isCheckViolation(err) {
+			return repository.Tenant{}, repository.ErrInvalidArgument
+		}
+		return repository.Tenant{}, fmt.Errorf("insert tenant: %w", err)
+	}
+
+	// Set the GUC for any subsequent inserts the caller may layer
+	// onto this transaction (the service layer's pattern). For
+	// the bare Create case it is harmless.
+	if _, err := tx.Exec(ctx, "SELECT set_config('sng.tenant_id', $1, true)", out.ID); err != nil {
+		return repository.Tenant{}, fmt.Errorf("set tenant context: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return repository.Tenant{}, fmt.Errorf("commit: %w", err)
+	}
+	return out, nil
+}
+
+func (r *TenantRepository) Get(ctx context.Context, id uuid.UUID) (repository.Tenant, error) {
+	const q = `SELECT ` + tenantSelectColumns + ` FROM tenants WHERE id = $1::uuid`
+	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("select tenant: %w", err)
+	}
+	return out, nil
+}
+
+func (r *TenantRepository) GetBySlug(ctx context.Context, slug string) (repository.Tenant, error) {
+	const q = `SELECT ` + tenantSelectColumns + ` FROM tenants WHERE slug = $1`
+	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, slug))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("select tenant by slug: %w", err)
+	}
+	return out, nil
+}
+
+func (r *TenantRepository) List(ctx context.Context, page repository.Page) (repository.PageResult[repository.Tenant], error) {
+	page = page.Normalize()
+	cur, err := decodeCursor(page.After)
+	if err != nil {
+		return repository.PageResult[repository.Tenant]{}, repository.ErrInvalidArgument
+	}
+
+	// ORDER BY (created_at, id) is a total order; the cursor uses
+	// (cur.T, cur.I) as the strict lower bound. The query is the
+	// same shape for ASC and DESC apart from direction operators.
+	var q string
+	args := []any{cur.T, cur.I, page.Limit}
+	switch page.Order {
+	case repository.SortAsc:
+		q = `
+			SELECT ` + tenantSelectColumns + `
+			FROM tenants
+			WHERE ($1::timestamptz IS NULL OR (created_at, id) > ($1::timestamptz, $2::uuid))
+			ORDER BY created_at ASC, id ASC
+			LIMIT $3
+		`
+		if cur.T.IsZero() {
+			args[0] = nil
+		}
+	default:
+		q = `
+			SELECT ` + tenantSelectColumns + `
+			FROM tenants
+			WHERE ($1::timestamptz IS NULL OR (created_at, id) < ($1::timestamptz, $2::uuid))
+			ORDER BY created_at DESC, id DESC
+			LIMIT $3
+		`
+		if cur.T.IsZero() {
+			args[0] = nil
+		}
+	}
+
+	rows, err := r.s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return repository.PageResult[repository.Tenant]{}, fmt.Errorf("list tenants: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]repository.Tenant, 0, page.Limit)
+	for rows.Next() {
+		t, err := scanTenant(rows)
+		if err != nil {
+			return repository.PageResult[repository.Tenant]{}, fmt.Errorf("scan tenant: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return repository.PageResult[repository.Tenant]{}, fmt.Errorf("iterate tenants: %w", err)
+	}
+
+	res := repository.PageResult[repository.Tenant]{Items: out}
+	if len(out) == page.Limit && len(out) > 0 {
+		last := out[len(out)-1]
+		res.NextCursor = encodeCursor(pageCursor{T: last.CreatedAt, I: last.ID})
+	}
+	return res, nil
+}
+
+func (r *TenantRepository) Update(ctx context.Context, t repository.Tenant) (repository.Tenant, error) {
+	if t.ID == uuid.Nil {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	// Build a sparse UPDATE that only touches the columns the
+	// caller provided. Using COALESCE on every column would clobber
+	// rows where the caller deliberately wanted to clear an
+	// optional field (e.g. region), so we send a NULL probe per
+	// column and skip ones the caller left blank.
+	const q = `
+		UPDATE tenants
+		SET name     = COALESCE(NULLIF($2, ''), name),
+		    slug     = COALESCE(NULLIF($3, ''), slug),
+		    status   = COALESCE(NULLIF($4, ''), status),
+		    region   = COALESCE(NULLIF($5, ''), region),
+		    tier     = COALESCE(NULLIF($6, ''), tier),
+		    settings = COALESCE($7::jsonb, settings)
+		WHERE id = $1::uuid
+		RETURNING ` + tenantSelectColumns
+	var settings any
+	if len(t.Settings) > 0 {
+		settings = []byte(t.Settings)
+	}
+	out, err := scanTenant(r.s.pool.QueryRow(ctx, q,
+		t.ID, t.Name, t.Slug, string(t.Status), t.Region, string(t.Tier), settings,
+	))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if isUniqueViolation(err) {
+		return repository.Tenant{}, repository.ErrConflict
+	}
+	if isCheckViolation(err) {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("update tenant: %w", err)
+	}
+	return out, nil
+}
+
+func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status repository.TenantStatus) (repository.Tenant, error) {
+	switch status {
+	case repository.TenantStatusActive, repository.TenantStatusSuspended, repository.TenantStatusDeleted:
+	default:
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	const q = `
+		UPDATE tenants
+		SET status     = $2,
+		    deleted_at = CASE WHEN $2 = 'deleted' THEN COALESCE(deleted_at, NOW()) ELSE deleted_at END
+		WHERE id = $1::uuid
+		RETURNING ` + tenantSelectColumns
+	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, string(status)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("update status: %w", err)
+	}
+	return out, nil
+}
+
+func (r *TenantRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	if _, err := r.UpdateStatus(ctx, id, repository.TenantStatusDeleted); err != nil {
+		return err
+	}
+	return nil
+}
