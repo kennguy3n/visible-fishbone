@@ -29,16 +29,16 @@ CREATE TABLE policy_signing_keys (
     UNIQUE (tenant_id, key_id)
 );
 
--- Fast lookup of the one active key per tenant.
-CREATE INDEX policy_signing_keys_tenant_active_idx
-    ON policy_signing_keys (tenant_id)
-    WHERE status = 'active';
-
--- At most one active key per tenant.  The partial unique index
+-- At most one active key per tenant. The partial unique index
 -- makes concurrent rotation safe: the INSERT of the new active key
--- and the UPDATE of the old key's status to 'rotated' can happen in
--- the same transaction, and any interleaving that would create two
--- active keys is rejected by the constraint.
+-- and the UPDATE of the old key's status to 'rotated' can happen
+-- in the same transaction, and any interleaving that would create
+-- two active keys is rejected by the constraint. This index also
+-- serves as the fast-lookup path for the active-key probe; a
+-- separate non-unique partial index with the same (tenant_id) +
+-- WHERE clause would be fully redundant (Devin Review
+-- #3312780989: write amplification with zero query benefit), so
+-- we deliberately use only this one.
 CREATE UNIQUE INDEX policy_signing_keys_tenant_one_active_idx
     ON policy_signing_keys (tenant_id)
     WHERE status = 'active';
