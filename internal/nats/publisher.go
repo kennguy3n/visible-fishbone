@@ -2,6 +2,8 @@ package nats
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -221,15 +223,43 @@ func (p *Publisher) PublishToDLQ(
 
 	// Re-use the original dedup ID prefixed with "dlq-" so a flapping
 	// consumer doesn't write duplicate DLQ rows for the same source
-	// message.
+	// message. When the original message lacks HeaderMessageID (an
+	// externally-produced message that didn't flow through this
+	// publisher), derive a stable dedup key from the message content
+	// + subject so retried DLQ publishes of the same source bytes
+	// still collapse to one DLQ entry. Without this fallback, the
+	// downstream Publish() would generate a fresh UUID on every call
+	// and a flapping consumer would write N duplicate DLQ rows for
+	// the same source event. SHA-256 over (subject || 0x00 || data)
+	// is the smallest stable key that survives external publishers
+	// (no MessageID), survives consumer restarts (no in-memory state),
+	// and won't collide across different source subjects.
 	originID := headers[HeaderMessageID]
-	msgID := ""
-	if originID != "" {
-		msgID = "dlq-" + originID
-	}
+	msgID := dlqMessageID(originID, originSubject, data)
 	return p.Publish(ctx, dlqSubject, data, PublishOptions{
 		MessageID:     msgID,
 		CorrelationID: headers[HeaderCorrelationID],
 		Headers:       hdrs,
 	})
+}
+
+// dlqMessageID returns a stable dedup key for a DLQ publish. When
+// originID is non-empty (the common path — messages produced by
+// this publisher always carry HeaderMessageID), the DLQ key is
+// `"dlq-" + originID`. When originID is empty (an externally
+// produced message), the key is derived from a SHA-256 over
+// `originSubject || 0x00 || data` so the same source bytes always
+// produce the same DLQ MessageID.
+//
+// The 0x00 separator prevents the (subject, data) and (subject',
+// data') ambiguity when one subject is a prefix of another.
+func dlqMessageID(originID, originSubject string, data []byte) string {
+	if originID != "" {
+		return "dlq-" + originID
+	}
+	h := sha256.New()
+	h.Write([]byte(originSubject))
+	h.Write([]byte{0})
+	h.Write(data)
+	return "dlq-content-" + hex.EncodeToString(h.Sum(nil))
 }

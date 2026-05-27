@@ -158,3 +158,97 @@ func TestPublisher_DLQ(t *testing.T) {
 	}
 	_ = msg.Ack()
 }
+
+// TestPublisher_DLQ_StableDedupOnMissingMessageID verifies that
+// PublishToDLQ deduplicates DLQ writes by message content when the
+// source message lacks HeaderMessageID (an externally-produced
+// message that didn't flow through this publisher). Without the
+// content-derived fallback key, the downstream Publish() would
+// generate a fresh UUID on every call and a flapping consumer
+// would write N duplicate DLQ rows for the same source event.
+//
+// Round-trips two PublishToDLQ calls with the same (originSubject,
+// data) but no MessageID; expects exactly one message in the DLQ
+// stream after both calls thanks to JetStream's MsgID-based dedup
+// (the dedup window in DefaultStreams is 2m, well above the test's
+// wall-clock).
+func TestPublisher_DLQ_StableDedupOnMissingMessageID(t *testing.T) {
+	t.Parallel()
+	_, js := startEmbeddedNATS(t)
+	cfg := defaultNATSConfig()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg), 0); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	pub := sngnats.NewPublisher(js, cfg, "test")
+
+	// Headers without HeaderMessageID — simulates an external
+	// publisher that doesn't follow the SNG header convention.
+	headers := map[string]string{
+		sngnats.HeaderTenantID:   "t1",
+		sngnats.HeaderEventClass: "flow",
+	}
+	payload := []byte("identical-payload-bytes")
+	if err := pub.PublishToDLQ(ctx, "external.tenant.events", payload, headers, 1, context.DeadlineExceeded); err != nil {
+		t.Fatalf("dlq #1: %v", err)
+	}
+	if err := pub.PublishToDLQ(ctx, "external.tenant.events", payload, headers, 1, context.DeadlineExceeded); err != nil {
+		t.Fatalf("dlq #2: %v", err)
+	}
+
+	stream, err := js.Stream(ctx, "TEST_DLQ")
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		t.Fatalf("info: %v", err)
+	}
+	// Exactly one message: the second PublishToDLQ should hit the
+	// server-side dedup window via the content-derived MsgID. If
+	// the test sees 2, the dedup fallback is missing.
+	if info.State.Msgs != 1 {
+		t.Errorf("expected 1 DLQ msg (content-derived dedup), got %d", info.State.Msgs)
+	}
+}
+
+// TestPublisher_DLQ_DifferentContentNotDeduplicated guards against
+// over-aggressive dedup — the content-derived fallback key must
+// produce DIFFERENT MsgIDs for different (subject, data) inputs so
+// distinct source messages don't collide in the DLQ.
+func TestPublisher_DLQ_DifferentContentNotDeduplicated(t *testing.T) {
+	t.Parallel()
+	_, js := startEmbeddedNATS(t)
+	cfg := defaultNATSConfig()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sngnats.EnsureStreams(ctx, js, sngnats.DefaultStreams(cfg), 0); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	pub := sngnats.NewPublisher(js, cfg, "test")
+	headers := map[string]string{sngnats.HeaderTenantID: "t1"}
+
+	if err := pub.PublishToDLQ(ctx, "external.events.flow", []byte("payload-A"), headers, 1, context.DeadlineExceeded); err != nil {
+		t.Fatalf("dlq A: %v", err)
+	}
+	if err := pub.PublishToDLQ(ctx, "external.events.flow", []byte("payload-B"), headers, 1, context.DeadlineExceeded); err != nil {
+		t.Fatalf("dlq B: %v", err)
+	}
+	// Same subject + different data should NOT dedup.
+	if err := pub.PublishToDLQ(ctx, "external.events.dns", []byte("payload-A"), headers, 1, context.DeadlineExceeded); err != nil {
+		t.Fatalf("dlq C: %v", err)
+	}
+
+	stream, err := js.Stream(ctx, "TEST_DLQ")
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		t.Fatalf("info: %v", err)
+	}
+	if info.State.Msgs != 3 {
+		t.Errorf("expected 3 distinct DLQ msgs, got %d (false-positive dedup)", info.State.Msgs)
+	}
+}

@@ -157,6 +157,11 @@ func DefaultStreams(cfg *config.NATS) []StreamSpec {
 
 // EnsureStream creates or updates the stream described by spec.
 // Idempotent. Safe to call at every process start.
+//
+// Uses JetStream's `CreateOrUpdateStream` which is a single
+// server-side atomic call — no lookup-then-create TOCTOU window,
+// and one fewer round trip than the previous lookup+update/create
+// flow.
 func EnsureStream(ctx context.Context, js jetstream.JetStream, spec StreamSpec) (jetstream.Stream, error) {
 	cfg := jetstream.StreamConfig{
 		Name:        spec.Name,
@@ -170,22 +175,11 @@ func EnsureStream(ctx context.Context, js jetstream.JetStream, spec StreamSpec) 
 		Discard:     spec.Discard,
 		Description: spec.Description,
 	}
-	_, err := js.Stream(ctx, spec.Name)
-	if err == nil {
-		updated, uErr := js.UpdateStream(ctx, cfg)
-		if uErr != nil {
-			return nil, fmt.Errorf("nats: update stream %s: %w", spec.Name, uErr)
-		}
-		return updated, nil
+	stream, err := js.CreateOrUpdateStream(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("nats: ensure stream %s: %w", spec.Name, err)
 	}
-	if !errors.Is(err, jetstream.ErrStreamNotFound) {
-		return nil, fmt.Errorf("nats: lookup stream %s: %w", spec.Name, err)
-	}
-	created, cErr := js.CreateStream(ctx, cfg)
-	if cErr != nil {
-		return nil, fmt.Errorf("nats: create stream %s: %w", spec.Name, cErr)
-	}
-	return created, nil
+	return stream, nil
 }
 
 // EnsureStreams ensures every spec exists. Errors aggregate so one

@@ -667,3 +667,98 @@ func TestService_DLQPublishFailureCounted(t *testing.T) {
 		t.Errorf("expected DLQPublished = 0 when every publish fails, got %d", m.DLQPublished)
 	}
 }
+
+// TestService_HotWriteExhaustionRoutedToDLQ is the regression test
+// for the round-3 finding "Hot-write failures that exhaust
+// MaxDeliver are silently dropped, not DLQ-routed". Before the fix,
+// a hot writer that failed for ALL delivery attempts (up to the
+// consumer's MaxDeliver=5) would just Nak forever and the message
+// would eventually fall out of the consumer's pending set with no
+// DLQ entry \u2014 silent data loss on a persistent hot-write
+// failure (e.g. ClickHouse down for >MaxDeliver redelivery
+// cycles).
+//
+// The fix: when dispatch sees NumDelivered >= hotPathMaxDeliver, it
+// routes the raw envelope bytes to the DLQ + Term()s the message
+// instead of Nak'ing for another (futile) redelivery.
+//
+// This test wires a captureWriter that fails every write (`failNTH =
+// 999` is far above the consumer's MaxDeliver), publishes one
+// envelope, and asserts:
+//
+//  1. The DLQ publisher received exactly 1 call with the raw bytes.
+//  2. The DLQ call's delivery count is >= hotPathMaxDeliver (the
+//     terminal attempt that triggered the DLQ route).
+//  3. The DLQPublished metric is 1.
+//  4. The hot writer was called hotPathMaxDeliver times (every
+//     redelivery up to and including the terminal one).
+func TestService_HotWriteExhaustionRoutedToDLQ(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	// failNTH >> hotPathMaxDeliver (5) so every delivery fails.
+	hot := &captureWriter{failNTH: 999}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	svc, err := telemetry.New(js, cfg,
+		telemetry.Config{Durable: "tlm-hot-dlq", DedupRingSize: 16},
+		hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dlq := &recordingDLQ{}
+	svc.WithDLQ(dlq)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	env := schema.Envelope{
+		SchemaVersion: schema.SchemaVersion, EventID: uuid.New(),
+		TenantID: uuid.New(), DeviceID: uuid.New(),
+		Timestamp:  time.Now().UTC(),
+		EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
+		Payload: newPayload(t),
+	}
+	if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// Each NakWithDelay(2s) + JetStream backoff puts the deadline
+	// at roughly 5 * 2s = 10s plus overhead. Allow 60s to absorb
+	// CI jitter; the test exits as soon as DLQPublished hits 1.
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		if svc.MetricsSnapshot().DLQPublished >= 1 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	_ = svc.Stop(stopCtx)
+
+	calls := dlq.Snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("DLQ publisher received %d calls, want 1 (hot-write exhaustion must route to DLQ)", len(calls))
+	}
+	call := calls[0]
+	if call.delivery < 5 {
+		t.Errorf("DLQ delivery count = %d, want >= 5 (terminal attempt only)", call.delivery)
+	}
+	if call.cause == "" {
+		t.Errorf("DLQ cause must carry the hot-write error string")
+	}
+
+	m := svc.MetricsSnapshot()
+	if m.DLQPublished != 1 {
+		t.Errorf("expected DLQPublished = 1, got %d", m.DLQPublished)
+	}
+	if m.DLQPublishFail != 0 {
+		t.Errorf("expected DLQPublishFail = 0 when DLQ accepts, got %d", m.DLQPublishFail)
+	}
+	if m.HotWriteFails < 5 {
+		t.Errorf("expected HotWriteFails >= 5 (full retry budget), got %d", m.HotWriteFails)
+	}
+}

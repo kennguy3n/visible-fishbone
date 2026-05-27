@@ -36,6 +36,26 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/nats/schema"
 )
 
+// hotPathMaxDeliver is the JetStream consumer's per-message retry
+// budget on the hot path. After NumDelivered reaches this value,
+// dispatch routes the message to the DLQ stream (preserving the
+// raw bytes + headers + cause) and Terms it, rather than letting
+// JetStream silently drop it once the consumer's MaxDeliver runs
+// out.
+//
+// The value is intentionally kept as a package-level constant
+// (not a Config knob) for two reasons:
+//
+//  1. The dispatch path's DLQ-on-final-attempt check must match
+//     the consumer's MaxDeliver exactly — a single source of
+//     truth eliminates the off-by-one bug class where the two
+//     drift.
+//  2. There is no operator workflow that benefits from tuning
+//     this independently of the consumer config. Operators tune
+//     AckWait + FetchBatchSize + NATS_PUBLISH_RETRY_ATTEMPTS;
+//     MaxDeliver is a worker invariant.
+const hotPathMaxDeliver = 5
+
 // HotWriter is the synchronous sink for hot-path telemetry events.
 // Implementations should be fast (sub-ms) and idempotent on the
 // envelope's EventID. The ClickHouse writer lands in PR9.
@@ -280,7 +300,7 @@ func (s *Service) Start(ctx context.Context) error {
 		FilterSubject: s.cfg.FilterSubject,
 		MaxAckPending: s.cfg.BatchSize * 4,
 		AckWait:       30 * time.Second,
-		MaxDeliver:    5,
+		MaxDeliver:    hotPathMaxDeliver,
 		Description:   "SNG telemetry hot-path consumer",
 	})
 	if err != nil {
@@ -398,8 +418,32 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 		s.logger.Warn("telemetry: hot write failed",
 			slog.Any("error", err),
 			slog.String("event_id", env.EventID.String()))
-		// Transient error — let the consumer redeliver up to
-		// MaxDeliver, then DLQ.
+		// JetStream has no built-in DLQ — once a message exceeds
+		// the consumer's MaxDeliver it is silently removed from
+		// the pending set with no automatic routing anywhere. To
+		// avoid silent data loss on a persistent hot-write
+		// failure (e.g. ClickHouse down for >MaxDeliver redelivery
+		// cycles), check the delivery count *before* Nak'ing: when
+		// this delivery would be the last (NumDelivered >=
+		// hotPathMaxDeliver), route the raw envelope bytes to the
+		// DLQ stream and Term() the message. The DLQ entry
+		// preserves the source subject, headers, delivery count,
+		// and cause so an operator can replay it after the hot
+		// writer recovers.
+		if s.deliveryExhausted(msg) {
+			s.routeHotWriteFailureToDLQ(msg, err)
+			if termErr := msg.Term(); termErr != nil {
+				s.logger.Warn("telemetry: term after hot-write exhaustion failed",
+					slog.Any("error", termErr),
+					slog.String("event_id", env.EventID.String()))
+			}
+			// Counted as Nacked to keep the metric semantics
+			// consistent (the message did not reach the hot
+			// store), with a separate DLQPublished counter
+			// distinguishing "DLQ'd" from "silently dropped".
+			s.metrics.Nacked.Add(1)
+			return
+		}
 		_ = msg.NakWithDelay(2 * time.Second)
 		s.metrics.Nacked.Add(1)
 		return
@@ -423,6 +467,71 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 	s.metrics.Acked.Add(1)
+}
+
+// deliveryExhausted reports whether the message has reached the
+// consumer's MaxDeliver budget on this delivery. NumDelivered is
+// 1-based (first delivery is 1), so the message has no further
+// retries available when NumDelivered >= hotPathMaxDeliver.
+//
+// A message without metadata (synthetic test message, or a NATS
+// client that strips metadata) is treated as NOT exhausted so the
+// fallback path (Nak + redeliver) still applies — the existing
+// safer default. The hot-write DLQ routing is a defence in depth;
+// missing metadata shouldn't promote a transient failure to a
+// permanent drop.
+func (s *Service) deliveryExhausted(msg jetstream.Msg) bool {
+	md, err := msg.Metadata()
+	if err != nil || md == nil {
+		return false
+	}
+	return md.NumDelivered >= hotPathMaxDeliver
+}
+
+// routeHotWriteFailureToDLQ publishes a hot-write-exhausted message
+// onto the DLQ stream so the raw envelope bytes are preserved for
+// replay after the hot writer recovers. Best-effort: a DLQ publish
+// failure is logged + counted but does NOT block the Term() that
+// follows. The alternative (retry the DLQ publish from inside
+// dispatch) would just hold up the consumer loop while the DLQ
+// itself is unhealthy, with no path forward — the original message
+// is already past its MaxDeliver budget.
+//
+// Like routeBadPayloadToDLQ, this derives publishCtx from
+// context.Background() so a graceful-shutdown that lands
+// mid-dispatch doesn't expire the 2s DLQ budget and force a Term()
+// with no forensic copy.
+func (s *Service) routeHotWriteFailureToDLQ(msg jetstream.Msg, cause error) {
+	s.mu.Lock()
+	dlq := s.dlq
+	s.mu.Unlock()
+	if dlq == nil {
+		s.logger.Warn("telemetry: hot-write exhausted, no DLQ publisher wired (message dropped)",
+			slog.String("subject", msg.Subject()),
+			slog.Any("hot_write_error", cause),
+			slog.Int("payload_bytes", len(msg.Data())))
+		return
+	}
+	headers := flattenMsgHeaders(msg)
+	publishCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	delivery := uint64(0)
+	if md, mdErr := msg.Metadata(); mdErr == nil && md != nil {
+		delivery = md.NumDelivered
+	}
+	if err := dlq.PublishToDLQ(publishCtx, msg.Subject(), msg.Data(), headers, delivery, cause); err != nil {
+		s.metrics.DLQPublishFail.Add(1)
+		s.logger.Warn("telemetry: hot-write DLQ publish failed (message will be dropped)",
+			slog.Any("dlq_error", err),
+			slog.Any("hot_write_error", cause),
+			slog.String("subject", msg.Subject()))
+		return
+	}
+	s.metrics.DLQPublished.Add(1)
+	s.logger.Info("telemetry: hot-write exhausted, routed to DLQ",
+		slog.String("subject", msg.Subject()),
+		slog.Any("hot_write_error", cause),
+		slog.Uint64("num_delivered", delivery))
 }
 
 // routeBadPayloadToDLQ republishes a decode-failed message onto the
