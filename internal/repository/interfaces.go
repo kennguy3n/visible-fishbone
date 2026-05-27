@@ -93,6 +93,13 @@ type TenantRepository interface {
 	List(ctx context.Context, page Page) (PageResult[Tenant], error)
 	Update(ctx context.Context, t Tenant) (Tenant, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status TenantStatus) (Tenant, error)
+	// TransitionStatus atomically changes the tenant status only if
+	// the current status matches `from`. Returns ErrForbidden if the
+	// precondition is not met, ErrNotFound if the tenant does not
+	// exist. This is the race-free building block for state-machine
+	// transitions like active->suspended or active->deleted; prefer
+	// it over a Get+UpdateStatus pair.
+	TransitionStatus(ctx context.Context, id uuid.UUID, from, to TenantStatus) (Tenant, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 }
 
@@ -159,6 +166,12 @@ type RoleRepository interface {
 type ClaimTokenRepository interface {
 	Create(ctx context.Context, tenantID uuid.UUID, t ClaimToken) (ClaimToken, error)
 	Redeem(ctx context.Context, tenantID uuid.UUID, hash []byte, now time.Time) (ClaimToken, error)
+	// UnredeemByHash clears RedeemedAt on a token identified by
+	// its hash. This is a compensating action: if the service
+	// redeems a token but a subsequent step (e.g. device creation)
+	// fails, the token can be restored so it is reusable on retry.
+	// Returns ErrNotFound if no token with the hash exists.
+	UnredeemByHash(ctx context.Context, tenantID uuid.UUID, hash []byte) error
 	GetByHash(ctx context.Context, tenantID uuid.UUID, hash []byte) (ClaimToken, error)
 }
 

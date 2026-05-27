@@ -126,6 +126,41 @@ func (r *ClaimTokenRepository) Redeem(ctx context.Context, tenantID uuid.UUID, h
 	return out, err
 }
 
+// UnredeemByHash clears the redeemed_at marker on a previously
+// redeemed token so the claim flow can be retried after a
+// compensating action (see identity.RedeemClaimToken). The
+// `redeemed_at IS NOT NULL` precondition makes the operation
+// idempotent-safe: a no-op against a never-redeemed token returns
+// ErrForbidden rather than silently succeeding, which would mask
+// bugs where the caller does not actually need to un-redeem.
+func (r *ClaimTokenRepository) UnredeemByHash(ctx context.Context, tenantID uuid.UUID, hash []byte) error {
+	return r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE claim_tokens SET redeemed_at = NULL WHERE token_hash = $1 AND redeemed_at IS NOT NULL`,
+			hash,
+		)
+		if err != nil {
+			return fmt.Errorf("unredeem claim token: %w", err)
+		}
+		if tag.RowsAffected() == 1 {
+			return nil
+		}
+		// Distinguish ErrNotFound (token absent) from ErrForbidden
+		// (token exists but was never redeemed).
+		var dummy []byte
+		if scanErr := tx.QueryRow(ctx,
+			`SELECT token_hash FROM claim_tokens WHERE token_hash = $1`,
+			hash,
+		).Scan(&dummy); scanErr != nil {
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				return repository.ErrNotFound
+			}
+			return fmt.Errorf("unredeem claim token lookup: %w", scanErr)
+		}
+		return repository.ErrForbidden
+	})
+}
+
 func (r *ClaimTokenRepository) GetByHash(ctx context.Context, tenantID uuid.UUID, hash []byte) (repository.ClaimToken, error) {
 	var out repository.ClaimToken
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
