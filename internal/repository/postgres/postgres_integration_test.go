@@ -609,4 +609,120 @@ func TestPostgres_Integration(t *testing.T) {
 			t.Errorf("KeyID round-trip: got %q, want %q", got.KeyID, k3.KeyID)
 		}
 	})
+
+	t.Run("TenantAPIKey_RLS_And_CrossTenantLookup", func(t *testing.T) {
+		tr := store.NewTenantRepository()
+		kr := store.NewTenantAPIKeyRepository()
+		tntA := mustTenant(t, tr)
+		tntB := mustTenant(t, tr)
+
+		// Provision a key in each tenant with distinct hashes so
+		// the cross-tenant LookupByHash test below can match by
+		// hash without ambiguity.
+		hashA := make([]byte, 32)
+		hashB := make([]byte, 32)
+		if _, err := rand.Read(hashA); err != nil {
+			t.Fatalf("rand A: %v", err)
+		}
+		if _, err := rand.Read(hashB); err != nil {
+			t.Fatalf("rand B: %v", err)
+		}
+
+		keyA, err := kr.Create(bgCtx(), tntA.ID, repository.TenantAPIKey{
+			Name: "ci-bot", Subject: "bot:a", Hash: hashA,
+			Status: repository.TenantAPIKeyStatusActive,
+		})
+		if err != nil {
+			t.Fatalf("create key A: %v", err)
+		}
+		keyB, err := kr.Create(bgCtx(), tntB.ID, repository.TenantAPIKey{
+			Name: "ci-bot", Subject: "bot:b", Hash: hashB,
+			Status: repository.TenantAPIKeyStatusActive,
+		})
+		if err != nil {
+			t.Fatalf("create key B: %v", err)
+		}
+
+		// RLS: Get from wrong tenant must return ErrNotFound. Even
+		// with the API key's ID known, tenant A cannot peek at
+		// tenant B's key.
+		if _, err := kr.Get(bgCtx(), tntA.ID, keyB.ID); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("cross-tenant Get: want ErrNotFound, got %v", err)
+		}
+
+		// RLS: List scoped to tenant A returns only A's key.
+		listA, err := kr.List(bgCtx(), tntA.ID)
+		if err != nil {
+			t.Fatalf("List A: %v", err)
+		}
+		if len(listA) != 1 || listA[0].ID != keyA.ID {
+			t.Errorf("List(A) returned %d items, want 1 (A)", len(listA))
+		}
+
+		// LookupByHash uses the system-role GUC bypass to scan
+		// across tenants — the auth middleware must be able to
+		// resolve a key without knowing which tenant owns it.
+		looked, err := kr.LookupByHash(bgCtx(), hashB)
+		if err != nil {
+			t.Fatalf("LookupByHash(B): %v", err)
+		}
+		if looked.ID != keyB.ID || looked.TenantID != tntB.ID {
+			t.Errorf("LookupByHash returned wrong row: got id=%s tenant=%s, want id=%s tenant=%s",
+				looked.ID, looked.TenantID, keyB.ID, tntB.ID)
+		}
+
+		// TouchLastUsed updates the row even though the auth
+		// middleware doesn't know which tenant owns the key —
+		// the repo plumbs the tenantID in (resolved from
+		// LookupByHash).
+		now := time.Now().UTC()
+		if err := kr.TouchLastUsed(bgCtx(), tntB.ID, keyB.ID, now); err != nil {
+			t.Fatalf("TouchLastUsed: %v", err)
+		}
+		got, err := kr.Get(bgCtx(), tntB.ID, keyB.ID)
+		if err != nil {
+			t.Fatalf("Get(B): %v", err)
+		}
+		if got.LastUsedAt == nil {
+			t.Fatalf("LastUsedAt not stamped")
+		}
+
+		// Revoke is idempotent — second call returns the row
+		// with the same RevokedAt as the first.
+		first, err := kr.Revoke(bgCtx(), tntA.ID, keyA.ID, now)
+		if err != nil {
+			t.Fatalf("first Revoke: %v", err)
+		}
+		if first.Status != repository.TenantAPIKeyStatusRevoked || first.RevokedAt == nil {
+			t.Fatalf("revoke did not flip status/timestamp: %+v", first)
+		}
+		later := now.Add(time.Minute)
+		second, err := kr.Revoke(bgCtx(), tntA.ID, keyA.ID, later)
+		if err != nil {
+			t.Fatalf("second Revoke: %v", err)
+		}
+		if !second.RevokedAt.Equal(*first.RevokedAt) {
+			t.Errorf("idempotent Revoke should keep first RevokedAt, got %s then %s",
+				*first.RevokedAt, *second.RevokedAt)
+		}
+
+		// LookupByHash returns the revoked row — the service
+		// layer (not the repo) decides what to do with status.
+		afterRevoke, err := kr.LookupByHash(bgCtx(), hashA)
+		if err != nil {
+			t.Fatalf("LookupByHash(A) post-revoke: %v", err)
+		}
+		if afterRevoke.Status != repository.TenantAPIKeyStatusRevoked {
+			t.Errorf("LookupByHash on revoked row should return Revoked status, got %s", afterRevoke.Status)
+		}
+
+		// Unknown hash → ErrNotFound.
+		unknown := make([]byte, 32)
+		if _, err := rand.Read(unknown); err != nil {
+			t.Fatalf("rand unknown: %v", err)
+		}
+		if _, err := kr.LookupByHash(bgCtx(), unknown); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("unknown hash: want ErrNotFound, got %v", err)
+		}
+	})
 }

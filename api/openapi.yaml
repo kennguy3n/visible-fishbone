@@ -516,6 +516,60 @@ paths:
       summary: Unregister webhook
       responses:
         "204": { description: removed }
+  /tenants/{tenant_id}/api-keys:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [api-keys]
+      summary: Mint a tenant API key
+      description: |
+        Creates a new tenant-scoped API key. The plaintext secret is
+        returned in the response body of THIS request only — it is
+        never persisted in plaintext and cannot be recovered. The
+        operator is expected to surface it to the human owner
+        immediately and discard it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/APIKeyCreateRequest" }
+      responses:
+        "201":
+          description: minted (plaintext returned once)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIKey" }
+    get:
+      tags: [api-keys]
+      summary: List tenant API keys
+      responses:
+        "200":
+          description: list (plaintext omitted)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/APIKey" }
+  /tenants/{tenant_id}/api-keys/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - $ref: "#/components/parameters/ResourceID"
+    get:
+      tags: [api-keys]
+      summary: Get tenant API key metadata
+      responses:
+        "200":
+          description: api key
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIKey" }
+    delete:
+      tags: [api-keys]
+      summary: Revoke tenant API key
+      responses:
+        "204": { description: revoked }
 components:
   securitySchemes:
     BearerJWT:
@@ -790,3 +844,28 @@ components:
         status: { type: string, enum: [active, disabled] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    APIKeyCreateRequest:
+      type: object
+      required: [name, subject]
+      properties:
+        name: { type: string, description: human-readable label, e.g. "ci-prod" }
+        subject: { type: string, description: stable identity injected into auth context, e.g. "bot:ci" }
+        expires_at:
+          type: string
+          format: date-time
+          description: optional RFC3339 absolute deadline; omit for non-expiring
+    APIKey:
+      type: object
+      required: [id, tenant_id, name, subject, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        subject: { type: string }
+        status: { type: string, enum: [active, revoked] }
+        expires_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        plaintext: { type: string, description: only returned on create }

@@ -385,6 +385,47 @@ const (
 	PolicySigningKeyStatusRevoked PolicySigningKeyStatus = "revoked"
 )
 
+// TenantAPIKeyStatus enumerates the lifecycle states of a
+// tenant-scoped API key. Mirrors the CHECK constraint on
+// `tenant_api_keys.status`.
+type TenantAPIKeyStatus string
+
+const (
+	// TenantAPIKeyStatusActive is a key that may authenticate
+	// requests (subject to ExpiresAt).
+	TenantAPIKeyStatusActive TenantAPIKeyStatus = "active"
+	// TenantAPIKeyStatusRevoked is a key the operator has
+	// permanently disabled. Revocation is one-way; minting a new
+	// key is the only way to restore access.
+	TenantAPIKeyStatusRevoked TenantAPIKeyStatus = "revoked"
+)
+
+// TenantAPIKey is one row in the tenant_api_keys table.
+//
+// `Hash` is the SHA-256 digest of the secret the operator received
+// at creation time. The plaintext is never persisted; presenting the
+// secret again requires minting a fresh key. The lookup path is
+// `Hash`-equality, so this is intentionally a deterministic digest
+// rather than a slow KDF — the underlying secret has 256 bits of
+// entropy and is uniformly random, putting it well outside the
+// reach of any offline cracker even against SHA-256.
+//
+// `Subject` is the human-readable actor name used in audit log
+// entries (e.g. "ci-bot"). It is NOT a permission scope.
+type TenantAPIKey struct {
+	ID         uuid.UUID
+	TenantID   uuid.UUID
+	Name       string
+	Subject    string
+	Hash       []byte
+	Status     TenantAPIKeyStatus
+	ExpiresAt  *time.Time
+	LastUsedAt *time.Time
+	CreatedBy  *uuid.UUID
+	CreatedAt  time.Time
+	RevokedAt  *time.Time
+}
+
 // PolicySigningKey is one Ed25519 keypair in a tenant's rotation
 // history. The private half is stored as the raw 32-byte seed; the
 // public half is the 32-byte verification key. KeyID is a stable
