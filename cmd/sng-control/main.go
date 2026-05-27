@@ -27,6 +27,14 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
+	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
+	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
+	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
+	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
+	"github.com/kennguy3n/visible-fishbone/internal/service/site"
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenant"
+	"github.com/kennguy3n/visible-fishbone/internal/service/webhook"
 )
 
 func main() {
@@ -99,13 +107,18 @@ func run() error {
 		return nil
 	}))
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", health.Liveness)
-	mux.HandleFunc("/readyz", health.Readiness)
+	router, webhookWorker := buildRouter(&cfg, logger, pool, health)
+
+	// Start the webhook delivery worker before the HTTP server so
+	// queued deliveries from a previous run start draining
+	// immediately on boot. Stopped during shutdown below.
+	if err := webhookWorker.Start(rootCtx); err != nil {
+		return fmt.Errorf("start webhook worker: %w", err)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.HTTP.Addr(),
-		Handler:           mux,
+		Handler:           router,
 		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
 		ReadTimeout:       cfg.HTTP.ReadTimeout,
 		WriteTimeout:      cfg.HTTP.WriteTimeout,
@@ -132,8 +145,71 @@ func run() error {
 		logger.Warn("sng-control: http shutdown error", slog.Any("error", err))
 	}
 
+	if err := webhookWorker.Stop(shutdownCtx); err != nil {
+		logger.Warn("sng-control: webhook worker shutdown error", slog.Any("error", err))
+	}
+
 	logger.Info("sng-control: stopped")
 	return nil
+}
+
+// buildRouter wires every repository / service / handler against
+// the Postgres pool and returns the composed HTTP handler plus the
+// webhook delivery worker (so main can start/stop it alongside the
+// HTTP server). Kept in one place so the dependency graph is
+// readable; production wiring + tests share the same factory.
+func buildRouter(
+	cfg *config.Config,
+	logger *slog.Logger,
+	pool *pgxpool.Pool,
+	health *handler.Health,
+) (http.Handler, *webhook.DeliveryWorker) {
+	store := postgres.NewStore(pool)
+
+	tenantRepo := store.NewTenantRepository()
+	siteRepo := store.NewSiteRepository()
+	deviceRepo := store.NewDeviceRepository()
+	roleRepo := store.NewRoleRepository()
+	claimRepo := store.NewClaimTokenRepository()
+	auditRepo := store.NewAuditLogRepository()
+	policyRepo := store.NewPolicyRepository()
+	webhookEndpointRepo := store.NewWebhookEndpointRepository()
+	webhookDeliveryRepo := store.NewWebhookDeliveryRepository()
+
+	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
+	siteSvc := site.New(siteRepo, auditRepo, logger)
+	identitySvc := identity.New(deviceRepo, claimRepo, auditRepo, logger)
+	rbacSvc := rbac.New(roleRepo, auditRepo, logger)
+	auditSvc := audit.New(auditRepo)
+	// Policy signing key — for now use an ephemeral signer so the
+	// service is functional out-of-box; production deployments
+	// MUST inject a KMS-backed signer (config option lands in PR8).
+	signer, err := policy.NewEphemeralSigner()
+	if err != nil {
+		logger.Error("sng-control: ephemeral policy signer init failed", slog.Any("error", err))
+		signer = nil
+	}
+	policySvc := policy.New(policyRepo, auditRepo, signer)
+	webhookSvc := webhook.New(webhookEndpointRepo, webhookDeliveryRepo, auditRepo, logger)
+
+	webhookWorker := webhook.NewDeliveryWorker(
+		webhookDeliveryRepo, webhookEndpointRepo,
+		nil, webhook.WorkerConfig{}, logger,
+	)
+
+	router := handler.NewRouter(handler.RouterDeps{
+		Config:   cfg,
+		Logger:   logger,
+		Tenants:  handler.NewTenantHandler(tenantSvc),
+		Sites:    handler.NewSiteHandler(siteSvc),
+		Devices:  handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.HTTP.ReadTimeout),
+		RBAC:     handler.NewRBACHandler(rbacSvc),
+		Policy:   handler.NewPolicyHandler(policySvc),
+		Audit:    handler.NewAuditHandler(auditSvc),
+		Webhooks: handler.NewWebhookHandler(webhookSvc),
+		Health:   health,
+	})
+	return router, webhookWorker
 }
 
 // newLogger constructs the process-wide structured logger.

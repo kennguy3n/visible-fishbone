@@ -33,16 +33,28 @@ func (s *Store) NewAuditLogRepository() *AuditLogRepository { return &AuditLogRe
 // NewPolicyRepository binds the Store to repository.PolicyRepository.
 func (s *Store) NewPolicyRepository() *PolicyRepository { return &PolicyRepository{s: s} }
 
+// NewWebhookEndpointRepository binds the Store to repository.WebhookEndpointRepository.
+func (s *Store) NewWebhookEndpointRepository() *WebhookEndpointRepository {
+	return &WebhookEndpointRepository{s: s}
+}
+
+// NewWebhookDeliveryRepository binds the Store to repository.WebhookDeliveryRepository.
+func (s *Store) NewWebhookDeliveryRepository() *WebhookDeliveryRepository {
+	return &WebhookDeliveryRepository{s: s}
+}
+
 // Compile-time interface compliance asserts. Keeping these in this
 // file means a single grep tells us "did the postgres package
 // implement every interface?" without scanning eight files.
 var (
-	_ repository.TenantRepository     = (*TenantRepository)(nil)
-	_ repository.SiteRepository       = (*SiteRepository)(nil)
-	_ repository.UserRepository       = (*UserRepository)(nil)
-	_ repository.DeviceRepository     = (*DeviceRepository)(nil)
-	_ repository.RoleRepository       = (*RoleRepository)(nil)
-	_ repository.ClaimTokenRepository = (*ClaimTokenRepository)(nil)
-	_ repository.AuditLogRepository   = (*AuditLogRepository)(nil)
-	_ repository.PolicyRepository     = (*PolicyRepository)(nil)
+	_ repository.TenantRepository          = (*TenantRepository)(nil)
+	_ repository.SiteRepository            = (*SiteRepository)(nil)
+	_ repository.UserRepository            = (*UserRepository)(nil)
+	_ repository.DeviceRepository          = (*DeviceRepository)(nil)
+	_ repository.RoleRepository            = (*RoleRepository)(nil)
+	_ repository.ClaimTokenRepository      = (*ClaimTokenRepository)(nil)
+	_ repository.AuditLogRepository        = (*AuditLogRepository)(nil)
+	_ repository.PolicyRepository          = (*PolicyRepository)(nil)
+	_ repository.WebhookEndpointRepository = (*WebhookEndpointRepository)(nil)
+	_ repository.WebhookDeliveryRepository = (*WebhookDeliveryRepository)(nil)
 )

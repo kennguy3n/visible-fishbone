@@ -194,6 +194,35 @@ type AuditLogRepository interface {
 	List(ctx context.Context, tenantID uuid.UUID, filter AuditFilter, page Page) (PageResult[AuditEntry], error)
 }
 
+// --- Webhooks -------------------------------------------------------------
+
+// WebhookEndpointRepository owns webhook_endpoints.
+type WebhookEndpointRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, ep WebhookEndpoint) (WebhookEndpoint, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (WebhookEndpoint, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[WebhookEndpoint], error)
+	Update(ctx context.Context, tenantID uuid.UUID, ep WebhookEndpoint) (WebhookEndpoint, error)
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+	// ListActive returns all active endpoints that subscribe to at
+	// least one of the given event types. Used by the delivery
+	// worker to fan out events.
+	ListActive(ctx context.Context, tenantID uuid.UUID, eventTypes []string) ([]WebhookEndpoint, error)
+}
+
+// WebhookDeliveryRepository owns webhook_deliveries.
+type WebhookDeliveryRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, d WebhookDelivery) (WebhookDelivery, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (WebhookDelivery, error)
+	List(ctx context.Context, tenantID uuid.UUID, endpointID *uuid.UUID, page Page) (PageResult[WebhookDelivery], error)
+	// UpdateStatus transitions the delivery to a new status with
+	// attempt metadata. Called by the delivery worker after each
+	// attempt.
+	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status WebhookDeliveryStatus, attempt int, lastErr string, responseStatus int, nextRetry time.Time) error
+	// ListPending returns deliveries that are due for retry.
+	// Ordered by next_retry_at ASC. Limit caps the batch size.
+	ListPending(ctx context.Context, limit int) ([]WebhookDelivery, error)
+}
+
 // --- Policy ---------------------------------------------------------------
 
 // PolicyRepository owns policy_graphs + policy_bundles.
