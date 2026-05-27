@@ -20,14 +20,47 @@ import (
 // agent-pull endpoint for compiled bundles that honours
 // HEAD / If-None-Match so receivers don't re-download a bundle they
 // already cache.
+//
+// `fileSigner` is the optional PR8 file-backed signer. When set, the
+// /public-key endpoint serves the file-backed key's public half
+// before falling through to the DB-backed rotation history, so
+// receivers that pulled a bundle signed by the file-backed signer
+// can resolve its `kid` through the same protocol surface they
+// already use for DB-backed bundles — no out-of-band public-key
+// distribution required. The DB-backed list/rotate/revoke surface
+// remains untouched; operators inspecting historical (pre-file-backed)
+// bundles still get them resolved.
 type PolicyHandler struct {
-	svc  *policy.Service
-	keys *policy.KeyService
+	svc        *policy.Service
+	keys       *policy.KeyService
+	fileSigner *policy.KeySigner
 }
 
-// NewPolicyHandler wires the handler.
-func NewPolicyHandler(svc *policy.Service, keys *policy.KeyService) *PolicyHandler {
-	return &PolicyHandler{svc: svc, keys: keys}
+// PolicyHandlerOption customises the handler at construction time.
+type PolicyHandlerOption func(*PolicyHandler)
+
+// WithFileBackedSigner registers a file-backed *policy.KeySigner so
+// /public-key requests for `key_id == ks.KeyID()` and `key_id == "active"`
+// short-circuit to the file-backed key before the DB lookup. Other
+// key_ids fall through to the DB-backed rotation history so
+// operators inspecting historical bundles signed by an earlier
+// DB-backed key still get a resolution. The handler holds the
+// signer by pointer (it is process-global and immutable for the
+// lifetime of the binary; rotation happens via file replacement +
+// restart).
+func WithFileBackedSigner(ks *policy.KeySigner) PolicyHandlerOption {
+	return func(h *PolicyHandler) { h.fileSigner = ks }
+}
+
+// NewPolicyHandler wires the handler. Pass WithFileBackedSigner to
+// expose the file-backed signer's public key through the same
+// /public-key endpoint used for DB-backed keys.
+func NewPolicyHandler(svc *policy.Service, keys *policy.KeyService, opts ...PolicyHandlerOption) *PolicyHandler {
+	h := &PolicyHandler{svc: svc, keys: keys}
+	for _, o := range opts {
+		o(h)
+	}
+	return h
 }
 
 // Register attaches routes.
@@ -416,6 +449,25 @@ func (h *PolicyHandler) getPublicKey(w http.ResponseWriter, r *http.Request) {
 	keyID := r.PathValue("key_id")
 	if keyID == "" {
 		WriteError(w, http.StatusBadRequest, "missing_key_id", "key_id path parameter is required")
+		return
+	}
+	// File-backed signer short-circuit. When POLICY_SIGNING_KEY_PATH
+	// is set, every bundle is signed by the same process-global
+	// KeySigner regardless of tenant, so its public key resolves
+	// uniformly across all tenant scopes. The route is still
+	// tenant-scoped — receivers verifying a bundle pulled from
+	// tenant T MUST resolve the kid under T's namespace — but the
+	// answer for a file-backed kid is identical for every T.
+	// Falling through to the DB path on a non-match preserves
+	// access to historical (pre-file-backed) keys so operators
+	// inspecting older bundles still get a resolution.
+	if h.fileSigner != nil && (keyID == "active" || keyID == h.fileSigner.KeyID()) {
+		WriteJSON(w, http.StatusOK, PolicyPublicKeyResponse{
+			KeyID:     h.fileSigner.KeyID(),
+			Algorithm: "ed25519",
+			PublicKey: base64.StdEncoding.EncodeToString(h.fileSigner.PublicKey()),
+			Status:    string(repository.PolicySigningKeyStatusActive),
+		})
 		return
 	}
 	var (

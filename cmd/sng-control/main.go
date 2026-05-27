@@ -223,17 +223,29 @@ func buildRouter(
 	}
 	policyKeySvc := policy.NewKeyService(policyKeyRepo, auditRepo, keyOpts...)
 	var policySigner policy.Signer = policyKeySvc
+	var fileSigner *policy.KeySigner
 	if cfg.Policy.SigningKeyPath != "" {
 		ks, err := policy.LoadKeySignerFromFile(cfg.Policy.SigningKeyPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("policy signing key: %w", err)
 		}
 		policySigner = ks
-		logger.Info("policy: using file-backed signing key (DB rotation endpoints remain available but will not take effect until POLICY_SIGNING_KEY_PATH is unset)",
+		fileSigner = ks
+		logger.Info("policy: using file-backed signing key (DB rotation endpoints remain available but will not take effect until POLICY_SIGNING_KEY_PATH is unset; /public-key endpoint serves this key uniformly for all tenants)",
 			slog.String("path", cfg.Policy.SigningKeyPath),
 			slog.String("key_id", ks.KeyID()))
 	}
 	policySvc := policy.New(policyRepo, auditRepo, policySigner, policy.WithLogger(logger))
+
+	// When the file-backed signer is active, expose its public key
+	// through the existing /signing-keys/{kid}/public-key endpoint
+	// so receivers can resolve bundle `kid`s through the same
+	// protocol surface used for DB-backed bundles. The DB-backed
+	// rotation history remains accessible by its own kids.
+	policyHandlerOpts := []handler.PolicyHandlerOption{}
+	if fileSigner != nil {
+		policyHandlerOpts = append(policyHandlerOpts, handler.WithFileBackedSigner(fileSigner))
+	}
 	webhookSvc := webhook.New(webhookEndpointRepo, webhookDeliveryRepo, auditRepo, logger)
 
 	// Translate the operator-facing config.Webhook knobs into the
@@ -273,7 +285,7 @@ func buildRouter(
 		Sites:        handler.NewSiteHandler(siteSvc),
 		Devices:      handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL),
 		RBAC:         handler.NewRBACHandler(rbacSvc),
-		Policy:       handler.NewPolicyHandler(policySvc, policyKeySvc),
+		Policy:       handler.NewPolicyHandler(policySvc, policyKeySvc, policyHandlerOpts...),
 		Audit:        handler.NewAuditHandler(auditSvc),
 		Webhooks:     handler.NewWebhookHandler(webhookSvc),
 		APIKeys:      handler.NewAPIKeyHandler(apiKeySvc),
