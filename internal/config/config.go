@@ -74,6 +74,7 @@ type Config struct {
 	CORS      CORS
 	Webhook   Webhook
 	Auth      Auth
+	Policy    Policy
 	Telemetry Telemetry
 }
 
@@ -420,6 +421,35 @@ type Auth struct {
 	APIKeyHeader string
 }
 
+// Policy carries policy-engine configuration. PR8 adds two
+// production-only knobs: a path to an out-of-band Ed25519 signing
+// key (so prod can boot without DB-backed rotation) and an
+// AES-256-GCM master key for at-rest wrapping of any DB-stored
+// signing seeds (KMS-on-a-stick for deployments without a real
+// KMS in the loop).
+type Policy struct {
+	// SigningKeyPath optionally points at a PEM / hex / raw
+	// 32-byte file containing an Ed25519 private key. When set,
+	// the policy service ignores the per-tenant DB-backed key
+	// store and signs every bundle with this key — useful for
+	// deployments where rotation is managed via configuration
+	// management (CD pipeline replaces the file and restarts the
+	// process) rather than online operator action. Mutually
+	// exclusive with the DB rotation API for the active tenant
+	// set.
+	SigningKeyPath string
+	// KeyWrapMasterB64 is a base64-encoded 32-byte AES-256 master
+	// key used by the AESGCMWrapper to encrypt signing-key seeds
+	// at rest in the policy_signing_keys.private_key column.
+	// Mutually exclusive with KeyWrapMasterFile. Empty in both
+	// places means PassthroughWrapper (plain seed on disk, at-rest
+	// protection via TDE / disk encryption).
+	KeyWrapMasterB64 string
+	// KeyWrapMasterFile is a path to either 32 raw bytes or the
+	// base64 encoding thereof. Mutually exclusive with B64.
+	KeyWrapMasterFile string
+}
+
 // Telemetry carries OTel SDK bridge configuration.
 type Telemetry struct {
 	// OTLPEndpoint is the OTLP/HTTP collector endpoint. When empty
@@ -508,6 +538,11 @@ func Load() (Config, error) {
 			JWTIssuer:    getStr("AUTH_JWT_ISSUER", "sng-control"),
 			JWTAudience:  getStr("AUTH_JWT_AUDIENCE", "sng-control"),
 			APIKeyHeader: getStr("AUTH_API_KEY_HEADER", "X-SNG-API-Key"),
+		},
+		Policy: Policy{
+			SigningKeyPath:    getStr("POLICY_SIGNING_KEY_PATH", ""),
+			KeyWrapMasterB64:  getStr("POLICY_KEY_WRAP_MASTER_B64", ""),
+			KeyWrapMasterFile: getStr("POLICY_KEY_WRAP_MASTER_FILE", ""),
 		},
 		Telemetry: Telemetry{
 			OTLPEndpoint:   getStr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
@@ -847,6 +882,9 @@ func (c Config) validate() error {
 	}
 	if c.Environment.IsProduction() && c.NATS.TLSInsecure {
 		return errors.New("NATS_TLS_INSECURE must be false in production environments")
+	}
+	if c.Policy.KeyWrapMasterB64 != "" && c.Policy.KeyWrapMasterFile != "" {
+		return errors.New("POLICY_KEY_WRAP_MASTER_B64 and POLICY_KEY_WRAP_MASTER_FILE are mutually exclusive")
 	}
 	if c.Environment.IsProduction() {
 		// In production we require a sslmode that guarantees TLS.
