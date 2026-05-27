@@ -326,6 +326,122 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PolicyBundle" }
+  /tenants/{tenant_id}/policy/bundles/{target_type}/payload:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - in: path
+        name: target_type
+        required: true
+        schema:
+          type: string
+          enum: [edge, endpoint, cloud, mobile]
+    get:
+      tags: [policy]
+      summary: Download the raw signed bundle payload (agent-pull)
+      description: |
+        Returns the MessagePack-encoded bundle bytes for agent
+        consumption. The Ed25519 signature is delivered in the
+        `X-Sng-Policy-Signature` response header (base64) and the
+        signing key id in `X-Sng-Policy-Key-Id` so the agent can
+        fetch the matching public key from the publication
+        endpoint. Supports `If-None-Match` against the strong
+        ETag (`sha256(bundle)`) for cache validation.
+      parameters:
+        - in: header
+          name: If-None-Match
+          schema: { type: string }
+      responses:
+        "200":
+          description: bundle bytes
+          headers:
+            ETag:
+              schema: { type: string }
+              description: Strong validator (sha256 of bundle bytes).
+            X-Sng-Policy-Signature:
+              schema: { type: string }
+              description: Base64-encoded Ed25519 signature over the bundle bytes.
+            X-Sng-Policy-Key-Id:
+              schema: { type: string }
+              description: Stable short id of the signing key.
+            X-Sng-Policy-Bundle-Id:
+              schema: { type: string }
+            X-Sng-Policy-Graph-Id:
+              schema: { type: string }
+          content:
+            application/vnd.sng.policy-bundle:
+              schema: { type: string, format: binary }
+        "304":
+          description: bundle unchanged (ETag matched If-None-Match)
+    head:
+      tags: [policy]
+      summary: Probe latest bundle ETag without transferring bytes
+      responses:
+        "200":
+          description: bundle metadata in headers
+  /tenants/{tenant_id}/policy/signing-keys:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [policy]
+      summary: List the tenant's signing-key rotation history
+      responses:
+        "200":
+          description: page of signing keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/PolicySigningKey" }
+  /tenants/{tenant_id}/policy/signing-keys/rotate:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [policy]
+      summary: Provision an initial key, or rotate the current active key
+      responses:
+        "200":
+          description: rotated key (active key existed)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicySigningKey" }
+        "201":
+          description: created key (no active key existed)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicySigningKey" }
+  /tenants/{tenant_id}/policy/signing-keys/{key_id}/revoke:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - in: path
+        name: key_id
+        required: true
+        schema: { type: string }
+    post:
+      tags: [policy]
+      summary: Revoke a signing key
+      responses:
+        "200":
+          description: revoked key
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicySigningKey" }
+  /tenants/{tenant_id}/policy/signing-keys/{key_id}/public-key:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - in: path
+        name: key_id
+        required: true
+        schema: { type: string, description: "key_id or the literal 'active'" }
+    get:
+      tags: [policy]
+      summary: Publish a signing key's public half for bundle verification
+      responses:
+        "200":
+          description: public key
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyPublicKey" }
   /tenants/{tenant_id}/audit-log:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     get:
@@ -605,9 +721,32 @@ components:
         id: { type: string, format: uuid }
         policy_graph_id: { type: string, format: uuid }
         target_type: { type: string, enum: [edge, endpoint, cloud, mobile] }
+        key_id: { type: string, description: stable short id of the signing key }
         bundle: { type: string, description: base64 of MessagePack payload }
         signature: { type: string, description: base64 of Ed25519 signature }
         created_at: { type: string, format: date-time }
+    PolicySigningKey:
+      type: object
+      required: [id, tenant_id, key_id, algorithm, public_key, status, activated_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        key_id: { type: string }
+        algorithm: { type: string, enum: [ed25519] }
+        public_key: { type: string, description: base64 of the Ed25519 public key (32 bytes) }
+        status: { type: string, enum: [active, rotated, revoked] }
+        activated_at: { type: string, format: date-time }
+        rotated_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    PolicyPublicKey:
+      type: object
+      required: [key_id, algorithm, public_key, status]
+      properties:
+        key_id: { type: string }
+        algorithm: { type: string, enum: [ed25519] }
+        public_key: { type: string, description: base64 of the Ed25519 public key (32 bytes) }
+        status: { type: string, enum: [active, rotated, revoked] }
     PolicyCompileResult:
       type: object
       required: [graph_id, compiled_at, bundles]

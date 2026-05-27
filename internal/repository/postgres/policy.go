@@ -37,12 +37,12 @@ func scanPolicyGraph(row pgx.Row) (repository.PolicyGraph, error) {
 }
 
 const policyBundleSelectColumns = `
-	id, policy_graph_id, target_type, bundle, signature, created_at
+	id, policy_graph_id, target_type, bundle, signature, COALESCE(key_id, ''), created_at
 `
 
 func scanPolicyBundle(row pgx.Row) (repository.PolicyBundle, error) {
 	var b repository.PolicyBundle
-	if err := row.Scan(&b.ID, &b.PolicyGraphID, &b.TargetType, &b.Bundle, &b.Signature, &b.CreatedAt); err != nil {
+	if err := row.Scan(&b.ID, &b.PolicyGraphID, &b.TargetType, &b.Bundle, &b.Signature, &b.KeyID, &b.CreatedAt); err != nil {
 		return repository.PolicyBundle{}, err
 	}
 	return b, nil
@@ -194,11 +194,15 @@ func (r *PolicyRepository) CreateBundle(ctx context.Context, tenantID uuid.UUID,
 		if err != nil {
 			return fmt.Errorf("verify graph ownership: %w", err)
 		}
+		var keyID any
+		if b.KeyID != "" {
+			keyID = b.KeyID
+		}
 		row := tx.QueryRow(ctx, `
-			INSERT INTO policy_bundles (id, policy_graph_id, target_type, bundle, signature)
-			VALUES ($1::uuid, $2::uuid, $3, $4, $5)
+			INSERT INTO policy_bundles (id, policy_graph_id, target_type, bundle, signature, key_id)
+			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6)
 			RETURNING `+policyBundleSelectColumns,
-			b.ID, b.PolicyGraphID, b.TargetType, b.Bundle, b.Signature,
+			b.ID, b.PolicyGraphID, b.TargetType, b.Bundle, b.Signature, keyID,
 		)
 		out, err = scanPolicyBundle(row)
 		if err != nil {
@@ -222,7 +226,7 @@ func (r *PolicyRepository) GetBundle(ctx context.Context, tenantID, id uuid.UUID
 	var out repository.PolicyBundle
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, `
-			SELECT b.id, b.policy_graph_id, b.target_type, b.bundle, b.signature, b.created_at
+			SELECT b.id, b.policy_graph_id, b.target_type, b.bundle, b.signature, COALESCE(b.key_id, ''), b.created_at
 			FROM policy_bundles b
 			JOIN policy_graphs g ON g.id = b.policy_graph_id
 			WHERE b.id = $1::uuid
@@ -250,7 +254,7 @@ func (r *PolicyRepository) GetLatestBundle(ctx context.Context, tenantID uuid.UU
 	var out repository.PolicyBundle
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, `
-			SELECT b.id, b.policy_graph_id, b.target_type, b.bundle, b.signature, b.created_at
+			SELECT b.id, b.policy_graph_id, b.target_type, b.bundle, b.signature, COALESCE(b.key_id, ''), b.created_at
 			FROM policy_bundles b
 			JOIN policy_graphs g ON g.id = b.policy_graph_id
 			WHERE b.target_type = $1
