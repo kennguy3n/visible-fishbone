@@ -682,13 +682,16 @@ func (c Config) validate() error {
 	if c.NATS.RequestTimeout <= 0 {
 		return fmt.Errorf("NATS_REQUEST_TIMEOUT must be > 0, got %s", c.NATS.RequestTimeout)
 	}
-	// NATS_DEDUP_WINDOW: zero is explicitly NOT rejected. The
-	// JetStream documentation defines `Duplicates: 0` as "dedup
-	// disabled" and that is a legitimate operator opt-out (e.g.
-	// when an at-least-once consumer is paired with idempotent
-	// downstream writes). We document the semantics in
-	// .env.example so an operator who picks 0 knows what they're
-	// turning off.
+	// NATS_DEDUP_WINDOW: zero is explicitly NOT rejected, but its
+	// runtime meaning is "use the JetStream server default
+	// (~2 minutes)", NOT "disabled". JetStream's `Duplicates`
+	// field treats 0 as "absent → server default", and the
+	// nats-server team has not exposed a true off-switch. Our
+	// `DefaultStreams` wrapper folds `<=0` into the same 2m
+	// default for consistency. Operators who want a different
+	// window must set a positive duration; there is no "disabled"
+	// option today (a follow-up could route true-disable via a
+	// sentinel like -1, but no caller currently needs that).
 	switch c.NATS.Storage {
 	case "file", "memory":
 	default:

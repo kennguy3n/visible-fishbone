@@ -74,7 +74,7 @@ func run() error {
 	// can still report errors per-stream rather than collapsing the
 	// whole bootstrap on a single context deadline.
 	streams := sngnats.DefaultStreams(&cfg.NATS)
-	overall := time.Duration(len(streams)) * 2 * cfg.NATS.RequestTimeout
+	overall := time.Duration(len(streams)*2) * cfg.NATS.RequestTimeout
 	if overall <= 0 {
 		overall = 30 * time.Second
 	}
