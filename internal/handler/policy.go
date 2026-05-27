@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -362,33 +361,25 @@ func (h *PolicyHandler) rotateSigningKey(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	// Provision an initial key if the tenant has none, otherwise
-	// rotate. The KeyService can't make this decision on its own
-	// because Rotate semantically requires an existing active key.
-	// We use GetActiveNoCreate (not GetActive) so the existence
-	// probe does NOT itself lazy-create a key — otherwise the
-	// "no key yet" branch would silently no-op into the rotate
-	// branch and double-provision on the very first call.
-	_, err := h.keys.GetActiveNoCreate(r.Context(), tenantID)
-	if errors.Is(err, repository.ErrNotFound) {
-		created, cerr := h.keys.CreateInitial(r.Context(), tenantID, actorFromCtx(r))
-		if cerr != nil {
-			WriteRepositoryError(w, cerr)
-			return
-		}
-		WriteJSON(w, http.StatusCreated, toPolicySigningKeyResponse(created))
-		return
-	}
+	// Single atomic operation: KeyService.RotateOrCreate generates
+	// a candidate key once, tries Rotate (existing tenant) /
+	// Create (brand-new tenant) under a bounded retry loop and
+	// returns which path committed. The earlier handler branched
+	// on GetActiveNoCreate first which had a TOCTOU window
+	// between the existence probe and the per-branch repo call
+	// (Devin Review #3312530121); the service-side retry loop
+	// closes the window without imposing a 404 / 409 on what
+	// callers consider an idempotent admin operation.
+	saved, outcome, err := h.keys.RotateOrCreate(r.Context(), tenantID, actorFromCtx(r))
 	if err != nil {
 		WriteRepositoryError(w, err)
 		return
 	}
-	rotated, err := h.keys.Rotate(r.Context(), tenantID, actorFromCtx(r))
-	if err != nil {
-		WriteRepositoryError(w, err)
-		return
+	status := http.StatusOK
+	if outcome == policy.RotateOutcomeCreated {
+		status = http.StatusCreated
 	}
-	WriteJSON(w, http.StatusOK, toPolicySigningKeyResponse(rotated))
+	WriteJSON(w, status, toPolicySigningKeyResponse(saved))
 }
 
 func (h *PolicyHandler) revokeSigningKey(w http.ResponseWriter, r *http.Request) {

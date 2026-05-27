@@ -185,14 +185,38 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 
 	compiledAt := time.Now().UTC()
 	bundles := make([]repository.PolicyBundle, 0, len(allTargets))
+	// Resolve the active signing key once via the optional
+	// PreparedSigner interface. KeyService implements it; lighter
+	// signers (e.g. EphemeralSigner used in handler tests) do not,
+	// in which case we fall back to one Sign per target (each
+	// performing its own DB lookup). The prepared path collapses
+	// 4× DB round-trips + 4× wrapper.Unwrap + 4× NewKeyFromSeed
+	// into one of each — Devin Review #3312683824 flagged the
+	// unprepared path as a non-correctness performance issue for
+	// high-throughput compiles.
+	var prepared PreparedSigning
+	if ps, ok := s.signer.(PreparedSigner); ok {
+		prepared, err = ps.PrepareSigner(ctx, tenantID)
+		if err != nil {
+			return CompileResult{}, fmt.Errorf("prepare signer: %w", err)
+		}
+	}
 	for _, target := range allTargets {
 		payload, err := encodeBundlePayload(target, graph, compiledAt)
 		if err != nil {
 			return CompileResult{}, fmt.Errorf("encode %s bundle: %w", target, err)
 		}
-		sig, keyID, err := s.signer.Sign(ctx, tenantID, payload)
-		if err != nil {
-			return CompileResult{}, fmt.Errorf("sign %s bundle: %w", target, err)
+		var (
+			sig   []byte
+			keyID string
+		)
+		if prepared != nil {
+			sig, keyID = prepared.Sign(payload)
+		} else {
+			sig, keyID, err = s.signer.Sign(ctx, tenantID, payload)
+			if err != nil {
+				return CompileResult{}, fmt.Errorf("sign %s bundle: %w", target, err)
+			}
 		}
 		saved, err := s.repo.CreateBundle(ctx, tenantID, repository.PolicyBundle{
 			PolicyGraphID: graph.ID,

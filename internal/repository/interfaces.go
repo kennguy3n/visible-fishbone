@@ -278,6 +278,18 @@ type PolicySigningKeyRepository interface {
 	// Returns ErrConflict if another active key already exists for
 	// this tenant — use Rotate to atomically replace it.
 	Create(ctx context.Context, tenantID uuid.UUID, k PolicySigningKey) (PolicySigningKey, error)
+	// CreateIfNoHistory inserts a new active key only when the
+	// tenant has no signing-key history at all. Used by the
+	// brand-new-tenant bootstrap path in EnsureKey to enforce the
+	// revocation-incident invariant atomically: once any key has
+	// ever existed for a tenant (active, rotated, or revoked),
+	// auto-provisioning is refused — an admin must explicitly
+	// Create or Rotate to resume signing. The existence check and
+	// the insert run inside a single transaction so a concurrent
+	// "create then revoke" on another connection cannot slip a
+	// fresh key past the guard. Returns ErrConflict when history
+	// exists.
+	CreateIfNoHistory(ctx context.Context, tenantID uuid.UUID, k PolicySigningKey) (PolicySigningKey, error)
 	// GetActive returns the unique active key for the tenant.
 	// Returns ErrNotFound if no key has ever been provisioned for
 	// this tenant.
