@@ -80,6 +80,47 @@ func (r *PolicySigningKeyRepository) Create(ctx context.Context, tenantID uuid.U
 	return cloneSigningKey(stored), nil
 }
 
+func (r *PolicySigningKeyRepository) CreateIfNoHistory(ctx context.Context, tenantID uuid.UUID, k repository.PolicySigningKey) (repository.PolicySigningKey, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.PolicySigningKey{}, err
+	}
+	if tenantID == uuid.Nil || k.KeyID == "" || k.Algorithm == "" {
+		return repository.PolicySigningKey{}, repository.ErrInvalidArgument
+	}
+	if len(k.PublicKey) == 0 || len(k.PrivateKey) == 0 {
+		return repository.PolicySigningKey{}, repository.ErrInvalidArgument
+	}
+	// Hold the store write lock for both the existence probe and
+	// the insert so a concurrent goroutine running Create / Rotate
+	// / Revoke against the same tenant cannot race in between the
+	// two phases. This is the memory-side analogue of the postgres
+	// CTE that does the check + insert in one statement.
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if _, ok := r.s.tenants[tenantID]; !ok {
+		return repository.PolicySigningKey{}, repository.ErrNotFound
+	}
+	for _, existing := range r.s.policySigningKeys {
+		if existing.TenantID == tenantID {
+			return repository.PolicySigningKey{}, repository.ErrConflict
+		}
+	}
+	if k.Status == "" {
+		k.Status = repository.PolicySigningKeyStatusActive
+	}
+	if k.ID == uuid.Nil {
+		k.ID = uuid.New()
+	}
+	if k.ActivatedAt.IsZero() {
+		k.ActivatedAt = r.s.clock()
+	}
+	k.TenantID = tenantID
+	k.CreatedAt = r.s.clock()
+	stored := cloneSigningKey(k)
+	r.s.policySigningKeys[stored.ID] = stored
+	return cloneSigningKey(stored), nil
+}
+
 func (r *PolicySigningKeyRepository) GetActive(ctx context.Context, tenantID uuid.UUID) (repository.PolicySigningKey, error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.PolicySigningKey{}, err

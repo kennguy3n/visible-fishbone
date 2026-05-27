@@ -204,30 +204,63 @@ func (s *KeyService) GetActiveNoCreate(ctx context.Context, tenantID uuid.UUID) 
 // behaviour: an admin must explicitly Rotate (or CreateInitial via
 // the admin handler) to resume compilation. Idempotent when an
 // active key already exists.
+//
+// The history-check and the insert run inside a single repository
+// call (CreateIfNoHistory) so a concurrent goroutine that creates
+// then revokes a key cannot slip past the guard. The earlier
+// implementation split this into List + CreateInitial which had a
+// (vanishingly narrow but real) TOCTOU window between the two
+// calls — Devin Review #3312683959 flagged it; this is the
+// architectural fix.
 func (s *KeyService) EnsureKey(ctx context.Context, tenantID uuid.UUID) error {
 	if _, err := s.repo.GetActive(ctx, tenantID); err == nil {
 		return nil
 	} else if !errors.Is(err, repository.ErrNotFound) {
 		return err
 	}
-	// No active key. Distinguish brand-new tenant (safe to
-	// auto-provision) from revoked / rotated-without-replacement
-	// (must NOT auto-provision — admin rotation required).
-	history, err := s.repo.List(ctx, tenantID)
+	// No active key right now. Try the atomic if-no-history
+	// insert. The repository performs the existence probe and the
+	// insert under a single transaction, so:
+	//   - brand-new tenant → insert succeeds → return nil.
+	//   - tenant has any historical key (active, rotated, or
+	//     revoked) → ErrConflict → return ErrNotFound with the
+	//     admin-rotation-required hint.
+	//   - concurrent CreateInitial / Rotate raced us → also
+	//     surfaces as ErrConflict — we just confirm there's now an
+	//     active key (idempotency for the happy race) and return
+	//     ErrNotFound otherwise (incident race).
+	pub, seed, err := s.generateKey()
 	if err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
+	wrapped, err := s.wrapper.Wrap(ctx, tenantID, seed)
+	if err != nil {
+		return fmt.Errorf("wrap key: %w", err)
+	}
+	saved, err := s.repo.CreateIfNoHistory(ctx, tenantID, repository.PolicySigningKey{
+		KeyID:       newKeyID(),
+		Algorithm:   "ed25519",
+		PublicKey:   pub,
+		PrivateKey:  wrapped,
+		Status:      repository.PolicySigningKeyStatusActive,
+		ActivatedAt: s.now(),
+	})
+	if err == nil {
+		s.appendAudit(ctx, tenantID, nil, "policy.signing_key_created", saved)
+		return nil
+	}
+	if !errors.Is(err, repository.ErrConflict) {
 		return err
 	}
-	if len(history) > 0 {
-		return fmt.Errorf("policy: no active signing key (admin rotation required after revocation): %w", repository.ErrNotFound)
+	// Conflict could be either:
+	//   (a) a concurrent caller just provisioned a key — confirm
+	//       by re-reading the active key and return nil; or
+	//   (b) the tenant has historical keys but no active one —
+	//       refuse to auto-provision (admin rotation required).
+	if _, err := s.repo.GetActive(ctx, tenantID); err == nil {
+		return nil
 	}
-	if _, err := s.CreateInitial(ctx, tenantID, nil); err != nil {
-		if errors.Is(err, repository.ErrConflict) {
-			// Race: a concurrent caller provisioned the key.
-			return nil
-		}
-		return err
-	}
-	return nil
+	return fmt.Errorf("policy: no active signing key (admin rotation required after revocation): %w", repository.ErrNotFound)
 }
 
 // GetByKeyID returns a key by its stable short identifier, used by
@@ -267,6 +300,159 @@ func (s *KeyService) Sign(ctx context.Context, tenantID uuid.UUID, data []byte) 
 	}
 	priv := ed25519.NewKeyFromSeed(seed)
 	return ed25519.Sign(priv, data), active.KeyID, nil
+}
+
+// RotateOutcome distinguishes the two terminal states of
+// RotateOrCreate: whether the resulting key is the tenant's first
+// ever (Created) or a successor to a previously active key
+// (Rotated). Callers (typically the admin HTTP handler) translate
+// the outcome to a status code (201 vs 200).
+type RotateOutcome int
+
+const (
+	// RotateOutcomeCreated indicates the tenant had no active key
+	// at the moment of the call and a fresh first key was
+	// provisioned.
+	RotateOutcomeCreated RotateOutcome = iota + 1
+	// RotateOutcomeRotated indicates an existing active key was
+	// transitioned to 'rotated' and a successor active key was
+	// inserted in the same transaction.
+	RotateOutcomeRotated
+)
+
+// rotateOrCreateMaxAttempts caps the bounded retry loop in
+// RotateOrCreate. Realistic races between two concurrent admin
+// rotates settle in at most 1 retry; we allow a few more for
+// belt-and-braces.
+const rotateOrCreateMaxAttempts = 4
+
+// RotateOrCreate is the all-in-one admin "give me a fresh active
+// signing key" operation used by the rotateSigningKey HTTP
+// handler. It replaces the previous handler-side
+// GetActiveNoCreate + branch pattern, which had a TOCTOU window
+// between the existence probe and the per-branch repository call
+// (Devin Review flagged this as a benign-but-confusing race that
+// could surface 404 / 409 from what callers consider an
+// idempotent operation).
+//
+// The retry loop is short (rotateOrCreateMaxAttempts) and
+// deterministic: each iteration either commits via Rotate, commits
+// via Create, or hits a repository ErrConflict / ErrNotFound and
+// retries. Concurrent callers see at most one of them succeed per
+// iteration; the others fall through to the next attempt.
+//
+// A fresh Ed25519 keypair is generated once outside the loop so
+// retries don't burn CPU regenerating keys. The keypair is only
+// committed when the underlying Rotate / Create succeeds.
+func (s *KeyService) RotateOrCreate(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID) (repository.PolicySigningKey, RotateOutcome, error) {
+	pub, seed, err := s.generateKey()
+	if err != nil {
+		return repository.PolicySigningKey{}, 0, fmt.Errorf("generate key: %w", err)
+	}
+	wrapped, err := s.wrapper.Wrap(ctx, tenantID, seed)
+	if err != nil {
+		return repository.PolicySigningKey{}, 0, fmt.Errorf("wrap key: %w", err)
+	}
+	keyID := newKeyID()
+	candidate := repository.PolicySigningKey{
+		KeyID:      keyID,
+		Algorithm:  "ed25519",
+		PublicKey:  pub,
+		PrivateKey: wrapped,
+	}
+	var lastErr error
+	for attempt := 0; attempt < rotateOrCreateMaxAttempts; attempt++ {
+		// Try Rotate first — this is the common "tenant has an
+		// active key" path and the atomic transaction in the
+		// driver handles concurrent rotates via the partial
+		// unique index (ErrConflict on race).
+		rotated, err := s.repo.Rotate(ctx, tenantID, candidate, s.now())
+		if err == nil {
+			s.appendAudit(ctx, tenantID, actorID, "policy.signing_key_rotated", rotated)
+			return rotated, RotateOutcomeRotated, nil
+		}
+		if errors.Is(err, repository.ErrNotFound) {
+			// No active key — try the first-time Create path.
+			candidate.Status = repository.PolicySigningKeyStatusActive
+			candidate.ActivatedAt = s.now()
+			created, cerr := s.repo.Create(ctx, tenantID, candidate)
+			if cerr == nil {
+				s.appendAudit(ctx, tenantID, actorID, "policy.signing_key_created", created)
+				return created, RotateOutcomeCreated, nil
+			}
+			if errors.Is(cerr, repository.ErrConflict) {
+				// Concurrent Create / Rotate raced us. Loop
+				// back; the next iteration will see the
+				// just-inserted active key and Rotate will
+				// succeed.
+				lastErr = cerr
+				continue
+			}
+			return repository.PolicySigningKey{}, 0, cerr
+		}
+		if errors.Is(err, repository.ErrConflict) {
+			// Race between two concurrent Rotate calls — the
+			// partial unique index rejected our INSERT. Retry.
+			lastErr = err
+			continue
+		}
+		return repository.PolicySigningKey{}, 0, err
+	}
+	return repository.PolicySigningKey{}, 0, fmt.Errorf("policy: rotate-or-create raced %d times: %w", rotateOrCreateMaxAttempts, lastErr)
+}
+
+// PreparedSigner is an optional Signer extension exposing a
+// prepare-once / sign-many idiom. The bundle compiler signs four
+// per-target payloads in a tight loop against the same tenant
+// key; without this interface every call hits the database for
+// repo.GetActive and re-derives the Ed25519 private-key seed.
+// With this interface the compiler resolves the key once and
+// performs pure-CPU signs for each target.
+//
+// Devin Review (#3312683824) flagged the unprepared path as a
+// non-correctness performance issue. The prepared path collapses
+// 4× DB round-trips + 4× wrapper.Unwrap + 4× NewKeyFromSeed into
+// a single round-trip + single Unwrap + single key derivation
+// per compile.
+type PreparedSigner interface {
+	PrepareSigner(ctx context.Context, tenantID uuid.UUID) (PreparedSigning, error)
+}
+
+// PreparedSigning carries the resolved private key and key ID for
+// the duration of one logical operation (e.g. one Compile run).
+// Sign performs pure-CPU Ed25519 signing — no DB and no allocation
+// of a fresh keypair per call.
+type PreparedSigning interface {
+	Sign(data []byte) (signature []byte, keyID string)
+}
+
+// PrepareSigner resolves the active key once and returns a
+// PreparedSigning bound to it. KeyService is a PreparedSigner.
+func (s *KeyService) PrepareSigner(ctx context.Context, tenantID uuid.UUID) (PreparedSigning, error) {
+	active, err := s.repo.GetActive(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	seed, err := s.wrapper.Unwrap(ctx, tenantID, active.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("unwrap key: %w", err)
+	}
+	if len(seed) != ed25519.SeedSize {
+		return nil, fmt.Errorf("policy: invalid seed size %d", len(seed))
+	}
+	return &preparedSigning{
+		priv:  ed25519.NewKeyFromSeed(seed),
+		keyID: active.KeyID,
+	}, nil
+}
+
+type preparedSigning struct {
+	priv  ed25519.PrivateKey
+	keyID string
+}
+
+func (p *preparedSigning) Sign(data []byte) ([]byte, string) {
+	return ed25519.Sign(p.priv, data), p.keyID
 }
 
 func (s *KeyService) generateKey() (pub []byte, seed []byte, err error) {

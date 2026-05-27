@@ -91,6 +91,66 @@ func (r *PolicySigningKeyRepository) Create(ctx context.Context, tenantID uuid.U
 	return out, err
 }
 
+func (r *PolicySigningKeyRepository) CreateIfNoHistory(ctx context.Context, tenantID uuid.UUID, k repository.PolicySigningKey) (repository.PolicySigningKey, error) {
+	if tenantID == uuid.Nil {
+		return repository.PolicySigningKey{}, repository.ErrInvalidArgument
+	}
+	if k.KeyID == "" || k.Algorithm == "" || len(k.PublicKey) == 0 || len(k.PrivateKey) == 0 {
+		return repository.PolicySigningKey{}, repository.ErrInvalidArgument
+	}
+	if k.ID == uuid.Nil {
+		k.ID = uuid.New()
+	}
+	if k.Status == "" {
+		k.Status = repository.PolicySigningKeyStatusActive
+	}
+	if k.ActivatedAt.IsZero() {
+		k.ActivatedAt = time.Now().UTC()
+	}
+	var out repository.PolicySigningKey
+	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		// Single-statement check-and-insert. The SELECT in the
+		// VALUES clause is evaluated together with the INSERT, so
+		// any concurrent insert / update / delete against this
+		// tenant's row set is serialised by the row-lock on the
+		// table — no goroutine can sneak a key in between our
+		// check and our write. RLS scopes the EXISTS subquery to
+		// this tenant only.
+		row := tx.QueryRow(ctx, `
+			INSERT INTO policy_signing_keys (
+				id, tenant_id, key_id, algorithm,
+				public_key, private_key, status, activated_at
+			)
+			SELECT $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8
+			WHERE NOT EXISTS (
+				SELECT 1 FROM policy_signing_keys WHERE tenant_id = $2::uuid
+			)
+			RETURNING `+policySigningKeySelectColumns,
+			k.ID, tenantID, k.KeyID, k.Algorithm,
+			k.PublicKey, k.PrivateKey, k.Status, k.ActivatedAt.UTC(),
+		)
+		var err error
+		out, err = scanPolicySigningKey(row)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// EXISTS subquery matched a historical row — refuse
+			// to auto-provision per the revocation-incident
+			// invariant.
+			return repository.ErrConflict
+		}
+		if err != nil {
+			if isUniqueViolation(err) {
+				return repository.ErrConflict
+			}
+			if isCheckViolation(err) {
+				return repository.ErrInvalidArgument
+			}
+			return fmt.Errorf("insert signing key (if-no-history): %w", err)
+		}
+		return nil
+	})
+	return out, err
+}
+
 func (r *PolicySigningKeyRepository) GetActive(ctx context.Context, tenantID uuid.UUID) (repository.PolicySigningKey, error) {
 	var out repository.PolicySigningKey
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
