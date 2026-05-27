@@ -6,10 +6,13 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -190,6 +193,12 @@ func openNATS(cfg *config.Config, logger *slog.Logger) (*nats.Conn, error) {
 		opts = append(opts, nats.UserCredentials(cfg.NATS.CredsFile))
 	}
 
+	tlsOpts, err := buildNATSTLSOptions(&cfg.NATS)
+	if err != nil {
+		return nil, fmt.Errorf("build TLS: %w", err)
+	}
+	opts = append(opts, tlsOpts...)
+
 	nc, err := nats.Connect(cfg.NATS.URL, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
@@ -199,7 +208,92 @@ func openNATS(cfg *config.Config, logger *slog.Logger) (*nats.Conn, error) {
 		return nil, fmt.Errorf("jetstream: %w", err)
 	}
 	logger.Info("sng-control: nats connected",
-		slog.String("url", cfg.NATS.URL),
+		slog.String("url", redactURL(cfg.NATS.URL)),
 		slog.String("stream_prefix", cfg.NATS.StreamPrefix))
 	return nc, nil
+}
+
+// buildNATSTLSOptions converts the TLS-related env-driven config into
+// nats.Option values applied at connect time. Returning a configured
+// *tls.Config (rather than relying on nats.Secure() with the default
+// system roots) lets us:
+//   - pin a tenant-supplied CA file (NATS_TLS_CA),
+//   - present a client certificate for mTLS
+//     (NATS_TLS_CERT + NATS_TLS_KEY),
+//   - allow operators to opt into self-signed deployments during
+//     local development (NATS_TLS_INSECURE) which is blocked in
+//     production by config validation.
+//
+// All three fields are independent: a deployment can run server-auth
+// only (CA but no client cert), or mTLS (cert+key) layered on top of
+// a custom CA, or mTLS with the system pool. We do not require
+// the URL scheme to be tls://: the nats.go client triggers TLS
+// whenever any of these options are present, and a tls:// URL still
+// works because the TLS config layers on top.
+func buildNATSTLSOptions(n *config.NATS) ([]nats.Option, error) {
+	var opts []nats.Option
+	hasCert := n.TLSCertFile != "" && n.TLSKeyFile != ""
+	hasCA := n.TLSCAFile != ""
+
+	// Reject half-specified mTLS up front so that an operator who
+	// set NATS_TLS_CERT but forgot NATS_TLS_KEY (or vice-versa) sees
+	// a clear error instead of a silent fall-back to anonymous TLS.
+	if (n.TLSCertFile != "") != (n.TLSKeyFile != "") {
+		return nil, errors.New("NATS_TLS_CERT and NATS_TLS_KEY must both be set or both empty")
+	}
+
+	if hasCA {
+		opts = append(opts, nats.RootCAs(n.TLSCAFile))
+	}
+	if hasCert {
+		opts = append(opts, nats.ClientCert(n.TLSCertFile, n.TLSKeyFile))
+	}
+	if n.TLSInsecure {
+		// nats.Secure layers on top of any RootCAs/ClientCert above
+		// because the nats.go client merges all TLS-related options
+		// into a single tls.Config at handshake time.
+		opts = append(opts, nats.Secure(&tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // gated by config.validate(): prod refuses true
+			MinVersion:         tls.VersionTLS12,
+		}))
+	}
+	// Eagerly load the CA to validate it parses at boot rather than
+	// at first connection attempt.
+	if hasCA {
+		pem, err := os.ReadFile(n.TLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read NATS_TLS_CA %q: %w", n.TLSCAFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("NATS_TLS_CA %q: no PEM certificates found", n.TLSCAFile)
+		}
+	}
+	return opts, nil
+}
+
+// redactURL strips userinfo from a URL string so it is safe to emit
+// in logs. Operators who embed `nats://user:password@host:4222`
+// instead of using the dedicated NATS_USER/NATS_PASSWORD fields
+// should still not leak their secret through info-level boot logs.
+//
+// Invalid URLs are returned unchanged after redacting an obvious
+// `@`-suffixed userinfo prefix so we still never emit the original
+// secret.
+func redactURL(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err == nil && u.User != nil {
+		return u.Redacted()
+	}
+	if err != nil {
+		if i := strings.LastIndex(raw, "@"); i > 0 {
+			if j := strings.Index(raw, "://"); j >= 0 && i > j {
+				return raw[:j+3] + "REDACTED@" + raw[i+1:]
+			}
+		}
+	}
+	return raw
 }

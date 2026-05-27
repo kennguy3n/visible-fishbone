@@ -157,13 +157,74 @@ type Postgres struct {
 	AppRole string
 }
 
-// DSN returns a libpq connection string.
+// DSN returns a libpq keyword/value connection string.
+//
+// Values containing spaces, backslashes or single-quotes are
+// single-quoted per the libpq syntax so a password like
+// `my secret'pass\` is parsed correctly by pgxpool.ParseConfig
+// instead of producing a confusing boot-time error.
+//
+// libpq keyword/value rules (per the official spec):
+//   - Empty values must be written as ”.
+//   - Values containing whitespace or single quotes must be quoted.
+//   - Within single quotes, single quotes and backslashes are
+//     escaped with a leading backslash.
 func (p Postgres) DSN() string {
-	return fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s connect_timeout=%d",
-		p.Host, p.Port, p.User, p.Password, p.Database, p.SSLMode,
-		int(p.ConnTimeout.Seconds()),
-	)
+	var b strings.Builder
+	writePair := func(k, v string) {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(libpqQuote(v))
+	}
+	writePair("host", p.Host)
+	writePair("port", strconv.Itoa(p.Port))
+	writePair("user", p.User)
+	writePair("password", p.Password)
+	writePair("dbname", p.Database)
+	writePair("sslmode", p.SSLMode)
+	writePair("connect_timeout", strconv.Itoa(int(p.ConnTimeout.Seconds())))
+	return b.String()
+}
+
+// libpqQuote returns a libpq keyword/value-safe rendering of v.
+//
+// libpq's parser accepts unquoted values only when they contain no
+// whitespace, backslashes, or single-quotes. Anything outside that
+// safe set — plus empty strings — must be wrapped in single quotes,
+// with backslash and single-quote within escaped by a leading
+// backslash. See:
+//
+//	https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING-KEYWORD-VALUE
+func libpqQuote(v string) string {
+	if v == "" {
+		return "''"
+	}
+	needsQuote := false
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\\' || c == '\'' {
+			needsQuote = true
+			break
+		}
+	}
+	if !needsQuote {
+		return v
+	}
+	var b strings.Builder
+	b.Grow(len(v) + 4)
+	b.WriteByte('\'')
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c == '\\' || c == '\'' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(c)
+	}
+	b.WriteByte('\'')
+	return b.String()
 }
 
 // RateLimit configures the per-IP token-bucket rate limiter that
@@ -345,50 +406,86 @@ func Load() (Config, error) {
 		},
 	}
 
-	// Critical numeric settings: re-parse with the strict helpers so
-	// a typo (e.g. HTTP_PORT="80a", HTTP_READ_TIMEOUT="5second")
-	// fails boot loudly instead of silently reverting to the
-	// default and giving us a wildly wrong setting in production.
+	// Critical numeric settings: re-parse with the strict helpers
+	// so a typo (e.g. HTTP_PORT="80a", HTTP_READ_TIMEOUT="5second")
+	// fails boot loudly instead of silently reverting to the default
+	// and giving us a wildly wrong setting in production.
+	//
+	// Strict parsing is reserved for fields where silently using the
+	// default could mask a security or correctness regression
+	// (timeouts, ports, retry budgets, pool sizes, rate limits,
+	// dedup windows). Lenient parsing is intentionally retained for
+	// purely cosmetic / non-load-bearing fields where defaults are
+	// always safe.
+	strictInts := []struct {
+		key string
+		def int
+		dst *int
+	}{
+		{"HTTP_PORT", 8080, &cfg.HTTP.Port},
+		{"PG_PORT", 5432, &cfg.Postgres.Port},
+		{"PG_MAX_OPEN_CONNS", 20, &cfg.Postgres.MaxOpenConns},
+		{"PG_MAX_IDLE_CONNS", 5, &cfg.Postgres.MaxIdleConns},
+		{"NATS_MAX_RECONNECTS", -1, &cfg.NATS.MaxReconnects},
+		{"NATS_REPLICAS", 1, &cfg.NATS.Replicas},
+		{"NATS_FETCH_BATCH_SIZE", 50, &cfg.NATS.FetchBatchSize},
+		{"NATS_PUBLISH_RETRY_ATTEMPTS", 3, &cfg.NATS.PublishRetryAttempts},
+		{"RATE_LIMIT_BURST", 60, &cfg.RateLimit.Burst},
+		{"WEBHOOK_MAX_RETRIES", 6, &cfg.Webhook.MaxRetries},
+	}
+	strictDurations := []struct {
+		key string
+		def time.Duration
+		dst *time.Duration
+	}{
+		{"HTTP_READ_TIMEOUT", 15 * time.Second, &cfg.HTTP.ReadTimeout},
+		{"HTTP_READ_HEADER_TIMEOUT", 5 * time.Second, &cfg.HTTP.ReadHeaderTimeout},
+		{"HTTP_WRITE_TIMEOUT", 30 * time.Second, &cfg.HTTP.WriteTimeout},
+		{"HTTP_SHUTDOWN_TIMEOUT", 10 * time.Second, &cfg.HTTP.ShutdownTimeout},
+		{"PG_CONN_TIMEOUT", 5 * time.Second, &cfg.Postgres.ConnTimeout},
+		{"PG_CONN_MAX_LIFETIME", time.Hour, &cfg.Postgres.ConnMaxLifetime},
+		{"NATS_REQUEST_TIMEOUT", 5 * time.Second, &cfg.NATS.RequestTimeout},
+		{"NATS_RECONNECT_WAIT", 2 * time.Second, &cfg.NATS.ReconnectWait},
+		{"NATS_DEDUP_WINDOW", 2 * time.Minute, &cfg.NATS.DedupWindow},
+		{"NATS_PUBLISH_RETRY_DELAY", 200 * time.Millisecond, &cfg.NATS.PublishRetryDelay},
+		{"NATS_FETCH_MAX_WAIT", 200 * time.Millisecond, &cfg.NATS.FetchMaxWait},
+		{"WEBHOOK_INITIAL_DELAY", time.Second, &cfg.Webhook.InitialDelay},
+		{"WEBHOOK_MAX_DELAY", 5 * time.Minute, &cfg.Webhook.MaxDelay},
+		{"WEBHOOK_DELIVERY_TIMEOUT", 10 * time.Second, &cfg.Webhook.DeliveryTimeout},
+		{"AUTH_ACCESS_TOKEN_TTL", time.Hour, &cfg.Auth.AccessTokenTTL},
+	}
+	strictFloats := []struct {
+		key string
+		def float64
+		dst *float64
+	}{
+		{"RATE_LIMIT_RATE", 30.0, &cfg.RateLimit.Rate},
+	}
+
 	var strictErrs []error
-	if v, err := getIntStrict("HTTP_PORT", 8080); err != nil {
-		strictErrs = append(strictErrs, err)
-	} else {
-		cfg.HTTP.Port = v
+	for _, s := range strictInts {
+		v, err := getIntStrict(s.key, s.def)
+		if err != nil {
+			strictErrs = append(strictErrs, err)
+			continue
+		}
+		*s.dst = v
 	}
-	if v, err := getDurationStrict("HTTP_READ_TIMEOUT", 15*time.Second); err != nil {
-		strictErrs = append(strictErrs, err)
-	} else {
-		cfg.HTTP.ReadTimeout = v
+	for _, s := range strictDurations {
+		v, err := getDurationStrict(s.key, s.def)
+		if err != nil {
+			strictErrs = append(strictErrs, err)
+			continue
+		}
+		*s.dst = v
 	}
-	if v, err := getDurationStrict("HTTP_READ_HEADER_TIMEOUT", 5*time.Second); err != nil {
-		strictErrs = append(strictErrs, err)
-	} else {
-		cfg.HTTP.ReadHeaderTimeout = v
-	}
-	if v, err := getDurationStrict("HTTP_WRITE_TIMEOUT", 30*time.Second); err != nil {
-		strictErrs = append(strictErrs, err)
-	} else {
-		cfg.HTTP.WriteTimeout = v
-	}
-	if v, err := getIntStrict("PG_PORT", 5432); err != nil {
-		strictErrs = append(strictErrs, err)
-	} else {
-		cfg.Postgres.Port = v
-	}
-	if v, err := getIntStrict("PG_MAX_OPEN_CONNS", 20); err != nil {
-		strictErrs = append(strictErrs, err)
-	} else {
-		cfg.Postgres.MaxOpenConns = v
-	}
-	if v, err := getDurationStrict("PG_CONN_TIMEOUT", 5*time.Second); err != nil {
-		strictErrs = append(strictErrs, err)
-	} else {
-		cfg.Postgres.ConnTimeout = v
-	}
-	if v, err := getIntStrict("WEBHOOK_MAX_RETRIES", 6); err != nil {
-		strictErrs = append(strictErrs, err)
-	} else {
-		cfg.Webhook.MaxRetries = v
+	for _, s := range strictFloats {
+		v, err := getFloatStrict(s.key, s.def)
+		if err != nil {
+			strictErrs = append(strictErrs, err)
+			continue
+		}
+		*s.dst = v
 	}
 	if len(strictErrs) > 0 {
 		return cfg, errors.Join(strictErrs...)
@@ -555,6 +652,19 @@ func getDurationStrict(key string, def time.Duration) (time.Duration, error) {
 	return d, nil
 }
 
+// getFloatStrict is the float64 twin of getIntStrict.
+func getFloatStrict(key string, def float64) (float64, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s=%q is not a valid float: %w", key, v, err)
+	}
+	return f, nil
+}
+
 func getBool(key string, def bool) bool {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		b, err := strconv.ParseBool(v)
@@ -606,31 +716,70 @@ func parseCSV(s string) []string {
 }
 
 // loadDotEnv parses a minimal .env file and assigns variables that
-// aren't already in the process environment. Lines beginning with
-// `#` and blank lines are ignored. Values may be optionally quoted.
+// aren't already in the process environment. The format mirrors the
+// de-facto conventions used by docker-compose / direnv:
+//
+//   - Lines beginning with `#` and blank lines are ignored.
+//   - Lines may optionally start with the shell `export` keyword,
+//     which is stripped before parsing.
+//   - Values may be optionally quoted with single or double quotes,
+//     in which case the quotes are stripped.
+//   - In unquoted values, an unescaped `#` introduces a trailing
+//     comment that is stripped. Within quoted values `#` is taken
+//     literally so passwords containing `#` survive.
 //
 // This is intentionally tiny: production deployments should source
 // the environment from the orchestrator (k8s ConfigMap/Secret, ECS
-// env, etc.).
+// env, etc.). The `.env` loader exists only so that local-dev and
+// CI scripts can drop their config in one place.
 func loadDotEnv(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		// Allow `export FOO=bar` for ergonomic copy-paste from a
+		// shell session. The "export " prefix is stripped before
+		// the key is parsed; "exportFOO=bar" is NOT treated as
+		// an export and remains literal.
+		line = strings.TrimPrefix(line, "export ")
+		line = strings.TrimPrefix(line, "export\t")
+		line = strings.TrimLeft(line, " \t")
+
 		eq := strings.IndexByte(line, '=')
 		if eq <= 0 {
 			continue
 		}
 		key := strings.TrimSpace(line[:eq])
 		val := strings.TrimSpace(line[eq+1:])
-		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[0] == val[len(val)-1] {
-			val = val[1 : len(val)-1]
+
+		switch {
+		case len(val) >= 2 && (val[0] == '"' || val[0] == '\''):
+			// Quoted-value path: take everything up to the
+			// matching closing quote, then discard a trailing
+			// `# comment` after the close. Anything inside the
+			// quotes — including `#` — is preserved verbatim.
+			quote := val[0]
+			if end := strings.IndexByte(val[1:], quote); end >= 0 {
+				rest := strings.TrimSpace(val[end+2:])
+				if rest == "" || strings.HasPrefix(rest, "#") {
+					val = val[1 : end+1]
+				}
+			}
+		default:
+			// Unquoted-value path: strip trailing `# comment`
+			// only when preceded by whitespace, so a value
+			// like `secret#1` survives but `secret # note`
+			// becomes `secret`.
+			if i := strings.IndexByte(val, '#'); i > 0 && (val[i-1] == ' ' || val[i-1] == '\t') {
+				val = strings.TrimRight(val[:i], " \t")
+			}
 		}
+
 		if _, ok := os.LookupEnv(key); ok {
 			continue
 		}

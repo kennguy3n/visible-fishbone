@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // withEnv temporarily sets the given environment variables for the
@@ -55,10 +57,19 @@ func clearAll(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_ENDPOINT", "SERVICE_VERSION",
 	}
 	for _, k := range keys {
+		k := k
 		prev, had := os.LookupEnv(k)
 		t.Cleanup(func() {
+			// Critical: cleanup must put the environment back
+			// to its exact pre-test state. If the key was set
+			// before, restore it; if it wasn't, unset it (a
+			// `.env` file or a sibling test may have injected
+			// the key in between, and leaking it across tests
+			// produced order-dependent failures).
 			if had {
 				_ = os.Setenv(k, prev)
+			} else {
+				_ = os.Unsetenv(k)
 			}
 		})
 		_ = os.Unsetenv(k)
@@ -516,5 +527,130 @@ func TestPostgresPoolBounds(t *testing.T) {
 	})
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error for very large PG_MAX_OPEN_CONNS")
+	}
+}
+
+func TestLibpqQuote(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", "''"},
+		{"sng", "sng"},
+		{"disable", "disable"},
+		{"my secret", "'my secret'"},
+		{"with'quote", `'with\'quote'`},
+		{`with\back`, `'with\\back'`},
+		{"both'and\\", `'both\'and\\'`},
+		{"trailing\t", "'trailing\t'"},
+		{"with\nnewline", "'with\nnewline'"},
+	}
+	for _, c := range cases {
+		if got := libpqQuote(c.in); got != c.want {
+			t.Errorf("libpqQuote(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestPostgresDSNHandlesSpecialChars(t *testing.T) {
+	p := Postgres{
+		Host:        "db.internal",
+		Port:        5432,
+		User:        "sng",
+		Password:    "p@ss w'rd\\x",
+		Database:    "sng db",
+		SSLMode:     "require",
+		ConnTimeout: 5 * time.Second,
+	}
+	dsn := p.DSN()
+	// pgxpool.ParseConfig accepts both URI and libpq KV formats.
+	// Round-tripping through the upstream parser is the only
+	// reliable check that escaping is correct.
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.ParseConfig rejected DSN %q: %v", dsn, err)
+	}
+	if cfg.ConnConfig.Password != p.Password {
+		t.Errorf("password round-trip mismatch: got %q, want %q",
+			cfg.ConnConfig.Password, p.Password)
+	}
+	if cfg.ConnConfig.Database != p.Database {
+		t.Errorf("database round-trip mismatch: got %q, want %q",
+			cfg.ConnConfig.Database, p.Database)
+	}
+}
+
+func TestStrictNumericRejectsTypo(t *testing.T) {
+	// One representative for each of the int, duration and float
+	// strict paths so a regression that drops a field from the
+	// strict tables produces a clear failure.
+	for _, c := range []struct {
+		key, bad string
+	}{
+		{"HTTP_PORT", "80a"},
+		{"NATS_REPLICAS", "two"},
+		{"RATE_LIMIT_BURST", "ten"},
+		{"WEBHOOK_MAX_RETRIES", "six"},
+		{"PG_MAX_IDLE_CONNS", "five"},
+		{"HTTP_SHUTDOWN_TIMEOUT", "10seconds"},
+		{"NATS_REQUEST_TIMEOUT", "5sec"},
+		{"NATS_DEDUP_WINDOW", "forever"},
+		{"AUTH_ACCESS_TOKEN_TTL", "lifetime"},
+		{"RATE_LIMIT_RATE", "thirty"},
+	} {
+		c := c
+		t.Run(c.key, func(t *testing.T) {
+			clearAll(t)
+			withEnv(t, map[string]string{c.key: c.bad})
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected boot-time error for %s=%q", c.key, c.bad)
+			} else if !strings.Contains(err.Error(), c.key) {
+				t.Fatalf("error %q should mention %s", err.Error(), c.key)
+			}
+		})
+	}
+}
+
+func TestLoadDotEnvInlineCommentsAndExport(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	contents := strings.Join([]string{
+		"# header comment",
+		"",
+		"export FOO=bar",
+		"BAZ=qux # trailing comment",
+		"PASS='p#1' # outside",
+		`QUOTED="value # not a comment"`,
+		"NOSPACE=secret#1",
+		"\texport TABBED=tabbed",
+	}, "\n")
+	if err := os.WriteFile(envPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clearAll(t)
+	t.Cleanup(func() {
+		for _, k := range []string{"FOO", "BAZ", "PASS", "QUOTED", "NOSPACE", "TABBED"} {
+			_ = os.Unsetenv(k)
+		}
+	})
+	if err := loadDotEnv(envPath); err != nil {
+		t.Fatalf("loadDotEnv: %v", err)
+	}
+	expect := map[string]string{
+		"FOO":     "bar",
+		"BAZ":     "qux",
+		"PASS":    "p#1",
+		"QUOTED":  "value # not a comment",
+		"NOSPACE": "secret#1",
+		"TABBED":  "tabbed",
+	}
+	for k, want := range expect {
+		got, ok := os.LookupEnv(k)
+		if !ok {
+			t.Errorf("%s not set", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
 	}
 }
