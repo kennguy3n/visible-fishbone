@@ -27,7 +27,7 @@ func newSvc(t *testing.T) (*rbac.Service, *memory.Store, uuid.UUID, uuid.UUID) {
 	if err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	svc := rbac.New(memory.NewRoleRepository(s), memory.NewUserRepository(s), memory.NewAuditLogRepository(s), nil)
+	svc := rbac.New(memory.NewRoleRepository(s), memory.NewAuditLogRepository(s), nil)
 	return svc, s, tn.ID, user.ID
 }
 

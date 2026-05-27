@@ -100,21 +100,15 @@ func (svc *Service) Update(ctx context.Context, t repository.Tenant) (repository
 	return updated, nil
 }
 
-// Suspend transitions a tenant from active to suspended. Only
-// active tenants may be suspended; attempting to suspend a deleted
-// or already-suspended tenant returns ErrForbidden.
+// Suspend atomically transitions a tenant from active to suspended.
+// Returns ErrForbidden (wrapped from the repository) if the tenant
+// is not currently active. The state check and the status update
+// happen in a single repository call to prevent TOCTOU races where
+// a concurrent Suspend/Delete could change the status between a
+// pre-flight Get and the UpdateStatus.
 func (svc *Service) Suspend(ctx context.Context, id uuid.UUID) (repository.Tenant, error) {
-	current, err := svc.tenants.Get(ctx, id)
-	if err != nil {
-		return repository.Tenant{}, err
-	}
-	if current.Status != repository.TenantStatusActive {
-		return repository.Tenant{}, fmt.Errorf(
-			"cannot suspend tenant with status %q (must be %q): %w",
-			current.Status, repository.TenantStatusActive, repository.ErrForbidden,
-		)
-	}
-	updated, err := svc.tenants.UpdateStatus(ctx, id, repository.TenantStatusSuspended)
+	updated, err := svc.tenants.TransitionStatus(ctx, id,
+		repository.TenantStatusActive, repository.TenantStatusSuspended)
 	if err != nil {
 		return repository.Tenant{}, err
 	}
@@ -123,16 +117,11 @@ func (svc *Service) Suspend(ctx context.Context, id uuid.UUID) (repository.Tenan
 }
 
 // Delete soft-deletes a tenant (status -> deleted, deleted_at set).
-// A tenant that is already deleted returns ErrForbidden to prevent
-// re-deletion or un-deletion via status change.
+// The repository's Delete enforces atomically that the tenant is
+// not already deleted, returning ErrForbidden otherwise. There is
+// no TOCTOU window between a status read and the delete because the
+// precondition lives inside the WHERE clause.
 func (svc *Service) Delete(ctx context.Context, id uuid.UUID) error {
-	current, err := svc.tenants.Get(ctx, id)
-	if err != nil {
-		return err
-	}
-	if current.Status == repository.TenantStatusDeleted {
-		return fmt.Errorf("tenant already deleted: %w", repository.ErrForbidden)
-	}
 	if err := svc.tenants.Delete(ctx, id); err != nil {
 		return err
 	}

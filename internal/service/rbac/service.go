@@ -132,7 +132,6 @@ var SystemRoles = []SystemRole{
 // Service implements RBAC operations.
 type Service struct {
 	roles  repository.RoleRepository
-	users  repository.UserRepository
 	audit  repository.AuditLogRepository
 	logger *slog.Logger
 }
@@ -140,14 +139,13 @@ type Service struct {
 // New returns a ready-to-use RBAC service.
 func New(
 	roles repository.RoleRepository,
-	users repository.UserRepository,
 	audit repository.AuditLogRepository,
 	logger *slog.Logger,
 ) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{roles: roles, users: users, audit: audit, logger: logger}
+	return &Service{roles: roles, audit: audit, logger: logger}
 }
 
 // SeedSystemRoles inserts every SystemRole as a tenant-scoped role.
@@ -161,11 +159,17 @@ func New(
 // snapshot.
 func (svc *Service) SeedSystemRoles(ctx context.Context, tenantID uuid.UUID) ([]repository.Role, error) {
 	out := make([]repository.Role, 0, len(SystemRoles))
-	var scopedID *uuid.UUID
-	if tenantID != uuid.Nil {
-		scopedID = &tenantID
-	}
 	for _, sr := range SystemRoles {
+		// Allocate a fresh TenantID pointer per role so no two
+		// stored roles share the same underlying uuid.UUID. This
+		// keeps the memory repo robust against future callers that
+		// might mutate a retrieved role's TenantID through the
+		// pointer; the postgres repo allocates per-row anyway.
+		var scopedID *uuid.UUID
+		if tenantID != uuid.Nil {
+			id := tenantID
+			scopedID = &id
+		}
 		role := repository.Role{
 			TenantID:    scopedID,
 			Name:        sr.Name,

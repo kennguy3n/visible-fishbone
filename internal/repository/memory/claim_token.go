@@ -76,6 +76,11 @@ func (r *ClaimTokenRepository) Redeem(ctx context.Context, tenantID uuid.UUID, h
 	return repository.ClaimToken{}, repository.ErrNotFound
 }
 
+// UnredeemByHash clears the RedeemedAt marker on a previously
+// redeemed token. Mirrors the postgres semantics:
+//   - ErrNotFound  if no token with the given hash exists
+//   - ErrForbidden if the token exists but was never redeemed
+//     (this would otherwise silently succeed, masking caller bugs).
 func (r *ClaimTokenRepository) UnredeemByHash(ctx context.Context, tenantID uuid.UUID, hash []byte) error {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return err
@@ -84,6 +89,9 @@ func (r *ClaimTokenRepository) UnredeemByHash(ctx context.Context, tenantID uuid
 	defer r.s.mu.Unlock()
 	for id, t := range r.s.claimTokens {
 		if t.TenantID == tenantID && bytes.Equal(t.TokenHash, hash) {
+			if t.RedeemedAt == nil {
+				return repository.ErrForbidden
+			}
 			t.RedeemedAt = nil
 			r.s.claimTokens[id] = t
 			return nil

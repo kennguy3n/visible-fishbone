@@ -93,6 +93,13 @@ type TenantRepository interface {
 	List(ctx context.Context, page Page) (PageResult[Tenant], error)
 	Update(ctx context.Context, t Tenant) (Tenant, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status TenantStatus) (Tenant, error)
+	// TransitionStatus atomically changes the tenant status only if
+	// the current status matches `from`. Returns ErrForbidden if the
+	// precondition is not met, ErrNotFound if the tenant does not
+	// exist. This is the race-free building block for state-machine
+	// transitions like active->suspended or active->deleted; prefer
+	// it over a Get+UpdateStatus pair.
+	TransitionStatus(ctx context.Context, id uuid.UUID, from, to TenantStatus) (Tenant, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 }
 

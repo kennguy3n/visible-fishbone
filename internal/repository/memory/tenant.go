@@ -170,9 +170,58 @@ func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, statu
 	return out, nil
 }
 
+func (r *TenantRepository) TransitionStatus(ctx context.Context, id uuid.UUID, from, to repository.TenantStatus) (repository.Tenant, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.Tenant{}, err
+	}
+	switch to {
+	case repository.TenantStatusActive, repository.TenantStatusSuspended, repository.TenantStatusDeleted:
+	default:
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.tenants[id]
+	if !ok {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if existing.Status != from {
+		return repository.Tenant{}, repository.ErrForbidden
+	}
+	existing.Status = to
+	existing.UpdatedAt = r.s.clock()
+	if to == repository.TenantStatusDeleted && existing.DeletedAt == nil {
+		t := r.s.clock()
+		existing.DeletedAt = &t
+	}
+	r.s.tenants[id] = existing
+	out := existing
+	out.Settings = cloneJSON(existing.Settings)
+	return out, nil
+}
+
+// Delete soft-deletes a tenant atomically. Returns ErrForbidden if
+// the tenant is already deleted (idempotency is the caller's
+// concern; the repo enforces single-shot semantics).
 func (r *TenantRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	if _, err := r.UpdateStatus(ctx, id, repository.TenantStatusDeleted); err != nil {
+	if err := errCtxIfNeeded(ctx); err != nil {
 		return err
 	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.tenants[id]
+	if !ok {
+		return repository.ErrNotFound
+	}
+	if existing.Status == repository.TenantStatusDeleted {
+		return repository.ErrForbidden
+	}
+	existing.Status = repository.TenantStatusDeleted
+	existing.UpdatedAt = r.s.clock()
+	if existing.DeletedAt == nil {
+		t := r.s.clock()
+		existing.DeletedAt = &t
+	}
+	r.s.tenants[id] = existing
 	return nil
 }

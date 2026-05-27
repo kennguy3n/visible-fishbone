@@ -245,9 +245,68 @@ func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, statu
 	return out, nil
 }
 
-func (r *TenantRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	if _, err := r.UpdateStatus(ctx, id, repository.TenantStatusDeleted); err != nil {
-		return err
+func (r *TenantRepository) TransitionStatus(ctx context.Context, id uuid.UUID, from, to repository.TenantStatus) (repository.Tenant, error) {
+	switch to {
+	case repository.TenantStatusActive, repository.TenantStatusSuspended, repository.TenantStatusDeleted:
+	default:
+		return repository.Tenant{}, repository.ErrInvalidArgument
 	}
-	return nil
+	// Single atomic UPDATE: the WHERE clause enforces the
+	// precondition (current status = $3) and prevents the TOCTOU
+	// window present in a Get+UpdateStatus pair. If the row does not
+	// exist we get pgx.ErrNoRows -> ErrNotFound; if the row exists
+	// but the precondition fails we must distinguish ErrForbidden,
+	// so we run a follow-up existence check.
+	const q = `
+		UPDATE tenants
+		SET status     = $2,
+		    deleted_at = CASE WHEN $2 = 'deleted' THEN COALESCE(deleted_at, NOW()) ELSE deleted_at END
+		WHERE id = $1::uuid AND status = $3
+		RETURNING ` + tenantSelectColumns
+	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, string(to), string(from)))
+	if err == nil {
+		return out, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return repository.Tenant{}, fmt.Errorf("transition status: %w", err)
+	}
+	// Either the tenant doesn't exist (NotFound) or it exists with a
+	// different status (Forbidden). One extra round-trip to
+	// disambiguate; rare path so cost is acceptable.
+	var dummyStatus string
+	if scanErr := r.s.pool.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1::uuid`, id).Scan(&dummyStatus); scanErr != nil {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return repository.Tenant{}, repository.ErrNotFound
+		}
+		return repository.Tenant{}, fmt.Errorf("transition status lookup: %w", scanErr)
+	}
+	return repository.Tenant{}, repository.ErrForbidden
+}
+
+// Delete atomically soft-deletes a tenant. Returns ErrForbidden if
+// the tenant is already deleted, ErrNotFound if it does not exist.
+// The WHERE clause prevents the TOCTOU window present in a
+// Get+UpdateStatus pair.
+func (r *TenantRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	const q = `
+		UPDATE tenants
+		SET status     = 'deleted',
+		    deleted_at = COALESCE(deleted_at, NOW())
+		WHERE id = $1::uuid AND status <> 'deleted'`
+	tag, err := r.s.pool.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("delete tenant: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	// Distinguish ErrForbidden (already deleted) from ErrNotFound.
+	var status string
+	if scanErr := r.s.pool.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1::uuid`, id).Scan(&status); scanErr != nil {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return repository.ErrNotFound
+		}
+		return fmt.Errorf("delete tenant lookup: %w", scanErr)
+	}
+	return repository.ErrForbidden
 }
