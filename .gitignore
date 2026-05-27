@@ -1,0 +1,24 @@
+# Build artifacts
+/bin/
+/target/
+
+# Test / coverage
+*.out
+*.test
+coverage.out
+coverage.html
+
+# Local environment
+.env
+.env.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go workspace files (use go.mod, not go.work, for this repo)
+go.work
+go.work.sum
