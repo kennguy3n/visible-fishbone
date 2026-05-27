@@ -15,7 +15,12 @@ import (
 //
 // pathParam is the name of the path parameter (e.g. "tenant_id").
 // The middleware is mounted *inside* the auth chain so it can rely
-// on the tenant ID already being in context.
+// on the tenant ID already being in context. Per-route mounting
+// (not a single apiMux wrapper) is required because
+// r.PathValue is only populated after the mux has matched the
+// pattern; a wrapper around the bare mux would always see empty.
+// The handler.MountTenantScoped helper applies this automatically
+// for any pattern containing "{tenant_id}".
 func RequireTenant(pathParam string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

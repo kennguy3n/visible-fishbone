@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 
@@ -31,10 +30,10 @@ func NewDeviceHandler(identitySvc *identity.Service, devices repository.DeviceRe
 
 // Register attaches routes.
 func (h *DeviceHandler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/v1/tenants/{tenant_id}/claim-tokens", h.createClaimToken)
-	mux.HandleFunc("POST /api/v1/tenants/{tenant_id}/devices/enroll", h.enroll)
-	mux.HandleFunc("GET /api/v1/tenants/{tenant_id}/devices", h.list)
-	mux.HandleFunc("GET /api/v1/tenants/{tenant_id}/devices/{id}", h.get)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/claim-tokens", h.createClaimToken)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/devices/enroll", h.enroll)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/devices", h.list)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/devices/{id}", h.get)
 }
 
 // ClaimTokenCreateRequest is the JSON body for POST /claim-tokens.
@@ -199,6 +198,5 @@ func toDeviceResponse(d repository.Device) DeviceResponse {
 		s := d.LastSeenAt.Format(time.RFC3339Nano)
 		resp.LastSeenAt = &s
 	}
-	_ = json.RawMessage(nil)
 	return resp
 }

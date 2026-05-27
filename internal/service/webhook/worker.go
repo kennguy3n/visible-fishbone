@@ -43,6 +43,21 @@ type WorkerConfig struct {
 	BackoffBase time.Duration
 	// BackoffMax is the per-attempt backoff ceiling. Default 1h.
 	BackoffMax time.Duration
+	// ProcessingTimeout is the stuck-row recovery window passed to
+	// WebhookDeliveryRepository.ListPending. Rows that a previous
+	// worker claimed (status='processing') but never transitioned
+	// out of — typically because the worker crashed mid-delivery
+	// — are re-claimable once their last_attempt_at is older than
+	// `now - ProcessingTimeout`.
+	//
+	// Choose this to be safely longer than the worst-case
+	// in-flight delivery (RequestTimeout + scheduler overhead): too
+	// short and the same delivery is dispatched twice if a single
+	// slow upstream pushes past the window; too long and a true
+	// worker crash leaves the queue stalled for that duration.
+	// Default 5m, which comfortably exceeds the default
+	// RequestTimeout of 10s.
+	ProcessingTimeout time.Duration
 }
 
 // defaults applies sensible defaults to zero-valued fields.
@@ -65,16 +80,21 @@ func (c *WorkerConfig) defaults() {
 	if c.BackoffMax <= 0 {
 		c.BackoffMax = time.Hour
 	}
+	if c.ProcessingTimeout <= 0 {
+		c.ProcessingTimeout = 5 * time.Minute
+	}
 }
 
 // DeliveryWorker drains pending webhook deliveries and POSTs them
 // to subscriber URLs with HMAC-signed bodies + exponential-backoff
 // retry. The worker is safe to run as a singleton or with multiple
-// instances against the same database (the ListPending +
-// UpdateStatus pair is intended to be raced by competing workers;
-// the repository layer is responsible for ordering and skip-locked
-// semantics — the postgres implementation uses `FOR UPDATE SKIP
-// LOCKED` to achieve this).
+// instances against the same database; the repository layer's
+// ListPending performs an atomic claim (UPDATE...RETURNING with
+// status transitioned to 'processing') so concurrent workers never
+// double-deliver. A worker that crashes mid-delivery leaves its
+// rows in 'processing'; they are re-claimed automatically by the
+// next ListPending call once `cfg.ProcessingTimeout` has elapsed
+// since the stuck row's last_attempt_at.
 type DeliveryWorker struct {
 	deliveries repository.WebhookDeliveryRepository
 	endpoints  repository.WebhookEndpointRepository
@@ -187,8 +207,8 @@ func (w *DeliveryWorker) loop(ctx context.Context) {
 // CronJob driving the same deliveries from a quiet control plane)
 // and so tests can drive a deterministic tick without spinning up
 // the background loop. Safe to call from multiple goroutines —
-// the repository's ListPending is expected to use SKIP LOCKED so
-// competing workers do not double-deliver.
+// the repository's atomic-claim ListPending guarantees competing
+// callers never receive overlapping rows.
 func (w *DeliveryWorker) ProcessPending(ctx context.Context) (int, error) {
 	return w.tick(ctx)
 }
@@ -197,7 +217,7 @@ func (w *DeliveryWorker) ProcessPending(ctx context.Context) (int, error) {
 // number of deliveries processed and the first non-context error
 // encountered.
 func (w *DeliveryWorker) tick(ctx context.Context) (int, error) {
-	pending, err := w.deliveries.ListPending(ctx, w.cfg.BatchSize)
+	pending, err := w.deliveries.ListPending(ctx, w.cfg.BatchSize, w.cfg.ProcessingTimeout)
 	if err != nil {
 		return 0, fmt.Errorf("list pending: %w", err)
 	}

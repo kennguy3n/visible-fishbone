@@ -4,11 +4,51 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
+
+// actorFromCtx returns the authenticated user's ID as a
+// *uuid.UUID for audit-actor parameters on service methods, or nil
+// when the request has no user-bound credential (e.g. API key
+// without a user mapping). Centralised here so every handler that
+// stamps an audit actor uses an identical conversion — earlier
+// revisions had a per-handler `actorPtr` duplicate which let a
+// behavioural drift slip in (e.g. one handler returning a fresh
+// zero-uuid pointer instead of nil) without compile-time
+// detection.
+func actorFromCtx(r *http.Request) *uuid.UUID {
+	u := middleware.UserIDFromContext(r.Context())
+	if u == uuid.Nil {
+		return nil
+	}
+	return &u
+}
+
+// MountTenantScoped registers a handler on mux for the given
+// `[METHOD] pattern`, automatically applying the RequireTenant
+// middleware when the pattern declares a `{tenant_id}` segment.
+// This is the single registration entry point every handler's
+// Register method uses; it guarantees no tenant-scoped route can
+// be added without picking up the tenant-isolation check.
+//
+// Why we do this per-route (instead of wrapping the entire api
+// mux): Go's http.ServeMux only populates r.PathValue after it has
+// matched the request pattern, so a wrapper around the bare mux
+// would always observe r.PathValue("tenant_id") == "" and silently
+// pass the request through. Wrapping the inner handler ensures the
+// middleware runs after pattern matching has bound the path values.
+func MountTenantScoped(mux *http.ServeMux, pattern string, h http.HandlerFunc) {
+	if strings.Contains(pattern, "{tenant_id}") {
+		mux.Handle(pattern, middleware.RequireTenant("tenant_id")(h))
+		return
+	}
+	mux.HandleFunc(pattern, h)
+}
 
 // ErrorEnvelope is the canonical structured-error response body.
 type ErrorEnvelope struct {

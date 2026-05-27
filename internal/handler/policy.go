@@ -22,10 +22,10 @@ func NewPolicyHandler(svc *policy.Service) *PolicyHandler {
 
 // Register attaches routes.
 func (h *PolicyHandler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/tenants/{tenant_id}/policy", h.getGraph)
-	mux.HandleFunc("PUT /api/v1/tenants/{tenant_id}/policy", h.putGraph)
-	mux.HandleFunc("POST /api/v1/tenants/{tenant_id}/policy/compile", h.compile)
-	mux.HandleFunc("GET /api/v1/tenants/{tenant_id}/policy/bundles/{target_type}", h.getBundle)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/policy", h.getGraph)
+	MountTenantScoped(mux, "PUT /api/v1/tenants/{tenant_id}/policy", h.putGraph)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/policy/compile", h.compile)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/policy/bundles/{target_type}", h.getBundle)
 }
 
 // PolicyGraphResponse is the JSON projection of repository.PolicyGraph.

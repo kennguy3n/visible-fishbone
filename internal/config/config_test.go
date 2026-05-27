@@ -53,6 +53,7 @@ func clearAll(t *testing.T) {
 		"CORS_ALLOWED_ORIGINS", "CORS_ALLOWED_METHODS", "CORS_ALLOWED_HEADERS", "CORS_MAX_AGE",
 		"WEBHOOK_MAX_RETRIES", "WEBHOOK_INITIAL_DELAY", "WEBHOOK_MAX_DELAY",
 		"WEBHOOK_DELIVERY_TIMEOUT", "WEBHOOK_SIGNATURE_HEADER",
+		"WEBHOOK_BATCH_SIZE", "WEBHOOK_POLL_INTERVAL", "WEBHOOK_PROCESSING_TIMEOUT",
 		"AUTH_JWT_SECRET", "AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "AUTH_ACCESS_TOKEN_TTL", "AUTH_API_KEY_HEADER",
 		"OTEL_EXPORTER_OTLP_ENDPOINT", "SERVICE_VERSION",
 	}
@@ -132,6 +133,19 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Webhook.SignatureHeader != "X-SNG-Signature" {
 		t.Errorf("Webhook.SignatureHeader = %q", cfg.Webhook.SignatureHeader)
+	}
+	// Worker-tunable defaults must match the values documented on
+	// Webhook (and consumed by the worker via the buildRouter
+	// translation in cmd/sng-control/main.go). A regression here
+	// means the strict-table default and the docstring drifted.
+	if cfg.Webhook.BatchSize != 32 {
+		t.Errorf("Webhook.BatchSize = %d, want 32", cfg.Webhook.BatchSize)
+	}
+	if cfg.Webhook.PollInterval != time.Second {
+		t.Errorf("Webhook.PollInterval = %s, want 1s", cfg.Webhook.PollInterval)
+	}
+	if cfg.Webhook.ProcessingTimeout != 5*time.Minute {
+		t.Errorf("Webhook.ProcessingTimeout = %s, want 5m", cfg.Webhook.ProcessingTimeout)
 	}
 }
 
@@ -885,6 +899,30 @@ func TestValidateRejectsZeroTimeouts(t *testing.T) {
 				t.Errorf("error should mention %s: %v", tc.want, err)
 			}
 		})
+	}
+}
+
+// TestValidateRejectsWebhookProcessingTimeoutShorterThanDelivery
+// locks in the cross-field invariant: the worker's stuck-row
+// reaper window must be strictly larger than the per-attempt HTTP
+// timeout. If the inequality is violated the reaper can steal a
+// row from a worker that's still inside its outbound HTTP call,
+// producing a duplicate webhook delivery downstream. We reject at
+// boot so the operator is forced to fix the misconfiguration
+// rather than discover it as a subscriber-side dedup bug under
+// load.
+func TestValidateRejectsWebhookProcessingTimeoutShorterThanDelivery(t *testing.T) {
+	clearAll(t)
+	withEnv(t, map[string]string{
+		"WEBHOOK_DELIVERY_TIMEOUT":   "30s",
+		"WEBHOOK_PROCESSING_TIMEOUT": "15s",
+	})
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("expected validation error when WEBHOOK_PROCESSING_TIMEOUT < WEBHOOK_DELIVERY_TIMEOUT")
+	}
+	if !strings.Contains(err.Error(), "WEBHOOK_PROCESSING_TIMEOUT") || !strings.Contains(err.Error(), "WEBHOOK_DELIVERY_TIMEOUT") {
+		t.Errorf("error should reference both knobs: %v", err)
 	}
 }
 

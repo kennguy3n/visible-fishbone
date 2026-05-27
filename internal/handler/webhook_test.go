@@ -222,6 +222,43 @@ func TestWebhookHandler_UnauthenticatedRejected(t *testing.T) {
 	}
 }
 
+// TestWebhookHandler_CrossTenantForgedPathRejected is the
+// regression test for the PR6 review finding observing that the
+// router never applied RequireTenant. A client holding a JWT for
+// tenant B could previously call /api/v1/tenants/{tenant_A}/...
+// and only be stopped by per-handler tenant filtering — and any
+// handler that forgot that filter would leak. The fix wires
+// MountTenantScoped around every /{tenant_id}/ route so the
+// middleware rejects the request at the router with 403 before
+// any handler runs.
+func TestWebhookHandler_CrossTenantForgedPathRejected(t *testing.T) {
+	t.Parallel()
+	router, _, tenantA, _, _ := newWebhookTestRouter(t)
+
+	forgedTenantBToken := mintJWT(t, "test-jwt-secret-key", uuid.New(), uuid.New())
+	// Hit tenant A's path with a tenant B JWT — must be rejected
+	// by the middleware, NOT by the handler. We assert on both
+	// the status (403 tenant_mismatch) and the error code body
+	// so a future regression where someone removes the wrapping
+	// and the handler-layer check still 404s would fail loudly.
+	rec := doJSON(t, router, http.MethodGet,
+		"/api/v1/tenants/"+tenantA.String()+"/webhooks", forgedTenantBToken, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error.Code != "tenant_mismatch" {
+		t.Errorf("error.code = %q, want tenant_mismatch (RequireTenant must reject before handler)", env.Error.Code)
+	}
+}
+
 func TestWebhookHandler_CrossTenantIsolation(t *testing.T) {
 	t.Parallel()
 	router, store, tenantA, _, tokenA := newWebhookTestRouter(t)

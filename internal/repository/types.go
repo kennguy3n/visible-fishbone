@@ -261,10 +261,21 @@ type WebhookEndpoint struct {
 type WebhookDeliveryStatus string
 
 const (
-	WebhookDeliveryStatusPending   WebhookDeliveryStatus = "pending"
-	WebhookDeliveryStatusDelivered WebhookDeliveryStatus = "delivered"
-	WebhookDeliveryStatusFailed    WebhookDeliveryStatus = "failed"
-	WebhookDeliveryStatusExhausted WebhookDeliveryStatus = "exhausted"
+	WebhookDeliveryStatusPending WebhookDeliveryStatus = "pending"
+	// WebhookDeliveryStatusProcessing is the exclusive-ownership
+	// state a delivery transitions into when a worker claims it via
+	// ListPending. While in this state no other worker will pick
+	// the row up — both via the atomic-claim UPDATE in the postgres
+	// repo and via the equivalent in-memory transition in the
+	// memory repo. On worker crash the row stays in 'processing'
+	// until ListPending's stuck-row reaper window elapses, at
+	// which point it is re-claimed by another worker. See
+	// migrations/003_webhook_processing.up.sql for the database
+	// schema rationale.
+	WebhookDeliveryStatusProcessing WebhookDeliveryStatus = "processing"
+	WebhookDeliveryStatusDelivered  WebhookDeliveryStatus = "delivered"
+	WebhookDeliveryStatusFailed     WebhookDeliveryStatus = "failed"
+	WebhookDeliveryStatusExhausted  WebhookDeliveryStatus = "exhausted"
 )
 
 // WebhookDelivery is a single delivery attempt record.

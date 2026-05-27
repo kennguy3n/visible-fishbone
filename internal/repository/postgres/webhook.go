@@ -394,44 +394,87 @@ func (r *WebhookDeliveryRepository) UpdateStatus(
 	})
 }
 
-// ListPending returns due-for-retry deliveries across all tenants
-// in NextRetryAt-ASC order. Uses `FOR UPDATE SKIP LOCKED` so
-// multiple workers can compete without blocking; competing workers
-// just skip rows already claimed.
+// ListPending atomically claims a batch of due-for-retry
+// deliveries. The implementation is a single `UPDATE ...
+// RETURNING` statement that:
 //
-// The lock is held only for the duration of the surrounding
-// transaction; the worker is expected to call UpdateStatus on each
-// row before committing, which both releases the lock and advances
-// the row's NextRetryAt past the worker's retry window.
+//  1. Selects up to `limit` rows whose status is 'pending' and
+//     whose next_retry_at is due, OR rows stuck in 'processing'
+//     whose last_attempt_at is older than `processingTimeout` ago
+//     (the stuck-row reaper window — rescues rows whose previous
+//     worker crashed between claim and UpdateStatus).
+//  2. Holds row-level locks via `FOR UPDATE SKIP LOCKED` on the
+//     inner SELECT so concurrent claim attempts skip each other's
+//     rows rather than blocking.
+//  3. Transitions the selected rows to 'processing' and stamps
+//     last_attempt_at = NOW() in the same statement. This is the
+//     critical invariant: the lock release at COMMIT no longer
+//     matters because the rows are no longer in the candidate set
+//     for any other worker — they're in 'processing', and the
+//     UPDATE's WHERE filters that out (except after the stuck-row
+//     window).
+//  4. Returns the post-update row so the caller sees
+//     status='processing' and can transition out via UpdateStatus
+//     after dispatching the HTTP request.
+//
+// The previous implementation used a bare SELECT ... FOR UPDATE
+// SKIP LOCKED and committed the transaction *before* the worker
+// processed rows, releasing the locks immediately. That made the
+// SKIP LOCKED hint cosmetic and produced duplicate deliveries
+// under concurrent workers; see migrations/003_webhook_processing
+// for the schema-level explanation.
+//
+// processingTimeout <= 0 disables the stuck-row reaper — only
+// suitable for tests where the worker is guaranteed to either
+// succeed or fail synchronously inside the same tick.
 //
 // Important: this method bypasses tenant RLS because the delivery
 // worker is a system-level component that must drain every
 // tenant's queue. RLS is restored implicitly for follow-up
-// per-delivery UpdateStatus calls which pass tenantID and thus
-// run with the appropriate sng.tenant_id GUC.
-func (r *WebhookDeliveryRepository) ListPending(ctx context.Context, limit int) ([]repository.WebhookDelivery, error) {
+// per-delivery UpdateStatus calls which pass tenantID and thus run
+// with the appropriate sng.tenant_id GUC.
+func (r *WebhookDeliveryRepository) ListPending(ctx context.Context, limit int, processingTimeout time.Duration) ([]repository.WebhookDelivery, error) {
 	if limit <= 0 {
 		limit = 32
 	}
 	var out []repository.WebhookDelivery
 	err := r.s.withSystem(ctx, func(tx pgx.Tx) error {
+		// Two cases per the candidate WHERE:
+		//   pending + due, OR processing + stuck > timeout ago.
+		// We pass processingTimeout as a numeric seconds value
+		// rather than embedding it as an interval literal so the
+		// query plan is stable regardless of value.
+		var timeoutSeconds float64
+		if processingTimeout > 0 {
+			timeoutSeconds = processingTimeout.Seconds()
+		}
 		const q = `
-			SELECT ` + webhookDeliverySelectColumns + `
-			FROM webhook_deliveries
-			WHERE status = 'pending'
-			  AND next_retry_at <= NOW()
-			ORDER BY next_retry_at ASC, id ASC
-			LIMIT $1
-			FOR UPDATE SKIP LOCKED`
-		rows, err := tx.Query(ctx, q, limit)
+			UPDATE webhook_deliveries
+			   SET status          = 'processing',
+			       last_attempt_at = NOW()
+			 WHERE id IN (
+			     SELECT id FROM webhook_deliveries
+			      WHERE (
+			            (status = 'pending' AND next_retry_at <= NOW())
+			         OR (status = 'processing'
+			             AND $2::float8 > 0
+			             AND last_attempt_at IS NOT NULL
+			             AND last_attempt_at < NOW() - make_interval(secs => $2::float8))
+			            )
+			      ORDER BY next_retry_at ASC, id ASC
+			      LIMIT $1
+			      FOR UPDATE SKIP LOCKED
+			 )
+			RETURNING ` + webhookDeliverySelectColumns
+		rows, err := tx.Query(ctx, q, limit, timeoutSeconds)
 		if err != nil {
-			return fmt.Errorf("list pending deliveries: %w", err)
+			return fmt.Errorf("claim pending deliveries: %w", err)
 		}
 		defer rows.Close()
 		for rows.Next() {
 			d, err := scanWebhookDelivery(rows)
 			if err != nil {
-				return fmt.Errorf("scan pending delivery: %w", err)
+				return fmt.Errorf("scan claimed delivery: %w", err)
 			}
 			out = append(out, d)
 		}

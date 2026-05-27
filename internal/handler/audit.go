@@ -23,7 +23,7 @@ func NewAuditHandler(svc *audit.Service) *AuditHandler {
 
 // Register attaches routes.
 func (h *AuditHandler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/tenants/{tenant_id}/audit-log", h.list)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/audit-log", h.list)
 }
 
 // AuditEntryResponse is the JSON projection of repository.AuditEntry.

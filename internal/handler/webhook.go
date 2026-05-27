@@ -4,9 +4,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
-
-	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/webhook"
 )
@@ -23,12 +20,12 @@ func NewWebhookHandler(svc *webhook.Service) *WebhookHandler {
 
 // Register attaches routes.
 func (h *WebhookHandler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/v1/tenants/{tenant_id}/webhooks", h.create)
-	mux.HandleFunc("GET /api/v1/tenants/{tenant_id}/webhooks", h.list)
-	mux.HandleFunc("GET /api/v1/tenants/{tenant_id}/webhooks/{id}", h.get)
-	mux.HandleFunc("PATCH /api/v1/tenants/{tenant_id}/webhooks/{id}", h.update)
-	mux.HandleFunc("DELETE /api/v1/tenants/{tenant_id}/webhooks/{id}", h.delete)
-	mux.HandleFunc("GET /api/v1/tenants/{tenant_id}/webhooks/{id}/deliveries", h.listDeliveries)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/webhooks", h.create)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/webhooks", h.list)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/webhooks/{id}", h.get)
+	MountTenantScoped(mux, "PATCH /api/v1/tenants/{tenant_id}/webhooks/{id}", h.update)
+	MountTenantScoped(mux, "DELETE /api/v1/tenants/{tenant_id}/webhooks/{id}", h.delete)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/webhooks/{id}/deliveries", h.listDeliveries)
 }
 
 // WebhookEndpointRequest is the JSON body for POST / PATCH.
@@ -106,7 +103,7 @@ func (h *WebhookHandler) create(w http.ResponseWriter, r *http.Request) {
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
-	actor := actorPtr(r)
+	actor := actorFromCtx(r)
 	res, err := h.svc.CreateEndpoint(r.Context(), tenantID, req.URL, req.Events, actor)
 	if err != nil {
 		WriteRepositoryError(w, err)
@@ -170,7 +167,7 @@ func (h *WebhookHandler) update(w http.ResponseWriter, r *http.Request) {
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
-	actor := actorPtr(r)
+	actor := actorFromCtx(r)
 	ep, err := h.svc.UpdateEndpoint(r.Context(), tenantID, id, req.URL, req.Events,
 		repository.WebhookEndpointStatus(req.Status), actor)
 	if err != nil {
@@ -189,7 +186,7 @@ func (h *WebhookHandler) delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	actor := actorPtr(r)
+	actor := actorFromCtx(r)
 	if err := h.svc.DeleteEndpoint(r.Context(), tenantID, id, actor); err != nil {
 		WriteRepositoryError(w, err)
 		return
@@ -224,12 +221,4 @@ func (h *WebhookHandler) listDeliveries(w http.ResponseWriter, r *http.Request) 
 		"items":       items,
 		"next_cursor": res.NextCursor,
 	})
-}
-
-func actorPtr(r *http.Request) *uuid.UUID {
-	u := middleware.UserIDFromContext(r.Context())
-	if u == uuid.Nil {
-		return nil
-	}
-	return &u
 }

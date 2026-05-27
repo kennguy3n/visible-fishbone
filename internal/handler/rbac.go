@@ -21,10 +21,10 @@ func NewRBACHandler(svc *rbac.Service) *RBACHandler {
 
 // Register attaches routes.
 func (h *RBACHandler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/tenants/{tenant_id}/roles", h.listRoles)
-	mux.HandleFunc("POST /api/v1/tenants/{tenant_id}/roles", h.createRole)
-	mux.HandleFunc("POST /api/v1/tenants/{tenant_id}/users/{user_id}/roles", h.assignRole)
-	mux.HandleFunc("DELETE /api/v1/tenants/{tenant_id}/users/{user_id}/roles/{role_id}", h.revokeRole)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/roles", h.listRoles)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/roles", h.createRole)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/users/{user_id}/roles", h.assignRole)
+	MountTenantScoped(mux, "DELETE /api/v1/tenants/{tenant_id}/users/{user_id}/roles/{role_id}", h.revokeRole)
 }
 
 // RoleResponse is the JSON projection of repository.Role.
