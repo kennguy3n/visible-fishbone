@@ -158,7 +158,57 @@ type Rule struct {
 
 	// Extra preserves unknown fields verbatim so future schema
 	// extensions don't require a migration of existing graphs.
+	// Populated by Rule.UnmarshalJSON and re-emitted with sorted
+	// keys by encodeRule so the bundle bytes are deterministic.
 	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// knownRuleFields enumerates the JSON keys consumed by the typed
+// Rule struct. Any other key on a rule object is preserved into
+// Rule.Extra by UnmarshalJSON below so the compiler does not
+// silently strip schema additions introduced after this code shipped.
+var knownRuleFields = map[string]struct{}{
+	"id":             {},
+	"domain":         {},
+	"verb":           {},
+	"subject_refs":   {},
+	"predicate_refs": {},
+	"subjects":       {},
+	"predicates":     {},
+	"targets":        {},
+	"description":    {},
+}
+
+// UnmarshalJSON decodes a rule object and routes unknown fields
+// into Extra. Defined on a pointer receiver because json.Unmarshal
+// requires it. Uses a typed alias to avoid infinite recursion into
+// this method during the typed decode pass.
+func (r *Rule) UnmarshalJSON(data []byte) error {
+	type alias Rule
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*r = Rule(a)
+	// Second pass: walk the raw object and stash anything we
+	// didn't recognise into Extra.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		// A non-object payload (e.g. a JSON null) can't carry
+		// Extra fields; the typed decode above already raised
+		// the right error for malformed objects.
+		return nil //nolint:nilerr
+	}
+	for k, v := range raw {
+		if _, known := knownRuleFields[k]; known {
+			continue
+		}
+		if r.Extra == nil {
+			r.Extra = make(map[string]json.RawMessage, len(raw))
+		}
+		r.Extra[k] = v
+	}
+	return nil
 }
 
 // ParseGraph decodes a JSON document into a Graph and validates it.
