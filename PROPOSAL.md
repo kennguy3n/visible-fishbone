@@ -3,9 +3,7 @@
 > Product positioning, competitive baseline, capability scope,
 > reference architecture, AI / data / security model, commercial
 > model, phased roadmap, and risk register for the third product in
-> the SN360 family. This is the planning equivalent of
-> [`sn360-es/internal/docs/PROPOSAL.md`](https://github.com/kennguy3n/sn360-es/blob/main/internal/docs/PROPOSAL.md)
-> for ShieldNet Defense.
+> the SN360 family. 
 
 ---
 
@@ -13,11 +11,7 @@
 
 **ShieldNet Gateway (SNG)** is a software-first, SaaS-delivered, unified
 security gateway built for small and medium enterprises. It is the
-third product in the SN360 family — joining
-[ShieldNet Access](https://github.com/kennguy3n/sn360-security-platform)
-(multi-tenant access / posture / compliance control plane) and
-[ShieldNet Defense](https://github.com/kennguy3n/sn360-es) (email
-security) — and is the SN360 footprint on the **network** layer.
+third product in the SN360 family — joining ShieldNet Access & ShieldNet Defense (include email security) — and is the SN360 footprint on the **network** layer.
 
 SNG is positioned as the **unified security operations and policy
 fabric for distributed SMEs**: one console, one typed policy model,
