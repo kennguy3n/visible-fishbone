@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -60,11 +61,35 @@ type Service struct {
 	repo   repository.PolicyRepository
 	audit  repository.AuditLogRepository
 	signer Signer
+	logger *slog.Logger
+}
+
+// ServiceOption configures New.
+type ServiceOption func(*Service)
+
+// WithLogger installs a non-default slog.Logger. Defaults to
+// slog.Default(). The logger is used today to surface the
+// legacy-graph compile-time fallback (Devin Review #3312847384):
+// when ParseGraph fails on a stored graph, Compile cannot do the
+// per-target rule transformation and forwards the verbatim rules
+// instead. That fallback is intentional for graphs written before
+// the typed schema landed, but operators need a clear signal so
+// the divergence isn't silent.
+func WithLogger(l *slog.Logger) ServiceOption {
+	return func(s *Service) {
+		if l != nil {
+			s.logger = l
+		}
+	}
 }
 
 // New returns a ready-to-use policy service.
-func New(repo repository.PolicyRepository, audit repository.AuditLogRepository, signer Signer) *Service {
-	return &Service{repo: repo, audit: audit, signer: signer}
+func New(repo repository.PolicyRepository, audit repository.AuditLogRepository, signer Signer, opts ...ServiceOption) *Service {
+	s := &Service{repo: repo, audit: audit, signer: signer, logger: slog.Default()}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // GraphInput is the JSON-serialized graph the operator submits.
@@ -212,6 +237,22 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 	var typed *Graph
 	if parsed, parseErr := ParseGraph(graph.Graph); parseErr == nil {
 		typed = &parsed
+	} else {
+		// PutGraph now validates new graphs against the typed
+		// schema, so any graph that fails ParseGraph here was
+		// written before that validation existed (or by a future
+		// schema extension this binary doesn't recognise). The
+		// fallback below produces a real bundle from the verbatim
+		// rules, but skips per-target rule slicing. Devin Review
+		// #3312847384 flagged the silent divergence — log a
+		// warning so operators see when a tenant is on the legacy
+		// path and can re-publish their graph to opt back in.
+		s.logger.Warn("policy: typed-graph parse failed at compile time; falling back to verbatim-rules path (per-target rule slicing disabled for this tenant)",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("graph_id", graph.ID.String()),
+			slog.Int("graph_version", graph.Version),
+			slog.Any("error", parseErr),
+		)
 	}
 	for _, target := range allTargets {
 		payload, err := encodeBundlePayloadFor(target, graph, typed, compiledAt)

@@ -1,10 +1,13 @@
 package policy
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -286,5 +289,96 @@ func TestService_PutGraph_AcceptsValidTypedSchema(t *testing.T) {
 		if _, err := svc.PutGraph(context.Background(), tnt.ID, nil, json.RawMessage(raw)); err != nil {
 			t.Errorf("case %d (%q): unexpected error: %v", i, raw, err)
 		}
+	}
+}
+
+// TestCompile_LogsFallbackForLegacyGraphs pins the observability
+// signal Devin Review #3312847384 asked for: when Compile encounters
+// a stored graph that doesn't pass the typed schema (PR6-era data
+// or future schema extensions this binary doesn't recognise) it must
+// still emit a real bundle (backward compat) AND log a warning so
+// operators can see which tenants are on the legacy verbatim-rules
+// path. PutGraph rejects such graphs going forward, so this branch
+// is only reachable via direct repository writes — exactly the
+// shape data written before the typed validator landed.
+func TestCompile_LogsFallbackForLegacyGraphs(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(s)
+	tnt, err := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "t", Slug: "t", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	policyRepo := memory.NewPolicyRepository(s)
+	keyRepo := memory.NewPolicySigningKeyRepository(s)
+	keys := NewKeyService(keyRepo, nil)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	svc := New(policyRepo, nil, keys, WithLogger(logger))
+
+	// Inject a graph that PutGraph would reject (invalid verb on
+	// the rule) directly via the repository so we exercise the
+	// legacy-data Compile branch.
+	legacy := json.RawMessage(`{"default_action":"deny","rules":[{"id":"r1","domain":"ztna","verb":"yeet"}]}`)
+	if _, err := policyRepo.CreateGraph(context.Background(), tnt.ID, repository.PolicyGraph{
+		Graph: legacy,
+	}); err != nil {
+		t.Fatalf("seed legacy graph: %v", err)
+	}
+
+	if _, err := svc.Compile(context.Background(), tnt.ID, nil); err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "typed-graph parse failed at compile time") {
+		t.Fatalf("expected fallback warning in log output; got:\n%s", out)
+	}
+	if !strings.Contains(out, tnt.ID.String()) {
+		t.Fatalf("expected tenant_id in log output; got:\n%s", out)
+	}
+	// Compile MUST still succeed despite the warning — the
+	// fallback emits a real bundle from the verbatim rules so
+	// existing tenants on legacy graphs keep working until they
+	// re-publish.
+	bundle, err := policyRepo.GetLatestBundle(context.Background(), tnt.ID, repository.PolicyBundleTargetEdge)
+	if err != nil {
+		t.Fatalf("get bundle: %v", err)
+	}
+	if len(bundle.Bundle) == 0 {
+		t.Fatalf("expected non-empty bundle even on fallback path")
+	}
+}
+
+// TestCompile_DoesNotLogFallbackForValidGraphs is the negative
+// counterpart: when the graph parses cleanly, no fallback warning
+// should fire. Pins that the warning is gated on the actual
+// fallback branch, not noisily emitted on every compile.
+func TestCompile_DoesNotLogFallbackForValidGraphs(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(s)
+	tnt, _ := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "t", Slug: "t", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	policyRepo := memory.NewPolicyRepository(s)
+	keyRepo := memory.NewPolicySigningKeyRepository(s)
+	keys := NewKeyService(keyRepo, nil)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	svc := New(policyRepo, nil, keys, WithLogger(logger))
+
+	raw := json.RawMessage(`{"default_action":"deny","rules":[{"id":"r1","domain":"ztna","verb":"allow"}]}`)
+	if _, err := svc.PutGraph(context.Background(), tnt.ID, nil, raw); err != nil {
+		t.Fatalf("put graph: %v", err)
+	}
+	if _, err := svc.Compile(context.Background(), tnt.ID, nil); err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if strings.Contains(buf.String(), "typed-graph parse failed") {
+		t.Fatalf("did not expect fallback warning for valid graph; got:\n%s", buf.String())
 	}
 }

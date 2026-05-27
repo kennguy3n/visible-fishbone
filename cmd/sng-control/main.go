@@ -198,7 +198,7 @@ func buildRouter(
 	// policy service is unchanged. PR8 will plug a KMS-backed
 	// PrivateKeyWrapper in via policy.WithKeyWrapper.
 	policyKeySvc := policy.NewKeyService(policyKeyRepo, auditRepo)
-	policySvc := policy.New(policyRepo, auditRepo, policyKeySvc)
+	policySvc := policy.New(policyRepo, auditRepo, policyKeySvc, policy.WithLogger(logger))
 	webhookSvc := webhook.New(webhookEndpointRepo, webhookDeliveryRepo, auditRepo, logger)
 
 	// Translate the operator-facing config.Webhook knobs into the
