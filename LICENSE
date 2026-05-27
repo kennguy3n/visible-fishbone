@@ -1,0 +1,81 @@
+ShieldNet Gateway — Proprietary License
+=======================================
+
+Copyright (c) 2026 SN360 Inc. All rights reserved.
+
+1. Proprietary and Confidential
+-------------------------------
+
+ShieldNet Gateway (SNG), including all source code, documentation,
+configuration files, build scripts, container images, virtual
+appliance images, endpoint installers, policy bundles, and any other
+materials contained in this repository (collectively, the "Software"),
+is proprietary and confidential to SN360 and its licensors.
+
+The Software is made available solely to authorized licensees of SN360
+and may be used only in accordance with a separate written license
+agreement between the licensee and SN360 (the "License Agreement"). In
+the absence of a License Agreement, no rights are granted to any party
+to use, copy, modify, distribute, display, perform, sublicense, or
+create derivative works of the Software.
+
+2. Restrictions
+---------------
+
+Without the prior written consent of SN360, no person or entity may:
+
+  (a) reproduce, modify, adapt, translate, or create derivative works
+      based on the Software, in whole or in part;
+  (b) distribute, sell, rent, lease, sublicense, assign, or otherwise
+      transfer the Software, in whole or in part, to any third party;
+  (c) reverse engineer, disassemble, decompile, or otherwise attempt
+      to derive the source code of any binary components of the
+      Software, except to the extent such activity is expressly
+      permitted by applicable law notwithstanding this restriction;
+  (d) remove, alter, or obscure any proprietary notices (including
+      copyright and trademark notices) contained in or affixed to the
+      Software; or
+  (e) use the Software for any purpose not expressly permitted by a
+      License Agreement or by SN360 in writing.
+
+3. Third-Party Open-Source Components
+-------------------------------------
+
+The Software is designed to be deployed alongside, and to interoperate
+with, third-party open-source components including (but not limited
+to) Suricata, Envoy, NATS, PostgreSQL, ClickHouse, and recursive DNS
+resolver software. Those components are not part of the Software, are
+not owned by SN360, and are governed by their own respective licenses.
+
+A list of the material third-party open-source components used in
+connection with the Software, together with their respective licenses,
+will be maintained in the file `THIRD_PARTY_LICENSES.md` in the root
+of this repository once the first source crates land (see
+[`PROGRESS.md`](./PROGRESS.md) Phase 1). Nothing in this license is
+intended to, or does, alter, restrict, or supersede the terms of any
+third-party open-source license applicable to those components.
+
+4. No Warranty
+--------------
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+IN NO EVENT SHALL SN360 OR ITS LICENSORS BE LIABLE FOR ANY CLAIM,
+DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR
+OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR
+THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+5. Termination
+--------------
+
+Any rights granted under a License Agreement terminate automatically
+upon any breach of that agreement or of this license. Upon termination,
+the licensee shall cease all use of the Software and destroy all copies
+of the Software in its possession or control.
+
+6. Contact
+----------
+
+For licensing inquiries, please contact SN360 through the project
+repository at https://github.com/kennguy3n/visible-fishbone.
