@@ -223,7 +223,12 @@ func (s *Service) Start(ctx context.Context) error {
 		return nil
 	}
 
-	stream := s.cfg.StreamPrefix + "_" + sngnats.StreamSuffixTelemetry
+	// Use the canonical StreamName helper so the prefix
+	// normalisation (TrimSpace, empty-default) matches
+	// EnsureStreams. Without this a NATS_STREAM_PREFIX with
+	// leading/trailing whitespace would lookup `"SNG _TELEMETRY"`
+	// while EnsureStreams created `"SNG_TELEMETRY"`.
+	stream := sngnats.StreamName(s.cfg.StreamPrefix, sngnats.StreamSuffixTelemetry)
 	cons, err := sngnats.EnsureConsumer(ctx, s.js, sngnats.ConsumerSpec{
 		Stream:        stream,
 		Durable:       s.cfg.Durable,

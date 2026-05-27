@@ -58,8 +58,8 @@ type StreamSpec struct {
 	Description string
 }
 
-// streamName returns the prefixed stream name, e.g. "SNG_TELEMETRY".
-func streamName(prefix, suffix string) string {
+// StreamName returns the prefixed stream name, e.g. "SNG_TELEMETRY".
+func StreamName(prefix, suffix string) string {
 	p := strings.TrimSpace(prefix)
 	if p == "" {
 		p = "SNG"
@@ -98,7 +98,7 @@ func DefaultStreams(cfg *config.NATS) []StreamSpec {
 	}
 	return []StreamSpec{
 		{
-			Name:        streamName(cfg.StreamPrefix, StreamSuffixTelemetry),
+			Name:        StreamName(cfg.StreamPrefix, StreamSuffixTelemetry),
 			Subjects:    []string{"sng.*.telemetry.>"},
 			Retention:   jetstream.LimitsPolicy,
 			Storage:     storage,
@@ -110,7 +110,7 @@ func DefaultStreams(cfg *config.NATS) []StreamSpec {
 			Description: "SNG control plane: per-tenant telemetry events",
 		},
 		{
-			Name:        streamName(cfg.StreamPrefix, StreamSuffixPolicy),
+			Name:        StreamName(cfg.StreamPrefix, StreamSuffixPolicy),
 			Subjects:    []string{"sng.*.policy.>"},
 			Retention:   jetstream.LimitsPolicy,
 			Storage:     storage,
@@ -121,7 +121,7 @@ func DefaultStreams(cfg *config.NATS) []StreamSpec {
 			Description: "SNG control plane: policy graph + bundle change notifications",
 		},
 		{
-			Name:        streamName(cfg.StreamPrefix, StreamSuffixEvents),
+			Name:        StreamName(cfg.StreamPrefix, StreamSuffixEvents),
 			Subjects:    []string{"sng.*.events.>"},
 			Retention:   jetstream.WorkQueuePolicy,
 			Storage:     storage,
@@ -132,7 +132,7 @@ func DefaultStreams(cfg *config.NATS) []StreamSpec {
 			Description: "SNG control plane: tenant/site/device lifecycle events",
 		},
 		{
-			Name:        streamName(cfg.StreamPrefix, StreamSuffixDLQ),
+			Name:        StreamName(cfg.StreamPrefix, StreamSuffixDLQ),
 			Subjects:    []string{"sngdlq.>"},
 			Retention:   jetstream.LimitsPolicy,
 			Storage:     storage,

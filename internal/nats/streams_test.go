@@ -71,6 +71,31 @@ func TestDefaultStreams_DefaultPrefix(t *testing.T) {
 	}
 }
 
+// TestStreamName_WhitespaceTrim guards the regression where a
+// NATS_STREAM_PREFIX with leading/trailing whitespace (e.g. from a
+// YAML ConfigMap) would split the stream identity between
+// EnsureStreams (which trimmed) and downstream consumers (which
+// didn't). Now that telemetry.Service.Start() routes through this
+// helper, both sides agree on the trimmed name.
+func TestStreamName_WhitespaceTrim(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in, want string
+	}{
+		{" SNG ", "SNG_TELEMETRY"},
+		{"\tACME\n", "ACME_TELEMETRY"},
+		{"", "SNG_TELEMETRY"},
+		{"   ", "SNG_TELEMETRY"},
+		{"SNG", "SNG_TELEMETRY"},
+	}
+	for _, c := range cases {
+		got := sngnats.StreamName(c.in, sngnats.StreamSuffixTelemetry)
+		if got != c.want {
+			t.Errorf("StreamName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestEnsureStreams_Idempotent(t *testing.T) {
 	t.Parallel()
 	_, js := startEmbeddedNATS(t)
