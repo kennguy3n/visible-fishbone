@@ -198,7 +198,7 @@ func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor *uuid.UU
 		return CreateResult{}, err
 	}
 
-	s.appendAuditAsync(ctx, tenantID, actor, "apikey.create", stored.ID, map[string]any{
+	s.appendAudit(ctx, tenantID, actor, "apikey.create", stored.ID, map[string]any{
 		"name":    stored.Name,
 		"subject": stored.Subject,
 	})
@@ -218,7 +218,7 @@ func (s *Service) Revoke(ctx context.Context, tenantID uuid.UUID, id uuid.UUID, 
 	if err != nil {
 		return repository.TenantAPIKey{}, err
 	}
-	s.appendAuditAsync(ctx, tenantID, actor, "apikey.revoke", out.ID, map[string]any{
+	s.appendAudit(ctx, tenantID, actor, "apikey.revoke", out.ID, map[string]any{
 		"name":    out.Name,
 		"subject": out.Subject,
 	})
@@ -326,7 +326,12 @@ func hashKey(key string) ([]byte, bool) {
 	return sum[:], true
 }
 
-func (s *Service) appendAuditAsync(ctx context.Context, tenantID uuid.UUID, actor *uuid.UUID, action string, resourceID uuid.UUID, details map[string]any) {
+// appendAudit synchronously persists an audit entry. Runs inline
+// with the primary operation so audit gaps are bounded by request
+// duration, not by goroutine scheduling. Errors are logged and
+// swallowed — audit failures must never block the user-visible
+// outcome (consistent with tenant/site/identity/rbac services).
+func (s *Service) appendAudit(ctx context.Context, tenantID uuid.UUID, actor *uuid.UUID, action string, resourceID uuid.UUID, details map[string]any) {
 	if s.audit == nil {
 		return
 	}

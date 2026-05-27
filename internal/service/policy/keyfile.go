@@ -61,15 +61,48 @@ func parsePrivateKey(body []byte) (ed25519.PrivateKey, error) {
 		return priv, nil
 	}
 
-	// Hex path.
+	// Hex path. We require the trimmed content to be exclusively
+	// hex digits AND of length 64 or 128 so that operator typos
+	// (a base64-encoded key, a missing trailing newline making
+	// the file 63 chars, etc.) fail loudly rather than producing
+	// a wrong-looking key. Note that a 32-byte OR 64-byte raw
+	// private key whose every byte coincidentally falls in the
+	// ASCII hex range remains indistinguishable from a hex
+	// literal under this format — the on-disk format simply has
+	// no marker. The astronomical likelihood of that collision
+	// (2^-128 for 32 bytes) makes it not worth defending against
+	// without a magic-byte framing change; operators who want
+	// hard certainty should use the PEM path.
 	trimmed := strings.TrimSpace(string(body))
-	if h, err := hex.DecodeString(trimmed); err == nil {
+	if looksLikeHex(trimmed) {
+		h, err := hex.DecodeString(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("policy: hex-decode signing key: %w", err)
+		}
 		return fromSeedOrPrivate(h)
 	}
 
 	// Raw bytes path (no whitespace trimming — the file is
 	// expected to be exactly 32 or 64 bytes).
 	return fromSeedOrPrivate(body)
+}
+
+// looksLikeHex returns true iff s is a hex literal of exactly the
+// length we expect for an Ed25519 seed (64 chars) or full private
+// key (128 chars). Anything else falls through to the raw-bytes
+// path so we don't accidentally truncate a 64-byte raw key whose
+// bytes happen to fall in the [0-9a-f] range.
+func looksLikeHex(s string) bool {
+	if len(s) != 64 && len(s) != 128 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func fromSeedOrPrivate(b []byte) (ed25519.PrivateKey, error) {
