@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sng-postgres
+    environment:
+      POSTGRES_USER: sng
+      POSTGRES_PASSWORD: sng
+      POSTGRES_DB: sng
+    # Bind to the loopback interface so the dev stack is not
+    # accessible from other machines on the LAN. Operators who need
+    # remote access should change this explicitly and add auth.
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - sng-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sng -d sng"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: sng-nats
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+    ports:
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
+    volumes:
+      - sng-nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  sng-postgres-data:
+  sng-nats-data:

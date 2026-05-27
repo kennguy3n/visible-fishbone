@@ -1,0 +1,98 @@
+# golangci-lint configuration for the SNG control plane.
+#
+# Written against the golangci-lint v2 schema (v2.5.x). Mirrors the
+# sn360-es .golangci.yml so engineers moving between the two
+# code bases see the same enforced standards.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - staticcheck
+    - gosec
+    - govet
+    - ineffassign
+    - unused
+    - gocritic
+    - misspell
+    - revive
+    - bodyclose
+    - noctx
+  settings:
+    errcheck:
+      # Suppress only the canonical Close / Fprintf-to-stdio idioms
+      # where checking the error has no actionable outcome. Every
+      # other unchecked error must be handled.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*github.com/jackc/pgx/v5.Rows).Close
+        - (net.Conn).Close
+        - fmt.Fprintf(os.Stdout)
+        - fmt.Fprintf(os.Stderr)
+        - fmt.Fprintln(os.Stdout)
+        - fmt.Fprintln(os.Stderr)
+        - fmt.Fprint(os.Stdout)
+        - fmt.Fprint(os.Stderr)
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: var-declaration
+        - name: var-naming
+    gosec:
+      excludes:
+        # G115 (integer overflow conversion) fires on dozens of safe
+        # int -> int32/uint conversions for pool sizes, timestamps,
+        # and counter widening. Inputs to those paths are operator-
+        # supplied and bounds-checked elsewhere.
+        - G115
+        # G304 (file inclusion via variable) is the wrong tool for
+        # this codebase: the only callers are config loaders /
+        # migration runners that read operator-supplied paths by
+        # design.
+        - G304
+  exclusions:
+    presets: []
+    rules:
+      - path: _test\.go$
+        linters:
+          - gosec
+          - errcheck
+          - bodyclose
+          - noctx
+      - path: _test\.go$
+        text: unused-parameter
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/kennguy3n/visible-fishbone
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
