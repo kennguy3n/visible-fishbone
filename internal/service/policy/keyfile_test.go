@@ -152,3 +152,50 @@ func TestKeySigner_PrepareSigner_OneCallSignsManyTargets(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadKeySignerFromFile_RawBytesWithNonHexByte(t *testing.T) {
+	t.Parallel()
+	// A 64-byte raw private key that contains at least one byte
+	// outside the ASCII hex range — looksLikeHex must reject it
+	// and the raw-bytes path must accept all 64 bytes verbatim.
+	raw := make([]byte, 64)
+	for i := range raw {
+		raw[i] = 0x80 | byte(i)
+	}
+	dir := t.TempDir()
+	p := writeFile(t, dir, "raw64", raw, 0o600)
+	ks, err := LoadKeySignerFromFile(p)
+	if err != nil {
+		t.Fatalf("LoadKeySignerFromFile: %v", err)
+	}
+	got := []byte(ks.priv)
+	if len(got) != ed25519.PrivateKeySize {
+		t.Fatalf("expected 64-byte raw private key, got %d bytes", len(got))
+	}
+	for i := range raw {
+		if got[i] != raw[i] {
+			t.Fatalf("byte %d mismatch: got 0x%02x want 0x%02x (loader reinterpreted as hex?)", i, got[i], raw[i])
+		}
+	}
+}
+
+func TestLooksLikeHex(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		s    string
+		want bool
+	}{
+		{"", false},
+		{"deadbeef", false},
+		{string(make([]byte, 64)), false},
+		{"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", true},
+		{"00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF", true},
+		{"00112233445566778899aabbccddeeff00112233445566778899aabbccddeegg", false},
+	}
+	for _, c := range cases {
+		got := looksLikeHex(c.s)
+		if got != c.want {
+			t.Errorf("looksLikeHex(%q) = %v, want %v", c.s, got, c.want)
+		}
+	}
+}

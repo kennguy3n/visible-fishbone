@@ -101,10 +101,11 @@ func (h *APIKeyHandler) create(w http.ResponseWriter, r *http.Request) {
 		Subject: req.Subject,
 	}
 	if req.ExpiresAt != "" {
+		// time.RFC3339Nano accepts both fractional and non-fractional
+		// RFC3339 timestamps — the `.999999999` is an optional
+		// fractional indicator in Go's format syntax, so a plain
+		// `2026-01-01T00:00:00Z` parses fine.
 		t, err := time.Parse(time.RFC3339Nano, req.ExpiresAt)
-		if err != nil {
-			t, err = time.Parse(time.RFC3339, req.ExpiresAt)
-		}
 		if err != nil {
 			WriteError(w, http.StatusBadRequest, "invalid_expires_at", "expires_at must be RFC3339")
 			return
