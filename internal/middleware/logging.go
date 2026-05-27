@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // statusRecorder wraps http.ResponseWriter to record the final
@@ -31,6 +33,18 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 
 // Logging emits a structured access log for every request, including
 // method, path, status, latency, request id, tenant id, and user id.
+//
+// Identity attributes (tenant_id, user_id) are populated by inner
+// middleware (Auth, RequireTenant) *after* this middleware calls
+// next. Because http.Request contexts are immutable, the inner
+// middleware can't update the outer closure's r.Context() directly
+// — instead, this middleware installs a pointer-to-RequestMeta into
+// the context before calling next, and the inner middleware writes
+// the resolved identity into that struct in addition to stamping
+// the per-request context values.
+//
+// See RequestMeta's doc comment for the rationale and concurrency
+// model.
 func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
@@ -39,6 +53,8 @@ func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			rec := &statusRecorder{ResponseWriter: w}
+			meta := &RequestMeta{}
+			r = r.WithContext(withRequestMeta(r.Context(), meta))
 			next.ServeHTTP(rec, r)
 			attrs := []any{
 				slog.String("method", r.Method),
@@ -49,10 +65,10 @@ func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 				slog.String("request_id", RequestIDFromContext(r.Context())),
 				slog.String("remote", r.RemoteAddr),
 			}
-			if tid := TenantIDFromContext(r.Context()); tid.String() != "00000000-0000-0000-0000-000000000000" {
+			if tid := meta.TenantID(); tid != uuid.Nil {
 				attrs = append(attrs, slog.String("tenant_id", tid.String()))
 			}
-			if uid := UserIDFromContext(r.Context()); uid.String() != "00000000-0000-0000-0000-000000000000" {
+			if uid := meta.UserID(); uid != uuid.Nil {
 				attrs = append(attrs, slog.String("user_id", uid.String()))
 			}
 			logger.Info("http: request", attrs...)

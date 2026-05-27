@@ -316,6 +316,89 @@ func TestRequireTenant_Match(t *testing.T) {
 	}
 }
 
+// TestLogging_CapturesIdentityResolvedByInnerMiddleware is the
+// regression test for Devin Review Finding (round 3): the Logging
+// middleware previously read tenant_id/user_id from the outer
+// closure's r.Context(), which is the ORIGINAL request — Auth's
+// r.WithContext() update is only visible to inner handlers, not
+// to the outer Logging closure. So the access log always observed
+// uuid.Nil even for authenticated requests.
+//
+// The fix installs a pointer-to-RequestMeta into the outer ctx
+// before next.ServeHTTP; Auth populates the struct in addition to
+// stamping new context values. This test wires the real Logging +
+// Auth stack and asserts the captured log line contains the
+// resolved IDs.
+func TestLogging_CapturesIdentityResolvedByInnerMiddleware(t *testing.T) {
+	t.Parallel()
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	tid := uuid.New()
+	keys := stubAPIKeys{info: middleware.APIKeyInfo{ID: "k-log", TenantID: tid, Subject: "ci-bot"}}
+	cfg := &config.Auth{APIKeyHeader: "X-SNG-API-Key"}
+
+	h := middleware.Logging(logger)(
+		middleware.Auth(cfg, keys)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})))
+
+	req := httptest.NewRequest(http.MethodGet, "/secure", nil)
+	req.Header.Set("X-SNG-API-Key", "secret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("tenant_id="+tid.String())) {
+		t.Errorf("log missing tenant_id %s, got: %s", tid, buf.String())
+	}
+}
+
+// TestLogging_CapturesUserIDFromJWT verifies the JWT path also
+// late-binds user_id onto the access log.
+func TestLogging_CapturesUserIDFromJWT(t *testing.T) {
+	t.Parallel()
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	secret := []byte("supersecret")
+	uid := uuid.New()
+	tid := uuid.New()
+	claims := jwt.MapClaims{
+		"iss":       "sng-control",
+		"aud":       "sng-control",
+		"sub":       uid.String(),
+		"tenant_id": tid.String(),
+		"exp":       time.Now().Add(time.Hour).Unix(),
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := tok.SignedString(secret)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	cfg := &config.Auth{JWTSecret: string(secret), JWTIssuer: "sng-control", JWTAudience: "sng-control"}
+	h := middleware.Logging(logger)(
+		middleware.Auth(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})))
+
+	req := httptest.NewRequest(http.MethodGet, "/secure", nil)
+	req.Header.Set("Authorization", "Bearer "+signed)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("user_id="+uid.String())) {
+		t.Errorf("log missing user_id %s, got: %s", uid, buf.String())
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("tenant_id="+tid.String())) {
+		t.Errorf("log missing tenant_id %s, got: %s", tid, buf.String())
+	}
+}
+
 func TestRequireTenant_Mismatch(t *testing.T) {
 	t.Parallel()
 	pathTenant := uuid.New()

@@ -51,7 +51,7 @@ func clearAll(t *testing.T) {
 		"RATE_LIMIT_ENABLED", "RATE_LIMIT_RATE", "RATE_LIMIT_BURST",
 		"RATE_LIMIT_CLEANUP_INTERVAL", "RATE_LIMIT_IDLE_TTL", "RATE_LIMIT_TRUSTED_PROXIES",
 		"CORS_ALLOWED_ORIGINS", "CORS_ALLOWED_METHODS", "CORS_ALLOWED_HEADERS", "CORS_MAX_AGE",
-		"WEBHOOK_MAX_ATTEMPTS", "WEBHOOK_INITIAL_DELAY", "WEBHOOK_MAX_DELAY",
+		"WEBHOOK_MAX_ATTEMPTS", "WEBHOOK_MAX_RETRIES", "WEBHOOK_INITIAL_DELAY", "WEBHOOK_MAX_DELAY",
 		"WEBHOOK_DELIVERY_TIMEOUT", "WEBHOOK_SIGNATURE_HEADER",
 		"WEBHOOK_BATCH_SIZE", "WEBHOOK_POLL_INTERVAL", "WEBHOOK_PROCESSING_TIMEOUT",
 		"AUTH_JWT_SECRET", "AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "AUTH_ACCESS_TOKEN_TTL", "AUTH_CLAIM_TOKEN_TTL", "AUTH_API_KEY_HEADER",
@@ -695,6 +695,34 @@ func TestStrictNumericRejectsTypo(t *testing.T) {
 				t.Fatalf("error %q should mention %s", err.Error(), c.key)
 			}
 		})
+	}
+}
+
+// TestLoad_RejectsRetiredWebhookMaxRetries — when an operator
+// upgrades the binary while leaving `WEBHOOK_MAX_RETRIES=N` in
+// their environment, Load() must refuse to boot with a clear
+// message rather than silently falling back to the
+// `WEBHOOK_MAX_ATTEMPTS` default (which has different semantics —
+// "N retries on top of the first" vs "N total deliveries").
+// Forcing the operator to ack the rename prevents a stealth
+// behavioural change at upgrade time.
+func TestLoad_RejectsRetiredWebhookMaxRetries(t *testing.T) {
+	clearAll(t)
+	tmp := t.TempDir()
+	wd, _ := os.Getwd()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	t.Setenv("WEBHOOK_MAX_RETRIES", "6")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() succeeded with retired WEBHOOK_MAX_RETRIES set; want error")
+	}
+	if !strings.Contains(err.Error(), "WEBHOOK_MAX_RETRIES") ||
+		!strings.Contains(err.Error(), "WEBHOOK_MAX_ATTEMPTS") {
+		t.Errorf("error %q does not name both the retired and replacement variables", err)
 	}
 }
 
