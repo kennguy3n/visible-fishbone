@@ -126,6 +126,22 @@ func (r *ClaimTokenRepository) Redeem(ctx context.Context, tenantID uuid.UUID, h
 	return out, err
 }
 
+func (r *ClaimTokenRepository) UnredeemByHash(ctx context.Context, tenantID uuid.UUID, hash []byte) error {
+	return r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE claim_tokens SET redeemed_at = NULL WHERE token_hash = $1`,
+			hash,
+		)
+		if err != nil {
+			return fmt.Errorf("unredeem claim token: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return repository.ErrNotFound
+		}
+		return nil
+	})
+}
+
 func (r *ClaimTokenRepository) GetByHash(ctx context.Context, tenantID uuid.UUID, hash []byte) (repository.ClaimToken, error) {
 	var out repository.ClaimToken
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {

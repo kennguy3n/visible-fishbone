@@ -28,6 +28,7 @@ func newSvc(t *testing.T) (*identity.Service, *memory.Store, uuid.UUID) {
 		memory.NewDeviceRepository(s),
 		memory.NewClaimTokenRepository(s),
 		memory.NewAuditLogRepository(s),
+		nil,
 	)
 	return svc, s, tn.ID
 }
@@ -105,6 +106,62 @@ func TestRedeem_UnknownToken(t *testing.T) {
 		"d1", repository.DevicePlatformWindows, "pk", repository.Posture{})
 	if !errors.Is(err, repository.ErrNotFound) && !errors.Is(err, repository.ErrForbidden) {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// failingDeviceRepo wraps a real DeviceRepository but fails Create
+// on the first call. Used to test the UnredeemByHash compensating
+// action when device creation fails after token redemption.
+type failingDeviceRepo struct {
+	repository.DeviceRepository
+	failNext bool
+}
+
+func (f *failingDeviceRepo) Create(ctx context.Context, tenantID uuid.UUID, d repository.Device) (repository.Device, error) {
+	if f.failNext {
+		f.failNext = false
+		return repository.Device{}, errors.New("simulated device create failure")
+	}
+	return f.DeviceRepository.Create(ctx, tenantID, d)
+}
+
+func TestRedeemClaimToken_UnredeemsOnDeviceCreateFailure(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tn, err := memory.NewTenantRepository(s).Create(context.Background(), repository.Tenant{
+		Name: "T", Slug: "t", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	realDeviceRepo := memory.NewDeviceRepository(s)
+	failRepo := &failingDeviceRepo{DeviceRepository: realDeviceRepo, failNext: true}
+	svc := identity.New(failRepo, memory.NewClaimTokenRepository(s), memory.NewAuditLogRepository(s), nil)
+	ctx := context.Background()
+
+	// Generate a claim token.
+	res, err := svc.GenerateClaimToken(ctx, tn.ID, time.Hour, nil)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	// First attempt — device creation fails; token should be
+	// un-redeemed so it can be retried.
+	_, err = svc.RedeemClaimToken(ctx, tn.ID, res.Plaintext, "d1",
+		repository.DevicePlatformLinux, "pk1", repository.Posture{})
+	if err == nil {
+		t.Fatal("expected device create failure, got nil")
+	}
+
+	// Verify the token is reusable: a second redeem with the same
+	// plaintext should succeed now that failNext is cleared.
+	dev, err := svc.RedeemClaimToken(ctx, tn.ID, res.Plaintext, "d1",
+		repository.DevicePlatformLinux, "pk1", repository.Posture{})
+	if err != nil {
+		t.Fatalf("second redeem should succeed after un-redeem; got %v", err)
+	}
+	if dev.Name != "d1" {
+		t.Errorf("device name = %q", dev.Name)
 	}
 }
 

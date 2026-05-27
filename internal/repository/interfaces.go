@@ -159,6 +159,12 @@ type RoleRepository interface {
 type ClaimTokenRepository interface {
 	Create(ctx context.Context, tenantID uuid.UUID, t ClaimToken) (ClaimToken, error)
 	Redeem(ctx context.Context, tenantID uuid.UUID, hash []byte, now time.Time) (ClaimToken, error)
+	// UnredeemByHash clears RedeemedAt on a token identified by
+	// its hash. This is a compensating action: if the service
+	// redeems a token but a subsequent step (e.g. device creation)
+	// fails, the token can be restored so it is reusable on retry.
+	// Returns ErrNotFound if no token with the hash exists.
+	UnredeemByHash(ctx context.Context, tenantID uuid.UUID, hash []byte) error
 	GetByHash(ctx context.Context, tenantID uuid.UUID, hash []byte) (ClaimToken, error)
 }
 

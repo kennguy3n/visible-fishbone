@@ -2,63 +2,44 @@
 // lifecycle management. It orchestrates the TenantRepository (CRUD)
 // and the AuditLogRepository (every mutation is audit-logged).
 //
-// Slug derivation mirrors sn360-security-platform/services/
-// tenant-controller's DeriveSlug: lowercase, collapse non-alnum
-// runs into single hyphens, trim leading/trailing hyphens, cap at
-// 63 bytes (DNS-label compat).
+// Slug derivation is delegated to the shared internal/slug package
+// that mirrors sn360-security-platform's DeriveSlug convention.
 package tenant
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
-	"strings"
+	"log/slog"
 
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/slug"
 )
-
-// slugAlnumRun matches runs of non-lowercase-alphanumeric chars.
-var slugAlnumRun = regexp.MustCompile(`[^a-z0-9]+`)
-
-// slugFormat validates a caller-supplied slug (DNS-label-safe).
-var slugFormat = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-
-const slugMaxLen = 63
 
 // Service implements tenant lifecycle operations.
 type Service struct {
 	tenants repository.TenantRepository
 	audit   repository.AuditLogRepository
+	logger  *slog.Logger
 }
 
 // New returns a ready-to-use tenant service.
-func New(tenants repository.TenantRepository, audit repository.AuditLogRepository) *Service {
-	return &Service{tenants: tenants, audit: audit}
+func New(tenants repository.TenantRepository, audit repository.AuditLogRepository, logger *slog.Logger) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{tenants: tenants, audit: audit, logger: logger}
 }
 
 // DeriveSlug projects a free-form name into a URL-safe slug.
-// Mirrors sn360-security-platform DeriveSlug (lowercase, collapse
-// non-alnum runs to hyphens, trim, cap at 63 bytes).
-func DeriveSlug(name string) string {
-	s := strings.Trim(slugAlnumRun.ReplaceAllString(strings.ToLower(name), "-"), "-")
-	if len(s) > slugMaxLen {
-		s = strings.TrimRight(s[:slugMaxLen], "-")
-	}
-	return s
-}
+// Thin wrapper around slug.Derive for backwards compatibility.
+func DeriveSlug(name string) string { return slug.Derive(name) }
 
-// IsValidSlug reports whether s is a well-formed slug: 1–63 bytes,
-// lowercase alphanumeric + hyphens, no leading/trailing/consecutive
-// hyphens.
-func IsValidSlug(s string) bool {
-	if s == "" || len(s) > slugMaxLen || strings.Contains(s, "--") {
-		return false
-	}
-	return slugFormat.MatchString(s)
-}
+// IsValidSlug reports whether s is a well-formed slug.
+// Thin wrapper around slug.IsValid for backwards compatibility.
+func IsValidSlug(s string) bool { return slug.IsValid(s) }
 
 // Create provisions a new tenant. If the caller omits a slug, one is
 // derived from the name. Status is forced to "active" regardless of
@@ -71,12 +52,12 @@ func (svc *Service) Create(ctx context.Context, t repository.Tenant) (repository
 		t.Tier = repository.TenantTierStarter
 	}
 	if t.Slug == "" {
-		t.Slug = DeriveSlug(t.Name)
+		t.Slug = slug.Derive(t.Name)
 		if t.Slug == "" {
 			t.Slug = "tenant-" + uuid.NewString()[:8]
 		}
 	}
-	if !IsValidSlug(t.Slug) {
+	if !slug.IsValid(t.Slug) {
 		return repository.Tenant{}, fmt.Errorf("invalid slug %q: %w", t.Slug, repository.ErrInvalidArgument)
 	}
 	t.Status = repository.TenantStatusActive
@@ -85,7 +66,7 @@ func (svc *Service) Create(ctx context.Context, t repository.Tenant) (repository
 	if err != nil {
 		return repository.Tenant{}, err
 	}
-	_ = svc.appendAudit(ctx, created.ID, nil, "tenant.created", "tenant", &created.ID, nil)
+	svc.logAuditErr(svc.appendAudit(ctx, created.ID, nil, "tenant.created", "tenant", &created.ID, nil))
 	return created, nil
 }
 
@@ -115,26 +96,47 @@ func (svc *Service) Update(ctx context.Context, t repository.Tenant) (repository
 	if err != nil {
 		return repository.Tenant{}, err
 	}
-	_ = svc.appendAudit(ctx, updated.ID, nil, "tenant.updated", "tenant", &updated.ID, nil)
+	svc.logAuditErr(svc.appendAudit(ctx, updated.ID, nil, "tenant.updated", "tenant", &updated.ID, nil))
 	return updated, nil
 }
 
-// Suspend transitions a tenant from active to suspended.
+// Suspend transitions a tenant from active to suspended. Only
+// active tenants may be suspended; attempting to suspend a deleted
+// or already-suspended tenant returns ErrForbidden.
 func (svc *Service) Suspend(ctx context.Context, id uuid.UUID) (repository.Tenant, error) {
+	current, err := svc.tenants.Get(ctx, id)
+	if err != nil {
+		return repository.Tenant{}, err
+	}
+	if current.Status != repository.TenantStatusActive {
+		return repository.Tenant{}, fmt.Errorf(
+			"cannot suspend tenant with status %q (must be %q): %w",
+			current.Status, repository.TenantStatusActive, repository.ErrForbidden,
+		)
+	}
 	updated, err := svc.tenants.UpdateStatus(ctx, id, repository.TenantStatusSuspended)
 	if err != nil {
 		return repository.Tenant{}, err
 	}
-	_ = svc.appendAudit(ctx, id, nil, "tenant.suspended", "tenant", &id, nil)
+	svc.logAuditErr(svc.appendAudit(ctx, id, nil, "tenant.suspended", "tenant", &id, nil))
 	return updated, nil
 }
 
-// Delete soft-deletes a tenant (status → deleted, deleted_at set).
+// Delete soft-deletes a tenant (status -> deleted, deleted_at set).
+// A tenant that is already deleted returns ErrForbidden to prevent
+// re-deletion or un-deletion via status change.
 func (svc *Service) Delete(ctx context.Context, id uuid.UUID) error {
+	current, err := svc.tenants.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if current.Status == repository.TenantStatusDeleted {
+		return fmt.Errorf("tenant already deleted: %w", repository.ErrForbidden)
+	}
 	if err := svc.tenants.Delete(ctx, id); err != nil {
 		return err
 	}
-	_ = svc.appendAudit(ctx, id, nil, "tenant.deleted", "tenant", &id, nil)
+	svc.logAuditErr(svc.appendAudit(ctx, id, nil, "tenant.deleted", "tenant", &id, nil))
 	return nil
 }
 
@@ -157,4 +159,10 @@ func (svc *Service) appendAudit(
 		Details:      details,
 	})
 	return err
+}
+
+func (svc *Service) logAuditErr(err error) {
+	if err != nil {
+		svc.logger.Warn("tenant: audit append failed", slog.Any("error", err))
+	}
 }

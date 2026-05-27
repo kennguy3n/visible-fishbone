@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,6 +39,7 @@ type Service struct {
 	devices repository.DeviceRepository
 	tokens  repository.ClaimTokenRepository
 	audit   repository.AuditLogRepository
+	logger  *slog.Logger
 	nowFunc func() time.Time
 }
 
@@ -46,11 +48,16 @@ func New(
 	devices repository.DeviceRepository,
 	tokens repository.ClaimTokenRepository,
 	audit repository.AuditLogRepository,
+	logger *slog.Logger,
 ) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Service{
 		devices: devices,
 		tokens:  tokens,
 		audit:   audit,
+		logger:  logger,
 		nowFunc: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -92,12 +99,15 @@ func (svc *Service) GenerateClaimToken(
 	if err != nil {
 		return GenerateClaimTokenResult{}, err
 	}
-	_ = svc.appendAudit(ctx, tenantID, createdBy, "claim_token.created", "claim_token", &saved.ID, nil)
+	svc.logAuditErr(svc.appendAudit(ctx, tenantID, createdBy, "claim_token.created", "claim_token", &saved.ID, nil))
 	return GenerateClaimTokenResult{Token: saved, Plaintext: plaintext}, nil
 }
 
 // RedeemClaimToken verifies the plaintext token, marks it redeemed,
-// and creates the device record. Returns the newly enrolled device.
+// and creates the device record. If device creation fails after the
+// token was redeemed, the token is un-redeemed via UnredeemByHash
+// so the enrollment can be retried with the same credential.
+// Returns the newly enrolled device.
 func (svc *Service) RedeemClaimToken(
 	ctx context.Context,
 	tenantID uuid.UUID,
@@ -125,9 +135,19 @@ func (svc *Service) RedeemClaimToken(
 		Posture:          posture,
 	})
 	if err != nil {
+		// Compensating action: un-redeem the token so the
+		// enrollment can be retried. Best-effort — if
+		// UnredeemByHash itself fails (e.g. DB down), we log
+		// the failure but return the original device-create
+		// error to the caller.
+		if unErr := svc.tokens.UnredeemByHash(ctx, tenantID, hash[:]); unErr != nil {
+			svc.logger.Error("identity: failed to un-redeem token after device creation failure",
+				slog.Any("unredeemError", unErr),
+				slog.Any("deviceCreateError", err))
+		}
 		return repository.Device{}, err
 	}
-	_ = svc.appendAudit(ctx, tenantID, nil, "device.enrolled", "device", &dev.ID, nil)
+	svc.logAuditErr(svc.appendAudit(ctx, tenantID, nil, "device.enrolled", "device", &dev.ID, nil))
 	return dev, nil
 }
 
@@ -160,4 +180,10 @@ func (svc *Service) appendAudit(
 		Details:      details,
 	})
 	return err
+}
+
+func (svc *Service) logAuditErr(err error) {
+	if err != nil {
+		svc.logger.Warn("identity: audit append failed", slog.Any("error", err))
+	}
 }

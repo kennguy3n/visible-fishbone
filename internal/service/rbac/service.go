@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 
@@ -130,9 +131,10 @@ var SystemRoles = []SystemRole{
 
 // Service implements RBAC operations.
 type Service struct {
-	roles repository.RoleRepository
-	users repository.UserRepository
-	audit repository.AuditLogRepository
+	roles  repository.RoleRepository
+	users  repository.UserRepository
+	audit  repository.AuditLogRepository
+	logger *slog.Logger
 }
 
 // New returns a ready-to-use RBAC service.
@@ -140,14 +142,19 @@ func New(
 	roles repository.RoleRepository,
 	users repository.UserRepository,
 	audit repository.AuditLogRepository,
+	logger *slog.Logger,
 ) *Service {
-	return &Service{roles: roles, users: users, audit: audit}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{roles: roles, users: users, audit: audit, logger: logger}
 }
 
 // SeedSystemRoles inserts every SystemRole as a tenant-scoped role.
 // Idempotent: roles that already exist (same tenant+name) trigger
-// ErrConflict and are skipped silently. Returns the freshly seeded
-// roles plus any pre-existing ones, in deterministic order.
+// ErrConflict and are skipped silently. Returns only the freshly
+// created roles; on a re-seed the returned slice is empty. Use
+// ListRoles to enumerate all roles including pre-existing ones.
 //
 // Pass tenantID = uuid.Nil for the platform-wide singleton (system
 // roles with tenant_id = NULL); pass a real UUID for a per-tenant
@@ -203,7 +210,7 @@ func (svc *Service) CreateCustomRole(
 	if err != nil {
 		return repository.Role{}, err
 	}
-	_ = svc.appendAudit(ctx, tenantID, actorID, "role.created", "role", &created.ID, nil)
+	svc.logAuditErr(svc.appendAudit(ctx, tenantID, actorID, "role.created", "role", &created.ID, nil))
 	return created, nil
 }
 
@@ -234,7 +241,7 @@ func (svc *Service) AssignRole(
 		"role_id":  roleID,
 		"scope_id": scopeID,
 	})
-	_ = svc.appendAudit(ctx, tenantID, grantedBy, "role.assigned", "user_role", &userID, details)
+	svc.logAuditErr(svc.appendAudit(ctx, tenantID, grantedBy, "role.assigned", "user_role", &userID, details))
 	return nil
 }
 
@@ -253,7 +260,7 @@ func (svc *Service) RevokeRole(
 		"role_id":  roleID,
 		"scope_id": scopeID,
 	})
-	_ = svc.appendAudit(ctx, tenantID, actorID, "role.revoked", "user_role", &userID, details)
+	svc.logAuditErr(svc.appendAudit(ctx, tenantID, actorID, "role.revoked", "user_role", &userID, details))
 	return nil
 }
 
@@ -288,4 +295,10 @@ func (svc *Service) appendAudit(
 		Details:      details,
 	})
 	return err
+}
+
+func (svc *Service) logAuditErr(err error) {
+	if err != nil {
+		svc.logger.Warn("rbac: audit append failed", slog.Any("error", err))
+	}
 }

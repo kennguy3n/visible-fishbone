@@ -12,11 +12,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"log/slog"
 
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/slug"
 )
 
 // TemplateConfig is the default config blob applied at site
@@ -53,13 +54,17 @@ var TemplateConfig = map[repository.SiteTemplate]json.RawMessage{
 
 // Service implements site CRUD.
 type Service struct {
-	sites repository.SiteRepository
-	audit repository.AuditLogRepository
+	sites  repository.SiteRepository
+	audit  repository.AuditLogRepository
+	logger *slog.Logger
 }
 
 // New returns a ready-to-use site service.
-func New(sites repository.SiteRepository, audit repository.AuditLogRepository) *Service {
-	return &Service{sites: sites, audit: audit}
+func New(sites repository.SiteRepository, audit repository.AuditLogRepository, logger *slog.Logger) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{sites: sites, audit: audit, logger: logger}
 }
 
 // Create provisions a new site. If `s.Config` is empty the template
@@ -80,20 +85,23 @@ func (svc *Service) Create(
 		return repository.Site{}, fmt.Errorf("unknown template %q: %w", s.Template, repository.ErrInvalidArgument)
 	}
 	if s.Slug == "" {
-		s.Slug = deriveSlug(s.Name)
+		s.Slug = slug.Derive(s.Name)
 		if s.Slug == "" {
 			s.Slug = "site-" + uuid.NewString()[:8]
 		}
 	}
 	if len(s.Config) == 0 || string(s.Config) == "{}" {
-		s.Config = TemplateConfig[s.Template]
+		// Clone the template bytes so in-place mutations of the
+		// returned Site.Config can never corrupt the shared
+		// TemplateConfig entries.
+		s.Config = append(json.RawMessage{}, TemplateConfig[s.Template]...)
 	}
 
 	created, err := svc.sites.Create(ctx, tenantID, s)
 	if err != nil {
 		return repository.Site{}, err
 	}
-	_ = svc.appendAudit(ctx, tenantID, actorID, "site.created", "site", &created.ID, nil)
+	svc.logAuditErr(svc.appendAudit(ctx, tenantID, actorID, "site.created", "site", &created.ID, nil))
 	return created, nil
 }
 
@@ -121,7 +129,7 @@ func (svc *Service) Update(
 	if err != nil {
 		return repository.Site{}, err
 	}
-	_ = svc.appendAudit(ctx, tenantID, actorID, "site.updated", "site", &updated.ID, nil)
+	svc.logAuditErr(svc.appendAudit(ctx, tenantID, actorID, "site.updated", "site", &updated.ID, nil))
 	return updated, nil
 }
 
@@ -130,7 +138,7 @@ func (svc *Service) Delete(ctx context.Context, tenantID, id uuid.UUID, actorID 
 	if err := svc.sites.Delete(ctx, tenantID, id); err != nil {
 		return err
 	}
-	_ = svc.appendAudit(ctx, tenantID, actorID, "site.deleted", "site", &id, nil)
+	svc.logAuditErr(svc.appendAudit(ctx, tenantID, actorID, "site.deleted", "site", &id, nil))
 	return nil
 }
 
@@ -155,27 +163,8 @@ func (svc *Service) appendAudit(
 	return err
 }
 
-// deriveSlug is a small local copy of tenant.DeriveSlug to avoid an
-// import cycle (tenant → audit chain) and keep the slug rules in
-// sync.
-func deriveSlug(name string) string {
-	const maxLen = 63
-	var b strings.Builder
-	b.Grow(len(name))
-	dashRun := false
-	for _, r := range strings.ToLower(name) {
-		switch {
-		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
-			b.WriteRune(r)
-			dashRun = false
-		case !dashRun && b.Len() > 0:
-			b.WriteByte('-')
-			dashRun = true
-		}
+func (svc *Service) logAuditErr(err error) {
+	if err != nil {
+		svc.logger.Warn("site: audit append failed", slog.Any("error", err))
 	}
-	out := strings.TrimRight(b.String(), "-")
-	if len(out) > maxLen {
-		out = strings.TrimRight(out[:maxLen], "-")
-	}
-	return out
 }

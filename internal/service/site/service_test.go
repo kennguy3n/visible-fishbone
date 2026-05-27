@@ -22,7 +22,7 @@ func newSvc(t *testing.T) (*site.Service, uuid.UUID) {
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	return site.New(memory.NewSiteRepository(s), memory.NewAuditLogRepository(s)), tn.ID
+	return site.New(memory.NewSiteRepository(s), memory.NewAuditLogRepository(s), nil), tn.ID
 }
 
 func TestCreate_TemplateDefaults(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 func newSvc(t *testing.T) (*tenant.Service, *memory.Store) {
 	t.Helper()
 	s := memory.NewStore()
-	return tenant.New(memory.NewTenantRepository(s), memory.NewAuditLogRepository(s)), s
+	return tenant.New(memory.NewTenantRepository(s), memory.NewAuditLogRepository(s), nil), s
 }
 
 func TestDeriveSlug(t *testing.T) {
@@ -123,6 +123,48 @@ func TestSuspendDelete(t *testing.T) {
 	}
 	if got.Status != repository.TenantStatusDeleted || got.DeletedAt == nil {
 		t.Errorf("expected deleted, got %+v", got)
+	}
+}
+
+func TestSuspend_RejectsNonActive(t *testing.T) {
+	t.Parallel()
+	svc, _ := newSvc(t)
+	ctx := context.Background()
+	tn, err := svc.Create(ctx, repository.Tenant{Name: "SM"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Suspend it first (valid: active → suspended).
+	if _, err := svc.Suspend(ctx, tn.ID); err != nil {
+		t.Fatalf("first suspend: %v", err)
+	}
+	// Second suspend should be rejected (suspended → suspended).
+	if _, err := svc.Suspend(ctx, tn.ID); !errors.Is(err, repository.ErrForbidden) {
+		t.Errorf("expected ErrForbidden on double suspend, got %v", err)
+	}
+	// Delete (valid: suspended → deleted).
+	if err := svc.Delete(ctx, tn.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	// Suspend a deleted tenant should be rejected.
+	if _, err := svc.Suspend(ctx, tn.ID); !errors.Is(err, repository.ErrForbidden) {
+		t.Errorf("expected ErrForbidden on suspend-after-delete, got %v", err)
+	}
+}
+
+func TestDelete_RejectsAlreadyDeleted(t *testing.T) {
+	t.Parallel()
+	svc, _ := newSvc(t)
+	ctx := context.Background()
+	tn, err := svc.Create(ctx, repository.Tenant{Name: "DD"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := svc.Delete(ctx, tn.ID); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+	if err := svc.Delete(ctx, tn.ID); !errors.Is(err, repository.ErrForbidden) {
+		t.Errorf("expected ErrForbidden on double delete, got %v", err)
 	}
 }
 
