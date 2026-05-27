@@ -21,9 +21,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
+	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
 )
 
 func main() {
@@ -62,6 +64,28 @@ func run() error {
 			logger.Warn("sng-control: nats drain error", slog.Any("error", err))
 		}
 	}()
+
+	js, err := jetstream.New(nc)
+	if err != nil {
+		return fmt.Errorf("jetstream: %w", err)
+	}
+	// Use a generous overall budget (numStreams * per-stream timeout * 2)
+	// so even a fully-degraded NATS that consumes the per-stream budget
+	// can still report errors per-stream rather than collapsing the
+	// whole bootstrap on a single context deadline.
+	streams := sngnats.DefaultStreams(&cfg.NATS)
+	overall := time.Duration(len(streams)*2) * cfg.NATS.RequestTimeout
+	if overall <= 0 {
+		overall = 30 * time.Second
+	}
+	ensureCtx, ensureCancel := context.WithTimeout(rootCtx, overall)
+	err = sngnats.EnsureStreams(ensureCtx, js, streams, cfg.NATS.RequestTimeout)
+	ensureCancel()
+	if err != nil {
+		return fmt.Errorf("ensure streams: %w", err)
+	}
+	logger.Info("sng-control: jetstream streams ensured",
+		slog.String("prefix", cfg.NATS.StreamPrefix))
 
 	health := handler.NewHealth(2 * time.Second)
 	health.Register("postgres", handler.PingerFunc(func(ctx context.Context) error {

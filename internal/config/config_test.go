@@ -490,14 +490,51 @@ func TestStrictIntJoinedErrors(t *testing.T) {
 }
 
 func TestNATSRetryRangeValidation(t *testing.T) {
-	clearAll(t)
-	withEnv(t, map[string]string{
-		"NATS_PUBLISH_RETRY_ATTEMPTS": "-3",
+	// Negative is rejected (obvious nonsense).
+	t.Run("negative_rejected", func(t *testing.T) {
+		clearAll(t)
+		withEnv(t, map[string]string{
+			"NATS_PUBLISH_RETRY_ATTEMPTS": "-3",
+		})
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected validation error for negative NATS_PUBLISH_RETRY_ATTEMPTS")
+		}
 	})
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected validation error for negative NATS_PUBLISH_RETRY_ATTEMPTS")
-	}
+
+	// Zero is also rejected — see config.go for why: the publisher's
+	// fallback chain treats <= 0 as unset, so an operator who sets 0
+	// expecting "fire-and-forget / single attempt" would silently get
+	// the hard-coded fallback of 3 attempts. Force them to set 1.
+	t.Run("zero_rejected", func(t *testing.T) {
+		clearAll(t)
+		withEnv(t, map[string]string{
+			"NATS_PUBLISH_RETRY_ATTEMPTS": "0",
+		})
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected validation error for NATS_PUBLISH_RETRY_ATTEMPTS=0")
+		}
+		if !strings.Contains(err.Error(), "NATS_PUBLISH_RETRY_ATTEMPTS") {
+			t.Errorf("expected error to mention NATS_PUBLISH_RETRY_ATTEMPTS, got %s", err.Error())
+		}
+	})
+
+	// 1 is the documented "single attempt, no retries" value and
+	// must be accepted.
+	t.Run("one_accepted", func(t *testing.T) {
+		clearAll(t)
+		withEnv(t, map[string]string{
+			"NATS_PUBLISH_RETRY_ATTEMPTS": "1",
+		})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("expected NATS_PUBLISH_RETRY_ATTEMPTS=1 to be accepted, got %v", err)
+		}
+		if cfg.NATS.PublishRetryAttempts != 1 {
+			t.Errorf("expected PublishRetryAttempts=1, got %d", cfg.NATS.PublishRetryAttempts)
+		}
+	})
 }
 
 func TestCORSDefaults(t *testing.T) {
