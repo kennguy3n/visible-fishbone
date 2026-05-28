@@ -152,23 +152,32 @@ func startPostgres(t *testing.T) (*postgres.Store, func()) {
 // job — see `migrations/002_role_bootstrap.up.sql` and
 // `docs/deploy.md` for the production runbook.
 func provisionAppRole(ctx context.Context, pool *pgxpool.Pool, role, bootstrapUser string) error {
-	// CREATE ROLE doesn't support IF NOT EXISTS; wrap in DO block.
-	createRole := fmt.Sprintf(`
-		DO $$
-		BEGIN
-			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '%s') THEN
-				CREATE ROLE %s NOINHERIT NOLOGIN;
-			END IF;
-		END $$;
-	`, role, role)
-	if _, err := pool.Exec(ctx, createRole); err != nil {
-		return fmt.Errorf("create role: %w", err)
+	// Existence check is parameterized; CREATE ROLE / GRANT
+	// interpolate via pgx.Identifier.Sanitize(). Today's callers pass
+	// hardcoded constants but treating the parameters as untrusted is
+	// the right long-term posture for a shared test helper.
+	var exists bool
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
+		role,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("check role existence: %w", err)
+	}
+	roleIdent := pgx.Identifier{role}.Sanitize()
+	if !exists {
+		if _, err := pool.Exec(ctx, fmt.Sprintf(
+			"CREATE ROLE %s NOINHERIT NOLOGIN",
+			roleIdent,
+		)); err != nil {
+			return fmt.Errorf("create role: %w", err)
+		}
 	}
 
 	// Grant the bootstrap superuser membership in the runtime role
 	// so `SET ROLE sng_app` succeeds on the prod pool's per-conn
 	// AfterConnect hook. "already a member" is benign on re-runs.
-	grantMembership := fmt.Sprintf("GRANT %s TO %s", role, bootstrapUser)
+	grantMembership := fmt.Sprintf("GRANT %s TO %s", roleIdent, pgx.Identifier{bootstrapUser}.Sanitize())
 	if _, err := pool.Exec(ctx, grantMembership); err != nil &&
 		!strings.Contains(err.Error(), "already a member") {
 		return fmt.Errorf("grant role to bootstrap user: %w", err)

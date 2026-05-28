@@ -81,15 +81,24 @@ Run the following once per database, as a superuser, **before**
 the first migration deploy:
 
 ```sql
--- 1. Runtime role. NOINHERIT means membership in this role does
---    NOT automatically grant its privileges to outer sessions;
---    callers must `SET ROLE sng_app` explicitly.
-CREATE ROLE sng_app NOINHERIT NOLOGIN;
+-- 1. Runtime role. NOLOGIN — nobody connects as `sng_app`
+--    directly; login users (below) acquire its privileges via
+--    `SET SESSION ROLE sng_app`. The NOINHERIT attribute on a
+--    role only governs what THAT role inherits from roles it is
+--    a member of (irrelevant for `sng_app` — it's not a member
+--    of anything else). The actual control over whether
+--    `sng_app_login` auto-acquires `sng_app`'s privileges lives
+--    on `sng_app_login` itself (next step).
+CREATE ROLE sng_app NOLOGIN;
 
 -- 2. (Optional) Login user for the runtime. Typical pattern is
 --    a per-environment service account whose only privilege is
---    membership in sng_app.
-CREATE ROLE sng_app_login LOGIN PASSWORD <strong_password>;
+--    membership in `sng_app`. NOINHERIT on the login user is
+--    what forces an explicit `SET SESSION ROLE sng_app` at
+--    connection time — without it, the login user would
+--    silently inherit `sng_app`'s grants and the per-connection
+--    `SET SESSION ROLE` hook would be a no-op.
+CREATE ROLE sng_app_login LOGIN NOINHERIT PASSWORD <strong_password>;
 GRANT sng_app TO sng_app_login;
 
 -- 3. Migration runner. Schema owner. Privileges depend on your
@@ -191,9 +200,13 @@ Production pools (PgBouncer, pgcat, RDS Proxy, etc.) MUST be
 configured for **session pooling**, not transaction pooling. This
 is because:
 
-* `SET ROLE sng_app` is connection-scoped, not transaction-scoped.
-  Transaction pooling would multiplex the same physical connection
-  across multiple roles within a single second.
+* `SET SESSION ROLE sng_app` is connection-scoped, not
+  transaction-scoped. (Bare `SET ROLE` inside a transaction block
+  behaves as `SET LOCAL ROLE` and reverts at `COMMIT`/`ROLLBACK`
+  — always use the explicit `SESSION` form on connection-setup
+  hooks so the role survives across transactions.) Transaction
+  pooling would multiplex the same physical connection across
+  multiple roles within a single second.
 * Several application code paths (notably the audit-log writer)
   rely on `set_config(..., true)` lasting for the entire
   transaction. Statement pooling would break the contract.

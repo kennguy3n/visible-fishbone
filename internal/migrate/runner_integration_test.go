@@ -70,6 +70,12 @@ func startPostgres(t *testing.T) string {
 // provisionAppRole creates the runtime role used by
 // 002_role_bootstrap and grants the bootstrap superuser membership
 // in it. Idempotent — re-running on an existing role is a no-op.
+//
+// The role-name existence check is parameterized through `$1`, and
+// the CREATE ROLE / GRANT statements interpolate via
+// `pgx.Identifier.Sanitize()`. Today's callers pass hardcoded
+// constants, but treating the parameter as untrusted is the right
+// long-term posture for shared test helpers.
 func provisionAppRole(ctx context.Context, dsn, role, bootstrapUser string) error {
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
@@ -77,18 +83,26 @@ func provisionAppRole(ctx context.Context, dsn, role, bootstrapUser string) erro
 	}
 	defer conn.Close(ctx)
 
-	createRole := fmt.Sprintf(`
-		DO $$
-		BEGIN
-			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '%s') THEN
-				CREATE ROLE %s NOINHERIT NOLOGIN;
-			END IF;
-		END $$;
-	`, role, role)
-	if _, err := conn.Exec(ctx, createRole); err != nil {
-		return fmt.Errorf("create role: %w", err)
+	var exists bool
+	if err := conn.QueryRow(
+		ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
+		role,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("check role existence: %w", err)
 	}
-	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT %s TO %s", role, bootstrapUser)); err != nil &&
+	roleIdent := pgx.Identifier{role}.Sanitize()
+	if !exists {
+		if _, err := conn.Exec(ctx, fmt.Sprintf(
+			"CREATE ROLE %s NOINHERIT NOLOGIN",
+			roleIdent,
+		)); err != nil {
+			return fmt.Errorf("create role: %w", err)
+		}
+	}
+
+	grant := fmt.Sprintf("GRANT %s TO %s", roleIdent, pgx.Identifier{bootstrapUser}.Sanitize())
+	if _, err := conn.Exec(ctx, grant); err != nil &&
 		!strings.Contains(err.Error(), "already a member") {
 		return fmt.Errorf("grant membership: %w", err)
 	}
