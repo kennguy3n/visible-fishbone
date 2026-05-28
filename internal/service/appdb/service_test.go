@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/nats/schema"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
@@ -504,6 +505,43 @@ func TestSteeringSnapshot_ReusedAcrossTargets(t *testing.T) {
 		if string(snapBytes) != string(singleBytes) {
 			t.Fatalf("target %s: snapshot output differs from single-shot path\nsnap: %s\nsingle: %s",
 				target, snapBytes, singleBytes)
+		}
+	}
+}
+
+// TestEnvelopeTrafficClassValidationCovers_AllRepositoryClasses keeps
+// the closed set in schema.Envelope.Validate (which intentionally
+// duplicates the canonical list to keep the transport package
+// dependency-free) in sync with repository.AllTrafficClasses. If a
+// new traffic class is added to the repository enum without also
+// being added to the schema validator, every producer emitting that
+// class would have its envelope rejected at Marshal time — a
+// hard-to-diagnose failure. This test makes that failure mode loud
+// and immediate.
+func TestEnvelopeTrafficClassValidationCovers_AllRepositoryClasses(t *testing.T) {
+	t.Parallel()
+	for _, c := range repository.AllTrafficClasses() {
+		env, err := schema.WrapFlowEvent(
+			schema.Envelope{
+				SchemaVersion: schema.SchemaVersion,
+				EventID:       uuid.New(),
+				TenantID:      uuid.New(),
+				DeviceID:      uuid.New(),
+				Timestamp:     time.Now().UTC(),
+				Platform:      schema.PlatformLinux,
+			},
+			string(c),
+			schema.FlowEvent{
+				SrcIP: "10.0.0.1", DstIP: "10.0.0.2",
+				SrcPort: 1024, DstPort: 443,
+				Protocol: "tcp", Verdict: schema.VerdictAllow,
+			},
+		)
+		if err != nil {
+			t.Fatalf("traffic class %q: WrapFlowEvent returned %v; the schema validator likely missed this class", c, err)
+		}
+		if _, err := schema.Marshal(env); err != nil {
+			t.Fatalf("traffic class %q: Marshal returned %v; the schema validator likely missed this class", c, err)
 		}
 	}
 }

@@ -75,6 +75,7 @@ func TestEnvelope_ValidateRejects(t *testing.T) {
 		"zero ts":       func(e *schema.Envelope) { e.Timestamp = time.Time{} },
 		"bad class":     func(e *schema.Envelope) { e.EventClass = "bogus" },
 		"bad platform":  func(e *schema.Envelope) { e.Platform = "bogus" },
+		"bad tc":        func(e *schema.Envelope) { e.TrafficClass = "bogus" },
 		"empty payload": func(e *schema.Envelope) { e.Payload = nil },
 	}
 	for name, mutate := range mutations {

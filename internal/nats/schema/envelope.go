@@ -170,10 +170,41 @@ func (e Envelope) Validate() error {
 	if !e.Platform.IsValid() {
 		return fmt.Errorf("platform %q is invalid: %w", e.Platform, ErrInvalid)
 	}
+	// Closed-set validation for TrafficClass. Empty is legitimate
+	// (legacy producers pre-dating traffic classification omit it;
+	// the writer applies the "inspect_full" default downstream), but
+	// any non-empty value must be one of the canonical classes —
+	// otherwise a malformed producer could pollute the ClickHouse
+	// traffic_class column with arbitrary strings and break
+	// per-class GROUP BY aggregates on the cost-attribution chart.
+	// The set is duplicated here (rather than imported from
+	// internal/repository) to keep this low-level transport package
+	// dependency-free.
+	if e.TrafficClass != "" && !isValidTrafficClass(e.TrafficClass) {
+		return fmt.Errorf("traffic_class %q is invalid: %w", e.TrafficClass, ErrInvalid)
+	}
 	if len(e.Payload) == 0 {
 		return fmt.Errorf("payload is required: %w", ErrInvalid)
 	}
 	return nil
+}
+
+// validTrafficClasses is the closed set of values Envelope.TrafficClass
+// may carry. Kept in sync with repository.AllTrafficClasses; any
+// addition there must land here too — the schema validator is the
+// boundary that protects ClickHouse from polluted dimension values.
+var validTrafficClasses = map[string]struct{}{
+	"trusted_direct":        {},
+	"trusted_media_bypass":  {},
+	"inspect_lite":          {},
+	"inspect_full":          {},
+	"tunnel_private":        {},
+	"block":                 {},
+}
+
+func isValidTrafficClass(s string) bool {
+	_, ok := validTrafficClasses[s]
+	return ok
 }
 
 // ErrInvalid is returned by Validate methods. Wrap with %w so
