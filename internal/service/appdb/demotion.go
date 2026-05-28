@@ -82,10 +82,30 @@ type DemotionPolicy struct {
 // DefaultDemotionPolicy is a conservative default applied when the
 // caller does not supply one. Threat-feed and cert-pin mismatches
 // are global; IP-range and anomaly are tenant-local.
+//
+// TTL rationale:
+//
+//   - threat_feed: 0 (permanent). A domain that lit up on a TI feed
+//     stays demoted until an operator explicitly clears the override.
+//     Auto-expiry here would silently re-promote a domain to
+//     trusted_direct after the timeout, which is exactly the
+//     behaviour the demotion engine exists to prevent.
+//   - cert_pin_mismatch: 7 days. Vendors rotate certs without
+//     warning and the agents' pin metadata may take a release cycle
+//     to catch up; auto-expiry after a week lets a stable
+//     re-pinning quietly recover without operator action, while
+//     long enough to give SNG time to ship a catalog update if the
+//     mismatch is real.
+//   - ip_range_mismatch: 6 hours. CDN edge IP pools rotate quickly;
+//     a short TTL avoids long-lived demotions caused by transient
+//     DNS resolver fan-out.
+//   - anomaly: 48 hours. Anomaly detectors are noisier than feed
+//     hits — give the tenant operator two days to look at it before
+//     the override expires.
 func DefaultDemotionPolicy() DemotionPolicy {
 	return DemotionPolicy{
 		TTLs: map[DemotionSignal]time.Duration{
-			SignalThreatFeed:      24 * time.Hour,
+			SignalThreatFeed:      0, // permanent — operator clears manually
 			SignalCertPinMismatch: 7 * 24 * time.Hour,
 			SignalIPRangeMismatch: 6 * time.Hour,
 			SignalAnomaly:         48 * time.Hour,

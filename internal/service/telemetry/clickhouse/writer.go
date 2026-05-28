@@ -183,12 +183,22 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Writer, error) 
 	return w, nil
 }
 
-// EnsureSchema creates the telemetry table if it does not exist.
-// The DDL is idempotent so callers can invoke this on every boot
-// without conditional logic. Returns immediately if the table
-// already exists.
+// EnsureSchema creates the telemetry table if it does not exist
+// and applies idempotent ALTERs so existing deployments pick up
+// columns added by later releases. The DDL is safe to call on
+// every boot without conditional logic.
+//
+// Two-phase rationale: CREATE TABLE IF NOT EXISTS is a no-op when
+// the table already exists, so an upgrade from a pre-`traffic_class`
+// schema would leave the column missing and silently break the
+// flush path. ALTER TABLE ... ADD COLUMN IF NOT EXISTS fills that
+// gap. The MergeTree ORDER BY tuple cannot be changed in place
+// after creation — existing deployments retain the old sort key
+// and pay a small scan penalty on per-class aggregations until
+// the table is rebuilt. Fresh deployments get the optimal sort
+// key from the CREATE TABLE statement above.
 func (w *Writer) EnsureSchema(ctx context.Context) error {
-	ddl := fmt.Sprintf(`
+	createDDL := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
     event_id        UUID,
     tenant_id       UUID,
@@ -205,8 +215,18 @@ CREATE TABLE IF NOT EXISTS %s (
 PARTITION BY toYYYYMMDD(timestamp)
 ORDER BY (tenant_id, event_class, traffic_class, timestamp, event_id)
 SETTINGS index_granularity = 8192`, w.cfg.Table)
-	if err := w.conn.Exec(ctx, ddl); err != nil {
+	if err := w.conn.Exec(ctx, createDDL); err != nil {
 		return fmt.Errorf("clickhouse: ensure schema: %w", err)
+	}
+	// Idempotent forward-migration for tables that pre-date the
+	// traffic_class column. ClickHouse honours IF NOT EXISTS on
+	// ADD COLUMN so this is a no-op once the column is present.
+	alterDDL := fmt.Sprintf(
+		"ALTER TABLE %s ADD COLUMN IF NOT EXISTS traffic_class LowCardinality(String) DEFAULT 'inspect_full'",
+		w.cfg.Table,
+	)
+	if err := w.conn.Exec(ctx, alterDDL); err != nil {
+		return fmt.Errorf("clickhouse: ensure traffic_class column: %w", err)
 	}
 	return nil
 }
@@ -449,19 +469,23 @@ func (w *Writer) QueryTrafficClassDistribution(ctx context.Context, tenantID uui
 	// byte sum across every event class without per-class
 	// branching. The traffic_class column has a stable
 	// LowCardinality dictionary so the GROUP BY runs from memory.
-	const q = `
+	//
+	// Uses w.cfg.Table rather than DefaultTable so operators who
+	// override the table name in Config get their custom table
+	// queried (writes already use w.cfg.Table via insertSQL).
+	q := fmt.Sprintf(`
 SELECT
     traffic_class AS class,
     count() AS events,
     sum(
         JSONExtractUInt(payload, 'bi') + JSONExtractUInt(payload, 'bo')
     ) AS bytes
-FROM ` + DefaultTable + `
+FROM %s
 WHERE tenant_id = $1
   AND timestamp >= $2
 GROUP BY traffic_class
 ORDER BY events DESC
-`
+`, w.cfg.Table)
 	rows, err := w.conn.Query(ctx, q, tenantID, since.UTC())
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: query traffic_class: %w", err)

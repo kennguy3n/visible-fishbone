@@ -148,9 +148,18 @@ func (s *Syncer) SyncAll(ctx context.Context) ([]SyncResult, error) {
 			results = append(results, r)
 			continue
 		}
+		// Compare against the *canonical* form of the existing
+		// rows (lowercase, deduped, sorted) so a sync that only
+		// adds a case-normalisation -- e.g. existing row has
+		// "Outlook.Office.com" and vendor publishes the same name
+		// lowercase -- does not register as a change. Without this
+		// normalisation, the first sync after a release would
+		// rewrite every app that was admin-inserted with mixed
+		// case, even when the vendor data is unchanged.
 		merged := mergeDomains(app.Domains, newDomains)
 		mergedRanges := mergeRanges(app.IPRanges, newRanges)
-		changed := !equalStringSlices(merged, app.Domains) || !equalRangeSlices(mergedRanges, app.IPRanges)
+		currentCanonical := mergeDomains(app.Domains, nil)
+		changed := !equalStringSlices(merged, currentCanonical) || !equalRangeSlices(mergedRanges, app.IPRanges)
 
 		r.DomainsAfter = len(merged)
 		r.IPRangesAfter = len(mergedRanges)

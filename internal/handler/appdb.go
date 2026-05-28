@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,17 +55,62 @@ type AppRegistrySyncer interface {
 }
 
 // AppRegistryHandler hosts the traffic-classification REST surface.
+//
+// `stats` is held behind an atomic.Pointer because production
+// wiring may attach the ClickHouse-backed querier *after*
+// NewAppRegistryHandler returns (the clickhouse writer is built
+// inside startTelemetry, which runs after the router is
+// constructed). The atomic load on the request path costs less
+// than a mutex and avoids a data race when SetStats races with
+// an in-flight request during boot.
 type AppRegistryHandler struct {
-	svc     *appdb.Service
-	stats   TelemetryClassQuerier
-	syncer  AppRegistrySyncer
+	svc    *appdb.Service
+	stats  atomic.Pointer[telemetryQuerierBox]
+	syncer AppRegistrySyncer
+}
+
+// telemetryQuerierBox wraps the interface so atomic.Pointer can
+// hold a typed value (atomic.Pointer is parameterised by struct
+// type only — it does not accept interface types directly).
+type telemetryQuerierBox struct {
+	q TelemetryClassQuerier
 }
 
 // NewAppRegistryHandler wires the handler. stats / syncer may be
 // nil when their respective subsystems are disabled — the handler
-// responds 503 on the matching endpoints in that case.
+// responds 503 on the matching endpoints in that case. Stats can
+// also be attached later via SetStats once the ClickHouse writer
+// is available.
 func NewAppRegistryHandler(svc *appdb.Service, stats TelemetryClassQuerier, syncer AppRegistrySyncer) *AppRegistryHandler {
-	return &AppRegistryHandler{svc: svc, stats: stats, syncer: syncer}
+	h := &AppRegistryHandler{svc: svc, syncer: syncer}
+	if stats != nil {
+		h.stats.Store(&telemetryQuerierBox{q: stats})
+	}
+	return h
+}
+
+// SetStats attaches (or replaces) the telemetry class querier.
+// Safe to call concurrently with request serving. Pass nil to
+// detach (the stats endpoint will then 503).
+func (h *AppRegistryHandler) SetStats(stats TelemetryClassQuerier) {
+	if h == nil {
+		return
+	}
+	if stats == nil {
+		h.stats.Store(nil)
+		return
+	}
+	h.stats.Store(&telemetryQuerierBox{q: stats})
+}
+
+// currentStats returns the attached querier or nil. Reads are
+// lock-free.
+func (h *AppRegistryHandler) currentStats() TelemetryClassQuerier {
+	box := h.stats.Load()
+	if box == nil {
+		return nil
+	}
+	return box.q
 }
 
 // Register attaches routes.
@@ -328,7 +374,8 @@ func (h *AppRegistryHandler) stats_handler(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	if h.stats == nil {
+	stats := h.currentStats()
+	if stats == nil {
 		WriteError(w, http.StatusServiceUnavailable, "telemetry_disabled", "traffic-class stats require ClickHouse telemetry")
 		return
 	}
@@ -349,7 +396,7 @@ func (h *AppRegistryHandler) stats_handler(w http.ResponseWriter, r *http.Reques
 		}
 		since = time.Now().UTC().Add(-time.Duration(n) * time.Hour)
 	}
-	rows, err := h.stats.QueryTrafficClassDistribution(r.Context(), tenantID, since)
+	rows, err := stats.QueryTrafficClassDistribution(r.Context(), tenantID, since)
 	if err != nil {
 		WriteError(w, http.StatusBadGateway, "telemetry_query", err.Error())
 		return

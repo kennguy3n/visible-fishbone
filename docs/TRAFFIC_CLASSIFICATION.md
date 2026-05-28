@@ -105,9 +105,9 @@ signals:
 | Trigger | Demotion Scope | TTL |
 |---|---|---|
 | Threat feed hit (NATS `sng.intel.dns`/`sng.intel.ip`) | Global, all tenants | Permanent until cleared by operator |
-| Cert-pin mismatch ≥ N devices in time window | Global if ≥ M tenants observe; tenant-scoped otherwise | 24h auto-expire; operator confirm to make permanent |
+| Cert-pin mismatch ≥ N devices in time window | Global if ≥ M tenants observe; tenant-scoped otherwise | 7 days auto-expire; operator confirm to make permanent. The longer-than-other-signals TTL avoids flapping when a vendor rotates its certificate chain ahead of an SNG catalog refresh. |
 | IP range mismatch | Tenant-scoped | 6h auto-expire |
-| Baseline-model anomaly (exfil pattern on trusted app) | Tenant-scoped | 24h auto-expire |
+| Baseline-model anomaly (exfil pattern on trusted app) | Tenant-scoped | 48h auto-expire |
 
 Every demotion is:
 
