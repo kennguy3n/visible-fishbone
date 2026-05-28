@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/slug"
 )
@@ -143,6 +144,13 @@ func (svc *Service) appendAudit(
 	if details == nil {
 		details = json.RawMessage(`{}`)
 	}
+	// Stamp the acting API-key ID into details when the request
+	// was authenticated via API key. actor_id (a *user* UUID) is
+	// NULL on API-key paths because keys are machine identities;
+	// the enrichment preserves machine-actor attribution for
+	// forensics without overloading actor_id's user-UUID
+	// semantics.
+	details = middleware.EnrichAuditDetails(ctx, details)
 	_, err := svc.audit.Append(ctx, tenantID, repository.AuditEntry{
 		ActorID:      actorID,
 		Action:       action,

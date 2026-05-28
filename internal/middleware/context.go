@@ -193,6 +193,18 @@ func withAPIKeyID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, keyAPIKeyID, id)
 }
 
+// ContextWithAPIKeyID returns a derived context carrying the
+// given API-key identifier so consumers of APIKeyIDFromContext
+// observe an API-key-authenticated request. This is exported for
+// service-layer tests that need to simulate an API-key-authed
+// caller without spinning up the full auth middleware stack —
+// production code MUST go through the auth middleware (which
+// calls the unexported withAPIKeyID after a real Lookup), not
+// through this helper.
+func ContextWithAPIKeyID(ctx context.Context, id string) context.Context {
+	return withAPIKeyID(ctx, id)
+}
+
 // withAuthSubject stamps the auth subject (JWT sub or key name).
 func withAuthSubject(ctx context.Context, sub string) context.Context {
 	return context.WithValue(ctx, keyAuthSubject, sub)

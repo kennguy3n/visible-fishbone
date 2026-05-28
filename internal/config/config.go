@@ -74,6 +74,7 @@ type Config struct {
 	CORS      CORS
 	Webhook   Webhook
 	Auth      Auth
+	Policy    Policy
 	Telemetry Telemetry
 }
 
@@ -425,6 +426,42 @@ type Auth struct {
 	// machine-to-machine authentication (defaults to
 	// "X-SNG-API-Key").
 	APIKeyHeader string
+	// APIKeyMaxActivePerTenant caps the number of active
+	// (non-revoked, non-expired) API keys a single tenant may
+	// hold. The service enforces this at Create time. Defaults to
+	// apikey.DefaultMaxActiveKeys (64). Set <= 0 to disable the
+	// cap entirely (test fixtures only — production must keep a
+	// finite cap, see validate()).
+	APIKeyMaxActivePerTenant int
+}
+
+// Policy carries policy-engine configuration. PR8 adds two
+// production-only knobs: a path to an out-of-band Ed25519 signing
+// key (so prod can boot without DB-backed rotation) and an
+// AES-256-GCM master key for at-rest wrapping of any DB-stored
+// signing seeds (KMS-on-a-stick for deployments without a real
+// KMS in the loop).
+type Policy struct {
+	// SigningKeyPath optionally points at a PEM / hex / raw
+	// 32-byte file containing an Ed25519 private key. When set,
+	// the policy service ignores the per-tenant DB-backed key
+	// store and signs every bundle with this key — useful for
+	// deployments where rotation is managed via configuration
+	// management (CD pipeline replaces the file and restarts the
+	// process) rather than online operator action. Mutually
+	// exclusive with the DB rotation API for the active tenant
+	// set.
+	SigningKeyPath string
+	// KeyWrapMasterB64 is a base64-encoded 32-byte AES-256 master
+	// key used by the AESGCMWrapper to encrypt signing-key seeds
+	// at rest in the policy_signing_keys.private_key column.
+	// Mutually exclusive with KeyWrapMasterFile. Empty in both
+	// places means PassthroughWrapper (plain seed on disk, at-rest
+	// protection via TDE / disk encryption).
+	KeyWrapMasterB64 string
+	// KeyWrapMasterFile is a path to either 32 raw bytes or the
+	// base64 encoding thereof. Mutually exclusive with B64.
+	KeyWrapMasterFile string
 }
 
 // Telemetry carries OTel SDK bridge configuration.
@@ -525,6 +562,11 @@ func Load() (Config, error) {
 			JWTAudience:  getStr("AUTH_JWT_AUDIENCE", "sng-control"),
 			APIKeyHeader: getStr("AUTH_API_KEY_HEADER", "X-SNG-API-Key"),
 		},
+		Policy: Policy{
+			SigningKeyPath:    getStr("POLICY_SIGNING_KEY_PATH", ""),
+			KeyWrapMasterB64:  getStr("POLICY_KEY_WRAP_MASTER_B64", ""),
+			KeyWrapMasterFile: getStr("POLICY_KEY_WRAP_MASTER_FILE", ""),
+		},
 		Telemetry: Telemetry{
 			OTLPEndpoint:   getStr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 			ServiceVersion: getStr("SERVICE_VERSION", ""),
@@ -558,6 +600,10 @@ func Load() (Config, error) {
 		{"RATE_LIMIT_BURST", 60, &cfg.RateLimit.Burst},
 		{"WEBHOOK_MAX_ATTEMPTS", 6, &cfg.Webhook.MaxAttempts},
 		{"WEBHOOK_BATCH_SIZE", 32, &cfg.Webhook.BatchSize},
+		// Kept in sync with apikey.DefaultMaxActiveKeys; literal
+		// here so the config package doesn't take a dependency on
+		// internal/service/apikey.
+		{"AUTH_API_KEY_MAX_ACTIVE_PER_TENANT", 64, &cfg.Auth.APIKeyMaxActivePerTenant},
 	}
 	strictDurations := []struct {
 		key string
@@ -874,6 +920,16 @@ func (c Config) validate() error {
 	// security model neutered.
 	if c.Environment.IsProduction() && c.Postgres.AppRole == "" {
 		return errors.New("PG_APP_ROLE must be set to a non-empty role in production environments (the runtime adopts this role via SET SESSION ROLE to enforce RLS; see docs/deploy.md)")
+	}
+	// The active-key cap blocks unbounded creation; disabling it
+	// in production is almost always a misconfiguration. Tests
+	// can still pass 0 via WithMaxActiveKeys directly without
+	// going through env-config.
+	if c.Environment.IsProduction() && c.Auth.APIKeyMaxActivePerTenant <= 0 {
+		return errors.New("AUTH_API_KEY_MAX_ACTIVE_PER_TENANT must be > 0 in production environments (the cap protects against unbounded key creation; see docs/deploy.md)")
+	}
+	if c.Policy.KeyWrapMasterB64 != "" && c.Policy.KeyWrapMasterFile != "" {
+		return errors.New("POLICY_KEY_WRAP_MASTER_B64 and POLICY_KEY_WRAP_MASTER_FILE are mutually exclusive")
 	}
 	if c.Environment.IsProduction() {
 		// In production we require a sslmode that guarantees TLS.

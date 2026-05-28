@@ -9,6 +9,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -525,18 +527,98 @@ func (s *EphemeralSigner) Sign(_ context.Context, _ uuid.UUID, data []byte) ([]b
 // PublicKey returns the verification key.
 func (s *EphemeralSigner) PublicKey() ed25519.PublicKey { return s.pub }
 
-// KeySigner uses a pre-loaded Ed25519 private key. PR8 will wire
-// this from a config file (`POLICY_SIGNING_KEY_PATH`).
+// KeySigner uses a pre-loaded Ed25519 private key.  This is the
+// production path for deployments that bootstrap a signing key
+// out-of-band (config file at `POLICY_SIGNING_KEY_PATH`) instead of
+// going through DB-backed rotation.  Single key, single tenant set
+// — operators rotating the key replace the file and restart the
+// process; the new key takes over on next boot.  There is no
+// in-process rotation in this mode by design (rotation lives in
+// KeyService).
+//
+// KeyID is derived from the public key at construction time so the
+// bundle envelope's `kid` field is stable across restarts (callers
+// only need the private key file — the public half is recomputable
+// from the seed). The derivation is the first 16 hex characters of
+// SHA-256(public), giving 64 bits of identification — comfortably
+// distinct across a small operator-managed key inventory while
+// staying short enough for log readability.
 type KeySigner struct {
-	priv ed25519.PrivateKey
+	priv  ed25519.PrivateKey
+	keyID string
 }
 
 // NewKeySigner returns a signer backed by the given private key.
+// `priv` must be a full ed25519.PrivateKey (64 bytes); callers that
+// have only a 32-byte seed should construct one via
+// `ed25519.NewKeyFromSeed(seed)` first.
 func NewKeySigner(priv ed25519.PrivateKey) *KeySigner {
-	return &KeySigner{priv: priv}
+	if len(priv) != ed25519.PrivateKeySize {
+		// Documented invariant; callers that hand us a malformed
+		// key should fail loudly at construction rather than
+		// shipping malformed signatures.
+		panic(fmt.Sprintf("policy: NewKeySigner expects a %d-byte ed25519 private key, got %d", ed25519.PrivateKeySize, len(priv)))
+	}
+	pub := priv.Public().(ed25519.PublicKey)
+	return &KeySigner{priv: priv, keyID: deriveKeyID(pub)}
 }
+
+// PublicKey returns the verification half of the signer's key. The
+// readiness handler publishes this so receivers can verify bundles
+// without an out-of-band trust step.
+func (s *KeySigner) PublicKey() ed25519.PublicKey {
+	return s.priv.Public().(ed25519.PublicKey)
+}
+
+// KeyID returns the stable identifier embedded in the bundle
+// envelope's `kid` field.
+func (s *KeySigner) KeyID() string { return s.keyID }
 
 // Sign produces an Ed25519 signature.
 func (s *KeySigner) Sign(_ context.Context, _ uuid.UUID, data []byte) ([]byte, string, error) {
-	return ed25519.Sign(s.priv, data), "", nil
+	return ed25519.Sign(s.priv, data), s.keyID, nil
+}
+
+// PrepareSigner returns a PreparedSigning bound to this signer's
+// private key. KeySigner satisfies the optional PreparedSigner
+// interface so Compile can sign all per-target payloads against a
+// single pure-CPU signer (no DB hop per target).
+func (s *KeySigner) PrepareSigner(_ context.Context, _ uuid.UUID) (PreparedSigning, error) {
+	return &preparedKeySigner{priv: s.priv, keyID: s.keyID}, nil
+}
+
+type preparedKeySigner struct {
+	priv  ed25519.PrivateKey
+	keyID string
+}
+
+func (p *preparedKeySigner) Sign(data []byte) ([]byte, string) {
+	return ed25519.Sign(p.priv, data), p.keyID
+}
+
+// deriveKeyID maps a public key to a stable short identifier. The
+// shape — first 16 hex chars of SHA-256(public) — matches the
+// PR7 KeyService.newKeyID convention so log filters and receiver-side
+// verification code are uniform across signer implementations.
+//
+// The two derivations use intentionally different sources:
+//
+//   - KeyService.newKeyID(): first 8 bytes of a fresh UUID v4
+//     (≈60 bits of entropy, fresh per rotation)
+//   - KeySigner.deriveKeyID(): first 8 bytes of SHA-256(public)
+//     (64 bits of effective entropy, deterministic in the public
+//     key so it's stable across restarts of the same file-backed
+//     deployment)
+//
+// The shape (16 hex chars) is the same so log filters and the
+// receiver's verification code don't need to know which signer
+// produced a given kid. Cross-mode collision probability between
+// a file-backed kid and a DB-backed kid is bounded by the lower
+// entropy source (≈2⁻⁶⁰ per pair); across a tenant with ~1000
+// historical DB rotations plus 1 file-backed key, by birthday-style
+// reasoning the probability of any collision is ~10⁻¹⁵ —
+// astronomically negligible.
+func deriveKeyID(pub ed25519.PublicKey) string {
+	sum := sha256.Sum256(pub)
+	return hex.EncodeToString(sum[:8])
 }

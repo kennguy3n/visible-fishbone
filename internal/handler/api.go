@@ -93,6 +93,8 @@ func WriteRepositoryError(w http.ResponseWriter, err error) {
 		WriteError(w, http.StatusForbidden, "forbidden", "operation not permitted")
 	case errors.Is(err, repository.ErrInvalidArgument):
 		WriteError(w, http.StatusBadRequest, "invalid_argument", err.Error())
+	case errors.Is(err, repository.ErrResourceExhausted):
+		WriteError(w, http.StatusTooManyRequests, "resource_exhausted", err.Error())
 	default:
 		WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 	}

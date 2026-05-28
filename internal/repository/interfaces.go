@@ -33,6 +33,14 @@ var (
 	// (e.g. a non-existent enum value). Callers can map this to
 	// a 400 at the HTTP boundary.
 	ErrInvalidArgument = errors.New("repository: invalid argument")
+
+	// ErrResourceExhausted is returned when an operation would
+	// exceed a per-tenant quota (e.g. the active-API-key cap).
+	// Distinct from ErrConflict (which means uniqueness) and
+	// ErrForbidden (which means policy denial) so the HTTP layer
+	// can map it to 429 Too Many Requests; the same caller may
+	// succeed later after revoking an existing resource.
+	ErrResourceExhausted = errors.New("repository: resource exhausted")
 )
 
 // SortOrder controls cursor pagination direction.
@@ -245,6 +253,59 @@ type WebhookDeliveryRepository interface {
 	// UpdateStatus, otherwise they remain in 'processing' until the
 	// stuck-row window elapses.
 	ListPending(ctx context.Context, limit int, processingTimeout time.Duration) ([]WebhookDelivery, error)
+}
+
+// --- Tenant API keys ------------------------------------------------------
+
+// TenantAPIKeyRepository owns the tenant_api_keys table. All tenant-
+// scoped reads/writes pass through `sng.tenant_id`; the cross-tenant
+// `LookupByHash` path runs under `sng.system_role='true'` because
+// the caller (the auth middleware) has not yet identified the
+// tenant — the presented key IS the identification.
+type TenantAPIKeyRepository interface {
+	// Create inserts a new API key. The caller is responsible for
+	// generating the random secret, computing its SHA-256 hash,
+	// and populating Name/Subject. The returned row carries the
+	// generated ID + CreatedAt; the secret itself is never stored.
+	Create(ctx context.Context, tenantID uuid.UUID, k TenantAPIKey) (TenantAPIKey, error)
+	// Get returns a single key by id, scoped to tenantID. Returns
+	// ErrNotFound when the key does not exist or belongs to a
+	// different tenant (filtered out by RLS).
+	Get(ctx context.Context, tenantID, id uuid.UUID) (TenantAPIKey, error)
+	// List returns all keys for the tenant ordered by created_at
+	// DESC. The handler does not paginate this list; an operator
+	// who hits the cap should rotate their key inventory rather
+	// than introducing cursoring.
+	List(ctx context.Context, tenantID uuid.UUID) ([]TenantAPIKey, error)
+	// Revoke transitions a key to status='revoked' and stamps the
+	// revoked_at column with `at`. Idempotent — revoking an
+	// already-revoked key is a no-op (no error). Returns
+	// ErrNotFound when the key does not exist.
+	Revoke(ctx context.Context, tenantID, id uuid.UUID, at time.Time) (TenantAPIKey, error)
+	// LookupByHash returns the API key whose SHA-256 hash matches
+	// `hash`. The lookup runs cross-tenant under the system-role
+	// RLS bypass; it is the only call path that does so. Returns
+	// ErrNotFound when no key with that hash exists. Status,
+	// expiry, and revocation checks are the caller's
+	// responsibility — the repository returns the raw row.
+	LookupByHash(ctx context.Context, hash []byte) (TenantAPIKey, error)
+	// TouchLastUsed best-effort updates last_used_at to `at`. The
+	// auth middleware calls this on every successful authentication
+	// so operators can audit key activity; the call is fire-and-
+	// forget and a failure must not block the request. Returns
+	// ErrNotFound when the key does not exist.
+	TouchLastUsed(ctx context.Context, tenantID, id uuid.UUID, at time.Time) error
+	// CountActive returns the number of active (non-revoked, non-
+	// expired) keys for the tenant. The service layer uses this to
+	// enforce a per-tenant cap on key inventory — without a cap an
+	// authenticated caller (JWT or existing key) could mint
+	// unbounded keys and DOS the List path (which intentionally
+	// does not paginate; see the List comment above for why).
+	// Expired keys are NOT counted because they are de-facto
+	// unusable and operators commonly leave them in place for
+	// audit-trail continuity rather than rotating-and-deleting.
+	// Implementations evaluate expiry against `now`.
+	CountActive(ctx context.Context, tenantID uuid.UUID, now time.Time) (int, error)
 }
 
 // --- Policy ---------------------------------------------------------------
