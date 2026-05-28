@@ -354,6 +354,10 @@ const (
 // MessagePack-encoded rules (see internal/service/policy). The
 // `Signature` is an Ed25519 signature over the bundle bytes; `KeyID`
 // names the tenant signing key whose public half verifies it.
+// `Sha256` is the precomputed SHA-256 digest of `Bundle`, populated
+// by the repository layer on insert and used by the agent-pull
+// endpoint to serve HEAD / If-None-Match responses without
+// transferring the full bundle bytes out of Postgres.
 type PolicyBundle struct {
 	ID            uuid.UUID
 	PolicyGraphID uuid.UUID
@@ -361,6 +365,32 @@ type PolicyBundle struct {
 	Bundle        []byte
 	Signature     []byte
 	KeyID         string
+	Sha256        []byte
+	CreatedAt     time.Time
+}
+
+// PolicyBundleMetadata is the agent-pull metadata view of a
+// PolicyBundle. It carries everything the HEAD / If-None-Match /
+// If-Modified-Since paths need to respond to a polling agent
+// (digest, signature, key_id, bundle byte length, timestamp)
+// WITHOUT loading the bundle BYTEA into application memory. The
+// downloadBundle handler resolves a metadata row first; only when
+// the agent's conditional headers do not short-circuit does it
+// reach for the full bundle bytes via GetLatestBundle.
+//
+// The split exists because polling agents fire HEAD / conditional
+// GET an order of magnitude more often than full GET, and bundles
+// can grow into the high-KB range as policy graphs scale. Avoiding
+// the BYTEA load on the polling-hot path keeps Postgres bandwidth
+// proportional to actual change rate, not poll rate.
+type PolicyBundleMetadata struct {
+	ID            uuid.UUID
+	PolicyGraphID uuid.UUID
+	TargetType    PolicyBundleTarget
+	Signature     []byte
+	KeyID         string
+	Sha256        []byte
+	BundleSize    int
 	CreatedAt     time.Time
 }
 

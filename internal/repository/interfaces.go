@@ -318,6 +318,13 @@ type PolicyRepository interface {
 	CreateBundle(ctx context.Context, tenantID uuid.UUID, b PolicyBundle) (PolicyBundle, error)
 	GetBundle(ctx context.Context, tenantID, id uuid.UUID) (PolicyBundle, error)
 	GetLatestBundle(ctx context.Context, tenantID uuid.UUID, target PolicyBundleTarget) (PolicyBundle, error)
+	// GetLatestBundleMetadata returns the row-level metadata for
+	// the latest bundle of `target` without loading the bundle
+	// BYTEA. The agent-pull endpoint uses this on the polling
+	// hot path so a HEAD / 304 response never round-trips the
+	// blob out of Postgres. Returns ErrNotFound when no bundle
+	// has yet been compiled for the (tenant, target) pair.
+	GetLatestBundleMetadata(ctx context.Context, tenantID uuid.UUID, target PolicyBundleTarget) (PolicyBundleMetadata, error)
 }
 
 // --- Policy signing keys --------------------------------------------------

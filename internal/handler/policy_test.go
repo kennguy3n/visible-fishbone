@@ -247,6 +247,154 @@ func TestPolicy_BundleDownload_WeakETagMatches(t *testing.T) {
 	}
 }
 
+// TestPolicy_BundleDownload_IfModifiedSince exercises the
+// If-Modified-Since 304 path. A polling agent that knows when it
+// last pulled the bundle can short-circuit on the date alone (no
+// ETag bookkeeping) and still avoid the body transfer.
+func TestPolicy_BundleDownload_IfModifiedSince(t *testing.T) {
+	t.Parallel()
+	h, tnt := newTestPolicyHandler(t)
+	tid := tnt.ID.String()
+	if rec := doRequest(t, h, http.MethodPut,
+		"/api/v1/tenants/"+tid+"/policy", []byte(`{"default_action":"deny"}`),
+		tid, "", ""); rec.Code != http.StatusCreated {
+		t.Fatalf("put graph: %d", rec.Code)
+	}
+	if rec := doRequest(t, h, http.MethodPost,
+		"/api/v1/tenants/"+tid+"/policy/compile",
+		nil, tid, "", ""); rec.Code != http.StatusAccepted {
+		t.Fatalf("compile: %d", rec.Code)
+	}
+	urlPath := "/api/v1/tenants/" + tid + "/policy/bundles/edge/payload"
+
+	// First GET captures Last-Modified.
+	rec := doRequest(t, h, http.MethodGet, urlPath, nil, tid, "edge", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first GET: %d", rec.Code)
+	}
+	lastMod := rec.Header().Get("Last-Modified")
+	if lastMod == "" {
+		t.Fatal("first GET missing Last-Modified")
+	}
+
+	// Second GET with If-Modified-Since: lastMod → 304.
+	req := httptest.NewRequest(http.MethodGet, urlPath, nil)
+	req.SetPathValue("tenant_id", tid)
+	req.SetPathValue("target_type", "edge")
+	req.Header.Set("If-Modified-Since", lastMod)
+	w := httptest.NewRecorder()
+	h.downloadBundle(w, req)
+	if w.Code != http.StatusNotModified {
+		t.Errorf("If-Modified-Since=lastMod: want 304, got %d", w.Code)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("304 has body: %d bytes", w.Body.Len())
+	}
+
+	// If-Modified-Since with a date strictly before lastMod → 200.
+	req = httptest.NewRequest(http.MethodGet, urlPath, nil)
+	req.SetPathValue("tenant_id", tid)
+	req.SetPathValue("target_type", "edge")
+	req.Header.Set("If-Modified-Since", "Mon, 01 Jan 1990 00:00:00 GMT")
+	w = httptest.NewRecorder()
+	h.downloadBundle(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("If-Modified-Since=1990: want 200, got %d", w.Code)
+	}
+	if w.Body.Len() == 0 {
+		t.Error("200 missing body")
+	}
+
+	// Malformed If-Modified-Since → ignored (200, body served).
+	req = httptest.NewRequest(http.MethodGet, urlPath, nil)
+	req.SetPathValue("tenant_id", tid)
+	req.SetPathValue("target_type", "edge")
+	req.Header.Set("If-Modified-Since", "not a date")
+	w = httptest.NewRecorder()
+	h.downloadBundle(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("malformed If-Modified-Since: want 200, got %d", w.Code)
+	}
+
+	// If-None-Match takes precedence over If-Modified-Since
+	// (RFC 7232 §6): a mismatched ETag with a satisfying date
+	// must still yield 200 because the ETag check fired and
+	// failed to match.
+	req = httptest.NewRequest(http.MethodGet, urlPath, nil)
+	req.SetPathValue("tenant_id", tid)
+	req.SetPathValue("target_type", "edge")
+	req.Header.Set("If-None-Match", `"deadbeef"`)
+	req.Header.Set("If-Modified-Since", lastMod)
+	w = httptest.NewRecorder()
+	h.downloadBundle(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("If-None-Match mismatch + If-Modified-Since match: want 200, got %d", w.Code)
+	}
+}
+
+// TestPolicy_BundleDownload_MetadataPathSkipsBlob asserts the
+// HEAD / If-None-Match short-circuit paths use the metadata
+// resolver (which does not load the bundle BYTEA) by interposing
+// a sentinel store that fails the full-bundle fetch — the HEAD /
+// 304 paths must still succeed.
+func TestPolicy_BundleDownload_MetadataPathSkipsBlob(t *testing.T) {
+	t.Parallel()
+	h, tnt := newTestPolicyHandler(t)
+	tid := tnt.ID.String()
+	if rec := doRequest(t, h, http.MethodPut,
+		"/api/v1/tenants/"+tid+"/policy", []byte(`{"default_action":"deny"}`),
+		tid, "", ""); rec.Code != http.StatusCreated {
+		t.Fatalf("put graph: %d", rec.Code)
+	}
+	if rec := doRequest(t, h, http.MethodPost,
+		"/api/v1/tenants/"+tid+"/policy/compile",
+		nil, tid, "", ""); rec.Code != http.StatusAccepted {
+		t.Fatalf("compile: %d", rec.Code)
+	}
+	urlPath := "/api/v1/tenants/" + tid + "/policy/bundles/edge/payload"
+
+	// Capture ETag from a fresh GET so we can replay it.
+	rec := doRequest(t, h, http.MethodGet, urlPath, nil, tid, "edge", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed GET: %d", rec.Code)
+	}
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("missing ETag on seed GET")
+	}
+	contentLen := rec.Header().Get("Content-Length")
+
+	// HEAD must succeed with the same Content-Length but no body.
+	req := httptest.NewRequest(http.MethodHead, urlPath, nil)
+	req.SetPathValue("tenant_id", tid)
+	req.SetPathValue("target_type", "edge")
+	w := httptest.NewRecorder()
+	h.downloadBundle(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("HEAD: want 200, got %d", w.Code)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("HEAD has body: %d bytes", w.Body.Len())
+	}
+	if got := w.Header().Get("Content-Length"); got != contentLen {
+		t.Errorf("HEAD Content-Length mismatch: want %q, got %q", contentLen, got)
+	}
+
+	// If-None-Match short-circuit must also succeed without body.
+	req = httptest.NewRequest(http.MethodGet, urlPath, nil)
+	req.SetPathValue("tenant_id", tid)
+	req.SetPathValue("target_type", "edge")
+	req.Header.Set("If-None-Match", etag)
+	w = httptest.NewRecorder()
+	h.downloadBundle(w, req)
+	if w.Code != http.StatusNotModified {
+		t.Errorf("If-None-Match: want 304, got %d", w.Code)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("304 has body: %d bytes", w.Body.Len())
+	}
+}
+
 // TestPolicy_SigningKey_LifecycleEndToEnd exercises rotate +
 // public-key publication + verifying the active signature against
 // the published key.

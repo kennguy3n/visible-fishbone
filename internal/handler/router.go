@@ -22,6 +22,7 @@ type RouterDeps struct {
 	Audit        *AuditHandler
 	Webhooks     *WebhookHandler
 	APIKeys      *APIKeyHandler
+	Telemetry    *TelemetryHandler
 	OpenAPISpec  *OpenAPIHandler
 	APIKeyLookup middleware.APIKeyLookup
 	RateLimiter  *middleware.RateLimiter
@@ -72,6 +73,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.APIKeys != nil {
 		deps.APIKeys.Register(apiMux)
+	}
+	if deps.Telemetry != nil {
+		deps.Telemetry.Register(apiMux)
 	}
 
 	apiChain := middleware.Chain(

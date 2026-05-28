@@ -37,15 +37,33 @@ func scanPolicyGraph(row pgx.Row) (repository.PolicyGraph, error) {
 }
 
 const policyBundleSelectColumns = `
-	id, policy_graph_id, target_type, bundle, signature, COALESCE(key_id, ''), created_at
+	id, policy_graph_id, target_type, bundle, signature, COALESCE(key_id, ''), sha256, created_at
 `
 
 func scanPolicyBundle(row pgx.Row) (repository.PolicyBundle, error) {
 	var b repository.PolicyBundle
-	if err := row.Scan(&b.ID, &b.PolicyGraphID, &b.TargetType, &b.Bundle, &b.Signature, &b.KeyID, &b.CreatedAt); err != nil {
+	if err := row.Scan(&b.ID, &b.PolicyGraphID, &b.TargetType, &b.Bundle, &b.Signature, &b.KeyID, &b.Sha256, &b.CreatedAt); err != nil {
 		return repository.PolicyBundle{}, err
 	}
 	return b, nil
+}
+
+// policyBundleMetaSelectColumns omits the `bundle` BYTEA so a SELECT
+// on the agent-pull HEAD path never round-trips the bundle bytes
+// out of Postgres. `octet_length(bundle)` carries the byte count so
+// the handler can emit Content-Length on HEAD without the payload.
+const policyBundleMetaSelectColumns = `
+	id, policy_graph_id, target_type, signature, COALESCE(key_id, ''), sha256, octet_length(bundle), created_at
+`
+
+func scanPolicyBundleMeta(row pgx.Row) (repository.PolicyBundleMetadata, error) {
+	var m repository.PolicyBundleMetadata
+	if err := row.Scan(
+		&m.ID, &m.PolicyGraphID, &m.TargetType, &m.Signature, &m.KeyID, &m.Sha256, &m.BundleSize, &m.CreatedAt,
+	); err != nil {
+		return repository.PolicyBundleMetadata{}, err
+	}
+	return m, nil
 }
 
 func (r *PolicyRepository) CreateGraph(ctx context.Context, tenantID uuid.UUID, g repository.PolicyGraph) (repository.PolicyGraph, error) {
@@ -198,9 +216,16 @@ func (r *PolicyRepository) CreateBundle(ctx context.Context, tenantID uuid.UUID,
 		if b.KeyID != "" {
 			keyID = b.KeyID
 		}
+		// Compute sha256 in the database so the value is byte-
+		// identical to the digest a Go caller would have produced
+		// before the column existed (sha256(bundle)) — keeps in-
+		// flight client ETag caches valid across the migration
+		// boundary and avoids serialising a redundant 32-byte
+		// parameter from the caller. Pgcrypto's `digest()` is
+		// available because migration 001 enables the extension.
 		row := tx.QueryRow(ctx, `
-			INSERT INTO policy_bundles (id, policy_graph_id, target_type, bundle, signature, key_id)
-			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6)
+			INSERT INTO policy_bundles (id, policy_graph_id, target_type, bundle, signature, key_id, sha256)
+			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, digest($4, 'sha256'))
 			RETURNING `+policyBundleSelectColumns,
 			b.ID, b.PolicyGraphID, b.TargetType, b.Bundle, b.Signature, keyID,
 		)
@@ -226,7 +251,7 @@ func (r *PolicyRepository) GetBundle(ctx context.Context, tenantID, id uuid.UUID
 	var out repository.PolicyBundle
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, `
-			SELECT b.id, b.policy_graph_id, b.target_type, b.bundle, b.signature, COALESCE(b.key_id, ''), b.created_at
+			SELECT b.id, b.policy_graph_id, b.target_type, b.bundle, b.signature, COALESCE(b.key_id, ''), b.sha256, b.created_at
 			FROM policy_bundles b
 			JOIN policy_graphs g ON g.id = b.policy_graph_id
 			WHERE b.id = $1::uuid
@@ -254,7 +279,7 @@ func (r *PolicyRepository) GetLatestBundle(ctx context.Context, tenantID uuid.UU
 	var out repository.PolicyBundle
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, `
-			SELECT b.id, b.policy_graph_id, b.target_type, b.bundle, b.signature, COALESCE(b.key_id, ''), b.created_at
+			SELECT b.id, b.policy_graph_id, b.target_type, b.bundle, b.signature, COALESCE(b.key_id, ''), b.sha256, b.created_at
 			FROM policy_bundles b
 			JOIN policy_graphs g ON g.id = b.policy_graph_id
 			WHERE b.target_type = $1
@@ -268,6 +293,39 @@ func (r *PolicyRepository) GetLatestBundle(ctx context.Context, tenantID uuid.UU
 		}
 		if err != nil {
 			return fmt.Errorf("select latest bundle: %w", err)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// GetLatestBundleMetadata mirrors GetLatestBundle but never selects
+// the bundle BYTEA. Same ordering (graph version desc, created_at
+// desc) so HEAD and GET round-trip identical rows.
+func (r *PolicyRepository) GetLatestBundleMetadata(ctx context.Context, tenantID uuid.UUID, target repository.PolicyBundleTarget) (repository.PolicyBundleMetadata, error) {
+	switch target {
+	case repository.PolicyBundleTargetEdge, repository.PolicyBundleTargetEndpoint,
+		repository.PolicyBundleTargetCloud, repository.PolicyBundleTargetMobile:
+	default:
+		return repository.PolicyBundleMetadata{}, repository.ErrInvalidArgument
+	}
+	var out repository.PolicyBundleMetadata
+	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		row := tx.QueryRow(ctx, `
+			SELECT `+policyBundleMetaSelectColumns+`
+			FROM policy_bundles b
+			JOIN policy_graphs g ON g.id = b.policy_graph_id
+			WHERE b.target_type = $1
+			ORDER BY g.version DESC, b.created_at DESC
+			LIMIT 1
+		`, target)
+		var err error
+		out, err = scanPolicyBundleMeta(row)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return repository.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("select latest bundle metadata: %w", err)
 		}
 		return nil
 	})
