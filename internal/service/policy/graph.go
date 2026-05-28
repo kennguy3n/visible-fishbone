@@ -1,11 +1,11 @@
 package policy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
@@ -492,8 +492,16 @@ func encodeRule(r Rule) ([]byte, error) {
 		return nil, errors.New("encode rule: malformed json")
 	}
 	keys := r.SortedExtra()
-	body := buf[:len(buf)-1]
-	if !strings.HasSuffix(string(body), "{") {
+	// Defensive copy of `buf` minus the trailing `}` so subsequent
+	// `append` calls below cannot mutate `buf`'s backing array. The
+	// previous `body := buf[:len(buf)-1]` shared `buf`'s storage —
+	// safe today because `buf` is never read after the alias, but a
+	// future refactor that reads `buf` post-merge would silently see
+	// a corrupted closing byte. One alloc per encode is the cost of
+	// eliminating the footgun (Devin Review PR#11 ANALYSIS-0001).
+	body := make([]byte, len(buf)-1, len(buf)+len(keys)*32)
+	copy(body, buf)
+	if !bytes.HasSuffix(body, []byte("{")) {
 		body = append(body, ',')
 	}
 	for i, k := range keys {
