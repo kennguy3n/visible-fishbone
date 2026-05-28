@@ -594,6 +594,176 @@ paths:
       summary: Revoke tenant API key
       responses:
         "204": { description: revoked }
+  /tenants/{tenant_id}/app-registry:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+    get:
+      tags: [app-registry]
+      summary: List effective app classifications (global + tenant overrides)
+      responses:
+        "200":
+          description: effective classifications
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/EffectiveApp" }
+  /tenants/{tenant_id}/app-registry/overrides:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+    get:
+      tags: [app-registry]
+      summary: List tenant app-classification overrides
+      responses:
+        "200":
+          description: overrides
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AppRegistryOverride" }
+                  next_cursor: { type: string }
+    post:
+      tags: [app-registry]
+      summary: Create a tenant override (promote / demote an app or custom domain)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppRegistryOverrideRequest" }
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppRegistryOverride" }
+  /tenants/{tenant_id}/app-registry/overrides/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - $ref: "#/components/parameters/ResourceID"
+    delete:
+      tags: [app-registry]
+      summary: Remove a tenant override
+      responses:
+        "204": { description: removed }
+  /tenants/{tenant_id}/app-registry/stats:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+    get:
+      tags: [app-registry]
+      summary: Per-class traffic distribution from telemetry
+      description: |
+        Returns the per-class event / byte distribution over a
+        time window. The window's lower bound can be specified
+        in one of two mutually-exclusive ways: `window_hours`
+        (relative) or `since` (absolute RFC3339 timestamp).
+        Passing both yields HTTP 400 `conflicting_window`. When
+        neither is set, the window defaults to the trailing 7
+        days.
+      parameters:
+        - name: window_hours
+          in: query
+          description: |
+            Trailing window size in hours. Mutually exclusive
+            with `since`.
+          schema: { type: integer, minimum: 1 }
+        - name: since
+          in: query
+          description: |
+            Absolute lower bound (inclusive) for the window.
+            Mutually exclusive with `window_hours`.
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: per-class distribution
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  since: { type: string, format: date-time }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/TrafficClassStat" }
+        "400":
+          description: conflicting_window — both since and window_hours supplied
+        "503":
+          description: telemetry pipeline disabled
+  /admin/app-registry:
+    get:
+      tags: [admin, app-registry]
+      summary: List global app catalog entries
+      responses:
+        "200":
+          description: catalog
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AppRegistry" }
+                  next_cursor: { type: string }
+    post:
+      tags: [admin, app-registry]
+      summary: Create a global app entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppRegistryRequest" }
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppRegistry" }
+  /admin/app-registry/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceID"
+    put:
+      tags: [admin, app-registry]
+      summary: Update a global app entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppRegistryRequest" }
+      responses:
+        "200":
+          description: updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppRegistry" }
+    delete:
+      tags: [admin, app-registry]
+      summary: Delete a global app entry
+      responses:
+        "204": { description: deleted }
+  /admin/app-registry/sync:
+    post:
+      tags: [admin, app-registry]
+      summary: Trigger vendor-endpoint sync (Microsoft / Google / AWS / generic)
+      responses:
+        "200":
+          description: sync results (one row per app with metadata_url)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: "#/components/schemas/SyncResult" }
+        "503":
+          description: vendor sync not configured
 components:
   securitySchemes:
     BearerJWT:
@@ -893,3 +1063,151 @@ components:
         created_at: { type: string, format: date-time }
         revoked_at: { type: string, format: date-time }
         plaintext: { type: string, description: only returned on create }
+    AppRegistry:
+      type: object
+      required: [id, name, traffic_class, scope, domains, is_system, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        vendor: { type: string }
+        traffic_class:
+          type: string
+          enum: [trusted_direct, trusted_media_bypass, inspect_lite, inspect_full, tunnel_private, block]
+        scope: { type: string, enum: [global, regional] }
+        regions:
+          type: array
+          items: { type: string }
+        domains:
+          type: array
+          items: { type: string }
+        ip_ranges:
+          type: array
+          items: { type: string }
+        cert_pins:
+          type: array
+          items: { type: string }
+        metadata_url: { type: string }
+        category: { type: string }
+        is_system: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AppRegistryRequest:
+      type: object
+      description: |
+        Create / update body for the global app catalog.
+
+        Optional scalar fields (`vendor`, `metadata_url`, `category`)
+        follow PUT-replacement semantics: omitting the field from
+        the JSON body inherits the existing value (or leaves it
+        empty on create), while setting the field to an empty
+        string explicitly clears it. This lets clients fully
+        replace an entry on PUT without having to delete and
+        recreate it.
+      required: [name, traffic_class, scope, domains]
+      properties:
+        name: { type: string }
+        vendor:
+          type: string
+          description: |
+            Vendor name. Send `""` on PUT to clear; omit to
+            inherit the existing value.
+        traffic_class:
+          type: string
+          enum: [trusted_direct, trusted_media_bypass, inspect_lite, inspect_full, tunnel_private, block]
+        scope: { type: string, enum: [global, regional] }
+        regions:
+          type: array
+          items: { type: string }
+        domains:
+          type: array
+          items: { type: string }
+        ip_ranges:
+          type: array
+          items: { type: string }
+        cert_pins:
+          type: array
+          items: { type: string }
+        metadata_url:
+          type: string
+          description: |
+            Vendor-published endpoint document URL (auto-sync
+            source). Send `""` on PUT to clear; omit to inherit.
+        category:
+          type: string
+          description: |
+            Category label. Send `""` on PUT to clear; omit to
+            inherit.
+        is_system: { type: boolean }
+    AppRegistryOverride:
+      type: object
+      required: [id, tenant_id, traffic_class_override, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        app_id: { type: string, format: uuid, description: "set when override targets a global app entry" }
+        custom_domains:
+          type: array
+          items: { type: string }
+          description: "set when override targets domains not present in the global catalog"
+        traffic_class_override:
+          type: string
+          enum: [trusted_direct, trusted_media_bypass, inspect_lite, inspect_full, tunnel_private, block]
+        reason: { type: string }
+        expires_at: { type: string, format: date-time, description: "TTL-based auto-cleanup; omit for permanent" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AppRegistryOverrideRequest:
+      type: object
+      required: [traffic_class_override]
+      description: |
+        Exactly one of `app_id` or `custom_domains` must be set.
+        - `app_id` references an entry in the global `app_registry`.
+        - `custom_domains` defines a tenant-local pattern list for
+          apps that are not in the global catalog.
+        Supplying neither (or both) returns 400
+        `invalid_override_target`. Empty / whitespace-only
+        custom-domain entries return 400 `invalid_custom_domain`
+        because they would never match any flow and would install
+        a silently-dead override.
+      properties:
+        app_id: { type: string, format: uuid }
+        custom_domains:
+          type: array
+          items: { type: string }
+        traffic_class_override:
+          type: string
+          enum: [trusted_direct, trusted_media_bypass, inspect_lite, inspect_full, tunnel_private, block]
+        reason: { type: string }
+        expires_at: { type: string, format: date-time }
+    EffectiveApp:
+      type: object
+      required: [app, effective_class, source]
+      properties:
+        app: { $ref: "#/components/schemas/AppRegistry" }
+        effective_class:
+          type: string
+          enum: [trusted_direct, trusted_media_bypass, inspect_lite, inspect_full, tunnel_private, block]
+        source: { type: string, enum: [global, override] }
+        override_id: { type: string, format: uuid }
+        override_expires_at: { type: string, format: date-time }
+        override_reason: { type: string }
+    TrafficClassStat:
+      type: object
+      required: [class, events, bytes]
+      properties:
+        class: { type: string }
+        events: { type: integer, format: int64 }
+        bytes: { type: integer, format: int64 }
+    SyncResult:
+      type: object
+      required: [app_id, app_name, metadata_url]
+      properties:
+        app_id: { type: string, format: uuid }
+        app_name: { type: string }
+        metadata_url: { type: string }
+        domains_before: { type: integer }
+        domains_after: { type: integer }
+        ip_ranges_before: { type: integer }
+        ip_ranges_after: { type: integer }
+        updated: { type: boolean }
+        error: { type: string }

@@ -58,12 +58,54 @@ type KeyEnsurer interface {
 	EnsureKey(ctx context.Context, tenantID uuid.UUID) error
 }
 
+// SteeringCompiler produces the per-target traffic-classification
+// steering rules that the policy compiler embeds into each bundle.
+// The interface is satisfied by *appdb.Service via the adapter
+// PolicySteeringAdapter — declared here as an interface so the
+// policy package does not import appdb directly (preventing an
+// import cycle and keeping the policy service unit-testable with a
+// tiny fake).
+//
+// The return type is `any` rather than a typed struct so the
+// interface stays decoupled from the appdb package; callers that
+// need the typed shape can type-assert. The policy compiler only
+// needs to JSON-encode the value, so a generic `any` is sufficient.
+//
+// SnapshotSteering returns a per-tenant cache of the catalog +
+// overrides so the compiler can produce every per-target rule
+// set from a single pair of DB reads instead of repeating those
+// reads for every target. The returned snapshot is single-use:
+// callers must not retain it across Compile invocations because
+// the underlying catalog drifts as operators mutate the registry.
+// A `nil` snapshot (no compiler installed) signals to the caller
+// that the steering section should be omitted from the bundle.
+type SteeringCompiler interface {
+	CompileSteeringRules(ctx context.Context, tenantID uuid.UUID, target repository.PolicyBundleTarget) (any, error)
+	// SnapshotSteering returns an object that implements
+	// SteeringSnapshot. The return is typed as `any` for the
+	// same reason CompileSteeringRules returns `any` — the
+	// concrete type lives in appdb and this package cannot
+	// import it. The Compile method type-asserts the result.
+	SnapshotSteering(ctx context.Context, tenantID uuid.UUID) (any, error)
+}
+
+// SteeringSnapshot is the interface the policy compiler uses to
+// produce per-target rules from a pre-fetched catalog. Implemented
+// by appdb.PolicySteeringSnapshotAdapter (wrapping
+// *appdb.SteeringSnapshot). Reusing the same snapshot across all
+// targets in a single Compile call avoids the N × ListAll round
+// trip pattern called out in Devin Review on commit 02765a2.
+type SteeringSnapshot interface {
+	CompileForTarget(target repository.PolicyBundleTarget) (any, error)
+}
+
 // Service is the policy service.
 type Service struct {
-	repo   repository.PolicyRepository
-	audit  repository.AuditLogRepository
-	signer Signer
-	logger *slog.Logger
+	repo     repository.PolicyRepository
+	audit    repository.AuditLogRepository
+	signer   Signer
+	logger   *slog.Logger
+	steering SteeringCompiler
 }
 
 // ServiceOption configures New.
@@ -82,6 +124,19 @@ func WithLogger(l *slog.Logger) ServiceOption {
 		if l != nil {
 			s.logger = l
 		}
+	}
+}
+
+// WithSteeringCompiler installs the traffic-classification
+// steering compiler. When supplied, Compile embeds the per-target
+// steering rules into each bundle's `steering` field. When nil,
+// bundles ship without a steering section (the receiver treats a
+// missing section as "no classification — fall back to the
+// pre-classification enforcement paths"). Production callers pass
+// the *appdb.Service from cmd/sng-control.
+func WithSteeringCompiler(c SteeringCompiler) ServiceOption {
+	return func(s *Service) {
+		s.steering = c
 	}
 }
 
@@ -256,8 +311,47 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 			slog.Any("error", parseErr),
 		)
 	}
+	// Snapshot the appdb catalog + tenant overrides once per
+	// Compile so the per-target steering build below doesn't
+	// re-issue the same pair of ListAll reads for every bundle
+	// target. A typical Compile produces four targets (edge,
+	// endpoint, cloud, mobile) — the previous shape did 4 × 2 =
+	// 8 round-trips per Compile against unchanged inputs.
+	// A nil compiler (in-process tests, dry runs) leaves the
+	// snapshot nil and the Steering section is omitted, matching
+	// the pre-snapshot fallback behaviour.
+	var steeringSnap SteeringSnapshot
+	if s.steering != nil {
+		snapAny, sErr := s.steering.SnapshotSteering(ctx, tenantID)
+		if sErr != nil {
+			return CompileResult{}, fmt.Errorf("snapshot steering: %w", sErr)
+		}
+		snap, ok := snapAny.(SteeringSnapshot)
+		if !ok {
+			return CompileResult{}, fmt.Errorf("snapshot steering: returned type %T does not implement SteeringSnapshot", snapAny)
+		}
+		steeringSnap = snap
+	}
 	for _, target := range allTargets {
-		payload, err := encodeBundlePayloadFor(target, graph, typed, compiledAt)
+		// Resolve the per-target steering rules from the
+		// snapshot. Determinism comes from the appdb compiler —
+		// it sorts every set into canonical order and runs at the
+		// same `compiledAt` for every target, so repeated
+		// compilations against an unchanged catalog produce
+		// identical bytes.
+		var steeringJSON json.RawMessage
+		if steeringSnap != nil {
+			raw, sErr := steeringSnap.CompileForTarget(target)
+			if sErr != nil {
+				return CompileResult{}, fmt.Errorf("compile steering rules %s: %w", target, sErr)
+			}
+			encoded, encErr := json.Marshal(raw)
+			if encErr != nil {
+				return CompileResult{}, fmt.Errorf("encode steering rules %s: %w", target, encErr)
+			}
+			steeringJSON = encoded
+		}
+		payload, err := encodeBundlePayloadFor(target, graph, typed, steeringJSON, compiledAt)
 		if err != nil {
 			return CompileResult{}, fmt.Errorf("encode %s bundle: %w", target, err)
 		}
@@ -332,7 +426,13 @@ type bundlePayload struct {
 	Compiler      string          `msgpack:"c"`
 	DefaultAction string          `msgpack:"d"`
 	Rules         json.RawMessage `msgpack:"r"`
-	CompiledAt    string          `msgpack:"ts"`
+	// Steering is the per-target traffic-classification rule set
+	// emitted by internal/service/appdb. JSON-encoded so the
+	// bundle remains deterministic byte-for-byte (the appdb
+	// compiler sorts every set into canonical order). Omitted when
+	// no steering compiler is wired.
+	Steering   json.RawMessage `msgpack:"st,omitempty"`
+	CompiledAt string          `msgpack:"ts"`
 }
 
 // encodeBundlePayload renders a deterministic, MessagePack-encoded
@@ -358,7 +458,7 @@ func encodeBundlePayload(target repository.PolicyBundleTarget, g repository.Poli
 	if parsed, err := ParseGraph(g.Graph); err == nil {
 		typed = &parsed
 	}
-	return encodeBundlePayloadFor(target, g, typed, compiledAt)
+	return encodeBundlePayloadFor(target, g, typed, nil, compiledAt)
 }
 
 // encodeBundlePayloadFor renders a deterministic, MessagePack-encoded
@@ -367,7 +467,12 @@ func encodeBundlePayload(target repository.PolicyBundleTarget, g repository.Poli
 // real bundle. Compile parses the graph once and threads the typed
 // result through every per-target call, replacing the 4× ParseGraph
 // per Compile that Devin Review #3312781265 flagged.
-func encodeBundlePayloadFor(target repository.PolicyBundleTarget, g repository.PolicyGraph, typed *Graph, compiledAt time.Time) ([]byte, error) {
+//
+// steeringJSON is the canonical-JSON encoding of the per-target
+// traffic-classification rule set (see internal/service/appdb.
+// SteeringRuleSet). nil means "no steering compiler was wired"; the
+// bundle omits the section in that case.
+func encodeBundlePayloadFor(target repository.PolicyBundleTarget, g repository.PolicyGraph, typed *Graph, steeringJSON json.RawMessage, compiledAt time.Time) ([]byte, error) {
 	rules, defaultAction := perTargetRulesFromParsed(target, g.Graph, typed)
 	p := bundlePayload{
 		SchemaVersion: 1,
@@ -377,6 +482,7 @@ func encodeBundlePayloadFor(target repository.PolicyBundleTarget, g repository.P
 		Compiler:      CompilerVersion,
 		DefaultAction: defaultAction,
 		Rules:         rules,
+		Steering:      steeringJSON,
 		CompiledAt:    compiledAt.Format(time.RFC3339Nano),
 	}
 	enc := msgpack.GetEncoder()

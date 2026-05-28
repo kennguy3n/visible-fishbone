@@ -12,25 +12,27 @@ import (
 
 func sampleEnvelope(t *testing.T) schema.Envelope {
 	t.Helper()
-	payload, err := schema.PackPayload(schema.FlowEvent{
-		SrcIP: "10.0.0.1", DstIP: "10.0.0.2",
-		SrcPort: 1024, DstPort: 443,
-		Protocol: "tcp", Verdict: schema.VerdictAllow,
-		BytesIn: 1000, BytesOut: 500, DurationMs: 100,
-	})
+	env, err := schema.WrapFlowEvent(
+		schema.Envelope{
+			SchemaVersion: schema.SchemaVersion,
+			EventID:       uuid.New(),
+			TenantID:      uuid.New(),
+			DeviceID:      uuid.New(),
+			Timestamp:     time.Now().UTC(),
+			Platform:      schema.PlatformLinux,
+		},
+		"trusted_direct",
+		schema.FlowEvent{
+			SrcIP: "10.0.0.1", DstIP: "10.0.0.2",
+			SrcPort: 1024, DstPort: 443,
+			Protocol: "tcp", Verdict: schema.VerdictAllow,
+			BytesIn: 1000, BytesOut: 500, DurationMs: 100,
+		},
+	)
 	if err != nil {
-		t.Fatalf("pack payload: %v", err)
+		t.Fatalf("wrap flow event: %v", err)
 	}
-	return schema.Envelope{
-		SchemaVersion: schema.SchemaVersion,
-		EventID:       uuid.New(),
-		TenantID:      uuid.New(),
-		DeviceID:      uuid.New(),
-		Timestamp:     time.Now().UTC(),
-		EventClass:    schema.EventClassFlow,
-		Platform:      schema.PlatformLinux,
-		Payload:       payload,
-	}
+	return env
 }
 
 func TestEnvelope_RoundTrip(t *testing.T) {
@@ -73,6 +75,7 @@ func TestEnvelope_ValidateRejects(t *testing.T) {
 		"zero ts":       func(e *schema.Envelope) { e.Timestamp = time.Time{} },
 		"bad class":     func(e *schema.Envelope) { e.EventClass = "bogus" },
 		"bad platform":  func(e *schema.Envelope) { e.Platform = "bogus" },
+		"bad tc":        func(e *schema.Envelope) { e.TrafficClass = "bogus" },
 		"empty payload": func(e *schema.Envelope) { e.Payload = nil },
 	}
 	for name, mutate := range mutations {

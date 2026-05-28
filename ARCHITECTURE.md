@@ -230,6 +230,48 @@ resolver). Dual-bank image install allows safe rollback.
   sensitive categories (healthcare, finance) — defaults match
   industry-standard "do not decrypt" lists.
 
+### 4.4a Traffic Classification Engine (`sng-appdb`)
+
+Every flow is classified into one of six **traffic classes** before
+enforcement decides which subsystem(s) inspect it. The class is the
+single dimension that drives "expensive vs. cheap path" — and is
+the foundation for the cloud-only deployment mode's unit economics
+(see PROPOSAL.md §9.4).
+
+- **Six classes**: `TRUSTED_DIRECT`, `TRUSTED_MEDIA_BYPASS`,
+  `INSPECT_LITE`, `INSPECT_FULL`, `TUNNEL_PRIVATE`, `BLOCK`.
+- **Per-class action**: direct egress / media-bypass /
+  SWG-lite (URL-cat only, no TLS MITM) / full SWG+TLS+IPS / SD-WAN
+  overlay / drop.
+- **App database** (`app_registry` + `app_registry_overrides`)
+  is the source of truth. Global catalog is curated by SNG; tenants
+  can promote/demote entries via per-tenant overrides (RLS-isolated).
+- **Per-deployment-mode steering**: the same class compiles to
+  different actions per bundle target. `edge` receives the full
+  steering table; `cloud` only the classes that reach the cloud
+  proxy (`INSPECT_FULL`, `TUNNEL_PRIVATE`, `BLOCK`); `endpoint` and
+  `mobile` receive DNS verification + steering decisions.
+- **Demotion engine** (`internal/service/appdb/demotion.go`)
+  subscribes to runtime threat signals (threat feed, cert-pin
+  mismatch, IP-range mismatch, anomaly detector) and installs
+  short-TTL overrides on the affected tenants. Global signals
+  (threat feed, cert mismatch) fan out across every active tenant.
+- **Vendor sync** (`internal/service/appdb/sync.go`) periodically
+  pulls Microsoft 365 endpoints JSON, Google IP ranges JSON, AWS IP
+  ranges JSON, and any custom `{ domains, ip_ranges }` feed
+  registered against an app's `metadata_url`.
+- **Byte determinism**: the compiled steering rule set is sorted
+  in canonical order (domains, IPs, pins, app refs) so two
+  compilations of the same catalog produce identical bytes —
+  signatures cache, bundle de-dup works, and the receiver-side
+  verifier needs no schema reshuffle.
+- **Telemetry dimension**: every event envelope carries the
+  `traffic_class` it was matched against; ClickHouse stores it as a
+  `LowCardinality(String)` column so per-class cost attribution is
+  a single GROUP BY. See `internal/service/telemetry/clickhouse`.
+
+See `docs/TRAFFIC_CLASSIFICATION.md` for the full design.
+
 ### 4.5 DNS Security (`sng-dns`)
 
 - Recursive resolver layer (Unbound-class) wrapped by `sng-dns`.

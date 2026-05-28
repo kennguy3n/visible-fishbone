@@ -113,6 +113,31 @@ type Envelope struct {
 	Timestamp     time.Time  `msgpack:"ts"`
 	EventClass    EventClass `msgpack:"cls"`
 	Platform      Platform   `msgpack:"plt"`
+	// TrafficClass hoists the per-flow classification decision
+	// (see internal/service/appdb) so the telemetry writer can
+	// promote it to a ClickHouse column without round-tripping
+	// the payload. Optional — legacy producers that pre-date
+	// traffic classification omit it; the writer applies the
+	// "inspect_full" default (the conservative baseline). Carried
+	// on the envelope rather than inside FlowEvent so the same
+	// dimension is available for DNS / HTTP / ZTNA events. This
+	// is the single source of truth — FlowEvent does NOT carry a
+	// parallel field.
+	TrafficClass string `msgpack:"tc,omitempty"`
+	// BytesIn and BytesOut hoist the per-flow byte counters out
+	// of the FlowEvent payload onto the envelope. The telemetry
+	// writer promotes these to dedicated ClickHouse columns so
+	// per-class byte totals can be SUMmed via column aggregates
+	// — the previous implementation tried to JSONExtract them
+	// from the MessagePack payload, which always returned zero
+	// and silently broke the cost-attribution chart. Non-flow
+	// event classes leave these at zero; the omitempty tags keep
+	// them off the wire when unused so per-event overhead stays
+	// flat. Producers MUST use WrapFlowEvent (below) when wrapping
+	// a FlowEvent so the envelope and payload byte counters can
+	// never disagree.
+	BytesIn  uint64 `msgpack:"bi,omitempty"`
+	BytesOut uint64 `msgpack:"bo,omitempty"`
 	// Payload is the MessagePack-encoded class-specific payload.
 	// Stored as opaque bytes so decoders can sniff EventClass
 	// first and dispatch to the right type without round-tripping
@@ -145,10 +170,41 @@ func (e Envelope) Validate() error {
 	if !e.Platform.IsValid() {
 		return fmt.Errorf("platform %q is invalid: %w", e.Platform, ErrInvalid)
 	}
+	// Closed-set validation for TrafficClass. Empty is legitimate
+	// (legacy producers pre-dating traffic classification omit it;
+	// the writer applies the "inspect_full" default downstream), but
+	// any non-empty value must be one of the canonical classes —
+	// otherwise a malformed producer could pollute the ClickHouse
+	// traffic_class column with arbitrary strings and break
+	// per-class GROUP BY aggregates on the cost-attribution chart.
+	// The set is duplicated here (rather than imported from
+	// internal/repository) to keep this low-level transport package
+	// dependency-free.
+	if e.TrafficClass != "" && !isValidTrafficClass(e.TrafficClass) {
+		return fmt.Errorf("traffic_class %q is invalid: %w", e.TrafficClass, ErrInvalid)
+	}
 	if len(e.Payload) == 0 {
 		return fmt.Errorf("payload is required: %w", ErrInvalid)
 	}
 	return nil
+}
+
+// validTrafficClasses is the closed set of values Envelope.TrafficClass
+// may carry. Kept in sync with repository.AllTrafficClasses; any
+// addition there must land here too — the schema validator is the
+// boundary that protects ClickHouse from polluted dimension values.
+var validTrafficClasses = map[string]struct{}{
+	"trusted_direct":        {},
+	"trusted_media_bypass":  {},
+	"inspect_lite":          {},
+	"inspect_full":          {},
+	"tunnel_private":        {},
+	"block":                 {},
+}
+
+func isValidTrafficClass(s string) bool {
+	_, ok := validTrafficClasses[s]
+	return ok
 }
 
 // ErrInvalid is returned by Validate methods. Wrap with %w so
@@ -179,6 +235,33 @@ func Unmarshal(b []byte) (Envelope, error) {
 		return Envelope{}, err
 	}
 	return e, nil
+}
+
+// WrapFlowEvent builds an Envelope around a FlowEvent and copies
+// the byte counters and traffic class onto the envelope so the
+// telemetry writer can hoist them to dedicated ClickHouse columns
+// without round-tripping the payload. Producers should always
+// route flow-event envelopes through this helper so envelope and
+// payload counters cannot drift.
+//
+// envMeta supplies the envelope metadata (tenant/device/site/
+// timestamp/platform/event-id) and any non-flow envelope fields.
+// Its EventClass is overridden to EventClassFlow and its
+// TrafficClass argument is preserved (callers pass the per-flow
+// classification decision separately from FlowEvent because the
+// classification is a transport-layer concern, not flow-payload
+// data).
+func WrapFlowEvent(envMeta Envelope, trafficClass string, flow FlowEvent) (Envelope, error) {
+	payload, err := PackPayload(flow)
+	if err != nil {
+		return Envelope{}, err
+	}
+	envMeta.EventClass = EventClassFlow
+	envMeta.TrafficClass = trafficClass
+	envMeta.BytesIn = flow.BytesIn
+	envMeta.BytesOut = flow.BytesOut
+	envMeta.Payload = payload
+	return envMeta, nil
 }
 
 // PackPayload marshals any msgpack-serializable typed payload into

@@ -16,12 +16,14 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
@@ -32,6 +34,7 @@ import (
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
+	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
@@ -128,7 +131,7 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, err := buildRouter(&cfg, logger, pool, health, telReplay)
+	router, webhookWorker, appRegHandler, appSyncer, err := buildRouter(&cfg, logger, pool, health, telReplay)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -140,15 +143,50 @@ func run() error {
 		return fmt.Errorf("start webhook worker: %w", err)
 	}
 
-	telShutdown, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher)
+	// Launch the periodic app-registry sync loop. The Syncer pulls
+	// vendor-published endpoint lists (Microsoft 365, Google IP
+	// ranges, AWS, etc.) on the cadence configured by
+	// APP_REGISTRY_SYNC_INTERVAL (default 24h, matching
+	// docs/TRAFFIC_CLASSIFICATION.md §8). Set
+	// APP_REGISTRY_SYNC_ENABLED=false to skip the background loop
+	// — the admin-triggered `POST /admin/app-registry/sync`
+	// endpoint stays functional regardless, so an operator can
+	// force a sync on demand. We do not wait for the goroutine on
+	// shutdown: Syncer.Run returns the moment rootCtx is
+	// cancelled, and an in-flight HTTP fetch will be unblocked by
+	// the same ctx that gates the rest of the process.
+	if cfg.AppRegistry.SyncEnabled {
+		go appSyncer.Run(rootCtx, cfg.AppRegistry.SyncInterval)
+		logger.Info("sng-control: app-registry sync loop started",
+			slog.Duration("interval", cfg.AppRegistry.SyncInterval))
+	} else {
+		logger.Info("sng-control: app-registry sync loop disabled (APP_REGISTRY_SYNC_ENABLED=false)")
+	}
+
+	rawTelShutdown, chWriter, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
+	// Wire the ClickHouse writer into the AppRegistry handler so
+	// the /app-registry/stats endpoint can serve per-class
+	// distributions. When ClickHouse is not configured, chWriter
+	// is nil and the handler keeps returning 503 on /stats.
+	if chWriter != nil {
+		appRegHandler.SetStats(clickhouseStatsAdapter{w: chWriter})
+	}
+	// Wrap startTelemetry's shutdown in a sync.Once so the bounded
+	// explicit call (with shutdownCtx) wins and the safety-net
+	// defer (with context.Background()) becomes a no-op rather
+	// than racing a second close against an already-stopped
+	// ClickHouse connection. The defer still covers early-return
+	// paths between here and the explicit shutdown below.
+	var telShutdownOnce sync.Once
+	telShutdown := func(ctx context.Context) error {
+		var shutdownErr error
+		telShutdownOnce.Do(func() { shutdownErr = rawTelShutdown(ctx) })
+		return shutdownErr
+	}
 	defer func() {
-		// Drain hot/cold writers on shutdown. Errors are logged
-		// inside startTelemetry's closure; we surface them here
-		// too so a malformed flush turns up in operator logs
-		// rather than disappearing into a deferred void.
 		if err := telShutdown(context.Background()); err != nil {
 			logger.Error("telemetry shutdown failed", slog.Any("error", err))
 		}
@@ -210,7 +248,7 @@ func buildRouter(
 	pool *pgxpool.Pool,
 	health *handler.Health,
 	replay *telreplay.Worker,
-) (http.Handler, *webhook.DeliveryWorker, error) {
+) (http.Handler, *webhook.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, error) {
 	store := postgres.NewStore(pool)
 
 	tenantRepo := store.NewTenantRepository()
@@ -224,6 +262,8 @@ func buildRouter(
 	webhookEndpointRepo := store.NewWebhookEndpointRepository()
 	webhookDeliveryRepo := store.NewWebhookDeliveryRepository()
 	apiKeyRepo := store.NewTenantAPIKeyRepository()
+	appRepo := store.NewAppRegistryRepository()
+	appOverrideRepo := store.NewAppRegistryOverrideRepository()
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -254,11 +294,11 @@ func buildRouter(
 	// the same in all cases.
 	keyOpts := []policy.KeyOption{}
 	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
-		return nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
 	} else if len(master) > 0 {
 		w, err := policy.NewAESGCMWrapper(master)
 		if err != nil {
-			return nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
 		}
 		keyOpts = append(keyOpts, policy.WithKeyWrapper(w))
 		logger.Info("policy: AES-256-GCM at-rest wrap enabled for signing seeds")
@@ -269,7 +309,7 @@ func buildRouter(
 	if cfg.Policy.SigningKeyPath != "" {
 		ks, err := policy.LoadKeySignerFromFile(cfg.Policy.SigningKeyPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("policy signing key: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
 		}
 		policySigner = ks
 		fileSigner = ks
@@ -277,7 +317,16 @@ func buildRouter(
 			slog.String("path", cfg.Policy.SigningKeyPath),
 			slog.String("key_id", ks.KeyID()))
 	}
-	policySvc := policy.New(policyRepo, auditRepo, policySigner, policy.WithLogger(logger))
+	appSvc := appdb.New(appRepo, appOverrideRepo, auditRepo, logger)
+	appSyncer := appdb.NewSyncer(appSvc, nil)
+	appRegHandler := handler.NewAppRegistryHandler(appSvc, nil, appSyncer)
+	policySvc := policy.New(
+		policyRepo,
+		auditRepo,
+		policySigner,
+		policy.WithLogger(logger),
+		policy.WithSteeringCompiler(appdb.PolicySteeringAdapter{Svc: appSvc}),
+	)
 
 	// When the file-backed signer is active, expose its public key
 	// through the existing /signing-keys/{kid}/public-key endpoint
@@ -332,11 +381,24 @@ func buildRouter(
 		Webhooks:     handler.NewWebhookHandler(webhookSvc),
 		APIKeys:      handler.NewAPIKeyHandler(apiKeySvc),
 		Telemetry:    handler.NewTelemetryHandler(replay),
+		AppRegistry:  appRegHandler,
 		APIKeyLookup: apiKeySvc,
 		Health:       health,
 		OpenAPISpec:  handler.NewOpenAPIHandler(),
 	})
-	return router, webhookWorker, nil
+	// Return the AppRegistry handler so the caller can attach the
+	// telemetry stats querier post-construction — the ClickHouse
+	// writer is built later by startTelemetry and we want the
+	// /app-registry/stats endpoint to come alive once the writer
+	// is ready, without round-tripping through a setter on the
+	// router.
+	//
+	// The Syncer is returned so main() can run its periodic
+	// background loop alongside the HTTP server. Without that, the
+	// admin `POST /admin/app-registry/sync` endpoint is the only
+	// way to refresh vendor endpoints — which contradicts
+	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
+	return router, webhookWorker, appRegHandler, appSyncer, nil
 }
 
 // loadPolicyKeyWrapMaster resolves the AES-GCM master key from
@@ -388,11 +450,12 @@ func startTelemetry(
 	logger *slog.Logger,
 	js jetstream.JetStream,
 	pub *sngnats.Publisher,
-) (func(context.Context) error, error) {
+) (func(context.Context) error, *chwriter.Writer, error) {
 	var hot telemetry.HotWriter
 	var cold telemetry.ColdWriter
 	var hotStop func(context.Context) error
 	var coldStop func(context.Context) error
+	var chWriter *chwriter.Writer
 
 	if len(cfg.TelemetryAnalytics.ClickHouseEndpoints) > 0 {
 		chCfg := chwriter.Config{
@@ -407,16 +470,17 @@ func startTelemetry(
 		}
 		w, err := chwriter.New(ctx, chCfg, logger)
 		if err != nil {
-			return nil, fmt.Errorf("clickhouse writer: %w", err)
+			return nil, nil, fmt.Errorf("clickhouse writer: %w", err)
 		}
 		if cfg.TelemetryAnalytics.ClickHouseEnsureSchema {
 			if err := w.EnsureSchema(ctx); err != nil {
 				_ = w.Stop(ctx)
-				return nil, fmt.Errorf("clickhouse schema: %w", err)
+				return nil, nil, fmt.Errorf("clickhouse schema: %w", err)
 			}
 		}
 		hot = w
 		hotStop = w.Stop
+		chWriter = w
 		logger.Info("telemetry: clickhouse hot-path writer enabled",
 			slog.String("endpoints", strings.Join(chCfg.Endpoints, ",")),
 			slog.String("database", chCfg.Database),
@@ -429,7 +493,7 @@ func startTelemetry(
 			if hotStop != nil {
 				_ = hotStop(ctx)
 			}
-			return nil, fmt.Errorf("aws config: %w", err)
+			return nil, nil, fmt.Errorf("aws config: %w", err)
 		}
 		s3Cfg := s3writer.Config{
 			Bucket:             cfg.TelemetryAnalytics.S3Bucket,
@@ -444,7 +508,7 @@ func startTelemetry(
 			if hotStop != nil {
 				_ = hotStop(ctx)
 			}
-			return nil, fmt.Errorf("s3 writer: %w", err)
+			return nil, nil, fmt.Errorf("s3 writer: %w", err)
 		}
 		cold = w
 		coldStop = w.Stop
@@ -461,7 +525,7 @@ func startTelemetry(
 		if coldStop != nil {
 			_ = coldStop(ctx)
 		}
-		return nil, fmt.Errorf("telemetry service: %w", err)
+		return nil, nil, fmt.Errorf("telemetry service: %w", err)
 	}
 	svc.WithDLQ(pub)
 	if err := svc.Start(ctx); err != nil {
@@ -471,7 +535,7 @@ func startTelemetry(
 		if coldStop != nil {
 			_ = coldStop(ctx)
 		}
-		return nil, fmt.Errorf("telemetry start: %w", err)
+		return nil, nil, fmt.Errorf("telemetry start: %w", err)
 	}
 	logger.Info("telemetry: consumer started")
 
@@ -492,7 +556,37 @@ func startTelemetry(
 		}
 		return firstErr
 	}
-	return shutdown, nil
+	return shutdown, chWriter, nil
+}
+
+// clickhouseStatsAdapter bridges chwriter.Writer (which returns
+// []chwriter.TrafficClassCount) to handler.TelemetryClassQuerier
+// (which expects []handler.TrafficClassStat). The two payload
+// types are structurally identical but live in separate packages
+// so the handler does not import the clickhouse subpackage. The
+// adapter is the seam that keeps that boundary clean.
+type clickhouseStatsAdapter struct {
+	w *chwriter.Writer
+}
+
+func (a clickhouseStatsAdapter) QueryTrafficClassDistribution(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	since time.Time,
+) ([]handler.TrafficClassStat, error) {
+	rows, err := a.w.QueryTrafficClassDistribution(ctx, tenantID, since)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]handler.TrafficClassStat, len(rows))
+	for i, r := range rows {
+		out[i] = handler.TrafficClassStat{
+			Class:  r.Class,
+			Events: r.Events,
+			Bytes:  r.Bytes,
+		}
+	}
+	return out, nil
 }
 
 // loadAWSConfig resolves an AWS config for the cold-path writer.

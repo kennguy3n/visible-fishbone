@@ -53,6 +53,16 @@ func (s *Store) NewWebhookDeliveryRepository() *WebhookDeliveryRepository {
 	return &WebhookDeliveryRepository{s: s}
 }
 
+// NewAppRegistryRepository binds the Store to repository.AppRegistryRepository.
+func (s *Store) NewAppRegistryRepository() *AppRegistryRepository {
+	return &AppRegistryRepository{s: s}
+}
+
+// NewAppRegistryOverrideRepository binds the Store to repository.AppRegistryOverrideRepository.
+func (s *Store) NewAppRegistryOverrideRepository() *AppRegistryOverrideRepository {
+	return &AppRegistryOverrideRepository{s: s}
+}
+
 // Compile-time interface compliance asserts. Keeping these in this
 // file means a single grep tells us "did the postgres package
 // implement every interface?" without scanning eight files.
@@ -69,4 +79,6 @@ var (
 	_ repository.TenantAPIKeyRepository     = (*TenantAPIKeyRepository)(nil)
 	_ repository.WebhookEndpointRepository  = (*WebhookEndpointRepository)(nil)
 	_ repository.WebhookDeliveryRepository  = (*WebhookDeliveryRepository)(nil)
+	_ repository.AppRegistryRepository      = (*AppRegistryRepository)(nil)
+	_ repository.AppRegistryOverrideRepository = (*AppRegistryOverrideRepository)(nil)
 )

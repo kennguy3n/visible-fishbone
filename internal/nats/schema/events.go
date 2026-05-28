@@ -9,6 +9,13 @@ import (
 // FlowEvent is a per-flow telemetry record (5-tuple + verdict +
 // counters). One of the highest-volume event classes — fields are
 // chosen to fit a typical observation in <200 bytes wire size.
+//
+// Note: the per-flow traffic-classification decision lives on the
+// parent Envelope (`Envelope.TrafficClass`), not here. Classification
+// is a transport-layer / routing concern shared with DNS / HTTP /
+// ZTNA events, so keeping it on the envelope gives a single source
+// of truth and avoids the drift risk of two parallel fields with
+// the same msgpack tag at different nesting levels.
 type FlowEvent struct {
 	SrcIP      string  `msgpack:"sip"`
 	DstIP      string  `msgpack:"dip"`

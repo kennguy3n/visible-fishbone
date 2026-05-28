@@ -172,23 +172,47 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Writer, error) 
 	}
 
 	w := &Writer{
-		conn:      conn,
-		cfg:       cfg,
-		logger:    logger,
-		pending:   make([]schema.Envelope, 0, cfg.BatchSize),
-		done:      make(chan struct{}),
-		insertSQL: fmt.Sprintf("INSERT INTO %s", cfg.Table),
+		conn:    conn,
+		cfg:     cfg,
+		logger:  logger,
+		pending: make([]schema.Envelope, 0, cfg.BatchSize),
+		done:    make(chan struct{}),
+		// Use explicit column names so the prepared batch's
+		// positional Append cannot be silently mis-aligned by a
+		// later ALTER TABLE that appends a column at the end of
+		// the table (the default placement for ADD COLUMN without
+		// an AFTER clause). The order here is the contract that
+		// flushOnce's Append() call must match. ingested_at is
+		// omitted so the column's DEFAULT clause supplies the
+		// timestamp.
+		insertSQL: fmt.Sprintf(
+			"INSERT INTO %s "+
+				"(event_id, tenant_id, device_id, site_id, timestamp, "+
+				"event_class, platform, schema_version, traffic_class, "+
+				"bytes_in, bytes_out, payload)",
+			cfg.Table,
+		),
 	}
 	w.start()
 	return w, nil
 }
 
-// EnsureSchema creates the telemetry table if it does not exist.
-// The DDL is idempotent so callers can invoke this on every boot
-// without conditional logic. Returns immediately if the table
-// already exists.
+// EnsureSchema creates the telemetry table if it does not exist
+// and applies idempotent ALTERs so existing deployments pick up
+// columns added by later releases. The DDL is safe to call on
+// every boot without conditional logic.
+//
+// Two-phase rationale: CREATE TABLE IF NOT EXISTS is a no-op when
+// the table already exists, so an upgrade from a pre-`traffic_class`
+// schema would leave the column missing and silently break the
+// flush path. ALTER TABLE ... ADD COLUMN IF NOT EXISTS fills that
+// gap. The MergeTree ORDER BY tuple cannot be changed in place
+// after creation — existing deployments retain the old sort key
+// and pay a small scan penalty on per-class aggregations until
+// the table is rebuilt. Fresh deployments get the optimal sort
+// key from the CREATE TABLE statement above.
 func (w *Writer) EnsureSchema(ctx context.Context) error {
-	ddl := fmt.Sprintf(`
+	createDDL := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
     event_id        UUID,
     tenant_id       UUID,
@@ -198,14 +222,48 @@ CREATE TABLE IF NOT EXISTS %s (
     event_class     LowCardinality(String),
     platform        LowCardinality(String),
     schema_version  UInt8,
+    traffic_class   LowCardinality(String) DEFAULT 'inspect_full',
+    bytes_in        UInt64 DEFAULT 0,
+    bytes_out       UInt64 DEFAULT 0,
     payload         String,
     ingested_at     DateTime64(6, 'UTC') DEFAULT now64(6, 'UTC')
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(timestamp)
-ORDER BY (tenant_id, event_class, timestamp, event_id)
+ORDER BY (tenant_id, event_class, traffic_class, timestamp, event_id)
 SETTINGS index_granularity = 8192`, w.cfg.Table)
-	if err := w.conn.Exec(ctx, ddl); err != nil {
+	if err := w.conn.Exec(ctx, createDDL); err != nil {
 		return fmt.Errorf("clickhouse: ensure schema: %w", err)
+	}
+	// Idempotent forward-migrations for tables that pre-date the
+	// traffic_class / bytes_in / bytes_out columns. ClickHouse
+	// honours IF NOT EXISTS on ADD COLUMN so this is a no-op
+	// once the columns are present.
+	//
+	// AFTER clauses pin the physical column order so that
+	// upgraded tables match the CREATE TABLE layout above
+	// regardless of when the migration ran. The prepared batch
+	// in flushOnce binds by explicit column names (see insertSQL
+	// in newWriter) so column position no longer affects the
+	// flush path, but keeping the physical layout consistent
+	// makes SELECT * results identical across deployments and
+	// removes a class of operator surprises.
+	for _, alter := range []string{
+		fmt.Sprintf(
+			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS traffic_class LowCardinality(String) DEFAULT 'inspect_full' AFTER schema_version",
+			w.cfg.Table,
+		),
+		fmt.Sprintf(
+			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS bytes_in UInt64 DEFAULT 0 AFTER traffic_class",
+			w.cfg.Table,
+		),
+		fmt.Sprintf(
+			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS bytes_out UInt64 DEFAULT 0 AFTER bytes_in",
+			w.cfg.Table,
+		),
+	} {
+		if err := w.conn.Exec(ctx, alter); err != nil {
+			return fmt.Errorf("clickhouse: ensure schema columns: %w", err)
+		}
 	}
 	return nil
 }
@@ -379,6 +437,21 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 			sid := *env.SiteID
 			siteID = &sid
 		}
+		// Hoist traffic_class / bytes_in / bytes_out out of the
+		// envelope onto their dedicated ClickHouse columns.
+		// Legacy producers that pre-date the classification
+		// engine omit traffic_class; the column DEFAULT supplies
+		// `inspect_full`, but we promote the same value
+		// explicitly so per-class aggregations report a stable
+		// label rather than a NULL. bytes_in / bytes_out default
+		// to zero for non-flow events.
+		//
+		// The order of Append arguments below MUST match the
+		// column list in insertSQL (constructed in newWriter).
+		trafficClass := env.TrafficClass
+		if trafficClass == "" {
+			trafficClass = "inspect_full"
+		}
 		if err := prepared.Append(
 			env.EventID,
 			env.TenantID,
@@ -388,6 +461,9 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 			string(env.EventClass),
 			string(env.Platform),
 			env.SchemaVersion,
+			trafficClass,
+			env.BytesIn,
+			env.BytesOut,
 			string(env.Payload),
 		); err != nil {
 			w.mu.Lock()
@@ -409,4 +485,69 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 	w.consecutiveErrors = 0
 	w.mu.Unlock()
 	return nil
+}
+
+// TrafficClassCount is one row of the per-class flow distribution.
+// Used by the operator UI to render the cost-attribution chart.
+type TrafficClassCount struct {
+	// Class is the traffic_class label
+	// (trusted_direct | trusted_media_bypass | inspect_lite |
+	// inspect_full | tunnel_private | block).
+	Class string `json:"class"`
+	// Events is the total number of telemetry events recorded for
+	// the class in the window.
+	Events uint64 `json:"events"`
+	// Bytes is the sum of bytes_in + bytes_out across flow events
+	// for the class. Zero when the window contained no FlowEvents.
+	Bytes uint64 `json:"bytes"`
+}
+
+// QueryTrafficClassDistribution returns the per-class event /
+// byte distribution for the tenant in the given window. Bytes
+// are summed across the dedicated `bytes_in` / `bytes_out`
+// columns (zero for non-flow event classes), so the result is
+// a true per-class byte total rather than an event-counter-only
+// approximation.
+func (w *Writer) QueryTrafficClassDistribution(ctx context.Context, tenantID uuid.UUID, since time.Time) ([]TrafficClassCount, error) {
+	// SUM over the dedicated bytes_in / bytes_out columns. The
+	// previous implementation tried to JSONExtractUInt the values
+	// out of the `payload` column, which holds raw MessagePack
+	// bytes; ClickHouse's JSON extractors silently return 0 on
+	// non-JSON input so every row produced 0 bytes, leaving the
+	// cost-attribution chart non-functional. With the columns
+	// hoisted to the table schema (see EnsureSchema), the byte
+	// totals are now a column-level aggregate the planner can
+	// run as a streaming SUM.
+	//
+	// Uses w.cfg.Table rather than DefaultTable so operators who
+	// override the table name in Config get their custom table
+	// queried (writes already use w.cfg.Table via insertSQL).
+	q := fmt.Sprintf(`
+SELECT
+    traffic_class AS class,
+    count() AS events,
+    sum(bytes_in + bytes_out) AS bytes
+FROM %s
+WHERE tenant_id = $1
+  AND timestamp >= $2
+GROUP BY traffic_class
+ORDER BY events DESC
+`, w.cfg.Table)
+	rows, err := w.conn.Query(ctx, q, tenantID, since.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: query traffic_class: %w", err)
+	}
+	defer rows.Close()
+	var out []TrafficClassCount
+	for rows.Next() {
+		var row TrafficClassCount
+		if err := rows.Scan(&row.Class, &row.Events, &row.Bytes); err != nil {
+			return nil, fmt.Errorf("clickhouse: scan traffic_class: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("clickhouse: iterate traffic_class: %w", err)
+	}
+	return out, nil
 }
