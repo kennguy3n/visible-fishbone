@@ -8,16 +8,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	tcpg "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/kennguy3n/visible-fishbone/internal/migrate"
+	"github.com/kennguy3n/visible-fishbone/internal/testutil/pgrole"
 )
 
-// startPostgres spins up a fresh postgres:16-alpine container and
-// returns a URL suitable for golang-migrate's pgx/v5 driver
-// (`pgx5://`). The container is torn down at test cleanup.
+// startPostgres spins up a fresh postgres:16-alpine container,
+// provisions the `sng_app` runtime role (so 002_role_bootstrap
+// can find it), and returns a URL suitable for golang-migrate's
+// pgx/v5 driver (`pgx5://`). The container is torn down at test
+// cleanup.
 //
 // Tests are tagged `integration` because they require Docker.
 func startPostgres(t *testing.T) string {
@@ -45,13 +49,31 @@ func startPostgres(t *testing.T) string {
 		// the test failure we actually care about.
 		_ = ctr.Terminate(context.Background())
 	})
-	url, err := ctr.ConnectionString(ctx, "sslmode=disable")
+	connStr, err := ctr.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
 		t.Fatalf("conn string: %v", err)
 	}
+
+	// Provision the runtime role BEFORE the test runs migrations.
+	// 002_role_bootstrap fails fast if `sng_app` does not exist,
+	// mirroring the production runbook in docs/deploy.md. The
+	// provisioning helper lives in `internal/testutil/pgrole` so
+	// the postgres repository tests can share the exact same logic.
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect bootstrap: %v", err)
+	}
+	if err := pgrole.Provision(ctx, conn, "sng_app", "sng"); err != nil {
+		conn.Close(ctx)
+		t.Fatalf("provision sng_app: %v", err)
+	}
+	if err := conn.Close(ctx); err != nil {
+		t.Fatalf("close bootstrap conn: %v", err)
+	}
+
 	// testcontainers returns a `postgres://` URL; golang-migrate's
 	// pgx/v5 driver expects `pgx5://`.
-	return "pgx5" + url[len("postgres"):]
+	return "pgx5" + connStr[len("postgres"):]
 }
 
 func TestRunner_UpDownStatus(t *testing.T) {

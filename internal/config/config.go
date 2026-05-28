@@ -178,11 +178,18 @@ type Postgres struct {
 	MinConns        int
 	ConnMaxLifetime time.Duration
 	ConnTimeout     time.Duration
-	// AppRole is the Postgres role the application connects as
-	// (defaults to the connection user). Reserved for future
-	// privilege-separation: control-plane RLS policies grant
-	// SELECT/INSERT/UPDATE on tenant-scoped tables to this role
-	// only.
+	// AppRole is the PostgreSQL role the runtime adopts on every
+	// new physical connection via `SET SESSION ROLE`. The login
+	// user (PG_USER) authenticates the TCP connection; AppRole is
+	// the role whose grants and RLS policies the application
+	// actually exercises. See `docs/deploy.md` for the role-
+	// separation architecture (`sng_app_login` → `sng_app`).
+	//
+	// Empty disables the SET SESSION ROLE hook: connections run
+	// as PG_USER directly. This is intended ONLY for development
+	// where a single PG_USER is granted DML directly; production
+	// must always set PG_APP_ROLE (default: `sng_app`) so RLS
+	// policies are enforced.
 	AppRole string
 }
 
@@ -442,7 +449,16 @@ func Load() (Config, error) {
 			Password: getStr("PG_PASSWORD", "sng"),
 			Database: getStr("PG_DATABASE", "sng"),
 			SSLMode:  getStr("PG_SSLMODE", "disable"),
-			AppRole:  getStr("PG_APP_ROLE", "sng_app"),
+			// PG_APP_ROLE uses getStrAllowEmpty (not getStr) because
+			// an explicitly empty value is the documented escape
+			// hatch for dev environments where a single PG_USER is
+			// granted DML directly without role-separation. Treating
+			// `PG_APP_ROLE=` and `PG_APP_ROLE` (unset) identically —
+			// as plain getStr would — would silently bury that
+			// escape hatch and force every dev to either provision
+			// `sng_app` or live with confusing SET SESSION ROLE
+			// errors. validate() enforces non-empty in production.
+			AppRole: getStrAllowEmpty("PG_APP_ROLE", "sng_app"),
 		},
 		RateLimit: RateLimit{
 			CleanupInterval: getDuration("RATE_LIMIT_CLEANUP_INTERVAL", time.Minute),
@@ -753,6 +769,17 @@ func (c Config) validate() error {
 	if c.Environment.IsProduction() && c.NATS.TLSInsecure {
 		return errors.New("NATS_TLS_INSECURE must be false in production environments")
 	}
+	// PG_APP_ROLE must be set in production. The Postgres pool's
+	// AfterConnect hook adopts this role via SET SESSION ROLE so
+	// RLS policies — which Postgres bypasses for superusers — apply
+	// to every query. Running production with an empty AppRole
+	// means the pool connects as PG_USER directly; if PG_USER is a
+	// superuser (the common case for cloud-managed PG), RLS would
+	// silently bypass. Fail boot rather than running with the
+	// security model neutered.
+	if c.Environment.IsProduction() && c.Postgres.AppRole == "" {
+		return errors.New("PG_APP_ROLE must be set to a non-empty role in production environments (the runtime adopts this role via SET SESSION ROLE to enforce RLS; see docs/deploy.md)")
+	}
 	if c.Environment.IsProduction() {
 		// In production we require a sslmode that guarantees TLS.
 		// `disable` is unencrypted; `allow` attempts plaintext
@@ -777,6 +804,21 @@ func (c Config) validate() error {
 
 func getStr(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return def
+}
+
+// getStrAllowEmpty is the peer of `getStr` that distinguishes an
+// unset environment variable from an explicitly empty one. Unset →
+// `def`; set to empty string → empty string. Use this only for
+// settings where the empty-string case is a meaningful operator
+// signal (e.g. `PG_APP_ROLE=` to disable the SET SESSION ROLE
+// hook in dev environments). Every other settings should use
+// `getStr`, which treats empty and unset identically and is the
+// safer default for fields where empty is never a valid value.
+func getStrAllowEmpty(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
 		return v
 	}
 	return def

@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -185,6 +186,38 @@ func openPostgres(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 	poolCfg.MaxConnLifetime = cfg.Postgres.ConnMaxLifetime
 	poolCfg.ConnConfig.ConnectTimeout = cfg.Postgres.ConnTimeout
 
+	// If PG_APP_ROLE is set, every new physical connection
+	// adopts that role for its session lifetime via `SET SESSION
+	// ROLE`. This is the runtime half of the role-separation
+	// architecture documented in `docs/deploy.md`: the pool
+	// authenticates as a LOGIN user (typically `sng_app_login`,
+	// NOINHERIT, member of `sng_app`) and immediately demotes to
+	// the NOLOGIN runtime role so RLS policies — which Postgres
+	// bypasses for superusers and OWNER of the table — apply to
+	// every query the application issues.
+	//
+	// The AfterConnect hook then verifies `current_user` matches
+	// the requested role. This catches three classes of
+	// silent-misconfiguration bugs that would otherwise bypass
+	// the security model:
+	//   1. Operator points PG_USER at a superuser, so `SET
+	//      SESSION ROLE` silently no-ops (the superuser ALREADY
+	//      has every privilege; the demotion still happens but
+	//      RLS would be bypassed by `BYPASSRLS` if granted).
+	//   2. The login user is missing membership in the runtime
+	//      role; `SET SESSION ROLE` would error and pgx rejects
+	//      the connection (this case is already loud — listed
+	//      for completeness).
+	//   3. The pooler runs in transaction-pooling mode and the
+	//      `SET SESSION ROLE` is reverted between transactions;
+	//      this would manifest as alternating successful and
+	//      `permission denied` queries, but the boot-time probe
+	//      below at least verifies the first connection is
+	//      configured correctly.
+	if cfg.Postgres.AppRole != "" {
+		poolCfg.AfterConnect = afterConnectSetRole(cfg.Postgres.AppRole)
+	}
+
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
@@ -198,8 +231,39 @@ func openPostgres(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 	logger.Info("sng-control: postgres connected",
 		slog.String("host", cfg.Postgres.Host),
 		slog.Int("port", cfg.Postgres.Port),
-		slog.String("database", cfg.Postgres.Database))
+		slog.String("database", cfg.Postgres.Database),
+		slog.String("app_role", cfg.Postgres.AppRole))
 	return pool, nil
+}
+
+// afterConnectSetRole returns a pgxpool.AfterConnect hook that
+// adopts `appRole` on every new physical connection and verifies
+// the demotion took effect. See the call site in openPostgres for
+// the full rationale.
+//
+// Exposed as a package-level function (rather than an inline
+// closure) so unit tests can exercise the SQLSTATE-handling paths
+// against a mock connection without going through the full
+// pgxpool.NewWithConfig boot sequence.
+func afterConnectSetRole(appRole string) func(context.Context, *pgx.Conn) error {
+	roleIdent := pgx.Identifier{appRole}.Sanitize()
+	setRoleSQL := fmt.Sprintf("SET SESSION ROLE %s", roleIdent)
+	return func(ctx context.Context, conn *pgx.Conn) error {
+		if _, err := conn.Exec(ctx, setRoleSQL); err != nil {
+			return fmt.Errorf("set session role %q: %w", appRole, err)
+		}
+		var current string
+		if err := conn.QueryRow(ctx, "SELECT current_user").Scan(&current); err != nil {
+			return fmt.Errorf("verify current_user after SET SESSION ROLE: %w", err)
+		}
+		if current != appRole {
+			return fmt.Errorf(
+				"post-SET SESSION ROLE current_user = %q, want %q (check PG_APP_ROLE / login-user membership)",
+				current, appRole,
+			)
+		}
+		return nil
+	}
 }
 
 // openNATS connects to the NATS cluster and verifies JetStream is
