@@ -137,17 +137,31 @@ func (h *AppRegistryHandler) Register(mux *http.ServeMux) {
 // --- Request / response DTOs ---------------------------------------------
 
 // AppRegistryRequest is the JSON body for admin create / update.
+//
+// Optional scalar fields (Vendor, MetadataURL, Category) are
+// modelled as `*string` so the handler can distinguish:
+//
+//   - field omitted from the JSON body (`nil`) — keep the
+//     existing value on an update, default to empty on a create;
+//   - field set to the empty string (`&""`) — caller explicitly
+//     clears it. PUT is a full replacement, so a client must be
+//     able to clear `vendor` / `metadata_url` / `category` without
+//     deleting + recreating the row;
+//   - field set to a non-empty value (`&"X"`) — overwrite.
+//
+// Required scalars (Name, TrafficClass, Scope) stay as plain
+// strings: there is no "clear this" semantic for them.
 type AppRegistryRequest struct {
 	Name         string   `json:"name"`
-	Vendor       string   `json:"vendor,omitempty"`
+	Vendor       *string  `json:"vendor,omitempty"`
 	TrafficClass string   `json:"traffic_class"`
 	Scope        string   `json:"scope"`
 	Regions      []string `json:"regions,omitempty"`
 	Domains      []string `json:"domains"`
 	IPRanges     []string `json:"ip_ranges,omitempty"`
 	CertPins     []string `json:"cert_pins,omitempty"`
-	MetadataURL  string   `json:"metadata_url,omitempty"`
-	Category     string   `json:"category,omitempty"`
+	MetadataURL  *string  `json:"metadata_url,omitempty"`
+	Category     *string  `json:"category,omitempty"`
 	IsSystem     *bool    `json:"is_system,omitempty"`
 }
 
@@ -525,13 +539,31 @@ func (h *AppRegistryHandler) adminSync(w http.ResponseWriter, r *http.Request) {
 // (base = zero) and update (base = existing row). Returns the
 // resulting AppRegistry value or an error describing the first
 // validation problem.
+//
+// Semantics:
+//   - For required scalar fields (Name, TrafficClass, Scope) an
+//     empty value falls back to the base value so a PUT that omits
+//     them (or sends "") inherits the existing row's value. The
+//     validation pass then errors if the final value is still
+//     missing.
+//   - For optional clearable scalar fields (Vendor, MetadataURL,
+//     Category), the `*string` request shape lets the caller
+//     differentiate "field omitted" (`nil` — inherit base) from
+//     "clear the field" (non-nil pointer to empty string — set to
+//     ""). PUT is a full replacement; without this distinction a
+//     client could never clear an existing `metadata_url` without
+//     deleting and recreating the row.
+//   - For slice fields (Regions, Domains, IPRanges, CertPins) the
+//     `nil` vs non-nil distinction the JSON decoder already gives
+//     us is enough: an explicit empty array clears, an omitted
+//     field inherits.
 func parseAppRequest(req AppRegistryRequest, base repository.AppRegistry) (repository.AppRegistry, error) {
 	out := base
 	if req.Name != "" {
 		out.Name = req.Name
 	}
-	if req.Vendor != "" {
-		out.Vendor = req.Vendor
+	if req.Vendor != nil {
+		out.Vendor = *req.Vendor
 	}
 	if req.TrafficClass != "" {
 		out.TrafficClass = repository.TrafficClass(req.TrafficClass)
@@ -571,11 +603,11 @@ func parseAppRequest(req AppRegistryRequest, base repository.AppRegistry) (repos
 	if req.CertPins != nil {
 		out.CertPins = req.CertPins
 	}
-	if req.MetadataURL != "" {
-		out.MetadataURL = req.MetadataURL
+	if req.MetadataURL != nil {
+		out.MetadataURL = *req.MetadataURL
 	}
-	if req.Category != "" {
-		out.Category = req.Category
+	if req.Category != nil {
+		out.Category = *req.Category
 	}
 	if req.IsSystem != nil {
 		out.IsSystem = *req.IsSystem

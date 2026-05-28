@@ -1093,10 +1093,24 @@ components:
         updated_at: { type: string, format: date-time }
     AppRegistryRequest:
       type: object
+      description: |
+        Create / update body for the global app catalog.
+
+        Optional scalar fields (`vendor`, `metadata_url`, `category`)
+        follow PUT-replacement semantics: omitting the field from
+        the JSON body inherits the existing value (or leaves it
+        empty on create), while setting the field to an empty
+        string explicitly clears it. This lets clients fully
+        replace an entry on PUT without having to delete and
+        recreate it.
       required: [name, traffic_class, scope, domains]
       properties:
         name: { type: string }
-        vendor: { type: string }
+        vendor:
+          type: string
+          description: |
+            Vendor name. Send `""` on PUT to clear; omit to
+            inherit the existing value.
         traffic_class:
           type: string
           enum: [trusted_direct, trusted_media_bypass, inspect_lite, inspect_full, tunnel_private, block]
@@ -1113,8 +1127,16 @@ components:
         cert_pins:
           type: array
           items: { type: string }
-        metadata_url: { type: string }
-        category: { type: string }
+        metadata_url:
+          type: string
+          description: |
+            Vendor-published endpoint document URL (auto-sync
+            source). Send `""` on PUT to clear; omit to inherit.
+        category:
+          type: string
+          description: |
+            Category label. Send `""` on PUT to clear; omit to
+            inherit.
         is_system: { type: boolean }
     AppRegistryOverride:
       type: object

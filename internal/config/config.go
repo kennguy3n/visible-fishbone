@@ -77,6 +77,31 @@ type Config struct {
 	Policy             Policy
 	Telemetry          Telemetry
 	TelemetryAnalytics TelemetryAnalytics
+	AppRegistry        AppRegistry
+}
+
+// AppRegistry carries the runtime knobs for the curated
+// app-classification engine. The Syncer pulls vendor-published
+// endpoint lists (Microsoft 365, Google IP ranges, AWS, etc.) on
+// a periodic schedule; SyncEnabled gates the background loop and
+// SyncInterval sets its cadence. Both default to "on" with a
+// 24-hour cadence so a fresh deployment behaves the way
+// docs/TRAFFIC_CLASSIFICATION.md describes — operators do not
+// have to set anything to get the periodic refresh. Set
+// APP_REGISTRY_SYNC_ENABLED=false to disable (useful for local
+// development, air-gapped clusters, and replicas that should not
+// duplicate the primary's outbound vendor fetches).
+type AppRegistry struct {
+	// SyncEnabled toggles the periodic vendor-endpoint sync loop
+	// in main(). When false, the admin-triggered
+	// `POST /admin/app-registry/sync` endpoint still works — only
+	// the background ticker is suppressed.
+	SyncEnabled bool
+	// SyncInterval is the cadence of the background sync loop.
+	// Defaults to 24h. Anything <= 0 is treated as the default by
+	// the Syncer; the strict parser still rejects un-parseable
+	// values so an operator typo doesn't silently revert.
+	SyncInterval time.Duration
 }
 
 // Log carries structured-logging configuration.
@@ -724,6 +749,7 @@ func Load() (Config, error) {
 		{"AUTH_CLAIM_TOKEN_TTL", 24 * time.Hour, &cfg.Auth.ClaimTokenTTL},
 		{"CLICKHOUSE_FLUSH_INTERVAL", 2 * time.Second, &cfg.TelemetryAnalytics.ClickHouseFlushInterval},
 		{"S3_TELEMETRY_FLUSH_INTERVAL", 30 * time.Second, &cfg.TelemetryAnalytics.S3FlushInterval},
+		{"APP_REGISTRY_SYNC_INTERVAL", 24 * time.Hour, &cfg.AppRegistry.SyncInterval},
 	}
 	strictFloats := []struct {
 		key string
@@ -754,6 +780,7 @@ func Load() (Config, error) {
 		{"RATE_LIMIT_ENABLED", true, &cfg.RateLimit.Enabled},
 		{"CLICKHOUSE_TLS", false, &cfg.TelemetryAnalytics.ClickHouseTLS},
 		{"CLICKHOUSE_ENSURE_SCHEMA", true, &cfg.TelemetryAnalytics.ClickHouseEnsureSchema},
+		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
 	}
 
 	var strictErrs []error

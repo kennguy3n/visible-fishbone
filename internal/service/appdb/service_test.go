@@ -2,6 +2,7 @@ package appdb_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/netip"
 	"sort"
 	"testing"
@@ -364,5 +365,98 @@ func TestDemotionEngine_GlobalSignal(t *testing.T) {
 	}
 	if len(installed) != 1 {
 		t.Fatalf("installed %d overrides for fake single-tenant repo, want 1", len(installed))
+	}
+}
+
+// captureAudit is a test-only AuditLogRepository that records
+// every Append call, including the ones the Postgres + memory
+// audit_log impls reject because they enforce a NOT-NULL
+// tenant_id. Global app-catalog mutations (CreateApp,
+// UpdateApp, SyncUpdateApp, DeleteApp) write with tenantID =
+// uuid.Nil; we use this capture in tests so the audit-emission
+// invariant is verifiable without depending on the schema
+// extension that would let global audit rows land in the real
+// audit_log table.
+type captureAudit struct {
+	entries []repository.AuditEntry
+}
+
+func (c *captureAudit) Append(_ context.Context, tenantID uuid.UUID, e repository.AuditEntry) (repository.AuditEntry, error) {
+	e.TenantID = tenantID
+	if e.ID == uuid.Nil {
+		e.ID = uuid.New()
+	}
+	c.entries = append(c.entries, e)
+	return e, nil
+}
+
+func (c *captureAudit) List(context.Context, uuid.UUID, repository.AuditFilter, repository.Page) (repository.PageResult[repository.AuditEntry], error) {
+	return repository.PageResult[repository.AuditEntry]{Items: c.entries}, nil
+}
+
+// TestSyncUpdateApp_EmitsAuditEntry verifies that a sync-driven
+// app update goes through the SyncUpdateApp method and writes an
+// `app.synced` audit-log row with the canonical before/after
+// counts — i.e. the audit-bypass that the syncer used to have
+// (direct apps.Update call) cannot regress.
+func TestSyncUpdateApp_EmitsAuditEntry(t *testing.T) {
+	s := memory.NewStore()
+	audit := &captureAudit{}
+	svc := appdb.New(
+		memory.NewAppRegistryRepository(s),
+		memory.NewAppRegistryOverrideRepository(s),
+		audit,
+		nil,
+	)
+	app, err := svc.CreateApp(context.Background(), repository.AppRegistry{
+		Name:         "Office",
+		TrafficClass: repository.TrafficClassTrustedDirect,
+		Scope:        repository.AppRegistryScopeGlobal,
+		Domains:      []string{"*.office.com"},
+		IsSystem:     true,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	// Reset so we only see the sync entry.
+	audit.entries = nil
+
+	app.MetadataURL = "https://endpoints.office.com/endpoints/worldwide"
+	app.Domains = []string{"*.office.com", "outlook.office365.com"}
+	if _, err := svc.SyncUpdateApp(context.Background(), app, appdb.SyncAppMetadata{
+		Source:         "endpoints.office.com",
+		DomainsBefore:  1,
+		DomainsAfter:   2,
+		IPRangesBefore: 0,
+		IPRangesAfter:  3,
+	}); err != nil {
+		t.Fatalf("sync update: %v", err)
+	}
+
+	if len(audit.entries) != 1 {
+		t.Fatalf("audit entries = %d, want exactly 1 `app.synced` row", len(audit.entries))
+	}
+	got := audit.entries[0]
+	if got.Action != "app.synced" {
+		t.Fatalf("audit action = %q, want app.synced", got.Action)
+	}
+	if got.ResourceType != "app_registry" {
+		t.Fatalf("audit resource_type = %q, want app_registry", got.ResourceType)
+	}
+	if got.ResourceID == nil || *got.ResourceID != app.ID {
+		t.Fatalf("audit resource_id = %v, want %s", got.ResourceID, app.ID)
+	}
+	var details map[string]any
+	if err := json.Unmarshal(got.Details, &details); err != nil {
+		t.Fatalf("unmarshal details: %v", err)
+	}
+	if details["source"] != "endpoints.office.com" {
+		t.Fatalf("audit source = %v, want endpoints.office.com", details["source"])
+	}
+	if d := details["domains_after"].(float64); d != 2 {
+		t.Fatalf("audit domains_after = %v, want 2", d)
+	}
+	if d := details["ip_ranges_after"].(float64); d != 3 {
+		t.Fatalf("audit ip_ranges_after = %v, want 3", d)
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -128,14 +127,14 @@ type DemotionPublisher interface {
 // DemotionEngine subscribes to demotion signals and turns them into
 // app_registry_overrides rows. It does not own its event source —
 // callers feed events via Apply or via Run + a channel.
+//
+// The engine is stateless beyond its constructor inputs: shutdown
+// is signalled by ctx cancellation in Run, not by an internal flag.
 type DemotionEngine struct {
 	svc       *Service
 	tenants   repository.TenantRepository
 	publisher DemotionPublisher
 	policy    DemotionPolicy
-
-	mu      sync.Mutex
-	stopped bool
 }
 
 // NewDemotionEngine constructs a DemotionEngine. Partial DemotionPolicy

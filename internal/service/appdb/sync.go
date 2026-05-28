@@ -173,7 +173,24 @@ func (s *Syncer) SyncAll(ctx context.Context) ([]SyncResult, error) {
 			app.Domains = merged
 			app.IPRanges = mergedRanges
 			app.UpdatedAt = s.now()
-			if _, uerr := s.svc.apps.Update(ctx, app); uerr != nil {
+			// Route through SyncUpdateApp (not the raw
+			// repository) so the mutation emits a dedicated
+			// `app.synced` audit entry with before/after
+			// counts. Calling s.svc.apps.Update directly
+			// bypassed the audit trail entirely — a poisoned
+			// vendor endpoint could rewrite domains and
+			// ip_ranges with zero forensic record. Using the
+			// generic UpdateApp would log an `app_registry.updated`
+			// entry instead, which is harder for an operator
+			// to filter for "what did the auto-sync touch?".
+			meta := SyncAppMetadata{
+				Source:         hostFromURL(app.MetadataURL),
+				DomainsBefore:  len(currentCanonicalDomains),
+				DomainsAfter:   len(merged),
+				IPRangesBefore: len(currentCanonicalRanges),
+				IPRangesAfter:  len(mergedRanges),
+			}
+			if _, uerr := s.svc.SyncUpdateApp(ctx, app, meta); uerr != nil {
 				r.Err = fmt.Sprintf("update: %v", uerr)
 				results = append(results, r)
 				continue
@@ -370,8 +387,19 @@ func parseGenericJSON(body []byte, _ []string) ([]string, []netip.Prefix, error)
 
 func mergeDomains(a, b []string) []string {
 	set := make(map[string]struct{}, len(a)+len(b))
+	// Canonicalise both inputs identically: lowercase, trim,
+	// drop blanks. Filtering only on the `b` side would let an
+	// existing row with a whitespace-only domain (or a literal
+	// "") survive every sync forever, polluting bundle output
+	// and matchesPattern with junk entries. Drop on the `a`
+	// side too so the first sync after a release self-heals
+	// such rows.
 	for _, d := range a {
-		set[strings.ToLower(strings.TrimSpace(d))] = struct{}{}
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d == "" {
+			continue
+		}
+		set[d] = struct{}{}
 	}
 	for _, d := range b {
 		d = strings.ToLower(strings.TrimSpace(d))

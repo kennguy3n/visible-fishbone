@@ -18,7 +18,6 @@ package appdb
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -100,6 +99,58 @@ func (s *Service) UpdateApp(ctx context.Context, app repository.AppRegistry) (re
 	s.audited(ctx, uuid.Nil, nil, "app_registry.updated", &out.ID, mustJSON(map[string]any{
 		"name":          out.Name,
 		"traffic_class": string(out.TrafficClass),
+	}))
+	return out, nil
+}
+
+// SyncAppMetadata captures the per-row delta that produced an
+// app.synced audit entry. The Syncer fills it in from
+// canonical-form before/after slices so operators get forensic
+// context — "what did the vendor change?" — without having to
+// diff two opaque snapshots.
+type SyncAppMetadata struct {
+	// Source identifies the vendor parser that produced the
+	// update (e.g. "endpoints.office.com"). Helps an operator
+	// reading the audit trail know which upstream feed moved.
+	Source string
+	// DomainsBefore / DomainsAfter are the canonicalised
+	// (lowercased, deduped, sorted) row counts before and after
+	// the sync. Zero values are legitimate (an app may legitimately
+	// drop all domains if the vendor publishes an empty list).
+	DomainsBefore  int
+	DomainsAfter   int
+	IPRangesBefore int
+	IPRangesAfter  int
+}
+
+// SyncUpdateApp is the write-path the Syncer uses to commit a
+// vendor-driven refresh. It is intentionally separate from
+// UpdateApp so the audit trail distinguishes operator-initiated
+// edits (`app_registry.updated`) from automated vendor pulls
+// (`app.synced`) — operators investigating a trust-list movement
+// can filter on the action name without scanning details blobs.
+//
+// The audit entry carries the before/after counts and the source
+// (vendor host) so a reader does not have to cross-reference an
+// out-of-band sync log to understand what changed.
+func (s *Service) SyncUpdateApp(
+	ctx context.Context,
+	app repository.AppRegistry,
+	meta SyncAppMetadata,
+) (repository.AppRegistry, error) {
+	out, err := s.apps.Update(ctx, app)
+	if err != nil {
+		return out, err
+	}
+	s.audited(ctx, uuid.Nil, nil, "app.synced", &out.ID, mustJSON(map[string]any{
+		"name":             out.Name,
+		"traffic_class":    string(out.TrafficClass),
+		"metadata_url":     out.MetadataURL,
+		"source":           meta.Source,
+		"domains_before":   meta.DomainsBefore,
+		"domains_after":    meta.DomainsAfter,
+		"ip_ranges_before": meta.IPRangesBefore,
+		"ip_ranges_after":  meta.IPRangesAfter,
 	}))
 	return out, nil
 }
@@ -268,6 +319,21 @@ func (s *Service) ResolveTrafficClass(ctx context.Context, tenantID uuid.UUID, d
 	if err != nil {
 		return "", fmt.Errorf("appdb: list overrides: %w", err)
 	}
+	// Resolve the global catalog up front and index by ID. Both
+	// the override pass (app-id-bound overrides need the app's
+	// domain set to test for membership) and the fallback pass
+	// need it, and pulling it once avoids the N+1 pattern of one
+	// `apps.Get` per app-id override that a tenant with many
+	// overrides used to trigger. Mirrors the strategy
+	// CompileSteeringRules already uses.
+	apps, err := s.apps.ListAll(ctx)
+	if err != nil {
+		return "", fmt.Errorf("appdb: list apps: %w", err)
+	}
+	appsByID := make(map[uuid.UUID]repository.AppRegistry, len(apps))
+	for _, app := range apps {
+		appsByID[app.ID] = app
+	}
 	now := s.now()
 	// Walk overrides first — tenant intent wins.
 	for _, ov := range ovs {
@@ -281,24 +347,21 @@ func (s *Service) ResolveTrafficClass(ctx context.Context, tenantID uuid.UUID, d
 			}
 			continue
 		}
-		// Global-app override: must look up the app's domains.
-		app, err := s.apps.Get(ctx, *ov.AppID)
-		if err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				continue
-			}
-			return "", fmt.Errorf("appdb: get app %s: %w", ov.AppID, err)
+		// Global-app override: consult the indexed catalog
+		// rather than issuing a fresh Get per override.
+		app, ok := appsByID[*ov.AppID]
+		if !ok {
+			// Override references a deleted app — leave the
+			// row for the operator to clean up; treat as a
+			// no-op on this resolution.
+			continue
 		}
 		if matchAny(domain, app.Domains) {
 			return ov.TrafficClassOverride, nil
 		}
 	}
 
-	// Fall back to global classification.
-	apps, err := s.apps.ListAll(ctx)
-	if err != nil {
-		return "", fmt.Errorf("appdb: list apps: %w", err)
-	}
+	// Fall back to global classification using the same indexed catalog.
 	// Match the most specific entry first (longest static suffix
 	// wins) so a literal `outlook.office365.com` beats
 	// `*.office365.com` when both exist.
@@ -620,7 +683,7 @@ func (s *Service) audited(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 	if details == nil {
 		details = json.RawMessage(`{}`)
 	}
-	_, _ = s.audit.Append(ctx, tenantID, repository.AuditEntry{
+	_, err := s.audit.Append(ctx, tenantID, repository.AuditEntry{
 		TenantID:     tenantID,
 		ActorID:      actorID,
 		Action:       action,
@@ -628,6 +691,24 @@ func (s *Service) audited(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 		ResourceID:   resourceID,
 		Details:      details,
 	})
+	if err != nil && s.logger != nil {
+		// Audit failures used to be silently dropped, which hid
+		// schema-level issues like the audit_log.tenant_id NOT
+		// NULL constraint rejecting global mutations
+		// (tenantID = uuid.Nil). Surfacing the failure as a
+		// structured warning lets operators see when the audit
+		// trail is incomplete — they should at minimum file a
+		// follow-up to extend the schema for global events.
+		// We deliberately do NOT propagate the error: the caller
+		// has already mutated the underlying row, and failing
+		// the API on audit-only errors would make the side
+		// effects irreversible from the client's perspective.
+		s.logger.WarnContext(ctx, "appdb: audit append failed",
+			"action", action,
+			"tenant_id", tenantID.String(),
+			"error", err,
+		)
+	}
 }
 
 // netipMust is a small helper used by callers (tests, seed code)
