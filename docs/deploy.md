@@ -71,11 +71,15 @@ when both run against the same pooler.
 
 ## Initial provisioning
 
-The migration runner refuses to run if `sng_app` is missing
-(`migrations/002_role_bootstrap.up.sql` raises
-`role "sng_app" does not exist` with a remediation hint). This is
-intentional: role lifecycle is an operator concern, not a schema
-concern.
+The migration runner refuses to run if `sng_app` is missing.
+`migrations/002_role_bootstrap.up.sql` raises a `SQLSTATE 42704`
+(`undefined_object`) error with the verbatim message:
+
+> `sng_app role missing; provision it before running migrations (see docs/deploy.md)`
+
+…and the HINT `CREATE ROLE sng_app NOLOGIN; GRANT sng_app TO <migration_runner>;`.
+This is intentional: role lifecycle is an operator concern, not a
+schema concern.
 
 Run the following once per database, as a superuser, **before**
 the first migration deploy:

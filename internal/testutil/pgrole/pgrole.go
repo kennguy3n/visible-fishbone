@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -76,9 +75,15 @@ func Provision(ctx context.Context, db Executor, role, bootstrapUser string) err
 		}
 	}
 
+	// Redundant GRANT membership is intentionally NOT special-cased.
+	// PostgreSQL 16 emits a NOTICE (not an error) when the grantee is
+	// already a member of the role, and pgx surfaces the NOTICE
+	// through `conn.OnNotice` rather than as a returned error — so
+	// re-running `Provision` against an already-granted membership
+	// returns `err == nil`. Any error here is therefore a real one
+	// (network, permissions, syntax) and worth propagating.
 	grant := fmt.Sprintf("GRANT %s TO %s", roleIdent, pgx.Identifier{bootstrapUser}.Sanitize())
-	if _, err := db.Exec(ctx, grant); err != nil &&
-		!strings.Contains(err.Error(), "already a member") {
+	if _, err := db.Exec(ctx, grant); err != nil {
 		return fmt.Errorf("pgrole: grant membership: %w", err)
 	}
 	return nil
