@@ -734,7 +734,18 @@ func matchAny(domain string, patterns []string) bool {
 	return false
 }
 
+// sortedKeys returns the keys of set in ascending order.
+// An empty input returns nil (not a non-nil empty slice) so the
+// `omitempty` tags on SteeringClassRules.Domains / IPRanges /
+// CertPins actually elide the field — otherwise the JSON would
+// carry `"domains":[],"ip_ranges":[],"cert_pins":[]` for every
+// class even when those sets are empty, defeating the tag and
+// inflating bundle bytes. Determinism is preserved: nil is just
+// as stable as a non-nil empty slice.
 func sortedKeys(set map[string]struct{}) []string {
+	if len(set) == 0 {
+		return nil
+	}
 	out := make([]string, 0, len(set))
 	for k := range set {
 		out = append(out, k)

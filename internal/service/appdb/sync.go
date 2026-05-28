@@ -121,12 +121,21 @@ func (s *Syncer) SyncAll(ctx context.Context) ([]SyncResult, error) {
 	}
 	results := make([]SyncResult, 0, len(apps))
 	for _, app := range apps {
+		// Canonicalise the existing rows up front so the
+		// SyncResult Before / After counts are always
+		// comparable to each other (both reflect deduped,
+		// lowercased, sorted sets) and consistent with the
+		// audit-log entry emitted by SyncUpdateApp below.
+		// mergeDomains / mergeRanges with a nil "new" slice
+		// is the canonical-only form.
+		currentCanonicalDomains := mergeDomains(app.Domains, nil)
+		currentCanonicalRanges := mergeRanges(app.IPRanges, nil)
 		r := SyncResult{
 			AppID:          app.ID.String(),
 			AppName:        app.Name,
 			MetadataURL:    app.MetadataURL,
-			DomainsBefore:  len(app.Domains),
-			IPRangesBefore: len(app.IPRanges),
+			DomainsBefore:  len(currentCanonicalDomains),
+			IPRangesBefore: len(currentCanonicalRanges),
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, app.MetadataURL, nil)
 		if err != nil {
@@ -162,11 +171,12 @@ func (s *Syncer) SyncAll(ctx context.Context) ([]SyncResult, error) {
 			continue
 		}
 		// Compare against the *canonical* form of the existing
-		// rows (lowercase, deduped, sorted) on both sides so a
-		// sync whose only effect is normalisation -- e.g. an
-		// existing row has "Outlook.Office.com" / unsorted CIDRs
-		// and the vendor publishes the same data with different
-		// case or order -- does not register as a change. Without
+		// rows (lowercase, deduped, sorted — pre-computed above)
+		// on both sides so a sync whose only effect is
+		// normalisation -- e.g. an existing row has
+		// "Outlook.Office.com" / unsorted CIDRs and the vendor
+		// publishes the same data with different case or order
+		// -- does not register as a change. Without
 		// canonicalising the existing slices, the first sync
 		// after a release would rewrite every app that was
 		// admin-inserted with mixed case or insertion-ordered
@@ -175,8 +185,6 @@ func (s *Syncer) SyncAll(ctx context.Context) ([]SyncResult, error) {
 		// vendor data is unchanged.
 		merged := mergeDomains(app.Domains, newDomains)
 		mergedRanges := mergeRanges(app.IPRanges, newRanges)
-		currentCanonicalDomains := mergeDomains(app.Domains, nil)
-		currentCanonicalRanges := mergeRanges(app.IPRanges, nil)
 		changed := !equalStringSlices(merged, currentCanonicalDomains) ||
 			!equalRangeSlices(mergedRanges, currentCanonicalRanges)
 
