@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
@@ -471,12 +472,18 @@ func (s *KeyService) appendAudit(ctx context.Context, tenantID uuid.UUID, actorI
 	if s.audit == nil {
 		return
 	}
-	details, _ := json.Marshal(map[string]any{
+	// Stamp the acting API-key ID into details when the request
+	// was authenticated via API key. actor_id (a *user* UUID) is
+	// NULL on API-key paths because keys are machine identities;
+	// the enrichment preserves machine-actor attribution for
+	// forensics without overloading actor_id's user-UUID
+	// semantics.
+	details, _ := json.Marshal(middleware.EnrichAuditDetailsMap(ctx, map[string]any{
 		"key_id":     k.KeyID,
 		"algorithm":  k.Algorithm,
 		"status":     k.Status,
 		"public_key": hex.EncodeToString(k.PublicKey),
-	})
+	}))
 	_, _ = s.audit.Append(ctx, tenantID, repository.AuditEntry{
 		TenantID: tenantID, ActorID: actorID,
 		Action: action, ResourceType: "policy_signing_key",

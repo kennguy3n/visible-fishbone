@@ -150,6 +150,31 @@ func (r *TenantAPIKeyRepository) LookupByHash(ctx context.Context, hash []byte) 
 	return repository.TenantAPIKey{}, repository.ErrNotFound
 }
 
+func (r *TenantAPIKeyRepository) CountActive(ctx context.Context, tenantID uuid.UUID, now time.Time) (int, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return 0, err
+	}
+	if tenantID == uuid.Nil {
+		return 0, repository.ErrInvalidArgument
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	n := 0
+	for _, k := range r.s.tenantAPIKeys {
+		if k.TenantID != tenantID {
+			continue
+		}
+		if k.Status != repository.TenantAPIKeyStatusActive {
+			continue
+		}
+		if k.ExpiresAt != nil && !k.ExpiresAt.After(now) {
+			continue
+		}
+		n++
+	}
+	return n, nil
+}
+
 func (r *TenantAPIKeyRepository) TouchLastUsed(ctx context.Context, tenantID, id uuid.UUID, at time.Time) error {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return err

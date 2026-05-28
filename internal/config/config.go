@@ -426,6 +426,13 @@ type Auth struct {
 	// machine-to-machine authentication (defaults to
 	// "X-SNG-API-Key").
 	APIKeyHeader string
+	// APIKeyMaxActivePerTenant caps the number of active
+	// (non-revoked, non-expired) API keys a single tenant may
+	// hold. The service enforces this at Create time. Defaults to
+	// apikey.DefaultMaxActiveKeys (64). Set <= 0 to disable the
+	// cap entirely (test fixtures only — production must keep a
+	// finite cap, see validate()).
+	APIKeyMaxActivePerTenant int
 }
 
 // Policy carries policy-engine configuration. PR8 adds two
@@ -593,6 +600,10 @@ func Load() (Config, error) {
 		{"RATE_LIMIT_BURST", 60, &cfg.RateLimit.Burst},
 		{"WEBHOOK_MAX_ATTEMPTS", 6, &cfg.Webhook.MaxAttempts},
 		{"WEBHOOK_BATCH_SIZE", 32, &cfg.Webhook.BatchSize},
+		// Kept in sync with apikey.DefaultMaxActiveKeys; literal
+		// here so the config package doesn't take a dependency on
+		// internal/service/apikey.
+		{"AUTH_API_KEY_MAX_ACTIVE_PER_TENANT", 64, &cfg.Auth.APIKeyMaxActivePerTenant},
 	}
 	strictDurations := []struct {
 		key string
@@ -909,6 +920,13 @@ func (c Config) validate() error {
 	// security model neutered.
 	if c.Environment.IsProduction() && c.Postgres.AppRole == "" {
 		return errors.New("PG_APP_ROLE must be set to a non-empty role in production environments (the runtime adopts this role via SET SESSION ROLE to enforce RLS; see docs/deploy.md)")
+	}
+	// The active-key cap blocks unbounded creation; disabling it
+	// in production is almost always a misconfiguration. Tests
+	// can still pass 0 via WithMaxActiveKeys directly without
+	// going through env-config.
+	if c.Environment.IsProduction() && c.Auth.APIKeyMaxActivePerTenant <= 0 {
+		return errors.New("AUTH_API_KEY_MAX_ACTIVE_PER_TENANT must be > 0 in production environments (the cap protects against unbounded key creation; see docs/deploy.md)")
 	}
 	if c.Policy.KeyWrapMasterB64 != "" && c.Policy.KeyWrapMasterFile != "" {
 		return errors.New("POLICY_KEY_WRAP_MASTER_B64 and POLICY_KEY_WRAP_MASTER_FILE are mutually exclusive")

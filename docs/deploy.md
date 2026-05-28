@@ -308,3 +308,37 @@ in admin tooling; it has no role in the verification path. The
 boot log at `cmd/sng-control/main.go` emits
 `policy: file-backed signer loaded kid=<…>` when Mode B is in
 effect so operators have a paper trail across restarts.
+
+## API-key inventory cap
+
+The operator-facing `POST /api/v1/tenants/{tenant_id}/api-keys`
+endpoint enforces a per-tenant cap on the number of active (non-
+revoked, non-expired) keys. The cap protects against unbounded
+key creation by an authenticated caller (either a human user via
+JWT or an existing API key) and bounds the response size of the
+un-paginated `GET /api/v1/tenants/{tenant_id}/api-keys`. Callers
+that exceed the cap receive HTTP 429 with the JSON error body
+`{"error":{"code":"resource_exhausted","message":"tenant has N
+active api keys; cap is M (revoke unused keys or contact platform
+to raise the cap)"}}`.
+
+The cap is configured via `AUTH_API_KEY_MAX_ACTIVE_PER_TENANT`
+(default 64). The default covers realistic operator workflows
+(multiple CI bots, integration accounts, scoped per-env keys)
+without leaving an unbounded tail. Production deployments that
+genuinely need a higher cap can raise the env var; production
+boot refuses values <= 0 (set the env var to a positive integer
+or remove it to inherit the default).
+
+Audit attribution: every `apikey.create` and `apikey.revoke`
+audit row records the *user* who initiated the change in the
+`actor_id` column when the request was authenticated via JWT.
+When the request was authenticated via API key (a machine
+identity, not a user), `actor_id` is NULL and the acting key's
+ID is stamped into the audit `details` JSON under the key
+`acting_api_key_id`. Operators correlating a key compromise to
+its blast radius should query the `details` column for that key
+alongside the `actor_id` column for human actions. The same
+enrichment applies to every audit-writing service (tenants,
+sites, identity, RBAC, webhooks, signing keys) so the rule
+holds uniformly across the platform.

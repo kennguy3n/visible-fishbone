@@ -33,6 +33,14 @@ var (
 	// (e.g. a non-existent enum value). Callers can map this to
 	// a 400 at the HTTP boundary.
 	ErrInvalidArgument = errors.New("repository: invalid argument")
+
+	// ErrResourceExhausted is returned when an operation would
+	// exceed a per-tenant quota (e.g. the active-API-key cap).
+	// Distinct from ErrConflict (which means uniqueness) and
+	// ErrForbidden (which means policy denial) so the HTTP layer
+	// can map it to 429 Too Many Requests; the same caller may
+	// succeed later after revoking an existing resource.
+	ErrResourceExhausted = errors.New("repository: resource exhausted")
 )
 
 // SortOrder controls cursor pagination direction.
@@ -287,6 +295,17 @@ type TenantAPIKeyRepository interface {
 	// forget and a failure must not block the request. Returns
 	// ErrNotFound when the key does not exist.
 	TouchLastUsed(ctx context.Context, tenantID, id uuid.UUID, at time.Time) error
+	// CountActive returns the number of active (non-revoked, non-
+	// expired) keys for the tenant. The service layer uses this to
+	// enforce a per-tenant cap on key inventory — without a cap an
+	// authenticated caller (JWT or existing key) could mint
+	// unbounded keys and DOS the List path (which intentionally
+	// does not paginate; see the List comment above for why).
+	// Expired keys are NOT counted because they are de-facto
+	// unusable and operators commonly leave them in place for
+	// audit-trail continuity rather than rotating-and-deleting.
+	// Implementations evaluate expiry against `now`.
+	CountActive(ctx context.Context, tenantID uuid.UUID, now time.Time) (int, error)
 }
 
 // --- Policy ---------------------------------------------------------------

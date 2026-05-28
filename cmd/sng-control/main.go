@@ -191,7 +191,10 @@ func buildRouter(
 	identitySvc := identity.New(deviceRepo, claimRepo, auditRepo, logger)
 	rbacSvc := rbac.New(roleRepo, auditRepo, logger)
 	auditSvc := audit.New(auditRepo)
-	apiKeySvc := apikey.New(apiKeyRepo, auditRepo, apikey.WithLogger(logger))
+	apiKeySvc := apikey.New(apiKeyRepo, auditRepo,
+		apikey.WithLogger(logger),
+		apikey.WithMaxActiveKeys(cfg.Auth.APIKeyMaxActivePerTenant),
+	)
 
 	// Policy signing — PR8 introduces two operator-controlled
 	// alternates to the PR7 DB-backed KeyService:

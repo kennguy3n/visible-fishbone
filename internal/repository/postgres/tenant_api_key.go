@@ -211,6 +211,26 @@ func (r *TenantAPIKeyRepository) LookupByHash(ctx context.Context, hash []byte) 
 	return out, err
 }
 
+func (r *TenantAPIKeyRepository) CountActive(ctx context.Context, tenantID uuid.UUID, now time.Time) (int, error) {
+	if tenantID == uuid.Nil {
+		return 0, repository.ErrInvalidArgument
+	}
+	var n int
+	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		row := tx.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM tenant_api_keys
+			WHERE status = 'active'
+			  AND (expires_at IS NULL OR expires_at > $1)
+		`, now.UTC())
+		if err := row.Scan(&n); err != nil {
+			return fmt.Errorf("count active tenant api keys: %w", err)
+		}
+		return nil
+	})
+	return n, err
+}
+
 func (r *TenantAPIKeyRepository) TouchLastUsed(ctx context.Context, tenantID, id uuid.UUID, at time.Time) error {
 	return r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		ct, err := tx.Exec(ctx, `

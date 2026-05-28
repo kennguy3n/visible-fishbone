@@ -12,9 +12,17 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 )
+
+// middlewareWithAPIKeyID is a test-only adapter to the
+// middleware package's API-key context helper, kept here to
+// minimize churn in the call sites below.
+func middlewareWithAPIKeyID(ctx context.Context, id string) context.Context {
+	return middleware.ContextWithAPIKeyID(ctx, id)
+}
 
 func newFixture(t *testing.T) (*Service, *memory.Store, uuid.UUID) {
 	t.Helper()
@@ -301,5 +309,99 @@ func TestTenantAPIKey_JSONMarshalOmitsHash(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte(`"Subject"`)) {
 		t.Errorf("expected Subject in marshalled output, got %s", out)
+	}
+}
+
+// TestCreate_EnforcesActiveKeyCap pins the per-tenant active-key
+// cap: once a tenant holds `cap` active keys, the next Create
+// returns ErrResourceExhausted (mapped to HTTP 429 at the handler
+// boundary). Revoked keys do not count against the cap so a
+// rotate-then-revoke workflow does not eventually wedge the
+// tenant out of issuing new keys.
+func TestCreate_EnforcesActiveKeyCap(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	tenants := memory.NewTenantRepository(store)
+	tnt, err := tenants.Create(context.Background(), repository.Tenant{
+		Name: "acme", Slug: "acme", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	repo := memory.NewTenantAPIKeyRepository(store)
+	svc := New(repo, nil,
+		WithLogger(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))),
+		WithClock(func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }),
+		WithAsyncTouch(func(fn func()) { fn() }),
+		WithMaxActiveKeys(3),
+	)
+	created := make([]repository.TenantAPIKey, 0, 3)
+	for i := 0; i < 3; i++ {
+		res, err := svc.Create(context.Background(), tnt.ID, nil, CreateInput{
+			Name: "k", Subject: "s",
+		})
+		if err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+		created = append(created, res.Record)
+	}
+	if _, err := svc.Create(context.Background(), tnt.ID, nil, CreateInput{
+		Name: "overflow", Subject: "s",
+	}); !errors.Is(err, repository.ErrResourceExhausted) {
+		t.Fatalf("expected ErrResourceExhausted at cap, got %v", err)
+	}
+	if _, err := svc.Revoke(context.Background(), tnt.ID, created[0].ID, nil); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if _, err := svc.Create(context.Background(), tnt.ID, nil, CreateInput{
+		Name: "after-revoke", Subject: "s",
+	}); err != nil {
+		t.Fatalf("Create after revoke should succeed (revoked keys don't count): %v", err)
+	}
+}
+
+// TestCreate_AuditDetailsCarryActingAPIKeyID pins that when Create
+// is invoked under an API-key-authenticated request (machine
+// actor, no JWT user ID), the audit row's details JSON carries
+// the acting API key ID under `acting_api_key_id`. The repository
+// row's actor_id stays NULL because the schema reserves it for
+// *user* UUIDs; machine-actor attribution lives in details.
+func TestCreate_AuditDetailsCarryActingAPIKeyID(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	tenants := memory.NewTenantRepository(store)
+	tnt, err := tenants.Create(context.Background(), repository.Tenant{
+		Name: "acme", Slug: "acme", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	repo := memory.NewTenantAPIKeyRepository(store)
+	audit := memory.NewAuditLogRepository(store)
+	svc := New(repo, audit,
+		WithLogger(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))),
+		WithClock(func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }),
+		WithAsyncTouch(func(fn func()) { fn() }),
+	)
+	actingKeyID := uuid.NewString()
+	ctx := middlewareWithAPIKeyID(context.Background(), actingKeyID)
+	if _, err := svc.Create(ctx, tnt.ID, nil, CreateInput{
+		Name: "child", Subject: "bot:child",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	page, err := audit.List(context.Background(), tnt.ID, repository.AuditFilter{}, repository.Page{Limit: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Items) == 0 {
+		t.Fatalf("expected at least one audit row")
+	}
+	var got map[string]any
+	if err := json.Unmarshal(page.Items[0].Details, &got); err != nil {
+		t.Fatalf("unmarshal details: %v", err)
+	}
+	if got["acting_api_key_id"] != actingKeyID {
+		t.Fatalf("expected acting_api_key_id=%q, got details=%v", actingKeyID, got)
 	}
 }

@@ -58,6 +58,17 @@ const secretBytes = 32
 // hit the lookup path.
 const MinExpiresIn = time.Minute
 
+// DefaultMaxActiveKeys is the default per-tenant cap on the number
+// of active (non-revoked, non-expired) API keys. The cap blocks an
+// authenticated caller from minting unbounded keys for a tenant —
+// every key represents a long-lived credential, an attack surface,
+// and a row that the un-paginated List endpoint must return on a
+// single response. Sixty-four covers the realistic operator
+// workflows (multiple CI bots, integration accounts, env-specific
+// scoped keys) without leaving an unbounded tail; deployments that
+// genuinely need more can raise it via WithMaxActiveKeys at boot.
+const DefaultMaxActiveKeys = 64
+
 // ErrInvalidKey is returned by Lookup when the presented key
 // either has the wrong format or does not match a stored row.
 // The middleware translates this to a generic 401 — we never tell
@@ -87,6 +98,11 @@ type Service struct {
 	// stale-er than it is in the audit log) and a slow touch
 	// must not slow auth.
 	asyncTouch func(fn func())
+	// maxActiveKeys is the per-tenant cap enforced on Create.
+	// Defaults to DefaultMaxActiveKeys; <= 0 disables the cap
+	// entirely (intended for unbounded test fixtures, NOT
+	// production).
+	maxActiveKeys int
 }
 
 // Option configures New.
@@ -124,14 +140,25 @@ func WithAsyncTouch(run func(fn func())) Option {
 	}
 }
 
+// WithMaxActiveKeys overrides the per-tenant active-key cap
+// enforced on Create. Defaults to DefaultMaxActiveKeys (64).
+// Pass <= 0 to disable the cap (test fixtures only — production
+// callers should keep a finite cap).
+func WithMaxActiveKeys(n int) Option {
+	return func(s *Service) {
+		s.maxActiveKeys = n
+	}
+}
+
 // New constructs the API-key service.
 func New(repo repository.TenantAPIKeyRepository, audit repository.AuditLogRepository, opts ...Option) *Service {
 	s := &Service{
-		repo:       repo,
-		audit:      audit,
-		logger:     slog.Default(),
-		now:        func() time.Time { return time.Now().UTC() },
-		asyncTouch: func(fn func()) { go fn() },
+		repo:          repo,
+		audit:         audit,
+		logger:        slog.Default(),
+		now:           func() time.Time { return time.Now().UTC() },
+		asyncTouch:    func(fn func()) { go fn() },
+		maxActiveKeys: DefaultMaxActiveKeys,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -178,6 +205,29 @@ func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor *uuid.UU
 		}
 		if ttl < MinExpiresIn {
 			return CreateResult{}, fmt.Errorf("expires_at must be at least %s in the future: %w", MinExpiresIn, repository.ErrInvalidArgument)
+		}
+	}
+
+	// Enforce the per-tenant active-key cap. The check is racy
+	// (count → insert is not atomic) but the only outcome of a
+	// race is a tenant briefly exceeding the cap by N-1 where N
+	// is the number of concurrent Create calls; the next attempt
+	// will see the cap and reject. Tightening this to a true
+	// transactional check would require a SELECT … FOR UPDATE on
+	// a per-tenant lock row, which would serialise key creation
+	// across the entire tenant for no security benefit at this
+	// scale (operators create keys at human rate, not load-test
+	// rate). Operators can raise the cap via WithMaxActiveKeys
+	// or revoke existing keys to make room.
+	if s.maxActiveKeys > 0 {
+		count, err := s.repo.CountActive(ctx, tenantID, s.now())
+		if err != nil {
+			return CreateResult{}, fmt.Errorf("count active api keys: %w", err)
+		}
+		if count >= s.maxActiveKeys {
+			return CreateResult{}, fmt.Errorf(
+				"tenant has %d active api keys; cap is %d (revoke unused keys or contact platform to raise the cap): %w",
+				count, s.maxActiveKeys, repository.ErrResourceExhausted)
 		}
 	}
 
@@ -335,6 +385,13 @@ func (s *Service) appendAudit(ctx context.Context, tenantID uuid.UUID, actor *uu
 	if s.audit == nil {
 		return
 	}
+	// Stamp the acting API-key ID into details when the request
+	// was authenticated via API key. actor_id (a *user* UUID) is
+	// NULL on API-key paths because keys are machine identities;
+	// the enrichment preserves machine-actor attribution for
+	// forensics without overloading actor_id's user-UUID
+	// semantics.
+	details = middleware.EnrichAuditDetailsMap(ctx, details)
 	body, err := json.Marshal(details)
 	if err != nil {
 		s.logger.Warn("apikey: marshal audit details failed", slog.Any("error", err))

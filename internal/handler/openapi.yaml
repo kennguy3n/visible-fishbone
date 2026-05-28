@@ -551,6 +551,17 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/APIKey" }
+        "429":
+          description: |
+            tenant has reached the per-tenant active-key cap; the
+            response body carries `error.code = "resource_exhausted"`
+            with a human-readable message identifying the current
+            count and the cap. Callers should revoke unused keys
+            or escalate to the platform owner to raise the cap
+            (configured via AUTH_API_KEY_MAX_ACTIVE_PER_TENANT).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     get:
       tags: [api-keys]
       summary: List tenant API keys
