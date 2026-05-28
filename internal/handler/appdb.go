@@ -346,8 +346,9 @@ func (h *AppRegistryHandler) createOverride(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		ov.AppID = &id
+	} else {
+		ov.CustomDomains = cleanedDomains
 	}
-	ov.CustomDomains = cleanedDomains
 	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
 		t, err := time.Parse(time.RFC3339Nano, *req.ExpiresAt)
 		if err != nil {

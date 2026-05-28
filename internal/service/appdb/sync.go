@@ -38,10 +38,13 @@ type Syncer struct {
 	mu      sync.RWMutex
 	parsers map[string]VendorParser
 
-	// syncMu serialises SyncAll across the periodic Run goroutine
-	// and the admin-triggered POST /admin/app-registry/sync
-	// endpoint. Two concurrent SyncAll invocations would otherwise
-	// (a) double-fetch every vendor endpoint (wasted bandwidth,
+	// syncSem is a 1-slot buffered channel used as a context-aware
+	// semaphore that serialises SyncAll across the periodic Run
+	// goroutine and the admin-triggered POST /admin/app-registry/
+	// sync endpoint.
+	//
+	// Two concurrent SyncAll invocations would otherwise (a)
+	// double-fetch every vendor endpoint (wasted bandwidth,
 	// possible vendor-side rate-limit trips), (b) race on the
 	// repository update path producing duplicate `app.synced`
 	// audit entries for the same row, and (c) interleave the
@@ -53,7 +56,16 @@ type Syncer struct {
 	// semantics of singleflight.Group (which would also surprise
 	// the admin caller by returning the periodic loop's stale
 	// result instead of the fresh sync they requested).
-	syncMu sync.Mutex
+	//
+	// We use a channel instead of sync.Mutex because sync.Mutex.Lock
+	// is context-oblivious — wrapping it in a select-on-ctx requires
+	// spawning a "wait for the lock" goroutine that outlives the
+	// caller when ctx fires first, which can pile up if many short-
+	// deadline admin calls hit a slow tick in succession. The
+	// channel form acquires atomically inside the same select that
+	// observes ctx.Done(), so cancellation is a clean no-op without
+	// any orphan goroutine.
+	syncSem chan struct{}
 
 	// failures tracks consecutive sync failures per app id so the
 	// Run loop can log a sustained-failure warning once the
@@ -88,6 +100,7 @@ func NewSyncer(svc *Service, client *http.Client) *Syncer {
 		client:              client,
 		now:                 func() time.Time { return time.Now().UTC() },
 		parsers:             map[string]VendorParser{},
+		syncSem:             make(chan struct{}, 1),
 		failures:            map[string]int{},
 		sustainedThreshold:  3, // matches docs/TRAFFIC_CLASSIFICATION.md §8
 		sustainedReportSent: map[string]bool{},
@@ -134,34 +147,23 @@ type SyncResult struct {
 // failure — it accumulates per-app results so the operator can see
 // which vendors are healthy.
 //
-// SyncAll is serialised by syncMu — only one invocation runs at a
-// time across the periodic Run loop and the admin-triggered
-// endpoint. See the syncMu doc on the Syncer struct for the
+// SyncAll is serialised by syncSem — only one invocation runs at
+// a time across the periodic Run loop and the admin-triggered
+// endpoint. See the syncSem doc on the Syncer struct for the
 // rationale.
 func (s *Syncer) SyncAll(ctx context.Context) ([]SyncResult, error) {
-	// Acquire syncMu with respect to context cancellation so an
-	// admin caller stuck behind a long periodic tick can still be
-	// unblocked by client-disconnect / server-shutdown rather than
-	// blocking forever. sync.Mutex.Lock is context-oblivious, so
-	// we wrap it in a select on a goroutine-completed channel.
-	lockCh := make(chan struct{})
-	go func() {
-		s.syncMu.Lock()
-		close(lockCh)
-	}()
+	// Acquire syncSem in a select that also observes ctx.Done(),
+	// so a cancelled caller (admin client disconnect, shutdown
+	// signal, request deadline) returns immediately without
+	// spawning a background goroutine that would outlive the
+	// caller waiting for the current sync to finish. The send
+	// succeeds when the channel has spare capacity (no sync in
+	// flight) and blocks otherwise; the matching receive on the
+	// defer releases the slot.
 	select {
-	case <-lockCh:
-		defer s.syncMu.Unlock()
+	case s.syncSem <- struct{}{}:
+		defer func() { <-s.syncSem }()
 	case <-ctx.Done():
-		// The lock goroutine will eventually acquire and
-		// immediately release the mutex when SyncAll completes;
-		// this is harmless. Returning the ctx error lets the
-		// admin handler emit a clean 4xx / 5xx rather than
-		// silently waiting on a dead client.
-		go func() {
-			<-lockCh
-			s.syncMu.Unlock()
-		}()
 		return nil, fmt.Errorf("sync: %w", ctx.Err())
 	}
 
