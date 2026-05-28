@@ -143,6 +143,17 @@ func tenantAAD(tenantID uuid.UUID) []byte {
 // error when an env var IS set but the value cannot be parsed —
 // silent fallback in that case would mean operators thinking they
 // have at-rest encryption when they don't.
+//
+// This function is the CLI/test entrypoint. The production boot
+// path in `cmd/sng-control/main.go` reads from `config.Config`
+// (also populated from these same env vars by
+// `internal/config/config.go`) and calls
+// `DecodeAESGCMMasterB64` / `LoadAESGCMMasterFromFile` directly so
+// both paths share the same dialect-acceptance and 32-byte length
+// invariant. The dual entry exists because the production path
+// goes through the validated Config struct (env precedence,
+// mutually-exclusive guard, dotenv) while this function lets
+// CLI tools and tests skip that layer.
 func LoadAESGCMMasterFromEnv() ([]byte, error) {
 	if raw := os.Getenv("POLICY_KEY_WRAP_MASTER_B64"); raw != "" {
 		return DecodeAESGCMMasterB64(raw)
@@ -197,16 +208,29 @@ func loadMasterFromFile(path string) ([]byte, error) {
 	if len(body) == 32 {
 		return body, nil
 	}
-	// Strip trailing whitespace (newlines) and try base64.
+	// Strip trailing whitespace (newlines) and try base64. The
+	// original `body` length is captured up-front so the error
+	// message below reflects the file's on-disk size, not the
+	// stripped length (and is unaffected by the strip path).
+	origLen := len(body)
 	trimmed := stripASCIIWhitespace(body)
 	if b, err := decodeMaster(string(trimmed)); err == nil {
 		return b, nil
 	}
-	return nil, fmt.Errorf("policy: POLICY_KEY_WRAP_MASTER_FILE must contain either 32 raw bytes or a base64 encoding of 32 bytes (got %d bytes)", len(body))
+	return nil, fmt.Errorf("policy: POLICY_KEY_WRAP_MASTER_FILE must contain either 32 raw bytes or a base64 encoding of 32 bytes (got %d bytes)", origLen)
 }
 
+// stripASCIIWhitespace returns a fresh byte slice containing `b`
+// with all ASCII whitespace (space, tab, CR, LF) removed. The
+// previous implementation used the in-place idiom `out := b[:0:len(b)]`
+// which shared `b`'s backing array — safe when the caller never
+// re-read `b` afterwards, but a latent footgun for future
+// maintainers who add post-strip access. Devin Review PR#12
+// ANALYSIS-0001 flagged this; the fix is the one-allocation copy
+// below which is on the boot path (called at most once per
+// process restart), so cost is negligible and the trap is gone.
 func stripASCIIWhitespace(b []byte) []byte {
-	out := b[:0:len(b)]
+	out := make([]byte, 0, len(b))
 	for _, c := range b {
 		switch c {
 		case ' ', '\t', '\r', '\n':

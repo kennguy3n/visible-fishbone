@@ -244,3 +244,67 @@ ROLE` between transactions, the first transaction succeeds and
 subsequent ones see `permission denied`. The combination of
 session-pooling at every layer + the boot-time probe + readiness
 checks running as `sng_app` is what closes the loop.
+
+## Policy signing-key modes
+
+The control plane signs every compiled policy bundle with an
+Ed25519 keypair. Two modes are supported; they differ in **where
+the key lives** and **what `kid=active` resolves to**.
+
+### Mode A — DB-backed (default)
+
+The `policy_signing_keys` table holds the canonical keypair set
+per tenant (one row per (tenant_id, key_id)). One row per tenant
+carries `status = 'active'` at any time; `Compile` pulls that row,
+signs the bundle, and embeds the row's `key_id` in the bundle
+envelope. Rotation is a DB-level transition: the previous active
+row flips to `status = 'rotated'` and a new active row is
+inserted. Receivers verifying a historical bundle resolve its
+`key_id` against the row history; the route
+`/tenants/{tid}/policy/signing-keys/{kid}/public-key` returns the
+matching public key.
+
+### Mode B — File-backed (single-key deployments)
+
+Setting `POLICY_SIGNING_KEY_PATH=/path/to/seed` at boot loads a
+file-backed `KeySigner` that signs **every** bundle for **every**
+tenant with the same seed. The signer's `key_id` is derived
+deterministically from the seed's public-key SHA-256 (first 16
+hex chars), so it is stable across restarts as long as the seed
+file is unchanged.
+
+This mode is intended for single-host deployments and air-gapped
+test rigs where DB-backed rotation is overkill. Operators rotate
+by replacing the seed file and restarting the process; the new
+`key_id` takes effect on next boot.
+
+The `/public-key` route is mode-aware:
+
+- `kid == <file-backed key_id>` or `kid == "active"` returns the
+  file-backed public key directly (no DB lookup).
+- Any other `kid` falls through to the DB-backed row history, so
+  bundles signed under Mode A before the operator switched to
+  Mode B remain verifiable.
+
+### Operational semantics of `kid=active` across mode switches
+
+When `POLICY_SIGNING_KEY_PATH` is set, `kid=active` resolves to
+the file-backed key regardless of whether the tenant also has a
+DB-backed active row. The DB-backed active row is unreachable via
+the `active` alias in this configuration — it remains reachable
+by its explicit `key_id`.
+
+Switching from Mode B back to Mode A (unsetting
+`POLICY_SIGNING_KEY_PATH` and restarting) silently re-points
+`kid=active` to the DB-backed row. Bundles signed during the
+Mode B window were signed under the file-backed key, NOT the DB
+row, so a receiver that pinned `kid=active` and cached the result
+will start failing verification after the switch.
+
+Recommendation: receivers SHOULD pin against the explicit `kid`
+embedded in the bundle envelope (`bundle.kid`), NOT against the
+`active` alias. The alias is only useful for boot-time discovery
+in admin tooling; it has no role in the verification path. The
+boot log at `cmd/sng-control/main.go` emits
+`policy: file-backed signer loaded kid=<…>` when Mode B is in
+effect so operators have a paper trail across restarts.
