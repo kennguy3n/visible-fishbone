@@ -658,12 +658,26 @@ paths:
     get:
       tags: [app-registry]
       summary: Per-class traffic distribution from telemetry
+      description: |
+        Returns the per-class event / byte distribution over a
+        time window. The window's lower bound can be specified
+        in one of two mutually-exclusive ways: `window_hours`
+        (relative) or `since` (absolute RFC3339 timestamp).
+        Passing both yields HTTP 400 `conflicting_window`. When
+        neither is set, the window defaults to the trailing 7
+        days.
       parameters:
         - name: window_hours
           in: query
+          description: |
+            Trailing window size in hours. Mutually exclusive
+            with `since`.
           schema: { type: integer, minimum: 1 }
         - name: since
           in: query
+          description: |
+            Absolute lower bound (inclusive) for the window.
+            Mutually exclusive with `window_hours`.
           schema: { type: string, format: date-time }
       responses:
         "200":
@@ -677,6 +691,8 @@ paths:
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/TrafficClassStat" }
+        "400":
+          description: conflicting_window — both since and window_hours supplied
         "503":
           description: telemetry pipeline disabled
   /admin/app-registry:

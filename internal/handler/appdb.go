@@ -379,17 +379,29 @@ func (h *AppRegistryHandler) stats_handler(w http.ResponseWriter, r *http.Reques
 		WriteError(w, http.StatusServiceUnavailable, "telemetry_disabled", "traffic-class stats require ClickHouse telemetry")
 		return
 	}
+	// `since` and `window_hours` are two ways of expressing the
+	// same lower bound; accepting both at once would force us to
+	// pick a precedence rule that callers would inevitably get
+	// wrong. Reject 400 when both are present so the caller has
+	// to choose. Default (neither set) is the trailing 7 days.
+	sinceParam := r.URL.Query().Get("since")
+	windowParam := r.URL.Query().Get("window_hours")
+	if sinceParam != "" && windowParam != "" {
+		WriteError(w, http.StatusBadRequest, "conflicting_window",
+			"specify either since or window_hours, not both")
+		return
+	}
 	since := time.Now().UTC().Add(-7 * 24 * time.Hour)
-	if v := r.URL.Query().Get("since"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
+	if sinceParam != "" {
+		t, err := time.Parse(time.RFC3339, sinceParam)
 		if err != nil {
 			WriteError(w, http.StatusBadRequest, "invalid_since", "since must be RFC3339")
 			return
 		}
 		since = t
 	}
-	if v := r.URL.Query().Get("window_hours"); v != "" {
-		n, err := strconv.Atoi(v)
+	if windowParam != "" {
+		n, err := strconv.Atoi(windowParam)
 		if err != nil || n <= 0 {
 			WriteError(w, http.StatusBadRequest, "invalid_window", "window_hours must be a positive integer")
 			return
