@@ -321,6 +321,16 @@ func (h *PolicyHandler) downloadBundle(w http.ResponseWriter, r *http.Request) {
 	// for the response the agent actually receives.
 	b, err := h.svc.GetLatestBundle(r.Context(), tenantID, target)
 	if err != nil {
+		// Strip the bundle-sized Content-Length and the
+		// application/octet-stream Content-Type we already
+		// stamped from metadata. Otherwise WriteRepositoryError's
+		// short JSON error body would be served under a multi-
+		// kilobyte Content-Length, causing the agent's HTTP
+		// client to hang waiting for the rest of the body or
+		// corrupt subsequent requests on a persistent (keep-
+		// alive) connection.
+		w.Header().Del("Content-Length")
+		w.Header().Del("Content-Type")
 		WriteRepositoryError(w, err)
 		return
 	}

@@ -8,10 +8,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
@@ -662,6 +665,95 @@ func TestPolicy_GetPublicKey_FileBackedSignerResolvesKid(t *testing.T) {
 	}
 	if respActive.PublicKey != resp.PublicKey {
 		t.Errorf("active vs by-kid PublicKey diverged: %q vs %q", respActive.PublicKey, resp.PublicKey)
+	}
+}
+
+// faultyPolicyRepo wraps a real PolicyRepository and flips one
+// failure switch on GetLatestBundle so a test can exercise the
+// downloadBundle error path *after* the metadata fetch has
+// already stamped Content-Length / Content-Type. All other
+// methods proxy to the underlying repo unchanged.
+type faultyPolicyRepo struct {
+	repository.PolicyRepository
+	failGetBundle bool
+}
+
+func (f *faultyPolicyRepo) GetLatestBundle(ctx context.Context, tenantID uuid.UUID, target repository.PolicyBundleTarget) (repository.PolicyBundle, error) {
+	if f.failGetBundle {
+		return repository.PolicyBundle{}, errors.New("simulated postgres outage")
+	}
+	return f.PolicyRepository.GetLatestBundle(ctx, tenantID, target)
+}
+
+// TestPolicy_BundleDownload_ErrorPathClearsContentLength is the
+// regression test for the agent-pull keep-alive corruption bug:
+// the handler stamps Content-Length from metadata before fetching
+// the full bundle, so a failure on the bundle fetch must clear
+// that header (and Content-Type) before delegating to
+// WriteRepositoryError. Otherwise the ~60-byte JSON error body
+// would be served under a multi-kilobyte Content-Length, hanging
+// the agent's HTTP client and corrupting subsequent requests on
+// the same persistent connection.
+func TestPolicy_BundleDownload_ErrorPathClearsContentLength(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(store)
+	tnt, err := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "Acme", Slug: "acme",
+		Status: repository.TenantStatusActive,
+		Tier:   repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	wrapped := &faultyPolicyRepo{PolicyRepository: memory.NewPolicyRepository(store)}
+	keyRepo := memory.NewPolicySigningKeyRepository(store)
+	auditRepo := memory.NewAuditLogRepository(store)
+	keys := policy.NewKeyService(keyRepo, auditRepo)
+	svc := policy.New(wrapped, auditRepo, keys)
+	h := NewPolicyHandler(svc, keys)
+	tid := tnt.ID.String()
+
+	// Seed a bundle so GetLatestBundleMetadata returns success on
+	// the first call. Failure is induced only on the subsequent
+	// GetLatestBundle call.
+	if rec := doRequest(t, h, http.MethodPut,
+		"/api/v1/tenants/"+tid+"/policy", []byte(`{"default_action":"deny"}`),
+		tid, "", ""); rec.Code != http.StatusCreated {
+		t.Fatalf("seed graph: %d", rec.Code)
+	}
+	if rec := doRequest(t, h, http.MethodPost,
+		"/api/v1/tenants/"+tid+"/policy/compile",
+		nil, tid, "", ""); rec.Code != http.StatusAccepted {
+		t.Fatalf("seed compile: %d", rec.Code)
+	}
+
+	wrapped.failGetBundle = true
+
+	urlPath := "/api/v1/tenants/" + tid + "/policy/bundles/edge/payload"
+	req := httptest.NewRequest(http.MethodGet, urlPath, nil)
+	req.SetPathValue("tenant_id", tid)
+	req.SetPathValue("target_type", "edge")
+	w := httptest.NewRecorder()
+	h.downloadBundle(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d", w.Code)
+	}
+	if cl := w.Header().Get("Content-Length"); cl != "" {
+		t.Errorf("Content-Length must be stripped on error path, got %q", cl)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		// WriteRepositoryError → WriteJSON sets application/json.
+		// The bundleContentType (application/octet-stream) we
+		// stamped from metadata must be replaced by the
+		// JSON-error content type.
+		t.Errorf("Content-Type must be JSON on error path, got %q", ct)
+	}
+	// Sanity check: the response body must be the JSON error
+	// envelope, not the bundle bytes.
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"error"`)) {
+		t.Errorf("body is not a JSON error envelope: %q", w.Body.String())
 	}
 }
 

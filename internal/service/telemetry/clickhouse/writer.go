@@ -121,10 +121,11 @@ type Writer struct {
 	// Counters guarded by mu; reads happen via Stats which also
 	// takes the mutex. Keeping these as plain ints under the mu
 	// means a Stats call gets a coherent snapshot rather than
-	// the torn (pending, flushed, flushErrors) tuple atomic
-	// counters would produce.
-	flushed     uint64
-	flushErrors uint64
+	// the torn (pending, flushed, flushErrors, consecutiveErrors)
+	// tuple atomic counters would produce.
+	flushed           uint64
+	flushErrors       uint64
+	consecutiveErrors uint64
 }
 
 // New connects to ClickHouse and returns a Writer.
@@ -212,18 +213,27 @@ SETTINGS index_granularity = 8192`, w.cfg.Table)
 // Write buffers an envelope. The buffered events are flushed by
 // the background goroutine on a size or interval trigger. Write
 // returns once the row has been enqueued; durable delivery is
-// signalled by the next successful flush. Operators wiring this
-// into the telemetry consumer should treat a successful Write as
-// "queued for ClickHouse" — losing buffered rows on crash is
-// acceptable because the upstream JetStream consumer's Nak path
-// re-delivers from the DLQ on the next boot.
+// signalled by the next successful flush.
 //
 // Returning sync errors from Write would require us to either
 // flush per-event (defeating the batching purpose) or block the
 // caller until the next flush completes (deadlock-prone under
-// JetStream's MaxAckPending budget). The dispatch loop already
-// has Nak / DLQ machinery to handle persistent flush failures via
-// the Writer's downstream metrics surface (see ConsecutiveErrors).
+// JetStream's MaxAckPending budget). Two safety nets backstop the
+// async durability gap:
+//
+//  1. Stats.ConsecutiveErrors counts back-to-back flush failures.
+//     Operators alert on this rising (e.g. > 10) and divert
+//     traffic before the ack-then-lose window grows.
+//  2. The cold-path S3 archive is written alongside ClickHouse
+//     in the same telemetry dispatch step (see telemetry.Service
+//     in internal/service/telemetry/service.go). If ClickHouse
+//     flushes fail, the events are still durably archived in S3
+//     and can be replayed via the DLQ admin endpoint.
+//
+// Operators wiring this into the telemetry consumer should treat
+// a successful Write as "queued for ClickHouse, durably archived
+// in S3" — losing buffered ClickHouse rows on crash is acceptable
+// because the S3 archive is the durable record of truth.
 func (w *Writer) Write(_ context.Context, env schema.Envelope) error {
 	w.mu.Lock()
 	w.pending = append(w.pending, env)
@@ -263,21 +273,29 @@ func (w *Writer) Stop(ctx context.Context) error {
 
 // Stats returns a snapshot of writer counters. Useful for the
 // /metrics endpoint and the operator-runbook playbook.
+//
+// ConsecutiveErrors is reset to zero on every successful flush
+// and incremented on every failed flush. Operators alert on this
+// rising past a configured threshold (e.g. > 10) as the signal
+// that the async-batching ack-then-lose window is opening and
+// traffic should be diverted from ClickHouse to the cold-path
+// archive until the writer recovers.
 type Stats struct {
-	Pending     int
-	Flushed     uint64
-	FlushErrors uint64
+	Pending           int
+	Flushed           uint64
+	FlushErrors       uint64
+	ConsecutiveErrors uint64
 }
 
 // Stats returns a snapshot of writer counters.
 func (w *Writer) Stats() Stats {
 	w.mu.Lock()
-	pending := len(w.pending)
-	w.mu.Unlock()
+	defer w.mu.Unlock()
 	return Stats{
-		Pending:     pending,
-		Flushed:     w.flushed,
-		FlushErrors: w.flushErrors,
+		Pending:           len(w.pending),
+		Flushed:           w.flushed,
+		FlushErrors:       w.flushErrors,
+		ConsecutiveErrors: w.consecutiveErrors,
 	}
 }
 
@@ -302,6 +320,16 @@ func (w *Writer) signalFlush() {
 	}
 }
 
+// loop runs the background flusher. ctx signals "exit the loop"
+// (e.g. Stop was called); it intentionally does NOT propagate into
+// flushOnce because cancelling an in-flight INSERT during graceful
+// shutdown would drop the swapped-out batch on the floor (a small
+// but real data-loss window). Each in-loop flush uses
+// context.Background() so a flush that's already begun completes
+// naturally before the loop checks ctx.Done() again. The trade-off:
+// a hung ClickHouse backend can stall Stop until the underlying
+// driver's own dial / IO timeout fires (DialTimeout, configured in
+// New).
 func (w *Writer) loop(ctx context.Context) {
 	defer close(w.done)
 	ticker := time.NewTicker(w.cfg.FlushInterval)
@@ -311,11 +339,11 @@ func (w *Writer) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := w.flushOnce(ctx); err != nil {
+			if err := w.flushOnce(context.Background()); err != nil {
 				w.logger.Warn("clickhouse: flush failed", slog.Any("error", err))
 			}
 		case <-w.flushSignal:
-			if err := w.flushOnce(ctx); err != nil {
+			if err := w.flushOnce(context.Background()); err != nil {
 				w.logger.Warn("clickhouse: flush failed", slog.Any("error", err))
 			}
 		}
@@ -340,6 +368,7 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 	if err != nil {
 		w.mu.Lock()
 		w.flushErrors++
+		w.consecutiveErrors++
 		w.mu.Unlock()
 		return fmt.Errorf("clickhouse: prepare batch: %w", err)
 	}
@@ -363,6 +392,7 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 		); err != nil {
 			w.mu.Lock()
 			w.flushErrors++
+			w.consecutiveErrors++
 			w.mu.Unlock()
 			return fmt.Errorf("clickhouse: append row: %w", err)
 		}
@@ -370,11 +400,13 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 	if err := prepared.Send(); err != nil {
 		w.mu.Lock()
 		w.flushErrors++
+		w.consecutiveErrors++
 		w.mu.Unlock()
 		return fmt.Errorf("clickhouse: send batch: %w", err)
 	}
 	w.mu.Lock()
 	w.flushed += uint64(len(batch))
+	w.consecutiveErrors = 0
 	w.mu.Unlock()
 	return nil
 }
