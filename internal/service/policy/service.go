@@ -308,6 +308,16 @@ func (s *Service) GetLatestBundle(ctx context.Context, tenantID uuid.UUID, targe
 	return s.repo.GetLatestBundle(ctx, tenantID, target)
 }
 
+// GetLatestBundleMetadata returns the row-level metadata for the
+// most recent bundle of `target` WITHOUT loading the bundle bytes.
+// The agent-pull HEAD / 304 paths use this so a polling agent's
+// conditional request never round-trips the bundle BYTEA out of
+// Postgres. Returns repository.ErrNotFound when no bundle has yet
+// been compiled for the (tenant, target) pair.
+func (s *Service) GetLatestBundleMetadata(ctx context.Context, tenantID uuid.UUID, target repository.PolicyBundleTarget) (repository.PolicyBundleMetadata, error) {
+	return s.repo.GetLatestBundleMetadata(ctx, tenantID, target)
+}
+
 // bundlePayload is the canonical wire shape. PR7 introduced
 // per-target rule transformation: the Rules field is the typed
 // per-target rule slice (encoded as JSON for deterministic

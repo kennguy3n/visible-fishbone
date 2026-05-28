@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
 	"sort"
 
 	"github.com/google/uuid"
@@ -130,11 +131,17 @@ func (r *PolicyRepository) CreateBundle(ctx context.Context, tenantID uuid.UUID,
 	}
 	b.Bundle = cloneBytes(b.Bundle)
 	b.Signature = cloneBytes(b.Signature)
+	// Precompute sha256 mirroring the Postgres pgcrypto-backed
+	// digest. The handler relies on Sha256 being populated so HEAD
+	// / If-None-Match never has to recompute it from b.Bundle.
+	sum := sha256.Sum256(b.Bundle)
+	b.Sha256 = append([]byte(nil), sum[:]...)
 	b.CreatedAt = r.s.clock()
 	r.s.policyBundles[b.ID] = b
 	out := b
 	out.Bundle = cloneBytes(b.Bundle)
 	out.Signature = cloneBytes(b.Signature)
+	out.Sha256 = cloneBytes(b.Sha256)
 	return out, nil
 }
 
@@ -155,6 +162,7 @@ func (r *PolicyRepository) GetBundle(ctx context.Context, tenantID, id uuid.UUID
 	out := b
 	out.Bundle = cloneBytes(b.Bundle)
 	out.Signature = cloneBytes(b.Signature)
+	out.Sha256 = cloneBytes(b.Sha256)
 	return out, nil
 }
 
@@ -189,5 +197,56 @@ func (r *PolicyRepository) GetLatestBundle(ctx context.Context, tenantID uuid.UU
 	out := best
 	out.Bundle = cloneBytes(best.Bundle)
 	out.Signature = cloneBytes(best.Signature)
+	out.Sha256 = cloneBytes(best.Sha256)
 	return out, nil
+}
+
+// GetLatestBundleMetadata mirrors GetLatestBundle but does not
+// clone the bundle bytes — the handler's HEAD / 304 path never
+// needs them. BundleSize is reported from the stored byte slice so
+// HEAD can advertise Content-Length without a row-level COUNT.
+func (r *PolicyRepository) GetLatestBundleMetadata(ctx context.Context, tenantID uuid.UUID, target repository.PolicyBundleTarget) (repository.PolicyBundleMetadata, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.PolicyBundleMetadata{}, err
+	}
+	switch target {
+	case repository.PolicyBundleTargetEdge, repository.PolicyBundleTargetEndpoint,
+		repository.PolicyBundleTargetCloud, repository.PolicyBundleTargetMobile:
+	default:
+		return repository.PolicyBundleMetadata{}, repository.ErrInvalidArgument
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	var (
+		best        repository.PolicyBundle
+		bestVersion int
+		found       bool
+	)
+	for _, b := range r.s.policyBundles {
+		if b.TargetType != target {
+			continue
+		}
+		graph, ok := r.s.policyGraphs[b.PolicyGraphID]
+		if !ok || graph.TenantID != tenantID {
+			continue
+		}
+		if !found || graph.Version > bestVersion || (graph.Version == bestVersion && b.CreatedAt.After(best.CreatedAt)) {
+			best = b
+			bestVersion = graph.Version
+			found = true
+		}
+	}
+	if !found {
+		return repository.PolicyBundleMetadata{}, repository.ErrNotFound
+	}
+	return repository.PolicyBundleMetadata{
+		ID:            best.ID,
+		PolicyGraphID: best.PolicyGraphID,
+		TargetType:    best.TargetType,
+		Signature:     cloneBytes(best.Signature),
+		KeyID:         best.KeyID,
+		Sha256:        cloneBytes(best.Sha256),
+		BundleSize:    len(best.Bundle),
+		CreatedAt:     best.CreatedAt,
+	}, nil
 }

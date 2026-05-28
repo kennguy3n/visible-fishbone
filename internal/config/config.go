@@ -66,16 +66,17 @@ type Config struct {
 	Environment Environment
 	AppName     string
 
-	Log       Log
-	HTTP      HTTP
-	NATS      NATS
-	Postgres  Postgres
-	RateLimit RateLimit
-	CORS      CORS
-	Webhook   Webhook
-	Auth      Auth
-	Policy    Policy
-	Telemetry Telemetry
+	Log                Log
+	HTTP               HTTP
+	NATS               NATS
+	Postgres           Postgres
+	RateLimit          RateLimit
+	CORS               CORS
+	Webhook            Webhook
+	Auth               Auth
+	Policy             Policy
+	Telemetry          Telemetry
+	TelemetryAnalytics TelemetryAnalytics
 }
 
 // Log carries structured-logging configuration.
@@ -475,6 +476,80 @@ type Telemetry struct {
 	ServiceVersion string
 }
 
+// TelemetryAnalytics carries the wiring knobs for the hot-path
+// (ClickHouse) and cold-path (S3) telemetry analytics sinks. The
+// fields are independent: a deployment can enable ClickHouse
+// without S3, S3 without ClickHouse, or both. Leaving every
+// field empty disables both sinks — the consumer falls back to
+// the no-op writers, which is the correct development default
+// (the consumer loop, dedup, DLQ machinery all still run; only
+// the long-term sinks are skipped).
+type TelemetryAnalytics struct {
+	// ClickHouse: comma-separated host:port list (native protocol
+	// port 9000, secure native 9440). Empty disables the hot-path
+	// sink.
+	ClickHouseEndpoints []string
+	// ClickHouseDatabase, ClickHouseTable scope the writer to a
+	// specific database / table. Defaults: "default" / "sng_telemetry".
+	ClickHouseDatabase string
+	ClickHouseTable    string
+	// ClickHouseUsername / Password authenticate against the
+	// ClickHouse cluster. In production both must be supplied;
+	// boot fails otherwise (see validate()).
+	ClickHouseUsername string
+	ClickHousePassword string
+	// ClickHouseTLS enables the secure native protocol. The driver
+	// uses the system root CA pool; a custom CA can be configured
+	// via the SSL_CERT_FILE environment variable.
+	ClickHouseTLS bool
+	// ClickHouseFlushInterval / BatchSize tune the hot-path
+	// buffering. Defaults: 2s, 1024 rows.
+	ClickHouseFlushInterval time.Duration
+	ClickHouseBatchSize     int
+	// ClickHouseEnsureSchema controls whether the writer issues a
+	// CREATE TABLE IF NOT EXISTS for the destination table on
+	// boot. Defaults true; set false when the table is provisioned
+	// out-of-band (e.g. dbt / Liquibase / a managed-service
+	// provisioning workflow).
+	ClickHouseEnsureSchema bool
+
+	// S3: bucket name. Empty disables the cold-path sink.
+	S3Bucket string
+	// S3Prefix is the top-level key prefix under which archive
+	// objects land. Defaults to "telemetry".
+	S3Prefix string
+	// S3Region is the AWS region. Required when S3Bucket is set
+	// (unless S3Endpoint is set, in which case region is best-
+	// effort populated by the SDK).
+	S3Region string
+	// S3Endpoint overrides the AWS endpoint URL. Used for MinIO,
+	// R2, GCS-via-S3, and other S3-compatible stores. Empty means
+	// "use the canonical AWS endpoint for S3Region".
+	S3Endpoint string
+	// S3AccessKeyID / S3SecretAccessKey override the SDK's default
+	// credentials chain (env / file / IMDS / SSO). When both are
+	// blank the writer uses the default chain.
+	S3AccessKeyID     string
+	S3SecretAccessKey string
+	// S3StorageClass selects the S3 storage class for archive
+	// objects. Defaults to STANDARD_IA. Set to STANDARD if you
+	// plan to read the archive frequently.
+	S3StorageClass string
+	// S3FlushInterval, MaxBytesPerObject, MaxEventsPerObject:
+	// tune the cold-path buffering. Defaults: 30s, 16 MiB, 50k
+	// events per object.
+	S3FlushInterval      time.Duration
+	S3MaxBytesPerObject  int
+	S3MaxEventsPerObject int
+
+	// ReplayDurable is the JetStream durable consumer name the
+	// replay worker maintains on SNG_DLQ. Defaults to
+	// "sng-telemetry-replay". Allowing operators to override this
+	// makes blue/green replay possible (two workers on two durable
+	// names tracking separate offsets).
+	ReplayDurable string
+}
+
 // Load reads configuration from the environment.
 //
 // It loads ".env" if present in the working directory (best-effort)
@@ -571,6 +646,21 @@ func Load() (Config, error) {
 			OTLPEndpoint:   getStr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 			ServiceVersion: getStr("SERVICE_VERSION", ""),
 		},
+		TelemetryAnalytics: TelemetryAnalytics{
+			ClickHouseEndpoints: splitCSV(getStr("CLICKHOUSE_ENDPOINTS", "")),
+			ClickHouseDatabase:  getStr("CLICKHOUSE_DATABASE", ""),
+			ClickHouseTable:     getStr("CLICKHOUSE_TABLE", ""),
+			ClickHouseUsername:  getStr("CLICKHOUSE_USERNAME", ""),
+			ClickHousePassword:  getStr("CLICKHOUSE_PASSWORD", ""),
+			S3Bucket:            getStr("S3_TELEMETRY_BUCKET", ""),
+			S3Prefix:            getStr("S3_TELEMETRY_PREFIX", ""),
+			S3Region:            getStr("S3_TELEMETRY_REGION", ""),
+			S3Endpoint:          getStr("S3_TELEMETRY_ENDPOINT", ""),
+			S3AccessKeyID:       getStr("S3_TELEMETRY_ACCESS_KEY_ID", ""),
+			S3SecretAccessKey:   getStr("S3_TELEMETRY_SECRET_ACCESS_KEY", ""),
+			S3StorageClass:      getStr("S3_TELEMETRY_STORAGE_CLASS", ""),
+			ReplayDurable:       getStr("TELEMETRY_REPLAY_DURABLE", ""),
+		},
 	}
 
 	// Critical numeric settings: re-parse with the strict helpers
@@ -604,6 +694,9 @@ func Load() (Config, error) {
 		// here so the config package doesn't take a dependency on
 		// internal/service/apikey.
 		{"AUTH_API_KEY_MAX_ACTIVE_PER_TENANT", 64, &cfg.Auth.APIKeyMaxActivePerTenant},
+		{"CLICKHOUSE_BATCH_SIZE", 1024, &cfg.TelemetryAnalytics.ClickHouseBatchSize},
+		{"S3_TELEMETRY_MAX_BYTES_PER_OBJECT", 16 * 1024 * 1024, &cfg.TelemetryAnalytics.S3MaxBytesPerObject},
+		{"S3_TELEMETRY_MAX_EVENTS_PER_OBJECT", 50_000, &cfg.TelemetryAnalytics.S3MaxEventsPerObject},
 	}
 	strictDurations := []struct {
 		key string
@@ -629,6 +722,8 @@ func Load() (Config, error) {
 		{"WEBHOOK_PROCESSING_TIMEOUT", 5 * time.Minute, &cfg.Webhook.ProcessingTimeout},
 		{"AUTH_ACCESS_TOKEN_TTL", time.Hour, &cfg.Auth.AccessTokenTTL},
 		{"AUTH_CLAIM_TOKEN_TTL", 24 * time.Hour, &cfg.Auth.ClaimTokenTTL},
+		{"CLICKHOUSE_FLUSH_INTERVAL", 2 * time.Second, &cfg.TelemetryAnalytics.ClickHouseFlushInterval},
+		{"S3_TELEMETRY_FLUSH_INTERVAL", 30 * time.Second, &cfg.TelemetryAnalytics.S3FlushInterval},
 	}
 	strictFloats := []struct {
 		key string
@@ -657,6 +752,8 @@ func Load() (Config, error) {
 	}{
 		{"NATS_TLS_INSECURE", false, &cfg.NATS.TLSInsecure},
 		{"RATE_LIMIT_ENABLED", true, &cfg.RateLimit.Enabled},
+		{"CLICKHOUSE_TLS", false, &cfg.TelemetryAnalytics.ClickHouseTLS},
+		{"CLICKHOUSE_ENSURE_SCHEMA", true, &cfg.TelemetryAnalytics.ClickHouseEnsureSchema},
 	}
 
 	var strictErrs []error
@@ -931,6 +1028,21 @@ func (c Config) validate() error {
 	if c.Policy.KeyWrapMasterB64 != "" && c.Policy.KeyWrapMasterFile != "" {
 		return errors.New("POLICY_KEY_WRAP_MASTER_B64 and POLICY_KEY_WRAP_MASTER_FILE are mutually exclusive")
 	}
+	// Telemetry analytics: production requires authenticated
+	// ClickHouse (anonymous default-user access is dangerous when
+	// the cluster is reachable from the network) and an explicit
+	// AWS region for the cold archive bucket (otherwise the SDK
+	// silently picks `us-east-1`, which can violate data-residency
+	// requirements). Both rules are skipped when the corresponding
+	// sink is disabled.
+	if c.Environment.IsProduction() && len(c.TelemetryAnalytics.ClickHouseEndpoints) > 0 {
+		if c.TelemetryAnalytics.ClickHouseUsername == "" || c.TelemetryAnalytics.ClickHousePassword == "" {
+			return errors.New("CLICKHOUSE_USERNAME and CLICKHOUSE_PASSWORD must be set in production when CLICKHOUSE_ENDPOINTS is configured (anonymous default-user access is unsafe over the network)")
+		}
+	}
+	if c.TelemetryAnalytics.S3Bucket != "" && c.TelemetryAnalytics.S3Region == "" && c.TelemetryAnalytics.S3Endpoint == "" {
+		return errors.New("S3_TELEMETRY_REGION must be set when S3_TELEMETRY_BUCKET is configured (or set S3_TELEMETRY_ENDPOINT for non-AWS S3-compatible stores)")
+	}
 	if c.Environment.IsProduction() {
 		// In production we require a sslmode that guarantees TLS.
 		// `disable` is unencrypted; `allow` attempts plaintext
@@ -952,6 +1064,27 @@ func (c Config) validate() error {
 }
 
 // --- env helpers ------------------------------------------------------------
+
+// splitCSV splits a comma-separated env-style list, trimming
+// whitespace and dropping empty entries. Empty input → empty
+// slice (not nil-vs-empty distinguished — callers treat both as
+// "no values"). Used by env helpers that resolve into list-typed
+// config fields (e.g. ClickHouse endpoints).
+func splitCSV(in string) []string {
+	if in == "" {
+		return nil
+	}
+	parts := strings.Split(in, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		t := strings.TrimSpace(p)
+		if t == "" {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
 
 func getStr(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {

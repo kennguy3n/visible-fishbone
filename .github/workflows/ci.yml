@@ -1,0 +1,148 @@
+# GitHub Actions CI for the SNG control plane.
+#
+# Pipeline shape mirrors the Makefile targets so a `make all` run
+# locally exercises the same gates that CI does. The "fast" jobs
+# (lint, build, unit) are split out from the "slow" jobs
+# (integration, testcontainers) so a PR sees lint/build/unit
+# feedback in roughly one minute even when the full integration
+# suite takes longer.
+#
+# Concurrency: cancel-in-progress is enabled per ref so a force-push
+# to a feature branch supersedes any in-flight CI for that branch.
+# main is excluded so a merge does not get cancelled by a follow-up
+# merge.
+
+name: ci
+
+on:
+  pull_request:
+    branches: ["**"]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  GO_VERSION: "1.25"
+  GOLANGCI_LINT_VERSION: "v2.5.0"
+
+jobs:
+  lint:
+    name: lint (go vet + golangci-lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: golangci-lint (default tags)
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout 5m
+      # The integration build tag pulls in test files that the
+      # default lint pass does not see. Run a second lint pass
+      # under -tags=integration so a stale import or unused param
+      # in the integration-only files surfaces in CI rather than
+      # the next local run.
+      - name: golangci-lint (integration tag)
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout 5m --build-tags=integration
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go build
+        run: |
+          go build ./...
+          go build -o bin/sng-control ./cmd/sng-control
+          go build -o bin/sng-migrate ./cmd/sng-migrate
+      - name: upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: sng-binaries-${{ github.sha }}
+          path: bin/
+          retention-days: 7
+
+  unit:
+    name: unit tests (-race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go test -race
+        # Exclude the integration build tag so unit tests do not
+        # spin up testcontainers. The integration job handles that.
+        run: go test -race -timeout 120s ./...
+      - name: go test -race (coverage)
+        if: always()
+        run: |
+          go test -race -timeout 120s -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -1
+      - name: upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage.out
+          retention-days: 7
+
+  integration:
+    name: integration tests (testcontainers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # GitHub-hosted runners ship Docker pre-installed, which is
+    # all testcontainers needs. No `services:` block is required.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go test -tags=integration -race
+        env:
+          # testcontainers downloads images on first run; allow
+          # extra time for the initial pull so a cold cache does
+          # not flake the suite.
+          TESTCONTAINERS_RYUK_DISABLED: "false"
+        run: go test -race -timeout 600s -tags=integration ./...
+
+  tidy:
+    name: go mod tidy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: verify go.mod / go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum || {
+            echo "::error::go.mod / go.sum are not tidy. Run 'go mod tidy' locally and commit the result."
+            exit 1
+          }

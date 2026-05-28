@@ -1043,3 +1043,108 @@ func TestValidateRejectsEmptyAppRoleInProduction(t *testing.T) {
 		t.Errorf("validation error should mention PG_APP_ROLE, got: %v", err)
 	}
 }
+
+// TestTelemetryAnalytics_DefaultsAndOverrides pins the analytics
+// config struct: every env var lands on the right field, defaults
+// fire when unset, and CLICKHOUSE_ENDPOINTS splits on commas.
+func TestTelemetryAnalytics_DefaultsAndOverrides(t *testing.T) {
+	clearAll(t)
+	withEnv(t, map[string]string{
+		"CLICKHOUSE_ENDPOINTS":               "ch-a:9000, ch-b:9000",
+		"CLICKHOUSE_DATABASE":                "events",
+		"CLICKHOUSE_TABLE":                   "telemetry",
+		"CLICKHOUSE_USERNAME":                "writer",
+		"CLICKHOUSE_PASSWORD":                "shh",
+		"CLICKHOUSE_TLS":                     "true",
+		"CLICKHOUSE_BATCH_SIZE":              "2048",
+		"CLICKHOUSE_FLUSH_INTERVAL":          "5s",
+		"CLICKHOUSE_ENSURE_SCHEMA":           "false",
+		"S3_TELEMETRY_BUCKET":                "tel-cold",
+		"S3_TELEMETRY_PREFIX":                "v1",
+		"S3_TELEMETRY_REGION":                "us-west-2",
+		"S3_TELEMETRY_ENDPOINT":              "https://minio.local:9000",
+		"S3_TELEMETRY_ACCESS_KEY_ID":         "AKIA...",
+		"S3_TELEMETRY_SECRET_ACCESS_KEY":     "...",
+		"S3_TELEMETRY_STORAGE_CLASS":         "GLACIER_IR",
+		"S3_TELEMETRY_FLUSH_INTERVAL":        "60s",
+		"S3_TELEMETRY_MAX_BYTES_PER_OBJECT":  "33554432",
+		"S3_TELEMETRY_MAX_EVENTS_PER_OBJECT": "100000",
+		"TELEMETRY_REPLAY_DURABLE":           "sng-telemetry-replay-bg",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ta := cfg.TelemetryAnalytics
+	if got, want := ta.ClickHouseEndpoints, []string{"ch-a:9000", "ch-b:9000"}; len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("endpoints: %v", got)
+	}
+	if ta.ClickHouseDatabase != "events" || ta.ClickHouseTable != "telemetry" {
+		t.Errorf("db/table: %s/%s", ta.ClickHouseDatabase, ta.ClickHouseTable)
+	}
+	if !ta.ClickHouseTLS {
+		t.Errorf("tls should be true")
+	}
+	if ta.ClickHouseEnsureSchema {
+		t.Errorf("ensure-schema should be false (explicitly disabled)")
+	}
+	if ta.ClickHouseBatchSize != 2048 {
+		t.Errorf("batch size: %d", ta.ClickHouseBatchSize)
+	}
+	if ta.ClickHouseFlushInterval != 5*time.Second {
+		t.Errorf("flush interval: %s", ta.ClickHouseFlushInterval)
+	}
+	if ta.S3Bucket != "tel-cold" || ta.S3Prefix != "v1" || ta.S3Region != "us-west-2" {
+		t.Errorf("s3 bucket/prefix/region: %+v", ta)
+	}
+	if ta.S3Endpoint != "https://minio.local:9000" {
+		t.Errorf("s3 endpoint: %s", ta.S3Endpoint)
+	}
+	if ta.S3StorageClass != "GLACIER_IR" {
+		t.Errorf("storage class: %s", ta.S3StorageClass)
+	}
+	if ta.S3FlushInterval != 60*time.Second {
+		t.Errorf("s3 flush interval: %s", ta.S3FlushInterval)
+	}
+	if ta.S3MaxBytesPerObject != 33554432 {
+		t.Errorf("s3 max bytes: %d", ta.S3MaxBytesPerObject)
+	}
+	if ta.S3MaxEventsPerObject != 100000 {
+		t.Errorf("s3 max events: %d", ta.S3MaxEventsPerObject)
+	}
+	if ta.ReplayDurable != "sng-telemetry-replay-bg" {
+		t.Errorf("replay durable: %s", ta.ReplayDurable)
+	}
+}
+
+// TestTelemetryAnalytics_S3BucketWithoutRegionFails confirms the
+// validator rejects S3 wiring without a region (and without an
+// endpoint override).
+func TestTelemetryAnalytics_S3BucketWithoutRegionFails(t *testing.T) {
+	clearAll(t)
+	withEnv(t, map[string]string{
+		"S3_TELEMETRY_BUCKET": "tel-cold",
+	})
+	if _, err := Load(); err == nil {
+		t.Fatal("expected validation error for missing region")
+	}
+}
+
+// TestTelemetryAnalytics_ProdRequiresClickHouseAuth confirms
+// production refuses anonymous ClickHouse access.
+func TestTelemetryAnalytics_ProdRequiresClickHouseAuth(t *testing.T) {
+	clearAll(t)
+	withEnv(t, map[string]string{
+		"ENVIRONMENT":          "prod",
+		"AUTH_JWT_SECRET":      "a-very-long-secret-string-for-production-use",
+		"PG_SSLMODE":           "require",
+		"CLICKHOUSE_ENDPOINTS": "clickhouse:9000",
+	})
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected validation error for missing ClickHouse credentials in prod")
+	}
+	if !strings.Contains(err.Error(), "CLICKHOUSE_USERNAME") {
+		t.Errorf("error should mention CLICKHOUSE_USERNAME: %v", err)
+	}
+}

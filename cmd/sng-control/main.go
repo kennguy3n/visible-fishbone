@@ -19,6 +19,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
@@ -34,6 +37,10 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
 	"github.com/kennguy3n/visible-fishbone/internal/service/site"
+	"github.com/kennguy3n/visible-fishbone/internal/service/telemetry"
+	chwriter "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/clickhouse"
+	telreplay "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/replay"
+	s3writer "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/s3"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenant"
 	"github.com/kennguy3n/visible-fishbone/internal/service/webhook"
 )
@@ -108,7 +115,20 @@ func run() error {
 		return nil
 	}))
 
-	router, webhookWorker, err := buildRouter(&cfg, logger, pool, health)
+	// Telemetry pipeline — hot-path ClickHouse writer + cold-path
+	// S3 archive + DLQ replay worker. Wired here so the consumer
+	// goroutine starts draining SNG_TELEMETRY as soon as we have
+	// connectivity to NATS + storage. The publisher used by the
+	// DLQ machinery is shared with the replay worker so a
+	// successful replay re-publish goes through the same retry +
+	// dedup configuration. Building the worker BEFORE buildRouter
+	// lets the operator-admin replay endpoint live on the same
+	// authed API mux as the rest of the operator surface.
+	telPublisher := sngnats.NewPublisher(js, &cfg.NATS, cfg.AppName+"/telemetry")
+	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
+		cfg.TelemetryAnalytics.ReplayDurable, logger)
+
+	router, webhookWorker, err := buildRouter(&cfg, logger, pool, health, telReplay)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -119,6 +139,20 @@ func run() error {
 	if err := webhookWorker.Start(rootCtx); err != nil {
 		return fmt.Errorf("start webhook worker: %w", err)
 	}
+
+	telShutdown, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher)
+	if err != nil {
+		return fmt.Errorf("start telemetry: %w", err)
+	}
+	defer func() {
+		// Drain hot/cold writers on shutdown. Errors are logged
+		// inside startTelemetry's closure; we surface them here
+		// too so a malformed flush turns up in operator logs
+		// rather than disappearing into a deferred void.
+		if err := telShutdown(context.Background()); err != nil {
+			logger.Error("telemetry shutdown failed", slog.Any("error", err))
+		}
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.HTTP.Addr(),
@@ -153,6 +187,10 @@ func run() error {
 		logger.Warn("sng-control: webhook worker shutdown error", slog.Any("error", err))
 	}
 
+	if err := telShutdown(shutdownCtx); err != nil {
+		logger.Warn("sng-control: telemetry shutdown error", slog.Any("error", err))
+	}
+
 	logger.Info("sng-control: stopped")
 	return nil
 }
@@ -171,6 +209,7 @@ func buildRouter(
 	logger *slog.Logger,
 	pool *pgxpool.Pool,
 	health *handler.Health,
+	replay *telreplay.Worker,
 ) (http.Handler, *webhook.DeliveryWorker, error) {
 	store := postgres.NewStore(pool)
 
@@ -292,6 +331,7 @@ func buildRouter(
 		Audit:        handler.NewAuditHandler(auditSvc),
 		Webhooks:     handler.NewWebhookHandler(webhookSvc),
 		APIKeys:      handler.NewAPIKeyHandler(apiKeySvc),
+		Telemetry:    handler.NewTelemetryHandler(replay),
 		APIKeyLookup: apiKeySvc,
 		Health:       health,
 		OpenAPISpec:  handler.NewOpenAPIHandler(),
@@ -318,6 +358,171 @@ func loadPolicyKeyWrapMaster(cfg *config.Config) ([]byte, error) {
 		return policy.LoadAESGCMMasterFromFile(cfg.Policy.KeyWrapMasterFile)
 	}
 	return nil, nil
+}
+
+// startTelemetry builds the hot-path + cold-path writers and the
+// consumer service, starts the consumer, and returns a shutdown
+// closure that drains the writers + stops the consumer.
+//
+// Three operational shapes are supported:
+//
+//  1. Both ClickHouse and S3 configured \u2014 full production wiring.
+//     Both writers buffer + flush asynchronously; a Write returning
+//     nil means "queued, durable on next flush".
+//  2. Only ClickHouse configured \u2014 cold archive disabled, no S3
+//     keys land. Useful for cost-sensitive deployments that retain
+//     full fidelity in ClickHouse and don't need long-term archive.
+//  3. Neither configured \u2014 NoopHotWriter / NoopColdWriter take
+//     over. The JetStream consumer still runs, dedup ring still
+//     fires, DLQ machinery still routes broken payloads. This is
+//     the local-dev default; the telemetry service's metrics
+//     surface still works for debugging.
+//
+// The S3 writer accepts AWS-style credentials via standard env
+// vars when S3_TELEMETRY_ACCESS_KEY_ID / SECRET are blank, so
+// EC2 / EKS / Fargate IAM-role auth works without explicit
+// configuration.
+func startTelemetry(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	js jetstream.JetStream,
+	pub *sngnats.Publisher,
+) (func(context.Context) error, error) {
+	var hot telemetry.HotWriter
+	var cold telemetry.ColdWriter
+	var hotStop func(context.Context) error
+	var coldStop func(context.Context) error
+
+	if len(cfg.TelemetryAnalytics.ClickHouseEndpoints) > 0 {
+		chCfg := chwriter.Config{
+			Endpoints:     cfg.TelemetryAnalytics.ClickHouseEndpoints,
+			Database:      cfg.TelemetryAnalytics.ClickHouseDatabase,
+			Table:         cfg.TelemetryAnalytics.ClickHouseTable,
+			Username:      cfg.TelemetryAnalytics.ClickHouseUsername,
+			Password:      cfg.TelemetryAnalytics.ClickHousePassword,
+			TLS:           cfg.TelemetryAnalytics.ClickHouseTLS,
+			FlushInterval: cfg.TelemetryAnalytics.ClickHouseFlushInterval,
+			BatchSize:     cfg.TelemetryAnalytics.ClickHouseBatchSize,
+		}
+		w, err := chwriter.New(ctx, chCfg, logger)
+		if err != nil {
+			return nil, fmt.Errorf("clickhouse writer: %w", err)
+		}
+		if cfg.TelemetryAnalytics.ClickHouseEnsureSchema {
+			if err := w.EnsureSchema(ctx); err != nil {
+				_ = w.Stop(ctx)
+				return nil, fmt.Errorf("clickhouse schema: %w", err)
+			}
+		}
+		hot = w
+		hotStop = w.Stop
+		logger.Info("telemetry: clickhouse hot-path writer enabled",
+			slog.String("endpoints", strings.Join(chCfg.Endpoints, ",")),
+			slog.String("database", chCfg.Database),
+			slog.String("table", chCfg.Table))
+	}
+
+	if cfg.TelemetryAnalytics.S3Bucket != "" {
+		awsCfg, err := loadAWSConfig(ctx, cfg)
+		if err != nil {
+			if hotStop != nil {
+				_ = hotStop(ctx)
+			}
+			return nil, fmt.Errorf("aws config: %w", err)
+		}
+		s3Cfg := s3writer.Config{
+			Bucket:             cfg.TelemetryAnalytics.S3Bucket,
+			Prefix:             cfg.TelemetryAnalytics.S3Prefix,
+			StorageClass:       cfg.TelemetryAnalytics.S3StorageClass,
+			FlushInterval:      cfg.TelemetryAnalytics.S3FlushInterval,
+			MaxBytesPerObject:  cfg.TelemetryAnalytics.S3MaxBytesPerObject,
+			MaxEventsPerObject: cfg.TelemetryAnalytics.S3MaxEventsPerObject,
+		}
+		w, err := s3writer.NewWithAWSConfig(awsCfg, s3Cfg, logger)
+		if err != nil {
+			if hotStop != nil {
+				_ = hotStop(ctx)
+			}
+			return nil, fmt.Errorf("s3 writer: %w", err)
+		}
+		cold = w
+		coldStop = w.Stop
+		logger.Info("telemetry: s3 cold-path archive enabled",
+			slog.String("bucket", s3Cfg.Bucket),
+			slog.String("prefix", s3Cfg.Prefix))
+	}
+
+	svc, err := telemetry.New(js, &cfg.NATS, telemetry.Config{}, hot, cold, logger)
+	if err != nil {
+		if hotStop != nil {
+			_ = hotStop(ctx)
+		}
+		if coldStop != nil {
+			_ = coldStop(ctx)
+		}
+		return nil, fmt.Errorf("telemetry service: %w", err)
+	}
+	svc.WithDLQ(pub)
+	if err := svc.Start(ctx); err != nil {
+		if hotStop != nil {
+			_ = hotStop(ctx)
+		}
+		if coldStop != nil {
+			_ = coldStop(ctx)
+		}
+		return nil, fmt.Errorf("telemetry start: %w", err)
+	}
+	logger.Info("telemetry: consumer started")
+
+	shutdown := func(sCtx context.Context) error {
+		var firstErr error
+		if err := svc.Stop(sCtx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if hotStop != nil {
+			if err := hotStop(sCtx); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if coldStop != nil {
+			if err := coldStop(sCtx); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+	return shutdown, nil
+}
+
+// loadAWSConfig resolves an AWS config for the cold-path writer.
+// Honours an explicit access-key / secret pair from config when
+// supplied (for MinIO / R2 style deployments where IAM roles
+// aren't available); otherwise defers to the SDK's default
+// credentials chain (env vars, shared profile, EC2/IMDS, ECS
+// task role, EKS IRSA, etc.).
+func loadAWSConfig(ctx context.Context, cfg *config.Config) (aws.Config, error) {
+	loadOpts := []func(*awsconfig.LoadOptions) error{}
+	if cfg.TelemetryAnalytics.S3Region != "" {
+		loadOpts = append(loadOpts, awsconfig.WithRegion(cfg.TelemetryAnalytics.S3Region))
+	}
+	if cfg.TelemetryAnalytics.S3AccessKeyID != "" && cfg.TelemetryAnalytics.S3SecretAccessKey != "" {
+		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(
+				cfg.TelemetryAnalytics.S3AccessKeyID,
+				cfg.TelemetryAnalytics.S3SecretAccessKey,
+				"",
+			),
+		))
+	}
+	if cfg.TelemetryAnalytics.S3Endpoint != "" {
+		loadOpts = append(loadOpts, awsconfig.WithBaseEndpoint(cfg.TelemetryAnalytics.S3Endpoint))
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
+	if err != nil {
+		return aws.Config{}, err
+	}
+	return awsCfg, nil
 }
 
 // newLogger constructs the process-wide structured logger.
