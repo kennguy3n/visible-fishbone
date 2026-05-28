@@ -58,13 +58,38 @@ func TestPostgres_Integration(t *testing.T) {
 			t.Errorf("dup slug: want ErrConflict got %v", err)
 		}
 
-		// update name
-		updated, err := repo.Update(bgCtx(), repository.Tenant{ID: tnt.ID, Name: "Renamed"})
+		// update name (sparse PATCH: only Name is set; other
+		// columns must be preserved exactly).
+		newName := "Renamed"
+		updated, err := repo.Update(bgCtx(), tnt.ID, repository.TenantPatch{Name: &newName})
 		if err != nil {
 			t.Fatalf("update: %v", err)
 		}
 		if updated.Name != "Renamed" {
 			t.Errorf("update name: %q", updated.Name)
+		}
+
+		// Round-trip the explicit-clear contract for Region:
+		// set it, then PATCH with `Region = &""` and verify
+		// the stored value is empty. This is the Postgres-side
+		// counterpart of the memory repo's TenantPatch test —
+		// the COALESCE(NULLIF(...,'') based predecessor query
+		// silently dropped the clear and left the column intact.
+		region := "us-east-2"
+		seeded, err := repo.Update(bgCtx(), tnt.ID, repository.TenantPatch{Region: &region})
+		if err != nil {
+			t.Fatalf("update region: %v", err)
+		}
+		if seeded.Region != region {
+			t.Fatalf("seed region: %q", seeded.Region)
+		}
+		empty := ""
+		cleared, err := repo.Update(bgCtx(), tnt.ID, repository.TenantPatch{Region: &empty})
+		if err != nil {
+			t.Fatalf("clear region: %v", err)
+		}
+		if cleared.Region != "" {
+			t.Errorf("clear region: want empty, got %q (the COALESCE-based predecessor silently dropped this PATCH)", cleared.Region)
 		}
 
 		// suspend then delete
@@ -373,6 +398,102 @@ func TestPostgres_Integration(t *testing.T) {
 		}
 		if latest.PolicyGraphID != g2.ID {
 			t.Errorf("latest mobile bundle should be from g2 (latest version)")
+		}
+	})
+
+	t.Run("Webhook_Endpoint_Delivery_RLS", func(t *testing.T) {
+		tr := store.NewTenantRepository()
+		er := store.NewWebhookEndpointRepository()
+		dr := store.NewWebhookDeliveryRepository()
+		tntA := mustTenant(t, tr)
+		tntB := mustTenant(t, tr)
+
+		// Provision an active endpoint in tenant A.
+		secret := make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			t.Fatalf("rand: %v", err)
+		}
+		epA, err := er.Create(bgCtx(), tntA.ID, repository.WebhookEndpoint{
+			URL: "https://a.example/hook", Events: []string{"tenant.created", "site.updated"},
+			SigningSecret: secret, Status: repository.WebhookEndpointStatusActive,
+		})
+		if err != nil {
+			t.Fatalf("create endpoint A: %v", err)
+		}
+		// Tenant B endpoint subscribed to a different event.
+		if _, err := er.Create(bgCtx(), tntB.ID, repository.WebhookEndpoint{
+			URL: "https://b.example/hook", Events: []string{"device.heartbeat"},
+			SigningSecret: secret, Status: repository.WebhookEndpointStatusActive,
+		}); err != nil {
+			t.Fatalf("create endpoint B: %v", err)
+		}
+
+		// RLS: Get from wrong tenant must return ErrNotFound.
+		if _, err := er.Get(bgCtx(), tntB.ID, epA.ID); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("cross-tenant Get: want ErrNotFound, got %v", err)
+		}
+
+		// ListActive scoped to tenant A returns only A's endpoint.
+		active, err := er.ListActive(bgCtx(), tntA.ID, []string{"tenant.created"})
+		if err != nil {
+			t.Fatalf("ListActive: %v", err)
+		}
+		if len(active) != 1 || active[0].ID != epA.ID {
+			t.Errorf("ListActive returned %d items, want 1 (A)", len(active))
+		}
+
+		// Enqueue a delivery for tenant A.
+		now := time.Now().UTC()
+		del, err := dr.Create(bgCtx(), tntA.ID, repository.WebhookDelivery{
+			EndpointID:  epA.ID,
+			EventType:   "tenant.created",
+			Payload:     json.RawMessage(`{"id":"abc"}`),
+			Status:      repository.WebhookDeliveryStatusPending,
+			NextRetryAt: now,
+		})
+		if err != nil {
+			t.Fatalf("create delivery: %v", err)
+		}
+
+		// ListPending uses the system-role GUC bypass to cross
+		// tenants — the worker must see the row even though no
+		// per-tenant context is set. processingTimeout=5m is
+		// the production default; the row is freshly pending so
+		// the reaper window is irrelevant for this assertion.
+		pending, err := dr.ListPending(bgCtx(), 10, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("ListPending: %v", err)
+		}
+		if len(pending) == 0 {
+			t.Fatalf("ListPending returned 0 items, want >= 1")
+		}
+		found := false
+		for _, p := range pending {
+			if p.ID == del.ID {
+				found = true
+				// The atomic-claim invariant flips the
+				// returned row to 'processing'.
+				if p.Status != repository.WebhookDeliveryStatusProcessing {
+					t.Errorf("claimed row status = %v, want processing", p.Status)
+				}
+				break
+			}
+		}
+		if !found {
+			t.Errorf("ListPending did not return the queued delivery")
+		}
+
+		// UpdateStatus to delivered closes the loop.
+		if err := dr.UpdateStatus(bgCtx(), tntA.ID, del.ID,
+			repository.WebhookDeliveryStatusDelivered, 1, "", 200, now); err != nil {
+			t.Fatalf("UpdateStatus: %v", err)
+		}
+		got, err := dr.Get(bgCtx(), tntA.ID, del.ID)
+		if err != nil {
+			t.Fatalf("post-update get: %v", err)
+		}
+		if got.Status != repository.WebhookDeliveryStatusDelivered || got.Attempts != 1 {
+			t.Errorf("post-update row = %+v", got)
 		}
 	})
 }

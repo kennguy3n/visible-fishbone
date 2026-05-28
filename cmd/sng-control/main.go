@@ -27,6 +27,14 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
+	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
+	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
+	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
+	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
+	"github.com/kennguy3n/visible-fishbone/internal/service/site"
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenant"
+	"github.com/kennguy3n/visible-fishbone/internal/service/webhook"
 )
 
 func main() {
@@ -99,13 +107,21 @@ func run() error {
 		return nil
 	}))
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", health.Liveness)
-	mux.HandleFunc("/readyz", health.Readiness)
+	router, webhookWorker, err := buildRouter(&cfg, logger, pool, health)
+	if err != nil {
+		return fmt.Errorf("build router: %w", err)
+	}
+
+	// Start the webhook delivery worker before the HTTP server so
+	// queued deliveries from a previous run start draining
+	// immediately on boot. Stopped during shutdown below.
+	if err := webhookWorker.Start(rootCtx); err != nil {
+		return fmt.Errorf("start webhook worker: %w", err)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.HTTP.Addr(),
-		Handler:           mux,
+		Handler:           router,
 		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
 		ReadTimeout:       cfg.HTTP.ReadTimeout,
 		WriteTimeout:      cfg.HTTP.WriteTimeout,
@@ -132,8 +148,111 @@ func run() error {
 		logger.Warn("sng-control: http shutdown error", slog.Any("error", err))
 	}
 
+	if err := webhookWorker.Stop(shutdownCtx); err != nil {
+		logger.Warn("sng-control: webhook worker shutdown error", slog.Any("error", err))
+	}
+
 	logger.Info("sng-control: stopped")
 	return nil
+}
+
+// buildRouter wires every repository / service / handler against
+// the Postgres pool and returns the composed HTTP handler plus the
+// webhook delivery worker (so main can start/stop it alongside the
+// HTTP server). Kept in one place so the dependency graph is
+// readable; production wiring + tests share the same factory.
+//
+// An error from this constructor is fatal at boot: a missing
+// policy signer would silently emit unsigned bundles that edge
+// agents (correctly) refuse, breaking enforcement everywhere.
+func buildRouter(
+	cfg *config.Config,
+	logger *slog.Logger,
+	pool *pgxpool.Pool,
+	health *handler.Health,
+) (http.Handler, *webhook.DeliveryWorker, error) {
+	store := postgres.NewStore(pool)
+
+	tenantRepo := store.NewTenantRepository()
+	siteRepo := store.NewSiteRepository()
+	deviceRepo := store.NewDeviceRepository()
+	roleRepo := store.NewRoleRepository()
+	claimRepo := store.NewClaimTokenRepository()
+	auditRepo := store.NewAuditLogRepository()
+	policyRepo := store.NewPolicyRepository()
+	webhookEndpointRepo := store.NewWebhookEndpointRepository()
+	webhookDeliveryRepo := store.NewWebhookDeliveryRepository()
+
+	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
+	siteSvc := site.New(siteRepo, auditRepo, logger)
+	identitySvc := identity.New(deviceRepo, claimRepo, auditRepo, logger)
+	rbacSvc := rbac.New(roleRepo, auditRepo, logger)
+	auditSvc := audit.New(auditRepo)
+	// Policy signing key — for now use an ephemeral signer so the
+	// service is functional out-of-box; production deployments
+	// MUST inject a KMS-backed signer (config option lands in PR8).
+	//
+	// Fail boot on signer init error. ed25519.GenerateKey only
+	// returns an error when crypto/rand.Reader fails, which means
+	// the OS entropy pool is broken — in that state we cannot
+	// safely sign anything later either. The previous code path
+	// (log + signer=nil + continue) would have let the service
+	// come up emitting nil-signed policy bundles; edge agents
+	// correctly refuse those, so the system would be silently
+	// degraded with enforcement disabled everywhere. Failing the
+	// boot makes that condition observable immediately rather
+	// than as a fleet-wide enforcement gap discovered later.
+	signer, err := policy.NewEphemeralSigner()
+	if err != nil {
+		return nil, nil, fmt.Errorf("policy signer init: %w", err)
+	}
+	policySvc := policy.New(policyRepo, auditRepo, signer)
+	webhookSvc := webhook.New(webhookEndpointRepo, webhookDeliveryRepo, auditRepo, logger)
+
+	// Translate the operator-facing config.Webhook knobs into the
+	// worker's internal WorkerConfig. The previous wiring passed
+	// an empty WorkerConfig{}, which silently fell back to the
+	// worker package's compiled-in defaults — meaning the
+	// WEBHOOK_* environment variables were validated at boot but
+	// never reached the live worker. Names differ across the two
+	// layers because the config struct is the public API
+	// (deliberately stable across worker refactors) while the
+	// worker fields evolved with the implementation.
+	webhookWorker := webhook.NewDeliveryWorker(
+		webhookDeliveryRepo, webhookEndpointRepo, nil,
+		webhook.WorkerConfig{
+			BatchSize:         cfg.Webhook.BatchSize,
+			PollInterval:      cfg.Webhook.PollInterval,
+			RequestTimeout:    cfg.Webhook.DeliveryTimeout,
+			MaxAttempts:       cfg.Webhook.MaxAttempts,
+			BackoffBase:       cfg.Webhook.InitialDelay,
+			BackoffMax:        cfg.Webhook.MaxDelay,
+			ProcessingTimeout: cfg.Webhook.ProcessingTimeout,
+			// WEBHOOK_SIGNATURE_HEADER is loaded + validated at
+			// boot but used to be silently dropped here, so a
+			// subscriber configured to look for a non-default
+			// header (e.g. `X-Acme-Webhook-Sig`) saw every
+			// signature as missing. Threading the value into
+			// WorkerConfig restores the operator-facing contract.
+			SignatureHeader: cfg.Webhook.SignatureHeader,
+		},
+		logger,
+	)
+
+	router := handler.NewRouter(handler.RouterDeps{
+		Config:      cfg,
+		Logger:      logger,
+		Tenants:     handler.NewTenantHandler(tenantSvc),
+		Sites:       handler.NewSiteHandler(siteSvc),
+		Devices:     handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL),
+		RBAC:        handler.NewRBACHandler(rbacSvc),
+		Policy:      handler.NewPolicyHandler(policySvc),
+		Audit:       handler.NewAuditHandler(auditSvc),
+		Webhooks:    handler.NewWebhookHandler(webhookSvc),
+		Health:      health,
+		OpenAPISpec: handler.NewOpenAPIHandler(),
+	})
+	return router, webhookWorker, nil
 }
 
 // newLogger constructs the process-wide structured logger.

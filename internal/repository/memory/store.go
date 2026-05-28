@@ -39,13 +39,15 @@ type Store struct {
 	tenants map[uuid.UUID]repository.Tenant
 
 	// Tenant-scoped tables. Keys are the row id.
-	sites         map[uuid.UUID]repository.Site
-	users         map[uuid.UUID]repository.User
-	devices       map[uuid.UUID]repository.Device
-	claimTokens   map[uuid.UUID]repository.ClaimToken
-	auditEntries  map[uuid.UUID]repository.AuditEntry
-	policyGraphs  map[uuid.UUID]repository.PolicyGraph
-	policyBundles map[uuid.UUID]repository.PolicyBundle
+	sites             map[uuid.UUID]repository.Site
+	users             map[uuid.UUID]repository.User
+	devices           map[uuid.UUID]repository.Device
+	claimTokens       map[uuid.UUID]repository.ClaimToken
+	auditEntries      map[uuid.UUID]repository.AuditEntry
+	policyGraphs      map[uuid.UUID]repository.PolicyGraph
+	policyBundles     map[uuid.UUID]repository.PolicyBundle
+	webhookEndpoints  map[uuid.UUID]repository.WebhookEndpoint
+	webhookDeliveries map[uuid.UUID]repository.WebhookDelivery
 
 	// Role / user_role tables. Roles are NOT tenant-scoped on
 	// their own (system roles have TenantID nil).
@@ -69,17 +71,19 @@ type userRoleKey struct {
 // NewStore constructs an empty Store backed by `time.Now().UTC()`.
 func NewStore() *Store {
 	return &Store{
-		tenants:       map[uuid.UUID]repository.Tenant{},
-		sites:         map[uuid.UUID]repository.Site{},
-		users:         map[uuid.UUID]repository.User{},
-		devices:       map[uuid.UUID]repository.Device{},
-		claimTokens:   map[uuid.UUID]repository.ClaimToken{},
-		auditEntries:  map[uuid.UUID]repository.AuditEntry{},
-		policyGraphs:  map[uuid.UUID]repository.PolicyGraph{},
-		policyBundles: map[uuid.UUID]repository.PolicyBundle{},
-		roles:         map[uuid.UUID]repository.Role{},
-		userRoles:     map[userRoleKey]repository.UserRole{},
-		clock:         func() time.Time { return time.Now().UTC() },
+		tenants:           map[uuid.UUID]repository.Tenant{},
+		sites:             map[uuid.UUID]repository.Site{},
+		users:             map[uuid.UUID]repository.User{},
+		devices:           map[uuid.UUID]repository.Device{},
+		claimTokens:       map[uuid.UUID]repository.ClaimToken{},
+		auditEntries:      map[uuid.UUID]repository.AuditEntry{},
+		policyGraphs:      map[uuid.UUID]repository.PolicyGraph{},
+		policyBundles:     map[uuid.UUID]repository.PolicyBundle{},
+		webhookEndpoints:  map[uuid.UUID]repository.WebhookEndpoint{},
+		webhookDeliveries: map[uuid.UUID]repository.WebhookDelivery{},
+		roles:             map[uuid.UUID]repository.Role{},
+		userRoles:         map[userRoleKey]repository.UserRole{},
+		clock:             func() time.Time { return time.Now().UTC() },
 	}
 }
 
