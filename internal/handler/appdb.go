@@ -463,9 +463,27 @@ func (h *AppRegistryHandler) stats_handler(w http.ResponseWriter, r *http.Reques
 // --- Admin handlers ------------------------------------------------------
 
 func (h *AppRegistryHandler) adminListApps(w http.ResponseWriter, r *http.Request) {
+	tcParam := r.URL.Query().Get("traffic_class")
+	scopeParam := r.URL.Query().Get("scope")
+	if tcParam != "" {
+		tc := repository.TrafficClass(tcParam)
+		if !tc.IsValid() {
+			WriteError(w, http.StatusBadRequest, "invalid_traffic_class",
+				"traffic_class filter must be a valid traffic class")
+			return
+		}
+	}
+	if scopeParam != "" {
+		sc := repository.AppRegistryScope(scopeParam)
+		if !sc.IsValid() {
+			WriteError(w, http.StatusBadRequest, "invalid_scope",
+				"scope filter must be 'global' or 'regional'")
+			return
+		}
+	}
 	filter := repository.AppRegistryFilter{
-		TrafficClass: repository.TrafficClass(r.URL.Query().Get("traffic_class")),
-		Scope:        repository.AppRegistryScope(r.URL.Query().Get("scope")),
+		TrafficClass: repository.TrafficClass(tcParam),
+		Scope:        repository.AppRegistryScope(scopeParam),
 		Region:       r.URL.Query().Get("region"),
 		Category:     r.URL.Query().Get("category"),
 	}

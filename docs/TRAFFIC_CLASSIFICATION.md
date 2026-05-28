@@ -181,8 +181,16 @@ auto-refreshed by a periodic sync job
 
 1. Fetches the vendor URL on a 24h cadence.
 2. Diffs the new endpoint set against the stored one.
-3. On non-empty diff, updates `domains` / `ip_ranges` and
-   stamps `updated_at`.
+3. On non-empty diff, **unions** the vendor-published entries with
+   the existing `domains` / `ip_ranges` and stamps `updated_at`.
+   The merge is additive-only by design: a vendor removal does NOT
+   automatically shrink the stored set. This prevents a poisoned
+   or buggy vendor response (empty payload, rate-limited, MITM)
+   from silently wiping the trusted domain list for an app. Stale
+   entries are handled by the demotion engine (threat-feed signal
+   → immediate `inspect_full` demotion) or manual operator pruning
+   via the admin API (`PUT /admin/app-registry/{id}` or
+   `DELETE /admin/app-registry/{id}`).
 4. Emits an `app.synced` audit + webhook event so operators see
    trust-list movements without polling.
 

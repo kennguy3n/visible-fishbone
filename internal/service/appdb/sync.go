@@ -529,6 +529,23 @@ func parseGenericJSON(body []byte, _ []string) ([]string, []netip.Prefix, error)
 }
 
 // --- Set-merge helpers ----------------------------------------------------
+//
+// mergeDomains and mergeRanges implement ADDITIVE-ONLY (union)
+// semantics. A vendor removal does NOT shrink the stored set.
+// This is a deliberate safety trade-off:
+//
+//   - A poisoned or buggy vendor response (empty payload,
+//     rate-limited 429, partial JSON, MITM) cannot silently wipe
+//     an app's entire trusted domain list.
+//   - Stale domains are handled at a different layer: the demotion
+//     engine reacts to threat-feed signals by immediately demoting
+//     the app to inspect_full (zero operator latency); operators
+//     can also prune stale entries via the admin API.
+//   - The catalog grows monotonically under automation. Manual
+//     pruning uses PUT /admin/app-registry/{id} (full replace)
+//     or DELETE.
+//
+// See docs/TRAFFIC_CLASSIFICATION.md §8 for the rationale.
 
 func mergeDomains(a, b []string) []string {
 	set := make(map[string]struct{}, len(a)+len(b))
