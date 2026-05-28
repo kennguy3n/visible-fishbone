@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -309,11 +310,36 @@ func (h *AppRegistryHandler) createOverride(w http.ResponseWriter, r *http.Reque
 		WriteError(w, http.StatusBadRequest, "invalid_class", "traffic_class_override is invalid")
 		return
 	}
+	// Enforce the (app_id XOR custom_domains) contract at the
+	// handler so the caller gets a field-specific 400 instead of
+	// the repository's generic ErrInvalidArgument. Also reject
+	// custom_domains entries that are empty/whitespace — those
+	// will never match any flow in matchesPattern and would
+	// install a silently-dead override that an operator could
+	// not distinguish from a working one without reading the
+	// matching code.
+	hasAppID := req.AppID != ""
+	cleanedDomains := make([]string, 0, len(req.CustomDomains))
+	for _, d := range req.CustomDomains {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			WriteError(w, http.StatusBadRequest, "invalid_custom_domain",
+				"custom_domains entries must be non-empty")
+			return
+		}
+		cleanedDomains = append(cleanedDomains, d)
+	}
+	hasDomains := len(cleanedDomains) > 0
+	if hasAppID == hasDomains {
+		WriteError(w, http.StatusBadRequest, "invalid_override_target",
+			"exactly one of app_id or custom_domains must be set")
+		return
+	}
 	ov := repository.AppRegistryOverride{
 		TrafficClassOverride: cls,
 		Reason:               req.Reason,
 	}
-	if req.AppID != "" {
+	if hasAppID {
 		id, err := uuid.Parse(req.AppID)
 		if err != nil {
 			WriteError(w, http.StatusBadRequest, "invalid_app_id", "app_id must be a UUID")
@@ -321,7 +347,7 @@ func (h *AppRegistryHandler) createOverride(w http.ResponseWriter, r *http.Reque
 		}
 		ov.AppID = &id
 	}
-	ov.CustomDomains = req.CustomDomains
+	ov.CustomDomains = cleanedDomains
 	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
 		t, err := time.Parse(time.RFC3339Nano, *req.ExpiresAt)
 		if err != nil {
@@ -561,6 +587,17 @@ func parseAppRequest(req AppRegistryRequest, base repository.AppRegistry) (repos
 	out := base
 	if req.Name != "" {
 		out.Name = req.Name
+	}
+	// Required-scalar check: name must be set after the merge.
+	// On create base.Name is empty and a missing req.Name leaves
+	// it empty; on update the inherited value satisfies the
+	// check. Without this, the empty value would slip through to
+	// the repository which returns a generic ErrInvalidArgument
+	// (mapped to a non-field-specific 400) — inconsistent with
+	// the field-specific messages emitted for traffic_class /
+	// scope / domains below.
+	if out.Name == "" {
+		return out, errors.New("name is required")
 	}
 	if req.Vendor != nil {
 		out.Vendor = *req.Vendor

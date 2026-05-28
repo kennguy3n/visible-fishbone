@@ -205,9 +205,21 @@ func (s *Syncer) SyncAll(ctx context.Context) ([]SyncResult, error) {
 // Run launches the periodic sync loop. Returns when ctx is
 // canceled. Errors from SyncAll are logged; a transient failure
 // does not stop the loop.
+//
+// The first sync runs immediately at startup rather than waiting
+// a full interval. With the default 24h cadence, a tick-only loop
+// would leave a fresh deployment running on stale seed data for
+// up to a day before the first vendor pull — a real correctness
+// gap if a vendor has rotated their published CIDRs since the
+// seed migration was authored. The startup pass is best-effort:
+// any error is logged and the periodic loop continues normally,
+// matching the in-loop error-handling contract.
 func (s *Syncer) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 24 * time.Hour
+	}
+	if _, err := s.SyncAll(ctx); err != nil {
+		s.svc.logger.ErrorContext(ctx, "appdb startup sync failed", "error", err)
 	}
 	tick := time.NewTicker(interval)
 	defer tick.Stop()

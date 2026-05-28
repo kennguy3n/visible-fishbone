@@ -1159,6 +1159,16 @@ components:
     AppRegistryOverrideRequest:
       type: object
       required: [traffic_class_override]
+      description: |
+        Exactly one of `app_id` or `custom_domains` must be set.
+        - `app_id` references an entry in the global `app_registry`.
+        - `custom_domains` defines a tenant-local pattern list for
+          apps that are not in the global catalog.
+        Supplying neither (or both) returns 400
+        `invalid_override_target`. Empty / whitespace-only
+        custom-domain entries return 400 `invalid_custom_domain`
+        because they would never match any flow and would install
+        a silently-dead override.
       properties:
         app_id: { type: string, format: uuid }
         custom_domains:
