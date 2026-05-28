@@ -70,8 +70,33 @@ type KeyEnsurer interface {
 // interface stays decoupled from the appdb package; callers that
 // need the typed shape can type-assert. The policy compiler only
 // needs to JSON-encode the value, so a generic `any` is sufficient.
+//
+// SnapshotSteering returns a per-tenant cache of the catalog +
+// overrides so the compiler can produce every per-target rule
+// set from a single pair of DB reads instead of repeating those
+// reads for every target. The returned snapshot is single-use:
+// callers must not retain it across Compile invocations because
+// the underlying catalog drifts as operators mutate the registry.
+// A `nil` snapshot (no compiler installed) signals to the caller
+// that the steering section should be omitted from the bundle.
 type SteeringCompiler interface {
 	CompileSteeringRules(ctx context.Context, tenantID uuid.UUID, target repository.PolicyBundleTarget) (any, error)
+	// SnapshotSteering returns an object that implements
+	// SteeringSnapshot. The return is typed as `any` for the
+	// same reason CompileSteeringRules returns `any` — the
+	// concrete type lives in appdb and this package cannot
+	// import it. The Compile method type-asserts the result.
+	SnapshotSteering(ctx context.Context, tenantID uuid.UUID) (any, error)
+}
+
+// SteeringSnapshot is the interface the policy compiler uses to
+// produce per-target rules from a pre-fetched catalog. Implemented
+// by appdb.PolicySteeringSnapshotAdapter (wrapping
+// *appdb.SteeringSnapshot). Reusing the same snapshot across all
+// targets in a single Compile call avoids the N × ListAll round
+// trip pattern called out in Devin Review on commit 02765a2.
+type SteeringSnapshot interface {
+	CompileForTarget(target repository.PolicyBundleTarget) (any, error)
 }
 
 // Service is the policy service.
@@ -286,18 +311,37 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 			slog.Any("error", parseErr),
 		)
 	}
+	// Snapshot the appdb catalog + tenant overrides once per
+	// Compile so the per-target steering build below doesn't
+	// re-issue the same pair of ListAll reads for every bundle
+	// target. A typical Compile produces four targets (edge,
+	// endpoint, cloud, mobile) — the previous shape did 4 × 2 =
+	// 8 round-trips per Compile against unchanged inputs.
+	// A nil compiler (in-process tests, dry runs) leaves the
+	// snapshot nil and the Steering section is omitted, matching
+	// the pre-snapshot fallback behaviour.
+	var steeringSnap SteeringSnapshot
+	if s.steering != nil {
+		snapAny, sErr := s.steering.SnapshotSteering(ctx, tenantID)
+		if sErr != nil {
+			return CompileResult{}, fmt.Errorf("snapshot steering: %w", sErr)
+		}
+		snap, ok := snapAny.(SteeringSnapshot)
+		if !ok {
+			return CompileResult{}, fmt.Errorf("snapshot steering: returned type %T does not implement SteeringSnapshot", snapAny)
+		}
+		steeringSnap = snap
+	}
 	for _, target := range allTargets {
 		// Resolve the per-target steering rules from the
-		// classification engine. Determinism comes from the appdb
-		// compiler — it sorts every set into canonical order and
-		// runs at the same `compiledAt` for every target, so
-		// repeated compilations against an unchanged catalog
-		// produce identical bytes. A nil compiler (in-process
-		// tests, dry runs) results in an omitted Steering
-		// section so existing assertions still pass.
+		// snapshot. Determinism comes from the appdb compiler —
+		// it sorts every set into canonical order and runs at the
+		// same `compiledAt` for every target, so repeated
+		// compilations against an unchanged catalog produce
+		// identical bytes.
 		var steeringJSON json.RawMessage
-		if s.steering != nil {
-			raw, sErr := s.steering.CompileSteeringRules(ctx, tenantID, target)
+		if steeringSnap != nil {
+			raw, sErr := steeringSnap.CompileForTarget(target)
 			if sErr != nil {
 				return CompileResult{}, fmt.Errorf("compile steering rules %s: %w", target, sErr)
 			}

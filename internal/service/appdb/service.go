@@ -486,24 +486,93 @@ func targetWantsClass(target repository.PolicyBundleTarget, class repository.Tra
 	return false
 }
 
+// SteeringSnapshot is a per-tenant cache of the global app
+// catalog + tenant overrides fetched at a single point in time.
+// The policy compiler builds one snapshot per Compile invocation
+// and reuses it to produce every per-target rule set, eliminating
+// the 8 redundant DB round-trips (4 targets × 2 tables) that a
+// per-target `CompileSteeringRules` call would otherwise incur.
+//
+// Snapshots are not safe to retain across compilations — they
+// reflect a moment-in-time catalog and overrides will drift as
+// operators mutate the registry. The intended lifetime is a single
+// `policy.Service.Compile` call.
+type SteeringSnapshot struct {
+	// apps is the full global catalog at snapshot time.
+	apps []repository.AppRegistry
+	// overrideByApp / customs are the tenant overrides
+	// pre-classified and pre-filtered for expiry against the
+	// snapshot clock (`now`). Subsequent CompileForTarget calls
+	// see the same filtered set so the per-target outputs are
+	// byte-deterministic against one snapshot.
+	overrideByApp map[uuid.UUID]repository.AppRegistryOverride
+	customs       []repository.AppRegistryOverride
+}
+
+// NewSteeringSnapshot fetches the catalog + overrides once and
+// returns a snapshot the caller can reuse for every per-target
+// compile. The expiry filter uses the service clock at snapshot
+// time so a TTL boundary crossed during a multi-target compile
+// does not produce inconsistent bundles between targets.
+func (s *Service) NewSteeringSnapshot(ctx context.Context, tenantID uuid.UUID) (*SteeringSnapshot, error) {
+	apps, err := s.apps.ListAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("appdb: list apps: %w", err)
+	}
+	ovs, err := s.overrides.ListAll(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("appdb: list overrides: %w", err)
+	}
+	now := s.now()
+	overrideByApp := make(map[uuid.UUID]repository.AppRegistryOverride, len(ovs))
+	customs := make([]repository.AppRegistryOverride, 0, len(ovs))
+	for _, ov := range ovs {
+		if ov.ExpiresAt != nil && !ov.ExpiresAt.After(now) {
+			continue
+		}
+		if ov.AppID != nil {
+			overrideByApp[*ov.AppID] = ov
+		} else {
+			customs = append(customs, ov)
+		}
+	}
+	return &SteeringSnapshot{
+		apps:          apps,
+		overrideByApp: overrideByApp,
+		customs:       customs,
+	}, nil
+}
+
 // CompileSteeringRules produces the steering table for `target`.
 // The output is byte-deterministic — equivalent inputs produce
 // byte-identical bytes — so two compilations of the same policy
 // graph and tenant overrides yield identical bundles. The compiler
 // signature on `policy.Service` depends on this property.
+//
+// Single-shot callers (admin endpoints, ad-hoc resolution) use
+// this method directly; the policy compiler uses
+// NewSteeringSnapshot + Snapshot.CompileForTarget to amortise the
+// catalog/overrides fetch across all four bundle targets.
 func (s *Service) CompileSteeringRules(ctx context.Context, tenantID uuid.UUID, target repository.PolicyBundleTarget) (SteeringRuleSet, error) {
 	if !isValidTarget(target) {
 		return SteeringRuleSet{}, fmt.Errorf("appdb: invalid target %q: %w", target, repository.ErrInvalidArgument)
 	}
-	apps, err := s.apps.ListAll(ctx)
+	snap, err := s.NewSteeringSnapshot(ctx, tenantID)
 	if err != nil {
-		return SteeringRuleSet{}, fmt.Errorf("appdb: list apps: %w", err)
+		return SteeringRuleSet{}, err
 	}
-	ovs, err := s.overrides.ListAll(ctx, tenantID)
-	if err != nil {
-		return SteeringRuleSet{}, fmt.Errorf("appdb: list overrides: %w", err)
+	return snap.CompileForTarget(target)
+}
+
+// CompileForTarget builds the steering table for `target` from
+// the snapshot's pre-fetched catalog. Multiple calls with
+// different targets all reuse the same underlying app catalog +
+// overrides, so a four-target Compile does one pair of DB reads
+// instead of four pairs.
+func (snap *SteeringSnapshot) CompileForTarget(target repository.PolicyBundleTarget) (SteeringRuleSet, error) {
+	if !isValidTarget(target) {
+		return SteeringRuleSet{}, fmt.Errorf("appdb: invalid target %q: %w", target, repository.ErrInvalidArgument)
 	}
-	now := s.now()
 
 	// Build the per-class buckets. The bucket key is the
 	// effective traffic class for each app/override.
@@ -524,23 +593,11 @@ func (s *Service) CompileSteeringRules(ctx context.Context, tenantID uuid.UUID, 
 		}
 	}
 
-	// Index overrides by app_id so we can short-circuit during the
-	// apps walk.
-	overrideByApp := make(map[uuid.UUID]repository.AppRegistryOverride, len(ovs))
-	customs := make([]repository.AppRegistryOverride, 0, len(ovs))
-	for _, ov := range ovs {
-		if ov.ExpiresAt != nil && !ov.ExpiresAt.After(now) {
-			continue
-		}
-		if ov.AppID != nil {
-			overrideByApp[*ov.AppID] = ov
-		} else {
-			customs = append(customs, ov)
-		}
-	}
+	overrideByApp := snap.overrideByApp
+	customs := snap.customs
 
 	// Walk global apps and slot them into the appropriate bucket.
-	for _, app := range apps {
+	for _, app := range snap.apps {
 		class := app.TrafficClass
 		source := "global"
 		if ov, ok := overrideByApp[app.ID]; ok {
@@ -622,6 +679,32 @@ type PolicySteeringAdapter struct{ Svc *Service }
 // CompileSteeringRules dispatches to the underlying Service.
 func (a PolicySteeringAdapter) CompileSteeringRules(ctx context.Context, tenantID uuid.UUID, target repository.PolicyBundleTarget) (any, error) {
 	rs, err := a.Svc.CompileSteeringRules(ctx, tenantID, target)
+	if err != nil {
+		return nil, err
+	}
+	return rs, nil
+}
+
+// SnapshotSteering produces a pre-fetched catalog snapshot that
+// the policy compiler reuses for every per-target compile.
+// Returns `any` so appdb doesn't import the policy package;
+// the concrete return (PolicySteeringSnapshotAdapter) satisfies
+// policy.SteeringSnapshot via implicit interface implementation.
+func (a PolicySteeringAdapter) SnapshotSteering(ctx context.Context, tenantID uuid.UUID) (any, error) {
+	snap, err := a.Svc.NewSteeringSnapshot(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return PolicySteeringSnapshotAdapter{snap: snap}, nil
+}
+
+// PolicySteeringSnapshotAdapter adapts *SteeringSnapshot to the
+// policy.SteeringSnapshot interface.
+type PolicySteeringSnapshotAdapter struct{ snap *SteeringSnapshot }
+
+// CompileForTarget dispatches to the underlying snapshot.
+func (a PolicySteeringSnapshotAdapter) CompileForTarget(target repository.PolicyBundleTarget) (any, error) {
+	rs, err := a.snap.CompileForTarget(target)
 	if err != nil {
 		return nil, err
 	}

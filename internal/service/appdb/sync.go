@@ -37,6 +37,16 @@ type Syncer struct {
 
 	mu      sync.RWMutex
 	parsers map[string]VendorParser
+
+	// failures tracks consecutive sync failures per app id so the
+	// Run loop can log a sustained-failure warning once the
+	// threshold (3 by default, per docs/TRAFFIC_CLASSIFICATION.md
+	// §8) is reached. A successful sync resets the counter for
+	// that app. The map is protected by mu — Run is single-
+	// threaded but admin-triggered SyncAll can run concurrently.
+	failures            map[string]int
+	sustainedThreshold  int
+	sustainedReportSent map[string]bool
 }
 
 // VendorParser parses a vendor's endpoint response into a flat
@@ -55,10 +65,13 @@ func NewSyncer(svc *Service, client *http.Client) *Syncer {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
 	s := &Syncer{
-		svc:     svc,
-		client:  client,
-		now:     func() time.Time { return time.Now().UTC() },
-		parsers: map[string]VendorParser{},
+		svc:                 svc,
+		client:              client,
+		now:                 func() time.Time { return time.Now().UTC() },
+		parsers:             map[string]VendorParser{},
+		failures:            map[string]int{},
+		sustainedThreshold:  3, // matches docs/TRAFFIC_CLASSIFICATION.md §8
+		sustainedReportSent: map[string]bool{},
 	}
 	s.RegisterParser("endpoints.office.com", parseMicrosoftEndpoints)
 	s.RegisterParser("www.gstatic.com", parseGoogleIPRanges)
@@ -203,8 +216,14 @@ func (s *Syncer) SyncAll(ctx context.Context) ([]SyncResult, error) {
 }
 
 // Run launches the periodic sync loop. Returns when ctx is
-// canceled. Errors from SyncAll are logged; a transient failure
-// does not stop the loop.
+// canceled. The loop calls SyncAll on every tick and inspects the
+// per-app results so individual fetch / parse / update failures
+// (which SyncAll returns inside SyncResult.Err rather than as a
+// top-level error) are surfaced to operators. Sustained per-app
+// failures (≥ sustainedThreshold consecutive misses, default 3
+// per docs/TRAFFIC_CLASSIFICATION.md §8) escalate from a per-app
+// warning to a per-app error and set a sticky flag so the operator
+// only sees the louder log line once per failure streak.
 //
 // The first sync runs immediately at startup rather than waiting
 // a full interval. With the default 24h cadence, a tick-only loop
@@ -214,13 +233,18 @@ func (s *Syncer) SyncAll(ctx context.Context) ([]SyncResult, error) {
 // seed migration was authored. The startup pass is best-effort:
 // any error is logged and the periodic loop continues normally,
 // matching the in-loop error-handling contract.
+//
+// app.sync_failed webhook delivery (docs §8) is intentionally not
+// fired here yet — the webhook event-type registry has not grown
+// the new event, and registering it spans the webhook subsystem.
+// Sustained failures are surfaced via structured logging in the
+// meantime; the webhook hookpoint is documented inline so the
+// follow-up is discoverable.
 func (s *Syncer) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 24 * time.Hour
 	}
-	if _, err := s.SyncAll(ctx); err != nil {
-		s.svc.logger.ErrorContext(ctx, "appdb startup sync failed", "error", err)
-	}
+	s.runOnce(ctx, "appdb startup sync")
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for {
@@ -228,10 +252,59 @@ func (s *Syncer) Run(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			if _, err := s.SyncAll(ctx); err != nil {
-				s.svc.logger.ErrorContext(ctx, "appdb sync failed", "error", err)
-			}
+			s.runOnce(ctx, "appdb sync")
 		}
+	}
+}
+
+// runOnce executes a single SyncAll and surfaces per-app failures
+// to the logger. Successes reset the consecutive-failure counter
+// and clear the sustained-failure sticky flag.
+func (s *Syncer) runOnce(ctx context.Context, label string) {
+	results, err := s.SyncAll(ctx)
+	if err != nil {
+		s.svc.logger.ErrorContext(ctx, label+" failed", "error", err)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range results {
+		if r.Err == "" {
+			if s.failures[r.AppID] > 0 || s.sustainedReportSent[r.AppID] {
+				s.svc.logger.InfoContext(ctx, "appdb sync recovered",
+					"app_id", r.AppID,
+					"app_name", r.AppName,
+					"after_consecutive_failures", s.failures[r.AppID],
+				)
+			}
+			delete(s.failures, r.AppID)
+			delete(s.sustainedReportSent, r.AppID)
+			continue
+		}
+		s.failures[r.AppID]++
+		streak := s.failures[r.AppID]
+		if streak >= s.sustainedThreshold && !s.sustainedReportSent[r.AppID] {
+			// One-shot sustained-failure escalation. The webhook
+			// emission lives here when the app.sync_failed event
+			// type is registered.
+			s.svc.logger.ErrorContext(ctx, "appdb sync sustained failure",
+				"app_id", r.AppID,
+				"app_name", r.AppName,
+				"metadata_url", r.MetadataURL,
+				"consecutive_failures", streak,
+				"threshold", s.sustainedThreshold,
+				"latest_error", r.Err,
+			)
+			s.sustainedReportSent[r.AppID] = true
+			continue
+		}
+		s.svc.logger.WarnContext(ctx, "appdb sync per-app failure",
+			"app_id", r.AppID,
+			"app_name", r.AppName,
+			"metadata_url", r.MetadataURL,
+			"consecutive_failures", streak,
+			"error", r.Err,
+		)
 	}
 }
 

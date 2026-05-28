@@ -460,3 +460,50 @@ func TestSyncUpdateApp_EmitsAuditEntry(t *testing.T) {
 		t.Fatalf("audit ip_ranges_after = %v, want 3", d)
 	}
 }
+
+// TestSteeringSnapshot_ReusedAcrossTargets verifies that a single
+// snapshot can produce per-target rule sets for every bundle
+// target and that those outputs are byte-identical to the
+// single-shot CompileSteeringRules path. The intent is the
+// performance fix called out in Devin Review on commit 02765a2:
+// the policy compiler creates one snapshot and reuses it for all
+// four targets instead of repeating the ListAll reads per target.
+func TestSteeringSnapshot_ReusedAcrossTargets(t *testing.T) {
+	svc, tenantID := newTestService(t)
+	seedApp(t, svc, "Office", repository.TrafficClassTrustedDirect, "*.office.com")
+	seedApp(t, svc, "Generic", repository.TrafficClassInspectFull, "shop.example.com")
+	seedApp(t, svc, "YouTube", repository.TrafficClassTrustedMediaBypass, "*.youtube.com")
+
+	snap, err := svc.NewSteeringSnapshot(context.Background(), tenantID)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	targets := []repository.PolicyBundleTarget{
+		repository.PolicyBundleTargetEdge,
+		repository.PolicyBundleTargetEndpoint,
+		repository.PolicyBundleTargetCloud,
+		repository.PolicyBundleTargetMobile,
+	}
+	for _, target := range targets {
+		fromSnap, err := snap.CompileForTarget(target)
+		if err != nil {
+			t.Fatalf("snapshot compile %s: %v", target, err)
+		}
+		fromSingle, err := svc.CompileSteeringRules(context.Background(), tenantID, target)
+		if err != nil {
+			t.Fatalf("single compile %s: %v", target, err)
+		}
+		snapBytes, err := json.Marshal(fromSnap)
+		if err != nil {
+			t.Fatalf("marshal snap %s: %v", target, err)
+		}
+		singleBytes, err := json.Marshal(fromSingle)
+		if err != nil {
+			t.Fatalf("marshal single %s: %v", target, err)
+		}
+		if string(snapBytes) != string(singleBytes) {
+			t.Fatalf("target %s: snapshot output differs from single-shot path\nsnap: %s\nsingle: %s",
+				target, snapBytes, singleBytes)
+		}
+	}
+}
