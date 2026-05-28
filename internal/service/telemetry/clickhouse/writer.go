@@ -172,12 +172,26 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Writer, error) 
 	}
 
 	w := &Writer{
-		conn:      conn,
-		cfg:       cfg,
-		logger:    logger,
-		pending:   make([]schema.Envelope, 0, cfg.BatchSize),
-		done:      make(chan struct{}),
-		insertSQL: fmt.Sprintf("INSERT INTO %s", cfg.Table),
+		conn:    conn,
+		cfg:     cfg,
+		logger:  logger,
+		pending: make([]schema.Envelope, 0, cfg.BatchSize),
+		done:    make(chan struct{}),
+		// Use explicit column names so the prepared batch's
+		// positional Append cannot be silently mis-aligned by a
+		// later ALTER TABLE that appends a column at the end of
+		// the table (the default placement for ADD COLUMN without
+		// an AFTER clause). The order here is the contract that
+		// flushOnce's Append() call must match. ingested_at is
+		// omitted so the column's DEFAULT clause supplies the
+		// timestamp.
+		insertSQL: fmt.Sprintf(
+			"INSERT INTO %s "+
+				"(event_id, tenant_id, device_id, site_id, timestamp, "+
+				"event_class, platform, schema_version, traffic_class, "+
+				"bytes_in, bytes_out, payload)",
+			cfg.Table,
+		),
 	}
 	w.start()
 	return w, nil
@@ -209,6 +223,8 @@ CREATE TABLE IF NOT EXISTS %s (
     platform        LowCardinality(String),
     schema_version  UInt8,
     traffic_class   LowCardinality(String) DEFAULT 'inspect_full',
+    bytes_in        UInt64 DEFAULT 0,
+    bytes_out       UInt64 DEFAULT 0,
     payload         String,
     ingested_at     DateTime64(6, 'UTC') DEFAULT now64(6, 'UTC')
 ) ENGINE = MergeTree
@@ -218,15 +234,36 @@ SETTINGS index_granularity = 8192`, w.cfg.Table)
 	if err := w.conn.Exec(ctx, createDDL); err != nil {
 		return fmt.Errorf("clickhouse: ensure schema: %w", err)
 	}
-	// Idempotent forward-migration for tables that pre-date the
-	// traffic_class column. ClickHouse honours IF NOT EXISTS on
-	// ADD COLUMN so this is a no-op once the column is present.
-	alterDDL := fmt.Sprintf(
-		"ALTER TABLE %s ADD COLUMN IF NOT EXISTS traffic_class LowCardinality(String) DEFAULT 'inspect_full'",
-		w.cfg.Table,
-	)
-	if err := w.conn.Exec(ctx, alterDDL); err != nil {
-		return fmt.Errorf("clickhouse: ensure traffic_class column: %w", err)
+	// Idempotent forward-migrations for tables that pre-date the
+	// traffic_class / bytes_in / bytes_out columns. ClickHouse
+	// honours IF NOT EXISTS on ADD COLUMN so this is a no-op
+	// once the columns are present.
+	//
+	// AFTER clauses pin the physical column order so that
+	// upgraded tables match the CREATE TABLE layout above
+	// regardless of when the migration ran. The prepared batch
+	// in flushOnce binds by explicit column names (see insertSQL
+	// in newWriter) so column position no longer affects the
+	// flush path, but keeping the physical layout consistent
+	// makes SELECT * results identical across deployments and
+	// removes a class of operator surprises.
+	for _, alter := range []string{
+		fmt.Sprintf(
+			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS traffic_class LowCardinality(String) DEFAULT 'inspect_full' AFTER schema_version",
+			w.cfg.Table,
+		),
+		fmt.Sprintf(
+			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS bytes_in UInt64 DEFAULT 0 AFTER traffic_class",
+			w.cfg.Table,
+		),
+		fmt.Sprintf(
+			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS bytes_out UInt64 DEFAULT 0 AFTER bytes_in",
+			w.cfg.Table,
+		),
+	} {
+		if err := w.conn.Exec(ctx, alter); err != nil {
+			return fmt.Errorf("clickhouse: ensure schema columns: %w", err)
+		}
 	}
 	return nil
 }
@@ -400,12 +437,17 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 			sid := *env.SiteID
 			siteID = &sid
 		}
-		// Hoist traffic_class out of the envelope onto the
-		// dedicated ClickHouse column. Legacy producers that
-		// pre-date the classification engine omit the field; the
-		// table DEFAULT clause supplies `inspect_full`, but we
-		// promote the same value explicitly here so the per-class
-		// aggregations report a stable label rather than a NULL.
+		// Hoist traffic_class / bytes_in / bytes_out out of the
+		// envelope onto their dedicated ClickHouse columns.
+		// Legacy producers that pre-date the classification
+		// engine omit traffic_class; the column DEFAULT supplies
+		// `inspect_full`, but we promote the same value
+		// explicitly so per-class aggregations report a stable
+		// label rather than a NULL. bytes_in / bytes_out default
+		// to zero for non-flow events.
+		//
+		// The order of Append arguments below MUST match the
+		// column list in insertSQL (constructed in newWriter).
 		trafficClass := env.TrafficClass
 		if trafficClass == "" {
 			trafficClass = "inspect_full"
@@ -420,6 +462,8 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 			string(env.Platform),
 			env.SchemaVersion,
 			trafficClass,
+			env.BytesIn,
+			env.BytesOut,
 			string(env.Payload),
 		); err != nil {
 			w.mu.Lock()
@@ -459,16 +503,21 @@ type TrafficClassCount struct {
 }
 
 // QueryTrafficClassDistribution returns the per-class event /
-// byte distribution for the tenant in the given window. The
-// query is scoped to FlowEvents because byte counters live on
-// the flow payload — other event classes contribute to event
-// counts but not byte totals.
+// byte distribution for the tenant in the given window. Bytes
+// are summed across the dedicated `bytes_in` / `bytes_out`
+// columns (zero for non-flow event classes), so the result is
+// a true per-class byte total rather than an event-counter-only
+// approximation.
 func (w *Writer) QueryTrafficClassDistribution(ctx context.Context, tenantID uuid.UUID, since time.Time) ([]TrafficClassCount, error) {
-	// JSONExtractUInt safely returns 0 for non-flow event classes
-	// where bytes_in / bytes_out are absent, so we can compute the
-	// byte sum across every event class without per-class
-	// branching. The traffic_class column has a stable
-	// LowCardinality dictionary so the GROUP BY runs from memory.
+	// SUM over the dedicated bytes_in / bytes_out columns. The
+	// previous implementation tried to JSONExtractUInt the values
+	// out of the `payload` column, which holds raw MessagePack
+	// bytes; ClickHouse's JSON extractors silently return 0 on
+	// non-JSON input so every row produced 0 bytes, leaving the
+	// cost-attribution chart non-functional. With the columns
+	// hoisted to the table schema (see EnsureSchema), the byte
+	// totals are now a column-level aggregate the planner can
+	// run as a streaming SUM.
 	//
 	// Uses w.cfg.Table rather than DefaultTable so operators who
 	// override the table name in Config get their custom table
@@ -477,9 +526,7 @@ func (w *Writer) QueryTrafficClassDistribution(ctx context.Context, tenantID uui
 SELECT
     traffic_class AS class,
     count() AS events,
-    sum(
-        JSONExtractUInt(payload, 'bi') + JSONExtractUInt(payload, 'bo')
-    ) AS bytes
+    sum(bytes_in + bytes_out) AS bytes
 FROM %s
 WHERE tenant_id = $1
   AND timestamp >= $2

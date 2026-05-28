@@ -138,15 +138,25 @@ type DemotionEngine struct {
 	stopped bool
 }
 
-// NewDemotionEngine constructs a DemotionEngine.
+// NewDemotionEngine constructs a DemotionEngine. Partial DemotionPolicy
+// inputs are merged with DefaultDemotionPolicy field-by-field rather
+// than only when both maps are nil — a caller that sets only TTLs
+// (or only GlobalSignals) gets the default fill-in on the other side
+// rather than silently disabling global fan-out or losing all
+// auto-expiry. Caller-provided values always win for the fields they
+// set; nil maps inherit the default.
 func NewDemotionEngine(
 	svc *Service,
 	tenants repository.TenantRepository,
 	publisher DemotionPublisher,
 	policy DemotionPolicy,
 ) *DemotionEngine {
-	if policy.TTLs == nil && policy.GlobalSignals == nil {
-		policy = DefaultDemotionPolicy()
+	def := DefaultDemotionPolicy()
+	if policy.TTLs == nil {
+		policy.TTLs = def.TTLs
+	}
+	if policy.GlobalSignals == nil {
+		policy.GlobalSignals = def.GlobalSignals
 	}
 	return &DemotionEngine{
 		svc:       svc,

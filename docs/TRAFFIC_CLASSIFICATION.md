@@ -214,11 +214,17 @@ ETag / If-None-Match short-circuit keeps holding.
 ## 10. Telemetry Visibility
 
 Every flow event the edge / agent emits carries the
-`traffic_class` it was steered into (added to
-`schema.FlowEvent`). The ClickHouse `sng_telemetry` table grows
-a `traffic_class` column (`LowCardinality(String)`) and the
-`ORDER BY` includes the class so per-tenant cost dashboards can
-roll up by class without a full scan.
+`traffic_class` it was steered into on the wire `Envelope`
+(`schema.Envelope.TrafficClass`, single source of truth — the
+field is shared across DNS / HTTP / ZTNA events, not duplicated
+inside per-class payload structs). The ClickHouse `sng_telemetry`
+table grows three hoisted columns — `traffic_class`
+(`LowCardinality(String)`), `bytes_in` and `bytes_out` (`UInt64`)
+— and the `ORDER BY` includes the class so per-tenant cost
+dashboards can roll up by class without a full scan. Hoisting
+bytes onto dedicated columns lets aggregation queries SUM them
+directly; the previous JSON-extraction path against the
+MessagePack `payload` blob always returned zero.
 
 Operators see, per tenant:
 

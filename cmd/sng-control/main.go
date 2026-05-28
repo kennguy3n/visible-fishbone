@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -142,7 +143,7 @@ func run() error {
 		return fmt.Errorf("start webhook worker: %w", err)
 	}
 
-	telShutdown, chWriter, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher)
+	rawTelShutdown, chWriter, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
@@ -153,11 +154,19 @@ func run() error {
 	if chWriter != nil {
 		appRegHandler.SetStats(clickhouseStatsAdapter{w: chWriter})
 	}
+	// Wrap startTelemetry's shutdown in a sync.Once so the bounded
+	// explicit call (with shutdownCtx) wins and the safety-net
+	// defer (with context.Background()) becomes a no-op rather
+	// than racing a second close against an already-stopped
+	// ClickHouse connection. The defer still covers early-return
+	// paths between here and the explicit shutdown below.
+	var telShutdownOnce sync.Once
+	telShutdown := func(ctx context.Context) error {
+		var shutdownErr error
+		telShutdownOnce.Do(func() { shutdownErr = rawTelShutdown(ctx) })
+		return shutdownErr
+	}
 	defer func() {
-		// Drain hot/cold writers on shutdown. Errors are logged
-		// inside startTelemetry's closure; we surface them here
-		// too so a malformed flush turns up in operator logs
-		// rather than disappearing into a deferred void.
 		if err := telShutdown(context.Background()); err != nil {
 			logger.Error("telemetry shutdown failed", slog.Any("error", err))
 		}

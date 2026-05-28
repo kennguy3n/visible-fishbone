@@ -149,17 +149,23 @@ func (s *Syncer) SyncAll(ctx context.Context) ([]SyncResult, error) {
 			continue
 		}
 		// Compare against the *canonical* form of the existing
-		// rows (lowercase, deduped, sorted) so a sync that only
-		// adds a case-normalisation -- e.g. existing row has
-		// "Outlook.Office.com" and vendor publishes the same name
-		// lowercase -- does not register as a change. Without this
-		// normalisation, the first sync after a release would
-		// rewrite every app that was admin-inserted with mixed
-		// case, even when the vendor data is unchanged.
+		// rows (lowercase, deduped, sorted) on both sides so a
+		// sync whose only effect is normalisation -- e.g. an
+		// existing row has "Outlook.Office.com" / unsorted CIDRs
+		// and the vendor publishes the same data with different
+		// case or order -- does not register as a change. Without
+		// canonicalising the existing slices, the first sync
+		// after a release would rewrite every app that was
+		// admin-inserted with mixed case or insertion-ordered
+		// CIDRs, generating spurious UPDATE rows + audit-log
+		// entries + NATS bundle invalidations even when the
+		// vendor data is unchanged.
 		merged := mergeDomains(app.Domains, newDomains)
 		mergedRanges := mergeRanges(app.IPRanges, newRanges)
-		currentCanonical := mergeDomains(app.Domains, nil)
-		changed := !equalStringSlices(merged, currentCanonical) || !equalRangeSlices(mergedRanges, app.IPRanges)
+		currentCanonicalDomains := mergeDomains(app.Domains, nil)
+		currentCanonicalRanges := mergeRanges(app.IPRanges, nil)
+		changed := !equalStringSlices(merged, currentCanonicalDomains) ||
+			!equalRangeSlices(mergedRanges, currentCanonicalRanges)
 
 		r.DomainsAfter = len(merged)
 		r.IPRangesAfter = len(mergedRanges)
