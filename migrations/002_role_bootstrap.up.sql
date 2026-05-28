@@ -46,7 +46,7 @@ BEGIN
         RAISE EXCEPTION USING
             ERRCODE = 'undefined_object',
             MESSAGE = 'sng_app role missing; provision it before running migrations (see docs/deploy.md)',
-            HINT    = 'CREATE ROLE sng_app NOINHERIT NOLOGIN; GRANT sng_app TO <migration_runner>;';
+            HINT    = 'CREATE ROLE sng_app NOLOGIN; GRANT sng_app TO <migration_runner>;';
     END IF;
 END $$;
 

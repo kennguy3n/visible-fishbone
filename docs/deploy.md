@@ -200,13 +200,15 @@ Production pools (PgBouncer, pgcat, RDS Proxy, etc.) MUST be
 configured for **session pooling**, not transaction pooling. This
 is because:
 
-* `SET SESSION ROLE sng_app` is connection-scoped, not
-  transaction-scoped. (Bare `SET ROLE` inside a transaction block
-  behaves as `SET LOCAL ROLE` and reverts at `COMMIT`/`ROLLBACK`
-  — always use the explicit `SESSION` form on connection-setup
-  hooks so the role survives across transactions.) Transaction
-  pooling would multiplex the same physical connection across
-  multiple roles within a single second.
+* `SET SESSION ROLE sng_app` is connection-scoped: the role
+  persists across `COMMIT`/`ROLLBACK` for the lifetime of the
+  physical connection. (Bare `SET ROLE` is equivalent to `SET
+  SESSION ROLE`; `SET LOCAL ROLE` is the variant that reverts at
+  end-of-transaction. We use the explicit `SESSION` form on the
+  pool's connection-setup hook for clarity, not because the bare
+  form would be incorrect.) Transaction pooling would multiplex
+  the same physical connection across multiple roles within a
+  single second, which breaks the per-connection role assumption.
 * Several application code paths (notably the audit-log writer)
   rely on `set_config(..., true)` lasting for the entire
   transaction. Statement pooling would break the contract.

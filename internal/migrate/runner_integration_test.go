@@ -5,8 +5,6 @@ package migrate_test
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +14,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/kennguy3n/visible-fishbone/internal/migrate"
+	"github.com/kennguy3n/visible-fishbone/internal/testutil/pgrole"
 )
 
 // startPostgres spins up a fresh postgres:16-alpine container,
@@ -57,56 +56,24 @@ func startPostgres(t *testing.T) string {
 
 	// Provision the runtime role BEFORE the test runs migrations.
 	// 002_role_bootstrap fails fast if `sng_app` does not exist,
-	// mirroring the production runbook in docs/deploy.md.
-	if err := provisionAppRole(ctx, connStr, "sng_app", "sng"); err != nil {
+	// mirroring the production runbook in docs/deploy.md. The
+	// provisioning helper lives in `internal/testutil/pgrole` so
+	// the postgres repository tests can share the exact same logic.
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect bootstrap: %v", err)
+	}
+	if err := pgrole.Provision(ctx, conn, "sng_app", "sng"); err != nil {
+		conn.Close(ctx)
 		t.Fatalf("provision sng_app: %v", err)
+	}
+	if err := conn.Close(ctx); err != nil {
+		t.Fatalf("close bootstrap conn: %v", err)
 	}
 
 	// testcontainers returns a `postgres://` URL; golang-migrate's
 	// pgx/v5 driver expects `pgx5://`.
 	return "pgx5" + connStr[len("postgres"):]
-}
-
-// provisionAppRole creates the runtime role used by
-// 002_role_bootstrap and grants the bootstrap superuser membership
-// in it. Idempotent — re-running on an existing role is a no-op.
-//
-// The role-name existence check is parameterized through `$1`, and
-// the CREATE ROLE / GRANT statements interpolate via
-// `pgx.Identifier.Sanitize()`. Today's callers pass hardcoded
-// constants, but treating the parameter as untrusted is the right
-// long-term posture for shared test helpers.
-func provisionAppRole(ctx context.Context, dsn, role, bootstrapUser string) error {
-	conn, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		return fmt.Errorf("connect: %w", err)
-	}
-	defer conn.Close(ctx)
-
-	var exists bool
-	if err := conn.QueryRow(
-		ctx,
-		"SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
-		role,
-	).Scan(&exists); err != nil {
-		return fmt.Errorf("check role existence: %w", err)
-	}
-	roleIdent := pgx.Identifier{role}.Sanitize()
-	if !exists {
-		if _, err := conn.Exec(ctx, fmt.Sprintf(
-			"CREATE ROLE %s NOINHERIT NOLOGIN",
-			roleIdent,
-		)); err != nil {
-			return fmt.Errorf("create role: %w", err)
-		}
-	}
-
-	grant := fmt.Sprintf("GRANT %s TO %s", roleIdent, pgx.Identifier{bootstrapUser}.Sanitize())
-	if _, err := conn.Exec(ctx, grant); err != nil &&
-		!strings.Contains(err.Error(), "already a member") {
-		return fmt.Errorf("grant membership: %w", err)
-	}
-	return nil
 }
 
 func TestRunner_UpDownStatus(t *testing.T) {
