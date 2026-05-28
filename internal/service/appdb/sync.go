@@ -38,12 +38,31 @@ type Syncer struct {
 	mu      sync.RWMutex
 	parsers map[string]VendorParser
 
+	// syncMu serialises SyncAll across the periodic Run goroutine
+	// and the admin-triggered POST /admin/app-registry/sync
+	// endpoint. Two concurrent SyncAll invocations would otherwise
+	// (a) double-fetch every vendor endpoint (wasted bandwidth,
+	// possible vendor-side rate-limit trips), (b) race on the
+	// repository update path producing duplicate `app.synced`
+	// audit entries for the same row, and (c) interleave the
+	// failure counter updates in runOnce producing nonsensical
+	// streak values. A single sync invocation typically completes
+	// in under a minute even with 20+ apps, so an admin-triggered
+	// call arriving mid-tick blocks briefly and then runs — no
+	// need for the more complex "share the in-flight result"
+	// semantics of singleflight.Group (which would also surprise
+	// the admin caller by returning the periodic loop's stale
+	// result instead of the fresh sync they requested).
+	syncMu sync.Mutex
+
 	// failures tracks consecutive sync failures per app id so the
 	// Run loop can log a sustained-failure warning once the
 	// threshold (3 by default, per docs/TRAFFIC_CLASSIFICATION.md
 	// §8) is reached. A successful sync resets the counter for
-	// that app. The map is protected by mu — Run is single-
-	// threaded but admin-triggered SyncAll can run concurrently.
+	// that app. Protected by mu rather than syncMu because runOnce
+	// is the only writer and it always holds syncMu while touching
+	// these maps — mu remains in place as a defensive guard for
+	// the (currently unused) external read path.
 	failures            map[string]int
 	sustainedThreshold  int
 	sustainedReportSent map[string]bool
@@ -114,7 +133,38 @@ type SyncResult struct {
 // if they differ. The function never aborts on a single fetch
 // failure — it accumulates per-app results so the operator can see
 // which vendors are healthy.
+//
+// SyncAll is serialised by syncMu — only one invocation runs at a
+// time across the periodic Run loop and the admin-triggered
+// endpoint. See the syncMu doc on the Syncer struct for the
+// rationale.
 func (s *Syncer) SyncAll(ctx context.Context) ([]SyncResult, error) {
+	// Acquire syncMu with respect to context cancellation so an
+	// admin caller stuck behind a long periodic tick can still be
+	// unblocked by client-disconnect / server-shutdown rather than
+	// blocking forever. sync.Mutex.Lock is context-oblivious, so
+	// we wrap it in a select on a goroutine-completed channel.
+	lockCh := make(chan struct{})
+	go func() {
+		s.syncMu.Lock()
+		close(lockCh)
+	}()
+	select {
+	case <-lockCh:
+		defer s.syncMu.Unlock()
+	case <-ctx.Done():
+		// The lock goroutine will eventually acquire and
+		// immediately release the mutex when SyncAll completes;
+		// this is harmless. Returning the ctx error lets the
+		// admin handler emit a clean 4xx / 5xx rather than
+		// silently waiting on a dead client.
+		go func() {
+			<-lockCh
+			s.syncMu.Unlock()
+		}()
+		return nil, fmt.Errorf("sync: %w", ctx.Err())
+	}
+
 	apps, err := s.svc.apps.ListWithMetadataURL(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("sync: list apps with metadata: %w", err)

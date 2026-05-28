@@ -3,8 +3,12 @@ package appdb_test
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -506,6 +510,76 @@ func TestSteeringSnapshot_ReusedAcrossTargets(t *testing.T) {
 			t.Fatalf("target %s: snapshot output differs from single-shot path\nsnap: %s\nsingle: %s",
 				target, snapBytes, singleBytes)
 		}
+	}
+}
+
+// TestSyncer_SyncAll_SerialisesConcurrentInvocations verifies the
+// syncMu contract: the periodic Run goroutine and the admin
+// POST /admin/app-registry/sync endpoint cannot interleave SyncAll
+// invocations, preventing double-fetch / duplicate-audit-entry
+// races flagged by Devin Review. The assertion is structural — an
+// httptest.Server with an in-flight counter — rather than timing,
+// so the test is deterministic.
+func TestSyncer_SyncAll_SerialisesConcurrentInvocations(t *testing.T) {
+	var inflight atomic.Int32
+	var maxInflight atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		now := inflight.Add(1)
+		// Track the high-water mark non-atomically — the
+		// CAS-free load is fine because we only care about
+		// whether it ever exceeds 1.
+		for {
+			prev := maxInflight.Load()
+			if now <= prev || maxInflight.CompareAndSwap(prev, now) {
+				break
+			}
+		}
+		// Hold the response briefly so concurrent callers
+		// have time to collide if the mutex were absent.
+		time.Sleep(30 * time.Millisecond)
+		inflight.Add(-1)
+		_, _ = w.Write([]byte(`{"domains":["a.example.com"],"ip_ranges":["1.2.3.0/24"]}`))
+	}))
+	defer srv.Close()
+
+	store := memory.NewStore()
+	svc := appdb.New(
+		memory.NewAppRegistryRepository(store),
+		memory.NewAppRegistryOverrideRepository(store),
+		nil,
+		nil,
+	)
+	// Two apps so each SyncAll does multiple HTTP round-trips —
+	// raises the probability of overlap if serialisation is
+	// broken.
+	for i := 0; i < 2; i++ {
+		if _, err := svc.CreateApp(context.Background(), repository.AppRegistry{
+			Name:         "app-" + uuid.NewString()[:8],
+			TrafficClass: repository.TrafficClassInspectFull,
+			Scope:        repository.AppRegistryScopeGlobal,
+			Domains:      []string{"placeholder.example.com"},
+			MetadataURL:  srv.URL,
+			IsSystem:     true,
+		}); err != nil {
+			t.Fatalf("create app: %v", err)
+		}
+	}
+
+	syncer := appdb.NewSyncer(svc, srv.Client())
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := syncer.SyncAll(context.Background()); err != nil {
+				t.Errorf("SyncAll: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if peak := maxInflight.Load(); peak > 1 {
+		t.Fatalf("syncMu serialisation violated: max concurrent in-flight HTTP requests = %d, want ≤ 1", peak)
 	}
 }
 
