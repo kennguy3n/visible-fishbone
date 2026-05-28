@@ -32,6 +32,7 @@ import (
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
+	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
@@ -224,6 +225,8 @@ func buildRouter(
 	webhookEndpointRepo := store.NewWebhookEndpointRepository()
 	webhookDeliveryRepo := store.NewWebhookDeliveryRepository()
 	apiKeyRepo := store.NewTenantAPIKeyRepository()
+	appRepo := store.NewAppRegistryRepository()
+	appOverrideRepo := store.NewAppRegistryOverrideRepository()
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -277,7 +280,15 @@ func buildRouter(
 			slog.String("path", cfg.Policy.SigningKeyPath),
 			slog.String("key_id", ks.KeyID()))
 	}
-	policySvc := policy.New(policyRepo, auditRepo, policySigner, policy.WithLogger(logger))
+	appSvc := appdb.New(appRepo, appOverrideRepo, auditRepo, logger)
+	appSyncer := appdb.NewSyncer(appSvc, nil)
+	policySvc := policy.New(
+		policyRepo,
+		auditRepo,
+		policySigner,
+		policy.WithLogger(logger),
+		policy.WithSteeringCompiler(appdb.PolicySteeringAdapter{Svc: appSvc}),
+	)
 
 	// When the file-backed signer is active, expose its public key
 	// through the existing /signing-keys/{kid}/public-key endpoint
@@ -332,6 +343,7 @@ func buildRouter(
 		Webhooks:     handler.NewWebhookHandler(webhookSvc),
 		APIKeys:      handler.NewAPIKeyHandler(apiKeySvc),
 		Telemetry:    handler.NewTelemetryHandler(replay),
+		AppRegistry:  handler.NewAppRegistryHandler(appSvc, nil, appSyncer),
 		APIKeyLookup: apiKeySvc,
 		Health:       health,
 		OpenAPISpec:  handler.NewOpenAPIHandler(),

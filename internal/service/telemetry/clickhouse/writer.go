@@ -198,11 +198,12 @@ CREATE TABLE IF NOT EXISTS %s (
     event_class     LowCardinality(String),
     platform        LowCardinality(String),
     schema_version  UInt8,
+    traffic_class   LowCardinality(String) DEFAULT 'inspect_full',
     payload         String,
     ingested_at     DateTime64(6, 'UTC') DEFAULT now64(6, 'UTC')
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(timestamp)
-ORDER BY (tenant_id, event_class, timestamp, event_id)
+ORDER BY (tenant_id, event_class, traffic_class, timestamp, event_id)
 SETTINGS index_granularity = 8192`, w.cfg.Table)
 	if err := w.conn.Exec(ctx, ddl); err != nil {
 		return fmt.Errorf("clickhouse: ensure schema: %w", err)
@@ -379,6 +380,16 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 			sid := *env.SiteID
 			siteID = &sid
 		}
+		// Hoist traffic_class out of the envelope onto the
+		// dedicated ClickHouse column. Legacy producers that
+		// pre-date the classification engine omit the field; the
+		// table DEFAULT clause supplies `inspect_full`, but we
+		// promote the same value explicitly here so the per-class
+		// aggregations report a stable label rather than a NULL.
+		trafficClass := env.TrafficClass
+		if trafficClass == "" {
+			trafficClass = "inspect_full"
+		}
 		if err := prepared.Append(
 			env.EventID,
 			env.TenantID,
@@ -388,6 +399,7 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 			string(env.EventClass),
 			string(env.Platform),
 			env.SchemaVersion,
+			trafficClass,
 			string(env.Payload),
 		); err != nil {
 			w.mu.Lock()
@@ -409,4 +421,62 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 	w.consecutiveErrors = 0
 	w.mu.Unlock()
 	return nil
+}
+
+// TrafficClassCount is one row of the per-class flow distribution.
+// Used by the operator UI to render the cost-attribution chart.
+type TrafficClassCount struct {
+	// Class is the traffic_class label
+	// (trusted_direct | trusted_media_bypass | inspect_lite |
+	// inspect_full | tunnel_private | block).
+	Class string `json:"class"`
+	// Events is the total number of telemetry events recorded for
+	// the class in the window.
+	Events uint64 `json:"events"`
+	// Bytes is the sum of bytes_in + bytes_out across flow events
+	// for the class. Zero when the window contained no FlowEvents.
+	Bytes uint64 `json:"bytes"`
+}
+
+// QueryTrafficClassDistribution returns the per-class event /
+// byte distribution for the tenant in the given window. The
+// query is scoped to FlowEvents because byte counters live on
+// the flow payload — other event classes contribute to event
+// counts but not byte totals.
+func (w *Writer) QueryTrafficClassDistribution(ctx context.Context, tenantID uuid.UUID, since time.Time) ([]TrafficClassCount, error) {
+	// JSONExtractUInt safely returns 0 for non-flow event classes
+	// where bytes_in / bytes_out are absent, so we can compute the
+	// byte sum across every event class without per-class
+	// branching. The traffic_class column has a stable
+	// LowCardinality dictionary so the GROUP BY runs from memory.
+	const q = `
+SELECT
+    traffic_class AS class,
+    count() AS events,
+    sum(
+        JSONExtractUInt(payload, 'bi') + JSONExtractUInt(payload, 'bo')
+    ) AS bytes
+FROM ` + DefaultTable + `
+WHERE tenant_id = $1
+  AND timestamp >= $2
+GROUP BY traffic_class
+ORDER BY events DESC
+`
+	rows, err := w.conn.Query(ctx, q, tenantID, since.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: query traffic_class: %w", err)
+	}
+	defer rows.Close()
+	var out []TrafficClassCount
+	for rows.Next() {
+		var row TrafficClassCount
+		if err := rows.Scan(&row.Class, &row.Events, &row.Bytes); err != nil {
+			return nil, fmt.Errorf("clickhouse: scan traffic_class: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("clickhouse: iterate traffic_class: %w", err)
+	}
+	return out, nil
 }

@@ -51,6 +51,14 @@ type Store struct {
 	webhookEndpoints  map[uuid.UUID]repository.WebhookEndpoint
 	webhookDeliveries map[uuid.UUID]repository.WebhookDelivery
 
+	// App registry tables — see internal/repository/app_registry.go
+	// and migrations/008_app_registry.up.sql. `appRegistry` is the
+	// global curated catalog (not tenant-scoped); `appOverrides`
+	// is the per-tenant overrides table (tenant_id stored on each
+	// row so we can filter by tenant just like Postgres RLS).
+	appRegistry  map[uuid.UUID]repository.AppRegistry
+	appOverrides map[uuid.UUID]repository.AppRegistryOverride
+
 	// Role / user_role tables. Roles are NOT tenant-scoped on
 	// their own (system roles have TenantID nil).
 	roles     map[uuid.UUID]repository.Role
@@ -85,6 +93,8 @@ func NewStore() *Store {
 		tenantAPIKeys:     map[uuid.UUID]repository.TenantAPIKey{},
 		webhookEndpoints:  map[uuid.UUID]repository.WebhookEndpoint{},
 		webhookDeliveries: map[uuid.UUID]repository.WebhookDelivery{},
+		appRegistry:       map[uuid.UUID]repository.AppRegistry{},
+		appOverrides:      map[uuid.UUID]repository.AppRegistryOverride{},
 		roles:             map[uuid.UUID]repository.Role{},
 		userRoles:         map[userRoleKey]repository.UserRole{},
 		clock:             func() time.Time { return time.Now().UTC() },

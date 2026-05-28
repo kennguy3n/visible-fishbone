@@ -10,17 +10,25 @@ import (
 // counters). One of the highest-volume event classes — fields are
 // chosen to fit a typical observation in <200 bytes wire size.
 type FlowEvent struct {
-	SrcIP      string  `msgpack:"sip"`
-	DstIP      string  `msgpack:"dip"`
-	SrcPort    uint16  `msgpack:"spt"`
-	DstPort    uint16  `msgpack:"dpt"`
-	Protocol   string  `msgpack:"prt"` // tcp|udp|icmp|other
-	AppID      string  `msgpack:"app,omitempty"`
-	Verdict    Verdict `msgpack:"vd"`
-	Score      float32 `msgpack:"sc,omitempty"`
-	BytesIn    uint64  `msgpack:"bi"`
-	BytesOut   uint64  `msgpack:"bo"`
-	DurationMs uint32  `msgpack:"dur"`
+	SrcIP    string  `msgpack:"sip"`
+	DstIP    string  `msgpack:"dip"`
+	SrcPort  uint16  `msgpack:"spt"`
+	DstPort  uint16  `msgpack:"dpt"`
+	Protocol string  `msgpack:"prt"` // tcp|udp|icmp|other
+	AppID    string  `msgpack:"app,omitempty"`
+	Verdict  Verdict `msgpack:"vd"`
+	Score    float32 `msgpack:"sc,omitempty"`
+	// TrafficClass is the traffic-classification decision the
+	// edge / agent applied. One of the six classes emitted by
+	// internal/service/appdb (trusted_direct, trusted_media_bypass,
+	// inspect_lite, inspect_full, tunnel_private, block). Omitted
+	// for legacy producers that pre-date the classification
+	// engine; the telemetry writer treats missing values as
+	// `inspect_full` (the conservative default).
+	TrafficClass string  `msgpack:"tc,omitempty"`
+	BytesIn      uint64  `msgpack:"bi"`
+	BytesOut     uint64  `msgpack:"bo"`
+	DurationMs   uint32  `msgpack:"dur"`
 }
 
 // Validate enforces required-field invariants for FlowEvent.

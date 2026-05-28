@@ -32,24 +32,28 @@ var TemplateConfig = map[repository.SiteTemplate]json.RawMessage{
   "dns": true,
   "sdwan": true,
   "wan_links": 2,
-  "throughput_mbps": 1000
+  "throughput_mbps": 1000,
+  "traffic_classification": "full"
 }`),
 	repository.SiteTemplateHub: json.RawMessage(`{
   "ngfw": true,
   "ips": true,
   "inter_site_routing": true,
-  "throughput_mbps": 10000
+  "throughput_mbps": 10000,
+  "traffic_classification": "routing_only"
 }`),
 	repository.SiteTemplateCloudOnly: json.RawMessage(`{
   "swg": true,
   "dns": true,
   "ztna": true,
-  "local_appliance": false
+  "local_appliance": false,
+  "traffic_classification": "smart_bypass"
 }`),
 	repository.SiteTemplateHomeOffice: json.RawMessage(`{
   "split_tunnel": true,
   "dns": true,
-  "posture_only": true
+  "posture_only": true,
+  "traffic_classification": "split_tunnel_smart"
 }`),
 }
 

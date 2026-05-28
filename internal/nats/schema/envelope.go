@@ -113,6 +113,15 @@ type Envelope struct {
 	Timestamp     time.Time  `msgpack:"ts"`
 	EventClass    EventClass `msgpack:"cls"`
 	Platform      Platform   `msgpack:"plt"`
+	// TrafficClass hoists the per-flow classification decision
+	// (see internal/service/appdb) so the telemetry writer can
+	// promote it to a ClickHouse column without round-tripping
+	// the payload. Optional — legacy producers that pre-date
+	// traffic classification omit it; the writer applies the
+	// "inspect_full" default (the conservative baseline). Carried
+	// on the envelope rather than only inside FlowEvent so the
+	// same dimension is available for DNS / HTTP / ZTNA events.
+	TrafficClass string `msgpack:"tc,omitempty"`
 	// Payload is the MessagePack-encoded class-specific payload.
 	// Stored as opaque bytes so decoders can sniff EventClass
 	// first and dispatch to the right type without round-tripping

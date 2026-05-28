@@ -1,0 +1,418 @@
+package appdb
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/netip"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Syncer pulls vendor-published endpoint lists and updates the
+// corresponding app_registry rows. Examples:
+//
+//   - Microsoft 365 endpoints JSON
+//     https://endpoints.office.com/endpoints/worldwide
+//   - Google IP ranges JSON
+//     https://www.gstatic.com/ipranges/goog.json
+//   - AWS IP ranges
+//     https://ip-ranges.amazonaws.com/ip-ranges.json
+//
+// Each vendor publishes a different shape; the Syncer dispatches to
+// a per-vendor parser by inspecting the metadata_url host. Unknown
+// hosts fall back to the generic JSON parser which expects a
+// `{ "domains": [...], "ip_ranges": [...] }` shape. Operators can
+// extend the dispatch table with custom parsers via
+// RegisterParser.
+type Syncer struct {
+	svc    *Service
+	client *http.Client
+	now    func() time.Time
+
+	mu      sync.RWMutex
+	parsers map[string]VendorParser
+}
+
+// VendorParser parses a vendor's endpoint response into a flat
+// (domains, ip_ranges) tuple. The parser receives the raw response
+// bytes and the AppRegistry row being refreshed so it can scope
+// the parse to the relevant service (e.g. Microsoft endpoint JSON
+// covers M365, Skype, Sharepoint as separate "serviceArea"s in one
+// document).
+type VendorParser func(body []byte, currentDomains []string) (domains []string, ipRanges []netip.Prefix, err error)
+
+// NewSyncer constructs a Syncer with a default 30-second HTTP
+// timeout and the built-in vendor parsers registered (Microsoft,
+// Google, AWS, generic).
+func NewSyncer(svc *Service, client *http.Client) *Syncer {
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	s := &Syncer{
+		svc:     svc,
+		client:  client,
+		now:     func() time.Time { return time.Now().UTC() },
+		parsers: map[string]VendorParser{},
+	}
+	s.RegisterParser("endpoints.office.com", parseMicrosoftEndpoints)
+	s.RegisterParser("www.gstatic.com", parseGoogleIPRanges)
+	s.RegisterParser("ip-ranges.amazonaws.com", parseAWSIPRanges)
+	return s
+}
+
+// SetClock replaces the wall-clock source. Tests use this to keep
+// updated_at deterministic.
+func (s *Syncer) SetClock(fn func() time.Time) {
+	if fn != nil {
+		s.now = fn
+	}
+}
+
+// RegisterParser binds a parser to a metadata_url host. The most
+// specific host match wins; the generic JSON parser is used when
+// nothing matches.
+func (s *Syncer) RegisterParser(host string, p VendorParser) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.parsers[strings.ToLower(host)] = p
+}
+
+// SyncResult is the per-app outcome from one SyncAll invocation.
+type SyncResult struct {
+	AppID          string `json:"app_id"`
+	AppName        string `json:"app_name"`
+	MetadataURL    string `json:"metadata_url"`
+	DomainsBefore  int    `json:"domains_before"`
+	DomainsAfter   int    `json:"domains_after"`
+	IPRangesBefore int    `json:"ip_ranges_before"`
+	IPRangesAfter  int    `json:"ip_ranges_after"`
+	Updated        bool   `json:"updated"`
+	Err            string `json:"error,omitempty"`
+}
+
+// SyncAll iterates every app with a non-empty metadata_url, fetches
+// the upstream document, and updates the app's domains / IP ranges
+// if they differ. The function never aborts on a single fetch
+// failure — it accumulates per-app results so the operator can see
+// which vendors are healthy.
+func (s *Syncer) SyncAll(ctx context.Context) ([]SyncResult, error) {
+	apps, err := s.svc.apps.ListWithMetadataURL(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("sync: list apps with metadata: %w", err)
+	}
+	results := make([]SyncResult, 0, len(apps))
+	for _, app := range apps {
+		r := SyncResult{
+			AppID:          app.ID.String(),
+			AppName:        app.Name,
+			MetadataURL:    app.MetadataURL,
+			DomainsBefore:  len(app.Domains),
+			IPRangesBefore: len(app.IPRanges),
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, app.MetadataURL, nil)
+		if err != nil {
+			r.Err = fmt.Sprintf("new request: %v", err)
+			results = append(results, r)
+			continue
+		}
+		req.Header.Set("User-Agent", "shieldnet-gateway-appdb-sync/1.0")
+		resp, err := s.client.Do(req)
+		if err != nil {
+			r.Err = fmt.Sprintf("http: %v", err)
+			results = append(results, r)
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			r.Err = fmt.Sprintf("read body: %v", readErr)
+			results = append(results, r)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			r.Err = fmt.Sprintf("http %d: %s", resp.StatusCode, snippet(body))
+			results = append(results, r)
+			continue
+		}
+
+		parser := s.parserFor(app.MetadataURL)
+		newDomains, newRanges, perr := parser(body, app.Domains)
+		if perr != nil {
+			r.Err = fmt.Sprintf("parse: %v", perr)
+			results = append(results, r)
+			continue
+		}
+		merged := mergeDomains(app.Domains, newDomains)
+		mergedRanges := mergeRanges(app.IPRanges, newRanges)
+		changed := !equalStringSlices(merged, app.Domains) || !equalRangeSlices(mergedRanges, app.IPRanges)
+
+		r.DomainsAfter = len(merged)
+		r.IPRangesAfter = len(mergedRanges)
+		if changed {
+			app.Domains = merged
+			app.IPRanges = mergedRanges
+			app.UpdatedAt = s.now()
+			if _, uerr := s.svc.apps.Update(ctx, app); uerr != nil {
+				r.Err = fmt.Sprintf("update: %v", uerr)
+				results = append(results, r)
+				continue
+			}
+			r.Updated = true
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+// Run launches the periodic sync loop. Returns when ctx is
+// canceled. Errors from SyncAll are logged; a transient failure
+// does not stop the loop.
+func (s *Syncer) Run(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if _, err := s.SyncAll(ctx); err != nil {
+				s.svc.logger.ErrorContext(ctx, "appdb sync failed", "error", err)
+			}
+		}
+	}
+}
+
+func (s *Syncer) parserFor(metadataURL string) VendorParser {
+	host := hostFromURL(metadataURL)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if p, ok := s.parsers[host]; ok {
+		return p
+	}
+	return parseGenericJSON
+}
+
+func hostFromURL(u string) string {
+	// Lightweight host extraction — full url.Parse is heavier
+	// than necessary for a dispatch key. We tolerate inputs
+	// without a scheme.
+	t := strings.TrimSpace(strings.ToLower(u))
+	if i := strings.Index(t, "://"); i >= 0 {
+		t = t[i+3:]
+	}
+	if i := strings.IndexAny(t, "/?"); i >= 0 {
+		t = t[:i]
+	}
+	if i := strings.Index(t, ":"); i >= 0 {
+		t = t[:i]
+	}
+	return t
+}
+
+func snippet(b []byte) string {
+	const max = 200
+	if len(b) > max {
+		return string(b[:max]) + "…"
+	}
+	return string(b)
+}
+
+// --- Vendor parsers -------------------------------------------------------
+
+// microsoftEndpoint is a single entry in the M365 endpoints JSON.
+// The document is an array of these objects.
+type microsoftEndpoint struct {
+	URLs []string `json:"urls"`
+	IPs  []string `json:"ips"`
+}
+
+// parseMicrosoftEndpoints walks the M365 endpoints document and
+// flattens the urls + ips fields. Wildcards (`*.office.com`) come
+// through as-is.
+func parseMicrosoftEndpoints(body []byte, _ []string) ([]string, []netip.Prefix, error) {
+	var entries []microsoftEndpoint
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return nil, nil, fmt.Errorf("ms endpoints: %w", err)
+	}
+	var (
+		domains []string
+		ranges  []netip.Prefix
+	)
+	for _, e := range entries {
+		domains = append(domains, e.URLs...)
+		for _, ip := range e.IPs {
+			p, err := netip.ParsePrefix(ip)
+			if err != nil {
+				continue
+			}
+			ranges = append(ranges, p)
+		}
+	}
+	return domains, ranges, nil
+}
+
+// googleIPRanges parses the Google IP ranges JSON.
+type googleIPRangesDoc struct {
+	Prefixes []struct {
+		IPv4Prefix string `json:"ipv4Prefix"`
+		IPv6Prefix string `json:"ipv6Prefix"`
+	} `json:"prefixes"`
+}
+
+func parseGoogleIPRanges(body []byte, _ []string) ([]string, []netip.Prefix, error) {
+	var doc googleIPRangesDoc
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, nil, fmt.Errorf("google ipranges: %w", err)
+	}
+	var ranges []netip.Prefix
+	for _, p := range doc.Prefixes {
+		for _, raw := range []string{p.IPv4Prefix, p.IPv6Prefix} {
+			if raw == "" {
+				continue
+			}
+			pref, err := netip.ParsePrefix(raw)
+			if err != nil {
+				continue
+			}
+			ranges = append(ranges, pref)
+		}
+	}
+	// Google publishes only IPs — domains stay as in the registry.
+	return nil, ranges, nil
+}
+
+type awsIPRangesDoc struct {
+	Prefixes []struct {
+		IPPrefix string `json:"ip_prefix"`
+		Service  string `json:"service"`
+	} `json:"prefixes"`
+	IPv6Prefixes []struct {
+		IPv6Prefix string `json:"ipv6_prefix"`
+		Service    string `json:"service"`
+	} `json:"ipv6_prefixes"`
+}
+
+func parseAWSIPRanges(body []byte, _ []string) ([]string, []netip.Prefix, error) {
+	var doc awsIPRangesDoc
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, nil, fmt.Errorf("aws ipranges: %w", err)
+	}
+	var ranges []netip.Prefix
+	for _, p := range doc.Prefixes {
+		pref, err := netip.ParsePrefix(p.IPPrefix)
+		if err != nil {
+			continue
+		}
+		ranges = append(ranges, pref)
+	}
+	for _, p := range doc.IPv6Prefixes {
+		pref, err := netip.ParsePrefix(p.IPv6Prefix)
+		if err != nil {
+			continue
+		}
+		ranges = append(ranges, pref)
+	}
+	return nil, ranges, nil
+}
+
+// parseGenericJSON expects { "domains": [...], "ip_ranges": [...] }.
+// Used as the fallback when no vendor-specific parser matches.
+type genericDoc struct {
+	Domains  []string `json:"domains"`
+	IPRanges []string `json:"ip_ranges"`
+}
+
+func parseGenericJSON(body []byte, _ []string) ([]string, []netip.Prefix, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, nil, nil
+	}
+	var doc genericDoc
+	if err := json.Unmarshal(trimmed, &doc); err != nil {
+		return nil, nil, fmt.Errorf("generic: %w", err)
+	}
+	var ranges []netip.Prefix
+	for _, raw := range doc.IPRanges {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil {
+			continue
+		}
+		ranges = append(ranges, p)
+	}
+	return doc.Domains, ranges, nil
+}
+
+// --- Set-merge helpers ----------------------------------------------------
+
+func mergeDomains(a, b []string) []string {
+	set := make(map[string]struct{}, len(a)+len(b))
+	for _, d := range a {
+		set[strings.ToLower(strings.TrimSpace(d))] = struct{}{}
+	}
+	for _, d := range b {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d == "" {
+			continue
+		}
+		set[d] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func mergeRanges(a, b []netip.Prefix) []netip.Prefix {
+	set := make(map[string]netip.Prefix, len(a)+len(b))
+	for _, p := range a {
+		set[p.String()] = p
+	}
+	for _, p := range b {
+		set[p.String()] = p
+	}
+	out := make([]netip.Prefix, 0, len(set))
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out = append(out, set[k])
+	}
+	return out
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalRangeSlices(a, b []netip.Prefix) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

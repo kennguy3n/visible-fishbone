@@ -116,6 +116,7 @@ Phase 4+ (see [`PROGRESS.md`](./PROGRESS.md)).
 | **DLP (partial)** | Web + SaaS DLP (regex, MIP labels, document fingerprints), browser protections | Inspect in `sng-swg` and in API-mode CASB; no endpoint DLP at launch (defer to SDA later) | High false-positive risk; pre-baked policy templates are mandatory | Envoy + classifier service | Medium |
 | **XDR Integration** | Signal export to SN360 Defense + third-party SIEM / XDR / IAM / ticketing | Reuse SN360 Defense alert-forwarding; webhook + syslog out; Terraform provider for config-as-code | Customers and MSPs demand it; bridges build trust during migration | Go integration service | Low-Medium |
 | **Telemetry + Policy Orchestration** | Single typed policy model, change simulation, NATS JetStream pipeline, ClickHouse hot analytics, S3 cold archive | One policy graph spanning all enforcement points; deterministic compiler producing per-edge / per-endpoint bundles | Single largest engineering investment; also the largest competitive moat | Go control plane + NATS + ClickHouse + S3 | High |
+| **Traffic Classification + Steering** | Six-class taxonomy (trusted_direct / trusted_media_bypass / inspect_lite / inspect_full / tunnel_private / block), curated app database with per-tenant overrides, demotion engine, vendor-endpoint sync | Per-bundle-target steering tables compiled deterministically into edge / endpoint / cloud / mobile bundles; threat-feed-driven auto-demotion | Cuts cloud-proxied traffic from ~100 % to ~10-20 % in the cloud-only tier — load-bearing for unit economics (see §9.4) | Go control plane + PostgreSQL catalog + NATS demotion fan-out | Medium |
 
 Out of scope at launch (called out explicitly so we do not drift):
 
@@ -395,7 +396,27 @@ posture.
 ### 9.4 Unit Economics Estimates
 
 > Indicative ranges only. To be refined against actual cloud + bandwidth
-> bills once Phase 1 is in production.
+> bills once production telemetry is available.
+
+**Smart classification is what makes cloud-only viable.** Without
+the traffic-classification engine, a cloud-only tenant pushes 100 %
+of egress through the cloud SWG proxy — bandwidth + compute + TLS
+intercept on every byte. With the engine (see ARCHITECTURE §4.4a),
+typical SME traffic distributes roughly as:
+
+| Class | Typical share of SME bytes | Cloud-proxy cost incurred? |
+|---|---|---|
+| `TRUSTED_DIRECT` (Office 365 / Google / Slack / Zoom signalling) | 35 - 45 % | No — DNS verify only |
+| `TRUSTED_MEDIA_BYPASS` (YouTube / Netflix / Spotify / Teams media) | 25 - 35 % | No — direct egress |
+| `INSPECT_LITE` (top-500, well-known CDNs, finance portals) | 10 - 15 % | URL-cat only, no TLS MITM |
+| `INSPECT_FULL` (everything else, including the long tail) | 10 - 20 % | Yes — full SWG + IPS + TLS |
+| `TUNNEL_PRIVATE` / `BLOCK` | < 5 % | Tunnel / drop |
+
+Net effect: only ~10-20 % of bytes hit the expensive cloud proxy
+path, which is what makes the cloud-only tier hit the same gross
+margin band as the branch-edge tier despite carrying no customer
+compute. The figures below assume the engine is enabled (the
+default for `cloud_only` and `home_office` site templates).
 
 #### Micro SME (1-25 users, 1 site)
 
@@ -451,6 +472,7 @@ posture.
 | **MSP misfit** | MSPs find the console worse than what they have today | MSP-first design partner cohort from Phase 3; hierarchical RBAC + bulk ops + Terraform on day one; per-MSP branding |
 | **Migration friction** | Customers refuse to switch off incumbent NGFW / VPN | Coexistence mode from Phase 2 — slice-by-slice cutover (DNS first, then SWG, then ZTNA, then NGFW), never forklift |
 | **Control-plane blast radius** | A bad release in shared control plane impacts all tenants | Blue-green control plane, canary release cohorts, per-tenant feature flags, dedicated-cell upsell for customers who require it |
+| **App-database maintenance drag** — domains, IP ranges, and cert pins for trusted apps drift over time | Stale catalog mis-routes flows: false-positive demotions when a domain's IPs change, missed bypass opportunities for newly-published vendor endpoints | Vendor-published endpoint sync (Microsoft 365 / Google / AWS feeds) covers the high-volume sources automatically (`internal/service/appdb/sync.go`); demotion engine self-corrects on cert / IP-range mismatch; per-tenant overrides let operators absorb the long tail without waiting on SNG to update the global catalog |
 
 ---
 
