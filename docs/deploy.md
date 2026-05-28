@@ -220,3 +220,27 @@ is because:
 Session pooling preserves both semantics. The application's own
 `pgxpool` is already configured for the session model — only
 external poolers need explicit configuration.
+
+### Runtime enforcement of `SET SESSION ROLE`
+
+The `sng-control` binary's pool configuration in
+`cmd/sng-control/main.go::openPostgres` installs an `AfterConnect`
+hook on every new physical connection that:
+
+1. Issues `SET SESSION ROLE <PG_APP_ROLE>` (default `sng_app`,
+   identifier-sanitised). An empty `PG_APP_ROLE` disables the hook
+   for dev environments where a single login user is granted DML
+   directly — production must always set `PG_APP_ROLE`.
+2. Verifies `SELECT current_user` returns the requested role and
+   returns an error from `AfterConnect` if it doesn't. pgx then
+   discards the connection, so the misconfiguration is loud (a
+   stream of `current_user = "..." want "..."` errors at boot)
+   rather than silent (queries running as the wrong role and
+   bypassing RLS).
+
+The boot-time probe doesn't catch the transaction-pooler scenario
+on its own — if a downstream pooler discards the `SET SESSION
+ROLE` between transactions, the first transaction succeeds and
+subsequent ones see `permission denied`. The combination of
+session-pooling at every layer + the boot-time probe + readiness
+checks running as `sng_app` is what closes the loop.

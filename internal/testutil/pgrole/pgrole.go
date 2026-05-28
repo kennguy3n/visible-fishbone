@@ -26,23 +26,43 @@ import (
 // Executor is the minimal pgx surface `Provision` needs. Both
 // `*pgx.Conn` and `*pgxpool.Pool` satisfy it without adapter
 // wrappers, which is the whole point of expressing the helper
-// against an interface rather than a concrete type.
+// against an interface rather than a concrete type. Methods are
+// kept to the bare minimum the helper actually uses today; add
+// new methods here only if a new `pgrole` helper needs them.
 type Executor interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
+
+// PostgreSQL SQLSTATEs we treat as benign-idempotent outcomes from
+// CREATE ROLE / GRANT. Both are documented in
+// https://www.postgresql.org/docs/16/errcodes-appendix.html
+const (
+	// 42710 — duplicate_object. Raised by `CREATE ROLE` when the
+	// role already exists; we treat this as a no-op so concurrent
+	// Provision callers don't race on existence-check + CREATE.
+	pgErrDuplicateObject = "42710"
+)
 
 // Provision creates `role` (with `NOLOGIN`) if it does not already
 // exist and grants `bootstrapUser` membership in it so subsequent
 // `SET SESSION ROLE <role>` calls succeed. Idempotent — safe to
-// re-run on an existing role.
+// re-run concurrently against the same database.
 //
-// The existence check is parameterized through `$1`; `CREATE ROLE`
-// and `GRANT` interpolate via `pgx.Identifier.Sanitize()` since
-// PostgreSQL does not accept bind parameters in the role-name
-// slot of those statements. Callers today pass hardcoded
-// constants, but treating the parameters as untrusted is the
-// right long-term posture for a shared test helper.
+// `CREATE ROLE` and `GRANT` interpolate via
+// `pgx.Identifier.Sanitize()` since PostgreSQL does not accept bind
+// parameters in the role-name slot of those statements. Callers
+// today pass hardcoded constants, but treating the parameters as
+// untrusted is the right long-term posture for a shared test
+// helper.
+//
+// Race-free CREATE: rather than `SELECT EXISTS` followed by
+// `CREATE ROLE`, we issue `CREATE ROLE` unconditionally and ignore
+// SQLSTATE 42710 (`duplicate_object`). PostgreSQL serialises
+// CREATE ROLE on `pg_authid`, so the only way for two concurrent
+// callers to both pass an existence check and both attempt CREATE
+// is what the old code did — and what we now sidestep entirely.
+// Any other error (network, permissions, syntax) propagates as
+// before.
 //
 // `NOINHERIT` is deliberately NOT set on `role`: it would only
 // govern privileges `role` inherits from roles `role` is a member
@@ -57,22 +77,13 @@ func Provision(ctx context.Context, db Executor, role, bootstrapUser string) err
 		return errors.New("pgrole.Provision: bootstrapUser must be non-empty")
 	}
 
-	var exists bool
-	if err := db.QueryRow(
-		ctx,
-		"SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
-		role,
-	).Scan(&exists); err != nil {
-		return fmt.Errorf("pgrole: check role existence: %w", err)
-	}
 	roleIdent := pgx.Identifier{role}.Sanitize()
-	if !exists {
-		if _, err := db.Exec(ctx, fmt.Sprintf(
-			"CREATE ROLE %s NOLOGIN",
-			roleIdent,
-		)); err != nil {
+	if _, err := db.Exec(ctx, fmt.Sprintf("CREATE ROLE %s NOLOGIN", roleIdent)); err != nil {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != pgErrDuplicateObject {
 			return fmt.Errorf("pgrole: create role: %w", err)
 		}
+		// duplicate_object — role already exists, treat as success.
 	}
 
 	// Redundant GRANT membership is intentionally NOT special-cased.

@@ -178,11 +178,18 @@ type Postgres struct {
 	MinConns        int
 	ConnMaxLifetime time.Duration
 	ConnTimeout     time.Duration
-	// AppRole is the Postgres role the application connects as
-	// (defaults to the connection user). Reserved for future
-	// privilege-separation: control-plane RLS policies grant
-	// SELECT/INSERT/UPDATE on tenant-scoped tables to this role
-	// only.
+	// AppRole is the PostgreSQL role the runtime adopts on every
+	// new physical connection via `SET SESSION ROLE`. The login
+	// user (PG_USER) authenticates the TCP connection; AppRole is
+	// the role whose grants and RLS policies the application
+	// actually exercises. See `docs/deploy.md` for the role-
+	// separation architecture (`sng_app_login` → `sng_app`).
+	//
+	// Empty disables the SET SESSION ROLE hook: connections run
+	// as PG_USER directly. This is intended ONLY for development
+	// where a single PG_USER is granted DML directly; production
+	// must always set PG_APP_ROLE (default: `sng_app`) so RLS
+	// policies are enforced.
 	AppRole string
 }
 
