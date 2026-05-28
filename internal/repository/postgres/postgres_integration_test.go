@@ -496,4 +496,117 @@ func TestPostgres_Integration(t *testing.T) {
 			t.Errorf("post-update row = %+v", got)
 		}
 	})
+
+	t.Run("PolicySigningKey_Lifecycle_RLS", func(t *testing.T) {
+		tr := store.NewTenantRepository()
+		kr := store.NewPolicySigningKeyRepository()
+		pr := store.NewPolicyRepository()
+		tntA := mustTenant(t, tr)
+		tntB := mustTenant(t, tr)
+
+		// Helper to manufacture a deterministic public/private
+		// pair for the table assertions — the actual ed25519
+		// integration lives in the service tests; this subtest
+		// only exercises the repository invariants.
+		mkKey := func(keyID string) repository.PolicySigningKey {
+			pub := make([]byte, 32)
+			priv := make([]byte, 32)
+			for i := range pub {
+				pub[i] = byte(i)
+				priv[i] = byte(i + 1)
+			}
+			return repository.PolicySigningKey{
+				KeyID: keyID, Algorithm: "ed25519",
+				PublicKey: pub, PrivateKey: priv,
+				Status: repository.PolicySigningKeyStatusActive,
+			}
+		}
+
+		// 1. Create initial active key for tenant A.
+		k1, err := kr.Create(bgCtx(), tntA.ID, mkKey("ka-1"))
+		if err != nil {
+			t.Fatalf("create k1: %v", err)
+		}
+		if k1.Status != repository.PolicySigningKeyStatusActive {
+			t.Errorf("k1 status: %q", k1.Status)
+		}
+
+		// 2. Partial unique index rejects a second active key.
+		if _, err := kr.Create(bgCtx(), tntA.ID, mkKey("ka-2")); !errors.Is(err, repository.ErrConflict) {
+			t.Errorf("second active create: want ErrConflict, got %v", err)
+		}
+
+		// 3. Atomic rotation: old key → rotated, new key → active,
+		//    in a single transaction.
+		rotAt := time.Now().UTC().Truncate(time.Microsecond)
+		k2, err := kr.Rotate(bgCtx(), tntA.ID, mkKey("ka-2"), rotAt)
+		if err != nil {
+			t.Fatalf("rotate: %v", err)
+		}
+		if k2.Status != repository.PolicySigningKeyStatusActive || k2.KeyID != "ka-2" {
+			t.Errorf("rotate result: %+v", k2)
+		}
+		old, err := kr.GetByKeyID(bgCtx(), tntA.ID, "ka-1")
+		if err != nil {
+			t.Fatalf("get old: %v", err)
+		}
+		if old.Status != repository.PolicySigningKeyStatusRotated {
+			t.Errorf("old status: %q", old.Status)
+		}
+		if old.RotatedAt == nil || !old.RotatedAt.Equal(rotAt) {
+			t.Errorf("RotatedAt: got %v, want %v", old.RotatedAt, rotAt)
+		}
+
+		// 4. Revoking the active key surfaces ErrNotFound on GetActive.
+		if _, err := kr.Revoke(bgCtx(), tntA.ID, "ka-2", time.Now().UTC()); err != nil {
+			t.Fatalf("revoke: %v", err)
+		}
+		if _, err := kr.GetActive(bgCtx(), tntA.ID); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("post-revoke GetActive: want ErrNotFound, got %v", err)
+		}
+
+		// 5. RLS: tenant B cannot see tenant A's keys.
+		if _, err := kr.GetByKeyID(bgCtx(), tntB.ID, "ka-1"); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("cross-tenant lookup: want ErrNotFound, got %v", err)
+		}
+		listB, err := kr.List(bgCtx(), tntB.ID)
+		if err != nil {
+			t.Fatalf("list B: %v", err)
+		}
+		if len(listB) != 0 {
+			t.Errorf("tenant B sees %d keys from tenant A's set", len(listB))
+		}
+
+		// 6. Bundle carries key_id round-trip through the
+		//    PolicyRepository: stamp the active key id on a
+		//    fresh bundle and confirm GetLatestBundle returns it.
+		g, err := pr.CreateGraph(bgCtx(), tntA.ID, repository.PolicyGraph{Graph: json.RawMessage(`{}`)})
+		if err != nil {
+			t.Fatalf("create graph: %v", err)
+		}
+		// Re-provision an active key so the bundle has something
+		// real to point at (the revoke in step 4 emptied it).
+		k3, err := kr.Create(bgCtx(), tntA.ID, mkKey("ka-3"))
+		if err != nil {
+			t.Fatalf("re-create active: %v", err)
+		}
+		saved, err := pr.CreateBundle(bgCtx(), tntA.ID, repository.PolicyBundle{
+			PolicyGraphID: g.ID, TargetType: repository.PolicyBundleTargetEdge,
+			Bundle: []byte("payload"), Signature: []byte("sig"),
+			KeyID: k3.KeyID,
+		})
+		if err != nil {
+			t.Fatalf("create bundle: %v", err)
+		}
+		if saved.KeyID != k3.KeyID {
+			t.Errorf("KeyID not persisted on CreateBundle: got %q, want %q", saved.KeyID, k3.KeyID)
+		}
+		got, err := pr.GetLatestBundle(bgCtx(), tntA.ID, repository.PolicyBundleTargetEdge)
+		if err != nil {
+			t.Fatalf("get latest: %v", err)
+		}
+		if got.KeyID != k3.KeyID {
+			t.Errorf("KeyID round-trip: got %q, want %q", got.KeyID, k3.KeyID)
+		}
+	})
 }

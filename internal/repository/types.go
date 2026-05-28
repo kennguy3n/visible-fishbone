@@ -352,12 +352,62 @@ const (
 
 // PolicyBundle is a compiled, signed bundle. The `Bundle` payload is
 // MessagePack-encoded rules (see internal/service/policy). The
-// `Signature` is an Ed25519 signature over the bundle bytes.
+// `Signature` is an Ed25519 signature over the bundle bytes; `KeyID`
+// names the tenant signing key whose public half verifies it.
 type PolicyBundle struct {
 	ID            uuid.UUID
 	PolicyGraphID uuid.UUID
 	TargetType    PolicyBundleTarget
 	Bundle        []byte
 	Signature     []byte
+	KeyID         string
 	CreatedAt     time.Time
+}
+
+// PolicySigningKeyStatus enumerates the lifecycle states of a
+// tenant-scoped Ed25519 signing key. Mirrors the CHECK constraint on
+// `policy_signing_keys.status`.
+type PolicySigningKeyStatus string
+
+const (
+	// PolicySigningKeyStatusActive is the current signing key.
+	// Exactly one key per tenant is in this state (enforced by a
+	// partial unique index).
+	PolicySigningKeyStatusActive PolicySigningKeyStatus = "active"
+	// PolicySigningKeyStatusRotated is a previously-active key
+	// retained so receivers can still verify bundles signed before
+	// the rotation.
+	PolicySigningKeyStatusRotated PolicySigningKeyStatus = "rotated"
+	// PolicySigningKeyStatusRevoked is a compromised or
+	// administratively-disabled key. Receivers MUST refuse
+	// bundles signed by a revoked key even within their original
+	// validity window.
+	PolicySigningKeyStatusRevoked PolicySigningKeyStatus = "revoked"
+)
+
+// PolicySigningKey is one Ed25519 keypair in a tenant's rotation
+// history. The private half is stored as the raw 32-byte seed; the
+// public half is the 32-byte verification key. KeyID is a stable
+// short identifier (e.g. a UUID truncated to 16 hex chars) so the
+// bundle envelope can carry it without leaking the full database
+// row id.
+//
+// PrivateKey carries the `json:"-"` tag as a defence-in-depth guard
+// against accidental serialisation. Every handler today projects
+// via `toPolicySigningKeyResponse` which omits the field, but
+// tagging the struct itself means a future refactor that passes
+// the raw `PolicySigningKey` through `json.Marshal` / `WriteJSON`
+// cannot leak the seed onto the wire.
+type PolicySigningKey struct {
+	ID          uuid.UUID
+	TenantID    uuid.UUID
+	KeyID       string
+	Algorithm   string
+	PublicKey   []byte
+	PrivateKey  []byte `json:"-"`
+	Status      PolicySigningKeyStatus
+	ActivatedAt time.Time
+	RotatedAt   *time.Time
+	RevokedAt   *time.Time
+	CreatedAt   time.Time
 }
