@@ -127,8 +127,17 @@ func startPostgres(t *testing.T) (*postgres.Store, func()) {
 	if err != nil {
 		t.Fatalf("parse pool cfg: %v", err)
 	}
+	// Mirror the production pool's AfterConnect identifier handling
+	// (cmd/sng-control/main.go:openPostgres → afterConnectSetRole)
+	// so this harness exercises the same SQL the runtime emits.
+	// `appRole` is a hardcoded constant today, but using
+	// pgx.Identifier.Sanitize() instead of bare interpolation
+	// keeps the test pattern aligned with prod and avoids the
+	// silent-divergence trap if the constant is ever changed to a
+	// name requiring quoting.
+	roleIdent := pgx.Identifier{appRole}.Sanitize()
 	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		_, err := conn.Exec(ctx, fmt.Sprintf("SET SESSION ROLE %s", appRole))
+		_, err := conn.Exec(ctx, fmt.Sprintf("SET SESSION ROLE %s", roleIdent))
 		return err
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)

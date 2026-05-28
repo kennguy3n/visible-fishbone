@@ -904,3 +904,76 @@ func TestValidateAcceptsZeroNATSDedupWindow(t *testing.T) {
 		t.Errorf("NATS.DedupWindow = %v, want 0", cfg.NATS.DedupWindow)
 	}
 }
+
+// setRawEnv sets `key` to `value` exactly — including the empty
+// string — and restores the prior state at test cleanup. Unlike
+// `withEnv` (which collapses `""` to unset), this helper preserves
+// the unset-vs-set-empty distinction the config package now cares
+// about for PG_APP_ROLE.
+func setRawEnv(t *testing.T, key, value string) {
+	t.Helper()
+	prev, had := os.LookupEnv(key)
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(key, prev)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
+	_ = os.Setenv(key, value)
+}
+
+// TestPGAppRoleEmptyEnvVarDisablesHook pins the documented escape
+// hatch: `PG_APP_ROLE=` (explicitly empty) must yield
+// `Postgres.AppRole == ""`, distinct from unset which yields the
+// `sng_app` default. This is the load-bearing behaviour distinction
+// between `getStr` and `getStrAllowEmpty` — if a future refactor
+// rewires PG_APP_ROLE to use plain `getStr`, this test breaks.
+func TestPGAppRoleEmptyEnvVarDisablesHook(t *testing.T) {
+	clearAll(t)
+	setRawEnv(t, "PG_APP_ROLE", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with empty PG_APP_ROLE in dev should succeed, got %v", err)
+	}
+	if cfg.Postgres.AppRole != "" {
+		t.Errorf("Postgres.AppRole = %q, want empty (the documented dev escape hatch)", cfg.Postgres.AppRole)
+	}
+}
+
+// TestPGAppRoleUnsetUsesDefault pins the unset → "sng_app"
+// default. Combined with TestPGAppRoleEmptyEnvVarDisablesHook,
+// these two tests lock in that `getStrAllowEmpty` distinguishes
+// the two cases.
+func TestPGAppRoleUnsetUsesDefault(t *testing.T) {
+	clearAll(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with unset PG_APP_ROLE should succeed, got %v", err)
+	}
+	if cfg.Postgres.AppRole != "sng_app" {
+		t.Errorf("Postgres.AppRole = %q, want \"sng_app\" (the default)", cfg.Postgres.AppRole)
+	}
+}
+
+// TestValidateRejectsEmptyAppRoleInProduction pins the production
+// guard: an operator who sets PG_APP_ROLE=  in a production
+// environment must fail boot rather than silently bypass the
+// SET SESSION ROLE hook and run with whatever PG_USER grants
+// (which is typically a superuser on cloud-managed PG, neutering
+// the entire RLS security model).
+func TestValidateRejectsEmptyAppRoleInProduction(t *testing.T) {
+	clearAll(t)
+	setRawEnv(t, "PG_APP_ROLE", "")
+	withEnv(t, map[string]string{
+		"ENVIRONMENT":       "prod",
+		"AUTH_JWT_SECRET":   "a-very-long-secret-string-for-production-use-only-not-a-default",
+		"PG_SSLMODE":        "require",
+		"NATS_TLS_INSECURE": "false",
+	})
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() with empty PG_APP_ROLE in production should fail validation")
+	} else if !strings.Contains(err.Error(), "PG_APP_ROLE") {
+		t.Errorf("validation error should mention PG_APP_ROLE, got: %v", err)
+	}
+}
