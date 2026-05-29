@@ -461,12 +461,18 @@ fn normalise_control_plane_url(raw: &str) -> String {
     // contains an authority component (anything past the
     // `<scheme>://` prefix).
     let stripped = trimmed.trim_end_matches('/');
-    // Re-attach `://` if and only if the original was a bare
-    // scheme. `stripped` ends with `:` iff there was nothing
-    // past `scheme://` to keep, in which case we preserve the
-    // user-visible bare-scheme form so the validation error
-    // stays accurate.
-    if stripped.ends_with(':') {
+    // Preserve the operator-visible form ONLY for the literal
+    // bare-scheme inputs `"http://"` / `"https://"` (any trailing-
+    // slash count). A previous version of this guard used
+    // `stripped.ends_with(':')`, which over-matched: a value like
+    // `"https://host:/"` strips down to `"https://host:"` (host
+    // with an open port-separator before the slash) — that's a
+    // typo, not a bare scheme, and the previous guard wrongly
+    // returned the un-stripped form so the trailing slash leaked
+    // into `sng-comms`' double-slashed requests. Match the bare
+    // scheme exactly instead so the canonical strip path catches
+    // every authority-carrying URL.
+    if stripped == "http:" || stripped == "https:" {
         trimmed.to_owned()
     } else {
         stripped.to_owned()
@@ -865,6 +871,33 @@ poll_interval = "1s"
         assert_eq!(
             super::normalise_control_plane_url("https:////"),
             "https:////"
+        );
+    }
+
+    /// Regression for the port-separator-colon edge case. A value
+    /// like `"https://host:/"` is a typo, not a bare scheme — the
+    /// trailing slash must still be stripped so `sng-comms` does
+    /// not get a double-slashed request. The previous
+    /// `stripped.ends_with(':')` guard over-matched this case and
+    /// returned the un-stripped form; the exact bare-scheme match
+    /// keeps the strip path firing here.
+    #[test]
+    fn url_normalisation_strips_slash_after_port_colon() {
+        assert_eq!(
+            super::normalise_control_plane_url("https://host:/"),
+            "https://host:",
+        );
+        assert_eq!(
+            super::normalise_control_plane_url("https://host://"),
+            "https://host:",
+        );
+        assert_eq!(
+            super::normalise_control_plane_url("http://host:8080/"),
+            "http://host:8080",
+        );
+        assert_eq!(
+            super::normalise_control_plane_url("http://host:8080//"),
+            "http://host:8080",
         );
     }
 
