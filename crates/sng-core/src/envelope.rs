@@ -41,7 +41,11 @@ use thiserror::Error;
 /// Unix epoch back to `0001-01-01T00:00:00Z`). `validate()` rejects
 /// exactly this value to mirror Go's `e.Timestamp.IsZero()` check
 /// at `internal/nats/schema/envelope.go::Envelope.Validate`.
-const GO_ZERO_TIME_SECS: i64 = -62_135_596_800;
+///
+/// Exposed (pub) so downstream crates (e.g. `sng-comms`,
+/// `sng-telemetry`) can write regression tests that assemble an
+/// "is-zero" timestamp without re-deriving the constant.
+pub const GO_ZERO_TIME_SECS: i64 = -62_135_596_800;
 
 /// Current wire-format version. Bumped only on a backwards-
 /// incompatible change; additive field changes do not bump it.

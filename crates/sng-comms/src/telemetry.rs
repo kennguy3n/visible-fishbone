@@ -225,8 +225,22 @@ impl TelemetryClient {
     /// builder, or already sealed into the spool). The caller is
     /// expected to invoke [`flush_one`] from a separate task
     /// against an active connection.
+    ///
+    /// Returns [`CommsError::EnvelopeInvalid`] if the envelope
+    /// fails [`Envelope::validate`] after enrichment. Validation
+    /// runs *after* enrichment because the canonical
+    /// `tenant_id` / `device_id` / `site_id` are stamped in by
+    /// the egress path — a producer is allowed (and expected)
+    /// to leave those slots in the producer-side default state.
+    /// Other fields (`event_id`, `timestamp`, `schema_version`,
+    /// `payload`) are the producer's responsibility, and the
+    /// Go-side `Envelope.Validate` will reject malformed bytes
+    /// server-side anyway; failing fast here means an invalid
+    /// envelope cannot consume a spool slot or burn network
+    /// bandwidth.
     pub async fn submit(&self, mut envelope: Envelope) -> Result<(), CommsError> {
         self.config.enrichment.enrich(&mut envelope);
+        envelope.validate()?;
         let mut guard = self.builder.lock().await;
         if let Some(batch) = guard.push(envelope) {
             drop(guard);
@@ -448,8 +462,9 @@ fn map_regression(reg: SequenceRegression) -> CommsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use chrono::Utc;
-    use sng_core::envelope::{EventClass, Platform, SCHEMA_VERSION};
+    use sng_core::envelope::{EventClass, GO_ZERO_TIME_SECS, Platform, SCHEMA_VERSION};
     use sng_core::ids::EventId;
     use sng_core::traffic_class::TrafficClass;
 
@@ -474,7 +489,11 @@ mod tests {
             traffic_class: Some(TrafficClass::TrustedDirect),
             bytes_in: 100,
             bytes_out: 200,
-            payload: Vec::new(),
+            // Non-empty so `Envelope::validate()` accepts it.
+            // The egress path is metadata-first so the actual
+            // bytes are opaque to the client; any non-empty
+            // slice suffices for the validation post-condition.
+            payload: vec![0xc0],
         }
     }
 
@@ -584,5 +603,111 @@ mod tests {
         // The canonical "unbound" identity wins — site is None
         // even though the producer stamped one in.
         assert_eq!(envelopes[0].site_id, None);
+    }
+
+    /// Regression: a producer must not be able to consume spool
+    /// capacity or burn network bandwidth with an envelope the
+    /// control plane will reject server-side. `submit` validates
+    /// after enrichment and returns
+    /// [`CommsError::EnvelopeInvalid`].
+    #[tokio::test]
+    async fn submit_rejects_envelope_with_empty_payload() {
+        let enrichment = mk_enrichment();
+        let client = TelemetryClient::new(TelemetryClientConfig::with_defaults(enrichment));
+        let mut env = mk_envelope();
+        env.payload.clear();
+
+        let err = client
+            .submit(env)
+            .await
+            .expect_err("empty payload must be rejected at the submit boundary");
+
+        assert!(
+            matches!(err, CommsError::EnvelopeInvalid(_)),
+            "unexpected variant: {err:?}",
+        );
+        assert_eq!(err.code(), sng_core::error::ErrorCode::WireSchema);
+        // Nothing reached the spool.
+        assert_eq!(client.spool_stats().pushed, 0);
+        // And nothing leaked into the pending builder either —
+        // `force_seal` would otherwise drain it onto the spool.
+        client.force_seal().await;
+        assert_eq!(client.spool_stats().pushed, 0);
+    }
+
+    #[tokio::test]
+    async fn submit_rejects_envelope_with_nil_event_id() {
+        let enrichment = mk_enrichment();
+        let client = TelemetryClient::new(TelemetryClientConfig::with_defaults(enrichment));
+        let mut env = mk_envelope();
+        env.event_id = EventId::nil();
+
+        let err = client.submit(env).await.expect_err("nil event id rejected");
+        assert!(matches!(err, CommsError::EnvelopeInvalid(_)));
+        assert_eq!(err.code(), sng_core::error::ErrorCode::WireSchema);
+        assert_eq!(client.spool_stats().pushed, 0);
+    }
+
+    #[tokio::test]
+    async fn submit_rejects_envelope_with_zero_schema_version() {
+        let enrichment = mk_enrichment();
+        let client = TelemetryClient::new(TelemetryClientConfig::with_defaults(enrichment));
+        let mut env = mk_envelope();
+        env.schema_version = 0;
+
+        let err = client
+            .submit(env)
+            .await
+            .expect_err("zero schema version rejected");
+        assert!(matches!(err, CommsError::EnvelopeInvalid(_)));
+        assert_eq!(err.code(), sng_core::error::ErrorCode::WireSchema);
+        assert_eq!(client.spool_stats().pushed, 0);
+    }
+
+    #[tokio::test]
+    async fn submit_rejects_envelope_with_go_zero_timestamp() {
+        let enrichment = mk_enrichment();
+        let client = TelemetryClient::new(TelemetryClientConfig::with_defaults(enrichment));
+        let mut env = mk_envelope();
+        // Reconstruct Go's `time.Time{}` zero value on the wire:
+        // exactly GO_ZERO_TIME_SECS seconds since the Unix epoch,
+        // zero sub-second component.
+        env.timestamp = chrono::Utc
+            .timestamp_opt(GO_ZERO_TIME_SECS, 0)
+            .single()
+            .expect("Go zero timestamp must be representable");
+
+        let err = client
+            .submit(env)
+            .await
+            .expect_err("Go zero timestamp rejected");
+        assert!(matches!(err, CommsError::EnvelopeInvalid(_)));
+        assert_eq!(err.code(), sng_core::error::ErrorCode::WireSchema);
+        assert_eq!(client.spool_stats().pushed, 0);
+    }
+
+    /// Enrichment must fix up nil tenant / device ids on the
+    /// producer's behalf — a producer is allowed to leave those
+    /// slots in their default state. Verify the post-enrichment
+    /// validate doesn't trip on identifiers the enrichment
+    /// pipeline has already stamped in.
+    #[tokio::test]
+    async fn submit_accepts_producer_nil_ids_after_enrichment() {
+        let enrichment = mk_enrichment();
+        let mut cfg = TelemetryClientConfig::with_defaults(enrichment.clone());
+        cfg.batch = BatchConfig {
+            max_events: 1,
+            ..BatchConfig::default()
+        };
+        let client = TelemetryClient::new(cfg);
+        let mut env = mk_envelope();
+        env.tenant_id = TenantId::nil();
+        env.device_id = DeviceId::nil();
+
+        client
+            .submit(env)
+            .await
+            .expect("enrichment fills in nil ids before validate");
+        assert_eq!(client.spool_stats().pushed, 1);
     }
 }

@@ -124,6 +124,17 @@ pub enum CommsError {
     #[error("msgpack: {0}")]
     Encoding(String),
 
+    /// A producer handed in an envelope that fails the wire-shape
+    /// validator (`Envelope::validate`) — empty payload, nil
+    /// `event_id`, zero schema version, Go-zero-time timestamp, etc.
+    /// The control plane would reject the bytes server-side; the
+    /// client rejects them at the `submit` boundary so an invalid
+    /// envelope cannot consume spool capacity or network bandwidth.
+    /// Permanent under the current producer call — the caller must
+    /// fix the envelope before retrying.
+    #[error("envelope validation: {0}")]
+    EnvelopeInvalid(#[from] sng_core::envelope::WireError),
+
     /// Compression / decompression failure.
     #[error("compression: {0}")]
     Compression(String),
@@ -188,6 +199,10 @@ impl CommsError {
             } => ErrorCode::ResourceMissing,
             Self::Server { .. } => ErrorCode::ControlPlaneUnreachable,
             Self::Encoding(_) | Self::Compression(_) => ErrorCode::WireEncoding,
+            // Defer to the underlying WireError so a `Schema(...)`
+            // failure maps to `WireSchema` while a stray encode /
+            // decode keeps mapping to `WireEncoding`.
+            Self::EnvelopeInvalid(err) => err.code(),
             Self::Policy(err) => err.code(),
             Self::PolicyVersion(_) => ErrorCode::BundleRejected,
             Self::SequenceRegression { .. } => ErrorCode::SequenceRegression,
@@ -210,6 +225,7 @@ impl CommsError {
             | Self::AlpnMismatch
             | Self::Encoding(_)
             | Self::Compression(_)
+            | Self::EnvelopeInvalid(_)
             | Self::Policy(_)
             | Self::PolicyVersion(_)
             | Self::SequenceRegression { .. }
