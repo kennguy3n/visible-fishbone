@@ -275,10 +275,16 @@ impl Envelope {
         if self.device_id.is_nil() {
             return Err(WireError::Schema("device_id is required".into()));
         }
-        // Producer-side timestamps must be non-zero; the Go side
-        // uses `time.Time.IsZero()` which corresponds to the
-        // Unix epoch on the chrono side.
-        if self.timestamp.timestamp() == 0 && self.timestamp.timestamp_subsec_nanos() == 0 {
+        // Producer-side timestamps must be strictly positive.
+        // Reject:
+        //   * Unix epoch (the chrono `Default`),
+        //   * pre-epoch timestamps,
+        //   * Go's zero `time.Time{}` which is year 1 AD and
+        //     serialises through `time.Time.UnixMilli()` to a
+        //     large negative value (~-6.21e13 ms).
+        // `timestamp_millis()` is the relevant axis because the
+        // wire form is `chrono::serde::ts_milliseconds`.
+        if self.timestamp.timestamp_millis() <= 0 {
             return Err(WireError::Schema("timestamp is required".into()));
         }
         if self.payload.is_empty() {
@@ -466,6 +472,33 @@ mod tests {
         env.schema_version = 0;
         let err = env.validate().expect_err("zero schema rejected");
         assert!(err.to_string().contains("schema_version"));
+    }
+
+    #[test]
+    fn validate_rejects_unix_epoch_timestamp() {
+        // chrono `DateTime<Utc>` defaults to the Unix epoch; this
+        // is one of the timestamps validate() must reject so a
+        // producer that forgot to set the timestamp does not
+        // poison the time-series writers.
+        let mut env = sample_envelope();
+        env.timestamp = Utc.timestamp_opt(0, 0).unwrap();
+        let err = env.validate().expect_err("unix epoch rejected");
+        assert!(err.to_string().contains("timestamp"));
+    }
+
+    #[test]
+    fn validate_rejects_go_zero_time() {
+        // Go's `time.Time{}` zero value is "year 1 AD" in UTC,
+        // which the `vmihailenco/msgpack/v5` encoder marshals
+        // through `time.Time.UnixMilli()` to ~-6.21e13. A naive
+        // `== 0` check on the chrono side would let this pass;
+        // the strengthened `<= 0` check rejects it.
+        let go_zero_unix_milli: i64 = -62_135_596_800_000; // year 1 AD in ms.
+        let mut env = sample_envelope();
+        env.timestamp = chrono::DateTime::<Utc>::from_timestamp_millis(go_zero_unix_milli)
+            .expect("year-1 timestamp in chrono range");
+        let err = env.validate().expect_err("Go zero time rejected");
+        assert!(err.to_string().contains("timestamp"));
     }
 
     #[test]

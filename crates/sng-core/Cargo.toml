@@ -22,7 +22,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
-parking_lot = { workspace = true }
 arc-swap = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }

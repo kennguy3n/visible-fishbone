@@ -24,59 +24,61 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::time::timeout;
 
 /// Producer half of the shutdown signal pair. The supervising
 /// binary holds this; firing it broadcasts the signal to every
 /// [`ShutdownSignal`] clone.
+///
+/// Internally backed by `tokio::sync::watch` rather than
+/// `Notify` + `Mutex<bool>` because `watch` is purpose-built for
+/// the "broadcast a state transition to many receivers, where
+/// receivers created after the transition still see it" pattern.
+/// A `Notify`-based implementation has a documented TOCTOU race
+/// between checking the fired flag and registering a waiter
+/// (see the Tokio `Notify::notify_waiters` docs).
 #[derive(Debug)]
 pub struct ShutdownTrigger {
-    notify: Arc<Notify>,
-    fired: Arc<parking_lot::Mutex<bool>>,
+    tx: watch::Sender<bool>,
 }
 
 impl ShutdownTrigger {
     /// Build a new trigger / signal pair.
+    ///
+    /// There is intentionally no `Default` impl: a trigger without
+    /// a matching `ShutdownSignal` is a footgun — `fire()` would
+    /// be a silent no-op because the receiver half is never
+    /// constructed.
     #[must_use]
     pub fn new() -> (Self, ShutdownSignal) {
-        let notify = Arc::new(Notify::new());
-        let fired = Arc::new(parking_lot::Mutex::new(false));
-        let trigger = Self {
-            notify: notify.clone(),
-            fired: fired.clone(),
-        };
-        let signal = ShutdownSignal { notify, fired };
-        (trigger, signal)
+        let (tx, rx) = watch::channel(false);
+        (Self { tx }, ShutdownSignal { rx })
     }
 
     /// Fire the trigger. Every subsystem waiting on the
     /// matching [`ShutdownSignal`] is woken. Safe to call from
     /// any thread; calling twice is a no-op.
     pub fn fire(&self) {
-        let mut fired = self.fired.lock();
-        if !*fired {
-            *fired = true;
-            // notify_waiters wakes every current waiter; future
-            // `wait()` calls return immediately because `fired`
-            // is now true.
-            self.notify.notify_waiters();
-        }
+        // send_if_modified makes the double-fire case explicit;
+        // the closure returns false on a no-op so receivers are
+        // not re-woken needlessly.
+        self.tx.send_if_modified(|fired| {
+            if *fired {
+                false
+            } else {
+                *fired = true;
+                true
+            }
+        });
     }
 
     /// Returns true if [`Self::fire`] has been called.
     #[must_use]
     pub fn is_fired(&self) -> bool {
-        *self.fired.lock()
-    }
-}
-
-impl Default for ShutdownTrigger {
-    fn default() -> Self {
-        Self::new().0
+        *self.tx.borrow()
     }
 }
 
@@ -84,24 +86,37 @@ impl Default for ShutdownTrigger {
 /// every cloned signal sees the same firing.
 #[derive(Clone, Debug)]
 pub struct ShutdownSignal {
-    notify: Arc<Notify>,
-    fired: Arc<parking_lot::Mutex<bool>>,
+    rx: watch::Receiver<bool>,
 }
 
 impl ShutdownSignal {
     /// Awaits shutdown. Resolves immediately if the trigger has
     /// already been fired; otherwise blocks until it is.
+    ///
+    /// Unlike a `Notify`-based wait this is race-free: the watch
+    /// channel's `changed()` future synchronises against the
+    /// channel's internal seen-counter, so a `fire()` that races
+    /// the entry into `wait()` still wakes the awaiting task.
     pub async fn wait(&self) {
-        if *self.fired.lock() {
+        // Clone the receiver so we own a `mut` handle without
+        // requiring `&mut self` (callers hold `Arc<ShutdownSignal>`
+        // in practice).
+        let mut rx = self.rx.clone();
+        // Fast path: already fired.
+        if *rx.borrow() {
             return;
         }
-        self.notify.notified().await;
+        // changed() resolves on the next state change, or returns
+        // an Err if the trigger has been dropped — treat both as
+        // "shutdown" since a dropped trigger means no further
+        // signal can ever arrive.
+        let _ = rx.changed().await;
     }
 
     /// Polls shutdown status without awaiting.
     #[must_use]
     pub fn is_fired(&self) -> bool {
-        *self.fired.lock()
+        *self.rx.borrow()
     }
 }
 
@@ -259,6 +274,33 @@ mod tests {
         trigger.fire();
         // Still resolves.
         signal.wait().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_signal_no_lost_wakeup_under_race() {
+        // Regression test for the TOCTOU race the previous
+        // `Notify` + `Mutex<bool>` implementation had: if `fire()`
+        // ran between the "is it already fired?" check and the
+        // wait registration, `notify_waiters()` would have already
+        // run and the new waiter would block forever. The
+        // watch-channel-backed implementation closes that gap.
+        //
+        // Loop enough iterations that any latent race would
+        // manifest as a hang on at least one iteration under a
+        // multi-thread runtime; each iteration is bounded by a
+        // timeout so a regression fails fast rather than hanging
+        // CI.
+        for _ in 0..256 {
+            let (trigger, signal) = ShutdownTrigger::new();
+            let waiter = tokio::spawn(async move { signal.wait().await });
+            // Fire on the runtime thread while the waiter is in
+            // flight on a worker — schedule order is undefined.
+            trigger.fire();
+            timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("no lost wakeup")
+                .expect("join ok");
+        }
     }
 
     #[test]

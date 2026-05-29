@@ -874,7 +874,6 @@ dependencies = [
  "figment",
  "hex",
  "ipnet",
- "parking_lot",
  "pretty_assertions",
  "rmp-serde",
  "rmpv",
