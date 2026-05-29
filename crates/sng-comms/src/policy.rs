@@ -333,20 +333,41 @@ impl PolicyPuller {
                     .bundle_id
                     .unwrap_or_else(|| PolicyBundleId::from_uuid(uuid::Uuid::nil()));
                 claims.check_target(bundle_id_for_check, self.config.target)?;
-                let prev_version = self.cached.read().as_ref().map(|c| c.claims.graph_version);
-                claims.check_not_stale(bundle_id_for_check, prev_version)?;
                 let cached = CachedBundle {
                     bundle,
                     claims,
                     headers,
                 };
+                // Read prev_version + check_not_stale + install
+                // under a single write lock so two concurrent
+                // `pull` calls cannot interleave such that a
+                // staler bundle overwrites a newer one. Previously
+                // the prev_version read held a read lock that was
+                // released before the install acquired a write
+                // lock, leaving a TOCTOU window: thread A reads
+                // v5, thread B installs v10, thread A then
+                // overwrites with v7 (which passed staleness
+                // against the stale v5 read).
+                //
+                // The expensive work (signature verification,
+                // body decode, claims parse) happens *outside*
+                // this lock, so concurrent pulls only serialise
+                // on the small, cheap version-compare and the
+                // pointer install.
+                {
+                    let mut guard = self.cached.write();
+                    let prev_version = guard.as_ref().map(|c| c.claims.graph_version);
+                    cached
+                        .claims
+                        .check_not_stale(bundle_id_for_check, prev_version)?;
+                    *guard = Some(cached.clone());
+                }
                 debug!(
                     bundle_id = ?cached.headers.bundle_id,
                     graph_id = ?cached.headers.graph_id,
                     graph_version = cached.claims.graph_version,
                     "accepted updated policy bundle",
                 );
-                *self.cached.write() = Some(cached.clone());
                 Ok(BundlePullOutcome::Updated(Box::new(cached)))
             }
             ResponseClass::NotModified => {

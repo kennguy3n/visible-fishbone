@@ -96,15 +96,19 @@ impl<T> BoundedSpool<T> {
             return PushOutcome::AcceptedWithEviction;
         }
         let mut guard = self.inner.lock();
-        let mut evicted = false;
+        // Count evictions inside the loop so the counter is
+        // correct-by-construction even if some future change to
+        // this module (e.g. a hot-reconfigure of `capacity` to a
+        // smaller value) lets the loop pop more than once per push.
+        let mut evicted_this_push: u64 = 0;
         while guard.len() >= self.capacity {
             // `pop_front` is O(1) on `VecDeque`.
             let _ = guard.pop_front();
-            evicted = true;
+            evicted_this_push += 1;
         }
         guard.push_back(item);
-        if evicted {
-            self.evicted.fetch_add(1, Ordering::Relaxed);
+        if evicted_this_push > 0 {
+            self.evicted.fetch_add(evicted_this_push, Ordering::Relaxed);
             PushOutcome::AcceptedWithEviction
         } else {
             PushOutcome::Accepted
@@ -136,16 +140,18 @@ impl<T> BoundedSpool<T> {
             return PushOutcome::AcceptedWithEviction;
         }
         let mut guard = self.inner.lock();
-        let mut evicted = false;
+        // Count evictions inside the loop (see `push` for
+        // rationale).
+        let mut evicted_this_push: u64 = 0;
         while guard.len() >= self.capacity {
             // The re-spooled item is the *oldest*, so to make
             // room we evict from the back (the newest items).
             let _ = guard.pop_back();
-            evicted = true;
+            evicted_this_push += 1;
         }
         guard.push_front(item);
-        if evicted {
-            self.evicted.fetch_add(1, Ordering::Relaxed);
+        if evicted_this_push > 0 {
+            self.evicted.fetch_add(evicted_this_push, Ordering::Relaxed);
             PushOutcome::AcceptedWithEviction
         } else {
             PushOutcome::Accepted
