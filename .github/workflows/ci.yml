@@ -61,7 +61,7 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: golangci-lint (default tags)
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
           args: --timeout 5m
@@ -71,7 +71,7 @@ jobs:
       # in the integration-only files surfaces in CI rather than
       # the next local run.
       - name: golangci-lint (integration tag)
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
           args: --timeout 5m --build-tags=integration
