@@ -183,6 +183,25 @@ impl LoadedBundle {
             (table, Some(Arc::new(rs)))
         };
         let default_verb = parse_default_verb(&raw.default_action);
+        // Every `suggest_only` rule must carry a `suggested_verb`
+        // (the would-be enforcement verb the operator UI surfaces).
+        // A bundle whose default action is `suggest_only` is also
+        // malformed — there is no per-rule context to attach a
+        // suggestion to. Reject both at load time rather than
+        // letting the engine emit `Verdict::SuggestOnly { suggestion:
+        // SuggestOnly }` at evaluation time.
+        for rule in &rules {
+            if rule.verb == Verb::SuggestOnly
+                && !matches!(rule.suggested_verb, Some(v) if v != Verb::SuggestOnly)
+            {
+                return Err(PolicyEvalError::SuggestOnlyMissingSuggestion {
+                    rule_id: Some(rule.id.clone()),
+                });
+            }
+        }
+        if default_verb == Verb::SuggestOnly {
+            return Err(PolicyEvalError::SuggestOnlyMissingSuggestion { rule_id: None });
+        }
         let (named_subjects, named_predicates) = build_vertex_indices(&rules);
         Ok(Self {
             schema_version: raw.schema_version,
@@ -389,6 +408,7 @@ mod tests {
             id: "a".into(),
             domain: EnforcementDomain::Dns,
             verb: Verb::Allow,
+            suggested_verb: None,
             subject_refs: vec![],
             predicate_refs: vec![],
             subjects: vec![],
@@ -439,5 +459,128 @@ mod tests {
         let body = empty_bundle_body(BundleTarget::Edge);
         let loaded = LoadedBundle::from_body(&body, BundleTarget::Edge).unwrap();
         assert!(loaded.bundle_id().is_some());
+    }
+
+    #[test]
+    fn suggest_only_rule_without_suggested_verb_is_rejected() {
+        let rule = Rule {
+            id: "so-1".into(),
+            domain: EnforcementDomain::Ngfw,
+            verb: Verb::SuggestOnly,
+            suggested_verb: None,
+            subject_refs: vec![],
+            predicate_refs: vec![],
+            subjects: vec![],
+            predicates: vec![],
+            targets: vec![],
+            description: String::new(),
+            extra: BTreeMap::new(),
+        };
+        let rules_json = serde_json::to_vec(&[rule]).unwrap();
+        let raw = RawBundle {
+            schema_version: 1,
+            target: BundleTarget::Edge,
+            graph_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            graph_version: 1,
+            compiler: "test".into(),
+            default_action: "deny".into(),
+            rules_json,
+            steering_json: vec![],
+            compiled_at: Utc::now(),
+        };
+        let body = encode_msgpack_named(&raw);
+        let err = LoadedBundle::from_body(&body, BundleTarget::Edge).unwrap_err();
+        assert!(
+            matches!(err, PolicyEvalError::SuggestOnlyMissingSuggestion { rule_id: Some(ref id) } if id == "so-1")
+        );
+    }
+
+    #[test]
+    fn suggest_only_rule_with_suggest_only_suggested_verb_is_rejected() {
+        let rule = Rule {
+            id: "so-2".into(),
+            domain: EnforcementDomain::Ngfw,
+            verb: Verb::SuggestOnly,
+            suggested_verb: Some(Verb::SuggestOnly),
+            subject_refs: vec![],
+            predicate_refs: vec![],
+            subjects: vec![],
+            predicates: vec![],
+            targets: vec![],
+            description: String::new(),
+            extra: BTreeMap::new(),
+        };
+        let rules_json = serde_json::to_vec(&[rule]).unwrap();
+        let raw = RawBundle {
+            schema_version: 1,
+            target: BundleTarget::Edge,
+            graph_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            graph_version: 1,
+            compiler: "test".into(),
+            default_action: "deny".into(),
+            rules_json,
+            steering_json: vec![],
+            compiled_at: Utc::now(),
+        };
+        let body = encode_msgpack_named(&raw);
+        let err = LoadedBundle::from_body(&body, BundleTarget::Edge).unwrap_err();
+        assert!(matches!(
+            err,
+            PolicyEvalError::SuggestOnlyMissingSuggestion { .. }
+        ));
+    }
+
+    #[test]
+    fn suggest_only_default_action_is_rejected() {
+        let raw = RawBundle {
+            schema_version: 1,
+            target: BundleTarget::Edge,
+            graph_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            graph_version: 1,
+            compiler: "test".into(),
+            default_action: "suggest_only".into(),
+            rules_json: vec![],
+            steering_json: vec![],
+            compiled_at: Utc::now(),
+        };
+        let body = encode_msgpack_named(&raw);
+        let err = LoadedBundle::from_body(&body, BundleTarget::Edge).unwrap_err();
+        assert!(matches!(
+            err,
+            PolicyEvalError::SuggestOnlyMissingSuggestion { rule_id: None }
+        ));
+    }
+
+    #[test]
+    fn suggest_only_rule_with_valid_suggested_verb_loads() {
+        let rule = Rule {
+            id: "so-3".into(),
+            domain: EnforcementDomain::Ngfw,
+            verb: Verb::SuggestOnly,
+            suggested_verb: Some(Verb::Deny),
+            subject_refs: vec![],
+            predicate_refs: vec![],
+            subjects: vec![],
+            predicates: vec![],
+            targets: vec![],
+            description: String::new(),
+            extra: BTreeMap::new(),
+        };
+        let rules_json = serde_json::to_vec(&[rule]).unwrap();
+        let raw = RawBundle {
+            schema_version: 1,
+            target: BundleTarget::Edge,
+            graph_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            graph_version: 1,
+            compiler: "test".into(),
+            default_action: "deny".into(),
+            rules_json,
+            steering_json: vec![],
+            compiled_at: Utc::now(),
+        };
+        let body = encode_msgpack_named(&raw);
+        let loaded = LoadedBundle::from_body(&body, BundleTarget::Edge).unwrap();
+        assert_eq!(loaded.rules[0].verb, Verb::SuggestOnly);
+        assert_eq!(loaded.rules[0].suggested_verb, Some(Verb::Deny));
     }
 }

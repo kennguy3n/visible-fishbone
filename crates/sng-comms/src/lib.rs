@@ -86,7 +86,8 @@ pub use ack::{RegressionKind, SequenceRegression, SequenceTracker};
 pub use backoff::{Backoff, ReconnectBackoff};
 pub use batch::{Batch, BatchBuilder, BatchConfig, BatchFlushReason};
 pub use client::{
-    CollectedResponse, ControlPlaneClient, ControlPlaneConnection, RequestBody, RequestPath,
+    CollectedResponse, ControlPlaneClient, ControlPlaneConnection, DEFAULT_MAX_RESPONSE_BODY_BYTES,
+    RequestBody, RequestPath,
 };
 pub use error::{CommsError, ResponseClass};
 pub use identity::{DeviceIdentity, IdentityError};

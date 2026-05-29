@@ -175,10 +175,13 @@ impl PolicyEngine {
             if !predicates_match(rule, flow, &bundle) {
                 continue;
             }
-            return verb_to_verdict(rule.verb, flow, &bundle);
+            return verb_to_verdict(rule.verb, rule.suggested_verb, flow, &bundle);
         }
-        // Default action — no rule matched.
-        verb_to_verdict(bundle.default_verb, flow, &bundle)
+        // Default action — no rule matched. `default_verb` is
+        // guaranteed by [`LoadedBundle::from_body`] not to be
+        // `SuggestOnly`, so the `None` suggested-verb here cannot
+        // trigger the defensive `Verdict::Allow` fallback path.
+        verb_to_verdict(bundle.default_verb, None, flow, &bundle)
     }
 }
 
@@ -248,8 +251,30 @@ fn subject_matches_flow(subject: &Subject, flow: &Flow<'_>) -> bool {
 }
 
 /// Map a fired-rule verb onto a concrete [`Verdict`], threading
-/// the steering table for the `Steer` case.
-fn verb_to_verdict(verb: Verb, flow: &Flow<'_>, bundle: &LoadedBundle) -> Verdict {
+/// the steering table for the `Steer` case and the rule's
+/// `suggested_verb` for the [`Verb::SuggestOnly`] case.
+///
+/// `suggested_verb` is the rule's [`crate::rule::Rule::suggested_verb`]
+/// (`None` when the caller is the bundle-level default-action path,
+/// which [`crate::bundle::LoadedBundle::from_body`] guarantees is
+/// not `SuggestOnly`). For any non-`SuggestOnly` `verb` this
+/// argument is ignored.
+///
+/// The `verb = SuggestOnly` + `suggested_verb = None` path is
+/// unreachable in practice — [`crate::bundle::LoadedBundle::from_body`]
+/// rejects such bundles with
+/// [`crate::error::PolicyEvalError::SuggestOnlyMissingSuggestion`].
+/// We defensively map it to [`Verdict::Allow`] (the most permissive
+/// non-blocking verdict, matching the existing `SuggestOnly`
+/// is-not-blocking semantics) rather than panicking, so a malformed
+/// bundle that somehow bypassed validation still fails open at the
+/// evaluation layer.
+fn verb_to_verdict(
+    verb: Verb,
+    suggested_verb: Option<Verb>,
+    flow: &Flow<'_>,
+    bundle: &LoadedBundle,
+) -> Verdict {
     match verb {
         Verb::Allow => Verdict::Allow,
         Verb::Deny => Verdict::Deny,
@@ -261,7 +286,10 @@ fn verb_to_verdict(verb: Verb, flow: &Flow<'_>, bundle: &LoadedBundle) -> Verdic
         Verb::Steer => Verdict::Steer {
             class: steering_class_for_flow(flow, bundle),
         },
-        Verb::SuggestOnly => Verdict::SuggestOnly { suggestion: verb },
+        Verb::SuggestOnly => match suggested_verb {
+            Some(v) if v != Verb::SuggestOnly => Verdict::SuggestOnly { suggestion: v },
+            _ => Verdict::Allow,
+        },
     }
 }
 
@@ -353,6 +381,7 @@ mod tests {
             id: id.into(),
             domain,
             verb,
+            suggested_verb: None,
             subject_refs: vec![],
             predicate_refs: vec![],
             subjects: vec![],
@@ -703,5 +732,21 @@ mod tests {
                  — concurrent swaps lost a write (TOCTOU regression)",
             );
         }
+    }
+
+    #[test]
+    fn suggest_only_verdict_carries_the_suggested_verb() {
+        let mut r = rule("suggest-deny", EnforcementDomain::Ngfw, Verb::SuggestOnly);
+        r.suggested_verb = Some(Verb::Deny);
+        let body = encode_bundle(BundleTarget::Edge, 1, "allow", &[r], None);
+        let eng = PolicyEngine::from_body(&body, BundleTarget::Edge).unwrap();
+        let flow = Flow::default();
+        assert_eq!(
+            eng.evaluate(&flow),
+            Verdict::SuggestOnly {
+                suggestion: Verb::Deny,
+            }
+        );
+        assert!(!eng.evaluate(&flow).is_blocking());
     }
 }

@@ -69,6 +69,22 @@ pub enum PolicyEvalError {
         /// The version that was already loaded.
         current: i64,
     },
+
+    /// A rule (or the bundle-level default action) carries
+    /// `verb = suggest_only` without a `suggested_verb` companion.
+    /// `SuggestOnly` is an advisory state — the operator UI surfaces
+    /// *"this rule **would** have applied {verb}"* — and the
+    /// would-be verb has to come from somewhere. The Go compiler
+    /// emits `suggested_verb` on every suggest-only rule; a bundle
+    /// that omits it is malformed.
+    #[error(
+        "rule {rule_id:?} has verb=suggest_only but no suggested_verb (or suggested_verb is itself suggest_only)"
+    )]
+    SuggestOnlyMissingSuggestion {
+        /// The offending rule's id, or `None` when the default-
+        /// action verb itself was the violation.
+        rule_id: Option<String>,
+    },
 }
 
 impl PolicyEvalError {
@@ -84,7 +100,8 @@ impl PolicyEvalError {
             Self::EnvelopeDecode(_)
             | Self::RulesDecode(_)
             | Self::SteeringDecode(_)
-            | Self::SchemaVersionTooNew { .. } => ErrorCode::BundleRejected,
+            | Self::SchemaVersionTooNew { .. }
+            | Self::SuggestOnlyMissingSuggestion { .. } => ErrorCode::BundleRejected,
             Self::TargetMismatch { .. } => ErrorCode::PolicyBundleTargetMismatch,
             Self::Stale { .. } => ErrorCode::PolicyBundleStale,
         }
@@ -135,6 +152,13 @@ mod tests {
             }
             .error_code(),
             ErrorCode::PolicyBundleStale
+        );
+        assert_eq!(
+            PolicyEvalError::SuggestOnlyMissingSuggestion {
+                rule_id: Some("r-1".into()),
+            }
+            .error_code(),
+            ErrorCode::BundleRejected
         );
     }
 }

@@ -33,6 +33,18 @@ use tokio::net::{TcpStream, lookup_host};
 use tokio_rustls::TlsConnector;
 use tracing::{debug, warn};
 
+/// Default upper bound on response body bytes the agent will
+/// collect before aborting the stream. Hardening against a
+/// compromised or misbehaving control plane that sends an
+/// arbitrarily large response — without the cap the agent would
+/// extend a `Vec` until OOM. 16 MiB is generous: the largest
+/// expected response is a signed policy bundle (typically
+/// < 1 MiB); telemetry ack payloads are a few hundred bytes.
+///
+/// Operators that ship custom bundles can override this via
+/// [`ControlPlaneClient::with_max_response_bytes`].
+pub const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Body-payload shape for outgoing requests. Either no body
 /// (GET / HEAD) or a single `Bytes` blob (POST batch /
 /// ETag conditional GET that happens to carry a body, etc.).
@@ -133,6 +145,10 @@ pub struct ControlPlaneClient {
     /// [`build_client_config`] / [`build_client_config_with_webpki_roots`]
     /// to construct.
     tls_config: Arc<rustls::ClientConfig>,
+    /// Cap on response body bytes the connection will collect.
+    /// Defaults to [`DEFAULT_MAX_RESPONSE_BODY_BYTES`].
+    /// Customisable through [`Self::with_max_response_bytes`].
+    max_response_bytes: usize,
 }
 
 impl ControlPlaneClient {
@@ -167,7 +183,28 @@ impl ControlPlaneClient {
             addr: addr.into(),
             server_name,
             tls_config,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BODY_BYTES,
         })
+    }
+
+    /// Override the response body cap (default:
+    /// [`DEFAULT_MAX_RESPONSE_BODY_BYTES`]). The cap is enforced
+    /// per request — a response that exceeds it aborts the stream
+    /// with [`CommsError::Http2`] before the in-memory buffer
+    /// grows further.
+    ///
+    /// `0` is treated as the default; use a small positive number
+    /// (e.g. for tests that want to assert the cap fires) or a
+    /// larger one if the control plane legitimately serves big
+    /// bundles.
+    #[must_use]
+    pub fn with_max_response_bytes(mut self, max: usize) -> Self {
+        self.max_response_bytes = if max == 0 {
+            DEFAULT_MAX_RESPONSE_BODY_BYTES
+        } else {
+            max
+        };
+        self
     }
 
     /// Establish a fresh TCP + TLS + HTTP/2 connection. On
@@ -232,7 +269,7 @@ impl ControlPlaneClient {
             }
         }
 
-        Self::finish_h2(tls, self.authority()).await
+        Self::finish_h2(tls, self.authority(), self.max_response_bytes).await
     }
 
     /// Derive the HTTP `:authority` pseudo-header value. Uses the
@@ -255,6 +292,7 @@ impl ControlPlaneClient {
     pub(crate) async fn finish_h2<IO>(
         io: IO,
         authority: String,
+        max_response_bytes: usize,
     ) -> Result<ControlPlaneConnection, CommsError>
     where
         IO: AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -289,6 +327,7 @@ impl ControlPlaneClient {
             send: send_request,
             authority,
             driver,
+            max_response_bytes,
         })
     }
 
@@ -325,6 +364,10 @@ pub struct ControlPlaneConnection {
     /// task, leaving the driver to run until the underlying h2
     /// connection closes on its own.
     driver: tokio::task::JoinHandle<()>,
+    /// Cap on response body bytes — copied from the
+    /// [`ControlPlaneClient`] at handshake time so every request
+    /// on this connection enforces the same limit.
+    max_response_bytes: usize,
 }
 
 impl Drop for ControlPlaneConnection {
@@ -368,6 +411,18 @@ impl ControlPlaneConnection {
     /// Send a single HTTP/2 request and collect the full
     /// response. Errors propagate the underlying h2 error in
     /// the source chain.
+    ///
+    /// Hardening: the response body is capped at the connection's
+    /// configured `max_response_bytes` (default
+    /// [`DEFAULT_MAX_RESPONSE_BODY_BYTES`], 16 MiB; configurable
+    /// via [`ControlPlaneClient::with_max_response_bytes`]). A
+    /// response that exceeds the cap aborts the stream with
+    /// [`CommsError::Http2`] rather than extending the in-memory
+    /// `Vec` until the agent OOMs — defence-in-depth against a
+    /// compromised or misbehaving control plane. The control
+    /// plane's legitimate responses (signed policy bundles,
+    /// telemetry acks) are kilobytes; a multi-megabyte response
+    /// is itself a signal that something is wrong.
     pub async fn send_request(
         &self,
         request: RequestPath,
@@ -446,6 +501,12 @@ impl ControlPlaneConnection {
         let mut flow = recv_body.flow_control().clone();
         while let Some(chunk) = recv_body.data().await {
             let bytes = chunk.map_err(|e| CommsError::Http2(format!("recv body: {e}")))?;
+            if collected.len().saturating_add(bytes.len()) > self.max_response_bytes {
+                return Err(CommsError::Http2(format!(
+                    "response body exceeds {} byte limit",
+                    self.max_response_bytes
+                )));
+            }
             // Released capacity = number of bytes the server
             // can send next; we release exactly what we
             // consumed.
@@ -509,5 +570,42 @@ mod tests {
             CommsError::Config(msg) => assert!(msg.contains("h2 ALPN")),
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn client_max_response_bytes_default_is_16_mib() {
+        crate::tls::install_ring_provider();
+        let cfg = crate::tls::build_client_config_with_webpki_roots(None).expect("builds");
+        let name = ServerName::try_from("example.invalid").expect("server name");
+        let client = ControlPlaneClient::new("example.invalid:443", name, Arc::new(cfg))
+            .expect("client constructs");
+        assert_eq!(client.max_response_bytes, DEFAULT_MAX_RESPONSE_BODY_BYTES);
+        assert_eq!(client.max_response_bytes, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn client_with_max_response_bytes_overrides_default() {
+        crate::tls::install_ring_provider();
+        let cfg = crate::tls::build_client_config_with_webpki_roots(None).expect("builds");
+        let name = ServerName::try_from("example.invalid").expect("server name");
+        let client = ControlPlaneClient::new("example.invalid:443", name, Arc::new(cfg))
+            .expect("client constructs")
+            .with_max_response_bytes(1024);
+        assert_eq!(client.max_response_bytes, 1024);
+    }
+
+    #[test]
+    fn client_with_max_response_bytes_zero_restores_default() {
+        crate::tls::install_ring_provider();
+        let cfg = crate::tls::build_client_config_with_webpki_roots(None).expect("builds");
+        let name = ServerName::try_from("example.invalid").expect("server name");
+        // Zero is a footgun — silently clamping a `0` to "no
+        // limit" would defeat the whole point of the cap. We map
+        // it back to the default so an accidental `0` from a
+        // config knob still gets the hardening.
+        let client = ControlPlaneClient::new("example.invalid:443", name, Arc::new(cfg))
+            .expect("client constructs")
+            .with_max_response_bytes(0);
+        assert_eq!(client.max_response_bytes, DEFAULT_MAX_RESPONSE_BODY_BYTES);
     }
 }

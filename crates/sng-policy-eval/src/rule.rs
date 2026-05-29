@@ -191,6 +191,20 @@ pub struct Rule {
     pub domain: EnforcementDomain,
     /// Verb to apply on match.
     pub verb: Verb,
+    /// The would-be enforcement verb when [`Self::verb`] is
+    /// [`Verb::SuggestOnly`]. Surfaced through
+    /// [`crate::verdict::Verdict::SuggestOnly`] so the operator UI
+    /// can show *"this rule would have applied `deny`"* rather
+    /// than the tautological *"this rule would have suggest-only-ed"*.
+    ///
+    /// Wire shape: optional `suggested_verb` JSON key. Must be set
+    /// to a non-[`Verb::SuggestOnly`] value when [`Self::verb`] is
+    /// [`Verb::SuggestOnly`] — enforced at bundle load time by
+    /// [`super::bundle::LoadedBundle::from_body`]. For any other
+    /// `verb` value the field is ignored (and conventionally
+    /// omitted on the wire).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_verb: Option<Verb>,
 
     /// Named subject vertex references — resolve against
     /// [`super::bundle::LoadedBundle::subjects`] at evaluation time.
@@ -295,6 +309,7 @@ mod tests {
             id: "r-1".into(),
             domain: EnforcementDomain::Dns,
             verb: Verb::Deny,
+            suggested_verb: None,
             subject_refs: vec!["all-users".into()],
             predicate_refs: vec![],
             subjects: vec![],
@@ -333,6 +348,7 @@ mod tests {
             id: "r-3".into(),
             domain: EnforcementDomain::Swg,
             verb: Verb::Inspect,
+            suggested_verb: None,
             subject_refs: vec![],
             predicate_refs: vec![],
             subjects: vec![],

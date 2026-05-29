@@ -68,6 +68,7 @@ fn rule(id: &str, domain: EnforcementDomain, verb: Verb) -> Rule {
         id: id.into(),
         domain,
         verb,
+        suggested_verb: None,
         subject_refs: vec![],
         predicate_refs: vec![],
         subjects: vec![],

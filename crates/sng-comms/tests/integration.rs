@@ -334,3 +334,71 @@ async fn server_error_classifies_as_retryable() {
     assert_eq!(resp.classify(), ResponseClass::ServerError);
     assert!(resp.classify().is_retryable());
 }
+
+#[tokio::test]
+async fn response_body_cap_aborts_oversize_response() {
+    // Server returns a 4 KiB body; client is configured with a
+    // 1 KiB cap. The response collection MUST error rather than
+    // grow the buffer past the cap. This is the test for the
+    // defence-in-depth hardening against a compromised control
+    // plane sending an arbitrarily large response.
+    let pki = mk_pki();
+    let oversize_body = Bytes::from(vec![0xABu8; 4 * 1024]);
+    let body_for_server = oversize_body.clone();
+    let (addr, _server) = serve_one(&pki, move |_req, _body| {
+        (StatusCode::OK, vec![], body_for_server.clone())
+    })
+    .await;
+
+    let tls_config = build_client_config(vec![pki.root_der.clone()], None).expect("tls config");
+    let server_name = ServerName::try_from("localhost").expect("server name");
+    let client = ControlPlaneClient::new(&addr, server_name, Arc::new(tls_config))
+        .expect("client")
+        .with_max_response_bytes(1024);
+    let conn = client.connect().await.expect("connect");
+
+    let err = conn
+        .send_request(RequestPath::get("/api/v1/healthz"), RequestBody::Empty)
+        .await
+        .expect_err("expected body-cap rejection");
+
+    match err {
+        sng_comms::CommsError::Http2(msg) => {
+            assert!(
+                msg.contains("byte limit") || msg.contains("1024"),
+                "unexpected error message: {msg}",
+            );
+        }
+        other => panic!("expected Http2 error, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn response_body_under_cap_succeeds() {
+    // Sanity: a body smaller than the cap still passes through.
+    // Catches a regression where the cap check incorrectly fires
+    // on under-limit responses (e.g. an off-by-one in the
+    // saturating_add comparison).
+    let pki = mk_pki();
+    let small_body = Bytes::from(vec![0xCDu8; 512]);
+    let body_for_server = small_body.clone();
+    let (addr, _server) = serve_one(&pki, move |_req, _body| {
+        (StatusCode::OK, vec![], body_for_server.clone())
+    })
+    .await;
+
+    let tls_config = build_client_config(vec![pki.root_der.clone()], None).expect("tls config");
+    let server_name = ServerName::try_from("localhost").expect("server name");
+    let client = ControlPlaneClient::new(&addr, server_name, Arc::new(tls_config))
+        .expect("client")
+        .with_max_response_bytes(1024);
+    let conn = client.connect().await.expect("connect");
+
+    let resp = conn
+        .send_request(RequestPath::get("/api/v1/healthz"), RequestBody::Empty)
+        .await
+        .expect("request");
+
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(resp.body.len(), 512);
+}
