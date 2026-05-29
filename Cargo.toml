@@ -14,6 +14,7 @@ members = [
     "crates/sng-core",
     "crates/sng-pal",
     "crates/sng-comms",
+    "crates/sng-policy-eval",
 ]
 resolver = "3"
 
@@ -151,6 +152,7 @@ rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"]
 sng-core = { path = "crates/sng-core" }
 sng-pal = { path = "crates/sng-pal" }
 sng-comms = { path = "crates/sng-comms" }
+sng-policy-eval = { path = "crates/sng-policy-eval" }
 
 # Workspace-wide lints. Set at the workspace level so a new crate
 # added in a later phase automatically inherits the same posture
