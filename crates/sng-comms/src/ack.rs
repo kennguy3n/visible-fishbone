@@ -69,13 +69,16 @@ pub struct SequenceTracker {
 struct Inner {
     /// Next sequence to emit.
     next: u64,
-    /// Whether `next_seq` has been called at least once on this
-    /// tracker. Required to distinguish "agent has emitted seq 0
-    /// and the server is acking it" (legitimate when start_seq=0)
-    /// from "agent has emitted nothing and the server is spuriously
-    /// acking seq 0" (regression — the server must not ack a
-    /// sequence the agent never sent, even the all-zeros one).
-    emitted_any: bool,
+    /// The most recently emitted sequence. `None` until
+    /// `next_seq` has been called at least once. Tracked
+    /// explicitly (instead of derived from `next - 1`) so the
+    /// `u64::MAX` saturation boundary in `next_seq` does not
+    /// make `record_ack` reject a legitimate ack of
+    /// `u64::MAX` as `AheadOfEmitted`. Also lets us distinguish
+    /// "agent has emitted seq 0 and the server is acking it"
+    /// (legitimate when start_seq=0) from "agent has emitted
+    /// nothing and the server is spuriously acking seq 0".
+    last_emitted: Option<u64>,
     /// Highest sequence the server has durably acked.
     acked_high_water: Option<u64>,
 }
@@ -94,7 +97,7 @@ impl SequenceTracker {
             stream: stream.into(),
             inner: Mutex::new(Inner {
                 next: start_seq,
-                emitted_any: false,
+                last_emitted: None,
                 acked_high_water: None,
             }),
         }
@@ -126,7 +129,7 @@ impl SequenceTracker {
         let mut guard = self.inner.lock();
         let seq = guard.next;
         guard.next = guard.next.saturating_add(1);
-        guard.emitted_any = true;
+        guard.last_emitted = Some(seq);
         seq
     }
 
@@ -160,15 +163,21 @@ impl SequenceTracker {
         // front so a server bug or a replay against a freshly
         // constructed tracker can't quietly install a high-water
         // mark.
-        let highest_emitted = guard.next.saturating_sub(1);
-        if !guard.emitted_any {
+        //
+        // We use `last_emitted` (not `next - 1`) so that the
+        // `u64::MAX` saturation boundary in `next_seq` is
+        // handled exactly: after emitting `u64::MAX`,
+        // `last_emitted == Some(u64::MAX)` and an ack of
+        // `u64::MAX` is accepted, while `next - 1 == u64::MAX - 1`
+        // would have rejected it as `AheadOfEmitted`.
+        let Some(highest_emitted) = guard.last_emitted else {
             return Err(SequenceRegression {
                 stream: self.stream.clone(),
-                highest_emitted,
+                highest_emitted: guard.next.saturating_sub(1),
                 observed,
                 kind: RegressionKind::AhedOfEmitted,
             });
-        }
+        };
         if observed > highest_emitted {
             return Err(SequenceRegression {
                 stream: self.stream.clone(),
@@ -273,6 +282,39 @@ mod tests {
         assert_eq!(err.kind, RegressionKind::BelowHighWater);
         assert_eq!(err.stream, "telemetry");
         assert_eq!(err.observed, 2);
+    }
+
+    #[test]
+    fn ack_of_u64_max_is_accepted_after_saturating_emit() {
+        // Regression for the Devin Review off-by-one at the
+        // u64::MAX saturation boundary. The earlier implementation
+        // computed `highest_emitted = guard.next.saturating_sub(1)`,
+        // so after `next_seq` emitted `u64::MAX` the next call kept
+        // `next` at `u64::MAX` (saturating_add no-op) and
+        // `highest_emitted` was reported as `u64::MAX - 1`, which
+        // made a legitimate ack of `u64::MAX` look like an
+        // `AheadOfEmitted` regression.
+        //
+        // The fix tracks `last_emitted` explicitly. We can't loop
+        // 2^64 times to reach saturation, so we seed `next` to
+        // `u64::MAX` via `start_seq` and exercise the saturating
+        // path directly: the first call returns `u64::MAX`, the
+        // second also returns `u64::MAX` (saturation), and an ack
+        // of `u64::MAX` must be accepted.
+        let t = SequenceTracker::new("telemetry", u64::MAX);
+        assert_eq!(t.next_seq(), u64::MAX);
+        assert_eq!(t.next_seq(), u64::MAX, "next_seq saturates at u64::MAX");
+        let prev = t
+            .record_ack(u64::MAX)
+            .expect("ack of saturated seq is accepted");
+        assert_eq!(prev, None);
+        assert_eq!(t.high_water(), Some(u64::MAX));
+        // And an ack ABOVE u64::MAX is mathematically impossible, but
+        // an idempotent re-ack at the boundary must still succeed.
+        let prev = t
+            .record_ack(u64::MAX)
+            .expect("idempotent re-ack at boundary");
+        assert_eq!(prev, Some(u64::MAX));
     }
 
     #[test]

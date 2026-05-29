@@ -148,24 +148,33 @@ impl BatchBuilder {
     /// batch around the new envelope. This guarantees no event
     /// is ever silently dropped from inside the builder, and
     /// the new event is always emitted in the next batch.
+    ///
+    /// `push` returns **at most one** batch per call. If the
+    /// pre-push state has crossed a bound AND the new envelope
+    /// would itself cross a bound (e.g. `max_events == 1`, or a
+    /// single envelope larger than `max_bytes`), the pre-push
+    /// batch is what comes out of this call; the oversized new
+    /// envelope stays as the next pending batch and is flushed
+    /// on the next `push` / `poll_timer` / `force_flush`.
     pub fn push(&mut self, envelope: Envelope) -> Option<Batch> {
         let envelope_size = estimated_msgpack_size(&envelope);
 
-        // If pushing this envelope would push us over a bound,
-        // flush the existing batch first and start a fresh one.
-        let flush_reason = if !self.pending.is_empty()
+        // Pre-push: if the current pending state already crosses
+        // a bound, OR adding this envelope would, flush the
+        // existing batch first and start a fresh one.
+        let pre_flush = if !self.pending.is_empty()
             && (self.pending.len() >= self.config.max_events
                 || self.estimated_bytes.saturating_add(envelope_size) > self.config.max_bytes)
         {
-            Some(if self.pending.len() >= self.config.max_events {
+            let reason = if self.pending.len() >= self.config.max_events {
                 BatchFlushReason::EventsLimit
             } else {
                 BatchFlushReason::BytesLimit
-            })
+            };
+            Some(self.take(reason))
         } else {
             None
         };
-        let flushed = flush_reason.map(|reason| self.take(reason));
 
         if self.started_at.is_none() {
             self.started_at = Some(envelope.timestamp);
@@ -173,10 +182,28 @@ impl BatchBuilder {
         self.estimated_bytes = self.estimated_bytes.saturating_add(envelope_size);
         self.pending.push(envelope);
 
-        // After the push, a single-envelope batch may also have
-        // hit the bound (e.g. max_events == 1, or the envelope
-        // alone exceeds max_bytes). In that case we flush again
-        // to give the caller a one-event batch immediately.
+        // Contract: `push` returns at most one batch. If the
+        // pre-push already produced a batch, return it and leave
+        // the new envelope pending — even if the new envelope
+        // alone exceeds a bound. The oversized-single-event
+        // batch will fire on the next `push` (becoming the
+        // pre-push case), `poll_timer`, or `force_flush`.
+        //
+        // Earlier revisions of this method ran a second flush
+        // check after the pre-push and silently dropped the
+        // pre-push batch when both triggers fired (e.g.
+        // `max_events == 1`, or a 70 KiB envelope arriving with
+        // `max_bytes == 64 KiB` while pending was non-empty).
+        // The regression is covered by
+        // `pre_push_flush_is_not_dropped_when_new_event_alone_exceeds_max_bytes`
+        // below.
+        if pre_flush.is_some() {
+            return pre_flush;
+        }
+
+        // Pre-push didn't fire: check whether the new envelope
+        // ALONE crossed a bound and flush a single-event batch
+        // if so.
         if self.pending.len() >= self.config.max_events
             || self.estimated_bytes > self.config.max_bytes
         {
@@ -185,23 +212,9 @@ impl BatchBuilder {
             } else {
                 BatchFlushReason::BytesLimit
             };
-            // We deliberately discard `flushed` here only if it
-            // was `None`; if both pre- and post-push hit the
-            // bound, the caller still needs both batches. The
-            // contract is that `push` returns *at most one*
-            // batch — if the pre-push flush already happened,
-            // the post-push case cannot have triggered (a
-            // single new event cannot itself exceed a bound
-            // that the pre-push had already cleared by
-            // resetting). The post-push trigger is only
-            // reachable when `flushed` is `None`.
-            debug_assert!(
-                flushed.is_none(),
-                "post-push trigger should only fire when pre-push did not",
-            );
             return Some(self.take(reason));
         }
-        flushed
+        None
     }
 
     /// Check whether the flush-interval timer has elapsed and
@@ -312,6 +325,10 @@ mod tests {
     use sng_core::traffic_class::TrafficClass;
 
     fn mk_envelope(seconds: i64) -> Envelope {
+        mk_envelope_with_payload(seconds, Vec::new())
+    }
+
+    fn mk_envelope_with_payload(seconds: i64, payload: Vec<u8>) -> Envelope {
         Envelope {
             schema_version: SCHEMA_VERSION,
             event_id: EventId::new_v4(),
@@ -324,7 +341,7 @@ mod tests {
             traffic_class: Some(TrafficClass::InspectLite),
             bytes_in: 0,
             bytes_out: 0,
-            payload: Vec::new(),
+            payload,
         }
     }
 
@@ -417,6 +434,94 @@ mod tests {
         assert!(b.is_empty());
         // Forced flush on an empty builder is a no-op.
         assert!(b.force_flush().is_none());
+    }
+
+    #[test]
+    fn pre_push_flush_is_not_dropped_when_new_event_alone_exceeds_max_bytes() {
+        // Regression for the silent-drop reported by Devin Review:
+        // when pending was non-empty AND the incoming envelope
+        // alone exceeded `max_bytes`, the pre-push flush was
+        // computed correctly but then overwritten by the
+        // post-push branch which returned a fresh single-event
+        // batch and dropped the old one on the floor.
+        //
+        // Set max_bytes large enough to hold 2-3 zero-payload
+        // envelopes but smaller than a single envelope carrying
+        // a multi-KiB payload; then arrange:
+        //   1) push a small envelope (pending = 1)
+        //   2) push a small envelope (still under max_bytes)
+        //   3) push a big envelope whose encoded size alone > max_bytes
+        // The third push must return the [small, small] batch
+        // accumulated in (1)-(2). The big envelope stays pending
+        // and is drained via `force_flush`.
+        let mut b = BatchBuilder::new(BatchConfig {
+            max_events: usize::MAX,
+            max_bytes: 512,
+            flush_interval: Duration::from_secs(60),
+        });
+        let small_1 = mk_envelope(1);
+        let small_2 = mk_envelope(2);
+        let id_small_1 = small_1.event_id;
+        let id_small_2 = small_2.event_id;
+        assert!(b.push(small_1).is_none(), "first small push doesn't flush");
+        assert!(
+            b.push(small_2).is_none(),
+            "second small push stays under max_bytes",
+        );
+        // Big envelope with a payload guaranteed to exceed
+        // max_bytes by itself.
+        let big = mk_envelope_with_payload(3, vec![0xab; 4096]);
+        let id_big = big.event_id;
+        let batch = b
+            .push(big)
+            .expect("oversized push must flush the accumulated pre-push batch");
+        // Pre-push batch must carry BOTH small envelopes — the
+        // bug was that it was overwritten with a fresh [big] batch.
+        let ids: Vec<_> = batch.envelopes.iter().map(|e| e.event_id).collect();
+        assert_eq!(
+            ids,
+            vec![id_small_1, id_small_2],
+            "pre-push batch must contain the two small envelopes \
+             accumulated before the oversized push",
+        );
+        assert_eq!(batch.reason, BatchFlushReason::BytesLimit);
+        // The oversized envelope stayed in pending.
+        assert_eq!(b.len(), 1, "oversized envelope is now the sole pending");
+        let leftover = b
+            .force_flush()
+            .expect("force_flush drains the oversized envelope");
+        let leftover_ids: Vec<_> = leftover.envelopes.iter().map(|e| e.event_id).collect();
+        assert_eq!(leftover_ids, vec![id_big]);
+        assert_eq!(leftover.reason, BatchFlushReason::Forced);
+    }
+
+    #[test]
+    fn pre_push_flush_is_not_dropped_when_max_events_is_one() {
+        // Same silent-drop class of bug for `max_events == 1`:
+        // pending has one event (already at the limit), a second
+        // push triggers pre-push (correct), the post-push then
+        // saw `pending.len() == 1 >= max_events` and overwrote
+        // the pre-push batch with a fresh single-event batch.
+        let mut b = BatchBuilder::new(BatchConfig {
+            max_events: 1,
+            max_bytes: usize::MAX,
+            flush_interval: Duration::from_secs(60),
+        });
+        let e1 = mk_envelope(1);
+        let e2 = mk_envelope(2);
+        let id_1 = e1.event_id;
+        let id_2 = e2.event_id;
+        // First push: post-push fires because max_events == 1.
+        let first = b.push(e1).expect("max_events=1 flushes immediately");
+        assert_eq!(first.envelopes.len(), 1);
+        assert_eq!(first.envelopes[0].event_id, id_1);
+        assert_eq!(first.reason, BatchFlushReason::EventsLimit);
+        // Second push into a now-empty builder: pre-push does NOT
+        // fire (pending is empty), post-push fires (max_events == 1).
+        let second = b.push(e2).expect("second push also flushes");
+        assert_eq!(second.envelopes.len(), 1);
+        assert_eq!(second.envelopes[0].event_id, id_2);
+        assert_eq!(second.reason, BatchFlushReason::EventsLimit);
     }
 
     #[test]

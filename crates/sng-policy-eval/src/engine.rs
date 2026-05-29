@@ -220,15 +220,17 @@ fn verb_to_verdict(verb: Verb, flow: &Flow<'_>, bundle: &LoadedBundle) -> Verdic
 /// when nothing matches, matching the Go
 /// `appdb/service.go::ResolveTrafficClass` semantics.
 fn steering_class_for_flow(flow: &Flow<'_>, bundle: &LoadedBundle) -> TrafficClass {
-    if let Some(host) = flow.destination_host
-        && let Some(class) = bundle.steering.class_for_host(host)
-    {
-        return class;
+    // NB: Written without `let` chains because the workspace's pinned
+    // MSRV (1.85) predates their stabilisation (1.88).
+    if let Some(host) = flow.destination_host {
+        if let Some(class) = bundle.steering.class_for_host(host) {
+            return class;
+        }
     }
-    if let Some(ip) = flow.destination_ip
-        && let Some(class) = bundle.steering.class_for_ip(ip)
-    {
-        return class;
+    if let Some(ip) = flow.destination_ip {
+        if let Some(class) = bundle.steering.class_for_ip(ip) {
+            return class;
+        }
     }
     TrafficClass::default_conservative()
 }
