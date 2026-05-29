@@ -201,10 +201,15 @@ impl ConfigError {
 
 impl Config {
     /// Environment-variable prefix. `SNG_TENANT_ID=…` overrides
-    /// `tenant_id`, `SNG_TELEMETRY_BATCH_SIZE=…` overrides
+    /// `tenant_id`, `SNG_TELEMETRY__BATCH_SIZE=…` overrides
     /// `telemetry.batch_size`, etc. The double-underscore
-    /// separator matches the `__` convention figment recognises
-    /// for nested struct fields.
+    /// separator between the section name and the leaf field
+    /// (`TELEMETRY__BATCH_SIZE`, not `TELEMETRY_BATCH_SIZE`)
+    /// matches the `__` convention figment recognises for
+    /// nested struct fields. With a single underscore figment
+    /// would look for a top-level `telemetry_batch_size` field
+    /// that does not exist and the override would silently
+    /// fall back to the default.
     pub const ENV_PREFIX: &'static str = "SNG_";
 
     /// Load configuration. If `path` is `Some` and the file
@@ -218,7 +223,18 @@ impl Config {
             }
         }
         figment = figment.merge(Env::prefixed(Self::ENV_PREFIX).split("__"));
-        let cfg: Self = figment.extract()?;
+        let mut cfg: Self = figment.extract()?;
+        // Normalize whitespace-sensitive fields BEFORE validation
+        // so the stored value matches what `validate()` checks.
+        // `validate()` takes `&self` so it cannot perform the
+        // normalization itself; it would otherwise accept a
+        // padded URL that downstream consumers (sng-comms) would
+        // then feed into the HTTP client as-is. See the
+        // regression test `load_normalises_control_plane_url`.
+        let trimmed = cfg.control_plane_url.trim();
+        if trimmed.len() != cfg.control_plane_url.len() {
+            cfg.control_plane_url = trimmed.to_owned();
+        }
         cfg.validate()?;
         Ok(cfg)
     }
@@ -582,6 +598,43 @@ poll_interval = "1s"
                 code,
                 ErrorCode::ConfigMissing | ErrorCode::ConfigInvalid
             ));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn load_normalises_control_plane_url() {
+        // Regression test for the case where an operator pastes
+        // a URL with stray whitespace into a config file or env
+        // var: validation must accept it AND the stored value
+        // must be the trimmed form so downstream consumers
+        // (sng-comms) feed a clean URL into their HTTP client.
+        let tenant = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let toml_body = format!(
+            r#"
+mode = "endpoint"
+tenant_id = "{tenant}"
+device_id = "{device}"
+control_plane_url = "  https://cp.example.com\n"
+
+[telemetry]
+batch_size = 1
+flush_interval = "1s"
+spool_size_bytes = 1024
+
+[policy]
+poll_interval = "1s"
+"#
+        );
+        figment::Jail::expect_with(|_jail| {
+            let mut file =
+                NamedTempFile::new().map_err(|e| figment::Error::from(format!("{e}")))?;
+            std::io::Write::write_all(&mut file, toml_body.as_bytes())
+                .map_err(|e| figment::Error::from(format!("{e}")))?;
+            let cfg = Config::load(Some(file.path()))
+                .map_err(|e| figment::Error::from(format!("{e}")))?;
+            assert_eq!(cfg.control_plane_url, "https://cp.example.com");
             Ok(())
         });
     }

@@ -154,6 +154,43 @@ impl<'de> Deserialize<'de> for BundleSignature {
     }
 }
 
+/// Serde adapter that encodes / decodes a fixed-size `[u8; 32]`
+/// as a MessagePack byte-string (`bin` family) rather than the
+/// default array-of-integers encoding `serde` would otherwise
+/// pick for fixed-size arrays. Mirrors how the Go side
+/// (`vmihailenco/msgpack/v5`) encodes a `[]byte` and keeps the
+/// digest bytes interoperable with any Go consumer that ends up
+/// reading the same on-wire bundle envelope. Also significantly
+/// more compact (35 bytes vs. ~96 bytes for a 32-byte digest).
+mod sha256_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// SHA-256 digests are always exactly 32 bytes. Keep the
+    /// constant local so any future re-use (e.g. a `Sha256Digest`
+    /// newtype) does not silently desync from this module.
+    pub(super) const SHA256_LEN: usize = 32;
+
+    pub(super) fn serialize<S: Serializer>(
+        bytes: &[u8; SHA256_LEN],
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(bytes)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<[u8; SHA256_LEN], D::Error> {
+        let raw = <serde_bytes::ByteBuf>::deserialize(d)?;
+        let raw = raw.into_vec();
+        let len = raw.len();
+        raw.try_into().map_err(|_| {
+            serde::de::Error::custom(format!(
+                "sha256 digest must be {SHA256_LEN} bytes, got {len}"
+            ))
+        })
+    }
+}
+
 /// Header that prefixes the on-wire policy bundle. Pulled
 /// separately from the payload so the verifier can check the
 /// target / version / key-id before deciding to spend cycles on
@@ -192,11 +229,43 @@ pub struct PolicyBundleHeader {
 /// signature has been checked against the trust store and the
 /// target type has been confirmed; the `body` bytes are safe to
 /// hand to `sng-policy-eval`.
+///
+/// Header fields are inlined directly rather than nested behind
+/// a `#[serde(flatten)] header: PolicyBundleHeader`: `flatten`
+/// requires the deserializer to buffer the input map and replay
+/// it against the inner struct, which is documented as
+/// problematic for non-self-describing formats like MessagePack
+/// (duplicate-key / ordering edge cases, extra allocations).
+/// Flat layout also matches the Go-side
+/// `internal/repository/types.go::PolicyBundle` shape exactly.
+/// Callers that need just the header view (e.g. an HTTP HEAD
+/// response that ships header fields out-of-band) can build a
+/// [`PolicyBundleHeader`] via [`PolicyBundle::header`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PolicyBundle {
-    /// Bundle header (target / version / signing key id / etc.).
-    #[serde(flatten)]
-    pub header: PolicyBundleHeader,
+    /// Bundle identifier.
+    #[serde(rename = "id")]
+    pub id: PolicyBundleId,
+    /// Source policy graph identifier.
+    #[serde(rename = "graph")]
+    pub graph_id: PolicyGraphId,
+    /// Tenant scope.
+    #[serde(rename = "tid")]
+    pub tenant_id: TenantId,
+    /// Target enforcement surface.
+    #[serde(rename = "tgt")]
+    pub target: BundleTarget,
+    /// Monotonic version number. Higher is newer; the verifier
+    /// rejects a bundle whose version is below the currently-
+    /// loaded one (downgrade / replay protection).
+    #[serde(rename = "ver")]
+    pub version: u64,
+    /// Compilation timestamp.
+    #[serde(rename = "ts", with = "chrono::serde::ts_milliseconds")]
+    pub compiled_at: DateTime<Utc>,
+    /// Identifier of the Ed25519 key that signed [`PolicyBundle::body`].
+    #[serde(rename = "kid")]
+    pub signing_key_id: PolicySigningKeyId,
     /// MessagePack-encoded compiled rule table. Opaque to this
     /// module — `sng-policy-eval` is responsible for parsing it
     /// into a usable form.
@@ -204,8 +273,9 @@ pub struct PolicyBundle {
     pub body: Vec<u8>,
     /// SHA-256 of `body`. Carried separately so the verifier
     /// can short-circuit a digest mismatch without re-hashing.
-    /// Must equal `sha256(body)`.
-    #[serde(rename = "sha")]
+    /// Must equal `sha256(body)`. Encoded on the wire as a
+    /// MessagePack byte-string (see [`sha256_serde`]).
+    #[serde(rename = "sha", with = "sha256_serde")]
     pub sha256: [u8; 32],
     /// Ed25519 signature over `sha256` (NOT over the raw bytes
     /// of `body` — signing the digest keeps the signature
@@ -213,6 +283,25 @@ pub struct PolicyBundle {
     /// Go-side scheme at `internal/repository/postgres/policy.go`.
     #[serde(rename = "sig")]
     pub signature: BundleSignature,
+}
+
+impl PolicyBundle {
+    /// Construct a lightweight header view of this bundle. Used
+    /// by HEAD / metadata-only paths (e.g. the agent-pull
+    /// `If-None-Match` short-circuit) where the body bytes are
+    /// not yet loaded.
+    #[must_use]
+    pub fn header(&self) -> PolicyBundleHeader {
+        PolicyBundleHeader {
+            id: self.id,
+            graph_id: self.graph_id,
+            tenant_id: self.tenant_id,
+            target: self.target,
+            version: self.version,
+            compiled_at: self.compiled_at,
+            signing_key_id: self.signing_key_id,
+        }
+    }
 }
 
 /// Verification error returned by [`PolicyVerifier::verify`].
@@ -318,19 +407,19 @@ impl PolicyVerifier {
     ) -> Result<(), VerificationError> {
         // 1. Target sanity check. Cheapest check first so a
         //    misrouted bundle costs nothing.
-        if bundle.header.target != expected_target {
+        if bundle.target != expected_target {
             return Err(VerificationError::TargetMismatch {
-                bundle_id: bundle.header.id,
-                actual: bundle.header.target,
+                bundle_id: bundle.id,
+                actual: bundle.target,
                 expected: expected_target,
             });
         }
         // 2. Downgrade / replay rejection.
         if let Some(current) = current_version {
-            if bundle.header.version < current {
+            if bundle.version < current {
                 return Err(VerificationError::Stale {
-                    bundle_id: bundle.header.id,
-                    found: bundle.header.version,
+                    bundle_id: bundle.id,
+                    found: bundle.version,
                     current,
                 });
             }
@@ -342,18 +431,19 @@ impl PolicyVerifier {
         hasher.update(&bundle.body);
         let computed: [u8; 32] = hasher.finalize().into();
         if computed != bundle.sha256 {
-            return Err(VerificationError::DigestMismatch(bundle.header.id));
+            return Err(VerificationError::DigestMismatch(bundle.id));
         }
         // 4. Key lookup.
-        let key = self.keys.get(&bundle.header.signing_key_id).ok_or(
-            VerificationError::UnknownSigningKey(bundle.header.signing_key_id),
-        )?;
+        let key = self
+            .keys
+            .get(&bundle.signing_key_id)
+            .ok_or(VerificationError::UnknownSigningKey(bundle.signing_key_id))?;
         // 5. Signature verification over the digest. Matches
         //    the Go-side `crypto/ed25519.Verify(pub, digest, sig)`
         //    call shape.
         let sig = Signature::from_bytes(&bundle.signature.bytes);
         key.verify(&bundle.sha256, &sig)
-            .map_err(|_| VerificationError::SignatureInvalid(bundle.header.id))
+            .map_err(|_| VerificationError::SignatureInvalid(bundle.id))
     }
 }
 
@@ -385,15 +475,13 @@ mod tests {
         let compiled_at =
             chrono::DateTime::from_timestamp_millis(now_ms).expect("ms timestamp in range");
         PolicyBundle {
-            header: PolicyBundleHeader {
-                id: PolicyBundleId::new_v4(),
-                graph_id: PolicyGraphId::new_v4(),
-                tenant_id: TenantId::new_v4(),
-                target,
-                version,
-                compiled_at,
-                signing_key_id: key_id,
-            },
+            id: PolicyBundleId::new_v4(),
+            graph_id: PolicyGraphId::new_v4(),
+            tenant_id: TenantId::new_v4(),
+            target,
+            version,
+            compiled_at,
+            signing_key_id: key_id,
             body,
             sha256,
             signature: BundleSignature {
@@ -538,6 +626,107 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&bundle).expect("encode");
         let back: PolicyBundle = rmp_serde::from_slice(&bytes).expect("decode");
         assert_eq!(bundle, back);
+    }
+
+    /// Regression: the `sha256` field must encode as a
+    /// MessagePack `bin` (byte-string) family, not as a 32-element
+    /// array of u8 integers. The Go side
+    /// (`vmihailenco/msgpack/v5`) encodes `[]byte` as `bin`, so
+    /// the wire bytes must agree for cross-language consumers.
+    /// `bin 8` (marker `0xc4`) takes 35 bytes for 32 bytes of
+    /// digest; the default `[u8; 32]` array encoding would emit
+    /// ~96 bytes (marker `0xdc` + length + 32×u8 markers).
+    #[test]
+    fn sha256_field_encodes_as_msgpack_bin() {
+        let (signing, key_id, _verify) = fixture_keypair();
+        let bundle = signed_bundle(BundleTarget::Edge, 1, &signing, key_id, b"rules".to_vec());
+        let bytes = rmp_serde::to_vec_named(&bundle).expect("encode");
+        // Locate the 32-byte digest in the encoded stream. The
+        // digest never appears as a literal substring elsewhere
+        // (it's a sha256 of the body), so a search is safe.
+        let needle = bundle.sha256;
+        let pos = bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("digest bytes must appear in encoded stream");
+        // The byte immediately preceding the digest must be the
+        // `bin 8` length byte (`0x20` = 32), and the byte before
+        // that must be the `bin 8` marker (`0xc4`).
+        assert!(pos >= 2, "digest must be prefixed by bin marker + length");
+        assert_eq!(
+            bytes[pos - 2],
+            0xc4,
+            "sha256 must be MessagePack bin family, got marker {:#x}",
+            bytes[pos - 2]
+        );
+        assert_eq!(
+            bytes[pos - 1],
+            32,
+            "sha256 bin length must be 32, got {}",
+            bytes[pos - 1]
+        );
+    }
+
+    /// Regression: deserialisation must reject a sha256 field
+    /// whose length is not exactly 32 bytes, so a malformed or
+    /// truncated digest cannot quietly turn into a different
+    /// type after the round-trip.
+    #[test]
+    fn sha256_field_rejects_wrong_length() {
+        // Build a tiny synthetic msgpack map with a 16-byte
+        // `sha` value (half the expected length). Use the
+        // `with`-aware deserializer path by piggybacking on
+        // `PolicyBundle`'s real shape so we only break the one
+        // field under test.
+        let (signing, key_id, _verify) = fixture_keypair();
+        let bundle = signed_bundle(BundleTarget::Edge, 1, &signing, key_id, b"rules".to_vec());
+        // Encode the good bundle, then surgically rewrite the
+        // 32-byte digest into a 16-byte one with a fresh `bin 8`
+        // length prefix. This keeps the rest of the map intact
+        // so any error must come from the sha256 length check.
+        let good = rmp_serde::to_vec_named(&bundle).expect("encode");
+        let digest = bundle.sha256;
+        let digest_pos = good
+            .windows(digest.len())
+            .position(|w| w == digest)
+            .expect("digest in encoded stream");
+        // Truncate to 16 bytes.
+        let mut bad = Vec::with_capacity(good.len() - 16);
+        bad.extend_from_slice(&good[..digest_pos - 1]); // up to length byte
+        bad.push(16); // new bin length
+        bad.extend_from_slice(&digest[..16]);
+        bad.extend_from_slice(&good[digest_pos + 32..]);
+        let err = rmp_serde::from_slice::<PolicyBundle>(&bad)
+            .expect_err("16-byte sha256 must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sha256 digest must be 32 bytes"),
+            "error must call out the length mismatch, got: {msg}"
+        );
+    }
+
+    /// `PolicyBundle::header()` must produce a `PolicyBundleHeader`
+    /// whose fields match the bundle's inlined fields exactly.
+    /// This is the contract the HEAD / metadata-pull path relies
+    /// on once `sng-comms` lands in PR 3.
+    #[test]
+    fn header_view_matches_inline_fields() {
+        let (signing, key_id, _verify) = fixture_keypair();
+        let bundle = signed_bundle(
+            BundleTarget::Endpoint,
+            42,
+            &signing,
+            key_id,
+            b"rules".to_vec(),
+        );
+        let header = bundle.header();
+        assert_eq!(header.id, bundle.id);
+        assert_eq!(header.graph_id, bundle.graph_id);
+        assert_eq!(header.tenant_id, bundle.tenant_id);
+        assert_eq!(header.target, bundle.target);
+        assert_eq!(header.version, bundle.version);
+        assert_eq!(header.compiled_at, bundle.compiled_at);
+        assert_eq!(header.signing_key_id, bundle.signing_key_id);
     }
 
     #[test]

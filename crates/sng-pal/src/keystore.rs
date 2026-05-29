@@ -11,15 +11,26 @@
 //! For PR 2 we ship the trait + an in-memory backend used by
 //! the rest of the workspace's tests (e.g. policy verification,
 //! enrolment-flow integration tests). The in-memory backend is
-//! gated behind a `dev-` feature so it can never accidentally
-//! ship into a production binary.
+//! gated behind the `dev-keystore` feature so it can never
+//! accidentally ship into a production binary — production
+//! binaries link against the per-OS secure-element backends
+//! introduced in PR 10 (`sng-ztna`). Workspace tests in this
+//! crate auto-enable the gate via `cfg(test)`; downstream
+//! crates that want to use the in-memory backend in their own
+//! tests must declare `sng-pal = { features = ["dev-keystore"] }`
+//! under their `[dev-dependencies]`.
 
 use async_trait::async_trait;
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
 use thiserror::Error;
+
+#[cfg(any(test, feature = "dev-keystore"))]
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+#[cfg(any(test, feature = "dev-keystore"))]
+use std::collections::HashMap;
+#[cfg(any(test, feature = "dev-keystore"))]
+use std::sync::Arc;
+#[cfg(any(test, feature = "dev-keystore"))]
 use tokio::sync::Mutex;
 
 /// Opaque handle to a key inside the secure element.
@@ -58,14 +69,18 @@ pub trait SecureKeyStore: Send + Sync {
 }
 
 /// In-memory keystore. Keys live in process memory only — never
-/// use this in a production binary. The struct is private to
-/// tests in the dependent crates and the few enrolment fixtures
-/// in this workspace.
+/// use this in a production binary. Gated behind the
+/// `dev-keystore` feature (auto-on for this crate's own
+/// `cfg(test)` builds) so a production binary that does not
+/// explicitly opt in cannot even reference this type by
+/// accident.
+#[cfg(any(test, feature = "dev-keystore"))]
 #[derive(Clone, Default)]
 pub struct InMemoryKeyStore {
     inner: Arc<Mutex<HashMap<KeyHandle, SigningKey>>>,
 }
 
+#[cfg(any(test, feature = "dev-keystore"))]
 impl std::fmt::Debug for InMemoryKeyStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Don't dump the keys.
@@ -73,6 +88,7 @@ impl std::fmt::Debug for InMemoryKeyStore {
     }
 }
 
+#[cfg(any(test, feature = "dev-keystore"))]
 impl InMemoryKeyStore {
     /// Construct an empty keystore.
     #[must_use]
@@ -98,6 +114,7 @@ impl InMemoryKeyStore {
     }
 }
 
+#[cfg(any(test, feature = "dev-keystore"))]
 #[async_trait]
 impl SecureKeyStore for InMemoryKeyStore {
     async fn generate_ed25519(&self) -> Result<KeyHandle, KeyStoreError> {
