@@ -234,16 +234,23 @@ impl Config {
         if self.device_id.is_nil() {
             return Err(ConfigError::Missing("device_id".into()));
         }
-        if self.control_plane_url.trim().is_empty() {
+        // Trim once so the emptiness check and the structural
+        // prefix check are evaluated against the same string. If
+        // we trimmed only one side, an operator who pasted
+        // " https://cp.example.com" would survive the emptiness
+        // check (trimmed) and then trip the prefix check
+        // (untrimmed), producing the confusing error "must start
+        // with http:// or https://" against a value that visibly
+        // does.
+        let url = self.control_plane_url.trim();
+        if url.is_empty() {
             return Err(ConfigError::Missing("control_plane_url".into()));
         }
         // Cheap structural URL check — full URL parsing is the
         // `sng-comms` layer's concern, but rejecting obvious
         // garbage at load time produces a much better operator
         // error than waiting for the first HTTP attempt.
-        if !self.control_plane_url.starts_with("http://")
-            && !self.control_plane_url.starts_with("https://")
-        {
+        if !url.starts_with("http://") && !url.starts_with("https://") {
             return Err(ConfigError::Invalid {
                 field: "control_plane_url".into(),
                 reason: "must start with http:// or https://".into(),
@@ -406,6 +413,32 @@ mod tests {
         assert!(matches!(
             c.validate(),
             Err(ConfigError::Invalid { field, .. }) if field == "control_plane_url"
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_url_with_surrounding_whitespace() {
+        // The emptiness check and the structural prefix check
+        // run against the same trimmed value, so a leading
+        // newline or stray space (common when an operator
+        // pastes from a chat / runbook) does not produce the
+        // confusing "must start with http:// or https://"
+        // error against a value that visibly does.
+        let mut c = valid_config();
+        c.control_plane_url = "  https://cp.example.com\n".into();
+        c.validate().expect("whitespace-padded URL is accepted");
+    }
+
+    #[test]
+    fn validate_rejects_whitespace_only_url() {
+        // Inverse of the above: trimmed-empty must still fail
+        // the emptiness check, not silently fall through to the
+        // structural check.
+        let mut c = valid_config();
+        c.control_plane_url = "   \n\t".into();
+        assert!(matches!(
+            c.validate(),
+            Err(ConfigError::Missing(f)) if f == "control_plane_url"
         ));
     }
 

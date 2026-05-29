@@ -264,6 +264,13 @@ mod macos {
                 std::io::Error::last_os_error()
             )));
         }
+        // The second sysctl call may have written fewer bytes
+        // than the initial probe reserved (e.g. if the kernel
+        // value shrank between the two calls). Truncate to the
+        // actual length so any stale tail bytes — including
+        // interior NULs that would survive a single trailing-NUL
+        // pop — are discarded before the UTF-8 conversion.
+        buf.truncate(len);
         // sysctl strings are NUL-terminated; trim.
         if let Some(&0) = buf.last() {
             buf.pop();

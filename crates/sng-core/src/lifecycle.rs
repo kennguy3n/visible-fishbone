@@ -167,13 +167,19 @@ impl Health {
         for s in &subsystems {
             match s.status {
                 HealthStatus::Down => {
+                    // `Down` is terminal — there is no worse status,
+                    // so short-circuit the scan.
                     status = HealthStatus::Down;
                     break;
                 }
-                HealthStatus::Degraded if status != HealthStatus::Down => {
+                HealthStatus::Degraded => {
+                    // The `Down` branch above always breaks, so on
+                    // entry here `status` is guaranteed to be either
+                    // `Up` or `Degraded` — overwriting with
+                    // `Degraded` is idempotent in the latter case.
                     status = HealthStatus::Degraded;
                 }
-                _ => {}
+                HealthStatus::Up => {}
             }
         }
         Self { status, subsystems }
