@@ -135,7 +135,18 @@ deny = [
 [advisories]
 version = 2
 yanked = "warn"
-ignore = []
+# RUSTSEC-2026-0009 — `time` v0.3.x has a stack-exhaustion DoS
+# in its parser, fixed in `time >= 0.3.47`. The fixed version
+# requires Rust 1.88, but the workspace pins to Rust 1.85 (see
+# `rust-toolchain.toml`). The vulnerable code path is reachable
+# only through `rcgen` (a dev-dependency used by `sng-comms`
+# integration tests to mint mock TLS certs); no production
+# build path touches it. Ignored here until the workspace
+# toolchain pin moves to >= 1.88, at which point `cargo update
+# -p time` will pick up the fix automatically.
+ignore = [
+    "RUSTSEC-2026-0009",
+]
 
 # ---------------------------------------------------------------------------
 # Sources
