@@ -166,7 +166,16 @@ id_newtype!(
 /// a `String` rather than `[u8; 8]` so future identifier shapes
 /// (longer key ids, non-hex alphabets, KMS ARNs, etc.) do not
 /// require a wire-format break.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// Wire shape: a single MessagePack / JSON string. The custom
+/// [`Deserialize`] impl below enforces [`Self::MAX_LEN`] *at the
+/// wire boundary*, not just on the constructor. Without that, the
+/// auto-derived `#[serde(transparent)]` impl would happily accept
+/// any-length string from the network and only the downstream
+/// trust-store lookup would notice — which is fine for security
+/// (the lookup will miss) but is a defence-in-depth gap that lets
+/// a misbehaving producer push arbitrarily large key-id strings
+/// through the bundle path and into log lines / dashboards.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct PolicySigningKeyId(String);
 
@@ -230,6 +239,27 @@ impl FromStr for PolicySigningKeyId {
     type Err = InvalidPolicySigningKeyId;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::new(s.to_owned())
+    }
+}
+
+impl<'de> Deserialize<'de> for PolicySigningKeyId {
+    /// Enforces the [`Self::MAX_LEN`] cap on the wire so an
+    /// attacker / misbehaving producer cannot push arbitrarily
+    /// long key-id strings through the bundle path.
+    ///
+    /// The empty string is *accepted* here because it is the
+    /// canonical ephemeral-signer sentinel that the Go side
+    /// produces for unsigned bundles — receivers reject those
+    /// later in [`crate::policy::PolicyVerifier::verify`] via
+    /// [`Self::is_ephemeral`], so the deserialiser would only get
+    /// in the way by collapsing the two failure modes
+    /// ("ephemeral signer used" vs. "wire id too long") into one.
+    fn deserialize<D: serde::de::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(de)?;
+        if raw.is_empty() {
+            return Ok(Self::ephemeral());
+        }
+        Self::new(raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -322,6 +352,51 @@ mod tests {
         let json = serde_json::to_string(&id).expect("serialize");
         assert_eq!(json, format!("\"{raw}\""));
         let back: DeviceId = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, id);
+    }
+
+    #[test]
+    fn policy_signing_key_id_deserialize_rejects_too_long() {
+        // The deserialise path must enforce MAX_LEN at the wire
+        // boundary so a misbehaving producer cannot push a 1 MB
+        // "key id" into log lines / dashboards. Build a JSON
+        // string that's deliberately longer than the cap.
+        let too_long = "a".repeat(PolicySigningKeyId::MAX_LEN + 1);
+        let json = format!("\"{too_long}\"");
+        let err: Result<PolicySigningKeyId, _> = serde_json::from_str(&json);
+        assert!(err.is_err(), "deserialise of over-MAX_LEN must fail");
+    }
+
+    #[test]
+    fn policy_signing_key_id_deserialize_accepts_at_max_len() {
+        // Exactly MAX_LEN is still valid (the constructor uses
+        // `len() > MAX_LEN`, not `>=`). This pins the boundary so
+        // a future refactor of the constructor doesn't silently
+        // narrow what wire keys deserialise.
+        let at_max = "a".repeat(PolicySigningKeyId::MAX_LEN);
+        let json = format!("\"{at_max}\"");
+        let id: PolicySigningKeyId = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(id.as_str(), at_max);
+    }
+
+    #[test]
+    fn policy_signing_key_id_deserialize_accepts_empty_as_ephemeral() {
+        // The empty string is the canonical ephemeral-signer
+        // sentinel on the Go side and must round-trip through
+        // serde rather than being rejected at the wire boundary.
+        // Downstream verification (`PolicyVerifier::verify`) is
+        // responsible for rejecting bundles signed by an
+        // ephemeral signer.
+        let id: PolicySigningKeyId = serde_json::from_str("\"\"").expect("deserialise");
+        assert!(id.is_ephemeral());
+    }
+
+    #[test]
+    fn policy_signing_key_id_serde_round_trip_short_form() {
+        let id = PolicySigningKeyId::new("abc123").expect("valid");
+        let json = serde_json::to_string(&id).expect("serialise");
+        assert_eq!(json, "\"abc123\"");
+        let back: PolicySigningKeyId = serde_json::from_str(&json).expect("deserialise");
         assert_eq!(back, id);
     }
 

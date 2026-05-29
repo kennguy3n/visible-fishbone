@@ -7,7 +7,16 @@
 //! * short-tag field names (`v`, `id`, `tid`, `did`, `sid`,
 //!   `ts`, `cls`, `plt`, `tc`, `bi`, `bo`, `pl`);
 //! * closed-set enums (event class, platform, verdict) that
-//!   carry the same string values on both sides.
+//!   carry the same string values on both sides;
+//! * **timestamp wire format**: the `ts` field is encoded as
+//!   MessagePack [Timestamp extension type -1](https://github.com/msgpack/msgpack/blob/master/spec.md#timestamp-extension-type)
+//!   — that is what `vmihailenco/msgpack/v5` emits by default for
+//!   a Go `time.Time` struct field. Plain integer milliseconds
+//!   (what `chrono::serde::ts_milliseconds` would produce) is
+//!   **wire-incompatible**: Go decoders looking for an ext type
+//!   would reject the integer and vice-versa. See
+//!   [`msgpack_timestamp`] for the adapter that bridges chrono's
+//!   `DateTime<Utc>` onto ext type -1.
 //!
 //! The envelope is what the NATS JetStream pipeline carries on
 //! the `sng.telemetry.>` and `sng.policy.>` subjects. Validating
@@ -24,6 +33,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
+
+/// The exact `DateTime<Utc>` that corresponds to Go's `time.Time{}`
+/// zero value (year 1 AD UTC). `vmihailenco/msgpack/v5` encodes a
+/// zero `time.Time` as the `timestamp 96` extension variant whose
+/// signed-i64 seconds field is `-62_135_596_800` (= seconds from
+/// Unix epoch back to `0001-01-01T00:00:00Z`). `validate()` rejects
+/// exactly this value to mirror Go's `e.Timestamp.IsZero()` check
+/// at `internal/nats/schema/envelope.go::Envelope.Validate`.
+const GO_ZERO_TIME_SECS: i64 = -62_135_596_800;
 
 /// Current wire-format version. Bumped only on a backwards-
 /// incompatible change; additive field changes do not bump it.
@@ -156,7 +174,10 @@ pub struct Envelope {
     #[serde(rename = "sid", default, skip_serializing_if = "Option::is_none")]
     pub site_id: Option<SiteId>,
     /// Producer-side timestamp.
-    #[serde(rename = "ts", with = "chrono::serde::ts_milliseconds")]
+    ///
+    /// Wire shape: MessagePack Timestamp extension (type -1).
+    /// See module docs and [`msgpack_timestamp`].
+    #[serde(rename = "ts", with = "msgpack_timestamp")]
     pub timestamp: DateTime<Utc>,
     /// Class of event the payload encodes.
     #[serde(rename = "cls")]
@@ -275,16 +296,23 @@ impl Envelope {
         if self.device_id.is_nil() {
             return Err(WireError::Schema("device_id is required".into()));
         }
-        // Producer-side timestamps must be strictly positive.
-        // Reject:
-        //   * Unix epoch (the chrono `Default`),
-        //   * pre-epoch timestamps,
-        //   * Go's zero `time.Time{}` which is year 1 AD and
-        //     serialises through `time.Time.UnixMilli()` to a
-        //     large negative value (~-6.21e13 ms).
-        // `timestamp_millis()` is the relevant axis because the
-        // wire form is `chrono::serde::ts_milliseconds`.
-        if self.timestamp.timestamp_millis() <= 0 {
+        // Mirror Go's `e.Timestamp.IsZero()` check at
+        // `internal/nats/schema/envelope.go::Envelope.Validate`.
+        // Go's `time.Time{}` zero value is `0001-01-01T00:00:00Z`
+        // UTC; on the wire it round-trips back to exactly
+        // `GO_ZERO_TIME_SECS` seconds since the Unix epoch.
+        //
+        // The previous `timestamp_millis() <= 0` rule was strictly
+        // stricter than Go (it also rejected the Unix epoch and
+        // any pre-1970 timestamp). That divergence caused valid
+        // Go-produced envelopes — e.g. fixtures explicitly set to
+        // the Unix epoch — to fail Rust-side validation while
+        // passing Go-side validation, exactly the kind of
+        // asymmetric wire-safety bug the round-trip tests in this
+        // module exist to catch.
+        if self.timestamp.timestamp() == GO_ZERO_TIME_SECS
+            && self.timestamp.timestamp_subsec_nanos() == 0
+        {
             return Err(WireError::Schema("timestamp is required".into()));
         }
         if self.payload.is_empty() {
@@ -377,6 +405,277 @@ pub fn wrap_flow_event(
     };
     env.validate()?;
     Ok(env)
+}
+
+/// MessagePack [Timestamp extension type -1][spec] serde adapter
+/// for chrono `DateTime<Utc>`.
+///
+/// `vmihailenco/msgpack/v5` (the Go side's encoder) emits a Go
+/// `time.Time` struct field as an extension type with tag `-1` and
+/// one of three payload variants:
+///
+/// * `timestamp 32` (4 bytes): `seconds` as big-endian `u32`, used
+///   when `nanos == 0` and `seconds` fits in `u32`;
+/// * `timestamp 64` (8 bytes): `(nanos << 34) | seconds`, used when
+///   `0 <= seconds < 2^34` and `nanos < 1_000_000_000`;
+/// * `timestamp 96` (12 bytes): 4-byte BE `u32` nanos followed by
+///   8-byte BE `i64` seconds, used for everything else (including
+///   pre-epoch values like Go's `time.Time{}` zero).
+///
+/// This module reproduces all three variants for serialisation
+/// (picking the smallest valid one, exactly like the Go encoder)
+/// and accepts all three on deserialisation. `rmp-serde` exposes
+/// the extension wire form through the magic
+/// [`MSGPACK_EXT_STRUCT_NAME`](rmp_serde::MSGPACK_EXT_STRUCT_NAME)
+/// newtype convention; the `Ext` newtype below is that hook.
+///
+/// [spec]: https://github.com/msgpack/msgpack/blob/master/spec.md#timestamp-extension-type
+pub(crate) mod msgpack_timestamp {
+    use chrono::{DateTime, TimeZone, Utc};
+    use serde::de::Error as DeError;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_bytes::ByteBuf;
+
+    /// rmp-serde's hook for emitting / decoding MessagePack ext
+    /// types. The crate recognises a `_ExtStruct((i8, ByteBuf))`
+    /// newtype on the wire and routes it through its ext-encoder
+    /// rather than the generic newtype path.
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename = "_ExtStruct")]
+    struct Ext((i8, ByteBuf));
+
+    /// MessagePack timestamp extension tag, defined by the spec
+    /// linked at the module docs. Reserved for `time.Time` /
+    /// `Instant` and never reused by application-level extensions.
+    const TIMESTAMP_EXT_TYPE: i8 = -1;
+
+    /// Encode `dt` to the smallest valid MessagePack timestamp
+    /// extension payload, matching `vmihailenco/msgpack/v5`'s
+    /// emission rules so the bytes are byte-identical to what the
+    /// Go side produces.
+    pub(super) fn serialize<S: Serializer>(dt: &DateTime<Utc>, ser: S) -> Result<S::Ok, S::Error> {
+        let secs = dt.timestamp();
+        let nanos = dt.timestamp_subsec_nanos();
+        let buf = encode_payload(secs, nanos);
+        Ext((TIMESTAMP_EXT_TYPE, ByteBuf::from(buf))).serialize(ser)
+    }
+
+    /// Decode a MessagePack timestamp extension. Rejects any
+    /// extension whose tag is not `-1` (defends against an attacker
+    /// substituting an application-level extension for a timestamp
+    /// field) and any payload length not in `{4, 8, 12}`.
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<DateTime<Utc>, D::Error> {
+        let Ext((tag, bytes)) = Ext::deserialize(de)?;
+        if tag != TIMESTAMP_EXT_TYPE {
+            return Err(D::Error::custom(format!(
+                "expected msgpack timestamp ext type {TIMESTAMP_EXT_TYPE}, got {tag}"
+            )));
+        }
+        let (secs, nanos) = decode_payload(&bytes).map_err(D::Error::custom)?;
+        Utc.timestamp_opt(secs, nanos)
+            .single()
+            .ok_or_else(|| D::Error::custom("timestamp out of range"))
+    }
+
+    /// timestamp 64 packs seconds into the bottom 34 bits, so any
+    /// value `0 <= secs < 2^34` is encodable. Above the boundary
+    /// (~year 2514) the encoder falls back to timestamp 96.
+    const SECS_TIMESTAMP_64_MAX: i64 = 1i64 << 34;
+
+    /// Pick the smallest of the three MessagePack timestamp
+    /// variants for the given seconds/nanos pair. Mirrors the
+    /// branching in `vmihailenco/msgpack/v5`'s
+    /// `encodeNativeTime`.
+    fn encode_payload(secs: i64, nanos: u32) -> Vec<u8> {
+        // timestamp 32 fits when nanos is zero and seconds is a
+        // non-negative `u32`. Use `try_from` rather than `as` to
+        // keep clippy's cast-truncation lint quiet and to make
+        // the bounds explicit at the call site.
+        if nanos == 0 {
+            if let Ok(secs_u32) = u32::try_from(secs) {
+                return secs_u32.to_be_bytes().to_vec();
+            }
+        }
+        // timestamp 64 fits when seconds is a non-negative value
+        // that fits in 34 bits and nanos < 1e9. The shift up by 34
+        // packs nanos into the high 30 bits of a 64-bit unsigned
+        // word; the spec guarantees the result is < 2^64. Use
+        // `u64::try_from` (which only fails on negative inputs,
+        // and the `(0..)` range already excludes those) so the
+        // expect path is unreachable rather than length-guarded.
+        if let Ok(secs_u64) = u64::try_from(secs)
+            && secs < SECS_TIMESTAMP_64_MAX
+            && nanos < 1_000_000_000
+        {
+            let data = (u64::from(nanos) << 34) | secs_u64;
+            return data.to_be_bytes().to_vec();
+        }
+        // timestamp 96: 4-byte BE nanos, 8-byte BE i64 seconds.
+        let mut buf = vec![0u8; 12];
+        buf[..4].copy_from_slice(&nanos.to_be_bytes());
+        buf[4..].copy_from_slice(&secs.to_be_bytes());
+        buf
+    }
+
+    /// Decode any of the three MessagePack timestamp variants.
+    /// Returns `(seconds, nanos)` where `nanos < 1_000_000_000`.
+    fn decode_payload(data: &[u8]) -> Result<(i64, u32), String> {
+        // `<[u8; N]>::try_from` on a slice of the right length
+        // never fails, but using it (instead of `expect` on a
+        // `try_into`) keeps clippy's `expect_used` lint quiet and
+        // makes the panic path unreachable rather than
+        // length-guarded.
+        if let Ok(payload) = <[u8; 4]>::try_from(data) {
+            let s = u32::from_be_bytes(payload);
+            return Ok((i64::from(s), 0));
+        }
+        if let Ok(payload) = <[u8; 8]>::try_from(data) {
+            let v = u64::from_be_bytes(payload);
+            let n = u32::try_from(v >> 34)
+                .map_err(|_| "timestamp 64: nanos high bits set".to_owned())?;
+            // 34-bit mask; the upper 30 bits are nanoseconds, the
+            // lower 34 are seconds. `as i64` is bounded by the
+            // mask so no sign loss occurs.
+            let s_unsigned = v & ((1u64 << 34) - 1);
+            let s = i64::try_from(s_unsigned)
+                .map_err(|_| "timestamp 64: seconds overflow i64".to_owned())?;
+            if n >= 1_000_000_000 {
+                return Err(format!("nanoseconds out of range: {n}"));
+            }
+            return Ok((s, n));
+        }
+        if let Ok(payload) = <[u8; 12]>::try_from(data) {
+            let mut n_bytes = [0u8; 4];
+            n_bytes.copy_from_slice(&payload[..4]);
+            let mut s_bytes = [0u8; 8];
+            s_bytes.copy_from_slice(&payload[4..]);
+            let n = u32::from_be_bytes(n_bytes);
+            let s = i64::from_be_bytes(s_bytes);
+            if n >= 1_000_000_000 {
+                return Err(format!("nanoseconds out of range: {n}"));
+            }
+            return Ok((s, n));
+        }
+        Err(format!(
+            "invalid msgpack timestamp ext length: {}",
+            data.len()
+        ))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use pretty_assertions::assert_eq;
+
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+        struct W {
+            #[serde(with = "super")]
+            ts: DateTime<Utc>,
+        }
+
+        fn encode(w: &W) -> Vec<u8> {
+            rmp_serde::to_vec_named(w).expect("encode")
+        }
+
+        fn decode(b: &[u8]) -> W {
+            rmp_serde::from_slice(b).expect("decode")
+        }
+
+        // Wire layout: byte 0 = fixmap(1) marker (0x81), bytes 1-3
+        // = fixstr(2) "ts" key (`0xa2 0x74 0x73`), then the ext
+        // marker starts at byte 4.
+        const EXT_MARKER: usize = 4;
+        const EXT_TYPE: usize = 5;
+
+        #[test]
+        fn timestamp32_round_trip() {
+            // Seconds-only past-epoch value with nanos == 0 —
+            // encoder should pick the 4-byte timestamp 32 variant.
+            let w = W {
+                ts: Utc.timestamp_opt(1_716_000_000, 0).unwrap(),
+            };
+            let b = encode(&w);
+            assert_eq!(b[EXT_MARKER], 0xd6, "expected fixext 4 prefix, got {b:?}");
+            assert_eq!(b[EXT_TYPE], 0xff, "expected ext type -1");
+            assert_eq!(decode(&b), w);
+        }
+
+        #[test]
+        fn timestamp64_round_trip() {
+            // Sub-second precision — forces timestamp 64.
+            let w = W {
+                ts: Utc.timestamp_opt(1_716_000_000, 123_000_000).unwrap(),
+            };
+            let b = encode(&w);
+            assert_eq!(b[EXT_MARKER], 0xd7, "expected fixext 8 prefix, got {b:?}");
+            assert_eq!(b[EXT_TYPE], 0xff, "expected ext type -1");
+            assert_eq!(decode(&b), w);
+        }
+
+        #[test]
+        fn timestamp96_round_trip_pre_epoch() {
+            // Year-1900 forces the timestamp 96 variant (negative
+            // seconds don't fit in the u34 of timestamp 64).
+            let w = W {
+                ts: Utc.with_ymd_and_hms(1900, 1, 1, 0, 0, 0).unwrap(),
+            };
+            let b = encode(&w);
+            // Wire shape: `c7 0c ff ...` = ext 8 (1-byte length
+            // prefix), length=12, tag -1, 12-byte payload. The
+            // length byte sits between the marker and the tag
+            // for this variant only.
+            assert_eq!(b[EXT_MARKER], 0xc7, "expected ext 8 prefix, got {b:?}");
+            assert_eq!(b[EXT_MARKER + 1], 12, "expected length 12");
+            assert_eq!(b[EXT_MARKER + 2], 0xff, "expected ext type -1");
+            assert_eq!(decode(&b), w);
+        }
+
+        #[test]
+        fn decodes_go_emitted_bytes_byte_for_byte() {
+            // These bytes were captured from the `vmihailenco/msgpack/v5`
+            // Go encoder for `time.Date(2024, 1, 15, 10, 30, 45, 123_000_000, time.UTC)`
+            // and represent the canonical timestamp 64 wire shape.
+            // If this decode ever drifts, Rust consumers will silently
+            // ignore live Go-produced envelopes — hence the byte-literal
+            // fixture rather than a generated-at-runtime value.
+            let go_bytes: [u8; 14] = [
+                0x81, 0xa2, 0x74, 0x73, 0xd7, 0xff, 0x1d, 0x53, 0x53, 0x00, 0x65, 0xa5, 0x09, 0x55,
+            ];
+            let decoded = decode(&go_bytes);
+            assert_eq!(
+                decoded.ts,
+                Utc.timestamp_opt(1_705_314_645, 123_000_000).unwrap()
+            );
+        }
+
+        #[test]
+        fn rejects_non_timestamp_ext_tag() {
+            // `d6 02 00000000` = fixext 4 with tag = 2 (application
+            // ext, not timestamp). The decoder must reject it rather
+            // than silently treating it as a 1970 timestamp.
+            let bytes: [u8; 10] = [0x81, 0xa2, 0x74, 0x73, 0xd6, 0x02, 0, 0, 0, 0];
+            let err: Result<W, _> = rmp_serde::from_slice(&bytes);
+            assert!(err.is_err(), "non-timestamp ext tag must be rejected");
+        }
+
+        #[test]
+        fn rejects_invalid_payload_length() {
+            // `c7 05 ff 0000000000` = ext 8 length=5, tag -1, garbage
+            // 5-byte payload. The decoder must reject the unknown
+            // length rather than guessing.
+            let bytes: [u8; 12] = [0x81, 0xa2, 0x74, 0x73, 0xc7, 0x05, 0xff, 0, 0, 0, 0, 0];
+            let err: Result<W, _> = rmp_serde::from_slice(&bytes);
+            assert!(err.is_err(), "invalid ext length must be rejected");
+        }
+
+        #[test]
+        fn nano_precision_round_trip() {
+            let w = W {
+                ts: Utc.timestamp_opt(1_716_000_000, 999_999_999).unwrap(),
+            };
+            assert_eq!(decode(&encode(&w)), w);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -547,30 +846,42 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_unix_epoch_timestamp() {
-        // chrono `DateTime<Utc>` defaults to the Unix epoch; this
-        // is one of the timestamps validate() must reject so a
-        // producer that forgot to set the timestamp does not
-        // poison the time-series writers.
+    fn validate_accepts_unix_epoch_timestamp() {
+        // Aligning Rust validation to Go's `e.Timestamp.IsZero()`:
+        // the Unix epoch is a valid (if unusual) producer timestamp
+        // that Go accepts, so the Rust side must accept it too.
+        // Anything else risks valid Go-produced envelopes failing
+        // Rust-side validation purely because the two sides disagree
+        // on what "zero" means.
         let mut env = sample_envelope();
         env.timestamp = Utc.timestamp_opt(0, 0).unwrap();
-        let err = env.validate().expect_err("unix epoch rejected");
-        assert!(err.to_string().contains("timestamp"));
+        env.validate()
+            .expect("unix epoch is valid per Go semantics");
     }
 
     #[test]
     fn validate_rejects_go_zero_time() {
-        // Go's `time.Time{}` zero value is "year 1 AD" in UTC,
-        // which the `vmihailenco/msgpack/v5` encoder marshals
-        // through `time.Time.UnixMilli()` to ~-6.21e13. A naive
-        // `== 0` check on the chrono side would let this pass;
-        // the strengthened `<= 0` check rejects it.
-        let go_zero_unix_milli: i64 = -62_135_596_800_000; // year 1 AD in ms.
+        // Go's `time.Time{}` zero value is `0001-01-01T00:00:00Z`,
+        // which `vmihailenco/msgpack/v5` encodes as the
+        // `timestamp 96` ext variant with signed-i64 seconds =
+        // -62_135_596_800. This is the exact value Go's
+        // `e.Timestamp.IsZero()` rejects; the Rust side must reject
+        // the same value.
         let mut env = sample_envelope();
-        env.timestamp = chrono::DateTime::<Utc>::from_timestamp_millis(go_zero_unix_milli)
-            .expect("year-1 timestamp in chrono range");
+        env.timestamp = Utc.timestamp_opt(GO_ZERO_TIME_SECS, 0).unwrap();
         let err = env.validate().expect_err("Go zero time rejected");
         assert!(err.to_string().contains("timestamp"));
+    }
+
+    #[test]
+    fn validate_accepts_pre_epoch_timestamp() {
+        // A pre-1970 timestamp is unusual but Go accepts it (only
+        // `time.Time{}` is rejected). The Rust side must match —
+        // otherwise a Go producer that emits a historical timestamp
+        // (rare but legal) trips a Rust-only validation error.
+        let mut env = sample_envelope();
+        env.timestamp = Utc.with_ymd_and_hms(1969, 6, 1, 0, 0, 0).unwrap();
+        env.validate().expect("pre-epoch is valid per Go semantics");
     }
 
     #[test]

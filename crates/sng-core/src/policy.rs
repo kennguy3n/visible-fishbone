@@ -944,4 +944,67 @@ mod tests {
         assert!(matches!(err, VerificationError::BodySchema(_)));
         assert_eq!(err.code(), ErrorCode::WireSchema);
     }
+
+    /// Regression: the Go compiler's `bundlePayload` carries
+    /// rule and steering tables (`r`, `st`) that `sng-core`'s
+    /// `PolicyBundleClaims` intentionally does NOT model — the
+    /// typed enforcement engine in `sng-policy-eval` (PR 4)
+    /// owns those shapes. `rmp-serde`'s named-map decode skips
+    /// keys not present on the target struct by default, so this
+    /// works today; the test pins that behaviour so a future
+    /// `#[serde(deny_unknown_fields)]` slip-up would surface as
+    /// a hard test failure rather than as silent claim-decode
+    /// failures in the field.
+    ///
+    /// Build a body that includes a populated `r` map and a
+    /// populated `st` map (matching what the Go compiler emits
+    /// for a non-trivial graph) and confirm the metadata claims
+    /// still decode byte-stable.
+    #[test]
+    fn claims_decode_ignores_rules_and_steering_fields() {
+        // Take a real signed-bundle body (which already has the
+        // shape `sng-policy-eval` decodes against), surgically
+        // splice in extra `r` and `st` map keys via `rmpv`, then
+        // confirm `PolicyBundleClaims::from_body` still decodes
+        // the metadata cleanly. Building the body via the same
+        // signer the Go side uses pins UUID / DateTime wire shapes
+        // to what `PolicyBundleClaims` actually expects, instead
+        // of hand-coding them (and getting the encoding wrong).
+        let (signing, key_id, _verify) = fixture_keypair();
+        let original = signed_bundle(BundleTarget::Edge, 42, &signing, key_id);
+        let mut map_value: rmpv::Value =
+            rmp_serde::from_slice(&original.body).expect("decode body as Value");
+        let rmpv::Value::Map(ref mut entries) = map_value else {
+            panic!("body must decode as a msgpack map");
+        };
+        // Inject the two fields `sng-core` intentionally ignores
+        // (`r` = rules table, `st` = steering snapshot). The Go
+        // compiler emits both for any non-trivial graph; the
+        // claims decoder must skip them silently.
+        entries.push((
+            rmpv::Value::String("r".into()),
+            rmpv::Value::Map(vec![
+                (
+                    rmpv::Value::String("rule-1".into()),
+                    rmpv::Value::String("inspect".into()),
+                ),
+                (
+                    rmpv::Value::String("rule-2".into()),
+                    rmpv::Value::String("deny".into()),
+                ),
+            ]),
+        ));
+        entries.push((
+            rmpv::Value::String("st".into()),
+            rmpv::Value::Map(vec![(
+                rmpv::Value::String("trusted_direct".into()),
+                rmpv::Value::Integer(1u8.into()),
+            )]),
+        ));
+        let mut augmented = Vec::new();
+        rmpv::encode::write_value(&mut augmented, &map_value).expect("encode augmented body");
+        let claims = PolicyBundleClaims::from_body(&augmented).expect("decode despite r / st keys");
+        assert_eq!(claims.target, BundleTarget::Edge);
+        assert_eq!(claims.graph_version, 42);
+    }
 }

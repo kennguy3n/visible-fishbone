@@ -224,23 +224,44 @@ impl Config {
         }
         figment = figment.merge(Env::prefixed(Self::ENV_PREFIX).split("__"));
         let mut cfg: Self = figment.extract()?;
-        // Normalize whitespace-sensitive fields BEFORE validation
-        // so the stored value matches what `validate()` checks.
-        // `validate()` takes `&self` so it cannot perform the
-        // normalization itself; it would otherwise accept a
-        // padded URL that downstream consumers (sng-comms) would
-        // then feed into the HTTP client as-is. See the
-        // regression tests `load_normalises_control_plane_url`
-        // and `load_strips_trailing_slash_on_control_plane_url`.
-        cfg.control_plane_url = normalise_control_plane_url(&cfg.control_plane_url);
+        // The loader is the canonical place where normalisation +
+        // validation are sequenced; programmatic callers (tests,
+        // hot-reload, etc.) get the same guarantee by calling
+        // [`Config::normalize`] then [`Config::validate`]
+        // themselves, and the validator enforces the post-
+        // condition so a caller that forgets to normalise gets a
+        // clear error rather than a silently malformed URL going
+        // into the HTTP layer.
+        cfg.normalize();
         cfg.validate()?;
         Ok(cfg)
     }
 
-    /// Validate invariants on an already-deserialised config.
-    /// Public so callers that build a config programmatically
-    /// (e.g. tests) can run the same validation as the
-    /// production loader.
+    /// Canonicalise whitespace-sensitive fields on the config.
+    /// `Config::load` calls this automatically; programmatic
+    /// callers that build a [`Config`] from scratch must call it
+    /// themselves before [`Config::validate`] (the validator
+    /// rejects un-normalised values rather than silently letting
+    /// them through, so the API surface is unambiguous about
+    /// which step owns the rewrite vs. the check).
+    ///
+    /// Today's transforms cover the `control_plane_url`; future
+    /// fields can be added here without touching call sites.
+    pub fn normalize(&mut self) {
+        self.control_plane_url = normalise_control_plane_url(&self.control_plane_url);
+    }
+
+    /// Validate invariants on a `Config`.
+    ///
+    /// `Config::load` runs [`Config::normalize`] before this; a
+    /// programmatic caller that bypasses `load` (e.g. test
+    /// fixtures, the future SIGHUP hot-reload path) MUST also
+    /// normalise first — this method takes `&self` so it cannot
+    /// silently mutate the URL on the caller's behalf. The check
+    /// at the bottom of this function rejects un-normalised
+    /// values with a clear `ConfigError::Invalid` so the
+    /// programmer error surfaces immediately, not as a confusing
+    /// 404 from the HTTP layer.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.tenant_id.is_nil() {
             return Err(ConfigError::Missing("tenant_id".into()));
@@ -268,6 +289,19 @@ impl Config {
             return Err(ConfigError::Invalid {
                 field: "control_plane_url".into(),
                 reason: "must start with http:// or https://".into(),
+            });
+        }
+        // Defence-in-depth: refuse to silently accept an
+        // un-normalised URL even though it would still resolve.
+        // Programmatic callers that build a `Config` and call
+        // `validate()` without `normalize()` get a precise
+        // pointer to the missing step instead of a confusing
+        // double-slashed request appearing in `sng-comms` logs.
+        let canonical = normalise_control_plane_url(&self.control_plane_url);
+        if canonical != self.control_plane_url {
+            return Err(ConfigError::Invalid {
+                field: "control_plane_url".into(),
+                reason: "must be normalised (call Config::normalize before validate)".into(),
             });
         }
         if self.resource_budget.max_memory_mb == 0 {
@@ -401,37 +435,41 @@ mod humantime_serde {
 ///
 /// Two transforms today:
 ///   1. trim surrounding whitespace (operator pasted a newline);
-///   2. strip a single trailing `/`. The `sng-comms` HTTP layer
-///      builds request paths with explicit leading slashes
-///      (`format!("{base}/api/v1/tenants/...")`), so a trailing
+///   2. strip *all* trailing `/` characters. The `sng-comms` HTTP
+///      layer builds request paths with explicit leading slashes
+///      (`format!("{base}/api/v1/tenants/...")`), so any trailing
 ///      slash on `base` produces double-slashed URLs that some
-///      proxies normalise and others reject. Strip it here so
-///      the canonical form stored in `Config` is what every
-///      downstream consumer sees.
+///      proxies normalise and others reject. Strip them all here
+///      so a copy-paste mistake like `https://cp.example.com//`
+///      (two slashes) is reduced to the canonical form — the
+///      previous single-slash strip would leave that case with
+///      one remaining slash and produce the very double-slashed
+///      requests this function exists to prevent.
 ///
 /// The function is intentionally NOT exposed: callers must go
-/// through [`Config::load`] / [`Config::validate`] so the
-/// invariants stay enforced in one place.
+/// through [`Config::load`] / [`Config::normalize`] /
+/// [`Config::validate`] so the invariants stay enforced in one
+/// place.
 fn normalise_control_plane_url(raw: &str) -> String {
     let trimmed = raw.trim();
-    // Strip a single trailing slash, but only if there's an
-    // authority component left after the scheme — bare scheme
-    // values like `"https://"` would shrink to `"https:/"`,
-    // which `validate()` would then reject with a confusing
-    // "must start with http:// or https://" error against a
-    // value that visibly does.
-    let Some(without_slash) = trimmed.strip_suffix('/') else {
-        return trimmed.to_owned();
-    };
-    // `without_slash` ends with `:/` iff the original was the
-    // bare scheme `xyz://`. (`":"` alone never appears at the
-    // end of a URL of the shape `scheme://...`.) Preserve the
-    // bare-scheme value as-is so the validation error stays
-    // accurate.
-    if without_slash.ends_with(":/") {
+    // Strip every trailing slash, but only down to the authority
+    // boundary. Bare-scheme values like `"https://"` shrink to
+    // `"https:/"` if naively trimmed, which `validate()` would
+    // then reject with a confusing "must start with http:// or
+    // https://" error against a value that visibly does. Detect
+    // that case by checking whether the trimmed result still
+    // contains an authority component (anything past the
+    // `<scheme>://` prefix).
+    let stripped = trimmed.trim_end_matches('/');
+    // Re-attach `://` if and only if the original was a bare
+    // scheme. `stripped` ends with `:` iff there was nothing
+    // past `scheme://` to keep, in which case we preserve the
+    // user-visible bare-scheme form so the validation error
+    // stays accurate.
+    if stripped.ends_with(':') {
         trimmed.to_owned()
     } else {
-        without_slash.to_owned()
+        stripped.to_owned()
     }
 }
 
@@ -494,16 +532,55 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_url_with_surrounding_whitespace() {
-        // The emptiness check and the structural prefix check
-        // run against the same trimmed value, so a leading
-        // newline or stray space (common when an operator
-        // pastes from a chat / runbook) does not produce the
-        // confusing "must start with http:// or https://"
-        // error against a value that visibly does.
+    fn validate_rejects_un_normalised_url_until_normalize_runs() {
+        // The new API contract: `validate()` rejects un-normalised
+        // URLs so a programmatic caller that forgets to call
+        // `normalize()` gets a precise error pointing at the missing
+        // step, not a confusing 404 from `sng-comms` later. Padding
+        // the URL with whitespace surfaces this: the structural
+        // prefix check still passes (it trims internally), but the
+        // post-condition check at the bottom of `validate()` fails
+        // because the stored value isn't yet canonical.
         let mut c = valid_config();
         c.control_plane_url = "  https://cp.example.com\n".into();
-        c.validate().expect("whitespace-padded URL is accepted");
+        let err = c.validate().expect_err("un-normalised URL rejected");
+        assert!(
+            matches!(&err, ConfigError::Invalid { field, reason } if field == "control_plane_url" && reason.contains("normali"))
+        );
+        // After `normalize()` the same config validates cleanly.
+        c.normalize();
+        assert_eq!(c.control_plane_url, "https://cp.example.com");
+        c.validate().expect("normalised URL is valid");
+    }
+
+    #[test]
+    fn validate_rejects_un_normalised_url_with_trailing_slash() {
+        // Same contract, different failure mode: a stored value
+        // with a trailing slash is what `load()` would strip but
+        // a programmatic caller might not. Confirming the
+        // post-condition fires here too proves the check is on the
+        // canonical form, not on a specific whitespace pattern.
+        let mut c = valid_config();
+        c.control_plane_url = "https://cp.example.com/".into();
+        assert!(matches!(
+            c.validate(),
+            Err(ConfigError::Invalid { field, .. }) if field == "control_plane_url"
+        ));
+    }
+
+    #[test]
+    fn normalize_is_idempotent() {
+        // Calling `normalize()` twice must produce the same value
+        // as calling it once — `validate()` depends on this to
+        // detect un-normalised inputs by comparing against a
+        // single round of normalisation.
+        let mut c = valid_config();
+        c.control_plane_url = "  https://cp.example.com///  ".into();
+        c.normalize();
+        let first = c.control_plane_url.clone();
+        c.normalize();
+        assert_eq!(first, c.control_plane_url);
+        assert_eq!(c.control_plane_url, "https://cp.example.com");
     }
 
     #[test]
@@ -760,6 +837,34 @@ poll_interval = "1s"
         assert_eq!(
             super::normalise_control_plane_url("https://cp.example.com/"),
             "https://cp.example.com",
+        );
+    }
+
+    #[test]
+    fn url_normalisation_strips_multiple_trailing_slashes() {
+        // An operator paste like `https://cp.example.com//` (a
+        // common shape when joining a base URL with a leading
+        // slash in some templating systems) must reduce all the
+        // way to the canonical no-slash form. The previous
+        // single-slash strip left this case with one remaining
+        // slash, which then produced the double-slashed request
+        // the helper exists to prevent. The bare-scheme guard
+        // still applies: `https:////` would otherwise collapse
+        // to `https:` and trip the prefix check with a confusing
+        // error against a value the operator can see is wrong.
+        assert_eq!(
+            super::normalise_control_plane_url("https://cp.example.com//"),
+            "https://cp.example.com",
+        );
+        assert_eq!(
+            super::normalise_control_plane_url("https://cp.example.com////"),
+            "https://cp.example.com",
+        );
+        // Bare scheme with many slashes still preserves the
+        // operator-visible form.
+        assert_eq!(
+            super::normalise_control_plane_url("https:////"),
+            "https:////"
         );
     }
 
