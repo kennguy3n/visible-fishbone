@@ -376,14 +376,14 @@ mod tests {
         let e1 = mk_envelope(1);
         let e2 = mk_envelope(2);
         let e3 = mk_envelope(3);
-        let id1 = e1.event_id;
-        let id2 = e2.event_id;
-        let id3 = e3.event_id;
+        let event_id_1 = e1.event_id;
+        let event_id_2 = e2.event_id;
+        let event_id_3 = e3.event_id;
         assert!(b.push(e1).is_none());
         // e2 pushes us to 2/2 and triggers a flush of [e1, e2].
         let batch = b.push(e2).expect("flushes at limit");
-        let ids: Vec<_> = batch.envelopes.iter().map(|e| e.event_id).collect();
-        assert_eq!(ids, vec![id1, id2]);
+        let collected_ids: Vec<_> = batch.envelopes.iter().map(|e| e.event_id).collect();
+        assert_eq!(collected_ids, vec![event_id_1, event_id_2]);
         // e3 starts a fresh batch.
         assert!(b.push(e3).is_none());
         assert_eq!(b.len(), 1);
@@ -394,7 +394,7 @@ mod tests {
                 .iter()
                 .map(|e| e.event_id)
                 .collect::<Vec<_>>(),
-            vec![id3],
+            vec![event_id_3],
         );
     }
 }
