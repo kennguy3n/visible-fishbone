@@ -90,6 +90,18 @@ jobs:
         run: npm install -g @stoplight/spectral-cli@6.15.0
       - name: spectral lint api/openapi.yaml
         run: spectral lint --ruleset .spectral.yaml api/openapi.yaml
+      # The handler package embeds a byte-identical copy of the
+      # spec via `go:embed openapi.yaml` (see internal/handler/spec.go).
+      # A contributor who edits only `api/openapi.yaml` would ship a
+      # spec drift that the runtime `/api/v1/openapi.yaml` endpoint
+      # returns the stale version of. Guard the invariant in CI
+      # rather than relying on a checklist.
+      - name: assert openapi.yaml is in sync with internal/handler/openapi.yaml
+        run: |
+          if ! diff -q api/openapi.yaml internal/handler/openapi.yaml; then
+            echo "::error::api/openapi.yaml and internal/handler/openapi.yaml have drifted; copy api/openapi.yaml over internal/handler/openapi.yaml and re-commit"
+            exit 1
+          fi
 
   build:
     name: build
