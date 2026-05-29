@@ -124,8 +124,19 @@ mod tests {
     fn next_backoff_within_ceiling() {
         let mut b = ReconnectBackoff::new(Duration::from_millis(100), Duration::from_secs(5), 2);
         for _ in 0..100 {
+            // Capture the ceiling *before* `next_backoff` advances
+            // it. The returned wait is drawn from `[0, OLD_ceiling]`;
+            // asserting against `b.current_ceiling()` after the call
+            // would compare against `OLD * multiplier` (always larger
+            // when `multiplier >= 1`), which is trivially satisfied
+            // and would fail to catch a future regression that
+            // widened the jitter range (e.g. `gen_range(0..=ceiling * 10)`).
+            let pre = b.current_ceiling();
             let wait = b.next_backoff();
-            assert!(wait <= b.current_ceiling());
+            assert!(
+                wait <= pre,
+                "jitter draw {wait:?} exceeded pre-advance ceiling {pre:?}",
+            );
         }
     }
 

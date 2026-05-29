@@ -166,15 +166,83 @@ impl PolicyTrustStore {
     }
 }
 
+/// RFC 7232 entity-tag (`ETag`) value, parsed into a weakness
+/// flag and the opaque tag string with surrounding quotes
+/// stripped. The structured form lets us round-trip both
+/// strong (`"abc"`) and weak (`W/"abc"`) ETags through the
+/// `If-None-Match` header without corrupting the wire syntax
+/// (a previous version of this module used
+/// `s.trim_matches('"')` + `format!("\"{etag}\"")`, which
+/// emitted the malformed `"W/"abc"` for weak ETags).
+///
+/// The Go control plane currently only emits strong ETags (a
+/// double-quoted hex SHA-256 of the body), but this module is
+/// the agent's defensive parser — a future deployment, a
+/// downstream cache, or a reverse proxy could legitimately
+/// rewrite an ETag as weak.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityTag {
+    /// `true` iff the ETag was prefixed with `W/` on the wire.
+    /// Strong ETags imply byte-for-byte identical resources;
+    /// weak ETags only imply semantically equivalent ones.
+    /// `If-None-Match` semantics are identical either way for
+    /// our use (the server uses the ETag for cache validation
+    /// only).
+    pub weak: bool,
+    /// The opaque-tag value, **without** the surrounding
+    /// double-quotes.
+    pub tag: String,
+}
+
+impl EntityTag {
+    /// Parse an `ETag` header value per RFC 7232 §2.3.
+    /// Returns `None` if the value doesn't match the
+    /// `[W/]"opaque-tag"` syntax or if the opaque-tag contains
+    /// embedded double-quotes (which RFC 7232 disallows in
+    /// unescaped form and our server never emits).
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        // RFC 7232 §2.3: entity-tag = [ weak ] opaque-tag;
+        //                 weak = "W/";
+        //                 opaque-tag = DQUOTE *etagc DQUOTE.
+        let (weak, body) = raw
+            .strip_prefix("W/")
+            .map_or((false, raw), |rest| (true, rest));
+        let body = body.strip_prefix('"')?.strip_suffix('"')?;
+        // Embedded `"` would require escaping per the BNF and
+        // our server never emits them — reject defensively so
+        // we never re-emit a malformed `If-None-Match`.
+        if body.contains('"') {
+            return None;
+        }
+        Some(Self {
+            weak,
+            tag: body.to_owned(),
+        })
+    }
+
+    /// Re-emit as the canonical `[W/]"opaque-tag"` wire form,
+    /// suitable for use as an `If-None-Match` header value.
+    #[must_use]
+    pub fn to_header_value(&self) -> String {
+        if self.weak {
+            format!("W/\"{}\"", self.tag)
+        } else {
+            format!("\"{}\"", self.tag)
+        }
+    }
+}
+
 /// Authenticated transport-level headers a successful pull
 /// surfaces alongside the bundle. None of these are trusted for
 /// security-relevant decisions (those go through the signed body),
 /// but they are useful for log decoration and cache control.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseHeaders {
-    /// Server-provided ETag for the bundle bytes (already
-    /// stripped of the surrounding quotes).
-    pub etag: Option<String>,
+    /// Server-provided ETag, parsed into structured form so we
+    /// can correctly round-trip both strong and weak tags
+    /// through `If-None-Match`.
+    pub etag: Option<EntityTag>,
     /// `Last-Modified` value from the response, verbatim.
     pub last_modified: Option<String>,
     /// `X-Sng-Policy-Bundle-Id` parsed as a UUID.
@@ -202,8 +270,8 @@ impl CachedBundle {
     /// against this cached bundle.
     pub fn conditional_request_headers(&self) -> HeaderMap {
         let mut hdrs = HeaderMap::new();
-        if let Some(etag) = self.headers.etag.as_deref() {
-            if let Ok(value) = HeaderValue::from_str(&format!("\"{etag}\"")) {
+        if let Some(etag) = self.headers.etag.as_ref() {
+            if let Ok(value) = HeaderValue::from_str(&etag.to_header_value()) {
                 hdrs.insert(IF_NONE_MATCH, value);
             }
         }
@@ -492,7 +560,7 @@ fn parse_response_headers(headers: &HeaderMap) -> ResponseHeaders {
     let etag = headers
         .get(ETAG)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim_matches('"').to_owned());
+        .and_then(EntityTag::parse);
     let last_modified = headers
         .get(http::header::LAST_MODIFIED)
         .and_then(|v| v.to_str().ok())
@@ -610,6 +678,74 @@ mod tests {
     }
 
     #[test]
+    fn entity_tag_parses_strong_and_weak() {
+        // Strong ETag — quotes stripped, weak=false.
+        let strong = EntityTag::parse("\"abc\"").expect("strong parses");
+        assert!(!strong.weak);
+        assert_eq!(strong.tag, "abc");
+        assert_eq!(strong.to_header_value(), "\"abc\"");
+
+        // Weak ETag — `W/` prefix recognised, weak=true.
+        let weak = EntityTag::parse("W/\"abc\"").expect("weak parses");
+        assert!(weak.weak);
+        assert_eq!(weak.tag, "abc");
+        assert_eq!(
+            weak.to_header_value(),
+            "W/\"abc\"",
+            "weak ETag must round-trip as `W/\"…\"`, not the malformed `\"W/\"abc\"`"
+        );
+
+        // Empty opaque-tag is legal per the BNF.
+        let empty = EntityTag::parse("\"\"").expect("empty parses");
+        assert_eq!(empty.tag, "");
+        assert_eq!(empty.to_header_value(), "\"\"");
+    }
+
+    #[test]
+    fn entity_tag_rejects_malformed() {
+        // Missing quotes.
+        assert!(EntityTag::parse("abc").is_none());
+        // Only leading quote.
+        assert!(EntityTag::parse("\"abc").is_none());
+        // Only trailing quote.
+        assert!(EntityTag::parse("abc\"").is_none());
+        // Weak without quotes.
+        assert!(EntityTag::parse("W/abc").is_none());
+        // Embedded unescaped quote.
+        assert!(EntityTag::parse("\"a\"b\"").is_none());
+        // Empty string.
+        assert!(EntityTag::parse("").is_none());
+    }
+
+    #[test]
+    fn weak_etag_round_trips_through_conditional_request() {
+        // Regression: previously `trim_matches('"')` produced
+        // `W/"abc` for input `W/"abc"`, and the re-wrap then
+        // emitted the malformed `"W/"abc"` as `If-None-Match`.
+        // With the structured `EntityTag`, the round-trip is
+        // exact.
+        let cached = CachedBundle {
+            bundle: PolicyBundle {
+                body: vec![],
+                signature: BundleSignature { bytes: [0; 64] },
+                signing_key_id: PolicySigningKeyId::new("any").expect("id"),
+            },
+            claims: mk_claims(1, BundleTarget::Edge),
+            headers: ResponseHeaders {
+                etag: EntityTag::parse("W/\"abc\""),
+                last_modified: None,
+                bundle_id: None,
+                graph_id: None,
+            },
+        };
+        let hdrs = cached.conditional_request_headers();
+        assert_eq!(
+            hdrs.get(IF_NONE_MATCH).and_then(|v| v.to_str().ok()),
+            Some("W/\"abc\""),
+        );
+    }
+
+    #[test]
     fn pull_200_verifies_and_caches() {
         let (signing, kid, pubk) = mk_keypair();
         let trust_store = Arc::new(PolicyTrustStore::new());
@@ -629,7 +765,14 @@ mod tests {
         match outcome {
             BundlePullOutcome::Updated(cached) => {
                 assert_eq!(cached.claims.graph_version, 7);
-                assert_eq!(cached.headers.etag.as_deref(), Some("abc"));
+                assert_eq!(
+                    cached
+                        .headers
+                        .etag
+                        .as_ref()
+                        .map(|e| (e.weak, e.tag.as_str())),
+                    Some((false, "abc")),
+                );
             }
             BundlePullOutcome::NotModified => panic!("expected Updated"),
         }

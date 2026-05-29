@@ -392,16 +392,23 @@ impl TelemetryClient {
     }
 
     fn encode_batch(batch: &Batch, compression: BatchCompression) -> Result<Bytes, CommsError> {
-        // `to_vec_named` writes MessagePack as named maps
-        // (`{ "v": …, "id": …, … }`) using the `#[serde(rename = "…")]`
-        // short tags defined on `Envelope`. The Go control plane's
-        // `vmihailenco/msgpack/v5` decoder matches struct fields by
-        // those map keys; compact / positional encoding would
-        // decode to misaligned fields (or outright fail) on the
-        // server side. See `crates/sng-core/src/envelope.rs`
-        // ("Use `to_vec_named` …") for the canonical contract.
-        let raw = rmp_serde::to_vec_named(&batch.envelopes)
-            .map_err(|e| CommsError::Encoding(format!("encode telemetry batch: {e}")))?;
+        // The per-envelope MessagePack bytes were captured once
+        // at `BatchBuilder::push` time using `to_vec_named` —
+        // named maps (`{ "v": …, "id": …, … }`) with the
+        // `#[serde(rename = "…")]` short tags the Go control
+        // plane's `vmihailenco/msgpack/v5` decoder expects. We
+        // splice them together under a single array header
+        // here: `array_header(N) ++ envelope_0_bytes ++ …
+        // ++ envelope_N-1_bytes` is byte-for-byte equivalent to
+        // `to_vec_named(&Vec<Envelope>)` but avoids the second
+        // full encode pass (the size-estimate at push time WAS
+        // the encode pass). See `batch.rs::EncodedEnvelope` for
+        // the equivalence proof.
+        let mut raw = Vec::with_capacity(batch.estimated_bytes.saturating_add(8));
+        crate::batch::write_msgpack_array_header(&mut raw, batch.envelopes.len());
+        for item in &batch.envelopes {
+            raw.extend_from_slice(&item.encoded);
+        }
         match compression {
             BatchCompression::None => Ok(Bytes::from(raw)),
             BatchCompression::Zstd { level } => {

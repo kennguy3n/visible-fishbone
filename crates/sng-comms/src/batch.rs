@@ -10,17 +10,75 @@
 //! * the caller explicitly invokes [`force_flush`] (used on
 //!   graceful shutdown).
 //!
-//! The "encoded payload" trigger uses the cached MessagePack
-//! size of each envelope rather than recomputing the framed size
-//! on every push — encoding once at push time both bounds the
-//! work-per-event and lets the flush path skip a re-encode. The
-//! envelopes are kept owned in the batch (not yet encoded) so a
-//! caller that wants to redact / enrich at flush time can do so
-//! without a decode-modify-re-encode cycle.
+//! The "encoded payload" trigger uses the **actual** MessagePack
+//! size of each envelope, not an estimate: we encode each
+//! envelope to bytes once at push time (so the size bound is
+//! exact, not approximate) and cache the bytes alongside the
+//! envelope inside the batch. The egress path then concatenates
+//! the cached per-envelope bytes under a single MessagePack
+//! array header rather than re-encoding the whole batch — the
+//! encode pass at push time *is* the only encode pass.
+//!
+//! Callers that need to redact / enrich an envelope must do so
+//! before calling [`BatchBuilder::push`]; the canonical place
+//! for late enrichment is `TelemetryClient::submit`, which
+//! applies the `EnrichmentContext` before forwarding to the
+//! builder.
 
 use chrono::{DateTime, Utc};
 use sng_core::envelope::Envelope;
 use std::time::Duration;
+
+/// One envelope plus its MessagePack bytes, captured at
+/// [`BatchBuilder::push`] time.
+///
+/// The cached `encoded` bytes are exactly what the production
+/// codec (`rmp_serde::to_vec_named`) produces for a single
+/// envelope. The batch flush path concatenates these bytes under
+/// a MessagePack array header — `array_header(N) ++ encoded[0]
+/// ++ … ++ encoded[N-1]` is byte-for-byte the same as
+/// `rmp_serde::to_vec_named(&[envelope_0, …, envelope_N-1])`.
+#[derive(Debug, Clone)]
+pub struct EncodedEnvelope {
+    /// The structured envelope. Preserved for observability,
+    /// metrics, and tests that want to inspect individual
+    /// fields after a batch flushes.
+    pub envelope: Envelope,
+    /// Per-envelope MessagePack-encoded bytes. Concatenating
+    /// these under a single MessagePack array header is
+    /// equivalent to encoding the whole `Vec<Envelope>` in one
+    /// shot — this is the property that lets us avoid the
+    /// previous double-encode (size estimate at push + full
+    /// re-encode at flush).
+    pub encoded: Vec<u8>,
+}
+
+impl EncodedEnvelope {
+    /// Encode an envelope and pair it with its bytes.
+    ///
+    /// On the (vanishingly rare) failure to encode, we still
+    /// produce a paired entry but with empty bytes; the batch's
+    /// `estimated_bytes` accounts for the resulting 0-byte
+    /// contribution. Callers that want to refuse a bad envelope
+    /// outright should call `rmp_serde::to_vec_named` directly
+    /// and surface the error; this helper is the all-good path.
+    #[must_use]
+    pub fn encode(envelope: Envelope) -> Self {
+        // `to_vec_named` matches `TelemetryClient::encode_batch`
+        // exactly — named maps using `#[serde(rename = "…")]`
+        // short tags. The Go control plane decodes with
+        // `vmihailenco/msgpack/v5`, which expects named maps.
+        let encoded = rmp_serde::to_vec_named(&envelope).unwrap_or_default();
+        Self { envelope, encoded }
+    }
+
+    /// Encoded byte length. Constant-time accessor used by the
+    /// builder's bounds-checking.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        self.encoded.len()
+    }
+}
 
 /// Reason a batch flushed. Surfaced for observability dashboards.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -70,11 +128,16 @@ impl Default for BatchConfig {
 /// batch.
 #[derive(Debug)]
 pub struct Batch {
-    /// Envelopes in oldest-to-newest order.
-    pub envelopes: Vec<Envelope>,
-    /// Estimated MessagePack size (sum of per-envelope sizes
-    /// observed at push time). Surfaced so the egress path can
-    /// pick a compression strategy without re-encoding.
+    /// Envelopes in oldest-to-newest order, paired with their
+    /// MessagePack-encoded bytes. The egress path concatenates
+    /// the encoded bytes under a single array header rather
+    /// than re-encoding the structured envelopes.
+    pub envelopes: Vec<EncodedEnvelope>,
+    /// Exact MessagePack size of the per-envelope payloads,
+    /// summed at push time. Does **not** include the array
+    /// header (≤5 bytes) the egress codec writes around the
+    /// payloads. Surfaced so the egress path can pick a
+    /// compression strategy without re-walking the envelopes.
     pub estimated_bytes: usize,
     /// Wall-clock timestamp the *first* envelope was pushed
     /// into this batch. Used to compute end-to-end latency
@@ -96,7 +159,7 @@ pub struct Batch {
 #[derive(Debug)]
 pub struct BatchBuilder {
     config: BatchConfig,
-    pending: Vec<Envelope>,
+    pending: Vec<EncodedEnvelope>,
     estimated_bytes: usize,
     started_at: Option<DateTime<Utc>>,
 }
@@ -157,7 +220,12 @@ impl BatchBuilder {
     /// envelope stays as the next pending batch and is flushed
     /// on the next `push` / `poll_timer` / `force_flush`.
     pub fn push(&mut self, envelope: Envelope) -> Option<Batch> {
-        let envelope_size = estimated_msgpack_size(&envelope);
+        // Encode once at push time so both the bounds check and
+        // the eventual flush use the same exact byte length —
+        // this is the singular MessagePack encode pass for the
+        // life of this envelope.
+        let encoded = EncodedEnvelope::encode(envelope);
+        let envelope_size = encoded.encoded_len();
 
         // Pre-push: if the current pending state already crosses
         // a bound, OR adding this envelope would, flush the
@@ -177,10 +245,10 @@ impl BatchBuilder {
         };
 
         if self.started_at.is_none() {
-            self.started_at = Some(envelope.timestamp);
+            self.started_at = Some(encoded.envelope.timestamp);
         }
         self.estimated_bytes = self.estimated_bytes.saturating_add(envelope_size);
-        self.pending.push(envelope);
+        self.pending.push(encoded);
 
         // Contract: `push` returns at most one batch. If the
         // pre-push already produced a batch, return it and leave
@@ -291,29 +359,35 @@ fn initial_capacity(max_events: usize) -> usize {
     max_events.clamp(1, 1024)
 }
 
-/// Estimate the MessagePack-encoded size of an envelope without
-/// allocating an encoded buffer. We use the actual
-/// `rmp_serde::encoded_len` helper rather than guessing — it
-/// walks the value once and tracks per-field framing exactly.
-/// On the rare cases where it fails (e.g. a deeply nested
-/// recursive type with a counter overflow), we fall back to a
-/// conservative upper bound of 4 KiB so the batch still has a
-/// monotonically advancing size signal.
-fn estimated_msgpack_size(envelope: &Envelope) -> usize {
-    // `rmp_serde` doesn't expose an `encoded_len` helper, but
-    // encoding to a `Vec<u8>` is the canonical sizing path and
-    // is what the egress codec will do at flush time anyway.
-    // To keep the per-event cost predictable, we cap the
-    // worst-case "this envelope is unencodable" path with a
-    // conservative bound; in practice every envelope shape that
-    // ships in this workspace encodes successfully.
-    // Use `to_vec_named` to match the production codec in
-    // `TelemetryClient::encode_batch`. The Go control plane
-    // expects MessagePack named maps (matching `vmihailenco/msgpack/v5`),
-    // and the named encoding is larger than the compact form;
-    // using compact here would undercount and let batches grow
-    // past `max_bytes` before tripping the flush threshold.
-    rmp_serde::to_vec_named(envelope).map_or(4 * 1024, |v| v.len())
+/// Write a MessagePack array-header (1-, 3-, or 5-byte form
+/// depending on `len`) to `out`. This is the same framing
+/// `rmp_serde::to_vec_named` would emit at the start of a
+/// `Vec<T>` encoding, so concatenating the cached per-envelope
+/// bytes after this header is byte-for-byte equivalent to
+/// re-encoding the whole `Vec<Envelope>`.
+pub(crate) fn write_msgpack_array_header(out: &mut Vec<u8>, len: usize) {
+    // <https://github.com/msgpack/msgpack/blob/master/spec.md#array-format-family>
+    // fixarray: 0x90 ..= 0x9F (length 0..=15)
+    // array16:  0xDC + u16 big-endian (length 16..=65535)
+    // array32:  0xDD + u32 big-endian (length ≥ 65536)
+    if let Ok(l) = u8::try_from(len) {
+        if l <= 0xF {
+            out.push(0x90 | l);
+            return;
+        }
+    }
+    if let Ok(l) = u16::try_from(len) {
+        out.push(0xDC);
+        out.extend_from_slice(&l.to_be_bytes());
+        return;
+    }
+    // `len` necessarily fits in u32 here on 64-bit targets only
+    // up to 4 G envelopes — beyond which we saturate to u32::MAX
+    // (a >4 G envelope batch would have crashed on RAM long
+    // before reaching this branch).
+    let l = u32::try_from(len).unwrap_or(u32::MAX);
+    out.push(0xDD);
+    out.extend_from_slice(&l.to_be_bytes());
 }
 
 #[cfg(test)]
@@ -342,6 +416,32 @@ mod tests {
             bytes_in: 0,
             bytes_out: 0,
             payload,
+        }
+    }
+
+    /// The crucial equivalence: `array_header(N) ++ encoded[0]
+    /// ++ … ++ encoded[N-1]` must be byte-for-byte the same as
+    /// `rmp_serde::to_vec_named(&Vec<Envelope>)`. This is what
+    /// lets the egress path avoid the second encode pass.
+    /// Exercised across the 1-byte / 3-byte / 5-byte array
+    /// header boundaries (fixarray ≤15, array16 ≤65535,
+    /// array32 ≥65536) so a future change to the framing helper
+    /// can't silently corrupt the wire format.
+    #[test]
+    fn array_header_plus_per_envelope_bytes_match_rmp_serde_named_vec() {
+        for n in [0usize, 1, 2, 15, 16, 32, 257] {
+            let envelopes: Vec<Envelope> = (0..n).map(|i| mk_envelope(i as i64)).collect();
+
+            let direct = rmp_serde::to_vec_named(&envelopes).expect("direct encode");
+
+            let mut spliced = Vec::with_capacity(direct.len());
+            write_msgpack_array_header(&mut spliced, n);
+            for env in &envelopes {
+                spliced
+                    .extend_from_slice(&rmp_serde::to_vec_named(env).expect("per-envelope encode"));
+            }
+
+            assert_eq!(spliced, direct, "splice equivalence broke for N={n}",);
         }
     }
 
@@ -477,7 +577,11 @@ mod tests {
             .expect("oversized push must flush the accumulated pre-push batch");
         // Pre-push batch must carry BOTH small envelopes — the
         // bug was that it was overwritten with a fresh [big] batch.
-        let ids: Vec<_> = batch.envelopes.iter().map(|e| e.event_id).collect();
+        let ids: Vec<_> = batch
+            .envelopes
+            .iter()
+            .map(|e| e.envelope.event_id)
+            .collect();
         assert_eq!(
             ids,
             vec![id_small_1, id_small_2],
@@ -490,7 +594,11 @@ mod tests {
         let leftover = b
             .force_flush()
             .expect("force_flush drains the oversized envelope");
-        let leftover_ids: Vec<_> = leftover.envelopes.iter().map(|e| e.event_id).collect();
+        let leftover_ids: Vec<_> = leftover
+            .envelopes
+            .iter()
+            .map(|e| e.envelope.event_id)
+            .collect();
         assert_eq!(leftover_ids, vec![id_big]);
         assert_eq!(leftover.reason, BatchFlushReason::Forced);
     }
@@ -514,13 +622,13 @@ mod tests {
         // First push: post-push fires because max_events == 1.
         let first = b.push(e1).expect("max_events=1 flushes immediately");
         assert_eq!(first.envelopes.len(), 1);
-        assert_eq!(first.envelopes[0].event_id, id_1);
+        assert_eq!(first.envelopes[0].envelope.event_id, id_1);
         assert_eq!(first.reason, BatchFlushReason::EventsLimit);
         // Second push into a now-empty builder: pre-push does NOT
         // fire (pending is empty), post-push fires (max_events == 1).
         let second = b.push(e2).expect("second push also flushes");
         assert_eq!(second.envelopes.len(), 1);
-        assert_eq!(second.envelopes[0].event_id, id_2);
+        assert_eq!(second.envelopes[0].envelope.event_id, id_2);
         assert_eq!(second.reason, BatchFlushReason::EventsLimit);
     }
 
@@ -540,7 +648,11 @@ mod tests {
         assert!(b.push(e1).is_none());
         // e2 pushes us to 2/2 and triggers a flush of [e1, e2].
         let batch = b.push(e2).expect("flushes at limit");
-        let collected_ids: Vec<_> = batch.envelopes.iter().map(|e| e.event_id).collect();
+        let collected_ids: Vec<_> = batch
+            .envelopes
+            .iter()
+            .map(|e| e.envelope.event_id)
+            .collect();
         assert_eq!(collected_ids, vec![event_id_1, event_id_2]);
         // e3 starts a fresh batch.
         assert!(b.push(e3).is_none());
@@ -550,7 +662,7 @@ mod tests {
             leftover
                 .envelopes
                 .iter()
-                .map(|e| e.event_id)
+                .map(|e| e.envelope.event_id)
                 .collect::<Vec<_>>(),
             vec![event_id_3],
         );
