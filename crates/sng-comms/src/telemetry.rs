@@ -169,8 +169,9 @@ pub struct TelemetryClient {
     builder: Mutex<BatchBuilder>,
     /// Serializes the `encode → next_seq → spool.push` critical
     /// section inside [`Self::seal_batch`]. Without this lock,
-    /// two concurrent [`Self::submit`] calls that each trigger a
-    /// seal could interleave such that thread A allocates
+    /// two concurrent seal paths (any combination of
+    /// [`Self::submit`], [`Self::tick`], and [`Self::force_seal`])
+    /// could interleave such that thread A allocates
     /// `next_seq() = N` and thread B allocates `next_seq() = N+1`,
     /// but B reaches `spool.push(entry_N+1)` before A reaches
     /// `spool.push(entry_N)`. The spool would then contain
@@ -179,14 +180,22 @@ pub struct TelemetryClient {
     /// `N+1`, and the subsequent `N` ack would be rejected as a
     /// sequence regression by the [`SequenceTracker`].
     ///
-    /// Holding the lock through the encoding pass as well
-    /// preserves the per-event submit order across the wire: the
-    /// batch sealed first is the batch encoded first is the
-    /// batch pushed first. The encode is cheap relative to the
-    /// HTTP/2 round-trip and only runs once per seal trigger
-    /// (every `max_events` / `max_bytes` boundary or
-    /// `flush_interval` tick) rather than per envelope, so
-    /// serialising it does not measurably affect throughput.
+    /// The lock guarantees **spool-order monotonicity in
+    /// sequence-number space** — the protocol-relevant invariant.
+    /// It does NOT guarantee chronological ordering of the
+    /// producer-side event timestamps between concurrently-sealing
+    /// batches: if [`Self::tick`] decides to drain older events
+    /// while [`Self::submit`] is mid-flight pushing a newer event,
+    /// the newer event's batch can briefly win the race for the
+    /// builder lock and end up with a lower seq than the older
+    /// batch the tick path goes on to allocate. That micro-reorder
+    /// is recoverable at the consumer because ClickHouse re-sorts
+    /// by `Envelope.timestamp`, and at the wire because the
+    /// per-batch seq is what `SequenceTracker` enforces — the
+    /// stronger invariant ("first sealed = first pushed") would
+    /// require holding the seal_lock across the builder lock too,
+    /// which would force every non-sealing submit through the seal
+    /// lock for a non-protocol property.
     ///
     /// `parking_lot::Mutex` is used here instead of
     /// `tokio::sync::Mutex` because the critical section is
