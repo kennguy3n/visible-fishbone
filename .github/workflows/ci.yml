@@ -251,8 +251,21 @@ jobs:
         # from the actual number of `.up.sql` files under
         # `migrations/` so new migrations do not require this step
         # to be edited.
+        #
+        # `set -euo pipefail` makes the find-failure surface as a
+        # job failure instead of a silent `N=`; the explicit
+        # `N <= 0` guard then asserts the count is positive — the
+        # CLI rejects `down 0` and the migrate step above would
+        # also have already failed if there were no migrations,
+        # so this is a defence-in-depth assertion rather than a
+        # workaround.
         run: |
-          N=$(find migrations -maxdepth 1 -name "*.up.sql" | wc -l)
+          set -euo pipefail
+          N=$(find migrations -maxdepth 1 -name "*.up.sql" -type f | wc -l)
+          if [ "$N" -le 0 ]; then
+            echo "::error::no migrations found under migrations/ — refusing to invoke 'sng-migrate down 0'"
+            exit 1
+          fi
           echo "rolling back $N migrations"
           bin/sng-migrate down "$N"
       - name: migrate up (re-apply)
