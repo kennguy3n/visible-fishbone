@@ -124,7 +124,7 @@ func (h *AppRegistryHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/app-registry/overrides", h.createOverride)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/app-registry/overrides", h.listOverrides)
 	MountTenantScoped(mux, "DELETE /api/v1/tenants/{tenant_id}/app-registry/overrides/{id}", h.deleteOverride)
-	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/app-registry/stats", h.stats_handler)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/app-registry/stats", h.statsHandler)
 
 	// Admin — global catalog management. No path tenant binding;
 	// the router's auth chain handles authentication.
@@ -186,11 +186,11 @@ type AppRegistryResponse struct {
 
 // OverrideRequest is the JSON body for tenant override creation.
 type OverrideRequest struct {
-	AppID                string    `json:"app_id,omitempty"`
-	CustomDomains        []string  `json:"custom_domains,omitempty"`
-	TrafficClassOverride string    `json:"traffic_class_override"`
-	Reason               string    `json:"reason,omitempty"`
-	ExpiresAt            *string   `json:"expires_at,omitempty"` // RFC3339
+	AppID                string   `json:"app_id,omitempty"`
+	CustomDomains        []string `json:"custom_domains,omitempty"`
+	TrafficClassOverride string   `json:"traffic_class_override"`
+	Reason               string   `json:"reason,omitempty"`
+	ExpiresAt            *string  `json:"expires_at,omitempty"` // RFC3339
 }
 
 // OverrideResponse is the JSON projection of repository.AppRegistryOverride.
@@ -410,7 +410,7 @@ func (h *AppRegistryHandler) deleteOverride(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *AppRegistryHandler) stats_handler(w http.ResponseWriter, r *http.Request) {
+func (h *AppRegistryHandler) statsHandler(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := PathUUID(w, r, "tenant_id")
 	if !ok {
 		return

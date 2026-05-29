@@ -537,7 +537,7 @@ ORDER BY events DESC
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: query traffic_class: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []TrafficClassCount
 	for rows.Next() {
 		var row TrafficClassCount

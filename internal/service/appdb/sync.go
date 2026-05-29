@@ -396,9 +396,9 @@ func hostFromURL(u string) string {
 }
 
 func snippet(b []byte) string {
-	const max = 200
-	if len(b) > max {
-		return string(b[:max]) + "…"
+	const maxLen = 200
+	if len(b) > maxLen {
+		return string(b[:maxLen]) + "…"
 	}
 	return string(b)
 }

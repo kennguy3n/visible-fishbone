@@ -29,6 +29,7 @@ paths:
   /tenants:
     post:
       tags: [tenants]
+      operationId: createTenant
       summary: Create a tenant
       requestBody:
         required: true
@@ -42,6 +43,7 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
     get:
       tags: [tenants]
+      operationId: listTenants
       summary: List tenants
       parameters:
         - $ref: "#/components/parameters/After"
@@ -62,12 +64,14 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     get:
       tags: [tenants]
+      operationId: getTenant
       summary: Get tenant by id
       responses:
         "200": { $ref: "#/components/responses/Tenant" }
         "404": { $ref: "#/components/responses/Error" }
     patch:
       tags: [tenants]
+      operationId: updateTenant
       summary: Update tenant
       requestBody:
         required: true
@@ -79,6 +83,7 @@ paths:
         "200": { $ref: "#/components/responses/Tenant" }
     delete:
       tags: [tenants]
+      operationId: deleteTenant
       summary: Soft-delete tenant
       responses:
         "204": { description: deleted }
@@ -86,6 +91,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     post:
       tags: [tenants]
+      operationId: suspendTenant
       summary: Suspend tenant
       responses:
         "200": { $ref: "#/components/responses/Tenant" }
@@ -93,6 +99,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     get:
       tags: [sites]
+      operationId: listSites
       summary: List sites
       responses:
         "200":
@@ -108,6 +115,7 @@ paths:
                   next_cursor: { type: string }
     post:
       tags: [sites]
+      operationId: createSite
       summary: Create site
       requestBody:
         required: true
@@ -122,11 +130,13 @@ paths:
       - $ref: "#/components/parameters/ResourceID"
     get:
       tags: [sites]
+      operationId: getSite
       summary: Get site
       responses:
         "200": { $ref: "#/components/responses/Site" }
     patch:
       tags: [sites]
+      operationId: updateSite
       summary: Update site
       requestBody:
         required: true
@@ -137,6 +147,7 @@ paths:
         "200": { $ref: "#/components/responses/Site" }
     delete:
       tags: [sites]
+      operationId: deleteSite
       summary: Delete site
       responses:
         "204": { description: deleted }
@@ -144,6 +155,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     post:
       tags: [devices]
+      operationId: createClaimToken
       summary: Generate a single-use claim token for device enrolment
       requestBody:
         content:
@@ -162,6 +174,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     post:
       tags: [devices]
+      operationId: enrollDevice
       summary: Redeem claim token and enrol a device
       requestBody:
         required: true
@@ -175,6 +188,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     get:
       tags: [devices]
+      operationId: listDevices
       summary: List enrolled devices
       parameters:
         - in: query
@@ -206,6 +220,7 @@ paths:
       - $ref: "#/components/parameters/ResourceID"
     get:
       tags: [devices]
+      operationId: getDevice
       summary: Get device by id
       responses:
         "200": { $ref: "#/components/responses/Device" }
@@ -213,6 +228,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     get:
       tags: [rbac]
+      operationId: listRoles
       summary: List roles
       responses:
         "200":
@@ -227,6 +243,7 @@ paths:
                     items: { $ref: "#/components/schemas/Role" }
     post:
       tags: [rbac]
+      operationId: createRole
       summary: Create custom role
       requestBody:
         required: true
@@ -248,6 +265,7 @@ paths:
         schema: { type: string, format: uuid }
     post:
       tags: [rbac]
+      operationId: assignUserRole
       summary: Assign role to user
       requestBody:
         required: true
@@ -269,6 +287,7 @@ paths:
         schema: { type: string, format: uuid }
     delete:
       tags: [rbac]
+      operationId: revokeUserRole
       summary: Revoke role
       responses:
         "204": { description: revoked }
@@ -276,6 +295,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     get:
       tags: [policy]
+      operationId: getPolicyGraph
       summary: Get latest policy graph
       responses:
         "200":
@@ -285,6 +305,7 @@ paths:
               schema: { $ref: "#/components/schemas/PolicyGraph" }
     put:
       tags: [policy]
+      operationId: updatePolicyGraph
       summary: Publish a new policy graph version
       requestBody:
         required: true
@@ -301,6 +322,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     post:
       tags: [policy]
+      operationId: compilePolicyBundles
       summary: Compile the latest graph into signed bundles
       responses:
         "202":
@@ -319,6 +341,7 @@ paths:
           enum: [edge, endpoint, cloud, mobile]
     get:
       tags: [policy]
+      operationId: getPolicyBundleMetadata
       summary: Fetch latest signed bundle for a target
       responses:
         "200":
@@ -337,6 +360,7 @@ paths:
           enum: [edge, endpoint, cloud, mobile]
     get:
       tags: [policy]
+      operationId: getPolicyBundlePayload
       summary: Download the raw signed bundle payload (agent-pull)
       description: |
         Returns the MessagePack-encoded bundle bytes for agent
@@ -374,6 +398,7 @@ paths:
           description: bundle unchanged (ETag matched If-None-Match)
     head:
       tags: [policy]
+      operationId: headPolicyBundlePayload
       summary: Probe latest bundle ETag without transferring bytes
       responses:
         "200":
@@ -382,6 +407,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     get:
       tags: [policy]
+      operationId: listPolicySigningKeys
       summary: List the tenant's signing-key rotation history
       responses:
         "200":
@@ -398,6 +424,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     post:
       tags: [policy]
+      operationId: rotatePolicySigningKey
       summary: Provision an initial key, or rotate the current active key
       responses:
         "200":
@@ -419,6 +446,7 @@ paths:
         schema: { type: string }
     post:
       tags: [policy]
+      operationId: revokePolicySigningKey
       summary: Revoke a signing key
       responses:
         "200":
@@ -435,6 +463,7 @@ paths:
         schema: { type: string, description: "key_id or the literal 'active'" }
     get:
       tags: [policy]
+      operationId: getPolicySigningKeyPublic
       summary: Publish a signing key's public half for bundle verification
       description: |
         Returns the public half of the signing key that produced a
@@ -459,6 +488,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     get:
       tags: [audit]
+      operationId: listAuditLog
       summary: List audit entries (append-only)
       parameters:
         - in: query
@@ -494,6 +524,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     post:
       tags: [webhooks]
+      operationId: createWebhook
       summary: Register an outbound webhook endpoint
       requestBody:
         required: true
@@ -508,6 +539,7 @@ paths:
               schema: { $ref: "#/components/schemas/WebhookEndpoint" }
     get:
       tags: [webhooks]
+      operationId: listWebhooks
       summary: List webhook endpoints
       responses:
         "200":
@@ -526,6 +558,7 @@ paths:
       - $ref: "#/components/parameters/ResourceID"
     delete:
       tags: [webhooks]
+      operationId: deleteWebhook
       summary: Unregister webhook
       responses:
         "204": { description: removed }
@@ -533,6 +566,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     post:
       tags: [api-keys]
+      operationId: createApiKey
       summary: Mint a tenant API key
       description: |
         Creates a new tenant-scoped API key. The plaintext secret is
@@ -564,6 +598,7 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
     get:
       tags: [api-keys]
+      operationId: listApiKeys
       summary: List tenant API keys
       responses:
         "200":
@@ -582,6 +617,7 @@ paths:
       - $ref: "#/components/parameters/ResourceID"
     get:
       tags: [api-keys]
+      operationId: getApiKey
       summary: Get tenant API key metadata
       responses:
         "200":
@@ -591,6 +627,7 @@ paths:
               schema: { $ref: "#/components/schemas/APIKey" }
     delete:
       tags: [api-keys]
+      operationId: deleteApiKey
       summary: Revoke tenant API key
       responses:
         "204": { description: revoked }
@@ -599,6 +636,7 @@ paths:
       - $ref: "#/components/parameters/TenantPathID"
     get:
       tags: [app-registry]
+      operationId: listTenantAppRegistry
       summary: List effective app classifications (global + tenant overrides)
       responses:
         "200":
@@ -616,6 +654,7 @@ paths:
       - $ref: "#/components/parameters/TenantPathID"
     get:
       tags: [app-registry]
+      operationId: listTenantAppRegistryOverrides
       summary: List tenant app-classification overrides
       responses:
         "200":
@@ -631,6 +670,7 @@ paths:
                   next_cursor: { type: string }
     post:
       tags: [app-registry]
+      operationId: createTenantAppRegistryOverride
       summary: Create a tenant override (promote / demote an app or custom domain)
       requestBody:
         required: true
@@ -649,6 +689,7 @@ paths:
       - $ref: "#/components/parameters/ResourceID"
     delete:
       tags: [app-registry]
+      operationId: deleteTenantAppRegistryOverride
       summary: Remove a tenant override
       responses:
         "204": { description: removed }
@@ -657,6 +698,7 @@ paths:
       - $ref: "#/components/parameters/TenantPathID"
     get:
       tags: [app-registry]
+      operationId: getTenantAppRegistryStats
       summary: Per-class traffic distribution from telemetry
       description: |
         Returns the per-class event / byte distribution over a
@@ -698,6 +740,7 @@ paths:
   /admin/app-registry:
     get:
       tags: [admin, app-registry]
+      operationId: adminListAppRegistry
       summary: List global app catalog entries
       responses:
         "200":
@@ -713,6 +756,7 @@ paths:
                   next_cursor: { type: string }
     post:
       tags: [admin, app-registry]
+      operationId: adminCreateAppRegistry
       summary: Create a global app entry
       requestBody:
         required: true
@@ -730,6 +774,7 @@ paths:
       - $ref: "#/components/parameters/ResourceID"
     put:
       tags: [admin, app-registry]
+      operationId: adminUpdateAppRegistry
       summary: Update a global app entry
       requestBody:
         required: true
@@ -744,12 +789,14 @@ paths:
               schema: { $ref: "#/components/schemas/AppRegistry" }
     delete:
       tags: [admin, app-registry]
+      operationId: adminDeleteAppRegistry
       summary: Delete a global app entry
       responses:
         "204": { description: deleted }
   /admin/app-registry/sync:
     post:
       tags: [admin, app-registry]
+      operationId: adminSyncAppRegistry
       summary: Trigger vendor-endpoint sync (Microsoft / Google / AWS / generic)
       responses:
         "200":
@@ -898,7 +945,7 @@ components:
       required: [id, token, expires_at]
       properties:
         id: { type: string, format: uuid }
-        token: { type: string, description: plaintext, shown once }
+        token: { type: string, description: "plaintext, shown once" }
         expires_at: { type: string, format: date-time }
     DeviceEnrollRequest:
       type: object

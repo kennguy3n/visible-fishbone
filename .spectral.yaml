@@ -1,0 +1,46 @@
+# Spectral ruleset for the ShieldNet Gateway control plane API.
+#
+# Base ruleset: the upstream OpenAPI ("oas") ruleset, which covers
+# OpenAPI 3.0 + 3.1 structural correctness, naming, and reference
+# integrity. Project-specific overrides live below and exist to:
+#
+#   * Tighten path / operation conventions for our REST surface.
+#   * Allow patterns that are conventional for control-plane APIs
+#     (multi-tenant path segments, snake_case query params) where
+#     the default ruleset is opinionated in a different direction.
+#
+# Run locally with:
+#
+#   spectral lint --ruleset .spectral.yaml api/openapi.yaml
+
+extends:
+  - ["spectral:oas", all]
+
+rules:
+  # The OpenAPI metadata block is curated separately and the
+  # description lives in the README. Treat absent `info.contact`
+  # / `info.license` fields as informational rather than hard
+  # errors so the API doc passes lint without a duplicate
+  # contact/license block.
+  info-contact: warn
+  info-license: warn
+  license-url: off
+
+  # Multi-tenant paths legitimately contain `{tenant_id}` segments;
+  # the default `path-keys-no-trailing-slash` and `path-not-include-query`
+  # rules already enforce sane segments. Treat operation-tag
+  # cardinality as advisory rather than mandatory so a single
+  # operation can carry both `tenants` and `policy` tags where
+  # both contexts are relevant.
+  operation-tag-defined: warn
+
+  # The default rule asks for an `operationId` on every operation.
+  # Keep it as an error: every endpoint in api/openapi.yaml should
+  # carry a stable `operationId` for generated clients.
+  operation-operationId: error
+  operation-operationId-unique: error
+
+  # `oas3-unused-component` flags schemas/parameters defined but
+  # not referenced. Useful, but kept as a warning so a refactor
+  # in flight does not block lint.
+  oas3-unused-component: warn

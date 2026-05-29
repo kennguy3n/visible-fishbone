@@ -1,16 +1,31 @@
-# GitHub Actions CI for the SNG control plane.
+# GitHub Actions CI for the ShieldNet Gateway (SNG) control plane.
 #
 # Pipeline shape mirrors the Makefile targets so a `make all` run
-# locally exercises the same gates that CI does. The "fast" jobs
-# (lint, build, unit) are split out from the "slow" jobs
-# (integration, testcontainers) so a PR sees lint/build/unit
-# feedback in roughly one minute even when the full integration
-# suite takes longer.
+# locally exercises the same gates that CI does. Jobs are organised
+# into two tiers:
 #
-# Concurrency: cancel-in-progress is enabled per ref so a force-push
-# to a feature branch supersedes any in-flight CI for that branch.
-# main is excluded so a merge does not get cancelled by a follow-up
-# merge.
+#   * Fast PR gate (runs on every PR + push):
+#       lint, unit, tidy, openapi-lint
+#     These complete in roughly one minute on a warm cache and are
+#     the gates a contributor has to clear before review.
+#
+#   * Full suite (PR + push, slower):
+#       integration (testcontainers), build (artifact upload)
+#     These run on PRs as well so a regression caught in
+#     integration tests blocks the merge, but they sit behind the
+#     fast jobs so a typo doesn't burn 5 minutes of integration
+#     spin-up before the lint failure surfaces.
+#
+#   * Main-only suite (push to main + manual dispatch):
+#       migration-dry-run
+#     Migration runs against a real postgres service container,
+#     applying every up + down migration to verify the embedded
+#     SQL files actually round-trip.
+#
+# Concurrency: cancel-in-progress is enabled per ref so a
+# force-push to a feature branch supersedes any in-flight CI for
+# that branch. main is excluded so a merge does not get cancelled
+# by a follow-up merge.
 
 name: ci
 
@@ -19,6 +34,7 @@ on:
     branches: ["**"]
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -59,6 +75,21 @@ jobs:
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
           args: --timeout 5m --build-tags=integration
+
+  openapi-lint:
+    name: openapi lint (spectral)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install spectral
+        run: npm install -g @stoplight/spectral-cli@6.15.0
+      - name: spectral lint api/openapi.yaml
+        run: spectral lint --ruleset .spectral.yaml api/openapi.yaml
 
   build:
     name: build
@@ -146,3 +177,85 @@ jobs:
             echo "::error::go.mod / go.sum are not tidy. Run 'go mod tidy' locally and commit the result."
             exit 1
           }
+
+  migration-dry-run:
+    name: migration dry-run (postgres)
+    # Migration round-trip is gated to pushes to main (and manual
+    # dispatch). The fast PR gate above already runs `go build`
+    # against the migrate command and the unit/integration suites
+    # exercise the embedded SQL through the `internal/migrate`
+    # runner. This job is the belt-and-braces check that every
+    # migration applies cleanly and rolls back cleanly against a
+    # real Postgres 16, which is the same image dev + prod ship.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sng
+          POSTGRES_PASSWORD: sng
+          POSTGRES_DB: sng
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sng -d sng"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # sng-migrate consumes the same PG_* env vars as the main
+      # control-plane binary. Setting them here lets `make
+      # migrate-{up,down,status}` work without a .env file.
+      PG_HOST: 127.0.0.1
+      PG_PORT: "5432"
+      PG_USER: sng
+      PG_PASSWORD: sng
+      PG_DATABASE: sng
+      PG_SSLMODE: disable
+      # PG_APP_ROLE must be a non-empty value the migrate command
+      # accepts; the role does not need to exist in the dry-run
+      # database because migrations themselves create it where
+      # required.
+      PG_APP_ROLE: sng_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: install postgres client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+      - name: provision sng_app runtime role
+        # `migrations/002_role_bootstrap.up.sql` refuses to run if
+        # `sng_app` does not already exist (role lifecycle is an
+        # operator concern, not a schema concern — see docs/deploy.md).
+        # Create it here as the postgres superuser, then grant it to
+        # `sng` so the migration runner can SET SESSION ROLE later.
+        env:
+          PGPASSWORD: sng
+        run: |
+          psql -h 127.0.0.1 -U sng -d sng -v ON_ERROR_STOP=1 -c \
+            "CREATE ROLE sng_app NOLOGIN; GRANT sng_app TO sng;"
+      - name: build sng-migrate
+        run: make build-migrate
+      - name: migrate up
+        run: bin/sng-migrate up
+      - name: migrate status (after up)
+        run: bin/sng-migrate status
+      - name: migrate down (full round-trip)
+        # Roll back every applied migration. Step count is derived
+        # from the actual number of `.up.sql` files under
+        # `migrations/` so new migrations do not require this step
+        # to be edited.
+        run: |
+          N=$(find migrations -maxdepth 1 -name "*.up.sql" | wc -l)
+          echo "rolling back $N migrations"
+          bin/sng-migrate down "$N"
+      - name: migrate up (re-apply)
+        run: bin/sng-migrate up
+      - name: migrate status (final)
+        run: bin/sng-migrate status

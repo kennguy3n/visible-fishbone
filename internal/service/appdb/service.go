@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -216,7 +215,7 @@ func (s *Service) ListOverrides(ctx context.Context, tenantID uuid.UUID, page re
 type EffectiveApp struct {
 	App               repository.AppRegistry  `json:"app"`
 	EffectiveClass    repository.TrafficClass `json:"effective_class"`
-	Source            string                  `json:"source"`            // "global" | "override"
+	Source            string                  `json:"source"` // "global" | "override"
 	OverrideID        *uuid.UUID              `json:"override_id,omitempty"`
 	OverrideExpiresAt *time.Time              `json:"override_expires_at,omitempty"`
 	OverrideReason    string                  `json:"override_reason,omitempty"`
@@ -366,8 +365,8 @@ func (s *Service) ResolveTrafficClass(ctx context.Context, tenantID uuid.UUID, d
 	// wins) so a literal `outlook.office365.com` beats
 	// `*.office365.com` when both exist.
 	type hit struct {
-		class    repository.TrafficClass
-		score    int
+		class     repository.TrafficClass
+		score     int
 		isLiteral bool
 	}
 	var best *hit
@@ -803,15 +802,4 @@ func (s *Service) audited(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 			"error", err,
 		)
 	}
-}
-
-// netipMust is a small helper used by callers (tests, seed code)
-// that already validated their CIDRs upstream and want a
-// parse-or-die path.
-func netipMust(s string) netip.Prefix {
-	p, err := netip.ParsePrefix(s)
-	if err != nil {
-		panic(fmt.Sprintf("appdb: invalid prefix %q: %v", s, err))
-	}
-	return p
 }
