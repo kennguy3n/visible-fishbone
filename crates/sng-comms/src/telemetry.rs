@@ -254,7 +254,13 @@ impl TelemetryClient {
     }
 
     fn seal_batch(&self, batch: &Batch) {
-        let seq = self.tracker.next_seq();
+        // Encode first, then allocate the sequence number. If
+        // encoding fails the batch is dropped without burning a
+        // sequence — the tracker only sees monotonic sequences
+        // that actually correspond to bytes pushed onto the
+        // spool. (`SequenceTracker` tolerates gaps, but
+        // gap-free emission keeps the wire trace easier to
+        // reason about against the control plane's logs.)
         let encoded = match Self::encode_batch(batch, self.config.compression) {
             Ok(body) => body,
             Err(e) => {
@@ -262,6 +268,7 @@ impl TelemetryClient {
                 return;
             }
         };
+        let seq = self.tracker.next_seq();
         let entry = EncodedBatch {
             seq,
             body: encoded,
@@ -313,14 +320,15 @@ impl TelemetryClient {
             Ok(r) => r,
             Err(e) => {
                 // Connection-level failure — re-queue the batch
-                // at the head of the spool by pushing it back.
-                // We accept that this momentarily inverts the
-                // FIFO order against any concurrently-submitted
-                // envelopes that may have landed during the
-                // round trip; for telemetry this is acceptable
-                // because the server already deduplicates on
-                // (stream, seq).
-                self.spool.push(entry);
+                // at the *front* of the spool so it keeps its
+                // FIFO position relative to any envelopes that
+                // were concurrently submitted during the round
+                // trip. If the spool is at capacity the
+                // newest-pushed entry is evicted to make room;
+                // this preserves the strict ordering guarantee
+                // for re-spooled batches that the
+                // SequenceTracker assumes when it accepts acks.
+                self.spool.push_front(entry);
                 return Err(e);
             }
         };
@@ -332,9 +340,10 @@ impl TelemetryClient {
                 Ok(FlushOutcome::Acked { seq: ack.seq })
             }
             class if class.is_retryable() => {
-                // Transient — re-spool and let the caller
-                // decide whether to reconnect.
-                self.spool.push(entry);
+                // Transient — re-spool at the front so the
+                // batch retries before any newer ones, then let
+                // the caller decide whether to reconnect.
+                self.spool.push_front(entry);
                 Ok(FlushOutcome::Transient { class })
             }
             class => {
@@ -355,7 +364,15 @@ impl TelemetryClient {
     }
 
     fn encode_batch(batch: &Batch, compression: BatchCompression) -> Result<Bytes, CommsError> {
-        let raw = rmp_serde::to_vec(&batch.envelopes)
+        // `to_vec_named` writes MessagePack as named maps
+        // (`{ "v": …, "id": …, … }`) using the `#[serde(rename = "…")]`
+        // short tags defined on `Envelope`. The Go control plane's
+        // `vmihailenco/msgpack/v5` decoder matches struct fields by
+        // those map keys; compact / positional encoding would
+        // decode to misaligned fields (or outright fail) on the
+        // server side. See `crates/sng-core/src/envelope.rs`
+        // ("Use `to_vec_named` …") for the canonical contract.
+        let raw = rmp_serde::to_vec_named(&batch.envelopes)
             .map_err(|e| CommsError::Encoding(format!("encode telemetry batch: {e}")))?;
         match compression {
             BatchCompression::None => Ok(Bytes::from(raw)),

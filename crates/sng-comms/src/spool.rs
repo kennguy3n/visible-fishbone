@@ -121,6 +121,37 @@ impl<T> BoundedSpool<T> {
         popped
     }
 
+    /// Push an item back onto the *front* of the spool, preserving
+    /// FIFO ordering for re-spooled batches (e.g. after a transient
+    /// flush failure). If the spool is at capacity, the **newest**
+    /// item at the back is evicted to make room — the opposite of
+    /// [`push`], because the caller is asserting that the item they
+    /// are re-spooling is the oldest live batch and must keep its
+    /// position. If capacity is zero the item is dropped (and an
+    /// eviction is counted) for symmetry with [`push`].
+    pub fn push_front(&self, item: T) -> PushOutcome {
+        self.pushed.fetch_add(1, Ordering::Relaxed);
+        if self.capacity == 0 {
+            self.evicted.fetch_add(1, Ordering::Relaxed);
+            return PushOutcome::AcceptedWithEviction;
+        }
+        let mut guard = self.inner.lock();
+        let mut evicted = false;
+        while guard.len() >= self.capacity {
+            // The re-spooled item is the *oldest*, so to make
+            // room we evict from the back (the newest items).
+            let _ = guard.pop_back();
+            evicted = true;
+        }
+        guard.push_front(item);
+        if evicted {
+            self.evicted.fetch_add(1, Ordering::Relaxed);
+            PushOutcome::AcceptedWithEviction
+        } else {
+            PushOutcome::Accepted
+        }
+    }
+
     /// Drain up to `max` items into a fresh `Vec`. The caller
     /// can pass `usize::MAX` to drain everything; a bounded
     /// drain is the canonical "flush one batch" call. Returns
@@ -217,6 +248,31 @@ mod tests {
         assert_eq!(stats.evicted, 1);
         assert_eq!(stats.drained, 2);
         assert_eq!(stats.len, 0);
+    }
+
+    #[test]
+    fn push_front_preserves_fifo_on_respool() {
+        let spool: BoundedSpool<u32> = BoundedSpool::new(4);
+        spool.push(2);
+        spool.push(3);
+        // Caller pops 1 off, fails to flush it, and re-spools.
+        spool.push_front(1);
+        let drained = spool.drain(usize::MAX);
+        assert_eq!(drained, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn push_front_at_capacity_evicts_newest() {
+        let spool: BoundedSpool<u32> = BoundedSpool::new(2);
+        spool.push(2);
+        spool.push(3);
+        // At capacity. `push_front(1)` must evict the newest
+        // (3 at the back), not the oldest, so the re-spooled
+        // batch retains its leading position.
+        let outcome = spool.push_front(1);
+        assert_eq!(outcome, PushOutcome::AcceptedWithEviction);
+        let drained = spool.drain(usize::MAX);
+        assert_eq!(drained, vec![1, 2]);
     }
 
     #[test]

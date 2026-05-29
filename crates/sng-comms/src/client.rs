@@ -27,10 +27,9 @@ use crate::error::{CommsError, ResponseClass};
 use bytes::Bytes;
 use http::{HeaderMap, Request, StatusCode};
 use rustls::pki_types::ServerName;
-use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, lookup_host};
 use tokio_rustls::TlsConnector;
 use tracing::{debug, warn};
 
@@ -181,9 +180,13 @@ impl ControlPlaneClient {
         // resolution; an explicit happy-eyeballs / multi-family
         // dialer can live in `sng-edge` / `sng-agent` later if
         // operators ask for it.
-        let addr = self
-            .addr
-            .to_socket_addrs()
+        //
+        // `tokio::net::lookup_host` performs the resolution on the
+        // runtime's blocking-pool thread so the calling task isn't
+        // pinned while the resolver waits. `std::net::ToSocketAddrs`
+        // would block the current worker thread.
+        let addr = lookup_host(self.addr.as_str())
+            .await
             .map_err(|e| CommsError::Connect(format!("resolve {}: {e}", self.addr)))?
             .next()
             .ok_or_else(|| CommsError::Connect(format!("no address for {}", self.addr)))?;
@@ -270,10 +273,13 @@ impl ControlPlaneClient {
 
         // Spawn the connection driver. It owns the read/write
         // halves of the TLS socket and pumps frames until the
-        // peer closes. Dropping the JoinHandle does NOT abort
-        // the task — we hold it inside the connection so the
-        // driver lives exactly as long as the SendRequest is
-        // useful.
+        // peer closes. Dropping a `JoinHandle` on its own does
+        // NOT abort the task; we stash the handle inside the
+        // connection and abort it explicitly in
+        // `ControlPlaneConnection::drop` so the socket is torn
+        // down deterministically when the caller drops the
+        // connection (e.g. on a reconnect after `flush_one`
+        // returns a connection error).
         let driver = tokio::spawn(async move {
             if let Err(e) = connection.await {
                 warn!(error = %e, "h2 connection closed");
@@ -282,7 +288,7 @@ impl ControlPlaneClient {
         Ok(ControlPlaneConnection {
             send: send_request,
             authority,
-            _driver: driver,
+            driver,
         })
     }
 
@@ -298,8 +304,8 @@ impl ControlPlaneClient {
 /// request gets its own clone) plus the spawned driver task.
 ///
 /// Drop semantics: dropping the connection aborts the driver
-/// task, which in turn closes the TCP socket. The control plane
-/// will see this as a clean GOAWAY-free FIN.
+/// task (see `Drop` impl), which in turn closes the TCP socket.
+/// The control plane will see this as a clean GOAWAY-free FIN.
 #[derive(Debug)]
 pub struct ControlPlaneConnection {
     /// `h2::client::SendRequest` is internally `Arc<Mutex<…>>`;
@@ -313,10 +319,24 @@ pub struct ControlPlaneConnection {
     /// reference rather than re-resolving the SNI / dial-addr
     /// for every request.
     authority: String,
-    /// The connection driver. Dropped together with the
-    /// connection — the JoinHandle drop aborts the task, which
-    /// closes the socket.
-    _driver: tokio::task::JoinHandle<()>,
+    /// The connection driver. Aborted in `Drop` so the socket
+    /// is closed deterministically when the connection is
+    /// dropped — `JoinHandle::drop` alone only detaches the
+    /// task, leaving the driver to run until the underlying h2
+    /// connection closes on its own.
+    driver: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ControlPlaneConnection {
+    fn drop(&mut self) {
+        // Abort the driver task so the TLS socket is torn down
+        // synchronously with the connection drop, matching the
+        // doc-comment contract above. The driver is otherwise
+        // detached from the JoinHandle and would linger until
+        // the peer signalled connection close, which delays
+        // socket-fd reclamation past the caller's reconnect.
+        self.driver.abort();
+    }
 }
 
 /// Wire-shape of a response — status + headers + collected body.

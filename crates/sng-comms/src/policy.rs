@@ -491,7 +491,13 @@ mod tests {
     use chrono::Utc;
     use ed25519_dalek::{Signer as _, SigningKey};
     use http::{HeaderValue, StatusCode};
-    use rmp_serde::to_vec as msgpack_encode;
+    // Match the production wire shape: the Go control plane signs
+    // bodies serialised with named MessagePack maps (matching
+    // `rmp_serde::to_vec_named`). Compact / positional encoding
+    // would still verify locally because the test signs the same
+    // bytes it produces, but wouldn't exercise the deserialiser
+    // path the agent runs against real bundles.
+    use rmp_serde::to_vec_named as msgpack_encode;
     use sng_core::ids::PolicyGraphId;
     use sng_core::policy::VerificationError;
 

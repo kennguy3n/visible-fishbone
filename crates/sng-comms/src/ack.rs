@@ -69,6 +69,13 @@ pub struct SequenceTracker {
 struct Inner {
     /// Next sequence to emit.
     next: u64,
+    /// Whether `next_seq` has been called at least once on this
+    /// tracker. Required to distinguish "agent has emitted seq 0
+    /// and the server is acking it" (legitimate when start_seq=0)
+    /// from "agent has emitted nothing and the server is spuriously
+    /// acking seq 0" (regression — the server must not ack a
+    /// sequence the agent never sent, even the all-zeros one).
+    emitted_any: bool,
     /// Highest sequence the server has durably acked.
     acked_high_water: Option<u64>,
 }
@@ -87,6 +94,7 @@ impl SequenceTracker {
             stream: stream.into(),
             inner: Mutex::new(Inner {
                 next: start_seq,
+                emitted_any: false,
                 acked_high_water: None,
             }),
         }
@@ -105,6 +113,7 @@ impl SequenceTracker {
         let mut guard = self.inner.lock();
         let seq = guard.next;
         guard.next = guard.next.saturating_add(1);
+        guard.emitted_any = true;
         seq
     }
 
@@ -132,10 +141,21 @@ impl SequenceTracker {
     /// closed.
     pub fn record_ack(&self, observed: u64) -> Result<Option<u64>, SequenceRegression> {
         let mut guard = self.inner.lock();
-        // Highest sequence the agent has *emitted* is `next - 1`;
-        // if `next == start_seq`, no sequences have been emitted
-        // and any non-zero ack is ahead of the agent.
+        // If nothing has been emitted yet, the server cannot
+        // legitimately ack any sequence — including 0, which is a
+        // valid sequence number when `start_seq == 0`. Reject up
+        // front so a server bug or a replay against a freshly
+        // constructed tracker can't quietly install a high-water
+        // mark.
         let highest_emitted = guard.next.saturating_sub(1);
+        if !guard.emitted_any {
+            return Err(SequenceRegression {
+                stream: self.stream.clone(),
+                highest_emitted,
+                observed,
+                kind: RegressionKind::AhedOfEmitted,
+            });
+        }
         if observed > highest_emitted {
             return Err(SequenceRegression {
                 stream: self.stream.clone(),
@@ -198,6 +218,35 @@ mod tests {
         assert_eq!(err.kind, RegressionKind::AhedOfEmitted);
         assert_eq!(err.highest_emitted, 0);
         assert_eq!(err.observed, 7);
+    }
+
+    #[test]
+    fn spurious_ack_before_any_emit_is_rejected() {
+        // Server acks seq 0 (or any seq) before the agent has
+        // emitted anything. The previous implementation silently
+        // accepted ack(0) here because `highest_emitted` underflows
+        // to 0 and `0 > 0` is false. With the emitted_any guard,
+        // the tracker now rejects unconditionally.
+        let t = SequenceTracker::new("telemetry", 1);
+        let err = t.record_ack(0).expect_err("ack before emit must regress");
+        assert_eq!(err.kind, RegressionKind::AhedOfEmitted);
+        assert_eq!(err.observed, 0);
+        // Same defence with start_seq=0 — the server cannot ack
+        // sequence 0 until the agent has actually emitted it.
+        let t0 = SequenceTracker::new("telemetry", 0);
+        let err0 = t0.record_ack(0).expect_err("ack before emit must regress");
+        assert_eq!(err0.kind, RegressionKind::AhedOfEmitted);
+    }
+
+    #[test]
+    fn ack_zero_after_emit_is_accepted() {
+        // After the agent emits seq 0 (start_seq=0), an ack of 0 is
+        // legitimate and must be recorded as the high-water mark.
+        let t = SequenceTracker::new("telemetry", 0);
+        assert_eq!(t.next_seq(), 0);
+        let prev = t.record_ack(0).expect("ack of emitted seq 0");
+        assert_eq!(prev, None);
+        assert_eq!(t.high_water(), Some(0));
     }
 
     #[test]

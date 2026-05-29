@@ -275,7 +275,13 @@ fn estimated_msgpack_size(envelope: &Envelope) -> usize {
     // worst-case "this envelope is unencodable" path with a
     // conservative bound; in practice every envelope shape that
     // ships in this workspace encodes successfully.
-    rmp_serde::to_vec(envelope).map_or(4 * 1024, |v| v.len())
+    // Use `to_vec_named` to match the production codec in
+    // `TelemetryClient::encode_batch`. The Go control plane
+    // expects MessagePack named maps (matching `vmihailenco/msgpack/v5`),
+    // and the named encoding is larger than the compact form;
+    // using compact here would undercount and let batches grow
+    // past `max_bytes` before tripping the flush threshold.
+    rmp_serde::to_vec_named(envelope).map_or(4 * 1024, |v| v.len())
 }
 
 #[cfg(test)]

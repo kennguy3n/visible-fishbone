@@ -236,7 +236,12 @@ async fn policy_pull_200_then_304() {
         default_action: "deny".into(),
         compiled_at: chrono::Utc::now(),
     };
-    let body_bytes = rmp_serde::to_vec(&claims).expect("encode claims");
+    // `to_vec_named` matches the Go control plane's wire shape —
+    // see `crates/sng-comms/src/telemetry.rs::encode_batch` for
+    // the canonical contract. Encoding-asymmetric bugs would
+    // otherwise pass this test because the fixture signs the same
+    // bytes it verifies.
+    let body_bytes = rmp_serde::to_vec_named(&claims).expect("encode claims");
     let sig = signing.sign(&body_bytes);
     let sig_b64 =
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, sig.to_bytes());
