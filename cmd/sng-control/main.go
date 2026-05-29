@@ -23,7 +23,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
@@ -172,7 +171,11 @@ func run() error {
 	// distributions. When ClickHouse is not configured, chWriter
 	// is nil and the handler keeps returning 503 on /stats.
 	if chWriter != nil {
-		appRegHandler.SetStats(clickhouseStatsAdapter{w: chWriter})
+		// chwriter.Writer.QueryTrafficClassDistribution now
+		// returns []stats.TrafficClassCount, which matches the
+		// handler.TelemetryClassQuerier contract directly — no
+		// adapter shim required.
+		appRegHandler.SetStats(chWriter)
 	}
 	// Wrap startTelemetry's shutdown in a sync.Once so the bounded
 	// explicit call (with shutdownCtx) wins and the safety-net
@@ -557,36 +560,6 @@ func startTelemetry(
 		return firstErr
 	}
 	return shutdown, chWriter, nil
-}
-
-// clickhouseStatsAdapter bridges chwriter.Writer (which returns
-// []chwriter.TrafficClassCount) to handler.TelemetryClassQuerier
-// (which expects []handler.TrafficClassStat). The two payload
-// types are structurally identical but live in separate packages
-// so the handler does not import the clickhouse subpackage. The
-// adapter is the seam that keeps that boundary clean.
-type clickhouseStatsAdapter struct {
-	w *chwriter.Writer
-}
-
-func (a clickhouseStatsAdapter) QueryTrafficClassDistribution(
-	ctx context.Context,
-	tenantID uuid.UUID,
-	since time.Time,
-) ([]handler.TrafficClassStat, error) {
-	rows, err := a.w.QueryTrafficClassDistribution(ctx, tenantID, since)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]handler.TrafficClassStat, len(rows))
-	for i, r := range rows {
-		out[i] = handler.TrafficClassStat{
-			Class:  r.Class,
-			Events: r.Events,
-			Bytes:  r.Bytes,
-		}
-	}
-	return out, nil
 }
 
 // loadAWSConfig resolves an AWS config for the cold-path writer.

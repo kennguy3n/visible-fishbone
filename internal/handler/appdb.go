@@ -29,24 +29,26 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
+	"github.com/kennguy3n/visible-fishbone/internal/service/telemetry/stats"
 )
 
 // TelemetryClassQuerier is the read-side dependency for the
 // /app-registry/stats endpoint. The production wiring passes the
 // ClickHouse writer; tests can pass a stub.
+//
+// The return type lives in
+// [internal/service/telemetry/stats] so the handler and the
+// ClickHouse writer share a single canonical row type without
+// either package depending on the other — see that package's
+// docs for the layering rationale.
 type TelemetryClassQuerier interface {
-	QueryTrafficClassDistribution(ctx context.Context, tenantID uuid.UUID, since time.Time) ([]TrafficClassStat, error)
+	QueryTrafficClassDistribution(ctx context.Context, tenantID uuid.UUID, since time.Time) ([]stats.TrafficClassCount, error)
 }
 
-// TrafficClassStat mirrors clickhouse.TrafficClassCount but lives
-// in the handler package so the handler does not import the
-// clickhouse package directly (keeps the handler dependency tree
-// flat).
-type TrafficClassStat struct {
-	Class  string `json:"class"`
-	Events uint64 `json:"events"`
-	Bytes  uint64 `json:"bytes"`
-}
+// TrafficClassStat is a backwards-compatible type alias for
+// callers that previously named the row type via this package.
+// New code should reference [stats.TrafficClassCount] directly.
+type TrafficClassStat = stats.TrafficClassCount
 
 // AppRegistrySyncer is the write-side dependency for the
 // `POST /admin/app-registry/sync` endpoint. The production wiring

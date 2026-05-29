@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,18 +38,19 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/nats/schema"
+	"github.com/kennguy3n/visible-fishbone/internal/service/telemetry/stats"
 )
 
 // identifierPattern is the strict subset of ClickHouse unquoted
 // identifier syntax we accept for Database and Table names: an
 // ASCII letter or underscore followed by ASCII letters, digits,
 // or underscores. ClickHouse itself allows broader identifiers
-// behind backticks, but we never quote in our generated DDL/DML,
-// so accepting only the unquoted-safe pattern is what closes the
-// SQL-injection surface that a malicious or fat-fingered
-// operator-supplied Config.Table value would otherwise open via
-// the fmt.Sprintf-based query construction in EnsureSchema /
-// insertSQL / Stats.
+// behind backticks (which the table accessor on Writer uses
+// uniformly via quoteIdentifier), but we also gate the value at
+// the validate() step so that even a Writer literal whose Config
+// was not run through validate (e.g. constructed in a test or by
+// a future caller that bypassed New) cannot inject metacharacters
+// via the quoted-identifier path.
 var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func validateIdentifier(role, value string) error {
@@ -57,6 +59,24 @@ func validateIdentifier(role, value string) error {
 			role, value, identifierPattern.String())
 	}
 	return nil
+}
+
+// quoteIdentifier wraps an already-validated ClickHouse
+// identifier in backticks and escapes any embedded backticks by
+// doubling them — ClickHouse's documented quoted-identifier
+// syntax. The function is the only call site that inserts a
+// caller-controlled identifier into generated SQL; all DDL/DML
+// builders inside this package route through it.
+//
+// In practice, validateIdentifier upstream rejects any string
+// containing a backtick (the regex permits only
+// [A-Za-z_][A-Za-z0-9_]*), so the escape branch is dead code
+// against the production validate() path. It is kept as
+// defense-in-depth: if a future change broadens the validator
+// to accept e.g. dot-separated database.table paths, the escape
+// remains correct.
+func quoteIdentifier(name string) string {
+	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
 }
 
 // DefaultTable is the table name the writer targets when Config.Table
@@ -125,19 +145,29 @@ func (c *Config) fillDefaults() {
 
 // validate runs the structural checks that fillDefaults cannot:
 // it rejects identifier values that would, if interpolated into
-// a CREATE TABLE / INSERT / SELECT statement via fmt.Sprintf,
-// either produce malformed SQL or — worse — allow operator-
-// controlled metacharacters (semicolons, quotes, comments) to
-// escape their column position. The Auth.Database field is also
-// validated even though it is passed to the driver as a struct
-// field rather than being sprintf'd: keeping both identifiers
-// under the same rule means a Database value cannot, for example,
-// embed a newline that would surprise the driver's auth handshake.
+// a CREATE TABLE / INSERT / SELECT statement, either produce
+// malformed SQL or — worse — allow operator-controlled
+// metacharacters (semicolons, quotes, comments) to escape their
+// column position. The Auth.Database field is also validated
+// even though it is passed to the driver as a struct field
+// rather than being interpolated: keeping both identifiers under
+// the same rule means a Database value cannot, for example,
+// embed a newline that would surprise the driver's auth
+// handshake.
 func (c *Config) validate() error {
 	if err := validateIdentifier("Config.Database", c.Database); err != nil {
 		return err
 	}
 	return validateIdentifier("Config.Table", c.Table)
+}
+
+// Validate is the exported entry point for callers that build a
+// Config literal outside New() and want the same structural
+// guarantees applied. New() calls validate internally so callers
+// going through the constructor do not need to call Validate
+// separately.
+func (c *Config) Validate() error {
+	return c.validate()
 }
 
 // Writer is the ClickHouse-backed HotWriter implementation.
@@ -155,6 +185,17 @@ type Writer struct {
 	flushSignal chan struct{}
 
 	insertSQL string
+
+	// validated is set to true at the end of New() once the
+	// embedded cfg has passed validate(). The accessor method
+	// qualifiedTable() consults this flag and re-runs validation
+	// on every call when it is unset — so a future caller that
+	// constructs a Writer literal (bypassing New) still hits the
+	// identifier check at the use site rather than relying solely
+	// on the constructor path. The flag is set-once at
+	// construction and never mutated after, so no mutex is
+	// required for the read.
+	validated bool
 
 	// Counters guarded by mu; reads happen via Stats which also
 	// takes the mutex. Keeping these as plain ints under the mu
@@ -213,11 +254,12 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Writer, error) 
 	}
 
 	w := &Writer{
-		conn:    conn,
-		cfg:     cfg,
-		logger:  logger,
-		pending: make([]schema.Envelope, 0, cfg.BatchSize),
-		done:    make(chan struct{}),
+		conn:      conn,
+		cfg:       cfg,
+		logger:    logger,
+		pending:   make([]schema.Envelope, 0, cfg.BatchSize),
+		done:      make(chan struct{}),
+		validated: true,
 		// Use explicit column names so the prepared batch's
 		// positional Append cannot be silently mis-aligned by a
 		// later ALTER TABLE that appends a column at the end of
@@ -231,11 +273,28 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Writer, error) 
 				"(event_id, tenant_id, device_id, site_id, timestamp, "+
 				"event_class, platform, schema_version, traffic_class, "+
 				"bytes_in, bytes_out, payload)",
-			cfg.Table,
+			quoteIdentifier(cfg.Table),
 		),
 	}
 	w.start()
 	return w, nil
+}
+
+// qualifiedTable returns the writer's table name wrapped in
+// ClickHouse identifier-quoting backticks. The accessor re-runs
+// validate on every call when the Writer was not constructed via
+// New(), so a future caller that builds a Writer{} literal still
+// gets the same identifier-injection guard the constructor
+// applies. When the Writer was built through New() (the only
+// supported construction path), validated is set and we skip the
+// redundant re-validation.
+func (w *Writer) qualifiedTable() (string, error) {
+	if !w.validated {
+		if err := validateIdentifier("Config.Table", w.cfg.Table); err != nil {
+			return "", err
+		}
+	}
+	return quoteIdentifier(w.cfg.Table), nil
 }
 
 // EnsureSchema creates the telemetry table if it does not exist
@@ -253,6 +312,10 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Writer, error) 
 // the table is rebuilt. Fresh deployments get the optimal sort
 // key from the CREATE TABLE statement above.
 func (w *Writer) EnsureSchema(ctx context.Context) error {
+	table, err := w.qualifiedTable()
+	if err != nil {
+		return fmt.Errorf("clickhouse: ensure schema: %w", err)
+	}
 	createDDL := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
     event_id        UUID,
@@ -271,7 +334,7 @@ CREATE TABLE IF NOT EXISTS %s (
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(timestamp)
 ORDER BY (tenant_id, event_class, traffic_class, timestamp, event_id)
-SETTINGS index_granularity = 8192`, w.cfg.Table)
+SETTINGS index_granularity = 8192`, table)
 	if err := w.conn.Exec(ctx, createDDL); err != nil {
 		return fmt.Errorf("clickhouse: ensure schema: %w", err)
 	}
@@ -291,15 +354,15 @@ SETTINGS index_granularity = 8192`, w.cfg.Table)
 	for _, alter := range []string{
 		fmt.Sprintf(
 			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS traffic_class LowCardinality(String) DEFAULT 'inspect_full' AFTER schema_version",
-			w.cfg.Table,
+			table,
 		),
 		fmt.Sprintf(
 			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS bytes_in UInt64 DEFAULT 0 AFTER traffic_class",
-			w.cfg.Table,
+			table,
 		),
 		fmt.Sprintf(
 			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS bytes_out UInt64 DEFAULT 0 AFTER bytes_in",
-			w.cfg.Table,
+			table,
 		),
 	} {
 		if err := w.conn.Exec(ctx, alter); err != nil {
@@ -528,20 +591,13 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 	return nil
 }
 
-// TrafficClassCount is one row of the per-class flow distribution.
-// Used by the operator UI to render the cost-attribution chart.
-type TrafficClassCount struct {
-	// Class is the traffic_class label
-	// (trusted_direct | trusted_media_bypass | inspect_lite |
-	// inspect_full | tunnel_private | block).
-	Class string `json:"class"`
-	// Events is the total number of telemetry events recorded for
-	// the class in the window.
-	Events uint64 `json:"events"`
-	// Bytes is the sum of bytes_in + bytes_out across flow events
-	// for the class. Zero when the window contained no FlowEvents.
-	Bytes uint64 `json:"bytes"`
-}
+// TrafficClassCount is a type alias kept for backwards
+// compatibility with callers that named the result type via this
+// package. The canonical definition lives in
+// [internal/service/telemetry/stats] so the handler package can
+// share the same row type without importing the ClickHouse
+// driver — see the package doc on stats for the rationale.
+type TrafficClassCount = stats.TrafficClassCount
 
 // QueryTrafficClassDistribution returns the per-class event /
 // byte distribution for the tenant in the given window. Bytes
@@ -549,7 +605,11 @@ type TrafficClassCount struct {
 // columns (zero for non-flow event classes), so the result is
 // a true per-class byte total rather than an event-counter-only
 // approximation.
-func (w *Writer) QueryTrafficClassDistribution(ctx context.Context, tenantID uuid.UUID, since time.Time) ([]TrafficClassCount, error) {
+func (w *Writer) QueryTrafficClassDistribution(ctx context.Context, tenantID uuid.UUID, since time.Time) ([]stats.TrafficClassCount, error) {
+	table, err := w.qualifiedTable()
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: query traffic_class: %w", err)
+	}
 	// SUM over the dedicated bytes_in / bytes_out columns. The
 	// previous implementation tried to JSONExtractUInt the values
 	// out of the `payload` column, which holds raw MessagePack
@@ -560,9 +620,10 @@ func (w *Writer) QueryTrafficClassDistribution(ctx context.Context, tenantID uui
 	// totals are now a column-level aggregate the planner can
 	// run as a streaming SUM.
 	//
-	// Uses w.cfg.Table rather than DefaultTable so operators who
-	// override the table name in Config get their custom table
-	// queried (writes already use w.cfg.Table via insertSQL).
+	// Uses w.cfg.Table (via qualifiedTable) rather than
+	// DefaultTable so operators who override the table name in
+	// Config get their custom table queried (writes already use
+	// the same path via insertSQL).
 	q := fmt.Sprintf(`
 SELECT
     traffic_class AS class,
@@ -573,15 +634,15 @@ WHERE tenant_id = $1
   AND timestamp >= $2
 GROUP BY traffic_class
 ORDER BY events DESC
-`, w.cfg.Table)
+`, table)
 	rows, err := w.conn.Query(ctx, q, tenantID, since.UTC())
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: query traffic_class: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var out []TrafficClassCount
+	var out []stats.TrafficClassCount
 	for rows.Next() {
-		var row TrafficClassCount
+		var row stats.TrafficClassCount
 		if err := rows.Scan(&row.Class, &row.Events, &row.Bytes); err != nil {
 			return nil, fmt.Errorf("clickhouse: scan traffic_class: %w", err)
 		}

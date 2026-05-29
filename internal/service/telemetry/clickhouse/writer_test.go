@@ -154,3 +154,68 @@ func TestConfig_Validate(t *testing.T) {
 		}
 	}
 }
+
+// TestQuoteIdentifier exercises the quoting helper directly. The
+// production validate() path rejects any caller-supplied
+// identifier with a backtick, so the escape branch is dead code
+// against today's validator — but the helper still must produce
+// correctly-quoted output if a future validator broadens the
+// accepted character set (e.g. to accept dot-separated db.table
+// paths). Pin the behaviour explicitly here so a regression in
+// either direction is loud.
+func TestQuoteIdentifier(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ in, out string }{
+		{"sng_telemetry", "`sng_telemetry`"},
+		{"my_db", "`my_db`"},
+		// backtick escape: doubled inside quotes
+		{"weird`name", "`weird``name`"},
+		{"`leading", "```leading`"},
+		{"", "``"},
+	}
+	for _, c := range cases {
+		got := quoteIdentifier(c.in)
+		if got != c.out {
+			t.Errorf("quoteIdentifier(%q): want %q, got %q", c.in, c.out, got)
+		}
+	}
+}
+
+// TestQualifiedTable_LiteralWriter exercises the use-site
+// validation behaviour: a Writer built via a struct literal
+// (bypassing New) must still hit identifier validation when its
+// table accessor is called. This catches a class of bug where a
+// future caller — internal test code, a misguided wiring change —
+// constructs a Writer{} directly and skips the constructor's
+// guard. The accessor must reject the bad identifier rather than
+// silently quote it.
+func TestQualifiedTable_LiteralWriter(t *testing.T) {
+	t.Parallel()
+	// Literal Writer with validated == false (zero value). A bad
+	// identifier must be rejected at the use site.
+	bad := &Writer{cfg: Config{Table: "sng_telemetry; DROP"}}
+	if _, err := bad.qualifiedTable(); err == nil {
+		t.Errorf("qualifiedTable on unvalidated Writer with bad Table should have failed")
+	}
+	// Literal Writer with a good identifier. Should return the
+	// quoted form.
+	good := &Writer{cfg: Config{Table: "sng_telemetry"}}
+	q, err := good.qualifiedTable()
+	if err != nil {
+		t.Fatalf("qualifiedTable on unvalidated Writer with good Table failed: %v", err)
+	}
+	if q != "`sng_telemetry`" {
+		t.Errorf("qualifiedTable: want `sng_telemetry`, got %s", q)
+	}
+	// Writer that has gone through New() (validated == true).
+	// The accessor must skip the redundant re-validation and
+	// just return the quoted form.
+	trusted := &Writer{cfg: Config{Table: "sng_telemetry"}, validated: true}
+	q, err = trusted.qualifiedTable()
+	if err != nil {
+		t.Fatalf("qualifiedTable on validated Writer failed: %v", err)
+	}
+	if q != "`sng_telemetry`" {
+		t.Errorf("qualifiedTable: want `sng_telemetry`, got %s", q)
+	}
+}
