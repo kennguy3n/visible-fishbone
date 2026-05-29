@@ -161,8 +161,25 @@ pub struct SubsystemHealth {
 impl Health {
     /// Aggregate a slice of subsystem reports into a single
     /// overall status.
+    ///
+    /// An empty subsystem list aggregates to [`HealthStatus::Down`]
+    /// — not `Up`. The supervisor only invokes `aggregate` after
+    /// every long-running module has registered its health probe;
+    /// observing zero subsystems at that point means either the
+    /// supervisor hasn't finished boot or every module failed to
+    /// register, neither of which is a "serving normally" state.
+    /// Defaulting to `Up` here would let `/health` return a
+    /// 200 OK with an empty subsystems array, which is exactly the
+    /// "looks fine, isn't" signal the control plane's operator
+    /// dashboard must never see.
     #[must_use]
     pub fn aggregate(subsystems: Vec<SubsystemHealth>) -> Self {
+        if subsystems.is_empty() {
+            return Self {
+                status: HealthStatus::Down,
+                subsystems,
+            };
+        }
         let mut status = HealthStatus::Up;
         for s in &subsystems {
             match s.status {
@@ -344,6 +361,21 @@ mod tests {
             let agg = Health::aggregate(subs);
             assert_eq!(agg.status, expected);
         }
+    }
+
+    /// Regression: an empty subsystem vector aggregates to
+    /// [`HealthStatus::Down`], not `Up`. The supervisor only ever
+    /// calls `aggregate` after every long-running module has
+    /// registered its probe — observing zero subsystems means
+    /// either boot is unfinished or every module failed to
+    /// register. Either way, `/health` returning `200 OK` with
+    /// `"status": "up"` and an empty subsystems array would be
+    /// the worst possible signal for the operator dashboard.
+    #[test]
+    fn health_aggregate_empty_subsystem_list_reports_down() {
+        let agg = Health::aggregate(Vec::new());
+        assert_eq!(agg.status, HealthStatus::Down);
+        assert!(agg.subsystems.is_empty());
     }
 
     struct SlowCheck;
