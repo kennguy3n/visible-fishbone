@@ -32,9 +32,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct SpoolStats {
     /// Items currently in the spool (snapshot, not monotonic).
     pub len: u64,
-    /// Total items pushed into the spool since construction.
+    /// Producer ingress: items the local subsystems pushed onto
+    /// the spool through [`BoundedSpool::push`]. Re-spools
+    /// performed by the egress consumer through
+    /// [`BoundedSpool::push_front`] are tracked separately in
+    /// [`Self::respooled`] so this counter stays a clean measure
+    /// of "how many distinct events did producers attempt to
+    /// enqueue". Dashboards consuming the metric assume this
+    /// semantic.
     pub pushed: u64,
-    /// Items evicted to make room for a new push (oldest-drop).
+    /// Re-spool count: items the egress consumer put back onto
+    /// the front of the spool through [`BoundedSpool::push_front`]
+    /// (typically after a transient flush failure). Separate from
+    /// [`Self::pushed`] because the same logical event would
+    /// otherwise be double-counted on every retry, inflating the
+    /// operator's view of ingress traffic.
+    pub respooled: u64,
+    /// Items evicted to make room for a new push (oldest-drop on
+    /// [`BoundedSpool::push`]) or for a re-spool (newest-drop on
+    /// [`BoundedSpool::push_front`]). Either way the item is
+    /// lost, so they share one counter.
     pub evicted: u64,
     /// Items dequeued by the drain path.
     pub drained: u64,
@@ -54,6 +71,7 @@ pub struct BoundedSpool<T> {
     inner: parking_lot::Mutex<VecDeque<T>>,
     capacity: usize,
     pushed: AtomicU64,
+    respooled: AtomicU64,
     evicted: AtomicU64,
     drained: AtomicU64,
 }
@@ -79,6 +97,7 @@ impl<T> BoundedSpool<T> {
             inner: parking_lot::Mutex::new(VecDeque::with_capacity(capacity.max(1))),
             capacity,
             pushed: AtomicU64::new(0),
+            respooled: AtomicU64::new(0),
             evicted: AtomicU64::new(0),
             drained: AtomicU64::new(0),
         }
@@ -133,8 +152,15 @@ impl<T> BoundedSpool<T> {
     /// are re-spooling is the oldest live batch and must keep its
     /// position. If capacity is zero the item is dropped (and an
     /// eviction is counted) for symmetry with [`push`].
+    ///
+    /// Increments [`SpoolStats::respooled`] (not
+    /// [`SpoolStats::pushed`]). The two counters are intentionally
+    /// kept separate so dashboards plotting producer ingress
+    /// (`pushed`) are not inflated by the egress retry loop, while
+    /// operators who want to see retry pressure can plot
+    /// `respooled` directly.
     pub fn push_front(&self, item: T) -> PushOutcome {
-        self.pushed.fetch_add(1, Ordering::Relaxed);
+        self.respooled.fetch_add(1, Ordering::Relaxed);
         if self.capacity == 0 {
             self.evicted.fetch_add(1, Ordering::Relaxed);
             return PushOutcome::AcceptedWithEviction;
@@ -199,6 +225,7 @@ impl<T> BoundedSpool<T> {
         SpoolStats {
             len: self.len() as u64,
             pushed: self.pushed.load(Ordering::Relaxed),
+            respooled: self.respooled.load(Ordering::Relaxed),
             evicted: self.evicted.load(Ordering::Relaxed),
             drained: self.drained.load(Ordering::Relaxed),
         }
@@ -265,6 +292,52 @@ mod tests {
         spool.push_front(1);
         let drained = spool.drain(usize::MAX);
         assert_eq!(drained, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn push_front_increments_respooled_not_pushed() {
+        // Regression guard for the wave-6 Devin Review finding:
+        // re-spool must not inflate the producer-ingress counter.
+        // Operators reading `pushed` from the dashboard should see
+        // exactly the number of times a local subsystem called
+        // `push`, regardless of how many transient flush failures
+        // re-circulated the same batch.
+        let spool: BoundedSpool<u32> = BoundedSpool::new(4);
+        spool.push(10);
+        spool.push(20);
+        let mid = spool.stats();
+        assert_eq!(mid.pushed, 2);
+        assert_eq!(mid.respooled, 0);
+
+        // Consumer pops one and re-spools it (simulating a
+        // transient send failure).
+        let popped = spool.pop_front().expect("item");
+        assert_eq!(popped, 10);
+        spool.push_front(popped);
+
+        let after = spool.stats();
+        // `pushed` is unchanged — no new producer ingress occurred.
+        assert_eq!(after.pushed, 2);
+        // `respooled` records the retry.
+        assert_eq!(after.respooled, 1);
+        // The spool itself still holds two items: [10, 20].
+        assert_eq!(after.len, 2);
+        let drained = spool.drain(usize::MAX);
+        assert_eq!(drained, vec![10, 20]);
+    }
+
+    #[test]
+    fn zero_capacity_push_front_counts_eviction_not_pushed() {
+        // Symmetric edge with `zero_capacity_drops_immediately`:
+        // a re-spool into a zero-capacity spool drops the item and
+        // is visible to operators as an eviction plus a respool
+        // attempt, NOT as a producer push.
+        let spool: BoundedSpool<u32> = BoundedSpool::new(0);
+        assert_eq!(spool.push_front(7), PushOutcome::AcceptedWithEviction);
+        let stats = spool.stats();
+        assert_eq!(stats.pushed, 0);
+        assert_eq!(stats.respooled, 1);
+        assert_eq!(stats.evicted, 1);
     }
 
     #[test]
