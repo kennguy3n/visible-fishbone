@@ -461,19 +461,26 @@ fn normalise_control_plane_url(raw: &str) -> String {
     // contains an authority component (anything past the
     // `<scheme>://` prefix).
     let stripped = trimmed.trim_end_matches('/');
-    // Preserve the operator-visible form ONLY for the literal
-    // bare-scheme inputs `"http://"` / `"https://"` (any trailing-
-    // slash count). A previous version of this guard used
-    // `stripped.ends_with(':')`, which over-matched: a value like
-    // `"https://host:/"` strips down to `"https://host:"` (host
-    // with an open port-separator before the slash) — that's a
-    // typo, not a bare scheme, and the previous guard wrongly
-    // returned the un-stripped form so the trailing slash leaked
-    // into `sng-comms`' double-slashed requests. Match the bare
-    // scheme exactly instead so the canonical strip path catches
-    // every authority-carrying URL.
-    if stripped == "http:" || stripped == "https:" {
-        trimmed.to_owned()
+    // Canonicalise the bare-scheme inputs to exactly `"http://"` /
+    // `"https://"`. An earlier version returned `trimmed` here,
+    // which let an operator paste like `"https:////"` survive as-is
+    // (it passes the validator's prefix check because it still
+    // starts with `"https://"` and the normaliser is idempotent on
+    // it, so the canonicality check at the end of `validate` does
+    // not flag it either). The strip-all-trailing-slashes invariant
+    // matters even for bare-scheme values, so rewrite the operator-
+    // visible form to its single canonical spelling. The previous
+    // suffix-based guard (`stripped.ends_with(':')`) was even more
+    // over-broad — it incorrectly matched `"https://host:/"` (an
+    // authority with an open port-separator) and left the trailing
+    // slash on `"https://host:"`, leaking into `sng-comms`'
+    // double-slashed requests. Match the bare scheme exactly so
+    // every authority-carrying URL falls through the canonical
+    // strip path.
+    if stripped == "http:" {
+        "http://".to_owned()
+    } else if stripped == "https:" {
+        "https://".to_owned()
     } else {
         stripped.to_owned()
     }
@@ -866,12 +873,14 @@ poll_interval = "1s"
             super::normalise_control_plane_url("https://cp.example.com////"),
             "https://cp.example.com",
         );
-        // Bare scheme with many slashes still preserves the
-        // operator-visible form.
-        assert_eq!(
-            super::normalise_control_plane_url("https:////"),
-            "https:////"
-        );
+        // Bare scheme with many slashes is canonicalised to the
+        // single spelling, not preserved verbatim — `"https:////"`
+        // would otherwise survive the prefix check in `validate`
+        // (still starts with `"https://"`) and the canonicality
+        // post-condition (idempotent under the normaliser) and
+        // leak through to `sng-comms` as a double-slashed request.
+        assert_eq!(super::normalise_control_plane_url("https:////"), "https://");
+        assert_eq!(super::normalise_control_plane_url("http:////"), "http://");
     }
 
     /// Regression for the port-separator-colon edge case. A value
