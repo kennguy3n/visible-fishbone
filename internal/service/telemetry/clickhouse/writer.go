@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sync"
 	"time"
 
@@ -37,6 +38,26 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/nats/schema"
 )
+
+// identifierPattern is the strict subset of ClickHouse unquoted
+// identifier syntax we accept for Database and Table names: an
+// ASCII letter or underscore followed by ASCII letters, digits,
+// or underscores. ClickHouse itself allows broader identifiers
+// behind backticks, but we never quote in our generated DDL/DML,
+// so accepting only the unquoted-safe pattern is what closes the
+// SQL-injection surface that a malicious or fat-fingered
+// operator-supplied Config.Table value would otherwise open via
+// the fmt.Sprintf-based query construction in EnsureSchema /
+// insertSQL / Stats.
+var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func validateIdentifier(role, value string) error {
+	if !identifierPattern.MatchString(value) {
+		return fmt.Errorf("clickhouse: %s %q must match %s",
+			role, value, identifierPattern.String())
+	}
+	return nil
+}
 
 // DefaultTable is the table name the writer targets when Config.Table
 // is left blank.
@@ -102,6 +123,23 @@ func (c *Config) fillDefaults() {
 	}
 }
 
+// validate runs the structural checks that fillDefaults cannot:
+// it rejects identifier values that would, if interpolated into
+// a CREATE TABLE / INSERT / SELECT statement via fmt.Sprintf,
+// either produce malformed SQL or — worse — allow operator-
+// controlled metacharacters (semicolons, quotes, comments) to
+// escape their column position. The Auth.Database field is also
+// validated even though it is passed to the driver as a struct
+// field rather than being sprintf'd: keeping both identifiers
+// under the same rule means a Database value cannot, for example,
+// embed a newline that would surprise the driver's auth handshake.
+func (c *Config) validate() error {
+	if err := validateIdentifier("Config.Database", c.Database); err != nil {
+		return err
+	}
+	return validateIdentifier("Config.Table", c.Table)
+}
+
 // Writer is the ClickHouse-backed HotWriter implementation.
 type Writer struct {
 	conn   driver.Conn
@@ -138,6 +176,9 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Writer, error) 
 		return nil, errors.New("clickhouse: at least one endpoint is required")
 	}
 	cfg.fillDefaults()
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}

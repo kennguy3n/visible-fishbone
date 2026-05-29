@@ -102,3 +102,55 @@ func TestWriter_StatsResetsConsecutiveOnSuccess(t *testing.T) {
 		t.Errorf("after success: Flushed want 5, got %d", s.Flushed)
 	}
 }
+
+// TestConfig_Validate guards the operator-config SQL-identifier
+// invariant. The Writer interpolates Config.Database and
+// Config.Table into the generated DDL/DML via fmt.Sprintf, so any
+// value that escapes the unquoted-identifier syntax — semicolons,
+// quotes, comments, backticks, newlines — opens a SQL injection
+// surface for whoever controls the deployment config. validate()
+// must reject every such value and must accept the boring
+// identifier shapes the platform actually uses (DefaultTable,
+// custom suffixed names like sng_telemetry_dev).
+func TestConfig_Validate(t *testing.T) {
+	t.Parallel()
+	ok := []string{
+		DefaultTable,
+		"sng_telemetry_dev",
+		"_internal",
+		"A1",
+	}
+	for _, name := range ok {
+		c := Config{Database: "default", Table: name}
+		if err := c.validate(); err != nil {
+			t.Errorf("validate(%q) unexpectedly failed: %v", name, err)
+		}
+	}
+	bad := []string{
+		"",                    // empty
+		"1name",               // leading digit
+		"sng_telemetry; DROP", // statement injection
+		"sng_telemetry`",      // backtick
+		"sng_telemetry--",     // comment marker
+		"sng telemetry",       // space
+		"sng_telemetry\nDROP", // newline
+		"\"sng_telemetry\"",   // quoted
+		"db.sng_telemetry",    // dotted (cross-db)
+	}
+	for _, name := range bad {
+		c := Config{Database: "default", Table: name}
+		if err := c.validate(); err == nil {
+			t.Errorf("validate(Table=%q) should have failed but did not", name)
+		}
+	}
+	// Database must be validated symmetrically: a malicious
+	// Database value would land in the driver's Auth handshake
+	// and is also embedded by the migration runner.
+	bad = []string{"", "1db", "db; DROP", "db`", "db\nx"}
+	for _, name := range bad {
+		c := Config{Database: name, Table: DefaultTable}
+		if err := c.validate(); err == nil {
+			t.Errorf("validate(Database=%q) should have failed but did not", name)
+		}
+	}
+}
