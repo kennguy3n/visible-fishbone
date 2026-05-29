@@ -104,12 +104,18 @@ pub enum BatchFlushReason {
 /// detection pipeline.
 #[derive(Debug, Clone, Copy)]
 pub struct BatchConfig {
-    /// Maximum events per batch. `0` is treated as `1` — i.e.
-    /// every event flushes immediately.
+    /// Maximum events per batch. The builder enforces a minimum
+    /// of `1` at construction time via [`BatchConfig::normalize`]
+    /// — a caller-supplied `0` becomes `1`, i.e. every event
+    /// flushes immediately. The normalisation is structural so a
+    /// future refactor of the post-push bounds check (`>=`
+    /// vs `>`) cannot silently regress to "never flush on event
+    /// count" when the operator sets `max_events = 0`.
     pub max_events: usize,
     /// Maximum estimated MessagePack-encoded size of the batch
     /// (in bytes). When the running total crosses this
-    /// threshold the batch flushes.
+    /// threshold the batch flushes. Normalised to a minimum of
+    /// `1` for the same reason as `max_events`.
     pub max_bytes: usize,
     /// Wall-clock duration since the first event in the batch
     /// after which the batch flushes regardless of size.
@@ -122,6 +128,29 @@ impl Default for BatchConfig {
             max_events: 256,
             max_bytes: 64 * 1024,
             flush_interval: Duration::from_secs(5),
+        }
+    }
+}
+
+impl BatchConfig {
+    /// Coerce caller-supplied values into the closed set the
+    /// builder's invariants assume. Both `max_events` and
+    /// `max_bytes` are clamped to a minimum of `1`: zero would
+    /// mean "never flush on this dimension", which is an
+    /// ambiguous footgun — the field is documented as a *cap*,
+    /// so the only consistent interpretation of `0` is "flush
+    /// every event".
+    ///
+    /// Called by [`BatchBuilder::new`]; callers constructing a
+    /// `BatchConfig` by hand can call this themselves to keep
+    /// the value they store identical to what the builder will
+    /// actually use.
+    #[must_use]
+    pub fn normalize(self) -> Self {
+        Self {
+            max_events: self.max_events.max(1),
+            max_bytes: self.max_bytes.max(1),
+            flush_interval: self.flush_interval,
         }
     }
 }
@@ -169,8 +198,14 @@ pub struct BatchBuilder {
 
 impl BatchBuilder {
     /// Construct a fresh builder.
+    ///
+    /// The supplied config is run through
+    /// [`BatchConfig::normalize`] so the builder's own
+    /// `max_events` / `max_bytes` invariants (both must be ≥ 1)
+    /// hold even if the caller passed `0`.
     #[must_use]
     pub fn new(config: BatchConfig) -> Self {
+        let config = config.normalize();
         Self {
             config,
             pending: Vec::with_capacity(initial_capacity(config.max_events)),
@@ -683,5 +718,59 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![event_id_3],
         );
+    }
+
+    /// Regression: a caller-supplied `max_events == 0` /
+    /// `max_bytes == 0` is structurally clamped to `1` at builder
+    /// construction. Without this, the post-push bounds check
+    /// (`>= max_events`) "happens to" still flush every event
+    /// because `usize >= 0` is always true — but the invariant
+    /// is implicit and a future refactor of the check from
+    /// `>=` to `>` would silently turn `max_events = 0` into
+    /// "never flush on event count".
+    #[test]
+    fn batch_config_normalize_clamps_zero_to_one() {
+        let raw = BatchConfig {
+            max_events: 0,
+            max_bytes: 0,
+            flush_interval: Duration::from_secs(5),
+        };
+        let norm = raw.normalize();
+        assert_eq!(norm.max_events, 1);
+        assert_eq!(norm.max_bytes, 1);
+        assert_eq!(norm.flush_interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn batch_config_normalize_passes_through_positive() {
+        let raw = BatchConfig {
+            max_events: 256,
+            max_bytes: 64 * 1024,
+            flush_interval: Duration::from_secs(5),
+        };
+        let norm = raw.normalize();
+        assert_eq!(norm.max_events, 256);
+        assert_eq!(norm.max_bytes, 64 * 1024);
+        assert_eq!(norm.flush_interval, Duration::from_secs(5));
+    }
+
+    /// Regression: `BatchBuilder::new` runs `normalize` so the
+    /// `max_events = 0` footgun cannot create a builder whose
+    /// invariants disagree with the documented contract.
+    #[test]
+    fn builder_new_normalises_zero_max_events_to_one() {
+        let mut builder = BatchBuilder::new(BatchConfig {
+            max_events: 0,
+            max_bytes: 16,
+            flush_interval: Duration::from_secs(60),
+        });
+        // Any push must produce a one-event batch immediately
+        // because the normalised cap is 1.
+        let env = mk_envelope(1);
+        let event_id = env.event_id;
+        let batch = builder.push(env).expect("push must flush at cap=1");
+        assert_eq!(batch.envelopes.len(), 1);
+        assert_eq!(batch.envelopes[0].envelope.event_id, event_id);
+        assert_eq!(batch.reason, BatchFlushReason::EventsLimit);
     }
 }

@@ -167,6 +167,32 @@ pub enum FlushOutcome {
 pub struct TelemetryClient {
     config: TelemetryClientConfig,
     builder: Mutex<BatchBuilder>,
+    /// Serializes the `encode → next_seq → spool.push` critical
+    /// section inside [`Self::seal_batch`]. Without this lock,
+    /// two concurrent [`Self::submit`] calls that each trigger a
+    /// seal could interleave such that thread A allocates
+    /// `next_seq() = N` and thread B allocates `next_seq() = N+1`,
+    /// but B reaches `spool.push(entry_N+1)` before A reaches
+    /// `spool.push(entry_N)`. The spool would then contain
+    /// `[N+1, N]` (FIFO from head), and `flush_one` would send
+    /// `N+1` first; the server's ack would lift high-water to
+    /// `N+1`, and the subsequent `N` ack would be rejected as a
+    /// sequence regression by the [`SequenceTracker`].
+    ///
+    /// Holding the lock through the encoding pass as well
+    /// preserves the per-event submit order across the wire: the
+    /// batch sealed first is the batch encoded first is the
+    /// batch pushed first. The encode is cheap relative to the
+    /// HTTP/2 round-trip and only runs once per seal trigger
+    /// (every `max_events` / `max_bytes` boundary or
+    /// `flush_interval` tick) rather than per envelope, so
+    /// serialising it does not measurably affect throughput.
+    ///
+    /// `parking_lot::Mutex` is used here instead of
+    /// `tokio::sync::Mutex` because the critical section is
+    /// strictly sync (no `.await` inside `seal_batch`) and
+    /// `parking_lot` avoids the executor-aware overhead.
+    seal_lock: parking_lot::Mutex<()>,
     spool: Arc<BoundedSpool<EncodedBatch>>,
     tracker: SequenceTracker,
 }
@@ -205,6 +231,7 @@ impl TelemetryClient {
         Self {
             config,
             builder: Mutex::new(BatchBuilder::new(batch_cfg)),
+            seal_lock: parking_lot::Mutex::new(()),
             spool: Arc::new(BoundedSpool::new(spool_cap)),
             tracker: SequenceTracker::new(stream, start_seq),
         }
@@ -271,6 +298,15 @@ impl TelemetryClient {
     }
 
     fn seal_batch(&self, batch: &Batch) {
+        // Serialise the whole `encode → next_seq → spool.push`
+        // critical section. See the doc comment on `seal_lock`
+        // for the full reasoning; the short version is that two
+        // concurrent submits that each trigger a seal can
+        // otherwise allocate sequence numbers and push to the
+        // spool in opposing orders, producing a spool whose head
+        // ships out of monotonic-seq order.
+        let _seal_guard = self.seal_lock.lock();
+
         // Encode first, then allocate the sequence number. If
         // encoding fails the batch is dropped without burning a
         // sequence — the tracker only sees monotonic sequences
@@ -709,5 +745,68 @@ mod tests {
             .await
             .expect("enrichment fills in nil ids before validate");
         assert_eq!(client.spool_stats().pushed, 1);
+    }
+
+    /// Regression: concurrent `submit` calls that each trigger a
+    /// batch seal must produce a spool whose entries come out in
+    /// monotonic-sequence FIFO order. Without `seal_lock`, two
+    /// submits on different runtime worker threads can interleave
+    /// `next_seq` and `spool.push` such that the spool head is
+    /// the higher-seq batch, and `flush_one` would ship batches
+    /// out of monotonic order — the server would accept the
+    /// higher seq first, lift its high-water mark, then reject
+    /// the lower seq as a sequence regression.
+    ///
+    /// This test drives many concurrent submits on the
+    /// multi-threaded runtime; the `max_events == 1` config
+    /// forces every submit to seal independently, maximising the
+    /// race window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_submits_seal_in_monotonic_spool_order() {
+        let enrichment = mk_enrichment();
+        let mut cfg = TelemetryClientConfig::with_defaults(enrichment);
+        // Every submit seals → maximum race window.
+        cfg.batch = BatchConfig {
+            max_events: 1,
+            ..BatchConfig::default()
+        };
+        cfg.spool_capacity = 256;
+
+        let client = Arc::new(TelemetryClient::new(cfg));
+
+        let mut handles = Vec::with_capacity(64);
+        for _ in 0..64 {
+            let c = client.clone();
+            handles.push(tokio::spawn(async move {
+                c.submit(mk_envelope()).await.expect("submit ok");
+            }));
+        }
+        for h in handles {
+            h.await.expect("task join");
+        }
+
+        assert_eq!(client.spool_stats().pushed, 64, "all submits sealed");
+
+        // Drain the spool in head-to-tail order and verify the
+        // sequence numbers are strictly monotonically increasing.
+        // Without `seal_lock`, two concurrent seals can produce a
+        // spool whose head has a higher seq than its tail.
+        let mut last_seq: Option<u64> = None;
+        let mut drained = 0usize;
+        while let Some(entry) = client.spool.pop_front() {
+            if let Some(prev) = last_seq {
+                assert!(
+                    entry.seq > prev,
+                    "spool entries out of monotonic order: prev={prev}, curr={}",
+                    entry.seq,
+                );
+            }
+            last_seq = Some(entry.seq);
+            drained += 1;
+        }
+        assert_eq!(drained, 64);
+        // The first seq is the configured start (default 1) and
+        // the last is start + N - 1.
+        assert_eq!(last_seq, Some(64));
     }
 }
