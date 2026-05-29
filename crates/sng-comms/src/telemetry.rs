@@ -77,16 +77,19 @@ pub struct EnrichmentContext {
 
 impl EnrichmentContext {
     /// Apply this context to an envelope in-place. The producer's
-    /// tenant / device id are overwritten with the canonical
-    /// values — local subsystems may have constructed envelopes
-    /// with placeholder ids that the egress path is expected to
-    /// fix up before they reach the wire.
+    /// tenant / device id / site id are *all* unconditionally
+    /// overwritten with the canonical values — local subsystems
+    /// may have constructed envelopes with placeholder or stale
+    /// identifiers that the egress path is expected to fix up
+    /// before they reach the wire. In particular, `site_id` is
+    /// also cleared (assigned `None`) when this context has no
+    /// site bound: an endpoint that has been re-bound away from
+    /// a site must not leak the previous site id onto the wire
+    /// because a producer happened to stamp one in.
     fn enrich(&self, envelope: &mut Envelope) {
         envelope.tenant_id = self.tenant_id;
         envelope.device_id = self.device_id;
-        if let Some(site) = self.site_id {
-            envelope.site_id = Some(site);
-        }
+        envelope.site_id = self.site_id;
     }
 }
 
@@ -334,7 +337,32 @@ impl TelemetryClient {
         };
         match response.classify() {
             ResponseClass::Success => {
-                let ack = parse_ack(&response.body)?;
+                // The server returned 2xx — the batch bytes are
+                // server-side regardless of what happens below.
+                // If the ack body is malformed, we cannot
+                // advance the high-water mark, but we also must
+                // NOT re-spool because the server already
+                // accepted the batch and a re-send would
+                // duplicate. The right behaviour is to drop the
+                // batch from the local spool (already popped),
+                // log loudly so operators can correlate against
+                // a server-side ack-encoding bug, and surface
+                // the error to the caller so the orchestrator
+                // can decide whether to reset state.
+                let ack = match parse_ack(&response.body) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!(
+                            seq = entry.seq,
+                            events = entry.event_count,
+                            error = %e,
+                            "control plane returned 2xx with malformed ack \
+                             body; batch is server-side, local high-water \
+                             mark NOT advanced",
+                        );
+                        return Err(e);
+                    }
+                };
                 self.tracker.record_ack(ack.seq).map_err(map_regression)?;
                 debug!(seq = ack.seq, "batch acked");
                 Ok(FlushOutcome::Acked { seq: ack.seq })
@@ -502,7 +530,12 @@ mod tests {
             ..BatchConfig::default()
         };
         let client = TelemetryClient::new(cfg);
-        client.submit(mk_envelope()).await.expect("submit");
+        // Producer stamps a stale site_id; the enrichment must
+        // overwrite it with the canonical value from the
+        // EnrichmentContext.
+        let mut env = mk_envelope();
+        env.site_id = Some(SiteId::new_v4());
+        client.submit(env).await.expect("submit");
         // Inspect the encoded batch via the spool — we know one
         // entry exists because max_events=1 forced a seal on
         // the very first submit.
@@ -515,5 +548,34 @@ mod tests {
         assert_eq!(envelopes[0].tenant_id, enrichment.tenant_id);
         assert_eq!(envelopes[0].device_id, enrichment.device_id);
         assert_eq!(envelopes[0].site_id, enrichment.site_id);
+    }
+
+    #[tokio::test]
+    async fn enrichment_clears_producer_site_when_context_unbound() {
+        // Endpoint scenario: device is *not* bound to a site, so
+        // the EnrichmentContext.site_id is None. A producer
+        // subsystem that left a stale site_id on the envelope
+        // must NOT have that value reach the wire.
+        let enrichment = EnrichmentContext {
+            tenant_id: TenantId::new_v4(),
+            device_id: DeviceId::new_v4(),
+            site_id: None,
+        };
+        let mut cfg = TelemetryClientConfig::with_defaults(enrichment.clone());
+        cfg.batch = BatchConfig {
+            max_events: 1,
+            ..BatchConfig::default()
+        };
+        let client = TelemetryClient::new(cfg);
+        let mut env = mk_envelope();
+        env.site_id = Some(SiteId::new_v4()); // producer's stale stamp
+        client.submit(env).await.expect("submit");
+        let entry = client.spool.pop_front().expect("one batch");
+        let raw = zstd::stream::decode_all(entry.body.as_ref()).expect("zstd decode");
+        let envelopes: Vec<Envelope> = rmp_serde::from_slice(&raw).expect("decode");
+        assert_eq!(envelopes.len(), 1);
+        // The canonical "unbound" identity wins — site is None
+        // even though the producer stamped one in.
+        assert_eq!(envelopes[0].site_id, None);
     }
 }

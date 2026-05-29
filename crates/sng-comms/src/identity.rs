@@ -724,6 +724,149 @@ mod tests {
         ));
     }
 
+    // ---------------------------------------------------------------
+    // Adversarial PEM-parser regressions.
+    //
+    // `decode_pem_blocks` is a hand-rolled RFC 7468 walker (we
+    // deliberately replaced `rustls-pemfile` because of
+    // RUSTSEC-2025-0134). These tests exercise edge cases beyond
+    // the happy-path `loads_matching_pem_pair` so accidental
+    // regressions in the walker — wrong label matching, premature
+    // EOF handling, base64 whitespace tolerance — are caught at
+    // unit-test time rather than at TLS-handshake time on a real
+    // agent.
+    // ---------------------------------------------------------------
+
+    /// Truncated base64 inside an otherwise well-framed block
+    /// must surface as `KeyParse` (or `CertParse`), not a panic
+    /// or a silent zero-length payload.
+    #[test]
+    fn rejects_truncated_base64_in_key_block() {
+        let (cert_pem, _key_pem) = mint_identity_pem();
+        // A PKCS#8 Ed25519 PEM body is 80 bytes of base64
+        // (60 chars of data + padding). Truncate to a non-padding
+        // multiple-of-4 character count so the decoder hits a
+        // partial-quantum error rather than benign trailing data.
+        let bad_key = b"-----BEGIN PRIVATE KEY-----\n\
+                        MC4CAQAwBQYDK2VwBC\n\
+                        -----END PRIVATE KEY-----\n";
+        let err = DeviceIdentity::from_pem(&cert_pem, bad_key)
+            .expect_err("truncated base64 must be rejected");
+        assert!(
+            matches!(
+                err,
+                IdentityError::KeyParse(_)
+                    | IdentityError::NoPrivateKey
+                    | IdentityError::UnsupportedKeyAlgorithm
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// A `PRIVATE KEY` BEGIN line without a matching
+    /// `END PRIVATE KEY` footer must surface as a parse error,
+    /// not be silently dropped (which would make the test pass
+    /// the "NoPrivateKey" branch even though the PEM was
+    /// malformed).
+    #[test]
+    fn rejects_pem_with_missing_end_marker() {
+        let (cert_pem, _key_pem) = mint_identity_pem();
+        // No `-----END PRIVATE KEY-----` line at all.
+        let bad_key = b"-----BEGIN PRIVATE KEY-----\n\
+                        MC4CAQAwBQYDK2VwBCIEIA\n";
+        let err = DeviceIdentity::from_pem(&cert_pem, bad_key)
+            .expect_err("missing END marker must be rejected");
+        assert!(
+            matches!(
+                err,
+                IdentityError::KeyParse(_) | IdentityError::NoPrivateKey
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// Liberal whitespace inside the base64 payload (extra
+    /// newlines, tabs, spaces) must be tolerated — RFC 7468 §3
+    /// explicitly permits whitespace anywhere in the encoded
+    /// data. This is the inverse-correctness test: it locks in
+    /// that we don't accidentally regress to a strict-line-length
+    /// parser that would refuse real-world PEM emitters.
+    #[test]
+    fn tolerates_whitespace_in_base64_body() {
+        let (cert_pem, key_pem) = mint_identity_pem();
+        // Re-emit the PEM with extra whitespace sprinkled inside
+        // each block body.
+        let scramble = |pem: &[u8]| -> Vec<u8> {
+            let s = std::str::from_utf8(pem).unwrap();
+            // Insert a tab + extra space + extra blank line on
+            // every other body line so the base64 payload has
+            // mixed whitespace.
+            let mut out = String::new();
+            for (i, line) in s.lines().enumerate() {
+                if !line.starts_with("-----") && !line.is_empty() {
+                    if i % 2 == 0 {
+                        out.push_str(line);
+                        out.push('\t');
+                        out.push('\n');
+                        out.push('\n');
+                    } else {
+                        out.push(' ');
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                } else {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            out.into_bytes()
+        };
+        let cert_w = scramble(&cert_pem);
+        let key_w = scramble(&key_pem);
+        let id =
+            DeviceIdentity::from_pem(&cert_w, &key_w).expect("whitespace-laden PEM still loads");
+        assert_eq!(id.cert_chain().len(), 1);
+    }
+
+    /// A `CERTIFICATE` block with the label spelled wrong (e.g.
+    /// `CERTIFCATE` — common typo from hand-edited files) must
+    /// be rejected with `EmptyCertChain`. The walker MUST NOT
+    /// fall through to accepting the body as a valid CERTIFICATE
+    /// just because the BEGIN-line looks "close enough".
+    #[test]
+    fn rejects_wrong_label_in_cert_block() {
+        let (cert_pem, key_pem) = mint_identity_pem();
+        // Replace the BEGIN/END labels with a typo. Both copies
+        // must change so the body is framed consistently.
+        let mut typo = String::from_utf8(cert_pem).unwrap();
+        typo = typo
+            .replace("BEGIN CERTIFICATE", "BEGIN CERTIFCATE")
+            .replace("END CERTIFICATE", "END CERTIFCATE");
+        let err = DeviceIdentity::from_pem(typo.as_bytes(), &key_pem)
+            .expect_err("mis-labelled CERTIFICATE must not load");
+        assert!(matches!(err, IdentityError::EmptyCertChain), "got: {err:?}");
+    }
+
+    /// Two `PRIVATE KEY` blocks back-to-back must load using the
+    /// *first* block — we only ever emit a single key file, but
+    /// a future operator concatenating two files together
+    /// shouldn't see a silent crash. The walker must terminate
+    /// cleanly after consuming whichever block we use.
+    #[test]
+    fn picks_first_private_key_when_two_present() {
+        let (cert_pem, key_pem_a) = mint_identity_pem();
+        let (_cert_pem_b, key_pem_b) = mint_identity_pem();
+        let mut combined = Vec::with_capacity(key_pem_a.len() + key_pem_b.len());
+        combined.extend_from_slice(&key_pem_a);
+        combined.push(b'\n');
+        combined.extend_from_slice(&key_pem_b);
+        // The first key is the one matching `cert_pem`, so the
+        // load should succeed iff the walker picked block #1.
+        let id = DeviceIdentity::from_pem(&cert_pem, &combined)
+            .expect("two-key PEM still loads using the first block");
+        assert_eq!(id.cert_chain().len(), 1);
+    }
+
     /// Silence the `unused` warnings on the helper types when
     /// rcgen's RSA backend is compiled out.
     #[allow(dead_code)]

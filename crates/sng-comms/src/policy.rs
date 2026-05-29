@@ -123,17 +123,38 @@ impl PolicyTrustStore {
     /// caller must have validated the key bytes; we forward to
     /// sng-core's `PolicyVerifier::add_key` for the canonical
     /// rejection rules (empty / over-length / ephemeral id).
+    ///
+    /// Atomic against concurrent writers. Two operators racing
+    /// `insert_key` calls cannot lose either key — the rcu loop
+    /// retries the read-modify-write until its CAS commits
+    /// against an unchanged inner pointer.
     pub fn insert_key(
         &self,
         id: &PolicySigningKeyId,
         public_key: &[u8; ed25519_dalek::PUBLIC_KEY_LENGTH],
     ) -> Result<(), PolicyTrustStoreError> {
-        let current = self.inner.load_full();
-        let mut next = (*current).clone();
-        next.add_key(id.clone(), public_key)
-            .map_err(|e| PolicyTrustStoreError::InvalidKeyId(format!("{e}")))?;
-        self.inner.store(Arc::new(next));
-        Ok(())
+        // `add_key`'s rejection set (empty / over-length /
+        // ephemeral id) is a pure function of `id` and the key
+        // bytes, not of the verifier state — so every rcu
+        // iteration produces the same Err/Ok outcome. We
+        // therefore stash the error from the closure (it will
+        // be the same value on every retry) and propagate it
+        // after the loop terminates. On error the closure
+        // returns the unchanged snapshot, which makes the CAS a
+        // no-op and lets concurrent successful writers commit
+        // ahead of us without interference.
+        let mut err: Option<PolicyTrustStoreError> = None;
+        self.inner.rcu(|current| {
+            let mut next = (**current).clone();
+            match next.add_key(id.clone(), public_key) {
+                Ok(()) => Arc::new(next),
+                Err(e) => {
+                    err = Some(PolicyTrustStoreError::InvalidKeyId(format!("{e}")));
+                    current.clone()
+                }
+            }
+        });
+        err.map_or(Ok(()), Err)
     }
 
     /// Borrow the current verifier through an Arc. The returned

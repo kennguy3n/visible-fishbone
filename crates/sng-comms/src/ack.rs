@@ -109,6 +109,19 @@ impl SequenceTracker {
     /// Allocate the next sequence number. The returned value is
     /// `last_emitted + 1`. Atomic with respect to concurrent
     /// `next_seq` calls.
+    ///
+    /// **Saturation contract**: the internal counter uses
+    /// `saturating_add`, so `next_seq` is guaranteed never to
+    /// panic but on overflow it will return `u64::MAX`
+    /// indefinitely instead of wrapping to 0. The agent emits
+    /// per-stream sequences, so at one batch per microsecond
+    /// (orders of magnitude beyond what any deployment will
+    /// produce) it would take ~584,942 years to reach the
+    /// saturation point — this branch exists solely to keep the
+    /// arithmetic infallible. If saturation ever became
+    /// reachable in practice the right response would be to
+    /// migrate the stream to a fresh sequence space (new
+    /// stream id), not to wrap.
     pub fn next_seq(&self) -> u64 {
         let mut guard = self.inner.lock();
         let seq = guard.next;

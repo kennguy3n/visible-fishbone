@@ -207,13 +207,32 @@ impl BatchBuilder {
     /// Check whether the flush-interval timer has elapsed and
     /// return the accumulated batch if so. Caller wires this up
     /// to a `tokio::time::interval` ticker in production.
+    ///
+    /// Resilient to wall-clock regression: if `now` precedes the
+    /// stored `started_at` (NTP backward adjustment, VM
+    /// snapshot-restore, leap-second handling), the timer is
+    /// re-pinned to `now` and treated as zero-elapsed for this
+    /// call. Without this, the negative `signed_duration_since`
+    /// would propagate `None` from `.to_std().ok()?` and the
+    /// batch would sit in memory until the clock recovered past
+    /// `started + flush_interval` (or a size-based trigger
+    /// fired). Re-pinning restores the wall-clock `flush_interval`
+    /// guarantee from this point forward at the cost of one
+    /// extra interval window of latency on the regression event
+    /// itself.
     pub fn poll_timer(&mut self, now: DateTime<Utc>) -> Option<Batch> {
         let started = self.started_at?;
         if self.pending.is_empty() {
             return None;
         }
         let elapsed = now.signed_duration_since(started);
-        let elapsed_std = elapsed.to_std().ok()?;
+        let Ok(elapsed_std) = elapsed.to_std() else {
+            // Backward clock jump — `started_at` is in the
+            // future relative to `now`. Re-pin so the next
+            // poll sees a sane forward duration.
+            self.started_at = Some(now);
+            return None;
+        };
         if elapsed_std >= self.config.flush_interval {
             Some(self.take(BatchFlushReason::TimerElapsed))
         } else {
@@ -334,6 +353,34 @@ mod tests {
             flush_interval: Duration::from_secs(60),
         });
         assert!(b.push(mk_envelope(1)).is_some());
+    }
+
+    #[test]
+    fn poll_timer_recovers_from_backward_clock_jump() {
+        let mut b = BatchBuilder::new(BatchConfig {
+            max_events: usize::MAX,
+            max_bytes: usize::MAX,
+            flush_interval: Duration::from_secs(1),
+        });
+        let env = mk_envelope(0);
+        let pushed_at = env.timestamp;
+        b.push(env);
+        // Simulate a backward clock jump: poll with `now` ten
+        // seconds *before* the push timestamp. Without the
+        // regression guard `poll_timer` would return None
+        // silently because `to_std()` errors on the negative
+        // duration, and the batch would sit until the clock
+        // caught back up past `pushed_at + 1s`.
+        let backward_now = pushed_at - chrono::Duration::seconds(10);
+        assert!(b.poll_timer(backward_now).is_none());
+        // The internal start should have been re-pinned to
+        // `backward_now`. After the configured interval has
+        // elapsed *from there*, the next poll must flush — proving
+        // the wall-clock guarantee was restored.
+        let forward_now = backward_now + chrono::Duration::seconds(2);
+        let flushed = b.poll_timer(forward_now).expect("flushes after re-pin");
+        assert_eq!(flushed.reason, BatchFlushReason::TimerElapsed);
+        assert_eq!(flushed.envelopes.len(), 1);
     }
 
     #[test]
