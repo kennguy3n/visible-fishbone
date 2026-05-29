@@ -100,12 +100,12 @@ pub use envelope::{
 pub use error::{ErrorCode, SngError, SngResult};
 pub use events::{AgentEvent, DnsEvent, FlowEvent, HttpEvent, IpsEvent, SdwanEvent, ZtnaEvent};
 pub use ids::{
-    ClaimTokenId, DeviceId, EventId, PolicyBundleId, PolicyGraphId, PolicySigningKeyId, SiteId,
-    TenantId,
+    ClaimTokenId, DeviceId, EventId, InvalidPolicySigningKeyId, PolicyBundleId, PolicyGraphId,
+    PolicySigningKeyId, SiteId, TenantId,
 };
 pub use lifecycle::{Health, HealthCheck, HealthStatus, ShutdownSignal, ShutdownTrigger};
 pub use policy::{
-    BundleSignature, BundleTarget, PolicyBundle, PolicyBundleHeader, PolicyVerifier,
-    VerificationError,
+    AddKeyError, BundleSignature, BundleTarget, PolicyBundle, PolicyBundleClaims, PolicyVerifier,
+    UnknownBundleTarget, VerificationError,
 };
 pub use traffic_class::TrafficClass;

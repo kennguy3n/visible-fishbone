@@ -417,6 +417,12 @@ mod tests {
         .expect("envelope")
     }
 
+    /// The "always-on" envelope fields must use the short tag
+    /// form on the wire and the Rust field names must never
+    /// leak. This test only asserts on tags that have no
+    /// `skip_serializing_if` / `default` adapter — fields that
+    /// may be omitted are covered separately so the assertion
+    /// failure mode is self-explanatory.
     #[test]
     fn envelope_wire_uses_short_tags_from_go_schema() {
         let env = sample_envelope();
@@ -424,13 +430,13 @@ mod tests {
         let map: std::collections::BTreeMap<String, rmpv::Value> =
             rmp_serde::from_slice(&bytes).expect("decode dynamic");
         let keys: std::collections::BTreeSet<&str> = map.keys().map(String::as_str).collect();
-        // Required short tags must all appear.
-        for required in [
-            "v", "id", "tid", "did", "sid", "ts", "cls", "plt", "tc", "bi", "bo", "pl",
-        ] {
+        // Required short tags must all appear — these have no
+        // `skip_serializing_if` adapter and are emitted for
+        // every envelope.
+        for required in ["v", "id", "tid", "did", "ts", "cls", "plt", "pl"] {
             assert!(
                 keys.contains(required),
-                "short tag {required} missing; got {keys:?}"
+                "required short tag {required} missing; got {keys:?}"
             );
         }
         // Rust field names must NOT leak.
@@ -438,6 +444,72 @@ mod tests {
             assert!(
                 !keys.contains(forbidden),
                 "Rust field {forbidden} leaked; got {keys:?}"
+            );
+        }
+    }
+
+    /// Optional / `skip_serializing_if` fields must appear
+    /// **only** when their value warrants emission, and must
+    /// use the short tag form when they do. Splitting this from
+    /// the always-on assertion above is what gives a future
+    /// failure mode a clear name: "the `tc` tag is missing from
+    /// a non-default-traffic-class envelope" vs "a default
+    /// envelope is unexpectedly emitting `tc`".
+    #[test]
+    fn envelope_wire_emits_optional_tags_when_populated() {
+        // Build a flow envelope whose optional fields all
+        // carry non-default values. Every optional tag MUST be
+        // present.
+        let env = sample_envelope();
+        assert!(
+            env.site_id.is_some()
+                && env.traffic_class.is_some()
+                && env.bytes_in > 0
+                && env.bytes_out > 0,
+            "fixture must exercise all optional tags",
+        );
+        let bytes = env.marshal().expect("marshal");
+        let map: std::collections::BTreeMap<String, rmpv::Value> =
+            rmp_serde::from_slice(&bytes).expect("decode dynamic");
+        let keys: std::collections::BTreeSet<&str> = map.keys().map(String::as_str).collect();
+        for populated in ["sid", "tc", "bi", "bo"] {
+            assert!(
+                keys.contains(populated),
+                "optional short tag {populated} should be present when populated; got {keys:?}",
+            );
+        }
+    }
+
+    /// The inverse of the above: when every optional field is
+    /// at its default ("absent") value, the encoder MUST omit
+    /// the tag entirely rather than emit zero / null. This is
+    /// what `skip_serializing_if` exists for — losing the
+    /// guard silently doubles the wire size of an idle agent's
+    /// heartbeat traffic.
+    #[test]
+    fn envelope_wire_omits_optional_tags_at_default() {
+        let mut env = sample_envelope();
+        // Synthesise a minimal-envelope flow: no site, no
+        // traffic class decision yet, zero bytes counted.
+        env.site_id = None;
+        env.traffic_class = None;
+        env.bytes_in = 0;
+        env.bytes_out = 0;
+        let bytes = env.marshal().expect("marshal");
+        let map: std::collections::BTreeMap<String, rmpv::Value> =
+            rmp_serde::from_slice(&bytes).expect("decode dynamic");
+        let keys: std::collections::BTreeSet<&str> = map.keys().map(String::as_str).collect();
+        for absent in ["sid", "tc", "bi", "bo"] {
+            assert!(
+                !keys.contains(absent),
+                "optional short tag {absent} must be omitted at default; got {keys:?}",
+            );
+        }
+        // The required tags must still all be present.
+        for required in ["v", "id", "tid", "did", "ts", "cls", "plt", "pl"] {
+            assert!(
+                keys.contains(required),
+                "required short tag {required} missing in minimal envelope; got {keys:?}",
             );
         }
     }

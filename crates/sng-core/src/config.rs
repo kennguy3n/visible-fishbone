@@ -230,11 +230,9 @@ impl Config {
         // normalization itself; it would otherwise accept a
         // padded URL that downstream consumers (sng-comms) would
         // then feed into the HTTP client as-is. See the
-        // regression test `load_normalises_control_plane_url`.
-        let trimmed = cfg.control_plane_url.trim();
-        if trimmed.len() != cfg.control_plane_url.len() {
-            cfg.control_plane_url = trimmed.to_owned();
-        }
+        // regression tests `load_normalises_control_plane_url`
+        // and `load_strips_trailing_slash_on_control_plane_url`.
+        cfg.control_plane_url = normalise_control_plane_url(&cfg.control_plane_url);
         cfg.validate()?;
         Ok(cfg)
     }
@@ -350,6 +348,13 @@ mod humantime_serde {
 
     fn parse_duration(s: &str) -> Result<Duration, String> {
         let s = s.trim();
+        // Suffix-aware fast path. `checked_mul` keeps the
+        // hours/days variants safe from a configured value
+        // close to `u64::MAX`: a release build would otherwise
+        // wrap silently and produce a wildly short duration,
+        // and a debug build would panic. Both modes now surface
+        // a stable parse error string that propagates through
+        // figment as a config-load failure.
         if let Some(stripped) = s.strip_suffix("ms") {
             stripped
                 .parse::<u64>()
@@ -361,16 +366,72 @@ mod humantime_serde {
                 .map(Duration::from_secs)
                 .map_err(|e| format!("{e}"))
         } else if let Some(stripped) = s.strip_suffix('m') {
-            stripped
-                .parse::<u64>()
-                .map(|n| Duration::from_secs(n * 60))
-                .map_err(|e| format!("{e}"))
+            let n: u64 = stripped
+                .parse()
+                .map_err(|e: std::num::ParseIntError| e.to_string())?;
+            n.checked_mul(60)
+                .map(Duration::from_secs)
+                .ok_or_else(|| format!("duration overflow: {n} minutes exceeds u64 seconds range"))
+        } else if let Some(stripped) = s.strip_suffix('h') {
+            let n: u64 = stripped
+                .parse()
+                .map_err(|e: std::num::ParseIntError| e.to_string())?;
+            n.checked_mul(3_600)
+                .map(Duration::from_secs)
+                .ok_or_else(|| format!("duration overflow: {n} hours exceeds u64 seconds range"))
+        } else if let Some(stripped) = s.strip_suffix('d') {
+            let n: u64 = stripped
+                .parse()
+                .map_err(|e: std::num::ParseIntError| e.to_string())?;
+            n.checked_mul(86_400)
+                .map(Duration::from_secs)
+                .ok_or_else(|| format!("duration overflow: {n} days exceeds u64 seconds range"))
         } else {
             // Bare number = seconds.
             s.parse::<u64>()
                 .map(Duration::from_secs)
                 .map_err(|e| format!("{e}"))
         }
+    }
+}
+
+/// Normalise the operator-supplied control-plane URL. Cheap,
+/// deterministic transforms only — full URL parsing is
+/// `sng-comms`' concern.
+///
+/// Two transforms today:
+///   1. trim surrounding whitespace (operator pasted a newline);
+///   2. strip a single trailing `/`. The `sng-comms` HTTP layer
+///      builds request paths with explicit leading slashes
+///      (`format!("{base}/api/v1/tenants/...")`), so a trailing
+///      slash on `base` produces double-slashed URLs that some
+///      proxies normalise and others reject. Strip it here so
+///      the canonical form stored in `Config` is what every
+///      downstream consumer sees.
+///
+/// The function is intentionally NOT exposed: callers must go
+/// through [`Config::load`] / [`Config::validate`] so the
+/// invariants stay enforced in one place.
+fn normalise_control_plane_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    // Strip a single trailing slash, but only if there's an
+    // authority component left after the scheme — bare scheme
+    // values like `"https://"` would shrink to `"https:/"`,
+    // which `validate()` would then reject with a confusing
+    // "must start with http:// or https://" error against a
+    // value that visibly does.
+    let Some(without_slash) = trimmed.strip_suffix('/') else {
+        return trimmed.to_owned();
+    };
+    // `without_slash` ends with `:/` iff the original was the
+    // bare scheme `xyz://`. (`":"` alone never appears at the
+    // end of a URL of the shape `scheme://...`.) Preserve the
+    // bare-scheme value as-is so the validation error stays
+    // accurate.
+    if without_slash.ends_with(":/") {
+        trimmed.to_owned()
+    } else {
+        without_slash.to_owned()
     }
 }
 
@@ -638,4 +699,101 @@ poll_interval = "1s"
             Ok(())
         });
     }
+
+    /// Regression test: a single trailing slash on the
+    /// control-plane URL must be stripped on load so the
+    /// canonical form is what downstream consumers see.
+    /// `sng-comms` builds request paths like
+    /// `format!("{base}/api/v1/...")` — a trailing slash on
+    /// `base` would otherwise produce `https://cp//api/v1/...`,
+    /// which some proxies normalise and others 404 on.
+    #[test]
+    fn load_strips_trailing_slash_on_control_plane_url() {
+        let tenant = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let toml_body = format!(
+            r#"
+mode = "endpoint"
+tenant_id = "{tenant}"
+device_id = "{device}"
+control_plane_url = "https://cp.example.com/"
+
+[telemetry]
+batch_size = 1
+flush_interval = "1s"
+spool_size_bytes = 1024
+
+[policy]
+poll_interval = "1s"
+"#
+        );
+        figment::Jail::expect_with(|_jail| {
+            let mut file =
+                NamedTempFile::new().map_err(|e| figment::Error::from(format!("{e}")))?;
+            std::io::Write::write_all(&mut file, toml_body.as_bytes())
+                .map_err(|e| figment::Error::from(format!("{e}")))?;
+            let cfg = Config::load(Some(file.path()))
+                .map_err(|e| figment::Error::from(format!("{e}")))?;
+            assert_eq!(cfg.control_plane_url, "https://cp.example.com");
+            Ok(())
+        });
+    }
+
+    /// A bare scheme (`https://`) — which lacks a host — must
+    /// NOT have its trailing slash stripped, because that would
+    /// reduce it to `https:`, which the prefix check in
+    /// `validate()` would then reject with a confusing error.
+    /// Operator-supplied URLs of this shape are still nonsense
+    /// (no host) but the failure mode should be the existing
+    /// "must start with http:// or https://" path, not a
+    /// shape-mangled empty-host string.
+    #[test]
+    fn url_normalisation_preserves_bare_scheme() {
+        // White-box test the helper directly so we exercise the
+        // edge case without depending on validate() ordering.
+        assert_eq!(super::normalise_control_plane_url("https://"), "https://");
+        assert_eq!(super::normalise_control_plane_url("http://"), "http://");
+        assert_eq!(
+            super::normalise_control_plane_url("https://cp.example.com"),
+            "https://cp.example.com",
+        );
+        assert_eq!(
+            super::normalise_control_plane_url("https://cp.example.com/"),
+            "https://cp.example.com",
+        );
+    }
+
+    /// Regression test for the duration parser's overflow
+    /// branches: `n * (60 | 3_600 | 86_400)` would silently
+    /// wrap in a release build and panic in debug for `n`
+    /// close to `u64::MAX`. The `checked_mul` rewrite surfaces
+    /// a stable parse-error string that propagates through
+    /// figment as a config-load failure regardless of build
+    /// mode. We deliberately pick the smallest `n` that
+    /// overflows each multiplier so the test does not depend
+    /// on the exact wrapping behaviour.
+    #[test]
+    fn parse_duration_rejects_overflow_in_minutes_hours_days() {
+        for (suffix, divisor) in [("m", 60_u64), ("h", 3_600), ("d", 86_400)] {
+            let smallest_overflow = (u64::MAX / divisor) + 1;
+            let raw = format!("{smallest_overflow}{suffix}");
+            // Deserialise via the same path Config::load uses,
+            // through humantime_serde, by hand-building a JSON
+            // string and routing it through serde_json.
+            let r: Result<std::time::Duration, _> =
+                serde_json::from_str(&format!("\"{raw}\"")).map(|d: Wrap| d.0);
+            let err = r.expect_err(&format!("{raw} must overflow"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("overflow"),
+                "{raw} expected overflow error, got: {msg}",
+            );
+        }
+    }
+
+    /// Test-only wrapper that routes through `humantime_serde`
+    /// so the overflow test exercises the same deserialisation
+    /// path Config::load uses.
+    #[derive(serde::Deserialize)]
+    struct Wrap(#[serde(with = "humantime_serde")] std::time::Duration);
 }

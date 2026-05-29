@@ -151,12 +151,102 @@ id_newtype!(
     /// policy graph the control plane compiles bundles from.
     PolicyGraphId
 );
-id_newtype!(
-    /// Ed25519 signing key identifier — used by bundle
-    /// verifiers to look up the public key that signed a
-    /// particular bundle in the operator-managed key store.
-    PolicySigningKeyId
-);
+/// Ed25519 signing key identifier — used by bundle verifiers
+/// to look up the public key that signed a particular bundle in
+/// the operator-managed key store.
+///
+/// Unlike the UUID-shaped identifiers above, this one is a short
+/// string. The Go control plane derives it as the first 16 hex
+/// characters of `SHA-256(public_key)` for file-backed signers
+/// or the first 8 bytes of a fresh UUID v4 for KMS-backed
+/// signers — both shapes land in the same 16-char form on purpose
+/// so receivers (this module) treat them identically. See
+/// `internal/service/policy/keys.go::newKeyID` and
+/// `internal/service/policy/service.go::deriveKeyID`. Stored as
+/// a `String` rather than `[u8; 8]` so future identifier shapes
+/// (longer key ids, non-hex alphabets, KMS ARNs, etc.) do not
+/// require a wire-format break.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PolicySigningKeyId(String);
+
+impl PolicySigningKeyId {
+    /// Maximum accepted length. Generous headroom over the
+    /// canonical 16-char form so KMS-backed signers can adopt
+    /// longer identifiers without forcing a wire bump. Wire
+    /// values larger than this are rejected at parse time.
+    pub const MAX_LEN: usize = 64;
+
+    /// Wraps a raw string id. Returns an error if the id is
+    /// empty or longer than [`Self::MAX_LEN`]. The empty id is
+    /// reserved as the "no signer" sentinel returned by
+    /// `EphemeralSigner` on the Go side — that case must use
+    /// [`Self::ephemeral`] explicitly rather than passing the
+    /// empty string here.
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidPolicySigningKeyId> {
+        let v = value.into();
+        if v.is_empty() {
+            return Err(InvalidPolicySigningKeyId::Empty);
+        }
+        if v.len() > Self::MAX_LEN {
+            return Err(InvalidPolicySigningKeyId::TooLong {
+                got: v.len(),
+                max: Self::MAX_LEN,
+            });
+        }
+        Ok(Self(v))
+    }
+
+    /// The sentinel id used by ephemeral signers on the Go side.
+    /// Receivers MUST reject bundles carrying this id — there is
+    /// no key to verify against. Provided as a constructor so the
+    /// rejection path can be tested without bypassing
+    /// [`Self::new`]'s validation.
+    #[must_use]
+    pub fn ephemeral() -> Self {
+        Self(String::new())
+    }
+
+    /// Returns true if this is the [`Self::ephemeral`] sentinel.
+    #[must_use]
+    pub fn is_ephemeral(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Borrows the underlying id string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for PolicySigningKeyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for PolicySigningKeyId {
+    type Err = InvalidPolicySigningKeyId;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s.to_owned())
+    }
+}
+
+/// Error returned by [`PolicySigningKeyId::new`] /
+/// [`PolicySigningKeyId::from_str`] when the candidate id fails
+/// shape validation.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidPolicySigningKeyId {
+    /// The empty string is reserved for the ephemeral sentinel —
+    /// use [`PolicySigningKeyId::ephemeral`] explicitly.
+    #[error("policy signing key id must be non-empty")]
+    Empty,
+    /// The candidate id exceeded [`PolicySigningKeyId::MAX_LEN`].
+    #[error("policy signing key id is {got} chars, max {max}")]
+    TooLong { got: usize, max: usize },
+}
+
 id_newtype!(
     /// Enrolment claim token identifier. The plaintext claim
     /// token is hashed at the boundary; only the identifier and
