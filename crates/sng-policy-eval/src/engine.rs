@@ -9,9 +9,14 @@
 //! - Bundle rotation ([`Self::swap`]) is atomic: the next
 //!   `evaluate` either sees the entire old bundle or the entire
 //!   new one — never a tear.
-//! - Concurrent `swap` calls are serialised by the bundle's
-//!   `ArcSwap::compare_and_swap` semantics so two operators
-//!   racing a policy push cannot lose either's write.
+//! - Concurrent `swap` calls are serialised by an
+//!   [`ArcSwap::rcu`] loop wrapping the staleness check and the
+//!   pointer install. The closure re-reads the current bundle on
+//!   every CAS retry, so two operators racing a policy push
+//!   cannot interleave their writes in a way that lets a staler
+//!   bundle overwrite a newer one — the read-modify-write is a
+//!   single atomic step from the perspective of every other
+//!   thread.
 //!
 //! Replay / downgrade protection: [`Self::swap`] refuses a
 //! bundle whose `graph_version` is strictly older than what is
@@ -62,20 +67,66 @@ impl PolicyEngine {
     /// currently-loaded version is rejected with
     /// [`PolicyEvalError::Stale`]. Pass `force = true` to accept
     /// an older version (recovery / explicit rollback).
+    ///
+    /// Concurrency: the staleness check and the pointer install
+    /// run inside [`ArcSwap::rcu`] so a slow swap of e.g. v7
+    /// cannot overwrite a fast swap of v10 that committed
+    /// between our [`from_body`](LoadedBundle::from_body) and our
+    /// store. Previously this method did a plain
+    /// `load`-check-`store` sequence which had a TOCTOU window
+    /// against concurrent installers; the rcu loop closes it by
+    /// re-evaluating the staleness predicate on every retry.
+    /// The expensive work (signature verification, body decode,
+    /// claims parse via [`LoadedBundle::from_body`]) happens
+    /// exactly once outside the loop — concurrent swaps only
+    /// serialise on the cheap version-compare and the atomic
+    /// pointer CAS.
     pub fn swap(&self, body: &[u8], force: bool) -> Result<(), PolicyEvalError> {
-        let next = LoadedBundle::from_body(body, self.target)?;
-        if !force {
-            let current = self.bundle.load();
-            if next.graph_version < current.graph_version {
-                let bundle_id = next.bundle_id().unwrap_or_else(PolicyBundleId::nil);
-                return Err(PolicyEvalError::Stale {
-                    bundle_id,
-                    found: next.graph_version,
-                    current: current.graph_version,
-                });
-            }
+        let next = Arc::new(LoadedBundle::from_body(body, self.target)?);
+        if force {
+            // Operator-acknowledged rollback — skip the rcu
+            // loop entirely. There is no version invariant to
+            // protect, so a single atomic store is sufficient.
+            self.bundle.store(next);
+            return Ok(());
         }
-        self.bundle.store(Arc::new(next));
+        // Atomic version-check-and-install. The closure may run
+        // multiple times if a concurrent `swap` commits between
+        // our snapshot read and our CAS; `stale` is overwritten
+        // on every iteration so its value after the loop reflects
+        // the *last* (committed) iteration's verdict, not an
+        // intermediate one that was retried away.
+        let mut stale: Option<(PolicyBundleId, i64, i64)> = None;
+        self.bundle.rcu(|current| {
+            if next.graph_version < current.graph_version {
+                // Reject — return the current pointer so the CAS
+                // is a no-op and other writers can commit ahead
+                // of us without interference.
+                stale = Some((
+                    next.bundle_id().unwrap_or_else(PolicyBundleId::nil),
+                    next.graph_version,
+                    current.graph_version,
+                ));
+                Arc::clone(current)
+            } else {
+                // Accept — try to install `next`. If a concurrent
+                // writer races us, the CAS fails and the closure
+                // re-runs against the freshly-observed current,
+                // at which point we re-evaluate the staleness
+                // predicate against the new `current.graph_version`
+                // — so we cannot overwrite a newer bundle that
+                // committed between our `from_body` and our CAS.
+                stale = None;
+                Arc::clone(&next)
+            }
+        });
+        if let Some((bundle_id, found, current)) = stale {
+            return Err(PolicyEvalError::Stale {
+                bundle_id,
+                found,
+                current,
+            });
+        }
         Ok(())
     }
 
@@ -580,5 +631,77 @@ mod tests {
         writer.join().unwrap();
         reader.join().unwrap();
         assert_eq!(eng.current_bundle().graph_version, 49);
+    }
+
+    /// Regression: two writer threads racing concurrent swaps
+    /// must not let a staler version overwrite a newer one. Under
+    /// the pre-rcu implementation this test occasionally observed
+    /// a final `graph_version` strictly less than the maximum
+    /// committed value because thread A's `load` returned `v_old`,
+    /// thread B then `store`d `v_max`, and thread A's
+    /// `store(v_intermediate)` clobbered B's write. The rcu loop
+    /// closes that window by re-evaluating the staleness check on
+    /// every CAS retry.
+    #[test]
+    fn concurrent_swap_writers_preserve_monotonic_max() {
+        // Each writer attempts a strictly-ascending series of
+        // versions disjoint with the other writer's series. The
+        // final version must be the max across both series — any
+        // observed `current_bundle().graph_version` strictly less
+        // than that is a TOCTOU regression. We iterate the entire
+        // experiment many times because the race window is small
+        // (microseconds) and a single iteration may miss it.
+        const ITERATIONS: usize = 64;
+        const PER_WRITER_STEPS: i64 = 200;
+        for iter in 0..ITERATIONS {
+            let v0 = encode_bundle(BundleTarget::Edge, 1, "deny", &[], None);
+            let eng = Arc::new(PolicyEngine::from_body(&v0, BundleTarget::Edge).unwrap());
+            // Writer A installs even versions 2, 4, …, 2*PER_WRITER_STEPS.
+            // Writer B installs odd versions  3, 5, …, 2*PER_WRITER_STEPS+1.
+            // Final committed version must be at least
+            // `2 * PER_WRITER_STEPS` (writer A's max) since every
+            // version writer A installs is `>=` the engine's
+            // current; the rcu loop guarantees the final state is
+            // the highest-numbered swap that ever committed.
+            let target_max = 2 * PER_WRITER_STEPS + 1;
+            let writer_a = {
+                let eng = Arc::clone(&eng);
+                std::thread::spawn(move || {
+                    for step in 1..=PER_WRITER_STEPS {
+                        let v = step * 2;
+                        let body = encode_bundle(BundleTarget::Edge, v, "deny", &[], None);
+                        // `swap` MAY return Stale if the other
+                        // writer has already raced ahead — that's
+                        // not a bug, it's the very downgrade-
+                        // protection invariant under test.
+                        let _ = eng.swap(&body, false);
+                    }
+                })
+            };
+            let writer_b = {
+                let eng = Arc::clone(&eng);
+                std::thread::spawn(move || {
+                    for step in 1..=PER_WRITER_STEPS {
+                        let v = step * 2 + 1;
+                        let body = encode_bundle(BundleTarget::Edge, v, "deny", &[], None);
+                        let _ = eng.swap(&body, false);
+                    }
+                })
+            };
+            writer_a.join().unwrap();
+            writer_b.join().unwrap();
+            let final_v = eng.current_bundle().graph_version;
+            // Under the OLD code, final_v could end up at a value
+            // strictly less than `target_max` even though both
+            // writers ran to completion, because a stale
+            // unconditional store could clobber a fresher one.
+            // Under the rcu fix, final_v always equals target_max
+            // (the maximum version anyone tried to install).
+            assert_eq!(
+                final_v, target_max,
+                "iteration {iter}: final version {final_v} != expected max {target_max} \
+                 — concurrent swaps lost a write (TOCTOU regression)",
+            );
+        }
     }
 }

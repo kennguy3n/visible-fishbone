@@ -51,16 +51,36 @@ impl ReconnectBackoff {
     /// * `initial` — first wait (and post-reset wait). 0 is
     ///   allowed and means "retry immediately" on the first
     ///   failure.
-    /// * `max` — ceiling the doubled wait is capped at.
+    /// * `max` — ceiling the doubled wait is capped at. Must be
+    ///   `>= initial`; if a caller passes `initial > max` the
+    ///   release build clamps `initial` down to `max` (debug
+    ///   panics) so the `max` knob stays observable instead of
+    ///   silently degrading into a `[0, initial]` jitter range
+    ///   the operator never asked for.
     /// * `multiplier` — exponent base. The classical choice is 2
     ///   (each failure doubles); 3 is occasionally used for
     ///   faster fall-off on long outages.
     ///
-    /// Panics in debug builds if `multiplier == 0`; multiplier
-    /// must be ≥1.
+    /// Panics in debug builds if `multiplier == 0` or if
+    /// `initial > max`; both are programmer errors and the
+    /// release-build clamp is a defence-in-depth — not a
+    /// substitute for fixing the call site.
     #[must_use]
     pub fn new(initial: Duration, max: Duration, multiplier: u32) -> Self {
         debug_assert!(multiplier >= 1, "multiplier must be >= 1");
+        debug_assert!(
+            initial <= max,
+            "initial backoff {initial:?} must be <= max {max:?} — \
+             otherwise the `max` ceiling is silently unreachable",
+        );
+        // Defence-in-depth: clamp `initial` down so the
+        // `next_backoff` ceiling-advancement (`next.max(self.initial)`)
+        // cannot pull the ceiling back above `max`. Without the
+        // clamp, a release build with `initial=10s, max=1s` would
+        // emit a `[0, 10s]` jitter forever — well above what the
+        // operator declared as the upper bound for reconnect
+        // latency.
+        let initial = initial.min(max);
         Self {
             initial,
             max,
@@ -182,4 +202,32 @@ mod tests {
         let b = ReconnectBackoff::default();
         assert_eq!(b.current_ceiling(), Duration::from_millis(500));
     }
+
+    #[test]
+    fn initial_equal_to_max_clamps_ceiling_to_max() {
+        // Boundary case for the `initial > max` clamp: `initial =
+        // max` must still produce a ceiling that never exceeds
+        // `max`. The clamp branch (`initial.min(max)`) is a no-op
+        // here; this test exists to lock in the boundary so a
+        // future refactor that removes the clamp doesn't silently
+        // regress callers that genuinely want `initial == max`
+        // (e.g. a unit-test backoff with `Duration::ZERO` ceiling).
+        let mut b =
+            ReconnectBackoff::new(Duration::from_millis(500), Duration::from_millis(500), 2);
+        assert_eq!(b.current_ceiling(), Duration::from_millis(500));
+        for _ in 0..16 {
+            let _ = b.next_backoff();
+            assert!(
+                b.current_ceiling() <= Duration::from_millis(500),
+                "ceiling {:?} exceeded max 500ms — clamp regressed",
+                b.current_ceiling(),
+            );
+        }
+    }
+
+    // The `initial > max` debug-assert path cannot be exercised
+    // in a normal `cargo test` run (the debug build aborts before
+    // the constructor returns). The release-build clamp is the
+    // safety net for production binaries; we rely on code review
+    // + the doc comment to keep it from silently degrading.
 }

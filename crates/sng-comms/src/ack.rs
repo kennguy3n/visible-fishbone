@@ -47,7 +47,7 @@ pub enum RegressionKind {
     /// Server acked a sequence above any the agent has emitted.
     /// Either a server bug or a replay against an old client
     /// session.
-    AhedOfEmitted,
+    AheadOfEmitted,
     /// Server acked a sequence below the agent's current
     /// high-water mark — the replay attack the fail-closed
     /// posture exists to detect.
@@ -175,7 +175,7 @@ impl SequenceTracker {
                 stream: self.stream.clone(),
                 highest_emitted: guard.next.saturating_sub(1),
                 observed,
-                kind: RegressionKind::AhedOfEmitted,
+                kind: RegressionKind::AheadOfEmitted,
             });
         };
         if observed > highest_emitted {
@@ -183,7 +183,7 @@ impl SequenceTracker {
                 stream: self.stream.clone(),
                 highest_emitted,
                 observed,
-                kind: RegressionKind::AhedOfEmitted,
+                kind: RegressionKind::AheadOfEmitted,
             });
         }
         if let Some(prev) = guard.acked_high_water {
@@ -237,7 +237,7 @@ mod tests {
         let t = SequenceTracker::new("telemetry", 1);
         // No sequences emitted yet — highest_emitted = 0.
         let err = t.record_ack(7).expect_err("ack ahead must regress");
-        assert_eq!(err.kind, RegressionKind::AhedOfEmitted);
+        assert_eq!(err.kind, RegressionKind::AheadOfEmitted);
         assert_eq!(err.highest_emitted, 0);
         assert_eq!(err.observed, 7);
     }
@@ -251,13 +251,13 @@ mod tests {
         // the tracker now rejects unconditionally.
         let t = SequenceTracker::new("telemetry", 1);
         let err = t.record_ack(0).expect_err("ack before emit must regress");
-        assert_eq!(err.kind, RegressionKind::AhedOfEmitted);
+        assert_eq!(err.kind, RegressionKind::AheadOfEmitted);
         assert_eq!(err.observed, 0);
         // Same defence with start_seq=0 — the server cannot ack
         // sequence 0 until the agent has actually emitted it.
         let t0 = SequenceTracker::new("telemetry", 0);
         let err0 = t0.record_ack(0).expect_err("ack before emit must regress");
-        assert_eq!(err0.kind, RegressionKind::AhedOfEmitted);
+        assert_eq!(err0.kind, RegressionKind::AheadOfEmitted);
     }
 
     #[test]

@@ -28,6 +28,7 @@
 use chrono::{DateTime, Utc};
 use sng_core::envelope::Envelope;
 use std::time::Duration;
+use tracing::warn;
 
 /// One envelope plus its MessagePack bytes, captured at
 /// [`BatchBuilder::push`] time.
@@ -56,20 +57,22 @@ pub struct EncodedEnvelope {
 impl EncodedEnvelope {
     /// Encode an envelope and pair it with its bytes.
     ///
-    /// On the (vanishingly rare) failure to encode, we still
-    /// produce a paired entry but with empty bytes; the batch's
-    /// `estimated_bytes` accounts for the resulting 0-byte
-    /// contribution. Callers that want to refuse a bad envelope
-    /// outright should call `rmp_serde::to_vec_named` directly
-    /// and surface the error; this helper is the all-good path.
-    #[must_use]
-    pub fn encode(envelope: Envelope) -> Self {
+    /// Returns `Err` if `rmp_serde::to_vec_named` fails — in
+    /// practice this is unreachable (all `Envelope` field types
+    /// are trivially serializable), but surfacing the error
+    /// prevents a silent-empty-bytes outcome that would produce
+    /// a corrupt MessagePack array: the array header would claim
+    /// N items but only N−1 items' worth of bytes would follow.
+    /// Callers (i.e. `BatchBuilder::push`) log-and-drop on error
+    /// so the wire format stays valid at the cost of one
+    /// dropped envelope.
+    pub fn encode(envelope: Envelope) -> Result<Self, rmp_serde::encode::Error> {
         // `to_vec_named` matches `TelemetryClient::encode_batch`
         // exactly — named maps using `#[serde(rename = "…")]`
         // short tags. The Go control plane decodes with
         // `vmihailenco/msgpack/v5`, which expects named maps.
-        let encoded = rmp_serde::to_vec_named(&envelope).unwrap_or_default();
-        Self { envelope, encoded }
+        let encoded = rmp_serde::to_vec_named(&envelope)?;
+        Ok(Self { envelope, encoded })
     }
 
     /// Encoded byte length. Constant-time accessor used by the
@@ -224,7 +227,21 @@ impl BatchBuilder {
         // the eventual flush use the same exact byte length —
         // this is the singular MessagePack encode pass for the
         // life of this envelope.
-        let encoded = EncodedEnvelope::encode(envelope);
+        let encoded = match EncodedEnvelope::encode(envelope) {
+            Ok(e) => e,
+            Err(e) => {
+                // Drop the un-encodable envelope rather than
+                // inserting a 0-byte entry that would corrupt the
+                // MessagePack array header/body contract. This is
+                // unreachable in practice (all Envelope field
+                // types derive Serialize), but if a future field
+                // introduces a non-trivially-serializable type the
+                // operator gets a visible log line and the wire
+                // format stays valid.
+                warn!(error = %e, "envelope encoding failed; dropping");
+                return None;
+            }
+        };
         let envelope_size = encoded.encoded_len();
 
         // Pre-push: if the current pending state already crosses
@@ -441,7 +458,7 @@ mod tests {
                     .extend_from_slice(&rmp_serde::to_vec_named(env).expect("per-envelope encode"));
             }
 
-            assert_eq!(spliced, direct, "splice equivalence broke for N={n}",);
+            assert_eq!(spliced, direct, "splice equivalence broke for N={n}");
         }
     }
 
