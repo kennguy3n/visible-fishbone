@@ -113,7 +113,12 @@ test-rust:
 lint-rust:
 	@if [ -f Cargo.toml ]; then \
 		$(CARGO) fmt --all -- --check && \
-		$(CARGO) clippy --workspace --all-targets -- -D warnings; \
+		$(CARGO) clippy --workspace --all-targets -- -D warnings && \
+		if command -v cargo-deny >/dev/null 2>&1; then \
+			$(CARGO) deny --all-features check; \
+		else \
+			echo "lint-rust: cargo-deny not installed; skipping (install with: cargo install --locked cargo-deny)"; \
+		fi; \
 	else \
 		echo "lint-rust: Cargo.toml not present yet; skipping"; \
 	fi

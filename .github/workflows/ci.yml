@@ -46,6 +46,13 @@ concurrency:
 env:
   GO_VERSION: "1.25"
   GOLANGCI_LINT_VERSION: "v2.5.0"
+  # Rust toolchain pin: must match `rust-version` in the workspace
+  # Cargo.toml. Bumping here without bumping Cargo.toml will cause
+  # the workspace to refuse the toolchain at build time, which is
+  # the desired forcing function.
+  RUST_TOOLCHAIN: "1.85"
+  CARGO_DENY_VERSION: "0.16.4"
+  CARGO_TERM_COLOR: always
 
 jobs:
   lint:
@@ -189,6 +196,70 @@ jobs:
             echo "::error::go.mod / go.sum are not tidy. Run 'go mod tidy' locally and commit the result."
             exit 1
           }
+
+  rust-fmt:
+    name: rust fmt (cargo fmt --check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  rust-clippy:
+    name: rust clippy (--all-targets -D warnings)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-${{ runner.os }}
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  rust-test:
+    name: rust test (cargo test --workspace)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-${{ runner.os }}
+      - name: cargo test --workspace
+        run: cargo test --workspace --all-targets
+
+  rust-deny:
+    name: rust deny (licenses + bans + advisories + sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: install cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: ${{ env.RUST_TOOLCHAIN }}
+          command: check
+          arg: --all-features
 
   migration-dry-run:
     name: migration dry-run (postgres)
