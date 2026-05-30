@@ -116,7 +116,7 @@ impl RuleCompiler {
 
         let default_action = verb_to_action(bundle.default_verb).unwrap_or(RuleAction::Deny);
 
-        let script = render_script(&compiled_rules, &zones, &nat, default_action);
+        let script = render_script(&compiled_rules, &zones, &nat, default_action)?;
 
         Ok(CompiledRuleSet {
             rules: compiled_rules,
@@ -385,7 +385,7 @@ fn render_script(
     zones: &ZoneTable,
     nat: &NatTable,
     default_action: RuleAction,
-) -> NftablesScript {
+) -> Result<NftablesScript, FirewallError> {
     use std::fmt::Write as _;
     let mut out = String::new();
     out.push_str("# sng-fw compiled ruleset\n");
@@ -466,7 +466,7 @@ fn render_script(
     // expansions as the same rule (the `id` is preserved on
     // every emitted line via the trailing `comment`).
     for r in rules {
-        out.push_str(&render_rule(r, zones));
+        out.push_str(&render_rule(r, zones)?);
     }
 
     // NAT table appended after the filter table — kernel
@@ -478,7 +478,7 @@ fn render_script(
     // previous `inet sng_nat` table in the kernel instead of
     // leaving its prerouting / postrouting chains live.
     out.push_str(&nat.render_nft());
-    NftablesScript::new(out.into_bytes())
+    Ok(NftablesScript::new(out.into_bytes()))
 }
 
 fn default_chain_policy(action: RuleAction) -> &'static str {
@@ -491,7 +491,7 @@ fn default_chain_policy(action: RuleAction) -> &'static str {
     }
 }
 
-fn render_rule(rule: &FirewallRule, zones: &ZoneTable) -> String {
+fn render_rule(rule: &FirewallRule, zones: &ZoneTable) -> Result<String, FirewallError> {
     use std::fmt::Write as _;
 
     let mut out = String::new();
@@ -581,12 +581,12 @@ fn render_rule(rule: &FirewallRule, zones: &ZoneTable) -> String {
                 }
 
                 let line =
-                    render_single_rule(rule, family, *from_zone, *to_zone, &src_cidrs, &dst_cidrs);
+                    render_single_rule(rule, family, *from_zone, *to_zone, &src_cidrs, &dst_cidrs)?;
                 let _ = writeln!(out, "{line}");
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Render one fully-qualified nftables rule line for the given
@@ -601,7 +601,7 @@ fn render_single_rule(
     to_zone: Option<&String>,
     src_cidrs: &[&IpNet],
     dst_cidrs: &[&IpNet],
-) -> String {
+) -> Result<String, FirewallError> {
     let mut parts: Vec<String> = vec!["add rule inet sng_filter forward".into()];
     // Zone / CIDR predicates are emitted only when the family
     // is known. The family-agnostic case (`family = None`) by
@@ -650,19 +650,47 @@ fn render_single_rule(
         // upstream `rule_address_families` (or one of the
         // call-site loops in `render_rule`) has been changed
         // in a way that breaks the cross-family safety
-        // guarantee — failing loud here is much safer than
-        // silently emitting wrong-family predicates.
-        assert!(
-            from_zone.is_none()
-                && to_zone.is_none()
-                && src_cidrs.is_empty()
-                && dst_cidrs.is_empty(),
-            "render_single_rule: family-agnostic slot received \
-             zone or CIDR predicates — `rule_address_families` \
-             must never return `None` for a rule with such \
-             predicates. Rule id: {}",
-            rule.id
-        );
+        // guarantee. We *must* refuse to emit the rule line
+        // — silently dropping the predicate would render the
+        // line strictly more permissive than the in-memory
+        // engine, which is the exact divergence this module
+        // exists to prevent.
+        //
+        // Earlier revisions used `assert!` here. That worked
+        // for dev builds but in production it would unwind
+        // the manager's compile task and trip the agent's
+        // panic-restart loop. Returning `FirewallError::BundleInvalid`
+        // instead lets the engine fail the install cleanly,
+        // keep the previous bundle live, and surface a
+        // diagnosable error to the control plane. The
+        // matching `debug_assert!` is still useful as a
+        // dev-time stack-trace breadcrumb when a test
+        // exercises the regression.
+        if !(from_zone.is_none()
+            && to_zone.is_none()
+            && src_cidrs.is_empty()
+            && dst_cidrs.is_empty())
+        {
+            debug_assert!(
+                false,
+                "render_single_rule: family-agnostic slot received \
+                 zone or CIDR predicates — `rule_address_families` \
+                 must never return `None` for a rule with such \
+                 predicates. Rule id: {}",
+                rule.id
+            );
+            return Err(FirewallError::BundleInvalid(format!(
+                "render_single_rule: family-agnostic slot received \
+                 zone or CIDR predicates for rule id {} — the \
+                 compiler's family-selection (`rule_address_families`) \
+                 returned `None` for a rule that has zones or CIDRs. \
+                 This is an internal compiler invariant violation; \
+                 fail the bundle install rather than emit a kernel \
+                 line strictly more permissive than the in-memory \
+                 engine.",
+                rule.id
+            )));
+        }
     }
     if let Some(p) = rule.matches.protocol.as_nft() {
         parts.push(format!("meta l4proto {p}"));
@@ -690,7 +718,7 @@ fn render_single_rule(
         parts.push(rule.action.as_nft_verdict().into());
     }
     parts.push(format!("comment \"{}\"", sanitize_comment(&rule.id)));
-    parts.join(" ")
+    Ok(parts.join(" "))
 }
 
 /// Address-family slots this rule needs to be rendered for.
@@ -1072,6 +1100,65 @@ mod tests {
         );
     }
 
+    /// Regression: `render_single_rule` used to `assert!` when
+    /// the family-agnostic invariant was violated. In a release
+    /// build that panic would unwind the manager's compile task
+    /// and trip the agent's panic-restart loop. The corrected
+    /// behaviour returns `FirewallError::BundleInvalid` so the
+    /// engine fails the install cleanly and keeps the previous
+    /// bundle live.
+    ///
+    /// This test feeds the invariant violation directly into
+    /// `render_single_rule` (the upstream `rule_address_families`
+    /// would never produce a `None` family for a rule with
+    /// zones / CIDRs in practice, but a bug there would manifest
+    /// here in production).
+    #[test]
+    fn render_single_rule_returns_error_on_invariant_violation() {
+        // Synthetic family-agnostic slot WITH a CIDR predicate —
+        // exactly the divergence the function exists to prevent.
+        let rule = FirewallRule {
+            id: "broken".into(),
+            matches: RuleMatch {
+                src_cidrs: vec![cidr("10.0.0.0/8")],
+                ..RuleMatch::default()
+            },
+            action: RuleAction::Deny,
+            from_zones: vec![],
+            to_zones: vec![],
+            description: String::new(),
+        };
+        let v4_net = cidr("10.0.0.0/8");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_single_rule(&rule, None, None, None, &[&v4_net], &[])
+        }));
+        match result {
+            Ok(Err(FirewallError::BundleInvalid(msg))) => {
+                assert!(
+                    msg.contains("broken"),
+                    "error must name the rule that violated the invariant: {msg}"
+                );
+                assert!(
+                    msg.contains("family-agnostic slot"),
+                    "error must explain the invariant that was violated: {msg}"
+                );
+            }
+            Ok(Ok(line)) => {
+                panic!("invariant violation must NOT silently emit a rule line — got: {line:?}")
+            }
+            Ok(Err(other)) => {
+                panic!("invariant violation must surface as BundleInvalid; got: {other:?}")
+            }
+            Err(_) => {
+                // `debug_assert!` in debug builds catches it as a
+                // panic — that's still acceptable behaviour as long
+                // as it isn't reachable in production. Convert the
+                // panic into the success case so the test passes
+                // under both `cargo test` (debug) and `cargo test --release`.
+            }
+        }
+    }
+
     #[test]
     fn compile_skips_non_ngfw_rules() {
         let bundle = make_bundle_with_rules(&[Rule {
@@ -1346,7 +1433,7 @@ mod tests {
             RuleAction::Allow,
             RuleMatch::default(),
         );
-        let out = render_rule(&r, &zones);
+        let out = render_rule(&r, &zones).unwrap();
         // `render_rule` always ends each emitted rule with a
         // single trailing newline; the body itself must contain
         // none.
@@ -1476,7 +1563,7 @@ mod tests {
             RuleAction::Log,
             RuleMatch::default(),
         );
-        let out = render_rule(&r, &zones);
+        let out = render_rule(&r, &zones).unwrap();
         assert!(out.contains("meta mark set 0x1002"), "{out}");
         assert!(
             !out.contains(" accept "),
@@ -1486,7 +1573,7 @@ mod tests {
         // emit `accept` — confirms the test isn't a false
         // negative.
         let r = rule_with_zones("a", &["z"], &[], RuleAction::Allow, RuleMatch::default());
-        assert!(render_rule(&r, &zones).contains(" accept "));
+        assert!(render_rule(&r, &zones).unwrap().contains(" accept "));
     }
 
     #[test]
@@ -1499,7 +1586,7 @@ mod tests {
             (RuleAction::Steer, " accept "),
         ] {
             let r = rule_with_zones("r", &["z"], &[], action, RuleMatch::default());
-            let s = render_rule(&r, &zones);
+            let s = render_rule(&r, &zones).unwrap();
             assert!(s.contains(verdict), "{action:?} -> {s}");
         }
     }
@@ -1522,7 +1609,7 @@ mod tests {
             RuleAction::Allow,
             RuleMatch::default(),
         );
-        let out = render_rule(&r, &zones);
+        let out = render_rule(&r, &zones).unwrap();
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 4, "{out}");
         assert!(out.contains("ip saddr @zone_a ip daddr @zone_x"));
@@ -1544,7 +1631,7 @@ mod tests {
             RuleAction::Allow,
             RuleMatch::default(),
         );
-        let out = render_rule(&r, &zones);
+        let out = render_rule(&r, &zones).unwrap();
         assert!(out.contains("ip6 saddr @zone6_v6only"), "{out}");
         assert!(!out.contains("ip saddr @zone_v6only"));
     }
@@ -1561,7 +1648,7 @@ mod tests {
             RuleAction::Allow,
             RuleMatch::default(),
         );
-        let out = render_rule(&r, &zones);
+        let out = render_rule(&r, &zones).unwrap();
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2, "{out}");
         assert!(out.contains("ip saddr @zone_mixed"));
@@ -1579,7 +1666,7 @@ mod tests {
         let mut m = RuleMatch::default();
         m.src_cidrs.push(cidr("10.0.1.0/24"));
         let r = rule_with_zones("both", &["z"], &[], RuleAction::Allow, m);
-        let out = render_rule(&r, &zones);
+        let out = render_rule(&r, &zones).unwrap();
         assert!(out.contains("ip saddr @zone_z"), "{out}");
         assert!(out.contains("ip saddr { 10.0.1.0/24 }"), "{out}");
     }
@@ -1600,7 +1687,7 @@ mod tests {
         let mut m = RuleMatch::default();
         m.src_cidrs.push(cidr("2001:db8::/32"));
         let r = rule_with_zones("xfam", &["v4only"], &[], RuleAction::Allow, m);
-        let out = render_rule(&r, &zones);
+        let out = render_rule(&r, &zones).unwrap();
         assert!(
             out.is_empty(),
             "expected no lines for cross-family rule, got: {out:?}"
@@ -1614,7 +1701,7 @@ mod tests {
         let mut m = RuleMatch::default();
         m.src_cidrs.push(cidr("10.0.0.0/8"));
         let r = rule_with_zones("xfam6", &["v6only"], &[], RuleAction::Allow, m);
-        let out = render_rule(&r, &zones);
+        let out = render_rule(&r, &zones).unwrap();
         assert!(
             out.is_empty(),
             "expected no lines for cross-family rule, got: {out:?}"
@@ -1630,7 +1717,7 @@ mod tests {
         let mut m = RuleMatch::default();
         m.dst_cidrs.push(cidr("2001:db8::/32"));
         let r = rule_with_zones("xfam-dst", &[], &["v4only"], RuleAction::Allow, m);
-        let out = render_rule(&r, &zones);
+        let out = render_rule(&r, &zones).unwrap();
         assert!(
             out.is_empty(),
             "expected no lines for cross-family rule, got: {out:?}"
@@ -1650,7 +1737,7 @@ mod tests {
         let mut m = RuleMatch::default();
         m.src_cidrs.push(cidr("2001:db8::/32"));
         let r = rule_with_zones("partial-xfam", &["dual"], &[], RuleAction::Allow, m);
-        let out = render_rule(&r, &zones);
+        let out = render_rule(&r, &zones).unwrap();
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 1, "{out}");
         assert!(out.contains("ip6 saddr @zone6_dual"), "{out}");
@@ -1668,7 +1755,7 @@ mod tests {
         // walk for no semantic gain.
         let zones = ZoneTable::new();
         let r = rule_with_zones("any", &[], &[], RuleAction::Deny, RuleMatch::default());
-        let out = render_rule(&r, &zones);
+        let out = render_rule(&r, &zones).unwrap();
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 1, "{out}");
         assert!(!lines[0].contains("ip saddr"), "{out}");
@@ -1695,7 +1782,7 @@ mod tests {
             RuleAction::Allow,
             RuleMatch::default(),
         );
-        let out = render_rule(&r, &zones);
+        let out = render_rule(&r, &zones).unwrap();
         assert!(out.contains("ip saddr @zone_v4only ip daddr @zone_mixed"));
         // No v6 rule because v4only has no v6 networks.
         assert!(!out.contains("ip6 saddr @zone6_v4only"));
