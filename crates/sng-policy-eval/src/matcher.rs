@@ -198,6 +198,13 @@ impl PredicateMatch {
 /// level). Empty suffix matches nothing — a graph that ships an
 /// empty subject matcher is a control-plane bug and we should
 /// not silently match every flow.
+///
+/// **Contrast with the steering table matcher.** `steering::domain_matches_suffix`
+/// uses the steering compiler's `match_any` semantics where the
+/// apex IS included (`host == suffix` returns `true`). Here we
+/// follow RFC 6125 §6.4 — apex is rejected, only subdomains
+/// match. The two are deliberately different and not interchangeable;
+/// see the matching cross-reference comment in `steering.rs`.
 fn domain_suffix_match(suffix: &str, value: &str) -> bool {
     let suffix = suffix.strip_prefix("*.").unwrap_or(suffix);
     if suffix.is_empty() || value.is_empty() {
