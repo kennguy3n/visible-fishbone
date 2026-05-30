@@ -97,15 +97,23 @@ impl ScoreBreakdown {
 /// static bias. Pure, deterministic, allocation-free.
 #[must_use]
 pub fn score_path(probe: &PathProbe, weights: &ScoreWeights, static_bias: f32) -> ScoreBreakdown {
-    // NaN on any metric → fail-closed (worst possible
-    // score). The probe constructor's `new_checked`
-    // rejects NaN at ingest, but the unchecked
-    // constructor + this fallback close the door against
-    // a misbehaving adapter that bypassed the check.
+    // Non-finite on any metric, weight, or bias →
+    // fail-closed (worst possible score). The
+    // `SdwanPolicy::validate` gate rejects non-finite
+    // weights and the probe constructor's `new_checked`
+    // rejects NaN metrics, but `score_path` is a free
+    // function reachable by any caller — keep the
+    // belt-and-braces guard so a misbehaving adapter
+    // that bypassed validation cannot mint a NaN total
+    // (e.g. `INFINITY * 0.0 = NaN`) and become
+    // non-comparable in the selector.
     if !probe.latency_ms.is_finite()
         || !probe.loss_pct.is_finite()
         || !probe.jitter_ms.is_finite()
         || !static_bias.is_finite()
+        || !weights.latency.is_finite()
+        || !weights.loss.is_finite()
+        || !weights.jitter.is_finite()
     {
         return ScoreBreakdown::worst();
     }
@@ -180,6 +188,39 @@ mod tests {
         let w = weights(1.0, 1.0, 1.0);
         let s = score_path(&probe, &w, f32::NAN);
         assert!(s.total.is_infinite());
+    }
+
+    #[test]
+    fn infinite_weight_with_zero_probe_does_not_mint_nan() {
+        // Defense-in-depth: `SdwanPolicy::validate()`
+        // rejects non-finite weights, but `score_path` is
+        // a free function any caller can reach. An
+        // INFINITY weight against a 0.0 probe metric
+        // mathematically yields NaN (`INFINITY * 0.0`),
+        // which would be non-comparable in the selector
+        // and could let a garbage path win. The guard
+        // must collapse this to `worst()` instead.
+        let probe = PathProbe::new(0.0, 0.0, 0.0, 0);
+        let w = weights(f32::INFINITY, 1.0, 1.0);
+        let s = score_path(&probe, &w, 0.0);
+        assert!(
+            s.total.is_infinite() && s.total > 0.0,
+            "non-finite weight must collapse to worst (+INFINITY), got {}",
+            s.total
+        );
+    }
+
+    #[test]
+    fn nan_weight_also_collapses_to_worst() {
+        // Same belt-and-braces guard for a NaN weight.
+        let probe = PathProbe::new(5.0, 0.5, 1.0, 0);
+        let w = weights(f32::NAN, 1.0, 1.0);
+        let s = score_path(&probe, &w, 0.0);
+        assert!(
+            s.total.is_infinite() && s.total > 0.0,
+            "NaN weight must collapse to worst, got {}",
+            s.total
+        );
     }
 
     #[test]
