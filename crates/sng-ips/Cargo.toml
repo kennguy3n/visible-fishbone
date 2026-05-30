@@ -1,0 +1,72 @@
+[package]
+name = "sng-ips"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ShieldNet Gateway IPS subsystem: signature matching, TCP reassembly, alert emission, action enforcement"
+
+[dependencies]
+# Foundation types — `IpsEvent`, `FlowEvent`, `Verdict`,
+# `TrafficClass`, and the `ErrorCode` taxonomy all live in
+# sng-core. The crate emits `IpsEvent`s through the telemetry
+# pipeline and consumes `FlowKey` semantics from sng-fw.
+sng-core = { workspace = true }
+
+# `FlowKey` / `IpProtocol` are imported from sng-fw so the IPS
+# engine speaks the same flow language as the firewall. The
+# IPS service receives `PacketObservation`-like inputs from
+# the same producers that feed `FwService::observe_packet`.
+sng-fw = { workspace = true }
+
+# Policy verdicts and signature rules ride on top of
+# sng-policy-eval's bundle format. The IPS crate decodes a
+# subset of the bundle (the `signatures` section) and never
+# writes back.
+sng-policy-eval = { workspace = true }
+
+# Egress — `IpsEvent`s land in the telemetry pipeline, not
+# on the wire directly.
+sng-telemetry = { workspace = true }
+
+# Pattern matching. `aho-corasick` is the multi-string
+# literal matcher used as the first-pass over packet
+# payloads; `regex` is the slower second-pass that
+# confirms anchored / case-aware / quantified patterns.
+# Patterns are compiled once at bundle-load time; the
+# data path only does `is_match` / `find_iter`.
+aho-corasick = { workspace = true }
+regex = { workspace = true }
+
+# Async runtime + sync primitives.
+tokio = { workspace = true, features = ["sync", "time"] }
+arc-swap = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+async-trait = { workspace = true }
+
+# Bounded LRU caches: per-flow reassembly buffers
+# (`ReassemblyTable`) and per-(flow, sid) alert dedup
+# (`DedupTable`). Both want O(1) eviction of the
+# least-recently-touched entry.
+lru = { workspace = true }
+
+# Configuration / wire types.
+serde = { workspace = true }
+bytes = { workspace = true }
+
+# Error taxonomy.
+thiserror = { workspace = true }
+
+# Structured logging.
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "io-util", "macros"] }
+pretty_assertions = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
