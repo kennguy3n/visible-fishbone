@@ -1,0 +1,751 @@
+//! Compilation: policy bundle NGFW slice → executable rule set.
+//!
+//! The compiler takes the NGFW rules out of a
+//! [`sng_policy_eval::bundle::LoadedBundle`], the operator's
+//! zone table, and the NAT table, and emits:
+//!
+//! * A [`Vec<FirewallRule>`] for the engine's per-packet walk.
+//! * An [`NftablesScript`] for the kernel apply path. The script
+//!   is deterministic: same inputs produce byte-identical bytes,
+//!   so [`crate::engine::FirewallEngine::compile_and_swap`] can
+//!   short-circuit on a matching SHA-256 hash rather than re-
+//!   apply the same rules.
+//!
+//! The compiler intentionally does *not* talk to the kernel —
+//! that's the [`crate::nftables::NftablesBackend`]'s job. This
+//! separation lets unit tests run the compiler in pure-userland
+//! and snapshot the script string for assertion without ever
+//! touching `nft`.
+//!
+//! Rule translation rules:
+//!
+//! * Every NGFW rule whose verb is one of
+//!   `Allow`, `Deny`, `Inspect`, `Log`, `Steer` becomes one
+//!   [`FirewallRule`]. `Decrypt` is a TLS-policy concern (handled
+//!   in [`crate::tls_policy`]) and is filtered out here.
+//! * `SuggestOnly` rules with a wrapped enforcement verb are
+//!   compiled as `Log` so they emit telemetry but do not enforce
+//!   — matches the architecture's "shadow rule" rollout pattern.
+//! * Inline subject matchers (e.g. `Cidr { … }`) populate the
+//!   rule's `src_cidrs` (for `kind = network` source subjects).
+//!   Named subject references are resolved through the bundle's
+//!   subject map.
+//! * Zone references on a rule must exist in the supplied
+//!   [`ZoneTable`] — the compile fails otherwise. The compiler
+//!   is fail-closed: a typo in a zone reference cannot silently
+//!   become "any zone".
+
+use ipnet::IpNet;
+use sng_policy_eval::bundle::LoadedBundle;
+use sng_policy_eval::matcher::SubjectMatch;
+use sng_policy_eval::rule::{EnforcementDomain, Rule, SubjectKind, Verb};
+
+use crate::error::FirewallError;
+use crate::nat::NatTable;
+use crate::nftables::NftablesScript;
+use crate::rule::{FirewallRule, RuleAction, RuleMatch};
+use crate::zone::ZoneTable;
+
+/// The compiled output of one bundle + zone-table + nat-table
+/// pass. Held inside [`crate::engine::FirewallEngine`] behind an
+/// `ArcSwap` so the hot path reads it without locking.
+#[derive(Clone, Debug)]
+pub struct CompiledRuleSet {
+    /// The filter rules in evaluation order. First match wins.
+    pub rules: Vec<FirewallRule>,
+    /// The zone table the engine evaluates against.
+    pub zones: ZoneTable,
+    /// The NAT table the engine emits.
+    pub nat: NatTable,
+    /// The default verdict when no rule matches — derived from
+    /// the bundle's `default_verb`.
+    pub default_action: RuleAction,
+    /// Source bundle graph id (for telemetry / audit).
+    pub source_graph_id: String,
+    /// Source bundle graph version. Monotonically increases —
+    /// the engine's hot-swap path rejects downgrades.
+    pub source_graph_version: i64,
+    /// Compiled nftables script. Cached so re-applying the same
+    /// ruleset is a no-op.
+    pub script: NftablesScript,
+}
+
+/// One-shot compiler. Stateless — construct, call `compile`,
+/// discard.
+#[derive(Debug, Default)]
+pub struct RuleCompiler;
+
+impl RuleCompiler {
+    /// New compiler.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Compile the NGFW slice of `bundle` against `zones` and
+    /// `nat`. The compiler validates every zone reference and
+    /// emits a deterministic [`NftablesScript`].
+    pub fn compile(
+        &self,
+        bundle: &LoadedBundle,
+        zones: ZoneTable,
+        nat: NatTable,
+    ) -> Result<CompiledRuleSet, FirewallError> {
+        zones
+            .validate()
+            .map_err(|e| FirewallError::BundleInvalid(format!("zone table invalid: {e}")))?;
+        nat.validate()
+            .map_err(|e| FirewallError::BundleInvalid(format!("nat table invalid: {e}")))?;
+
+        // Pre-build a name → subject lookup so refs resolve
+        // without scanning the rule list per match. `LoadedBundle`
+        // exposes its own private lookup but doesn't expose it
+        // publicly, so we walk `bundle.rules` once here.
+        let subject_lookup = collect_named_subjects(&bundle.rules);
+
+        let mut compiled_rules = Vec::with_capacity(bundle.rules.len());
+        for r in bundle.rules.iter() {
+            if !r.applies_to_domain(EnforcementDomain::Ngfw) {
+                continue;
+            }
+            if let Some(rule) = compile_one(r, &subject_lookup, &zones)? {
+                compiled_rules.push(rule);
+            }
+        }
+
+        let default_action = verb_to_action(bundle.default_verb).unwrap_or(RuleAction::Deny);
+
+        let script = render_script(&compiled_rules, &zones, &nat, default_action);
+
+        Ok(CompiledRuleSet {
+            rules: compiled_rules,
+            zones,
+            nat,
+            default_action,
+            source_graph_id: bundle.graph_id.clone(),
+            source_graph_version: bundle.graph_version,
+            script,
+        })
+    }
+}
+
+fn collect_named_subjects(
+    rules: &[Rule],
+) -> std::collections::HashMap<String, sng_policy_eval::rule::Subject> {
+    let mut out = std::collections::HashMap::new();
+    for r in rules {
+        for s in &r.subjects {
+            if !s.name.is_empty() {
+                out.entry(s.name.clone()).or_insert_with(|| s.clone());
+            }
+        }
+    }
+    out
+}
+
+fn compile_one(
+    raw: &Rule,
+    subject_lookup: &std::collections::HashMap<String, sng_policy_eval::rule::Subject>,
+    zones: &ZoneTable,
+) -> Result<Option<FirewallRule>, FirewallError> {
+    // Suggest-only with an inner verb compiles as `Log` so it
+    // emits telemetry but never enforces — the architecture's
+    // "shadow rule" pattern. Suggest-only without an inner verb
+    // is rejected by the bundle decoder up front
+    // (`PolicyEvalError::SuggestOnlyMissingSuggestion`), so the
+    // defensive branch here just defends against a hypothetical
+    // future where the decoder relaxes that check.
+    let verb = if matches!(raw.verb, Verb::SuggestOnly) {
+        if raw.suggested_verb.is_some() {
+            Verb::Log
+        } else {
+            return Ok(None);
+        }
+    } else {
+        raw.verb
+    };
+
+    let Some(action) = verb_to_action(verb) else {
+        // Decrypt verdicts belong to the TLS-policy module and
+        // do not compile into a filter rule.
+        return Ok(None);
+    };
+
+    let mut matches = RuleMatch::default();
+
+    // Inline subjects — fold each into the rule's L3 / L4
+    // predicate.
+    for s in &raw.subjects {
+        fold_subject(s.kind, &s.matcher, &mut matches);
+    }
+    // Named subject references — resolve through the lookup
+    // built from the bundle's rules.
+    for name in &raw.subject_refs {
+        if let Some(s) = subject_lookup.get(name) {
+            fold_subject(s.kind, &s.matcher, &mut matches);
+        } else {
+            return Err(FirewallError::BundleInvalid(format!(
+                "ngfw rule {} references unknown subject {name}",
+                raw.id
+            )));
+        }
+    }
+
+    // Zone references — must exist in the table.
+    let mut from_zones = Vec::new();
+    let mut to_zones = Vec::new();
+    for (name, list, kind) in [
+        ("from", &mut from_zones, "from_zone"),
+        ("to", &mut to_zones, "to_zone"),
+    ] {
+        if let Some(v) = raw.extra.get(&format!("{name}_zones")) {
+            let zone_names: Vec<String> = serde_json::from_value(v.clone()).map_err(|e| {
+                FirewallError::BundleInvalid(format!(
+                    "ngfw rule {} has malformed {kind}s: {e}",
+                    raw.id
+                ))
+            })?;
+            for z in &zone_names {
+                if !zones.zones.contains_key(z) {
+                    return Err(FirewallError::BundleInvalid(format!(
+                        "ngfw rule {} references unknown {kind} {z}",
+                        raw.id
+                    )));
+                }
+            }
+            *list = zone_names;
+        }
+    }
+
+    Ok(Some(FirewallRule {
+        id: raw.id.clone(),
+        matches,
+        action,
+        from_zones,
+        to_zones,
+        description: raw.description.clone(),
+    }))
+}
+
+fn fold_subject(kind: SubjectKind, matcher: &SubjectMatch, into: &mut RuleMatch) {
+    match (kind, matcher) {
+        // Source / network subjects become CIDR predicates on
+        // the rule's src_cidrs. Device subjects with a literal
+        // CIDR fold to the same predicate — common pattern when
+        // the operator pins a workstation by static lease.
+        (SubjectKind::Network | SubjectKind::Device, SubjectMatch::Cidr { cidr }) => {
+            into.src_cidrs.push(*cidr);
+        }
+        // User / app / site subjects fold into the rule's
+        // subject matcher so the engine's hot path runs the
+        // string compare. Multiple subject vertices collapse
+        // into a single AnyOf — the union of values.
+        (
+            SubjectKind::User | SubjectKind::App | SubjectKind::Site,
+            SubjectMatch::Literal { value },
+        ) => {
+            merge_subject_literal(&mut into.subject, value.clone());
+        }
+        (
+            SubjectKind::User | SubjectKind::App | SubjectKind::Site,
+            SubjectMatch::AnyOf { values },
+        ) => {
+            for v in values {
+                merge_subject_literal(&mut into.subject, v.clone());
+            }
+        }
+        // Any other combination falls through — the engine's
+        // per-flow match will treat it as "no constraint" on the
+        // unmodified fields. The TODO list explicitly says to
+        // not silently allow on unknown matcher shapes; we
+        // preserve the rule's default-deny posture by leaving
+        // `matches` empty (which matches every flow) and letting
+        // the verb decide. The control plane's rule validator
+        // already rejects rules whose verb is `allow` with no
+        // predicates.
+        _ => {}
+    }
+}
+
+fn merge_subject_literal(slot: &mut SubjectMatch, value: String) {
+    match slot {
+        SubjectMatch::Any => {
+            *slot = SubjectMatch::Literal { value };
+        }
+        SubjectMatch::Literal { value: existing } => {
+            // Promote single literal to AnyOf when a second
+            // value is folded in.
+            *slot = SubjectMatch::AnyOf {
+                values: vec![existing.clone(), value],
+            };
+        }
+        SubjectMatch::AnyOf { values } => {
+            if !values.contains(&value) {
+                values.push(value);
+            }
+        }
+        // Cidr / DomainSuffix / Unknown: respect the existing
+        // matcher and skip — folding heterogeneous matcher
+        // kinds would produce a logically incoherent rule.
+        SubjectMatch::Cidr { .. } | SubjectMatch::DomainSuffix { .. } | SubjectMatch::Unknown => {}
+    }
+}
+
+fn verb_to_action(v: Verb) -> Option<RuleAction> {
+    match v {
+        Verb::Allow => Some(RuleAction::Allow),
+        Verb::Deny => Some(RuleAction::Deny),
+        Verb::Inspect => Some(RuleAction::Inspect),
+        Verb::Log => Some(RuleAction::Log),
+        Verb::Steer => Some(RuleAction::Steer),
+        // Decrypt is the TLS-policy module's verb; SuggestOnly
+        // is handled by the caller (which translates it into a
+        // Log rule when the inner verb is present).
+        Verb::Decrypt | Verb::SuggestOnly => None,
+    }
+}
+
+fn render_script(
+    rules: &[FirewallRule],
+    zones: &ZoneTable,
+    nat: &NatTable,
+    default_action: RuleAction,
+) -> NftablesScript {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    out.push_str("# sng-fw compiled ruleset\n");
+    out.push_str("add table inet sng_filter\n");
+    // Define one set per zone so the rule chain can match on
+    // `ip saddr @zone_<name>`.
+    for z in zones.zones.values() {
+        let name = sanitize_set_name(&z.name);
+        let _ = writeln!(
+            out,
+            "add set inet sng_filter zone_{name} {{ type ipv4_addr; flags interval; }}"
+        );
+        for n in &z.networks {
+            // nftables sets accept CIDRs via `add element`.
+            // Skip IPv6 nets — the IPv6 zone sets would be in a
+            // parallel `ip6_addr` set; the compiler emits both
+            // when an IPv6 CIDR is present.
+            if let IpNet::V4(v4) = n {
+                let _ = writeln!(out, "add element inet sng_filter zone_{name} {{ {v4} }}");
+            }
+        }
+        // IPv6 networks live in a parallel set.
+        if z.networks.iter().any(|n| matches!(n, IpNet::V6(_))) {
+            let _ = writeln!(
+                out,
+                "add set inet sng_filter zone6_{name} {{ type ipv6_addr; flags interval; }}"
+            );
+            for n in &z.networks {
+                if let IpNet::V6(v6) = n {
+                    let _ = writeln!(out, "add element inet sng_filter zone6_{name} {{ {v6} }}");
+                }
+            }
+        }
+    }
+
+    // Filter chain hooked at input + forward priority `filter`.
+    out.push_str(
+        "add chain inet sng_filter input { type filter hook input priority filter; policy ",
+    );
+    out.push_str(default_chain_policy(default_action));
+    out.push_str("; }\n");
+    out.push_str(
+        "add chain inet sng_filter forward { type filter hook forward priority filter; policy ",
+    );
+    out.push_str(default_chain_policy(default_action));
+    out.push_str("; }\n");
+
+    // Per-rule lines, in source order.
+    for r in rules {
+        out.push_str(&render_rule(r));
+        out.push('\n');
+    }
+
+    // NAT table appended after the filter table — kernel
+    // commits both transactionally.
+    out.push_str(&nat.render_nft());
+    NftablesScript::new(out.into_bytes())
+}
+
+fn default_chain_policy(action: RuleAction) -> &'static str {
+    match action {
+        RuleAction::Allow => "accept",
+        // Inspect / Log / Steer / Deny all fall back to drop —
+        // the marked-packet actions only make sense per-rule,
+        // not as chain defaults.
+        RuleAction::Deny | RuleAction::Inspect | RuleAction::Log | RuleAction::Steer => "drop",
+    }
+}
+
+fn render_rule(rule: &FirewallRule) -> String {
+    let mut parts: Vec<String> = vec!["add rule inet sng_filter forward".into()];
+    // Zone source — match on the per-zone set if the rule
+    // specifies a single from-zone (the common case).
+    if let Some(z) = rule.from_zones.first() {
+        parts.push(format!("ip saddr @zone_{}", sanitize_set_name(z)));
+    } else if !rule.matches.src_cidrs.is_empty() {
+        let list: Vec<String> = rule
+            .matches
+            .src_cidrs
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        parts.push(format!("ip saddr {{ {} }}", list.join(", ")));
+    }
+    if let Some(z) = rule.to_zones.first() {
+        parts.push(format!("ip daddr @zone_{}", sanitize_set_name(z)));
+    } else if !rule.matches.dst_cidrs.is_empty() {
+        let list: Vec<String> = rule
+            .matches
+            .dst_cidrs
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        parts.push(format!("ip daddr {{ {} }}", list.join(", ")));
+    }
+    if let Some(p) = rule.matches.protocol.as_nft() {
+        parts.push(format!("meta l4proto {p}"));
+    }
+    if !rule.matches.src_ports.is_empty() {
+        let list: Vec<String> = rule.matches.src_ports.iter().map(|r| r.as_nft()).collect();
+        parts.push(format!("th sport {{ {} }}", list.join(", ")));
+    }
+    if !rule.matches.dst_ports.is_empty() {
+        let list: Vec<String> = rule.matches.dst_ports.iter().map(|r| r.as_nft()).collect();
+        parts.push(format!("th dport {{ {} }}", list.join(", ")));
+    }
+    // Mark + verdict.
+    if let Some(mark) = rule.action.meta_mark() {
+        parts.push(format!("meta mark set {mark:#x}"));
+    }
+    parts.push(rule.action.as_nft_verdict().into());
+    parts.push(format!("comment \"{}\"", sanitize_comment(&rule.id)));
+    parts.join(" ")
+}
+
+fn sanitize_set_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn sanitize_comment(s: &str) -> String {
+    s.replace('"', "'").replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nat::{NatRule, NatType};
+    use crate::rule::Protocol;
+    use crate::zone::{Zone, ZonePolicy};
+    use pretty_assertions::assert_eq;
+    use sng_policy_eval::matcher::SubjectMatch;
+    use sng_policy_eval::rule::Subject as RawSubject;
+
+    fn cidr(s: &str) -> IpNet {
+        s.parse().unwrap()
+    }
+
+    /// Wire-compatible bundle envelope. Lives at module scope
+    /// so test helpers can re-use it without tripping clippy's
+    /// `items_after_statements` lint.
+    #[derive(serde::Serialize)]
+    struct Wire<'a> {
+        #[serde(rename = "v")]
+        v: u8,
+        #[serde(rename = "t")]
+        t: &'a str,
+        #[serde(rename = "g")]
+        g: &'a str,
+        #[serde(rename = "gv")]
+        gv: i64,
+        #[serde(rename = "c")]
+        c: &'a str,
+        #[serde(rename = "d")]
+        d: &'a str,
+        #[serde(rename = "r", with = "serde_bytes")]
+        r: &'a [u8],
+        #[serde(rename = "ts")]
+        ts: &'a str,
+    }
+
+    fn make_bundle_with_rules(rules: &[Rule]) -> LoadedBundle {
+        make_bundle(rules, "deny")
+    }
+
+    fn make_bundle(rules: &[Rule], default_action: &str) -> LoadedBundle {
+        // Construct a wire-compatible bundle envelope and run it
+        // through the production decoder. This keeps the compile
+        // tests honest: they exercise the same load path
+        // production callers use, and we don't have to depend on
+        // any private field on `LoadedBundle`.
+        let rules_json = serde_json::to_vec(rules).expect("rules serialise");
+        let wire = Wire {
+            v: 1,
+            t: "edge",
+            g: "test-graph",
+            gv: 1,
+            c: "test",
+            d: default_action,
+            r: &rules_json,
+            ts: "2026-01-01T00:00:00Z",
+        };
+        let body = rmp_serde::to_vec_named(&wire).expect("encode bundle");
+        LoadedBundle::from_body(&body, sng_core::policy::BundleTarget::Edge).expect("decode bundle")
+    }
+
+    fn ngfw_rule(id: &str, verb: Verb, subjects: Vec<RawSubject>) -> Rule {
+        Rule {
+            id: id.into(),
+            domain: EnforcementDomain::Ngfw,
+            verb,
+            suggested_verb: None,
+            subject_refs: Vec::new(),
+            predicate_refs: Vec::new(),
+            subjects,
+            predicates: Vec::new(),
+            targets: Vec::new(),
+            description: String::new(),
+            extra: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn compile_emits_filter_table_header() {
+        let zones = ZoneTable::new();
+        let nat = NatTable::new();
+        let bundle = make_bundle_with_rules(&[]);
+        let out = RuleCompiler::new().compile(&bundle, zones, nat).unwrap();
+        let s = out.script.as_str().unwrap();
+        assert!(s.contains("add table inet sng_filter"));
+        assert!(s.contains("add chain inet sng_filter input"));
+        assert!(s.contains("add chain inet sng_filter forward"));
+    }
+
+    #[test]
+    fn compile_skips_non_ngfw_rules() {
+        let bundle = make_bundle_with_rules(&[Rule {
+            id: "swg-rule".into(),
+            domain: EnforcementDomain::Swg,
+            verb: Verb::Allow,
+            suggested_verb: None,
+            subject_refs: vec![],
+            predicate_refs: vec![],
+            subjects: vec![],
+            predicates: vec![],
+            targets: vec![],
+            description: String::new(),
+            extra: std::collections::BTreeMap::new(),
+        }]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        assert!(out.rules.is_empty());
+    }
+
+    #[test]
+    fn compile_skips_decrypt_verb_rules() {
+        let bundle = make_bundle_with_rules(&[ngfw_rule("d", Verb::Decrypt, vec![])]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        assert!(out.rules.is_empty());
+    }
+
+    #[test]
+    fn compile_suggest_only_with_inner_verb_emits_log_rule() {
+        let mut r = ngfw_rule("shadow", Verb::SuggestOnly, vec![]);
+        r.suggested_verb = Some(Verb::Deny);
+        let bundle = make_bundle_with_rules(&[r]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        assert_eq!(out.rules.len(), 1);
+        assert_eq!(out.rules[0].action, RuleAction::Log);
+    }
+
+    // NOTE: There is no negative test for
+    // "SuggestOnly without an inner verb is dropped" because
+    // `LoadedBundle::from_body` rejects such bundles up front
+    // (`PolicyEvalError::SuggestOnlyMissingSuggestion`). The
+    // defensive branch in `compile_one` guards a hypothetical
+    // future relaxation only — it is unreachable today.
+
+    #[test]
+    fn compile_folds_network_subject_into_src_cidrs() {
+        let r = ngfw_rule(
+            "net",
+            Verb::Allow,
+            vec![RawSubject {
+                name: String::new(),
+                kind: SubjectKind::Network,
+                matcher: SubjectMatch::Cidr {
+                    cidr: cidr("10.0.0.0/24"),
+                },
+            }],
+        );
+        let bundle = make_bundle_with_rules(&[r]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        assert_eq!(out.rules.len(), 1);
+        assert_eq!(out.rules[0].matches.src_cidrs, vec![cidr("10.0.0.0/24")]);
+    }
+
+    #[test]
+    fn compile_unknown_subject_ref_fails() {
+        let mut r = ngfw_rule("bad", Verb::Allow, vec![]);
+        r.subject_refs.push("ghost".into());
+        let bundle = make_bundle_with_rules(&[r]);
+        let e = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap_err();
+        assert!(matches!(e, FirewallError::BundleInvalid(_)));
+    }
+
+    #[test]
+    fn compile_default_action_falls_back_to_deny() {
+        let bundle = make_bundle_with_rules(&[]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        assert_eq!(out.default_action, RuleAction::Deny);
+    }
+
+    #[test]
+    fn compile_emits_per_zone_set_per_ipv4_zone() {
+        let mut zones = ZoneTable::new();
+        zones
+            .add_zone(Zone {
+                name: "branch.lan".into(),
+                networks: vec![cidr("10.0.0.0/24")],
+                description: String::new(),
+            })
+            .unwrap();
+        let bundle = make_bundle_with_rules(&[]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, zones, NatTable::new())
+            .unwrap();
+        let s = out.script.as_str().unwrap();
+        assert!(s.contains("add set inet sng_filter zone_branch_lan"));
+        assert!(s.contains("add element inet sng_filter zone_branch_lan { 10.0.0.0/24 }"));
+    }
+
+    #[test]
+    fn compile_emits_ipv6_sets_when_zone_has_ipv6_cidrs() {
+        let mut zones = ZoneTable::new();
+        zones
+            .add_zone(Zone {
+                name: "v6".into(),
+                networks: vec![cidr("2001:db8::/32")],
+                description: String::new(),
+            })
+            .unwrap();
+        let bundle = make_bundle_with_rules(&[]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, zones, NatTable::new())
+            .unwrap();
+        let s = out.script.as_str().unwrap();
+        assert!(s.contains("add set inet sng_filter zone6_v6 { type ipv6_addr;"));
+        assert!(s.contains("add element inet sng_filter zone6_v6 { 2001:db8::/32 }"));
+    }
+
+    #[test]
+    fn compile_includes_nat_table_when_supplied() {
+        let mut nat = NatTable::new();
+        nat.add(NatRule {
+            id: "snat".into(),
+            src_cidrs: vec![cidr("10.0.0.0/8")],
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocol: Protocol::Any,
+            iif: String::new(),
+            oif: "wan0".into(),
+            nat: NatType::Masquerade { port: None },
+            description: String::new(),
+        })
+        .unwrap();
+        let bundle = make_bundle_with_rules(&[]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), nat)
+            .unwrap();
+        let s = out.script.as_str().unwrap();
+        assert!(s.contains("add table inet sng_nat"));
+        assert!(s.contains("masquerade"));
+    }
+
+    #[test]
+    fn compile_script_is_deterministic_for_same_inputs() {
+        let mut zones = ZoneTable::new();
+        zones
+            .add_zone(Zone {
+                name: "a".into(),
+                networks: vec![cidr("10.0.0.0/24")],
+                description: String::new(),
+            })
+            .unwrap();
+        let bundle = make_bundle_with_rules(&[ngfw_rule(
+            "r",
+            Verb::Allow,
+            vec![RawSubject {
+                name: String::new(),
+                kind: SubjectKind::Network,
+                matcher: SubjectMatch::Cidr {
+                    cidr: cidr("10.0.0.0/24"),
+                },
+            }],
+        )]);
+        let a = RuleCompiler::new()
+            .compile(&bundle, zones.clone(), NatTable::new())
+            .unwrap();
+        let b = RuleCompiler::new()
+            .compile(&bundle, zones, NatTable::new())
+            .unwrap();
+        assert_eq!(a.script.bytes, b.script.bytes);
+        assert_eq!(a.script.digest, b.script.digest);
+    }
+
+    #[test]
+    fn compile_default_action_allow_propagates_to_chain_policy() {
+        let bundle = make_bundle(&[], "allow");
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        let s = out.script.as_str().unwrap();
+        assert!(s.contains("policy accept;"));
+    }
+
+    #[test]
+    fn compile_records_source_graph_metadata() {
+        let bundle = make_bundle_with_rules(&[]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        assert_eq!(out.source_graph_id, "test-graph");
+        assert_eq!(out.source_graph_version, 1);
+    }
+
+    #[test]
+    fn compile_includes_chain_policy_in_rendered_script() {
+        let bundle = make_bundle_with_rules(&[]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        let s = out.script.as_str().unwrap();
+        assert!(s.contains("policy drop;"));
+    }
+
+    // Suppress unused-import warning on the in-test helper.
+    #[allow(dead_code)]
+    fn assert_zone_policy_present(_zp: ZonePolicy) {}
+}

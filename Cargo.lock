@@ -1526,6 +1526,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "sng-fw"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bytes",
+ "ipnet",
+ "pretty_assertions",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2",
+ "sng-core",
+ "sng-policy-eval",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sng-pal"
 version = "0.1.0"
 dependencies = [
