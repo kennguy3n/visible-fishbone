@@ -1,0 +1,62 @@
+[package]
+name = "sng-fw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ShieldNet Gateway L3-L7 firewall: stateful conntrack, verdict cache, app-aware identification, TLS bypass decision, telemetry emission"
+
+[dependencies]
+# Foundation types — FlowEvent / FlowVerdict / TrafficClass /
+# ErrorCode all live in sng-core. The crate emits FlowEvents into
+# the telemetry pipeline; the verdict-to-traffic-class mapping
+# uses the canonical sng-core taxonomy.
+sng-core = { workspace = true }
+
+# Verdict source — the firewall queries sng-policy-eval for the
+# L3-L7 policy verdict on a flow. The crate owns the cache + the
+# conntrack table; sng-policy-eval owns the bundle + the
+# evaluator.
+sng-policy-eval = { workspace = true }
+
+# Egress — FlowEvents land in the telemetry pipeline, not on the
+# wire directly. The crate depends on sng-telemetry only for the
+# [`TelemetryEvent`] producer surface.
+sng-telemetry = { workspace = true }
+
+# Async runtime + sync primitives. The conntrack table is guarded
+# by a parking_lot Mutex (short critical sections, no async work
+# under the lock); arc-swap drives the hot-swap of the configured
+# verdict resolver on policy reload.
+tokio = { workspace = true, features = ["sync", "time"] }
+arc-swap = { workspace = true }
+parking_lot = { workspace = true }
+async-trait = { workspace = true }
+
+# Configuration / wire types.
+serde = { workspace = true }
+ipnet = { workspace = true }
+
+# Error taxonomy.
+thiserror = { workspace = true }
+
+# Structured logging.
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "io-util", "macros"] }
+pretty_assertions = { workspace = true }
+serde_json = { workspace = true }
+# Bundle synthesis in service.rs unit tests mirrors the
+# wire shape sng-policy-eval decodes — chrono provides the
+# `ts` field, rmp_serde does the MessagePack encode,
+# serde_bytes is required by the WireBundle's `r` / `st`
+# fields.
+chrono = { workspace = true }
+rmp-serde = { workspace = true }
+serde_bytes = { workspace = true }
+
+[lints]
+workspace = true
