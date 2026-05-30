@@ -14,12 +14,25 @@
 //!
 //! ```text
 //! { sid, msg, sev, act, proto, src?, dst?, sport?, dport?,
-//!   patterns: [ { kind, value, nocase, anchor? } ] }
+//!   patterns: [ { kind, value, anchor? } ] }
 //! ```
 //!
 //! The crate decodes that shape into the typed [`Signature`]
 //! below, then [`crate::matcher::SignatureSet::compile`]
 //! turns the patterns into a multi-pattern matcher.
+//!
+//! ### Case sensitivity
+//!
+//! [`Pattern::Literal`] matches the payload bytes verbatim;
+//! there is no `nocase` flag on the typed pattern. A bundle
+//! author who needs case-insensitive matching ships a
+//! [`Pattern::Regex`] with the `(?i)` flag (e.g.
+//! `(?i)mozilla/`). The matcher passes the `regex::bytes`
+//! engine the pattern as-written, so `(?i)` Unicode case-
+//! folding works end-to-end. A future revision may grow a
+//! dedicated case-insensitive literal variant for the
+//! Aho-Corasick layer (case-folded automaton); until then,
+//! the `(?i)` regex path is the supported escape hatch.
 
 use serde::{Deserialize, Serialize};
 use sng_fw::flow::IpProtocol;

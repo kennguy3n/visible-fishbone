@@ -34,7 +34,25 @@ pub struct IpsStats {
 pub struct IpsStatsSnapshot {
     /// Number of payloads handed to the matcher.
     pub payloads_scanned: u64,
-    /// Total bytes that passed through the matcher.
+    /// Total bytes presented to the IPS service via
+    /// [`crate::service::IpsService::observe_payload`]
+    /// (`PayloadObservation::payload.len()` summed across
+    /// every call).
+    ///
+    /// This is an **input-throughput** counter, not a
+    /// matcher-work counter. Under the consume-and-
+    /// lookback model the assembled buffer the matcher
+    /// actually scans on a given call includes lookback
+    /// bytes carried over from the previous scan, so the
+    /// per-call number of bytes the matcher compared
+    /// against patterns can exceed the per-call payload
+    /// length. Operators interpreting this counter on a
+    /// dashboard should read it as "ingest volume," not
+    /// "matcher byte-compare volume." There is no
+    /// separate work counter today; the matcher's cost is
+    /// instead bounded by the per-flow reassembly window
+    /// (`reassembly_window_overflows` surfaces when that
+    /// bound is hit).
     pub bytes_scanned: u64,
     /// Total **observations** (`observe_payload` calls)
     /// that produced at least one signature hit. This is
