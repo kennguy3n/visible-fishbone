@@ -75,13 +75,28 @@ pub enum ZtnaError {
 
 impl ZtnaError {
     /// Map to the stable workspace error code.
+    ///
+    /// `UnknownApp` maps to
+    /// [`ErrorCode::ResourceMissing`] (the user may be
+    /// fully authenticated but is requesting a resource
+    /// that is not in the active catalog — the failure is
+    /// resource-shaped, not identity-shaped).
+    ///
+    /// `DeviceNotEnrolled` and `IdentityNotFound` map to
+    /// [`ErrorCode::IdentityRejected`] — the proxy's
+    /// mTLS + IdP chain may have produced a client cert
+    /// or `sub` claim, but the ZTNA brain itself has no
+    /// record for that identity, which from the
+    /// supervisor's perspective is functionally
+    /// indistinguishable from an mTLS-level rejection.
     #[must_use]
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::BundleDecode(_) => ErrorCode::WireSchema,
-            Self::UnknownApp { .. }
-            | Self::DeviceNotEnrolled { .. }
-            | Self::IdentityNotFound { .. } => ErrorCode::IdentityRejected,
+            Self::UnknownApp { .. } => ErrorCode::ResourceMissing,
+            Self::DeviceNotEnrolled { .. } | Self::IdentityNotFound { .. } => {
+                ErrorCode::IdentityRejected
+            }
             Self::ProviderFailure { .. } | Self::Telemetry(_) => ErrorCode::Io,
         }
     }
@@ -93,13 +108,19 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn unknown_app_maps_to_identity_rejected() {
+    fn unknown_app_maps_to_resource_missing() {
+        // `UnknownApp` is "user is fine, the resource isn't" —
+        // distinct from identity-rejection and modelled as
+        // `ResourceMissing` so dashboards bucket it next to
+        // other resource-not-found failures (missing policy
+        // bundle, missing device record, missing signing key)
+        // rather than next to authn / authz rejections.
         assert_eq!(
             ZtnaError::UnknownApp {
                 app_id: "missing".into()
             }
             .code(),
-            ErrorCode::IdentityRejected
+            ErrorCode::ResourceMissing
         );
     }
 
