@@ -470,14 +470,14 @@ fn render_script(
     }
 
     // NAT table appended after the filter table — kernel
-    // commits both transactionally. Skip entirely when the
-    // bundle has no NAT rules so we don't install an empty
-    // `inet sng_nat` table (which would still create
-    // prerouting / postrouting chains the kernel would have to
-    // traverse on every packet).
-    if !nat.rules.is_empty() {
-        out.push_str(&nat.render_nft());
-    }
+    // commits both transactionally. `render_nft` returns the
+    // full NAT block when there are rules, or a two-line
+    // `add table` + `delete table` atomic cleanup directive
+    // when there are not — so a bundle that rotates from
+    // NAT-present to NAT-empty actually tears down the
+    // previous `inet sng_nat` table in the kernel instead of
+    // leaving its prerouting / postrouting chains live.
+    out.push_str(&nat.render_nft());
     NftablesScript::new(out.into_bytes())
 }
 
@@ -992,6 +992,86 @@ mod tests {
         assert!(s2_text.contains("flush table inet sng_filter"));
     }
 
+    /// Regression: when a bundle that *had* NAT rules rotates
+    /// to a bundle that has *no* NAT rules, the rendered script
+    /// must still tear down the `inet sng_nat` table in the
+    /// kernel. The previous behaviour was to emit nothing for
+    /// the empty-NAT case, which left the prerouting /
+    /// postrouting chains live in the kernel and silently kept
+    /// DNAT-ing / SNAT-ing traffic according to the old bundle
+    /// while the in-memory engine reported "no NAT".
+    #[test]
+    fn compile_rotation_to_no_nat_tears_down_kernel_table() {
+        use crate::nat::{NatRule, NatType};
+        use crate::rule::Protocol;
+
+        // v1: bundle with one masquerade rule.
+        let mut nat_v1 = NatTable::new();
+        nat_v1
+            .add(NatRule {
+                id: "out".into(),
+                src_cidrs: vec!["10.0.0.0/8".parse().unwrap()],
+                dst_cidrs: vec![],
+                dst_ports: vec![],
+                protocol: Protocol::Any,
+                iif: String::new(),
+                oif: "wan0".into(),
+                nat: NatType::Masquerade { port: None },
+                description: String::new(),
+            })
+            .unwrap();
+        let v1 = make_bundle_with_rules(&[]);
+        let s1 = RuleCompiler::new()
+            .compile(&v1, ZoneTable::new(), nat_v1)
+            .unwrap();
+        let s1_text = s1.script.as_str().unwrap();
+
+        // v2: same control-plane bundle, but NAT table is now
+        // empty (operator removed every NAT rule).
+        let v2 = make_bundle_with_rules(&[]);
+        let s2 = RuleCompiler::new()
+            .compile(&v2, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        let s2_text = s2.script.as_str().unwrap();
+
+        // v1 must install the masquerade rule into sng_nat.
+        assert!(
+            s1_text.contains("add table inet sng_nat"),
+            "v1 must install the NAT table:\n{s1_text}"
+        );
+        assert!(
+            s1_text.contains("masquerade"),
+            "v1 must install the masquerade rule:\n{s1_text}"
+        );
+
+        // v2 must tear down the NAT table — both `add` (no-op /
+        // creates) and `delete` lines must appear, in that
+        // order, and no chain / rule declarations must follow.
+        assert!(
+            s2_text.contains("add table inet sng_nat"),
+            "v2 must idempotently `add` the NAT table so the \
+             subsequent `delete` works even on a first-ever \
+             install:\n{s2_text}"
+        );
+        assert!(
+            s2_text.contains("delete table inet sng_nat"),
+            "v2 must `delete` the NAT table so the kernel \
+             actually drops the previous bundle's chains and \
+             rules:\n{s2_text}"
+        );
+        let add_idx = s2_text.find("add table inet sng_nat").unwrap();
+        let del_idx = s2_text.find("delete table inet sng_nat").unwrap();
+        assert!(
+            add_idx < del_idx,
+            "the cleanup directive ordering must be add-then-delete"
+        );
+        // The previous masquerade rule must not survive.
+        assert!(
+            !s2_text.contains("masquerade"),
+            "v2 must not carry forward the v1 masquerade rule:\n{s2_text}"
+        );
+    }
+
     #[test]
     fn compile_skips_non_ngfw_rules() {
         let bundle = make_bundle_with_rules(&[Rule {
@@ -1198,17 +1278,38 @@ mod tests {
     }
 
     #[test]
-    fn compile_skips_nat_table_when_no_nat_rules() {
-        // The kernel still has to traverse every chain we
-        // declare even if it's empty. Don't emit `add table inet
-        // sng_nat` / prerouting / postrouting at all when the
-        // bundle has no NAT rules.
+    fn compile_emits_atomic_nat_teardown_when_no_nat_rules() {
+        // Previously this test asserted the script contained
+        // *no* NAT-related lines at all when the bundle had no
+        // NAT rules. That contract was wrong: it left any
+        // previously-installed `inet sng_nat` table live in the
+        // kernel, so rotating from a NAT-present bundle to a
+        // NAT-empty bundle silently kept DNAT-ing / SNAT-ing
+        // traffic according to the old bundle while the
+        // in-memory engine reported "no NAT".
+        //
+        // The new contract: every install must teardown the NAT
+        // table atomically via the `add` + `delete` idiom, so
+        // the kernel state always matches the in-memory engine
+        // regardless of what the previous bundle installed.
+        // Chains must NOT appear (this is a teardown, not a
+        // re-population), but the two-line cleanup directive
+        // must.
         let bundle = make_bundle_with_rules(&[]);
         let out = RuleCompiler::new()
             .compile(&bundle, ZoneTable::new(), NatTable::new())
             .unwrap();
         let s = out.script.as_str().unwrap();
-        assert!(!s.contains("add table inet sng_nat"), "{s}");
+        assert!(
+            s.contains("add table inet sng_nat"),
+            "must emit `add table` for idempotency:\n{s}"
+        );
+        assert!(
+            s.contains("delete table inet sng_nat"),
+            "must emit `delete table` to tear down stale state:\n{s}"
+        );
+        // The kernel does NOT need to traverse empty NAT chains —
+        // the `delete table` above removes them all.
         assert!(!s.contains("hook prerouting priority dstnat"), "{s}");
         assert!(!s.contains("hook postrouting priority srcnat"), "{s}");
     }

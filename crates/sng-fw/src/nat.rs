@@ -384,19 +384,36 @@ impl NatTable {
     /// Render the full NAT table as an nftables script. The
     /// output is deterministic: same input -> byte-identical
     /// bytes. The compiler uses this for the hot-swap diff.
+    ///
+    /// When the rule list is empty the output is *not* empty:
+    /// it is the two-line atomic cleanup directive
+    /// ```text
+    /// add table inet <name>
+    /// delete table inet <name>
+    /// ```
+    /// which is the standard nftables idiom for "ensure this
+    /// table is gone regardless of whether it previously
+    /// existed". `add table` is a no-op if the table exists
+    /// (and creates it otherwise); `delete table` then removes
+    /// it. Both run inside the same `nft -f` netlink
+    /// transaction so the kernel atomically sees the
+    /// "NAT-gone" state. The earlier behaviour of returning an
+    /// empty string left stale `inet sng_nat` chains and rules
+    /// live in the kernel after a bundle rotated from
+    /// NAT-present to NAT-empty — the in-memory engine reported
+    /// "no NAT" while the kernel still happily DNAT'd and
+    /// SNAT'd traffic according to the previous bundle.
     #[must_use]
     pub fn render_nft(&self) -> String {
         use std::fmt::Write as _;
-        // Skip the whole table when there are no NAT rules.
-        // Emitting `add table inet sng_nat` plus the two empty
-        // chains for a bundle that doesn't NAT anything just
-        // creates kernel objects no rule will ever touch, and
-        // makes the hot-swap diff noisier than it has to be.
-        // An empty render is the right "no NAT" wire signal —
-        // the kernel-side cleanup hook drops the table on the
-        // next apply.
         if self.rules.is_empty() {
-            return String::new();
+            // Atomic cleanup: ensure no stale NAT table from a
+            // previous bundle rotation persists in the kernel.
+            // See the doc-comment above for the full rationale.
+            let mut out = String::new();
+            let _ = writeln!(out, "add table inet {}", self.table_name);
+            let _ = writeln!(out, "delete table inet {}", self.table_name);
+            return out;
         }
         // Group rules by hook so the script emits one chain per
         // hook with the correct priority (DNAT before SNAT).
@@ -793,15 +810,62 @@ mod tests {
     }
 
     #[test]
-    fn nat_table_render_skips_table_when_empty() {
-        // An empty NAT table must not emit ANY nftables output —
-        // not the table header, not the prerouting chain, not
-        // the postrouting chain. Empty objects on every install
-        // pollute the hot-swap digest (two no-op installs would
-        // otherwise still differ from a non-empty diff) and
-        // create kernel objects no rule will ever reference.
+    fn nat_table_render_emits_atomic_cleanup_when_empty() {
+        // An empty NAT table must NOT render to an empty string —
+        // doing so would leave a stale `inet sng_nat` table with
+        // its prerouting / postrouting chains live in the kernel
+        // after a bundle rotated from NAT-present to NAT-empty.
+        // Instead, render the two-line atomic cleanup directive
+        // so the kernel sees an explicit "tear down the NAT
+        // table" netlink transaction.
         let t = NatTable::new();
-        assert_eq!(t.render_nft(), "");
+        let s = t.render_nft();
+        assert!(
+            s.contains("add table inet sng_nat\n"),
+            "empty NAT must emit add table for idempotency: {s}"
+        );
+        assert!(
+            s.contains("delete table inet sng_nat\n"),
+            "empty NAT must emit delete table to tear down stale state: {s}"
+        );
+        // The order matters: `add` first (no-op if table exists,
+        // creates if not), then `delete` (always succeeds because
+        // the previous `add` guaranteed it exists). Reversed
+        // ordering would fail on a first-ever install where the
+        // table doesn't exist yet.
+        let add_idx = s.find("add table inet sng_nat\n").unwrap();
+        let del_idx = s.find("delete table inet sng_nat\n").unwrap();
+        assert!(
+            add_idx < del_idx,
+            "add table must precede delete table so the cleanup is \
+             idempotent on first-ever install"
+        );
+        // No chain or rule declarations should appear — this is
+        // a cleanup, not a re-population.
+        assert!(
+            !s.contains("add chain"),
+            "empty NAT cleanup must not declare chains: {s}"
+        );
+        assert!(
+            !s.contains("add rule"),
+            "empty NAT cleanup must not declare rules: {s}"
+        );
+    }
+
+    #[test]
+    fn nat_table_render_cleanup_uses_configured_table_name() {
+        // The cleanup directive must respect a custom
+        // `table_name` — a future operator that renames their
+        // NAT table (e.g. for namespacing in a shared-tenant
+        // build) still gets a correct teardown.
+        let t = NatTable {
+            table_name: "tenant42_nat".into(),
+            rules: vec![],
+        };
+        let s = t.render_nft();
+        assert!(s.contains("add table inet tenant42_nat\n"));
+        assert!(s.contains("delete table inet tenant42_nat\n"));
+        assert!(!s.contains("sng_nat"));
     }
 
     #[test]
