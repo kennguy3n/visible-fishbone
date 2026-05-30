@@ -170,9 +170,24 @@ pub struct ZtnaEvent {
     /// Posture result (`pass` / `fail`).
     #[serde(rename = "pst")]
     pub posture_result: String,
-    /// Decision (`allow` / `deny`).
+    /// Decision (`allow` / `deny`). Carries only the
+    /// allow/deny outcome — the detailed reason (e.g.
+    /// `unknown_app`, `mfa_stale`, `tenant_mismatch`)
+    /// lives on the sibling [`Self::reason`] field so
+    /// dashboards that bucket by outcome and dashboards
+    /// that bucket by cause both have a single source of
+    /// truth.
     #[serde(rename = "dec")]
     pub decision: String,
+    /// Detailed structured reason — the dashboards' deny
+    /// bucket label (e.g. `unknown_app`, `mfa_stale`,
+    /// `not_entitled`, `device_posture_insufficient`,
+    /// `tenant_mismatch`) or `allow` on the allow path.
+    /// Always non-empty; the field maps to the
+    /// `ZtnaDecisionReason::as_str()` wire string in
+    /// `sng-ztna`.
+    #[serde(rename = "rsn")]
+    pub reason: String,
     /// Was the user identity verified (mTLS + IdP).
     #[serde(rename = "iv")]
     pub identity_verified: bool,
