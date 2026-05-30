@@ -449,12 +449,14 @@ impl SdwanService {
         let probe = decision.path_id.as_ref().and_then(|id| self.probes.get(id));
         // Update sticky cache on a path selection.
         if let Some(path_id) = &decision.path_id {
+            let pinned_until_ms = request
+                .now_ms
+                .saturating_add(self.policy.snapshot().sticky_window_ms);
             self.sticky_insert(
                 request.flow_key.clone(),
                 path_id.clone(),
-                request
-                    .now_ms
-                    .saturating_add(self.policy.snapshot().sticky_window_ms),
+                request.now_ms,
+                pinned_until_ms,
             );
         }
         // Build + emit telemetry event.
@@ -491,20 +493,31 @@ impl SdwanService {
     /// a single-step eviction sweep when the cache
     /// reaches its capacity, to keep the upper bound
     /// honest under high-cardinality flow_key streams.
-    fn sticky_insert(&self, flow_key: String, path_id: PathId, pinned_until_ms: u64) {
+    ///
+    /// `now_ms` is the request's wall-clock timestamp —
+    /// the eviction sweep uses it as the freshness
+    /// threshold so still-valid entries (those whose
+    /// `pinned_until_ms` is in the future relative to
+    /// `now_ms`) survive the sweep. Passing the new
+    /// entry's `pinned_until_ms` as the threshold would
+    /// wipe nearly the entire cache, defeating the
+    /// sticky-pin feature.
+    fn sticky_insert(&self, flow_key: String, path_id: PathId, now_ms: u64, pinned_until_ms: u64) {
         let mut g = self.sticky.lock();
         if g.len() >= self.cfg.sticky_cache_capacity {
-            // Sweep expired entries first. If none are
-            // expired, evict an arbitrary entry to make
-            // room — this is rare in practice (it
-            // requires `capacity` distinct flows
-            // arriving inside one sticky window), and
-            // the alternative (refusing to insert) would
-            // silently break the sticky-pin contract for
-            // the new flow.
-            let now_threshold = pinned_until_ms;
+            // Sweep *expired* entries first — keep entries
+            // whose `pinned_until_ms` is still in the
+            // future relative to the *current* time
+            // (`now_ms`), drop the rest. If no entry is
+            // expired, fall through and evict one
+            // arbitrary entry to make room — rare in
+            // practice (it requires `capacity` distinct
+            // flows arriving inside one sticky window),
+            // and the alternative (refusing to insert)
+            // would silently break the sticky-pin
+            // contract for the new flow.
             let before = g.len();
-            g.retain(|_, e| e.pinned_until_ms >= now_threshold);
+            g.retain(|_, e| e.pinned_until_ms > now_ms);
             let removed = before - g.len();
             if removed > 0 {
                 self.evictions.fetch_add(removed as u64, Ordering::Relaxed);
@@ -874,6 +887,85 @@ mod tests {
         let d2 = svc2.evaluate(&req("flow-r", TrafficClass::Interactive, NOW + 1_000));
         assert_eq!(d2.path_id, Some(PathId::new("inet")));
         assert_eq!(d2.reason, SteeringReason::Best);
+    }
+
+    #[test]
+    fn sticky_cache_capacity_sweep_keeps_still_valid_entries() {
+        // Regression test for the eviction-threshold bug:
+        // when the cache reaches its capacity, the sweep
+        // must use the request's `now_ms` (current time)
+        // as the eviction threshold — not the new
+        // entry's future `pinned_until_ms`. Using the
+        // future threshold would wipe every entry whose
+        // expiration is before the new entry's
+        // expiration (i.e. nearly the entire cache),
+        // defeating the sticky-pin feature.
+        //
+        // Test shape: fill the cache to capacity with
+        // entries that are STILL VALID at `now_ms`,
+        // insert one more, and verify those still-valid
+        // entries survived the sweep (only when the
+        // arbitrary-eviction fallback runs should we lose
+        // an entry, and exactly one).
+        let (tx, _rx) = telemetry();
+        let svc = SdwanServiceBuilder::new()
+            .with_config(SdwanServiceConfig {
+                sticky_cache_capacity: 4,
+                ..SdwanServiceConfig::default()
+            })
+            .with_policy(Arc::new(
+                SdwanPolicyHolder::try_new(SdwanPolicy::default()).unwrap(),
+            ))
+            .with_path_provider(Arc::new(StaticPathProvider::from_paths([Path::new(
+                "mpls",
+                [TrafficClass::Interactive],
+            )])))
+            .with_probe_provider(Arc::new(StaticProbeProvider::from_probes([(
+                PathId::new("mpls"),
+                PathProbe::new(10.0, 0.0, 0.0, NOW),
+            )])))
+            .build(tx);
+
+        // Fill cache to capacity. All four entries are
+        // still valid at NOW (their pinned_until_ms is
+        // NOW + sticky_window_ms = NOW + 30_000).
+        for i in 0..4 {
+            let flow = format!("flow-{i}");
+            let _ = svc.evaluate(&req(&flow, TrafficClass::Interactive, NOW));
+        }
+        assert_eq!(svc.sticky.lock().len(), 4);
+        let evictions_before = svc.evictions();
+
+        // Insert one more entry at NOW. The sweep should
+        // NOT wipe the four valid entries — they have
+        // pinned_until_ms = NOW + 30_000 > NOW. The
+        // fall-through arbitrary-eviction runs and
+        // removes exactly one entry (no expired entries
+        // to harvest), making room for the new one.
+        let _ = svc.evaluate(&req("flow-new", TrafficClass::Interactive, NOW));
+        let cache = svc.sticky.lock();
+        // Cache should be at capacity (4), holding the
+        // new entry plus three of the original four.
+        assert_eq!(cache.len(), 4, "cache should remain at capacity");
+        assert!(
+            cache.contains_key("flow-new"),
+            "new entry should have been inserted"
+        );
+        let survivors = (0..4)
+            .filter(|i| cache.contains_key(&format!("flow-{i}")))
+            .count();
+        assert_eq!(
+            survivors, 3,
+            "exactly three of the original four entries should survive (one evicted by the arbitrary-eviction fallback)"
+        );
+        drop(cache);
+        // Exactly one eviction recorded (the arbitrary
+        // fallback).
+        assert_eq!(
+            svc.evictions() - evictions_before,
+            1,
+            "exactly one eviction should have been recorded (not the four-of-four wipe the bug would cause)"
+        );
     }
 
     #[test]
