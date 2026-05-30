@@ -362,6 +362,17 @@ impl IpsService {
         // SID seen for deterministic attribution.
         let mut top_action: Action = Action::Alert;
         let mut top_sid: u32 = 0;
+        // Distinct "have we picked a top hit yet?" flag so
+        // the initialization check is independent of the
+        // SID value. Using `top_sid == 0` as the sentinel
+        // would conflate "uninitialized" with a perfectly
+        // valid `sid=0` signature (nothing in
+        // [`SignatureSet::compile`] reserves SID 0), and a
+        // single `sid=0` hit would then leak through the
+        // `if top_sid == 0` branch on every subsequent
+        // iteration — making the *last* hit win attribution
+        // instead of the most-severe-action one.
+        let mut top_assigned = false;
         // Parallel to `raw_hits`: `true` means the hit
         // passed dedup and must emit a telemetry alert in
         // the post-lock submit pass. Computed under the
@@ -380,9 +391,10 @@ impl IpsService {
                     Some(prev) => IpsHit::fold_action(prev, hit.action),
                     None => hit.action,
                 });
-                if top_sid == 0 || hit.action > top_action {
+                if !top_assigned || hit.action > top_action {
                     top_action = hit.action;
                     top_sid = hit.sid;
+                    top_assigned = true;
                 }
                 let key = DedupKey {
                     flow_id: obs.flow_id,
@@ -990,6 +1002,69 @@ mod tests {
         let v = d.verdict_escalation.expect("Drop folds to deny");
         match v.reason {
             VerdictReason::PolicyMatch(label) => assert_eq!(label, "ips:sid=900"),
+            other => panic!("expected PolicyMatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verdict_sid_attribution_handles_sid_zero() {
+        // Pin the architectural contract that the
+        // "have we picked a top hit yet" flag is
+        // independent of the SID value. Two signatures
+        // hit on one payload: an early `sid=0` Alert and
+        // a later `sid=500` Drop. Drop is the more-severe
+        // action, so the verdict reason MUST attribute to
+        // sid=500 — even though the iteration sees sid=0
+        // first, because nothing in the matcher reserves
+        // SID 0 and a `top_sid == 0` sentinel would
+        // wrongly treat the first hit as "uninitialized".
+        let alert_sid_zero = literal_sig(0, b"ALERT", Action::Alert);
+        let drop_high = literal_sig(500, b"DROP", Action::Drop);
+        let (svc, _rx) = mk_service(vec![alert_sid_zero, drop_high]);
+        let d = svc.observe_payload(&PayloadObservation {
+            flow_id: 1,
+            flow_key: key_tcp(40000, 80),
+            direction: Direction::Originator,
+            payload: b"ALERT then DROP",
+            now_ms: 1_000,
+        });
+        assert_eq!(d.raw_hits, 2);
+        let v = d.verdict_escalation.expect("Drop folds to deny");
+        match v.reason {
+            VerdictReason::PolicyMatch(label) => {
+                assert_eq!(
+                    label, "ips:sid=500",
+                    "Drop sig must win attribution even when an earlier sid=0 hit was processed first"
+                );
+            }
+            other => panic!("expected PolicyMatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verdict_sid_attribution_with_only_sid_zero_drop() {
+        // Symmetric case: a single Drop hit at sid=0 must
+        // produce a verdict reason that names sid=0
+        // rather than silently overwriting it as
+        // "uninitialized" on a subsequent loop iteration.
+        // With only one hit there is no later iteration
+        // to trip the bug, but pinning the literal
+        // ensures that a future refactor that re-
+        // introduces a `top_sid == 0` sentinel surfaces
+        // immediately.
+        let drop_sid_zero = literal_sig(0, b"DROP", Action::Drop);
+        let (svc, _rx) = mk_service(vec![drop_sid_zero]);
+        let d = svc.observe_payload(&PayloadObservation {
+            flow_id: 1,
+            flow_key: key_tcp(40000, 80),
+            direction: Direction::Originator,
+            payload: b"DROP",
+            now_ms: 1_000,
+        });
+        assert_eq!(d.raw_hits, 1);
+        let v = d.verdict_escalation.expect("Drop folds to deny");
+        match v.reason {
+            VerdictReason::PolicyMatch(label) => assert_eq!(label, "ips:sid=0"),
             other => panic!("expected PolicyMatch, got {other:?}"),
         }
     }
