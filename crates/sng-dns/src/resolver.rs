@@ -233,8 +233,20 @@ fn decode_udp_response(
     // Terminal RCODEs (NXDOMAIN is NOT terminal — it's a
     // legitimate "name does not exist" the agent must surface to
     // the caller) get mapped to UpstreamRcode so the supervisor
-    // can decide whether to fail-open or fail-closed.
-    if matches!(hdr.rcode, RCode::ServFail | RCode::Refused) {
+    // can decide whether to fail-open or fail-closed. The
+    // canonical "upstream failed" set is owned by
+    // [`RCode::is_upstream_failure`] (FORMERR / SERVFAIL /
+    // NOTIMP / REFUSED). Inlining the matches! here used to
+    // skip FORMERR (1) and NOTIMP (4): an upstream that
+    // returned either of those was silently passed through as
+    // `Ok(DnsResponse)`, the [`crate::service::DnsService`]
+    // took the success path, the verdict was not escalated to
+    // [`sng_core::envelope::Verdict::Alert`], and the operator
+    // dashboard never saw the resolver error. Route the check
+    // through the canonical predicate so any future addition
+    // (e.g. a private DNS rcode the gateway treats as
+    // upstream-failed) lands in one place.
+    if hdr.rcode.is_upstream_failure() {
         return Err(DnsError::UpstreamRcode {
             rcode: hdr.rcode.to_wire(),
         });
@@ -416,6 +428,65 @@ mod tests {
         let q = DnsQuery::new("example.com", QType::A);
         let err = decode_udp_response(&pkt, 0x1234, &q, "upstream").expect_err("must reject QR=0");
         assert!(matches!(err, DnsError::WireFormat(_)));
+    }
+
+    /// Build a syntactically valid DNS *response* (QR=1) for
+    /// `example.com A` with the supplied wire rcode in the
+    /// low 4 bits of the second header byte. Lets the rcode
+    /// test below cover every upstream-failure value without
+    /// duplicating the encode plumbing.
+    fn synth_response_with_rcode(rcode_wire: u8) -> Vec<u8> {
+        let mut pkt = crate::wire::encode_query(0x4242, "example.com", QType::A).expect("encode");
+        // Set QR=1 (response) and OR in the rcode. The wire
+        // rcode is the low 4 bits of byte 3 per RFC 1035 §4.1.1.
+        pkt[2] |= 0x80;
+        pkt[3] = (pkt[3] & 0xF0) | (rcode_wire & 0x0F);
+        pkt
+    }
+
+    /// Pin the canonical upstream-failure set. RFC 1035 §4.1.1
+    /// rcodes 1 (FORMERR), 2 (SERVFAIL), 4 (NOTIMP), 5 (REFUSED)
+    /// MUST all map to `DnsError::UpstreamRcode` so the service
+    /// layer escalates the verdict to Alert. A previous version
+    /// only matched ServFail/Refused, silently passing FORMERR
+    /// and NOTIMP through as `Ok(DnsResponse)`.
+    #[test]
+    fn decode_maps_every_upstream_failure_rcode() {
+        let q = DnsQuery::new("example.com", QType::A);
+        for (wire, label) in [
+            (1u8, "FORMERR"),
+            (2, "SERVFAIL"),
+            (4, "NOTIMP"),
+            (5, "REFUSED"),
+        ] {
+            let pkt = synth_response_with_rcode(wire);
+            let err = decode_udp_response(&pkt, 0x4242, &q, "upstream").expect_err(&format!(
+                "rcode {label} ({wire}) must surface as UpstreamRcode"
+            ));
+            match err {
+                DnsError::UpstreamRcode { rcode } => assert_eq!(
+                    rcode, wire,
+                    "rcode {label}: decoder must preserve wire value"
+                ),
+                other => panic!("rcode {label}: expected UpstreamRcode, got {other:?}"),
+            }
+        }
+    }
+
+    /// NoError (0) and NXDOMAIN (3) are NOT upstream failures
+    /// — NoError is a successful empty answer, NXDOMAIN is a
+    /// legitimate negative answer the agent must surface.
+    /// Pin the contract so a future maintainer doesn't widen
+    /// `is_upstream_failure` past the four real failure codes.
+    #[test]
+    fn decode_passes_noerror_and_nxdomain_through() {
+        let q = DnsQuery::new("example.com", QType::A);
+        for (wire, label) in [(0u8, "NOERROR"), (3, "NXDOMAIN")] {
+            let pkt = synth_response_with_rcode(wire);
+            let resp = decode_udp_response(&pkt, 0x4242, &q, "upstream")
+                .unwrap_or_else(|e| panic!("rcode {label} ({wire}) must succeed: {e:?}"));
+            assert_eq!(resp.rcode.to_wire(), wire);
+        }
     }
 
     /// Pin the contract that two `UdpResolver` instances constructed
