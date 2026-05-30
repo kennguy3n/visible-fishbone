@@ -66,7 +66,7 @@
 //!     AgentIdentity, Enricher, Pipeline, PipelineConfig,
 //!     PcapRing, PcapRingConfig, RedactionPolicy, SystemTime,
 //! };
-//! use sng_comms::{EnrichmentContext, TelemetryClient, TelemetryClientConfig};
+//! use sng_comms::{TelemetryClient, TelemetryClientConfig};
 //! use sng_core::envelope::Platform;
 //! use sng_core::ids::{DeviceId, TenantId};
 //!
@@ -78,12 +78,13 @@
 //!     Platform::Linux,
 //! );
 //!
-//! // 2. Egress sink. sng-comms owns the wire.
-//! let egress_cfg = TelemetryClientConfig::with_defaults(EnrichmentContext {
-//!     tenant_id: identity.tenant_id,
-//!     device_id: identity.device_id,
-//!     site_id: identity.site_id,
-//! });
+//! // 2. Egress sink. sng-comms owns the wire. Use the
+//! //    AgentIdentity helper so the producer-side enricher and
+//! //    the egress-side enrichment share one source of truth —
+//! //    Pipeline::new() refuses to start if they disagree.
+//! let egress_cfg = TelemetryClientConfig::with_defaults(
+//!     identity.to_comms_enrichment_context(),
+//! );
 //! let egress = Arc::new(TelemetryClient::new(egress_cfg));
 //!
 //! // 3. PCAP ring. Shared so producers can also push into it.
@@ -97,7 +98,8 @@
 //!     RedactionPolicy::strict(),
 //!     Arc::clone(&egress),
 //!     pcap,
-//! );
+//! )
+//! .expect("AgentIdentity helper guarantees the identity contract");
 //!
 //! // 5. Spawn the run loop. Producers clone `handle` and call
 //! //    `handle.submit(event).await`.

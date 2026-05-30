@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use sng_comms::{BatchConfig, EnrichmentContext, TelemetryClient, TelemetryClientConfig};
+use sng_comms::{BatchConfig, TelemetryClient, TelemetryClientConfig};
 use sng_core::envelope::{Platform, Verdict};
 use sng_core::events::{FlowEvent, HttpEvent};
 use sng_core::ids::{DeviceId, SiteId, TenantId};
@@ -85,11 +85,7 @@ fn http_with_url(url: &str) -> TelemetryEvent {
 fn mk_egress(spool_cap: usize) -> Arc<TelemetryClient> {
     let cfg = TelemetryClientConfig {
         spool_capacity: spool_cap,
-        ..TelemetryClientConfig::with_defaults(EnrichmentContext {
-            tenant_id: identity().tenant_id,
-            device_id: identity().device_id,
-            site_id: identity().site_id,
-        })
+        ..TelemetryClientConfig::with_defaults(identity().to_comms_enrichment_context())
     };
     Arc::new(TelemetryClient::new(cfg))
 }
@@ -105,6 +101,7 @@ fn mk_pipeline(
         egress,
         pcap,
     )
+    .expect("identity contract holds in integration test wiring")
 }
 
 #[tokio::test]
@@ -207,11 +204,7 @@ async fn backpressure_storm_surfaces_as_spool_evictions() {
             max_events: 1,
             ..BatchConfig::default()
         },
-        ..TelemetryClientConfig::with_defaults(EnrichmentContext {
-            tenant_id: identity().tenant_id,
-            device_id: identity().device_id,
-            site_id: identity().site_id,
-        })
+        ..TelemetryClientConfig::with_defaults(identity().to_comms_enrichment_context())
     };
     let egress = Arc::new(TelemetryClient::new(cfg));
     let (mut p, _h) = mk_pipeline(Arc::clone(&egress));

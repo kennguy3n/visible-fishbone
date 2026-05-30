@@ -202,21 +202,72 @@ impl<T: TimeSource> Pipeline<T> {
     /// New pipeline. The handle is returned separately so
     /// producers can be wired up before the pipeline task is
     /// spawned.
-    #[must_use]
+    ///
+    /// # Identity-wiring contract
+    ///
+    /// The pipeline runs two enrichment stages back-to-back:
+    ///
+    /// 1. [`Enricher::enrich`] (producer-side) stamps the agent's
+    ///    `tenant_id` / `device_id` / `site_id` / `platform` /
+    ///    `timestamp` / `traffic_class` on every envelope it
+    ///    constructs from a [`TelemetryEvent`].
+    /// 2. [`sng_comms::TelemetryClient::submit`] (egress-side)
+    ///    then calls [`sng_comms::EnrichmentContext::enrich`]
+    ///    which OVERWRITES `tenant_id` / `device_id` / `site_id`
+    ///    on the envelope with the values the comms client was
+    ///    constructed with.
+    ///
+    /// Both stages are intentionally idempotent — the design
+    /// expects them to carry the same identity so the overwrite
+    /// is a no-op. If they disagree, the comms layer silently
+    /// wins on the wire, which on a multi-tenant control plane
+    /// is a tenant-attribution incident, not a benign config
+    /// nit. This constructor therefore VERIFIES the contract
+    /// at boot and refuses to start a pipeline whose two
+    /// enrichments disagree, returning
+    /// [`TelemetryError::IdentityMismatch`] with the offending
+    /// field name. Use
+    /// [`crate::AgentIdentity::to_comms_enrichment_context`] to
+    /// derive both halves from a single source of truth at
+    /// wiring time and the check passes trivially.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TelemetryError::IdentityMismatch`] when the
+    /// `enricher.identity()` and the `egress.enrichment()`
+    /// disagree on any of `tenant_id`, `device_id`, or
+    /// `site_id`.
     pub fn new(
         cfg: PipelineConfig,
         enricher: Enricher<T>,
         redaction: RedactionPolicy,
         egress: Arc<TelemetryClient>,
         pcap: Arc<PcapRing>,
-    ) -> (Self, PipelineHandle) {
+    ) -> Result<(Self, PipelineHandle), TelemetryError> {
+        // Boot-time identity-contract check. Cheap (three
+        // equality compares), runs once at startup. Each branch
+        // names the offending field so the error message
+        // localises the misconfiguration in the operator's
+        // logs — no need to introspect both contexts post-mortem.
+        let producer = enricher.identity();
+        let egress_ctx = egress.enrichment();
+        if producer.tenant_id != egress_ctx.tenant_id {
+            return Err(TelemetryError::IdentityMismatch { field: "tenant_id" });
+        }
+        if producer.device_id != egress_ctx.device_id {
+            return Err(TelemetryError::IdentityMismatch { field: "device_id" });
+        }
+        if producer.site_id != egress_ctx.site_id {
+            return Err(TelemetryError::IdentityMismatch { field: "site_id" });
+        }
+
         let (tx, rx) = mpsc::channel(cfg.event_channel_capacity);
         let dedup = Dedup::new(cfg.dedup_window, cfg.dedup_max_entries);
         let handle = PipelineHandle {
             tx: tx.clone(),
             pcap: Arc::clone(&pcap),
         };
-        (
+        Ok((
             Self {
                 cfg,
                 dedup,
@@ -229,7 +280,7 @@ impl<T: TimeSource> Pipeline<T> {
                 tx: Some(tx),
             },
             handle,
-        )
+        ))
     }
 
     /// Snapshot of the pipeline's current counters. Owns no
@@ -455,13 +506,11 @@ mod tests {
     }
 
     fn mk_egress() -> Arc<TelemetryClient> {
-        let enrich = sng_comms::EnrichmentContext {
-            tenant_id: identity().tenant_id,
-            device_id: identity().device_id,
-            site_id: identity().site_id,
-        };
+        // Use the canonical helper so the egress identity
+        // matches the producer enricher's. The new identity-
+        // contract check in Pipeline::new() depends on this.
         Arc::new(TelemetryClient::new(TelemetryClientConfig::with_defaults(
-            enrich,
+            identity().to_comms_enrichment_context(),
         )))
     }
 
@@ -475,7 +524,8 @@ mod tests {
             RedactionPolicy::strict(),
             Arc::clone(&egress),
             pcap,
-        );
+        )
+        .expect("identity contract holds in test wiring");
         (p, h, egress)
     }
 
@@ -549,7 +599,8 @@ mod tests {
         let egress = mk_egress();
         let pcap = Arc::new(PcapRing::new(crate::pcap::PcapRingConfig::default()));
         let enricher = Enricher::new(identity(), fixed_clock());
-        let (_p, h) = Pipeline::new(cfg, enricher, RedactionPolicy::strict(), egress, pcap);
+        let (_p, h) = Pipeline::new(cfg, enricher, RedactionPolicy::strict(), egress, pcap)
+            .expect("identity contract holds");
         // First try_submit lands in the channel (capacity=1).
         h.try_submit(flow()).unwrap();
         // Second try_submit must report Full and return the
@@ -558,6 +609,120 @@ mod tests {
             Err(TrySubmitError::Full(_)) => {}
             other => panic!("expected Full, got {other:?}"),
         }
+    }
+
+    /// Pins the identity-wiring contract: when the producer
+    /// enricher and the egress comms client are constructed
+    /// from different identities, `Pipeline::new` MUST refuse
+    /// to start. Without this guard, the egress's
+    /// `EnrichmentContext::enrich` silently overwrites the
+    /// producer-stamped tenant/device/site on every submit,
+    /// routing the agent's traffic to the wrong tenant on the
+    /// multi-tenant control plane — a tenant-attribution
+    /// incident that the wire trace would not surface until the
+    /// control plane refused the bundle.
+    #[tokio::test]
+    async fn pipeline_new_rejects_identity_mismatch() {
+        // Producer-side identity.
+        let producer = identity();
+        let enricher = Enricher::new(producer.clone(), fixed_clock());
+
+        // Egress-side identity intentionally diverges on tenant_id
+        // ONLY. The constructor must localise the mismatch.
+        let divergent_tenant = sng_comms::EnrichmentContext {
+            tenant_id: TenantId::new_v4(),
+            device_id: producer.device_id,
+            site_id: producer.site_id,
+        };
+        let egress = Arc::new(TelemetryClient::new(TelemetryClientConfig::with_defaults(
+            divergent_tenant,
+        )));
+        let pcap = Arc::new(PcapRing::new(crate::pcap::PcapRingConfig::default()));
+        let err = Pipeline::new(
+            PipelineConfig::default(),
+            enricher,
+            RedactionPolicy::strict(),
+            egress,
+            pcap,
+        )
+        .expect_err("identity mismatch must reject construction");
+        match err {
+            TelemetryError::IdentityMismatch { field } => assert_eq!(field, "tenant_id"),
+            other => panic!("expected IdentityMismatch on tenant_id, got {other:?}"),
+        }
+
+        // device_id divergence: the constructor MUST flag that
+        // specifically, not tenant_id (it's already equal here).
+        let divergent_device = sng_comms::EnrichmentContext {
+            tenant_id: producer.tenant_id,
+            device_id: DeviceId::new_v4(),
+            site_id: producer.site_id,
+        };
+        let egress = Arc::new(TelemetryClient::new(TelemetryClientConfig::with_defaults(
+            divergent_device,
+        )));
+        let pcap = Arc::new(PcapRing::new(crate::pcap::PcapRingConfig::default()));
+        let err = Pipeline::new(
+            PipelineConfig::default(),
+            Enricher::new(producer.clone(), fixed_clock()),
+            RedactionPolicy::strict(),
+            egress,
+            pcap,
+        )
+        .expect_err("identity mismatch must reject construction");
+        match err {
+            TelemetryError::IdentityMismatch { field } => assert_eq!(field, "device_id"),
+            other => panic!("expected IdentityMismatch on device_id, got {other:?}"),
+        }
+
+        // site_id divergence (producer has None, egress has Some).
+        let divergent_site = sng_comms::EnrichmentContext {
+            tenant_id: producer.tenant_id,
+            device_id: producer.device_id,
+            site_id: Some(sng_core::ids::SiteId::new_v4()),
+        };
+        let egress = Arc::new(TelemetryClient::new(TelemetryClientConfig::with_defaults(
+            divergent_site,
+        )));
+        let pcap = Arc::new(PcapRing::new(crate::pcap::PcapRingConfig::default()));
+        let err = Pipeline::new(
+            PipelineConfig::default(),
+            Enricher::new(producer, fixed_clock()),
+            RedactionPolicy::strict(),
+            egress,
+            pcap,
+        )
+        .expect_err("identity mismatch must reject construction");
+        match err {
+            TelemetryError::IdentityMismatch { field } => assert_eq!(field, "site_id"),
+            other => panic!("expected IdentityMismatch on site_id, got {other:?}"),
+        }
+    }
+
+    /// Companion to `pipeline_new_rejects_identity_mismatch`:
+    /// verifies the canonical `to_comms_enrichment_context()`
+    /// helper produces an egress context that passes the
+    /// boot-time check, so the documented "derive both halves
+    /// from one source of truth" pattern is wire-tested.
+    #[tokio::test]
+    async fn pipeline_new_accepts_helper_derived_identity() {
+        let producer = identity();
+        let egress = Arc::new(TelemetryClient::new(TelemetryClientConfig::with_defaults(
+            producer.to_comms_enrichment_context(),
+        )));
+        let pcap = Arc::new(PcapRing::new(crate::pcap::PcapRingConfig::default()));
+        let result = Pipeline::new(
+            PipelineConfig::default(),
+            Enricher::new(producer, fixed_clock()),
+            RedactionPolicy::strict(),
+            egress,
+            pcap,
+        );
+        assert!(
+            result.is_ok(),
+            "helper-derived identity must satisfy contract: {:?}",
+            result.err()
+        );
     }
 
     #[tokio::test]

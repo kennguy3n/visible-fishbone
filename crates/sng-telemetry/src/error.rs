@@ -36,6 +36,26 @@ pub enum TelemetryError {
     /// exceeds the per-packet size cap).
     #[error("pcap: {0}")]
     Pcap(String),
+
+    /// The pipeline was wired with a producer-side identity
+    /// (the [`crate::Enricher`]'s [`crate::AgentIdentity`]) that
+    /// disagrees with the egress-side identity (the
+    /// [`sng_comms::TelemetryClient`]'s
+    /// [`sng_comms::EnrichmentContext`]). Refusing to start in
+    /// this state is the only way to prevent the comms layer
+    /// from silently overwriting the producer's tenant / device /
+    /// site stamps with a different value on every submit, which
+    /// would route the agent's traffic to the wrong tenant on
+    /// the control plane. Use
+    /// [`crate::AgentIdentity::to_comms_enrichment_context`] to
+    /// derive both halves from a single source of truth.
+    #[error(
+        "pipeline identity mismatch: producer enricher and egress comms client disagree on {field}"
+    )]
+    IdentityMismatch {
+        /// Which of `tenant_id`, `device_id`, `site_id` mismatched.
+        field: &'static str,
+    },
 }
 
 impl TelemetryError {
@@ -48,6 +68,7 @@ impl TelemetryError {
             Self::Envelope(_) => ErrorCode::WireEncoding,
             Self::Egress(e) => e.code(),
             Self::Pcap(_) => ErrorCode::Io,
+            Self::IdentityMismatch { .. } => ErrorCode::ConfigInvalid,
         }
     }
 }

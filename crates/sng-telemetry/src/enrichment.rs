@@ -99,6 +99,31 @@ impl AgentIdentity {
             default_traffic_class: TrafficClass::default_conservative(),
         }
     }
+
+    /// Project this identity into the
+    /// [`sng_comms::EnrichmentContext`] the egress
+    /// [`sng_comms::TelemetryClient`] uses to stamp the canonical
+    /// `tenant_id` / `device_id` / `site_id` on every outgoing
+    /// envelope.
+    ///
+    /// Use this helper when constructing the
+    /// [`sng_comms::TelemetryClientConfig`] so both enrichment
+    /// stages — the producer-side [`Enricher::enrich`] and the
+    /// egress-side [`sng_comms::EnrichmentContext::enrich`] —
+    /// share a single source of truth. The
+    /// [`crate::Pipeline::new`] constructor verifies this
+    /// invariant at boot and refuses to start a pipeline whose
+    /// two enrichment stages disagree on identity, so wiring
+    /// divergent identities surfaces as a hard error rather than
+    /// the previous silent overwrite at the wire.
+    #[must_use]
+    pub fn to_comms_enrichment_context(&self) -> sng_comms::EnrichmentContext {
+        sng_comms::EnrichmentContext {
+            tenant_id: self.tenant_id,
+            device_id: self.device_id,
+            site_id: self.site_id,
+        }
+    }
 }
 
 /// Per-event enrichment context — a fast-path bag of caller-
