@@ -77,8 +77,18 @@ impl Posture {
         matches!(self, Self::Block | Self::Quarantine)
     }
 
-    /// True for the postures that disable TLS
-    /// interception (`TlsBypass`, `Allow`, `AlertOnly`).
+    /// True for the postures that permit the request to
+    /// reach the upstream server: `Allow`, `AlertOnly`,
+    /// `InspectFull`, and `TlsBypass`. `Block` and
+    /// `Quarantine` are the two postures that do NOT
+    /// permit traffic — those return `false` here.
+    ///
+    /// Note: "permits traffic" is independent of whether
+    /// the SWG intercepts TLS. `InspectFull` permits the
+    /// request *and* enables MITM; `TlsBypass` permits the
+    /// request *and* skips MITM. Callers who want the
+    /// "will the brain MITM this request" predicate should
+    /// match on `InspectFull` directly.
     #[must_use]
     pub const fn permits_traffic(self) -> bool {
         matches!(
@@ -108,11 +118,20 @@ pub struct SwgPolicy {
     pub default_posture: Posture,
     /// Reputation threshold at which the policy upgrades
     /// the posture from `InspectFull` (or weaker) to
-    /// `Block`. `1.0` disables the upgrade.
+    /// `Block`. The check is `score >= reputation_block_at`,
+    /// so `1.0` blocks **only** the worst-possible score
+    /// (since `ReputationScore` is clamped to `[0.0, 1.0]`).
+    /// Operators who want to fully disable reputation-based
+    /// blocking should set this to a sentinel above 1.0
+    /// (e.g. `2.0`) — `ReputationScore` can never reach it
+    /// so the upgrade is unreachable.
     pub reputation_block_at: f32,
     /// Reputation threshold at which the policy upgrades
-    /// from `Allow` (or `AlertOnly`) to `InspectFull`.
-    /// `1.0` disables the upgrade.
+    /// from `Allow` (or `AlertOnly`) to `InspectFull`. The
+    /// check is `score >= reputation_inspect_at`, so `1.0`
+    /// upgrades **only** the worst-possible score. Use a
+    /// sentinel above 1.0 (e.g. `2.0`) to fully disable
+    /// the upgrade.
     pub reputation_inspect_at: f32,
 }
 

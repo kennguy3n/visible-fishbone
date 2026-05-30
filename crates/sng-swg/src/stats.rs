@@ -1,5 +1,5 @@
 //! SWG runtime stats — atomic counters surfaced to ops
-//! dashboards via [`IpsStatsSnapshot`]-style snapshots.
+//! dashboards via [`SwgStatsSnapshot`]-style snapshots.
 
 use crate::malware::MalwareVerdict;
 use crate::policy::Posture;
