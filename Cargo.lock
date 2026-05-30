@@ -1660,6 +1660,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sng-ztna"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "parking_lot",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sng-core",
+ "sng-policy-eval",
+ "sng-telemetry",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "socket2"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

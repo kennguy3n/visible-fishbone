@@ -1,0 +1,32 @@
+[package]
+name = "sng-ztna"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ShieldNet Gateway Zero-Trust Network Access subsystem: per-application access decisions (identity + device posture + app catalog)"
+
+[dependencies]
+sng-core = { workspace = true }
+sng-policy-eval = { workspace = true }
+sng-telemetry = { workspace = true }
+
+tokio = { workspace = true, features = ["sync", "time"] }
+arc-swap = { workspace = true }
+parking_lot = { workspace = true }
+async-trait = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "io-util", "macros"] }
+pretty_assertions = { workspace = true }
+
+[lints]
+workspace = true
