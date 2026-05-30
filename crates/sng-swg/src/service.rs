@@ -226,12 +226,39 @@ impl SwgService {
         &self.policy
     }
 
-    /// Reload the active SWG policy. The compile step is
-    /// trivial for the SWG (the policy is data, not
-    /// patterns), so this is an unconditional success.
-    pub fn reload_policy(&self, policy: SwgPolicy) {
-        self.policy.replace(policy);
-        self.stats.record_bundle_load();
+    /// Reload the active SWG policy.
+    ///
+    /// The reload validates the candidate policy via
+    /// [`SwgPolicy::validate`] before installing it. A
+    /// failed validation leaves the previously-loaded
+    /// policy active (the data path keeps running with
+    /// the last known-good ruleset), records a
+    /// [`SwgStats::record_bundle_load_failure`], and
+    /// returns the error so the bundle adapter (or the
+    /// caller that explicitly drove the reload) can
+    /// surface it. The success counter
+    /// [`SwgStats::record_bundle_load`] is bumped only on
+    /// a successful install — ops dashboards can
+    /// distinguish `new policy applied` from `new
+    /// policy rejected`.
+    ///
+    /// # Errors
+    ///
+    /// - [`SwgError::InvalidPolicy`] when the candidate
+    ///   policy contains non-finite, negative, or inverted
+    ///   reputation thresholds (see [`SwgPolicy::validate`]
+    ///   for the full contract).
+    pub fn reload_policy(&self, policy: SwgPolicy) -> Result<(), SwgError> {
+        match self.policy.try_replace(policy) {
+            Ok(()) => {
+                self.stats.record_bundle_load();
+                Ok(())
+            }
+            Err(e) => {
+                self.stats.record_bundle_load_failure();
+                Err(e)
+            }
+        }
     }
 
     /// Configured max session count — surfaced for the
@@ -565,10 +592,53 @@ mod tests {
         strict
             .by_category
             .insert(Category::Business, Posture::Block);
-        svc.reload_policy(strict);
+        svc.reload_policy(strict)
+            .expect("valid policy should install");
         let d = svc.observe(&obs("https://saas.example/")).unwrap();
         assert_eq!(d.posture, Posture::Block);
         assert_eq!(svc.stats.snapshot().bundle_loads, 1);
+        assert_eq!(svc.stats.snapshot().bundle_load_failures, 0);
+    }
+
+    #[test]
+    fn reload_policy_rejects_nan_threshold_and_preserves_active_policy() {
+        let (svc, _rx) = mk_service_with(&[("saas.example", Category::Business)], &[]);
+        // Default policy allows Business.
+        let d = svc.observe(&obs("https://saas.example/")).unwrap();
+        assert_eq!(d.posture, Posture::Allow);
+        // Try to install a policy with a NaN block
+        // threshold — must be rejected, the previously-
+        // active policy stays in force, and the failure
+        // counter goes up.
+        let bad = SwgPolicy {
+            reputation_block_at: f32::NAN,
+            ..SwgPolicy::default()
+        };
+        let err = svc.reload_policy(bad).expect_err("NaN must be rejected");
+        assert!(matches!(err, SwgError::InvalidPolicy(_)), "got {err:?}");
+        // Old policy still applies (Business still allowed).
+        let d = svc.observe(&obs("https://saas.example/")).unwrap();
+        assert_eq!(d.posture, Posture::Allow);
+        let snap = svc.stats.snapshot();
+        assert_eq!(snap.bundle_loads, 0);
+        assert_eq!(snap.bundle_load_failures, 1);
+    }
+
+    #[test]
+    fn reload_policy_rejects_inverted_thresholds() {
+        let (svc, _rx) = mk_service_with(&[("saas.example", Category::Business)], &[]);
+        // inspect_at > block_at is incoherent (a score
+        // below the inspect line would still cross block).
+        let bad = SwgPolicy {
+            reputation_inspect_at: 0.9,
+            reputation_block_at: 0.5,
+            ..SwgPolicy::default()
+        };
+        let err = svc
+            .reload_policy(bad)
+            .expect_err("inverted thresholds must be rejected");
+        assert!(matches!(err, SwgError::InvalidPolicy(_)), "got {err:?}");
+        assert_eq!(svc.stats.snapshot().bundle_load_failures, 1);
     }
 
     #[test]
