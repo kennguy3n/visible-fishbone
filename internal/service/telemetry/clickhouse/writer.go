@@ -572,6 +572,20 @@ func (w *Writer) Write(_ context.Context, env schema.Envelope) error {
 // passed context for the final flush; if the context expires
 // before flush completes, remaining buffered rows are dropped and
 // the error is returned.
+//
+// Shutdown abandon contract: if the final flush fails (e.g. the
+// ClickHouse cluster is down at the moment Stop is called), the
+// failure paths inside flushOnce will requeue surviving rows back
+// into `w.pending` via requeueBatch. Those rows are then lost on
+// conn.Close() because there is no further flush loop to drain
+// them — the S3 cold-path archive is the durable record of truth
+// per the Write() doc comment. Without an explicit operator
+// signal, an SRE reading logs after a graceful shutdown couldn't
+// distinguish "all flushed cleanly" from "N rows abandoned in
+// memory". We surface that count + bracket event IDs as a WARN
+// right before conn.Close so the shutdown forensic trail is
+// complete and matches the operator runbook contract for the
+// failure-during-Stop scenario.
 func (w *Writer) Stop(ctx context.Context) error {
 	var stopErr error
 	w.stopOnce.Do(func() {
@@ -582,11 +596,44 @@ func (w *Writer) Stop(ctx context.Context) error {
 		<-w.done
 		// Final flush of whatever remains.
 		stopErr = w.flushOnce(ctx)
+		// Surface any rows requeued by the failure path of the
+		// final flush — those rows are about to be silently
+		// discarded by conn.Close() and the SRE needs the
+		// abandon signal in the log stream to correlate with
+		// the S3 cold-path replay window.
+		w.logShutdownAbandon(stopErr)
 		if err := w.conn.Close(); err != nil && stopErr == nil {
 			stopErr = fmt.Errorf("clickhouse: close: %w", err)
 		}
 	})
 	return stopErr
+}
+
+// logShutdownAbandon emits a WARN with the count of rows left in
+// `w.pending` after the final flush has returned. If the final
+// flush succeeded, w.pending is empty and this is a no-op. If it
+// failed and rows were requeued, this is the operator's explicit
+// signal of "N rows abandoned at shutdown, replay from S3 cold
+// path between event_id X and Y". `flushErr` is included so the
+// SRE can correlate the abandon-count with the proximate cause
+// (context deadline / ClickHouse outage / driver-level failure).
+func (w *Writer) logShutdownAbandon(flushErr error) {
+	w.mu.Lock()
+	abandoned := len(w.pending)
+	var firstEventID, lastEventID string
+	if abandoned > 0 {
+		firstEventID = w.pending[0].EventID.String()
+		lastEventID = w.pending[abandoned-1].EventID.String()
+	}
+	w.mu.Unlock()
+	if abandoned == 0 {
+		return
+	}
+	w.logger.Warn("clickhouse: rows abandoned at shutdown after final flush failure",
+		slog.Int("abandoned", abandoned),
+		slog.String("first_event_id", firstEventID),
+		slog.String("last_event_id", lastEventID),
+		slog.Any("flush_error", flushErr))
 }
 
 // Stats returns a snapshot of writer counters. Useful for the
@@ -859,13 +906,22 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 		return fmt.Errorf("clickhouse: append row (all %d rows rejected): %w", dropped, firstAppendErr)
 	}
 	if err := prepared.Send(); err != nil {
-		// Network-side Send failure after some rows were
-		// successfully Appended. The good rows are not
-		// malformed — they just lost the network race — so we
-		// REQUEUE them at the head of `pending` so the next
-		// flush picks them up. The Append-rejected rows stay
-		// dropped (already credited to droppedRows).
-		w.requeueBatch(successfullyAppended, "send failed after partial append", requeueDrops{appendRejected: dropped})
+		// Network-side Send failure after rows were Appended.
+		// The good rows are not malformed — they just lost the
+		// network race — so we REQUEUE them at the head of
+		// `pending` so the next flush picks them up. Any
+		// Append-rejected rows stay dropped (credited to
+		// droppedRows inside requeueBatch). The reason string
+		// distinguishes the "all rows Appended cleanly, Send
+		// failed" case from the "some rows rejected by Append
+		// AND Send failed" case so an operator reading the
+		// requeue Info log can tell the two apart without
+		// cross-referencing the dropped counter.
+		reason := "send failed"
+		if dropped > 0 {
+			reason = "send failed after partial append"
+		}
+		w.requeueBatch(successfullyAppended, reason, requeueDrops{appendRejected: dropped})
 		return fmt.Errorf("clickhouse: send batch: %w", err)
 	}
 	sent = true

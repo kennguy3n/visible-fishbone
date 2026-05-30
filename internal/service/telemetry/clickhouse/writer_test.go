@@ -1,8 +1,11 @@
 package clickhouse
 
 import (
+	"bytes"
+	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -572,5 +575,78 @@ func TestStats_PartialDropFlushesIsExposed(t *testing.T) {
 	// semantic split — see writer.go on droppedRows).
 	if s.ConsecutiveErrors != 0 {
 		t.Errorf("PartialDropFlushes must not couple to ConsecutiveErrors: got %d, want 0", s.ConsecutiveErrors)
+	}
+}
+
+// recordingLogger captures every slog record emitted on the
+// writer for later assertion. Used by the shutdown-abandon tests
+// to verify that the operator-visible WARN with the abandoned-
+// row count, first/last event IDs, and the proximate flush
+// error all land on the log stream.
+func recordingLogger() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), &buf
+}
+
+// TestLogShutdownAbandon_EmitsCountAndBracketEventIDsWhenPendingNonEmpty
+// pins the operator-visible "rows abandoned at shutdown after
+// final flush failure" WARN contract. When Stop()'s final
+// flushOnce fails and the requeue path leaves rows back in
+// w.pending, the writer is about to discard them on conn.Close;
+// SREs need an explicit signal in the log stream so they can
+// correlate with the S3 cold-path replay window. Asserting the
+// count, the bracket event IDs, and the flush_error are all on
+// the record.
+func TestLogShutdownAbandon_EmitsCountAndBracketEventIDsWhenPendingNonEmpty(t *testing.T) {
+	t.Parallel()
+	logger, buf := recordingLogger()
+	first, middle, last := mkEnv(), mkEnv(), mkEnv()
+	w := &Writer{
+		cfg: Config{BatchSize: 1024, MaxBacklogMultiplier: 4},
+		// `middle` carries no extra assertions beyond the
+		// count — it's deliberately inserted so the test
+		// distinguishes "first" and "last" event IDs from
+		// "the only event".
+		logger:  logger,
+		pending: []schema.Envelope{first, middle, last},
+	}
+	flushErr := errors.New("clickhouse: prepare batch: connection refused")
+	w.logShutdownAbandon(flushErr)
+
+	out := buf.String()
+	if !strings.Contains(out, `"abandoned":3`) {
+		t.Errorf("WARN must include abandoned=3; got log = %q", out)
+	}
+	if !strings.Contains(out, `"first_event_id":"`+first.EventID.String()+`"`) {
+		t.Errorf("WARN must include first event_id = %s; got log = %q", first.EventID, out)
+	}
+	if !strings.Contains(out, `"last_event_id":"`+last.EventID.String()+`"`) {
+		t.Errorf("WARN must include last event_id = %s; got log = %q", last.EventID, out)
+	}
+	if !strings.Contains(out, "connection refused") {
+		t.Errorf("WARN must include proximate flush_error; got log = %q", out)
+	}
+	if !strings.Contains(out, `"level":"WARN"`) {
+		t.Errorf("Abandon log must be emitted at WARN level so it surfaces above default-INFO operator dashboards; got log = %q", out)
+	}
+}
+
+// TestLogShutdownAbandon_IsNoOpWhenPendingEmpty pins the
+// other half of the contract: the WARN MUST NOT fire on the
+// clean-shutdown path (final flush succeeded, w.pending is
+// empty). The signal must be the rare-and-actionable kind, not
+// a "Stop was called" heartbeat — otherwise it gets filtered
+// out and the real abandon case slips through with it.
+func TestLogShutdownAbandon_IsNoOpWhenPendingEmpty(t *testing.T) {
+	t.Parallel()
+	logger, buf := recordingLogger()
+	w := &Writer{
+		cfg:     Config{BatchSize: 1024, MaxBacklogMultiplier: 4},
+		logger:  logger,
+		pending: nil,
+	}
+	w.logShutdownAbandon(nil)
+	if buf.Len() != 0 {
+		t.Errorf("logShutdownAbandon must NOT emit a record when pending is empty; got %q", buf.String())
 	}
 }
