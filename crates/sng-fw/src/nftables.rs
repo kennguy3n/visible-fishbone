@@ -57,6 +57,49 @@ impl NftablesScript {
     }
 }
 
+/// Sanitise an arbitrary string for safe inclusion inside an
+/// nftables string token (a `comment "..."` clause or an
+/// `iif "..."` / `oif "..."` interface name).
+///
+/// nftables uses double-quote-delimited string tokens; an
+/// unescaped `"` would terminate the token early and the
+/// remainder of the line would be parsed as syntax. A `\`
+/// inside a string starts an escape sequence which would also
+/// trip the parser on the next character. Newlines / carriage
+/// returns / other control characters would split the
+/// `add rule ...` line across multiple physical lines and the
+/// kernel would reject the whole script with a confusing
+/// syntax error message.
+///
+/// The compiler's inputs (rule ids, interface names) come from
+/// a trusted policy bundle, but this is a defense-in-depth
+/// boundary at the userland → kernel handoff: a malformed
+/// upstream value gets mapped to a harmless variant (quote →
+/// apostrophe, backslash → forward-slash, control → space)
+/// rather than allowed to break the apply or — worse — inject
+/// extra nftables syntax. The transformation is total (every
+/// codepoint maps to exactly one ASCII character or itself) so
+/// it has no error path; callers can use the result directly.
+///
+/// Multi-byte UTF-8 is preserved unchanged so operator-friendly
+/// IDs containing emoji or non-ASCII letters round-trip
+/// correctly through `nft list` and `journalctl`.
+///
+/// Shared between `compile.rs` (filter chain rule IDs) and
+/// `nat.rs` (NAT rule IDs + `iif` / `oif` interface names) so
+/// the two callers can't drift out of sync if the escape rules
+/// ever need to change.
+pub(crate) fn escape_nft_comment(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '"' => '\'',
+            '\\' => '/',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect()
+}
+
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();

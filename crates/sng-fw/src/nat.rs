@@ -26,6 +26,7 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use crate::error::FirewallError;
+use crate::nftables::escape_nft_comment;
 use crate::rule::{PortRange, Protocol};
 use crate::zone::AddressFamily;
 
@@ -257,15 +258,15 @@ impl NatRule {
             // `sng-policy-eval` validates interface names against
             // the device descriptor) but the bundle decoder is a
             // separate trust boundary, so we run the value through
-            // `escape_comment` for the same reason rule IDs do at
-            // `nat.rs:286` and `compile.rs:1000-1014`: a stray `"`,
-            // `\`, or control character in the bundle must not be
-            // able to split the rendered line or inject extra
-            // nftables syntax into `nft -f`.
-            parts.push(format!("iif \"{}\"", escape_comment(&self.iif)));
+            // the shared `nftables::escape_nft_comment` helper for
+            // the same reason rule IDs do below: a stray `"`, `\`,
+            // or control character in the bundle must not be able
+            // to split the rendered line or inject extra nftables
+            // syntax into `nft -f`.
+            parts.push(format!("iif \"{}\"", escape_nft_comment(&self.iif)));
         }
         if !self.oif.is_empty() {
-            parts.push(format!("oif \"{}\"", escape_comment(&self.oif)));
+            parts.push(format!("oif \"{}\"", escape_nft_comment(&self.oif)));
         }
         // Filter CIDRs to the current family slot (if any). A
         // rule with a `from` zone-level family but no matching
@@ -346,24 +347,9 @@ impl NatRule {
             parts.push(format!("th dport {{ {} }}", list.join(", ")));
         }
         parts.push(self.nat.as_nft());
-        parts.push(format!("comment \"{}\"", escape_comment(&self.id)));
+        parts.push(format!("comment \"{}\"", escape_nft_comment(&self.id)));
         Ok(Some(parts.join(" ")))
     }
-}
-
-fn escape_comment(s: &str) -> String {
-    // Mirror `compile::sanitize_comment`: strip newlines /
-    // carriage returns / other control characters so a
-    // crafted rule id can't split the `add rule ...` line and
-    // confuse `nft -f`.
-    s.chars()
-        .map(|c| match c {
-            '"' => '\'',
-            '\\' => '/',
-            c if c.is_control() => ' ',
-            c => c,
-        })
-        .collect()
 }
 
 /// Compiled NAT table — the rule list plus the table name they
@@ -1076,22 +1062,28 @@ mod tests {
 
     #[test]
     fn comment_escape_replaces_quotes_and_backslashes() {
-        assert_eq!(escape_comment("plain"), "plain");
-        assert_eq!(escape_comment(r#"with"quotes"#), "with'quotes");
-        assert_eq!(escape_comment(r"with\backslash"), "with/backslash");
+        // The NAT renderer used to carry a private `escape_comment`
+        // helper; it now delegates to the shared
+        // `nftables::escape_nft_comment` (same function the filter
+        // chain renderer uses) so the two render paths can't drift
+        // out of sync. The end-to-end semantics this test pins
+        // down are unchanged.
+        assert_eq!(escape_nft_comment("plain"), "plain");
+        assert_eq!(escape_nft_comment(r#"with"quotes"#), "with'quotes");
+        assert_eq!(escape_nft_comment(r"with\backslash"), "with/backslash");
     }
 
     #[test]
     fn comment_escape_strips_newlines_and_control_chars() {
         // Newlines would split the `add rule ...` line across
         // multiple physical lines and break `nft -f`.
-        assert_eq!(escape_comment("line1\nline2"), "line1 line2");
-        assert_eq!(escape_comment("line1\r\nline2"), "line1  line2");
+        assert_eq!(escape_nft_comment("line1\nline2"), "line1 line2");
+        assert_eq!(escape_nft_comment("line1\r\nline2"), "line1  line2");
         // Other control characters get the same treatment.
-        assert_eq!(escape_comment("tab\there"), "tab here");
-        assert_eq!(escape_comment("nul\0byte"), "nul byte");
+        assert_eq!(escape_nft_comment("tab\there"), "tab here");
+        assert_eq!(escape_nft_comment("nul\0byte"), "nul byte");
         // Multi-byte UTF-8 must pass through untouched.
-        assert_eq!(escape_comment("emoji-🦀-ok"), "emoji-🦀-ok");
+        assert_eq!(escape_nft_comment("emoji-🦀-ok"), "emoji-🦀-ok");
     }
 
     /// Defense-in-depth regression test: directly calling

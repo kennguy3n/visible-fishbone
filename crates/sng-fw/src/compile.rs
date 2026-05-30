@@ -43,7 +43,7 @@ use std::collections::BTreeSet;
 
 use crate::error::FirewallError;
 use crate::nat::NatTable;
-use crate::nftables::NftablesScript;
+use crate::nftables::{NftablesScript, escape_nft_comment};
 use crate::rule::{FirewallRule, RuleAction, RuleMatch};
 use crate::zone::{AddressFamily, ZoneTable};
 
@@ -725,7 +725,7 @@ fn render_single_rule(
     if rule.action.is_terminal() {
         parts.push(rule.action.as_nft_verdict().into());
     }
-    parts.push(format!("comment \"{}\"", sanitize_comment(&rule.id)));
+    parts.push(format!("comment \"{}\"", escape_nft_comment(&rule.id)));
     Ok(parts.join(" "))
 }
 
@@ -795,25 +795,6 @@ pub(crate) fn sanitize_set_name(name: &str) -> String {
             } else {
                 '_'
             }
-        })
-        .collect()
-}
-
-fn sanitize_comment(s: &str) -> String {
-    // Quotes / backslashes would terminate the comment string
-    // early and break the `nft -f` parse; newlines / carriage
-    // returns / other control characters would split the
-    // `add rule ...` line across multiple lines and the kernel
-    // would reject the script with a confusing syntax error.
-    // Rule IDs come from a trusted policy bundle, but the engine
-    // applies defense-in-depth here so a bad input is mapped to
-    // a harmless space rather than a parse failure.
-    s.chars()
-        .map(|c| match c {
-            '"' => '\'',
-            '\\' => '/',
-            c if c.is_control() => ' ',
-            c => c,
         })
         .collect()
 }
@@ -1411,20 +1392,23 @@ mod tests {
 
     #[test]
     fn sanitize_comment_strips_newlines_and_control_chars() {
-        // Quotes / backslashes stay normalised the way they
-        // always have been.
-        assert_eq!(sanitize_comment("plain"), "plain");
-        assert_eq!(sanitize_comment(r#"with"quotes"#), "with'quotes");
-        assert_eq!(sanitize_comment(r"with\backslash"), "with/backslash");
+        // The compiler used to carry a private `sanitize_comment`
+        // helper; it now delegates to `nftables::escape_nft_comment`
+        // (same function `nat.rs` uses) so the two render paths
+        // can't drift out of sync. The end-to-end semantics this
+        // test pins down are unchanged.
+        assert_eq!(escape_nft_comment("plain"), "plain");
+        assert_eq!(escape_nft_comment(r#"with"quotes"#), "with'quotes");
+        assert_eq!(escape_nft_comment(r"with\backslash"), "with/backslash");
         // Newlines + carriage returns + tabs + NUL collapse to a
         // single space each — a crafted rule id can't split the
         // emitted `add rule ...` line across multiple lines.
-        assert_eq!(sanitize_comment("a\nb"), "a b");
-        assert_eq!(sanitize_comment("a\r\nb"), "a  b");
-        assert_eq!(sanitize_comment("a\tb"), "a b");
-        assert_eq!(sanitize_comment("a\0b"), "a b");
+        assert_eq!(escape_nft_comment("a\nb"), "a b");
+        assert_eq!(escape_nft_comment("a\r\nb"), "a  b");
+        assert_eq!(escape_nft_comment("a\tb"), "a b");
+        assert_eq!(escape_nft_comment("a\0b"), "a b");
         // Multi-byte UTF-8 must pass through unchanged.
-        assert_eq!(sanitize_comment("emoji-🦀"), "emoji-🦀");
+        assert_eq!(escape_nft_comment("emoji-🦀"), "emoji-🦀");
     }
 
     #[test]
