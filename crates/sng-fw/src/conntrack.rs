@@ -132,8 +132,18 @@ struct Inner {
 pub enum LookupOutcome {
     /// Flow is brand new; the caller must evaluate policy
     /// and may want to call [`ConnTable::update_app_id`]
-    /// once the app id is resolved.
-    Created,
+    /// once the app id is resolved. `evicted_for_capacity`
+    /// reports the number of LRU evictions that ran inside
+    /// [`ConnTable::lookup_or_create`] to free a slot for
+    /// this new entry — non-zero values indicate the table
+    /// is sized too small for the offered load. The caller
+    /// (typically [`crate::service::FwService`]) folds this
+    /// into [`crate::stats::FwStats::record_flow_evicted_capacity`].
+    Created {
+        /// Count of entries evicted from the table to free a
+        /// slot for the new flow. Zero on the common path.
+        evicted_for_capacity: u32,
+    },
     /// Flow already existed in the forward direction.
     ExistingForward,
     /// Flow already existed in the reverse direction (the
@@ -141,6 +151,16 @@ pub enum LookupOutcome {
     /// should credit bytes to the responder counter and
     /// reuse the established verdict.
     ExistingReverse,
+}
+
+impl LookupOutcome {
+    /// True when the variant is `Created` (regardless of
+    /// eviction count). Mirrors the previous bare-variant
+    /// matcher so callers don't need to re-pattern.
+    #[must_use]
+    pub const fn is_created(&self) -> bool {
+        matches!(self, Self::Created { .. })
+    }
 }
 
 impl ConnTable {
@@ -199,6 +219,7 @@ impl ConnTable {
             }
         }
         // New flow.
+        let mut evicted_for_capacity: u32 = 0;
         if g.forward.len() >= self.config.max_entries {
             // Evict the entry with the smallest
             // `last_seen_ms`.
@@ -209,6 +230,7 @@ impl ConnTable {
                 .map(|(k, _)| *k);
             if let Some(v) = victim {
                 Self::remove_locked(&mut g, &v);
+                evicted_for_capacity = evicted_for_capacity.saturating_add(1);
             } else {
                 let pressure_pct = 100u8;
                 return Err(FwError::ConntrackFull { pressure_pct });
@@ -227,7 +249,12 @@ impl ConnTable {
         };
         g.forward.insert(key, entry.clone());
         g.reverse.insert(key.reverse(), key);
-        Ok((LookupOutcome::Created, entry))
+        Ok((
+            LookupOutcome::Created {
+                evicted_for_capacity,
+            },
+            entry,
+        ))
     }
 
     /// Apply a mutation closure to the entry for `key`. The
@@ -357,7 +384,12 @@ mod tests {
         let (outcome, entry) = t
             .lookup_or_create(k(443, IpProtocol::Tcp), FlowDirection::Egress, 1_000)
             .unwrap();
-        assert_eq!(outcome, LookupOutcome::Created);
+        assert_eq!(
+            outcome,
+            LookupOutcome::Created {
+                evicted_for_capacity: 0
+            }
+        );
         assert_eq!(entry.flow_key, k(443, IpProtocol::Tcp));
         assert_eq!(entry.state.conn_state, ConnState::SynSent);
         assert_eq!(entry.state.start_ms, 1_000);
@@ -431,7 +463,7 @@ mod tests {
         let (outcome, _) = t
             .lookup_or_create(key.reverse(), FlowDirection::Ingress, 1_100)
             .unwrap();
-        assert_eq!(outcome, LookupOutcome::Created);
+        assert!(outcome.is_created());
     }
 
     #[test]
@@ -506,13 +538,22 @@ mod tests {
             s.observe_originator(1, 200);
         });
         assert!(ran);
-        t.lookup_or_create(k(22, IpProtocol::Tcp), FlowDirection::Egress, 300)
+        let (outcome, _) = t
+            .lookup_or_create(k(22, IpProtocol::Tcp), FlowDirection::Egress, 300)
             .unwrap();
         assert_eq!(t.len(), 2);
         // 80 should have been evicted.
         assert!(t.snapshot(&k(80, IpProtocol::Tcp)).is_none());
         assert!(t.snapshot(&k(443, IpProtocol::Tcp)).is_some());
         assert!(t.snapshot(&k(22, IpProtocol::Tcp)).is_some());
+        // The outcome must report the capacity-eviction so
+        // FwService can fold it into `flows_evicted_capacity`.
+        assert_eq!(
+            outcome,
+            LookupOutcome::Created {
+                evicted_for_capacity: 1
+            }
+        );
     }
 
     #[test]

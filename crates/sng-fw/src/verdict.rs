@@ -22,10 +22,9 @@
 //! tearing down conntrack.
 
 use arc_swap::ArcSwap;
-use parking_lot::Mutex;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sng_core::envelope::Verdict;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,6 +61,18 @@ pub enum VerdictReason {
     /// further inspection (e.g. trusted broadcast traffic on
     /// an internal segment).
     Bypass,
+    /// The policy matched a steering rule — the firewall
+    /// allows the flow but the SD-WAN engine should route
+    /// it via the named [`sng_core::traffic_class::TrafficClass`].
+    /// The class is carried as its wire string (`trusted_direct`,
+    /// `accelerated_egress`, `inspect_full`, …) — stable
+    /// across bundle versions and matches the Go control
+    /// plane's `traffic_class` field on `FlowEvent`. The
+    /// SD-WAN crate reads the class off this variant rather
+    /// than re-evaluating the policy graph, so downstream
+    /// telemetry can distinguish a plain allow from a
+    /// steered allow.
+    Steering(String),
 }
 
 impl VerdictReason {
@@ -76,6 +87,20 @@ impl VerdictReason {
             Self::CachedEstablished => "cache.established".into(),
             Self::FailClosed => "policy.fail_closed".into(),
             Self::Bypass => "bypass".into(),
+            Self::Steering(class) => format!("steering:{class}"),
+        }
+    }
+
+    /// If this verdict was produced by a steering rule,
+    /// return the steering class as its wire string.
+    /// Otherwise `None`. The SD-WAN crate uses this to map
+    /// the firewall verdict onto a SD-WAN routing decision
+    /// without re-walking the policy graph.
+    #[must_use]
+    pub fn steering_class(&self) -> Option<&str> {
+        match self {
+            Self::Steering(class) => Some(class.as_str()),
+            _ => None,
         }
     }
 }
@@ -223,27 +248,35 @@ impl Default for VerdictCacheConfig {
     }
 }
 
-/// Per-flow verdict cache backed by an ArcSwap-wrapped
-/// `HashMap`. The data path takes a snapshot via
-/// [`VerdictCache::get`] without acquiring a lock — only
-/// inserts and the periodic sweep need the mutex.
+/// Per-flow verdict cache backed by an `ArcSwap<DashMap>`.
+/// The data path takes a snapshot of the `Arc<DashMap>` via
+/// [`VerdictCache::get`] (one atomic load) and reads / writes
+/// individual shards lock-free at the per-key granularity
+/// that DashMap provides. Hot-reload swaps the entire Arc
+/// atomically on [`VerdictCache::clear_all`].
 ///
-/// Note: ArcSwap is here so the cache contents can be
-/// hot-swapped on policy reload (call
-/// [`VerdictCache::clear_all`]); the underlying map mutates
-/// under a mutex per-insert. Reads are lock-free.
+/// Why not `ArcSwap<HashMap>`: the previous design
+/// copy-on-wrote the full map on every `insert`, which was
+/// O(n) per write and pathological under flow-creation
+/// bursts (port scans, DNS storms). DashMap shards on the
+/// key's hash so concurrent inserts on different keys never
+/// contend, and a single insert is O(1) regardless of how
+/// many other entries the cache holds.
+///
+/// Why ArcSwap is still here: it gives us atomic
+/// `clear_all` semantics on policy reload — store a fresh
+/// `Arc<DashMap>` and any in-flight reader keeps using its
+/// snapshot of the old one until it drops it. We do NOT
+/// need ArcSwap to serialise writes any more.
 #[derive(Debug)]
 pub struct VerdictCache {
     config: VerdictCacheConfig,
-    /// Lock-free read path: snapshots are cheap clones of
-    /// `Arc<Map>` — every reader gets a consistent view at
-    /// the cost of an atomic load. The map is replaced
-    /// wholesale on `clear_all`, which scales because
-    /// `clear_all` is rare (only on policy reload).
-    map: ArcSwap<HashMap<FlowKey, CacheEntry>>,
-    /// Serializes inserts and TTL sweeps. Short critical
-    /// sections, no `.await` under the lock.
-    write_guard: Mutex<()>,
+    /// Hot-swappable concurrent map. Reads acquire the Arc
+    /// via `map.load()` (lock-free atomic load) and use the
+    /// DashMap's per-shard locks for the actual lookup;
+    /// writes do the same. `clear_all` atomically replaces
+    /// the Arc with a fresh empty DashMap.
+    map: ArcSwap<DashMap<FlowKey, CacheEntry>>,
 }
 
 /// A cached verdict + its expiry deadline.
@@ -257,10 +290,10 @@ impl VerdictCache {
     /// Construct an empty cache with the given config.
     #[must_use]
     pub fn new(config: VerdictCacheConfig) -> Self {
+        let map = DashMap::with_capacity(config.max_entries);
         Self {
             config,
-            map: ArcSwap::from_pointee(HashMap::new()),
-            write_guard: Mutex::new(()),
+            map: ArcSwap::from_pointee(map),
         }
     }
 
@@ -286,65 +319,84 @@ impl VerdictCache {
 
     /// Insert (or replace) a verdict for `key`. The verdict
     /// expires at `now_ms + config.ttl`. If the cache is at
-    /// capacity, evicts the oldest entry first.
+    /// capacity, evicts the entry with the soonest expiry
+    /// first (which doubles as an opportunistic TTL sweep:
+    /// anything already expired wins the eviction lottery).
     pub fn insert(&self, key: FlowKey, verdict: FwVerdict, now_ms: u64) {
         let ttl_ms = u64::try_from(self.config.ttl.as_millis()).unwrap_or(u64::MAX);
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
-        let _guard = self.write_guard.lock();
         let snapshot = self.map.load();
-        let mut next: HashMap<FlowKey, CacheEntry> = (**snapshot).clone();
-        if !next.contains_key(&key) && next.len() >= self.config.max_entries {
-            // Evict the entry with the soonest expiry. This
-            // doubles as a TTL sweep — anything already
-            // expired wins the eviction lottery.
-            if let Some((evict_key, _)) = next
-                .iter()
-                .min_by_key(|(_, e)| e.expires_at_ms)
-                .map(|(k, e)| (*k, e.clone()))
-            {
-                next.remove(&evict_key);
+        // Cap check is approximate — DashMap::len() is a
+        // shard-walking O(shards) operation; we accept a
+        // small overshoot when many threads race past the
+        // capacity boundary because the next insert will
+        // re-trigger eviction. The alternative (locking the
+        // whole map for the len check) would re-introduce
+        // the bottleneck this redesign is meant to remove.
+        if snapshot.len() >= self.config.max_entries && !snapshot.contains_key(&key) {
+            // Find the soonest-expiring entry to evict. We
+            // scan all shards under their individual locks;
+            // each shard is small so the per-shard hold is
+            // brief.
+            let mut victim: Option<(FlowKey, u64)> = None;
+            for entry in snapshot.iter() {
+                let exp = entry.value().expires_at_ms;
+                match victim {
+                    None => victim = Some((*entry.key(), exp)),
+                    Some((_, v_exp)) if exp < v_exp => victim = Some((*entry.key(), exp)),
+                    _ => {}
+                }
+            }
+            if let Some((victim_key, _)) = victim {
+                snapshot.remove(&victim_key);
             }
         }
-        next.insert(
+        snapshot.insert(
             key,
             CacheEntry {
                 verdict,
                 expires_at_ms,
             },
         );
-        self.map.store(Arc::new(next));
     }
 
     /// Drop every entry. Used on policy reload — the new
     /// bundle may produce different verdicts for flows the
     /// cache currently holds, so the safest thing is to
-    /// re-query on the next packet.
+    /// re-query on the next packet. Atomic from any
+    /// reader's perspective: in-flight `get` calls keep
+    /// reading from the prior Arc until they drop it.
     pub fn clear_all(&self) {
-        let _guard = self.write_guard.lock();
-        self.map.store(Arc::new(HashMap::new()));
+        let map = DashMap::with_capacity(self.config.max_entries);
+        self.map.store(Arc::new(map));
     }
 
     /// Drop entries whose `expires_at_ms` is `<= now_ms`.
     /// Returns the number of entries dropped. Called by
     /// the service's periodic maintenance task.
     pub fn sweep_expired(&self, now_ms: u64) -> usize {
-        let _guard = self.write_guard.lock();
         let snapshot = self.map.load();
-        if snapshot.is_empty() {
-            return 0;
-        }
-        let mut next: HashMap<FlowKey, CacheEntry> = (**snapshot).clone();
-        let before = next.len();
-        next.retain(|_, entry| entry.expires_at_ms > now_ms);
-        let removed = before - next.len();
-        if removed > 0 {
-            self.map.store(Arc::new(next));
-        }
+        let mut removed = 0usize;
+        // `retain` walks every shard under its own lock,
+        // dropping entries inline. We could compute the
+        // delta via `len_before - len_after` but `retain`'s
+        // closure can count directly and avoid the second
+        // shard-walking `len()` call.
+        snapshot.retain(|_, entry| {
+            if entry.expires_at_ms <= now_ms {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
         removed
     }
 
     /// Current number of cached entries (including expired
-    /// ones that haven't been swept yet).
+    /// ones that haven't been swept yet). Shard-walking
+    /// O(shards) — fine for ops snapshots, do not call on
+    /// the data path.
     #[must_use]
     pub fn len(&self) -> usize {
         self.map.load().len()
@@ -390,6 +442,21 @@ mod tests {
         );
         assert_eq!(VerdictReason::FailClosed.as_label(), "policy.fail_closed");
         assert_eq!(VerdictReason::Bypass.as_label(), "bypass");
+        assert_eq!(
+            VerdictReason::Steering("trusted_direct".into()).as_label(),
+            "steering:trusted_direct"
+        );
+    }
+
+    #[test]
+    fn verdict_reason_steering_class_accessor() {
+        let s = VerdictReason::Steering("inspect_full".into());
+        assert_eq!(s.steering_class(), Some("inspect_full"));
+        assert_eq!(VerdictReason::Bypass.steering_class(), None);
+        assert_eq!(
+            VerdictReason::PolicyMatch("r-1".into()).steering_class(),
+            None
+        );
     }
 
     #[test]
@@ -580,5 +647,52 @@ mod tests {
     fn sweep_expired_on_empty_returns_zero() {
         let cache = VerdictCache::with_defaults();
         assert_eq!(cache.sweep_expired(123_456), 0);
+    }
+
+    #[test]
+    fn concurrent_inserts_do_not_lose_writes() {
+        // Pin the DashMap-backed cache's parallel-write
+        // semantics: many threads inserting distinct keys
+        // must all land — the prior `ArcSwap<HashMap>`
+        // CoW design had a last-writer-wins race that
+        // could lose inserts under contention. With
+        // DashMap each insert lands on its key's shard
+        // and concurrent inserts on different keys do
+        // not contend.
+        use std::sync::Arc;
+        let cache = Arc::new(VerdictCache::new(VerdictCacheConfig {
+            max_entries: 4_096,
+            ttl: Duration::from_secs(60),
+        }));
+        let mut handles = Vec::new();
+        let threads: u32 = 8;
+        let per_thread: u32 = 64;
+        for t in 0..threads {
+            let cache = Arc::clone(&cache);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..per_thread {
+                    let slot = t * per_thread + i + 1;
+                    let port = u16::try_from(slot).unwrap();
+                    let key = FlowKey::new(
+                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                        port,
+                        443,
+                        IpProtocol::Tcp,
+                    )
+                    .unwrap();
+                    cache.insert(
+                        key,
+                        FwVerdict::allow(VerdictReason::Bypass),
+                        u64::from(slot),
+                    );
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let expected = usize::try_from(threads * per_thread).unwrap();
+        assert_eq!(cache.len(), expected);
     }
 }

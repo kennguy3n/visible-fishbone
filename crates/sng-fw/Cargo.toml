@@ -34,6 +34,13 @@ tokio = { workspace = true, features = ["sync", "time"] }
 arc-swap = { workspace = true }
 parking_lot = { workspace = true }
 async-trait = { workspace = true }
+# Sharded concurrent map for the verdict cache. The prior
+# implementation used `ArcSwap<HashMap>` which is O(n) per
+# insert (copy-on-write of the full table); DashMap's
+# shard-locked design gives O(1) inserts on the data-path
+# hot loop while keeping the lock-free read path that
+# ArcSwap originally provided.
+dashmap = { workspace = true }
 
 # Configuration / wire types.
 serde = { workspace = true }

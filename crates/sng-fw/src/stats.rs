@@ -28,6 +28,7 @@ pub struct FwStats {
     verdict_inspects: AtomicU64,
     telemetry_events_emitted: AtomicU64,
     telemetry_events_dropped: AtomicU64,
+    state_update_races: AtomicU64,
 }
 
 /// Sampled view of the counters at a point in time. The
@@ -48,6 +49,15 @@ pub struct FwStatsSnapshot {
     pub verdict_inspects: u64,
     pub telemetry_events_emitted: u64,
     pub telemetry_events_dropped: u64,
+    /// Number of times `FwService::observe_packet` completed
+    /// policy evaluation but found the conntrack entry had
+    /// been swept away before the state update could land
+    /// (a race between a producer thread and the
+    /// maintenance `tick()`). Should be near-zero in steady
+    /// state; non-trivial values indicate the conntrack
+    /// idle timeouts are too aggressive relative to the
+    /// data-path latency.
+    pub state_update_races: u64,
 }
 
 impl FwStats {
@@ -131,6 +141,15 @@ impl FwStats {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Increment when an `observe_packet` call discovers
+    /// the conntrack entry it had just minted/lookedup has
+    /// already been swept away by the time the `with_entry`
+    /// closure runs. See [`FwStatsSnapshot::state_update_races`]
+    /// for ops semantics.
+    pub fn record_state_update_race(&self) {
+        self.state_update_races.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Snapshot every counter into a serialisable view.
     #[must_use]
     pub fn snapshot(&self) -> FwStatsSnapshot {
@@ -147,6 +166,7 @@ impl FwStats {
             verdict_inspects: self.verdict_inspects.load(Ordering::Relaxed),
             telemetry_events_emitted: self.telemetry_events_emitted.load(Ordering::Relaxed),
             telemetry_events_dropped: self.telemetry_events_dropped.load(Ordering::Relaxed),
+            state_update_races: self.state_update_races.load(Ordering::Relaxed),
         }
     }
 }
@@ -177,6 +197,16 @@ mod tests {
         assert_eq!(snap.flows_created, 2);
         assert_eq!(snap.flows_evicted_idle, 1);
         assert_eq!(snap.flows_evicted_capacity, 1);
+    }
+
+    #[test]
+    fn state_update_race_counter_increments_and_snapshots() {
+        let s = FwStats::new();
+        s.record_state_update_race();
+        s.record_state_update_race();
+        s.record_state_update_race();
+        let snap = s.snapshot();
+        assert_eq!(snap.state_update_races, 3);
     }
 
     #[test]

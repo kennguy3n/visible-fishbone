@@ -175,24 +175,36 @@ impl FwService {
         // existing flow we leave the stored app id alone
         // unless we have a TLS-without-SNI that the new
         // payload can promote.
-        let stored_app = entry.state.app_id.clone();
-        let resolved_app = match outcome {
-            LookupOutcome::Created => {
-                let r = self.app_id.resolve(&obs.key, obs.payload).unwrap_or_else(|e| {
-                    tracing::debug!(error = ?e, "app-id sniff failed; defaulting to port heuristic");
-                    self.app_id.port.classify(&obs.key)
-                });
-                self.stats.record_flow_created();
-                r
+        // Surface capacity-pressure evictions to ops via
+        // FwStats so undersized conntrack tables become
+        // visible on dashboards. The ConnTable doesn't hold
+        // an Arc<FwStats> directly (it lives a layer below);
+        // the outcome variant carries the count instead.
+        if let LookupOutcome::Created {
+            evicted_for_capacity,
+        } = outcome
+        {
+            for _ in 0..evicted_for_capacity {
+                self.stats.record_flow_evicted_capacity();
             }
-            _ => match stored_app {
+        }
+        let stored_app = entry.state.app_id.clone();
+        let resolved_app = if outcome.is_created() {
+            let r = self.app_id.resolve(&obs.key, obs.payload).unwrap_or_else(|e| {
+                tracing::debug!(error = ?e, "app-id sniff failed; defaulting to port heuristic");
+                self.app_id.port.classify(&obs.key)
+            });
+            self.stats.record_flow_created();
+            r
+        } else {
+            match stored_app {
                 Some(AppId::Tls { sni: None }) if !obs.payload.is_empty() => self
                     .app_id
                     .refine(AppId::Tls { sni: None }, obs.payload)
                     .unwrap_or(AppId::Tls { sni: None }),
                 Some(app) => app,
                 None => AppId::Unknown,
-            },
+            }
         };
 
         // Verdict: hit the cache; on miss, run policy and
@@ -220,26 +232,36 @@ impl FwService {
                 }
             };
             self.verdict_cache.insert(cache_key, v.clone(), obs.now_ms);
-            (v, matches!(outcome, LookupOutcome::Created))
+            (v, outcome.is_created())
         };
         self.stats.record_verdict(verdict.disposition);
 
         // Update flow state: TCP state machine, byte counts,
-        // last seen, app id.
-        let _ = self.conntrack.with_entry(&entry.flow_key, |state| {
+        // last seen, app id. The closure runs under the
+        // conntrack mutex; `with_entry` returns `false` only
+        // when the entry has been swept away between the
+        // `lookup_or_create` above and now (a concurrent
+        // tick() racing with this observe_packet call). When
+        // that happens we credit a `record_state_update_race`
+        // counter so ops can detect the rare collision
+        // pattern (it would mean conntrack is sweeping more
+        // aggressively than the data path can re-create
+        // flows, e.g. timeouts set too short).
+        let is_reverse = matches!(outcome, LookupOutcome::ExistingReverse);
+        let updated = self.conntrack.with_entry(&entry.flow_key, |state| {
             if let Some(flags) = obs.tcp_flags {
                 state.advance_tcp(flags);
             }
-            match outcome {
-                LookupOutcome::ExistingReverse => {
-                    state.observe_responder(obs.bytes, obs.now_ms);
-                }
-                _ => {
-                    state.observe_originator(obs.bytes, obs.now_ms);
-                }
+            if is_reverse {
+                state.observe_responder(obs.bytes, obs.now_ms);
+            } else {
+                state.observe_originator(obs.bytes, obs.now_ms);
             }
             state.app_id = Some(resolved_app.clone());
         });
+        if !updated {
+            self.stats.record_state_update_race();
+        }
 
         // Emit a per-packet flow event for telemetry. The
         // pipeline applies its own dedup + redact + enrich;

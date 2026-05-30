@@ -135,14 +135,17 @@ pub fn verdict_from_policy(raw: &Verdict) -> FwVerdict {
             let _ = level; // explicit to mark intent.
             FwVerdict::inspect(VerdictReason::PolicyMatch(String::new()))
         }
-        Verdict::Steer { class: _ } => {
+        Verdict::Steer { class } => {
             // Steering verdicts permit the flow and route it
-            // via the SDWAN / traffic-class engine. From the
-            // firewall's perspective the verdict is "allow"
-            // with a steering reason; the SDWAN engine reads
-            // the steering class off the policy graph
-            // separately.
-            FwVerdict::allow(VerdictReason::PolicyMatch(String::new()))
+            // via the SDWAN / traffic-class engine. The
+            // wire-level verdict is Allow but we tag the
+            // reason with the class as its stable wire
+            // string (`trusted_direct`, `inspect_full`, …)
+            // so downstream telemetry can distinguish a
+            // plain allow from a steered allow and so the
+            // SDWAN crate doesn't need to re-walk the policy
+            // graph to recover the routing class.
+            FwVerdict::allow(VerdictReason::Steering(class.to_string()))
         }
         Verdict::Decrypt => FwVerdict::inspect(VerdictReason::PolicyMatch(String::new())),
         Verdict::Log => FwVerdict::log(VerdictReason::PolicyMatch(String::new())),
@@ -224,6 +227,41 @@ mod tests {
             VerdictReason::PolicyMatch(ref s) => assert_eq!(s, "suggest_only"),
             other => panic!("unexpected reason: {other:?}"),
         }
+    }
+
+    #[test]
+    fn steer_maps_to_allow_with_steering_class_in_reason() {
+        use sng_core::traffic_class::TrafficClass;
+        let v = verdict_from_policy(&Verdict::Steer {
+            class: TrafficClass::TrustedDirect,
+        });
+        assert_eq!(v.disposition, sng_core::envelope::Verdict::Allow);
+        // The class must be preserved on the reason so the
+        // SD-WAN crate can route the flow without re-walking
+        // the policy graph.
+        match &v.reason {
+            VerdictReason::Steering(class) => {
+                assert_eq!(class.as_str(), TrafficClass::TrustedDirect.as_str());
+            }
+            other => panic!("expected Steering reason, got {other:?}"),
+        }
+        // And the helper accessor agrees.
+        assert_eq!(
+            v.reason.steering_class(),
+            Some(TrafficClass::TrustedDirect.as_str())
+        );
+    }
+
+    #[test]
+    fn steer_reason_label_is_steering_prefixed() {
+        use sng_core::traffic_class::TrafficClass;
+        let v = verdict_from_policy(&Verdict::Steer {
+            class: TrafficClass::InspectFull,
+        });
+        assert_eq!(
+            v.reason.as_label(),
+            format!("steering:{}", TrafficClass::InspectFull.as_str())
+        );
     }
 
     #[test]

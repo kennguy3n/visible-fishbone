@@ -418,7 +418,20 @@ impl FlowState {
             // legitimate traffic on a kernel ordering quirk.
             (ConnState::SynSent, f) if f & ACK != 0 => ConnState::Established,
             (ConnState::Established, f) if f & FIN != 0 => ConnState::Closing,
-            (ConnState::Closing, f) if f & FIN != 0 || f & ACK != 0 => ConnState::Closed,
+            // Closing -> Closed only on the peer's FIN, NOT
+            // on a plain ACK. After one side sends FIN the
+            // peer typically ACKs immediately and then keeps
+            // sending data + ACKs in the half-closed window;
+            // collapsing to Closed on the first ACK would
+            // evict the conntrack entry mid-conversation
+            // and split the flow's byte / verdict accounting
+            // across a second flow entry on the next packet.
+            // The accompanying FIN-from-the-peer (or a RST
+            // handled above) is the legitimate Closed
+            // trigger. Pinned by
+            // `closing_state_holds_on_plain_ack` /
+            // `closing_state_closes_on_peer_fin` tests.
+            (ConnState::Closing, f) if f & FIN != 0 => ConnState::Closed,
             (other, _) => other,
         };
         self.conn_state != prior
@@ -572,6 +585,47 @@ mod tests {
         assert!(s.advance_tcp(0x11)); // FIN+ACK
         assert_eq!(s.conn_state, ConnState::Closed);
         assert!(!s.conn_state.is_live());
+    }
+
+    #[test]
+    fn closing_state_holds_on_plain_ack() {
+        // Half-closed flow: client sent FIN, server ACKs the
+        // FIN and keeps sending data (typical TCP half-close
+        // window). The peer's bare ACK must NOT collapse the
+        // flow to Closed — otherwise the conntrack sweeper
+        // would evict the entry mid-conversation.
+        let mut s = FlowState::new(IpProtocol::Tcp, FlowDirection::Egress, 1_000);
+        // Walk into Established.
+        s.advance_tcp(0x12); // SYN+ACK
+        s.advance_tcp(0x10); // ACK
+        assert_eq!(s.conn_state, ConnState::Established);
+        // Client FIN -> Closing.
+        s.advance_tcp(0x01);
+        assert_eq!(s.conn_state, ConnState::Closing);
+        // Server ACKs the FIN (plain ACK, no FIN of its own).
+        // State must stay Closing.
+        let changed = s.advance_tcp(0x10);
+        assert!(!changed);
+        assert_eq!(s.conn_state, ConnState::Closing);
+        // Server keeps sending data + ACK; still Closing.
+        let changed = s.advance_tcp(0x10);
+        assert!(!changed);
+        assert_eq!(s.conn_state, ConnState::Closing);
+    }
+
+    #[test]
+    fn closing_state_closes_on_peer_fin() {
+        // Half-closed flow finally completes with the peer's
+        // FIN — this is the legitimate Closed trigger.
+        let mut s = FlowState::new(IpProtocol::Tcp, FlowDirection::Egress, 1_000);
+        s.advance_tcp(0x12);
+        s.advance_tcp(0x10);
+        s.advance_tcp(0x01); // client FIN -> Closing
+        assert_eq!(s.conn_state, ConnState::Closing);
+        // Peer FIN+ACK -> Closed.
+        let changed = s.advance_tcp(0x11);
+        assert!(changed);
+        assert_eq!(s.conn_state, ConnState::Closed);
     }
 
     #[test]
