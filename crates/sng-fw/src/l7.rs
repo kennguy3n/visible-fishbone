@@ -516,6 +516,23 @@ impl L7Match {
     }
 }
 
+/// SNI suffix matcher used by the SWG bypass list.
+///
+/// **Intentionally diverges from RFC 6125 §6.4 / from
+/// `sng_policy_eval::matcher::domain_suffix_match`**: the
+/// PKI matcher is for subject-name verification, where only
+/// a single-label subdomain may match the wildcard and the
+/// apex is *excluded*. This matcher is for an operator-written
+/// SNI bypass list — `*.bank.com` is meant to express "bypass
+/// TLS interception for anything under bank.com, including the
+/// apex itself and any depth of subdomain". Using strict RFC
+/// 6125 semantics here would silently let `bank.com` (the
+/// apex) hit the inspection path, defeating the purpose of
+/// listing it.
+///
+/// Keep this divergence greppable from either side: search
+/// `domain_suffix_match` (the PKI flavor) vs `sni_suffix_match`
+/// (the bypass-list flavor).
 fn sni_suffix_match(suffix: &str, value: &str) -> bool {
     let suffix = suffix.strip_prefix("*.").unwrap_or(suffix);
     if suffix.is_empty() || value.is_empty() {
@@ -524,11 +541,7 @@ fn sni_suffix_match(suffix: &str, value: &str) -> bool {
     let v = value.to_ascii_lowercase();
     let s = suffix.to_ascii_lowercase();
     if v == s {
-        // Exact match — both forms accept the apex (this is the
-        // permissive semantics used by SNG's SWG bypass lists;
-        // the steering compiler in sng-policy-eval uses the same
-        // match_any rule for SNI matching, so a `*.bank.com`
-        // entry matches both `bank.com` and `online.bank.com`).
+        // Exact match — accept the apex.
         return true;
     }
     if let Some(prefix) = v.strip_suffix(&s) {
