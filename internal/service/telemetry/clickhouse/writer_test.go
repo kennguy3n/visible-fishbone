@@ -327,7 +327,7 @@ func TestRequeueBatch_PrependsToHeadOfPending(t *testing.T) {
 		logger:  quietLogger(),
 		pending: []schema.Envelope{concurrentC},
 	}
-	w.requeueBatch([]schema.Envelope{failedA, failedB}, "test")
+	w.requeueBatch([]schema.Envelope{failedA, failedB}, "test", requeueDrops{})
 	if got, want := len(w.pending), 3; got != want {
 		t.Fatalf("len(pending): got %d, want %d", got, want)
 	}
@@ -340,11 +340,22 @@ func TestRequeueBatch_PrependsToHeadOfPending(t *testing.T) {
 	if w.pending[2].EventID != concurrentC.EventID {
 		t.Errorf("tail: want concurrentC, got %s", w.pending[2].EventID)
 	}
-	if got := w.Stats().RequeuedBatches; got != 1 {
-		t.Errorf("RequeuedBatches: want 1, got %d", got)
+	s := w.Stats()
+	if s.RequeuedBatches != 1 {
+		t.Errorf("RequeuedBatches: want 1, got %d", s.RequeuedBatches)
 	}
-	if got := w.Stats().BacklogDrops; got != 0 {
-		t.Errorf("BacklogDrops on a non-overflow requeue: want 0, got %d", got)
+	if s.BacklogDrops != 0 {
+		t.Errorf("BacklogDrops on a non-overflow requeue: want 0, got %d", s.BacklogDrops)
+	}
+	// Single-lock invariant: every requeue is a failure-path
+	// call, so flushErrors and consecutiveErrors must rise in
+	// lockstep with RequeuedBatches. A concurrent Stats() reader
+	// can no longer observe RequeuedBatches=1 while FlushErrors=0.
+	if s.FlushErrors != 1 {
+		t.Errorf("FlushErrors must rise in lockstep with RequeuedBatches: want 1, got %d", s.FlushErrors)
+	}
+	if s.ConsecutiveErrors != 1 {
+		t.Errorf("ConsecutiveErrors must rise in lockstep with RequeuedBatches: want 1, got %d", s.ConsecutiveErrors)
 	}
 }
 
@@ -371,7 +382,7 @@ func TestRequeueBatch_ShedsOldestPastBacklogCap(t *testing.T) {
 	// Mark the third (newest) failed envelope so we can prove the
 	// shed pass dropped from the HEAD, not the tail.
 	keepEvent := failed[2]
-	w.requeueBatch(failed, "test")
+	w.requeueBatch(failed, "test", requeueDrops{})
 	if got, want := len(w.pending), 4; got != want {
 		t.Fatalf("len(pending) after cap shed: got %d, want %d (backlogCap)", got, want)
 	}
@@ -391,28 +402,48 @@ func TestRequeueBatch_ShedsOldestPastBacklogCap(t *testing.T) {
 	if s.RequeuedBatches != 1 {
 		t.Errorf("RequeuedBatches: want 1, got %d", s.RequeuedBatches)
 	}
+	if s.FlushErrors != 1 {
+		t.Errorf("FlushErrors must rise with cap-shed requeue: want 1, got %d", s.FlushErrors)
+	}
+	if s.ConsecutiveErrors != 1 {
+		t.Errorf("ConsecutiveErrors must rise with cap-shed requeue: want 1, got %d", s.ConsecutiveErrors)
+	}
 }
 
-// TestRequeueBatch_EmptyIsNoOp guards the cheap-path shortcut.
-// requeueBatch is called from the Send-failure branch with the
-// successfully-Appended sub-slice; in the worst case (all rows
-// rejected on Append, no Send), that sub-slice is empty. The
-// shortcut avoids both a needless allocation AND a needless
-// RequeuedBatches increment that would mislead operators about
-// the writer's actual recovery behaviour.
-func TestRequeueBatch_EmptyIsNoOp(t *testing.T) {
+// TestRequeueBatch_EmptyBatchStillBumpsFailureCounters pins the
+// single-lock-acquisition invariant for the empty-batch path.
+// requeueBatch is the consolidated entry point for every flush-
+// failure code path; even when there's nothing to put back on
+// `pending` (an unreachable case in production today, but a
+// possible future call site with an already-empty good-rows
+// sub-slice), the failure-bookkeeping side of the contract MUST
+// still run — otherwise a concurrent Stats() reader could see
+// FlushErrors stale relative to the actual flush outcome. The
+// requeue-side state (pending, RequeuedBatches, BacklogDrops)
+// is correctly NOT mutated since there were no rows to put back.
+func TestRequeueBatch_EmptyBatchStillBumpsFailureCounters(t *testing.T) {
 	t.Parallel()
 	w := &Writer{
 		cfg:     Config{BatchSize: 1024, MaxBacklogMultiplier: 4},
 		logger:  quietLogger(),
 		pending: []schema.Envelope{mkEnv()},
 	}
-	w.requeueBatch(nil, "test")
-	w.requeueBatch([]schema.Envelope{}, "test")
+	w.requeueBatch(nil, "test", requeueDrops{})
+	w.requeueBatch([]schema.Envelope{}, "test", requeueDrops{appendRejected: 3})
 	if got, want := len(w.pending), 1; got != want {
-		t.Errorf("len(pending) must be unchanged: got %d, want %d", got, want)
+		t.Errorf("len(pending) must be unchanged on empty requeue: got %d, want %d", got, want)
 	}
-	if got := w.Stats().RequeuedBatches; got != 0 {
-		t.Errorf("RequeuedBatches on no-op: want 0, got %d", got)
+	s := w.Stats()
+	if s.RequeuedBatches != 0 {
+		t.Errorf("RequeuedBatches on empty requeue: want 0, got %d", s.RequeuedBatches)
+	}
+	if s.FlushErrors != 2 {
+		t.Errorf("FlushErrors must bump on every requeueBatch call (failure path): want 2, got %d", s.FlushErrors)
+	}
+	if s.ConsecutiveErrors != 2 {
+		t.Errorf("ConsecutiveErrors must bump on every requeueBatch call: want 2, got %d", s.ConsecutiveErrors)
+	}
+	if s.DroppedRows != 3 {
+		t.Errorf("DroppedRows must include requeueDrops.appendRejected: want 3, got %d", s.DroppedRows)
 	}
 }

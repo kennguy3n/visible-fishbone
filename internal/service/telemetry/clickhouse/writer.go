@@ -697,11 +697,7 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 		// trips, the oldest rows are shed and credited to
 		// backlogDrops + droppedRows so the alerting contract
 		// surfaces the loss.
-		w.requeueBatch(batch, "prepare batch failed")
-		w.mu.Lock()
-		w.flushErrors++
-		w.consecutiveErrors++
-		w.mu.Unlock()
+		w.requeueBatch(batch, "prepare batch failed", requeueDrops{})
 		return fmt.Errorf("clickhouse: prepare batch: %w", err)
 	}
 	// Per-flush drop counter. A row that the driver rejects on
@@ -808,12 +804,7 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 		// REQUEUE them at the head of `pending` so the next
 		// flush picks them up. The Append-rejected rows stay
 		// dropped (already credited to droppedRows).
-		w.requeueBatch(successfullyAppended, "send failed after partial append")
-		w.mu.Lock()
-		w.droppedRows += uint64(dropped)
-		w.flushErrors++
-		w.consecutiveErrors++
-		w.mu.Unlock()
+		w.requeueBatch(successfullyAppended, "send failed after partial append", requeueDrops{appendRejected: dropped})
 		return fmt.Errorf("clickhouse: send batch: %w", err)
 	}
 	w.mu.Lock()
@@ -835,11 +826,46 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 	return nil
 }
 
+// shedLogSampleSize bounds the number of per-row WARN lines
+// emitted when the backlog cap trips on a single requeue. During
+// a sustained outage with a high-throughput producer the writer
+// could otherwise emit one WARN per shed row per flush cycle —
+// up to (BatchSize × MaxBacklogMultiplier) lines per cycle — and
+// saturate the log pipeline. We keep the per-row WARN for the
+// FIRST shedLogSampleSize rows so operators retain a sample for
+// forensics, then emit a single aggregate WARN with the total
+// shed count and the first / last shed event IDs.
+const shedLogSampleSize = 8
+
+// extraDrops bundles the per-row drop counts a failure-path
+// caller wants applied alongside the requeue. Today only the
+// Append-rejected-rows counter (incremented on
+// partial-Append-then-Send-failure) lands here; keeping it as a
+// dedicated field — rather than collapsing into a single int —
+// documents the intent and leaves room for a future counter
+// without breaking the call signature.
+type requeueDrops struct {
+	// appendRejected is the count of rows the driver rejected
+	// during Append in this flush. These rows are NOT requeued
+	// (they are judged malformed) but must be credited to
+	// droppedRows so the alerting contract sees the loss.
+	appendRejected int
+}
+
 // requeueBatch re-prepends `batch` to the head of `pending` so
-// the rows ride the next successful flush. If the resulting
-// backlog would exceed `cfg.BatchSize * cfg.MaxBacklogMultiplier`,
-// the OLDEST rows (FIFO order, head of the merged slice) are
-// shed and credited to both `droppedRows` and `backlogDrops`.
+// the rows ride the next successful flush, AND atomically
+// updates every counter the failure-path caller would otherwise
+// touch under a second lock acquisition (flushErrors,
+// consecutiveErrors, droppedRows for Append-rejected rows).
+// Consolidating the counter writes into the same lock as the
+// requeue closes the otherwise-visible "RequeuedBatches
+// incremented but FlushErrors not yet" window that a concurrent
+// Stats() reader could observe.
+//
+// If the resulting backlog would exceed
+// `cfg.BatchSize * cfg.MaxBacklogMultiplier`, the OLDEST rows
+// (FIFO order, head of the merged slice) are shed and credited
+// to both `droppedRows` and `backlogDrops`.
 //
 // The dual counting (DroppedRows + BacklogDrops) is intentional:
 // DroppedRows is the canonical "per-writer data loss" signal that
@@ -848,12 +874,22 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 // outage outlasting the in-memory shield" — the latter is the
 // condition that requires diverting producers to the S3 cold path
 // until the writer recovers.
-func (w *Writer) requeueBatch(batch []schema.Envelope, reason string) {
+func (w *Writer) requeueBatch(batch []schema.Envelope, reason string, drops requeueDrops) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// Failure-path bookkeeping runs unconditionally — even if
+	// `batch` is empty (the all-Append-rejected case can't reach
+	// this helper, but a future caller might pass an empty good-
+	// rows slice and the failure-counter contract should still
+	// hold for that caller).
+	w.flushErrors++
+	w.consecutiveErrors++
+	if drops.appendRejected > 0 {
+		w.droppedRows += uint64(drops.appendRejected)
+	}
 	if len(batch) == 0 {
 		return
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	// Re-prepend: the failed batch (oldest — was swapped out of
 	// pending first) goes before any rows that arrived during
 	// the flush attempt. This preserves the per-writer FIFO
@@ -865,12 +901,15 @@ func (w *Writer) requeueBatch(batch []schema.Envelope, reason string) {
 	backlogCap := w.cfg.BatchSize * w.cfg.MaxBacklogMultiplier
 	if len(merged) > backlogCap {
 		shed := len(merged) - backlogCap
-		// Log per-row context for the shed rows so the operator
-		// can correlate the loss to the producer that emitted
-		// them. A burst of these is the signal that the writer
-		// is being overrun by the outage and the cold-path
-		// fallback must take over.
-		for i := 0; i < shed; i++ {
+		// Bounded sample of per-row WARN context so operators
+		// can correlate the loss to the producer without
+		// flooding the log pipeline during a sustained outage.
+		// See [shedLogSampleSize] for the rationale.
+		sample := shed
+		if sample > shedLogSampleSize {
+			sample = shedLogSampleSize
+		}
+		for i := 0; i < sample; i++ {
 			env := merged[i]
 			w.logger.Warn("clickhouse: shed row on backlog cap",
 				slog.String("event_id", env.EventID.String()),
@@ -879,6 +918,17 @@ func (w *Writer) requeueBatch(batch []schema.Envelope, reason string) {
 				slog.Int("cap", backlogCap),
 				slog.String("reason", reason))
 		}
+		// Aggregate WARN with the total shed count + bracket
+		// event IDs (first + last) so a downstream forensic
+		// query can still find every shed row by walking the
+		// telemetry stream between the two event IDs.
+		w.logger.Warn("clickhouse: backlog cap exceeded, oldest rows shed",
+			slog.Int("shed", shed),
+			slog.Int("sampled", sample),
+			slog.Int("cap", backlogCap),
+			slog.String("first_event_id", merged[0].EventID.String()),
+			slog.String("last_event_id", merged[shed-1].EventID.String()),
+			slog.String("reason", reason))
 		merged = merged[shed:]
 		w.backlogDrops += uint64(shed)
 		w.droppedRows += uint64(shed)
