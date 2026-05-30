@@ -13,6 +13,7 @@
 members = [
     "crates/sng-core",
     "crates/sng-pal",
+    "crates/sng-comms",
 ]
 resolver = "3"
 
@@ -114,9 +115,34 @@ windows = { version = "0.61", features = [
 # IP / CIDR utilities (shared across pal posture + future fw rules).
 ipnet = { version = "2", features = ["serde"] }
 
+# Networking + TLS stack (shared across sng-comms, sng-swg, sng-ztna,
+# and the binaries). rustls is pinned with the `ring` crypto provider
+# explicitly so cargo-deny's bans block on `aws-lc-sys` (and any
+# OpenSSL-FFI fallback) hold even when a future crate adds a feature
+# that would otherwise activate the alternate backend. The `h2`
+# crate is the pure-Rust HTTP/2 implementation used directly (not via
+# hyper) so the client can drive flow-controlled streams without
+# pulling in the full hyper server / service stack.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pki-types = "1"
+webpki-roots = "1"
+h2 = "0.4"
+http = "1"
+http-body = "1"
+url = "2"
+zstd = "0.13"
+rand = "0.8"
+
 # Test-only dependencies.
 tempfile = "3"
 pretty_assertions = "1"
+# rcgen mints self-signed leaf + CA certificates for the in-process
+# TLS server used by sng-comms integration tests. Pinned at the
+# workspace level so future crates that need an ephemeral test PKI
+# (sng-policy-eval bundle pull, sng-edge enrolment) share the same
+# version.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
 
 # Internal crate references — each member crate is reachable via
 # `{ workspace = true }` from every other crate without having to
@@ -124,6 +150,7 @@ pretty_assertions = "1"
 # get one more entry here.
 sng-core = { path = "crates/sng-core" }
 sng-pal = { path = "crates/sng-pal" }
+sng-comms = { path = "crates/sng-comms" }
 
 # Workspace-wide lints. Set at the workspace level so a new crate
 # added in a later phase automatically inherits the same posture

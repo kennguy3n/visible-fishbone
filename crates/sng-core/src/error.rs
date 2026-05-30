@@ -58,6 +58,37 @@ pub enum ErrorCode {
     /// [`crate::lifecycle::HealthCheck`] interface and the
     /// caller declined to proceed.
     HealthUnhealthy,
+    /// Device identity (Ed25519 keypair + client certificate) failed
+    /// to load or did not match its leaf cert's
+    /// SubjectPublicKeyInfo. Permanent under the current files on
+    /// disk; the agent must point at a different identity or
+    /// re-enrol.
+    IdentityInvalid,
+    /// Server rejected the device identity at the mTLS handshake
+    /// or the application-layer auth check (HTTP 401 / 403).
+    /// Permanent under the current credentials; the agent must
+    /// re-enrol.
+    IdentityRejected,
+    /// The control plane was unreachable — connect timeout, TLS
+    /// handshake failure, h2 ALPN mismatch, 5xx server error, or
+    /// 429 rate limit. Retryable after a backoff.
+    ControlPlaneUnreachable,
+    /// A resource the agent requested (policy bundle, signing key,
+    /// device record) is not present on the control plane for
+    /// this tenant binding.
+    ResourceMissing,
+    /// A signed policy bundle failed an invariant check that is
+    /// neither a signature failure (covered by
+    /// [`Self::PolicyBundleSignatureInvalid`]) nor a target
+    /// mismatch (covered by [`Self::PolicyBundleTargetMismatch`])
+    /// nor a downgrade (covered by [`Self::PolicyBundleStale`]) —
+    /// e.g. the server response carried no version header, or the
+    /// claims block could not be decoded.
+    BundleRejected,
+    /// Monotonic sequence number regressed below the high-water
+    /// mark on a stream. Either a replay attack or a server bug;
+    /// the agent fails the stream closed and reconnects.
+    SequenceRegression,
     /// Catch-all for failures that genuinely do not fit one of
     /// the more specific buckets. Use sparingly — a new code is
     /// almost always preferable so dashboards can break the rate
@@ -81,6 +112,12 @@ impl ErrorCode {
             Self::Io => "io",
             Self::LifecycleShutdown => "lifecycle.shutdown",
             Self::HealthUnhealthy => "health.unhealthy",
+            Self::IdentityInvalid => "identity.invalid",
+            Self::IdentityRejected => "identity.rejected",
+            Self::ControlPlaneUnreachable => "control_plane.unreachable",
+            Self::ResourceMissing => "resource.missing",
+            Self::BundleRejected => "policy.bundle.rejected",
+            Self::SequenceRegression => "sequence.regression",
             Self::Other => "other",
         }
     }
@@ -186,6 +223,15 @@ mod tests {
             (ErrorCode::Io, "io"),
             (ErrorCode::LifecycleShutdown, "lifecycle.shutdown"),
             (ErrorCode::HealthUnhealthy, "health.unhealthy"),
+            (ErrorCode::IdentityInvalid, "identity.invalid"),
+            (ErrorCode::IdentityRejected, "identity.rejected"),
+            (
+                ErrorCode::ControlPlaneUnreachable,
+                "control_plane.unreachable",
+            ),
+            (ErrorCode::ResourceMissing, "resource.missing"),
+            (ErrorCode::BundleRejected, "policy.bundle.rejected"),
+            (ErrorCode::SequenceRegression, "sequence.regression"),
             (ErrorCode::Other, "other"),
         ];
         for (code, expected) in cases {
