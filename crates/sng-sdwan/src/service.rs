@@ -333,6 +333,15 @@ impl SdwanService {
     /// to a [`SteeringReason::NoAvailablePath`] /
     /// [`SteeringReason::AllProbesStale`] decision.
     pub fn evaluate(&self, request: &SteeringRequest) -> SteeringDecision {
+        // Snapshot the policy exactly once for the whole
+        // evaluation. The same `Arc<SdwanPolicy>` is then
+        // threaded through `finalise` so the sticky-pin
+        // duration written into the cache matches the
+        // policy used for scoring + floor checks, even if
+        // a `reload_policy` lands between the two reads
+        // on another thread. The lock-free `ArcSwap`
+        // design still applies: a swap mid-evaluation is
+        // safe, it just lands on the *next* evaluation.
         let policy_snap = self.policy.snapshot();
         let candidates = self.paths.candidates(request.traffic_class);
 
@@ -341,6 +350,7 @@ impl SdwanService {
             return self.finalise(
                 request,
                 SteeringDecision::no_path(SteeringReason::NoAvailablePath, request.traffic_class),
+                &policy_snap,
             );
         }
 
@@ -352,7 +362,7 @@ impl SdwanService {
             if let Some(sticky_decision) =
                 self.try_sticky(&pinned, &candidates, &policy_snap, request)
             {
-                return self.finalise(request, sticky_decision);
+                return self.finalise(request, sticky_decision, &policy_snap);
             }
         }
 
@@ -396,6 +406,7 @@ impl SdwanService {
             return self.finalise(
                 request,
                 SteeringDecision::no_path(SteeringReason::AllProbesStale, request.traffic_class),
+                &policy_snap,
             );
         }
 
@@ -431,13 +442,26 @@ impl SdwanService {
             }
             None => SteeringDecision::no_path(reason, request.traffic_class),
         };
-        self.finalise(request, decision)
+        self.finalise(request, decision, &policy_snap)
     }
 
     /// Common tail of `evaluate`: bump stats, emit
     /// telemetry, update the sticky cache. Kept private
     /// so the call sites stay terse.
-    fn finalise(&self, request: &SteeringRequest, decision: SteeringDecision) -> SteeringDecision {
+    ///
+    /// `policy` is the same snapshot the evaluation was
+    /// scored against — passed in (not re-snapshotted)
+    /// so the sticky-pin window written into the cache
+    /// is consistent with the policy the decision was
+    /// made under, even if `reload_policy` lands on
+    /// another thread between the evaluation start and
+    /// the cache write.
+    fn finalise(
+        &self,
+        request: &SteeringRequest,
+        decision: SteeringDecision,
+        policy: &SdwanPolicy,
+    ) -> SteeringDecision {
         self.stats.record_decision(&decision.reason);
         // Look up the raw probe for the selected path
         // so the emitted event carries the wire-shape
@@ -449,9 +473,7 @@ impl SdwanService {
         let probe = decision.path_id.as_ref().and_then(|id| self.probes.get(id));
         // Update sticky cache on a path selection.
         if let Some(path_id) = &decision.path_id {
-            let pinned_until_ms = request
-                .now_ms
-                .saturating_add(self.policy.snapshot().sticky_window_ms);
+            let pinned_until_ms = request.now_ms.saturating_add(policy.sticky_window_ms);
             self.sticky_insert(
                 request.flow_key.clone(),
                 path_id.clone(),
@@ -504,7 +526,19 @@ impl SdwanService {
     /// sticky-pin feature.
     fn sticky_insert(&self, flow_key: String, path_id: PathId, now_ms: u64, pinned_until_ms: u64) {
         let mut g = self.sticky.lock();
-        if g.len() >= self.cfg.sticky_cache_capacity {
+        // Re-pinning an existing flow is an overwrite
+        // (no size increase), so it must NOT trigger an
+        // eviction sweep. The sweep is only needed when
+        // we'd otherwise grow the map past capacity —
+        // i.e. when the key is genuinely new. Skipping
+        // the sweep on re-pin is critical: under
+        // sustained sticky-pinned load at capacity, every
+        // re-evaluation calls `sticky_insert` for the
+        // selected flow, and an unconditional sweep here
+        // would needlessly drop *another* flow's pin on
+        // every request — exactly the kind of flapping
+        // the sticky-pin feature exists to prevent.
+        if !g.contains_key(&flow_key) && g.len() >= self.cfg.sticky_cache_capacity {
             // Sweep *expired* entries first — keep entries
             // whose `pinned_until_ms` is still in the
             // future relative to the *current* time
@@ -1010,6 +1044,78 @@ mod tests {
         let d2 = svc.evaluate(&req("flow-reload", TrafficClass::Interactive, NOW + 5_000));
         assert_eq!(d2.path_id, Some(PathId::new("mpls")));
         assert_eq!(d2.reason, SteeringReason::StickyPinned);
+    }
+
+    #[test]
+    fn repinning_existing_flow_at_capacity_does_not_evict_others() {
+        // Regression test for BUG_0001: under sustained
+        // sticky-pinned load with the cache at capacity,
+        // re-pinning an *already-cached* flow_key must
+        // NOT trigger the eviction sweep — a HashMap
+        // insert on an existing key is an overwrite, not
+        // a growth. The bug was that `sticky_insert`
+        // checked `g.len() >= capacity` unconditionally,
+        // so every re-pin would needlessly evict a
+        // different flow's pin, defeating the sticky-pin
+        // contract for the evicted flow on its next
+        // evaluation.
+        let (tx, _rx) = telemetry();
+        let svc = SdwanServiceBuilder::new()
+            .with_config(SdwanServiceConfig {
+                sticky_cache_capacity: 4,
+                ..SdwanServiceConfig::default()
+            })
+            .with_policy(Arc::new(
+                SdwanPolicyHolder::try_new(SdwanPolicy::default()).unwrap(),
+            ))
+            .with_path_provider(Arc::new(StaticPathProvider::from_paths([Path::new(
+                "mpls",
+                [TrafficClass::Interactive],
+            )])))
+            .with_probe_provider(Arc::new(StaticProbeProvider::from_probes([(
+                PathId::new("mpls"),
+                PathProbe::new(10.0, 0.0, 0.0, NOW),
+            )])))
+            .build(tx);
+
+        // Fill cache to capacity with 4 distinct flows.
+        for i in 0..4 {
+            let flow = format!("flow-{i}");
+            let _ = svc.evaluate(&req(&flow, TrafficClass::Interactive, NOW));
+        }
+        assert_eq!(svc.sticky.lock().len(), 4);
+        let evictions_before = svc.evictions();
+
+        // Re-pin flow-0 (an existing key) at capacity.
+        // The bug would trigger the sweep + arbitrary
+        // eviction here, dropping one of flow-1/2/3.
+        // The fix skips the sweep entirely because the
+        // key already exists in the map.
+        let _ = svc.evaluate(&req("flow-0", TrafficClass::Interactive, NOW + 100));
+        assert_eq!(
+            svc.sticky.lock().len(),
+            4,
+            "re-pinning an existing key must not change cache size"
+        );
+        for i in 0..4 {
+            assert!(
+                svc.sticky.lock().contains_key(&format!("flow-{i}")),
+                "flow-{i} should still be in the cache after re-pinning flow-0"
+            );
+        }
+        assert_eq!(
+            svc.evictions(),
+            evictions_before,
+            "no eviction should have been recorded for an in-place re-pin at capacity"
+        );
+
+        // Re-pin flow-0 many more times; cache stays
+        // intact, eviction count never grows.
+        for _ in 0..100 {
+            let _ = svc.evaluate(&req("flow-0", TrafficClass::Interactive, NOW + 200));
+        }
+        assert_eq!(svc.evictions(), evictions_before);
+        assert_eq!(svc.sticky.lock().len(), 4);
     }
 
     #[test]
