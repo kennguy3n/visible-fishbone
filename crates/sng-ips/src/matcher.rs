@@ -340,7 +340,15 @@ impl SignatureSet {
             if !sig.applies_to(ctx.protocol, ctx.source_port, ctx.destination_port) {
                 continue;
             }
-            if let Some(m) = rx.find(ctx.payload) {
+            // `find_iter` walks every non-overlapping match.
+            // We accept the earliest match whose offset
+            // satisfies the signature's anchor — using
+            // `rx.find()` alone would only consider the
+            // leftmost match and falsely conclude the
+            // signature didn't fire when an earlier match
+            // happens to fall outside the anchor window
+            // but a later match satisfies it.
+            for m in rx.find_iter(ctx.payload) {
                 if !sig.anchor.permits(m.start(), m.end() - m.start()) {
                     continue;
                 }
@@ -349,6 +357,10 @@ impl SignatureSet {
                 if m.start() < prev {
                     earliest.insert(earliest_key, m.start());
                 }
+                // Matches are returned in order, so the
+                // first anchor-satisfying match is the
+                // earliest one — no need to keep scanning.
+                break;
             }
         }
 
@@ -629,6 +641,62 @@ mod tests {
             source_port: 0,
             destination_port: 80,
             payload: b"prefix bytes BANG",
+        });
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn regex_signature_finds_later_anchor_satisfying_match() {
+        // Pin the architectural contract for the regex
+        // scan path: when the leftmost regex match falls
+        // OUTSIDE the anchor window, the scan must keep
+        // walking matches to find a later one that
+        // satisfies the anchor. `rx.find()` alone (which
+        // only returns the leftmost match) would
+        // false-negative this case.
+        let mut sig = sig_simple(2001, vec![regex(r"\d{4}")]);
+        sig.anchor = Anchor {
+            offset: Some(10),
+            depth: None,
+        };
+        let set = SignatureSet::compile(vec![sig]).unwrap();
+
+        // First match `1234` is at offset 0 (rejected by
+        // the offset-10 anchor). Second match `5678` is at
+        // offset 13 (satisfies the anchor). The scan must
+        // surface a hit.
+        let hits = set.scan(ScanContext {
+            protocol: IpProtocol::Tcp,
+            source_port: 0,
+            destination_port: 80,
+            payload: b"1234 padding 5678",
+        });
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].sid, 2001);
+        // Reported offset should be the anchor-satisfying
+        // match, not the rejected leftmost one.
+        assert_eq!(hits[0].first_match_offset, 13);
+    }
+
+    #[test]
+    fn regex_signature_no_match_when_all_outside_anchor_depth() {
+        // Inverse contract: if EVERY match falls outside
+        // the anchor depth window, no hit fires (the scan
+        // shouldn't silently relax the anchor).
+        let mut sig = sig_simple(2002, vec![regex(r"\d{4}")]);
+        sig.anchor = Anchor {
+            offset: None,
+            depth: Some(4),
+        };
+        let set = SignatureSet::compile(vec![sig]).unwrap();
+        let hits = set.scan(ScanContext {
+            protocol: IpProtocol::Tcp,
+            source_port: 0,
+            destination_port: 80,
+            // First match `1234` at offset 5, length 4 →
+            // end=9, depth=4 → rejected. Second match
+            // `5678` at offset 18 → also rejected.
+            payload: b"abcd 1234 padding 5678",
         });
         assert!(hits.is_empty());
     }

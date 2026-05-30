@@ -282,6 +282,17 @@ impl IpsService {
         let mut top_severity = Severity::Info;
         let mut top_sid: u32 = 0;
         let mut top_msg = String::new();
+        // Parallel to `raw_hits`: `true` means the hit
+        // passed dedup and must emit a telemetry alert in
+        // the post-lock submit pass. Computed under the
+        // dedup lock so the lock is held only for the
+        // bookkeeping, not for the telemetry channel
+        // send. Decoupling decision from emit via a flag
+        // vector avoids any reliance on per-key timestamp
+        // equality, which is unsafe when multiple
+        // observations on the same flow arrive at the
+        // same millisecond.
+        let mut emit_flags: Vec<bool> = Vec::with_capacity(raw_hits.len());
         {
             let mut dedup = self.dedup.lock();
             for hit in &raw_hits {
@@ -298,12 +309,9 @@ impl IpsService {
                     flow_id: obs.flow_id,
                     sid: hit.sid,
                 };
-                if dedup.should_emit(key, obs.now_ms, ttl_ms) {
-                    // Hold the dedup lock only long enough
-                    // to record the emission; the actual
-                    // telemetry submit happens after the
-                    // lock is released so a saturated
-                    // pipeline can't stall other producers.
+                let emit = dedup.should_emit(key, obs.now_ms, ttl_ms);
+                emit_flags.push(emit);
+                if emit {
                     emitted_alerts += 1;
                 } else {
                     self.stats.record_suppressed_dup_hit();
@@ -312,28 +320,14 @@ impl IpsService {
         }
 
         // Telemetry submit pass — lock-free relative to the
-        // dedup map.
+        // dedup map. Iterate raw_hits alongside the
+        // pre-computed emit flags so we replay exactly the
+        // decisions the dedup pass made.
         if emitted_alerts > 0 {
-            let mut emitted_this_pass = 0usize;
-            for hit in &raw_hits {
-                // Repeat the dedup check via a peek so we
-                // emit exactly the hits we counted above.
-                // The dedup table won't change between the
-                // two checks because no other observation
-                // is in flight for this (flow, sid) — the
-                // service is called serially per flow at
-                // the data-path layer.
-                let key = DedupKey {
-                    flow_id: obs.flow_id,
-                    sid: hit.sid,
-                };
-                if !self.dedup.lock().was_emitted_at(key, obs.now_ms) {
+            for (hit, &emit) in raw_hits.iter().zip(emit_flags.iter()) {
+                if !emit {
                     continue;
                 }
-                if emitted_this_pass >= emitted_alerts {
-                    break;
-                }
-                emitted_this_pass += 1;
                 let event = build_ips_event(&obs.flow_key, hit);
                 if self.telemetry.try_send(TelemetryEvent::Ips(event)).is_err() {
                     self.stats.record_telemetry_drop();
@@ -458,15 +452,6 @@ impl DedupTable {
                 true
             }
         }
-    }
-
-    /// Did this (flow, sid) record its emit at exactly
-    /// `now_ms`? Used in the post-lock telemetry submit
-    /// loop to find the hits the dedup pass selected.
-    /// Uses `peek` so the recency-bump from `should_emit`
-    /// is the single source of LRU order.
-    fn was_emitted_at(&self, key: DedupKey, now_ms: u64) -> bool {
-        self.inner.peek(&key) == Some(&now_ms)
     }
 
     fn touch(&mut self, key: DedupKey, now_ms: u64) {
@@ -869,6 +854,68 @@ mod tests {
         assert!(!tbl.inner.contains(&b));
         assert!(tbl.inner.contains(&c));
         assert_eq!(tbl.inner.len(), 2);
+    }
+
+    #[test]
+    fn two_observations_at_same_ms_emit_correct_signature() {
+        // Pin the architectural contract for the
+        // dedup/emit decoupling: when two observations on
+        // the same flow arrive at the SAME millisecond and
+        // a previously-seen signature reappears alongside
+        // a NEW signature, the new one must emit and the
+        // repeat one must NOT.
+        let sigs = vec![
+            literal_sig(7001, b"AAA", Action::Alert),
+            literal_sig(7002, b"BBB", Action::Alert),
+        ];
+        let (svc, mut rx) = mk_service(sigs);
+        let key = key_tcp(40000, 80);
+        // Observation 1: only sig 7001 fires.
+        let d1 = svc.observe_payload(&PayloadObservation {
+            flow_id: 1,
+            flow_key: key,
+            direction: Direction::Originator,
+            payload: b"AAA",
+            now_ms: 5_000,
+        });
+        assert_eq!(d1.emitted_alerts, 1);
+        let ev1 = rx.try_recv().unwrap();
+        match ev1 {
+            TelemetryEvent::Ips(e) => assert_eq!(e.rule_id, "7001"),
+            _ => panic!("expected Ips event"),
+        }
+        // Clear flow state so the next observation sees a
+        // fresh payload (not a buffered re-match of AAA).
+        svc.on_flow_closed(1);
+        // Observation 2 at the SAME now_ms=5_000: both
+        // sig 7001 (suppressed by dedup) and sig 7002
+        // (new) fire on the matcher pass.
+        let d2 = svc.observe_payload(&PayloadObservation {
+            flow_id: 1,
+            flow_key: key,
+            direction: Direction::Originator,
+            payload: b"AAA-BBB",
+            now_ms: 5_000,
+        });
+        assert_eq!(d2.raw_hits, 2);
+        assert_eq!(d2.emitted_alerts, 1);
+        let ev2 = rx.try_recv().unwrap();
+        match ev2 {
+            TelemetryEvent::Ips(e) => {
+                // The bug emitted "7001" here (replaying
+                // the dedup decision via timestamp
+                // equality), not "7002". After the fix the
+                // suppressed sig must NOT re-emit and the
+                // new sig must.
+                assert_eq!(e.rule_id, "7002");
+                assert_eq!(e.action, "alert");
+            }
+            _ => panic!("expected Ips event"),
+        }
+        // Exactly one telemetry event on this observation.
+        assert!(rx.try_recv().is_err());
+        // Exactly one suppression accounted for.
+        assert_eq!(svc.stats.snapshot().suppressed_dup_hits, 1);
     }
 
     #[test]
