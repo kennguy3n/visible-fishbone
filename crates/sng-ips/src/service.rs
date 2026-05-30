@@ -422,12 +422,13 @@ struct DedupTable {
 
 impl DedupTable {
     fn new(capacity: usize) -> Self {
-        // `capacity.max(1)` is always `>= 1`, so the
-        // NonZeroUsize construction is infallible. The
-        // fallback is a const NonZeroUsize so the
-        // call site stays out of the `expect_used` lint.
-        const ONE: NonZeroUsize = NonZeroUsize::new(1).expect("compile-time: 1 is non-zero");
-        let capacity = NonZeroUsize::new(capacity.max(1)).unwrap_or(ONE);
+        // `NonZeroUsize::MIN` is the canonical const 1 used as
+        // the fallback when the caller asks for a zero-capacity
+        // table (e.g. test config). The `unwrap_or(MIN)` keeps the
+        // call site out of both `expect_used` and `unwrap_used`
+        // clippy lints; `.max(1)` then constrains LruCache to its
+        // smallest legal size rather than degrading silently.
+        let capacity = NonZeroUsize::new(capacity.max(1)).unwrap_or(NonZeroUsize::MIN);
         Self {
             inner: LruCache::new(capacity),
         }

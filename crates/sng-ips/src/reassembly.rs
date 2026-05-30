@@ -261,13 +261,13 @@ impl ReassemblyTable {
     /// insert) and would crash `LruCache::new` outright.
     #[must_use]
     pub fn new(capacity: usize, cfg: ReassemblyConfig) -> Self {
-        // `capacity.max(1)` is always `>= 1`, so the
-        // NonZeroUsize construction is infallible. The
-        // fallback is a const NonZeroUsize so the
-        // unwrap-style call sites stay out of the
-        // `expect_used` lint.
-        const ONE: NonZeroUsize = NonZeroUsize::new(1).expect("compile-time: 1 is non-zero");
-        let capacity = NonZeroUsize::new(capacity.max(1)).unwrap_or(ONE);
+        // `NonZeroUsize::MIN` is the canonical const 1 used as
+        // the fallback when the caller asks for a zero-capacity
+        // table. The `unwrap_or(MIN)` keeps the call site out of
+        // both `expect_used` and `unwrap_used` clippy lints;
+        // `.max(1)` then constrains LruCache to its smallest
+        // legal size rather than degrading silently.
+        let capacity = NonZeroUsize::new(capacity.max(1)).unwrap_or(NonZeroUsize::MIN);
         Self {
             capacity,
             cfg,
