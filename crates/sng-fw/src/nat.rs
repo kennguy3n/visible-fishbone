@@ -289,6 +289,13 @@ impl NatRule {
         // invariant. Mirrors the equivalent guard in
         // `compile::render_single_rule`.
         if !src_cidrs.is_empty() || !dst_cidrs.is_empty() {
+            // `expect` is appropriate here: the upstream caller
+            // narrows family to `Some(...)` whenever a NAT rule
+            // carries CIDR predicates, so the `None` arm would
+            // signal a programmer bug, not a runtime input
+            // anomaly. Allow the workspace `expect_used` lint
+            // for this structural invariant.
+            #[allow(clippy::expect_used)]
             let qualifier = family.expect(
                 "NatRule::render_one: CIDR predicates require a known address \
                  family — `NatTable::render_nft` must not pass `family = None` \

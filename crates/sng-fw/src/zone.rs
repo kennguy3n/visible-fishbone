@@ -364,6 +364,42 @@ impl ZoneTable {
             }
         }
         self.reject_cross_zone_overlap()?;
+        self.reject_sanitized_name_collisions()?;
+        Ok(())
+    }
+
+    /// Defense-in-depth: reject two zones whose names collapse to
+    /// the same nftables set identifier under the compiler's
+    /// `sanitize_set_name` transform.
+    ///
+    /// `sanitize_set_name` maps every non-alphanumeric, non-
+    /// underscore character to `_`. Two distinct zone names like
+    /// `branch.lan` and `branch_lan` therefore produce the same
+    /// kernel set name `zone_branch_lan`. The kernel silently
+    /// merges both zones' network elements into a single set
+    /// while the in-memory engine still matches zones by exact
+    /// string, so a rule scoped to one zone fires for traffic
+    /// from the other — a security-relevant kernel/engine
+    /// verdict divergence.
+    ///
+    /// The bundle compiler should fail loudly here rather than
+    /// emit a script that silently broadens enforcement.
+    fn reject_sanitized_name_collisions(&self) -> Result<(), FirewallError> {
+        // Build the map in BTreeMap-iteration order so the error
+        // message names the same pair on every run.
+        let mut seen: std::collections::BTreeMap<String, &str> = std::collections::BTreeMap::new();
+        for name in self.zones.keys() {
+            let sanitized = crate::compile::sanitize_set_name(name);
+            if let Some(prev) = seen.insert(sanitized.clone(), name.as_str()) {
+                return Err(FirewallError::RuleInvalid(format!(
+                    "zones {prev:?} and {name:?} both sanitize to the same nftables \
+                     set name {sanitized:?}; the kernel would merge their network \
+                     elements into one set and silently broaden enforcement — rename \
+                     one of the zones so the names differ under the \
+                     non-alphanumeric → '_' transform"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -651,6 +687,49 @@ mod tests {
             .unwrap();
         let e = t.validate().unwrap_err();
         assert!(matches!(e, FirewallError::RuleInvalid(_)));
+    }
+
+    #[test]
+    fn validate_rejects_zones_whose_sanitized_names_collide() {
+        // Regression for the sanitize_set_name collision found
+        // by Devin Review: two zone names that differ only in
+        // characters the sanitizer maps to `_` produce the same
+        // nftables set name, and the kernel would silently merge
+        // both zones' networks into one set — a kernel/engine
+        // verdict divergence the in-memory engine can't catch
+        // because it does exact-string zone matches.
+        let mut t = ZoneTable::new();
+        // CIDRs deliberately non-overlapping so this test
+        // exercises the *name-collision* validator, not the
+        // network-overlap validator that already existed.
+        t.add_zone(zone("branch.lan", &["10.0.0.0/24"])).unwrap();
+        t.add_zone(zone("branch_lan", &["10.1.0.0/24"])).unwrap();
+        let e = t.validate().unwrap_err();
+        match e {
+            FirewallError::RuleInvalid(msg) => {
+                // Error must name both zone names AND the
+                // sanitized collision target so operators can
+                // disambiguate without re-deriving the transform.
+                assert!(msg.contains("branch.lan"), "{msg}");
+                assert!(msg.contains("branch_lan"), "{msg}");
+                assert!(
+                    msg.contains("sanitize") || msg.contains("nftables set name"),
+                    "error must point at the sanitize collision: {msg}"
+                );
+            }
+            other => panic!("expected RuleInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_zones_with_visually_similar_but_distinct_sanitized_names() {
+        // Negative: zones whose names diverge in alphanumeric
+        // characters (not just punctuation) must NOT trip the
+        // new validator — only true collisions are rejected.
+        let mut t = ZoneTable::new();
+        t.add_zone(zone("branch.lan1", &["10.0.0.0/24"])).unwrap();
+        t.add_zone(zone("branch.lan2", &["10.1.0.0/24"])).unwrap();
+        t.validate().expect("non-colliding zones must validate");
     }
 
     #[test]

@@ -736,7 +736,22 @@ fn zone_has_family(zones: &ZoneTable, name: &str, family: AddressFamily) -> bool
     zones.zones.get(name).is_some_and(|z| z.has_family(family))
 }
 
-fn sanitize_set_name(name: &str) -> String {
+/// Map a zone name into an nftables-set-safe identifier.
+///
+/// nftables set names tolerate a narrower character class than
+/// the operator's zone-name convention does (dotted lowercase,
+/// like `branch.lan`), so non-alphanumeric / non-underscore
+/// characters all collapse to `_`. This conversion can collide
+/// (e.g. `branch.lan` and `branch_lan` both → `branch_lan`);
+/// the kernel side would silently merge both zones' networks
+/// into a single set while the in-memory engine kept them
+/// separate by exact name match. `ZoneTable::validate` calls
+/// `reject_sanitized_name_collisions` to fail the bundle
+/// compile before that divergence can ship.
+///
+/// Kept `pub(crate)` so the zone-table validator can hash on the
+/// exact same transform the compiler will eventually apply.
+pub(crate) fn sanitize_set_name(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' {
