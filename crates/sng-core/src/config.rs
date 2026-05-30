@@ -285,11 +285,32 @@ impl Config {
         // `sng-comms` layer's concern, but rejecting obvious
         // garbage at load time produces a much better operator
         // error than waiting for the first HTTP attempt.
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            return Err(ConfigError::Invalid {
-                field: "control_plane_url".into(),
-                reason: "must start with http:// or https://".into(),
-            });
+        //
+        // We strip the scheme prefix and verify there is at
+        // least one character of host after it. Without this the
+        // bare-scheme strings `http://` / `https://` survive the
+        // prefix check above and the canonicality check below
+        // (normalisation is idempotent on them), then fail at
+        // `sng-comms` connect time with an opaque resolver
+        // error. Catching it at the config layer surfaces the
+        // typo with a clear field reference for the operator.
+        let after_scheme = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"));
+        match after_scheme {
+            None => {
+                return Err(ConfigError::Invalid {
+                    field: "control_plane_url".into(),
+                    reason: "must start with http:// or https://".into(),
+                });
+            }
+            Some("") => {
+                return Err(ConfigError::Invalid {
+                    field: "control_plane_url".into(),
+                    reason: "missing host after scheme (got bare scheme like `https://`)".into(),
+                });
+            }
+            Some(_) => {}
         }
         // Defence-in-depth: refuse to silently accept an
         // un-normalised URL even though it would still resolve.
@@ -542,6 +563,32 @@ mod tests {
             c.validate(),
             Err(ConfigError::Invalid { field, .. }) if field == "control_plane_url"
         ));
+    }
+
+    #[test]
+    fn validate_rejects_bare_scheme_url() {
+        // `https://` (and `http://`) survive the scheme-prefix
+        // check and `normalise_control_plane_url` is idempotent
+        // on them, so without the post-scheme host check both
+        // bare schemes would silently validate and only fail at
+        // `sng-comms` connect time with an opaque resolver error.
+        // The defence-in-depth check at the config layer catches
+        // the typo with a clear `control_plane_url` field tag.
+        for bare in ["https://", "http://"] {
+            let mut c = valid_config();
+            c.control_plane_url = bare.into();
+            let err = c.validate().expect_err("bare scheme rejected");
+            match err {
+                ConfigError::Invalid { field, reason } => {
+                    assert_eq!(field, "control_plane_url");
+                    assert!(
+                        reason.contains("host") || reason.contains("bare scheme"),
+                        "reason should mention missing host: {reason}"
+                    );
+                }
+                other => panic!("unexpected error for {bare:?}: {other:?}"),
+            }
+        }
     }
 
     #[test]
