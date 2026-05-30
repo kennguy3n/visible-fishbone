@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use crate::app::App;
 use crate::device::{DevicePosture, DeviceTrust};
+use crate::error::ZtnaError;
 use crate::identity::UserIdentity;
 
 /// Minimum device-posture requirement an app may declare.
@@ -222,6 +223,20 @@ pub struct ZtnaPolicy {
     /// rejects cross-tenant requests (where the user or
     /// device belongs to a different tenant than the
     /// policy is configured for).
+    ///
+    /// **Empty string disables the cross-tenant guard.**
+    /// This is the intentional shape for single-tenant
+    /// deployments where every device and user belong
+    /// to the same implicit tenant and the bundle
+    /// adapter has no tenant claim to install. Multi-
+    /// tenant deployments MUST reject an empty
+    /// `tenant_id` at the bundle adapter — the
+    /// evaluator can't tell single-tenant-by-design
+    /// apart from multi-tenant-misconfiguration, only
+    /// the bundle source knows. [`Self::validate`] is
+    /// intentionally silent on emptiness for this
+    /// reason; the multi-tenant bundle adapter layers
+    /// its own non-empty check on top.
     pub tenant_id: String,
 }
 
@@ -245,6 +260,52 @@ impl Default for ZtnaPolicy {
     }
 }
 
+impl ZtnaPolicy {
+    /// Validate the value-domain invariants on this
+    /// policy. Called from
+    /// [`ZtnaPolicyHolder::try_replace`] (and indirectly
+    /// from [`crate::service::ZtnaService::reload_policy`])
+    /// so a misconfigured bundle is rejected at load
+    /// time and the previously-active ruleset stays in
+    /// force.
+    ///
+    /// The current checks reject:
+    ///
+    /// - `mfa_max_age_ms == 0` — a zero freshness budget
+    ///   marks every MFA assertion stale, making the
+    ///   evaluator a uniform deny.
+    /// - `device_posture_max_age_ms == 0` — same reason
+    ///   for posture freshness.
+    ///
+    /// `tenant_id` is *not* checked here — the empty
+    /// string is the intentional spelling for single-
+    /// tenant deployments (see the doc on
+    /// [`Self::tenant_id`]). Multi-tenant deployments
+    /// add a non-empty check at the bundle adapter
+    /// layer where the bundle's claim on a tenant is
+    /// known.
+    ///
+    /// # Errors
+    ///
+    /// - [`ZtnaError::InvalidPolicy`] when any of the
+    ///   above invariants fail.
+    pub fn validate(&self) -> Result<(), ZtnaError> {
+        if self.mfa_max_age_ms == 0 {
+            return Err(ZtnaError::InvalidPolicy(
+                "mfa_max_age_ms must be > 0 (a zero budget marks every MFA assertion stale)"
+                    .to_owned(),
+            ));
+        }
+        if self.device_posture_max_age_ms == 0 {
+            return Err(ZtnaError::InvalidPolicy(
+                "device_posture_max_age_ms must be > 0 (a zero budget marks every posture attestation stale)"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// `ArcSwap`-backed holder for the active
 /// [`ZtnaPolicy`]. The data path snapshots a cheap
 /// `Arc<ZtnaPolicy>` per evaluation; the bundle adapter
@@ -256,7 +317,15 @@ pub struct ZtnaPolicyHolder {
 }
 
 impl ZtnaPolicyHolder {
-    /// Construct a holder initialised with `policy`.
+    /// Construct a holder around `policy` *without*
+    /// validating it. Reserved for callers that already
+    /// own a known-good policy — primarily
+    /// [`ZtnaPolicy::default`] and unit tests. Bundle
+    /// adapters and any externally-sourced policy should
+    /// use [`try_new`](Self::try_new) instead so a
+    /// misconfigured bundle is rejected at load time
+    /// rather than silently replacing the working
+    /// ruleset with one that denies every request.
     #[must_use]
     pub fn new(policy: ZtnaPolicy) -> Self {
         Self {
@@ -264,10 +333,47 @@ impl ZtnaPolicyHolder {
         }
     }
 
-    /// Replace the active policy. In-flight evaluations
-    /// see the old policy until they finish.
+    /// Construct a holder around `policy`, returning an
+    /// error if the policy fails [`ZtnaPolicy::validate`].
+    /// The intended call site is the bundle adapter that
+    /// converts a decoded policy bundle into the in-memory
+    /// ZTNA snapshot — a misconfigured bundle is rejected
+    /// at load time and the supervisor keeps the
+    /// previously-active policy.
+    ///
+    /// # Errors
+    ///
+    /// - [`ZtnaError::InvalidPolicy`] when `policy`
+    ///   fails [`ZtnaPolicy::validate`].
+    pub fn try_new(policy: ZtnaPolicy) -> Result<Self, ZtnaError> {
+        policy.validate()?;
+        Ok(Self::new(policy))
+    }
+
+    /// Replace the active policy *without* validating
+    /// it. Reserved for known-good policies; bundle
+    /// adapters should use
+    /// [`try_replace`](Self::try_replace) so a
+    /// misconfigured candidate cannot clobber the live
+    /// ruleset. In-flight evaluations see the old policy
+    /// until they finish.
     pub fn replace(&self, policy: ZtnaPolicy) {
         self.inner.store(Arc::new(policy));
+    }
+
+    /// Validate and atomically replace the policy. On
+    /// validation failure the previously-loaded policy
+    /// is preserved and the data path keeps running
+    /// against the last known-good ruleset.
+    ///
+    /// # Errors
+    ///
+    /// - [`ZtnaError::InvalidPolicy`] when `policy`
+    ///   fails [`ZtnaPolicy::validate`].
+    pub fn try_replace(&self, policy: ZtnaPolicy) -> Result<(), ZtnaError> {
+        policy.validate()?;
+        self.replace(policy);
+        Ok(())
     }
 
     /// Cheap snapshot of the active policy — clones the
@@ -765,5 +871,93 @@ mod tests {
         // trips.
         let dec2 = ZtnaDecision::deny(ZtnaDecisionReason::MfaStale, true);
         assert!(dec2.posture_pass);
+    }
+
+    #[test]
+    fn validate_accepts_default_policy() {
+        ZtnaPolicy::default()
+            .validate()
+            .expect("default policy must be valid");
+    }
+
+    #[test]
+    fn validate_accepts_empty_tenant_id() {
+        // Empty tenant_id is the intentional spelling
+        // for single-tenant deployments — the multi-
+        // tenant bundle-adapter layer adds its own
+        // non-empty check. The policy itself must not
+        // reject it.
+        let p = ZtnaPolicy {
+            tenant_id: String::new(),
+            ..ZtnaPolicy::default()
+        };
+        p.validate().expect("empty tenant_id is intentional");
+    }
+
+    #[test]
+    fn validate_rejects_zero_mfa_freshness() {
+        // A zero MFA budget marks every assertion stale
+        // — every request becomes a uniform deny. That
+        // is almost certainly a misconfigured bundle,
+        // not an operator intent, so the policy holder
+        // rejects it at load time.
+        let p = ZtnaPolicy {
+            mfa_max_age_ms: 0,
+            ..ZtnaPolicy::default()
+        };
+        let err = p.validate().expect_err("zero MFA budget must be rejected");
+        assert!(matches!(err, ZtnaError::InvalidPolicy(ref m) if m.contains("mfa_max_age_ms")));
+    }
+
+    #[test]
+    fn validate_rejects_zero_device_posture_freshness() {
+        let p = ZtnaPolicy {
+            device_posture_max_age_ms: 0,
+            ..ZtnaPolicy::default()
+        };
+        let err = p
+            .validate()
+            .expect_err("zero posture budget must be rejected");
+        assert!(
+            matches!(err, ZtnaError::InvalidPolicy(ref m) if m.contains("device_posture_max_age_ms"))
+        );
+    }
+
+    #[test]
+    fn policy_holder_try_new_rejects_invalid_policy() {
+        let bad = ZtnaPolicy {
+            mfa_max_age_ms: 0,
+            ..ZtnaPolicy::default()
+        };
+        let err = ZtnaPolicyHolder::try_new(bad).expect_err("zero MFA budget must be rejected");
+        assert!(matches!(err, ZtnaError::InvalidPolicy(_)));
+    }
+
+    #[test]
+    fn policy_holder_try_replace_preserves_previous_policy_on_invalid_input() {
+        // Critical safety property: a bundle adapter
+        // that feeds a malformed policy must NOT clobber
+        // the last-known-good policy. The data path
+        // keeps running with whatever was loaded before.
+        let h = ZtnaPolicyHolder::new(policy("t1"));
+        let baseline = h.snapshot();
+        let bad = ZtnaPolicy {
+            mfa_max_age_ms: 0,
+            ..ZtnaPolicy::default()
+        };
+        let err = h
+            .try_replace(bad)
+            .expect_err("zero MFA budget must be rejected");
+        assert!(matches!(err, ZtnaError::InvalidPolicy(_)));
+        // Old policy still present (Arc-identity check).
+        assert!(Arc::ptr_eq(&baseline, &h.snapshot()));
+    }
+
+    #[test]
+    fn policy_holder_try_replace_swaps_on_valid_policy() {
+        let h = ZtnaPolicyHolder::new(policy("t1"));
+        h.try_replace(policy("t2"))
+            .expect("valid policy must install");
+        assert_eq!(h.snapshot().tenant_id, "t2");
     }
 }

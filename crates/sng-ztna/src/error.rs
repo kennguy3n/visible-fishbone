@@ -53,6 +53,18 @@ pub enum ZtnaError {
     #[error("bundle decode: {0}")]
     BundleDecode(String),
 
+    /// The candidate [`crate::policy::ZtnaPolicy`] failed
+    /// value-domain validation (e.g. a freshness budget
+    /// of zero, which would mark every MFA / posture
+    /// signal stale). Distinct from `BundleDecode`
+    /// (wire-format) so dashboards can distinguish
+    /// "bundle parsed but logically incoherent" from
+    /// "bundle bytes are corrupt". The policy holder
+    /// returns this on `try_replace` and the previously-
+    /// loaded ruleset stays active.
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(String),
+
     /// A provider returned an error. The orchestrator's
     /// fail-policy decides whether the request is allowed
     /// or blocked; the variant exists so the supervisor
@@ -92,7 +104,7 @@ impl ZtnaError {
     #[must_use]
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::BundleDecode(_) => ErrorCode::WireSchema,
+            Self::BundleDecode(_) | Self::InvalidPolicy(_) => ErrorCode::WireSchema,
             Self::UnknownApp { .. } => ErrorCode::ResourceMissing,
             Self::DeviceNotEnrolled { .. } | Self::IdentityNotFound { .. } => {
                 ErrorCode::IdentityRejected
@@ -152,6 +164,26 @@ mod tests {
             ZtnaError::BundleDecode("bad".into()).code(),
             ErrorCode::WireSchema
         );
+    }
+
+    #[test]
+    fn invalid_policy_maps_to_wire_schema() {
+        // `InvalidPolicy` joins `BundleDecode` under
+        // `wire.schema` — both surface "the bundle that
+        // arrived was structurally unusable" to ops
+        // dashboards, even though `InvalidPolicy` catches
+        // value-domain failures (zero freshness budget)
+        // and `BundleDecode` catches byte-level failures.
+        assert_eq!(
+            ZtnaError::InvalidPolicy("mfa_max_age_ms must be > 0".into()).code(),
+            ErrorCode::WireSchema
+        );
+    }
+
+    #[test]
+    fn invalid_policy_display_includes_reason() {
+        let err = ZtnaError::InvalidPolicy("mfa_max_age_ms must be > 0".into());
+        assert!(format!("{err}").contains("mfa_max_age_ms"));
     }
 
     #[test]

@@ -236,21 +236,36 @@ impl ZtnaService {
     /// finish against the old policy snapshot they
     /// already loaded.
     ///
-    /// The reload always succeeds: the ZTNA policy is
-    /// plain data (`device_posture_max_age_ms`,
-    /// `mfa_max_age_ms`, `tenant_id`) and there are no
-    /// thresholds whose floating-point shape could turn
-    /// degenerate the way the SWG's reputation thresholds
-    /// can. The compile step is therefore trivial and
-    /// returns `()`, not `Result<_, _>`. If a future
-    /// policy field grows a validation contract (e.g. a
-    /// minimum-fields-required-for-`Strict` constraint on
-    /// the per-app `PostureRequirement::Strict` variant),
-    /// switch this to `try_replace`-style and bump
-    /// `record_bundle_load_failure` on rejection.
-    pub fn reload_policy(&self, policy: ZtnaPolicy) {
-        self.policy.replace(policy);
-        self.stats.record_bundle_load();
+    /// The reload validates the candidate policy via
+    /// [`ZtnaPolicy::validate`] before installing it. A
+    /// failed validation leaves the previously-loaded
+    /// policy active (the data path keeps running with
+    /// the last known-good ruleset), records a
+    /// [`ZtnaStats::record_bundle_load_failure`], and
+    /// returns the error so the bundle adapter (or the
+    /// caller that explicitly drove the reload) can
+    /// surface it. The success counter
+    /// [`ZtnaStats::record_bundle_load`] is bumped only
+    /// on a successful install — ops dashboards can
+    /// distinguish `new policy applied` from `new
+    /// policy rejected`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ZtnaError::InvalidPolicy`] when the candidate
+    ///   policy fails [`ZtnaPolicy::validate`] (zero
+    ///   freshness budget for MFA or device posture).
+    pub fn reload_policy(&self, policy: ZtnaPolicy) -> Result<(), ZtnaError> {
+        match self.policy.try_replace(policy) {
+            Ok(()) => {
+                self.stats.record_bundle_load();
+                Ok(())
+            }
+            Err(e) => {
+                self.stats.record_bundle_load_failure();
+                Err(e)
+            }
+        }
     }
 
     /// Record a failed bundle reload. The bundle adapter
@@ -823,7 +838,8 @@ mod tests {
         svc.reload_policy(ZtnaPolicy {
             tenant_id: String::new(),
             ..ZtnaPolicy::default()
-        });
+        })
+        .expect("default policy with empty tenant_id is valid");
         let d = svc.evaluate(&req("wiki", "dev-1", "alice", now)).unwrap();
         assert!(d.allow);
 
