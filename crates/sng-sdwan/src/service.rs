@@ -411,8 +411,17 @@ impl SdwanService {
             // Defensive: should be unreachable because
             // `had_fresh_candidate` is true iff we
             // populated at least one of the two
-            // best_* slots above. Coerced to
-            // AllProbesStale rather than panicking.
+            // best_* slots above. The `debug_assert!`
+            // ensures a logic regression that breaks
+            // this invariant trips loudly in tests /
+            // debug builds; release builds fall through
+            // to a fail-closed AllProbesStale rather
+            // than panicking on the production data
+            // path.
+            debug_assert!(
+                false,
+                "evaluate: had_fresh_candidate=true but both best_in_budget and best_fallback are None (invariant broken)"
+            );
             (None, SteeringReason::AllProbesStale)
         };
 
@@ -865,6 +874,50 @@ mod tests {
         let d2 = svc2.evaluate(&req("flow-r", TrafficClass::Interactive, NOW + 1_000));
         assert_eq!(d2.path_id, Some(PathId::new("inet")));
         assert_eq!(d2.reason, SteeringReason::Best);
+    }
+
+    #[test]
+    fn sticky_pin_survives_in_place_policy_reload() {
+        // Devin Review noted that the sticky-across-reload
+        // case wasn't covered: the previous tests built a
+        // new SdwanService (which has its own empty
+        // sticky cache) for the second evaluation. The
+        // realistic operator path is a `reload_policy()`
+        // call on the *same* service. The sticky cache
+        // lives on the service, not on the policy holder,
+        // so a policy swap must preserve the cache.
+        let (svc, _rx) = build(
+            SdwanPolicy::default(),
+            vec![
+                Path::new("mpls", [TrafficClass::Interactive]),
+                Path::new("inet", [TrafficClass::Interactive]),
+            ],
+            vec![
+                (PathId::new("mpls"), PathProbe::new(10.0, 0.0, 0.0, NOW)),
+                (PathId::new("inet"), PathProbe::new(100.0, 0.0, 0.0, NOW)),
+            ],
+        );
+        // First call pins to mpls (it scores lower).
+        let d1 = svc.evaluate(&req("flow-reload", TrafficClass::Interactive, NOW));
+        assert_eq!(d1.path_id, Some(PathId::new("mpls")));
+        assert_eq!(d1.reason, SteeringReason::Best);
+
+        // Reload the policy in place. Reuse the default
+        // policy with a tweaked sticky window so the
+        // semantic change is observable; the sticky cache
+        // on `svc` must NOT be cleared by this swap.
+        svc.reload_policy(SdwanPolicy {
+            sticky_window_ms: 60_000,
+            ..SdwanPolicy::default()
+        })
+        .expect("reload should succeed");
+
+        // Second call within the sticky window on the
+        // same service: must observe the prior pin and
+        // return StickyPinned, not re-select.
+        let d2 = svc.evaluate(&req("flow-reload", TrafficClass::Interactive, NOW + 5_000));
+        assert_eq!(d2.path_id, Some(PathId::new("mpls")));
+        assert_eq!(d2.reason, SteeringReason::StickyPinned);
     }
 
     #[test]
