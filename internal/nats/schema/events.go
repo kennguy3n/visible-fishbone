@@ -124,11 +124,22 @@ func (i IPSEvent) Validate() error {
 }
 
 // ZTNAEvent is a Zero-Trust Network Access decision record.
+//
+// The `Reason` field carries the structured, stable wire string for
+// the deny / allow bucket (e.g. "mfa_stale", "device_posture_insufficient",
+// "tenant_mismatch", "allow") so dashboards can break decisions down by
+// cause without parsing a free-form message. It mirrors the Rust-side
+// `sng_ztna::policy::ZtnaDecisionReason::as_str()` field-for-field and
+// participates in the dedup fingerprint at
+// `crates/sng-telemetry/src/dedup.rs::hash_ztna` — without it, two denies
+// on the same (device, app) for different structural causes would collapse
+// to a single wire event.
 type ZTNAEvent struct {
 	DeviceID         string `msgpack:"did"`
 	AppID            string `msgpack:"app"`
 	PostureResult    string `msgpack:"pst"` // pass|fail
 	Decision         string `msgpack:"dec"` // allow|deny
+	Reason           string `msgpack:"rsn"` // detailed structured reason; see ZtnaDecisionReason in sng-ztna
 	IdentityVerified bool   `msgpack:"iv"`
 }
 
@@ -139,6 +150,9 @@ func (z ZTNAEvent) Validate() error {
 	}
 	if z.Decision == "" {
 		return fmt.Errorf("ztna.decision is required: %w", ErrInvalid)
+	}
+	if z.Reason == "" {
+		return fmt.Errorf("ztna.reason is required: %w", ErrInvalid)
 	}
 	return nil
 }

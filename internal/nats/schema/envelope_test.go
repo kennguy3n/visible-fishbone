@@ -158,13 +158,22 @@ func TestIPSEvent_Validate(t *testing.T) {
 func TestZTNAEvent_Validate(t *testing.T) {
 	t.Parallel()
 	bad := []schema.ZTNAEvent{
-		{AppID: "", Decision: "allow"},
-		{AppID: "app", Decision: ""},
+		{AppID: "", Decision: "allow", Reason: "allow"},
+		{AppID: "app", Decision: "", Reason: "allow"},
+		// Reason is required: mirrors the Rust-side ZtnaDecisionReason
+		// wire contract — without it, dashboards bucketing denies by
+		// cause would collapse distinct structural failures into a
+		// single bucket, defeating the purpose of the field.
+		{AppID: "app", Decision: "deny", Reason: ""},
 	}
 	for i, c := range bad {
 		if err := c.Validate(); !errors.Is(err, schema.ErrInvalid) {
 			t.Errorf("case %d: err = %v", i, err)
 		}
+	}
+	good := schema.ZTNAEvent{AppID: "app", Decision: "allow", Reason: "allow"}
+	if err := good.Validate(); err != nil {
+		t.Errorf("good: %v", err)
 	}
 }
 
