@@ -21,6 +21,7 @@ members = [
     "crates/sng-ips",
     "crates/sng-swg",
     "crates/sng-ztna",
+    "crates/sng-sdwan",
 ]
 resolver = "3"
 
@@ -191,6 +192,7 @@ sng-fw = { path = "crates/sng-fw" }
 sng-ips = { path = "crates/sng-ips" }
 sng-swg = { path = "crates/sng-swg" }
 sng-ztna = { path = "crates/sng-ztna" }
+sng-sdwan = { path = "crates/sng-sdwan" }
 
 # Workspace-wide lints. Set at the workspace level so a new crate
 # added in a later phase automatically inherits the same posture
