@@ -94,6 +94,17 @@ once_cell = "1"
 # flow-creation bursts.
 dashmap = "6"
 
+# Bounded LRU cache. Used by `sng-ips` for the dedup
+# (flow, sid) table and the per-flow reassembly buffer
+# table — both bounded resources where the eviction policy
+# is "drop the least-recently-touched entry". `lru` is the
+# canonical Rust implementation: a HashMap keyed on K plus
+# an intrusive doubly-linked list keyed on access order,
+# giving O(1) `put`, `get`, and `pop_lru`. Avoids the O(n)
+# linear-scan-to-find-min pattern that becomes pathological
+# under flow-creation bursts or signature-hit storms.
+lru = "0.16"
+
 # Configuration loading. `figment` is the canonical layered-config
 # library and matches the Go control plane's preference for env
 # vars + optional file overlay.

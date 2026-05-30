@@ -47,6 +47,12 @@ parking_lot = { workspace = true }
 dashmap = { workspace = true }
 async-trait = { workspace = true }
 
+# Bounded LRU caches: per-flow reassembly buffers
+# (`ReassemblyTable`) and per-(flow, sid) alert dedup
+# (`DedupTable`). Both want O(1) eviction of the
+# least-recently-touched entry.
+lru = { workspace = true }
+
 # Configuration / wire types.
 serde = { workspace = true }
 bytes = { workspace = true }

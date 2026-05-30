@@ -6,9 +6,13 @@
 //!
 //! - **Aho-Corasick** for literal patterns. One automaton
 //!   holds every literal pattern across every signature;
-//!   one scan returns every literal match offset, then the
-//!   matcher attributes each offset back to the owning
-//!   signature and applies the per-signature anchor.
+//!   one **overlapping** scan returns every literal match
+//!   offset (non-overlapping scans would let one
+//!   signature's literal shadow another signature's
+//!   literal that starts inside it — a classic IPS
+//!   evasion). The matcher attributes each offset back to
+//!   the owning signature and applies the per-signature
+//!   anchor.
 //! - **`regex::bytes`** for regex patterns. Each regex
 //!   signature gets its own compiled regex; scanning is
 //!   O(P · n) where P is the number of regex signatures
@@ -63,15 +67,15 @@ impl IpsHit {
     /// Fold two hits' actions into the most-severe one for
     /// flows where multiple signatures match. Order:
     /// `Drop > Reset > Block > Alert`.
+    ///
+    /// The implementation delegates to `Action`'s derived
+    /// `Ord` impl — variants are declared in severity
+    /// order on the type, so positional comparison gives
+    /// the right answer. See the type-level doc on
+    /// [`Action`] for the invariant.
     #[must_use]
     pub fn fold_action(a: Action, b: Action) -> Action {
-        let weight = |x| match x {
-            Action::Alert => 0_u8,
-            Action::Block => 1,
-            Action::Reset => 2,
-            Action::Drop => 3,
-        };
-        if weight(a) >= weight(b) { a } else { b }
+        std::cmp::max(a, b)
     }
 }
 
@@ -211,14 +215,19 @@ impl SignatureSet {
         let literal_ac = if literal_patterns.is_empty() {
             None
         } else {
-            // `LeftmostFirst` matches Suricata's leftmost
-            // semantics — the lowest-offset match wins when
-            // multiple patterns could start at the same
-            // position. Anchored signatures depend on the
-            // matcher reporting the leftmost match, not an
-            // arbitrary one.
+            // `MatchKind::Standard` is the only mode that
+            // supports `find_overlapping_iter`, which we
+            // need so that literal patterns from different
+            // signatures cannot shadow each other in the
+            // payload (a `GET ` literal at offset 0 would
+            // otherwise hide an `ET /etc/passwd` literal
+            // at offset 1). Anchor semantics
+            // (offset/depth) are enforced per-signature
+            // inside `scan` via `Anchor::permits`, so the
+            // matcher itself just needs to report every
+            // pattern occurrence.
             let ac = AhoCorasickBuilder::new()
-                .match_kind(MatchKind::LeftmostFirst)
+                .match_kind(MatchKind::Standard)
                 .ascii_case_insensitive(false)
                 .build(&literal_patterns)
                 .map_err(|e| IpsError::InvalidSignature {
@@ -298,7 +307,7 @@ impl SignatureSet {
         let mut earliest: HashMap<(usize, usize), usize> = HashMap::new();
 
         if let Some(ac) = &self.literal_ac {
-            for m in ac.find_iter(ctx.payload) {
+            for m in ac.find_overlapping_iter(ctx.payload) {
                 let pid = m.pattern().as_usize();
                 if let Some(owners) = self.literal_index.get(pid) {
                     for owner in owners {
@@ -659,6 +668,31 @@ mod tests {
         });
         let sids: Vec<u32> = hits.iter().map(|h| h.sid).collect();
         assert_eq!(sids, vec![1001, 1002]);
+    }
+
+    #[test]
+    fn overlapping_literal_patterns_from_different_signatures_both_fire() {
+        // Regression for the IPS-evasion bug where
+        // `find_iter` (non-overlapping) would let the
+        // first signature's literal "GET " shadow the
+        // second signature's literal "ET /etc/passwd"
+        // that starts at offset 1. Both signatures MUST
+        // fire on a single payload that contains them
+        // both.
+        let set = SignatureSet::compile(vec![
+            sig_simple(2001, vec![lit(b"GET ")]),
+            sig_simple(2002, vec![lit(b"ET /etc/passwd")]),
+        ])
+        .unwrap();
+        let hits = set.scan(ScanContext {
+            protocol: IpProtocol::Tcp,
+            source_port: 0,
+            destination_port: 80,
+            payload: b"GET /etc/passwd HTTP/1.0\r\n",
+        });
+        let sids: Vec<u32> = hits.iter().map(|h| h.sid).collect();
+        assert!(sids.contains(&2001), "sid 2001 (GET ) must fire");
+        assert!(sids.contains(&2002), "sid 2002 (ET /etc/passwd) must fire");
     }
 
     #[test]

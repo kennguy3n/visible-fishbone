@@ -26,12 +26,13 @@
 //! until the next observation; no torn reads.
 
 use arc_swap::ArcSwap;
+use lru::LruCache;
 use parking_lot::Mutex;
 use sng_core::events::IpsEvent;
 use sng_fw::flow::{FlowKey, IpProtocol};
 use sng_fw::verdict::{FwVerdict, VerdictReason};
 use sng_telemetry::TelemetryEvent;
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -407,19 +408,34 @@ struct DedupKey {
     sid: u32,
 }
 
-/// Bounded last-seen table that decides whether an
-/// (flow, sid) hit should emit an alert.
+/// Bounded last-seen table that decides whether a
+/// `(flow, sid)` hit should emit an alert.
+///
+/// Backed by an [`lru::LruCache`] so both insert and
+/// eviction are O(1). The previous design (`HashMap` +
+/// linear-scan-for-min on insert) was O(n) per insert
+/// once the table reached `capacity` — that turns into a
+/// real latency bottleneck under signature-hit storms
+/// because the data path holds the dedup mutex across the
+/// eviction scan. The LRU order (most-recently-touched
+/// at front) is a strictly better proxy for "stale" than
+/// last-seen-timestamp anyway, since the data path always
+/// touches an entry on every hit.
 #[derive(Debug)]
 struct DedupTable {
-    capacity: usize,
-    map: HashMap<DedupKey, u64>,
+    inner: LruCache<DedupKey, u64>,
 }
 
 impl DedupTable {
     fn new(capacity: usize) -> Self {
+        // `capacity.max(1)` is always `>= 1`, so the
+        // NonZeroUsize construction is infallible. The
+        // fallback is a const NonZeroUsize so the
+        // call site stays out of the `expect_used` lint.
+        const ONE: NonZeroUsize = NonZeroUsize::new(1).expect("compile-time: 1 is non-zero");
+        let capacity = NonZeroUsize::new(capacity.max(1)).unwrap_or(ONE);
         Self {
-            capacity: capacity.max(1),
-            map: HashMap::new(),
+            inner: LruCache::new(capacity),
         }
     }
 
@@ -431,7 +447,10 @@ impl DedupTable {
             self.touch(key, now_ms);
             return true;
         }
-        let last = self.map.get(&key).copied();
+        // `peek` does NOT bump the LRU order — important
+        // when the entry exists but is still fresh and we
+        // want to leave the dedup window unchanged.
+        let last = self.inner.peek(&key).copied();
         match last {
             Some(t) if now_ms.saturating_sub(t) < ttl_ms => false,
             _ => {
@@ -444,27 +463,39 @@ impl DedupTable {
     /// Did this (flow, sid) record its emit at exactly
     /// `now_ms`? Used in the post-lock telemetry submit
     /// loop to find the hits the dedup pass selected.
+    /// Uses `peek` so the recency-bump from `should_emit`
+    /// is the single source of LRU order.
     fn was_emitted_at(&self, key: DedupKey, now_ms: u64) -> bool {
-        self.map.get(&key) == Some(&now_ms)
+        self.inner.peek(&key) == Some(&now_ms)
     }
 
     fn touch(&mut self, key: DedupKey, now_ms: u64) {
-        if self.map.len() >= self.capacity && !self.map.contains_key(&key) {
-            // Evict oldest by last-seen.
-            let victim = self.map.iter().min_by_key(|(_, t)| **t).map(|(k, _)| *k);
-            if let Some(v) = victim {
-                self.map.remove(&v);
-            }
-        }
-        self.map.insert(key, now_ms);
+        // `LruCache::put` handles both the insert-or-update
+        // semantics AND the O(1) eviction of the
+        // least-recently-touched entry when at capacity.
+        self.inner.put(key, now_ms);
     }
 
     /// Drop entries older than `ttl_ms` relative to `now_ms`.
+    ///
+    /// Implementation walks the cache from the tail (LRU
+    /// end) and pops while the entry is stale; once a
+    /// non-stale entry is hit we stop, because everything
+    /// closer to the head was touched at least as
+    /// recently (LRU order tracks last-bump time, and
+    /// `touch` is the only path that bumps — see
+    /// `should_emit`). This keeps the sweep
+    /// O(stale-count) rather than O(n).
     fn sweep(&mut self, now_ms: u64, ttl_ms: u64) {
         if ttl_ms == 0 {
             return;
         }
-        self.map.retain(|_, t| now_ms.saturating_sub(*t) < ttl_ms);
+        while let Some((_, &t)) = self.inner.peek_lru() {
+            if now_ms.saturating_sub(t) < ttl_ms {
+                break;
+            }
+            self.inner.pop_lru();
+        }
     }
 }
 
@@ -750,10 +781,10 @@ mod tests {
             payload: b"S",
             now_ms: 1_000,
         });
-        assert_eq!(svc.dedup.lock().map.len(), 1);
+        assert_eq!(svc.dedup.lock().inner.len(), 1);
         // Tick well past the TTL.
         svc.tick(10_000);
-        assert_eq!(svc.dedup.lock().map.len(), 0);
+        assert_eq!(svc.dedup.lock().inner.len(), 0);
     }
 
     #[test]
@@ -814,5 +845,50 @@ mod tests {
         assert_eq!(d.raw_hits, 2);
         // The drop wins; verdict_escalation is Some(deny).
         assert!(d.verdict_escalation.is_some());
+    }
+
+    #[test]
+    fn dedup_table_evicts_lru_at_capacity() {
+        // Pin the architectural contract for the
+        // bounded LRU dedup table: at capacity, the
+        // least-recently-touched key is evicted in O(1).
+        let mut tbl = DedupTable::new(2);
+        let a = DedupKey { flow_id: 1, sid: 1 };
+        let b = DedupKey { flow_id: 2, sid: 1 };
+        let c = DedupKey { flow_id: 3, sid: 1 };
+        // a + b take the only two slots.
+        assert!(tbl.should_emit(a, 100, 0));
+        assert!(tbl.should_emit(b, 101, 0));
+        assert!(tbl.inner.contains(&a));
+        assert!(tbl.inner.contains(&b));
+        // Touch `a` to bump it to MRU. Adding `c` should
+        // then evict `b` (now LRU) — NOT `a`.
+        assert!(tbl.should_emit(a, 102, 0));
+        assert!(tbl.should_emit(c, 103, 0));
+        assert!(tbl.inner.contains(&a));
+        assert!(!tbl.inner.contains(&b));
+        assert!(tbl.inner.contains(&c));
+        assert_eq!(tbl.inner.len(), 2);
+    }
+
+    #[test]
+    fn dedup_table_sweep_drops_only_stale_at_tail() {
+        // Pin the architectural contract for the
+        // O(stale-count) sweep: it walks from the LRU
+        // end, popping stale entries, and stops at the
+        // first non-stale one.
+        let mut tbl = DedupTable::new(8);
+        for (i, ts) in [(1_u64, 100_u64), (2, 200), (3, 300), (4, 400)] {
+            assert!(tbl.should_emit(DedupKey { flow_id: i, sid: 1 }, ts, 0,));
+        }
+        // Cutoff: anything older than now-150 is stale.
+        // now=350, ttl=150 → keep entries newer than 200.
+        // 100 is stale, 200 is stale (350 - 200 == 150,
+        // not < 150), 300 and 400 are fresh.
+        tbl.sweep(350, 150);
+        assert!(!tbl.inner.contains(&DedupKey { flow_id: 1, sid: 1 }));
+        assert!(!tbl.inner.contains(&DedupKey { flow_id: 2, sid: 1 }));
+        assert!(tbl.inner.contains(&DedupKey { flow_id: 3, sid: 1 }));
+        assert!(tbl.inner.contains(&DedupKey { flow_id: 4, sid: 1 }));
     }
 }

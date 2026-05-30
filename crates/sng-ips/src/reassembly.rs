@@ -43,8 +43,9 @@
 //! [`Direction::Originator`] / [`Direction::Responder`]
 //! and exposes the assembled payload per direction.
 
+use lru::LruCache;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 /// Direction of a payload within a flow.
@@ -234,39 +235,43 @@ impl ReassemblyBuffer {
 /// Flow-keyed table of reassembly buffers. The IPS service
 /// looks up a buffer per flow as packets arrive; the table
 /// is bounded by [`ReassemblyTable::capacity`] and evicts
-/// the longest-idle buffer when full.
+/// the **least-recently-touched** buffer when full.
+///
+/// Internally backed by an [`lru::LruCache`] so both insert
+/// and eviction are O(1) — important under flow-creation
+/// bursts (port scans, SYN floods, opportunistic crawlers)
+/// where a linear-scan-for-min eviction would dominate
+/// lock-hold time.
 #[derive(Debug)]
 pub struct ReassemblyTable {
-    capacity: usize,
+    capacity: NonZeroUsize,
     cfg: ReassemblyConfig,
-    inner: Mutex<TableInner>,
-}
-
-#[derive(Debug)]
-struct TableInner {
-    buffers: HashMap<u64, FlowBuf>,
-    /// Monotonic counter used as the "last touched" sequence;
-    /// cheaper than wall-clock time for LRU.
-    seq: u64,
-}
-
-#[derive(Debug)]
-struct FlowBuf {
-    buf: Arc<ReassemblyBuffer>,
-    last_seq: u64,
+    /// `LruCache` is not internally synchronised; we keep
+    /// it behind a `parking_lot::Mutex` and release the
+    /// guard as soon as the per-flow buffer Arc is cloned
+    /// out. The scan-and-append path runs entirely outside
+    /// this lock.
+    inner: Mutex<LruCache<u64, Arc<ReassemblyBuffer>>>,
 }
 
 impl ReassemblyTable {
-    /// Construct a new table.
+    /// Construct a new table. Capacity is clamped to a
+    /// minimum of 1 — a zero-capacity table is degenerate
+    /// (it would evict the just-inserted entry on the next
+    /// insert) and would crash `LruCache::new` outright.
     #[must_use]
     pub fn new(capacity: usize, cfg: ReassemblyConfig) -> Self {
+        // `capacity.max(1)` is always `>= 1`, so the
+        // NonZeroUsize construction is infallible. The
+        // fallback is a const NonZeroUsize so the
+        // unwrap-style call sites stay out of the
+        // `expect_used` lint.
+        const ONE: NonZeroUsize = NonZeroUsize::new(1).expect("compile-time: 1 is non-zero");
+        let capacity = NonZeroUsize::new(capacity.max(1)).unwrap_or(ONE);
         Self {
-            capacity: capacity.max(1),
+            capacity,
             cfg,
-            inner: Mutex::new(TableInner {
-                buffers: HashMap::new(),
-                seq: 0,
-            }),
+            inner: Mutex::new(LruCache::new(capacity)),
         }
     }
 
@@ -275,42 +280,13 @@ impl ReassemblyTable {
     /// so the caller can run scans against the buffer
     /// without blocking other flows.
     ///
-    /// Updates the flow's last-touched seq so eviction
-    /// picks the least-recently accessed flow.
+    /// `LruCache::get_or_insert` bumps the flow to the
+    /// most-recently-used position, so the next eviction
+    /// picks a flow that has actually been idle.
     pub fn get_or_create(&self, flow_id: u64) -> Arc<ReassemblyBuffer> {
         let mut inner = self.inner.lock();
-        inner.seq = inner.seq.saturating_add(1);
-        let seq = inner.seq;
-        if !inner.buffers.contains_key(&flow_id) {
-            while inner.buffers.len() >= self.capacity {
-                let victim_key = inner
-                    .buffers
-                    .iter()
-                    .min_by_key(|(_, fb)| fb.last_seq)
-                    .map(|(k, _)| *k);
-                match victim_key {
-                    Some(k) => {
-                        inner.buffers.remove(&k);
-                    }
-                    None => break,
-                }
-            }
-            inner.buffers.insert(
-                flow_id,
-                FlowBuf {
-                    buf: Arc::new(ReassemblyBuffer::new(self.cfg)),
-                    last_seq: seq,
-                },
-            );
-        }
-        let Some(fb) = inner.buffers.get_mut(&flow_id) else {
-            // Unreachable: we just inserted above. Use a
-            // defensive fallback rather than `expect` so the
-            // workspace clippy::expect_used lint stays clean.
-            return Arc::new(ReassemblyBuffer::new(self.cfg));
-        };
-        fb.last_seq = seq;
-        Arc::clone(&fb.buf)
+        let buf = inner.get_or_insert(flow_id, || Arc::new(ReassemblyBuffer::new(self.cfg)));
+        Arc::clone(buf)
     }
 
     /// Run `f` against the buffer for the given flow,
@@ -328,25 +304,25 @@ impl ReassemblyTable {
     /// flow closes (conntrack sweep / TCP FIN / RST).
     pub fn drop_flow(&self, flow_id: u64) {
         let mut inner = self.inner.lock();
-        inner.buffers.remove(&flow_id);
+        inner.pop(&flow_id);
     }
 
     /// Number of flows currently held.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.lock().buffers.len()
+        self.inner.lock().len()
     }
 
     /// True if no flows are currently held.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().buffers.is_empty()
+        self.inner.lock().is_empty()
     }
 
     /// Configured capacity.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.capacity.get()
     }
 
     /// Configuration each buffer is constructed with.

@@ -65,6 +65,16 @@ impl Severity {
 /// signatures fold to the most-severe one (Drop > Reset >
 /// Block > Alert) — see
 /// [`crate::matcher::IpsHit::fold_action`].
+///
+/// **Variant declaration order is load-bearing.** The
+/// derived `Ord` impl uses positional ordering, so the
+/// variants are declared in the same order as the severity
+/// hierarchy that [`crate::matcher::IpsHit::fold_action`]
+/// implements: `Alert < Block < Reset < Drop`. That way,
+/// `std::cmp::max(Action::Drop, Action::Block) == Action::Drop`
+/// and the derived comparison agrees with the documented
+/// fold semantics. The wire form is independent of order
+/// (serde uses the variant name).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
@@ -72,22 +82,22 @@ pub enum Action {
     /// default for `signal-only` signatures the security team
     /// is still tuning.
     Alert,
-    /// Drop the offending packet and let upstream TCP
-    /// retransmit handle the rest. Cheaper than Reset but
-    /// the flow can recover on retransmit; for signatures
-    /// like SQLi we typically prefer Reset.
-    Drop,
-    /// Send a TCP RST on the flow so both endpoints tear it
-    /// down immediately. Use when the IPS wants the user to
-    /// see the failure (e.g. a content-policy violation, not
-    /// an exploit).
-    Reset,
     /// Synonym for Reset on flows that the data path knows
     /// how to forcibly close at the L3 layer (UDP, ICMP).
     /// The IPS service folds Block onto Reset before
     /// surfacing the action string on
     /// [`sng_core::events::IpsEvent::action`].
     Block,
+    /// Send a TCP RST on the flow so both endpoints tear it
+    /// down immediately. Use when the IPS wants the user to
+    /// see the failure (e.g. a content-policy violation, not
+    /// an exploit).
+    Reset,
+    /// Drop the offending packet and let upstream TCP
+    /// retransmit handle the rest. Cheaper than Reset but
+    /// the flow can recover on retransmit; for signatures
+    /// like SQLi we typically prefer Reset.
+    Drop,
 }
 
 impl Action {
@@ -327,6 +337,22 @@ mod tests {
         assert!(Action::Drop.is_terminal());
         assert!(Action::Reset.is_terminal());
         assert!(Action::Block.is_terminal());
+    }
+
+    #[test]
+    fn derived_ord_matches_fold_action_severity() {
+        // Pinning the invariant that the derived `Ord` on
+        // `Action` (which is positional / variant-order)
+        // agrees with the severity hierarchy
+        // `Drop > Reset > Block > Alert` that
+        // `IpsHit::fold_action` implements. If a future
+        // refactor reorders the variants this test will
+        // catch the silent disagreement.
+        assert!(Action::Alert < Action::Block);
+        assert!(Action::Block < Action::Reset);
+        assert!(Action::Reset < Action::Drop);
+        assert_eq!(std::cmp::max(Action::Drop, Action::Block), Action::Drop);
+        assert_eq!(std::cmp::max(Action::Reset, Action::Block), Action::Reset);
     }
 
     #[test]

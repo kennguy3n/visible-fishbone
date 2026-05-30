@@ -36,17 +36,30 @@ pub struct IpsStatsSnapshot {
     pub payloads_scanned: u64,
     /// Total bytes that passed through the matcher.
     pub bytes_scanned: u64,
-    /// Total signature hits observed across all
-    /// payloads (a single payload can produce multiple
-    /// hits if multiple signatures fire).
+    /// Total **observations** (`observe_payload` calls)
+    /// that produced at least one signature hit. This is
+    /// a per-observation counter, not a per-signature
+    /// counter: a single observation that fires three
+    /// signatures still bumps `hits_total` by exactly 1.
+    /// The matcher's per-hit detail lands on the
+    /// telemetry pipeline as individual
+    /// [`sng_core::events::IpsEvent`]s, which is the
+    /// authoritative per-signature audit log; these
+    /// stats are observability for the **service**, not
+    /// the matcher.
     pub hits_total: u64,
-    /// Hits whose folded action was `Alert`.
+    /// Observations whose folded action was `Alert`
+    /// (per-observation, not per-hit — same semantics as
+    /// `hits_total`).
     pub hits_alert: u64,
-    /// Hits whose folded action was `Drop`.
+    /// Observations whose folded action was `Drop`
+    /// (per-observation, see `hits_total`).
     pub hits_drop: u64,
-    /// Hits whose folded action was `Reset`.
+    /// Observations whose folded action was `Reset`
+    /// (per-observation, see `hits_total`).
     pub hits_reset: u64,
-    /// Hits whose folded action was `Block`.
+    /// Observations whose folded action was `Block`
+    /// (per-observation, see `hits_total`).
     pub hits_block: u64,
     /// Bundle reload successes — the number of times
     /// `on_policy_reload` was called with a valid
