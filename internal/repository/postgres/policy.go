@@ -223,9 +223,16 @@ func (r *PolicyRepository) CreateBundle(ctx context.Context, tenantID uuid.UUID,
 		// boundary and avoids serialising a redundant 32-byte
 		// parameter from the caller. Pgcrypto's `digest()` is
 		// available because migration 001 enables the extension.
+		// `$4::bytea` is cast explicitly because `digest()` from
+		// pgcrypto is overloaded on (text, text) AND (bytea, text);
+		// referencing the same parameter both as a `bytea` column
+		// value and as a `digest()` argument leaves the planner
+		// unable to pick an overload (SQLSTATE 42P08, "inconsistent
+		// types deduced"). The cast pins the parameter to bytea
+		// in both call sites.
 		row := tx.QueryRow(ctx, `
 			INSERT INTO policy_bundles (id, policy_graph_id, target_type, bundle, signature, key_id, sha256)
-			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, digest($4, 'sha256'))
+			VALUES ($1::uuid, $2::uuid, $3, $4::bytea, $5, $6, digest($4::bytea, 'sha256'))
 			RETURNING `+policyBundleSelectColumns,
 			b.ID, b.PolicyGraphID, b.TargetType, b.Bundle, b.Signature, keyID,
 		)

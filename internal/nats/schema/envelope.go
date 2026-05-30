@@ -194,12 +194,12 @@ func (e Envelope) Validate() error {
 // addition there must land here too — the schema validator is the
 // boundary that protects ClickHouse from polluted dimension values.
 var validTrafficClasses = map[string]struct{}{
-	"trusted_direct":        {},
-	"trusted_media_bypass":  {},
-	"inspect_lite":          {},
-	"inspect_full":          {},
-	"tunnel_private":        {},
-	"block":                 {},
+	"trusted_direct":       {},
+	"trusted_media_bypass": {},
+	"inspect_lite":         {},
+	"inspect_full":         {},
+	"tunnel_private":       {},
+	"block":                {},
 }
 
 func isValidTrafficClass(s string) bool {

@@ -531,6 +531,18 @@ type TelemetryAnalytics struct {
 	// buffering. Defaults: 2s, 1024 rows.
 	ClickHouseFlushInterval time.Duration
 	ClickHouseBatchSize     int
+	// ClickHouseMaxBacklogMultiplier bounds how many
+	// `ClickHouseBatchSize`-worth of rows the writer is willing
+	// to retain in its in-memory shield across transient
+	// ClickHouse outages. When the requeue path would push the
+	// backlog past `BatchSize * MaxBacklogMultiplier`, the
+	// OLDEST rows are shed (FIFO) and credited to BacklogDrops
+	// + DroppedRows. Default 4 (≈ 8s of buffering at the 2s
+	// default flush interval). Operators with tight memory
+	// budgets or large batch sizes may want to lower this;
+	// operators with bursty producers and a known-long
+	// ClickHouse maintenance window may want to raise it.
+	ClickHouseMaxBacklogMultiplier int
 	// ClickHouseEnsureSchema controls whether the writer issues a
 	// CREATE TABLE IF NOT EXISTS for the destination table on
 	// boot. Defaults true; set false when the table is provisioned
@@ -720,6 +732,7 @@ func Load() (Config, error) {
 		// internal/service/apikey.
 		{"AUTH_API_KEY_MAX_ACTIVE_PER_TENANT", 64, &cfg.Auth.APIKeyMaxActivePerTenant},
 		{"CLICKHOUSE_BATCH_SIZE", 1024, &cfg.TelemetryAnalytics.ClickHouseBatchSize},
+		{"CLICKHOUSE_MAX_BACKLOG_MULTIPLIER", 4, &cfg.TelemetryAnalytics.ClickHouseMaxBacklogMultiplier},
 		{"S3_TELEMETRY_MAX_BYTES_PER_OBJECT", 16 * 1024 * 1024, &cfg.TelemetryAnalytics.S3MaxBytesPerObject},
 		{"S3_TELEMETRY_MAX_EVENTS_PER_OBJECT", 50_000, &cfg.TelemetryAnalytics.S3MaxEventsPerObject},
 	}
