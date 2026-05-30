@@ -19,6 +19,7 @@ members = [
     "crates/sng-dns",
     "crates/sng-fw",
     "crates/sng-ips",
+    "crates/sng-swg",
 ]
 resolver = "3"
 
@@ -187,6 +188,7 @@ sng-telemetry = { path = "crates/sng-telemetry" }
 sng-dns = { path = "crates/sng-dns" }
 sng-fw = { path = "crates/sng-fw" }
 sng-ips = { path = "crates/sng-ips" }
+sng-swg = { path = "crates/sng-swg" }
 
 # Workspace-wide lints. Set at the workspace level so a new crate
 # added in a later phase automatically inherits the same posture
