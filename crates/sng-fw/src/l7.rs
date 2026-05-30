@@ -540,7 +540,13 @@ impl L7Match {
 /// Keep this divergence greppable from either side: search
 /// `domain_suffix_match` (the PKI flavor) vs `sni_suffix_match`
 /// (the bypass-list flavor).
-fn sni_suffix_match(suffix: &str, value: &str) -> bool {
+///
+/// Re-exported as a `pub` symbol because `sng-swg`'s TLS bypass
+/// evaluator must use the *same* matcher as the firewall's L7
+/// classifier — having two implementations of "permissive SNI
+/// match" in the same workspace would let an operator-curated
+/// bypass list match in one subsystem but miss in the other.
+pub fn sni_suffix_match(suffix: &str, value: &str) -> bool {
     let suffix = suffix.strip_prefix("*.").unwrap_or(suffix);
     if suffix.is_empty() || value.is_empty() {
         return false;

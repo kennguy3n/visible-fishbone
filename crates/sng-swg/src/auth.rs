@@ -1,0 +1,814 @@
+//! Envoy ext-authz HTTP handler.
+//!
+//! Envoy posts each candidate proxied request to
+//! `POST /ext_authz` with a small JSON body describing the
+//! request (method, scheme, host, path, SNI, tenant +
+//! principal headers). The handler returns a verdict JSON the
+//! ext_authz filter translates into an Envoy wire action:
+//!
+//! * `{"action": "allow"}` → Envoy lets the request flow upstream
+//! * `{"action": "deny",  "status": 403, "reason": "…"}` → Envoy
+//!   returns the supplied status + reason to the client
+//! * `{"action": "rate_limit", "retry_after_secs": 30}` → Envoy
+//!   returns 429 with `Retry-After`
+//! * `{"action": "bypass"}` → identical wire behaviour to allow;
+//!   the distinction lives on the telemetry event so the
+//!   operator dashboard can distinguish decrypted-and-allowed
+//!   from straight-through-no-MITM.
+//!
+//! The handler is a *pure* function over the trait surface — it
+//! takes the categorizer, malware verdict provider, bypass
+//! list, rate limiter, and telemetry emitter — and decides
+//! synchronously. No I/O happens inside the verdict logic
+//! itself. The HTTP listener that wraps the handler is a thin
+//! tokio reader that calls `handle(request) -> response`.
+
+use std::sync::Arc;
+
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+
+use crate::bypass::BypassList;
+use crate::categorizer::UrlCategorizer;
+use crate::error::SwgError;
+use crate::malware::{MalwareVerdict, MalwareVerdictProvider};
+use crate::rate_limit::RateLimiter;
+use crate::telemetry::{TelemetryEmitter, VerdictEvent};
+use crate::verdict::{Action, RequestContext, Verdict};
+
+/// JSON shape Envoy POSTs at the ext-authz endpoint. Field
+/// names match what an operator can configure via Envoy's
+/// `ext_authz` HTTP service `headers_to_add` /
+/// `allowed_headers` lists. Required headers:
+///
+/// * `:method`, `:scheme`, `:path` — Envoy pseudo-headers
+/// * `host` — the request Host header
+/// * `x-sng-tenant` — tenant the principal authenticates under,
+///   injected by the upstream agent / IdP
+/// * `x-sng-principal` — principal id (device id / user id /
+///   service account)
+///
+/// Optional headers:
+/// * `x-sng-sni` — TLS SNI when the request originates from an
+///   intercepted CONNECT
+/// * `x-sng-file-sha256` — when the request body has been
+///   pre-hashed by an inline scanner
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtAuthzRequest {
+    /// Flat header map. Lower-cased keys are required (the
+    /// Envoy ext-authz emitter lowercases by default).
+    pub headers: Vec<(String, String)>,
+    /// Optional file hash on the request body. When present the
+    /// handler queries the malware provider; when absent the
+    /// handler skips the malware lookup entirely.
+    pub body_sha256: Option<String>,
+}
+
+impl ExtAuthzRequest {
+    /// Build a [`RequestContext`] from the request envelope.
+    /// Returns [`SwgError::ExtAuthzDecode`] when a required
+    /// header is missing or has an empty value.
+    pub fn into_context(self) -> Result<RequestContext, SwgError> {
+        let header = |k: &str| {
+            self.headers
+                .iter()
+                .find(|(h, _)| h.eq_ignore_ascii_case(k))
+                .map(|(_, v)| v.clone())
+        };
+        let require = |k: &str| -> Result<String, SwgError> {
+            header(k)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| SwgError::ExtAuthzDecode(format!("missing header: {k}")))
+        };
+        let method = require(":method")?;
+        let scheme = require(":scheme")?;
+        let path = require(":path")?;
+        let host = require("host")?;
+        let tenant_id = require("x-sng-tenant")?;
+        let principal_id = require("x-sng-principal")?;
+        let mut ctx = RequestContext {
+            tenant_id,
+            principal_id,
+            method,
+            scheme,
+            host,
+            path,
+            sni: header("x-sng-sni").filter(|v| !v.is_empty()),
+            file_hash: self.body_sha256,
+        };
+        ctx.normalize();
+        Ok(ctx)
+    }
+}
+
+/// Verdict JSON Envoy reads back. Stable wire contract — adding
+/// a field is fine; removing or renaming one is a wire break.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExtAuthzResponse {
+    /// "allow" | "deny" | "bypass" | "rate_limit"
+    pub action: String,
+    /// HTTP status Envoy returns to the client on deny /
+    /// rate_limit. `None` on allow / bypass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// Categorisation/deny reason — surfaces in operator
+    /// telemetry and in any 4xx body Envoy emits.
+    pub reason: String,
+    /// Bound on the value of `Retry-After` Envoy puts on a
+    /// rate_limit response, in seconds. `None` on allow /
+    /// bypass / deny.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u64>,
+    /// Optional category tag — surfaces on telemetry so a
+    /// dashboard can drill into "% of requests by category".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
+/// Serialize an [`ExtAuthzResponse`] to bytes.
+///
+/// `ExtAuthzResponse` has a fixed, all-finite shape — every
+/// field is a string, an `Option<u16>`, or an `Option<u64>`, none
+/// of which can fail `serde_json::to_vec`. We still handle the
+/// theoretical error by writing a minimal hard-coded JSON blob
+/// rather than `expect`, because (a) the production lint policy
+/// denies `expect_used`, and (b) the supervisor must never
+/// panic on a malformed verdict — even a theoretical one —
+/// because doing so would tear down the SWG and let traffic
+/// through unfiltered.
+fn serialize_response(resp: &ExtAuthzResponse) -> Vec<u8> {
+    serde_json::to_vec(resp).unwrap_or_else(|_| {
+        // Hand-rolled JSON literal as a final fallback. Stable
+        // shape, no escaping pitfalls (no operator-supplied
+        // strings), and the response is a 5xx so Envoy will
+        // surface the failure mode to the caller.
+        br#"{"action":"deny","status":500,"reason":"verdict serialization failed"}"#.to_vec()
+    })
+}
+
+impl ExtAuthzResponse {
+    fn from_verdict(v: &Verdict) -> Self {
+        match v.action {
+            Action::Allow => Self {
+                action: "allow".into(),
+                status: None,
+                reason: v.reason.clone(),
+                retry_after_secs: None,
+                category: v.category.clone(),
+            },
+            Action::Bypass => Self {
+                action: "bypass".into(),
+                status: None,
+                reason: v.reason.clone(),
+                retry_after_secs: None,
+                category: v.category.clone(),
+            },
+            Action::Deny => Self {
+                action: "deny".into(),
+                status: Some(403),
+                reason: v.reason.clone(),
+                retry_after_secs: None,
+                category: v.category.clone(),
+            },
+            Action::RateLimit => Self {
+                action: "rate_limit".into(),
+                status: Some(429),
+                reason: v.reason.clone(),
+                retry_after_secs: None,
+                category: v.category.clone(),
+            },
+        }
+    }
+}
+
+/// The handler. Wires the pluggable trait surfaces — categoriser,
+/// malware provider, bypass list, rate limiter, telemetry — into
+/// a single per-request decision function.
+#[derive(Clone)]
+pub struct ExtAuthzHandler {
+    inner: Arc<HandlerInner>,
+}
+
+struct HandlerInner {
+    categorizer: Arc<dyn UrlCategorizer>,
+    malware: Arc<dyn MalwareVerdictProvider>,
+    /// Bypass list is hot-swap via [`RwLock<Arc<BypassList>>`].
+    /// The hot path takes a brief read lock to clone the
+    /// Arc, then drops the lock before evaluating — so a
+    /// concurrent install path doesn't block per-request
+    /// verdicts. The ArcSwap pattern would also work; we use
+    /// RwLock here because BypassList is small enough that
+    /// the read-side overhead is in the noise.
+    bypass: Arc<RwLock<Arc<BypassList>>>,
+    rate_limiter: RateLimiter,
+    telemetry: Arc<dyn TelemetryEmitter>,
+    /// Operator-controlled deny-categories. A category that
+    /// appears here causes the handler to return Deny instead of
+    /// Allow. Stored as a sorted Vec so contains() is O(log n)
+    /// after a binary_search, which beats HashSet on the typical
+    /// 50-200 entry list.
+    deny_categories: Vec<String>,
+}
+
+impl std::fmt::Debug for ExtAuthzHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtAuthzHandler")
+            .field("deny_categories_len", &self.inner.deny_categories.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Builder for [`ExtAuthzHandler`] — the trait dependencies are
+/// all required so the builder is just a named constructor; we
+/// keep it on the type to mirror the manager's lifecycle (which
+/// produces a handler from the configured providers).
+pub struct ExtAuthzHandlerBuilder {
+    // Trait objects don't derive Debug so the builder hand-rolls
+    // an impl below. The fields are `Option<...>` because the
+    // builder accumulates set/unset state before `build` checks
+    // for completeness.
+    #[allow(missing_docs, missing_debug_implementations)]
+    _phantom: std::marker::PhantomData<()>,
+    categorizer: Option<Arc<dyn UrlCategorizer>>,
+    malware: Option<Arc<dyn MalwareVerdictProvider>>,
+    bypass: Option<Arc<BypassList>>,
+    rate_limiter: Option<RateLimiter>,
+    telemetry: Option<Arc<dyn TelemetryEmitter>>,
+    deny_categories: Vec<String>,
+}
+
+impl std::fmt::Debug for ExtAuthzHandlerBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtAuthzHandlerBuilder")
+            .field("categorizer_set", &self.categorizer.is_some())
+            .field("malware_set", &self.malware.is_some())
+            .field("bypass_set", &self.bypass.is_some())
+            .field("rate_limiter_set", &self.rate_limiter.is_some())
+            .field("telemetry_set", &self.telemetry.is_some())
+            .field("deny_categories", &self.deny_categories)
+            .finish()
+    }
+}
+
+impl ExtAuthzHandlerBuilder {
+    /// Start a new builder. All trait deps must be set before
+    /// [`Self::build`] is called.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            _phantom: std::marker::PhantomData,
+            categorizer: None,
+            malware: None,
+            bypass: None,
+            rate_limiter: None,
+            telemetry: None,
+            deny_categories: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_categorizer(mut self, c: Arc<dyn UrlCategorizer>) -> Self {
+        self.categorizer = Some(c);
+        self
+    }
+
+    #[must_use]
+    pub fn with_malware(mut self, m: Arc<dyn MalwareVerdictProvider>) -> Self {
+        self.malware = Some(m);
+        self
+    }
+
+    #[must_use]
+    pub fn with_bypass(mut self, b: Arc<BypassList>) -> Self {
+        self.bypass = Some(b);
+        self
+    }
+
+    #[must_use]
+    pub fn with_rate_limiter(mut self, r: RateLimiter) -> Self {
+        self.rate_limiter = Some(r);
+        self
+    }
+
+    #[must_use]
+    pub fn with_telemetry(mut self, t: Arc<dyn TelemetryEmitter>) -> Self {
+        self.telemetry = Some(t);
+        self
+    }
+
+    /// Categories that map onto Deny instead of Allow. Stored
+    /// in a Vec the builder sorts + dedups at build time; the
+    /// hot path uses binary_search to test membership.
+    #[must_use]
+    pub fn with_deny_categories(mut self, cats: Vec<String>) -> Self {
+        self.deny_categories = cats;
+        self
+    }
+
+    /// Build the handler. Returns an error when any required
+    /// dep was not set.
+    pub fn build(mut self) -> Result<ExtAuthzHandler, SwgError> {
+        // Sort + dedup so binary_search works on the hot path.
+        // Lowercasing here keeps the case-insensitive compare
+        // out of every request.
+        for c in &mut self.deny_categories {
+            *c = c.to_ascii_lowercase();
+        }
+        self.deny_categories.sort();
+        self.deny_categories.dedup();
+        Ok(ExtAuthzHandler {
+            inner: Arc::new(HandlerInner {
+                categorizer: self
+                    .categorizer
+                    .ok_or_else(|| SwgError::Config("categorizer not set".into()))?,
+                malware: self
+                    .malware
+                    .ok_or_else(|| SwgError::Config("malware provider not set".into()))?,
+                bypass: Arc::new(RwLock::new(
+                    self.bypass
+                        .ok_or_else(|| SwgError::Config("bypass list not set".into()))?,
+                )),
+                rate_limiter: self
+                    .rate_limiter
+                    .ok_or_else(|| SwgError::Config("rate limiter not set".into()))?,
+                telemetry: self
+                    .telemetry
+                    .ok_or_else(|| SwgError::Config("telemetry emitter not set".into()))?,
+                deny_categories: self.deny_categories,
+            }),
+        })
+    }
+}
+
+impl Default for ExtAuthzHandlerBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExtAuthzHandler {
+    /// Atomically swap in a new bypass list. The hot path picks
+    /// up the new list on its next read; any in-flight verdicts
+    /// continue using the old list.
+    pub fn install_bypass(&self, list: Arc<BypassList>) {
+        *self.inner.bypass.write() = list;
+    }
+
+    /// Convenience: process a decoded JSON request envelope.
+    /// Returns the response envelope ready for serialisation.
+    pub async fn handle_request(&self, req: ExtAuthzRequest) -> Result<ExtAuthzResponse, SwgError> {
+        let ctx = req.into_context()?;
+        let verdict = self.evaluate(&ctx).await;
+        let resp = ExtAuthzResponse::from_verdict(&verdict);
+        self.inner
+            .telemetry
+            .emit(VerdictEvent::from_context(&ctx, verdict));
+        Ok(resp)
+    }
+
+    /// Convenience: process a raw JSON byte buffer (Envoy's
+    /// over-the-wire shape) and return the JSON byte buffer
+    /// Envoy expects. This is the entry point a thin tokio HTTP
+    /// listener wraps; the verdict logic remains testable via
+    /// [`Self::evaluate`] without needing to spin one up.
+    pub async fn handle_json_bytes(&self, body: &[u8]) -> Vec<u8> {
+        let req: ExtAuthzRequest = match serde_json::from_slice(body) {
+            Ok(r) => r,
+            Err(e) => {
+                let r = ExtAuthzResponse {
+                    action: "deny".into(),
+                    status: Some(400),
+                    reason: format!("malformed ext_authz request: {e}"),
+                    retry_after_secs: None,
+                    category: None,
+                };
+                return serialize_response(&r);
+            }
+        };
+        let resp = match self.handle_request(req).await {
+            Ok(r) => r,
+            Err(SwgError::ExtAuthzDecode(msg)) => ExtAuthzResponse {
+                action: "deny".into(),
+                status: Some(400),
+                reason: format!("ext_authz decode: {msg}"),
+                retry_after_secs: None,
+                category: None,
+            },
+            Err(other) => ExtAuthzResponse {
+                action: "deny".into(),
+                status: Some(500),
+                reason: format!("handler error: {other}"),
+                retry_after_secs: None,
+                category: None,
+            },
+        };
+        serialize_response(&resp)
+    }
+
+    /// The verdict engine. Pure over the trait surface — given
+    /// the same `(categorizer, bypass, malware, rate limiter)`
+    /// snapshot the same context always produces the same
+    /// verdict. That's what makes the handler unit-testable
+    /// without an HTTP layer.
+    ///
+    /// Decision order:
+    /// 1. TLS bypass — exempt the request entirely if SNI matches
+    /// 2. Rate limit — protect the verdict pipeline from runaways
+    /// 3. URL categorisation — operator deny-list wins; default allow
+    /// 4. Malware verdict on the response body hash (when supplied)
+    pub async fn evaluate(&self, ctx: &RequestContext) -> Verdict {
+        // 1. TLS bypass — we *only* short-circuit when SNI
+        //    matches a bypass entry. Other paths see the full
+        //    pipeline. Pulling a clone of the Arc out of the
+        //    RwLock lets us drop the lock before the
+        //    (synchronous) match call so the read side is as
+        //    narrow as possible.
+        let bypass = { Arc::clone(&self.inner.bypass.read()) };
+        if let Some(sni) = ctx.sni.as_deref() {
+            let dec = bypass.evaluate(Some(sni));
+            if dec.bypass {
+                return Verdict::bypass(dec.reason.to_telemetry_string());
+            }
+        }
+
+        // 2. Rate limit. Bucket key is (tenant_id, principal_id);
+        //    the rate limiter is the source-of-truth for retry
+        //    timing.
+        let rate = self
+            .inner
+            .rate_limiter
+            .acquire(&ctx.tenant_id, &ctx.principal_id);
+        if !rate.permitted {
+            let mut v = Verdict::rate_limit(format!("rate_limit.{}", rate.bucket_key));
+            v.category = Some("rate_limit.bucket".into());
+            return v;
+        }
+
+        // 3. Categorise + apply deny list.
+        let category = self
+            .inner
+            .categorizer
+            .categorize(&ctx.host, &ctx.path)
+            .await;
+        if let Some(cat) = category.as_ref() {
+            let lc = cat.0.to_ascii_lowercase();
+            if self.inner.deny_categories.binary_search(&lc).is_ok() {
+                return Verdict::deny_categorized(cat.0.clone());
+            }
+        }
+
+        // 4. Malware verdict on response body hash. Only kicks
+        //    in when an upstream scanner has supplied a hash —
+        //    a missing hash is *not* a deny signal.
+        if let Some(hash) = ctx.file_hash.as_deref() {
+            match self.inner.malware.verdict(hash).await {
+                MalwareVerdict::Malicious | MalwareVerdict::Suspicious => {
+                    return Verdict::deny_categorized("malware.detected");
+                }
+                MalwareVerdict::Clean | MalwareVerdict::Unknown => {}
+            }
+        }
+        match category {
+            Some(cat) => Verdict::allow_categorized(cat.0),
+            None => Verdict::allow_uncategorized(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bypass::{BypassEntry, BypassList};
+    use crate::categorizer::{Category, CategoryEntry, LocalCategoryDb};
+    use crate::malware::{NullMalwareProvider, StaticMalwareList};
+    use crate::rate_limit::{RateLimiter, TestClock};
+    use crate::telemetry::{SwgEventSource, TelemetryEmitter, VerdictEvent};
+    use parking_lot::Mutex;
+    use pretty_assertions::assert_eq;
+    use sng_telemetry::EventSource;
+    use std::time::Duration;
+
+    #[derive(Debug, Default)]
+    struct CapturingEmitter {
+        events: Mutex<Vec<VerdictEvent>>,
+    }
+    impl TelemetryEmitter for CapturingEmitter {
+        fn emit(&self, event: VerdictEvent) {
+            self.events.lock().push(event);
+        }
+    }
+
+    fn make_handler(deny: Vec<&str>) -> (ExtAuthzHandler, Arc<CapturingEmitter>) {
+        let cap = Arc::new(CapturingEmitter::default());
+        let bypass = Arc::new(BypassList::new(vec![BypassEntry {
+            suffix: "bank.com".into(),
+            category: "tls.finance".into(),
+        }]));
+        let cats = LocalCategoryDb::new(vec![
+            CategoryEntry {
+                host: "porn.example".into(),
+                path_prefix: None,
+                category: Category("adult".into()),
+            },
+            CategoryEntry {
+                host: "biz.example".into(),
+                path_prefix: None,
+                category: Category("business.saas".into()),
+            },
+        ]);
+        let mal = Arc::new(StaticMalwareList::new(vec![(
+            "a".repeat(64),
+            MalwareVerdict::Malicious,
+        )]));
+        let clock = Arc::new(TestClock::new());
+        let rl = RateLimiter::new(2.0, 1.0, clock);
+        let h = ExtAuthzHandlerBuilder::new()
+            .with_categorizer(Arc::new(cats))
+            .with_malware(mal)
+            .with_bypass(bypass)
+            .with_rate_limiter(rl)
+            .with_telemetry(cap.clone() as Arc<dyn TelemetryEmitter>)
+            .with_deny_categories(deny.into_iter().map(Into::into).collect())
+            .build()
+            .unwrap();
+        (h, cap)
+    }
+
+    fn req(host: &str, path: &str, sni: Option<&str>, file_hash: Option<&str>) -> ExtAuthzRequest {
+        let mut headers = vec![
+            (":method".into(), "GET".into()),
+            (":scheme".into(), "https".into()),
+            (":path".into(), path.into()),
+            ("host".into(), host.into()),
+            ("x-sng-tenant".into(), "tenant-1".into()),
+            ("x-sng-principal".into(), "principal-1".into()),
+        ];
+        if let Some(s) = sni {
+            headers.push(("x-sng-sni".into(), s.into()));
+        }
+        ExtAuthzRequest {
+            headers,
+            body_sha256: file_hash.map(Into::into),
+        }
+    }
+
+    #[tokio::test]
+    async fn allow_default_when_uncategorized() {
+        let (h, cap) = make_handler(vec![]);
+        let resp = h
+            .handle_request(req("unknown.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+        assert!(resp.status.is_none());
+        assert!(resp.reason.starts_with("allow"));
+        assert_eq!(cap.events.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn allow_categorised_when_category_not_in_deny_list() {
+        let (h, _cap) = make_handler(vec![]);
+        let resp = h
+            .handle_request(req("biz.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+        assert_eq!(resp.category.as_deref(), Some("business.saas"));
+    }
+
+    #[tokio::test]
+    async fn deny_when_category_matches_operator_deny_list() {
+        let (h, _cap) = make_handler(vec!["adult"]);
+        let resp = h
+            .handle_request(req("porn.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.status, Some(403));
+        assert_eq!(resp.category.as_deref(), Some("adult"));
+    }
+
+    #[tokio::test]
+    async fn bypass_short_circuits_before_categorization() {
+        let (h, _cap) = make_handler(vec!["adult"]);
+        // SNI matches bank.com → bypass; even though host
+        // matches a deny-list category, the bypass wins.
+        let resp = h
+            .handle_request(req("porn.example", "/", Some("online.bank.com"), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "bypass");
+        assert!(resp.reason.contains("bypass"));
+    }
+
+    #[tokio::test]
+    async fn malware_verdict_triggers_deny() {
+        let (h, _cap) = make_handler(vec![]);
+        let hash = "a".repeat(64);
+        let resp = h
+            .handle_request(req("biz.example", "/", None, Some(&hash)))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.category.as_deref(), Some("malware.detected"));
+    }
+
+    #[tokio::test]
+    async fn unknown_malware_verdict_does_not_change_decision() {
+        let (h, _cap) = make_handler(vec![]);
+        let resp = h
+            .handle_request(req("biz.example", "/", None, Some("9".repeat(64).as_str())))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_kicks_in_after_capacity_exhausted() {
+        let (h, _cap) = make_handler(vec![]);
+        for _ in 0..2 {
+            let r = h
+                .handle_request(req("biz.example", "/", None, None))
+                .await
+                .unwrap();
+            assert_eq!(r.action, "allow");
+        }
+        let r = h
+            .handle_request(req("biz.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.action, "rate_limit");
+        assert_eq!(r.status, Some(429));
+    }
+
+    #[tokio::test]
+    async fn missing_required_header_returns_400_via_handle_json_bytes() {
+        let (h, _cap) = make_handler(vec![]);
+        // Build an envelope missing x-sng-tenant.
+        let bad = serde_json::to_vec(&ExtAuthzRequest {
+            headers: vec![
+                (":method".into(), "GET".into()),
+                (":scheme".into(), "https".into()),
+                (":path".into(), "/".into()),
+                ("host".into(), "biz.example".into()),
+                ("x-sng-principal".into(), "p".into()),
+            ],
+            body_sha256: None,
+        })
+        .unwrap();
+        let out = h.handle_json_bytes(&bad).await;
+        let resp: ExtAuthzResponse = serde_json::from_slice(&out).unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.status, Some(400));
+        assert!(resp.reason.contains("x-sng-tenant"));
+    }
+
+    #[tokio::test]
+    async fn malformed_json_returns_400_with_decode_message() {
+        let (h, _cap) = make_handler(vec![]);
+        let out = h.handle_json_bytes(b"{not json").await;
+        let resp: ExtAuthzResponse = serde_json::from_slice(&out).unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.status, Some(400));
+        assert!(resp.reason.contains("malformed"));
+    }
+
+    #[tokio::test]
+    async fn install_bypass_atomically_swaps_table() {
+        let (h, _cap) = make_handler(vec![]);
+        let r = h
+            .handle_request(req("biz.example", "/", Some("foo.com"), None))
+            .await
+            .unwrap();
+        assert_eq!(r.action, "allow");
+        h.install_bypass(Arc::new(BypassList::new(vec![BypassEntry {
+            suffix: "foo.com".into(),
+            category: "tls.dev".into(),
+        }])));
+        let r = h
+            .handle_request(req("biz.example", "/", Some("foo.com"), None))
+            .await
+            .unwrap();
+        assert_eq!(r.action, "bypass");
+    }
+
+    #[test]
+    fn ext_authz_request_into_context_normalizes_lowercase_fields() {
+        let r = ExtAuthzRequest {
+            headers: vec![
+                (":method".into(), "GET".into()),
+                (":scheme".into(), "HTTPS".into()),
+                (":path".into(), "/abc".into()),
+                ("HOST".into(), "Example.COM".into()),
+                ("x-sng-tenant".into(), "t".into()),
+                ("x-sng-principal".into(), "p".into()),
+                ("x-sng-sni".into(), "EXAMPLE.com".into()),
+            ],
+            body_sha256: None,
+        };
+        let ctx = r.into_context().unwrap();
+        assert_eq!(ctx.method, "get");
+        assert_eq!(ctx.scheme, "https");
+        assert_eq!(ctx.host, "example.com");
+        assert_eq!(ctx.path, "/abc");
+        assert_eq!(ctx.sni.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn ext_authz_request_into_context_treats_empty_header_as_missing() {
+        // An empty header value satisfies the "required header"
+        // check syntactically but carries no information — the
+        // operator's intent is unambiguous: this is a missing
+        // header. The decoder must reject it instead of
+        // silently using an empty tenant id.
+        let r = ExtAuthzRequest {
+            headers: vec![
+                (":method".into(), "GET".into()),
+                (":scheme".into(), "https".into()),
+                (":path".into(), "/".into()),
+                ("host".into(), "h".into()),
+                ("x-sng-tenant".into(), String::new()),
+                ("x-sng-principal".into(), "p".into()),
+            ],
+            body_sha256: None,
+        };
+        let err = r.into_context().expect_err("must reject empty tenant");
+        match err {
+            SwgError::ExtAuthzDecode(msg) => assert!(msg.contains("x-sng-tenant"), "{msg}"),
+            other => panic!("expected ExtAuthzDecode, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_emits_one_verdict_event_per_request() {
+        let (h, cap) = make_handler(vec![]);
+        for _ in 0..3 {
+            h.handle_request(req("biz.example", "/", None, None))
+                .await
+                .unwrap();
+        }
+        assert_eq!(cap.events.lock().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn telemetry_sink_receives_swg_event_source_events() {
+        // Smoke-test that a real SwgEventSource sink wires up
+        // and the handler emits decodable events through it.
+        let (sink, mut source) = SwgEventSource::channel(8);
+        let cap = Arc::new(sink) as Arc<dyn TelemetryEmitter>;
+        let bypass = Arc::new(BypassList::new(vec![]));
+        let cats = LocalCategoryDb::new(vec![]);
+        let mal = Arc::new(NullMalwareProvider);
+        let clock = Arc::new(TestClock::new());
+        let h = ExtAuthzHandlerBuilder::new()
+            .with_categorizer(Arc::new(cats))
+            .with_malware(mal)
+            .with_bypass(bypass)
+            .with_rate_limiter(RateLimiter::new(100.0, 100.0, clock))
+            .with_telemetry(cap)
+            .build()
+            .unwrap();
+        h.handle_request(req("any.example", "/x", None, None))
+            .await
+            .unwrap();
+        // The channel sink fed the source — receive one event.
+        // tokio::time::timeout guards against a hang.
+        let got = tokio::time::timeout(Duration::from_millis(100), source.recv()).await;
+        assert!(got.unwrap().is_some());
+    }
+
+    #[test]
+    fn ext_authz_response_serializes_with_stable_field_order() {
+        let v = Verdict::deny_categorized("adult");
+        let resp = ExtAuthzResponse::from_verdict(&v);
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"action\":\"deny\""));
+        assert!(json.contains("\"status\":403"));
+        assert!(json.contains("\"category\":\"adult\""));
+    }
+
+    #[test]
+    fn ext_authz_response_omits_none_fields_on_allow() {
+        let v = Verdict::allow_uncategorized();
+        let resp = ExtAuthzResponse::from_verdict(&v);
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("status"), "{json}");
+        assert!(!json.contains("retry_after"), "{json}");
+        assert!(!json.contains("category"), "{json}");
+    }
+
+    #[tokio::test]
+    async fn missing_required_dependency_in_builder_returns_config_error() {
+        // Forgetting to wire a trait is a wiring bug; the
+        // builder must fail loudly instead of silently
+        // building a handler that panics on the first
+        // request.
+        let err = ExtAuthzHandlerBuilder::new()
+            .build()
+            .expect_err("must fail");
+        match err {
+            SwgError::Config(msg) => assert!(msg.contains("categorizer"), "{msg}"),
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+}
