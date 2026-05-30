@@ -1677,6 +1677,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "sng-sdwan"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "parking_lot",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sng-core",
+ "sng-telemetry",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sng-swg"
 version = "0.1.0"
 dependencies = [
