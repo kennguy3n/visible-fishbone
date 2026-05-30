@@ -108,7 +108,10 @@ pub mod service;
 pub mod stats;
 
 pub use app::{App, AppCatalogProvider, StaticAppCatalog};
-pub use device::{DevicePosture, DeviceTrust, DeviceTrustProvider, StaticDeviceTrustProvider};
+pub use device::{
+    ArcSwapDeviceTrustProvider, DevicePosture, DeviceTrust, DeviceTrustProvider,
+    StaticDeviceTrustProvider,
+};
 pub use error::ZtnaError;
 pub use identity::{IdentityProvider, StaticIdentityProvider, UserIdentity};
 pub use policy::{
