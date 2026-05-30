@@ -123,6 +123,22 @@ pub struct IpsServiceConfig {
     ///     observations, the per-scan work shifts back
     ///     toward O(window_bytes), and the consume
     ///     optimization loses effectiveness.
+    ///   - Too high (interaction with [`Self::dedup_ttl`]):
+    ///     a pattern whose matching bytes happen to sit
+    ///     entirely within the retained lookback tail will
+    ///     re-match on every subsequent scan of the same
+    ///     flow. While the (`flow`, `sid`) dedup entry is
+    ///     still fresh, those re-matches are suppressed and
+    ///     credited to [`crate::stats::IpsStats::record_suppressed_dup_hit`].
+    ///     Once `dedup_ttl` elapses, the same in-buffer
+    ///     bytes re-fire one alert per `dedup_ttl` window
+    ///     for the lifetime of the flow (correct behaviour —
+    ///     the matching bytes ARE still in the flow's
+    ///     observable stream — but operator-surprising on a
+    ///     long-lived flow with very low new-byte rate).
+    ///     Sizing the retention close to the actual longest
+    ///     plausible regex match (rather than the worst-case
+    ///     ceiling) keeps this re-alert window short.
     ///
     /// The default (4 KiB) covers HTTP-style signatures
     /// (headers + first request line) and most ET-rule
