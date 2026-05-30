@@ -834,12 +834,12 @@ mod tests {
         // (deny, tenant_mismatch) and then the (allow,
         // allow) once the request is re-driven against a
         // policy with a matching tenant.
-        let ev0 = ztna_event(&evs[0]);
-        assert_eq!(ev0.decision, "deny");
-        assert_eq!(ev0.reason, "tenant_mismatch");
-        let ev1 = ztna_event(&evs[1]);
-        assert_eq!(ev1.decision, "allow");
-        assert_eq!(ev1.reason, "allow");
+        let pre_swap = ztna_event(&evs[0]);
+        assert_eq!(pre_swap.decision, "deny");
+        assert_eq!(pre_swap.reason, "tenant_mismatch");
+        let post_swap = ztna_event(&evs[1]);
+        assert_eq!(post_swap.decision, "allow");
+        assert_eq!(post_swap.reason, "allow");
 
         assert_eq!(svc.stats.snapshot().bundle_loads, 1);
     }
