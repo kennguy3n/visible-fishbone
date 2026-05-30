@@ -361,6 +361,17 @@ impl NatTable {
     #[must_use]
     pub fn render_nft(&self) -> String {
         use std::fmt::Write as _;
+        // Skip the whole table when there are no NAT rules.
+        // Emitting `add table inet sng_nat` plus the two empty
+        // chains for a bundle that doesn't NAT anything just
+        // creates kernel objects no rule will ever touch, and
+        // makes the hot-swap diff noisier than it has to be.
+        // An empty render is the right "no NAT" wire signal —
+        // the kernel-side cleanup hook drops the table on the
+        // next apply.
+        if self.rules.is_empty() {
+            return String::new();
+        }
         // Group rules by hook so the script emits one chain per
         // hook with the correct priority (DNAT before SNAT).
         let mut prerouting: Vec<String> = Vec::new();
@@ -743,6 +754,42 @@ mod tests {
         let dnat_pos = script.find("dnat to 10.0.0.5").unwrap();
         let snat_pos = script.find("masquerade").unwrap();
         assert!(dnat_pos < snat_pos, "DNAT must render before SNAT");
+    }
+
+    #[test]
+    fn nat_table_render_skips_table_when_empty() {
+        // An empty NAT table must not emit ANY nftables output —
+        // not the table header, not the prerouting chain, not
+        // the postrouting chain. Empty objects on every install
+        // pollute the hot-swap digest (two no-op installs would
+        // otherwise still differ from a non-empty diff) and
+        // create kernel objects no rule will ever reference.
+        let t = NatTable::new();
+        assert_eq!(t.render_nft(), "");
+    }
+
+    #[test]
+    fn nat_table_render_emits_table_when_rules_present() {
+        // Regression guard for the empty-skip fix above: with at
+        // least one rule the full table header + chain
+        // declarations must still appear.
+        let mut t = NatTable::new();
+        t.add(NatRule {
+            id: "a".into(),
+            src_cidrs: vec![cidr("10.0.0.0/8")],
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocol: Protocol::Any,
+            iif: String::new(),
+            oif: "wan0".into(),
+            nat: NatType::Masquerade { port: None },
+            description: String::new(),
+        })
+        .unwrap();
+        let script = t.render_nft();
+        assert!(script.contains("add table inet sng_nat"));
+        assert!(script.contains("hook prerouting priority dstnat"));
+        assert!(script.contains("hook postrouting priority srcnat"));
     }
 
     #[test]

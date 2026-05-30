@@ -533,12 +533,27 @@ fn render_rule(rule: &FirewallRule, zones: &ZoneTable) -> String {
                     .iter()
                     .filter(|n| family.is_none_or(|f| AddressFamily::of(n) == f))
                     .collect();
+                // Skip emission when the operator declared src/dst
+                // CIDRs but none survive the family filter for this
+                // slot. This is the cross-family divergence guard:
+                // if a rule has e.g. `from_zones: [v4-zone]` AND
+                // `src_cidrs: [v6-net]`, the v4 iteration would
+                // otherwise render `ip saddr @zone_<v4-zone>` with
+                // no CIDR predicate — strictly more permissive than
+                // the in-memory engine (which AND-combines the v4
+                // zone match with the all-CIDRs check and finds the
+                // v6 CIDR doesn't contain a v4 address, so denies).
+                // Skipping the whole line keeps the kernel chain at
+                // worst as permissive as the in-memory engine. The
+                // `_explicit` flags capture the operator's intent:
+                // CIDR-empty is "any CIDR matches", CIDR-non-empty
+                // is "only these CIDRs match".
                 let src_explicit = !rule.matches.src_cidrs.is_empty();
                 let dst_explicit = !rule.matches.dst_cidrs.is_empty();
-                if src_explicit && from_zone.is_none() && src_cidrs.is_empty() {
+                if src_explicit && src_cidrs.is_empty() {
                     continue;
                 }
-                if dst_explicit && to_zone.is_none() && dst_cidrs.is_empty() {
+                if dst_explicit && dst_cidrs.is_empty() {
                     continue;
                 }
 
@@ -1275,6 +1290,80 @@ mod tests {
         let out = render_rule(&r, &zones);
         assert!(out.contains("ip saddr @zone_z"), "{out}");
         assert!(out.contains("ip saddr { 10.0.1.0/24 }"), "{out}");
+    }
+
+    #[test]
+    fn render_rule_v4_zone_with_v6_only_src_cidrs_skips_line() {
+        // Cross-family divergence guard. Rule has a v4 zone AND a
+        // v6 src_cidr. Previously the v4 iteration would render
+        // `ip saddr @zone_v4only` WITHOUT the cidr (filtered out
+        // by family) — strictly more permissive than the
+        // in-memory engine, which AND-combines the v4 zone match
+        // with the v6 CIDR (and finds the v6 CIDR doesn't contain
+        // any v4 address, so denies). The fix is to skip the
+        // emission when the operator declared CIDRs but none
+        // survive the family filter, regardless of whether a
+        // zone is present.
+        let zones = make_zones(&[("v4only", &["10.0.0.0/8"])]);
+        let mut m = RuleMatch::default();
+        m.src_cidrs.push(cidr("2001:db8::/32"));
+        let r = rule_with_zones("xfam", &["v4only"], &[], RuleAction::Allow, m);
+        let out = render_rule(&r, &zones);
+        assert!(
+            out.is_empty(),
+            "expected no lines for cross-family rule, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn render_rule_v6_zone_with_v4_only_src_cidrs_skips_line() {
+        // Mirror of the above for the v6-zone + v4-cidr case.
+        let zones = make_zones(&[("v6only", &["2001:db8::/32"])]);
+        let mut m = RuleMatch::default();
+        m.src_cidrs.push(cidr("10.0.0.0/8"));
+        let r = rule_with_zones("xfam6", &["v6only"], &[], RuleAction::Allow, m);
+        let out = render_rule(&r, &zones);
+        assert!(
+            out.is_empty(),
+            "expected no lines for cross-family rule, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn render_rule_v4_zone_with_v6_only_dst_cidrs_skips_line() {
+        // Same guard but for dst_cidrs. The to_zone branch was
+        // previously also gated on `to_zone.is_none()`, which
+        // missed the same divergence.
+        let zones = make_zones(&[("v4only", &["10.0.0.0/8"])]);
+        let mut m = RuleMatch::default();
+        m.dst_cidrs.push(cidr("2001:db8::/32"));
+        let r = rule_with_zones("xfam-dst", &[], &["v4only"], RuleAction::Allow, m);
+        let out = render_rule(&r, &zones);
+        assert!(
+            out.is_empty(),
+            "expected no lines for cross-family rule, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn render_rule_mixed_family_zone_with_v6_only_src_cidrs_emits_v6_line_only() {
+        // Cross-family divergence guard against a more
+        // permissive form of the test above: a zone that holds
+        // BOTH families (v4 + v6) combined with a v6-only
+        // src_cidr. The v4 iteration must skip (cidr filtered
+        // out → can't AND it in, so dropping the whole line is
+        // the only divergence-free option). The v6 iteration
+        // must emit normally.
+        let zones = make_zones(&[("dual", &["10.0.0.0/8", "2001:db8::/32"])]);
+        let mut m = RuleMatch::default();
+        m.src_cidrs.push(cidr("2001:db8::/32"));
+        let r = rule_with_zones("partial-xfam", &["dual"], &[], RuleAction::Allow, m);
+        let out = render_rule(&r, &zones);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 1, "{out}");
+        assert!(out.contains("ip6 saddr @zone6_dual"), "{out}");
+        assert!(out.contains("ip6 saddr { 2001:db8::/32 }"), "{out}");
+        assert!(!out.contains("ip saddr @zone_dual"), "{out}");
     }
 
     #[test]
