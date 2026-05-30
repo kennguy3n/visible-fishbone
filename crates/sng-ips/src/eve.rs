@@ -91,14 +91,14 @@ impl EveRecord {
             .ok_or_else(|| IpsError::EveDecode("missing event_type".into()))?
             .to_string();
         match event_type.as_str() {
-            "alert" => Ok(Self::Alert(decode_payload(&v, "alert")?)),
-            "anomaly" => Ok(Self::Anomaly(decode_payload(&v, "anomaly")?)),
-            "dns" => Ok(Self::Dns(decode_payload(&v, "dns")?)),
-            "http" => Ok(Self::Http(decode_payload(&v, "http")?)),
-            "tls" => Ok(Self::Tls(decode_payload(&v, "tls")?)),
-            "fileinfo" => Ok(Self::Fileinfo(decode_payload(&v, "fileinfo")?)),
-            "flow" => Ok(Self::Flow(decode_payload(&v, "flow")?)),
-            "stats" => Ok(Self::Stats(decode_payload(&v, "stats")?)),
+            "alert" => Ok(Self::Alert(decode_payload(&v)?)),
+            "anomaly" => Ok(Self::Anomaly(decode_payload(&v)?)),
+            "dns" => Ok(Self::Dns(decode_payload(&v)?)),
+            "http" => Ok(Self::Http(decode_payload(&v)?)),
+            "tls" => Ok(Self::Tls(decode_payload(&v)?)),
+            "fileinfo" => Ok(Self::Fileinfo(decode_payload(&v)?)),
+            "flow" => Ok(Self::Flow(decode_payload(&v)?)),
+            "stats" => Ok(Self::Stats(decode_payload(&v)?)),
             _ => Ok(Self::Unknown { event_type, raw: v }),
         }
     }
@@ -140,23 +140,30 @@ impl EveRecord {
     }
 }
 
-/// Decode the named payload object out of the raw EVE line.
-/// Used by every concrete variant — kept private because the
-/// envelope-shape contract (the payload lives under a key equal
-/// to the `event_type` discriminator) is internal to Suricata.
-fn decode_payload<T: for<'de> Deserialize<'de>>(line: &Value, key: &str) -> Result<T, IpsError> {
-    // The envelope fields (timestamp, src_ip, …) sit alongside
-    // the payload object on the same JSON line, so we serde-
-    // decode the whole line into the typed struct rather than
-    // pulling just the payload sub-object. The struct definitions
-    // below use `#[serde(flatten)]` to collect the envelope into
-    // a [`FlowTuple`] field and `#[serde(rename = "...")]` to
-    // pull the payload sub-object into the typed `payload` field.
-    //
-    // We pass the key in so the same decoder helper works for
-    // every variant; the typed struct's rename annotation does
-    // the actual extraction.
-    let _ = key;
+/// Decode an EVE line into a typed envelope+payload struct.
+///
+/// Each concrete EVE variant struct (e.g. `EveAlert`,
+/// `EveDns`) is shaped as:
+///
+/// ```text
+/// #[derive(Deserialize)]
+/// struct EveAlert {
+///     #[serde(flatten)] envelope: FlowTuple,
+///     #[serde(rename = "alert")] payload: AlertPayload,
+/// }
+/// ```
+///
+/// — so the envelope fields (`timestamp`, `src_ip`, …) flatten
+/// onto the struct top-level and the payload object under the
+/// `event_type` key (`"alert"`, `"dns"`, …) lands in the
+/// typed `payload` field. We serde-decode the **whole line**
+/// into the typed struct rather than pulling just the payload
+/// sub-object, which is why this helper never needed a `key`
+/// argument: the rename annotation on each variant struct
+/// performs the extraction itself.
+///
+/// Kept private — the envelope contract is internal to Suricata.
+fn decode_payload<T: for<'de> Deserialize<'de>>(line: &Value) -> Result<T, IpsError> {
     serde_json::from_value(line.clone())
         .map_err(|e| IpsError::EveDecode(format!("decode payload: {e}")))
 }
