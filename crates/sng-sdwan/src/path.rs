@@ -19,6 +19,7 @@
 //! shows up in dashboards and runbooks, so the human-
 //! readable string wins over an interned u32.
 
+use crate::error::SdwanError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -132,8 +133,28 @@ pub struct Path {
     /// Operators use this to nudge a path down (negative
     /// bias) or up (positive bias) in the ranking without
     /// changing the global [`crate::ScoreWeights`].
-    /// Defaults to `0.0`; finite & non-NaN is enforced by
-    /// [`crate::SdwanPolicy::validate`].
+    /// Defaults to `0.0`.
+    ///
+    /// Finiteness is enforced in two places:
+    ///
+    /// 1. [`Path::validate`] — the primary gate. Bundle
+    ///    adapters that build a `StaticPathProvider` from
+    ///    decoded bundle bytes call it on every path before
+    ///    constructing the provider, so a non-finite
+    ///    `static_bias` is rejected at load time alongside
+    ///    other bundle-validity checks.
+    /// 2. [`crate::score::score_path`] — defense-in-depth.
+    ///    Even if a misbehaving adapter bypassed
+    ///    `Path::validate`, the score function collapses a
+    ///    non-finite bias to [`crate::ScoreBreakdown::worst`]
+    ///    so the path can never win the selector.
+    ///
+    /// The previous version of this doc referred to
+    /// `SdwanPolicy::validate`, but the
+    /// [`crate::policy::SdwanPolicy`] struct does not own
+    /// the path catalog — paths live in the
+    /// [`PathProvider`] — so the per-`Path` validator is
+    /// where this invariant actually lives.
     #[serde(default)]
     pub static_bias: f32,
 }
@@ -164,6 +185,46 @@ impl Path {
     #[must_use]
     pub fn eligible(&self, class: TrafficClass) -> bool {
         self.eligible_classes.iter().any(|c| *c == class)
+    }
+
+    /// Value-domain validation. Bundle adapters call this
+    /// on every decoded path before installing the
+    /// catalog so an invalid path is rejected at load
+    /// time rather than silently turning into a never-
+    /// winning candidate via
+    /// [`crate::score::score_path`]'s defense-in-depth
+    /// guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdwanError::InvalidPolicy`] when:
+    ///
+    /// - `id` is empty (the path could not be referenced
+    ///   by [`crate::SteeringDecision::path_id`] or by
+    ///   the sticky-flow cache).
+    /// - `eligible_classes` is empty (the path would
+    ///   never appear in any candidate set).
+    /// - `static_bias` is `NaN` or infinite.
+    pub fn validate(&self) -> Result<(), SdwanError> {
+        if self.id.as_str().is_empty() {
+            return Err(SdwanError::InvalidPolicy(
+                "path id must not be empty".into(),
+            ));
+        }
+        if self.eligible_classes.is_empty() {
+            return Err(SdwanError::InvalidPolicy(format!(
+                "path {:?} declares no eligible_classes — it would never be selected",
+                self.id.as_str()
+            )));
+        }
+        if !self.static_bias.is_finite() {
+            return Err(SdwanError::InvalidPolicy(format!(
+                "path {:?} static_bias must be finite (got {})",
+                self.id.as_str(),
+                self.static_bias
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -198,12 +259,45 @@ impl StaticPathProvider {
     /// are not allowed — the last one wins, but the
     /// policy validator runs before this constructor so
     /// duplicates are rejected at bundle-load time.
+    ///
+    /// Does NOT call [`Path::validate`] — callers that
+    /// want value-domain validation (bundle adapters,
+    /// production wiring) should use
+    /// [`Self::try_from_paths`] instead. The infallible
+    /// constructor exists for tests/fixtures that
+    /// intentionally exercise edge-case paths.
     pub fn from_paths<I: IntoIterator<Item = Path>>(paths: I) -> Self {
         let mut by_id: HashMap<PathId, Arc<Path>> = HashMap::new();
         for p in paths {
             by_id.insert(p.id.clone(), Arc::new(p));
         }
         Self { by_id }
+    }
+
+    /// Validating constructor. Calls [`Path::validate`]
+    /// on every entry before installing the catalog and
+    /// rejects duplicate ids (a duplicate would silently
+    /// shadow the earlier entry).
+    ///
+    /// # Errors
+    ///
+    /// - [`SdwanError::InvalidPolicy`] when any path
+    ///   fails [`Path::validate`].
+    /// - [`SdwanError::InvalidPolicy`] when a duplicate
+    ///   path id is observed.
+    pub fn try_from_paths<I: IntoIterator<Item = Path>>(paths: I) -> Result<Self, SdwanError> {
+        let mut by_id: HashMap<PathId, Arc<Path>> = HashMap::new();
+        for p in paths {
+            p.validate()?;
+            if by_id.contains_key(&p.id) {
+                return Err(SdwanError::InvalidPolicy(format!(
+                    "duplicate path id {:?} in catalog",
+                    p.id.as_str()
+                )));
+            }
+            by_id.insert(p.id.clone(), Arc::new(p));
+        }
+        Ok(Self { by_id })
     }
 
     /// Empty catalog. Useful for unit tests that exercise
@@ -319,5 +413,90 @@ mod tests {
         // wrapper.
         let id = PathId::new("mpls-east");
         assert_eq!(format!("{id}"), "mpls-east");
+    }
+
+    #[test]
+    fn path_validate_accepts_well_formed_path() {
+        let p = Path::new("mpls", [TrafficClass::RealTime]).with_bias(1.5);
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn path_validate_rejects_empty_id() {
+        let p = Path::new("", [TrafficClass::Bulk]);
+        let err = p.validate().expect_err("empty id must be rejected");
+        assert!(matches!(err, SdwanError::InvalidPolicy(_)));
+        assert!(format!("{err}").contains("id must not be empty"));
+    }
+
+    #[test]
+    fn path_validate_rejects_empty_eligible_classes() {
+        // A path with no eligible classes would never
+        // appear in `candidates(class)` for any class,
+        // making it dead weight in the catalog. Bundle
+        // adapters should reject it at load time rather
+        // than ship an unreferenceable entry.
+        let p = Path::new("mpls", std::iter::empty());
+        let err = p.validate().expect_err("empty classes must be rejected");
+        assert!(matches!(err, SdwanError::InvalidPolicy(_)));
+        assert!(format!("{err}").contains("eligible_classes"));
+    }
+
+    #[test]
+    fn path_validate_rejects_nan_static_bias() {
+        let p = Path::new("mpls", [TrafficClass::Bulk]).with_bias(f32::NAN);
+        let err = p.validate().expect_err("nan bias must be rejected");
+        assert!(matches!(err, SdwanError::InvalidPolicy(_)));
+        assert!(format!("{err}").contains("static_bias"));
+    }
+
+    #[test]
+    fn path_validate_rejects_infinite_static_bias() {
+        let p = Path::new("mpls", [TrafficClass::Bulk]).with_bias(f32::INFINITY);
+        let err = p.validate().expect_err("inf bias must be rejected");
+        assert!(matches!(err, SdwanError::InvalidPolicy(_)));
+
+        let p = Path::new("mpls", [TrafficClass::Bulk]).with_bias(f32::NEG_INFINITY);
+        let err = p.validate().expect_err("-inf bias must be rejected");
+        assert!(matches!(err, SdwanError::InvalidPolicy(_)));
+    }
+
+    #[test]
+    fn try_from_paths_propagates_path_validation_errors() {
+        // A non-finite bias on one path must fail the
+        // whole catalog construction so the bundle
+        // adapter never installs a partly-valid catalog.
+        let err = StaticPathProvider::try_from_paths([
+            Path::new("ok", [TrafficClass::Bulk]),
+            Path::new("bad", [TrafficClass::Bulk]).with_bias(f32::NAN),
+        ])
+        .expect_err("bad bias must reject the catalog");
+        assert!(matches!(err, SdwanError::InvalidPolicy(_)));
+    }
+
+    #[test]
+    fn try_from_paths_rejects_duplicate_ids() {
+        let err = StaticPathProvider::try_from_paths([
+            Path::new("mpls", [TrafficClass::Bulk]),
+            Path::new("mpls", [TrafficClass::RealTime]),
+        ])
+        .expect_err("duplicate ids must reject the catalog");
+        assert!(matches!(err, SdwanError::InvalidPolicy(_)));
+        assert!(format!("{err}").contains("duplicate path id"));
+    }
+
+    #[test]
+    fn try_from_paths_accepts_valid_catalog() {
+        // Two well-formed paths with distinct ids must
+        // produce a working catalog identical to the
+        // infallible constructor.
+        let provider = StaticPathProvider::try_from_paths([
+            Path::new("mpls", [TrafficClass::RealTime]).with_bias(0.5),
+            Path::new("inet", [TrafficClass::BestEffort]).with_bias(-0.5),
+        ])
+        .expect("well-formed catalog must construct");
+        assert_eq!(provider.len(), 2);
+        assert!(provider.get(&PathId::new("mpls")).is_some());
+        assert!(provider.get(&PathId::new("inet")).is_some());
     }
 }
