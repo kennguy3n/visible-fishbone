@@ -97,14 +97,29 @@ impl UdpResolver {
             .await
             .map_err(|e| DnsError::Io(format!("udp connect {upstream}: {e}")))?;
         // Seed the TXID counter with the low 16 bits of the
-        // monotonic clock so two resolvers in the same process
-        // start from different points.
-        // Take the low 16 bits of the monotonic nanosecond
-        // counter — the cast IS intentional truncation; we only
-        // want the bottom of the nanosecond value to seed a TXID
-        // counter.
+        // wall-clock nanosecond counter so two resolvers in the
+        // same process start from different points. We
+        // deliberately use `SystemTime::now()` against the unix
+        // epoch (which IS guaranteed to vary call-to-call by the
+        // time the second resolver constructs) rather than
+        // `Instant::now().elapsed()` (which trivially returns ~0
+        // ns because the `Instant` is created on the previous
+        // expression and immediately interrogated). The TXID
+        // seed is not a security primitive — it only needs to
+        // de-correlate two resolver instances in the same
+        // process so an upstream cache implementation that
+        // tracks recent (src_port, TXID) tuples doesn't see
+        // identical sequences. The cast IS intentional
+        // truncation; we only want the bottom of the nanosecond
+        // value. If the system clock is unreadable (e.g. clock
+        // skew before NTP sync on a fresh boot), fall back to a
+        // fixed scramble so construction still succeeds; the
+        // resolver is functionally correct with any seed.
         #[allow(clippy::cast_possible_truncation)]
-        let seed = (std::time::Instant::now().elapsed().as_nanos() as u16).wrapping_add(0x9E37);
+        let wall_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0u16, |d| d.as_nanos() as u16);
+        let seed = wall_ns.wrapping_add(0x9E37);
         Ok(Self {
             upstream,
             deadline,
@@ -401,5 +416,54 @@ mod tests {
         let q = DnsQuery::new("example.com", QType::A);
         let err = decode_udp_response(&pkt, 0x1234, &q, "upstream").expect_err("must reject QR=0");
         assert!(matches!(err, DnsError::WireFormat(_)));
+    }
+
+    /// Pin the contract that two `UdpResolver` instances constructed
+    /// back-to-back in the same process produce different TXID
+    /// seeds. The previous implementation used
+    /// `Instant::now().elapsed()` which trivially returned ~0 ns
+    /// (every resolver got seed `0x9E37`); the current
+    /// implementation reads `SystemTime::now()` against the unix
+    /// epoch, which varies enough across constructions to seed a
+    /// distinct sequence.
+    #[tokio::test]
+    async fn udp_resolver_seeds_vary_across_constructions() {
+        // Build N resolvers in quick succession. The first TXID
+        // each emits is `(seed + step) & 0xFFFF` (where `step`
+        // is the LCG constant). If the seeds collide, the first
+        // TXIDs collide; if the seeds vary by at least one bit,
+        // the first TXIDs vary too. We need >=2 distinct TXIDs
+        // across 4 resolvers to pin the contract — a much
+        // weaker bar than "all distinct" (which would be flaky
+        // under nanosecond-clock granularity collisions on slow
+        // hosts) but strong enough to catch the original bug.
+        let upstream: SocketAddr = "127.0.0.1:0".parse().expect("parse");
+        // Bind a throwaway UDP listener so `socket.connect` has
+        // a routable target on every platform — Linux requires
+        // an actual address to be listening for the kernel
+        // not to immediately return ECONNREFUSED on the next
+        // sendto, but the test only constructs resolvers and
+        // never actually sends.
+        let listener = UdpSocket::bind("127.0.0.1:0").await.expect("bind listener");
+        let upstream = SocketAddr::new(upstream.ip(), listener.local_addr().expect("addr").port());
+        let mut first_txids = Vec::new();
+        for _ in 0..4 {
+            let r = UdpResolver::bind(upstream, Duration::from_millis(10))
+                .await
+                .expect("bind");
+            first_txids.push(r.next_txid());
+            // Sleep a microsecond between constructions so the
+            // SystemTime clock advances even on hosts where
+            // `SystemTime::now()` has microsecond granularity
+            // (Windows pre-1809; some embedded Linux configs).
+            tokio::time::sleep(Duration::from_micros(1)).await;
+        }
+        let mut uniq = first_txids.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert!(
+            uniq.len() >= 2,
+            "expected >=2 distinct first-TXIDs across 4 UdpResolver constructions; got {first_txids:?}"
+        );
     }
 }
