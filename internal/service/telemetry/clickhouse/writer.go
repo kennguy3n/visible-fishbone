@@ -214,6 +214,35 @@ type Writer struct {
 	// the operator sees in Stats / dashboards; the slog.Warn at
 	// the drop site carries the per-row context (event id,
 	// tenant id, traffic class, error) for forensic root-cause.
+	//
+	// Alerting contract — IMPORTANT:
+	//
+	// Operators who previously alerted on `ConsecutiveErrors > N`
+	// to detect bad-row scenarios will no longer fire on a partial
+	// flush (a few bad rows mixed with good ones), because Send()
+	// still succeeded and consecutiveErrors resets to 0 on a
+	// partially-successful flush. The replacement signal is
+	// `rate(DroppedRows[5m]) > threshold` — point alerting at this
+	// counter to catch upstream producers emitting malformed
+	// envelopes. ConsecutiveErrors retains its original meaning:
+	// "the writer is wedged (all-Append-rejected, Send-failed, or
+	// transport-down)" — a different operational condition.
+	//
+	// Counting model — what is and isn't accounted in DroppedRows:
+	//
+	//   - Append-rejected row: increments DroppedRows.
+	//   - All-rows-rejected batch (no Send): increments DroppedRows
+	//     by the batch size, increments flushErrors, increments
+	//     consecutiveErrors.
+	//   - Partial-Append-then-Send-failure: increments DroppedRows
+	//     by ONLY the Append-rejected count (the
+	//     successfully-Appended-but-not-Sent rows are accounted for
+	//     by flushErrors / consecutiveErrors, NOT by DroppedRows).
+	//     Append rejections and network failures are distinct
+	//     failure modes; conflating them into a single counter
+	//     would hide the producer-side vs control-plane-side
+	//     attribution that dashboards rely on. The S3 cold archive
+	//     remains the durable record of truth for both classes.
 	droppedRows uint64
 }
 
@@ -298,6 +327,21 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Writer, error) 
 // applies. When the Writer was built through New() (the only
 // supported construction path), validated is set and we skip the
 // redundant re-validation.
+//
+// Database vs. Table asymmetry — DELIBERATE:
+//
+// Only Config.Table is re-validated here, not Config.Database.
+// Config.Database is never interpolated into a SQL string in this
+// package; it is passed exclusively to the clickhouse-go driver
+// via the clickhouse.Auth.Database field (see New() above), which
+// uses it as a connection-protocol parameter rather than as a
+// query token. There is therefore no identifier-injection surface
+// associated with Config.Database for qualifiedTable to defend.
+// New() still runs validate() on both Database and Table for
+// defence-in-depth at the connection boundary; if a future change
+// ever interpolates Database into a SQL string (e.g. a fully
+// database-qualified table reference in DDL), this function must
+// gain a matching re-validation branch.
 func (w *Writer) qualifiedTable() (string, error) {
 	if !w.validated {
 		if err := validateIdentifier("Config.Table", w.cfg.Table); err != nil {
