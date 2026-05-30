@@ -477,7 +477,15 @@ fn render_script(
     // NAT-present to NAT-empty actually tears down the
     // previous `inet sng_nat` table in the kernel instead of
     // leaving its prerouting / postrouting chains live.
-    out.push_str(&nat.render_nft());
+    // Propagate `NatTable::render_nft`'s `Result` via `?` so an
+    // internal invariant violation on the NAT side (e.g. a
+    // family-agnostic slot receiving CIDR predicates) fails the
+    // bundle install cleanly with `FirewallError::BundleInvalid`,
+    // mirroring `render_single_rule`'s behaviour on the filter
+    // side (commit 9502c24). The engine then keeps the previous
+    // bundle live instead of unwinding the manager task on a
+    // release-build panic.
+    out.push_str(&nat.render_nft()?);
     Ok(NftablesScript::new(out.into_bytes()))
 }
 

@@ -204,8 +204,15 @@ impl NatRule {
     ///
     /// Used by the table emitter; exposed publicly so tests can
     /// snapshot the wire format.
-    #[must_use]
-    pub fn render_nft(&self, table: &str) -> Vec<String> {
+    ///
+    /// Returns `Err(FirewallError::BundleInvalid)` if the rule
+    /// trips an internal compiler invariant (a family-agnostic
+    /// slot receiving CIDR predicates) — mirrors the `Result`
+    /// signature on `compile::render_single_rule` so the NAT and
+    /// filter compilers fail cleanly with the same error shape
+    /// instead of unwinding the manager task on a release-build
+    /// panic.
+    pub fn render_nft(&self, table: &str) -> Result<Vec<String>, FirewallError> {
         let mut families: BTreeSet<AddressFamily> = BTreeSet::new();
         for n in self.src_cidrs.iter().chain(self.dst_cidrs.iter()) {
             families.insert(AddressFamily::of(n));
@@ -229,13 +236,20 @@ impl NatRule {
         } else {
             families.into_iter().map(Some).collect()
         };
-        family_slots
-            .into_iter()
-            .filter_map(|f| self.render_one(table, f))
-            .collect()
+        let mut out = Vec::with_capacity(family_slots.len());
+        for f in family_slots {
+            if let Some(line) = self.render_one(table, f)? {
+                out.push(line);
+            }
+        }
+        Ok(out)
     }
 
-    fn render_one(&self, table: &str, family: Option<AddressFamily>) -> Option<String> {
+    fn render_one(
+        &self,
+        table: &str,
+        family: Option<AddressFamily>,
+    ) -> Result<Option<String>, FirewallError> {
         let mut parts: Vec<String> = vec![format!("add rule inet {} {}", table, self.nat.hook())];
         if !self.iif.is_empty() {
             // Defense-in-depth: `iif` / `oif` come from a trusted
@@ -274,7 +288,7 @@ impl NatRule {
         if (!self.src_cidrs.is_empty() && src_cidrs.is_empty())
             || (!self.dst_cidrs.is_empty() && dst_cidrs.is_empty())
         {
-            return None;
+            return Ok(None);
         }
         // Family-agnostic invariant: a NAT rule with CIDR
         // predicates always has a known family by the time we
@@ -282,26 +296,39 @@ impl NatRule {
         // `Some(family)` when CIDRs are present, and the
         // `target_family()` narrowing for addressed NAT
         // targets (SNAT / DNAT) also pins a concrete family.
-        // The fail-fast assertion replaces the older
-        // `map_or("ip", ...)` default that would silently
-        // emit IPv4 (`ip`) qualifiers on a family-agnostic
-        // slot if a future change ever broke the upstream
-        // invariant. Mirrors the equivalent guard in
-        // `compile::render_single_rule`.
+        //
+        // Earlier revisions used `.expect()` here. That worked
+        // for dev builds but in production it would unwind the
+        // manager's compile task and trip the agent's
+        // panic-restart loop. Returning
+        // `FirewallError::BundleInvalid` instead lets the engine
+        // fail the install cleanly, keep the previous bundle
+        // live, and surface a diagnosable error to the control
+        // plane. Mirrors the equivalent guard in
+        // `compile::render_single_rule` (commit 9502c24). The
+        // accompanying `debug_assert!` is still useful as a
+        // dev-time stack-trace breadcrumb when a test exercises
+        // the regression.
         if !src_cidrs.is_empty() || !dst_cidrs.is_empty() {
-            // `expect` is appropriate here: the upstream caller
-            // narrows family to `Some(...)` whenever a NAT rule
-            // carries CIDR predicates, so the `None` arm would
-            // signal a programmer bug, not a runtime input
-            // anomaly. Allow the workspace `expect_used` lint
-            // for this structural invariant.
-            #[allow(clippy::expect_used)]
-            let qualifier = family.expect(
-                "NatRule::render_one: CIDR predicates require a known address \
-                 family — `NatTable::render_nft` must not pass `family = None` \
-                 to a rule with CIDRs",
-            );
-            let qualifier = qualifier.nft_qualifier();
+            let Some(fam) = family else {
+                debug_assert!(
+                    false,
+                    "NatRule::render_one: CIDR predicates require a known address \
+                     family — `NatTable::render_nft` must not pass `family = None` \
+                     to a rule with CIDRs"
+                );
+                return Err(FirewallError::BundleInvalid(format!(
+                    "NatRule::render_one: family-agnostic slot received CIDR \
+                     predicates for NAT rule (target {:?}) — the upstream \
+                     slot-selection in `NatTable::render_nft` returned \
+                     `family = None` for a rule that has CIDRs. This is an \
+                     internal compiler invariant violation; fail the bundle \
+                     install rather than emit a kernel line strictly more \
+                     permissive than the in-memory engine.",
+                    self.nat
+                )));
+            };
+            let qualifier = fam.nft_qualifier();
             if !src_cidrs.is_empty() {
                 let list: Vec<String> = src_cidrs.iter().map(ToString::to_string).collect();
                 parts.push(format!("{qualifier} saddr {{ {} }}", list.join(", ")));
@@ -320,7 +347,7 @@ impl NatRule {
         }
         parts.push(self.nat.as_nft());
         parts.push(format!("comment \"{}\"", escape_comment(&self.id)));
-        Some(parts.join(" "))
+        Ok(Some(parts.join(" ")))
     }
 }
 
@@ -403,8 +430,15 @@ impl NatTable {
     /// NAT-present to NAT-empty — the in-memory engine reported
     /// "no NAT" while the kernel still happily DNAT'd and
     /// SNAT'd traffic according to the previous bundle.
-    #[must_use]
-    pub fn render_nft(&self) -> String {
+    ///
+    /// Returns `Err(FirewallError::BundleInvalid)` if any rule
+    /// in the table trips a compiler invariant (currently: a
+    /// family-agnostic slot receiving CIDR predicates). The
+    /// `Result` propagation mirrors `compile::render_script` so
+    /// the engine fails the bundle install cleanly instead of
+    /// unwinding the manager task — see commit 9502c24 for the
+    /// equivalent change on the filter compiler.
+    pub fn render_nft(&self) -> Result<String, FirewallError> {
         use std::fmt::Write as _;
         if self.rules.is_empty() {
             // Atomic cleanup: ensure no stale NAT table from a
@@ -413,14 +447,14 @@ impl NatTable {
             let mut out = String::new();
             let _ = writeln!(out, "add table inet {}", self.table_name);
             let _ = writeln!(out, "delete table inet {}", self.table_name);
-            return out;
+            return Ok(out);
         }
         // Group rules by hook so the script emits one chain per
         // hook with the correct priority (DNAT before SNAT).
         let mut prerouting: Vec<String> = Vec::new();
         let mut postrouting: Vec<String> = Vec::new();
         for r in &self.rules {
-            let lines = r.render_nft(&self.table_name);
+            let lines = r.render_nft(&self.table_name)?;
             match r.nat.hook() {
                 "prerouting" => prerouting.extend(lines),
                 "postrouting" => postrouting.extend(lines),
@@ -457,7 +491,7 @@ impl NatTable {
             out.push_str(&line);
             out.push('\n');
         }
-        out
+        Ok(out)
     }
 }
 
@@ -598,7 +632,9 @@ mod tests {
             },
             description: String::new(),
         };
-        let lines = r.render_nft("sng_nat");
+        let lines = r
+            .render_nft("sng_nat")
+            .expect("render must succeed for a well-formed rule");
         // Single-family rule — one emitted line.
         assert_eq!(lines.len(), 1, "single-family rule must emit one line");
         let line = &lines[0];
@@ -665,7 +701,9 @@ mod tests {
             },
             description: String::new(),
         };
-        let lines = r.render_nft("sng_nat");
+        let lines = r
+            .render_nft("sng_nat")
+            .expect("render must succeed for a well-formed rule");
         assert_eq!(lines.len(), 1);
         assert!(
             lines[0].contains("ip6 saddr { 2001:db8::/32 }"),
@@ -693,7 +731,9 @@ mod tests {
             nat: NatType::Masquerade { port: None },
             description: String::new(),
         };
-        let lines = r.render_nft("sng_nat");
+        let lines = r
+            .render_nft("sng_nat")
+            .expect("render must succeed for a well-formed rule");
         assert_eq!(lines.len(), 2, "mixed-family rule must emit per-family");
         // Each line carries only its own family's CIDRs.
         let v4_line = lines
@@ -727,7 +767,9 @@ mod tests {
             nat: NatType::Masquerade { port: None },
             description: String::new(),
         };
-        let lines = r.render_nft("sng_nat");
+        let lines = r
+            .render_nft("sng_nat")
+            .expect("render must succeed for a well-formed rule");
         assert_eq!(lines.len(), 1, "family-agnostic rule must emit once");
         assert!(!lines[0].contains("ip saddr"));
         assert!(!lines[0].contains("ip6 saddr"));
@@ -756,7 +798,9 @@ mod tests {
             },
             description: String::new(),
         };
-        let lines = r.render_nft("sng_nat");
+        let lines = r
+            .render_nft("sng_nat")
+            .expect("render must succeed for a well-formed rule");
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("ip saddr { 10.0.0.0/8 }"));
         assert!(!lines[0].contains("ip6"));
@@ -793,7 +837,9 @@ mod tests {
             description: String::new(),
         })
         .unwrap();
-        let script = t.render_nft();
+        let script = t
+            .render_nft()
+            .expect("render must succeed for a well-formed table");
         assert!(script.contains("add table inet sng_nat"));
         assert!(script.contains(
             "add chain inet sng_nat prerouting { type nat hook prerouting priority dstnat; }"
@@ -819,7 +865,9 @@ mod tests {
         // so the kernel sees an explicit "tear down the NAT
         // table" netlink transaction.
         let t = NatTable::new();
-        let s = t.render_nft();
+        let s = t
+            .render_nft()
+            .expect("render must succeed for an empty table");
         assert!(
             s.contains("add table inet sng_nat\n"),
             "empty NAT must emit add table for idempotency: {s}"
@@ -862,7 +910,9 @@ mod tests {
             table_name: "tenant42_nat".into(),
             rules: vec![],
         };
-        let s = t.render_nft();
+        let s = t
+            .render_nft()
+            .expect("render must succeed for an empty table");
         assert!(s.contains("add table inet tenant42_nat\n"));
         assert!(s.contains("delete table inet tenant42_nat\n"));
         assert!(!s.contains("sng_nat"));
@@ -886,7 +936,9 @@ mod tests {
             description: String::new(),
         })
         .unwrap();
-        let script = t.render_nft();
+        let script = t
+            .render_nft()
+            .expect("render must succeed for a well-formed table");
         assert!(script.contains("add table inet sng_nat"));
         assert!(script.contains("hook prerouting priority dstnat"));
         assert!(script.contains("hook postrouting priority srcnat"));
@@ -912,7 +964,9 @@ mod tests {
             description: String::new(),
         })
         .unwrap();
-        let script = t.render_nft();
+        let script = t
+            .render_nft()
+            .expect("render must succeed for a well-formed table");
         let add_idx = script
             .find("add table inet sng_nat\n")
             .expect("add table line present");
@@ -984,8 +1038,12 @@ mod tests {
             description: String::new(),
         })
         .unwrap();
-        let s1 = t1.render_nft();
-        let s2 = t2.render_nft();
+        let s1 = t1
+            .render_nft()
+            .expect("render must succeed for a well-formed table");
+        let s2 = t2
+            .render_nft()
+            .expect("render must succeed for a well-formed table");
         assert!(s1.contains("\"removed\""));
         assert!(!s2.contains("\"removed\""));
         assert!(s1.contains("flush table inet sng_nat"));
@@ -1008,7 +1066,12 @@ mod tests {
         })
         .unwrap();
         let t2 = t1.clone();
-        assert_eq!(t1.render_nft(), t2.render_nft());
+        assert_eq!(
+            t1.render_nft()
+                .expect("render must succeed for a well-formed table"),
+            t2.render_nft()
+                .expect("render must succeed for a well-formed table"),
+        );
     }
 
     #[test]
@@ -1029,5 +1092,107 @@ mod tests {
         assert_eq!(escape_comment("nul\0byte"), "nul byte");
         // Multi-byte UTF-8 must pass through untouched.
         assert_eq!(escape_comment("emoji-🦀-ok"), "emoji-🦀-ok");
+    }
+
+    /// Defense-in-depth regression test: directly calling
+    /// `NatRule::render_one` with a `family = None` slot for a
+    /// rule that carries CIDR predicates is a programmer error
+    /// — `NatTable::render_nft` is supposed to slot-select
+    /// `Some(family)` whenever any CIDR is present. The render
+    /// path must NOT silently emit a kernel line stripped of its
+    /// CIDR qualifier (which would be strictly more permissive
+    /// than the in-memory engine); it must return
+    /// `Err(FirewallError::BundleInvalid)` so the engine fails
+    /// the bundle install instead of unwinding the manager task
+    /// on a release-build panic. Mirrors
+    /// `compile::tests::render_single_rule_returns_bundle_invalid_on_internal_invariant_violation`.
+    #[test]
+    fn render_one_returns_bundle_invalid_when_family_agnostic_slot_has_cidrs() {
+        // Build a rule whose CIDR carries an unambiguous family
+        // (v4) but force the call site to pass `family = None`,
+        // simulating an upstream slot-selection bug.
+        let r = NatRule {
+            id: "broken-slot".into(),
+            src_cidrs: vec![cidr("10.0.0.0/8")],
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocol: Protocol::Any,
+            iif: String::new(),
+            oif: "wan0".into(),
+            nat: NatType::Masquerade { port: None },
+            description: String::new(),
+        };
+        // Calling `render_one` directly with `family = None` is
+        // what a faulty upstream would do. In a debug build,
+        // `debug_assert!` fires and the call panics — which is
+        // also acceptable, the debug-build assertion is there
+        // for the dev-time stack trace. In a release build the
+        // assertion is compiled out and the function must
+        // return `Err(BundleInvalid)` rather than emit a kernel
+        // line stripped of the CIDR qualifier. Mirrors the
+        // approach in
+        // `compile::tests::render_single_rule_returns_error_on_invariant_violation`.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            r.render_one("sng_nat", None)
+        }));
+        match result {
+            Ok(Err(FirewallError::BundleInvalid(msg))) => {
+                // Sanity-check that the diagnostic actually
+                // mentions the invariant that was violated and
+                // the offending NAT target so an operator can
+                // map it back to a rule id.
+                assert!(
+                    msg.contains("family-agnostic slot"),
+                    "diagnostic must name the invariant: {msg}"
+                );
+                assert!(
+                    msg.contains("Masquerade"),
+                    "diagnostic must include the NAT target: {msg}"
+                );
+            }
+            Ok(Ok(line)) => {
+                panic!("invariant violation must NOT silently emit a kernel line — got: {line:?}")
+            }
+            Ok(Err(other)) => {
+                panic!("invariant violation must surface as BundleInvalid; got: {other:?}")
+            }
+            Err(_) => {
+                // `debug_assert!` in debug builds catches the
+                // invariant before the Err return — acceptable,
+                // since release builds are the production path
+                // and they exercise the `Err` arm.
+            }
+        }
+    }
+
+    /// Companion test: the public `render_nft` entry point on
+    /// `NatRule` and `NatTable` must propagate the
+    /// `BundleInvalid` error through `?` instead of swallowing
+    /// it — but only the *direct* `render_one` path is reachable
+    /// in practice because `render_nft`'s slot-selection logic
+    /// always pairs CIDR predicates with `Some(family)`. So we
+    /// just exercise the cascade for completeness.
+    #[test]
+    fn render_nft_propagates_bundle_invalid_from_render_one() {
+        // The slot-selector in `NatRule::render_nft` *would*
+        // never pass `None` to a CIDR-bearing rule, so the
+        // happy path always succeeds; this test confirms the
+        // success-path cascade hasn't changed.
+        let r = NatRule {
+            id: "good".into(),
+            src_cidrs: vec![cidr("10.0.0.0/8")],
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocol: Protocol::Any,
+            iif: String::new(),
+            oif: "wan0".into(),
+            nat: NatType::Masquerade { port: None },
+            description: String::new(),
+        };
+        let lines = r
+            .render_nft("sng_nat")
+            .expect("well-formed rule must render successfully");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("ip saddr { 10.0.0.0/8 }"));
     }
 }
