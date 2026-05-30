@@ -138,8 +138,17 @@ impl ConntrackTracker {
                 if matches!(state, ConntrackState::Closed | ConntrackState::Invalid) {
                     return ConntrackState::Invalid;
                 }
-                // NEW -> ESTABLISHED on the first reply packet.
-                if matches!(state, ConntrackState::New) && direction == FlowDirection::Reply {
+                // NEW / RELATED -> ESTABLISHED on the first
+                // reply packet. The kernel promotes RELATED
+                // child flows (FTP data, ICMP errors) to
+                // ESTABLISHED once their reverse direction is
+                // observed; mirroring that here keeps the
+                // engine's view consistent so a rule that
+                // matches `ct state established` will hit a
+                // long-lived child flow on follow-up packets.
+                if matches!(state, ConntrackState::New | ConntrackState::Related)
+                    && direction == FlowDirection::Reply
+                {
                     *state = ConntrackState::Established;
                 }
                 *state
@@ -222,6 +231,31 @@ mod tests {
         t.declare_related("ftp-control", "ftp-data");
         let s = t.observe("ftp-data", FlowDirection::Original);
         assert_eq!(s, ConntrackState::Related);
+    }
+
+    #[test]
+    fn tracker_related_child_promotes_to_established_on_reply() {
+        // Linux conntrack promotes a RELATED child flow to
+        // ESTABLISHED once its reverse direction is observed —
+        // e.g. an FTP data channel transitions to ESTABLISHED
+        // as soon as the server's first segment is acked. The
+        // engine has to mirror that so a rule matching
+        // `ct state established` will hit follow-up packets on
+        // the same long-lived child.
+        let mut t = ConntrackTracker::new();
+        t.observe("ftp-control", FlowDirection::Original);
+        t.declare_related("ftp-control", "ftp-data");
+        // First child packet: RELATED.
+        let s0 = t.observe("ftp-data", FlowDirection::Original);
+        assert_eq!(s0, ConntrackState::Related);
+        // First reply on the child: promote to ESTABLISHED.
+        let s1 = t.observe("ftp-data", FlowDirection::Reply);
+        assert_eq!(s1, ConntrackState::Established);
+        // Subsequent traffic stays ESTABLISHED, both directions.
+        let s2 = t.observe("ftp-data", FlowDirection::Original);
+        assert_eq!(s2, ConntrackState::Established);
+        let s3 = t.observe("ftp-data", FlowDirection::Reply);
+        assert_eq!(s3, ConntrackState::Established);
     }
 
     #[test]

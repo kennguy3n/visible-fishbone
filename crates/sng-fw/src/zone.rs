@@ -112,6 +112,20 @@ impl Zone {
                 "zone name must not be empty".into(),
             ));
         }
+        // A zone with no networks would silently degrade in the
+        // compiler: `has_family` returns false for both V4 and
+        // V6, so `rule_address_families` collapses the rule into
+        // a family-agnostic slot — but the slot still references
+        // `zone_<name>` / `zone6_<name>` sets that are never
+        // emitted. Reject empty zones at the source so the
+        // compiler can rely on `has_family` actually meaning
+        // "the zone has CIDRs of this family".
+        if self.networks.is_empty() {
+            return Err(FirewallError::RuleInvalid(format!(
+                "zone {} must contain at least one network",
+                self.name,
+            )));
+        }
         Ok(())
     }
 }
@@ -497,6 +511,30 @@ mod tests {
             description: String::new(),
         });
         assert!(matches!(e, Err(FirewallError::RuleInvalid(_))));
+    }
+
+    #[test]
+    fn add_zone_rejects_empty_networks() {
+        // A zone with no networks would make `has_family` lie:
+        // it would report neither V4 nor V6, which collapses
+        // every rule that references the zone into a
+        // family-agnostic slot — and the compiler would then
+        // emit `@zone_<name>` references against a set it
+        // never created. Reject at the source.
+        let mut t = ZoneTable::new();
+        let e = t.add_zone(Zone {
+            name: "lan".into(),
+            networks: vec![],
+            description: String::new(),
+        });
+        let err = e.unwrap_err();
+        match err {
+            FirewallError::RuleInvalid(msg) => {
+                assert!(msg.contains("lan"), "{msg}");
+                assert!(msg.contains("network"), "{msg}");
+            }
+            other => panic!("expected RuleInvalid, got {other:?}"),
+        }
     }
 
     #[test]

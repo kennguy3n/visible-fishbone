@@ -289,7 +289,18 @@ impl NatRule {
 }
 
 fn escape_comment(s: &str) -> String {
-    s.replace('"', "'").replace('\\', "/")
+    // Mirror `compile::sanitize_comment`: strip newlines /
+    // carriage returns / other control characters so a
+    // crafted rule id can't split the `add rule ...` line and
+    // confuse `nft -f`.
+    s.chars()
+        .map(|c| match c {
+            '"' => '\'',
+            '\\' => '/',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect()
 }
 
 /// Compiled NAT table — the rule list plus the table name they
@@ -748,5 +759,18 @@ mod tests {
         assert_eq!(escape_comment("plain"), "plain");
         assert_eq!(escape_comment(r#"with"quotes"#), "with'quotes");
         assert_eq!(escape_comment(r"with\backslash"), "with/backslash");
+    }
+
+    #[test]
+    fn comment_escape_strips_newlines_and_control_chars() {
+        // Newlines would split the `add rule ...` line across
+        // multiple physical lines and break `nft -f`.
+        assert_eq!(escape_comment("line1\nline2"), "line1 line2");
+        assert_eq!(escape_comment("line1\r\nline2"), "line1  line2");
+        // Other control characters get the same treatment.
+        assert_eq!(escape_comment("tab\there"), "tab here");
+        assert_eq!(escape_comment("nul\0byte"), "nul byte");
+        // Multi-byte UTF-8 must pass through untouched.
+        assert_eq!(escape_comment("emoji-🦀-ok"), "emoji-🦀-ok");
     }
 }

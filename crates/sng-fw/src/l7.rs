@@ -252,14 +252,21 @@ impl SignatureScanner {
             return false;
         }
         // Header is 12 bytes: id, flags (2), qd/an/ns/ar counts.
-        // Validate Z bits are zero and the opcode is one of the
-        // assigned values.
+        // Validate the (still-reserved) Z bit is zero and the
+        // opcode is one of the assigned values.
         let flags = u16::from_be_bytes([payload[2], payload[3]]);
         let opcode = (flags >> 11) & 0x0F;
-        let z_bits = (flags >> 4) & 0x07;
+        // RFC 1035 §4.1.1 originally defined Z as a 3-bit
+        // reserved field (bits 6–4 of the low byte). RFC 2535 /
+        // RFC 4035 reallocated two of those bits as AD
+        // (Authenticated Data) and CD (Checking Disabled) for
+        // DNSSEC, leaving a single reserved bit at position 6.
+        // Rejecting traffic where AD or CD is set would block
+        // legitimate DNSSEC resolvers, so we only enforce that
+        // the lone remaining reserved bit is zero.
+        let z_reserved = (flags >> 6) & 0x01;
         let qdcount = u16::from_be_bytes([payload[4], payload[5]]);
-        // RFC 1035 §4.1.1 reserved Z bits MUST be zero.
-        if z_bits != 0 {
+        if z_reserved != 0 {
             return false;
         }
         // Opcodes 0 (QUERY), 1 (IQUERY), 2 (STATUS), 4 (NOTIFY),
@@ -718,6 +725,39 @@ mod tests {
             0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
         assert_eq!(id.identify(&p), L7Protocol::Dns);
+    }
+
+    #[test]
+    fn identify_recognises_dnssec_query_with_ad_and_cd_flags() {
+        // Resolvers that speak DNSSEC set AD (bit 5 of the low
+        // byte) on responses they authenticated, and CD (bit 4)
+        // on outbound queries to disable downstream validation.
+        // Both must be accepted as DNS.
+        let id = AppIdentifier::new();
+        // flags = 0x0130: RD=1 (bit 8) | AD=1 (bit 5) | CD=1 (bit 4)
+        let ad_and_cd = [
+            0x12, 0x34, 0x01, 0x30, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(id.identify(&ad_and_cd), L7Protocol::Dns);
+        // Just AD, simulating a validated response.
+        // flags = 0x8120: QR=1 | RD=1 | AD=1
+        let just_ad = [
+            0x12, 0x34, 0x81, 0x20, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(id.identify(&just_ad), L7Protocol::Dns);
+    }
+
+    #[test]
+    fn identify_rejects_dns_with_reserved_z_bit_set() {
+        // The single reserved Z bit at position 6 of the low byte
+        // must still be zero per RFC 4035; anything else looks
+        // malformed.
+        let id = AppIdentifier::new();
+        // flags = 0x0140: RD=1 | Z=1 (bit 6 of low byte)
+        let z_set = [
+            0x12, 0x34, 0x01, 0x40, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(id.identify(&z_set), L7Protocol::Unknown);
     }
 
     #[test]

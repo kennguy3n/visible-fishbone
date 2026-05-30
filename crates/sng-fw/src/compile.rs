@@ -373,8 +373,14 @@ fn render_script(
     }
 
     // NAT table appended after the filter table — kernel
-    // commits both transactionally.
-    out.push_str(&nat.render_nft());
+    // commits both transactionally. Skip entirely when the
+    // bundle has no NAT rules so we don't install an empty
+    // `inet sng_nat` table (which would still create
+    // prerouting / postrouting chains the kernel would have to
+    // traverse on every packet).
+    if !nat.rules.is_empty() {
+        out.push_str(&nat.render_nft());
+    }
     NftablesScript::new(out.into_bytes())
 }
 
@@ -598,7 +604,22 @@ fn sanitize_set_name(name: &str) -> String {
 }
 
 fn sanitize_comment(s: &str) -> String {
-    s.replace('"', "'").replace('\\', "/")
+    // Quotes / backslashes would terminate the comment string
+    // early and break the `nft -f` parse; newlines / carriage
+    // returns / other control characters would split the
+    // `add rule ...` line across multiple lines and the kernel
+    // would reject the script with a confusing syntax error.
+    // Rule IDs come from a trusted policy bundle, but the engine
+    // applies defense-in-depth here so a bad input is mapped to
+    // a harmless space rather than a parse failure.
+    s.chars()
+        .map(|c| match c {
+            '"' => '\'',
+            '\\' => '/',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -894,6 +915,66 @@ mod tests {
         let s = out.script.as_str().unwrap();
         assert!(s.contains("add table inet sng_nat"));
         assert!(s.contains("masquerade"));
+    }
+
+    #[test]
+    fn compile_skips_nat_table_when_no_nat_rules() {
+        // The kernel still has to traverse every chain we
+        // declare even if it's empty. Don't emit `add table inet
+        // sng_nat` / prerouting / postrouting at all when the
+        // bundle has no NAT rules.
+        let bundle = make_bundle_with_rules(&[]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        let s = out.script.as_str().unwrap();
+        assert!(!s.contains("add table inet sng_nat"), "{s}");
+        assert!(!s.contains("hook prerouting priority dstnat"), "{s}");
+        assert!(!s.contains("hook postrouting priority srcnat"), "{s}");
+    }
+
+    #[test]
+    fn sanitize_comment_strips_newlines_and_control_chars() {
+        // Quotes / backslashes stay normalised the way they
+        // always have been.
+        assert_eq!(sanitize_comment("plain"), "plain");
+        assert_eq!(sanitize_comment(r#"with"quotes"#), "with'quotes");
+        assert_eq!(sanitize_comment(r"with\backslash"), "with/backslash");
+        // Newlines + carriage returns + tabs + NUL collapse to a
+        // single space each — a crafted rule id can't split the
+        // emitted `add rule ...` line across multiple lines.
+        assert_eq!(sanitize_comment("a\nb"), "a b");
+        assert_eq!(sanitize_comment("a\r\nb"), "a  b");
+        assert_eq!(sanitize_comment("a\tb"), "a b");
+        assert_eq!(sanitize_comment("a\0b"), "a b");
+        // Multi-byte UTF-8 must pass through unchanged.
+        assert_eq!(sanitize_comment("emoji-🦀"), "emoji-🦀");
+    }
+
+    #[test]
+    fn render_rule_sanitises_newline_in_rule_id() {
+        // End-to-end: feed a rule whose `id` contains a newline
+        // through `render_rule` and assert the emitted line is
+        // single-line. Without sanitisation this would split
+        // into two physical lines and `nft -f` would reject it.
+        let zones = ZoneTable::new();
+        let r = rule_with_zones(
+            "evil\nrule",
+            &[],
+            &[],
+            RuleAction::Allow,
+            RuleMatch::default(),
+        );
+        let out = render_rule(&r, &zones);
+        // `render_rule` always ends each emitted rule with a
+        // single trailing newline; the body itself must contain
+        // none.
+        let trimmed = out.trim_end_matches('\n');
+        assert!(
+            !trimmed.contains('\n'),
+            "rule body contains embedded newline: {out:?}"
+        );
+        assert!(out.contains(r#"comment "evil rule""#), "{out}");
     }
 
     #[test]
