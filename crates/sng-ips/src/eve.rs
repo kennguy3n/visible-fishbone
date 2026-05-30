@@ -564,7 +564,16 @@ impl EveAlert {
             rule_id: self.alert.signature_id.to_string(),
             signature: self.alert.signature.clone(),
             severity: severity_label(self.alert.severity).into(),
-            action: self.alert.action.clone(),
+            // Normalise the Suricata action vocabulary
+            // (`allowed`/`blocked`/`drop`/`pass`/`reject`) into the
+            // four labels `sng_core::events::IpsEvent::action`
+            // documents (`alert`/`block`/`drop`/`reset`). Without
+            // normalisation, downstream filters that match on the
+            // documented values (e.g. Go control-plane dashboards
+            // querying `action == "block"`) would silently miss
+            // every Suricata-origin alert, since Suricata emits
+            // `"blocked"` (past tense) for the same outcome.
+            action: normalise_suricata_action(&self.alert.action).into(),
             src_ip: self
                 .tuple
                 .src_ip
@@ -592,6 +601,36 @@ pub fn severity_label(severity: u8) -> &'static str {
         3 => "medium",
         4 => "low",
         _ => "info",
+    }
+}
+
+/// Translate Suricata's runtime action vocabulary into the four
+/// labels [`sng_core::events::IpsEvent::action`] documents. The
+/// mapping pins what Suricata actually emits in EVE today:
+///
+/// | Suricata EVE `alert.action` | `IpsEvent::action` | Meaning |
+/// |-----------------------------|--------------------|---------|
+/// | `"allowed"`                 | `"alert"`          | Rule matched in IDS mode (or in IPS mode with an `alert` action); the packet was let through and an alert was raised. |
+/// | `"blocked"`                 | `"block"`          | Rule matched with a `drop` action *and* Suricata is in inline mode, so the drop was enforced on the wire. |
+/// | `"drop"`                    | `"drop"`           | Rule matched with a `drop` action but the engine is in IDS mode and cannot drop — emitted for visibility as the operator's "would have dropped if inline" signal. |
+/// | `"pass"`                    | `"alert"`          | Rule matched a `pass` (allow-list) signature; surfaced as an alert so the dashboard records the allow-listing without claiming a drop occurred. |
+/// | `"reject"`                  | `"reset"`          | Rule matched a `reject` action and Suricata sent a TCP RST / ICMP unreachable. |
+///
+/// Any value the parser has not seen before is passed through
+/// verbatim so an unforeseen Suricata release surfaces as a
+/// distinct, traceable action label rather than silently
+/// collapsing into one of the four documented buckets. The
+/// downstream filter will then "miss" the event, but the
+/// dashboard will at least surface the unknown label — a
+/// strictly better failure mode than a silent map-to-default.
+#[must_use]
+pub fn normalise_suricata_action(action: &str) -> &str {
+    match action {
+        "allowed" | "pass" => "alert",
+        "blocked" => "block",
+        "drop" => "drop",
+        "reject" => "reset",
+        other => other,
     }
 }
 
@@ -800,10 +839,33 @@ mod tests {
         assert_eq!(ev.rule_id, "2001234");
         assert_eq!(ev.signature, "ET MALWARE Suspicious User-Agent");
         assert_eq!(ev.severity, "critical");
-        assert_eq!(ev.action, "blocked");
+        // Suricata emits `"blocked"` (past tense) but the SNG
+        // event schema documents `"block"`. The translation must
+        // hit that contract so downstream filters that match on
+        // the documented value find the alert.
+        assert_eq!(ev.action, "block");
         assert_eq!(ev.src_ip, "10.0.0.5");
         assert_eq!(ev.dst_ip, "203.0.113.10");
         assert_eq!(ev.protocol, "tcp");
+    }
+
+    #[test]
+    fn normalise_suricata_action_maps_every_suricata_vocabulary_value() {
+        // Pins the contract between Suricata's runtime action
+        // labels and the four `IpsEvent::action` values
+        // sng-core documents. Drift here would cause downstream
+        // dashboards filtering on the documented values to drop
+        // every Suricata-origin alert.
+        assert_eq!(normalise_suricata_action("allowed"), "alert");
+        assert_eq!(normalise_suricata_action("blocked"), "block");
+        assert_eq!(normalise_suricata_action("drop"), "drop");
+        assert_eq!(normalise_suricata_action("pass"), "alert");
+        assert_eq!(normalise_suricata_action("reject"), "reset");
+        // Unknown values pass through verbatim so a future
+        // Suricata release surfaces in dashboards as a distinct
+        // label rather than silently collapsing into a default.
+        assert_eq!(normalise_suricata_action("invalid"), "invalid");
+        assert_eq!(normalise_suricata_action(""), "");
     }
 
     #[test]

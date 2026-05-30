@@ -63,7 +63,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -75,7 +75,7 @@ use crate::eve::EveRecord;
 use crate::health::{
     FailMode, HealthMonitor, HealthProbe, HealthState, HealthThresholds, HealthTransition,
 };
-use crate::process::{ProcessStatus, SuricataProcess, SuricataSignal, SuricataStats};
+use crate::process::{ProcessStatus, StatsDelta, SuricataProcess, SuricataSignal, SuricataStats};
 use crate::rules::{IpsRuleBundle, IpsRuleVerifier, RuleStager};
 use crate::telemetry::{IpsEventSink, SinkSendError};
 
@@ -131,6 +131,20 @@ pub struct IpsManagerConfig {
     /// looking for the `Crashed` transition. Default 1 second;
     /// tests shrink this to keep wall-clock waits short.
     pub restart_poll_interval: Duration,
+    /// Whether the EVE tail seeks to end-of-file on initial
+    /// open. Default `true` — the production-safe posture, which
+    /// avoids re-emitting historical alerts from a pre-existing
+    /// `eve.json` after a manager restart (those alerts have
+    /// already been delivered to the telemetry sink by the
+    /// previous manager instance; replaying them would duplicate
+    /// every entry on the dashboard). Set to `false` to read
+    /// from offset 0 — used by tests that pre-populate the EVE
+    /// file before spawning the tail task, and by operators who
+    /// explicitly want a one-shot replay (e.g. a forensics tool
+    /// that consumes the entire file). Rotation handling is
+    /// unaffected: the tail still resyncs to offset 0 of the
+    /// new file when `file_identity` reports a change.
+    pub eve_tail_seek_to_end: bool,
 }
 
 impl Default for IpsManagerConfig {
@@ -147,6 +161,7 @@ impl Default for IpsManagerConfig {
             restart_max_backoff: Duration::from_secs(30),
             restart_max_attempts: None,
             restart_poll_interval: Duration::from_secs(1),
+            eve_tail_seek_to_end: true,
         }
     }
 }
@@ -307,6 +322,16 @@ impl IpsManager {
     /// supervisor synchronously without the tail / poll / watchdog
     /// running.
     pub async fn start(&self, input: &IpsConfigInput) -> Result<SuricataConfig, IpsError> {
+        // Enforce the same EVE path invariant `apply_config` does.
+        // Without this check, a caller can start the manager with
+        // an input whose `eve_log_path` differs from the one the
+        // manager was constructed with — Suricata will then write
+        // its EVE log to one path while the tail task spawned by
+        // `spawn_background_tasks` reads from another, silently
+        // dropping every alert. The defaults on `IpsManagerConfig`
+        // and `IpsConfigInput` are aligned, but a caller who
+        // overrides one without the other would still trip this.
+        self.ensure_eve_path_matches(input)?;
         let cfg = self.config_gen.render(input)?;
         self.write_config_to_disk(&cfg).await?;
         self.process.start(&self.cfg.config_path).await?;
@@ -317,6 +342,22 @@ impl IpsManager {
             "ips started"
         );
         Ok(cfg)
+    }
+
+    /// Reject an `IpsConfigInput` whose `eve_log_path` does not
+    /// match the path the manager (and its tail task) are bound
+    /// to. Centralised so `start` and `apply_config` cannot drift
+    /// — a future entry point that takes an `IpsConfigInput` only
+    /// has to call this helper to inherit the same invariant.
+    fn ensure_eve_path_matches(&self, input: &IpsConfigInput) -> Result<(), IpsError> {
+        if input.eve_log_path != self.cfg.eve_log_path {
+            return Err(IpsError::Config(format!(
+                "eve_log_path mismatch: manager bound to {} but config input has {}",
+                self.cfg.eve_log_path.display(),
+                input.eve_log_path.display()
+            )));
+        }
+        Ok(())
     }
 
     /// Spawn the EVE tail + stats poll + restart watchdog
@@ -335,11 +376,12 @@ impl IpsManager {
     #[must_use]
     pub fn spawn_background_tasks(&self) -> SupervisorHandles {
         let eve_path = self.cfg.eve_log_path.clone();
+        let seek_to_end = self.cfg.eve_tail_seek_to_end;
         let inner_eve = Arc::clone(&self.inner);
         let sink_eve = self.sink.clone();
         let process_eve = Arc::clone(&self.process);
         let eve_handle = tokio::spawn(async move {
-            tail_eve_log(eve_path, inner_eve, sink_eve, process_eve).await;
+            tail_eve_log(eve_path, seek_to_end, inner_eve, sink_eve, process_eve).await;
         });
 
         let inner_stats = Arc::clone(&self.inner);
@@ -396,13 +438,7 @@ impl IpsManager {
         // another, silently losing every alert until somebody
         // noticed the dashboard had gone quiet. Reject the swap
         // before we ever touch disk or signal the process.
-        if input.eve_log_path != self.cfg.eve_log_path {
-            return Err(IpsError::Config(format!(
-                "eve_log_path mismatch: manager bound to {} but config input has {}",
-                self.cfg.eve_log_path.display(),
-                input.eve_log_path.display()
-            )));
-        }
+        self.ensure_eve_path_matches(input)?;
         let new_cfg = self.config_gen.render(input)?;
         // Compare against the on-disk digest by re-reading the
         // file — cheap, and the source of truth lives on the
@@ -560,8 +596,16 @@ impl SupervisorHandles {
 /// surfaces as an `IpsError::EveDecode` and bumps the
 /// `eve_decode_errors` counter) but not forwarded — the
 /// telemetry pipeline only consumes IPS alerts today.
+// The tail loop runs three branches inline (shutdown, line,
+// rotation poll) so the function naturally exceeds clippy's
+// 100-line guideline. Splitting them out would require sharing
+// the BufReader / inode / counters across helpers behind extra
+// `&mut` references with no readability gain; keep them in one
+// place and silence the lint at the function level.
+#[allow(clippy::too_many_lines)]
 async fn tail_eve_log(
     eve_path: PathBuf,
+    seek_to_end: bool,
     inner: Arc<Inner>,
     sink: IpsEventSink,
     process: Arc<dyn SuricataProcess>,
@@ -571,7 +615,7 @@ async fn tail_eve_log(
     // at 100 ms is enough for the common race; longer waits are
     // handled by the watchdog (the manager logs and the EVE
     // staleness probe will surface the gap).
-    let Some(file) = open_eve_with_retry(&eve_path).await else {
+    let Some(mut file) = open_eve_with_retry(&eve_path).await else {
         warn!(
             target: "sng_ips::manager::eve",
             path = %eve_path.display(),
@@ -579,6 +623,25 @@ async fn tail_eve_log(
         );
         return;
     };
+    // Production posture: skip every line that already exists in
+    // the file at the moment we opened it. These lines belong to
+    // a previous manager instance and have already been delivered
+    // to the telemetry sink; replaying them would duplicate every
+    // entry on the dashboard. Rotation is unaffected — the tail
+    // resyncs to offset 0 of the *new* file when `file_identity`
+    // changes, so post-rotation lines are still observed in full.
+    // Tests that pre-populate the EVE file set
+    // `eve_tail_seek_to_end = false` to keep the replay behaviour.
+    if seek_to_end {
+        if let Err(e) = file.seek(std::io::SeekFrom::End(0)).await {
+            warn!(
+                target: "sng_ips::manager::eve",
+                path = %eve_path.display(),
+                error = %e,
+                "failed to seek EVE log to end on initial open; falling back to offset 0 (may replay historical alerts)"
+            );
+        }
+    }
     let mut current_inode = file_identity(&eve_path).await;
     let mut reader = BufReader::new(file).lines();
     let mut shutdown_rx = inner.shutdown_rx();
@@ -937,25 +1000,44 @@ async fn build_probe(
     staleness: Duration,
 ) -> HealthProbe {
     let alive = process.is_alive().await;
-    let stats = process.stats().await.unwrap_or_else(|e| {
-        warn!(
-            target: "sng_ips::manager::stats",
-            error = %e,
-            "stats read failed; treating as zero delta"
-        );
-        SuricataStats::zero()
-    });
-    let prev = {
-        let mut guard = inner.last_stats.lock();
-        std::mem::replace(&mut *guard, stats.clone())
+    // Compute the per-interval stats delta *only* when the read
+    // actually succeeded. Earlier revisions of this function
+    // substituted `SuricataStats::zero()` on read failure and
+    // stored it as `last_stats`, which produced a spurious
+    // lifetime-sized delta on the *next* successful tick (current
+    // - 0 = full counters), inflating alerts-per-second and
+    // packets-per-second telemetry the moment Suricata recovered.
+    // Saturating subtraction also masked the failure tick itself
+    // as a zero delta, so the health monitor could not see the
+    // gap. Keep `last_stats` untouched on failure: the recovery
+    // tick will then produce the actual cross-failure interval
+    // delta (real recovered counter - last known good counter),
+    // and the failure tick itself emits a `StatsDelta::zero()`
+    // probe so the health monitor still observes a "no progress
+    // during this window" signal.
+    let stats_delta = match process.stats().await {
+        Ok(stats) => {
+            let prev = {
+                let mut guard = inner.last_stats.lock();
+                std::mem::replace(&mut *guard, stats.clone())
+            };
+            stats.delta_since(&prev)
+        }
+        Err(e) => {
+            warn!(
+                target: "sng_ips::manager::stats",
+                error = %e,
+                "stats read failed; emitting zero delta but keeping last_stats so the recovery tick reports the real interval"
+            );
+            StatsDelta::zero()
+        }
     };
-    let delta = stats.delta_since(&prev);
     let last_progress = *inner.last_eve_progress_at.lock();
     let progressing = last_progress.elapsed() < staleness;
     HealthProbe {
         process_alive: alive,
         eve_progressing: progressing,
-        stats_delta: delta,
+        stats_delta,
     }
 }
 
@@ -1138,6 +1220,11 @@ mod tests {
             restart_max_backoff: Duration::from_millis(20),
             restart_max_attempts: Some(3),
             restart_poll_interval: Duration::from_millis(20),
+            // Tests pre-populate the EVE file before the tail
+            // task starts; opt out of the production-safe
+            // seek-to-end posture so the pre-written lines are
+            // observed by the tail.
+            eve_tail_seek_to_end: false,
         };
         let process: Arc<dyn SuricataProcess> = Arc::new(mock);
         (
@@ -1375,7 +1462,12 @@ mod tests {
         assert_eq!(ev.rule_id, "2000001");
         assert_eq!(ev.signature, "ET TROJAN bogus");
         assert_eq!(ev.severity, "critical");
-        assert_eq!(ev.action, "blocked");
+        // Suricata emits `"blocked"` (past tense) but the SNG
+        // event schema documents `"block"` — `to_ips_event` runs
+        // every EVE `alert.action` through `normalise_suricata_action`
+        // before storing it, so the regression contract is the
+        // normalised value, not the raw EVE field.
+        assert_eq!(ev.action, "block");
         assert_eq!(ev.src_ip, "10.0.0.5");
         assert_eq!(ev.dst_ip, "1.2.3.4");
         assert_eq!(ev.protocol, "tcp");
@@ -1414,7 +1506,10 @@ mod tests {
         let inner2 = Arc::clone(&inner);
         let process_for_tail: Arc<dyn SuricataProcess> = Arc::new(MockSuricata::new());
         let handle = tokio::spawn(async move {
-            tail_eve_log(eve_path, inner2, sink, process_for_tail).await;
+            // Pre-populated EVE file — opt out of the
+            // production-safe seek-to-end posture so the lines
+            // written before the tail started are observed.
+            tail_eve_log(eve_path, false, inner2, sink, process_for_tail).await;
         });
         // The first record (alert) should land on the source.
         let event = tokio::time::timeout(Duration::from_secs(2), source.recv())
@@ -1465,7 +1560,9 @@ mod tests {
         let inner2 = Arc::clone(&inner);
         let process_for_tail: Arc<dyn SuricataProcess> = Arc::new(MockSuricata::new());
         let handle = tokio::spawn(async move {
-            tail_eve_log(eve_path, inner2, sink, process_for_tail).await;
+            // Same rationale as the sibling test — EVE file is
+            // pre-populated before the tail spawns.
+            tail_eve_log(eve_path, false, inner2, sink, process_for_tail).await;
         });
         // The valid alert (second line) still gets through.
         let ev = tokio::time::timeout(Duration::from_secs(2), source.recv())
@@ -1540,6 +1637,9 @@ mod tests {
             restart_max_backoff: Duration::from_millis(5),
             restart_max_attempts: max_attempts,
             restart_poll_interval: Duration::from_millis(10),
+            // Same rationale as the sibling helper: tests
+            // pre-populate the EVE file.
+            eve_tail_seek_to_end: false,
         };
         // Override the 1-second status-poll cadence the
         // watchdog hard-codes internally — see

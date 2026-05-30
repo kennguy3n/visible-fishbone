@@ -112,12 +112,20 @@ impl IpsConfigInput {
         for parser in ["tls", "http", "dns", "smb", "ssh", "smtp", "ftp"] {
             app_layer.insert(parser.to_owned(), true);
         }
+        // Pinned to the same `/{etc,var/log,run,var/lib}/sng/...`
+        // namespace `IpsManagerConfig::default()` uses. The two
+        // defaults *must* agree on `eve_log_path` — the manager's
+        // tail task is bound to `IpsManagerConfig::eve_log_path`
+        // and would silently drop every alert if Suricata wrote to
+        // a different path. Keeping all four paths under the same
+        // root avoids the foot-gun where a caller constructs one
+        // half from defaults and the other half by hand.
         Self {
-            rule_file_path: PathBuf::from("/var/lib/suricata/rules/sng.rules"),
+            rule_file_path: PathBuf::from("/var/lib/sng/rules/sng.rules"),
             interface: "eth0".to_owned(),
             runtime,
-            eve_log_path: PathBuf::from("/var/log/suricata/eve.json"),
-            stats_socket_path: PathBuf::from("/run/suricata/suricata-command.socket"),
+            eve_log_path: PathBuf::from("/var/log/sng/eve.json"),
+            stats_socket_path: PathBuf::from("/run/sng/suricata-command.socket"),
             home_net: vec!["10.0.0.0/8".to_owned(), "192.168.0.0/16".to_owned()],
             external_net: vec!["!$HOME_NET".to_owned()],
             app_layer_enabled: app_layer,

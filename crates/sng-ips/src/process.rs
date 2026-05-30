@@ -147,6 +147,21 @@ pub struct StatsDelta {
 }
 
 impl StatsDelta {
+    /// The all-zero delta. Emitted by the stats poll task when a
+    /// `process.stats()` read fails — the failure tick should
+    /// still surface a probe so the health monitor records the
+    /// gap, but the per-interval delta is unknown, so we publish
+    /// zero rather than guess.
+    #[must_use]
+    pub const fn zero() -> Self {
+        Self {
+            packets_processed: 0,
+            alerts_emitted: 0,
+            packets_dropped: 0,
+            cpu_ms: 0,
+        }
+    }
+
     /// Drop ratio over the interval, as a value in `[0.0, 1.0]`.
     /// Returns `0.0` when no packets were observed (avoids a
     /// `NaN` from a `0 / 0` divide on a quiet interval).
