@@ -120,8 +120,13 @@ impl IpsRuleBundleClaims {
 
     /// Encode a claims body to MessagePack bytes (named-map shape
     /// so the Go side's `msgpack/v5` reads it without remapping).
+    ///
+    /// Returns [`IpsError::RuleBodyEncode`] on a serializer failure
+    /// so dashboards filtering on `ips.rule.body.encode` see the
+    /// outbound encode path distinctly from the inbound
+    /// [`Self::from_body`] decode path.
     pub fn encode(&self) -> Result<Vec<u8>, IpsError> {
-        rmp_serde::to_vec_named(self).map_err(|e| IpsError::RuleBodyDecode(e.to_string()))
+        rmp_serde::to_vec_named(self).map_err(|e| IpsError::RuleBodyEncode(e.to_string()))
     }
 }
 

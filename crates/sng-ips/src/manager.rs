@@ -395,22 +395,13 @@ impl IpsManager {
 
         let inner_watch = Arc::clone(&self.inner);
         let process_watch = Arc::clone(&self.process);
-        let cfg_path_watch = self.cfg.config_path.clone();
         let initial = self.cfg.restart_initial_backoff;
         let max = self.cfg.restart_max_backoff;
         let max_attempts = self.cfg.restart_max_attempts;
         let poll = self.cfg.restart_poll_interval;
         let watchdog_handle = tokio::spawn(async move {
-            run_restart_watchdog(
-                inner_watch,
-                process_watch,
-                cfg_path_watch,
-                initial,
-                max,
-                max_attempts,
-                poll,
-            )
-            .await;
+            run_restart_watchdog(inner_watch, process_watch, initial, max, max_attempts, poll)
+                .await;
         });
 
         SupervisorHandles {
@@ -739,6 +730,23 @@ async fn tail_eve_log(
                             }
                             continue;
                         }
+                        // No rotation, but refresh the cached
+                        // identity so the carried `len` keeps
+                        // up with the file's legitimate growth.
+                        // Without this update the cached `len`
+                        // is the size at original open time; a
+                        // copytruncate that shrunk the file to a
+                        // value *above* that original size
+                        // (because Suricata wrote new data
+                        // between the truncate and our probe)
+                        // would still test as growth and miss
+                        // the rotation. Keeping the cache in
+                        // sync with each EOF observation makes
+                        // the shrink comparison a true "shrunk
+                        // between consecutive EOF probes" check.
+                        if let Some(cur) = now {
+                            current_inode = Some(cur);
+                        }
                         // Same inode, still EOF — Suricata is
                         // mid-flush. Sleep then poll again. The
                         // staleness probe in run_stats_poll
@@ -779,10 +787,18 @@ async fn tail_eve_log(
 /// log rotation. The two variants encode the rotation semantics
 /// the underlying platform actually supports:
 ///
-/// * On Unix we have an authoritative `(st_dev, st_ino)` pair.
-///   Any change to either field means the path now resolves to a
-///   different on-disk inode — i.e. a rotation. `==` / `!=` is
-///   the right primitive.
+/// * On Unix we have an authoritative `(st_dev, st_ino)` pair
+///   plus the file length. A change to either of `(dev, ino)`
+///   is a `mv eve.log eve.log.1; touch eve.log` style rotation;
+///   a length *shrink* (inode unchanged) is logrotate's
+///   `copytruncate` mode — the file is truncated in place so
+///   Suricata's open fd survives but our tail's read position
+///   is now past EOF on a freshly-empty file. The previous
+///   inode-only comparison silently missed copytruncate and
+///   the tail kept reading from a stale offset, dropping the
+///   first ~`prev.len` bytes of new alerts after every
+///   truncation. Growth is the normal append path and must NOT
+///   count as rotation.
 /// * On non-Unix we only have file size to work with, and
 ///   Suricata is *constantly* appending to the live EVE log
 ///   between flushes. Using `!=` here would fire on every EOF
@@ -802,7 +818,10 @@ async fn tail_eve_log(
 enum FileIdentity {
     /// Authoritative Unix identity. `dev` is the filesystem the
     /// inode lives on; `ino` is the inode number on that fs.
-    Inode { dev: u64, ino: u64 },
+    /// `len` is the file's byte length sampled at the same instant
+    /// — carried to detect logrotate's `copytruncate` mode where
+    /// the inode does not change but the file is shrunk to zero.
+    Inode { dev: u64, ino: u64, len: u64 },
     /// Non-Unix fallback. Only the file length is portable.
     /// Constructed only under `#[cfg(not(unix))]` but kept in
     /// the unified enum so `rotated_from` can be a single
@@ -816,20 +835,35 @@ enum FileIdentity {
 impl FileIdentity {
     /// Did the path rotate relative to a previously captured
     /// identity? See the type-level doc for the per-variant
-    /// semantics — most importantly, on `Size` we only flag a
-    /// rotation on shrink, never on growth.
+    /// semantics — most importantly, on both variants we only
+    /// flag a rotation on a *shrink* (never on growth), so the
+    /// normal append-during-flush path does not trigger a reopen.
     fn rotated_from(&self, prev: &Self) -> bool {
         match (prev, self) {
             (
                 Self::Inode {
                     dev: d_prev,
                     ino: i_prev,
+                    len: l_prev,
                 },
                 Self::Inode {
                     dev: d_cur,
                     ino: i_cur,
+                    len: l_cur,
                 },
-            ) => d_prev != d_cur || i_prev != i_cur,
+            ) => {
+                if d_prev != d_cur || i_prev != i_cur {
+                    // Classic rename rotation — inode changed.
+                    return true;
+                }
+                // Same inode, but the file got *shorter*: the
+                // operator's logrotate config uses `copytruncate`.
+                // The tail's read position is now past EOF on a
+                // freshly-empty file; reopen and resync to offset
+                // 0 so we don't drop the first `l_prev` bytes of
+                // post-truncation alerts.
+                l_cur < l_prev
+            }
             (Self::Size(prev_len), Self::Size(cur_len)) => cur_len < prev_len,
             // Variant mismatch (cross-platform recompile of an
             // in-memory cache, etc.) cannot happen in a single
@@ -848,6 +882,7 @@ async fn file_identity(path: &Path) -> Option<FileIdentity> {
         Some(FileIdentity::Inode {
             dev: meta.dev(),
             ino: meta.ino(),
+            len: meta.len(),
         })
     }
     #[cfg(not(unix))]
@@ -1073,10 +1108,18 @@ fn log_transition(t: HealthTransition, fail_mode: FailMode) {
 /// restart against the last-known config path, and either
 /// resets the backoff (on success) or doubles it (capped) on
 /// failure.
+///
+/// The config path is read from `inner.config_path` on every
+/// restart attempt rather than captured at spawn time, so a
+/// `apply_config` call that swaps the path under us is reflected
+/// in both the restart's `process.start(&path)` invocation and
+/// the success log below. (Today `write_config_to_disk` always
+/// stores `self.cfg.config_path.clone()`, so the path is in fact
+/// invariant; sourcing it dynamically is defence-in-depth against
+/// a future change that makes the on-disk path mutable.)
 async fn run_restart_watchdog(
     inner: Arc<Inner>,
     process: Arc<dyn SuricataProcess>,
-    config_path: PathBuf,
     initial_backoff: Duration,
     max_backoff: Duration,
     max_attempts: Option<u32>,
@@ -1121,7 +1164,7 @@ async fn run_restart_watchdog(
                     Ok(()) => {
                         info!(
                             target: "sng_ips::manager::watchdog",
-                            config_path = %config_path.display(),
+                            config_path = %path.display(),
                             attempt = *inner.restart_attempts.lock(),
                             "ips restarted after crash"
                         );
@@ -1823,20 +1866,85 @@ mod tests {
 
     #[test]
     fn file_identity_inode_unchanged_is_not_a_rotation() {
-        let id = FileIdentity::Inode { dev: 64, ino: 42 };
+        let id = FileIdentity::Inode {
+            dev: 64,
+            ino: 42,
+            len: 1_024,
+        };
         assert!(!id.rotated_from(&id));
     }
 
     #[test]
     fn file_identity_inode_change_flags_rotation() {
-        let prev = FileIdentity::Inode { dev: 64, ino: 42 };
+        let prev = FileIdentity::Inode {
+            dev: 64,
+            ino: 42,
+            len: 1_024,
+        };
         // Same fs, new inode (logrotate move-then-create).
-        let cur_new_inode = FileIdentity::Inode { dev: 64, ino: 99 };
+        let cur_new_inode = FileIdentity::Inode {
+            dev: 64,
+            ino: 99,
+            len: 0,
+        };
         assert!(cur_new_inode.rotated_from(&prev));
         // Same inode number, different filesystem (rare but
         // possible if /var/log is bind-mounted aside).
-        let cur_new_dev = FileIdentity::Inode { dev: 65, ino: 42 };
+        let cur_new_dev = FileIdentity::Inode {
+            dev: 65,
+            ino: 42,
+            len: 1_024,
+        };
         assert!(cur_new_dev.rotated_from(&prev));
+    }
+
+    #[test]
+    fn file_identity_inode_growth_is_not_a_rotation() {
+        // Suricata appending to the live EVE log between flushes
+        // grows the file under us; same inode, larger size MUST
+        // NOT be flagged as a rotation, otherwise the tail would
+        // reopen on every EOF tick and re-emit every previously
+        // processed alert.
+        let prev = FileIdentity::Inode {
+            dev: 64,
+            ino: 42,
+            len: 1_000,
+        };
+        let cur = FileIdentity::Inode {
+            dev: 64,
+            ino: 42,
+            len: 2_000,
+        };
+        assert!(!cur.rotated_from(&prev));
+    }
+
+    #[test]
+    fn file_identity_inode_shrink_flags_rotation_copytruncate() {
+        // logrotate's `copytruncate` directive copies the old
+        // file aside, then truncates the live file in place —
+        // Suricata's open fd survives (same inode), but the size
+        // resets toward zero. The previous Unix-only inode check
+        // missed this, so the tail kept reading at a stale offset
+        // and dropped the first ~prev.len bytes of new alerts on
+        // every rotation. Same inode + smaller size MUST flag a
+        // rotation so the tail reopens and resyncs to offset 0.
+        let prev = FileIdentity::Inode {
+            dev: 64,
+            ino: 42,
+            len: 5_000,
+        };
+        let cur_truncated = FileIdentity::Inode {
+            dev: 64,
+            ino: 42,
+            len: 0,
+        };
+        assert!(cur_truncated.rotated_from(&prev));
+        let cur_partial = FileIdentity::Inode {
+            dev: 64,
+            ino: 42,
+            len: 4_999,
+        };
+        assert!(cur_partial.rotated_from(&prev));
     }
 
     #[test]
@@ -1874,7 +1982,11 @@ mod tests {
         // Cross-variant cannot occur in a single process build
         // but the safe answer is "rotated" so the tail reopens
         // once and resyncs.
-        let inode = FileIdentity::Inode { dev: 0, ino: 0 };
+        let inode = FileIdentity::Inode {
+            dev: 0,
+            ino: 0,
+            len: 0,
+        };
         let size = FileIdentity::Size(0);
         assert!(inode.rotated_from(&size));
         assert!(size.rotated_from(&inode));

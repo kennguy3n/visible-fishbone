@@ -52,6 +52,16 @@ pub enum IpsError {
     #[error("rule bundle body decode failed: {0}")]
     RuleBodyDecode(String),
 
+    /// Rule bundle body failed to encode as MessagePack.
+    /// Pragmatically unreachable for the current claims struct
+    /// shape — `rmp_serde::to_vec_named` does not fail on a
+    /// well-formed Rust struct — but kept distinct from
+    /// [`Self::RuleBodyDecode`] so the telemetry pipeline routes
+    /// an encode failure under `ips.rule.body.encode` instead of
+    /// misclassifying it under the decode bucket.
+    #[error("rule bundle body encode failed: {0}")]
+    RuleBodyEncode(String),
+
     /// `suricata -T` dry-run on the staged ruleset failed —
     /// the new rules are syntactically invalid and the supervisor
     /// must not swap them in.
@@ -77,6 +87,7 @@ impl IpsError {
             Self::RuleSignatureUnknownKey(_) => ErrorCode::IpsRuleSigningKeyUnknown,
             Self::RuleStale { .. } => ErrorCode::IpsRuleStale,
             Self::RuleBodyDecode(_) => ErrorCode::IpsRuleBodyDecode,
+            Self::RuleBodyEncode(_) => ErrorCode::IpsRuleBodyEncode,
             Self::RuleValidate(_) => ErrorCode::IpsRuleValidate,
             Self::EveDecode(_) => ErrorCode::IpsEveDecode,
         }
@@ -104,6 +115,7 @@ mod tests {
                 current: 2,
             },
             IpsError::RuleBodyDecode("x".into()),
+            IpsError::RuleBodyEncode("x".into()),
             IpsError::RuleValidate("x".into()),
             IpsError::EveDecode("x".into()),
         ];
@@ -133,10 +145,29 @@ mod tests {
             }
             .code(),
             IpsError::RuleBodyDecode("x".into()).code(),
+            IpsError::RuleBodyEncode("x".into()).code(),
             IpsError::RuleValidate("x".into()).code(),
             IpsError::EveDecode("x".into()).code(),
         ];
         let unique: std::collections::HashSet<_> = cases.iter().copied().collect();
         assert_eq!(unique.len(), cases.len(), "duplicate codes: {cases:?}");
+    }
+
+    #[test]
+    fn rule_body_encode_and_decode_map_to_distinct_codes() {
+        // Regression guard against the previous behaviour where
+        // `IpsRuleBundleClaims::encode()` mapped a serializer
+        // failure to `RuleBodyDecode` — operator dashboards
+        // filtering on `ips.rule.body.decode` would have
+        // misclassified an outbound encode failure as a corrupt
+        // inbound bundle.
+        assert_ne!(
+            IpsError::RuleBodyDecode("x".into()).code(),
+            IpsError::RuleBodyEncode("x".into()).code(),
+        );
+        assert_eq!(
+            IpsError::RuleBodyEncode("x".into()).code().as_str(),
+            "ips.rule.body.encode",
+        );
     }
 }

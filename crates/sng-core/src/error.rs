@@ -114,6 +114,14 @@ pub enum ErrorCode {
     /// IPS rule bundle body failed to decode (corrupt download,
     /// schema mismatch).
     IpsRuleBodyDecode,
+    /// IPS rule bundle body failed to encode (serializer rejected
+    /// the in-memory claims struct). Pragmatically unreachable for
+    /// the current `IpsRuleBundleClaims` shape — `rmp_serde` does
+    /// not fail on a well-formed Rust struct — but kept distinct
+    /// from [`Self::IpsRuleBodyDecode`] so dashboards filtering on
+    /// `ips.rule.body.decode` do not misclassify a failure on the
+    /// outbound encode path.
+    IpsRuleBodyEncode,
     /// `suricata -T` dry-run on the staged rule set failed —
     /// the new rules are syntactically invalid. The supervisor
     /// keeps the previous rule set installed.
@@ -158,6 +166,7 @@ impl ErrorCode {
             Self::IpsRuleSigningKeyUnknown => "ips.rule.signing_key.unknown",
             Self::IpsRuleStale => "ips.rule.stale",
             Self::IpsRuleBodyDecode => "ips.rule.body.decode",
+            Self::IpsRuleBodyEncode => "ips.rule.body.encode",
             Self::IpsRuleValidate => "ips.rule.validate",
             Self::IpsEveDecode => "ips.eve.decode",
             Self::Other => "other",
@@ -286,6 +295,7 @@ mod tests {
             ),
             (ErrorCode::IpsRuleStale, "ips.rule.stale"),
             (ErrorCode::IpsRuleBodyDecode, "ips.rule.body.decode"),
+            (ErrorCode::IpsRuleBodyEncode, "ips.rule.body.encode"),
             (ErrorCode::IpsRuleValidate, "ips.rule.validate"),
             (ErrorCode::IpsEveDecode, "ips.eve.decode"),
             (ErrorCode::Other, "other"),

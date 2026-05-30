@@ -198,9 +198,28 @@ impl HealthMonitor {
             if self.consecutive_dead >= self.failed_consecutive_required {
                 return HealthState::Failed;
             }
-            // Not yet at the threshold — degrade but don't
-            // declare Failed.
-            return HealthState::Degraded;
+            // Not yet at the consecutive-dead threshold. Two cases:
+            //
+            // 1. We were Healthy / Degraded before. The first
+            //    transient probe miss should degrade — never jump
+            //    straight to Failed — so alarm flap is suppressed.
+            //
+            // 2. We were *already* Failed (the drop-ratio branch
+            //    below put us there on an earlier alive probe, then
+            //    the process died). Downgrading to Degraded just
+            //    because the dead counter only sits at 1/3 would
+            //    *relax* the observable state: dashboards would see
+            //    Failed → Degraded → Failed as the counter climbed
+            //    to the threshold. That oscillation is purely a
+            //    state-machine artefact — there has been no real
+            //    recovery between the two Failed observations. Keep
+            //    Failed sticky against transient dead probes; only
+            //    a clean alive probe in the alive branch below can
+            //    legitimately move us out.
+            return match self.state {
+                HealthState::Failed => HealthState::Failed,
+                HealthState::Healthy | HealthState::Degraded => HealthState::Degraded,
+            };
         }
         // Live probe — reset the dead counter.
         self.consecutive_dead = 0;
@@ -370,6 +389,37 @@ mod tests {
         let back: HealthThresholds = serde_json::from_str(&json).unwrap();
         assert!((t.degraded_drop_ratio - back.degraded_drop_ratio).abs() < 1e-9);
         assert!((t.failed_drop_ratio - back.failed_drop_ratio).abs() < 1e-9);
+    }
+
+    #[test]
+    fn failed_due_to_drop_ratio_stays_failed_on_subsequent_dead_probe() {
+        // Regression: if the drop-ratio branch put the monitor in
+        // Failed and the very next probe is a single transient
+        // dead miss, the old machine downgraded to Degraded
+        // (because consecutive_dead climbed from 0 to 1 < 3) and
+        // dashboards saw Failed → Degraded → Failed flap before
+        // the actual recovery. Once Failed, only a clean alive
+        // probe can move us out.
+        let mut m = HealthMonitor::new();
+        // 30 % drops trips Failed in the alive branch (process is
+        // technically up but ring buffer is saturating).
+        assert_eq!(
+            m.observe(alive_probe(700, 300, true)).current,
+            HealthState::Failed,
+        );
+        // A single dead probe should NOT relax the visible state
+        // back to Degraded.
+        let t = m.observe(dead_probe());
+        assert_eq!(t.current, HealthState::Failed);
+        assert!(!t.changed);
+        // Still Failed after a second dead probe (counter climbing
+        // toward the threshold).
+        assert_eq!(m.observe(dead_probe()).current, HealthState::Failed);
+        // A clean alive probe is the only thing that can recover
+        // out of Failed.
+        let recovery = m.observe(alive_probe(1000, 0, true));
+        assert_eq!(recovery.current, HealthState::Healthy);
+        assert!(recovery.changed);
     }
 
     #[test]
