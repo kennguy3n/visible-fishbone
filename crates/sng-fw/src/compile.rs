@@ -39,12 +39,13 @@ use ipnet::IpNet;
 use sng_policy_eval::bundle::LoadedBundle;
 use sng_policy_eval::matcher::SubjectMatch;
 use sng_policy_eval::rule::{EnforcementDomain, Rule, SubjectKind, Verb};
+use std::collections::BTreeSet;
 
 use crate::error::FirewallError;
 use crate::nat::NatTable;
 use crate::nftables::NftablesScript;
 use crate::rule::{FirewallRule, RuleAction, RuleMatch};
-use crate::zone::ZoneTable;
+use crate::zone::{AddressFamily, ZoneTable};
 
 /// The compiled output of one bundle + zone-table + nat-table
 /// pass. Held inside [`crate::engine::FirewallEngine`] behind an
@@ -358,10 +359,15 @@ fn render_script(
     out.push_str(default_chain_policy(default_action));
     out.push_str("; }\n");
 
-    // Per-rule lines, in source order.
+    // Per-rule lines, in source order. One logical FirewallRule
+    // may expand into multiple nftables lines — one per address
+    // family the rule can apply to, and one per
+    // (from_zone × to_zone) cross-product when the rule lists
+    // multiple zones. The engine's in-memory walk treats those
+    // expansions as the same rule (the `id` is preserved on
+    // every emitted line via the trailing `comment`).
     for r in rules {
-        out.push_str(&render_rule(r));
-        out.push('\n');
+        out.push_str(&render_rule(r, zones));
     }
 
     // NAT table appended after the filter table — kernel
@@ -380,31 +386,124 @@ fn default_chain_policy(action: RuleAction) -> &'static str {
     }
 }
 
-fn render_rule(rule: &FirewallRule) -> String {
-    let mut parts: Vec<String> = vec!["add rule inet sng_filter forward".into()];
-    // Zone source — match on the per-zone set if the rule
-    // specifies a single from-zone (the common case).
-    if let Some(z) = rule.from_zones.first() {
-        parts.push(format!("ip saddr @zone_{}", sanitize_set_name(z)));
-    } else if !rule.matches.src_cidrs.is_empty() {
-        let list: Vec<String> = rule
-            .matches
-            .src_cidrs
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        parts.push(format!("ip saddr {{ {} }}", list.join(", ")));
+fn render_rule(rule: &FirewallRule, zones: &ZoneTable) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    // Decide which address families this logical rule covers.
+    // A rule applies to a family iff at least one match
+    // predicate (cidr or zone) restricts to that family, OR no
+    // such predicate is present at all (the rule is then
+    // family-agnostic and must be emitted once per family that
+    // any referenced zone supports — if no zones at all are
+    // referenced, both families).
+    let families = rule_address_families(rule, zones);
+
+    for family in families {
+        // Cross-product over from_zones × to_zones. An empty
+        // zone list reduces to a single `None` slot so the rule
+        // is still emitted (CIDR-only predicates apply).
+        let from_slots: Vec<Option<&String>> = if rule.from_zones.is_empty() {
+            vec![None]
+        } else {
+            rule.from_zones.iter().map(Some).collect()
+        };
+        let to_slots: Vec<Option<&String>> = if rule.to_zones.is_empty() {
+            vec![None]
+        } else {
+            rule.to_zones.iter().map(Some).collect()
+        };
+
+        for from_zone in &from_slots {
+            // Skip zones that don't have any networks of this
+            // family — there'd be no per-family set to match
+            // against, and the in-memory engine would never
+            // classify a packet of this family into the zone.
+            if let Some(z) = from_zone {
+                if !zone_has_family(zones, z, family) {
+                    continue;
+                }
+            }
+            for to_zone in &to_slots {
+                if let Some(z) = to_zone {
+                    if !zone_has_family(zones, z, family) {
+                        continue;
+                    }
+                }
+                // Filter src/dst cidrs to this family. An
+                // empty filtered list means "no cidr predicate
+                // for this family" — which is fine unless the
+                // operator explicitly listed cidrs of *some*
+                // family but the current family yielded none
+                // *and* there's no zone predicate to fall back
+                // on; in that case we skip emitting (the rule
+                // can't match anything in this family).
+                let src_cidrs: Vec<&IpNet> = rule
+                    .matches
+                    .src_cidrs
+                    .iter()
+                    .filter(|n| AddressFamily::of(n) == family)
+                    .collect();
+                let dst_cidrs: Vec<&IpNet> = rule
+                    .matches
+                    .dst_cidrs
+                    .iter()
+                    .filter(|n| AddressFamily::of(n) == family)
+                    .collect();
+                let src_explicit = !rule.matches.src_cidrs.is_empty();
+                let dst_explicit = !rule.matches.dst_cidrs.is_empty();
+                if src_explicit && from_zone.is_none() && src_cidrs.is_empty() {
+                    continue;
+                }
+                if dst_explicit && to_zone.is_none() && dst_cidrs.is_empty() {
+                    continue;
+                }
+
+                let line =
+                    render_single_rule(rule, family, *from_zone, *to_zone, &src_cidrs, &dst_cidrs);
+                let _ = writeln!(out, "{line}");
+            }
+        }
     }
-    if let Some(z) = rule.to_zones.first() {
-        parts.push(format!("ip daddr @zone_{}", sanitize_set_name(z)));
-    } else if !rule.matches.dst_cidrs.is_empty() {
-        let list: Vec<String> = rule
-            .matches
-            .dst_cidrs
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        parts.push(format!("ip daddr {{ {} }}", list.join(", ")));
+    out
+}
+
+/// Render one fully-qualified nftables rule line for the given
+/// (family, from_zone, to_zone) slot. Emits zone *and* cidr
+/// predicates when both are present (nftables AND-combines
+/// repeated `<family> saddr` clauses), so a rule that lists
+/// both is no longer silently dropped.
+fn render_single_rule(
+    rule: &FirewallRule,
+    family: AddressFamily,
+    from_zone: Option<&String>,
+    to_zone: Option<&String>,
+    src_cidrs: &[&IpNet],
+    dst_cidrs: &[&IpNet],
+) -> String {
+    let qualifier = family.nft_qualifier();
+    let zone_prefix = family.nft_zone_set_prefix();
+
+    let mut parts: Vec<String> = vec!["add rule inet sng_filter forward".into()];
+    if let Some(z) = from_zone {
+        parts.push(format!(
+            "{qualifier} saddr @{zone_prefix}{}",
+            sanitize_set_name(z)
+        ));
+    }
+    if !src_cidrs.is_empty() {
+        let list: Vec<String> = src_cidrs.iter().map(ToString::to_string).collect();
+        parts.push(format!("{qualifier} saddr {{ {} }}", list.join(", ")));
+    }
+    if let Some(z) = to_zone {
+        parts.push(format!(
+            "{qualifier} daddr @{zone_prefix}{}",
+            sanitize_set_name(z)
+        ));
+    }
+    if !dst_cidrs.is_empty() {
+        let list: Vec<String> = dst_cidrs.iter().map(ToString::to_string).collect();
+        parts.push(format!("{qualifier} daddr {{ {} }}", list.join(", ")));
     }
     if let Some(p) = rule.matches.protocol.as_nft() {
         parts.push(format!("meta l4proto {p}"));
@@ -417,13 +516,60 @@ fn render_rule(rule: &FirewallRule) -> String {
         let list: Vec<String> = rule.matches.dst_ports.iter().map(|r| r.as_nft()).collect();
         parts.push(format!("th dport {{ {} }}", list.join(", ")));
     }
-    // Mark + verdict.
+    // Mark for downstream-pipeline dispatch — emitted even for
+    // non-terminal rules so the marker tap can pick them up.
     if let Some(mark) = rule.action.meta_mark() {
         parts.push(format!("meta mark set {mark:#x}"));
     }
-    parts.push(rule.action.as_nft_verdict().into());
+    // Verdict — ONLY emitted for terminal actions. nftables
+    // treats `accept` as terminal in a chain (subsequent rules
+    // are skipped), but the in-memory engine treats `Log` as
+    // non-terminal and continues walking. Omit the verdict for
+    // `Log` so the kernel evaluation falls through to later
+    // rules and the two semantics stay aligned.
+    if rule.action.is_terminal() {
+        parts.push(rule.action.as_nft_verdict().into());
+    }
     parts.push(format!("comment \"{}\"", sanitize_comment(&rule.id)));
     parts.join(" ")
+}
+
+/// Address families this rule needs to be rendered for. A rule
+/// that mentions only IPv4 zones / CIDRs emits IPv4 nft rules
+/// only; a rule with mixed predicates emits one nft rule per
+/// family; an entirely family-agnostic rule (no zones, no
+/// cidrs) emits both families.
+fn rule_address_families(rule: &FirewallRule, zones: &ZoneTable) -> Vec<AddressFamily> {
+    let mut families: BTreeSet<AddressFamily> = BTreeSet::new();
+    for n in rule
+        .matches
+        .src_cidrs
+        .iter()
+        .chain(rule.matches.dst_cidrs.iter())
+    {
+        families.insert(AddressFamily::of(n));
+    }
+    for zone_name in rule.from_zones.iter().chain(rule.to_zones.iter()) {
+        if let Some(z) = zones.zones.get(zone_name) {
+            if z.has_family(AddressFamily::V4) {
+                families.insert(AddressFamily::V4);
+            }
+            if z.has_family(AddressFamily::V6) {
+                families.insert(AddressFamily::V6);
+            }
+        }
+    }
+    if families.is_empty() {
+        // No predicate restricts family — the rule applies to
+        // every flow; render once per family.
+        families.insert(AddressFamily::V4);
+        families.insert(AddressFamily::V6);
+    }
+    families.into_iter().collect()
+}
+
+fn zone_has_family(zones: &ZoneTable, name: &str, family: AddressFamily) -> bool {
+    zones.zones.get(name).is_some_and(|z| z.has_family(family))
 }
 
 fn sanitize_set_name(name: &str) -> String {
@@ -748,4 +894,201 @@ mod tests {
     // Suppress unused-import warning on the in-test helper.
     #[allow(dead_code)]
     fn assert_zone_policy_present(_zp: ZonePolicy) {}
+
+    // -- render_rule behaviour tests -----------------------------
+    //
+    // These exercise the family-aware, multi-zone, both-zone-and-cidr
+    // emitter directly. The bundle-driven `compile_*` tests above
+    // cover the integration path; these focus on the rule-rendering
+    // surface so a regression in zone / family handling fails a
+    // small, targeted test instead of a snapshot-style integration
+    // check.
+
+    fn rule_with_zones(
+        id: &str,
+        from: &[&str],
+        to: &[&str],
+        action: RuleAction,
+        matches: RuleMatch,
+    ) -> FirewallRule {
+        FirewallRule {
+            id: id.into(),
+            matches,
+            action,
+            from_zones: from.iter().map(|s| (*s).to_string()).collect(),
+            to_zones: to.iter().map(|s| (*s).to_string()).collect(),
+            description: String::new(),
+        }
+    }
+
+    fn make_zones(entries: &[(&str, &[&str])]) -> ZoneTable {
+        let mut zt = ZoneTable::new();
+        for (name, cidrs) in entries {
+            zt.add_zone(Zone {
+                name: (*name).into(),
+                networks: cidrs.iter().map(|c| cidr(c)).collect(),
+                description: String::new(),
+            })
+            .unwrap();
+        }
+        zt
+    }
+
+    #[test]
+    fn render_rule_log_action_omits_terminal_verdict() {
+        // Log is non-terminal in the in-memory engine — the
+        // rendered nftables rule MUST NOT emit `accept`
+        // otherwise the kernel would short-circuit subsequent
+        // rules and diverge from the engine's semantics.
+        let zones = make_zones(&[("z", &["10.0.0.0/24"])]);
+        let r = rule_with_zones(
+            "log-rule",
+            &["z"],
+            &[],
+            RuleAction::Log,
+            RuleMatch::default(),
+        );
+        let out = render_rule(&r, &zones);
+        assert!(out.contains("meta mark set 0x1002"), "{out}");
+        assert!(
+            !out.contains(" accept "),
+            "Log rule must not emit a terminal verdict: {out}"
+        );
+        // Sanity: a terminal Allow rule on the same zone *does*
+        // emit `accept` — confirms the test isn't a false
+        // negative.
+        let r = rule_with_zones("a", &["z"], &[], RuleAction::Allow, RuleMatch::default());
+        assert!(render_rule(&r, &zones).contains(" accept "));
+    }
+
+    #[test]
+    fn render_rule_terminal_actions_emit_their_verdict() {
+        let zones = make_zones(&[("z", &["10.0.0.0/24"])]);
+        for (action, verdict) in [
+            (RuleAction::Allow, " accept "),
+            (RuleAction::Deny, " drop "),
+            (RuleAction::Inspect, " accept "),
+            (RuleAction::Steer, " accept "),
+        ] {
+            let r = rule_with_zones("r", &["z"], &[], action, RuleMatch::default());
+            let s = render_rule(&r, &zones);
+            assert!(s.contains(verdict), "{action:?} -> {s}");
+        }
+    }
+
+    #[test]
+    fn render_rule_multi_zone_cross_product_emits_one_line_per_pair() {
+        // A rule with two from-zones and two to-zones must
+        // expand into four nftables lines so the kernel sees
+        // every zone combination, not just the first.
+        let zones = make_zones(&[
+            ("a", &["10.0.0.0/24"]),
+            ("b", &["10.1.0.0/24"]),
+            ("x", &["10.2.0.0/24"]),
+            ("y", &["10.3.0.0/24"]),
+        ]);
+        let r = rule_with_zones(
+            "multi",
+            &["a", "b"],
+            &["x", "y"],
+            RuleAction::Allow,
+            RuleMatch::default(),
+        );
+        let out = render_rule(&r, &zones);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4, "{out}");
+        assert!(out.contains("ip saddr @zone_a ip daddr @zone_x"));
+        assert!(out.contains("ip saddr @zone_a ip daddr @zone_y"));
+        assert!(out.contains("ip saddr @zone_b ip daddr @zone_x"));
+        assert!(out.contains("ip saddr @zone_b ip daddr @zone_y"));
+    }
+
+    #[test]
+    fn render_rule_ipv6_zone_emits_ip6_predicate() {
+        // IPv6-only zone must emit `ip6 saddr @zone6_<name>`,
+        // not the ipv4 `ip saddr @zone_<name>` form that would
+        // never match an ipv6 packet at the kernel.
+        let zones = make_zones(&[("v6only", &["2001:db8::/32"])]);
+        let r = rule_with_zones(
+            "v6",
+            &["v6only"],
+            &[],
+            RuleAction::Allow,
+            RuleMatch::default(),
+        );
+        let out = render_rule(&r, &zones);
+        assert!(out.contains("ip6 saddr @zone6_v6only"), "{out}");
+        assert!(!out.contains("ip saddr @zone_v6only"));
+    }
+
+    #[test]
+    fn render_rule_dual_family_zone_emits_both_v4_and_v6() {
+        // A zone that holds both v4 and v6 networks should
+        // produce one rule per family.
+        let zones = make_zones(&[("mixed", &["10.0.0.0/24", "2001:db8::/32"])]);
+        let r = rule_with_zones(
+            "dual",
+            &["mixed"],
+            &[],
+            RuleAction::Allow,
+            RuleMatch::default(),
+        );
+        let out = render_rule(&r, &zones);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "{out}");
+        assert!(out.contains("ip saddr @zone_mixed"));
+        assert!(out.contains("ip6 saddr @zone6_mixed"));
+    }
+
+    #[test]
+    fn render_rule_zone_plus_src_cidr_emits_both_anded() {
+        // When the operator sets both `from_zones` and
+        // `src_cidrs`, the rule must AND both predicates — the
+        // in-memory engine does AND, and dropping the cidr in
+        // the rendered nft form would make the kernel rule
+        // strictly more permissive than the engine.
+        let zones = make_zones(&[("z", &["10.0.0.0/8"])]);
+        let mut m = RuleMatch::default();
+        m.src_cidrs.push(cidr("10.0.1.0/24"));
+        let r = rule_with_zones("both", &["z"], &[], RuleAction::Allow, m);
+        let out = render_rule(&r, &zones);
+        assert!(out.contains("ip saddr @zone_z"), "{out}");
+        assert!(out.contains("ip saddr { 10.0.1.0/24 }"), "{out}");
+    }
+
+    #[test]
+    fn render_rule_no_zone_no_cidr_emits_per_family_rules() {
+        // A family-agnostic rule (no zones, no cidrs) must
+        // render once per family so it matches both v4 and v6
+        // traffic at the kernel.
+        let zones = ZoneTable::new();
+        let r = rule_with_zones("any", &[], &[], RuleAction::Deny, RuleMatch::default());
+        let out = render_rule(&r, &zones);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "{out}");
+    }
+
+    #[test]
+    fn render_rule_skips_zone_that_lacks_requested_family() {
+        // Rule references a v4-only zone, but a mixed-family
+        // sibling zone covers v6. The v6 rendering for the
+        // v4-only zone must be skipped (no `zone6_v4only`
+        // set exists), and the v4 rendering must still be
+        // emitted.
+        let zones = make_zones(&[
+            ("v4only", &["10.0.0.0/24"]),
+            ("mixed", &["10.1.0.0/24", "2001:db8::/32"]),
+        ]);
+        let r = rule_with_zones(
+            "f",
+            &["v4only"],
+            &["mixed"],
+            RuleAction::Allow,
+            RuleMatch::default(),
+        );
+        let out = render_rule(&r, &zones);
+        assert!(out.contains("ip saddr @zone_v4only ip daddr @zone_mixed"));
+        // No v6 rule because v4only has no v6 networks.
+        assert!(!out.contains("ip6 saddr @zone6_v4only"));
+    }
 }

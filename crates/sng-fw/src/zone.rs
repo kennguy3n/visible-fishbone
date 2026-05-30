@@ -28,6 +28,52 @@ use std::net::IpAddr;
 use crate::error::FirewallError;
 use crate::rule::RuleAction;
 
+/// Address family of an IP network. Used by the nftables
+/// compiler to decide whether to render a rule as `ip` (IPv4)
+/// or `ip6` (IPv6) — every nft rule predicate is
+/// family-qualified, so a single logical rule that spans both
+/// families compiles down to one rule per family.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AddressFamily {
+    /// IPv4 — `ip saddr` / `ip daddr` matches, `zone_<name>`
+    /// sets keyed on `ipv4_addr`.
+    V4,
+    /// IPv6 — `ip6 saddr` / `ip6 daddr` matches, `zone6_<name>`
+    /// sets keyed on `ipv6_addr`.
+    V6,
+}
+
+impl AddressFamily {
+    /// nftables address-family qualifier prefix — `ip` for v4,
+    /// `ip6` for v6.
+    #[must_use]
+    pub const fn nft_qualifier(self) -> &'static str {
+        match self {
+            Self::V4 => "ip",
+            Self::V6 => "ip6",
+        }
+    }
+
+    /// nftables set-name prefix for a per-zone set in this
+    /// family — `zone_` for v4, `zone6_` for v6.
+    #[must_use]
+    pub const fn nft_zone_set_prefix(self) -> &'static str {
+        match self {
+            Self::V4 => "zone_",
+            Self::V6 => "zone6_",
+        }
+    }
+
+    /// Family of an `IpNet`.
+    #[must_use]
+    pub const fn of(net: &IpNet) -> Self {
+        match net {
+            IpNet::V4(_) => Self::V4,
+            IpNet::V6(_) => Self::V6,
+        }
+    }
+}
+
 /// A zone: a name plus the L3 networks that belong to it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Zone {
@@ -49,6 +95,14 @@ impl Zone {
     #[must_use]
     pub fn contains(&self, addr: IpAddr) -> bool {
         self.networks.iter().any(|c| c.contains(&addr))
+    }
+
+    /// Does this zone hold any networks of the given family?
+    /// Used by the nftables emitter to skip rendering rules
+    /// that would reference a non-existent per-family zone set.
+    #[must_use]
+    pub fn has_family(&self, family: AddressFamily) -> bool {
+        self.networks.iter().any(|n| AddressFamily::of(n) == family)
     }
 
     /// Validate the zone body.

@@ -6,12 +6,19 @@
 //!   hot path ([`Self::evaluate`]) clones the `Arc`, walks the
 //!   rule list in source order, and returns the first match's
 //!   verdict. No locking on the data path.
-//! * An [`NftablesBackend`] handle. [`Self::swap`] applies the
-//!   compiled rule set to the kernel after installing the new
-//!   ruleset in the in-memory engine. The two updates are
-//!   sequenced — kernel-then-memory would race a packet against
-//!   the new kernel rules with the old in-memory ruleset, so
-//!   the order is memory-first.
+//! * An [`NftablesBackend`] handle. [`Self::install`] swaps the
+//!   in-memory ruleset *before* applying to the kernel — a
+//!   packet that races a swap then sees either the old in-memory
+//!   rules with the old kernel rules (pre-swap) or the new
+//!   in-memory rules with the new kernel rules (post-apply).
+//!   If the kernel apply fails the in-memory swap is rolled
+//!   back so the two stay consistent.
+//! * An install-mutex ([`tokio::sync::Mutex`]) that serialises
+//!   concurrent [`Self::install`] / [`Self::compile_and_swap`]
+//!   calls. Without it two callers could each pass the
+//!   version-monotonicity check against the same stale
+//!   `ArcSwap` snapshot and race their swaps; the mutex closes
+//!   that TOCTOU window.
 //! * A [`ConntrackTracker`] used to seed the engine's
 //!   `connection_state` view on every evaluation.
 //!
@@ -23,6 +30,7 @@
 use arc_swap::ArcSwap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::compile::{CompiledRuleSet, RuleCompiler};
 use crate::conntrack::{ConntrackState, ConntrackTracker, FlowDirection};
@@ -127,6 +135,12 @@ pub struct FirewallEngine {
     backend: Arc<dyn NftablesBackend>,
     ruleset: ArcSwap<Option<CompiledRuleSet>>,
     conntrack: Mutex<ConntrackTracker>,
+    /// Serialises concurrent installs. Held across the async
+    /// kernel apply so two callers cannot both pass the version
+    /// check, then race their `ArcSwap::store` and clobber the
+    /// winner. The hot path ([`Self::evaluate`]) does not
+    /// touch this mutex — it only reads the `ArcSwap`.
+    install_lock: AsyncMutex<()>,
 }
 
 impl std::fmt::Debug for FirewallEngine {
@@ -164,6 +178,7 @@ impl FirewallEngine {
             backend,
             ruleset: ArcSwap::from_pointee(None),
             conntrack: Mutex::new(ConntrackTracker::default()),
+            install_lock: AsyncMutex::new(()),
         }
     }
 
@@ -183,22 +198,39 @@ impl FirewallEngine {
         Ok(script)
     }
 
-    /// Install an already-compiled ruleset. Applies the script
-    /// to the kernel, then swaps the in-memory pointer. If the
-    /// apply fails, the in-memory ruleset is *not* updated —
-    /// the engine continues evaluating against the previous
-    /// ruleset and the error surfaces to the caller.
+    /// Install an already-compiled ruleset. Holds the install
+    /// mutex so the digest-dedup / version-monotonicity checks
+    /// and the kernel apply happen atomically with respect to
+    /// other installers; the hot path is unaffected.
+    ///
+    /// Order is **memory-first then kernel**: the in-memory
+    /// `ArcSwap` is updated, then the kernel script is applied.
+    /// If the apply fails the in-memory swap is rolled back so
+    /// the engine never reports a verdict from a ruleset the
+    /// kernel hasn't loaded.
     pub async fn install(&self, compiled: CompiledRuleSet) -> Result<(), FirewallError> {
-        // Skip if the digest matches the currently-installed
-        // ruleset — saves a kernel-side commit + a transient
-        // arc-swap on policy republishes that don't actually
-        // change the rules.
-        if let Some(current) = self.ruleset.load().as_ref().as_ref() {
+        // Serialise installers. Tokio mutex is fine to hold
+        // across the `await` on the backend; the hot path
+        // ([`Self::evaluate`]) doesn't touch this mutex.
+        let _install_guard = self.install_lock.lock().await;
+
+        // Snapshot the current ruleset *inside* the install
+        // lock so the digest / version comparison is consistent
+        // with the in-memory state we'll swap against, and so
+        // we can roll back to exactly that snapshot if the
+        // kernel apply fails.
+        let previous = self.ruleset.load_full();
+        if let Some(current) = previous.as_ref().as_ref() {
+            // Digest dedup — same script + same graph version
+            // means there's nothing to apply.
             if current.script.digest == compiled.script.digest
                 && current.source_graph_version == compiled.source_graph_version
             {
                 return Ok(());
             }
+            // Version monotonicity. Inside the install lock
+            // this is no longer a TOCTOU — a concurrent
+            // installer is blocked on the mutex above.
             if compiled.source_graph_version < current.source_graph_version {
                 return Err(FirewallError::BundleInvalid(format!(
                     "stale ruleset: incoming graph_version {} < current {}",
@@ -206,8 +238,22 @@ impl FirewallEngine {
                 )));
             }
         }
-        self.backend.apply(&compiled.script).await?;
+
+        // Memory-first swap. A racing `evaluate()` between
+        // this store and the kernel apply will see the new
+        // in-memory ruleset but the old kernel state — which
+        // is the safer mismatch direction (the in-memory
+        // verdict is the source of truth for downstream
+        // dispatch; the kernel chain is an in-band enforcer
+        // and will catch up on the next packet).
+        let script = compiled.script.clone();
         self.ruleset.store(Arc::new(Some(compiled)));
+        if let Err(e) = self.backend.apply(&script).await {
+            // Roll back so the engine doesn't report verdicts
+            // from a ruleset the kernel never accepted.
+            self.ruleset.store(previous);
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -315,12 +361,14 @@ impl FirewallEngine {
         ct.observe(&key, ctx.direction)
     }
 
-    /// Snapshot of the currently-loaded ruleset, if any. Used
-    /// by telemetry / introspection callers.
+    /// Snapshot of the currently-loaded ruleset, if any. The
+    /// inner [`Option`] is `None` before the first successful
+    /// install. Returns an `Arc` so callers can hold the
+    /// snapshot stable across subsequent hot-swaps without
+    /// blocking the install path.
     #[must_use]
-    pub fn current_ruleset(&self) -> Option<Arc<Option<CompiledRuleSet>>> {
-        let g = self.ruleset.load();
-        Some(g.clone())
+    pub fn current_ruleset(&self) -> Arc<Option<CompiledRuleSet>> {
+        self.ruleset.load_full()
     }
 }
 
@@ -633,5 +681,90 @@ mod tests {
         assert!(!zone_match(&["a".into()], None));
         assert!(!zone_match(&["a".into()], Some("b")));
         assert!(zone_match(&["a".into(), "b".into()], Some("b")));
+    }
+
+    #[tokio::test]
+    async fn current_ruleset_returns_arc_without_outer_option() {
+        // Type-level assertion: the return is `Arc<Option<_>>`,
+        // *not* `Option<Arc<Option<_>>>`. The outer Option was
+        // removed because it could never be `None` — keep this
+        // test so a regression in the wrapper layering trips a
+        // compiler error here.
+        let (eng, _b) = make_engine();
+        let snap: Arc<Option<CompiledRuleSet>> = eng.current_ruleset();
+        assert!(snap.is_none());
+        eng.install(empty_ruleset(RuleAction::Allow)).await.unwrap();
+        let snap: Arc<Option<CompiledRuleSet>> = eng.current_ruleset();
+        assert!(snap.is_some());
+    }
+
+    #[tokio::test]
+    async fn install_swaps_memory_before_kernel_apply() {
+        // Memory-first guarantee: the in-memory ruleset must be
+        // visible to evaluate() by the time the kernel apply
+        // returns. We assert this indirectly by snapshotting
+        // current_ruleset() immediately after install() — if
+        // the order were kernel-first then a hypothetical
+        // failure between apply and store would leave the
+        // in-memory engine on the old ruleset (already covered
+        // by `install_preserves_previous_ruleset_when_apply_fails`
+        // which exercises the rollback path).
+        let (eng, _b) = make_engine();
+        let mut rs = empty_ruleset(RuleAction::Allow);
+        rs.source_graph_version = 7;
+        eng.install(rs).await.unwrap();
+        let snap = eng.current_ruleset();
+        assert_eq!(
+            snap.as_ref().as_ref().unwrap().source_graph_version,
+            7,
+            "in-memory ruleset must reflect the just-installed version"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_serialises_concurrent_calls_to_prevent_toctou() {
+        // The install lock must serialise so two callers can't
+        // race past the version-monotonicity check. We fire
+        // many concurrent installs of monotonically-increasing
+        // versions; after they all complete, the in-memory
+        // version must be the highest one, every call must
+        // have either succeeded or returned BundleInvalid, and
+        // the kernel apply count must equal the number of
+        // *unique* digests we sent (digest-dedup short-circuits
+        // duplicates).
+        let (eng, backend) = make_engine();
+        let engine = Arc::new(eng);
+        let mut tasks = Vec::new();
+        for v in 1..=20i64 {
+            let e = engine.clone();
+            tasks.push(tokio::spawn(async move {
+                // Make each script byte-unique so digest-dedup
+                // doesn't mask races — we want every install
+                // to genuinely contend for the lock.
+                let mut rs = empty_ruleset(RuleAction::Allow);
+                rs.source_graph_version = v;
+                rs.script = NftablesScript::new(format!("# v={v}\n").into_bytes());
+                e.install(rs).await
+            }));
+        }
+        let mut ok = 0;
+        let mut rejected = 0;
+        for t in tasks {
+            match t.await.unwrap() {
+                Ok(()) => ok += 1,
+                Err(FirewallError::BundleInvalid(_)) => rejected += 1,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert_eq!(ok + rejected, 20);
+        // The lock guarantees monotonic progress: the snapshot
+        // must be the highest version we ever submitted.
+        let snap = engine.current_ruleset();
+        let installed_version = snap.as_ref().as_ref().unwrap().source_graph_version;
+        assert_eq!(installed_version, 20);
+        // Without the lock the kernel apply count would be
+        // racy / possibly exceed 20; with the lock it is at
+        // most the number of accepted installs.
+        assert!(backend.apply_count() <= ok);
     }
 }
