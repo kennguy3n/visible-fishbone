@@ -430,6 +430,29 @@ func (w *Writer) qualifiedTable() (string, error) {
 	return quoteIdentifier(w.cfg.Table), nil
 }
 
+// backlogCapacity returns the cap on `pending` that the requeue
+// path enforces, in rows: `BatchSize * MaxBacklogMultiplier`.
+// Mirrors the qualifiedTable() pattern of guarding-at-the-use-
+// site so a future caller that builds a Writer literal
+// (bypassing New() / fillDefaults) can't accidentally collapse
+// the cap to 0 — which would shed every row on every requeue.
+// Whenever either field is non-positive (the only way the
+// product can reach 0 here, since both are signed ints), we
+// substitute the canonical default so the requeue logic
+// continues to behave correctly under the same operational
+// envelope the constructor advertises.
+func (w *Writer) backlogCapacity() int {
+	batch := w.cfg.BatchSize
+	if batch <= 0 {
+		batch = DefaultBatchSize
+	}
+	mult := w.cfg.MaxBacklogMultiplier
+	if mult <= 0 {
+		mult = DefaultMaxBacklogMultiplier
+	}
+	return batch * mult
+}
+
 // EnsureSchema creates the telemetry table if it does not exist
 // and applies idempotent ALTERs so existing deployments pick up
 // columns added by later releases. The DDL is safe to call on
@@ -947,7 +970,7 @@ func (w *Writer) requeueBatch(batch []schema.Envelope, reason string, drops requ
 	merged := make([]schema.Envelope, 0, len(batch)+len(w.pending))
 	merged = append(merged, batch...)
 	merged = append(merged, w.pending...)
-	backlogCap := w.cfg.BatchSize * w.cfg.MaxBacklogMultiplier
+	backlogCap := w.backlogCapacity()
 	// shedFromBatch tracks how many rows from the failed `batch`
 	// itself ended up shed (vs shed from the pre-existing
 	// `w.pending` tail). Reported in the Info log so the operator

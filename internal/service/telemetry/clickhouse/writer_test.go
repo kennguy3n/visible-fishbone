@@ -448,6 +448,98 @@ func TestRequeueBatch_EmptyBatchStillBumpsFailureCounters(t *testing.T) {
 	}
 }
 
+// TestBacklogCapacity_FallsBackToDefaultsForStructLiterals pins
+// the defense-in-depth contract for the requeue-cap accessor.
+// `Writer.requeueBatch` reads its backlog cap through
+// `backlogCapacity()` so a Writer constructed via a struct
+// literal (bypassing `New()` / `fillDefaults()`) cannot
+// accidentally collapse the cap to 0 — which would shed every
+// row on every requeue, silently turning the in-memory shield
+// into a row-loss amplifier during a sustained ClickHouse
+// outage. Mirrors the same `guard-at-use-site` pattern used by
+// `qualifiedTable()` for identifier validation.
+func TestBacklogCapacity_FallsBackToDefaultsForStructLiterals(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		cfg  Config
+		want int
+	}{
+		{
+			name: "both fields zero falls back to defaults",
+			cfg:  Config{},
+			want: DefaultBatchSize * DefaultMaxBacklogMultiplier,
+		},
+		{
+			name: "BatchSize zero falls back to default",
+			cfg:  Config{MaxBacklogMultiplier: 2},
+			want: DefaultBatchSize * 2,
+		},
+		{
+			name: "MaxBacklogMultiplier zero falls back to default",
+			cfg:  Config{BatchSize: 16},
+			want: 16 * DefaultMaxBacklogMultiplier,
+		},
+		{
+			name: "negative BatchSize is treated as missing",
+			cfg:  Config{BatchSize: -1, MaxBacklogMultiplier: 2},
+			want: DefaultBatchSize * 2,
+		},
+		{
+			name: "both fields positive — no fallback",
+			cfg:  Config{BatchSize: 16, MaxBacklogMultiplier: 2},
+			want: 32,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := &Writer{cfg: tc.cfg, logger: quietLogger()}
+			if got := w.backlogCapacity(); got != tc.want {
+				t.Errorf("backlogCapacity for cfg=%+v: got %d, want %d", tc.cfg, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRequeueBatch_StructLiteralWithZeroCapDoesNotShedEverything
+// is the integration-level pin for the same contract: a struct-
+// literal Writer with zero-valued cap fields must still honour
+// the default cap rather than collapsing the backlog to 0 (which
+// the pre-guard implementation would have done — shedding every
+// row on every requeue).
+func TestRequeueBatch_StructLiteralWithZeroCapDoesNotShedEverything(t *testing.T) {
+	t.Parallel()
+	// Struct literal — BatchSize and MaxBacklogMultiplier both
+	// zero — simulating a future caller that bypasses New() /
+	// fillDefaults() (e.g. a test harness wiring a Writer
+	// directly).
+	w := &Writer{
+		cfg:    Config{},
+		logger: quietLogger(),
+	}
+	// 100 rows is well under the default cap
+	// (DefaultBatchSize × DefaultMaxBacklogMultiplier =
+	// 1024 × 4 = 4096), so the requeue must place every row on
+	// `pending` without shedding any.
+	batch := make([]schema.Envelope, 100)
+	for i := range batch {
+		batch[i] = mkEnv()
+	}
+	w.requeueBatch(batch, "struct-literal-test", requeueDrops{})
+	if got, want := len(w.pending), 100; got != want {
+		t.Fatalf("len(pending) for struct-literal Writer: got %d, want %d (guard collapsed cap to 0)", got, want)
+	}
+	s := w.Stats()
+	if s.BacklogDrops != 0 {
+		t.Errorf("BacklogDrops must be 0 when row count is under default cap: got %d", s.BacklogDrops)
+	}
+	if s.DroppedRows != 0 {
+		t.Errorf("DroppedRows must be 0 when row count is under default cap: got %d", s.DroppedRows)
+	}
+}
+
 // TestStats_PartialDropFlushesIsExposed pins that the
 // per-flush partial-drop counter is surfaced through Stats so
 // dashboards can alert on `rate(PartialDropFlushes[5m]) >
