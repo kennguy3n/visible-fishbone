@@ -49,6 +49,16 @@ pub struct SwgStats {
     /// Times a request was rejected because the session
     /// table was full.
     session_table_full: AtomicU64,
+    /// Times an observation was rejected because the
+    /// producer's URL / Host / SNI all failed to yield
+    /// a usable host. Counted separately from
+    /// `requests_observed` so the invariant
+    /// `requests_observed == sum(posture_*)` holds across
+    /// the well-formed traffic path. Ops dashboards bucket
+    /// these as a producer-side diagnostic (proxy emitted
+    /// a malformed observation) rather than an SWG
+    /// decision.
+    invalid_url: AtomicU64,
 }
 
 impl SwgStats {
@@ -122,6 +132,15 @@ impl SwgStats {
         self.session_table_full.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// One observation rejected at the host-resolution
+    /// step. Counted separately from
+    /// [`Self::record_request_observed`] so the
+    /// `requests_observed == sum(posture_*)` invariant
+    /// stays true across the well-formed traffic path.
+    pub fn record_invalid_url(&self) {
+        self.invalid_url.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Atomic snapshot for serialization. Reads each
     /// counter independently; values are observably
     /// consistent within each counter but the snapshot
@@ -148,6 +167,7 @@ impl SwgStats {
             bundle_load_failures: self.bundle_load_failures.load(Ordering::Relaxed),
             telemetry_drops: self.telemetry_drops.load(Ordering::Relaxed),
             session_table_full: self.session_table_full.load(Ordering::Relaxed),
+            invalid_url: self.invalid_url.load(Ordering::Relaxed),
         }
     }
 }
@@ -174,6 +194,7 @@ pub struct SwgStatsSnapshot {
     pub bundle_load_failures: u64,
     pub telemetry_drops: u64,
     pub session_table_full: u64,
+    pub invalid_url: u64,
 }
 
 #[cfg(test)]

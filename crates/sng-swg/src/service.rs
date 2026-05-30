@@ -275,9 +275,23 @@ impl SwgService {
     /// - [`SwgError::InvalidUrl`] when neither the URL,
     ///   the Host header, nor SNI yields a usable host.
     pub fn observe(&self, obs: &HttpObservation) -> Result<SwgDecision, SwgError> {
+        // Host resolution is the first fallible step. We
+        // intentionally do NOT bump `requests_observed` /
+        // `bytes_inspected` until it succeeds: the invariant
+        // `requests_observed == sum(posture_*)` only holds on
+        // the well-formed traffic path. Producer-side
+        // malformed observations land on the
+        // [`SwgStats::record_invalid_url`] diagnostic
+        // counter so ops can see them without breaking the
+        // well-formed-path math.
+        let host = match obs.effective_host() {
+            Ok(h) => h,
+            Err(e) => {
+                self.stats.record_invalid_url();
+                return Err(e);
+            }
+        };
         self.stats.record_request_observed(obs.response_bytes);
-
-        let host = obs.effective_host()?;
         let category = if let Some(c) = self.category.category_for(&host) {
             self.stats.record_category_lookup(true);
             c
@@ -542,6 +556,70 @@ mod tests {
         let (svc, _rx) = mk_service_with(&[], &[]);
         let e = svc.observe(&obs("not a url")).unwrap_err();
         assert!(matches!(e, SwgError::InvalidUrl(_)));
+    }
+
+    #[test]
+    fn invalid_url_does_not_inflate_requests_observed() {
+        // Producer-side malformed observation: the SWG must
+        // surface it on the diagnostic `invalid_url` counter
+        // and leave the well-formed-path counters
+        // (`requests_observed`, `bytes_inspected`, `posture_*`)
+        // at zero. Otherwise ops dashboards lose the invariant
+        // `requests_observed == sum(posture_*)` and a noisy
+        // producer can silently inflate the SWG's per-tenant
+        // billed-request count.
+        let (svc, _rx) = mk_service_with(&[], &[]);
+        let mut bad = obs("not a url");
+        bad.host = String::new();
+        bad.sni = None;
+        bad.response_bytes = 999_999;
+        let e = svc.observe(&bad).unwrap_err();
+        assert!(matches!(e, SwgError::InvalidUrl(_)));
+        let snap = svc.stats().snapshot();
+        assert_eq!(
+            snap.invalid_url, 1,
+            "invalid_url should bump on producer error"
+        );
+        assert_eq!(
+            snap.requests_observed, 0,
+            "well-formed counter must not move"
+        );
+        assert_eq!(snap.bytes_inspected, 0, "bytes counter must not move");
+        // No posture decision was reached, so every bucket
+        // must be zero.
+        assert_eq!(snap.posture_allow, 0);
+        assert_eq!(snap.posture_alert_only, 0);
+        assert_eq!(snap.posture_inspect_full, 0);
+        assert_eq!(snap.posture_tls_bypass, 0);
+        assert_eq!(snap.posture_quarantine, 0);
+        assert_eq!(snap.posture_block, 0);
+    }
+
+    #[test]
+    fn well_formed_observation_bumps_requests_observed_and_invariant() {
+        // Sister test to `invalid_url_does_not_inflate_requests_observed`:
+        // a well-formed observation MUST bump both the request
+        // counter and a posture bucket, preserving the
+        // `requests_observed == sum(posture_*)` invariant.
+        let (svc, _rx) = mk_service_with(&[("saas.example", Category::Business)], &[]);
+        let mut o = obs("https://saas.example/");
+        o.response_bytes = 100;
+        let d = svc.observe(&o).unwrap();
+        assert_eq!(d.posture, Posture::Allow);
+        let snap = svc.stats().snapshot();
+        assert_eq!(snap.invalid_url, 0);
+        assert_eq!(snap.requests_observed, 1);
+        assert_eq!(snap.bytes_inspected, 100);
+        assert_eq!(snap.posture_allow, 1);
+        // Invariant: every well-formed request lands in exactly
+        // one posture bucket.
+        let posture_sum = snap.posture_allow
+            + snap.posture_alert_only
+            + snap.posture_inspect_full
+            + snap.posture_tls_bypass
+            + snap.posture_quarantine
+            + snap.posture_block;
+        assert_eq!(snap.requests_observed, posture_sum);
     }
 
     #[test]
