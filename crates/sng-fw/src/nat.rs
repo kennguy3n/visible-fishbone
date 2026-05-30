@@ -386,6 +386,16 @@ impl NatTable {
         }
         let mut out = String::new();
         let _ = writeln!(out, "add table inet {}", self.table_name);
+        // Flush the NAT table before re-populating it, for the
+        // same reason `render_script` flushes the filter table:
+        // `nft -f` is one netlink transaction, so the kernel
+        // atomically sees flush+repopulate. Without the flush,
+        // every `add rule ...` in this block would *append* to
+        // the existing prerouting / postrouting chains and a
+        // removed NAT rule would never actually leave the
+        // kernel — engine and kernel state would silently
+        // diverge across bundle rotations.
+        let _ = writeln!(out, "flush table inet {}", self.table_name);
         let _ = writeln!(
             out,
             "add chain inet {} prerouting {{ type nat hook prerouting priority dstnat; }}",
@@ -790,6 +800,106 @@ mod tests {
         assert!(script.contains("add table inet sng_nat"));
         assert!(script.contains("hook prerouting priority dstnat"));
         assert!(script.contains("hook postrouting priority srcnat"));
+    }
+
+    /// Regression: NatTable::render_nft MUST emit `flush table
+    /// inet <table>` after `add table` and before the chain /
+    /// rule declarations. Without it, NAT rule lists
+    /// accumulate across bundle rotations (same kernel/engine
+    /// divergence bug as the filter table).
+    #[test]
+    fn nat_table_render_emits_flush_table_after_add_table() {
+        let mut t = NatTable::new();
+        t.add(NatRule {
+            id: "a".into(),
+            src_cidrs: vec![cidr("10.0.0.0/8")],
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocol: Protocol::Any,
+            iif: String::new(),
+            oif: "wan0".into(),
+            nat: NatType::Masquerade { port: None },
+            description: String::new(),
+        })
+        .unwrap();
+        let script = t.render_nft();
+        let add_idx = script
+            .find("add table inet sng_nat\n")
+            .expect("add table line present");
+        let flush_idx = script
+            .find("flush table inet sng_nat\n")
+            .expect("flush table line present");
+        let chain_idx = script
+            .find("add chain inet sng_nat prerouting")
+            .expect("prerouting chain present");
+        let rule_idx = script
+            .find("add rule inet sng_nat")
+            .expect("rule line present");
+        assert!(
+            add_idx < flush_idx,
+            "add table must come before flush:\n{script}"
+        );
+        assert!(
+            flush_idx < chain_idx,
+            "flush must come before chain creation:\n{script}"
+        );
+        assert!(
+            flush_idx < rule_idx,
+            "flush must come before rule emission:\n{script}"
+        );
+    }
+
+    /// Regression: rotating from a NAT table that contains a
+    /// rule to one that does not must drop the rule via the
+    /// flush — the new script must not mention the removed
+    /// rule id but MUST still emit the flush so the kernel
+    /// drops it transactionally.
+    #[test]
+    fn nat_table_rotation_drops_removed_rule_via_flush() {
+        let mut t1 = NatTable::new();
+        t1.add(NatRule {
+            id: "keep".into(),
+            src_cidrs: vec![cidr("10.0.0.0/8")],
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocol: Protocol::Any,
+            iif: String::new(),
+            oif: "wan0".into(),
+            nat: NatType::Masquerade { port: None },
+            description: String::new(),
+        })
+        .unwrap();
+        t1.add(NatRule {
+            id: "removed".into(),
+            src_cidrs: vec![cidr("192.168.0.0/16")],
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocol: Protocol::Any,
+            iif: String::new(),
+            oif: "wan0".into(),
+            nat: NatType::Masquerade { port: None },
+            description: String::new(),
+        })
+        .unwrap();
+        let mut t2 = NatTable::new();
+        t2.add(NatRule {
+            id: "keep".into(),
+            src_cidrs: vec![cidr("10.0.0.0/8")],
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocol: Protocol::Any,
+            iif: String::new(),
+            oif: "wan0".into(),
+            nat: NatType::Masquerade { port: None },
+            description: String::new(),
+        })
+        .unwrap();
+        let s1 = t1.render_nft();
+        let s2 = t2.render_nft();
+        assert!(s1.contains("\"removed\""));
+        assert!(!s2.contains("\"removed\""));
+        assert!(s1.contains("flush table inet sng_nat"));
+        assert!(s2.contains("flush table inet sng_nat"));
     }
 
     #[test]

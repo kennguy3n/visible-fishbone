@@ -390,6 +390,29 @@ fn render_script(
     let mut out = String::new();
     out.push_str("# sng-fw compiled ruleset\n");
     out.push_str("add table inet sng_filter\n");
+    // Wipe the table before every rotation so the kernel sees
+    // the new bundle as a *replacement*, not an *append*.
+    //
+    // `nft` commands run by `nft -f` are wrapped in a single
+    // netlink transaction, so the kernel atomically sees
+    // "flush + re-populate" as one commit — no traffic-window
+    // where the table is empty. Without the flush, every install
+    // would *append*: `add rule ...` appends to whatever the
+    // chain already contains, `add element ...` appends to a
+    // set's element list, and `add chain ...` with attributes is
+    // a no-op if the chain already exists (so a new
+    // `policy drop` would not replace an existing `policy
+    // accept`). The result on the old code path was that:
+    //
+    // * Removing a rule from a bundle left the kernel rule live.
+    // * Changing the chain's default policy did not propagate.
+    // * Zone-set elements accumulated across rotations.
+    //
+    // The in-memory engine swaps cleanly via `ArcSwap` so it
+    // would report the new verdict, while the kernel kept the
+    // stale rule — a security-relevant split-brain. The flush
+    // makes the script idempotent under repeated apply.
+    out.push_str("flush table inet sng_filter\n");
     // Define one set per zone-family pair so the rule chain can
     // match on `ip saddr @zone_<name>` / `ip6 saddr @zone6_<name>`.
     // Each set is created only when the zone actually has
@@ -799,6 +822,126 @@ mod tests {
         assert!(s.contains("add table inet sng_filter"));
         assert!(s.contains("add chain inet sng_filter input"));
         assert!(s.contains("add chain inet sng_filter forward"));
+    }
+
+    /// Regression: the rendered script MUST emit `flush table
+    /// inet sng_filter` before re-populating the table on every
+    /// install. Without it, `add rule ...` / `add element ...`
+    /// from successive bundles accumulate in the kernel chain
+    /// and the engine / kernel rulesets silently diverge across
+    /// rotations.
+    #[test]
+    fn compile_emits_flush_table_for_filter() {
+        let bundle = make_bundle_with_rules(&[]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        let s = out.script.as_str().unwrap();
+        assert!(
+            s.contains("flush table inet sng_filter"),
+            "expected `flush table inet sng_filter` in rendered \
+             script; without it, kernel rules accumulate across \
+             bundle rotations:\n{s}"
+        );
+    }
+
+    /// Regression: `flush table` MUST appear after `add table`
+    /// (so the table exists when flushed) and BEFORE any
+    /// `add chain` / `add set` / `add element` / `add rule`
+    /// statements (so the flushed state is the starting point
+    /// for the new bundle, not a no-op after population).
+    #[test]
+    fn compile_flush_table_ordering_precedes_population() {
+        let bundle = make_bundle_with_rules(&[ngfw_rule("r", Verb::Deny, vec![])]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        let s = out.script.as_str().unwrap();
+        let add_table_idx = s
+            .find("add table inet sng_filter\n")
+            .expect("add table line present");
+        let flush_idx = s
+            .find("flush table inet sng_filter\n")
+            .expect("flush table line present");
+        let chain_input_idx = s
+            .find("add chain inet sng_filter input")
+            .expect("input chain present");
+        let chain_forward_idx = s
+            .find("add chain inet sng_filter forward")
+            .expect("forward chain present");
+        let first_rule_idx = s
+            .find("add rule inet sng_filter forward")
+            .expect("rule line present");
+        assert!(
+            add_table_idx < flush_idx,
+            "add table must come before flush (script:\n{s})"
+        );
+        assert!(
+            flush_idx < chain_input_idx,
+            "flush must come before chain creation (script:\n{s})"
+        );
+        assert!(
+            flush_idx < chain_forward_idx,
+            "flush must come before chain creation (script:\n{s})"
+        );
+        assert!(
+            flush_idx < first_rule_idx,
+            "flush must come before rule emission (script:\n{s})"
+        );
+    }
+
+    /// Regression: rendering the same bundle twice must
+    /// produce byte-identical scripts. Combined with the
+    /// `flush table` guarantee above, this proves the script
+    /// is idempotent on the kernel — applying it N times
+    /// yields the same chain state as applying it once.
+    #[test]
+    fn compile_render_is_idempotent_under_repeated_apply() {
+        let bundle = make_bundle_with_rules(&[
+            ngfw_rule("a", Verb::Allow, vec![]),
+            ngfw_rule("b", Verb::Deny, vec![]),
+            ngfw_rule("c", Verb::Log, vec![]),
+        ]);
+        let a = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        let b = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        assert_eq!(
+            a.script.as_str().unwrap(),
+            b.script.as_str().unwrap(),
+            "compiler must render the same bundle byte-identically"
+        );
+    }
+
+    /// Regression: rotating from a bundle that defines a rule
+    /// to a bundle that does NOT define it must produce a
+    /// script whose `add rule` count for that id is zero. With
+    /// `flush table`, the kernel transactionally drops the
+    /// stale rule even though the rendered script never says
+    /// `delete rule`.
+    #[test]
+    fn compile_rotation_drops_removed_rule_via_flush() {
+        let v1 = make_bundle_with_rules(&[
+            ngfw_rule("keep", Verb::Allow, vec![]),
+            ngfw_rule("removed", Verb::Deny, vec![]),
+        ]);
+        let v2 = make_bundle_with_rules(&[ngfw_rule("keep", Verb::Allow, vec![])]);
+        let s1 = RuleCompiler::new()
+            .compile(&v1, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        let s2 = RuleCompiler::new()
+            .compile(&v2, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        let s1_text = s1.script.as_str().unwrap();
+        let s2_text = s2.script.as_str().unwrap();
+        assert!(s1_text.contains("\"removed\""));
+        assert!(!s2_text.contains("\"removed\""));
+        // Both scripts must flush; the second script is the
+        // authoritative replacement of the first.
+        assert!(s1_text.contains("flush table inet sng_filter"));
+        assert!(s2_text.contains("flush table inet sng_filter"));
     }
 
     #[test]
