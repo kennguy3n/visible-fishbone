@@ -56,6 +56,16 @@ pub enum SwgError {
         /// percentage (0..=100).
         pressure_pct: u8,
     },
+
+    /// A policy bundle landed with structurally invalid
+    /// thresholds (NaN, negative, etc.). The bundle adapter
+    /// drops the bundle and keeps the previously-active
+    /// policy. The variant exists so the supervisor can
+    /// alert on the structural reject without conflating it
+    /// with `BundleDecode` (which is a wire-format failure
+    /// rather than a value-domain failure).
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(String),
 }
 
 impl SwgError {
@@ -63,7 +73,9 @@ impl SwgError {
     #[must_use]
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::InvalidUrl(_) | Self::BundleDecode(_) => ErrorCode::WireSchema,
+            Self::InvalidUrl(_) | Self::BundleDecode(_) | Self::InvalidPolicy(_) => {
+                ErrorCode::WireSchema
+            }
             Self::ProviderFailure { .. } | Self::Telemetry(_) | Self::SessionTableFull { .. } => {
                 ErrorCode::Io
             }
@@ -137,5 +149,19 @@ mod tests {
     fn session_table_full_display_includes_pressure() {
         let e = SwgError::SessionTableFull { pressure_pct: 99 };
         assert!(format!("{e}").contains("99"));
+    }
+
+    #[test]
+    fn invalid_policy_maps_to_wire_schema() {
+        assert_eq!(
+            SwgError::InvalidPolicy("reputation_block_at is NaN".into()).code(),
+            ErrorCode::WireSchema
+        );
+    }
+
+    #[test]
+    fn invalid_policy_display_includes_reason() {
+        let e = SwgError::InvalidPolicy("reputation_inspect_at is NaN".into());
+        assert!(format!("{e}").contains("NaN"));
     }
 }

@@ -16,6 +16,7 @@
 //! no logging.
 
 use crate::category::Category;
+use crate::error::SwgError;
 use crate::malware::MalwareVerdict;
 use crate::reputation::ReputationScore;
 use arc_swap::ArcSwap;
@@ -168,6 +169,63 @@ impl SwgPolicy {
             .copied()
             .unwrap_or(self.default_posture)
     }
+
+    /// Reject structurally invalid policies before they
+    /// reach the data path.
+    ///
+    /// A policy that survives [`Deserialize`] (e.g. coming
+    /// out of a MessagePack bundle, a JSON config file, or a
+    /// generated test value) can still carry numerically
+    /// degenerate thresholds that silently disable
+    /// reputation-based enforcement. `NaN` is the canonical
+    /// example — every `>=` comparison against `NaN` returns
+    /// `false`, so a `NaN` threshold means reputation never
+    /// upgrades posture, regardless of the score the
+    /// provider returned. Negative thresholds are similarly
+    /// nonsensical because
+    /// [`ReputationScore`](crate::reputation::ReputationScore)
+    /// is clamped to `[0.0, 1.0]`. A misconfigured bundle
+    /// must be observable; this method returns
+    /// [`SwgError::InvalidPolicy`] so the bundle adapter can
+    /// reject the load instead of silently disabling
+    /// enforcement.
+    ///
+    /// Operators who want to *intentionally* disable a
+    /// reputation upgrade should use a sentinel above `1.0`
+    /// (e.g. `2.0`); `ReputationScore` can never reach it,
+    /// the comparison is well-defined, and the intent is
+    /// preserved in the policy snapshot.
+    pub fn validate(&self) -> Result<(), SwgError> {
+        for (name, value) in [
+            ("reputation_block_at", self.reputation_block_at),
+            ("reputation_inspect_at", self.reputation_inspect_at),
+        ] {
+            if !value.is_finite() {
+                return Err(SwgError::InvalidPolicy(format!(
+                    "{name} must be finite, got {value}"
+                )));
+            }
+            if value < 0.0 {
+                return Err(SwgError::InvalidPolicy(format!(
+                    "{name} must be non-negative, got {value}"
+                )));
+            }
+        }
+        // `reputation_inspect_at` is the *softer* upgrade
+        // (Allow/AlertOnly -> InspectFull); it must not be
+        // stricter than the block threshold or the upgrade
+        // ordering becomes incoherent (a score below the
+        // "upgrade to inspect" line would still cross the
+        // "upgrade to block" line, never landing at
+        // InspectFull).
+        if self.reputation_inspect_at > self.reputation_block_at {
+            return Err(SwgError::InvalidPolicy(format!(
+                "reputation_inspect_at ({}) must be <= reputation_block_at ({})",
+                self.reputation_inspect_at, self.reputation_block_at
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Inputs to the policy decision.
@@ -194,7 +252,14 @@ pub struct SwgPolicyHolder {
 }
 
 impl SwgPolicyHolder {
-    /// Construct a holder around `policy`.
+    /// Construct a holder around `policy` *without*
+    /// validating it. Reserved for callers that already
+    /// own a known-good policy — primarily
+    /// [`SwgPolicy::default`] and unit tests. Bundle
+    /// adapters and any externally-sourced policy should
+    /// use [`try_new`](Self::try_new) instead so a
+    /// misconfigured bundle is rejected rather than
+    /// silently disabling enforcement.
     #[must_use]
     pub fn new(policy: SwgPolicy) -> Self {
         Self {
@@ -202,10 +267,33 @@ impl SwgPolicyHolder {
         }
     }
 
-    /// Replace the policy atomically. In-flight
-    /// evaluations see the old policy until they finish.
+    /// Construct a holder around `policy`, returning an
+    /// error if the policy fails [`SwgPolicy::validate`].
+    /// The intended call site is the bundle adapter that
+    /// converts a decoded policy bundle into the in-memory
+    /// SWG snapshot — a misconfigured bundle is rejected at
+    /// load time and the supervisor keeps the previously-
+    /// active policy.
+    pub fn try_new(policy: SwgPolicy) -> Result<Self, SwgError> {
+        policy.validate()?;
+        Ok(Self::new(policy))
+    }
+
+    /// Replace the policy atomically *without* validating
+    /// it. Reserved for known-good policies; bundle
+    /// adapters should use [`try_replace`](Self::try_replace).
     pub fn replace(&self, policy: SwgPolicy) {
         self.inner.store(Arc::new(policy));
+    }
+
+    /// Validate and atomically replace the policy. On
+    /// validation failure the previously-loaded policy is
+    /// preserved and the data path keeps running with the
+    /// last known-good ruleset.
+    pub fn try_replace(&self, policy: SwgPolicy) -> Result<(), SwgError> {
+        policy.validate()?;
+        self.replace(policy);
+        Ok(())
     }
 
     /// Cheap snapshot of the current policy — clones the
@@ -271,10 +359,43 @@ pub fn evaluate_policy(policy: &SwgPolicy, inputs: DecisionInputs) -> Posture {
             };
         }
     }
-    // Step 4: suspicious malware verdict on an
-    // otherwise-allow path → quarantine.
+    // Step 4: suspicious malware verdict on a posture
+    // that would otherwise *deliver* traffic upstream →
+    // quarantine.
+    //
+    // The Suspicious verdict means the malware scanner
+    // already inspected the candidate object and returned
+    // a soft-positive. At that point further MITM
+    // inspection adds no new signal — we already have the
+    // scanner's opinion — so any posture that still hands
+    // the response to the user (`Allow`, `AlertOnly`,
+    // `InspectFull`) is downgraded to `Quarantine` instead.
+    //
+    // Critical invariant: this branch must apply after
+    // step 3's reputation upgrade as well as to the
+    // natively-InspectFull category posture. A previous
+    // version only caught `Allow | AlertOnly`, which meant
+    // a Business-category site (Allow) with medium
+    // reputation (≥ `reputation_inspect_at`) and a
+    // Suspicious verdict landed at `InspectFull` —
+    // strictly weaker than the same site with *no*
+    // reputation signal, which correctly landed at
+    // `Quarantine`. A worse reputation signal must never
+    // produce a more permissive outcome.
+    //
+    // `Block` / `Quarantine` are untouched (already
+    // blocking). `TlsBypass` is also untouched: the proxy
+    // does not intercept the response body on that path,
+    // so a Suspicious verdict cannot reach the malware
+    // scanner in the first place, and an out-of-band
+    // Suspicious signal must not silently re-enable MITM
+    // on a regulated category — see the step-3 comment
+    // block for the full rationale.
     if matches!(inputs.malware, Some(MalwareVerdict::Suspicious))
-        && matches!(posture, Posture::Allow | Posture::AlertOnly)
+        && matches!(
+            posture,
+            Posture::Allow | Posture::AlertOnly | Posture::InspectFull
+        )
     {
         posture = Posture::Quarantine;
     }
@@ -469,16 +590,193 @@ mod tests {
     }
 
     #[test]
-    fn suspicious_does_not_promote_inspect_full() {
+    fn suspicious_quarantines_natively_inspect_full() {
+        // The Suspicious verdict means the malware
+        // scanner already inspected the candidate and
+        // returned a soft-positive. Sending the response
+        // to the user behind MITM adds no new signal —
+        // we already have the scanner's opinion — so the
+        // posture downgrades to Quarantine.
         let h = SwgPolicyHolder::default();
         let inputs = DecisionInputs {
             category: Category::Uncategorised,
             reputation: None,
             malware: Some(MalwareVerdict::Suspicious),
         };
-        // InspectFull stays — suspicious only quarantines
-        // allow-class postures.
-        assert_eq!(h.evaluate(inputs), Posture::InspectFull);
+        assert_eq!(h.evaluate(inputs), Posture::Quarantine);
+    }
+
+    #[test]
+    fn suspicious_quarantines_reputation_upgraded_inspect_full() {
+        // Regression test for the masking bug: a
+        // Business-category site (Allow) with medium
+        // reputation (>= reputation_inspect_at) and a
+        // Suspicious verdict must land at Quarantine, not
+        // at InspectFull. Before the fix, step 3 upgraded
+        // Allow -> InspectFull on the reputation signal
+        // and step 4 only quarantined from
+        // `Allow | AlertOnly`, so the site got delivered
+        // through MITM — a strictly *weaker* outcome than
+        // the same request with no reputation signal at
+        // all (which already landed at Quarantine).
+        let h = SwgPolicyHolder::default();
+        let inputs = DecisionInputs {
+            category: Category::Business,
+            reputation: Some(ReputationScore::new(0.6)),
+            malware: Some(MalwareVerdict::Suspicious),
+        };
+        assert_eq!(h.evaluate(inputs), Posture::Quarantine);
+    }
+
+    #[test]
+    fn suspicious_does_not_quarantine_tls_bypass() {
+        // TlsBypass is operator-chosen for regulated
+        // categories where MITM creates compliance
+        // exposure. On that path the proxy doesn't
+        // intercept the response body so the scanner can't
+        // even produce a verdict — but if an out-of-band
+        // Suspicious signal somehow arrives, do NOT
+        // silently re-enable enforcement on the regulated
+        // category. Pinning the contract so a future
+        // refactor that drops the TlsBypass branch out of
+        // the step-4 match surfaces immediately.
+        let h = SwgPolicyHolder::default();
+        let inputs = DecisionInputs {
+            category: Category::Sensitive,
+            reputation: None,
+            malware: Some(MalwareVerdict::Suspicious),
+        };
+        assert_eq!(h.evaluate(inputs), Posture::TlsBypass);
+    }
+
+    #[test]
+    fn validate_rejects_nan_block_threshold() {
+        let p = SwgPolicy {
+            reputation_block_at: f32::NAN,
+            ..SwgPolicy::default()
+        };
+        let err = p.validate().expect_err("NaN must be rejected");
+        match err {
+            SwgError::InvalidPolicy(msg) => {
+                assert!(
+                    msg.contains("reputation_block_at") && msg.contains("finite"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected InvalidPolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_nan_inspect_threshold() {
+        let p = SwgPolicy {
+            reputation_inspect_at: f32::NAN,
+            ..SwgPolicy::default()
+        };
+        let err = p.validate().expect_err("NaN must be rejected");
+        match err {
+            SwgError::InvalidPolicy(msg) => {
+                assert!(msg.contains("reputation_inspect_at"));
+            }
+            other => panic!("expected InvalidPolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_negative_threshold() {
+        let p = SwgPolicy {
+            reputation_block_at: -0.1,
+            ..SwgPolicy::default()
+        };
+        let err = p.validate().expect_err("negative must be rejected");
+        match err {
+            SwgError::InvalidPolicy(msg) => {
+                assert!(msg.contains("non-negative"));
+            }
+            other => panic!("expected InvalidPolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_infinite_threshold() {
+        let p = SwgPolicy {
+            reputation_block_at: f32::INFINITY,
+            ..SwgPolicy::default()
+        };
+        let err = p.validate().expect_err("infinity must be rejected");
+        match err {
+            SwgError::InvalidPolicy(msg) => {
+                assert!(msg.contains("finite"));
+            }
+            other => panic!("expected InvalidPolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_inspect_above_block() {
+        let p = SwgPolicy {
+            reputation_block_at: 0.3,
+            reputation_inspect_at: 0.8,
+            ..SwgPolicy::default()
+        };
+        let err = p
+            .validate()
+            .expect_err("inverted thresholds must be rejected");
+        match err {
+            SwgError::InvalidPolicy(msg) => {
+                assert!(msg.contains("reputation_inspect_at"));
+                assert!(msg.contains("reputation_block_at"));
+            }
+            other => panic!("expected InvalidPolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_above_one_sentinel() {
+        // Operators who want to fully disable a reputation
+        // upgrade should use a finite sentinel above 1.0,
+        // not NaN/infinity. Pin that this idiom is
+        // accepted.
+        let p = SwgPolicy {
+            reputation_block_at: 2.0,
+            reputation_inspect_at: 2.0,
+            ..SwgPolicy::default()
+        };
+        p.validate().expect("2.0 sentinel must be accepted");
+    }
+
+    #[test]
+    fn validate_accepts_default_policy() {
+        SwgPolicy::default()
+            .validate()
+            .expect("default policy must be valid");
+    }
+
+    #[test]
+    fn try_new_rejects_invalid_policy() {
+        let p = SwgPolicy {
+            reputation_block_at: f32::NAN,
+            ..SwgPolicy::default()
+        };
+        assert!(SwgPolicyHolder::try_new(p).is_err());
+    }
+
+    #[test]
+    fn try_replace_preserves_previous_policy_on_invalid_input() {
+        // Critical safety property: a bundle adapter that
+        // feeds a malformed policy must NOT clobber the
+        // last-known-good policy. The data path keeps
+        // running with whatever was loaded before.
+        let h = SwgPolicyHolder::default();
+        let baseline = h.snapshot();
+        let bad = SwgPolicy {
+            reputation_block_at: f32::NAN,
+            ..SwgPolicy::default()
+        };
+        let err = h.try_replace(bad).expect_err("NaN must be rejected");
+        assert!(matches!(err, SwgError::InvalidPolicy(_)));
+        // Old policy still present.
+        assert!(Arc::ptr_eq(&baseline, &h.snapshot()));
     }
 
     #[test]
