@@ -287,7 +287,15 @@ impl SuricataProcess for ShellSuricata {
             .arg(config_path)
             .arg("--af-packet")
             .arg(&self.interface)
-            .arg("-D") // run, but don't daemonise — tokio owns the supervision
+            // Foreground mode. Suricata's `-D` actually means
+            // "daemonise" — the parent process exits immediately
+            // and the daemon child reparents to init, which
+            // would leave tokio holding a stale child PID and
+            // break is_alive(), signal delivery, and the
+            // restart watchdog. Foreground is the default when
+            // `-D` is omitted; we rely on that so this tokio
+            // `Child` handle stays bound to the actual Suricata
+            // process for its full lifetime.
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
