@@ -183,6 +183,17 @@ pub trait SuricataProcess: Send + Sync + std::fmt::Debug {
     /// snapshot the supervisor updates on a timer — the manager
     /// does not care which.
     async fn stats(&self) -> Result<SuricataStats, IpsError>;
+    /// Push a stats snapshot the manager harvested out-of-band
+    /// (e.g. by parsing an `event_type: stats` EVE record).
+    /// Implementations are expected to merge `update` into the
+    /// value [`Self::stats`] returns next, so the health monitor
+    /// sees real packet/drop counters instead of zero. The
+    /// default implementation is a no-op so backends that
+    /// already have a first-class stats path (e.g. a future
+    /// `suricatasc`-backed reader) can ignore the EVE feed.
+    async fn push_stats(&self, _update: SuricataStats) -> Result<(), IpsError> {
+        Ok(())
+    }
     /// Is the process currently alive? Implementations may
     /// short-circuit on a cached PID liveness check; an authoritative
     /// answer requires an OS query (`kill(0)` on POSIX).
@@ -295,17 +306,61 @@ impl SuricataProcess for ShellSuricata {
             state.status = ProcessStatus::Stopped;
             return Ok(());
         };
-        // Send SIGTERM via tokio's `start_kill`; if the process
-        // refuses to exit within the grace window, escalate to a
-        // hard kill.
-        let _ = child.start_kill();
+        // Graceful stop contract (trait doc):
+        //   1. send SIGTERM (signal 15),
+        //   2. wait up to `grace_period` for the child to exit,
+        //   3. only then escalate to SIGKILL.
+        //
+        // tokio's `Child::start_kill()` is unconditionally
+        // SIGKILL on Unix and would defeat the grace window
+        // entirely — Suricata would never flush in-flight
+        // flows or close the EVE log cleanly. So we issue the
+        // signal ourselves through /bin/kill (matching the
+        // pattern in `signal()` above), keep the child handle
+        // so we can `wait()` on it, and only escalate if the
+        // timeout expires.
+        if let Some(pid) = child.id() {
+            let sig_num = SuricataSignal::Shutdown.as_posix();
+            let kill_res = Command::new("/bin/kill")
+                .arg(format!("-{sig_num}"))
+                .arg(pid.to_string())
+                .output()
+                .await;
+            match kill_res {
+                Ok(out) if out.status.success() => {}
+                Ok(out) => {
+                    // SIGTERM delivery failed (process already
+                    // reaped between `id()` and the kill, EPERM,
+                    // etc). Don't fail the stop — fall through
+                    // to the escalation path so the supervisor's
+                    // "stopped" invariant still holds.
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    tracing::warn!(
+                        target: "sng_ips::process::shell",
+                        pid,
+                        sig = sig_num,
+                        stderr = %stderr,
+                        "SIGTERM delivery failed; escalating to SIGKILL after grace window"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "sng_ips::process::shell",
+                        pid,
+                        error = %e,
+                        "could not spawn /bin/kill for SIGTERM; escalating to SIGKILL"
+                    );
+                }
+            }
+        }
         match tokio::time::timeout(self.grace_period, child.wait()).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
                 return Err(IpsError::Process(format!("wait failed: {e}")));
             }
             Err(_) => {
-                // Timed out — escalate.
+                // Grace period expired — escalate to SIGKILL via
+                // tokio's `kill()` (which sends SIGKILL and waits).
                 let _ = child.kill().await;
             }
         }
@@ -354,18 +409,39 @@ impl SuricataProcess for ShellSuricata {
         // RSS via /proc/<pid>/status — best-effort.
         let rss = Self::read_rss_bytes(pid).await;
         state.last_stats.rss_bytes = rss;
-        // Counters from /proc/<pid>/stat — utime+stime fields,
+        // CPU from /proc/<pid>/stat — utime+stime fields,
         // converted to ms via the kernel clock tick.
         let cpu_ms = match tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await {
             Ok(contents) => parse_cpu_ms_from_proc_stat(&contents),
             Err(_) => state.last_stats.cpu_ms,
         };
         state.last_stats.cpu_ms = cpu_ms;
+        // Packet / alert / rule counters come from the manager's
+        // EVE-stats reader via `push_stats()` — see the trait
+        // doc. They live in `state.last_stats` already (the
+        // push_stats impl writes there); we read them out as-is.
         Ok(state.last_stats.clone())
     }
 
+    async fn push_stats(&self, update: SuricataStats) -> Result<(), IpsError> {
+        let mut state = self.state.lock().await;
+        // Merge: take packet/alert/rule fields from `update`
+        // (the EVE feed) and preserve rss/cpu (the /proc feed
+        // owns those). This way two writers can update the
+        // same snapshot without clobbering each other.
+        state.last_stats.packets_processed = update.packets_processed;
+        state.last_stats.alerts_emitted = update.alerts_emitted;
+        state.last_stats.packets_dropped = update.packets_dropped;
+        state.last_stats.rules_loaded = update.rules_loaded;
+        Ok(())
+    }
+
     async fn is_alive(&self) -> bool {
-        let state = self.state.lock().await;
+        // Take the lock as `mut` so we can drive the
+        // Running→Crashed transition in one place (see
+        // `status()` for the same pattern).
+        let mut state = self.state.lock().await;
+        Self::observe_child_exit(&mut state);
         match state.child.as_ref().and_then(tokio::process::Child::id) {
             Some(pid) => {
                 // `kill -0` via /bin/kill: zero exit means the
@@ -382,8 +458,64 @@ impl SuricataProcess for ShellSuricata {
     }
 
     async fn status(&self) -> ProcessStatus {
-        let state = self.state.lock().await;
+        // The manager's restart watchdog gates on `Crashed`,
+        // so this is where we have to observe an unexpected
+        // exit and transition out of `Running`. `try_wait()` is
+        // non-blocking; a successful read with `Some(_)` means
+        // the child has been reaped (it exited or was signalled),
+        // at which point we drop the handle and flip to `Crashed`.
+        let mut state = self.state.lock().await;
+        Self::observe_child_exit(&mut state);
         state.status
+    }
+}
+
+impl ShellSuricata {
+    /// Drive the Running→Crashed transition by polling
+    /// `try_wait()` on the cached child handle. Called by every
+    /// status-observing entry point (`status`, `is_alive`) so the
+    /// watchdog sees the new state on its next tick regardless of
+    /// which method it called.
+    fn observe_child_exit(state: &mut ShellState) {
+        // Only meaningful while we believe the process is
+        // running and we still hold a child handle. A child
+        // that has already been taken (e.g. by `stop()`) is
+        // either Stopped (clean exit) or Crashed (already
+        // observed) — nothing to do either way.
+        if !matches!(state.status, ProcessStatus::Running) {
+            return;
+        }
+        let Some(child) = state.child.as_mut() else {
+            return;
+        };
+        match child.try_wait() {
+            // Process still running.
+            Ok(None) => {}
+            // Process exited — reap and flip to Crashed.
+            // We use `Crashed` rather than `Stopped` because we
+            // didn't initiate the exit (a clean `stop()` takes
+            // the child out of state before calling `wait()`,
+            // so we'd never observe the exit here).
+            Ok(Some(status)) => {
+                tracing::warn!(
+                    target: "sng_ips::process::shell",
+                    ?status,
+                    "suricata child exited unexpectedly; flipping to Crashed"
+                );
+                state.child = None;
+                state.status = ProcessStatus::Crashed;
+            }
+            // try_wait itself failed (extremely rare; would be
+            // a kernel-level oddity). Don't mutate state — the
+            // next poll will retry.
+            Err(e) => {
+                tracing::warn!(
+                    target: "sng_ips::process::shell",
+                    error = %e,
+                    "try_wait on suricata child failed; will retry next poll"
+                );
+            }
+        }
     }
 }
 
@@ -470,6 +602,10 @@ struct MockState {
     /// supervisor's restart-on-crash policy.
     start_count: u32,
     stop_count: u32,
+    /// Number of times the manager pushed an EVE-derived stats
+    /// snapshot. Tests on the EVE-stats integration assert this
+    /// monotonically advances.
+    push_stats_calls: u32,
 }
 
 impl MockSuricata {
@@ -543,6 +679,13 @@ impl MockSuricata {
     pub fn stop_count(&self) -> u32 {
         self.inner.lock().stop_count
     }
+
+    /// Number of times the manager pushed an EVE-derived stats
+    /// snapshot via `push_stats`.
+    #[must_use]
+    pub fn push_stats_calls(&self) -> u32 {
+        self.inner.lock().push_stats_calls
+    }
 }
 
 #[async_trait]
@@ -593,6 +736,23 @@ impl SuricataProcess for MockSuricata {
             return Ok(next);
         }
         Ok(s.current_stats.clone())
+    }
+
+    async fn push_stats(&self, update: SuricataStats) -> Result<(), IpsError> {
+        // Mirror the production backend's merge semantics: the
+        // EVE feed owns packet / alert / rule counters, the
+        // /proc feed (which the test fakes out by setting
+        // `current_stats` directly) owns rss/cpu. Tests can
+        // drive the manager's EVE-stats path end-to-end and
+        // then read back `stats()` to confirm the projection
+        // arrived intact.
+        let mut s = self.inner.lock();
+        s.current_stats.packets_processed = update.packets_processed;
+        s.current_stats.alerts_emitted = update.alerts_emitted;
+        s.current_stats.packets_dropped = update.packets_dropped;
+        s.current_stats.rules_loaded = update.rules_loaded;
+        s.push_stats_calls = s.push_stats_calls.saturating_add(1);
+        Ok(())
     }
 
     async fn is_alive(&self) -> bool {

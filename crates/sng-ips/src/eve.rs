@@ -56,6 +56,14 @@ pub enum EveRecord {
     Tls(EveTls),
     Fileinfo(EveFileinfo),
     Flow(EveFlow),
+    /// `event_type: stats` payload. Suricata emits a periodic
+    /// rollup of capture/decode/detect counters (interval set
+    /// in suricata.yaml under `outputs.eve-log.types.stats`).
+    /// The manager funnels these into [`crate::process::SuricataStats`]
+    /// so the health monitor's drop-ratio threshold has real
+    /// data to compare against, instead of reading 0/0 from
+    /// `/proc/<pid>/status` like the resource-budget path does.
+    Stats(EveStats),
     /// Event type the parser does not recognise. Carries the
     /// raw `event_type` string + the parsed JSON object so the
     /// supervisor can log it without re-parsing. The manager
@@ -90,6 +98,7 @@ impl EveRecord {
             "tls" => Ok(Self::Tls(decode_payload(&v, "tls")?)),
             "fileinfo" => Ok(Self::Fileinfo(decode_payload(&v, "fileinfo")?)),
             "flow" => Ok(Self::Flow(decode_payload(&v, "flow")?)),
+            "stats" => Ok(Self::Stats(decode_payload(&v, "stats")?)),
             _ => Ok(Self::Unknown { event_type, raw: v }),
         }
     }
@@ -107,7 +116,9 @@ impl EveRecord {
             Self::Tls(t) => Some(&t.tuple),
             Self::Fileinfo(f) => Some(&f.tuple),
             Self::Flow(f) => Some(&f.tuple),
-            Self::Unknown { .. } => None,
+            // Stats records describe the whole-process counters,
+            // not a single flow — they have no 5-tuple.
+            Self::Stats(_) | Self::Unknown { .. } => None,
         }
     }
 
@@ -123,6 +134,7 @@ impl EveRecord {
             Self::Tls(_) => "tls",
             Self::Fileinfo(_) => "fileinfo",
             Self::Flow(_) => "flow",
+            Self::Stats(_) => "stats",
             Self::Unknown { event_type, .. } => event_type.as_str(),
         }
     }
@@ -156,7 +168,7 @@ fn decode_payload<T: for<'de> Deserialize<'de>>(line: &Value, key: &str) -> Resu
 /// `dst_*`). We keep the Suricata naming on the deserialised
 /// struct and translate at the normalisation boundary so the
 /// JSON test fixtures stay byte-identical to the raw EVE output.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FlowTuple {
     /// RFC 3339 timestamp emitted by Suricata.
     #[serde(default)]
@@ -421,6 +433,112 @@ pub struct FlowPayload {
     /// Flow end timestamp.
     #[serde(default)]
     pub end: Option<String>,
+}
+
+/// `event_type: stats` payload.
+///
+/// Suricata emits one of these on the configured stats interval
+/// (`outputs.eve-log.types.stats.interval` in suricata.yaml).
+/// The on-the-wire shape is a flat dotted-name to number map
+/// nested under arbitrarily-deep keys (`capture.kernel_packets`,
+/// `decoder.pkts`, `detect.alert`, `detect.rules_loaded`, …).
+/// We don't reify the whole tree because it's unstable across
+/// Suricata releases and only a handful of counters drive
+/// policy decisions in `sng-ips`. The deserialiser walks the
+/// nested object once and copies the counters we care about
+/// into typed fields.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EveStats {
+    #[serde(flatten)]
+    pub tuple: FlowTuple,
+    pub stats: EveStatsRaw,
+}
+
+/// The raw `stats` sub-object. We only deserialise the branches
+/// that feed [`EveStatsCounters`]; anything else stays untyped
+/// so a Suricata upgrade can not break the decoder for unrelated
+/// counters.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EveStatsRaw {
+    /// AF_PACKET / pcap capture counters.
+    #[serde(default)]
+    pub capture: Option<EveStatsCapture>,
+    /// Per-decode-layer packet counter rollup.
+    #[serde(default)]
+    pub decoder: Option<EveStatsDecoder>,
+    /// Detect-engine alert + rule counters.
+    #[serde(default)]
+    pub detect: Option<EveStatsDetect>,
+}
+
+/// Capture-layer counters from Suricata's `stats.capture` sub-object.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EveStatsCapture {
+    /// Packets the kernel handed to the capture thread.
+    #[serde(default)]
+    pub kernel_packets: u64,
+    /// Packets the kernel dropped before they reached Suricata
+    /// (ring full / no buffer).
+    #[serde(default)]
+    pub kernel_drops: u64,
+}
+
+/// Decoder-layer counters; we use `pkts` as the canonical
+/// "packets processed" total (matches `suricatasc dump-counters`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EveStatsDecoder {
+    /// Total decoded packets.
+    #[serde(default)]
+    pub pkts: u64,
+}
+
+/// Detect-engine counters. `alert` is the running total of
+/// alerts emitted; the manager turns that into a delta-per-tick.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EveStatsDetect {
+    /// Alerts emitted since process start.
+    #[serde(default)]
+    pub alert: u64,
+    /// Rules loaded by the detect engine. Suricata reports this
+    /// as a top-level `detect.rules_loaded` in newer versions;
+    /// older versions nest it under `detect.engines[].rules_loaded`.
+    /// We read the flat form and treat missing as zero; the
+    /// health monitor never gates on rule count alone.
+    #[serde(default)]
+    pub rules_loaded: u64,
+}
+
+/// Typed projection of the [`EveStats`] payload into the
+/// counter set [`crate::process::SuricataStats`] cares about.
+/// Counters that the running Suricata didn't emit (e.g. a
+/// build without AF_PACKET) come through as zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EveStatsCounters {
+    pub packets_processed: u64,
+    pub alerts_emitted: u64,
+    pub packets_dropped: u64,
+    pub rules_loaded: u64,
+}
+
+impl EveStats {
+    /// Project the raw nested object into the typed view the
+    /// manager pushes into [`crate::process::SuricataStats`].
+    #[must_use]
+    pub fn counters(&self) -> EveStatsCounters {
+        let cap = self.stats.capture.as_ref();
+        let dec = self.stats.decoder.as_ref();
+        let det = self.stats.detect.as_ref();
+        EveStatsCounters {
+            // Prefer the decoder's total when present (matches
+            // `suricatasc dump-counters`); fall back to the
+            // capture path's kernel_packets if the build doesn't
+            // expose a decoder counter (e.g. xdp-only).
+            packets_processed: dec.map_or_else(|| cap.map_or(0, |c| c.kernel_packets), |d| d.pkts),
+            alerts_emitted: det.map_or(0, |d| d.alert),
+            packets_dropped: cap.map_or(0, |c| c.kernel_drops),
+            rules_loaded: det.map_or(0, |d| d.rules_loaded),
+        }
+    }
 }
 
 // ----- Normalisation into the workspace event schema -----

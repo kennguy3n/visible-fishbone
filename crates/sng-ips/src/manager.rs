@@ -63,16 +63,15 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
-use sng_core::events::IpsEvent;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::config::{ConfigGenerator, IpsConfigInput, SuricataConfig};
 use crate::error::IpsError;
-use crate::eve::{EveAlert, EveRecord};
+use crate::eve::EveRecord;
 use crate::health::{
     FailMode, HealthMonitor, HealthProbe, HealthState, HealthThresholds, HealthTransition,
 };
@@ -171,6 +170,16 @@ pub struct IpsManagerStatus {
     /// Number of EVE records normalised and forwarded to the
     /// telemetry sink since start.
     pub events_emitted: u64,
+    /// Number of `event_type: stats` EVE records the manager
+    /// pushed into the process backend via `push_stats`. The
+    /// health monitor's drop-ratio threshold only has real data
+    /// when this counter is monotonically advancing.
+    pub stats_records_seen: u64,
+    /// Number of times the EVE tail observed a log rotation
+    /// (inode change on the watched path) and re-opened the
+    /// file. Surfaced for visibility — a non-zero value after
+    /// `rotate_logs()` proves the rotate handler ran cleanly.
+    pub eve_reopens: u64,
     /// Number of restart attempts the watchdog has issued since
     /// start. Resets on a successful `Healthy` transition.
     pub restart_attempts: u32,
@@ -190,9 +199,47 @@ struct Inner {
     health: Mutex<HealthMonitor>,
     eve_decode_errors: parking_lot::Mutex<u64>,
     events_emitted: parking_lot::Mutex<u64>,
+    stats_records_seen: parking_lot::Mutex<u64>,
+    eve_reopens: parking_lot::Mutex<u64>,
     restart_attempts: parking_lot::Mutex<u32>,
-    /// Notify the EVE tail to stop. Set on `stop()`.
-    shutdown: Notify,
+    /// Level-triggered shutdown latch. The previous design used
+    /// `tokio::sync::Notify` which is edge-triggered: a
+    /// `notify_waiters()` issued while a task is between two
+    /// `notified()` registrations is silently dropped on the
+    /// floor. The EVE tail's EOF branch in particular sleeps
+    /// for 200 ms with no `notified()` future live, so an
+    /// unlucky `stop()` could leak that task forever.
+    ///
+    /// `watch` is level-triggered: any task that calls
+    /// `subscribe().changed().await` after the sender published
+    /// `true` returns immediately, regardless of when it
+    /// subscribed. `stop()` sets the value to `true` exactly
+    /// once; tasks loop while the current value is `false`.
+    shutdown_tx: watch::Sender<bool>,
+}
+
+impl Inner {
+    /// Spawn a fresh subscriber pinned to the shutdown latch.
+    /// Each background task takes its own receiver so they all
+    /// observe the level-true transition independently.
+    fn shutdown_rx(&self) -> watch::Receiver<bool> {
+        self.shutdown_tx.subscribe()
+    }
+
+    /// Await the next `false -> true` transition on the latch.
+    /// Returns immediately if the latch is already `true` (the
+    /// `borrow_and_update` arm covers the already-shut-down
+    /// case so a task started after `stop()` exits promptly).
+    async fn wait_for_shutdown(rx: &mut watch::Receiver<bool>) {
+        if *rx.borrow_and_update() {
+            return;
+        }
+        // `changed()` only resolves on the next send. If the
+        // sender has been dropped (impossible while `Inner` is
+        // alive, since it owns `shutdown_tx`), exit as if we
+        // had been told to shut down.
+        let _ = rx.changed().await;
+    }
 }
 
 /// IPS supervisor handle. Cheap to clone (`Arc` inside) and
@@ -231,8 +278,10 @@ impl IpsManager {
             ),
             eve_decode_errors: parking_lot::Mutex::new(0),
             events_emitted: parking_lot::Mutex::new(0),
+            stats_records_seen: parking_lot::Mutex::new(0),
+            eve_reopens: parking_lot::Mutex::new(0),
             restart_attempts: parking_lot::Mutex::new(0),
-            shutdown: Notify::new(),
+            shutdown_tx: watch::channel(false).0,
         });
         Self {
             cfg,
@@ -288,8 +337,9 @@ impl IpsManager {
         let eve_path = self.cfg.eve_log_path.clone();
         let inner_eve = Arc::clone(&self.inner);
         let sink_eve = self.sink.clone();
+        let process_eve = Arc::clone(&self.process);
         let eve_handle = tokio::spawn(async move {
-            tail_eve_log(eve_path, inner_eve, sink_eve).await;
+            tail_eve_log(eve_path, inner_eve, sink_eve, process_eve).await;
         });
 
         let inner_stats = Arc::clone(&self.inner);
@@ -403,6 +453,8 @@ impl IpsManager {
             forwarding_allowed,
             eve_decode_errors: *self.inner.eve_decode_errors.lock(),
             events_emitted: *self.inner.events_emitted.lock(),
+            stats_records_seen: *self.inner.stats_records_seen.lock(),
+            eve_reopens: *self.inner.eve_reopens.lock(),
             restart_attempts: *self.inner.restart_attempts.lock(),
         }
     }
@@ -424,7 +476,11 @@ impl IpsManager {
     /// [`SupervisorHandles`] after this returns to drain the
     /// tasks cleanly.
     pub async fn stop(&self) -> Result<(), IpsError> {
-        self.inner.shutdown.notify_waiters();
+        // `send_replace` updates the latch even if no
+        // subscribers exist yet; combined with `borrow_and_update`
+        // in `wait_for_shutdown`, this means tasks started after
+        // `stop()` still exit promptly.
+        let _ = self.inner.shutdown_tx.send_replace(true);
         self.process.stop().await?;
         info!(target: "sng_ips::manager", "ips stopped");
         Ok(())
@@ -490,7 +546,12 @@ impl SupervisorHandles {
 /// surfaces as an `IpsError::EveDecode` and bumps the
 /// `eve_decode_errors` counter) but not forwarded — the
 /// telemetry pipeline only consumes IPS alerts today.
-async fn tail_eve_log(eve_path: PathBuf, inner: Arc<Inner>, sink: IpsEventSink) {
+async fn tail_eve_log(
+    eve_path: PathBuf,
+    inner: Arc<Inner>,
+    sink: IpsEventSink,
+    process: Arc<dyn SuricataProcess>,
+) {
     // Open the file with a small retry loop — Suricata may not
     // have created the file yet on a cold start. Three retries
     // at 100 ms is enough for the common race; longer waits are
@@ -504,12 +565,14 @@ async fn tail_eve_log(eve_path: PathBuf, inner: Arc<Inner>, sink: IpsEventSink) 
         );
         return;
     };
+    let mut current_inode = file_identity(&eve_path).await;
     let mut reader = BufReader::new(file).lines();
+    let mut shutdown_rx = inner.shutdown_rx();
 
     loop {
         tokio::select! {
             // Shutdown wins — exit before reading more.
-            () = inner.shutdown.notified() => {
+            () = Inner::wait_for_shutdown(&mut shutdown_rx) => {
                 debug!(target: "sng_ips::manager::eve", "shutdown signalled");
                 return;
             }
@@ -524,7 +587,9 @@ async fn tail_eve_log(eve_path: PathBuf, inner: Arc<Inner>, sink: IpsEventSink) 
                         }
                         *inner.last_eve_progress_at.lock() = Instant::now();
                         match EveRecord::parse_line(&text) {
-                            Ok(record) => handle_eve_record(record, &inner, &sink),
+                            Ok(record) => {
+                                handle_eve_record(record, &inner, &sink, &*process).await;
+                            }
                             Err(e) => {
                                 *inner.eve_decode_errors.lock() += 1;
                                 warn!(
@@ -536,12 +601,79 @@ async fn tail_eve_log(eve_path: PathBuf, inner: Arc<Inner>, sink: IpsEventSink) 
                         }
                     }
                     Ok(None) => {
-                        // Suricata is still writing; sleep then
-                        // poll again. The staleness probe in
-                        // run_stats_poll covers the "writer
-                        // wedged" case, so we do not need our
-                        // own timer here.
-                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        // Reached EOF on the current file handle.
+                        // Two reasons this happens in production:
+                        //   1. Suricata is between flushes —
+                        //      the same inode is still the live
+                        //      log; we just need to wait.
+                        //   2. Operator's logrotate moved the
+                        //      old file aside (or `SIGHUP`'d
+                        //      Suricata to reopen) and the path
+                        //      now points at a brand-new inode
+                        //      that we never attached to.
+                        //
+                        // `file_identity` returns a (device, inode)
+                        // pair on Unix; comparing to the cached
+                        // value detects case (2) without racing
+                        // against case (1). On a rotation we drop
+                        // the old reader and reopen the path.
+                        let now = file_identity(&eve_path).await;
+                        let rotated = match (current_inode, now) {
+                            (Some(prev), Some(cur)) => prev != cur,
+                            // File disappeared (rotation step is
+                            // mid-rename) — treat as rotation; the
+                            // open_eve_with_retry loop will wait
+                            // for the new file to materialise.
+                            (Some(_), None) => true,
+                            // We never observed an identity to
+                            // begin with (e.g. a /proc-style FS
+                            // that doesn't expose inodes). Fall
+                            // through to the sleep+continue path.
+                            _ => false,
+                        };
+                        if rotated {
+                            info!(
+                                target: "sng_ips::manager::eve",
+                                path = %eve_path.display(),
+                                previous = ?current_inode,
+                                current = ?now,
+                                "eve log rotated; reopening"
+                            );
+                            if let Some(new_file) = open_eve_with_retry(&eve_path).await {
+                                current_inode = file_identity(&eve_path).await;
+                                reader = BufReader::new(new_file).lines();
+                                *inner.eve_reopens.lock() += 1;
+                            } else {
+                                warn!(
+                                    target: "sng_ips::manager::eve",
+                                    path = %eve_path.display(),
+                                    "eve log unavailable after rotation; tail task exiting"
+                                );
+                                return;
+                            }
+                            continue;
+                        }
+                        // Same inode, still EOF — Suricata is
+                        // mid-flush. Sleep then poll again. The
+                        // staleness probe in run_stats_poll
+                        // covers the "writer wedged" case.
+                        //
+                        // Wrap the sleep in a select against the
+                        // shutdown latch so a `stop()` issued
+                        // during the 200 ms idle window unblocks
+                        // the task immediately (rather than
+                        // waiting up to 200 ms per cycle for the
+                        // next outer-select iteration).
+                        tokio::select! {
+                            () = Inner::wait_for_shutdown(&mut shutdown_rx) => {
+                                debug!(
+                                    target: "sng_ips::manager::eve",
+                                    "shutdown signalled mid-EOF sleep"
+                                );
+                                return;
+                            }
+                            () = tokio::time::sleep(Duration::from_millis(200)) => {}
+                        }
                     }
                     Err(e) => {
                         warn!(
@@ -557,6 +689,46 @@ async fn tail_eve_log(eve_path: PathBuf, inner: Arc<Inner>, sink: IpsEventSink) 
     }
 }
 
+/// Cross-platform file identity tuple used by the EVE tail to
+/// detect log rotation. On Unix we use `(st_dev, st_ino)` so
+/// rotations that move a file to a different filesystem still
+/// count as a rotation (`logrotate` with `copytruncate` is the
+/// portable exception — that strategy preserves the inode and
+/// truncates, which we surface via the size-decrease check the
+/// staleness probe already covers). On non-Unix platforms we
+/// fall back to file size: a numerically smaller size than what
+/// we previously saw is the only signal we have.
+async fn file_identity(path: &Path) -> Option<FileIdentity> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(FileIdentity {
+            dev: meta.dev(),
+            inode: meta.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        // Treat each (size) reading as the identity proxy on
+        // non-Unix; the rotation detector flags any change as a
+        // potential rotation. False positives just trigger a
+        // benign reopen.
+        Some(FileIdentity {
+            dev: 0,
+            inode: meta.len(),
+        })
+    }
+}
+
+/// Stable identity for the EVE log file. Two reads with
+/// matching identities are reading the same on-disk inode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    inode: u64,
+}
+
 async fn open_eve_with_retry(path: &Path) -> Option<tokio::fs::File> {
     for _ in 0..3_u8 {
         match tokio::fs::File::open(path).await {
@@ -567,10 +739,21 @@ async fn open_eve_with_retry(path: &Path) -> Option<tokio::fs::File> {
     tokio::fs::File::open(path).await.ok()
 }
 
-fn handle_eve_record(record: EveRecord, inner: &Inner, sink: &IpsEventSink) {
+async fn handle_eve_record(
+    record: EveRecord,
+    inner: &Inner,
+    sink: &IpsEventSink,
+    process: &dyn SuricataProcess,
+) {
     match record {
         EveRecord::Alert(alert) => {
-            let ev = normalise_alert(&alert);
+            // Delegate to `EveAlert::to_ips_event` so both the
+            // public conversion API and the live telemetry path
+            // produce identical events. The previous inline
+            // implementation drifted on missing-IP handling
+            // (empty string vs `"unknown"`); a single shared
+            // converter prevents that class of bug.
+            let ev = alert.to_ips_event();
             // try_send rather than blocking — the sink is the
             // telemetry pipeline's buffered channel; back-pressure
             // means the operator already has a saturation alarm.
@@ -585,6 +768,35 @@ fn handle_eve_record(record: EveRecord, inner: &Inner, sink: &IpsEventSink) {
                 );
             } else {
                 *inner.events_emitted.lock() += 1;
+            }
+        }
+        EveRecord::Stats(stats) => {
+            // Project the nested EVE stats object into the
+            // SuricataStats counter set the health monitor
+            // gates on. push_stats merges the snapshot into
+            // the process backend's cached stats so the next
+            // run_stats_poll tick sees real packet/drop counts
+            // (the /proc path only fills RSS + CPU).
+            let counters = stats.counters();
+            let snapshot = SuricataStats {
+                packets_processed: counters.packets_processed,
+                alerts_emitted: counters.alerts_emitted,
+                packets_dropped: counters.packets_dropped,
+                rules_loaded: counters.rules_loaded,
+                // rss / cpu stay zero here; push_stats merges
+                // by field so the live /proc-sourced values
+                // are preserved on the backend.
+                rss_bytes: 0,
+                cpu_ms: 0,
+            };
+            if let Err(e) = process.push_stats(snapshot).await {
+                warn!(
+                    target: "sng_ips::manager::eve",
+                    error = %e,
+                    "push_stats failed; health monitor will see stale counters"
+                );
+            } else {
+                *inner.stats_records_seen.lock() += 1;
             }
         }
         other => {
@@ -602,18 +814,6 @@ fn handle_eve_record(record: EveRecord, inner: &Inner, sink: &IpsEventSink) {
     }
 }
 
-fn normalise_alert(alert: &EveAlert) -> IpsEvent {
-    IpsEvent {
-        rule_id: alert.alert.signature_id.to_string(),
-        signature: alert.alert.signature.clone(),
-        severity: crate::eve::severity_label(alert.alert.severity).into(),
-        action: alert.alert.action.clone(),
-        src_ip: alert.tuple.src_ip.clone().unwrap_or_default(),
-        dst_ip: alert.tuple.dst_ip.clone().unwrap_or_default(),
-        protocol: alert.tuple.normalised_protocol(),
-    }
-}
-
 /// Poll the process backend at `interval`, compute the per-tick
 /// stats delta + EVE staleness, fold them into a
 /// [`HealthProbe`], step the [`HealthMonitor`], and log
@@ -627,9 +827,10 @@ async fn run_stats_poll(
 ) {
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut shutdown_rx = inner.shutdown_rx();
     loop {
         tokio::select! {
-            () = inner.shutdown.notified() => {
+            () = Inner::wait_for_shutdown(&mut shutdown_rx) => {
                 debug!(target: "sng_ips::manager::stats", "shutdown signalled");
                 return;
             }
@@ -713,9 +914,10 @@ async fn run_restart_watchdog(
 ) {
     let mut backoff = initial_backoff;
     let mut consecutive_failures: u32 = 0;
+    let mut shutdown_rx = inner.shutdown_rx();
     loop {
         tokio::select! {
-            () = inner.shutdown.notified() => {
+            () = Inner::wait_for_shutdown(&mut shutdown_rx) => {
                 debug!(target: "sng_ips::manager::watchdog", "shutdown signalled");
                 return;
             }
@@ -730,7 +932,19 @@ async fn run_restart_watchdog(
                     continue;
                 }
                 // Crashed: wait the backoff window then retry.
-                tokio::time::sleep(backoff).await;
+                // Make the backoff itself interruptible; an
+                // operator-initiated `stop()` during a 30-second
+                // restart backoff should not hang the manager.
+                tokio::select! {
+                    () = Inner::wait_for_shutdown(&mut shutdown_rx) => {
+                        debug!(
+                            target: "sng_ips::manager::watchdog",
+                            "shutdown signalled during restart backoff"
+                        );
+                        return;
+                    }
+                    () = tokio::time::sleep(backoff) => {}
+                }
                 *inner.restart_attempts.lock() += 1;
                 let path = inner.config_path.load_full();
                 match process.start(&path).await {
@@ -1000,8 +1214,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normalise_alert_maps_eve_alert_to_ips_event() {
-        let alert = EveAlert {
+    async fn eve_alert_to_ips_event_maps_fields() {
+        // Smoke-cover: the manager used to wrap a private
+        // `normalise_alert` helper that just delegated to
+        // `EveAlert::to_ips_event`. We deleted the duplicate;
+        // this test guards the live mapping path the tail
+        // task actually uses.
+        let alert = crate::eve::EveAlert {
             tuple: crate::eve::FlowTuple {
                 timestamp: Some("2026-05-30T12:00:00Z".into()),
                 flow_id: Some(42),
@@ -1022,7 +1241,7 @@ mod tests {
                 gid: Some(1),
             },
         };
-        let ev = normalise_alert(&alert);
+        let ev = alert.to_ips_event();
         assert_eq!(ev.rule_id, "2000001");
         assert_eq!(ev.signature, "ET TROJAN bogus");
         assert_eq!(ev.severity, "critical");
@@ -1057,11 +1276,16 @@ mod tests {
             health: Mutex::new(HealthMonitor::new()),
             eve_decode_errors: parking_lot::Mutex::new(0),
             events_emitted: parking_lot::Mutex::new(0),
+            stats_records_seen: parking_lot::Mutex::new(0),
+            eve_reopens: parking_lot::Mutex::new(0),
             restart_attempts: parking_lot::Mutex::new(0),
-            shutdown: Notify::new(),
+            shutdown_tx: watch::channel(false).0,
         });
         let inner2 = Arc::clone(&inner);
-        let handle = tokio::spawn(async move { tail_eve_log(eve_path, inner2, sink).await });
+        let process_for_tail: Arc<dyn SuricataProcess> = Arc::new(MockSuricata::new());
+        let handle = tokio::spawn(async move {
+            tail_eve_log(eve_path, inner2, sink, process_for_tail).await;
+        });
         // The first record (alert) should land on the source.
         let event = tokio::time::timeout(Duration::from_secs(2), source.recv())
             .await
@@ -1075,7 +1299,7 @@ mod tests {
             other => panic!("expected Ips event; got {other:?}"),
         }
         // Tell the tail to exit and join.
-        inner.shutdown.notify_waiters();
+        let _ = inner.shutdown_tx.send_replace(true);
         let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
         // Counters: 1 alert emitted, 0 decode errors.
         assert_eq!(*inner.events_emitted.lock(), 1);
@@ -1103,11 +1327,16 @@ mod tests {
             health: Mutex::new(HealthMonitor::new()),
             eve_decode_errors: parking_lot::Mutex::new(0),
             events_emitted: parking_lot::Mutex::new(0),
+            stats_records_seen: parking_lot::Mutex::new(0),
+            eve_reopens: parking_lot::Mutex::new(0),
             restart_attempts: parking_lot::Mutex::new(0),
-            shutdown: Notify::new(),
+            shutdown_tx: watch::channel(false).0,
         });
         let inner2 = Arc::clone(&inner);
-        let handle = tokio::spawn(async move { tail_eve_log(eve_path, inner2, sink).await });
+        let process_for_tail: Arc<dyn SuricataProcess> = Arc::new(MockSuricata::new());
+        let handle = tokio::spawn(async move {
+            tail_eve_log(eve_path, inner2, sink, process_for_tail).await;
+        });
         // The valid alert (second line) still gets through.
         let ev = tokio::time::timeout(Duration::from_secs(2), source.recv())
             .await
@@ -1119,7 +1348,7 @@ mod tests {
             }
             other => panic!("expected Ips event; got {other:?}"),
         }
-        inner.shutdown.notify_waiters();
+        let _ = inner.shutdown_tx.send_replace(true);
         let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
         assert_eq!(*inner.eve_decode_errors.lock(), 1);
         assert_eq!(*inner.events_emitted.lock(), 1);

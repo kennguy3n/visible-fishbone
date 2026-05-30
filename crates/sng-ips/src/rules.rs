@@ -29,6 +29,7 @@ use async_trait::async_trait;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::error::IpsError;
 
@@ -281,11 +282,36 @@ pub trait RuleStager: Send + Sync + std::fmt::Debug {
 /// Production stager: writes to a tempfile in `staging_dir`,
 /// validates via the supplied [`RuleValidator`], then
 /// `tokio::fs::rename`s atomically into `final_path`.
+///
+/// Concurrency contract: every `stage_and_swap` call serialises
+/// behind `swap_lock`. Two simultaneous bundle pushes could
+/// otherwise race in three observable ways:
+///
+/// 1. Both pass the staleness check against the same
+///    `installed` snapshot, both succeed, and the *older* of
+///    the two completes its `rename` last — silently demoting
+///    the running rule set to the older version.
+/// 2. Both write the same staging tempfile name
+///    (`<final>.staging-<version>`), corrupting each other's
+///    on-disk bytes mid-write.
+/// 3. The `installed = Some(version)` book-keeping at the end
+///    is not paired with the file-on-disk under the same lock,
+///    so a reader of `current_version` could see a version
+///    number that does not match what is actually live.
+///
+/// Holding an async mutex across the full sequence (staleness
+/// → write → validate → rename → version cell update) makes the
+/// whole operation atomic from any caller's perspective. The
+/// validator call may be slow, so we deliberately use
+/// `tokio::sync::Mutex` instead of `parking_lot::Mutex` —
+/// blocking the executor would defeat the back-pressure
+/// strategy.
 #[derive(Clone, Debug)]
 pub struct FsRuleStager {
     config: RuleStagerConfig,
     validator: Arc<dyn RuleValidator>,
     installed: Arc<Mutex<Option<u64>>>,
+    swap_lock: Arc<AsyncMutex<()>>,
 }
 
 impl FsRuleStager {
@@ -296,6 +322,7 @@ impl FsRuleStager {
             config,
             validator,
             installed: Arc::new(Mutex::new(None)),
+            swap_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -310,8 +337,18 @@ impl FsRuleStager {
 #[async_trait]
 impl RuleStager for FsRuleStager {
     async fn stage_and_swap(&self, claims: &IpsRuleBundleClaims) -> Result<u64, IpsError> {
+        // Serialise every concurrent stage_and_swap. The guard
+        // is held across the full IO + validate + rename + state
+        // update so two simultaneous pushes can never interleave
+        // and reach an inconsistent state. See the type-level
+        // doc comment for the race we are preventing.
+        let _guard = self.swap_lock.lock().await;
         // Staleness check first — no point staging anything that
-        // would be rejected on version compare.
+        // would be rejected on version compare. Reading the
+        // version cell inside the swap lock guarantees that the
+        // value we compare against is exactly the one that any
+        // *previous* swap committed (the writer updates the cell
+        // before releasing `swap_lock`).
         if let Some(current) = *self.installed.lock() {
             if claims.version <= current {
                 return Err(IpsError::RuleStale {
