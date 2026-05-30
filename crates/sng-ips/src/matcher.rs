@@ -105,6 +105,23 @@ pub struct SignatureSet {
     /// as `literal_index` so the matcher can join the two
     /// at scan time.
     regex_index: HashMap<RegexKey, Regex>,
+    /// Longest literal pattern (in bytes) across every
+    /// signature in the set. Used by [`crate::service::IpsService`]
+    /// to size the reassembly lookback when consuming
+    /// scanned bytes: a cross-segment literal match of
+    /// length L can land partly in the consumed bytes and
+    /// partly in the next observation only if we retain at
+    /// least `L - 1` bytes from the previous scan. Stored
+    /// on the set rather than recomputed per scan so the
+    /// observe hot path is O(1) here.
+    max_literal_pattern_len: usize,
+    /// True iff the set contains at least one
+    /// [`Pattern::Regex`] signature. Regex match length is
+    /// unbounded in general; the service uses an operator-
+    /// configured lookback (`regex_lookback_bytes`) to
+    /// decide how many bytes to retain when consuming
+    /// scanned bytes, but only if this flag is set.
+    has_regex_patterns: bool,
 }
 
 /// Identifies a regex pattern by its position inside the
@@ -167,6 +184,8 @@ impl SignatureSet {
         let mut literal_patterns: Vec<Vec<u8>> = Vec::new();
         let mut literal_index: Vec<Vec<LiteralOwner>> = Vec::new();
         let mut regex_index: HashMap<RegexKey, Regex> = HashMap::new();
+        let mut max_literal_pattern_len: usize = 0;
+        let mut has_regex_patterns = false;
 
         for (sig_idx, sig) in signatures.iter().enumerate() {
             if sig.patterns.is_empty() {
@@ -184,6 +203,9 @@ impl SignatureSet {
                                 reason: "literal pattern is empty".into(),
                             });
                         }
+                        if bytes.len() > max_literal_pattern_len {
+                            max_literal_pattern_len = bytes.len();
+                        }
                         let entry = literal_dedup.entry(bytes.clone()).or_insert_with(|| {
                             let i = literal_patterns.len();
                             literal_patterns.push(bytes.clone());
@@ -200,6 +222,7 @@ impl SignatureSet {
                             sid: sig.sid,
                             reason: format!("regex compile: {e}"),
                         })?;
+                        has_regex_patterns = true;
                         regex_index.insert(
                             RegexKey {
                                 sig_idx,
@@ -242,6 +265,8 @@ impl SignatureSet {
             literal_ac,
             literal_index,
             regex_index,
+            max_literal_pattern_len,
+            has_regex_patterns,
         })
     }
 
@@ -254,7 +279,31 @@ impl SignatureSet {
             literal_ac: None,
             literal_index: Vec::new(),
             regex_index: HashMap::new(),
+            max_literal_pattern_len: 0,
+            has_regex_patterns: false,
         }
+    }
+
+    /// Length (in bytes) of the longest literal pattern in
+    /// the set, or `0` if there are no literal patterns.
+    /// The IPS service uses this to size the reassembly
+    /// lookback when sliding the window past already-
+    /// scanned bytes: retaining `max_literal_pattern_len - 1`
+    /// trailing bytes preserves cross-observation literal
+    /// matches that span the previous and next scan.
+    #[must_use]
+    pub fn max_literal_pattern_len(&self) -> usize {
+        self.max_literal_pattern_len
+    }
+
+    /// True iff the set contains at least one regex
+    /// pattern. Regex match length is not bounded by the
+    /// set itself, so callers that want to retain lookback
+    /// for regex matches must consult an operator-configured
+    /// bound (`IpsServiceConfig::regex_lookback_bytes`).
+    #[must_use]
+    pub fn has_regex_patterns(&self) -> bool {
+        self.has_regex_patterns
     }
 
     /// Number of signatures in the set.

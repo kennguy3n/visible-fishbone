@@ -106,6 +106,32 @@ pub struct IpsServiceConfig {
     /// any one time. Beyond this, the oldest entry is
     /// evicted. Bounds memory in long-running deployments.
     pub dedup_capacity: usize,
+    /// Maximum number of trailing bytes to retain in the
+    /// reassembly buffer when [`IpsService::observe_payload`]
+    /// slides the window past already-scanned bytes, on
+    /// behalf of regex signatures only. Literal patterns
+    /// are bounded by the matcher itself
+    /// ([`crate::matcher::SignatureSet::max_literal_pattern_len`])
+    /// — this knob bounds regex patterns, whose match
+    /// length is unbounded in general.
+    ///
+    /// Tuning notes:
+    ///   - Too low → a regex signature whose match spans a
+    ///     segment boundary larger than this bound will be
+    ///     missed (evasion surface).
+    ///   - Too high → the buffer holds more bytes between
+    ///     observations, the per-scan work shifts back
+    ///     toward O(window_bytes), and the consume
+    ///     optimization loses effectiveness.
+    ///
+    /// The default (4 KiB) covers HTTP-style signatures
+    /// (headers + first request line) and most ET-rule
+    /// regex patterns. Deployments running custom rules with
+    /// `.*`-style unbounded matches should raise this until
+    /// the missed-match risk is acceptable, or split those
+    /// rules into literal anchors that the AC matcher can
+    /// catch precisely.
+    pub regex_lookback_bytes: usize,
 }
 
 impl Default for IpsServiceConfig {
@@ -115,6 +141,7 @@ impl Default for IpsServiceConfig {
             reassembly_window_bytes: 64 * 1024,
             dedup_ttl: Duration::from_secs(30),
             dedup_capacity: 65_536,
+            regex_lookback_bytes: 4 * 1024,
         }
     }
 }
@@ -253,19 +280,61 @@ impl IpsService {
 
         // Scan under the buffer's read lock. Closures
         // returning Vec is fine — the lock is released as
-        // soon as the closure returns.
+        // soon as the closure returns. We also capture the
+        // post-scan buffer length so the consume step below
+        // can compute the slide distance without a second
+        // round trip through the buffer's lock.
         let ctx_protocol = obs.flow_key.protocol;
         let sport = obs.flow_key.source_port;
         let dport = obs.flow_key.destination_port;
-        let raw_hits: Vec<IpsHit> = buf.with_payload(obs.direction, |payload| {
-            let ctx = ScanContext {
-                protocol: ctx_protocol,
-                source_port: sport,
-                destination_port: dport,
-                payload,
-            };
-            sigs.scan(ctx)
-        });
+        let (raw_hits, scanned_len): (Vec<IpsHit>, usize) =
+            buf.with_payload(obs.direction, |payload| {
+                let ctx = ScanContext {
+                    protocol: ctx_protocol,
+                    source_port: sport,
+                    destination_port: dport,
+                    payload,
+                };
+                (sigs.scan(ctx), payload.len())
+            });
+
+        // Slide the reassembly window past already-scanned
+        // bytes, retaining enough lookback that any pattern
+        // whose match would span this scan and the next can
+        // still be detected. Without this step every
+        // observation re-scans the full assembled buffer up
+        // to `reassembly_window_bytes`, so a long-lived flow
+        // does O(window_bytes) of work per packet instead of
+        // O(new_bytes + lookback).
+        //
+        // Lookback semantics:
+        //   - Literal patterns: retain `max_literal_pattern_len`
+        //     trailing bytes so a literal of length L that
+        //     would have matched at the boundary of the next
+        //     observation still finds its prefix in the
+        //     retained tail.
+        //   - Regex patterns: retain `cfg.regex_lookback_bytes`
+        //     trailing bytes (an operator-tuned bound — see
+        //     the field doc on `IpsServiceConfig`).
+        //
+        // The dedup table is NOT a substitute for this
+        // lookback. Dedup suppresses *duplicate* alerts for
+        // a (flow, sid) we already matched; it cannot
+        // recover a match that the scan would never have
+        // produced because the buffer was truncated mid-
+        // pattern. The lookback is what keeps the matcher
+        // sound under sliding-window assembly.
+        let lookback = {
+            let mut lb = sigs.max_literal_pattern_len();
+            if sigs.has_regex_patterns() && self.cfg.regex_lookback_bytes > lb {
+                lb = self.cfg.regex_lookback_bytes;
+            }
+            lb
+        };
+        let consume_n = scanned_len.saturating_sub(lookback);
+        if consume_n > 0 {
+            buf.consume(obs.direction, consume_n);
+        }
 
         if raw_hits.is_empty() {
             return InspectionDecision::default();
@@ -917,6 +986,106 @@ mod tests {
         assert!(rx.try_recv().is_err());
         // Exactly one suppression accounted for.
         assert_eq!(svc.stats.snapshot().suppressed_dup_hits, 1);
+    }
+
+    #[test]
+    fn observe_consumes_scanned_bytes_leaving_only_lookback() {
+        // After a scan the reassembly buffer must slide
+        // forward past already-scanned bytes so a long-
+        // lived flow does not redo O(window_bytes) of work
+        // on every observation. The lookback retained is
+        // the max literal pattern length so cross-segment
+        // literal matches still fire.
+        let (svc, _rx) = mk_service(vec![literal_sig(7001, b"FOUR", Action::Alert)]);
+        let key = key_tcp(40000, 80);
+        // First observation: 200 bytes of unmatched filler.
+        let filler = vec![b'A'; 200];
+        let obs1 = PayloadObservation {
+            flow_id: 9,
+            flow_key: key,
+            direction: Direction::Originator,
+            payload: &filler,
+            now_ms: 1_000,
+        };
+        let _ = svc.observe_payload(&obs1);
+        // Buffer should now hold only the trailing lookback
+        // (== max_literal_pattern_len, which is 4 for
+        // "FOUR") — everything before that was consumed.
+        let buf = svc.reassembly().get_or_create(9);
+        assert_eq!(
+            buf.len(Direction::Originator),
+            4,
+            "consume must leave only the lookback tail; got {} bytes",
+            buf.len(Direction::Originator),
+        );
+    }
+
+    #[test]
+    fn observe_consume_preserves_cross_observation_literal_match() {
+        // The lookback contract: a literal pattern split
+        // across two consecutive observations (last byte in
+        // obs N, prefix in obs N+1) must still match on
+        // obs N+1. Without consume-with-lookback this works
+        // trivially (no consume, full re-scan). With
+        // consume-with-lookback it only works if we keep
+        // at least `max_literal_pattern_len` bytes in the
+        // buffer between observations.
+        let (svc, mut rx) = mk_service(vec![literal_sig(7002, b"ATTACK", Action::Drop)]);
+        let key = key_tcp(40000, 80);
+        // Obs 1: 100 bytes of noise then "ATTA" (4 bytes,
+        // first 4 chars of the pattern). No match yet.
+        let mut obs1_buf = vec![b'X'; 100];
+        obs1_buf.extend_from_slice(b"ATTA");
+        let obs1 = PayloadObservation {
+            flow_id: 11,
+            flow_key: key,
+            direction: Direction::Originator,
+            payload: &obs1_buf,
+            now_ms: 1_000,
+        };
+        let d1 = svc.observe_payload(&obs1);
+        assert_eq!(d1.raw_hits, 0, "no match yet on obs 1");
+        // Obs 2: "CK\r\n" — completes the pattern across
+        // the segment boundary. Lookback must have
+        // retained the trailing "ATTA" from obs 1.
+        let obs2 = PayloadObservation {
+            flow_id: 11,
+            flow_key: key,
+            direction: Direction::Originator,
+            payload: b"CK\r\n",
+            now_ms: 1_001,
+        };
+        let d2 = svc.observe_payload(&obs2);
+        assert_eq!(
+            d2.raw_hits, 1,
+            "cross-segment match must still fire because lookback retained the pattern prefix",
+        );
+        let _ev = rx
+            .try_recv()
+            .expect("expected ips event on cross-segment match");
+    }
+
+    #[test]
+    fn observe_consume_no_op_when_set_has_no_signatures_with_lookback() {
+        // When the active signature set has no literal
+        // patterns and no regex patterns (empty set), the
+        // observe loop bails out before consume runs. The
+        // buffer state must NOT be touched.
+        let (svc, _rx) = mk_service(vec![]);
+        let key = key_tcp(40000, 80);
+        let filler = vec![b'A'; 50];
+        let obs = PayloadObservation {
+            flow_id: 13,
+            flow_key: key,
+            direction: Direction::Originator,
+            payload: &filler,
+            now_ms: 1_000,
+        };
+        let _ = svc.observe_payload(&obs);
+        let buf = svc.reassembly().get_or_create(13);
+        // No signatures → early return before consume, so
+        // the full 50 bytes remain in the buffer.
+        assert_eq!(buf.len(Direction::Originator), 50);
     }
 
     #[test]
