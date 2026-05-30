@@ -207,7 +207,26 @@ impl ConfigGenerator {
             validate_plain(net, "external_net entry")?;
         }
         for parser in input.app_layer_enabled.keys() {
-            validate_plain(parser, "app_layer parser name")?;
+            // Parser names are emitted as *unquoted* YAML keys at
+            // `app-layer.protocols.<name>` (see render below).
+            // `validate_plain` only blocks the characters the
+            // value-context writer cannot escape (`"`, `\`,
+            // control chars), but unquoted YAML keys are far more
+            // restrictive: a `:` followed by whitespace, ` #`, or a
+            // leading indicator (`[`, `]`, `{`, `}`, `,`, `&`,
+            // `*`, `!`, `|`, `>`, `'`, `"`, `%`, `@`, `` ` ``)
+            // either ends the key, starts a comment, or starts a
+            // YAML flow/anchor/alias construct. Suricata's actual
+            // parser-name table (`tls`, `http`, `dns`, `smb`,
+            // `ssh`, `smtp`, `ftp`, `ikev2`, `krb5`, `nfs`, `ntp`,
+            // `snmp`, `dhcp`, ...) is uniformly lowercase
+            // alphanumeric with a permissive underscore/hyphen
+            // allowance for future names — so the safe set
+            // `[a-z][a-z0-9_-]*` is what Suricata can actually
+            // dispatch to, and any operator-supplied name outside
+            // that set would have made `suricata -T` reject the
+            // config anyway, just with a less useful error.
+            validate_yaml_key(parser, "app_layer parser name")?;
         }
 
         let mut out = String::with_capacity(2048);
@@ -335,6 +354,50 @@ fn validate_plain(s: &str, field: &str) -> Result<(), IpsError> {
         if c == '"' || c == '\\' || c.is_control() {
             return Err(IpsError::Config(format!(
                 "{field} {s:?} contains a character ({c:?}) the YAML writer cannot escape",
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate a string that will be emitted as an *unquoted* YAML
+/// scalar key. The accepted set is intentionally narrow — only
+/// what cannot trigger any YAML structural interpretation:
+/// lowercase ASCII letters, ASCII digits, underscore, and
+/// hyphen, with a required leading letter so the value cannot
+/// be misread as a number, a tag (`!foo`), an anchor (`&foo`),
+/// or a flow construct.
+///
+/// Anything outside this set could be mis-parsed by Suricata's
+/// YAML loader (e.g. a key containing `: ` would split into a
+/// nested mapping, a leading `[` would open a flow sequence,
+/// `#` would start a comment) and crash `suricata -T` with an
+/// error far less obvious than this validator's. The contract
+/// the module doc states — "refuses to emit anything that would
+/// require quoting semantics it does not implement" — only
+/// holds if every unquoted-key write goes through this helper.
+fn validate_yaml_key(s: &str, field: &str) -> Result<(), IpsError> {
+    if s.is_empty() {
+        return Err(IpsError::Config(format!("{field} must not be empty")));
+    }
+    let mut chars = s.chars();
+    // `s.is_empty()` checked above, so `next()` is `Some`. We
+    // still defensively `match` instead of `expect`/`unwrap` to
+    // keep clippy's `expect_used` lint happy in the lib config
+    // (this code is on the bundle-install path, not a test).
+    let Some(first) = chars.next() else {
+        return Err(IpsError::Config(format!("{field} must not be empty")));
+    };
+    if !first.is_ascii_lowercase() {
+        return Err(IpsError::Config(format!(
+            "{field} {s:?} must start with a lowercase ASCII letter; got {first:?}"
+        )));
+    }
+    for c in std::iter::once(first).chain(chars) {
+        let ok = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
+        if !ok {
+            return Err(IpsError::Config(format!(
+                "{field} {s:?} contains {c:?}; unquoted YAML keys only accept [a-z0-9_-]"
             )));
         }
     }
@@ -521,6 +584,91 @@ mod tests {
         input.rule_file_path = PathBuf::from(r"/etc/suricata\bad");
         let err = ConfigGenerator::new().render(&input).unwrap_err();
         assert!(matches!(err, IpsError::Config(_)));
+    }
+
+    #[test]
+    fn render_rejects_app_layer_parser_name_with_colon_space() {
+        // `tls: bad` would pass the old `validate_plain` (no `"`,
+        // `\`, or control chars) but be emitted unquoted as
+        //     tls: bad:
+        //       enabled: yes
+        // which YAML parses as key `tls` mapping to `bad:` —
+        // structurally invalid and `suricata -T` rejects the
+        // file. Defensive validator must catch it up-front.
+        let mut input = baseline();
+        input.app_layer_enabled.insert("tls: bad".into(), true);
+        let err = ConfigGenerator::new().render(&input).unwrap_err();
+        match err {
+            IpsError::Config(m) => {
+                assert!(
+                    m.contains("app_layer parser name"),
+                    "expected app_layer parser name in error, got: {m}"
+                );
+                assert!(
+                    m.contains("[a-z0-9_-]"),
+                    "error should cite the accepted charset for diagnosability: {m}"
+                );
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_rejects_app_layer_parser_name_with_leading_indicator() {
+        // Leading `[` would start a flow sequence; leading `&`
+        // an anchor; leading `*` an alias. All would corrupt the
+        // document. Rule out by requiring a lowercase ASCII
+        // letter as the first char.
+        for bad in ["[tls", "&tls", "*tls", "!tls", "0tls", "Tls", "-tls"] {
+            let mut input = baseline();
+            input.app_layer_enabled.clear();
+            input.app_layer_enabled.insert(bad.into(), true);
+            let err = ConfigGenerator::new().render(&input).expect_err(bad);
+            assert!(
+                matches!(err, IpsError::Config(_)),
+                "expected Config error for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_rejects_app_layer_parser_name_with_uppercase_or_punctuation() {
+        // YAML accepts uppercase keys but Suricata's parser
+        // dispatch is case-sensitive lowercase; `# foo` would
+        // start a YAML comment; spaces would split the key.
+        for bad in ["TLS", "tls.v3", "tls v3", "tls#1", "tls,1"] {
+            let mut input = baseline();
+            input.app_layer_enabled.clear();
+            input.app_layer_enabled.insert(bad.into(), true);
+            let err = ConfigGenerator::new().render(&input).expect_err(bad);
+            assert!(
+                matches!(err, IpsError::Config(_)),
+                "expected Config error for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_accepts_app_layer_parser_names_with_underscores_and_digits() {
+        // Future Suricata parsers may use digits / underscores /
+        // hyphens (e.g. `ikev2`, `mqtt_v5`, `dnp3-secure`). The
+        // validator must not reject them.
+        let mut input = baseline();
+        input.app_layer_enabled.clear();
+        for ok in ["tls", "ikev2", "mqtt_v5", "dnp3-secure", "krb5"] {
+            input.app_layer_enabled.insert(ok.into(), true);
+        }
+        let cfg = ConfigGenerator::new()
+            .render(&input)
+            .expect("valid parser names must render");
+        for ok in ["tls", "ikev2", "mqtt_v5", "dnp3-secure", "krb5"] {
+            assert!(
+                cfg.text()
+                    .contains(&format!("    {ok}:\n      enabled: yes")),
+                "missing parser {ok} in {}",
+                cfg.text()
+            );
+        }
     }
 
     #[test]
