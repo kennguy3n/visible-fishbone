@@ -18,6 +18,7 @@ members = [
     "crates/sng-telemetry",
     "crates/sng-dns",
     "crates/sng-fw",
+    "crates/sng-ips",
 ]
 resolver = "3"
 
@@ -125,6 +126,15 @@ windows = { version = "0.61", features = [
 # IP / CIDR utilities (shared across pal posture + future fw rules).
 ipnet = { version = "2", features = ["serde"] }
 
+# Pattern matching for the sng-ips signature engine. `regex` is the
+# canonical pure-Rust regex engine (linear time on all inputs);
+# `aho-corasick` provides multi-string literal matching at multi-GB/s
+# throughput, used as the first-pass filter before regex confirm.
+# `regex` is pinned without the optional `pattern` / `unicode-script`
+# features the IPS engine doesn't need, keeping the binary small.
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
+aho-corasick = { version = "1", default-features = false, features = ["std", "perf-literal"] }
+
 # Networking + TLS stack (shared across sng-comms, sng-swg, sng-ztna,
 # and the binaries). rustls is pinned with the `ring` crypto provider
 # explicitly so cargo-deny's bans block on `aws-lc-sys` (and any
@@ -165,6 +175,7 @@ sng-policy-eval = { path = "crates/sng-policy-eval" }
 sng-telemetry = { path = "crates/sng-telemetry" }
 sng-dns = { path = "crates/sng-dns" }
 sng-fw = { path = "crates/sng-fw" }
+sng-ips = { path = "crates/sng-ips" }
 
 # Workspace-wide lints. Set at the workspace level so a new crate
 # added in a later phase automatically inherits the same posture

@@ -1575,6 +1575,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "sng-ips"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "arc-swap",
+ "async-trait",
+ "bytes",
+ "dashmap",
+ "parking_lot",
+ "pretty_assertions",
+ "regex",
+ "serde",
+ "serde_json",
+ "sng-core",
+ "sng-fw",
+ "sng-policy-eval",
+ "sng-telemetry",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sng-pal"
 version = "0.1.0"
 dependencies = [
