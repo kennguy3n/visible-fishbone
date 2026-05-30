@@ -111,9 +111,16 @@ impl Default for ReconnectBackoff {
 impl Backoff for ReconnectBackoff {
     fn next_backoff(&mut self) -> Duration {
         let ceiling = self.current_ceiling;
-        // Advance the ceiling for the *next* call. We do this
-        // before drawing so an immediate-zero initial value
-        // still produces a non-zero second backoff.
+        // Advance the ceiling for the *next* call. The post-
+        // advance lower bound is `self.initial` so callers that
+        // configured a non-zero initial keep escalating even
+        // when a previous draw landed near zero — but if the
+        // operator deliberately configured `initial = ZERO`
+        // (the "retry immediately, forever" posture), this
+        // arithmetic correctly degenerates: `ZERO * multiplier
+        // = ZERO`, `ZERO.max(ZERO) = ZERO`, so every subsequent
+        // wait is also zero. That matches `Reset()`'s semantics
+        // and is pinned by `zero_initial_yields_zero_first_wait`.
         let next = ceiling.saturating_mul(self.multiplier).min(self.max);
         self.current_ceiling = next.max(self.initial);
         if ceiling.is_zero() {

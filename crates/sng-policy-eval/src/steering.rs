@@ -239,6 +239,18 @@ impl SteeringTable {
 /// semantics are "include the apex and every subdomain", which
 /// is what `*.example.com` means in the steering compiler's
 /// `match_any` (see `appdb/service.go::matchAny`).
+///
+/// **Contrast with the subject matcher.** `matcher::domain_suffix_match`
+/// (used by `Subject::DomainSuffix` in compiled policy rules)
+/// follows RFC 6125 §6.4 wildcard semantics — `*.example.com`
+/// matches subdomains but **not** the apex. The two functions
+/// are deliberately not interchangeable: steering is a control-
+/// plane traffic-class lookup table whose `match_any` semantics
+/// come from the appdb compiler, while subject matching is the
+/// policy-rule predicate that must obey the same wildcard rules
+/// the policy authoring docs describe to operators. If you find
+/// yourself extending one, audit the other and update the cross-
+/// reference comments on both sides.
 fn domain_matches_suffix(suffix: &str, host_lc: &str) -> bool {
     if host_lc == suffix {
         return true;

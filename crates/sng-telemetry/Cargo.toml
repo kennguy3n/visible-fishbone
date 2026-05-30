@@ -1,0 +1,56 @@
+[package]
+name = "sng-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ShieldNet Gateway telemetry collector: normalize, dedup, redact, enrich, PCAP ring, egress to sng-comms"
+
+[dependencies]
+# Foundation types — Envelope, Event*, traffic class, ids, errors,
+# lifecycle. Re-exported through this crate's public surface so a
+# downstream caller does not need to depend on sng-core directly
+# just to construct a Flow/DNS/HTTP/IPS/ZTNA/SDWAN/Agent event.
+sng-core = { workspace = true }
+
+# Egress sink — `sng-comms::TelemetryClient` is the only sanctioned
+# wire path from this crate to the control plane. The crate does
+# not own the HTTP/2 stack or the spool itself; it owns the
+# pipeline that feeds the spool.
+sng-comms = { workspace = true }
+
+# Async runtime + sync primitives. The pipeline orchestrator runs
+# under tokio; the dedup window and PCAP ring use parking_lot for
+# sync-fast critical sections (no `.await` inside the lock).
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+async-trait = { workspace = true }
+
+# Wire types — chrono for timestamps, uuid for event ids, serde for
+# the Source -> Pipeline boundary. rmp-serde is used by source.rs
+# to encode per-class payload bytes that land in the envelope
+# `payload` field on the wire.
+chrono = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+rmp-serde = { workspace = true }
+
+# Bytes-friendly buffers for PCAP packet bodies.
+bytes = { workspace = true }
+
+# Error taxonomy.
+thiserror = { workspace = true }
+
+# Structured logging.
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt"] }
+serde_json = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

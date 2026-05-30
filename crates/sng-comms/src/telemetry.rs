@@ -251,6 +251,26 @@ impl TelemetryClient {
         self.spool.stats()
     }
 
+    /// Borrow the enrichment context the client will stamp on
+    /// every outgoing envelope.
+    ///
+    /// This is the source-of-truth identity for the egress path:
+    /// `submit` calls [`EnrichmentContext::enrich`] on the
+    /// envelope before validation, overwriting whatever
+    /// `tenant_id` / `device_id` / `site_id` the producer
+    /// stamped in. Downstream subsystems that construct their
+    /// own [`Envelope`] (e.g. the [`sng_telemetry::Pipeline`]
+    /// at `crates/sng-telemetry/src/pipeline.rs`) need to verify
+    /// at construction time that their producer-side identity
+    /// matches what the egress layer will stamp on — otherwise
+    /// the two enrichments silently diverge and the comms layer
+    /// wins, which is the failure mode the
+    /// `pipeline_new_rejects_identity_mismatch` test pins.
+    #[must_use]
+    pub fn enrichment(&self) -> &EnrichmentContext {
+        &self.config.enrichment
+    }
+
     /// Snapshot of the sequence tracker's high-water mark.
     pub fn ack_high_water(&self) -> Option<u64> {
         self.tracker.high_water()

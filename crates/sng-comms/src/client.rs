@@ -139,6 +139,13 @@ pub struct ControlPlaneClient {
     /// fields so callers can connect over an IP-resolved address
     /// while still presenting the original hostname in SNI.
     addr: String,
+    /// Port parsed out of [`Self::addr`] at construction time.
+    /// Stored separately so [`Self::authority`] never has to
+    /// re-split the addr string at request time — and so the
+    /// IPv6-vs-`host:port` ambiguity is resolved once, with a
+    /// clear error from [`parse_host_port`] if the caller hands
+    /// in an unbracketed IPv6 literal.
+    port: u16,
     /// SNI / certificate-validation server name.
     server_name: ServerName<'static>,
     /// rustls client config — must have ALPN `h2` set. Use
@@ -149,6 +156,57 @@ pub struct ControlPlaneClient {
     /// Defaults to [`DEFAULT_MAX_RESPONSE_BODY_BYTES`].
     /// Customisable through [`Self::with_max_response_bytes`].
     max_response_bytes: usize,
+}
+
+/// Parse a `host:port` string into its component parts.
+///
+/// Handles three shapes the agent legitimately consumes:
+///
+/// - DNS-name form: `cp.example.com:443`
+/// - IPv4-literal form: `192.0.2.1:443`
+/// - Bracketed-IPv6 form: `[2001:db8::1]:443`
+///
+/// Rejects unbracketed IPv6 literals (e.g. `::1:443`) with a
+/// clear error — the colon separator is ambiguous and the
+/// rsplit-once heuristic the previous implementation used would
+/// silently produce a garbage port number on those inputs. This
+/// is the long-term-correct fix: parse once at construction time
+/// and store the parsed port, so every later code path that
+/// needs the port reads a typed `u16` rather than re-deriving it
+/// with a string heuristic.
+fn parse_host_port(s: &str) -> Result<(String, u16), CommsError> {
+    if let Some(stripped) = s.strip_prefix('[') {
+        let (host, rest) = stripped.split_once(']').ok_or_else(|| {
+            CommsError::Config(format!("missing ']' in bracketed IPv6 address: {s:?}"))
+        })?;
+        let port_str = rest.strip_prefix(':').ok_or_else(|| {
+            CommsError::Config(format!(
+                "missing ':port' suffix after ']' in bracketed address: {s:?}"
+            ))
+        })?;
+        let port: u16 = port_str
+            .parse()
+            .map_err(|_| CommsError::Config(format!("invalid port in: {s:?}")))?;
+        Ok((host.to_string(), port))
+    } else {
+        let (host, port_str) = s
+            .rsplit_once(':')
+            .ok_or_else(|| CommsError::Config(format!("missing ':port' in address: {s:?}")))?;
+        // If the host portion still contains a colon, the caller
+        // handed in an unbracketed IPv6 address. Reject with a
+        // clear error rather than splitting at the wrong colon.
+        // RFC 3986 §3.2.2 requires brackets for IPv6 in URIs and
+        // the same convention applies here.
+        if host.contains(':') {
+            return Err(CommsError::Config(format!(
+                "unbracketed IPv6 address in: {s:?} — use the [::1]:port form per RFC 3986 §3.2.2"
+            )));
+        }
+        let port: u16 = port_str
+            .parse()
+            .map_err(|_| CommsError::Config(format!("invalid port in: {s:?}")))?;
+        Ok((host.to_string(), port))
+    }
 }
 
 impl ControlPlaneClient {
@@ -179,8 +237,17 @@ impl ControlPlaneClient {
                     .into(),
             ));
         }
+        let addr = addr.into();
+        // Parse the port at construction time so [`Self::authority`]
+        // never has to re-derive it with a string heuristic. This
+        // closes the IPv6-ambiguity hole the rsplit-once approach
+        // had: an unbracketed IPv6 literal would silently produce
+        // a garbage port at request time; the typed parser rejects
+        // it up front with a clear `CommsError::Config`.
+        let (_host, port) = parse_host_port(&addr)?;
         Ok(Self {
-            addr: addr.into(),
+            addr,
+            port,
             server_name,
             tls_config,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BODY_BYTES,
@@ -277,10 +344,15 @@ impl ControlPlaneClient {
     /// control-plane case `agents.cp.example.com:443`), otherwise
     /// falls back to the dial address (IP-literal endpoints in
     /// tests / private deployments).
+    ///
+    /// The port is the [`Self::port`] field parsed at
+    /// construction time — no string-heuristic split here, so an
+    /// unbracketed IPv6 dial address (which `parse_host_port`
+    /// would have rejected on construction) cannot produce a
+    /// garbage `:authority` at request time.
     fn authority(&self) -> String {
-        let port = self.addr.rsplit_once(':').map_or("443", |(_, p)| p);
         match &self.server_name {
-            ServerName::DnsName(dns) => format!("{}:{}", dns.as_ref(), port),
+            ServerName::DnsName(dns) => format!("{}:{}", dns.as_ref(), self.port),
             _ => self.addr.clone(),
         }
     }
@@ -607,5 +679,105 @@ mod tests {
             .expect("client constructs")
             .with_max_response_bytes(0);
         assert_eq!(client.max_response_bytes, DEFAULT_MAX_RESPONSE_BODY_BYTES);
+    }
+
+    #[test]
+    fn parse_host_port_dns_name() {
+        let (host, port) = parse_host_port("cp.example.com:443").expect("parses");
+        assert_eq!(host, "cp.example.com");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn parse_host_port_ipv4_literal() {
+        let (host, port) = parse_host_port("192.0.2.1:8443").expect("parses");
+        assert_eq!(host, "192.0.2.1");
+        assert_eq!(port, 8443);
+    }
+
+    #[test]
+    fn parse_host_port_bracketed_ipv6() {
+        let (host, port) = parse_host_port("[2001:db8::1]:443").expect("parses");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn parse_host_port_bracketed_loopback() {
+        let (host, port) = parse_host_port("[::1]:8443").expect("parses");
+        assert_eq!(host, "::1");
+        assert_eq!(port, 8443);
+    }
+
+    #[test]
+    fn parse_host_port_rejects_unbracketed_ipv6() {
+        // The previous rsplit_once heuristic would silently split
+        // this at the LAST colon and report port=1, producing a
+        // garbage `:authority` at request time. The typed parser
+        // rejects it up front.
+        let err = parse_host_port("::1:443").expect_err("rejects unbracketed ipv6");
+        match err {
+            CommsError::Config(msg) => assert!(msg.contains("unbracketed IPv6"), "{msg}"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_host_port_rejects_missing_port() {
+        let err = parse_host_port("example.com").expect_err("rejects missing port");
+        assert!(matches!(err, CommsError::Config(_)));
+    }
+
+    #[test]
+    fn parse_host_port_rejects_non_numeric_port() {
+        let err = parse_host_port("example.com:https").expect_err("rejects non-numeric port");
+        assert!(matches!(err, CommsError::Config(_)));
+    }
+
+    #[test]
+    fn parse_host_port_rejects_unclosed_bracket() {
+        let err = parse_host_port("[::1:443").expect_err("rejects unclosed bracket");
+        assert!(matches!(err, CommsError::Config(_)));
+    }
+
+    #[test]
+    fn client_rejects_unbracketed_ipv6_addr() {
+        // End-to-end: the parser hooks into `ControlPlaneClient::new`
+        // so a caller that hands in an ambiguous IPv6 address is
+        // rejected at construction, not at request time.
+        crate::tls::install_ring_provider();
+        let cfg = crate::tls::build_client_config_with_webpki_roots(None).expect("builds");
+        let name = ServerName::try_from("example.invalid").expect("server name");
+        let err = ControlPlaneClient::new("::1:443", name, Arc::new(cfg))
+            .expect_err("must reject unbracketed ipv6");
+        match err {
+            CommsError::Config(msg) => assert!(msg.contains("unbracketed IPv6"), "{msg}"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_accepts_bracketed_ipv6_addr() {
+        crate::tls::install_ring_provider();
+        let cfg = crate::tls::build_client_config_with_webpki_roots(None).expect("builds");
+        let name = ServerName::try_from("example.invalid").expect("server name");
+        let client = ControlPlaneClient::new("[2001:db8::1]:8443", name, Arc::new(cfg))
+            .expect("must accept bracketed ipv6");
+        assert_eq!(client.port, 8443);
+    }
+
+    #[test]
+    fn authority_uses_parsed_port_with_dns_sni() {
+        // Regression test against the old rsplit_once behaviour:
+        // even on a bracketed-IPv6 dial addr, the `:authority`
+        // pseudo-header (which always uses the SNI DnsName for
+        // DnsName SNI) must carry the correctly-parsed port, not
+        // whatever-comes-after-the-last-colon-in-the-addr.
+        crate::tls::install_ring_provider();
+        let cfg = crate::tls::build_client_config_with_webpki_roots(None).expect("builds");
+        let name = ServerName::try_from("cp.example.com").expect("server name");
+        let client =
+            ControlPlaneClient::new("[2001:db8::1]:8443", name, Arc::new(cfg)).expect("client");
+        assert_eq!(client.authority(), "cp.example.com:8443");
     }
 }

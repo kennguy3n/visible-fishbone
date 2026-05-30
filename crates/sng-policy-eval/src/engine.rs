@@ -33,6 +33,7 @@ use sng_core::ids::PolicyBundleId;
 use sng_core::policy::BundleTarget;
 use sng_core::traffic_class::TrafficClass;
 use std::sync::Arc;
+use tracing::error;
 
 /// Atomic policy evaluation engine. One per agent / edge VM —
 /// holds the live bundle and dispatches every flow through it.
@@ -269,6 +270,21 @@ fn subject_matches_flow(subject: &Subject, flow: &Flow<'_>) -> bool {
 /// is-not-blocking semantics) rather than panicking, so a malformed
 /// bundle that somehow bypassed validation still fails open at the
 /// evaluation layer.
+///
+/// The `Allow` fallback preserves the documented `SuggestOnly`
+/// contract (it is never a blocking verdict). The trade-off is
+/// that if a future refactor accidentally bypasses the load-time
+/// validator the engine silently allows traffic instead of
+/// denying it. We mitigate that by emitting a `tracing::error!`
+/// at the point of the unreachable branch so the malformed bundle
+/// surfaces immediately in operator logs / alerting, and pinning
+/// the behaviour with [`tests::malformed_suggestonly_falls_back_to_allow`]
+/// so a future contributor cannot silently change the failure
+/// mode without updating the test — every call to `evaluate()`
+/// against a malformed bundle will produce a log line tagged
+/// `suggest_only_missing_suggestion = true` (on the
+/// `sng_policy_eval` target) that dashboards / alerts can
+/// pick up.
 fn verb_to_verdict(
     verb: Verb,
     suggested_verb: Option<Verb>,
@@ -288,7 +304,26 @@ fn verb_to_verdict(
         },
         Verb::SuggestOnly => match suggested_verb {
             Some(v) if v != Verb::SuggestOnly => Verdict::SuggestOnly { suggestion: v },
-            _ => Verdict::Allow,
+            _ => {
+                // Unreachable in practice: `LoadedBundle::from_body`
+                // rejects bundles whose default verb or whose
+                // matched rule's verb is `SuggestOnly` without a
+                // valid `suggested_verb`. Emit a structured error
+                // so an operator sees the malformed bundle in
+                // logs / alerting if validation is ever bypassed,
+                // then fall back to `Allow` to preserve the
+                // documented `SuggestOnly` (non-blocking) contract.
+                error!(
+                    target: "sng_policy_eval",
+                    suggest_only_missing_suggestion = true,
+                    bundle_id = ?bundle.bundle_id(),
+                    bundle_graph_version = bundle.graph_version,
+                    "SuggestOnly verb reached evaluator without a valid suggested_verb \
+                     — load-time validation was bypassed; falling back to Verdict::Allow \
+                     to preserve the SuggestOnly contract"
+                );
+                Verdict::Allow
+            }
         },
     }
 }
@@ -748,5 +783,31 @@ mod tests {
             }
         );
         assert!(!eng.evaluate(&flow).is_blocking());
+    }
+
+    #[test]
+    fn malformed_suggest_only_without_suggestion_falls_back_to_allow() {
+        // Defence-in-depth pin: a `SuggestOnly` verb with no
+        // `suggested_verb` would normally be rejected by
+        // `LoadedBundle::from_body`, but if that validator is ever
+        // bypassed `verb_to_verdict` must still produce a
+        // non-blocking verdict per the SuggestOnly contract. Direct
+        // unit test on `verb_to_verdict` so the test pins the
+        // fallback even though the bundle path can't construct the
+        // malformed shape. A `tracing::error!` is also emitted on
+        // this branch so an operator sees the malformed bundle in
+        // logs; the test verifies the verdict only (capturing the
+        // tracing event would require a heavyweight subscriber).
+        let body = encode_bundle(BundleTarget::Edge, 1, "deny", &[], None);
+        let bundle = LoadedBundle::from_body(&body, BundleTarget::Edge).unwrap();
+        let flow = Flow::default();
+        let v = verb_to_verdict(Verb::SuggestOnly, None, &flow, &bundle);
+        assert_eq!(v, Verdict::Allow);
+        assert!(!v.is_blocking(), "SuggestOnly contract: never blocking");
+        // Also pin the `Some(SuggestOnly)` cycle-rejection branch
+        // — a nested `SuggestOnly` suggestion must collapse to
+        // Allow rather than recursing.
+        let v = verb_to_verdict(Verb::SuggestOnly, Some(Verb::SuggestOnly), &flow, &bundle);
+        assert_eq!(v, Verdict::Allow);
     }
 }
