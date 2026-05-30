@@ -245,8 +245,26 @@ pub fn evaluate_policy(policy: &SwgPolicy, inputs: DecisionInputs) -> Posture {
         if rep.at_least(policy.reputation_block_at) {
             posture = Posture::Block;
         } else if rep.at_least(policy.reputation_inspect_at) {
-            // Only upgrade *upward* — never downgrade a
-            // `Block` / `Quarantine` to `InspectFull`.
+            // Reputation-based "upgrade to InspectFull"
+            // only fires from the soft-allow postures
+            // (`Allow` / `AlertOnly`). All other postures
+            // are intentionally preserved:
+            //   - `Block` / `Quarantine`: would be a
+            //     *downgrade* — never weaken an enforcement
+            //     posture on a soft reputation signal.
+            //   - `InspectFull`: already the target.
+            //   - `TlsBypass`: preserved deliberately. An
+            //     operator chose `TlsBypass` for a
+            //     regulated category (healthcare, finance,
+            //     legal) where MITM would create compliance
+            //     exposure. A medium-high reputation score
+            //     (e.g. 0.6 on a Sensitive site) must NOT
+            //     silently re-enable MITM — that would
+            //     subvert the operator's intent. Operators
+            //     who want reputation to override
+            //     `TlsBypass` should configure that
+            //     explicitly via `by_category` instead of
+            //     relying on this fall-through.
             posture = match posture {
                 Posture::Allow | Posture::AlertOnly => Posture::InspectFull,
                 other => other,
@@ -398,6 +416,45 @@ mod tests {
             malware: None,
         };
         assert_eq!(h.evaluate(inputs), Posture::Quarantine);
+    }
+
+    #[test]
+    fn medium_reputation_does_not_override_tls_bypass() {
+        // Pin the architectural contract: `TlsBypass` is
+        // an operator choice driven by compliance
+        // (healthcare / finance / legal). A medium-high
+        // reputation signal MUST NOT silently re-enable
+        // MITM by promoting `TlsBypass` to `InspectFull`.
+        // Operators who want reputation to override
+        // `TlsBypass` should configure that explicitly via
+        // `by_category` instead of relying on this
+        // fall-through.
+        let h = SwgPolicyHolder::default();
+        let inputs = DecisionInputs {
+            category: Category::Sensitive,
+            reputation: Some(ReputationScore::new(0.6)),
+            malware: None,
+        };
+        assert_eq!(h.evaluate(inputs), Posture::TlsBypass);
+    }
+
+    #[test]
+    fn high_reputation_still_blocks_tls_bypass() {
+        // Counterpart test: even though medium reputation
+        // does not weaken `TlsBypass`, the strict
+        // `reputation_block_at` threshold is a separate
+        // enforcement step that DOES override every
+        // category — including `TlsBypass`. This is the
+        // documented escape hatch for a confirmed-bad host
+        // that an operator nonetheless put under a
+        // Sensitive category.
+        let h = SwgPolicyHolder::default();
+        let inputs = DecisionInputs {
+            category: Category::Sensitive,
+            reputation: Some(ReputationScore::new(0.99)),
+            malware: None,
+        };
+        assert_eq!(h.evaluate(inputs), Posture::Block);
     }
 
     #[test]
