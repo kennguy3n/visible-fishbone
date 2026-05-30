@@ -290,8 +290,20 @@ impl FirewallEngine {
     /// is loaded, returns [`RuleAction::Deny`].
     pub fn evaluate(&self, ctx: &EvaluationContext<'_>) -> FirewallVerdict {
         let ruleset_guard = self.ruleset.load();
-        let conntrack_state = self.update_conntrack(ctx);
 
+        // Gate conntrack updates on a loaded ruleset. The
+        // engine is fail-closed (default Deny) before the first
+        // bundle install, and on that path there is no useful
+        // flow state to remember — every packet is denied
+        // regardless of conntrack. Updating anyway would let
+        // the `ConntrackTracker` (a `Vec`-backed advisory
+        // structure with no eviction) accumulate one entry per
+        // observed 5-tuple for the entire duration of a
+        // bundle-less startup, growing the per-evaluate scan
+        // linearly until the first bundle arrives. Skip the
+        // update on the no-ruleset path; pass `New` as the
+        // verdict's conntrack state to match the prior
+        // observable contract for the fail-closed branch.
         let Some(rs) = ruleset_guard.as_ref().as_ref() else {
             return FirewallVerdict {
                 action: RuleAction::Deny,
@@ -299,9 +311,11 @@ impl FirewallEngine {
                 logged_rule_ids: Vec::new(),
                 from_zone: None,
                 to_zone: None,
-                conntrack: conntrack_state,
+                conntrack: crate::conntrack::ConntrackState::New,
             };
         };
+
+        let conntrack_state = self.update_conntrack(ctx);
 
         let from_zone = rs.zones.classify(ctx.flow.src_ip).map(str::to_owned);
         let to_zone = rs.zones.classify(ctx.flow.dst_ip).map(str::to_owned);
@@ -463,6 +477,33 @@ mod tests {
         let v = eng.evaluate(&ctx(ipv4(10, 0, 0, 1), ipv4(8, 8, 8, 8), 443));
         assert_eq!(v.action, RuleAction::Deny);
         assert!(v.matched_rule_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn evaluate_does_not_grow_conntrack_when_no_ruleset_loaded() {
+        // Regression: the pre-bundle fail-closed path used to
+        // call `update_conntrack` before checking whether a
+        // ruleset was loaded, so a long-running engine that
+        // hadn't received its first bundle would accumulate one
+        // entry per observed 5-tuple forever (the `Vec`-backed
+        // `ConntrackTracker` has no eviction). Gate the update
+        // on `Some(rs)` so a no-bundle engine stays bounded.
+        let (eng, _b) = make_engine();
+        for i in 0..50_u8 {
+            // Each call uses a distinct 5-tuple so an
+            // unconditional update would push a fresh entry
+            // every iteration.
+            let _ = eng.evaluate(&ctx(ipv4(10, 0, 0, i), ipv4(8, 8, 8, 8), 443));
+        }
+        // Reach in via the public snapshot path (mirrors how
+        // tcpdump-style telemetry inspects the tracker) rather
+        // than adding a test-only accessor.
+        let entries = eng.conntrack.lock().unwrap().snapshot();
+        assert_eq!(
+            entries.len(),
+            0,
+            "conntrack tracker must not grow while no ruleset is loaded; saw {entries:?}"
+        );
     }
 
     #[tokio::test]
