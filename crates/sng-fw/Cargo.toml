@@ -1,0 +1,59 @@
+[package]
+name = "sng-fw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ShieldNet Gateway firewall subsystem: nftables rule compilation, NAT, zone segmentation, conntrack model, L7 protocol identification, and TLS policy"
+
+[dependencies]
+# Foundation types — TrafficClass, ErrorCode, Verdict. Re-exported
+# through this crate's public surface so a downstream caller can
+# inspect rule verdicts without depending on sng-core directly.
+sng-core = { workspace = true }
+
+# Policy evaluation — consumes `sng-policy-eval` verdicts to
+# compile the NGFW slice of the bundle into nftables rule sets.
+sng-policy-eval = { workspace = true }
+
+# Async runtime + sync primitives. nftables backend `apply` is
+# async so a real shell-out doesn't block the data path; arc-swap
+# drives the compiled-ruleset hot-swap on bundle reload.
+tokio = { workspace = true, features = ["process", "io-util", "sync"] }
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+
+# Configuration / wire types — rules and zones serialise to / from
+# the policy bundle, which is MessagePack on the wire but JSON in
+# unit tests / fixtures.
+serde = { workspace = true }
+serde_json = { workspace = true }
+ipnet = { workspace = true }
+bytes = { workspace = true }
+
+# SHA-256 digest of compiled nftables scripts — drives the
+# engine's hot-swap skip optimisation. Workspace-pinned so the
+# whole crate graph agrees on one version.
+sha2 = { workspace = true }
+
+# Error taxonomy.
+thiserror = { workspace = true }
+
+# Structured logging.
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "io-util", "macros"] }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+# Used by the compile-module tests to build a wire-compatible
+# bundle envelope on the fly so the tests exercise the real
+# `LoadedBundle::from_body` decode path instead of relying on
+# `pub(crate)` field literals.
+rmp-serde = { workspace = true }
+serde_bytes = { workspace = true }
+
+[lints]
+workspace = true
