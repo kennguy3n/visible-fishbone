@@ -205,23 +205,42 @@ impl SdwanPolicy {
     }
 
     /// True iff `latency_ms` is at or below the policy's
-    /// latency floor. `None` floor → always true.
+    /// latency floor.
+    ///
+    /// Fail-closed on `NaN`: a NaN metric is always
+    /// classified as out-of-floor, regardless of whether
+    /// the floor is configured. This matches the broader
+    /// brain's contract that NaN-metric paths cannot win
+    /// (see also [`crate::score::score_path`] which
+    /// collapses to `ScoreBreakdown::worst()` on NaN).
+    /// `None` floor with a finite metric → always true.
     #[must_use]
     pub fn within_latency_floor(&self, latency_ms: f32) -> bool {
+        if latency_ms.is_nan() {
+            return false;
+        }
         self.max_latency_ms.is_none_or(|cap| latency_ms <= cap)
     }
 
     /// True iff `loss_pct` is at or below the policy's
-    /// loss floor.
+    /// loss floor. Fail-closed on `NaN` — see
+    /// [`Self::within_latency_floor`].
     #[must_use]
     pub fn within_loss_floor(&self, loss_pct: f32) -> bool {
+        if loss_pct.is_nan() {
+            return false;
+        }
         self.max_loss_pct.is_none_or(|cap| loss_pct <= cap)
     }
 
     /// True iff `jitter_ms` is at or below the policy's
-    /// jitter floor.
+    /// jitter floor. Fail-closed on `NaN` — see
+    /// [`Self::within_latency_floor`].
     #[must_use]
     pub fn within_jitter_floor(&self, jitter_ms: f32) -> bool {
+        if jitter_ms.is_nan() {
+            return false;
+        }
         self.max_jitter_ms.is_none_or(|cap| jitter_ms <= cap)
     }
 }
@@ -409,6 +428,32 @@ mod tests {
         assert!(!p.within_loss_floor(2.1));
         assert!(p.within_jitter_floor(10.0));
         assert!(!p.within_jitter_floor(10.1));
+    }
+
+    #[test]
+    fn within_floors_fail_closed_on_nan_with_or_without_floor() {
+        // Defense in depth: a NaN metric value must be
+        // classified as out-of-floor *regardless* of
+        // whether a floor is configured. Without this,
+        // an unconfigured floor would let a NaN-metric
+        // path through into the in-budget bucket (the
+        // selector then never picks it because score_path
+        // collapses to worst(), but the bucket label
+        // would be incoherent).
+        let no_floors = SdwanPolicy::default();
+        assert!(!no_floors.within_latency_floor(f32::NAN));
+        assert!(!no_floors.within_loss_floor(f32::NAN));
+        assert!(!no_floors.within_jitter_floor(f32::NAN));
+
+        let with_floors = SdwanPolicy {
+            max_latency_ms: Some(50.0),
+            max_loss_pct: Some(2.0),
+            max_jitter_ms: Some(10.0),
+            ..SdwanPolicy::default()
+        };
+        assert!(!with_floors.within_latency_floor(f32::NAN));
+        assert!(!with_floors.within_loss_floor(f32::NAN));
+        assert!(!with_floors.within_jitter_floor(f32::NAN));
     }
 
     #[test]
