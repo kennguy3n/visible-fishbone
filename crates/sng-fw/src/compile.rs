@@ -602,34 +602,67 @@ fn render_single_rule(
     src_cidrs: &[&IpNet],
     dst_cidrs: &[&IpNet],
 ) -> String {
-    // Family-agnostic slots (`None`) skip the `ip` / `ip6`
-    // qualifier and the per-family zone-set prefix entirely.
-    // By construction, callers in this state pass empty
-    // zone / CIDR slices, so the `_qualifier` /
-    // `_zone_prefix` values are never used in that branch.
-    let qualifier = family.map_or("ip", AddressFamily::nft_qualifier);
-    let zone_prefix = family.map_or("zone_", AddressFamily::nft_zone_set_prefix);
-
     let mut parts: Vec<String> = vec!["add rule inet sng_filter forward".into()];
-    if let Some(z) = from_zone {
-        parts.push(format!(
-            "{qualifier} saddr @{zone_prefix}{}",
-            sanitize_set_name(z)
-        ));
-    }
-    if !src_cidrs.is_empty() {
-        let list: Vec<String> = src_cidrs.iter().map(ToString::to_string).collect();
-        parts.push(format!("{qualifier} saddr {{ {} }}", list.join(", ")));
-    }
-    if let Some(z) = to_zone {
-        parts.push(format!(
-            "{qualifier} daddr @{zone_prefix}{}",
-            sanitize_set_name(z)
-        ));
-    }
-    if !dst_cidrs.is_empty() {
-        let list: Vec<String> = dst_cidrs.iter().map(ToString::to_string).collect();
-        parts.push(format!("{qualifier} daddr {{ {} }}", list.join(", ")));
+    // Zone / CIDR predicates are emitted only when the family
+    // is known. The family-agnostic case (`family = None`) by
+    // construction also has zone = None and CIDRs empty —
+    // `rule_address_families` returns `vec![None]` only when
+    // the rule has no zones and no CIDRs, and the zone /
+    // CIDR-filter loops in `render_rule` then pass `None` /
+    // empty slices into this branch.
+    //
+    // Wrapping the predicate emission in a single
+    // `if let Some(family)` makes the invariant *structural*
+    // rather than a comment: any future change that lets a
+    // family-agnostic slot carry a zone or CIDR predicate
+    // would either trip the `assert!` in the `else` branch
+    // (catching the bug at install time, where the in-memory
+    // engine is still authoritative) or land at a structural
+    // rewrite of this branch. Compare to the older `map_or`
+    // default that silently produced an IPv4 (`ip`) qualifier
+    // on what should have been a dual-stack rule.
+    if let Some(family) = family {
+        let qualifier = family.nft_qualifier();
+        let zone_prefix = family.nft_zone_set_prefix();
+        if let Some(z) = from_zone {
+            parts.push(format!(
+                "{qualifier} saddr @{zone_prefix}{}",
+                sanitize_set_name(z)
+            ));
+        }
+        if !src_cidrs.is_empty() {
+            let list: Vec<String> = src_cidrs.iter().map(ToString::to_string).collect();
+            parts.push(format!("{qualifier} saddr {{ {} }}", list.join(", ")));
+        }
+        if let Some(z) = to_zone {
+            parts.push(format!(
+                "{qualifier} daddr @{zone_prefix}{}",
+                sanitize_set_name(z)
+            ));
+        }
+        if !dst_cidrs.is_empty() {
+            let list: Vec<String> = dst_cidrs.iter().map(ToString::to_string).collect();
+            parts.push(format!("{qualifier} daddr {{ {} }}", list.join(", ")));
+        }
+    } else {
+        // Family-agnostic invariant guard. If we ever reach
+        // this branch with a zone or CIDR predicate, the
+        // upstream `rule_address_families` (or one of the
+        // call-site loops in `render_rule`) has been changed
+        // in a way that breaks the cross-family safety
+        // guarantee — failing loud here is much safer than
+        // silently emitting wrong-family predicates.
+        assert!(
+            from_zone.is_none()
+                && to_zone.is_none()
+                && src_cidrs.is_empty()
+                && dst_cidrs.is_empty(),
+            "render_single_rule: family-agnostic slot received \
+             zone or CIDR predicates — `rule_address_families` \
+             must never return `None` for a rule with such \
+             predicates. Rule id: {}",
+            rule.id
+        );
     }
     if let Some(p) = rule.matches.protocol.as_nft() {
         parts.push(format!("meta l4proto {p}"));

@@ -276,14 +276,33 @@ impl NatRule {
         {
             return None;
         }
-        let qualifier = family.map_or("ip", AddressFamily::nft_qualifier);
-        if !src_cidrs.is_empty() {
-            let list: Vec<String> = src_cidrs.iter().map(ToString::to_string).collect();
-            parts.push(format!("{qualifier} saddr {{ {} }}", list.join(", ")));
-        }
-        if !dst_cidrs.is_empty() {
-            let list: Vec<String> = dst_cidrs.iter().map(ToString::to_string).collect();
-            parts.push(format!("{qualifier} daddr {{ {} }}", list.join(", ")));
+        // Family-agnostic invariant: a NAT rule with CIDR
+        // predicates always has a known family by the time we
+        // reach this branch — `render_nft` slot-selects only
+        // `Some(family)` when CIDRs are present, and the
+        // `target_family()` narrowing for addressed NAT
+        // targets (SNAT / DNAT) also pins a concrete family.
+        // The fail-fast assertion replaces the older
+        // `map_or("ip", ...)` default that would silently
+        // emit IPv4 (`ip`) qualifiers on a family-agnostic
+        // slot if a future change ever broke the upstream
+        // invariant. Mirrors the equivalent guard in
+        // `compile::render_single_rule`.
+        if !src_cidrs.is_empty() || !dst_cidrs.is_empty() {
+            let qualifier = family.expect(
+                "NatRule::render_one: CIDR predicates require a known address \
+                 family — `NatTable::render_nft` must not pass `family = None` \
+                 to a rule with CIDRs",
+            );
+            let qualifier = qualifier.nft_qualifier();
+            if !src_cidrs.is_empty() {
+                let list: Vec<String> = src_cidrs.iter().map(ToString::to_string).collect();
+                parts.push(format!("{qualifier} saddr {{ {} }}", list.join(", ")));
+            }
+            if !dst_cidrs.is_empty() {
+                let list: Vec<String> = dst_cidrs.iter().map(ToString::to_string).collect();
+                parts.push(format!("{qualifier} daddr {{ {} }}", list.join(", ")));
+            }
         }
         if let Some(p) = self.protocol.as_nft() {
             parts.push(format!("meta l4proto {p}"));
