@@ -158,10 +158,16 @@ pub struct ZoneTable {
     /// Zones keyed by name.
     #[serde(default)]
     pub zones: BTreeMap<String, Zone>,
-    /// Per-pair operator policy. Missing pairs default to
+    /// Per-pair operator policy, keyed as `policy[from][to]`.
+    /// The nested layout (instead of `BTreeMap<(String,
+    /// String), ZonePolicy>`) lets [`Self::lookup`] do a
+    /// borrow-only `get(&str)` chain on the hot path — the
+    /// engine calls it once per packet after classification, so
+    /// the original tuple-keyed layout cost two `String`
+    /// allocations per lookup. Missing pairs default to
     /// [`ZonePolicy::Deny`].
     #[serde(default)]
-    pub policy: BTreeMap<(String, String), ZonePolicy>,
+    pub policy: BTreeMap<String, BTreeMap<String, ZonePolicy>>,
     /// Optional intra-zone (`from == to`) override. The
     /// SNG default is `Allow` for intra-zone flows (a host in
     /// `branch.lan` can talk to another host in `branch.lan`
@@ -238,17 +244,28 @@ impl ZoneTable {
                 "zone policy references unknown to-zone: {to}"
             )));
         }
-        self.policy.insert((from.into(), to.into()), policy);
+        self.policy
+            .entry(from.to_owned())
+            .or_default()
+            .insert(to.to_owned(), policy);
         Ok(())
     }
 
     /// Look up the policy for `(from, to)`. Returns the
     /// per-pair declaration if present, otherwise the
     /// intra / inter default.
+    ///
+    /// This is on the per-packet hot path — the engine calls
+    /// it once per evaluated flow after zone classification.
+    /// The nested-map layout (`policy[from][to]`) lets us
+    /// `get(&str)` on the borrowed slices directly, with no
+    /// `String` allocation per call.
     #[must_use]
     pub fn lookup(&self, from: &str, to: &str) -> ZonePolicy {
-        if let Some(p) = self.policy.get(&(from.into(), to.into())) {
-            return *p;
+        if let Some(inner) = self.policy.get(from) {
+            if let Some(p) = inner.get(to) {
+                return *p;
+            }
         }
         if from == to {
             self.default_intra
@@ -261,16 +278,33 @@ impl ZoneTable {
     /// address belongs to no registered zone — the caller must
     /// decide how to handle unclassified packets (the engine
     /// fail-closes by default).
+    ///
+    /// When zones overlap (e.g. a broad `10.0.0.0/8` trusted
+    /// zone plus a narrower `10.1.0.0/16` dmz zone), the
+    /// **longest-prefix match wins** — the same semantics
+    /// nftables's `flags interval` sets use when the engine's
+    /// rendered script runs in the kernel. Falling back to the
+    /// `BTreeMap`'s alphabetical iteration order (as the
+    /// previous implementation did) made the in-memory verdict
+    /// silently diverge from the kernel verdict whenever the
+    /// alphabetically-first zone happened to also be the
+    /// shorter / more general one. Tie-breaking on equal
+    /// prefix length falls back to `BTreeMap` key order, so
+    /// classification is still deterministic across runs.
     #[must_use]
     pub fn classify(&self, addr: IpAddr) -> Option<&str> {
-        // BTreeMap preserves ordering so classification is
-        // deterministic when networks overlap.
+        let mut best: Option<(u8, &str)> = None;
         for z in self.zones.values() {
-            if z.contains(addr) {
-                return Some(&z.name);
+            for n in &z.networks {
+                if n.contains(&addr) {
+                    let prefix = n.prefix_len();
+                    if best.is_none_or(|(b, _)| prefix > b) {
+                        best = Some((prefix, z.name.as_str()));
+                    }
+                }
             }
         }
-        None
+        best.map(|(_, n)| n)
     }
 
     /// Validate every cross-reference in the table. Used by the
@@ -279,16 +313,18 @@ impl ZoneTable {
         for z in self.zones.values() {
             z.validate()?;
         }
-        for (from, to) in self.policy.keys() {
+        for (from, inner) in &self.policy {
             if !self.zones.contains_key(from) {
                 return Err(FirewallError::RuleInvalid(format!(
                     "zone policy references unknown from-zone: {from}"
                 )));
             }
-            if !self.zones.contains_key(to) {
-                return Err(FirewallError::RuleInvalid(format!(
-                    "zone policy references unknown to-zone: {to}"
-                )));
+            for to in inner.keys() {
+                if !self.zones.contains_key(to) {
+                    return Err(FirewallError::RuleInvalid(format!(
+                        "zone policy references unknown to-zone: {to}"
+                    )));
+                }
             }
         }
         Ok(())
@@ -352,17 +388,67 @@ mod tests {
     }
 
     #[test]
-    fn classify_matches_first_listed_zone_for_address() {
+    fn classify_uses_longest_prefix_match() {
+        // Longest-prefix match matches the kernel's `flags
+        // interval` set semantics: when a packet's address
+        // falls into multiple zones' networks, the one with the
+        // most specific (longest-prefix) network wins, NOT the
+        // alphabetically-first zone. The previous BTreeMap-
+        // iteration-order behaviour was a silent divergence
+        // from the rendered nftables script.
         let mut t = ZoneTable::new();
         t.add_zone(zone("trusted", &["10.0.0.0/8"])).unwrap();
         t.add_zone(zone("dmz", &["10.1.0.0/16"])).unwrap();
-        // BTreeMap iteration is sorted by key, so dmz comes
-        // before trusted alphabetically — the dmz CIDR is a
-        // subnet of trusted, so a packet in 10.1.0.0/16 must
-        // classify as dmz, not trusted.
         assert_eq!(t.classify(ip("10.1.5.5")), Some("dmz"));
         assert_eq!(t.classify(ip("10.2.0.1")), Some("trusted"));
         assert_eq!(t.classify(ip("172.16.0.1")), None);
+    }
+
+    #[test]
+    fn classify_lpm_picks_specific_over_broad_regardless_of_zone_name() {
+        // Regression: with the old iteration-order code, a
+        // narrow `narrow` zone (broad-coverage CIDR) would have
+        // beaten a `wide` zone with the more specific CIDR if
+        // their names happened to sort the broad zone first.
+        // Use a name pair that sorts the BROAD-zone first
+        // (`aaa` < `zzz`) but expect classify to return the
+        // narrow zone for an address only the narrow CIDR
+        // covers narrowly.
+        let mut t = ZoneTable::new();
+        t.add_zone(zone("aaa-broad", &["10.0.0.0/8"])).unwrap();
+        t.add_zone(zone("zzz-narrow", &["10.5.0.0/16"])).unwrap();
+        assert_eq!(t.classify(ip("10.5.1.1")), Some("zzz-narrow"));
+        assert_eq!(t.classify(ip("10.6.1.1")), Some("aaa-broad"));
+    }
+
+    #[test]
+    fn classify_lpm_breaks_ties_deterministically() {
+        // Two zones with equally-specific CIDRs that cover
+        // the same address \u2014 deterministic tie-break by
+        // BTreeMap key order (alphabetical zone name).
+        let mut t = ZoneTable::new();
+        t.add_zone(zone("alpha", &["10.0.0.0/24"])).unwrap();
+        t.add_zone(zone("beta", &["10.0.0.0/24"])).unwrap();
+        assert_eq!(t.classify(ip("10.0.0.5")), Some("alpha"));
+    }
+
+    #[test]
+    fn classify_lpm_picks_longest_prefix_within_single_zone() {
+        // A single zone with overlapping CIDRs (operator gave
+        // the same zone both a broad transit /16 and a narrow
+        // /24 inside it). Classification is by zone, so the
+        // result is the same zone name either way \u2014 the LPM
+        // logic must still walk all networks rather than break
+        // out on first match, otherwise narrower networks in
+        // OTHER zones with the same /24 could be missed.
+        let mut t = ZoneTable::new();
+        t.add_zone(zone("broad", &["10.0.0.0/8"])).unwrap();
+        let mut z = zone("multi", &["10.10.0.0/16"]);
+        z.networks.push("10.10.5.0/24".parse().unwrap());
+        t.add_zone(z).unwrap();
+        // Address only matches the /24 in `multi` and the /8 in
+        // `broad`; /24 wins.
+        assert_eq!(t.classify(ip("10.10.5.42")), Some("multi"));
     }
 
     #[test]

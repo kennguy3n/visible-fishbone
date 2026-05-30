@@ -22,10 +22,12 @@
 
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use crate::error::FirewallError;
 use crate::rule::{PortRange, Protocol};
+use crate::zone::AddressFamily;
 
 /// The closed set of NAT operations supported. SNAT and DNAT
 /// rewrite the address; masquerade is SNAT-to-the-outbound-
@@ -67,14 +69,22 @@ pub enum NatType {
 impl NatType {
     /// nftables verdict expression — the right-hand-side that
     /// follows the match clause.
+    ///
+    /// IPv6 addresses combined with a port require the
+    /// `[addr]:port` bracket syntax: the bare
+    /// `2001:db8::1:8080` form is ambiguous because the colon
+    /// separator collides with the address's own colons, and
+    /// nftables rejects the script outright.
     #[must_use]
     pub fn as_nft(&self) -> String {
         match self {
             Self::Snat { to, port } => match port {
+                Some(p) if to.is_ipv6() => format!("snat to [{}]:{}", to, p.as_nft()),
                 Some(p) => format!("snat to {}:{}", to, p.as_nft()),
                 None => format!("snat to {to}"),
             },
             Self::Dnat { to, port } => match port {
+                Some(p) if to.is_ipv6() => format!("dnat to [{}]:{}", to, p.as_nft()),
                 Some(p) => format!("dnat to {}:{}", to, p.as_nft()),
                 None => format!("dnat to {to}"),
             },
@@ -82,6 +92,21 @@ impl NatType {
                 Some(p) => format!("masquerade to :{}", p.as_nft()),
                 None => "masquerade".into(),
             },
+        }
+    }
+
+    /// Address family of the NAT target, if it has one. SNAT
+    /// and DNAT carry an [`IpAddr`] target; masquerade picks the
+    /// outbound interface's primary address at runtime so its
+    /// family is determined by the matched packet, not the rule.
+    #[must_use]
+    pub const fn target_family(&self) -> Option<AddressFamily> {
+        match self {
+            Self::Snat { to, .. } | Self::Dnat { to, .. } => Some(match to {
+                IpAddr::V4(_) => AddressFamily::V4,
+                IpAddr::V6(_) => AddressFamily::V6,
+            }),
+            Self::Masquerade { .. } => None,
         }
     }
 
@@ -165,11 +190,52 @@ impl NatRule {
         Ok(())
     }
 
-    /// Render the rule as a single nftables `add rule` line.
+    /// Render the rule as one or more nftables `add rule`
+    /// lines. A rule with CIDR predicates of a single address
+    /// family emits one line under that family's qualifier
+    /// (`ip` vs `ip6`). A rule with mixed-family CIDRs emits
+    /// one line per family with that family's CIDRs only —
+    /// nftables's `inet` table accepts both families but the
+    /// per-clause qualifier must match the CIDR's family or
+    /// the script is rejected (`ip saddr 2001:db8::/32` is a
+    /// type error). A rule with no CIDR predicates at all
+    /// emits one family-agnostic line (no `ip` / `ip6`
+    /// qualifier needed).
+    ///
     /// Used by the table emitter; exposed publicly so tests can
     /// snapshot the wire format.
     #[must_use]
-    pub fn render_nft(&self, table: &str) -> String {
+    pub fn render_nft(&self, table: &str) -> Vec<String> {
+        let mut families: BTreeSet<AddressFamily> = BTreeSet::new();
+        for n in self.src_cidrs.iter().chain(self.dst_cidrs.iter()) {
+            families.insert(AddressFamily::of(n));
+        }
+        // SNAT / DNAT targets pin the rule to the target's
+        // family — rewriting a v4 source to a v6 address is
+        // not a thing nftables supports, so we narrow to the
+        // target family up front rather than emitting a
+        // mismatched line.
+        if let Some(tf) = self.nat.target_family() {
+            families.retain(|&f| f == tf);
+            if families.is_empty() {
+                families.insert(tf);
+            }
+        }
+        let family_slots: Vec<Option<AddressFamily>> = if families.is_empty() {
+            // No CIDR predicate and no addressed NAT target —
+            // the rule applies to every packet that reaches the
+            // hook; render once without a family qualifier.
+            vec![None]
+        } else {
+            families.into_iter().map(Some).collect()
+        };
+        family_slots
+            .into_iter()
+            .filter_map(|f| self.render_one(table, f))
+            .collect()
+    }
+
+    fn render_one(&self, table: &str, family: Option<AddressFamily>) -> Option<String> {
         let mut parts: Vec<String> = vec![format!("add rule inet {} {}", table, self.nat.hook())];
         if !self.iif.is_empty() {
             parts.push(format!("iif \"{}\"", self.iif));
@@ -177,13 +243,37 @@ impl NatRule {
         if !self.oif.is_empty() {
             parts.push(format!("oif \"{}\"", self.oif));
         }
-        if !self.src_cidrs.is_empty() {
-            let list: Vec<String> = self.src_cidrs.iter().map(ToString::to_string).collect();
-            parts.push(format!("ip saddr {{ {} }}", list.join(", ")));
+        // Filter CIDRs to the current family slot (if any). A
+        // rule with a `from` zone-level family but no matching
+        // CIDRs of that family for src / dst is fine; we just
+        // skip the per-side clause.
+        let src_cidrs: Vec<&IpNet> = self
+            .src_cidrs
+            .iter()
+            .filter(|n| family.is_none_or(|f| AddressFamily::of(n) == f))
+            .collect();
+        let dst_cidrs: Vec<&IpNet> = self
+            .dst_cidrs
+            .iter()
+            .filter(|n| family.is_none_or(|f| AddressFamily::of(n) == f))
+            .collect();
+        // If the rule has CIDR predicates but none survived the
+        // family filter, the rule can't match anything in this
+        // family — skip emitting a line that would just be a
+        // catch-all under the wrong qualifier.
+        if (!self.src_cidrs.is_empty() && src_cidrs.is_empty())
+            || (!self.dst_cidrs.is_empty() && dst_cidrs.is_empty())
+        {
+            return None;
         }
-        if !self.dst_cidrs.is_empty() {
-            let list: Vec<String> = self.dst_cidrs.iter().map(ToString::to_string).collect();
-            parts.push(format!("ip daddr {{ {} }}", list.join(", ")));
+        let qualifier = family.map_or("ip", AddressFamily::nft_qualifier);
+        if !src_cidrs.is_empty() {
+            let list: Vec<String> = src_cidrs.iter().map(ToString::to_string).collect();
+            parts.push(format!("{qualifier} saddr {{ {} }}", list.join(", ")));
+        }
+        if !dst_cidrs.is_empty() {
+            let list: Vec<String> = dst_cidrs.iter().map(ToString::to_string).collect();
+            parts.push(format!("{qualifier} daddr {{ {} }}", list.join(", ")));
         }
         if let Some(p) = self.protocol.as_nft() {
             parts.push(format!("meta l4proto {p}"));
@@ -194,7 +284,7 @@ impl NatRule {
         }
         parts.push(self.nat.as_nft());
         parts.push(format!("comment \"{}\"", escape_comment(&self.id)));
-        parts.join(" ")
+        Some(parts.join(" "))
     }
 }
 
@@ -255,10 +345,10 @@ impl NatTable {
         let mut prerouting: Vec<String> = Vec::new();
         let mut postrouting: Vec<String> = Vec::new();
         for r in &self.rules {
-            let line = r.render_nft(&self.table_name);
+            let lines = r.render_nft(&self.table_name);
             match r.nat.hook() {
-                "prerouting" => prerouting.push(line),
-                "postrouting" => postrouting.push(line),
+                "prerouting" => prerouting.extend(lines),
+                "postrouting" => postrouting.extend(lines),
                 _ => {}
             }
         }
@@ -423,7 +513,10 @@ mod tests {
             },
             description: String::new(),
         };
-        let line = r.render_nft("sng_nat");
+        let lines = r.render_nft("sng_nat");
+        // Single-family rule — one emitted line.
+        assert_eq!(lines.len(), 1, "single-family rule must emit one line");
+        let line = &lines[0];
         // Spot-check the components — full string is brittle.
         assert!(line.contains("iif \"wan0\""));
         assert!(line.contains("ip daddr { 203.0.113.0/24 }"));
@@ -433,6 +526,156 @@ mod tests {
         assert!(line.contains("comment \"publish-web\""));
         // Hook is implicitly prerouting for DNAT.
         assert!(line.starts_with("add rule inet sng_nat prerouting"));
+    }
+
+    #[test]
+    fn snat_dnat_render_ipv6_target_with_brackets_when_port_present() {
+        // Bug fix: bare `snat to 2001:db8::1:8080` is ambiguous
+        // — nftables requires `[addr]:port` for v6. The port-less
+        // form needs no brackets because nft infers family from
+        // the address literal.
+        let snat_port = NatType::Snat {
+            to: "2001:db8::1".parse().unwrap(),
+            port: Some(PortRange::single(8080)),
+        };
+        assert_eq!(snat_port.as_nft(), "snat to [2001:db8::1]:8080");
+
+        let snat_no_port = NatType::Snat {
+            to: "2001:db8::1".parse().unwrap(),
+            port: None,
+        };
+        assert_eq!(snat_no_port.as_nft(), "snat to 2001:db8::1");
+
+        let dnat_port = NatType::Dnat {
+            to: "2001:db8::5".parse().unwrap(),
+            port: Some(PortRange::single(8443)),
+        };
+        assert_eq!(dnat_port.as_nft(), "dnat to [2001:db8::5]:8443");
+
+        // v4 path unchanged — brackets only applied for v6.
+        let snat_v4 = NatType::Snat {
+            to: "10.0.0.1".parse().unwrap(),
+            port: Some(PortRange::single(8080)),
+        };
+        assert_eq!(snat_v4.as_nft(), "snat to 10.0.0.1:8080");
+    }
+
+    #[test]
+    fn nat_rule_renders_ipv6_clauses_with_ip6_qualifier() {
+        // Bug fix: v6 CIDRs must emit `ip6 saddr` — `ip saddr`
+        // is a type error against an `ipv6_addr` element and
+        // nftables rejects the script. The single-family rule
+        // gets one line under the right qualifier.
+        let r = NatRule {
+            id: "v6-snat".into(),
+            src_cidrs: vec![cidr("2001:db8::/32")],
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocol: Protocol::Any,
+            iif: String::new(),
+            oif: "wan0".into(),
+            nat: NatType::Snat {
+                to: "2001:db8::1".parse().unwrap(),
+                port: None,
+            },
+            description: String::new(),
+        };
+        let lines = r.render_nft("sng_nat");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("ip6 saddr { 2001:db8::/32 }"),
+            "v6 CIDR must emit ip6 saddr, got: {}",
+            lines[0]
+        );
+        assert!(!lines[0].contains("ip saddr"));
+    }
+
+    #[test]
+    fn nat_rule_with_mixed_cidrs_emits_one_line_per_family() {
+        // Mixed v4 + v6 CIDRs on a masquerade rule must split
+        // into two emitted lines: one with the v4 CIDRs under
+        // `ip saddr`, the other with the v6 CIDRs under
+        // `ip6 saddr`. Masquerade has no addressed target so
+        // both families are valid.
+        let r = NatRule {
+            id: "mixed-masq".into(),
+            src_cidrs: vec![cidr("10.0.0.0/8"), cidr("2001:db8::/32")],
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocol: Protocol::Any,
+            iif: String::new(),
+            oif: "wan0".into(),
+            nat: NatType::Masquerade { port: None },
+            description: String::new(),
+        };
+        let lines = r.render_nft("sng_nat");
+        assert_eq!(lines.len(), 2, "mixed-family rule must emit per-family");
+        // Each line carries only its own family's CIDRs.
+        let v4_line = lines
+            .iter()
+            .find(|l| l.contains("ip saddr"))
+            .expect("v4 line must be present");
+        let v6_line = lines
+            .iter()
+            .find(|l| l.contains("ip6 saddr"))
+            .expect("v6 line must be present");
+        assert!(v4_line.contains("10.0.0.0/8"));
+        assert!(!v4_line.contains("2001:db8"));
+        assert!(v6_line.contains("2001:db8::/32"));
+        assert!(!v6_line.contains("10.0.0.0/8"));
+    }
+
+    #[test]
+    fn nat_rule_with_no_cidrs_renders_once_without_family_qualifier() {
+        // A masquerade rule scoped only by oif applies to every
+        // packet exiting the named interface; no CIDR predicate
+        // means no need for a family qualifier at all. The
+        // `inet` table handles both families transparently.
+        let r = NatRule {
+            id: "any-masq".into(),
+            src_cidrs: vec![],
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocol: Protocol::Any,
+            iif: String::new(),
+            oif: "wan0".into(),
+            nat: NatType::Masquerade { port: None },
+            description: String::new(),
+        };
+        let lines = r.render_nft("sng_nat");
+        assert_eq!(lines.len(), 1, "family-agnostic rule must emit once");
+        assert!(!lines[0].contains("ip saddr"));
+        assert!(!lines[0].contains("ip6 saddr"));
+        assert!(lines[0].contains("oif \"wan0\""));
+        assert!(lines[0].contains("masquerade"));
+    }
+
+    #[test]
+    fn snat_with_v4_target_skips_v6_cidrs() {
+        // SNAT target is v4 — a v6 source CIDR on the same
+        // rule cannot be rewritten to a v4 source. We pin the
+        // emitted line to the target's family and drop the
+        // non-matching CIDR rather than emit a line that the
+        // kernel would reject.
+        let r = NatRule {
+            id: "v4-snat".into(),
+            src_cidrs: vec![cidr("10.0.0.0/8"), cidr("2001:db8::/32")],
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocol: Protocol::Any,
+            iif: String::new(),
+            oif: "wan0".into(),
+            nat: NatType::Snat {
+                to: "203.0.113.1".parse().unwrap(),
+                port: None,
+            },
+            description: String::new(),
+        };
+        let lines = r.render_nft("sng_nat");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("ip saddr { 10.0.0.0/8 }"));
+        assert!(!lines[0].contains("ip6"));
+        assert!(!lines[0].contains("2001:db8"));
     }
 
     #[test]

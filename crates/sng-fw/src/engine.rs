@@ -97,14 +97,41 @@ impl FlowKey {
 /// The engine's per-packet output. Wraps the matching action
 /// plus the metadata downstream subsystems need: the rule id
 /// for audit, the zone classification, and the conntrack state.
+///
+/// # Action vs. logged rules
+///
+/// `action` is the verdict the kernel actually applies to the
+/// packet — it is always either the action of a *terminal*
+/// matching rule ([`RuleAction::is_terminal`]) or the chain's
+/// `default_action`. Non-terminal [`RuleAction::Log`] rules do
+/// **not** appear in `action`; that would diverge from
+/// nftables, where a `log` rule without an immediate verdict
+/// falls through to subsequent rules and ultimately to the
+/// chain policy.
+///
+/// `logged_rule_ids` records every Log rule whose match
+/// predicates fired during the walk, in source order. These
+/// are advisory — they generate audit events for the
+/// telemetry pipeline but do not influence packet disposition.
+/// A typical "log-and-default-deny" flow surfaces as
+/// `action = Deny`, `matched_rule_id = None`,
+/// `logged_rule_ids = ["log-suspicious"]`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FirewallVerdict {
-    /// Final action — what the engine instructs the kernel /
-    /// inline pipeline to do.
+    /// Final action — what the kernel / inline pipeline does
+    /// with this packet. Mirrors the chain policy when no
+    /// terminal rule matched; never carries [`RuleAction::Log`]
+    /// (Log is non-terminal and surfaces via
+    /// `logged_rule_ids` instead).
     pub action: RuleAction,
-    /// Id of the matching rule. `None` when the verdict came
-    /// from the default action.
+    /// Id of the *terminal* matching rule. `None` when the
+    /// verdict came from the chain default, even if Log rules
+    /// fired along the way.
     pub matched_rule_id: Option<String>,
+    /// Ids of every Log rule whose predicates matched during
+    /// the rule walk, in source order. Advisory only —
+    /// surfaces audit events without altering packet fate.
+    pub logged_rule_ids: Vec<String>,
     /// Ingress zone classification, if known.
     pub from_zone: Option<String>,
     /// Egress zone classification, if known.
@@ -269,6 +296,7 @@ impl FirewallEngine {
             return FirewallVerdict {
                 action: RuleAction::Deny,
                 matched_rule_id: None,
+                logged_rule_ids: Vec::new(),
                 from_zone: None,
                 to_zone: None,
                 conntrack: conntrack_state,
@@ -286,6 +314,7 @@ impl FirewallEngine {
                 return FirewallVerdict {
                     action: RuleAction::Deny,
                     matched_rule_id: None,
+                    logged_rule_ids: Vec::new(),
                     from_zone: from_zone.clone(),
                     to_zone: to_zone.clone(),
                     conntrack: conntrack_state,
@@ -293,8 +322,11 @@ impl FirewallEngine {
             }
         }
 
-        // Walk the rule list. Terminal action wins.
-        let mut log_pending: Option<&str> = None;
+        // Walk the rule list. A terminal action stops the walk
+        // and decides the packet's fate; Log rules accumulate
+        // into `logged` so the operator still sees an audit
+        // event regardless of how the walk resolves.
+        let mut logged: Vec<String> = Vec::new();
         for r in &rs.rules {
             if !zone_match(&r.from_zones, from_zone.as_deref()) {
                 continue;
@@ -316,35 +348,32 @@ impl FirewallEngine {
                 return FirewallVerdict {
                     action: r.action,
                     matched_rule_id: Some(r.id.clone()),
+                    logged_rule_ids: logged,
                     from_zone,
                     to_zone,
                     conntrack: conntrack_state,
                 };
             }
-            // Non-terminal (Log) — record and continue walking
-            // so a subsequent terminal rule applies.
-            log_pending = Some(&r.id);
+            // Non-terminal (Log) — record and continue walking.
+            // The kernel `nftables` script omits the verdict on
+            // Log rules (see `compile::render_single_rule`), so
+            // the chain default ends up applying there too;
+            // mirroring that here keeps in-memory and kernel
+            // verdicts aligned.
+            logged.push(r.id.clone());
         }
 
-        // No terminal match. If a Log rule fired, return that —
-        // the operator wants the audit even if no other rule
-        // matched. Otherwise fall back to the default action.
-        if let Some(id) = log_pending {
-            FirewallVerdict {
-                action: RuleAction::Log,
-                matched_rule_id: Some(id.to_owned()),
-                from_zone,
-                to_zone,
-                conntrack: conntrack_state,
-            }
-        } else {
-            FirewallVerdict {
-                action: rs.default_action,
-                matched_rule_id: None,
-                from_zone,
-                to_zone,
-                conntrack: conntrack_state,
-            }
+        // No terminal rule matched: the chain's `default_action`
+        // decides the packet's fate — same as the kernel chain
+        // policy. Any Log rules that fired remain in
+        // `logged_rule_ids` for telemetry.
+        FirewallVerdict {
+            action: rs.default_action,
+            matched_rule_id: None,
+            logged_rule_ids: logged,
+            from_zone,
+            to_zone,
+            conntrack: conntrack_state,
         }
     }
 
@@ -591,7 +620,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn evaluate_log_rule_continues_to_next_terminal() {
+    async fn evaluate_log_rule_alone_falls_through_to_default_action() {
+        // Log is non-terminal in nftables \u2014 a rule with only a
+        // `log` statement falls through to subsequent rules and
+        // ultimately to the chain policy. The in-memory engine
+        // must match: a Log rule on a default-deny chain leaves
+        // the packet denied, with the Log rule's id surfaced in
+        // `logged_rule_ids` for the audit trail. Returning
+        // `action = Log` (the old behaviour) would tell the
+        // caller the packet is being \"logged\" while the kernel
+        // is silently dropping it.
+        let (eng, _b) = make_engine();
+        let mut rs = empty_ruleset(RuleAction::Deny);
+        rs.rules = vec![FirewallRule {
+            id: "log-only".into(),
+            matches: RuleMatch::default(),
+            action: RuleAction::Log,
+            from_zones: vec![],
+            to_zones: vec![],
+            description: String::new(),
+        }];
+        eng.install(rs).await.unwrap();
+        let v = eng.evaluate(&ctx(ipv4(10, 0, 0, 1), ipv4(8, 8, 8, 8), 22));
+        assert_eq!(v.action, RuleAction::Deny);
+        assert!(v.matched_rule_id.is_none());
+        assert_eq!(v.logged_rule_ids, vec!["log-only".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn evaluate_log_rule_alone_with_default_allow_falls_through_to_allow() {
+        // Same shape, default-allow chain: packet is allowed,
+        // Log rule still surfaces in the audit trail.
+        let (eng, _b) = make_engine();
+        let mut rs = empty_ruleset(RuleAction::Allow);
+        rs.rules = vec![FirewallRule {
+            id: "log-only".into(),
+            matches: RuleMatch::default(),
+            action: RuleAction::Log,
+            from_zones: vec![],
+            to_zones: vec![],
+            description: String::new(),
+        }];
+        eng.install(rs).await.unwrap();
+        let v = eng.evaluate(&ctx(ipv4(10, 0, 0, 1), ipv4(8, 8, 8, 8), 22));
+        assert_eq!(v.action, RuleAction::Allow);
+        assert!(v.matched_rule_id.is_none());
+        assert_eq!(v.logged_rule_ids, vec!["log-only".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn evaluate_terminal_after_log_preserves_log_audit_trail() {
+        // When a Log rule fires *and* a later terminal rule
+        // also matches, both must be reported: the terminal
+        // rule decides packet fate (`matched_rule_id`); the Log
+        // rule's id stays in `logged_rule_ids` so the audit
+        // trail isn't silently lost.
         let (eng, _b) = make_engine();
         let mut rs = empty_ruleset(RuleAction::Allow);
         rs.rules = vec![
@@ -604,7 +687,7 @@ mod tests {
                 description: String::new(),
             },
             FirewallRule {
-                id: "deny".into(),
+                id: "deny-ssh".into(),
                 matches: RuleMatch {
                     dst_ports: vec![crate::rule::PortRange::single(22)],
                     ..RuleMatch::default()
@@ -618,25 +701,8 @@ mod tests {
         eng.install(rs).await.unwrap();
         let v = eng.evaluate(&ctx(ipv4(10, 0, 0, 1), ipv4(8, 8, 8, 8), 22));
         assert_eq!(v.action, RuleAction::Deny);
-        assert_eq!(v.matched_rule_id.as_deref(), Some("deny"));
-    }
-
-    #[tokio::test]
-    async fn evaluate_log_rule_alone_returns_log_with_audit_id() {
-        let (eng, _b) = make_engine();
-        let mut rs = empty_ruleset(RuleAction::Deny);
-        rs.rules = vec![FirewallRule {
-            id: "log-only".into(),
-            matches: RuleMatch::default(),
-            action: RuleAction::Log,
-            from_zones: vec![],
-            to_zones: vec![],
-            description: String::new(),
-        }];
-        eng.install(rs).await.unwrap();
-        let v = eng.evaluate(&ctx(ipv4(10, 0, 0, 1), ipv4(8, 8, 8, 8), 22));
-        assert_eq!(v.action, RuleAction::Log);
-        assert_eq!(v.matched_rule_id.as_deref(), Some("log-only"));
+        assert_eq!(v.matched_rule_id.as_deref(), Some("deny-ssh"));
+        assert_eq!(v.logged_rule_ids, vec!["log".to_string()]);
     }
 
     #[tokio::test]

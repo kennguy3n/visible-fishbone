@@ -316,24 +316,26 @@ fn render_script(
     let mut out = String::new();
     out.push_str("# sng-fw compiled ruleset\n");
     out.push_str("add table inet sng_filter\n");
-    // Define one set per zone so the rule chain can match on
-    // `ip saddr @zone_<name>`.
+    // Define one set per zone-family pair so the rule chain can
+    // match on `ip saddr @zone_<name>` / `ip6 saddr @zone6_<name>`.
+    // Each set is created only when the zone actually has
+    // networks of that family — emitting an empty IPv4 set for
+    // an IPv6-only zone wastes a slot in the kernel set table
+    // and would never be referenced by a rule (the
+    // `zone_has_family` check in `render_rule` skips it).
     for z in zones.zones.values() {
         let name = sanitize_set_name(&z.name);
-        let _ = writeln!(
-            out,
-            "add set inet sng_filter zone_{name} {{ type ipv4_addr; flags interval; }}"
-        );
-        for n in &z.networks {
-            // nftables sets accept CIDRs via `add element`.
-            // Skip IPv6 nets — the IPv6 zone sets would be in a
-            // parallel `ip6_addr` set; the compiler emits both
-            // when an IPv6 CIDR is present.
-            if let IpNet::V4(v4) = n {
-                let _ = writeln!(out, "add element inet sng_filter zone_{name} {{ {v4} }}");
+        if z.networks.iter().any(|n| matches!(n, IpNet::V4(_))) {
+            let _ = writeln!(
+                out,
+                "add set inet sng_filter zone_{name} {{ type ipv4_addr; flags interval; }}"
+            );
+            for n in &z.networks {
+                if let IpNet::V4(v4) = n {
+                    let _ = writeln!(out, "add element inet sng_filter zone_{name} {{ {v4} }}");
+                }
             }
         }
-        // IPv6 networks live in a parallel set.
         if z.networks.iter().any(|n| matches!(n, IpNet::V6(_))) {
             let _ = writeln!(
                 out,
@@ -390,19 +392,23 @@ fn render_rule(rule: &FirewallRule, zones: &ZoneTable) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::new();
-    // Decide which address families this logical rule covers.
-    // A rule applies to a family iff at least one match
-    // predicate (cidr or zone) restricts to that family, OR no
-    // such predicate is present at all (the rule is then
-    // family-agnostic and must be emitted once per family that
-    // any referenced zone supports — if no zones at all are
-    // referenced, both families).
-    let families = rule_address_families(rule, zones);
+    // Decide which address-family slots this logical rule
+    // covers. `Some(f)` means "emit a family-qualified line for
+    // family f" — the line carries `ip` / `ip6` qualified zone
+    // and CIDR clauses, and would be a type error if applied to
+    // the wrong family. `None` means "emit a single
+    // family-agnostic line" — used when the rule has no zone
+    // and no CIDR predicates at all, so there's nothing the
+    // kernel could disagree about; the `inet` table accepts the
+    // resulting protocol-/port-only rule for both families
+    // without duplication.
+    let family_slots = rule_address_families(rule, zones);
 
-    for family in families {
+    for family in family_slots {
         // Cross-product over from_zones × to_zones. An empty
         // zone list reduces to a single `None` slot so the rule
-        // is still emitted (CIDR-only predicates apply).
+        // is still emitted (CIDR-only or family-agnostic
+        // predicates apply).
         let from_slots: Vec<Option<&String>> = if rule.from_zones.is_empty() {
             vec![None]
         } else {
@@ -419,36 +425,33 @@ fn render_rule(rule: &FirewallRule, zones: &ZoneTable) -> String {
             // family — there'd be no per-family set to match
             // against, and the in-memory engine would never
             // classify a packet of this family into the zone.
-            if let Some(z) = from_zone {
-                if !zone_has_family(zones, z, family) {
+            // (Family-agnostic slots have no zones at all by
+            // construction, so the check is skipped.)
+            if let (Some(z), Some(f)) = (from_zone, family) {
+                if !zone_has_family(zones, z, f) {
                     continue;
                 }
             }
             for to_zone in &to_slots {
-                if let Some(z) = to_zone {
-                    if !zone_has_family(zones, z, family) {
+                if let (Some(z), Some(f)) = (to_zone, family) {
+                    if !zone_has_family(zones, z, f) {
                         continue;
                     }
                 }
-                // Filter src/dst cidrs to this family. An
-                // empty filtered list means "no cidr predicate
-                // for this family" — which is fine unless the
-                // operator explicitly listed cidrs of *some*
-                // family but the current family yielded none
-                // *and* there's no zone predicate to fall back
-                // on; in that case we skip emitting (the rule
-                // can't match anything in this family).
+                // Filter src/dst cidrs to this family (no-op
+                // for family-agnostic slots, which have no
+                // CIDR predicates).
                 let src_cidrs: Vec<&IpNet> = rule
                     .matches
                     .src_cidrs
                     .iter()
-                    .filter(|n| AddressFamily::of(n) == family)
+                    .filter(|n| family.is_none_or(|f| AddressFamily::of(n) == f))
                     .collect();
                 let dst_cidrs: Vec<&IpNet> = rule
                     .matches
                     .dst_cidrs
                     .iter()
-                    .filter(|n| AddressFamily::of(n) == family)
+                    .filter(|n| family.is_none_or(|f| AddressFamily::of(n) == f))
                     .collect();
                 let src_explicit = !rule.matches.src_cidrs.is_empty();
                 let dst_explicit = !rule.matches.dst_cidrs.is_empty();
@@ -475,14 +478,19 @@ fn render_rule(rule: &FirewallRule, zones: &ZoneTable) -> String {
 /// both is no longer silently dropped.
 fn render_single_rule(
     rule: &FirewallRule,
-    family: AddressFamily,
+    family: Option<AddressFamily>,
     from_zone: Option<&String>,
     to_zone: Option<&String>,
     src_cidrs: &[&IpNet],
     dst_cidrs: &[&IpNet],
 ) -> String {
-    let qualifier = family.nft_qualifier();
-    let zone_prefix = family.nft_zone_set_prefix();
+    // Family-agnostic slots (`None`) skip the `ip` / `ip6`
+    // qualifier and the per-family zone-set prefix entirely.
+    // By construction, callers in this state pass empty
+    // zone / CIDR slices, so the `_qualifier` /
+    // `_zone_prefix` values are never used in that branch.
+    let qualifier = family.map_or("ip", AddressFamily::nft_qualifier);
+    let zone_prefix = family.map_or("zone_", AddressFamily::nft_zone_set_prefix);
 
     let mut parts: Vec<String> = vec!["add rule inet sng_filter forward".into()];
     if let Some(z) = from_zone {
@@ -534,12 +542,14 @@ fn render_single_rule(
     parts.join(" ")
 }
 
-/// Address families this rule needs to be rendered for. A rule
-/// that mentions only IPv4 zones / CIDRs emits IPv4 nft rules
-/// only; a rule with mixed predicates emits one nft rule per
-/// family; an entirely family-agnostic rule (no zones, no
-/// cidrs) emits both families.
-fn rule_address_families(rule: &FirewallRule, zones: &ZoneTable) -> Vec<AddressFamily> {
+/// Address-family slots this rule needs to be rendered for.
+/// A rule that mentions only IPv4 zones / CIDRs emits one IPv4
+/// nft line; a rule with mixed predicates emits one nft line
+/// per family; an entirely family-agnostic rule (no zones, no
+/// cidrs) emits a single line with no `ip` / `ip6` qualifier,
+/// rather than two identical lines that the kernel would walk
+/// twice for every packet.
+fn rule_address_families(rule: &FirewallRule, zones: &ZoneTable) -> Vec<Option<AddressFamily>> {
     let mut families: BTreeSet<AddressFamily> = BTreeSet::new();
     for n in rule
         .matches
@@ -560,12 +570,15 @@ fn rule_address_families(rule: &FirewallRule, zones: &ZoneTable) -> Vec<AddressF
         }
     }
     if families.is_empty() {
-        // No predicate restricts family — the rule applies to
-        // every flow; render once per family.
-        families.insert(AddressFamily::V4);
-        families.insert(AddressFamily::V6);
+        // No predicate restricts family — emit a single
+        // family-agnostic line. Without zone / CIDR clauses,
+        // the `ip` / `ip6` qualifier would have nothing to bind
+        // to, so duplicating the line per family would just
+        // double the kernel's per-packet work.
+        vec![None]
+    } else {
+        families.into_iter().map(Some).collect()
     }
-    families.into_iter().collect()
 }
 
 fn zone_has_family(zones: &ZoneTable, name: &str, family: AddressFamily) -> bool {
@@ -804,6 +817,59 @@ mod tests {
         let s = out.script.as_str().unwrap();
         assert!(s.contains("add set inet sng_filter zone6_v6 { type ipv6_addr;"));
         assert!(s.contains("add element inet sng_filter zone6_v6 { 2001:db8::/32 }"));
+    }
+
+    #[test]
+    fn compile_skips_ipv4_set_for_ipv6_only_zone() {
+        // An IPv6-only zone must NOT cause an empty `zone_<name>`
+        // ipv4_addr set to be created \u2014 nothing would ever
+        // reference it (the v4 rule rendering path skips zones
+        // without v4 networks) and it just pollutes the kernel's
+        // set table. The mirror v6 set is the one that actually
+        // gets used.
+        let mut zones = ZoneTable::new();
+        zones
+            .add_zone(Zone {
+                name: "v6only".into(),
+                networks: vec![cidr("2001:db8::/32")],
+                description: String::new(),
+            })
+            .unwrap();
+        let bundle = make_bundle_with_rules(&[]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, zones, NatTable::new())
+            .unwrap();
+        let s = out.script.as_str().unwrap();
+        assert!(
+            !s.contains("add set inet sng_filter zone_v6only"),
+            "v4 set must not be created for v6-only zone: {s}"
+        );
+        // Spot-check: v6 mirror set is still created.
+        assert!(s.contains("add set inet sng_filter zone6_v6only { type ipv6_addr;"));
+    }
+
+    #[test]
+    fn compile_skips_ipv6_set_for_ipv4_only_zone() {
+        // Mirror of the above: a v4-only zone must not cause an
+        // empty ipv6_addr set to be created.
+        let mut zones = ZoneTable::new();
+        zones
+            .add_zone(Zone {
+                name: "v4only".into(),
+                networks: vec![cidr("10.0.0.0/8")],
+                description: String::new(),
+            })
+            .unwrap();
+        let bundle = make_bundle_with_rules(&[]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, zones, NatTable::new())
+            .unwrap();
+        let s = out.script.as_str().unwrap();
+        assert!(
+            !s.contains("add set inet sng_filter zone6_v4only"),
+            "v6 set must not be created for v4-only zone: {s}"
+        );
+        assert!(s.contains("add set inet sng_filter zone_v4only { type ipv4_addr;"));
     }
 
     #[test]
@@ -1057,15 +1123,22 @@ mod tests {
     }
 
     #[test]
-    fn render_rule_no_zone_no_cidr_emits_per_family_rules() {
-        // A family-agnostic rule (no zones, no cidrs) must
-        // render once per family so it matches both v4 and v6
-        // traffic at the kernel.
+    fn render_rule_no_zone_no_cidr_emits_single_family_agnostic_rule() {
+        // A family-agnostic rule (no zones, no CIDRs) must
+        // render exactly once \u2014 without `ip` / `ip6`
+        // qualifier. The `inet` table matches the resulting
+        // line for both v4 and v6 traffic; emitting two
+        // identical copies just doubles the kernel's per-packet
+        // walk for no semantic gain.
         let zones = ZoneTable::new();
         let r = rule_with_zones("any", &[], &[], RuleAction::Deny, RuleMatch::default());
         let out = render_rule(&r, &zones);
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2, "{out}");
+        assert_eq!(lines.len(), 1, "{out}");
+        assert!(!lines[0].contains("ip saddr"), "{out}");
+        assert!(!lines[0].contains("ip6 saddr"), "{out}");
+        assert!(!lines[0].contains("ip daddr"), "{out}");
+        assert!(!lines[0].contains("ip6 daddr"), "{out}");
     }
 
     #[test]
