@@ -389,27 +389,48 @@ impl SignatureSet {
             if !sig.applies_to(ctx.protocol, ctx.source_port, ctx.destination_port) {
                 continue;
             }
-            // `find_iter` walks every non-overlapping match.
-            // We accept the earliest match whose offset
-            // satisfies the signature's anchor — using
-            // `rx.find()` alone would only consider the
-            // leftmost match and falsely conclude the
-            // signature didn't fire when an earlier match
-            // happens to fall outside the anchor window
-            // but a later match satisfies it.
-            for m in rx.find_iter(ctx.payload) {
-                if !sig.anchor.permits(m.start(), m.end() - m.start()) {
-                    continue;
+            // Walk regex matches with **single-byte slide on
+            // anchor rejection**. `regex::bytes::Regex::find_at`
+            // returns the leftmost match starting at or after a
+            // given position. Plain `find_iter` would not be
+            // correct here: for a greedy variable-length pattern
+            // like `\d+` against `x12345y` with anchor
+            // `offset >= 2`, `find_iter` would return one match
+            // `12345` at offset 1 (rejected by the anchor), then
+            // skip the remaining payload because it's covered by
+            // that match — even though the shorter match `2345`
+            // at offset 2 *would* satisfy the anchor. Sliding
+            // forward by exactly one byte (`m.start() + 1`) on
+            // every rejected match ensures every regex *starting
+            // position* in the payload gets a chance to satisfy
+            // the anchor, closing this anchor-evasion gap.
+            //
+            // The slide is bounded by the payload length and the
+            // regex matcher's own internal cost; in the typical
+            // case (anchor satisfied on the leftmost match) we
+            // do exactly one `find_at` call.
+            let earliest_key = (key.sig_idx, key.pattern_idx);
+            let mut from = 0usize;
+            while let Some(m) = rx.find_at(ctx.payload, from) {
+                if sig.anchor.permits(m.start(), m.end() - m.start()) {
+                    let prev = earliest.get(&earliest_key).copied().unwrap_or(usize::MAX);
+                    if m.start() < prev {
+                        earliest.insert(earliest_key, m.start());
+                    }
+                    break;
                 }
-                let earliest_key = (key.sig_idx, key.pattern_idx);
-                let prev = earliest.get(&earliest_key).copied().unwrap_or(usize::MAX);
-                if m.start() < prev {
-                    earliest.insert(earliest_key, m.start());
+                // Slide forward by one byte from the rejected
+                // match's start so the next `find_at` can pick
+                // up a shorter / later match that the anchor
+                // would accept. Saturate via the payload bound
+                // so the loop terminates even if the regex
+                // engine ever returns a zero-width match at the
+                // payload end.
+                let next = m.start().saturating_add(1);
+                if next >= ctx.payload.len() {
+                    break;
                 }
-                // Matches are returned in order, so the
-                // first anchor-satisfying match is the
-                // earliest one — no need to keep scanning.
-                break;
+                from = next;
             }
         }
 
@@ -725,6 +746,38 @@ mod tests {
         // Reported offset should be the anchor-satisfying
         // match, not the rejected leftmost one.
         assert_eq!(hits[0].first_match_offset, 13);
+    }
+
+    #[test]
+    fn regex_signature_slides_past_anchor_rejected_overlapping_match() {
+        // Pins the slide-on-anchor-reject contract. A
+        // greedy variable-length pattern like `\d+` against
+        // `x12345y` with `offset >= 2` would, under a
+        // `find_iter`-only scan, find one non-overlapping
+        // match `12345` at offset 1, see the anchor reject
+        // it, and stop — because `find_iter` has already
+        // consumed every digit. The scan must slide one
+        // byte forward and try again so the shorter match
+        // `2345` at offset 2 (which the anchor accepts) is
+        // still reported. Without the slide this is an
+        // anchor-evasion gap.
+        let mut sig = sig_simple(2003, vec![regex(r"\d+")]);
+        sig.anchor = Anchor {
+            offset: Some(2),
+            depth: None,
+        };
+        let set = SignatureSet::compile(vec![sig]).unwrap();
+        let hits = set.scan(ScanContext {
+            protocol: IpProtocol::Tcp,
+            source_port: 0,
+            destination_port: 80,
+            payload: b"x12345y",
+        });
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].sid, 2003);
+        // The slide accepts the shortened match starting
+        // at offset 2 (within the anchor window).
+        assert_eq!(hits[0].first_match_offset, 2);
     }
 
     #[test]
