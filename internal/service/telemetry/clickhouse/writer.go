@@ -899,8 +899,19 @@ func (w *Writer) requeueBatch(batch []schema.Envelope, reason string, drops requ
 	merged = append(merged, batch...)
 	merged = append(merged, w.pending...)
 	backlogCap := w.cfg.BatchSize * w.cfg.MaxBacklogMultiplier
+	// shedFromBatch tracks how many rows from the failed `batch`
+	// itself ended up shed (vs shed from the pre-existing
+	// `w.pending` tail). Reported in the Info log so the operator
+	// can read the actual surviving-from-batch count rather than
+	// the attempt-count, which is what the previous log shape
+	// implied.
+	shedFromBatch := 0
 	if len(merged) > backlogCap {
 		shed := len(merged) - backlogCap
+		shedFromBatch = shed
+		if shedFromBatch > len(batch) {
+			shedFromBatch = len(batch)
+		}
 		// Bounded sample of per-row WARN context so operators
 		// can correlate the loss to the producer without
 		// flooding the log pipeline during a sustained outage.
@@ -924,6 +935,8 @@ func (w *Writer) requeueBatch(batch []schema.Envelope, reason string, drops requ
 		// telemetry stream between the two event IDs.
 		w.logger.Warn("clickhouse: backlog cap exceeded, oldest rows shed",
 			slog.Int("shed", shed),
+			slog.Int("shed_from_batch", shedFromBatch),
+			slog.Int("shed_from_pending", shed-shedFromBatch),
 			slog.Int("sampled", sample),
 			slog.Int("cap", backlogCap),
 			slog.String("first_event_id", merged[0].EventID.String()),
@@ -935,8 +948,17 @@ func (w *Writer) requeueBatch(batch []schema.Envelope, reason string, drops requ
 	}
 	w.pending = merged
 	w.requeuedBatches++
+	// `requeued` reports the rows from `batch` that ACTUALLY
+	// survived the backlog-cap shed and are now sitting in
+	// `w.pending` — not the attempt count. `attempted` retains
+	// the original caller-supplied size so an operator can read
+	// "tried to requeue X, kept X-Y after sheds, Y went to the
+	// backlogDrops bucket". Without this split the Info log line
+	// would overstate the surviving count whenever the cap trips.
 	w.logger.Info("clickhouse: requeued batch after transient failure",
-		slog.Int("requeued", len(batch)),
+		slog.Int("attempted", len(batch)),
+		slog.Int("requeued", len(batch)-shedFromBatch),
+		slog.Int("shed_from_batch", shedFromBatch),
 		slog.Int("backlog", len(merged)),
 		slog.String("reason", reason))
 }
