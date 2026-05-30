@@ -323,7 +323,27 @@ impl ConfigGenerator {
         // Match the EVE record types our `eve.rs` parser knows
         // about. Anything else is decoded as `Unknown` but not
         // dropped, so adding a type here later is forward-safe.
-        for ty in ["alert", "anomaly", "dns", "http", "tls", "flow", "fileinfo"] {
+        //
+        // `stats` is critical and must NOT be removed: the manager's
+        // EVE tail relies on `event_type: stats` records to feed
+        // packet/drop counters into `SuricataProcess::push_stats`,
+        // which is what drives `StatsDelta::drop_ratio()` and in
+        // turn the `HealthMonitor`'s `Degraded` (>=1%) and `Failed`
+        // (>=25%) drop-ratio transitions (`health.rs:227-231`). The
+        // separate top-level `stats:` output stanza below uses
+        // `filetype: unix_stream` and is for the `suricatasc`
+        // command socket — it does not write into the EVE JSON
+        // file. Without `stats` in *this* list, Suricata never
+        // emits stats records into `eve.json`, the tail never sees
+        // them, `push_stats` is never invoked, drop counts stay
+        // pinned at zero, `drop_ratio` always returns 0.0 (its
+        // 0/0 guard), and the entire drop-ratio branch of the
+        // health machine is dead code in production. The
+        // regression test `render_includes_stats_in_eve_types` in
+        // this file pins the invariant.
+        for ty in [
+            "alert", "anomaly", "dns", "http", "tls", "flow", "fileinfo", "stats",
+        ] {
             let _ = writeln!(out, "        - {ty}");
         }
         out.push_str("  - stats:\n");
@@ -522,9 +542,49 @@ mod tests {
         assert!(t.contains(r#"filename: "/run/sng/suricata.sock""#), "{t}");
         // Every EVE type the manager normalises must be enabled
         // in the outputs stanza.
-        for ty in ["alert", "anomaly", "dns", "http", "tls", "flow", "fileinfo"] {
+        for ty in [
+            "alert", "anomaly", "dns", "http", "tls", "flow", "fileinfo", "stats",
+        ] {
             assert!(t.contains(&format!("- {ty}\n")), "{t} missing type {ty}");
         }
+    }
+
+    /// Regression test for the health-monitor wiring: the EVE
+    /// log's `types` list must include `stats`, otherwise
+    /// Suricata never writes `event_type: stats` records into the
+    /// EVE JSON file, the manager's tail never calls
+    /// `SuricataProcess::push_stats`, `packets_dropped` stays at
+    /// zero forever, and the health monitor's drop-ratio
+    /// thresholds (1% Degraded / 25% Failed) become dead code in
+    /// production. The separate top-level `stats:` output stanza
+    /// is for the `suricatasc` command socket and does NOT cover
+    /// this path. This test pins the invariant at the lowest
+    /// level so a future trim of the types list cannot silently
+    /// reintroduce the bug.
+    #[test]
+    fn render_includes_stats_in_eve_types() {
+        let cfg = ConfigGenerator::new();
+        let input = baseline();
+        let rendered = cfg.render(&input).unwrap();
+        let t = rendered.text();
+        // The `types:` key for the eve-log stanza must be
+        // followed by an enumeration that includes `stats`. We
+        // assert on the line-anchored form to avoid being fooled
+        // by the unrelated top-level `stats:` block (which is a
+        // YAML key at column 2, not a list item under `types:`).
+        assert!(
+            t.contains("        - stats\n"),
+            "eve-log types list must include `stats`; rendered: {t}"
+        );
+        // And the eve-log stanza itself must precede the
+        // stats-socket stanza (sanity that we are reading the
+        // types we think we are).
+        let eve_log_pos = t.find("  - eve-log:").expect("eve-log stanza missing");
+        let stats_block_pos = t.find("  - stats:").expect("stats socket stanza missing");
+        assert!(
+            eve_log_pos < stats_block_pos,
+            "eve-log stanza must precede the stats unix-socket stanza"
+        );
     }
 
     #[test]
