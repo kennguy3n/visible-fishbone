@@ -46,6 +46,17 @@ concurrency:
 env:
   GO_VERSION: "1.25"
   GOLANGCI_LINT_VERSION: "v2.5.0"
+  # Rust toolchain pin: must match `rust-version` in the workspace
+  # Cargo.toml. Bumping here without bumping Cargo.toml will cause
+  # the workspace to refuse the toolchain at build time, which is
+  # the desired forcing function.
+  RUST_TOOLCHAIN: "1.85"
+  # cargo-deny pin: must match the version used by `make lint-rust`
+  # locally so a contributor sees the same gate output in CI and
+  # at their workstation. Bumping here propagates through every
+  # rust-deny CI run via the install step below.
+  CARGO_DENY_VERSION: "0.19.8"
+  CARGO_TERM_COLOR: always
 
 jobs:
   lint:
@@ -189,6 +200,76 @@ jobs:
             echo "::error::go.mod / go.sum are not tidy. Run 'go mod tidy' locally and commit the result."
             exit 1
           }
+
+  rust-fmt:
+    name: rust fmt (cargo fmt --check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  rust-clippy:
+    name: rust clippy (--all-targets -D warnings)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-${{ runner.os }}
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  rust-test:
+    name: rust test (cargo test --workspace)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-${{ runner.os }}
+      - name: cargo test --workspace
+        run: cargo test --workspace --all-targets
+
+  rust-deny:
+    name: rust deny (licenses + bans + advisories + sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # Install cargo-deny at the pinned version using
+      # taiki-e/install-action, which pulls prebuilt binaries
+      # (cached by GitHub) rather than building from source. The
+      # version comes from the workflow-level `CARGO_DENY_VERSION`
+      # env var so the pin is a real single-source-of-truth that
+      # bumping mechanically updates every rust-deny CI run.
+      - name: install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }}
+      - name: cargo deny check
+        run: cargo deny --all-features check
 
   migration-dry-run:
     name: migration dry-run (postgres)

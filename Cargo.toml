@@ -1,0 +1,237 @@
+[workspace]
+# Phase 2 introduces the two foundation crates: `sng-core` (shared
+# types, lifecycle, error taxonomy, traffic class, policy bundle
+# verification) and `sng-pal` (cross-platform OS hooks). Subsequent
+# phases add `sng-comms`, `sng-policy-eval`, `sng-telemetry`,
+# `sng-dns`, `sng-fw`, `sng-ips`, `sng-swg`, `sng-ztna`,
+# `sng-sdwan`, `sng-updater`, and finally the two binary crates
+# (`sng-edge`, `sng-agent`). The list grows additively rather than
+# being placeholder-filled now, because every member listed here
+# must compile cleanly on every CI run — adding empty stubs would
+# defeat the cargo-deny + clippy gates this workspace exists to
+# enforce.
+members = [
+    "crates/sng-core",
+    "crates/sng-pal",
+    "crates/sng-comms",
+    "crates/sng-policy-eval",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-Proprietary"
+authors = ["ShieldNet Gateway Contributors"]
+rust-version = "1.85"
+repository = "https://github.com/kennguy3n/visible-fishbone"
+description = "ShieldNet Gateway (SNG) - multi-tenant secure access platform"
+
+# Shared dependency versions for every workspace crate. Anything
+# that is shared by two or more crates lives here so version drift
+# is impossible — each crate references `{ workspace = true }`
+# rather than naming a version of its own.
+[workspace.dependencies]
+# Async runtime. Features are kept narrow at the workspace level;
+# individual crates that need additional Tokio features add them
+# locally rather than expanding the global feature set, which keeps
+# binary size predictable on the resource-constrained `sng-agent`
+# build (sub-15 MB resident, sub-0.1% idle CPU).
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+
+# Serialization. MessagePack (rmp-serde) is the wire format for
+# event envelopes and policy bundles — chosen to match the Go side
+# (`github.com/vmihailenco/msgpack/v5` in
+# `internal/nats/schema/envelope.go`). JSON is used for human-
+# readable surfaces (REST, audit log, structured logs).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_bytes = "0.11"
+rmp-serde = "1"
+
+# Cryptography. The control-plane signs policy bundles and update
+# manifests with Ed25519 (Go: `crypto/ed25519`), so the verifier on
+# the edge / endpoint side must speak the exact same curve. `ring`
+# is used as the rustls crypto backend (smaller, no aws-lc-sys
+# build) and for general-purpose primitives (SHA-256, AEAD).
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast", "rand_core"] }
+# Re-exported by ed25519-dalek when the `rand_core` feature is on,
+# but the workspace pins the version explicitly so cargo-deny does
+# not complain about a transient version skew between dependencies.
+rand_core = { version = "0.6", default-features = false, features = ["std", "getrandom"] }
+ring = "0.17"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+
+# Logging. tracing is the de-facto Rust async-logging stack; both
+# the SDA (sn360-desktop-agent) and SKA (sn360-agent-k8s) workspaces
+# use it, and the Go side emits structured logs through `slog`, so
+# the operational shape on both sides is comparable.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "json", "smallvec"] }
+
+# Error handling.
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+
+# Utilities.
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+parking_lot = "0.12"
+arc-swap = "1"
+once_cell = "1"
+
+# Configuration loading. `figment` is the canonical layered-config
+# library and matches the Go control plane's preference for env
+# vars + optional file overlay.
+# `test` feature exposes `figment::Jail` for per-test env-var isolation;
+# it is sound to leave on in non-test builds (it adds no runtime cost
+# unless `Jail::expect_with` is called) and avoids per-crate feature
+# gating.
+figment = { version = "0.10", features = ["env", "toml", "test"] }
+toml = "0.8"
+
+# Filesystem watching (used by sng-pal for config reload signal on
+# Linux/macOS where SIGHUP semantics differ from Windows).
+notify = "7"
+
+# Platform-specific. nix is used for POSIX (Linux + macOS) syscalls
+# that don't have a libstd equivalent (TPROXY, NETLINK, kqueue).
+# windows is used for the Windows-side WFP / TPM hooks. Both are
+# version-pinned here even when only one crate consumes them so
+# they cannot drift between crates.
+nix = { version = "0.30", default-features = false, features = ["fs", "user", "process", "signal", "net", "hostname"] }
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_System_SystemInformation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+] }
+
+# IP / CIDR utilities (shared across pal posture + future fw rules).
+ipnet = { version = "2", features = ["serde"] }
+
+# Networking + TLS stack (shared across sng-comms, sng-swg, sng-ztna,
+# and the binaries). rustls is pinned with the `ring` crypto provider
+# explicitly so cargo-deny's bans block on `aws-lc-sys` (and any
+# OpenSSL-FFI fallback) hold even when a future crate adds a feature
+# that would otherwise activate the alternate backend. The `h2`
+# crate is the pure-Rust HTTP/2 implementation used directly (not via
+# hyper) so the client can drive flow-controlled streams without
+# pulling in the full hyper server / service stack.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pki-types = "1"
+webpki-roots = "1"
+h2 = "0.4"
+http = "1"
+http-body = "1"
+url = "2"
+zstd = "0.13"
+rand = "0.8"
+
+# Test-only dependencies.
+tempfile = "3"
+pretty_assertions = "1"
+# rcgen mints self-signed leaf + CA certificates for the in-process
+# TLS server used by sng-comms integration tests. Pinned at the
+# workspace level so future crates that need an ephemeral test PKI
+# (sng-policy-eval bundle pull, sng-edge enrolment) share the same
+# version.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+
+# Internal crate references — each member crate is reachable via
+# `{ workspace = true }` from every other crate without having to
+# repeat the relative path. New crates added in later phases just
+# get one more entry here.
+sng-core = { path = "crates/sng-core" }
+sng-pal = { path = "crates/sng-pal" }
+sng-comms = { path = "crates/sng-comms" }
+sng-policy-eval = { path = "crates/sng-policy-eval" }
+
+# Workspace-wide lints. Set at the workspace level so a new crate
+# added in a later phase automatically inherits the same posture
+# without having to opt in. `unsafe_code = "forbid"` is the policy
+# for every crate in the workspace EXCEPT modules that legitimately
+# need a syscall whose Rust binding has no safe wrapper — those
+# modules locally re-enable `unsafe_code = "allow"` on the specific
+# `mod` they need and document why in a doc-comment. The default is
+# forbid so the audit trail is "look for `unsafe_code = "allow"`
+# overrides", not "look for `unsafe` blocks in 30 crates".
+[workspace.lints.rust]
+# `deny` rather than `forbid` so leaf modules that genuinely
+# need an unsafe syscall (sng-pal's per-OS sysctl/GetComputerNameExW
+# wrappers, future kernel-bridge crates) can relax the lint
+# locally with `#[allow(unsafe_code)]` on the specific block and a
+# documented rationale. The default is still deny so any uncommented
+# unsafe block fails the build.
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# `pedantic` is the right default tier for this workspace — it
+# catches real correctness issues (cast_lossless, needless_pass_by_value,
+# inefficient_to_string) without the false positives of `nursery` or
+# `restriction`. Specific noisy lints are downgraded below.
+pedantic = { level = "warn", priority = -1 }
+# Allow-listed clippy::pedantic lints that don't add signal on this
+# codebase: documentation-completeness lints, "must_use" pedantry,
+# and the "wrap every product name in backticks" lint which produces
+# pages of false positives on the architecture doc-comments.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"
+# `Result` payload size: `figment::Error` is intentionally large
+# (it carries the source path / span / metadata for a config
+# error). Boxing the whole `ConfigError` enum just to shrink the
+# pre-Err discriminant would lose the source-error trail
+# `thiserror::Error` provides for free. Allow the lint at the
+# workspace level rather than per-call-site.
+result_large_err = "allow"
+# Trivial `&u64` parameters on serde helpers do not warrant a
+# rewrite to by-value.
+trivially_copy_pass_by_ref = "allow"
+# `Option<&T>` vs `&Option<T>` is fine in private trait surfaces.
+ref_option = "allow"
+# These are correctness lints (NOT subjective style). Set to
+# `warn` rather than `deny` so test code that legitimately uses
+# `.expect("fixture")` for fast-failing test assertions does not
+# require per-module allow attributes. Production code paths
+# still get the warning, which is what CI is for. `todo` /
+# `unimplemented` stay at deny — those are flags for unfinished
+# code and must never reach main.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "deny"
+unimplemented = "deny"
+
+# Release profile: optimise for binary size on the edge VM image
+# and the endpoint agent (resident-memory budget is sub-15 MB for
+# `sng-agent`). `panic = "abort"` removes the unwinder which buys
+# both binary size and a small startup-time win.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = "z"
+strip = true
+
+# CI-oriented release profile: same optimisation flags as `release`
+# but with thin LTO and multiple codegen units for dramatically
+# faster compile times. Used by the `build` and `e2e` CI jobs where
+# wall-clock matters more than the last few percent of binary size.
+# Reference: sn360-desktop-agent/Cargo.toml uses the same split.
+[profile.ci]
+inherits = "release"
+lto = "thin"
+codegen-units = 4
+strip = "symbols"

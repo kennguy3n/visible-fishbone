@@ -1,0 +1,47 @@
+[package]
+name = "sng-core"
+description = "ShieldNet Gateway shared types, lifecycle, configuration, and policy bundle verification"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_bytes = { workspace = true }
+rmp-serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+arc-swap = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+figment = { workspace = true }
+toml = { workspace = true }
+ipnet = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
+pretty_assertions = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+anyhow = { workspace = true }
+# Dynamic MessagePack `Value` decoder used by the wire-format
+# tests to assert that field tags on the wire match the short
+# Go-side schema names (`sip`, `bi`, etc.). Test-only — never
+# linked into the agent binary. `with-serde` enables `Value` to
+# implement `serde::{Serialize, Deserialize}` which the
+# round-trip tests rely on.
+rmpv = { version = "1", features = ["with-serde"] }

@@ -1,0 +1,51 @@
+[package]
+name = "sng-policy-eval"
+description = "ShieldNet Gateway (SNG) — local policy evaluation engine: loads signed bundles, evaluates per-flow verdicts, hot-swaps atomically."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# Serde stack. Bundle bodies are MessagePack-encoded by the Go
+# compiler (`internal/service/policy/service.go::encodeBundlePayloadFor`);
+# the `r` (rules) and `st` (steering) fields are themselves
+# JSON-encoded `json.RawMessage` blobs inside the msgpack envelope,
+# so this crate needs both decoders to round-trip a real bundle.
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+arc-swap = { workspace = true }
+
+# IP / CIDR utilities for network-subject matchers and steering
+# IP-range lookups. Already shared by sng-pal posture; pulling it
+# here keeps a single resolution across the workspace.
+ipnet = { workspace = true }
+uuid = { workspace = true }
+
+# Local crate dependency: sng-core supplies the verified
+# `PolicyBundle::body` bytes, the `BundleTarget` / `PolicyGraphId`
+# / `PolicyBundleId` newtypes, the `TrafficClass` enum, and the
+# `ErrorCode` taxonomy this crate's typed errors map onto.
+sng-core = { workspace = true }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
+pretty_assertions = { workspace = true }
+criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support"] }
+
+[[bench]]
+name = "eval"
+harness = false
