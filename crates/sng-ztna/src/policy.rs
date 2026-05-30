@@ -89,8 +89,9 @@ impl PostureRequirement {
 /// The reason an evaluator denied (or allowed) a
 /// request. Every reason maps to a stable wire string
 /// for downstream dashboards and the
-/// [`sng_core::events::ZtnaEvent::decision`] +
-/// `posture_result` fields.
+/// [`sng_core::events::ZtnaEvent::reason`] field (the
+/// sibling [`sng_core::events::ZtnaEvent::decision`]
+/// field carries the binary `allow`/`deny` outcome).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ZtnaDecisionReason {
@@ -127,9 +128,9 @@ pub enum ZtnaDecisionReason {
 
 impl ZtnaDecisionReason {
     /// Stable wire string for the
-    /// [`sng_core::events::ZtnaEvent::decision`] field
-    /// (when this is an allow) or the dashboards' deny
-    /// bucket label (when this is a deny).
+    /// [`sng_core::events::ZtnaEvent::reason`] field —
+    /// `allow` on the allow path, or the dashboards'
+    /// deny bucket label on a deny.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {

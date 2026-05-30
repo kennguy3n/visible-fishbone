@@ -419,6 +419,14 @@ fn build_ztna_event(
     decision: &ZtnaDecision,
     identity_verified: bool,
 ) -> ZtnaEvent {
+    // `decision` carries the binary allow/deny outcome
+    // (the field is documented as such on
+    // [`ZtnaEvent::decision`]); the detailed structured
+    // reason — e.g. `unknown_app`, `mfa_stale`,
+    // `tenant_mismatch` — lives on
+    // [`ZtnaEvent::reason`]. Dashboards that bucket by
+    // outcome and dashboards that bucket by cause both
+    // have one place to read from.
     ZtnaEvent {
         device_id: device_id.to_string(),
         app_id: app_id.to_string(),
@@ -428,7 +436,8 @@ fn build_ztna_event(
             "fail"
         }
         .to_string(),
-        decision: decision.reason.as_str().to_string(),
+        decision: if decision.allow { "allow" } else { "deny" }.to_string(),
+        reason: decision.reason.as_str().to_string(),
         identity_verified,
     }
 }
@@ -545,6 +554,11 @@ mod tests {
         assert_eq!(ev.app_id, "wiki");
         assert_eq!(ev.posture_result, "pass");
         assert_eq!(ev.decision, "allow");
+        // Allow path: `reason` carries the same `allow`
+        // marker as `decision` — dashboards keying off the
+        // dedicated reason field see a non-empty,
+        // discriminating bucket label.
+        assert_eq!(ev.reason, "allow");
         assert!(ev.identity_verified);
         // Stats: one request, one allow.
         let snap = svc.stats.snapshot();
@@ -572,7 +586,13 @@ mod tests {
         let evs = drain(&mut rx);
         assert_eq!(evs.len(), 1);
         let ev = ztna_event(&evs[0]);
-        assert_eq!(ev.decision, "unknown_app");
+        // The wire-shape `decision` field is the binary
+        // outcome (`deny`) and the detailed bucket label
+        // (`unknown_app`) lives on `reason` — see
+        // `build_ztna_event` for why the split is
+        // intentional.
+        assert_eq!(ev.decision, "deny");
+        assert_eq!(ev.reason, "unknown_app");
         assert_eq!(ev.posture_result, "fail");
         // identity_verified is false on the early-return
         // path because the orchestrator never reached the
@@ -600,7 +620,8 @@ mod tests {
         assert!(matches!(err, ZtnaError::DeviceNotEnrolled { .. }));
         let evs = drain(&mut rx);
         let ev = ztna_event(&evs[0]);
-        assert_eq!(ev.decision, "device_not_enrolled");
+        assert_eq!(ev.decision, "deny");
+        assert_eq!(ev.reason, "device_not_enrolled");
         assert!(!ev.identity_verified);
         let snap = svc.stats.snapshot();
         assert_eq!(snap.deny_device_not_enrolled, 1);
@@ -622,7 +643,8 @@ mod tests {
         assert!(matches!(err, ZtnaError::IdentityNotFound { .. }));
         let evs = drain(&mut rx);
         let ev = ztna_event(&evs[0]);
-        assert_eq!(ev.decision, "identity_not_found");
+        assert_eq!(ev.decision, "deny");
+        assert_eq!(ev.reason, "identity_not_found");
         // Even though the IdP chain validated the `sub`
         // claim, the brain's identity provider has no
         // record, so we report `identity_verified=false`
@@ -648,7 +670,8 @@ mod tests {
         assert_eq!(d.reason, ZtnaDecisionReason::TenantMismatch);
         let evs = drain(&mut rx);
         let ev = ztna_event(&evs[0]);
-        assert_eq!(ev.decision, "tenant_mismatch");
+        assert_eq!(ev.decision, "deny");
+        assert_eq!(ev.reason, "tenant_mismatch");
         // identity_verified=true here because the brain
         // *did* resolve every provider; the policy is
         // what said no.
@@ -670,7 +693,8 @@ mod tests {
         assert_eq!(d.reason, ZtnaDecisionReason::NotEntitled);
         let evs = drain(&mut rx);
         let ev = ztna_event(&evs[0]);
-        assert_eq!(ev.decision, "not_entitled");
+        assert_eq!(ev.decision, "deny");
+        assert_eq!(ev.reason, "not_entitled");
         assert_eq!(svc.stats.snapshot().deny_not_entitled, 1);
     }
 
@@ -693,7 +717,8 @@ mod tests {
         assert_eq!(d.reason, ZtnaDecisionReason::MfaStale);
         let evs = drain(&mut rx);
         let ev = ztna_event(&evs[0]);
-        assert_eq!(ev.decision, "mfa_stale");
+        assert_eq!(ev.decision, "deny");
+        assert_eq!(ev.reason, "mfa_stale");
         assert_eq!(svc.stats.snapshot().deny_mfa_stale, 1);
     }
 
@@ -718,7 +743,9 @@ mod tests {
         let d = svc.evaluate(&req("wiki", "dev-1", "alice", now)).unwrap();
         assert_eq!(d.reason, ZtnaDecisionReason::DevicePostureStale);
         let evs = drain(&mut rx);
-        assert_eq!(ztna_event(&evs[0]).decision, "device_posture_stale");
+        let ev = ztna_event(&evs[0]);
+        assert_eq!(ev.decision, "deny");
+        assert_eq!(ev.reason, "device_posture_stale");
         assert_eq!(svc.stats.snapshot().deny_device_posture_stale, 1);
     }
 
@@ -742,7 +769,8 @@ mod tests {
         assert!(!d.posture_pass);
         let evs = drain(&mut rx);
         let ev = ztna_event(&evs[0]);
-        assert_eq!(ev.decision, "device_posture_insufficient");
+        assert_eq!(ev.decision, "deny");
+        assert_eq!(ev.reason, "device_posture_insufficient");
         assert_eq!(ev.posture_result, "fail");
         assert_eq!(svc.stats.snapshot().deny_device_posture_insufficient, 1);
     }
@@ -802,8 +830,16 @@ mod tests {
         // Drain the two events.
         let evs = drain(&mut rx);
         assert_eq!(evs.len(), 2);
-        assert_eq!(ztna_event(&evs[0]).decision, "tenant_mismatch");
-        assert_eq!(ztna_event(&evs[1]).decision, "allow");
+        // Two distinct events on the wire: first the
+        // (deny, tenant_mismatch) and then the (allow,
+        // allow) once the request is re-driven against a
+        // policy with a matching tenant.
+        let ev0 = ztna_event(&evs[0]);
+        assert_eq!(ev0.decision, "deny");
+        assert_eq!(ev0.reason, "tenant_mismatch");
+        let ev1 = ztna_event(&evs[1]);
+        assert_eq!(ev1.decision, "allow");
+        assert_eq!(ev1.reason, "allow");
 
         assert_eq!(svc.stats.snapshot().bundle_loads, 1);
     }
