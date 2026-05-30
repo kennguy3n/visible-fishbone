@@ -464,6 +464,21 @@ impl IpsManager {
     /// picks up the new rules without restarting.
     ///
     /// Returns the version that is now installed.
+    ///
+    /// ## Retry semantics on signal failure
+    ///
+    /// `stage_and_swap` and `process.signal(Reload)` are not
+    /// transactional: the stager commits `installed = Some(version)`
+    /// on a successful swap, but if `signal(Reload)` then fails
+    /// (the process died between swap and signal, the signal
+    /// pipe was momentarily unavailable, etc.) this method
+    /// returns `Err(IpsError::Process(...))` with the rules
+    /// already staged on disk. The stager's monotonic-version
+    /// guard means a retry with the *same* bundle would be
+    /// rejected as stale (see [`crate::rules::IpsRuleVerifier`]'s
+    /// `RuleStale` path) — there is no "replay the bundle" path.
+    /// To resend just the SIGHUP without re-staging, call
+    /// [`Self::reload_signal`].
     pub async fn apply_rule_bundle(&self, bundle: &IpsRuleBundle) -> Result<u64, IpsError> {
         let claims = self.verifier.verify_and_decode(bundle)?;
         let version = self.stager.stage_and_swap(&claims).await?;
@@ -474,6 +489,30 @@ impl IpsManager {
             "ips rule bundle installed; sighup sent"
         );
         Ok(version)
+    }
+
+    /// Re-issue Suricata's `SIGHUP` (reload) without touching the
+    /// stager. The companion retry path for [`Self::apply_rule_bundle`]:
+    /// if a previous `apply_rule_bundle` call returned an error
+    /// from the `process.signal(Reload)` step but the stager had
+    /// already committed the swap, the operator can call this
+    /// method to deliver the SIGHUP that the prior call lost. The
+    /// operation is idempotent on Suricata's side — a SIGHUP
+    /// against a process that is already running the staged
+    /// rules causes a harmless rule reload.
+    ///
+    /// This intentionally does *not* take a bundle argument: it
+    /// is the "retry the signal half of a partially-committed
+    /// rule install" hook, not a way to bypass verification.
+    /// Callers that need to install a new bundle must go through
+    /// [`Self::apply_rule_bundle`].
+    pub async fn reload_signal(&self) -> Result<(), IpsError> {
+        self.process.signal(SuricataSignal::Reload).await?;
+        info!(
+            target: "sng_ips::manager",
+            "ips reload signal re-issued"
+        );
+        Ok(())
     }
 
     /// Trigger an EVE log rotation. The manager sends `SIGUSR1`
@@ -650,7 +689,25 @@ async fn tail_eve_log(
             );
         }
     }
-    let mut current_inode = file_identity(&eve_path).await;
+    // Anchor the cached identity to the *file descriptor we just
+    // opened*, not to the path. The previous design read
+    // `file_identity(&eve_path)` here, which is a `stat(2)` on the
+    // path and resolves whatever inode the path points at *now*
+    // — not the inode the freshly-opened `File` is bound to. A
+    // rename-style rotation that lands in the microsecond window
+    // between `File::open(path)` and `file_identity(path)` would
+    // cache the *new* file's identity while the BufReader still
+    // holds an fd to the *old* file. The next EOF probe would
+    // then see "path identity == cached identity" and conclude
+    // there is no rotation, silently dropping every alert
+    // Suricata writes to the new file until the EVE staleness
+    // probe (30 s default) fires Degraded health. `fstat`-via-
+    // `File::metadata` resolves the identity *of the open fd*,
+    // closing that race: an in-flight rotation produces a
+    // legitimate "fd identity != path identity" on the very
+    // next EOF probe, which is the trigger the rotation branch
+    // expects.
+    let mut current_inode = file_identity_from_handle(&file).await;
     let mut reader = BufReader::new(file).lines();
 
     loop {
@@ -754,7 +811,16 @@ async fn tail_eve_log(
                                 );
                                 return;
                             };
-                            current_inode = file_identity(&eve_path).await;
+                            // Same rationale as the initial open:
+                            // anchor the cached identity to the
+                            // freshly opened fd, not the path. A
+                            // second rotation that lands while we
+                            // are still reading the first new
+                            // file would otherwise be missed if
+                            // the path's identity changed between
+                            // our `open(2)` and our re-probe of
+                            // the path.
+                            current_inode = file_identity_from_handle(&new_file).await;
                             reader = BufReader::new(new_file).lines();
                             *inner.eve_reopens.lock() += 1;
                             continue;
@@ -903,21 +969,53 @@ impl FileIdentity {
     }
 }
 
-async fn file_identity(path: &Path) -> Option<FileIdentity> {
-    let meta = tokio::fs::metadata(path).await.ok()?;
+/// Project a `std::fs::Metadata` value into our platform-aware
+/// identity enum. Centralised so the path-side probe
+/// [`file_identity`] and the fd-side probe
+/// [`file_identity_from_handle`] cannot drift from each other on
+/// what counts as identity-bearing metadata. The two callers
+/// MUST produce comparable values — the EOF rotation branch
+/// reads the path side and compares it against the cached
+/// fd-side identity from the initial open, so any divergence on
+/// platform-conditional field selection would break the
+/// rotation detection invariant.
+fn file_identity_from_meta(meta: &std::fs::Metadata) -> FileIdentity {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        Some(FileIdentity::Inode {
+        FileIdentity::Inode {
             dev: meta.dev(),
             ino: meta.ino(),
             len: meta.len(),
-        })
+        }
     }
     #[cfg(not(unix))]
     {
-        Some(FileIdentity::Size(meta.len()))
+        FileIdentity::Size(meta.len())
     }
+}
+
+/// Path-side identity probe. Resolves whatever inode the path
+/// points at *right now* — used by the EOF rotation branch to
+/// detect that the path's inode has diverged from the inode the
+/// open file descriptor is bound to.
+async fn file_identity(path: &Path) -> Option<FileIdentity> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    Some(file_identity_from_meta(&meta))
+}
+
+/// Fd-side identity probe. Resolves the inode (and length) of
+/// the file that the supplied [`tokio::fs::File`] handle is
+/// bound to via `fstat(2)` — independent of whatever the path
+/// currently resolves to. Used at the initial open and at every
+/// post-rotation re-open so the cached identity in the tail
+/// loop reflects the file we are actually reading, not the
+/// file that happens to live at the path at the moment of the
+/// probe. See the rationale comment at the call site for the
+/// race this closes.
+async fn file_identity_from_handle(file: &tokio::fs::File) -> Option<FileIdentity> {
+    let meta = file.metadata().await.ok()?;
+    Some(file_identity_from_meta(&meta))
 }
 
 async fn open_eve_with_retry(path: &Path) -> Option<tokio::fs::File> {
@@ -1531,6 +1629,39 @@ mod tests {
         // No reload signal — the manager rejected the bundle
         // before reaching the process.
         assert!(mock.signals().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reload_signal_resends_sighup_without_re_staging() {
+        // Pins the retry-after-partial-commit contract: after a
+        // bundle has been staged but the SIGHUP delivery
+        // failed (e.g. the process died between swap and
+        // signal), `reload_signal()` must be the way to re-issue
+        // SIGHUP without going through the verifier or stager
+        // again. The stager's monotonic-version guard would
+        // reject a replay of the same bundle, so without this
+        // hook the operator has no in-API path back to a
+        // consistent state.
+        let dir = TempDir::new().unwrap();
+        let mock = MockSuricata::new();
+        let (mgr, _source, eve, rules) = manager_under_test(&dir, mock.clone());
+        let input = config_input(rules, eve, dir.path().join("stats.sock"));
+        mgr.start(&input).await.unwrap();
+        // Drain the start-time signals so the assertion below
+        // counts only the reload_signal()-driven signal.
+        let baseline = mock.signals().len();
+        mgr.reload_signal().await.unwrap();
+        let signals = mock.signals();
+        assert_eq!(
+            signals.len(),
+            baseline + 1,
+            "reload_signal must issue exactly one signal; saw {signals:?}"
+        );
+        assert_eq!(
+            signals.last(),
+            Some(&SuricataSignal::Reload),
+            "reload_signal must issue SIGHUP (Reload), not Rotate or Shutdown; saw {signals:?}"
+        );
     }
 
     #[tokio::test]
@@ -2233,5 +2364,95 @@ mod tests {
         let size = FileIdentity::Size(0);
         assert!(inode.rotated_from(&size));
         assert!(size.rotated_from(&inode));
+    }
+
+    #[tokio::test]
+    async fn file_identity_from_handle_detects_in_flight_rotation_against_path() {
+        // Pins the fd-vs-path race fix: the cached identity at
+        // tail open time MUST reflect the inode of the file
+        // descriptor we actually opened, NOT the inode the path
+        // resolves to at the moment of the probe. The previous
+        // design called `file_identity(&path)` *after* opening
+        // the file, which is a TOCTOU race — if a rename-style
+        // rotation lands between `open(2)` and `stat(2)`, the
+        // cached identity would point at the new file while the
+        // BufReader still holds the old fd. The next rotation
+        // check would then conclude "path identity == cached
+        // identity, no rotation" and silently miss the swap,
+        // dropping every alert Suricata writes to the new file
+        // until the EVE staleness probe (30 s default) fires
+        // Degraded health.
+        //
+        // We simulate the race by:
+        //   1. Creating an EVE file, opening it to get an fd,
+        //   2. Renaming the file (path now resolves to nothing
+        //      or to a different file),
+        //   3. Asserting that `file_identity_from_handle(&file)`
+        //      still resolves the fd's original inode while
+        //      `file_identity(&path)` returns `None` (or a
+        //      different identity) \u2014 i.e. the two probes are
+        //      decoupled and the fd-side answer is stable
+        //      across rotations.
+        use tokio::io::AsyncWriteExt as _;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("eve.json");
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .read(true)
+            .open(&path)
+            .await
+            .unwrap();
+        file.write_all(b"{\"event_type\":\"flow\"}\n")
+            .await
+            .unwrap();
+        file.flush().await.unwrap();
+        // Capture the fd-anchored identity BEFORE any rotation.
+        let fd_id_before = file_identity_from_handle(&file).await.unwrap();
+        // Simulate a rename-style rotation: move the file aside.
+        // The fd we hold still references the original inode
+        // (per POSIX); but the path now resolves to a *new* file
+        // (or, if no new file is created, the path lookup
+        // fails).
+        let aside = dir.path().join("eve.json.1");
+        tokio::fs::rename(&path, &aside).await.unwrap();
+        // Create a new file at the original path with different
+        // content \u2014 this is what a real `mv eve.json eve.json.1
+        // && touch eve.json` rotation looks like on a live
+        // logrotate run.
+        let mut new_file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&path)
+            .await
+            .unwrap();
+        new_file.write_all(b"").await.unwrap();
+        new_file.flush().await.unwrap();
+        drop(new_file);
+        // The fd-anchored identity must STILL match the original
+        // inode \u2014 our `file` handle is bound to the *old* inode,
+        // not the new one created at the path.
+        let fd_id_after = file_identity_from_handle(&file).await.unwrap();
+        assert_eq!(
+            fd_id_before, fd_id_after,
+            "file_identity_from_handle must reflect the open fd's inode, \
+             not the path's current inode; before={fd_id_before:?}, after={fd_id_after:?}"
+        );
+        // The path-side identity must be DIFFERENT from the
+        // fd-anchored identity \u2014 this is the divergence the
+        // tail's rotation branch uses to detect a rename
+        // rotation. If `file_identity` had been called *after*
+        // open instead of `file_identity_from_handle`, the cached
+        // value would now equal `path_id` and the rotation would
+        // be missed forever.
+        let path_id = file_identity(&path).await.expect("new file exists at path");
+        assert_ne!(
+            path_id, fd_id_after,
+            "rename-style rotation must produce a path identity \
+             that diverges from the fd-anchored identity so the \
+             tail's EOF rotation branch fires; path_id={path_id:?}, fd_id={fd_id_after:?}"
+        );
     }
 }
