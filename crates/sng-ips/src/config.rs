@@ -51,6 +51,16 @@ impl IpsRuntime {
     }
 }
 
+/// Render a Rust `bool` as the lowercase `yes`/`no` literal
+/// Suricata's own default configuration uses for every boolean
+/// knob (see the upstream `suricata.yaml.in` template). Keeping
+/// the generator on a single convention means an operator who
+/// diffs the rendered YAML against the canonical config sees
+/// only the intended deltas, not formatting noise.
+const fn yaml_bool(v: bool) -> &'static str {
+    if v { "yes" } else { "no" }
+}
+
 /// Operator-facing knob bundle. Built from the policy bundle's
 /// IPS section by [`crate::manager::IpsManager`] and fed into
 /// [`ConfigGenerator::render`].
@@ -231,10 +241,17 @@ impl ConfigGenerator {
         // we only override what differs from upstream Suricata
         // defaults.
         out.push_str("detect:\n");
+        // Suricata's own configuration template uses `yes`/`no`
+        // for every boolean knob; mixing Rust-flavoured
+        // `true`/`false` on a single line (Suricata accepts
+        // both, but the rest of this generator emits `yes`/`no`)
+        // is purely a readability hazard for operators who diff
+        // the rendered YAML against upstream defaults. Pick the
+        // upstream convention and stay consistent.
         let drop_on_alert = input
             .force_drop_on_alert
             .unwrap_or_else(|| input.runtime.detect_default_drop());
-        let _ = writeln!(out, "  drop-on-alert: {drop_on_alert}");
+        let _ = writeln!(out, "  drop-on-alert: {}", yaml_bool(drop_on_alert));
 
         if let Some(max_pending) = input.max_pending_packets {
             let _ = writeln!(out, "max-pending-packets: {max_pending}");
@@ -357,7 +374,7 @@ mod tests {
         let cfg = g.render(&baseline()).expect("render");
         let t = cfg.text();
         assert!(t.contains("copy-mode: ips"), "{t}");
-        assert!(t.contains("drop-on-alert: true"), "{t}");
+        assert!(t.contains("drop-on-alert: yes"), "{t}");
     }
 
     #[test]
@@ -368,7 +385,7 @@ mod tests {
             .unwrap();
         let t = cfg.text();
         assert!(t.contains("copy-mode: none"), "{t}");
-        assert!(t.contains("drop-on-alert: false"), "{t}");
+        assert!(t.contains("drop-on-alert: no"), "{t}");
     }
 
     #[test]
@@ -376,7 +393,7 @@ mod tests {
         let mut input = IpsConfigInput::defaults(IpsRuntime::Ids);
         input.force_drop_on_alert = Some(true);
         let cfg = ConfigGenerator::new().render(&input).unwrap();
-        assert!(cfg.text().contains("drop-on-alert: true"));
+        assert!(cfg.text().contains("drop-on-alert: yes"));
     }
 
     #[test]

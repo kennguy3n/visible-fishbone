@@ -186,19 +186,40 @@ pub struct RuleStagerConfig {
     /// Where the temporary staged file lives between
     /// write-and-validate and the atomic rename.
     pub staging_dir: PathBuf,
+    /// Path to the `suricata.yaml` the validator should evaluate
+    /// the staged rule file against. `suricata -T` requires a
+    /// configuration file; if we omit it, the binary falls back
+    /// to `/etc/suricata/suricata.yaml`, which on the SNG
+    /// appliance image does not exist — every validate call
+    /// would then fail with a missing-config error and the
+    /// stager would refuse to install otherwise-valid rule
+    /// bundles. Plumbing the path through `RuleStagerConfig`
+    /// keeps the validator contract honest: a `RuleValidator`
+    /// receives both the staged rule file and the live config
+    /// it should validate against.
+    pub config_path: PathBuf,
 }
 
 /// Pluggable rule validator. Production wires this to
 /// [`SuricataValidator`] which shells out to `suricata -T`;
 /// tests use [`AlwaysValidValidator`] (or a custom mock) to drive
 /// the swap path without launching the IDS.
+///
+/// Implementations receive *both* the staged rule file and the
+/// live `suricata.yaml` the running daemon is bound to. The
+/// config file is mandatory for any validator that has to load
+/// app-layer parsers, address-group vars, or other rule
+/// dependencies declared in the YAML; passing it on the trait
+/// surface (rather than holding it on the implementor) means
+/// the same validator instance can be reused across multiple
+/// staging environments (e.g. a per-tenant manager).
 #[async_trait]
 pub trait RuleValidator: Send + Sync + std::fmt::Debug {
-    /// Validate the supplied staged file. Implementations should
-    /// return a structured [`IpsError::RuleValidate`] on syntax
-    /// error so the manager can surface the failure as a
-    /// telemetry event.
-    async fn validate(&self, staged_path: &Path) -> Result<(), IpsError>;
+    /// Validate the supplied staged file using the supplied
+    /// `suricata.yaml`. Implementations should return a
+    /// structured [`IpsError::RuleValidate`] on syntax error so
+    /// the manager can surface the failure as a telemetry event.
+    async fn validate(&self, staged_path: &Path, config_path: &Path) -> Result<(), IpsError>;
 }
 
 /// `suricata -T` validator. Shells out to the IDS binary in
@@ -234,9 +255,18 @@ impl Default for SuricataValidator {
 
 #[async_trait]
 impl RuleValidator for SuricataValidator {
-    async fn validate(&self, staged_path: &Path) -> Result<(), IpsError> {
+    async fn validate(&self, staged_path: &Path, config_path: &Path) -> Result<(), IpsError> {
+        // `suricata -T` loads the supplied YAML to resolve
+        // app-layer parsers and address-group vars before it
+        // can syntax-check the rule file. Without `-c` it falls
+        // back to `/etc/suricata/suricata.yaml`, which on the
+        // SNG appliance image does not exist and would cause
+        // every validate call to fail with a missing-config
+        // error rather than a real rule-syntax error.
         let out = tokio::process::Command::new(&self.binary)
             .arg("-T")
+            .arg("-c")
+            .arg(config_path)
             .arg("-S")
             .arg(staged_path)
             .output()
@@ -259,7 +289,7 @@ pub struct AlwaysValidValidator;
 
 #[async_trait]
 impl RuleValidator for AlwaysValidValidator {
-    async fn validate(&self, _staged_path: &Path) -> Result<(), IpsError> {
+    async fn validate(&self, _staged_path: &Path, _config_path: &Path) -> Result<(), IpsError> {
         Ok(())
     }
 }
@@ -373,9 +403,14 @@ impl RuleStager for FsRuleStager {
         tokio::fs::write(&staged, claims.rules_text.as_bytes())
             .await
             .map_err(|e| IpsError::Io(format!("write staged file {}: {e}", staged.display())))?;
-        // Validate; if it fails, leave the staged file in place
-        // for operator inspection but never swap it in.
-        self.validator.validate(&staged).await?;
+        // Validate against the live `suricata.yaml`; if it
+        // fails, leave the staged file in place for operator
+        // inspection but never swap it in. Passing the config
+        // path is mandatory — see RuleStagerConfig::config_path
+        // for the failure mode `suricata -T` without `-c` hits.
+        self.validator
+            .validate(&staged, &self.config.config_path)
+            .await?;
         // Ensure the parent of the final path exists before the
         // atomic rename.
         if let Some(parent) = self.config.final_path.parent() {
@@ -565,6 +600,7 @@ mod tests {
         let cfg = RuleStagerConfig {
             final_path: final_path.clone(),
             staging_dir,
+            config_path: tmp.path().join("suricata.yaml"),
         };
         let stager = FsRuleStager::new(cfg, Arc::new(AlwaysValidValidator));
         let v = stager
@@ -586,6 +622,7 @@ mod tests {
         let cfg = RuleStagerConfig {
             final_path: final_path.clone(),
             staging_dir: tmp.path().join("staging"),
+            config_path: tmp.path().join("suricata.yaml"),
         };
         let stager = FsRuleStager::new(cfg, Arc::new(AlwaysValidValidator));
         stager.set_installed_version(10);
@@ -607,6 +644,7 @@ mod tests {
         let cfg = RuleStagerConfig {
             final_path: tmp.path().join("sng.rules"),
             staging_dir: tmp.path().join("staging"),
+            config_path: tmp.path().join("suricata.yaml"),
         };
         let stager = FsRuleStager::new(cfg, Arc::new(AlwaysValidValidator));
         stager.stage_and_swap(&sample_claims(5)).await.unwrap();
@@ -621,7 +659,7 @@ mod tests {
 
     #[async_trait]
     impl RuleValidator for RejectValidator {
-        async fn validate(&self, _staged: &Path) -> Result<(), IpsError> {
+        async fn validate(&self, _staged: &Path, _config: &Path) -> Result<(), IpsError> {
             Err(IpsError::RuleValidate("synthetic failure".into()))
         }
     }
@@ -636,6 +674,7 @@ mod tests {
         let cfg = RuleStagerConfig {
             final_path: final_path.clone(),
             staging_dir: tmp.path().join("staging"),
+            config_path: tmp.path().join("suricata.yaml"),
         };
         let stager = FsRuleStager::new(cfg, Arc::new(RejectValidator));
         let err = stager.stage_and_swap(&sample_claims(1)).await.unwrap_err();
@@ -654,9 +693,96 @@ mod tests {
         let cfg = RuleStagerConfig {
             final_path: tmp.path().join("sng.rules"),
             staging_dir: staging_dir.clone(),
+            config_path: tmp.path().join("suricata.yaml"),
         };
         let stager = FsRuleStager::new(cfg, Arc::new(AlwaysValidValidator));
         stager.stage_and_swap(&sample_claims(1)).await.unwrap();
         assert!(staging_dir.exists());
+    }
+
+    /// Pin the suricata invocation contract: `-T -c <config> -S
+    /// <rules>` in that order. The previous version of this
+    /// validator omitted `-c`, which made `suricata -T` fall
+    /// back to `/etc/suricata/suricata.yaml` (which the SNG
+    /// appliance image does not ship) and reject every
+    /// otherwise-valid rule file with a missing-config error.
+    /// This test uses a tiny shell stand-in for `suricata` that
+    /// echoes its argv so we can assert the exact flag layout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn suricata_validator_passes_config_path_with_dash_c() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let argv_log = tmp.path().join("argv.log");
+        let fake_bin = tmp.path().join("suricata");
+        // Print every argument on its own line so the assertion
+        // can pattern-match against an exact slice. `set -e` so
+        // the script bubbles up failures from `printf` itself.
+        let script = format!(
+            "#!/bin/sh\nset -e\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {}\ndone\nexit 0\n",
+            argv_log.display()
+        );
+        tokio::fs::write(&fake_bin, script).await.unwrap();
+        tokio::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755))
+            .await
+            .unwrap();
+        let staged = tmp.path().join("staged.rules");
+        tokio::fs::write(&staged, b"alert ip any any -> any any (sid:1;)")
+            .await
+            .unwrap();
+        let config = tmp.path().join("suricata.yaml");
+        tokio::fs::write(&config, b"%YAML 1.1\n---\n")
+            .await
+            .unwrap();
+        let validator = SuricataValidator::new().with_binary(&fake_bin);
+        validator.validate(&staged, &config).await.unwrap();
+        let recorded = tokio::fs::read_to_string(&argv_log).await.unwrap();
+        let args: Vec<&str> = recorded.lines().collect();
+        // Exact layout: -T -c <config> -S <staged>. Anything
+        // else (e.g. missing -c, swapped order) breaks the
+        // contract the running daemon relies on.
+        assert_eq!(
+            args,
+            vec![
+                "-T",
+                "-c",
+                config.to_str().unwrap(),
+                "-S",
+                staged.to_str().unwrap(),
+            ],
+            "unexpected suricata argv: {args:?}"
+        );
+    }
+
+    /// Round-trip the failure path: a non-zero exit from the
+    /// validator binary surfaces as `IpsError::RuleValidate`
+    /// carrying the stderr payload, so an operator can see the
+    /// underlying parse error in the telemetry stream.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn suricata_validator_surfaces_stderr_on_failure() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_bin = tmp.path().join("suricata");
+        let script = "#!/bin/sh\nprintf 'rule parse error: synthetic\\n' >&2\nexit 1\n".to_owned();
+        tokio::fs::write(&fake_bin, script).await.unwrap();
+        tokio::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755))
+            .await
+            .unwrap();
+        let staged = tmp.path().join("staged.rules");
+        tokio::fs::write(&staged, b"garbage").await.unwrap();
+        let config = tmp.path().join("suricata.yaml");
+        tokio::fs::write(&config, b"---\n").await.unwrap();
+        let validator = SuricataValidator::new().with_binary(&fake_bin);
+        let err = validator.validate(&staged, &config).await.unwrap_err();
+        match err {
+            IpsError::RuleValidate(msg) => {
+                assert!(
+                    msg.contains("rule parse error"),
+                    "stderr should pass through, got {msg:?}"
+                );
+            }
+            other => panic!("expected RuleValidate, got {other:?}"),
+        }
     }
 }

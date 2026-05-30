@@ -612,14 +612,23 @@ async fn tail_eve_log(
                         //      now points at a brand-new inode
                         //      that we never attached to.
                         //
-                        // `file_identity` returns a (device, inode)
-                        // pair on Unix; comparing to the cached
-                        // value detects case (2) without racing
-                        // against case (1). On a rotation we drop
-                        // the old reader and reopen the path.
+                        // `file_identity` returns either an
+                        // `(st_dev, st_ino)` pair (Unix) or a
+                        // size-only sentinel (non-Unix). The
+                        // platform-aware comparison lives on
+                        // `FileIdentity::rotated_from` so the
+                        // tail loop does not have to encode the
+                        // semantics for each platform. On Unix any
+                        // identity change is a rotation; on
+                        // non-Unix only a *shrink* counts — the
+                        // append-during-flush case keeps the size
+                        // monotonically growing and must NOT
+                        // trigger a reopen, otherwise the tail
+                        // would re-emit every previously-processed
+                        // alert on every EOF tick.
                         let now = file_identity(&eve_path).await;
                         let rotated = match (current_inode, now) {
-                            (Some(prev), Some(cur)) => prev != cur,
+                            (Some(prev), Some(cur)) => cur.rotated_from(&prev),
                             // File disappeared (rotation step is
                             // mid-rename) — treat as rotation; the
                             // open_eve_with_retry loop will wait
@@ -689,44 +698,85 @@ async fn tail_eve_log(
     }
 }
 
-/// Cross-platform file identity tuple used by the EVE tail to
-/// detect log rotation. On Unix we use `(st_dev, st_ino)` so
-/// rotations that move a file to a different filesystem still
-/// count as a rotation (`logrotate` with `copytruncate` is the
-/// portable exception — that strategy preserves the inode and
-/// truncates, which we surface via the size-decrease check the
-/// staleness probe already covers). On non-Unix platforms we
-/// fall back to file size: a numerically smaller size than what
-/// we previously saw is the only signal we have.
+/// Cross-platform file identity used by the EVE tail to detect
+/// log rotation. The two variants encode the rotation semantics
+/// the underlying platform actually supports:
+///
+/// * On Unix we have an authoritative `(st_dev, st_ino)` pair.
+///   Any change to either field means the path now resolves to a
+///   different on-disk inode — i.e. a rotation. `==` / `!=` is
+///   the right primitive.
+/// * On non-Unix we only have file size to work with, and
+///   Suricata is *constantly* appending to the live EVE log
+///   between flushes. Using `!=` here would fire on every EOF
+///   tick during normal operation and force the tail to reopen
+///   from offset 0, re-emitting every previously-processed
+///   alert to the telemetry sink. The only signal a portable
+///   `len()` reading can reliably give us is *shrink*: a smaller
+///   size than the cached value means the file was truncated
+///   (logrotate `copytruncate`) or replaced with a fresh,
+///   shorter file. Growth is the normal append path and must
+///   NOT count as rotation.
+///
+/// Encoding the comparison on the type itself (rather than at
+/// the call site) makes the platform difference impossible to
+/// get wrong from the EVE-tail loop's perspective.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileIdentity {
+    /// Authoritative Unix identity. `dev` is the filesystem the
+    /// inode lives on; `ino` is the inode number on that fs.
+    Inode { dev: u64, ino: u64 },
+    /// Non-Unix fallback. Only the file length is portable.
+    /// Constructed only under `#[cfg(not(unix))]` but kept in
+    /// the unified enum so `rotated_from` can be a single
+    /// platform-agnostic match; the dead-code warning on Unix
+    /// builds (where the variant is never constructed) is
+    /// intentional and silenced here.
+    #[cfg_attr(unix, allow(dead_code))]
+    Size(u64),
+}
+
+impl FileIdentity {
+    /// Did the path rotate relative to a previously captured
+    /// identity? See the type-level doc for the per-variant
+    /// semantics — most importantly, on `Size` we only flag a
+    /// rotation on shrink, never on growth.
+    fn rotated_from(&self, prev: &Self) -> bool {
+        match (prev, self) {
+            (
+                Self::Inode {
+                    dev: d_prev,
+                    ino: i_prev,
+                },
+                Self::Inode {
+                    dev: d_cur,
+                    ino: i_cur,
+                },
+            ) => d_prev != d_cur || i_prev != i_cur,
+            (Self::Size(prev_len), Self::Size(cur_len)) => cur_len < prev_len,
+            // Variant mismatch (cross-platform recompile of an
+            // in-memory cache, etc.) cannot happen in a single
+            // process, but if it ever does the safer answer is
+            // "rotated" so the tail reopens once and resyncs.
+            _ => true,
+        }
+    }
+}
+
 async fn file_identity(path: &Path) -> Option<FileIdentity> {
     let meta = tokio::fs::metadata(path).await.ok()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        Some(FileIdentity {
+        Some(FileIdentity::Inode {
             dev: meta.dev(),
-            inode: meta.ino(),
+            ino: meta.ino(),
         })
     }
     #[cfg(not(unix))]
     {
-        // Treat each (size) reading as the identity proxy on
-        // non-Unix; the rotation detector flags any change as a
-        // potential rotation. False positives just trigger a
-        // benign reopen.
-        Some(FileIdentity {
-            dev: 0,
-            inode: meta.len(),
-        })
+        Some(FileIdentity::Size(meta.len()))
     }
-}
-
-/// Stable identity for the EVE log file. Two reads with
-/// matching identities are reading the same on-disk inode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileIdentity {
-    dev: u64,
-    inode: u64,
 }
 
 async fn open_eve_with_retry(path: &Path) -> Option<tokio::fs::File> {
@@ -1027,6 +1077,7 @@ mod tests {
         let stager_config = RuleStagerConfig {
             final_path: rules_path.clone(),
             staging_dir: staging,
+            config_path: config_path.clone(),
         };
         let stager = Arc::new(FsRuleStager::new(
             stager_config,
@@ -1390,6 +1441,7 @@ mod tests {
         let stager_config = RuleStagerConfig {
             final_path: rules_path.clone(),
             staging_dir: staging,
+            config_path: config_path.clone(),
         };
         let stager = Arc::new(FsRuleStager::new(
             stager_config,
@@ -1508,5 +1560,73 @@ mod tests {
         drop(h);
         assert_eq!(mgr.health_state(), HealthState::Failed);
         assert!(!mgr.forwarding_allowed());
+    }
+
+    // ---- FileIdentity rotation semantics ----
+    //
+    // These pin the contract the EVE tail relies on for log
+    // rotation. The non-Unix variant must NOT flag a rotation on
+    // growth — Suricata appends to the live EVE log continuously
+    // between flushes, so a `!=` comparison would re-emit every
+    // previously-processed alert on every EOF tick. See the
+    // type-level doc on `FileIdentity` for the design rationale.
+
+    #[test]
+    fn file_identity_inode_unchanged_is_not_a_rotation() {
+        let id = FileIdentity::Inode { dev: 64, ino: 42 };
+        assert!(!id.rotated_from(&id));
+    }
+
+    #[test]
+    fn file_identity_inode_change_flags_rotation() {
+        let prev = FileIdentity::Inode { dev: 64, ino: 42 };
+        // Same fs, new inode (logrotate move-then-create).
+        let cur_new_inode = FileIdentity::Inode { dev: 64, ino: 99 };
+        assert!(cur_new_inode.rotated_from(&prev));
+        // Same inode number, different filesystem (rare but
+        // possible if /var/log is bind-mounted aside).
+        let cur_new_dev = FileIdentity::Inode { dev: 65, ino: 42 };
+        assert!(cur_new_dev.rotated_from(&prev));
+    }
+
+    #[test]
+    fn file_identity_size_growth_is_not_a_rotation() {
+        // This is the precise BUG_0001 regression guard: the
+        // non-Unix path must treat a *larger* size reading as
+        // ordinary append, not as a rotation. The previous code
+        // used `!=` which would have fired here and forced the
+        // tail to reopen + reprocess every previously-seen line.
+        let prev = FileIdentity::Size(1_000);
+        let cur = FileIdentity::Size(2_000);
+        assert!(!cur.rotated_from(&prev));
+    }
+
+    #[test]
+    fn file_identity_size_shrink_flags_rotation() {
+        // copytruncate / file-replacement leaves the new file
+        // strictly smaller than the cached size; this is the
+        // only signal a portable `len()` reading can give us.
+        let prev = FileIdentity::Size(5_000);
+        let cur = FileIdentity::Size(0);
+        assert!(cur.rotated_from(&prev));
+        let cur_shorter = FileIdentity::Size(4_999);
+        assert!(cur_shorter.rotated_from(&prev));
+    }
+
+    #[test]
+    fn file_identity_size_unchanged_is_not_a_rotation() {
+        let id = FileIdentity::Size(1_234);
+        assert!(!id.rotated_from(&id));
+    }
+
+    #[test]
+    fn file_identity_variant_mismatch_flags_rotation() {
+        // Cross-variant cannot occur in a single process build
+        // but the safe answer is "rotated" so the tail reopens
+        // once and resyncs.
+        let inode = FileIdentity::Inode { dev: 0, ino: 0 };
+        let size = FileIdentity::Size(0);
+        assert!(inode.rotated_from(&size));
+        assert!(size.rotated_from(&inode));
     }
 }
