@@ -175,15 +175,18 @@ fn compile_one(
     let mut matches = RuleMatch::default();
 
     // Inline subjects — fold each into the rule's L3 / L4
-    // predicate.
+    // predicate. `fold_subject` is fail-closed: an unknown or
+    // logically incoherent (kind, matcher) combination errors
+    // here rather than silently widening the rule to match
+    // every flow.
     for s in &raw.subjects {
-        fold_subject(s.kind, &s.matcher, &mut matches);
+        fold_subject(&raw.id, s.kind, &s.matcher, &mut matches)?;
     }
     // Named subject references — resolve through the lookup
     // built from the bundle's rules.
     for name in &raw.subject_refs {
         if let Some(s) = subject_lookup.get(name) {
-            fold_subject(s.kind, &s.matcher, &mut matches);
+            fold_subject(&raw.id, s.kind, &s.matcher, &mut matches)?;
         } else {
             return Err(FirewallError::BundleInvalid(format!(
                 "ngfw rule {} references unknown subject {name}",
@@ -228,7 +231,40 @@ fn compile_one(
     }))
 }
 
-fn fold_subject(kind: SubjectKind, matcher: &SubjectMatch, into: &mut RuleMatch) {
+/// Fold one (kind, matcher) pair into the rule's accumulated
+/// `RuleMatch`. Fail-closed:
+///
+/// * **Recognised combinations** populate the appropriate slot
+///   (`Network|Device + Cidr` → `src_cidrs`;
+///   `User|App|Site + Literal/AnyOf` → `subject`).
+/// * **Explicit `Any`** — `(kind, SubjectMatch::Any)` is accepted
+///   and leaves the predicate slot untouched. This is the
+///   operator's explicit "no constraint on this kind" signal
+///   (e.g. "any user can reach this resource if other predicates
+///   match"). Leaving `RuleMatch.subject` at its default `Any` is
+///   the same as what the engine sees on a rule with no subject
+///   at all.
+/// * **Forward-compat `Unknown`** — rejected with
+///   `FirewallError::BundleInvalid`. The decoder uses
+///   `SubjectMatch::Unknown` to model matcher shapes from future
+///   schema versions that this build doesn't recognise. Silently
+///   matching them would widen rules unpredictably; rejecting at
+///   compile means a bundle authored against a newer schema is
+///   refused on the edge VM rather than enforcing partially.
+/// * **Incoherent combinations** — e.g.
+///   `(User, Cidr)`, `(Network, Literal)`,
+///   `(User|App|Site, DomainSuffix)` — rejected with
+///   `FirewallError::BundleInvalid`. The control-plane rule
+///   validator (`sng-policy-eval::rule::Rule::validate`) is the
+///   first line of defence against these, but defence-in-depth
+///   says we fail at compile rather than trust the upstream
+///   validator to be complete.
+fn fold_subject(
+    rule_id: &str,
+    kind: SubjectKind,
+    matcher: &SubjectMatch,
+    into: &mut RuleMatch,
+) -> Result<(), FirewallError> {
     match (kind, matcher) {
         // Source / network subjects become CIDR predicates on
         // the rule's src_cidrs. Device subjects with a literal
@@ -236,35 +272,62 @@ fn fold_subject(kind: SubjectKind, matcher: &SubjectMatch, into: &mut RuleMatch)
         // the operator pins a workstation by static lease.
         (SubjectKind::Network | SubjectKind::Device, SubjectMatch::Cidr { cidr }) => {
             into.src_cidrs.push(*cidr);
+            Ok(())
         }
-        // User / app / site subjects fold into the rule's
-        // subject matcher so the engine's hot path runs the
-        // string compare. Multiple subject vertices collapse
-        // into a single AnyOf — the union of values.
+        // User / app / site / device subjects fold into the
+        // rule's subject matcher so the engine's hot path runs
+        // the string compare. Multiple subject vertices collapse
+        // into a single AnyOf — the union of values. Device is
+        // included here because operators can also pin a rule to
+        // a literal device id (vs the Network/Cidr fold above
+        // for static-lease devices).
         (
-            SubjectKind::User | SubjectKind::App | SubjectKind::Site,
+            SubjectKind::User | SubjectKind::App | SubjectKind::Site | SubjectKind::Device,
             SubjectMatch::Literal { value },
         ) => {
             merge_subject_literal(&mut into.subject, value.clone());
+            Ok(())
         }
         (
-            SubjectKind::User | SubjectKind::App | SubjectKind::Site,
+            SubjectKind::User | SubjectKind::App | SubjectKind::Site | SubjectKind::Device,
             SubjectMatch::AnyOf { values },
         ) => {
             for v in values {
                 merge_subject_literal(&mut into.subject, v.clone());
             }
+            Ok(())
         }
-        // Any other combination falls through — the engine's
-        // per-flow match will treat it as "no constraint" on the
-        // unmodified fields. The TODO list explicitly says to
-        // not silently allow on unknown matcher shapes; we
-        // preserve the rule's default-deny posture by leaving
-        // `matches` empty (which matches every flow) and letting
-        // the verb decide. The control plane's rule validator
-        // already rejects rules whose verb is `allow` with no
-        // predicates.
-        _ => {}
+        // Explicit "no constraint on this kind" — accept and
+        // leave the rule's matcher untouched.
+        (_, SubjectMatch::Any) => Ok(()),
+        // Forward-compat sentinel — refuse to compile a rule
+        // whose matcher shape this build does not recognise.
+        (_, SubjectMatch::Unknown) => Err(FirewallError::BundleInvalid(format!(
+            "ngfw rule {rule_id} uses an unrecognised subject matcher shape \
+             (forward-compat sentinel); refusing to compile so the rule does \
+             not silently widen to match every flow"
+        ))),
+        // Anything else — incoherent combinations like
+        // `(SubjectKind::User, SubjectMatch::Cidr)` or
+        // `(SubjectKind::Network, SubjectMatch::Literal)`. Fail
+        // the compile rather than silently produce an empty
+        // predicate.
+        (k, m) => Err(FirewallError::BundleInvalid(format!(
+            "ngfw rule {rule_id} has incompatible subject: kind {k:?} \
+             cannot be combined with matcher {}",
+            describe_matcher(m)
+        ))),
+    }
+}
+
+fn describe_matcher(m: &SubjectMatch) -> &'static str {
+    match m {
+        SubjectMatch::Any => "any",
+        SubjectMatch::Literal { .. } => "literal",
+        SubjectMatch::AnyOf { .. } => "any_of",
+        SubjectMatch::Cidr { .. } => "cidr",
+        SubjectMatch::DomainSuffix { .. } => "domain_suffix",
+        SubjectMatch::Unknown => "unknown",
     }
 }
 
@@ -1244,5 +1307,215 @@ mod tests {
         assert!(out.contains("ip saddr @zone_v4only ip daddr @zone_mixed"));
         // No v6 rule because v4only has no v6 networks.
         assert!(!out.contains("ip6 saddr @zone6_v4only"));
+    }
+
+    // ------------------------------------------------------------
+    // fold_subject — fail-closed behaviour for unsupported and
+    // logically-incoherent (kind, matcher) combinations.
+    // ------------------------------------------------------------
+    //
+    // The bot's defence-in-depth concern was that the previous
+    // catch-all `_ => {}` arm would silently leave
+    // `RuleMatch.subject = SubjectMatch::Any`, which is the same
+    // shape the engine treats as "no constraint on subject". For
+    // a `Verb::Allow` rule, that would expand to allow-all.
+    //
+    // The new `fold_subject` rejects any combination it doesn't
+    // explicitly recognise. These tests pin every accept / reject
+    // edge so future schema changes can't silently regress to the
+    // permissive behaviour.
+
+    #[test]
+    fn fold_subject_rejects_user_with_cidr_matcher() {
+        let s = RawSubject {
+            name: String::new(),
+            kind: SubjectKind::User,
+            matcher: SubjectMatch::Cidr {
+                cidr: cidr("10.0.0.0/8"),
+            },
+        };
+        let bundle = make_bundle_with_rules(&[ngfw_rule("incoherent", Verb::Allow, vec![s])]);
+        let err = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("incoherent") && msg.contains("User") && msg.contains("cidr"),
+            "expected incoherent-subject error mentioning rule id, kind, and matcher; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn fold_subject_rejects_network_with_literal_matcher() {
+        let s = RawSubject {
+            name: String::new(),
+            kind: SubjectKind::Network,
+            matcher: SubjectMatch::Literal {
+                value: "10.0.0.0/8".into(),
+            },
+        };
+        let bundle = make_bundle_with_rules(&[ngfw_rule("bad-net", Verb::Allow, vec![s])]);
+        let err = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("Network"),
+            "expected error to mention the Network kind: {err}"
+        );
+    }
+
+    #[test]
+    fn fold_subject_rejects_user_with_domain_suffix_matcher() {
+        // The exact case the bot flagged: a User subject paired
+        // with a DomainSuffix matcher. Previously this silently
+        // produced `subject: Any` and the rule would match every
+        // user. Now it must fail the compile.
+        let s = RawSubject {
+            name: String::new(),
+            kind: SubjectKind::User,
+            matcher: SubjectMatch::DomainSuffix {
+                suffix: "example.com".into(),
+            },
+        };
+        let bundle = make_bundle_with_rules(&[ngfw_rule("user-with-domain", Verb::Allow, vec![s])]);
+        let err = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("user-with-domain"));
+        assert!(msg.contains("User"));
+        assert!(msg.contains("domain_suffix"));
+    }
+
+    #[test]
+    fn fold_subject_rejects_unknown_matcher_for_any_kind() {
+        // Forward-compat sentinel: SubjectMatch::Unknown means
+        // the decoder saw a matcher shape this build doesn't
+        // recognise. Compiling such a rule would silently widen
+        // it; the compiler must refuse instead.
+        for kind in [
+            SubjectKind::User,
+            SubjectKind::Network,
+            SubjectKind::App,
+            SubjectKind::Device,
+            SubjectKind::Site,
+        ] {
+            let s = RawSubject {
+                name: String::new(),
+                kind,
+                matcher: SubjectMatch::Unknown,
+            };
+            let bundle = make_bundle_with_rules(&[ngfw_rule("u", Verb::Allow, vec![s])]);
+            let err = RuleCompiler::new()
+                .compile(&bundle, ZoneTable::new(), NatTable::new())
+                .unwrap_err();
+            assert!(
+                format!("{err}").contains("unrecognised"),
+                "kind={kind:?} should produce an unrecognised-matcher error; got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn fold_subject_accepts_explicit_any_matcher_without_constraint() {
+        // `SubjectMatch::Any` is the operator's explicit "no
+        // constraint" signal. It must compile cleanly and leave
+        // the rule's predicate slot at its default (no
+        // `subject` filter on the engine's hot path).
+        for kind in [
+            SubjectKind::User,
+            SubjectKind::Network,
+            SubjectKind::App,
+            SubjectKind::Device,
+            SubjectKind::Site,
+        ] {
+            let s = RawSubject {
+                name: String::new(),
+                kind,
+                matcher: SubjectMatch::Any,
+            };
+            let bundle = make_bundle_with_rules(&[ngfw_rule("any", Verb::Allow, vec![s])]);
+            let compiled = RuleCompiler::new()
+                .compile(&bundle, ZoneTable::new(), NatTable::new())
+                .unwrap();
+            assert_eq!(
+                compiled.rules.len(),
+                1,
+                "Any matcher should compile a single rule for kind {kind:?}"
+            );
+            assert!(
+                matches!(compiled.rules[0].matches.subject, SubjectMatch::Any),
+                "Any matcher should leave subject slot at Any for kind {kind:?}"
+            );
+            assert!(
+                compiled.rules[0].matches.src_cidrs.is_empty(),
+                "Any matcher should not populate src_cidrs for kind {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fold_subject_accepts_device_literal_subject() {
+        // Device subjects with a literal device-id fold into the
+        // subject slot the same way User/App/Site do. This is
+        // the new behaviour added alongside the fail-closed
+        // tightening: previously a `(Device, Literal)` pair fell
+        // through the catch-all and silently produced
+        // `subject: Any`.
+        let s = RawSubject {
+            name: String::new(),
+            kind: SubjectKind::Device,
+            matcher: SubjectMatch::Literal {
+                value: "device-42".into(),
+            },
+        };
+        let bundle = make_bundle_with_rules(&[ngfw_rule("d", Verb::Allow, vec![s])]);
+        let compiled = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        match &compiled.rules[0].matches.subject {
+            SubjectMatch::Literal { value } => assert_eq!(value, "device-42"),
+            other => panic!("expected Literal subject for Device; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fold_subject_rejects_incoherent_via_named_subject_reference() {
+        // Same fail-closed posture must apply when an incoherent
+        // matcher is reached through a named subject reference
+        // rather than inline. Build a rule that names a subject
+        // resolved through the bundle-wide lookup.
+        let bad_subject = RawSubject {
+            name: "bad-net".into(),
+            kind: SubjectKind::Network,
+            matcher: SubjectMatch::Literal {
+                value: "not-a-cidr".into(),
+            },
+        };
+        let referrer = Rule {
+            id: "uses-bad-net".into(),
+            domain: EnforcementDomain::Ngfw,
+            verb: Verb::Allow,
+            suggested_verb: None,
+            subject_refs: vec!["bad-net".into()],
+            predicate_refs: Vec::new(),
+            subjects: Vec::new(),
+            predicates: Vec::new(),
+            targets: Vec::new(),
+            description: String::new(),
+            extra: std::collections::BTreeMap::new(),
+        };
+        let definer = ngfw_rule("defines-bad-net", Verb::Allow, vec![bad_subject]);
+        let bundle = make_bundle_with_rules(&[definer, referrer]);
+        let err = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap_err();
+        // The error fires on whichever rule is compiled first;
+        // both rules reference the same incompatible subject so
+        // either id is acceptable, but the message must surface
+        // the Network/literal mismatch.
+        let msg = format!("{err}");
+        assert!(msg.contains("Network"), "{msg}");
+        assert!(msg.contains("literal"), "{msg}");
     }
 }
