@@ -323,6 +323,28 @@ impl ZoneTable {
 
     /// Validate every cross-reference in the table. Used by the
     /// compiler so a malformed table fails fast.
+    ///
+    /// In addition to checking that policy entries reference
+    /// declared zones, this rejects **cross-zone network
+    /// overlap**: two distinct zones whose CIDR sets contain a
+    /// common address. The reason is a deliberate engine /
+    /// kernel divergence elimination —
+    /// [`Self::classify`] resolves an overlap via longest-prefix
+    /// match (so `10.1.5.5` belongs to the narrower zone), but
+    /// the rendered nftables `flags interval` sets at
+    /// `crates/sng-fw/src/compile.rs:393-394` are unordered
+    /// containment checks: a rule scoped to the broader zone
+    /// would still fire on `10.1.5.5` in the kernel even though
+    /// the in-memory engine routed it to the narrower zone and
+    /// skipped the rule. The two views would silently disagree.
+    ///
+    /// Operators who genuinely want a "broad bucket plus narrow
+    /// carveouts" topology should express that as a single zone
+    /// with multiple CIDRs plus per-rule CIDR predicates, not as
+    /// overlapping zones. This validator surfaces the
+    /// misconfiguration at bundle-compile time so the bundle
+    /// signer never publishes a ruleset whose semantics depend
+    /// on which side of the engine you ask.
     pub fn validate(&self) -> Result<(), FirewallError> {
         for z in self.zones.values() {
             z.validate()?;
@@ -341,6 +363,33 @@ impl ZoneTable {
                 }
             }
         }
+        self.reject_cross_zone_overlap()?;
+        Ok(())
+    }
+
+    fn reject_cross_zone_overlap(&self) -> Result<(), FirewallError> {
+        // BTreeMap iteration is alphabetical so the error
+        // message names the same pair on every run — keeps the
+        // bundle compiler's failure deterministic.
+        let zs: Vec<(&String, &Zone)> = self.zones.iter().collect();
+        for i in 0..zs.len() {
+            for j in (i + 1)..zs.len() {
+                let (a_name, a) = zs[i];
+                let (b_name, b) = zs[j];
+                for na in &a.networks {
+                    for nb in &b.networks {
+                        if networks_overlap(na, nb) {
+                            return Err(FirewallError::RuleInvalid(format!(
+                                "zones {a_name:?} and {b_name:?} have overlapping networks \
+                                 ({na} vs {nb}); engine LPM and kernel interval-set \
+                                 lookup would disagree on the classification — collapse \
+                                 the overlap into one zone with per-rule CIDR predicates"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -350,6 +399,24 @@ impl ZoneTable {
     #[must_use]
     pub fn zone_names(&self) -> BTreeSet<&str> {
         self.zones.keys().map(String::as_str).collect()
+    }
+}
+
+/// Two IP networks overlap when at least one of them is a
+/// (loose) subset of the other. `IpNet` doesn't expose a direct
+/// `intersects` API, so this is the canonical equivalent: their
+/// families must match and one must `contains(network())` the
+/// other (a network is a subset of itself; the broader network
+/// contains the narrower one's network address).
+fn networks_overlap(a: &IpNet, b: &IpNet) -> bool {
+    match (a, b) {
+        (IpNet::V4(_), IpNet::V4(_)) | (IpNet::V6(_), IpNet::V6(_)) => {
+            a.contains(&b.network()) || b.contains(&a.network())
+        }
+        // Different address families can never overlap; the
+        // engine routes V4 traffic against V4 zones and V6
+        // traffic against V6 zones.
+        _ => false,
     }
 }
 
@@ -492,12 +559,96 @@ mod tests {
     #[test]
     fn validate_catches_dangling_policy_after_zone_removed() {
         let mut t = ZoneTable::new();
-        t.add_zone(zone("trusted", &["10.0.0.0/8"])).unwrap();
+        // Disjoint /16s — the dangling-policy check is what we
+        // want to assert, so steer clear of the cross-zone
+        // overlap rejection added below.
+        t.add_zone(zone("trusted", &["10.0.0.0/16"])).unwrap();
         t.add_zone(zone("dmz", &["10.1.0.0/16"])).unwrap();
         t.set_policy("trusted", "dmz", ZonePolicy::Allow).unwrap();
         // Mutate behind the API to simulate a malformed bundle
         // that compiled `policy` referencing a removed zone.
         t.zones.remove("dmz");
+        let e = t.validate().unwrap_err();
+        assert!(matches!(e, FirewallError::RuleInvalid(_)));
+    }
+
+    #[test]
+    fn validate_rejects_overlapping_zones_v4_broad_then_narrow() {
+        // The compiler-time check exists because the classify()
+        // resolver and the kernel's interval-set lookup disagree
+        // on which zone owns 10.1.5.5 when a broader /8 and a
+        // narrower /16 overlap. Reject before that divergence
+        // can desync the engine and the data path.
+        let mut t = ZoneTable::new();
+        t.add_zone(zone("trusted", &["10.0.0.0/8"])).unwrap();
+        t.add_zone(zone("dmz", &["10.1.0.0/16"])).unwrap();
+        let e = t.validate().unwrap_err();
+        match e {
+            FirewallError::RuleInvalid(msg) => {
+                assert!(
+                    msg.contains("overlapping networks"),
+                    "unexpected error: {msg}"
+                );
+                assert!(msg.contains("trusted") && msg.contains("dmz"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_overlapping_zones_v4_identical_cidr() {
+        // The narrower fallback (`network()` containment) must
+        // catch identical CIDRs too — otherwise the operator can
+        // declare two zones with the exact same backing range
+        // and the classifier returns whichever the HashMap
+        // iteration happens to surface first.
+        let mut t = ZoneTable::new();
+        t.add_zone(zone("a", &["10.0.0.0/16"])).unwrap();
+        t.add_zone(zone("b", &["10.0.0.0/16"])).unwrap();
+        let e = t.validate().unwrap_err();
+        assert!(matches!(e, FirewallError::RuleInvalid(_)));
+    }
+
+    #[test]
+    fn validate_allows_disjoint_v4_zones() {
+        let mut t = ZoneTable::new();
+        t.add_zone(zone("a", &["10.0.0.0/16"])).unwrap();
+        t.add_zone(zone("b", &["10.1.0.0/16"])).unwrap();
+        t.add_zone(zone("c", &["192.168.0.0/16"])).unwrap();
+        t.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_overlapping_zones_v6() {
+        let mut t = ZoneTable::new();
+        t.add_zone(zone("v6broad", &["2001:db8::/32"])).unwrap();
+        t.add_zone(zone("v6narrow", &["2001:db8:abcd::/48"]))
+            .unwrap();
+        let e = t.validate().unwrap_err();
+        assert!(matches!(e, FirewallError::RuleInvalid(_)));
+    }
+
+    #[test]
+    fn validate_allows_overlap_across_address_families() {
+        // 10.0.0.0/8 and ::/0 "contain" the same numeric space
+        // semantically, but the engine routes V4 traffic against
+        // V4 zones only and V6 against V6 only, so the
+        // cross-family pair is safe.
+        let mut t = ZoneTable::new();
+        t.add_zone(zone("v4", &["10.0.0.0/8"])).unwrap();
+        t.add_zone(zone("v6", &["::/0"])).unwrap();
+        t.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_overlap_when_one_zone_has_multiple_networks() {
+        // The pair iteration also has to walk inside-zone
+        // network lists, not just one-CIDR-per-zone.
+        let mut t = ZoneTable::new();
+        t.add_zone(zone("left", &["10.0.0.0/16", "192.168.1.0/24"]))
+            .unwrap();
+        t.add_zone(zone("right", &["172.16.0.0/16", "192.168.0.0/16"]))
+            .unwrap();
         let e = t.validate().unwrap_err();
         assert!(matches!(e, FirewallError::RuleInvalid(_)));
     }

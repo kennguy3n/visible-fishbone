@@ -337,8 +337,19 @@ fn merge_subject_literal(slot: &mut SubjectMatch, value: String) {
             *slot = SubjectMatch::Literal { value };
         }
         SubjectMatch::Literal { value: existing } => {
-            // Promote single literal to AnyOf when a second
-            // value is folded in.
+            // Folding the same literal twice (e.g. two subjects
+            // both `Device(literal "device-42")`) is harmless
+            // matching-wise but would produce a degenerate
+            // `AnyOf { values: ["device-42", "device-42"] }`
+            // that's inconsistent with the dedup the `AnyOf`
+            // branch below performs. Keep the slot as the
+            // existing `Literal` instead of promoting to a
+            // single-element `AnyOf`.
+            if *existing == value {
+                return;
+            }
+            // Promote single literal to AnyOf when a *different*
+            // second value is folded in.
             *slot = SubjectMatch::AnyOf {
                 values: vec![existing.clone(), value],
             };

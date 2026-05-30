@@ -238,10 +238,20 @@ impl NatRule {
     fn render_one(&self, table: &str, family: Option<AddressFamily>) -> Option<String> {
         let mut parts: Vec<String> = vec![format!("add rule inet {} {}", table, self.nat.hook())];
         if !self.iif.is_empty() {
-            parts.push(format!("iif \"{}\"", self.iif));
+            // Defense-in-depth: `iif` / `oif` come from a trusted
+            // policy bundle (the deterministic compiler in
+            // `sng-policy-eval` validates interface names against
+            // the device descriptor) but the bundle decoder is a
+            // separate trust boundary, so we run the value through
+            // `escape_comment` for the same reason rule IDs do at
+            // `nat.rs:286` and `compile.rs:1000-1014`: a stray `"`,
+            // `\`, or control character in the bundle must not be
+            // able to split the rendered line or inject extra
+            // nftables syntax into `nft -f`.
+            parts.push(format!("iif \"{}\"", escape_comment(&self.iif)));
         }
         if !self.oif.is_empty() {
-            parts.push(format!("oif \"{}\"", self.oif));
+            parts.push(format!("oif \"{}\"", escape_comment(&self.oif)));
         }
         // Filter CIDRs to the current family slot (if any). A
         // rule with a `from` zone-level family but no matching
