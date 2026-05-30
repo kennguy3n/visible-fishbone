@@ -601,16 +601,33 @@ async fn tail_eve_log(
     sink: IpsEventSink,
     process: Arc<dyn SuricataProcess>,
 ) {
-    // Open the file with a small retry loop — Suricata may not
-    // have created the file yet on a cold start. Three retries
-    // at 100 ms is enough for the common race; longer waits are
-    // handled by the watchdog (the manager logs and the EVE
-    // staleness probe will surface the gap).
-    let Some(mut file) = open_eve_with_retry(&eve_path).await else {
-        warn!(
+    // The shutdown latch must be observable from the *very*
+    // first await of this task so a `stop()` issued while we
+    // are still waiting for Suricata to create `eve.json`
+    // (e.g. during a crash-restart cycle) unblocks us promptly
+    // instead of running the open-loop to completion. Pulled
+    // outside the open helper so the rotation re-open path
+    // shares the same receiver and the latch's already-true
+    // edge is honoured everywhere.
+    let mut shutdown_rx = inner.shutdown_rx();
+    // Production-safe open posture: wait until the file appears
+    // OR shutdown fires. The previous design returned from the
+    // task entirely after a 3 × 100 ms retry budget, which left
+    // the supervisor with no EVE consumer for the lifetime of the
+    // process if Suricata's first start-up race ran long. The
+    // restart watchdog (see `run_restart_watchdog`) only re-issues
+    // `process.start()`; it never re-spawns this task. With the
+    // old behaviour, a Suricata crash that wiped `eve.json` would
+    // silently lose every subsequent alert even though the
+    // watchdog dutifully brought the process back up. The
+    // resilient open path below keeps the tail self-healing: it
+    // tries the fast 3 × 100 ms retry once, then polls at 1 s
+    // cadence with shutdown awareness until the file exists.
+    let Some(mut file) = open_eve_until_shutdown(&eve_path, &mut shutdown_rx).await else {
+        debug!(
             target: "sng_ips::manager::eve",
             path = %eve_path.display(),
-            "eve log not available; tail task exiting"
+            "shutdown signalled before EVE log appeared"
         );
         return;
     };
@@ -635,7 +652,6 @@ async fn tail_eve_log(
     }
     let mut current_inode = file_identity(&eve_path).await;
     let mut reader = BufReader::new(file).lines();
-    let mut shutdown_rx = inner.shutdown_rx();
 
     loop {
         tokio::select! {
@@ -716,18 +732,31 @@ async fn tail_eve_log(
                                 current = ?now,
                                 "eve log rotated; reopening"
                             );
-                            if let Some(new_file) = open_eve_with_retry(&eve_path).await {
-                                current_inode = file_identity(&eve_path).await;
-                                reader = BufReader::new(new_file).lines();
-                                *inner.eve_reopens.lock() += 1;
-                            } else {
-                                warn!(
+                            // Use the same shutdown-aware open
+                            // helper as the initial open path so a
+                            // rotation that lands while the new
+                            // file is still mid-creation (logrotate
+                            // `delaycompress` or a Suricata crash
+                            // during rotation) waits for the new
+                            // file rather than killing the tail.
+                            // Production-safe seek posture: post-
+                            // rotation we want to read from offset
+                            // 0, never re-seek to end, otherwise we
+                            // would drop the first batch of alerts
+                            // written to the new file.
+                            let Some(new_file) =
+                                open_eve_until_shutdown(&eve_path, &mut shutdown_rx).await
+                            else {
+                                debug!(
                                     target: "sng_ips::manager::eve",
                                     path = %eve_path.display(),
-                                    "eve log unavailable after rotation; tail task exiting"
+                                    "shutdown signalled while waiting for post-rotation EVE log"
                                 );
                                 return;
-                            }
+                            };
+                            current_inode = file_identity(&eve_path).await;
+                            reader = BufReader::new(new_file).lines();
+                            *inner.eve_reopens.lock() += 1;
                             continue;
                         }
                         // No rotation, but refresh the cached
@@ -899,6 +928,60 @@ async fn open_eve_with_retry(path: &Path) -> Option<tokio::fs::File> {
         }
     }
     tokio::fs::File::open(path).await.ok()
+}
+
+/// Open the EVE log, retrying indefinitely until the file is
+/// available OR `shutdown_rx` goes true. Returns `None` only on
+/// shutdown; production callers should treat that as a clean
+/// exit signal.
+///
+/// This is the supervisor-grade replacement for the bare
+/// `open_eve_with_retry`. It first invokes the fast path (3 ×
+/// 100 ms) to handle the common cold-start race where Suricata
+/// has not yet created `eve.json`, then falls back to a 1-second
+/// poll cadence. Each poll is wrapped in a `select!` against the
+/// shutdown latch so `stop()` is observed within at most one
+/// retry interval rather than blocking on the kernel-level
+/// `open(2)` syscall queue.
+///
+/// Self-healing matters because the restart watchdog only
+/// re-issues `process.start()` on a Suricata crash; it does NOT
+/// re-spawn the EVE tail task. Without a tail that survives a
+/// missing file, a single transient unavailability — e.g. the
+/// watchdog restarting Suricata after a crash, which wipes
+/// `eve.json` momentarily — would permanently silence the
+/// telemetry pipeline. Keeping the wait local to the tail task
+/// (rather than coupling it to the watchdog) is the correct
+/// separation of concerns: the watchdog owns the process; the
+/// tail owns the file.
+async fn open_eve_until_shutdown(
+    path: &Path,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> Option<tokio::fs::File> {
+    // Honour an already-true latch before any IO so a `stop()`
+    // issued before the tail even spawned exits cleanly.
+    if *shutdown_rx.borrow_and_update() {
+        return None;
+    }
+    // Fast path — the common cold-start race.
+    if let Some(f) = open_eve_with_retry(path).await {
+        return Some(f);
+    }
+    // Slow path — longer wait for a logrotate / crash-restart
+    // cycle. 1 s is short enough that the EVE staleness probe
+    // (default 30 s window) still picks up a wedged writer, but
+    // long enough that we are not hammering the filesystem in a
+    // tight loop.
+    loop {
+        tokio::select! {
+            () = Inner::wait_for_shutdown(shutdown_rx) => return None,
+            () = tokio::time::sleep(Duration::from_secs(1)) => {
+                if let Ok(f) = tokio::fs::File::open(path).await {
+                    return Some(f);
+                }
+            }
+        }
+    }
 }
 
 async fn handle_eve_record(
@@ -1622,6 +1705,166 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
         assert_eq!(*inner.eve_decode_errors.lock(), 1);
         assert_eq!(*inner.events_emitted.lock(), 1);
+    }
+
+    /// Regression test for the restart-watchdog/tail composition
+    /// gap: the restart watchdog only re-issues `process.start()`
+    /// and does NOT re-spawn the EVE tail task. Before the tail
+    /// was made self-healing, a Suricata crash that wiped
+    /// `eve.json` would leave the tail with no file to attach to
+    /// for the lifetime of its 3 × 100 ms retry budget, after
+    /// which the task exited and every subsequent alert was lost
+    /// even though the watchdog dutifully restarted Suricata. The
+    /// resilient open path now keeps the tail alive across an
+    /// arbitrary outage, so this scenario must deliver the
+    /// post-recovery alert without operator intervention.
+    #[tokio::test]
+    async fn eve_tail_self_heals_when_file_appears_after_initial_unavailability() {
+        let dir = TempDir::new().unwrap();
+        let eve_path = dir.path().join("eve.json");
+        // File deliberately absent at tail spawn — exercises the
+        // open_eve_until_shutdown slow path. The previous design
+        // would have exited the task within ~300 ms.
+        let (sink, mut source) = IpsEventSource::channel(8);
+        let inner = Arc::new(Inner {
+            config_path: ArcSwap::from_pointee(dir.path().join("suricata.yaml")),
+            last_eve_progress_at: Mutex::new(Instant::now()),
+            last_stats: Mutex::new(SuricataStats::zero()),
+            health: Mutex::new(HealthMonitor::new()),
+            eve_decode_errors: parking_lot::Mutex::new(0),
+            events_emitted: parking_lot::Mutex::new(0),
+            stats_records_seen: parking_lot::Mutex::new(0),
+            eve_reopens: parking_lot::Mutex::new(0),
+            restart_attempts: parking_lot::Mutex::new(0),
+            shutdown_tx: watch::channel(false).0,
+        });
+        let inner2 = Arc::clone(&inner);
+        let eve_path_tail = eve_path.clone();
+        let process_for_tail: Arc<dyn SuricataProcess> = Arc::new(MockSuricata::new());
+        let handle = tokio::spawn(async move {
+            // seek_to_end = false so the alert we write below is
+            // observed at offset 0 on the fresh file.
+            tail_eve_log(eve_path_tail, false, inner2, sink, process_for_tail).await;
+        });
+        // Give the tail enough wall time to exhaust the fast
+        // path (3 × 100 ms = 300 ms) and enter the slow 1 s poll
+        // loop — proving the slow path is the one delivering the
+        // alert, not the fast path racing the test writer.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Now create the file — simulates Suricata coming up
+        // late on cold start, or the watchdog restarting a
+        // crashed process that wiped eve.json.
+        tokio::fs::write(
+            &eve_path,
+            "{\"event_type\":\"alert\",\"src_ip\":\"10.0.0.1\",\"dest_ip\":\"1.1.1.1\",\
+             \"proto\":\"TCP\",\"alert\":{\"signature_id\":7777,\"signature\":\"recovered\",\
+             \"severity\":2,\"action\":\"blocked\"}}\n",
+        )
+        .await
+        .unwrap();
+        // The slow path polls at 1 s — give it up to 3 s.
+        let event = tokio::time::timeout(Duration::from_secs(3), source.recv())
+            .await
+            .expect("source must deliver the post-recovery alert; tail failed to self-heal")
+            .expect("source closed");
+        match event {
+            sng_telemetry::source::TelemetryEvent::Ips(ev) => {
+                assert_eq!(ev.rule_id, "7777");
+            }
+            other => panic!("expected Ips event; got {other:?}"),
+        }
+        let _ = inner.shutdown_tx.send_replace(true);
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        assert_eq!(*inner.events_emitted.lock(), 1);
+    }
+
+    /// Regression test for the post-rotation re-open path: after
+    /// the tail attaches to an EVE file, a copytruncate-style
+    /// rotation (or a Suricata crash-restart that recreates the
+    /// file on the same inode) must be observed without losing
+    /// alerts written after the rotation. The previous design
+    /// exited the tail if the post-rotation open exhausted its
+    /// fast retry budget; the resilient path now waits.
+    #[tokio::test]
+    async fn eve_tail_self_heals_across_rotation_with_brief_unavailability() {
+        let dir = TempDir::new().unwrap();
+        let eve_path = dir.path().join("eve.json");
+        // Pre-create with one alert so the tail observes a real
+        // EOF + rotation sequence rather than the cold-start
+        // path tested above.
+        tokio::fs::write(
+            &eve_path,
+            "{\"event_type\":\"alert\",\"src_ip\":\"10.0.0.1\",\"dest_ip\":\"1.1.1.1\",\
+             \"proto\":\"TCP\",\"alert\":{\"signature_id\":1111,\"signature\":\"pre\",\
+             \"severity\":2,\"action\":\"blocked\"}}\n",
+        )
+        .await
+        .unwrap();
+        let (sink, mut source) = IpsEventSource::channel(8);
+        let inner = Arc::new(Inner {
+            config_path: ArcSwap::from_pointee(dir.path().join("suricata.yaml")),
+            last_eve_progress_at: Mutex::new(Instant::now()),
+            last_stats: Mutex::new(SuricataStats::zero()),
+            health: Mutex::new(HealthMonitor::new()),
+            eve_decode_errors: parking_lot::Mutex::new(0),
+            events_emitted: parking_lot::Mutex::new(0),
+            stats_records_seen: parking_lot::Mutex::new(0),
+            eve_reopens: parking_lot::Mutex::new(0),
+            restart_attempts: parking_lot::Mutex::new(0),
+            shutdown_tx: watch::channel(false).0,
+        });
+        let inner2 = Arc::clone(&inner);
+        let eve_path_tail = eve_path.clone();
+        let process_for_tail: Arc<dyn SuricataProcess> = Arc::new(MockSuricata::new());
+        let handle = tokio::spawn(async move {
+            tail_eve_log(eve_path_tail, false, inner2, sink, process_for_tail).await;
+        });
+        // Drain the pre-rotation alert so the tail's reader is
+        // sitting at EOF on the original file when we delete it.
+        let first = tokio::time::timeout(Duration::from_secs(2), source.recv())
+            .await
+            .expect("source must deliver the pre-rotation alert")
+            .expect("source closed");
+        match first {
+            sng_telemetry::source::TelemetryEvent::Ips(ev) => {
+                assert_eq!(ev.rule_id, "1111");
+            }
+            other => panic!("expected Ips event; got {other:?}"),
+        }
+        // Simulate a watchdog-restart cycle: file goes away,
+        // tail observes EOF + missing identity (a rotation), then
+        // waits for the file to reappear. Sleep longer than the
+        // tail's 200 ms EOF poll so we are firmly in the post-
+        // rotation re-open path before the file reappears.
+        tokio::fs::remove_file(&eve_path).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::fs::write(
+            &eve_path,
+            "{\"event_type\":\"alert\",\"src_ip\":\"10.0.0.1\",\"dest_ip\":\"1.1.1.1\",\
+             \"proto\":\"TCP\",\"alert\":{\"signature_id\":2222,\"signature\":\"post\",\
+             \"severity\":2,\"action\":\"blocked\"}}\n",
+        )
+        .await
+        .unwrap();
+        // Slow path polls at 1 s — give it up to 3 s.
+        let second = tokio::time::timeout(Duration::from_secs(3), source.recv())
+            .await
+            .expect("source must deliver the post-rotation alert; tail failed to re-attach")
+            .expect("source closed");
+        match second {
+            sng_telemetry::source::TelemetryEvent::Ips(ev) => {
+                assert_eq!(ev.rule_id, "2222");
+            }
+            other => panic!("expected Ips event; got {other:?}"),
+        }
+        let _ = inner.shutdown_tx.send_replace(true);
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        assert_eq!(*inner.events_emitted.lock(), 2);
+        assert!(
+            *inner.eve_reopens.lock() >= 1,
+            "expected at least one reopen counter bump after rotation; saw {}",
+            *inner.eve_reopens.lock()
+        );
     }
 
     #[tokio::test]
