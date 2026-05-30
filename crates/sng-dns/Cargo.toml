@@ -1,0 +1,47 @@
+[package]
+name = "sng-dns"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ShieldNet Gateway DNS subsystem: recursive-resolver wrapper, per-tenant filter chain (reputation, category, sinkhole), telemetry emission"
+
+[dependencies]
+# Foundation types — DnsEvent, Verdict, ErrorCode. Re-exported
+# through this crate's public surface so a downstream caller can
+# inspect the verdict without depending on sng-core directly.
+sng-core = { workspace = true }
+
+# Egress: events the filter chain emits land in the telemetry
+# pipeline, not on the wire directly. The crate depends on
+# sng-telemetry only for the [`TelemetryEvent`] producer surface;
+# the pipeline itself is wired up in the binary.
+sng-telemetry = { workspace = true }
+
+# Async runtime + sync primitives. UDP resolver runs under tokio,
+# arc-swap drives the per-tenant filter chain hot-swap on bundle
+# reload, parking_lot guards the small in-memory caches.
+tokio = { workspace = true, features = ["net"] }
+arc-swap = { workspace = true }
+parking_lot = { workspace = true }
+async-trait = { workspace = true }
+
+# Configuration / wire types.
+serde = { workspace = true }
+ipnet = { workspace = true }
+
+# Error taxonomy.
+thiserror = { workspace = true }
+
+# Structured logging.
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "io-util"] }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

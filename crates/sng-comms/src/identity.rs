@@ -867,6 +867,35 @@ mod tests {
         assert_eq!(id.cert_chain().len(), 1);
     }
 
+    /// RFC 7468 mandates a line ending after the closing
+    /// `-----END LABEL-----`, but in the wild some emitters
+    /// (`cat` without `-n`, Windows clipboard pastes, MS-edited
+    /// PEM blobs that strip the trailing newline) hand the
+    /// loader bytes that end exactly on the closing dashes.
+    /// Pin the contract that the parser still loads correctly —
+    /// the walker scans for the closing `-----` pattern and the
+    /// next-block search bails on the now-empty input, neither
+    /// of which requires a trailing newline.
+    #[test]
+    fn loads_pem_without_trailing_newline() {
+        let (cert_pem, key_pem) = mint_identity_pem();
+        let strip_trailing_newlines = |pem: Vec<u8>| -> Vec<u8> {
+            let mut out = pem;
+            while matches!(out.last(), Some(b'\n' | b'\r')) {
+                out.pop();
+            }
+            out
+        };
+        let cert_no_trailing = strip_trailing_newlines(cert_pem);
+        let key_no_trailing = strip_trailing_newlines(key_pem);
+        // Sanity: neither input ends in a newline.
+        assert!(!matches!(cert_no_trailing.last(), Some(b'\n' | b'\r')));
+        assert!(!matches!(key_no_trailing.last(), Some(b'\n' | b'\r')));
+        let id = DeviceIdentity::from_pem(&cert_no_trailing, &key_no_trailing)
+            .expect("PEM without trailing newline still loads");
+        assert_eq!(id.cert_chain().len(), 1);
+    }
+
     /// Silence the `unused` warnings on the helper types when
     /// rcgen's RSA backend is compiled out.
     #[allow(dead_code)]

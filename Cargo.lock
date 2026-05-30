@@ -1508,6 +1508,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sng-dns"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "ipnet",
+ "parking_lot",
+ "pretty_assertions",
+ "serde",
+ "sng-core",
+ "sng-telemetry",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sng-pal"
 version = "0.1.0"
 dependencies = [

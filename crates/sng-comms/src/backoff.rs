@@ -49,8 +49,18 @@ impl ReconnectBackoff {
     /// Construct a backoff with the given window.
     ///
     /// * `initial` — first wait (and post-reset wait). 0 is
-    ///   allowed and means "retry immediately" on the first
-    ///   failure.
+    ///   allowed and means "retry immediately, forever" — a
+    ///   non-zero `initial` produces the usual exponential
+    ///   escalation `initial * multiplier^n` capped at `max`,
+    ///   but `initial = ZERO` makes the post-advance lower
+    ///   bound in [`Self::next_backoff`] also zero, so every
+    ///   subsequent ceiling stays at zero. Operators who want
+    ///   "immediate first retry, then normal escalation"
+    ///   should pass a small non-zero value (e.g. `1ms`) — the
+    ///   jitter draw will produce sub-millisecond waits for
+    ///   the first few retries while the ceiling escalates
+    ///   normally. The behaviour is pinned by the
+    ///   `zero_initial_yields_zero_first_wait` test.
     /// * `max` — ceiling the doubled wait is capped at. Must be
     ///   `>= initial`; if a caller passes `initial > max` the
     ///   release build clamps `initial` down to `max` (debug
