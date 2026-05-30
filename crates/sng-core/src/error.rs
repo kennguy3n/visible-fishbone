@@ -89,6 +89,40 @@ pub enum ErrorCode {
     /// mark on a stream. Either a replay attack or a server bug;
     /// the agent fails the stream closed and reconnects.
     SequenceRegression,
+    /// Suricata supervisor failed to spawn, signal, or wait on
+    /// the child process. Triggers a managed restart in
+    /// `sng-ips::manager`.
+    IpsProcessFailure,
+    /// `suricata.yaml` render produced an invalid document (the
+    /// renderer is fully under our control so this surfaces a
+    /// bug in `sng-ips::config`, not an operator misconfig).
+    IpsConfigInvalid,
+    /// IPS rule bundle's Ed25519 signature did not verify.
+    /// Mirror of [`Self::PolicyBundleSignatureInvalid`] but for
+    /// the IPS rule bundle plane — kept separate so dashboards
+    /// can break out IPS-rule signature failures from policy
+    /// bundle signature failures even though both go through the
+    /// same key infrastructure.
+    IpsRuleSignatureInvalid,
+    /// IPS rule bundle was signed with a key id the operator
+    /// trust store does not know about.
+    IpsRuleSigningKeyUnknown,
+    /// Incoming IPS rule bundle has a version <= the currently
+    /// installed bundle. Downgrade-protection mirror of
+    /// [`Self::PolicyBundleStale`].
+    IpsRuleStale,
+    /// IPS rule bundle body failed to decode (corrupt download,
+    /// schema mismatch).
+    IpsRuleBodyDecode,
+    /// `suricata -T` dry-run on the staged rule set failed —
+    /// the new rules are syntactically invalid. The supervisor
+    /// keeps the previous rule set installed.
+    IpsRuleValidate,
+    /// EVE JSON line could not be parsed. Almost always indicates
+    /// a Suricata version that emits a new EVE event type — the
+    /// supervisor logs and continues so a single malformed line
+    /// does not stop the tail reader.
+    IpsEveDecode,
     /// Catch-all for failures that genuinely do not fit one of
     /// the more specific buckets. Use sparingly — a new code is
     /// almost always preferable so dashboards can break the rate
@@ -118,6 +152,14 @@ impl ErrorCode {
             Self::ResourceMissing => "resource.missing",
             Self::BundleRejected => "policy.bundle.rejected",
             Self::SequenceRegression => "sequence.regression",
+            Self::IpsProcessFailure => "ips.process.failure",
+            Self::IpsConfigInvalid => "ips.config.invalid",
+            Self::IpsRuleSignatureInvalid => "ips.rule.signature.invalid",
+            Self::IpsRuleSigningKeyUnknown => "ips.rule.signing_key.unknown",
+            Self::IpsRuleStale => "ips.rule.stale",
+            Self::IpsRuleBodyDecode => "ips.rule.body.decode",
+            Self::IpsRuleValidate => "ips.rule.validate",
+            Self::IpsEveDecode => "ips.eve.decode",
             Self::Other => "other",
         }
     }
@@ -232,6 +274,20 @@ mod tests {
             (ErrorCode::ResourceMissing, "resource.missing"),
             (ErrorCode::BundleRejected, "policy.bundle.rejected"),
             (ErrorCode::SequenceRegression, "sequence.regression"),
+            (ErrorCode::IpsProcessFailure, "ips.process.failure"),
+            (ErrorCode::IpsConfigInvalid, "ips.config.invalid"),
+            (
+                ErrorCode::IpsRuleSignatureInvalid,
+                "ips.rule.signature.invalid",
+            ),
+            (
+                ErrorCode::IpsRuleSigningKeyUnknown,
+                "ips.rule.signing_key.unknown",
+            ),
+            (ErrorCode::IpsRuleStale, "ips.rule.stale"),
+            (ErrorCode::IpsRuleBodyDecode, "ips.rule.body.decode"),
+            (ErrorCode::IpsRuleValidate, "ips.rule.validate"),
+            (ErrorCode::IpsEveDecode, "ips.eve.decode"),
             (ErrorCode::Other, "other"),
         ];
         for (code, expected) in cases {

@@ -18,6 +18,7 @@ members = [
     "crates/sng-telemetry",
     "crates/sng-dns",
     "crates/sng-fw",
+    "crates/sng-ips",
 ]
 resolver = "3"
 
@@ -159,6 +160,7 @@ sng-policy-eval = { path = "crates/sng-policy-eval" }
 sng-telemetry = { path = "crates/sng-telemetry" }
 sng-dns = { path = "crates/sng-dns" }
 sng-fw = { path = "crates/sng-fw" }
+sng-ips = { path = "crates/sng-ips" }
 
 # Workspace-wide lints. Set at the workspace level so a new crate
 # added in a later phase automatically inherits the same posture
