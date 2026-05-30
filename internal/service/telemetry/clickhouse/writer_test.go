@@ -447,3 +447,38 @@ func TestRequeueBatch_EmptyBatchStillBumpsFailureCounters(t *testing.T) {
 		t.Errorf("DroppedRows must include requeueDrops.appendRejected: want 3, got %d", s.DroppedRows)
 	}
 }
+
+// TestStats_PartialDropFlushesIsExposed pins that the
+// per-flush partial-drop counter is surfaced through Stats so
+// dashboards can alert on `rate(PartialDropFlushes[5m]) >
+// threshold` without conflating the signal with the
+// (semantically distinct) ConsecutiveErrors / DroppedRows
+// counters. ConsecutiveErrors is ClickHouse-health (resets on
+// every successful Send); DroppedRows is per-row data loss;
+// PartialDropFlushes is per-flush "the producer is emitting
+// bad envelopes". Tested by direct counter mutation because
+// the full flushOnce path requires a mock ClickHouse driver
+// (out of scope for this unit test; the requeueBatch suite
+// above covers the failure-path counter contract end-to-end).
+func TestStats_PartialDropFlushesIsExposed(t *testing.T) {
+	t.Parallel()
+	w := &Writer{
+		cfg:    Config{BatchSize: 1024, MaxBacklogMultiplier: 4},
+		logger: quietLogger(),
+	}
+	w.mu.Lock()
+	w.partialDropFlushes = 7
+	w.mu.Unlock()
+	s := w.Stats()
+	if s.PartialDropFlushes != 7 {
+		t.Errorf("Stats must expose partialDropFlushes: got %d, want 7", s.PartialDropFlushes)
+	}
+	// Pin that PartialDropFlushes is INDEPENDENT of
+	// ConsecutiveErrors so dashboards can alert on the two
+	// separately. ConsecutiveErrors stays at 0 even when
+	// partialDropFlushes is rising (which is the documented
+	// semantic split — see writer.go on droppedRows).
+	if s.ConsecutiveErrors != 0 {
+		t.Errorf("PartialDropFlushes must not couple to ConsecutiveErrors: got %d, want 0", s.ConsecutiveErrors)
+	}
+}

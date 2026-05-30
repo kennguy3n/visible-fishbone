@@ -313,6 +313,16 @@ type Writer struct {
 	//     requeued. Increments flushErrors, consecutiveErrors,
 	//     and RequeuedBatches.
 	droppedRows uint64
+	// partialDropFlushes counts flushOnce calls that completed
+	// SUCCESSFULLY (prepared.Send returned nil) but had at least
+	// one row rejected by Append. This is the per-flush companion
+	// to droppedRows (which is per-row): dashboards that want to
+	// alert on "the producer is emitting bad rows" can
+	// `rate(PartialDropFlushes[5m]) > threshold` without conflating
+	// the signal with sustained ClickHouse outages
+	// (consecutiveErrors). Mutually-exclusive with all-rows-rejected
+	// (which lands in flushErrors/consecutiveErrors instead).
+	partialDropFlushes uint64
 }
 
 // New connects to ClickHouse and returns a Writer.
@@ -603,6 +613,19 @@ type Stats struct {
 	// rising). When BacklogDrops > 0 operators MUST be diverting
 	// to the S3 cold path until the writer recovers.
 	BacklogDrops uint64
+	// PartialDropFlushes is the cumulative count of flushes that
+	// completed successfully (Send returned nil) but had at least
+	// one row rejected by the driver's Append call. This is the
+	// per-flush companion to DroppedRows (which is per-row), and
+	// it is distinct from ConsecutiveErrors (which is
+	// ClickHouse-health-only). Dashboards that want to alert on
+	// "a producer is emitting bad envelopes" should target
+	// `rate(PartialDropFlushes[5m]) > threshold` rather than
+	// ConsecutiveErrors, which under the current semantics
+	// resets to zero on a partially-successful flush. See the
+	// alerting contract section on Writer.droppedRows for the
+	// full rationale and migration guide.
+	PartialDropFlushes uint64
 }
 
 // Stats returns a snapshot of writer counters.
@@ -610,13 +633,14 @@ func (w *Writer) Stats() Stats {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return Stats{
-		Pending:           len(w.pending),
-		Flushed:           w.flushed,
-		FlushErrors:       w.flushErrors,
-		ConsecutiveErrors: w.consecutiveErrors,
-		DroppedRows:       w.droppedRows,
-		RequeuedBatches:   w.requeuedBatches,
-		BacklogDrops:      w.backlogDrops,
+		Pending:            len(w.pending),
+		Flushed:            w.flushed,
+		FlushErrors:        w.flushErrors,
+		ConsecutiveErrors:  w.consecutiveErrors,
+		DroppedRows:        w.droppedRows,
+		RequeuedBatches:    w.requeuedBatches,
+		BacklogDrops:       w.backlogDrops,
+		PartialDropFlushes: w.partialDropFlushes,
 	}
 }
 
@@ -700,6 +724,20 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 		w.requeueBatch(batch, "prepare batch failed", requeueDrops{})
 		return fmt.Errorf("clickhouse: prepare batch: %w", err)
 	}
+	// Defensive Abort() on every non-Send exit so any
+	// driver-side batch state is released. The current
+	// clickhouse-go v2 native driver buffers the batch entirely
+	// client-side and lets GC reclaim it — but a future driver
+	// version (or a driver switch) could grow a server-side
+	// batch state where leaving the batch un-aborted is a real
+	// resource leak. Tracking `sent` lets us no-op the Abort
+	// when Send() succeeded.
+	sent := false
+	defer func() {
+		if !sent {
+			_ = prepared.Abort()
+		}
+	}()
 	// Per-flush drop counter. A row that the driver rejects on
 	// Append (type mismatch, oversized value, etc.) is skipped
 	// individually instead of taking the whole batch down with
@@ -807,10 +845,21 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 		w.requeueBatch(successfullyAppended, "send failed after partial append", requeueDrops{appendRejected: dropped})
 		return fmt.Errorf("clickhouse: send batch: %w", err)
 	}
+	sent = true
 	w.mu.Lock()
 	w.flushed += uint64(len(batch) - dropped)
 	w.droppedRows += uint64(dropped)
 	w.consecutiveErrors = 0
+	if dropped > 0 {
+		// Per-flush partial-drop signal — distinct from
+		// per-row droppedRows and from consecutiveErrors
+		// (which under the documented contract resets on a
+		// successful Send). Dashboards alert on this to
+		// catch "a producer is emitting bad envelopes"
+		// without conflating the signal with sustained
+		// ClickHouse outages.
+		w.partialDropFlushes++
+	}
 	w.mu.Unlock()
 	if firstAppendErr != nil {
 		// At least one row was dropped, but the rest of the

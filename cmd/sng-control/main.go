@@ -462,14 +462,15 @@ func startTelemetry(
 
 	if len(cfg.TelemetryAnalytics.ClickHouseEndpoints) > 0 {
 		chCfg := chwriter.Config{
-			Endpoints:     cfg.TelemetryAnalytics.ClickHouseEndpoints,
-			Database:      cfg.TelemetryAnalytics.ClickHouseDatabase,
-			Table:         cfg.TelemetryAnalytics.ClickHouseTable,
-			Username:      cfg.TelemetryAnalytics.ClickHouseUsername,
-			Password:      cfg.TelemetryAnalytics.ClickHousePassword,
-			TLS:           cfg.TelemetryAnalytics.ClickHouseTLS,
-			FlushInterval: cfg.TelemetryAnalytics.ClickHouseFlushInterval,
-			BatchSize:     cfg.TelemetryAnalytics.ClickHouseBatchSize,
+			Endpoints:            cfg.TelemetryAnalytics.ClickHouseEndpoints,
+			Database:             cfg.TelemetryAnalytics.ClickHouseDatabase,
+			Table:                cfg.TelemetryAnalytics.ClickHouseTable,
+			Username:             cfg.TelemetryAnalytics.ClickHouseUsername,
+			Password:             cfg.TelemetryAnalytics.ClickHousePassword,
+			TLS:                  cfg.TelemetryAnalytics.ClickHouseTLS,
+			FlushInterval:        cfg.TelemetryAnalytics.ClickHouseFlushInterval,
+			BatchSize:            cfg.TelemetryAnalytics.ClickHouseBatchSize,
+			MaxBacklogMultiplier: cfg.TelemetryAnalytics.ClickHouseMaxBacklogMultiplier,
 		}
 		w, err := chwriter.New(ctx, chCfg, logger)
 		if err != nil {
