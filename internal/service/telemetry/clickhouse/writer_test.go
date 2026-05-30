@@ -1,11 +1,34 @@
 package clickhouse
 
 import (
+	"io"
+	"log/slog"
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/kennguy3n/visible-fishbone/internal/nats/schema"
 )
+
+// quietLogger discards every log record. The requeue path emits
+// slog.Info / slog.Warn lines per shed row, which would flood
+// the test runner's stdout otherwise.
+func quietLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// mkEnv builds a minimally-valid Envelope for the requeue tests.
+// The Envelope's actual contents do not matter for the tests
+// below — they exercise the slice plumbing in requeueBatch, not
+// the per-row Append path.
+func mkEnv() schema.Envelope {
+	return schema.Envelope{
+		EventID:  uuid.New(),
+		TenantID: uuid.New(),
+		DeviceID: uuid.New(),
+	}
+}
 
 // TestWriter_StatsHoldsMutex exercises the Stats() method under
 // the race detector to confirm that all four counters are read
@@ -284,5 +307,112 @@ func TestWriter_DroppedRowsCounterSurfacesViaStats(t *testing.T) {
 	}
 	if s.ConsecutiveErrors != 1 {
 		t.Errorf("after all-rejected flush: ConsecutiveErrors want 1, got %d", s.ConsecutiveErrors)
+	}
+}
+
+// TestRequeueBatch_PrependsToHeadOfPending pins the FIFO ordering
+// contract: a failed-batch requeue lands at the HEAD of pending
+// (oldest-first), with any rows that arrived during the failed
+// flush attempt following behind. Without this ordering, a
+// requeued batch would jump the queue and be sent ahead of rows
+// the producer wrote later than the original batch, breaking the
+// per-writer FIFO guarantee the cold-path / aggregate
+// dashboards depend on for chronological event ordering.
+func TestRequeueBatch_PrependsToHeadOfPending(t *testing.T) {
+	t.Parallel()
+	failedA, failedB := mkEnv(), mkEnv()
+	concurrentC := mkEnv()
+	w := &Writer{
+		cfg:     Config{BatchSize: 1024, MaxBacklogMultiplier: 4},
+		logger:  quietLogger(),
+		pending: []schema.Envelope{concurrentC},
+	}
+	w.requeueBatch([]schema.Envelope{failedA, failedB}, "test")
+	if got, want := len(w.pending), 3; got != want {
+		t.Fatalf("len(pending): got %d, want %d", got, want)
+	}
+	if w.pending[0].EventID != failedA.EventID {
+		t.Errorf("head: want failedA, got %s", w.pending[0].EventID)
+	}
+	if w.pending[1].EventID != failedB.EventID {
+		t.Errorf("second: want failedB, got %s", w.pending[1].EventID)
+	}
+	if w.pending[2].EventID != concurrentC.EventID {
+		t.Errorf("tail: want concurrentC, got %s", w.pending[2].EventID)
+	}
+	if got := w.Stats().RequeuedBatches; got != 1 {
+		t.Errorf("RequeuedBatches: want 1, got %d", got)
+	}
+	if got := w.Stats().BacklogDrops; got != 0 {
+		t.Errorf("BacklogDrops on a non-overflow requeue: want 0, got %d", got)
+	}
+}
+
+// TestRequeueBatch_ShedsOldestPastBacklogCap pins the cap-shed
+// contract: when a requeue would push len(pending) past
+// BatchSize * MaxBacklogMultiplier, the OLDEST rows are dropped
+// FIFO-style. Both droppedRows and backlogDrops are credited so
+// dashboards distinguish "in-line bad-row drops" (DroppedRows
+// rising, BacklogDrops flat) from "sustained-outage overrun"
+// (BacklogDrops also rising). The shed rows are the head of the
+// merged slice — i.e., the oldest entries of the requeued batch,
+// not the newest concurrent writes — so producers' freshest data
+// is preserved in the failover-to-cold-path window.
+func TestRequeueBatch_ShedsOldestPastBacklogCap(t *testing.T) {
+	t.Parallel()
+	// Backlog cap = 4. We requeue 3 + already have 3 pending → 6
+	// total, must shed 2.
+	w := &Writer{
+		cfg:     Config{BatchSize: 2, MaxBacklogMultiplier: 2},
+		logger:  quietLogger(),
+		pending: []schema.Envelope{mkEnv(), mkEnv(), mkEnv()},
+	}
+	failed := []schema.Envelope{mkEnv(), mkEnv(), mkEnv()}
+	// Mark the third (newest) failed envelope so we can prove the
+	// shed pass dropped from the HEAD, not the tail.
+	keepEvent := failed[2]
+	w.requeueBatch(failed, "test")
+	if got, want := len(w.pending), 4; got != want {
+		t.Fatalf("len(pending) after cap shed: got %d, want %d (backlogCap)", got, want)
+	}
+	// First entry of the resulting pending must be the third
+	// (newest of failed-batch) failed envelope: oldest two of
+	// the merged slice (failed[0], failed[1]) were shed.
+	if w.pending[0].EventID != keepEvent.EventID {
+		t.Errorf("head after shed: want failed[2] (newest of failed batch), got %s", w.pending[0].EventID)
+	}
+	s := w.Stats()
+	if s.BacklogDrops != 2 {
+		t.Errorf("BacklogDrops: want 2, got %d", s.BacklogDrops)
+	}
+	if s.DroppedRows != 2 {
+		t.Errorf("DroppedRows must include BacklogDrops: want 2, got %d", s.DroppedRows)
+	}
+	if s.RequeuedBatches != 1 {
+		t.Errorf("RequeuedBatches: want 1, got %d", s.RequeuedBatches)
+	}
+}
+
+// TestRequeueBatch_EmptyIsNoOp guards the cheap-path shortcut.
+// requeueBatch is called from the Send-failure branch with the
+// successfully-Appended sub-slice; in the worst case (all rows
+// rejected on Append, no Send), that sub-slice is empty. The
+// shortcut avoids both a needless allocation AND a needless
+// RequeuedBatches increment that would mislead operators about
+// the writer's actual recovery behaviour.
+func TestRequeueBatch_EmptyIsNoOp(t *testing.T) {
+	t.Parallel()
+	w := &Writer{
+		cfg:     Config{BatchSize: 1024, MaxBacklogMultiplier: 4},
+		logger:  quietLogger(),
+		pending: []schema.Envelope{mkEnv()},
+	}
+	w.requeueBatch(nil, "test")
+	w.requeueBatch([]schema.Envelope{}, "test")
+	if got, want := len(w.pending), 1; got != want {
+		t.Errorf("len(pending) must be unchanged: got %d, want %d", got, want)
+	}
+	if got := w.Stats().RequeuedBatches; got != 0 {
+		t.Errorf("RequeuedBatches on no-op: want 0, got %d", got)
 	}
 }

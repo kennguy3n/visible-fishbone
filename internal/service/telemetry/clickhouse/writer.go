@@ -91,6 +91,22 @@ const DefaultFlushInterval = 2 * time.Second
 // the writer flushes synchronously on the next Write call.
 const DefaultBatchSize = 1024
 
+// DefaultMaxBacklogMultiplier caps how many `BatchSize`-worth of
+// rows the writer is willing to hold in `pending` across
+// transient ClickHouse outages. The cap matters because the
+// `flushOnce` failure paths (PrepareBatch reject, all-Append-
+// reject + Send skip, network Send failure) re-enqueue the
+// already-swapped batch at the head of `pending` so the rows
+// survive the outage and ride the next successful flush. Without
+// a cap, a wedged ClickHouse plus a steady producer would grow
+// `pending` until the writer ran out of memory. The default of
+// 4 means the writer holds up to ~4 full batches (~4096 rows by
+// default) before it starts shedding the OLDEST rows under
+// pressure; older rows are credited to `droppedRows` so the
+// alerting contract still surfaces the loss. The S3 cold-path
+// archive backs the durability gap during the shedding window.
+const DefaultMaxBacklogMultiplier = 4
+
 // Config configures a ClickHouse Writer. Endpoint is required;
 // everything else has sane defaults.
 type Config struct {
@@ -120,6 +136,16 @@ type Config struct {
 	// the writer triggers a synchronous flush. Defaults to
 	// DefaultBatchSize.
 	BatchSize int
+	// MaxBacklogMultiplier bounds how many `BatchSize`-worth of
+	// rows the writer is willing to keep in `pending` across
+	// transient ClickHouse outages. The flushOnce failure paths
+	// re-enqueue the swapped-out batch at the head of `pending`
+	// so the rows survive the failure and ride the next
+	// successful flush. When the resulting backlog exceeds
+	// `BatchSize * MaxBacklogMultiplier`, the writer sheds the
+	// OLDEST rows (FIFO) and credits them to `droppedRows`.
+	// Defaults to DefaultMaxBacklogMultiplier.
+	MaxBacklogMultiplier int
 	// DialTimeout caps the time spent on initial connection.
 	// Defaults to 5s.
 	DialTimeout time.Duration
@@ -137,6 +163,9 @@ func (c *Config) fillDefaults() {
 	}
 	if c.BatchSize <= 0 {
 		c.BatchSize = DefaultBatchSize
+	}
+	if c.MaxBacklogMultiplier <= 0 {
+		c.MaxBacklogMultiplier = DefaultMaxBacklogMultiplier
 	}
 	if c.DialTimeout <= 0 {
 		c.DialTimeout = 5 * time.Second
@@ -205,15 +234,42 @@ type Writer struct {
 	flushed           uint64
 	flushErrors       uint64
 	consecutiveErrors uint64
+	// requeuedBatches counts how many times flushOnce re-enqueued
+	// a swapped-out batch at the head of `pending` because a
+	// transient failure (PrepareBatch reject, network Send
+	// failure, all-Append-rejected fallthrough) prevented the
+	// rows from reaching ClickHouse. This is the canonical
+	// "writer is shielding rows from a transient outage" signal
+	// and pairs with `consecutiveErrors`: a high requeue rate
+	// without `consecutiveErrors` rising means individual
+	// flushes are failing but recovering on the next attempt; a
+	// rising `consecutiveErrors` alongside `requeuedBatches`
+	// confirms a sustained outage where the backlog cap will
+	// eventually trip and shed rows into `droppedRows`.
+	requeuedBatches uint64
+	// backlogDrops counts how many envelopes were shed from the
+	// HEAD of `pending` (oldest-first FIFO) because a requeue
+	// would have pushed `len(pending)` past
+	// `cfg.BatchSize * cfg.MaxBacklogMultiplier`. backlogDrops
+	// is also credited to `droppedRows` so the alerting contract
+	// keeps a single source of truth for total per-writer data
+	// loss. The split is for forensics: a non-zero backlogDrops
+	// is the specific signal that the ClickHouse outage outlasted
+	// the writer's in-memory shield, and operators should be
+	// diverting traffic to the S3 cold path until the writer
+	// recovers.
+	backlogDrops uint64
 	// droppedRows counts individual envelopes that flushOnce
-	// could not Append to the prepared batch (e.g. a value
-	// rejected by the driver as a type-mismatch). The flushOnce
-	// path skips a bad row and keeps Appending the rest, so a
-	// single corrupted envelope no longer takes the whole batch
-	// down with it. This counter is the durability budget that
-	// the operator sees in Stats / dashboards; the slog.Warn at
-	// the drop site carries the per-row context (event id,
-	// tenant id, traffic class, error) for forensic root-cause.
+	// could not deliver to ClickHouse — either because the
+	// driver rejected the row on Append (type mismatch,
+	// oversized value) or because the row was shed from the
+	// head of `pending` after a sustained outage filled the
+	// requeue backlog past `BatchSize * MaxBacklogMultiplier`.
+	// This counter is the canonical "per-writer data loss"
+	// signal; the slog.Warn at the drop site carries the per-row
+	// context (event id, tenant id, traffic class, error) for
+	// forensic root-cause. The S3 cold-path archive remains the
+	// durable record of truth across every drop class below.
 	//
 	// Alerting contract — IMPORTANT:
 	//
@@ -224,25 +280,38 @@ type Writer struct {
 	// partially-successful flush. The replacement signal is
 	// `rate(DroppedRows[5m]) > threshold` — point alerting at this
 	// counter to catch upstream producers emitting malformed
-	// envelopes. ConsecutiveErrors retains its original meaning:
-	// "the writer is wedged (all-Append-rejected, Send-failed, or
-	// transport-down)" — a different operational condition.
+	// envelopes AND sustained ClickHouse outages overrunning the
+	// in-memory shield. ConsecutiveErrors retains its original
+	// meaning: "the writer is wedged" (rising count means flushes
+	// keep failing); pair it with RequeuedBatches to distinguish
+	// a recovering writer from one whose backlog cap is about to
+	// trip.
 	//
 	// Counting model — what is and isn't accounted in DroppedRows:
 	//
-	//   - Append-rejected row: increments DroppedRows.
-	//   - All-rows-rejected batch (no Send): increments DroppedRows
-	//     by the batch size, increments flushErrors, increments
-	//     consecutiveErrors.
-	//   - Partial-Append-then-Send-failure: increments DroppedRows
-	//     by ONLY the Append-rejected count (the
-	//     successfully-Appended-but-not-Sent rows are accounted for
-	//     by flushErrors / consecutiveErrors, NOT by DroppedRows).
-	//     Append rejections and network failures are distinct
-	//     failure modes; conflating them into a single counter
-	//     would hide the producer-side vs control-plane-side
-	//     attribution that dashboards rely on. The S3 cold archive
-	//     remains the durable record of truth for both classes.
+	//   - Append-rejected row: increments DroppedRows by 1.
+	//     The row is judged bad (type mismatch, oversized value)
+	//     and is NOT requeued; retrying a malformed row would
+	//     loop forever.
+	//   - All-rows-rejected batch (no Send): increments
+	//     DroppedRows by the batch size, increments flushErrors,
+	//     increments consecutiveErrors. The rows are bad and are
+	//     NOT requeued (same rationale as above).
+	//   - PrepareBatch failure (whole batch never reached the
+	//     driver): the swapped-out batch is REQUEUED at the head
+	//     of `pending` so the rows ride the next successful
+	//     flush. Increments flushErrors, consecutiveErrors, and
+	//     RequeuedBatches. No DroppedRows accounting unless the
+	//     requeue exceeds the backlog cap and sheds rows; in
+	//     that case the SHED rows are credited to both
+	//     DroppedRows and BacklogDrops.
+	//   - Partial-Append-then-Send-failure: the
+	//     successfully-Appended-but-not-Sent rows (good rows
+	//     the driver lost on the network) are REQUEUED at the
+	//     head of `pending` for retry. The Append-rejected rows
+	//     (genuinely bad) are credited to DroppedRows and NOT
+	//     requeued. Increments flushErrors, consecutiveErrors,
+	//     and RequeuedBatches.
 	droppedRows uint64
 }
 
@@ -512,6 +581,28 @@ type Stats struct {
 	// expected. Per-row context for every drop is in the
 	// structured logs at WARN level.
 	DroppedRows uint64
+	// RequeuedBatches is the cumulative count of flushOnce
+	// failures that re-enqueued the swapped-out batch at the
+	// head of `pending` so the rows would ride a subsequent
+	// successful flush. A rising RequeuedBatches alongside a
+	// flat ConsecutiveErrors means individual flushes are
+	// hiccuping but recovering. A rising RequeuedBatches paired
+	// with rising ConsecutiveErrors signals a sustained outage
+	// where the backlog will eventually cap out and start
+	// shedding into BacklogDrops / DroppedRows.
+	RequeuedBatches uint64
+	// BacklogDrops is the cumulative count of envelopes shed
+	// from the HEAD of `pending` (oldest-first FIFO) when a
+	// requeue would push the backlog past
+	// `cfg.BatchSize * cfg.MaxBacklogMultiplier`. BacklogDrops
+	// is also rolled into DroppedRows so the headline alert
+	// signal remains DroppedRows; BacklogDrops is exposed
+	// separately so dashboards can distinguish "a few bad rows"
+	// (DroppedRows rising, BacklogDrops flat) from "sustained
+	// outage shedding the in-memory shield" (BacklogDrops also
+	// rising). When BacklogDrops > 0 operators MUST be diverting
+	// to the S3 cold path until the writer recovers.
+	BacklogDrops uint64
 }
 
 // Stats returns a snapshot of writer counters.
@@ -524,6 +615,8 @@ func (w *Writer) Stats() Stats {
 		FlushErrors:       w.flushErrors,
 		ConsecutiveErrors: w.consecutiveErrors,
 		DroppedRows:       w.droppedRows,
+		RequeuedBatches:   w.requeuedBatches,
+		BacklogDrops:      w.backlogDrops,
 	}
 }
 
@@ -594,6 +687,17 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 
 	prepared, err := w.conn.PrepareBatch(ctx, w.insertSQL)
 	if err != nil {
+		// Transient ClickHouse outage (driver-side reject before
+		// any row was Appended). The swapped-out batch is
+		// intact, so requeue it at the head of `pending` for the
+		// next flush attempt; without this the batch would be
+		// silently lost because it has already been swapped out
+		// of `pending` above. Bounded by the backlog cap so a
+		// sustained outage cannot OOM the writer — if the cap
+		// trips, the oldest rows are shed and credited to
+		// backlogDrops + droppedRows so the alerting contract
+		// surfaces the loss.
+		w.requeueBatch(batch, "prepare batch failed")
 		w.mu.Lock()
 		w.flushErrors++
 		w.consecutiveErrors++
@@ -611,6 +715,14 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 	// success / failure signal for the rest of the batch.
 	var dropped int
 	var firstAppendErr error
+	// successfullyAppended collects the envelopes the driver
+	// accepted on Append. If Send() then fails, these rows are
+	// REQUEUED at the head of `pending` so the next flush can
+	// retry them — they are not malformed (Append accepted),
+	// they just lost the network race. The Append-rejected
+	// rows are NOT included here; those are credited to
+	// droppedRows and dropped permanently.
+	successfullyAppended := make([]schema.Envelope, 0, len(batch))
 	for i := range batch {
 		env := batch[i]
 		var siteID *uuid.UUID
@@ -669,6 +781,7 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 				slog.Any("error", err))
 			continue
 		}
+		successfullyAppended = append(successfullyAppended, env)
 	}
 	if dropped == len(batch) {
 		// Every row was rejected by Append — there is nothing
@@ -678,7 +791,9 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 		// in this branch because the clickhouse-go driver's
 		// Send on an empty prepared batch is
 		// implementation-defined; sending 0 rows is wasted
-		// network and risks driver-specific surprises.
+		// network and risks driver-specific surprises. We also
+		// do NOT requeue — every row was judged malformed and
+		// retrying would loop forever.
 		w.mu.Lock()
 		w.droppedRows += uint64(dropped)
 		w.flushErrors++
@@ -687,6 +802,13 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 		return fmt.Errorf("clickhouse: append row (all %d rows rejected): %w", dropped, firstAppendErr)
 	}
 	if err := prepared.Send(); err != nil {
+		// Network-side Send failure after some rows were
+		// successfully Appended. The good rows are not
+		// malformed — they just lost the network race — so we
+		// REQUEUE them at the head of `pending` so the next
+		// flush picks them up. The Append-rejected rows stay
+		// dropped (already credited to droppedRows).
+		w.requeueBatch(successfullyAppended, "send failed after partial append")
 		w.mu.Lock()
 		w.droppedRows += uint64(dropped)
 		w.flushErrors++
@@ -711,6 +833,62 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 			slog.Any("first_error", firstAppendErr))
 	}
 	return nil
+}
+
+// requeueBatch re-prepends `batch` to the head of `pending` so
+// the rows ride the next successful flush. If the resulting
+// backlog would exceed `cfg.BatchSize * cfg.MaxBacklogMultiplier`,
+// the OLDEST rows (FIFO order, head of the merged slice) are
+// shed and credited to both `droppedRows` and `backlogDrops`.
+//
+// The dual counting (DroppedRows + BacklogDrops) is intentional:
+// DroppedRows is the canonical "per-writer data loss" signal that
+// alerts fire on, while BacklogDrops is the forensic signal that
+// distinguishes "bad rows arriving sporadically" from "sustained
+// outage outlasting the in-memory shield" — the latter is the
+// condition that requires diverting producers to the S3 cold path
+// until the writer recovers.
+func (w *Writer) requeueBatch(batch []schema.Envelope, reason string) {
+	if len(batch) == 0 {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// Re-prepend: the failed batch (oldest — was swapped out of
+	// pending first) goes before any rows that arrived during
+	// the flush attempt. This preserves the per-writer FIFO
+	// order so the next flush sends the oldest rows first, which
+	// matches the producer's ordering expectations.
+	merged := make([]schema.Envelope, 0, len(batch)+len(w.pending))
+	merged = append(merged, batch...)
+	merged = append(merged, w.pending...)
+	backlogCap := w.cfg.BatchSize * w.cfg.MaxBacklogMultiplier
+	if len(merged) > backlogCap {
+		shed := len(merged) - backlogCap
+		// Log per-row context for the shed rows so the operator
+		// can correlate the loss to the producer that emitted
+		// them. A burst of these is the signal that the writer
+		// is being overrun by the outage and the cold-path
+		// fallback must take over.
+		for i := 0; i < shed; i++ {
+			env := merged[i]
+			w.logger.Warn("clickhouse: shed row on backlog cap",
+				slog.String("event_id", env.EventID.String()),
+				slog.String("tenant_id", env.TenantID.String()),
+				slog.String("event_class", string(env.EventClass)),
+				slog.Int("cap", backlogCap),
+				slog.String("reason", reason))
+		}
+		merged = merged[shed:]
+		w.backlogDrops += uint64(shed)
+		w.droppedRows += uint64(shed)
+	}
+	w.pending = merged
+	w.requeuedBatches++
+	w.logger.Info("clickhouse: requeued batch after transient failure",
+		slog.Int("requeued", len(batch)),
+		slog.Int("backlog", len(merged)),
+		slog.String("reason", reason))
 }
 
 // TrafficClassCount is a type alias kept for backwards
