@@ -532,18 +532,19 @@ impl EveStats {
     /// manager pushes into [`crate::process::SuricataStats`].
     #[must_use]
     pub fn counters(&self) -> EveStatsCounters {
-        let cap = self.stats.capture.as_ref();
-        let dec = self.stats.decoder.as_ref();
-        let det = self.stats.detect.as_ref();
+        let capture = self.stats.capture.as_ref();
+        let decoder = self.stats.decoder.as_ref();
+        let detect = self.stats.detect.as_ref();
         EveStatsCounters {
             // Prefer the decoder's total when present (matches
             // `suricatasc dump-counters`); fall back to the
             // capture path's kernel_packets if the build doesn't
             // expose a decoder counter (e.g. xdp-only).
-            packets_processed: dec.map_or_else(|| cap.map_or(0, |c| c.kernel_packets), |d| d.pkts),
-            alerts_emitted: det.map_or(0, |d| d.alert),
-            packets_dropped: cap.map_or(0, |c| c.kernel_drops),
-            rules_loaded: det.map_or(0, |d| d.rules_loaded),
+            packets_processed: decoder
+                .map_or_else(|| capture.map_or(0, |c| c.kernel_packets), |d| d.pkts),
+            alerts_emitted: detect.map_or(0, |d| d.alert),
+            packets_dropped: capture.map_or(0, |c| c.kernel_drops),
+            rules_loaded: detect.map_or(0, |d| d.rules_loaded),
         }
     }
 }
