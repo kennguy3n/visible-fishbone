@@ -348,9 +348,20 @@ impl IpsService {
         let ttl_ms = u64::try_from(self.cfg.dedup_ttl.as_millis()).unwrap_or(u64::MAX);
         let mut emitted_alerts = 0usize;
         let mut folded: Option<Action> = None;
-        let mut top_severity = Severity::Info;
+        // Track the SID of the signature responsible for
+        // the most-severe *action* in the fold — NOT the
+        // signature with the loudest *severity* label.
+        // The verdict reason surfaces the SID that
+        // actually caused the terminal action (deny), so
+        // operators correlating a deny to telemetry can
+        // jump straight to the rule that fired. Action
+        // ordering matches
+        // [`IpsHit::fold_action`]:
+        // `Alert < Block < Reset < Drop`. On ties (two
+        // hits with the same action) we keep the first
+        // SID seen for deterministic attribution.
+        let mut top_action: Action = Action::Alert;
         let mut top_sid: u32 = 0;
-        let mut top_msg = String::new();
         // Parallel to `raw_hits`: `true` means the hit
         // passed dedup and must emit a telemetry alert in
         // the post-lock submit pass. Computed under the
@@ -369,10 +380,9 @@ impl IpsService {
                     Some(prev) => IpsHit::fold_action(prev, hit.action),
                     None => hit.action,
                 });
-                if hit.severity >= top_severity {
-                    top_severity = hit.severity;
+                if top_sid == 0 || hit.action > top_action {
+                    top_action = hit.action;
                     top_sid = hit.sid;
-                    top_msg.clone_from(&hit.msg);
                 }
                 let key = DedupKey {
                     flow_id: obs.flow_id,
@@ -900,6 +910,88 @@ mod tests {
         assert_eq!(d.raw_hits, 2);
         // The drop wins; verdict_escalation is Some(deny).
         assert!(d.verdict_escalation.is_some());
+    }
+
+    #[test]
+    fn verdict_sid_attributes_to_terminal_action_not_severity() {
+        // Pin the architectural contract that the verdict
+        // reason surfaces the SID of the signature whose
+        // *action* caused the deny — not the signature
+        // with the loudest *severity* label. The bug this
+        // test guards: a Critical-severity Alert sig and a
+        // Low-severity Drop sig both hit on one payload.
+        // The folded action is Drop (terminal → deny).
+        // The verdict_reason must point at the Drop sig
+        // (sid=200), not the Critical-severity alert
+        // (sid=100), so operators correlating the deny to
+        // a rule jump straight to the cause.
+        let alert_critical = Signature {
+            sid: 100,
+            msg: "sid-100-alert-critical".into(),
+            severity: Severity::Critical,
+            action: Action::Alert,
+            protocol: IpProtocol::Tcp,
+            ports: PortFilter::default(),
+            patterns: vec![Pattern::Literal(b"ALERT".to_vec())],
+            anchor: Anchor::default(),
+        };
+        let drop_low = Signature {
+            sid: 200,
+            msg: "sid-200-drop-low".into(),
+            severity: Severity::Low,
+            action: Action::Drop,
+            protocol: IpProtocol::Tcp,
+            ports: PortFilter::default(),
+            patterns: vec![Pattern::Literal(b"DROP".to_vec())],
+            anchor: Anchor::default(),
+        };
+        let (svc, _rx) = mk_service(vec![alert_critical, drop_low]);
+        let d = svc.observe_payload(&PayloadObservation {
+            flow_id: 1,
+            flow_key: key_tcp(40000, 80),
+            direction: Direction::Originator,
+            payload: b"ALERT and DROP",
+            now_ms: 1_000,
+        });
+        assert_eq!(d.raw_hits, 2);
+        let v = d.verdict_escalation.expect("Drop folds to deny");
+        assert_eq!(v.disposition, sng_core::envelope::Verdict::Deny);
+        match v.reason {
+            VerdictReason::PolicyMatch(label) => {
+                assert_eq!(
+                    label, "ips:sid=200",
+                    "verdict must attribute to the Drop sid=200, not the Critical-severity Alert sid=100"
+                );
+            }
+            other => panic!("expected PolicyMatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verdict_sid_attribution_is_stable_on_action_tie() {
+        // Two Drop signatures (same action). The verdict
+        // reason must deterministically attribute to the
+        // first SID seen on the payload — preserving the
+        // operator's expectation that a re-scan of the
+        // same payload always names the same SID.
+        let sigs = vec![
+            literal_sig(900, b"FIRST", Action::Drop),
+            literal_sig(901, b"SECOND", Action::Drop),
+        ];
+        let (svc, _rx) = mk_service(sigs);
+        let d = svc.observe_payload(&PayloadObservation {
+            flow_id: 1,
+            flow_key: key_tcp(40000, 80),
+            direction: Direction::Originator,
+            payload: b"FIRST then SECOND",
+            now_ms: 1_000,
+        });
+        assert_eq!(d.raw_hits, 2);
+        let v = d.verdict_escalation.expect("Drop folds to deny");
+        match v.reason {
+            VerdictReason::PolicyMatch(label) => assert_eq!(label, "ips:sid=900"),
+            other => panic!("expected PolicyMatch, got {other:?}"),
+        }
     }
 
     #[test]

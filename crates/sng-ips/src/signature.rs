@@ -179,8 +179,16 @@ pub struct Anchor {
     /// this byte offset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<usize>,
-    /// Upper bound (exclusive). Match must end at or before
-    /// `offset + depth`.
+    /// Length of the matchable window starting at `offset`.
+    /// A candidate match at `(match_start, match_len)` is
+    /// accepted iff
+    /// `match_start + match_len <= offset + depth`, i.e.
+    /// the matchable byte range is `[offset, offset + depth)`
+    /// (depth-many bytes; `offset + depth` is exclusive
+    /// when viewed as a byte index). Equivalently, a match
+    /// may end on the byte immediately before
+    /// `offset + depth` but not on `offset + depth`
+    /// itself. Maps to Suricata's `depth:N` keyword.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth: Option<usize>,
 }

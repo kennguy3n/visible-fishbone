@@ -288,9 +288,22 @@ impl SignatureSet {
     /// the set, or `0` if there are no literal patterns.
     /// The IPS service uses this to size the reassembly
     /// lookback when sliding the window past already-
-    /// scanned bytes: retaining `max_literal_pattern_len - 1`
+    /// scanned bytes: retaining `max_literal_pattern_len`
     /// trailing bytes preserves cross-observation literal
     /// matches that span the previous and next scan.
+    ///
+    /// The conservatively-correct retention is `L` (the
+    /// pattern length) rather than `L - 1`. A literal of
+    /// length `L` whose final byte landed at the very last
+    /// scanned position needs all `L` preceding bytes
+    /// available in the next scan in order to re-match —
+    /// retaining only `L - 1` would drop the byte before
+    /// the candidate match and lose the literal. The cost
+    /// of the extra byte is negligible compared to the
+    /// per-flow buffer size, and the simpler `L` keeps
+    /// the consume math in
+    /// [`crate::service::IpsService::observe_payload`]
+    /// obvious.
     #[must_use]
     pub fn max_literal_pattern_len(&self) -> usize {
         self.max_literal_pattern_len
