@@ -212,11 +212,11 @@ struct Inner {
     last_eve_progress_at: Mutex<Instant>,
     last_stats: Mutex<SuricataStats>,
     health: Mutex<HealthMonitor>,
-    eve_decode_errors: parking_lot::Mutex<u64>,
-    events_emitted: parking_lot::Mutex<u64>,
-    stats_records_seen: parking_lot::Mutex<u64>,
-    eve_reopens: parking_lot::Mutex<u64>,
-    restart_attempts: parking_lot::Mutex<u32>,
+    eve_decode_errors: Mutex<u64>,
+    events_emitted: Mutex<u64>,
+    stats_records_seen: Mutex<u64>,
+    eve_reopens: Mutex<u64>,
+    restart_attempts: Mutex<u32>,
     /// Level-triggered shutdown latch. The previous design used
     /// `tokio::sync::Notify` which is edge-triggered: a
     /// `notify_waiters()` issued while a task is between two
@@ -291,11 +291,11 @@ impl IpsManager {
                 HealthMonitor::with_thresholds(cfg.health_thresholds)
                     .with_failed_threshold(cfg.failed_consecutive_required),
             ),
-            eve_decode_errors: parking_lot::Mutex::new(0),
-            events_emitted: parking_lot::Mutex::new(0),
-            stats_records_seen: parking_lot::Mutex::new(0),
-            eve_reopens: parking_lot::Mutex::new(0),
-            restart_attempts: parking_lot::Mutex::new(0),
+            eve_decode_errors: Mutex::new(0),
+            events_emitted: Mutex::new(0),
+            stats_records_seen: Mutex::new(0),
+            eve_reopens: Mutex::new(0),
+            restart_attempts: Mutex::new(0),
             shutdown_tx: watch::channel(false).0,
         });
         Self {
@@ -1622,11 +1622,11 @@ mod tests {
             last_eve_progress_at: Mutex::new(Instant::now()),
             last_stats: Mutex::new(SuricataStats::zero()),
             health: Mutex::new(HealthMonitor::new()),
-            eve_decode_errors: parking_lot::Mutex::new(0),
-            events_emitted: parking_lot::Mutex::new(0),
-            stats_records_seen: parking_lot::Mutex::new(0),
-            eve_reopens: parking_lot::Mutex::new(0),
-            restart_attempts: parking_lot::Mutex::new(0),
+            eve_decode_errors: Mutex::new(0),
+            events_emitted: Mutex::new(0),
+            stats_records_seen: Mutex::new(0),
+            eve_reopens: Mutex::new(0),
+            restart_attempts: Mutex::new(0),
             shutdown_tx: watch::channel(false).0,
         });
         let inner2 = Arc::clone(&inner);
@@ -1676,11 +1676,11 @@ mod tests {
             last_eve_progress_at: Mutex::new(Instant::now()),
             last_stats: Mutex::new(SuricataStats::zero()),
             health: Mutex::new(HealthMonitor::new()),
-            eve_decode_errors: parking_lot::Mutex::new(0),
-            events_emitted: parking_lot::Mutex::new(0),
-            stats_records_seen: parking_lot::Mutex::new(0),
-            eve_reopens: parking_lot::Mutex::new(0),
-            restart_attempts: parking_lot::Mutex::new(0),
+            eve_decode_errors: Mutex::new(0),
+            events_emitted: Mutex::new(0),
+            stats_records_seen: Mutex::new(0),
+            eve_reopens: Mutex::new(0),
+            restart_attempts: Mutex::new(0),
             shutdown_tx: watch::channel(false).0,
         });
         let inner2 = Arc::clone(&inner);
@@ -1731,11 +1731,11 @@ mod tests {
             last_eve_progress_at: Mutex::new(Instant::now()),
             last_stats: Mutex::new(SuricataStats::zero()),
             health: Mutex::new(HealthMonitor::new()),
-            eve_decode_errors: parking_lot::Mutex::new(0),
-            events_emitted: parking_lot::Mutex::new(0),
-            stats_records_seen: parking_lot::Mutex::new(0),
-            eve_reopens: parking_lot::Mutex::new(0),
-            restart_attempts: parking_lot::Mutex::new(0),
+            eve_decode_errors: Mutex::new(0),
+            events_emitted: Mutex::new(0),
+            stats_records_seen: Mutex::new(0),
+            eve_reopens: Mutex::new(0),
+            restart_attempts: Mutex::new(0),
             shutdown_tx: watch::channel(false).0,
         });
         let inner2 = Arc::clone(&inner);
@@ -1806,11 +1806,11 @@ mod tests {
             last_eve_progress_at: Mutex::new(Instant::now()),
             last_stats: Mutex::new(SuricataStats::zero()),
             health: Mutex::new(HealthMonitor::new()),
-            eve_decode_errors: parking_lot::Mutex::new(0),
-            events_emitted: parking_lot::Mutex::new(0),
-            stats_records_seen: parking_lot::Mutex::new(0),
-            eve_reopens: parking_lot::Mutex::new(0),
-            restart_attempts: parking_lot::Mutex::new(0),
+            eve_decode_errors: Mutex::new(0),
+            events_emitted: Mutex::new(0),
+            stats_records_seen: Mutex::new(0),
+            eve_reopens: Mutex::new(0),
+            restart_attempts: Mutex::new(0),
             shutdown_tx: watch::channel(false).0,
         });
         let inner2 = Arc::clone(&inner);
