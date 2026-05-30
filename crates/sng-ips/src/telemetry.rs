@@ -13,6 +13,39 @@ use sng_core::events::IpsEvent;
 use sng_telemetry::source::{EventSource, TelemetryEvent};
 use tokio::sync::mpsc;
 
+/// Reason a `try_send` could not deliver the event. The caller
+/// uses this to decide whether the failure is recoverable
+/// (`Full` — back-pressure, drop the alert and keep tailing) or
+/// terminal (`Closed` — the telemetry pipeline has shut down,
+/// so the IPS supervisor should wind down too).
+#[derive(Debug)]
+pub enum SinkSendError {
+    /// The channel buffer is full. The unsent event is returned
+    /// so the caller can choose to drop, retry, or telemetry-log
+    /// it.
+    Full(IpsEvent),
+    /// The receiver has been dropped. Subsequent sends will all
+    /// fail; the caller should treat this as terminal.
+    Closed(IpsEvent),
+}
+
+impl SinkSendError {
+    /// True when the failure is `Closed` — the consumer is gone
+    /// permanently and the caller cannot recover by retrying.
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Closed(_))
+    }
+
+    /// Borrow the event that was not delivered.
+    #[must_use]
+    pub const fn event(&self) -> &IpsEvent {
+        match self {
+            Self::Full(ev) | Self::Closed(ev) => ev,
+        }
+    }
+}
+
 /// Producer half of the IPS event channel. Held by the
 /// [`crate::manager::IpsManager`]; pushes normalised alerts.
 #[derive(Clone, Debug)]
@@ -21,24 +54,37 @@ pub struct IpsEventSink {
 }
 
 impl IpsEventSink {
-    /// Push an event into the channel. Returns `Ok(())` on
-    /// success; `Err(())` if the consumer has been dropped (i.e.
-    /// the telemetry pipeline has shut down). Callers should
-    /// treat that as terminal for the IPS subsystem.
-    pub fn try_send(&self, ev: IpsEvent) -> Result<(), IpsEvent> {
+    /// Push an event into the channel without blocking.
+    ///
+    /// Returns:
+    /// * `Ok(())` if the event was queued,
+    /// * `Err(SinkSendError::Full(ev))` if the channel buffer
+    ///   is full — the caller may drop the event and continue,
+    /// * `Err(SinkSendError::Closed(ev))` if the consumer has
+    ///   been dropped — the IPS supervisor should treat this
+    ///   as terminal and stop tailing.
+    ///
+    /// The two error paths used to be conflated under a single
+    /// `Err(IpsEvent)` return; callers (and operators reading
+    /// the dashboard) couldn't tell a transient back-pressure
+    /// drop from a permanent shutdown of the telemetry pipeline.
+    pub fn try_send(&self, ev: IpsEvent) -> Result<(), SinkSendError> {
         match self.tx.try_send(ev) {
             Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(ev) | mpsc::error::TrySendError::Closed(ev)) => {
-                Err(ev)
-            }
+            Err(mpsc::error::TrySendError::Full(ev)) => Err(SinkSendError::Full(ev)),
+            Err(mpsc::error::TrySendError::Closed(ev)) => Err(SinkSendError::Closed(ev)),
         }
     }
 
-    /// Async send. Returns `Err(())` only when the channel is
-    /// permanently closed (consumer dropped); back-pressure
-    /// blocks rather than failing.
-    pub async fn send(&self, ev: IpsEvent) -> Result<(), IpsEvent> {
-        self.tx.send(ev).await.map_err(|e| e.0)
+    /// Async send. Returns `Err(SinkSendError::Closed(ev))`
+    /// only when the channel is permanently closed (consumer
+    /// dropped); back-pressure blocks rather than failing, so
+    /// there is no `Full` variant on this path.
+    pub async fn send(&self, ev: IpsEvent) -> Result<(), SinkSendError> {
+        self.tx
+            .send(ev)
+            .await
+            .map_err(|e| SinkSendError::Closed(e.0))
     }
 
     /// Approximate channel capacity remaining. Used by health
@@ -117,7 +163,11 @@ mod tests {
         let (sink, _source) = IpsEventSource::channel(1);
         sink.try_send(alert("a")).unwrap();
         let back = sink.try_send(alert("b")).unwrap_err();
-        assert_eq!(back.rule_id, "b");
+        // `Full` is recoverable — the caller may drop the alert
+        // and keep tailing; `is_terminal()` must say so.
+        assert!(matches!(back, SinkSendError::Full(_)));
+        assert!(!back.is_terminal());
+        assert_eq!(back.event().rule_id, "b");
     }
 
     #[tokio::test]
@@ -125,7 +175,26 @@ mod tests {
         let (sink, source) = IpsEventSource::channel(1);
         drop(source);
         let back = sink.try_send(alert("a")).unwrap_err();
-        assert_eq!(back.rule_id, "a");
+        // `Closed` is terminal — the consumer is gone and no
+        // retry will succeed.
+        assert!(matches!(back, SinkSendError::Closed(_)));
+        assert!(back.is_terminal());
+        assert_eq!(back.event().rule_id, "a");
+    }
+
+    #[tokio::test]
+    async fn async_send_returns_closed_when_consumer_dropped() {
+        // The async send path used to return `Err(IpsEvent)`
+        // — same opaque return as the sync path — so callers
+        // couldn't classify the failure. Pin the new contract:
+        // it returns `Closed`, never `Full` (back-pressure on
+        // this path blocks rather than failing).
+        let (sink, source) = IpsEventSource::channel(1);
+        drop(source);
+        let back = sink.send(alert("x")).await.unwrap_err();
+        assert!(matches!(back, SinkSendError::Closed(_)));
+        assert!(back.is_terminal());
+        assert_eq!(back.event().rule_id, "x");
     }
 
     #[tokio::test]

@@ -648,12 +648,27 @@ impl EveHttp {
 
 impl EveFlow {
     /// Map an EVE flow record into the workspace [`FlowEvent`].
-    /// The SNG schema's `bytes_in` / `bytes_out` are oriented
-    /// from the server's perspective; Suricata's
-    /// `bytes_toserver` / `bytes_toclient` are oriented from
-    /// the connection's perspective. So `toserver` maps to
-    /// `bytes_out` (client → server) and `toclient` to
-    /// `bytes_in` (server → client).
+    ///
+    /// Byte-direction mapping: the SNG `FlowEvent` schema is
+    /// oriented from the **network-edge** perspective, where
+    /// `bytes_in` counts traffic flowing INTO the edge (server →
+    /// client, i.e. downloads from the client's point of view)
+    /// and `bytes_out` counts traffic flowing OUT of the edge
+    /// (client → server, i.e. uploads). Suricata's `toserver` /
+    /// `toclient` are connection-oriented, so `toserver` →
+    /// `bytes_out` and `toclient` → `bytes_in`. (See the field
+    /// docs on [`sng_core::events::FlowEvent`] which call this
+    /// out the same way.)
+    ///
+    /// Duration: when both `flow.start` and `flow.end` are
+    /// present and parse as RFC 3339 timestamps, the difference
+    /// is reported in milliseconds (saturating to `u32::MAX` for
+    /// flows older than ~49 days). If either timestamp is
+    /// missing or unparseable the value falls back to `0`; the
+    /// alternative — dropping the record — would silently lose
+    /// every flow when Suricata's clock or formatter regressed,
+    /// which is worse for downstream analytics than a few
+    /// zero-duration records.
     #[must_use]
     pub fn to_flow_event(&self) -> FlowEvent {
         FlowEvent {
@@ -675,9 +690,57 @@ impl EveFlow {
             score: None,
             bytes_in: self.flow.bytes_toclient,
             bytes_out: self.flow.bytes_toserver,
-            duration_ms: 0,
+            duration_ms: compute_flow_duration_ms(
+                self.flow.start.as_deref(),
+                self.flow.end.as_deref(),
+            ),
         }
     }
+}
+
+/// Parse a pair of RFC 3339 / ISO 8601 timestamps and return the
+/// non-negative difference in whole milliseconds, saturating at
+/// `u32::MAX`. Returns `0` when either timestamp is absent, fails
+/// to parse, or `end < start` — the FlowEvent schema treats zero
+/// as "unknown / unmeasured".
+///
+/// Kept as a free function so the EVE tests can exercise it
+/// directly with synthesised inputs (Suricata's RFC 3339 with a
+/// 6-digit fractional-second tail and a `+0000` offset is the
+/// production fixture).
+fn compute_flow_duration_ms(start: Option<&str>, end: Option<&str>) -> u32 {
+    let (Some(s), Some(e)) = (start, end) else {
+        return 0;
+    };
+    match (parse_eve_timestamp(s), parse_eve_timestamp(e)) {
+        (Some(s), Some(e)) => {
+            let delta = e.signed_duration_since(s);
+            let ms = delta.num_milliseconds();
+            if ms <= 0 {
+                0
+            } else {
+                u32::try_from(ms).unwrap_or(u32::MAX)
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Accept both strict RFC 3339 (`+00:00`) and Suricata's
+/// shorter ISO 8601 offset (`+0000`). Suricata's EVE writer
+/// emits the short form by default, so the strict parser
+/// alone would return 0 for every real flow we ever see.
+fn parse_eve_timestamp(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt);
+    }
+    // Suricata's `outputs.eve-log.timestamp-format` default:
+    // `%Y-%m-%dT%H:%M:%S.%6N%z` — fractional seconds + RFC
+    // 822 numeric timezone offset without a colon.
+    if let Ok(dt) = chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%z") {
+        return Some(dt);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -884,6 +947,63 @@ mod tests {
         // toclient=server→client (= SNG's bytes_in).
         assert_eq!(ev.bytes_out, 5000);
         assert_eq!(ev.bytes_in, 80_000);
+        // start=10:30:00, end=10:30:06 → 6 000 ms.
+        // Previously this was hardcoded to 0; pin the parsed
+        // value so downstream analytics get real flow lifetimes.
+        assert_eq!(ev.duration_ms, 6_000);
+    }
+
+    #[test]
+    fn compute_flow_duration_ms_handles_both_present_in_milliseconds() {
+        let start = Some("2024-01-15T10:30:00.000000+0000");
+        let end = Some("2024-01-15T10:30:01.250000+0000");
+        assert_eq!(compute_flow_duration_ms(start, end), 1_250);
+    }
+
+    #[test]
+    fn compute_flow_duration_ms_returns_zero_when_either_missing() {
+        assert_eq!(
+            compute_flow_duration_ms(None, Some("2024-01-15T10:30:01.000000+0000")),
+            0,
+            "missing start must produce 0, not panic"
+        );
+        assert_eq!(
+            compute_flow_duration_ms(Some("2024-01-15T10:30:00.000000+0000"), None),
+            0,
+            "missing end must produce 0, not panic"
+        );
+        assert_eq!(compute_flow_duration_ms(None, None), 0);
+    }
+
+    #[test]
+    fn compute_flow_duration_ms_returns_zero_when_unparseable() {
+        // A formatter regression in Suricata shouldn't drop the
+        // record; it falls back to 0 (the FlowEvent schema's
+        // "unknown duration" sentinel).
+        assert_eq!(
+            compute_flow_duration_ms(Some("not-a-timestamp"), Some("also-not-one")),
+            0,
+            "garbage input must NOT panic; fall back to 0"
+        );
+    }
+
+    #[test]
+    fn compute_flow_duration_ms_returns_zero_when_end_before_start() {
+        // Clock skew on the Suricata host should not produce a
+        // negative duration that silently wraps; clamp to 0.
+        let start = Some("2024-01-15T10:30:10.000000+0000");
+        let end = Some("2024-01-15T10:30:00.000000+0000");
+        assert_eq!(compute_flow_duration_ms(start, end), 0);
+    }
+
+    #[test]
+    fn compute_flow_duration_ms_saturates_at_u32_max() {
+        // A multi-decade flow (impossible in practice but
+        // possible from a corrupt EVE record) must saturate
+        // rather than panic on the `try_from` conversion.
+        let start = Some("1970-01-01T00:00:00.000000+0000");
+        let end = Some("2099-01-01T00:00:00.000000+0000");
+        assert_eq!(compute_flow_duration_ms(start, end), u32::MAX);
     }
 
     #[test]

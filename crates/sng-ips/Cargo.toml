@@ -36,6 +36,12 @@ hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# RFC 3339 timestamp parsing for EVE flow start/end fields, so
+# `FlowEvent::duration_ms` carries a real value rather than a
+# placeholder zero. Workspace default-features already includes
+# `clock` + `serde`; we only need parsing here.
+chrono = { workspace = true }
+
 # MessagePack — wire format for signed rule bundles delivered by
 # the control plane (matches sng-comms' bundle envelope).
 rmp-serde = { workspace = true }

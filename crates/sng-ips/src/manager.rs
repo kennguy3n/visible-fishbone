@@ -77,7 +77,7 @@ use crate::health::{
 };
 use crate::process::{ProcessStatus, SuricataProcess, SuricataSignal, SuricataStats};
 use crate::rules::{IpsRuleBundle, IpsRuleVerifier, RuleStager};
-use crate::telemetry::IpsEventSink;
+use crate::telemetry::{IpsEventSink, SinkSendError};
 
 /// Tunable knobs for the supervisor. The defaults are biased
 /// toward responsive failure detection (1-second stats poll,
@@ -389,6 +389,20 @@ impl IpsManager {
     /// caller can confirm the swap by comparing against the
     /// telemetry attribute the manager logs.
     pub async fn apply_config(&self, input: &IpsConfigInput) -> Result<String, IpsError> {
+        // Enforce the invariant the manager's tail task depends on:
+        // the EVE path baked into the rendered YAML must match the
+        // path the tail is reading from. A mismatch would have
+        // Suricata writing to one file and the tail reading from
+        // another, silently losing every alert until somebody
+        // noticed the dashboard had gone quiet. Reject the swap
+        // before we ever touch disk or signal the process.
+        if input.eve_log_path != self.cfg.eve_log_path {
+            return Err(IpsError::Config(format!(
+                "eve_log_path mismatch: manager bound to {} but config input has {}",
+                self.cfg.eve_log_path.display(),
+                input.eve_log_path.display()
+            )));
+        }
         let new_cfg = self.config_gen.render(input)?;
         // Compare against the on-disk digest by re-reading the
         // file — cheap, and the source of truth lives on the
@@ -810,14 +824,27 @@ async fn handle_eve_record(
             // Dropping a single alert beats blocking the EVE
             // reader (which would let Suricata's EVE writer
             // back-pressure, which would drop packets).
-            if let Err(returned) = sink.try_send(ev) {
-                warn!(
-                    target: "sng_ips::manager::eve",
-                    rule_id = %returned.rule_id,
-                    "telemetry sink full; dropping alert"
-                );
-            } else {
-                *inner.events_emitted.lock() += 1;
+            // Distinguish back-pressure (channel full) from a
+            // terminal shutdown (consumer dropped). Conflating
+            // them produced misleading "telemetry sink full"
+            // log lines when the telemetry pipeline had actually
+            // shut down for good.
+            match sink.try_send(ev) {
+                Ok(()) => *inner.events_emitted.lock() += 1,
+                Err(SinkSendError::Full(returned)) => {
+                    warn!(
+                        target: "sng_ips::manager::eve",
+                        rule_id = %returned.rule_id,
+                        "telemetry sink full; dropping alert"
+                    );
+                }
+                Err(SinkSendError::Closed(returned)) => {
+                    warn!(
+                        target: "sng_ips::manager::eve",
+                        rule_id = %returned.rule_id,
+                        "telemetry sink closed; consumer has been dropped, dropping alert"
+                    );
+                }
             }
         }
         EveRecord::Stats(stats) => {
@@ -887,6 +914,17 @@ async fn run_stats_poll(
             _ = ticker.tick() => {
                 let probe = build_probe(&inner, &*process, staleness).await;
                 let transition = inner.health.lock().observe(probe);
+                // Reset the cumulative restart counter on every
+                // transition INTO `Healthy`. The watchdog already
+                // resets its own `consecutive_failures` local on a
+                // successful restart, but the publicly-visible
+                // `restart_attempts` counter on `IpsManagerStatus`
+                // is documented as resetting on each healthy
+                // transition so dashboards can count restarts
+                // per incident rather than per process lifetime.
+                if transition.changed && transition.current == HealthState::Healthy {
+                    *inner.restart_attempts.lock() = 0;
+                }
                 log_transition(transition, fail_mode);
             }
         }
@@ -1164,6 +1202,47 @@ mod tests {
         // And the manager sent a single Reload (SIGHUP).
         let signals = mock.signals();
         assert_eq!(signals, vec![SuricataSignal::Reload]);
+    }
+
+    #[tokio::test]
+    async fn apply_config_rejects_mismatched_eve_log_path() {
+        // Regression: the IpsManagerConfig doc promises that the
+        // manager validates `input.eve_log_path` against its own
+        // bound path on every config swap. Before the fix the
+        // check was missing entirely — a caller could pass a
+        // mismatched path and Suricata would write EVE output to
+        // one file while the tail task read from another,
+        // silently losing every alert.
+        let dir = TempDir::new().unwrap();
+        let mock = MockSuricata::new();
+        let (mgr, _source, eve, rules) = manager_under_test(&dir, mock.clone());
+        let input = config_input(rules.clone(), eve.clone(), dir.path().join("stats.sock"));
+        mgr.start(&input).await.unwrap();
+
+        // Build an input whose eve_log_path diverges from the
+        // manager's bound path.
+        let mut bad_input = input.clone();
+        bad_input.eve_log_path = dir.path().join("other-eve.json");
+        let err = mgr
+            .apply_config(&bad_input)
+            .await
+            .expect_err("apply_config must reject a mismatched eve_log_path");
+        match err {
+            IpsError::Config(msg) => {
+                assert!(
+                    msg.contains("eve_log_path mismatch"),
+                    "error must name the violated invariant: {msg}"
+                );
+            }
+            other => panic!("expected IpsError::Config, got {other:?}"),
+        }
+        // The mismatched apply MUST be a no-op on disk + signals.
+        // We had a real reload before the fix.
+        let signals = mock.signals();
+        assert!(
+            signals.is_empty(),
+            "rejected apply must not have signalled the process; saw {signals:?}"
+        );
     }
 
     #[tokio::test]
@@ -1532,6 +1611,77 @@ mod tests {
             "watchdog should have made at least 3 restart attempts; saw {}",
             *mgr.inner.restart_attempts.lock()
         );
+        mgr.stop().await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handles.join()).await;
+    }
+
+    #[tokio::test]
+    async fn restart_attempts_reset_on_healthy_transition() {
+        // Regression: `IpsManagerStatus::restart_attempts` is
+        // documented as "Resets on a successful `Healthy`
+        // transition", but before the fix the counter was only
+        // ever incremented — operators reading the dashboard saw
+        // a monotonically growing value that never matched the
+        // post-recovery state. Pin the contract: a Crashed →
+        // Running → Healthy sequence must zero the counter.
+        let dir = TempDir::new().unwrap();
+        let mock = MockSuricata::new();
+        let (mgr, _source, eve, rules) = fast_watchdog_manager(&dir, mock.clone(), Some(10));
+        let input = config_input(rules, eve, dir.path().join("stats.sock"));
+        mgr.start(&input).await.unwrap();
+
+        let handles = mgr.spawn_background_tasks();
+
+        // Drive a crash so the watchdog increments
+        // `restart_attempts` ≥ 1.
+        mock.mark_crashed();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline && *mgr.inner.restart_attempts.lock() == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let attempts_before_recovery = *mgr.inner.restart_attempts.lock();
+        assert!(
+            attempts_before_recovery >= 1,
+            "watchdog should have bumped restart_attempts at least once before recovery"
+        );
+
+        // Force the next stats poll to observe a healthy probe:
+        // process alive + eve progressing. The watchdog's next
+        // start call returns `Ok` (no `fail_next_start` queued),
+        // which flips status back to Running, and `force_alive`
+        // pins is_alive() to true while we wait for the stats
+        // tick.
+        mock.force_alive(true);
+        *mgr.inner.last_eve_progress_at.lock() = Instant::now();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            let st = mgr.status().await;
+            if st.health == HealthState::Healthy && *mgr.inner.restart_attempts.lock() == 0 {
+                break;
+            }
+            // Keep tickling the progress timestamp so the stats
+            // poll's staleness probe sees eve_progressing=true.
+            *mgr.inner.last_eve_progress_at.lock() = Instant::now();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let final_status = mgr.status().await;
+        assert_eq!(
+            final_status.health,
+            HealthState::Healthy,
+            "manager should have recovered to Healthy; got {:?}",
+            final_status.health
+        );
+        assert_eq!(
+            *mgr.inner.restart_attempts.lock(),
+            0,
+            "restart_attempts must reset on the Healthy transition; \
+             saw {} after recovery (had {} before)",
+            *mgr.inner.restart_attempts.lock(),
+            attempts_before_recovery
+        );
+
         mgr.stop().await.unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(2), handles.join()).await;
     }
