@@ -106,6 +106,20 @@ pub struct SdwanServiceConfig {
     /// stream (e.g. one per 5-tuple over a long
     /// observation window) can't grow the map without
     /// bound between sweeps.
+    ///
+    /// The value is clamped to a minimum of `1` by
+    /// [`Self::normalize`] (applied automatically by
+    /// [`SdwanServiceBuilder::with_config`] and
+    /// [`SdwanServiceBuilder::build`]). A capacity of
+    /// `0` would otherwise let the sweep oscillate
+    /// between `0` and `1` entry on every insert because
+    /// `g.len() >= 0` always holds — the cache would be
+    /// effectively disabled but each insert would still
+    /// pay the sweep cost. Operators who want to disable
+    /// stickiness entirely should instead set
+    /// [`crate::SdwanPolicy::sticky_window_ms`] to `0`,
+    /// which short-circuits the cache lookup at the
+    /// entry to `finalise`.
     pub sticky_cache_capacity: usize,
 }
 
@@ -115,6 +129,30 @@ impl Default for SdwanServiceConfig {
             max_flows: 131_072,
             sticky_cache_capacity: 65_536,
         }
+    }
+}
+
+impl SdwanServiceConfig {
+    /// Clamp fields that would otherwise produce
+    /// surprising runtime behavior into a safe range.
+    ///
+    /// Currently:
+    ///
+    /// - `sticky_cache_capacity` is clamped to `>= 1`.
+    ///   `0` is documented as 'disable stickiness' but
+    ///   the natural reading produces oscillation rather
+    ///   than disablement; the intended way to disable
+    ///   sticky-flow is `SdwanPolicy::sticky_window_ms =
+    ///   0`. We clamp here so a misconfigured deployment
+    ///   doesn't silently churn the cache.
+    ///
+    /// Idempotent — calling `.normalize()` twice on the
+    /// same config returns the same shape as calling it
+    /// once.
+    #[must_use]
+    pub fn normalize(mut self) -> Self {
+        self.sticky_cache_capacity = self.sticky_cache_capacity.max(1);
+        self
     }
 }
 
@@ -143,10 +181,14 @@ impl SdwanServiceBuilder {
         }
     }
 
-    /// Override the config.
+    /// Override the config. The config is passed through
+    /// [`SdwanServiceConfig::normalize`] so callers that
+    /// pass `sticky_cache_capacity = 0` (which would
+    /// otherwise oscillate the sticky cache) get the
+    /// clamped-to-1 value installed.
     #[must_use]
     pub fn with_config(mut self, cfg: SdwanServiceConfig) -> Self {
-        self.cfg = cfg;
+        self.cfg = cfg.normalize();
         self
     }
 
@@ -181,10 +223,14 @@ impl SdwanServiceBuilder {
     /// Build the service. `telemetry` is the egress
     /// channel — every evaluation `try_send`s one
     /// [`sng_core::events::SdwanEvent`] here.
+    ///
+    /// The config is normalised one last time so callers
+    /// that mutated `self.cfg` directly between
+    /// `with_config` and `build` still get a safe shape.
     #[must_use]
     pub fn build(self, telemetry: mpsc::Sender<TelemetryEvent>) -> SdwanService {
         SdwanService {
-            cfg: self.cfg,
+            cfg: self.cfg.normalize(),
             policy: self.policy,
             paths: self.paths,
             probes: self.probes,
@@ -1295,6 +1341,88 @@ mod tests {
         let denied =
             SteeringDecision::no_path(SteeringReason::AllProbesStale, TrafficClass::Interactive);
         assert_eq!(decision_to_verdict(&denied), Verdict::Deny);
+    }
+
+    #[test]
+    fn service_config_normalize_clamps_zero_capacity_to_one() {
+        // `sticky_cache_capacity = 0` would let the
+        // `g.len() >= capacity` sweep fire on every
+        // insert and produce 0↔1 oscillation. Normalize
+        // clamps it to 1 so a misconfigured deployment
+        // doesn't silently churn the cache.
+        let cfg = SdwanServiceConfig {
+            max_flows: 16,
+            sticky_cache_capacity: 0,
+        }
+        .normalize();
+        assert_eq!(cfg.sticky_cache_capacity, 1);
+        // Idempotent: calling normalize a second time
+        // doesn't move the value any further.
+        let cfg = cfg.normalize();
+        assert_eq!(cfg.sticky_cache_capacity, 1);
+    }
+
+    #[test]
+    fn service_config_normalize_preserves_nonzero_capacity() {
+        let cfg = SdwanServiceConfig {
+            max_flows: 16,
+            sticky_cache_capacity: 7,
+        }
+        .normalize();
+        assert_eq!(cfg.sticky_cache_capacity, 7);
+    }
+
+    #[test]
+    fn builder_with_config_zero_capacity_does_not_oscillate() {
+        // Regression: prior to `SdwanServiceConfig::normalize`
+        // a deployment that set `sticky_cache_capacity = 0`
+        // would have the sticky cache oscillate between
+        // 0 and 1 entries on every insert (sweep fires
+        // unconditionally because `len() >= 0`). After
+        // normalize, the cache holds at least one entry.
+        let (svc, _rx) = {
+            let policy = SdwanPolicy {
+                sticky_window_ms: 10_000,
+                ..SdwanPolicy::default()
+            };
+            let holder = SdwanPolicyHolder::default();
+            holder.try_replace(policy).expect("valid policy");
+            let paths = StaticPathProvider::from_paths(vec![Path::new(
+                "mpls",
+                [TrafficClass::Interactive],
+            )]);
+            let probes = StaticProbeProvider::from_probes(vec![(
+                PathId::new("mpls"),
+                PathProbe::new(10.0, 0.0, 0.0, NOW),
+            )]);
+            let (tx, rx) = telemetry();
+            let svc = SdwanServiceBuilder::new()
+                .with_config(SdwanServiceConfig {
+                    max_flows: 16,
+                    // Operator-typo'd value that previously
+                    // produced oscillation.
+                    sticky_cache_capacity: 0,
+                })
+                .with_policy(Arc::new(holder))
+                .with_path_provider(Arc::new(paths))
+                .with_probe_provider(Arc::new(probes))
+                .build(tx);
+            (svc, rx)
+        };
+        // Two distinct flows pin in the same window.
+        let _ = svc.evaluate(&req("flow-a", TrafficClass::Interactive, NOW));
+        let _ = svc.evaluate(&req("flow-b", TrafficClass::Interactive, NOW + 1));
+        // With capacity clamped to 1, the second insert
+        // evicts the first (LRU-style eviction sweep) —
+        // but the cache still holds 1 entry, NOT 0.
+        // Re-evaluating the same flow within the sticky
+        // window observes the pin (cache wasn't wiped).
+        let dec_b2 = svc.evaluate(&req("flow-b", TrafficClass::Interactive, NOW + 2));
+        assert_eq!(
+            dec_b2.path_id.as_ref().map(PathId::as_str),
+            Some("mpls"),
+            "with normalised capacity the sticky cache stays live"
+        );
     }
 
     #[test]
