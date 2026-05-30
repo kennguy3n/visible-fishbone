@@ -1,0 +1,149 @@
+# cargo-deny configuration for the ShieldNet Gateway (SNG) workspace.
+#
+# This file is the operational enforcement of the workspace's
+# licence + supply-chain posture:
+#
+# - Workspace crates ship under `LicenseRef-Proprietary`; the
+#   third-party dependency surface is gated to permissive
+#   Rust-crate licences only (MIT / Apache-2.0 / BSD / ISC /
+#   Unicode / Zlib / MPL-2.0 / OpenSSL / BSL-1.0). Strong
+#   copyleft (GPL / AGPL / LGPL / SSPL / BUSL / CC-BY-NC) is
+#   explicitly NOT allow-listed and must be replaced or
+#   feature-gated out of the default build.
+#
+# - Supply-chain reachability is restricted to crates.io. Git
+#   dependencies must be explicitly allow-listed here so a fork
+#   on GitHub cannot be pulled in via `[patch]` or a
+#   `git = "..."` dependency without a reviewable change to this
+#   file.
+#
+# - The `bans` block is the mechanical enforcement of the
+#   "wire-compat with the sn360-desktop-agent workspace" policy:
+#   the SNG agent and edge implementations must use the same
+#   cryptography (`ring`, `ed25519-dalek`), the same TLS stack
+#   (`rustls`, not OpenSSL), and the same serde-msgpack codec.
+#   The bans below block obviously inappropriate alternatives so
+#   a future contributor cannot quietly swap in a non-permissive
+#   crypto crate, an OpenSSL-FFI dependency, or a
+#   non-rustls TLS implementation.
+#
+# Run locally with:
+#
+#     cargo install --locked cargo-deny
+#     cargo deny check licenses
+#     cargo deny check bans
+#     cargo deny check advisories
+#     cargo deny check sources
+#
+# The `make lint-rust` target runs all four checks; the CI
+# workflow runs the same set on every PR.
+
+# ---------------------------------------------------------------------------
+# Graph
+# ---------------------------------------------------------------------------
+# Check every target the SNG workspace builds for so a
+# non-permissive licence cannot hide behind a `cfg(target_os = "...")`
+# gate. Mirrors the platform support matrix in `PROPOSAL.md` §4.2
+# (Edge VM Linux x86_64/aarch64; Endpoint Linux/macOS/Windows
+# x86_64 + macOS aarch64).
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+all-features = true
+
+# ---------------------------------------------------------------------------
+# Licences
+# ---------------------------------------------------------------------------
+# Allow-list. Any third-party dependency whose effective licence
+# expression is NOT in this list fails the build. `LicenseRef-Proprietary`
+# covers SNG's own workspace crates.
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+    "OpenSSL",
+    "BSL-1.0",
+    "LicenseRef-Proprietary",
+]
+
+# `ring` ships under a triple-license that pre-dates SPDX
+# canonicalisation; clarify the expression so cargo-deny does
+# not refuse a crate the rest of the Rust ecosystem also uses.
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 },
+]
+
+# ---------------------------------------------------------------------------
+# Bans
+# ---------------------------------------------------------------------------
+# Bans encode "wire-compat with sn360-desktop-agent" + "no
+# OpenSSL-FFI build" policy. Multiple-versions is a warn, not
+# deny, because transitively duplicated minor versions (e.g.
+# `rand_core` 0.6 + 0.7) are common in the early-Phase-2 graph
+# and surfacing them as build errors blocks unrelated work.
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+deny = [
+    # OpenSSL FFI is barred. The agent uses `ring` (via `rustls`)
+    # for all crypto. An OpenSSL build would (a) blow the
+    # sub-15MB resident-memory budget for `sng-agent`, (b)
+    # introduce a non-Rust toolchain dependency on the build
+    # host, and (c) duplicate the audit surface that `ring`
+    # already covers.
+    { name = "openssl", reason = "OpenSSL-FFI is barred; SNG uses `ring` via `rustls` for all crypto (see PROPOSAL.md §4.1, ARCHITECTURE.md §5.2)." },
+    { name = "openssl-sys", reason = "OpenSSL-FFI is barred; see `openssl` ban above." },
+    { name = "native-tls", reason = "`native-tls` pulls a platform OpenSSL on Linux; SNG mandates `rustls` (see PROPOSAL.md §4.1)." },
+
+    # Async-std is barred; the workspace standardises on Tokio.
+    # Mixing runtimes pulls the executor into the binary twice
+    # and complicates the supervisor / drain plumbing in
+    # `sng-core::lifecycle`.
+    { name = "async-std", reason = "SNG standardises on Tokio (see Cargo.toml comment on `tokio` workspace dep)." },
+]
+
+# ---------------------------------------------------------------------------
+# Advisories
+# ---------------------------------------------------------------------------
+# RustSec advisory enforcement. Yanked crates are warned, not
+# denied, so a transient yank does not break the build —
+# advisories are denied by default (no ignore list).
+[advisories]
+version = 2
+yanked = "warn"
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+# Restrict crate sources to crates.io. Git dependencies must be
+# explicitly allow-listed here.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

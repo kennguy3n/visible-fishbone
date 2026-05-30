@@ -1,0 +1,55 @@
+[package]
+name = "sng-pal"
+description = "ShieldNet Gateway Platform Abstraction Layer (cross-platform OS hooks)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Compile in the in-memory keystore (`InMemoryKeyStore`). The
+# struct lives in this crate so tests across the workspace can
+# share a single non-secure keystore for fixtures, but it must
+# NEVER be linked into a production binary — production builds
+# bind to the per-OS secure element backend (TPM 2.0 / Secure
+# Enclave / kernel keyring). Gating behind this opt-in feature
+# is what enforces that invariant.
+dev-keystore = []
+
+[dependencies]
+sng-core = { workspace = true }
+async-trait = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+ipnet = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# libc is needed for the few BSD syscalls that don't have a
+# higher-level wrapper on macOS (sysctl + IOKit shape probing).
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
