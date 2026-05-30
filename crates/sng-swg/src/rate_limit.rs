@@ -47,13 +47,25 @@ impl Clock for SystemClock {
     fn now(&self) -> Duration {
         // `Instant` is monotonic but has no Duration accessor
         // across instances; we convert to a Duration using the
-        // wall clock difference from the process-start anchor.
-        // The anchor is initialised once on first call so all
-        // subsequent calls share the same reference point.
-        thread_local! {
-            static ANCHOR: Instant = Instant::now();
-        }
-        ANCHOR.with(Instant::elapsed)
+        // wall clock difference from a single process-wide anchor.
+        //
+        // The anchor MUST be process-global (not thread-local):
+        // the rate-limiter buckets are shared across every tokio
+        // worker thread via `Arc<Mutex<HashMap>>`, and
+        // `bucket.last_refill` is stored as a `Duration` from this
+        // anchor's epoch. A `thread_local!` anchor would give each
+        // worker its own Instant initialised at a different
+        // wall-clock time, so the elapsed-time math
+        // (`now.checked_sub(bucket.last_refill)`) would use
+        // incompatible epochs across threads — either under-
+        // refilling (thread started later → smaller now() →
+        // checked_sub falls back to zero, tokens never refill) or
+        // over-refilling (thread started earlier → inflated
+        // elapsed → extra tokens beyond capacity). `LazyLock`
+        // gives us one Instant for the whole process, initialised
+        // on the first call from any thread.
+        static ANCHOR: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+        ANCHOR.elapsed()
     }
 }
 
@@ -421,5 +433,51 @@ mod tests {
         let t = wall_clock_unix_secs();
         assert!(t > 1_500_000_000, "wall_clock too low: {t}");
         assert!(t < 7_200_000_000, "wall_clock too high: {t}");
+    }
+
+    #[test]
+    fn system_clock_anchor_is_process_global_not_per_thread() {
+        // Regression test for the cross-thread refill bug:
+        // `SystemClock::now()` must return values from a single
+        // monotonically-increasing epoch shared by every thread.
+        // If the anchor were `thread_local!`, a newly-spawned
+        // thread would initialise its own Instant later than the
+        // process anchor, so its `now()` would return a SMALLER
+        // Duration than a thread that had already initialised —
+        // and the rate-limiter's `last_refill` math (which stores
+        // a Duration from one thread and subtracts a Duration
+        // observed on another) would silently under-refill the
+        // bucket. The fix is `std::sync::LazyLock<Instant>`; this
+        // test pins that.
+        let clock = SystemClock;
+        // Anchor the process-global Instant on this thread first
+        // so subsequent threads can only return larger values.
+        let t0 = clock.now();
+        // Spin up a few worker threads — each observes the same
+        // shared anchor. With a thread-local anchor each thread
+        // would start near zero; with the shared anchor each
+        // thread sees at least `t0`.
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let h = std::thread::spawn(|| SystemClock.now());
+            handles.push(h);
+        }
+        // Give the workers a tiny window so their observed
+        // Duration is strictly greater than `t0`.
+        std::thread::sleep(Duration::from_millis(10));
+        let t_final = clock.now();
+        assert!(t_final >= t0, "anchor went backwards on same thread");
+        for (i, h) in handles.into_iter().enumerate() {
+            let t_worker = h.join().expect("thread join");
+            // The worker must see the SAME process anchor — its
+            // `now()` cannot be smaller than `t0` (which was
+            // observed before the worker spawned).
+            assert!(
+                t_worker >= t0,
+                "worker {i} observed {t_worker:?} < t0 {t0:?} \
+                 — the SystemClock anchor is per-thread, which \
+                 would cause cross-thread rate-limit refill bugs",
+            );
+        }
     }
 }

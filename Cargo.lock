@@ -1624,7 +1624,6 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "hex",
- "once_cell",
  "parking_lot",
  "pretty_assertions",
  "serde",

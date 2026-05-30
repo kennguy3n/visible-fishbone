@@ -464,13 +464,14 @@ impl EnvoyProcess for MockEnvoy {
     async fn validate_config(&self, config_path: &Path) -> Result<(), SwgError> {
         let mut g = self.inner.lock();
         g.validated.push(config_path.to_path_buf());
+        // Clone the scripted error so the same value is returned
+        // on every call. `SwgError: Clone` (see error.rs) makes
+        // this exhaustive across every variant — a future variant
+        // added to the taxonomy doesn't silently drop to `Ok(())`
+        // the way a per-variant match did before.
         match &g.validate_result {
-            // We carry an explicit clone so tests scripting a
-            // failure return the same value on every call.
-            Some(SwgError::ConfigValidate(s)) => Err(SwgError::ConfigValidate(s.clone())),
-            Some(SwgError::Process(s)) => Err(SwgError::Process(s.clone())),
-            Some(SwgError::Config(s)) => Err(SwgError::Config(s.clone())),
-            Some(_) | None => Ok(()),
+            Some(err) => Err(err.clone()),
+            None => Ok(()),
         }
     }
 
@@ -562,6 +563,50 @@ mod tests {
         match err {
             SwgError::ConfigValidate(msg) => assert_eq!(msg, "bad yaml"),
             other => panic!("expected ConfigValidate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_config_reproduces_every_swg_error_variant() {
+        // Regression test for the per-variant match arm bug:
+        // `with_validate_failure` previously matched only three
+        // variants explicitly (ConfigValidate, Process, Config)
+        // and silently dropped every other variant to `Ok(())`.
+        // A test that scripted `Io("disk full")` would see the
+        // mock accept the config — masking the failure the test
+        // was trying to assert. The fix is for the mock to
+        // `.clone()` whatever scripted error it was handed, which
+        // covers every variant exhaustively (the type system
+        // enforces it because `SwgError: Clone`). Enumerate one
+        // case per discriminant so a future variant addition
+        // forces the test author to drop it in here.
+        let cases: Vec<SwgError> = vec![
+            SwgError::Io("disk full".into()),
+            SwgError::Process("envoy died".into()),
+            SwgError::Config("bad render".into()),
+            SwgError::ConfigValidate("bad yaml".into()),
+            SwgError::CategoryBundleSignatureInvalid,
+            SwgError::CategoryBundleUnknownKey("kid-3".into()),
+            SwgError::CategoryBundleStale {
+                incoming: 4,
+                current: 7,
+            },
+            SwgError::CategoryBundleBodyDecode("trailing bytes".into()),
+            SwgError::ExtAuthzDecode("missing url".into()),
+        ];
+        for scripted in cases {
+            let label = format!("{scripted:?}");
+            let m = MockEnvoy::new().with_validate_failure(scripted.clone());
+            let outcome = m.validate_config(Path::new("/tmp/envoy.yaml")).await;
+            let err = match outcome {
+                Ok(()) => panic!("variant must surface as error rather than Ok(()): {label}"),
+                Err(e) => e,
+            };
+            // The reproduced error must match the variant the
+            // test scripted — Debug-formatted comparison keeps
+            // the assertion exhaustive across discriminants and
+            // their payloads without naming every variant arm.
+            assert_eq!(format!("{err:?}"), label);
         }
     }
 

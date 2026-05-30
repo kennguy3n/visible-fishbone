@@ -11,7 +11,14 @@ use sng_core::error::ErrorCode;
 use thiserror::Error;
 
 /// All failures the SWG subsystem can return.
-#[derive(Debug, Error)]
+///
+/// Implements `Clone` so the `MockEnvoy` (and any other test
+/// fixture that scripts a SwgError outcome) can reproduce the
+/// same error on every call without needing per-variant
+/// match arms. All variants carry owned data (no
+/// `std::io::Error`, no file handles, no socket addresses) so
+/// `Clone` is a cheap structural copy.
+#[derive(Clone, Debug, Error)]
 pub enum SwgError {
     /// Generic IO failure (file read, pipe write, process spawn).
     #[error("io error: {0}")]

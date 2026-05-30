@@ -55,9 +55,12 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 
-# Deterministic time + monotonic clocks for the rate limiter and
-# the malware verdict cache TTL.
-once_cell = { workspace = true }
+# Note: the rate limiter's `SystemClock` anchor uses
+# `std::sync::LazyLock<Instant>` (stabilised in Rust 1.80) so we
+# do not need `once_cell` for the monotonic-clock epoch. If a
+# future site needs a `Lazy<T>` for a type that can't be inlined
+# behind a `LazyLock` (e.g. a closure that closes over runtime
+# state), add `once_cell = { workspace = true }` back here.
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt", "macros", "io-util", "sync", "fs", "net"] }
