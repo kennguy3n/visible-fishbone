@@ -219,3 +219,70 @@ func TestQualifiedTable_LiteralWriter(t *testing.T) {
 		t.Errorf("qualifiedTable: want `sng_telemetry`, got %s", q)
 	}
 }
+
+// TestWriter_DroppedRowsCounterSurfacesViaStats pins the
+// observability contract for the new partial-batch-drop
+// behaviour: flushOnce skips individual rows whose Append() the
+// driver rejects (rather than losing the whole batch as the
+// previous behaviour did), and the per-row drops accumulate into
+// Writer.droppedRows which surfaces in Stats().DroppedRows for
+// dashboards / alerting. The counter is sticky across flushes so
+// a sustained non-zero increment rate signals schema / producer
+// drift; a single one-off drop on a malformed envelope is
+// expected noise. Exercises the counter via direct mutation
+// (mirroring TestWriter_StatsResetsConsecutiveOnSuccess) because
+// flushOnce requires a real driver.Conn.
+func TestWriter_DroppedRowsCounterSurfacesViaStats(t *testing.T) {
+	t.Parallel()
+	w := &Writer{pending: make([]schema.Envelope, 0)}
+	if got := w.Stats().DroppedRows; got != 0 {
+		t.Fatalf("fresh writer: DroppedRows want 0, got %d", got)
+	}
+	// First flush: 2 rows dropped out of a batch of 10, the
+	// other 8 sent successfully (we record both the drop count
+	// and the flushed count).
+	w.mu.Lock()
+	w.droppedRows += 2
+	w.flushed += 8
+	w.consecutiveErrors = 0
+	w.mu.Unlock()
+	s := w.Stats()
+	if s.DroppedRows != 2 {
+		t.Errorf("after partial-drop flush: DroppedRows want 2, got %d", s.DroppedRows)
+	}
+	if s.Flushed != 8 {
+		t.Errorf("after partial-drop flush: Flushed want 8, got %d", s.Flushed)
+	}
+	// Second flush: 0 drops, all 10 rows succeed. DroppedRows
+	// is sticky (cumulative), Flushed accumulates.
+	w.mu.Lock()
+	w.flushed += 10
+	w.consecutiveErrors = 0
+	w.mu.Unlock()
+	s = w.Stats()
+	if s.DroppedRows != 2 {
+		t.Errorf("after clean flush: DroppedRows must be sticky, want 2, got %d", s.DroppedRows)
+	}
+	if s.Flushed != 18 {
+		t.Errorf("after clean flush: Flushed want 18, got %d", s.Flushed)
+	}
+	// Third flush: every row in the batch was rejected — the
+	// flushOnce path also increments flushErrors and
+	// consecutiveErrors on the all-rejected case, because no
+	// rows reached the wire.
+	w.mu.Lock()
+	w.droppedRows += 5
+	w.flushErrors++
+	w.consecutiveErrors++
+	w.mu.Unlock()
+	s = w.Stats()
+	if s.DroppedRows != 7 {
+		t.Errorf("after all-rejected flush: DroppedRows want 7, got %d", s.DroppedRows)
+	}
+	if s.FlushErrors != 1 {
+		t.Errorf("after all-rejected flush: FlushErrors want 1, got %d", s.FlushErrors)
+	}
+	if s.ConsecutiveErrors != 1 {
+		t.Errorf("after all-rejected flush: ConsecutiveErrors want 1, got %d", s.ConsecutiveErrors)
+	}
+}

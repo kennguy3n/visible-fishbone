@@ -200,11 +200,21 @@ type Writer struct {
 	// Counters guarded by mu; reads happen via Stats which also
 	// takes the mutex. Keeping these as plain ints under the mu
 	// means a Stats call gets a coherent snapshot rather than
-	// the torn (pending, flushed, flushErrors, consecutiveErrors)
-	// tuple atomic counters would produce.
+	// the torn (pending, flushed, flushErrors, consecutiveErrors,
+	// droppedRows) tuple atomic counters would produce.
 	flushed           uint64
 	flushErrors       uint64
 	consecutiveErrors uint64
+	// droppedRows counts individual envelopes that flushOnce
+	// could not Append to the prepared batch (e.g. a value
+	// rejected by the driver as a type-mismatch). The flushOnce
+	// path skips a bad row and keeps Appending the rest, so a
+	// single corrupted envelope no longer takes the whole batch
+	// down with it. This counter is the durability budget that
+	// the operator sees in Stats / dashboards; the slog.Warn at
+	// the drop site carries the per-row context (event id,
+	// tenant id, traffic class, error) for forensic root-cause.
+	droppedRows uint64
 }
 
 // New connects to ClickHouse and returns a Writer.
@@ -447,6 +457,17 @@ type Stats struct {
 	Flushed           uint64
 	FlushErrors       uint64
 	ConsecutiveErrors uint64
+	// DroppedRows is the cumulative count of envelopes that
+	// were skipped by flushOnce because the ClickHouse driver
+	// rejected the Append call (typically a row-level
+	// type-mismatch). A non-zero value indicates partial-batch
+	// loss — the offending row was dropped, the rest of the
+	// batch was sent normally. Operators should alert on a
+	// sustained non-zero rate (it suggests a schema / producer
+	// drift) while a transient blip on a malformed envelope is
+	// expected. Per-row context for every drop is in the
+	// structured logs at WARN level.
+	DroppedRows uint64
 }
 
 // Stats returns a snapshot of writer counters.
@@ -458,6 +479,7 @@ func (w *Writer) Stats() Stats {
 		Flushed:           w.flushed,
 		FlushErrors:       w.flushErrors,
 		ConsecutiveErrors: w.consecutiveErrors,
+		DroppedRows:       w.droppedRows,
 	}
 }
 
@@ -534,6 +556,17 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 		w.mu.Unlock()
 		return fmt.Errorf("clickhouse: prepare batch: %w", err)
 	}
+	// Per-flush drop counter. A row that the driver rejects on
+	// Append (type mismatch, oversized value, etc.) is skipped
+	// individually instead of taking the whole batch down with
+	// it — the previous behaviour returned early on the first
+	// Append error, silently losing the remaining rows that had
+	// already been swapped out of w.pending. firstAppendErr is
+	// surfaced to the caller / logger only as supplementary
+	// context; the partial Send below is the authoritative
+	// success / failure signal for the rest of the batch.
+	var dropped int
+	var firstAppendErr error
 	for i := range batch {
 		env := batch[i]
 		var siteID *uuid.UUID
@@ -570,24 +603,69 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 			env.BytesOut,
 			string(env.Payload),
 		); err != nil {
-			w.mu.Lock()
-			w.flushErrors++
-			w.consecutiveErrors++
-			w.mu.Unlock()
-			return fmt.Errorf("clickhouse: append row: %w", err)
+			// Drop just this row, keep the rest of the batch.
+			// Returning early here would silently lose every
+			// envelope after this one because the batch slice
+			// has already been swapped out of w.pending; the
+			// previous behaviour traded "don't half-commit" for
+			// "lose 100 rows because the 1st was malformed",
+			// which is the wrong trade-off given S3 archival is
+			// the durable record of truth. Surface the per-row
+			// context at WARN so an operator can chase the
+			// producer that emitted a bad envelope.
+			dropped++
+			if firstAppendErr == nil {
+				firstAppendErr = err
+			}
+			w.logger.Warn("clickhouse: drop row on append error",
+				slog.String("event_id", env.EventID.String()),
+				slog.String("tenant_id", env.TenantID.String()),
+				slog.String("event_class", string(env.EventClass)),
+				slog.String("traffic_class", trafficClass),
+				slog.Any("error", err))
+			continue
 		}
+	}
+	if dropped == len(batch) {
+		// Every row was rejected by Append — there is nothing
+		// to send. Account the drops + the failure under the
+		// mutex and bail out with the first Append error as the
+		// caller-visible reason. We do NOT call prepared.Send()
+		// in this branch because the clickhouse-go driver's
+		// Send on an empty prepared batch is
+		// implementation-defined; sending 0 rows is wasted
+		// network and risks driver-specific surprises.
+		w.mu.Lock()
+		w.droppedRows += uint64(dropped)
+		w.flushErrors++
+		w.consecutiveErrors++
+		w.mu.Unlock()
+		return fmt.Errorf("clickhouse: append row (all %d rows rejected): %w", dropped, firstAppendErr)
 	}
 	if err := prepared.Send(); err != nil {
 		w.mu.Lock()
+		w.droppedRows += uint64(dropped)
 		w.flushErrors++
 		w.consecutiveErrors++
 		w.mu.Unlock()
 		return fmt.Errorf("clickhouse: send batch: %w", err)
 	}
 	w.mu.Lock()
-	w.flushed += uint64(len(batch))
+	w.flushed += uint64(len(batch) - dropped)
+	w.droppedRows += uint64(dropped)
 	w.consecutiveErrors = 0
 	w.mu.Unlock()
+	if firstAppendErr != nil {
+		// At least one row was dropped, but the rest of the
+		// batch was sent successfully. Surface the partial
+		// failure to the caller / loop logger so the WARN line
+		// in the flush goroutine includes the per-flush drop
+		// count; a `dropped` > 0 doesn't fail the flush.
+		w.logger.Warn("clickhouse: flush completed with dropped rows",
+			slog.Int("dropped", dropped),
+			slog.Int("sent", len(batch)-dropped),
+			slog.Any("first_error", firstAppendErr))
+	}
 	return nil
 }
 
