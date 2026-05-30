@@ -24,8 +24,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::Mutex as AsyncMutex;
+use tracing::{debug, warn};
 
 use crate::error::IpsError;
 
@@ -311,13 +313,43 @@ impl SuricataProcess for ShellSuricata {
             // `-D` is omitted; we rely on that so this tokio
             // `Child` handle stays bound to the actual Suricata
             // process for its full lifetime.
+            //
+            // stdout/stderr are piped so we can forward them to
+            // tracing — Suricata writes its EVE alerts to the
+            // configured JSON file but reserves stdout / stderr
+            // for boot diagnostics, fatal load errors, and
+            // segfault dumps that are the only signal an
+            // operator has when `suricata -T` validation passed
+            // but the live process refuses to come up. Stdio::null
+            // would lose those entirely; leaving the pipes alive
+            // *without* a reader would deadlock Suricata once the
+            // ~64KiB kernel pipe buffer fills (write(2) blocks on
+            // a full pipe), causing the process to appear alive
+            // to kill(0) while silently freezing the packet path
+            // — the symptom would surface much later as a
+            // "no-EVE-progress" Degraded health transition with
+            // no diagnostic context. Spawning drainer tasks
+            // below keeps the pipes empty and lifts the lines
+            // into structured logs.
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|e| IpsError::Process(format!("spawn suricata: {e}")))?;
+        // Hand stdout / stderr off to dedicated drainer tasks.
+        // `Child::stdout` / `Child::stderr` are `Option<Owned>`
+        // handles that we `take()` so the tasks own them
+        // outright — once `kill_on_drop(true)` fires the pipes
+        // close and the drainers exit on EOF, so we do not need
+        // to track or join them explicitly.
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(drain_child_stdout(stdout));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(drain_child_stderr(stderr));
+        }
         state.child = Some(child);
         state.status = ProcessStatus::Running;
         Ok(())
@@ -583,6 +615,60 @@ fn parse_cpu_ms_from_proc_stat(contents: &str) -> u64 {
     // libc, and a wrong constant here only affects the
     // telemetry magnitude, not correctness.
     ticks.saturating_mul(10)
+}
+
+/// Drain Suricata's stdout into structured logs.
+///
+/// Stdout under foreground mode carries the engine's startup
+/// banner (rules-loaded counts, AF_PACKET socket bringup, plugin
+/// initialisation) and any unstructured operator messages.
+/// None of it is alert telemetry — EVE alerts go to the
+/// configured JSON file — so we forward at `debug` level so the
+/// volume doesn't drown out the manager's own info-level
+/// lifecycle messages, while still being available with
+/// `RUST_LOG=sng_ips=debug` when triaging a stuck start.
+///
+/// The task exits cleanly when stdout closes (process exit or
+/// pipe drop triggered by `kill_on_drop`). Any read error is
+/// logged once at `warn` and the task ends — we deliberately do
+/// not retry, because a broken pipe means the child is gone and
+/// the manager's `is_alive()` check will pick that up.
+async fn drain_child_stdout(stdout: ChildStdout) {
+    let mut lines = BufReader::new(stdout).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => debug!(target: "sng_ips::suricata", "suricata stdout: {line}"),
+            Ok(None) => break,
+            Err(e) => {
+                warn!(target: "sng_ips::suricata", "suricata stdout drain error: {e}");
+                break;
+            }
+        }
+    }
+}
+
+/// Drain Suricata's stderr into structured logs.
+///
+/// Stderr is the channel Suricata uses for the diagnostics an
+/// operator actually needs to debug a non-starting agent: rule
+/// load failures, AF_PACKET socket errors, malformed YAML
+/// fatals, and segfault dumps. We forward at `warn` because
+/// every line here is by Suricata's convention something the
+/// engine considered worth printing outside the EVE pipeline,
+/// and losing them to `Stdio::null()` would make a failing
+/// `start()` undebuggable from logs alone.
+async fn drain_child_stderr(stderr: ChildStderr) {
+    let mut lines = BufReader::new(stderr).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => warn!(target: "sng_ips::suricata", "suricata stderr: {line}"),
+            Ok(None) => break,
+            Err(e) => {
+                warn!(target: "sng_ips::suricata", "suricata stderr drain error: {e}");
+                break;
+            }
+        }
+    }
 }
 
 /// In-process backend used by tests. Records every call made
@@ -1057,5 +1143,67 @@ mod tests {
         // shutdown-everything path).
         s.stop().await.unwrap();
         assert_eq!(s.status().await, ProcessStatus::Stopped);
+    }
+
+    /// Regression test for the stdout/stderr deadlock: when a
+    /// child process writes more than the OS pipe buffer
+    /// (~64KiB on Linux) and the parent never reads, the next
+    /// write(2) on the child side blocks indefinitely and the
+    /// engine appears alive to `kill(0)` while silently
+    /// freezing the packet path.
+    ///
+    /// This exercises the drainer wiring by spawning `/bin/sh`
+    /// — the only no-extra-dep way to generate a controllable
+    /// amount of stdout — and verifying the child both runs to
+    /// completion within a tight bounded time AND that the
+    /// supervised `Child` handle survives concurrent draining.
+    /// We can't run the real Suricata binary in CI, but the
+    /// `start()` codepath spawns the binary the same way, so
+    /// covering the drainer side here is enough to prevent the
+    /// regression in the production path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_with_high_stdout_volume_does_not_deadlock() {
+        use std::time::Duration as StdDuration;
+        use tokio::time::timeout;
+
+        // Spew ~200KiB to stdout and ~50KiB to stderr — both
+        // well past the kernel's 64KiB default pipe buffer, so
+        // an undrained Stdio::piped() handle would deadlock the
+        // child here.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(
+                "for i in $(seq 1 2000); do \
+                   echo 'stdout line padding padding padding padding padding padding padding padding padding'; \
+                 done; \
+                 for i in $(seq 1 500); do \
+                   echo 'stderr line padding padding padding padding padding padding padding padding padding' 1>&2; \
+                 done",
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = cmd
+            .spawn()
+            .expect("/bin/sh must be available on a unix CI runner");
+        // Wire the drainers exactly as `ShellSuricata::start`
+        // does. Without these spawns the `wait()` below would
+        // hang indefinitely on a stuck SIGPIPE-less child.
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(drain_child_stdout(stdout));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(drain_child_stderr(stderr));
+        }
+        let status = timeout(StdDuration::from_secs(10), child.wait())
+            .await
+            .expect("child must exit within the test timeout — drainer regression?")
+            .expect("child.wait() must succeed");
+        assert!(
+            status.success(),
+            "spew script should exit cleanly, got: {status:?}"
+        );
     }
 }

@@ -405,8 +405,28 @@ fn validate_yaml_key(s: &str, field: &str) -> Result<(), IpsError> {
 }
 
 fn validate_path(p: &std::path::Path, field: &str) -> Result<(), IpsError> {
-    let s = p.to_string_lossy();
-    validate_plain(&s, field)
+    // Fail-closed on non-UTF-8 paths. `Path::to_string_lossy`
+    // replaces invalid UTF-8 byte sequences with U+FFFD, which
+    // would then sail past `validate_plain`'s `c.is_control()` /
+    // `"` / `\` checks even though the byte sequence Suricata
+    // actually sees on the YAML line could contain those
+    // characters. The agent ships on Linux where paths are
+    // bytes (not guaranteed UTF-8), so a maliciously crafted
+    // SuricataInputConfig with a path of e.g.
+    // `0xff" \n redirect: /tmp/evil.yaml \n#` would slip past
+    // `validate_plain` after the lossy conversion. Using
+    // `Path::to_str` returns `None` on non-UTF-8 input and we
+    // reject the bundle outright — same trust-boundary posture
+    // as the rule-id / parser-name validators above.
+    let s = p.to_str().ok_or_else(|| {
+        IpsError::Config(format!(
+            "{field} {} is not valid UTF-8; Suricata's YAML loader \
+             requires UTF-8 paths and non-UTF-8 byte sequences cannot \
+             be safely emitted into the rendered config",
+            p.display()
+        ))
+    })?;
+    validate_plain(s, field)
 }
 
 fn parent_or_root(path: &std::path::Path) -> &str {
@@ -584,6 +604,50 @@ mod tests {
         input.rule_file_path = PathBuf::from(r"/etc/suricata\bad");
         let err = ConfigGenerator::new().render(&input).unwrap_err();
         assert!(matches!(err, IpsError::Config(_)));
+    }
+
+    /// Regression: `validate_path` used to call
+    /// `Path::to_string_lossy()` which substitutes U+FFFD for
+    /// any non-UTF-8 byte. A crafted path containing `0xff"`
+    /// would become `"\u{fffd}\""` after the lossy conversion,
+    /// at which point `validate_plain` no longer sees the `"`
+    /// in its original position because Rust counts the
+    /// replacement as one `char`. Switching to `Path::to_str`
+    /// fails closed: a non-UTF-8 path is rejected with a
+    /// `Config` error before any rendering happens.
+    #[test]
+    #[cfg(unix)]
+    fn render_rejects_non_utf8_path_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        // Construct a `PathBuf` whose raw bytes are NOT valid
+        // UTF-8 (lone continuation byte 0x80 in a position that
+        // can't start a multi-byte sequence). `Path::to_str`
+        // returns `None`; `Path::to_string_lossy` returned a
+        // U+FFFD-substituted string that previously sailed past
+        // the charset check.
+        let mut bytes = b"/etc/suricata-".to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b".rules");
+        let bad: PathBuf = OsString::from_vec(bytes).into();
+
+        let mut input = baseline();
+        input.rule_file_path = bad;
+        let err = ConfigGenerator::new().render(&input).unwrap_err();
+        match err {
+            IpsError::Config(m) => {
+                assert!(
+                    m.contains("rule_file_path"),
+                    "error must name the offending field: {m}"
+                );
+                assert!(
+                    m.contains("not valid UTF-8"),
+                    "error must explain the failure mode so an operator can fix the bundle: {m}"
+                );
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
     }
 
     #[test]
