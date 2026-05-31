@@ -177,6 +177,30 @@ func TestZTNAEvent_Validate(t *testing.T) {
 	}
 }
 
+// TestZTNAEvent_IsLegacy pins the consumer-side helper for detecting
+// pre-PR-30 envelopes. Empty `Reason` is a valid wire shape during a
+// rolling deploy (the Rust-side `#[serde(default)]` decodes a missing
+// `rsn` key to `""`), so dashboards bucketing by `Reason` need a
+// canonical way to identify legacy envelopes and fall back to the
+// binary `Decision` field. Without this helper, consumers would have
+// to inline a magic empty-string check at every callsite.
+func TestZTNAEvent_IsLegacy(t *testing.T) {
+	t.Parallel()
+	legacy := schema.ZTNAEvent{AppID: "app", Decision: "allow", Reason: ""}
+	if !legacy.IsLegacy() {
+		t.Errorf("empty Reason must be reported as legacy")
+	}
+	current := schema.ZTNAEvent{AppID: "app", Decision: "allow", Reason: "allow"}
+	if current.IsLegacy() {
+		t.Errorf("populated Reason must NOT be reported as legacy")
+	}
+	// Even a deny-bucket label should be reported as non-legacy.
+	deny := schema.ZTNAEvent{AppID: "app", Decision: "deny", Reason: "mfa_stale"}
+	if deny.IsLegacy() {
+		t.Errorf("populated Reason on a deny must NOT be reported as legacy")
+	}
+}
+
 func TestSDWANEvent_Validate(t *testing.T) {
 	t.Parallel()
 	if err := (schema.SDWANEvent{PathID: ""}.Validate()); !errors.Is(err, schema.ErrInvalid) {
