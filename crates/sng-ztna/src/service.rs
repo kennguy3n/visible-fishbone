@@ -40,8 +40,8 @@ use crate::device::{DeviceTrustProvider, StaticDeviceTrustProvider};
 use crate::error::ZtnaError;
 use crate::identity::{IdentityProvider, StaticIdentityProvider};
 use crate::policy::{
-    EvaluationInputs, ZtnaDecision, ZtnaDecisionReason, ZtnaPolicy, ZtnaPolicyHolder,
-    evaluate_policy,
+    EvaluationInputs, PostureResult, ZtnaDecision, ZtnaDecisionReason, ZtnaPolicy,
+    ZtnaPolicyHolder, evaluate_policy,
 };
 use crate::request::AccessRequest;
 use crate::stats::ZtnaStats;
@@ -356,7 +356,7 @@ impl ZtnaService {
                 &request.device_id,
                 &request.app_id,
                 ZtnaDecisionReason::UnknownApp,
-                false,
+                PostureResult::NotEvaluated,
                 false,
             );
             return Err(ZtnaError::UnknownApp {
@@ -370,7 +370,7 @@ impl ZtnaService {
                 &request.device_id,
                 &request.app_id,
                 ZtnaDecisionReason::DeviceNotEnrolled,
-                false,
+                PostureResult::NotEvaluated,
                 false,
             );
             return Err(ZtnaError::DeviceNotEnrolled {
@@ -389,7 +389,7 @@ impl ZtnaService {
                 &request.device_id,
                 &request.app_id,
                 ZtnaDecisionReason::IdentityNotFound,
-                false,
+                PostureResult::NotEvaluated,
                 false,
             );
             return Err(ZtnaError::IdentityNotFound {
@@ -447,10 +447,10 @@ impl ZtnaService {
         device_id: &str,
         app_id: &str,
         reason: ZtnaDecisionReason,
-        posture_pass: bool,
+        posture_result: PostureResult,
         identity_verified: bool,
     ) {
-        let decision = ZtnaDecision::deny(reason, posture_pass);
+        let decision = ZtnaDecision::deny(reason, posture_result);
         self.stats.record_decision(&decision.reason);
         let event = build_ztna_event(device_id, app_id, &decision, identity_verified);
         if self
@@ -485,12 +485,17 @@ fn build_ztna_event(
     ZtnaEvent {
         device_id: device_id.to_string(),
         app_id: app_id.to_string(),
-        posture_result: if decision.posture_pass {
-            "pass"
-        } else {
-            "fail"
-        }
-        .to_string(),
+        // The wire alphabet is the tri-state
+        // `"pass" | "fail" | "not_evaluated"`; see
+        // [`crate::policy::PostureResult`] for the
+        // contract. Older consumers that only know
+        // `"pass"` / `"fail"` will see
+        // `"not_evaluated"` as an unknown bucket
+        // — safer than the previous behavior of
+        // stamping `"fail"` on every non-posture deny,
+        // which made the field literally lie about
+        // whether the device's posture had failed.
+        posture_result: decision.posture_result.as_str().to_string(),
         decision: if decision.allow { "allow" } else { "deny" }.to_string(),
         reason: decision.reason.as_str().to_string(),
         identity_verified,
@@ -599,7 +604,7 @@ mod tests {
             .expect("allow path returns Ok");
         assert!(d.allow);
         assert_eq!(d.reason, ZtnaDecisionReason::Allow);
-        assert!(d.posture_pass);
+        assert_eq!(d.posture_result, PostureResult::Pass);
         // One ZtnaEvent on the channel, identity verified,
         // posture pass.
         let evs = drain(&mut rx);
@@ -648,7 +653,12 @@ mod tests {
         // intentional.
         assert_eq!(ev.decision, "deny");
         assert_eq!(ev.reason, "unknown_app");
-        assert_eq!(ev.posture_result, "fail");
+        // UnknownApp short-circuits before the policy
+        // evaluator runs the posture check — the wire
+        // field correctly reflects "not evaluated"
+        // rather than "fail" (which would falsely
+        // suggest a device-posture issue).
+        assert_eq!(ev.posture_result, "not_evaluated");
         // identity_verified is false on the early-return
         // path because the orchestrator never reached the
         // identity provider.
@@ -819,9 +829,11 @@ mod tests {
         );
         let d = svc.evaluate(&req("wiki", "dev-1", "alice", now)).unwrap();
         assert_eq!(d.reason, ZtnaDecisionReason::DevicePostureInsufficient);
-        // posture_pass is false on this branch — that's
-        // the whole point of the bucket.
-        assert!(!d.posture_pass);
+        // Posture check ran and the device failed it
+        // — wire field reflects "fail" honestly here
+        // (contrast with the UnknownApp test above,
+        // where the field reflects "not_evaluated").
+        assert_eq!(d.posture_result, PostureResult::Fail);
         let evs = drain(&mut rx);
         let ev = ztna_event(&evs[0]);
         assert_eq!(ev.decision, "deny");
@@ -852,7 +864,7 @@ mod tests {
     #[test]
     fn decision_to_verdict_is_total() {
         let allow = ZtnaDecision::allow();
-        let deny = ZtnaDecision::deny(ZtnaDecisionReason::NotEntitled, false);
+        let deny = ZtnaDecision::deny(ZtnaDecisionReason::NotEntitled, PostureResult::NotEvaluated);
         assert_eq!(decision_to_verdict(&allow), Verdict::Allow);
         assert_eq!(decision_to_verdict(&deny), Verdict::Deny);
     }

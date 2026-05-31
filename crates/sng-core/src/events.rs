@@ -167,7 +167,16 @@ pub struct ZtnaEvent {
     /// Application id.
     #[serde(rename = "app")]
     pub app_id: String,
-    /// Posture result (`pass` / `fail`).
+    /// Posture-check result (`pass` / `fail` / `not_evaluated`).
+    /// Stamped by the `sng-ztna` brain from the
+    /// `sng_ztna::policy::PostureResult` tri-state enum;
+    /// see that type's wire-form doc for the full
+    /// alphabet rationale. The `not_evaluated` value is
+    /// emitted on denies that short-circuit before the
+    /// posture check runs (e.g. `unknown_app`,
+    /// `tenant_mismatch`, `not_entitled`, `mfa_stale`) so
+    /// dashboards can distinguish a posture failure from
+    /// a deny that never reached the posture check.
     #[serde(rename = "pst")]
     pub posture_result: String,
     /// Decision (`allow` / `deny`). Carries only the

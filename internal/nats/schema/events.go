@@ -153,9 +153,39 @@ func (i IPSEvent) Validate() error {
 // the allow/deny rollup. See the `IsLegacy` helper for the canonical
 // way to detect a pre-PR-30 envelope on the consumer side.
 type ZTNAEvent struct {
-	DeviceID         string `msgpack:"did"`
-	AppID            string `msgpack:"app"`
-	PostureResult    string `msgpack:"pst"` // pass|fail
+	DeviceID string `msgpack:"did"`
+	AppID    string `msgpack:"app"`
+	// PostureResult is the wire form of the tri-state
+	// posture-check outcome. Stable alphabet:
+	//
+	//   - "pass"          — posture check ran and the
+	//                       device satisfied the app's
+	//                       posture requirement.
+	//   - "fail"          — posture check ran and the
+	//                       device failed it (stale
+	//                       attestation OR requirement
+	//                       unsatisfied).
+	//   - "not_evaluated" — the decision short-circuited
+	//                       before the posture check ran
+	//                       (e.g. unknown_app,
+	//                       tenant_mismatch, not_entitled,
+	//                       mfa_stale).
+	//
+	// The "not_evaluated" value was added to honor the
+	// field's name — dashboards previously could not
+	// distinguish a deny caused by a posture failure from
+	// a deny that short-circuited before the posture
+	// check ran (both stamped "fail"). Old consumers that
+	// only know "pass" / "fail" will see "not_evaluated"
+	// as an unknown bucket, which is safer than the prior
+	// behavior of literally lying about whether the
+	// device's posture had failed.
+	//
+	// Mirrors the Rust-side
+	// `sng_ztna::policy::PostureResult` enum
+	// field-for-field; see that type's wire-form doc for
+	// the full rationale.
+	PostureResult    string `msgpack:"pst"` // pass|fail|not_evaluated
 	Decision         string `msgpack:"dec"` // allow|deny
 	Reason           string `msgpack:"rsn"` // detailed structured reason; see ZtnaDecisionReason in sng-ztna
 	IdentityVerified bool   `msgpack:"iv"`
