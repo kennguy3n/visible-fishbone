@@ -518,14 +518,33 @@ impl SdwanService {
         // — this is observability, not the verdict.
         let probe = decision.path_id.as_ref().and_then(|id| self.probes.get(id));
         // Update sticky cache on a path selection.
-        if let Some(path_id) = &decision.path_id {
-            let pinned_until_ms = request.now_ms.saturating_add(policy.sticky_window_ms);
-            self.sticky_insert(
-                request.flow_key.clone(),
-                path_id.clone(),
-                request.now_ms,
-                pinned_until_ms,
-            );
+        //
+        // Short-circuit when stickiness is disabled
+        // (`policy.sticky_window_ms == 0`). Without this
+        // guard, `sticky_insert` would still execute and
+        // write `pinned_until_ms = now_ms + 0 = now_ms`
+        // into the cache — an entry that's *already
+        // expired* by the time the next `sticky_lookup`
+        // runs (because `lookup` keeps entries whose
+        // `pinned_until_ms > now_ms`, and `T > T` is
+        // false). The entry has no functional effect on
+        // selection, but every insert still pays the
+        // mutex acquire + the eviction-sweep cost when
+        // we hit capacity. Skipping the insert wholesale
+        // is the only way to honour the
+        // `SdwanServiceConfig::sticky_cache_capacity`
+        // doc contract that promises this exact
+        // short-circuit on `sticky_window_ms == 0`.
+        if policy.sticky_window_ms > 0 {
+            if let Some(path_id) = &decision.path_id {
+                let pinned_until_ms = request.now_ms.saturating_add(policy.sticky_window_ms);
+                self.sticky_insert(
+                    request.flow_key.clone(),
+                    path_id.clone(),
+                    request.now_ms,
+                    pinned_until_ms,
+                );
+            }
         }
         // Build + emit telemetry event.
         let event = build_sdwan_event(&decision, probe.as_ref());
@@ -1045,6 +1064,91 @@ mod tests {
             svc.evictions() - evictions_before,
             1,
             "exactly one eviction should have been recorded (not the four-of-four wipe the bug would cause)"
+        );
+    }
+
+    /// Regression test for the doc/code mismatch
+    /// surfaced by Devin Review. The
+    /// [`SdwanServiceConfig::sticky_cache_capacity`] doc
+    /// claims `sticky_window_ms == 0` "short-circuits the
+    /// cache lookup at the entry to `finalise`", but the
+    /// pre-fix code still ran `sticky_insert` with
+    /// `pinned_until_ms = now_ms + 0 = now_ms` — an
+    /// already-expired entry that paid the mutex acquire
+    /// and the capacity-sweep cost on every evaluation.
+    /// This test pins the short-circuit so zero-window
+    /// policies never insert into the sticky cache.
+    #[test]
+    fn sticky_window_zero_skips_sticky_insert() {
+        let policy = SdwanPolicy {
+            sticky_window_ms: 0,
+            ..SdwanPolicy::default()
+        };
+        let (svc, _rx) = build(
+            policy,
+            vec![Path::new("mpls", [TrafficClass::Interactive])],
+            vec![(PathId::new("mpls"), PathProbe::new(10.0, 0.0, 0.0, NOW))],
+        );
+
+        // Hammer the service from many distinct flows.
+        // With a non-zero window, every evaluation
+        // inserts a sticky entry. With sticky_window_ms
+        // == 0, the doc promises a short-circuit, so the
+        // cache must remain empty no matter how many
+        // requests we process.
+        for i in 0..32 {
+            let flow = format!("flow-zero-{i}");
+            let d = svc.evaluate(&req(&flow, TrafficClass::Interactive, NOW));
+            assert_eq!(
+                d.path_id,
+                Some(PathId::new("mpls")),
+                "every selection should still pick mpls"
+            );
+            assert_eq!(
+                d.reason,
+                SteeringReason::Best,
+                "no sticky pin should ever fire (the cache is empty)"
+            );
+        }
+
+        // Cache size is 0. Pre-fix, this would be 32
+        // (one entry per flow_key, all with
+        // `pinned_until_ms = now_ms` and therefore
+        // expired-on-arrival on any lookup).
+        assert_eq!(
+            svc.sticky.lock().len(),
+            0,
+            "sticky_window_ms == 0 must short-circuit the insert wholesale; cache should be empty"
+        );
+        // And no evictions, because no inserts happened.
+        // Pre-fix, with 32 inserts at capacity 65_536 we
+        // wouldn't hit the sweep — but a deployment
+        // running with a tighter cap would have paid an
+        // eviction sweep on every flap. Confirm the
+        // counter is untouched here as the cleanest
+        // observable signal.
+        assert_eq!(svc.evictions(), 0);
+    }
+
+    /// Companion test: with a non-zero window, the cache
+    /// fills as expected — confirms the short-circuit
+    /// guard fires *only* on the zero case, not as a
+    /// silent disable of the feature.
+    #[test]
+    fn sticky_window_nonzero_still_populates_cache() {
+        let (svc, _rx) = build(
+            SdwanPolicy::default(),
+            vec![Path::new("mpls", [TrafficClass::Interactive])],
+            vec![(PathId::new("mpls"), PathProbe::new(10.0, 0.0, 0.0, NOW))],
+        );
+        for i in 0..5 {
+            let flow = format!("flow-nonzero-{i}");
+            let _ = svc.evaluate(&req(&flow, TrafficClass::Interactive, NOW));
+        }
+        assert_eq!(
+            svc.sticky.lock().len(),
+            5,
+            "non-zero window must populate the cache normally"
         );
     }
 
