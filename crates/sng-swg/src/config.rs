@@ -242,6 +242,23 @@ pub struct ListenerConfig {
 /// outlier detection, circuit breakers) writes their own
 /// Envoy bootstrap snippet via the supervisor's `extra_yaml`
 /// extension point (future work).
+///
+/// # `connect_timeout_ms` zero is rejected at render time
+///
+/// Envoy's protobuf `Duration` parser reads `0s` as "no
+/// timeout" on cluster `connect_timeout`. For a STATIC cluster
+/// (`endpoints` non-empty) a zero connect timeout means Envoy
+/// will wait *indefinitely* for the TCP connect to succeed,
+/// pinning the worker thread on a black-holed upstream. For an
+/// endpointless `dynamic_forward_proxy` cluster Envoy still
+/// honours `connect_timeout` on the per-request DNS-resolved
+/// upstream socket connect, so the same hang applies. This is
+/// the symmetric foot-gun to
+/// [`ListenerConfig::ext_authz_timeout_ms`] — a zero in either
+/// timeout slot is a configuration we never want to render to
+/// disk. [`render_envoy_yaml`] therefore rejects
+/// `connect_timeout_ms == 0` as [`SwgError::Config`] at install
+/// time, naming the offending cluster.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterConfig {
     pub name: String,
@@ -287,6 +304,26 @@ pub fn render_envoy_yaml(cfg: &EnvoyConfig) -> Result<String, SwgError> {
                  as \"disabled\"; sng-swg requires a positive timeout so the \
                  ext_authz hop preserves fail-closed deny on verdict-provider hangs",
                 l.name
+            )));
+        }
+    }
+    // Symmetric guard for cluster `connect_timeout`: Envoy reads
+    // `0s` here as "no timeout" on the upstream TCP connect
+    // (`dynamic_forward_proxy` clusters still honour this on the
+    // per-request DNS-resolved socket connect, so the carve-out
+    // for endpoint-less clusters does not apply). A zero would
+    // let a black-holed upstream pin the worker thread
+    // indefinitely on connect, defeating the whole point of
+    // having a connect-time budget. Reject at install time and
+    // name the offending cluster.
+    for c in &cfg.clusters {
+        if c.connect_timeout_ms == 0 {
+            return Err(SwgError::Config(format!(
+                "cluster {:?} has connect_timeout_ms = 0, which Envoy interprets \
+                 as \"no timeout\" on the upstream TCP connect; sng-swg requires \
+                 a positive connect timeout so a black-holed upstream cannot \
+                 pin worker threads indefinitely on connect",
+                c.name
             )));
         }
     }
@@ -1352,5 +1389,104 @@ mod tests {
             s.contains("                  timeout: 0.250s\n"),
             "legacy bundle must inherit the historical 250ms timeout; got:\n{s}",
         );
+    }
+
+    #[test]
+    fn render_rejects_zero_connect_timeout_as_symmetric_guard() {
+        // Symmetric foot-gun to `ext_authz_timeout_ms = 0`.
+        // Envoy's protobuf `Duration` parser reads `0s` on a
+        // cluster `connect_timeout` as "no timeout" on the
+        // upstream TCP connect. For a STATIC cluster a zero
+        // connect timeout means Envoy waits indefinitely for the
+        // upstream socket — a black-holed upstream pins the
+        // worker thread on connect with no operator-visible
+        // signal. The endpointless `dynamic_forward_proxy`
+        // cluster gets DNS-resolved per request, but Envoy still
+        // applies `connect_timeout` on the resolved socket
+        // connect, so the same hang applies. Reject at render
+        // time, naming the offending cluster.
+        let mut cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        // The minimal forward-proxy config puts the ext_authz
+        // cluster at index 0 and dynamic_forward_proxy at index 1
+        // — zero either and the guard must trip.
+        cfg.clusters[0].connect_timeout_ms = 0;
+        let err = render_envoy_yaml(&cfg).expect_err("zero connect timeout must reject");
+        match err {
+            SwgError::Config(msg) => {
+                assert!(
+                    msg.contains("connect_timeout_ms = 0"),
+                    "error must name the offending field; got: {msg}",
+                );
+                assert!(
+                    msg.contains("no timeout"),
+                    "error must explain the Envoy parse semantic; got: {msg}",
+                );
+                assert!(
+                    msg.contains("ext_authz"),
+                    "error must name the offending cluster; got: {msg}",
+                );
+            }
+            other => panic!("expected SwgError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_rejects_zero_connect_timeout_on_any_cluster_not_just_first() {
+        // Walk-all-clusters parity with the listener-side guard:
+        // a second cluster with a zero connect timeout must not
+        // slip through because the first cluster is sane.
+        let mut cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        // dynamic_forward_proxy is index 1 in the minimal config;
+        // zero it out so the first cluster passes the check and
+        // the second one trips it.
+        cfg.clusters[1].connect_timeout_ms = 0;
+        let err = render_envoy_yaml(&cfg).expect_err("zero on any cluster must reject");
+        match err {
+            SwgError::Config(msg) => {
+                // The offending cluster name must be in the
+                // error so an operator with a many-cluster
+                // bundle can find the typo.
+                assert!(
+                    msg.contains("dynamic_forward_proxy"),
+                    "error must name the second cluster as the offender; got: {msg}",
+                );
+            }
+            other => panic!("expected SwgError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_rejects_zero_connect_timeout_on_endpointless_cluster_too() {
+        // `dynamic_forward_proxy` is the canonical endpointless
+        // cluster shape (DNS resolved per request). Envoy still
+        // honours `connect_timeout` on the resolved upstream
+        // socket connect, so the foot-gun is identical to the
+        // STATIC cluster case. The carve-out a casual reader
+        // might assume ("zero is fine on endpointless clusters
+        // because Envoy resolves DNS itself") does NOT apply.
+        let cfg = EnvoyConfig {
+            listeners: Vec::new(),
+            clusters: vec![ClusterConfig {
+                name: "dynamic_forward_proxy".into(),
+                endpoints: Vec::new(),
+                connect_timeout_ms: 0,
+            }],
+            admin_port: DEFAULT_ADMIN_PORT,
+        };
+        let err =
+            render_envoy_yaml(&cfg).expect_err("zero on endpointless cluster must also reject");
+        match err {
+            SwgError::Config(msg) => {
+                assert!(
+                    msg.contains("connect_timeout_ms = 0"),
+                    "error must name the offending field; got: {msg}",
+                );
+                assert!(
+                    msg.contains("dynamic_forward_proxy"),
+                    "error must name the offending cluster; got: {msg}",
+                );
+            }
+            other => panic!("expected SwgError::Config, got {other:?}"),
+        }
     }
 }

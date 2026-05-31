@@ -216,6 +216,39 @@ impl EventSource for SwgEventSource {
     }
 }
 
+// Pin the [`sng_telemetry::EventSource`] supertrait bounds at the
+// struct definition site. The trait is `Send + Sync + 'static`;
+// the `impl EventSource for SwgEventSource` block above relies on
+// the compiler discharging those bounds on the concrete type, but
+// the failure mode is brittle — a future change that swaps the
+// internal channel for a `!Sync` receiver (e.g. a `Cell`, an `Rc`,
+// or a `tokio::sync::mpsc::Receiver` variant that loses `Sync`)
+// would surface as a confusing "the trait `EventSource` is not
+// implemented" diagnostic at every consumer site rather than a
+// clean message pointing at the struct field that broke the
+// invariant.
+//
+// The two `const _` blocks here are zero-runtime-cost compile-time
+// assertions that force the bound to be checked *at the struct
+// definition site*. Any future field change that breaks the
+// invariant fails the build right here, with a diagnostic that
+// names `SwgEventSource` directly.
+const _: fn() = || {
+    fn assert_event_source_bounds<T: Send + Sync + 'static>() {}
+    assert_event_source_bounds::<SwgEventSource>();
+};
+const _: fn() = || {
+    // Mirror the assertion on the sink half too. `Clone + Send +
+    // Sync` is what every caller assumes today (the manager
+    // hands clones to per-request handler tasks across worker
+    // threads), but nothing enforces it at the type level until
+    // a consumer requires it. Pin it here so a future change to
+    // the sink's internal channel type cannot silently lose the
+    // bound.
+    fn assert_sink_bounds<T: Clone + Send + Sync + 'static>() {}
+    assert_sink_bounds::<SwgEventSink>();
+};
+
 /// Trait the manager threads through the handler so the test
 /// suite can swap a recording emitter in. The production wiring
 /// uses [`SwgEventSink`] directly; the trait keeps the handler
@@ -362,5 +395,26 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].http.verdict, Verdict::Deny);
         assert_eq!(events[1].http.verdict, Verdict::Allow);
+    }
+
+    #[test]
+    fn swg_event_source_can_be_boxed_as_dyn_event_source() {
+        // Belt-and-braces complement to the `const _:` static
+        // assertions above. The `sng_telemetry::Pipeline` wires
+        // each producer in as a `Box<dyn EventSource>` (the
+        // pipeline holds a heterogeneous collection of sources
+        // and polls them by trait), so we must be able to *erase*
+        // the concrete type through the trait. A static assertion
+        // on `T: Send + Sync + 'static` is necessary but not
+        // sufficient — coercion to `dyn EventSource` requires
+        // object safety to hold for both the trait itself and the
+        // concrete type's bounds. Exercise the coercion in a real
+        // expression so any future regression (e.g. someone adds
+        // a generic method to `EventSource` that breaks object
+        // safety, or a field is added that breaks the supertrait
+        // bound) trips this test rather than only blowing up at a
+        // distant pipeline-construction site.
+        let (_sink, source) = SwgEventSource::channel(8);
+        let _erased: Box<dyn EventSource> = Box::new(source);
     }
 }
