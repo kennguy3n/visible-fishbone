@@ -125,40 +125,107 @@ fn canonicalize_suffix(raw: &str) -> String {
 }
 
 impl BypassList {
-    /// Build a bypass list from a sequence of entries. The
-    /// constructor first normalises every suffix to canonical
-    /// form (ASCII-lowercase, `*.` prefix stripped — see
-    /// [`canonicalize_suffix`]) so the dedup and operator-override
-    /// paths agree with the runtime evaluator (which delegates to
-    /// [`sni_suffix_match`], a case-insensitive and `*.`-prefix-
-    /// agnostic matcher). It then sorts entries by suffix length
-    /// descending so the longest-matching entry wins; ties are
-    /// broken by the suffix string compared lexicographically so
-    /// the order is fully deterministic.
+    /// Build a bypass list from a sequence of entries.
+    ///
+    /// The constructor performs three normalisation steps so the
+    /// stored representation is matcher-equivalent regardless of
+    /// the input form:
+    ///
+    /// 1. Every suffix is canonicalised to lowercase with the
+    ///    leading `*.` stripped (see [`canonicalize_suffix`]).
+    ///    The runtime evaluator delegates to [`sni_suffix_match`],
+    ///    which is case-insensitive and `*.`-prefix-agnostic;
+    ///    storing a single canonical byte string is what makes
+    ///    the merge / dedup paths agree with the matcher.
+    /// 2. Entries with the same canonicalised suffix are collapsed
+    ///    — the **last** occurrence in the input vector wins.
+    ///    Two identical (suffix, category) pairs collapse to one;
+    ///    a same-suffix / different-category pair collapses to
+    ///    the later one. This is the universal
+    ///    "operator-override" rule the bypass list applies
+    ///    everywhere: callers append the override-source entries
+    ///    after the source they want to override, and the
+    ///    constructor honours that ordering. [`with_extensions`]
+    ///    relies on this contract — it appends operator entries
+    ///    after the existing defaults and then calls
+    ///    [`Self::new`] to resolve.
+    /// 3. The final vector is sorted by suffix length descending
+    ///    so the runtime walk hits the longest / most-specific
+    ///    suffix first. Ties (same length) are broken by the
+    ///    suffix string compared lexicographically so the order
+    ///    is fully deterministic.
+    ///
+    /// # Same-suffix conflict resolution
+    ///
+    /// The previous implementation only deduped exact
+    /// (suffix, category) pairs (`Vec::dedup` keys off
+    /// [`PartialEq`] which compares both fields). Two entries
+    /// that shared a canonical suffix but differed in category
+    /// both survived; at evaluate time the first-in-walk would
+    /// win, which — because the secondary sort is lexicographic
+    /// on the suffix string and two identical strings tie — was
+    /// the *first-in-input* one. That contract differed from
+    /// [`Self::with_extensions`] (which is explicit about
+    /// last-wins for the operator-override use case) and was a
+    /// maintenance hazard: a future direct caller of [`Self::new`]
+    /// that assumed the obvious "operator override appended last"
+    /// semantics would silently get the opposite. Unifying both
+    /// constructors on last-wins eliminates the surface area.
     #[must_use]
     pub fn new(mut entries: Vec<BypassEntry>) -> Self {
-        // Canonicalise to lowercase + `*.`-stripped form before
-        // sort + dedup so an operator-authored `Chase.COM` or
-        // `*.chase.com` collides with the industry-default
-        // `chase.com` entry on merge — otherwise the runtime
-        // matcher (case-insensitive, `*.`-prefix-agnostic) would
-        // see both, the first-in-walk-order would win, and the
-        // operator's intended override could silently be lost.
+        // Canonicalise to lowercase + `*.`-stripped form first so
+        // an operator-authored `Chase.COM` or `*.chase.com`
+        // collides with the industry-default `chase.com` on the
+        // adjacency sort below. Without this the runtime matcher
+        // (case-insensitive, `*.`-prefix-agnostic) would see both
+        // and the operator's intended override could silently be
+        // lost.
         for e in &mut entries {
             e.suffix = canonicalize_suffix(&e.suffix);
         }
-        entries.sort_by(|a, b| {
+        // Stable sort by suffix string so same-suffix entries are
+        // adjacent in input order. The `Vec::sort_by`
+        // documentation pins this as a stable sort.
+        //
+        // SORT-STABILITY INVARIANT — DO NOT change `sort_by` to
+        // `sort_unstable_by`: the last-wins contract above
+        // depends on `Vec::sort_by` being a *stable* sort
+        // (documented at <https://doc.rust-lang.org/std/vec/struct.Vec.html#method.sort_by>).
+        // With a stable sort, two entries that compare equal
+        // (same suffix) keep their relative input order, so the
+        // later one lands *after* the earlier one in the sorted
+        // vector and the merge loop below replaces the earlier
+        // entry with it. An unstable sort would be free to swap
+        // them, silently flipping the merge so the *first*-in-
+        // input wins — catastrophic for `with_extensions`'s
+        // operator-override contract, which calls `Self::new` to
+        // do the resolution.
+        entries.sort_by(|a, b| a.suffix.cmp(&b.suffix));
+        // Walk adjacent same-suffix entries and keep the last one
+        // (operator override / later-in-input wins). Identical
+        // (suffix, category) pairs collapse trivially — the second
+        // replaces the first with byte-identical contents — so the
+        // simple-dedup case is still covered without a separate
+        // `Vec::dedup` call.
+        let mut merged: Vec<BypassEntry> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Some(last) = merged.last_mut() {
+                if last.suffix == entry.suffix {
+                    *last = entry;
+                    continue;
+                }
+            }
+            merged.push(entry);
+        }
+        // Final sort: longest-suffix first so the evaluate-time
+        // walk finds the most-specific match first.
+        merged.sort_by(|a, b| {
             b.suffix
                 .len()
                 .cmp(&a.suffix.len())
                 .then_with(|| a.suffix.cmp(&b.suffix))
         });
-        // Dedup identical (suffix, category) pairs. Two
-        // operator-authored bundles could overlap when the
-        // industry default for healthcare is left in and an
-        // operator pushes their own healthcare extension.
-        entries.dedup();
-        Self { entries }
+        Self { entries: merged }
     }
 
     /// Construct a bypass list from the baked-in industry
@@ -175,60 +242,37 @@ impl BypassList {
     /// default override the default's category — this is how an
     /// operator demotes a default category they don't recognise
     /// in their environment.
+    ///
+    /// The override resolution is delegated to [`Self::new`],
+    /// which applies last-wins on canonical-suffix collisions.
+    /// Operator entries are appended after the existing defaults
+    /// in the combined input vector, so the stable adjacency sort
+    /// inside [`Self::new`] places the operator entry after the
+    /// matching default and the merge loop keeps the operator's
+    /// category. Pinned by
+    /// `operator_extension_overrides_default_category` and
+    /// `with_extensions_normalizes_wildcard_prefix_against_default`.
     #[must_use]
-    pub fn with_extensions(mut self, mut extra: Vec<BypassEntry>) -> Self {
-        // Canonicalise extra entries' suffixes (lowercase +
-        // `*.`-strip) before the merge so an operator-authored
-        // `Chase.COM` or `*.chase.com` collides with the industry
-        // default `chase.com` on the merge step. The runtime
-        // matcher is case-insensitive and `*.`-prefix-agnostic;
-        // the merge path must agree, otherwise the merged list
-        // carries semantically-equivalent duplicate entries and
-        // operator overrides that only differ from a default by
-        // `*.` prefix silently fail to take effect.
-        for e in &mut extra {
-            e.suffix = canonicalize_suffix(&e.suffix);
-        }
-        // Rebuild from the union, then re-sort. Operator entries
-        // appear last in the input vector so on dedup they win
-        // the category for an exact-suffix collision.
+    pub fn with_extensions(mut self, extra: Vec<BypassEntry>) -> Self {
+        // Build the combined input vector with defaults first and
+        // operator entries second. The override semantics depend
+        // entirely on this ordering — [`Self::new`] resolves
+        // same-suffix collisions with last-wins, so anything
+        // appearing later in the combined vector overrides what
+        // came earlier.
         let mut combined = std::mem::take(&mut self.entries);
         combined.extend(extra);
-        // Stable sort by suffix so two entries with the same
-        // suffix appear adjacent; the dedup logic below keeps
-        // the *last* one (operator override) when categories
-        // differ.
-        //
-        // SORT-STABILITY INVARIANT — DO NOT change `sort_by` to
-        // `sort_unstable_by`: the operator-override contract
-        // depends on `Vec::sort_by` being a *stable* sort
-        // (documented at <https://doc.rust-lang.org/std/vec/struct.Vec.html#method.sort_by>).
-        // With a stable sort, two entries that compare equal
-        // (same suffix) keep their relative input order, so the
-        // operator entry — which `extend`'s above appended after
-        // the defaults — lands *after* the matching default in
-        // the sorted vector. The dedup loop below replaces the
-        // first occurrence with the next equal-suffix entry, so
-        // the operator's category wins. An unstable sort would
-        // be free to swap them, silently flipping the merge so
-        // the *default* category overrides the operator —
-        // catastrophic for the only reason `with_extensions`
-        // exists. Pinned by
-        // `operator_extension_overrides_default_category`.
-        combined.sort_by(|a, b| a.suffix.cmp(&b.suffix));
-        let mut merged: Vec<BypassEntry> = Vec::with_capacity(combined.len());
-        for entry in combined {
-            if let Some(last) = merged.last_mut() {
-                if last.suffix == entry.suffix {
-                    // Operator override wins — replace the
-                    // default's category.
-                    *last = entry;
-                    continue;
-                }
-            }
-            merged.push(entry);
-        }
-        Self::new(merged)
+        // [`Self::new`] canonicalises (so input-form variants like
+        // `Chase.COM` or `*.chase.com` collide with the
+        // industry-default `chase.com` on the merge step),
+        // resolves same-suffix collisions with last-wins, and
+        // sorts by length-desc for the evaluate-time walk. Letting
+        // it do the work means there is exactly one definition of
+        // "same-suffix collision" in this module, eliminating the
+        // historical asymmetry where the direct [`Self::new`]
+        // path used first-wins and the merge path here used
+        // last-wins.
+        Self::new(combined)
     }
 
     /// Number of bypass entries. Mostly for telemetry / debug
@@ -530,6 +574,53 @@ mod tests {
             entry("bank.com", "tls.finance"),
         ]);
         assert_eq!(bl.len(), 1);
+    }
+
+    #[test]
+    fn new_last_wins_on_same_suffix_different_category() {
+        // The constructor unifies same-suffix conflict resolution
+        // on last-wins so a direct caller of `BypassList::new`
+        // gets the same semantics as `with_extensions`: append the
+        // override-source entry after the source to override, and
+        // it wins. The previous first-wins behaviour was a
+        // maintenance hazard — a direct caller assuming the
+        // "obvious" last-wins (operator override appended last)
+        // semantics would silently get the opposite, and the rule
+        // diverged from `with_extensions` for no good reason.
+        //
+        // Pin the contract so a future refactor that swaps the
+        // adjacency sort for `sort_unstable_by` or that reverts to
+        // the old dedup-by-(suffix,category) immediately fails this
+        // test rather than silently flipping merge semantics on
+        // every direct caller of `Self::new`.
+        let bl = BypassList::new(vec![
+            entry("bank.com", "tls.finance"),
+            entry("bank.com", "tls.tenant-override"),
+        ]);
+        assert_eq!(bl.len(), 1, "same-suffix entries must collapse");
+        let only = bl.iter().next().unwrap();
+        assert_eq!(
+            only.category, "tls.tenant-override",
+            "last-in-input must win on same-suffix conflict"
+        );
+    }
+
+    #[test]
+    fn new_last_wins_across_input_form_variants() {
+        // Defence-in-depth: the last-wins contract must hold
+        // across input forms that the canonicaliser folds together
+        // (case, `*.` prefix). An operator that authors
+        // `*.Bank.COM` with their own category after a default
+        // `bank.com` must end up with their category — both
+        // canonicalisation and last-wins must agree.
+        let bl = BypassList::new(vec![
+            entry("bank.com", "tls.finance"),
+            entry("*.Bank.COM", "tls.tenant-override"),
+        ]);
+        assert_eq!(bl.len(), 1);
+        let only = bl.iter().next().unwrap();
+        assert_eq!(only.suffix, "bank.com");
+        assert_eq!(only.category, "tls.tenant-override");
     }
 
     #[test]
