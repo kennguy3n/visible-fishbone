@@ -1622,7 +1622,6 @@ name = "sng-sdwan"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "async-trait",
  "parking_lot",
  "pretty_assertions",
  "serde",
@@ -1674,6 +1673,33 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "sng-updater"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "base64",
+ "bytes",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "parking_lot",
+ "pretty_assertions",
+ "rand",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2",
+ "sng-core",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
