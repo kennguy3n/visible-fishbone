@@ -207,38 +207,62 @@ impl SdwanPolicy {
     /// True iff `latency_ms` is at or below the policy's
     /// latency floor.
     ///
-    /// Fail-closed on `NaN`: a NaN metric is always
+    /// Fail-closed on any non-finite input (`NaN`,
+    /// `+∞`, `-∞`): a non-finite metric is always
     /// classified as out-of-floor, regardless of whether
     /// the floor is configured. This matches the broader
-    /// brain's contract that NaN-metric paths cannot win
-    /// (see also [`crate::score::score_path`] which
-    /// collapses to `ScoreBreakdown::worst()` on NaN).
+    /// brain's contract that non-finite-metric paths
+    /// cannot win (see also [`crate::score::score_path`]
+    /// which collapses to `ScoreBreakdown::worst()` on a
+    /// non-finite metric, and `probe_is_usable` which
+    /// drops the candidate before scoring entirely).
     /// `None` floor with a finite metric → always true.
+    ///
+    /// ## Self-defending API
+    ///
+    /// Today the data-path callers
+    /// ([`crate::service::SdwanService::evaluate`] +
+    /// [`crate::service::SdwanService::try_sticky`]) gate
+    /// on `probe_is_usable` *before* invoking these
+    /// floor methods, so a non-finite metric never
+    /// reaches them in practice. The non-finite guard
+    /// here is defense-in-depth: it removes an implicit
+    /// pre-condition from the public API so a future
+    /// consumer (a new brain composing
+    /// [`SdwanPolicy`] directly, a fuzz harness, an
+    /// adapter that hasn't yet pre-filtered) cannot
+    /// accidentally classify a non-finite-metric path
+    /// as in-budget purely because no floor was
+    /// configured. The change is behaviorally neutral
+    /// on every existing call site because
+    /// `probe_is_usable` already enforces the same
+    /// invariant upstream — deletion of the upstream
+    /// guard would not silently widen the floor.
     #[must_use]
     pub fn within_latency_floor(&self, latency_ms: f32) -> bool {
-        if latency_ms.is_nan() {
+        if !latency_ms.is_finite() {
             return false;
         }
         self.max_latency_ms.is_none_or(|cap| latency_ms <= cap)
     }
 
     /// True iff `loss_pct` is at or below the policy's
-    /// loss floor. Fail-closed on `NaN` — see
-    /// [`Self::within_latency_floor`].
+    /// loss floor. Fail-closed on any non-finite input
+    /// — see [`Self::within_latency_floor`].
     #[must_use]
     pub fn within_loss_floor(&self, loss_pct: f32) -> bool {
-        if loss_pct.is_nan() {
+        if !loss_pct.is_finite() {
             return false;
         }
         self.max_loss_pct.is_none_or(|cap| loss_pct <= cap)
     }
 
     /// True iff `jitter_ms` is at or below the policy's
-    /// jitter floor. Fail-closed on `NaN` — see
-    /// [`Self::within_latency_floor`].
+    /// jitter floor. Fail-closed on any non-finite input
+    /// — see [`Self::within_latency_floor`].
     #[must_use]
     pub fn within_jitter_floor(&self, jitter_ms: f32) -> bool {
-        if jitter_ms.is_nan() {
+        if !jitter_ms.is_finite() {
             return false;
         }
         self.max_jitter_ms.is_none_or(|cap| jitter_ms <= cap)
@@ -454,6 +478,41 @@ mod tests {
         assert!(!with_floors.within_latency_floor(f32::NAN));
         assert!(!with_floors.within_loss_floor(f32::NAN));
         assert!(!with_floors.within_jitter_floor(f32::NAN));
+    }
+
+    #[test]
+    fn within_floors_fail_closed_on_infinity_with_or_without_floor() {
+        // Same defense-in-depth rationale as the NaN
+        // case, extended to ±INFINITY. The hot-path
+        // callers (evaluate + try_sticky) already gate
+        // on probe_is_usable() which rejects all
+        // non-finite metrics, so this guard does not
+        // change observable behavior today — it only
+        // removes an implicit precondition from the
+        // public API so a future direct consumer of
+        // SdwanPolicy can't accidentally classify a
+        // non-finite metric as in-budget purely because
+        // no floor was configured.
+        let no_floors = SdwanPolicy::default();
+        assert!(!no_floors.within_latency_floor(f32::INFINITY));
+        assert!(!no_floors.within_loss_floor(f32::INFINITY));
+        assert!(!no_floors.within_jitter_floor(f32::INFINITY));
+        assert!(!no_floors.within_latency_floor(f32::NEG_INFINITY));
+        assert!(!no_floors.within_loss_floor(f32::NEG_INFINITY));
+        assert!(!no_floors.within_jitter_floor(f32::NEG_INFINITY));
+
+        let with_floors = SdwanPolicy {
+            max_latency_ms: Some(50.0),
+            max_loss_pct: Some(2.0),
+            max_jitter_ms: Some(10.0),
+            ..SdwanPolicy::default()
+        };
+        assert!(!with_floors.within_latency_floor(f32::INFINITY));
+        assert!(!with_floors.within_loss_floor(f32::INFINITY));
+        assert!(!with_floors.within_jitter_floor(f32::INFINITY));
+        assert!(!with_floors.within_latency_floor(f32::NEG_INFINITY));
+        assert!(!with_floors.within_loss_floor(f32::NEG_INFINITY));
+        assert!(!with_floors.within_jitter_floor(f32::NEG_INFINITY));
     }
 
     #[test]
