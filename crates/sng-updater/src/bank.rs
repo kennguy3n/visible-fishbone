@@ -266,6 +266,21 @@ pub trait BankWriter: Send + Sync {
     /// Mark the named slot as `Committed` with the supplied
     /// version. Called by the orchestrator after a successful
     /// post-swap health check.
+    ///
+    /// **Idempotency contract**: implementations MUST treat a
+    /// call against a slot already in `Committed { version }`
+    /// (matching the supplied `version`) as a successful
+    /// no-op. The orchestrator's post-commit bookkeeping
+    /// retry loop (see [`crate::service::UpdaterService`])
+    /// re-runs the `mark_committed` / `set_active` pair on
+    /// every transient failure, so a non-idempotent
+    /// implementation that errors on "already Committed" would
+    /// turn a recoverable transient failure on `set_active`
+    /// into a hard divergence on the next retry. The retry
+    /// loop is the only way the orchestrator recovers from a
+    /// flaky metadata partition write without surfacing
+    /// [`UpdaterError::PostCommitLayoutSync`] and poisoning
+    /// the engine.
     async fn mark_committed(&self, slot: Bank, version: ImageVersion) -> Result<(), UpdaterError>;
 
     /// Update the metadata-partition record of which slot is
@@ -276,6 +291,16 @@ pub trait BankWriter: Send + Sync {
     /// metadata-partition rewrite alongside the bootloader
     /// config update; the in-memory writer just bumps the
     /// in-process layout.
+    ///
+    /// **Idempotency contract**: implementations MUST treat a
+    /// call against a slot already recorded as active as a
+    /// successful no-op. The orchestrator's post-commit
+    /// bookkeeping retry loop re-runs this call together with
+    /// [`Self::mark_committed`] on every transient failure of
+    /// either; a non-idempotent implementation that errors on
+    /// "already active" would turn a recoverable transient
+    /// failure on `mark_committed` into a hard divergence on
+    /// the next retry.
     async fn set_active(&self, slot: Bank) -> Result<(), UpdaterError>;
 }
 
