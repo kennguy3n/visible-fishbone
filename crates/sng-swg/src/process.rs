@@ -367,15 +367,28 @@ impl EnvoyProcess for ShellEnvoy {
         let Some(child) = state.child.as_mut() else {
             return false;
         };
-        match child.try_wait() {
-            // try_wait Ok(None) means the child is still alive.
-            Ok(None) => true,
-            Ok(Some(_)) => {
-                state.status = ProcessStatus::Crashed;
-                state.child = None;
-                false
-            }
-            Err(_) => false,
+        // `Ok(None)` from `try_wait` is the only outcome that
+        // means "child is still alive and reapable". The two
+        // terminal outcomes — `Ok(Some(_))` (the child exited
+        // and `try_wait` reaped it) and `Err(_)` (a platform
+        // condition like ECHILD where the child handle is no
+        // longer ours to reap, typically because another thread
+        // already reaped it) — both indicate the child is no
+        // longer alive *and* no longer attached. Both must
+        // therefore set status to `Crashed` and clear the child
+        // handle so a subsequent [`Self::status`] call agrees
+        // with [`Self::is_alive`]. Pre-fix, the `Err` arm fell
+        // through with status untouched, so a health probe that
+        // read both fields would render an internally
+        // inconsistent `ManagerHealth` snapshot (is_alive=false
+        // but status=Running). Merging the two terminal arms
+        // closes the gap.
+        if let Ok(None) = child.try_wait() {
+            true
+        } else {
+            state.status = ProcessStatus::Crashed;
+            state.child = None;
+            false
         }
     }
 

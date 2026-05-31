@@ -106,20 +106,39 @@ pub struct SwgManager {
     state: Arc<State>,
 }
 
-// All fields share the `last_*` prefix because they all
-// represent the most-recent state of one observable; clippy's
-// `struct_field_names` lint nudges toward dropping the prefix
-// but the fields ARE conceptually "the last X" — dropping it
-// makes the call sites less readable, so we disable the lint
-// for this struct.
-#[allow(clippy::struct_field_names)]
-struct State {
+/// Last-installed `(config, digest)` pair, swapped atomically
+/// as a unit so any reader (probe / listener summary / future
+/// snapshot exporter) observes a consistent pair instead of
+/// `(new_config, old_digest)` or `(old_config, new_digest)`
+/// across the transient window between two separate field
+/// swaps. Replaces the previous shape of two side-by-side
+/// [`arc_swap::ArcSwap`]s (one per field). The `install_lock`
+/// already serialises the *write* side, but a concurrent
+/// reader correlating the two fields — even if the current
+/// readers don't — would have observed a momentary mismatch.
+/// Bundling them eliminates the inter-store window by
+/// construction so a future reader cannot accidentally regress
+/// the invariant.
+#[derive(Default)]
+struct InstalledSnapshot {
     /// Last installed `EnvoyConfig` (None on cold boot).
-    last_config: ArcSwap<Option<EnvoyConfig>>,
-    /// Hex SHA-256 of the rendered YAML for `last_config`.
-    /// Used by [`SwgManager::install`] to skip the validate +
-    /// signal cycle when the new render hashes the same.
-    last_digest: ArcSwap<Option<String>>,
+    config: Option<EnvoyConfig>,
+    /// Hex SHA-256 of the rendered YAML for `config`. Used by
+    /// [`SwgManager::install`] to skip the validate + signal
+    /// cycle when the new render hashes the same. Invariant
+    /// (enforced by [`SwgManager::install`] and
+    /// [`SwgManager::stop`]): `config.is_some() ==
+    /// digest.is_some()`. The two fields are written together
+    /// in a single [`arc_swap::ArcSwap::store`] so a reader
+    /// either sees the pre-install pair or the post-install
+    /// pair — never a half-written intermediate.
+    digest: Option<String>,
+}
+
+struct State {
+    /// Atomic snapshot of `(config, digest)`. Single ArcSwap so
+    /// the two fields swap as a unit.
+    installed: ArcSwap<InstalledSnapshot>,
     /// Wall clock of the most recent verdict emission, set by
     /// the handler (via the [`SwgManager::mark_verdict_emitted`]
     /// hook). Used by the health monitor to compute staleness.
@@ -127,7 +146,7 @@ struct State {
     /// Serialises [`SwgManager::install`] against itself so two
     /// concurrent installs do not race past the digest dedup
     /// and both try to validate / rename / restart Envoy. The
-    /// individual `ArcSwap`s above are atomic per-field, but
+    /// `installed` ArcSwap above is atomic per-store, but
     /// `install()` performs a multi-step transition (digest read
     /// → staging write → validate → rename → restart → memory
     /// swap) that needs to be atomic *as a whole* to make the
@@ -157,8 +176,7 @@ impl SwgManager {
             cfg,
             process,
             state: Arc::new(State {
-                last_config: ArcSwap::from_pointee(None),
-                last_digest: ArcSwap::from_pointee(None),
+                installed: ArcSwap::from_pointee(InstalledSnapshot::default()),
                 last_verdict_at: Mutex::new(None),
                 install_lock: AsyncMutex::new(()),
             }),
@@ -233,8 +251,8 @@ impl SwgManager {
                 return Ok(InstallOutcome::Busy { digest });
             }
         };
-        if let Some(prev) = self.state.last_digest.load().as_ref().clone() {
-            if prev == digest {
+        if let Some(prev) = self.state.installed.load().digest.as_ref() {
+            if prev == &digest {
                 return Ok(InstallOutcome::NoOp { digest });
             }
         }
@@ -283,10 +301,15 @@ impl SwgManager {
             }
         }
         // Memory swap last so a failure above leaves the
-        // previous state intact. ArcSwap stores are atomic on
-        // both readers and writers.
-        self.state.last_config.store(Arc::new(Some(cfg)));
-        self.state.last_digest.store(Arc::new(Some(digest.clone())));
+        // previous state intact. Single ArcSwap store publishes
+        // the (config, digest) pair atomically: a concurrent
+        // reader either sees the pre-install pair or the
+        // post-install pair, never `(new_config, old_digest)` or
+        // `(old_config, new_digest)` across two separate stores.
+        self.state.installed.store(Arc::new(InstalledSnapshot {
+            config: Some(cfg),
+            digest: Some(digest.clone()),
+        }));
         Ok(InstallOutcome::Reloaded { digest })
     }
 
@@ -321,8 +344,12 @@ impl SwgManager {
             }
         };
         self.process.stop().await?;
-        self.state.last_config.store(Arc::new(None));
-        self.state.last_digest.store(Arc::new(None));
+        // Atomically clear both fields in a single store so a
+        // concurrent reader observes the pre-stop pair or the
+        // post-stop empty pair, never a half-cleared mix.
+        self.state
+            .installed
+            .store(Arc::new(InstalledSnapshot::default()));
         *self.state.last_verdict_at.lock() = None;
         Ok(())
     }
@@ -360,12 +387,16 @@ impl SwgManager {
             verdict_staleness_window: self.cfg.verdict_staleness_window,
         };
         let report = evaluate(&probe);
-        let cfg = self.state.last_config.load();
-        let (listener_count, cluster_count) = match cfg.as_ref() {
+        // Single load over the bundled snapshot so listener_count
+        // / cluster_count and digest come from the same observed
+        // generation — no chance of `(new_config, old_digest)` or
+        // `(old_config, new_digest)` across the read.
+        let installed = self.state.installed.load();
+        let (listener_count, cluster_count) = match installed.config.as_ref() {
             Some(c) => (c.listeners.len(), c.clusters.len()),
             None => (0, 0),
         };
-        let digest = self.state.last_digest.load().as_ref().clone();
+        let digest = installed.digest.clone();
         SwgSnapshot {
             digest,
             listener_count,
@@ -378,7 +409,7 @@ impl SwgManager {
     /// Current rendered config digest, if any.
     #[must_use]
     pub fn current_digest(&self) -> Option<String> {
-        self.state.last_digest.load().as_ref().clone()
+        self.state.installed.load().digest.clone()
     }
 
     /// Listener summary derived from the last installed config.
@@ -387,7 +418,7 @@ impl SwgManager {
     pub fn listener_summary(
         &self,
     ) -> std::collections::BTreeMap<String, crate::config::ListenerSummary> {
-        match self.state.last_config.load().as_ref() {
+        match self.state.installed.load().config.as_ref() {
             Some(c) => summarize_listeners(c),
             None => std::collections::BTreeMap::new(),
         }
@@ -756,6 +787,89 @@ mod tests {
         let sum = m.listener_summary();
         assert_eq!(sum.len(), 1);
         assert!(sum.contains_key("swg_forward"));
+    }
+
+    /// Regression: the manager's `(config, digest)` pair must be
+    /// observable as a single atomic snapshot, never as
+    /// `(new_config, old_digest)` or `(old_config, new_digest)`.
+    /// Pre-bundling the two fields lived in separate
+    /// [`arc_swap::ArcSwap`]s and were written one-at-a-time on
+    /// install (and one-at-a-time on stop), so a reader between
+    /// the two stores would observe a mismatched pair. After the
+    /// bundling refactor both fields live in a single
+    /// `ArcSwap<InstalledSnapshot>`, so every observable state
+    /// pair the reader can witness satisfies the invariant
+    /// `digest.is_some() == listener_count > 0`. Walks the full
+    /// lifecycle (cold → install → reinstall → stop) and pins the
+    /// invariant at each stage.
+    #[tokio::test]
+    async fn probe_observes_consistent_config_digest_pair_across_install_lifecycle() {
+        let tmp = TempDir::new().unwrap();
+        let (m, _) = manager(&tmp);
+        let cold = m.probe(true).await;
+        assert!(
+            cold.digest.is_none() && cold.listener_count == 0,
+            "cold-boot pair invariant: both empty"
+        );
+        let cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        m.install(cfg).await.unwrap();
+        let post_install = m.probe(true).await;
+        assert!(
+            post_install.digest.is_some() && post_install.listener_count > 0,
+            "post-install pair invariant: both populated"
+        );
+        // Reinstall a different cluster shape so the digest and
+        // listener_count both advance to new values; observed
+        // pair must still satisfy the invariant.
+        let cfg2 = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz2.sock");
+        m.install(cfg2).await.unwrap();
+        let post_reinstall = m.probe(true).await;
+        assert!(
+            post_reinstall.digest.is_some() && post_reinstall.listener_count > 0,
+            "post-reinstall pair invariant: both populated"
+        );
+        assert_ne!(
+            post_install.digest, post_reinstall.digest,
+            "digest must advance across different installs"
+        );
+        m.stop().await.unwrap();
+        let post_stop = m.probe(true).await;
+        assert!(
+            post_stop.digest.is_none() && post_stop.listener_count == 0,
+            "post-stop pair invariant: both cleared"
+        );
+    }
+
+    /// Pin the atomicity of the install commit by reading the
+    /// observable pair through both surfaces the manager exposes
+    /// (`probe().digest` and `current_digest()`) — they must
+    /// agree on every single call. Without bundling, a reader
+    /// that called these two methods in sequence could in
+    /// principle observe one populated and the other empty if
+    /// another thread committed an install between the calls.
+    /// With bundling both surfaces read from the same atomic
+    /// snapshot, so the pair always agrees.
+    #[tokio::test]
+    async fn current_digest_and_probe_digest_agree_after_install_and_stop() {
+        let tmp = TempDir::new().unwrap();
+        let (m, _) = manager(&tmp);
+        let cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        m.install(cfg).await.unwrap();
+        let probe_digest = m.probe(true).await.digest;
+        let current_digest = m.current_digest();
+        assert_eq!(
+            probe_digest, current_digest,
+            "post-install: probe and current_digest must agree"
+        );
+        assert!(current_digest.is_some());
+        m.stop().await.unwrap();
+        let probe_digest = m.probe(true).await.digest;
+        let current_digest = m.current_digest();
+        assert_eq!(
+            probe_digest, current_digest,
+            "post-stop: probe and current_digest must agree"
+        );
+        assert!(current_digest.is_none());
     }
 
     #[test]

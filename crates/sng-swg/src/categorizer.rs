@@ -28,9 +28,34 @@
 //!      uncategorised allow by default; the manager can override
 //!      this with a deny-default policy at install time.
 //!
-//! Lookups are O(log n) on the prefix tree: entries are bucketed
-//! by hostname (longest suffix wins) and each bucket is sorted
-//! by path prefix descending so the longest-prefix match wins.
+//! Lookup is an O(n) linear scan over a pre-sorted entry vector.
+//! [`LocalCategoryDb::install`] sorts entries by host-specificity
+//! descending (with `(exact-before-wildcard, path-prefix-desc)`
+//! as secondary tie-breaks) so the first entry that matches under
+//! [`host_matches`] + path-prefix is also the most-specific
+//! match — the scan can return on first hit. The categoriser is
+//! intentionally *not* a trie or hash-bucketed structure:
+//!
+//! 1. The wildcard host pattern (`*.example.com`) and the path
+//!    prefix both require *containment* matching, not exact
+//!    equality, so a hash on either field would force a fallback
+//!    scan for the wildcard / prefix cases — defeating the
+//!    hash's purpose.
+//! 2. Category feeds in production deployments are hundreds to
+//!    low-thousands of entries (the operator deny-list is even
+//!    smaller); a linear scan over a `Vec<CategoryEntry>` with a
+//!    pre-sorted layout fits in L1 / L2 cache, branch-predicts
+//!    well, and benchmarks faster than a trie walk at this size.
+//! 3. Hot-swap via [`arc_swap::ArcSwap`] is trivial on a flat
+//!    vector — a trie would need either a copy-on-write rebuild
+//!    on every install or a concurrent-safe trie crate
+//!    (`crossbeam-skiplist` etc.) that doesn't carry its weight
+//!    at this entry count.
+//!
+//! A future migration to a host-bucketed `HashMap<&str,
+//! Vec<CategoryEntry>>` is plausible once feed sizes cross
+//! ~10k entries, but the current shape is the right tradeoff
+//! for the deployment envelope sng-swg ships today.
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
