@@ -1,0 +1,65 @@
+[package]
+name = "sng-ips"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ShieldNet Gateway IDS/IPS subsystem — Suricata process orchestration, signed rule sync, and EVE JSON alert normalisation"
+
+[dependencies]
+# Shared workspace types: ids (TenantId, etc), envelope/events for
+# alert normalisation, error code taxonomy, lifecycle hooks.
+sng-core = { workspace = true }
+# Telemetry pipeline source — IPS publishes normalised alerts into
+# the shared event channel rather than re-implementing its own
+# pipeline.
+sng-telemetry = { workspace = true }
+
+# Async runtime: Suricata supervision (spawn / wait / SIGHUP), EVE
+# tail (async file IO), control-plane rule pulls.
+tokio = { workspace = true, features = ["process", "io-util", "sync", "fs", "time", "macros"] }
+async-trait = { workspace = true }
+
+# Suricata rule bundle verification — Ed25519 over the bundle body.
+# Same primitives as sng-policy-eval's PolicyVerifier so the
+# control plane signs IPS rules with the same key infrastructure.
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+# JSON: EVE log format (Suricata writes JSON-lines) and YAML
+# generation is hand-rolled (no yaml-rust dep — the file is short
+# and the structure is fully under our control, so a writer
+# avoids a 300 kLoC parser).
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# RFC 3339 timestamp parsing for EVE flow start/end fields, so
+# `FlowEvent::duration_ms` carries a real value rather than a
+# placeholder zero. Workspace default-features already includes
+# `clock` + `serde`; we only need parsing here.
+chrono = { workspace = true }
+
+# MessagePack — wire format for signed rule bundles delivered by
+# the control plane (matches sng-comms' bundle envelope).
+rmp-serde = { workspace = true }
+
+# Lockless config swap on the hot tail-reader path.
+arc-swap = { workspace = true }
+parking_lot = { workspace = true }
+
+# Error taxonomy + structured logging.
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "macros", "io-util", "sync", "fs"] }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+rmp-serde = { workspace = true }
+rand_core = { workspace = true }
+
+[lints]
+workspace = true

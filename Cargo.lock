@@ -1548,6 +1548,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "sng-ips"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "parking_lot",
+ "pretty_assertions",
+ "rand_core",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sng-core",
+ "sng-telemetry",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sng-pal"
 version = "0.1.0"
 dependencies = [

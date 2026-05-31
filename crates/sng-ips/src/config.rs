@@ -1,0 +1,861 @@
+//! `suricata.yaml` config generation.
+//!
+//! Translates the IPS-relevant slice of a compiled policy bundle
+//! into a `suricata.yaml` document the production binary consumes
+//! on `-c`. The output is intentionally deterministic — two
+//! identical [`IpsConfigInput`]s produce byte-identical YAML, so
+//! the manager can SHA-256 the rendered text and skip a kernel
+//! restart when nothing has changed.
+//!
+//! The writer is hand-rolled (no third-party YAML serializer).
+//! The Suricata config surface we actually populate is small
+//! (capture, defrag, app-layer, detect, outputs, vars) and fully
+//! controlled by us, so a writer avoids pulling in a 300 kLoC
+//! parser as a hard dependency just to emit a few hundred bytes.
+//! The emitter validates every string against the YAML escaping
+//! rules and refuses to emit anything that would require quoting
+//! semantics it does not implement.
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::error::IpsError;
+
+/// Operating mode for the Suricata data plane.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpsRuntime {
+    /// Inline mode: Suricata sits in the packet path and can
+    /// drop. This is the production deployment for the edge VM.
+    Inline,
+    /// IDS mode: packets are copied; detect-only. Useful for the
+    /// initial roll-out window where the operator wants
+    /// observability before enabling drop.
+    Ids,
+}
+
+impl IpsRuntime {
+    const fn af_packet_copy_mode(self) -> &'static str {
+        match self {
+            Self::Inline => "ips",
+            Self::Ids => "none",
+        }
+    }
+
+    const fn detect_default_drop(self) -> bool {
+        matches!(self, Self::Inline)
+    }
+}
+
+/// Render a Rust `bool` as the lowercase `yes`/`no` literal
+/// Suricata's own default configuration uses for every boolean
+/// knob (see the upstream `suricata.yaml.in` template). Keeping
+/// the generator on a single convention means an operator who
+/// diffs the rendered YAML against the canonical config sees
+/// only the intended deltas, not formatting noise.
+const fn yaml_bool(v: bool) -> &'static str {
+    if v { "yes" } else { "no" }
+}
+
+/// Operator-facing knob bundle. Built from the policy bundle's
+/// IPS section by [`crate::manager::IpsManager`] and fed into
+/// [`ConfigGenerator::render`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpsConfigInput {
+    /// Where the in-flight rule bundle is staged on disk.
+    /// `suricata -T` validates the file at this path and the
+    /// running binary re-reads it on `SIGHUP`.
+    pub rule_file_path: PathBuf,
+    /// `af-packet` interface (or `pcap` interface for IDS mode).
+    /// Corresponds to the edge VM's data-path NIC.
+    pub interface: String,
+    /// IDS / IPS mode toggle.
+    pub runtime: IpsRuntime,
+    /// EVE JSON output path. The manager tails this file to
+    /// normalise alerts into the workspace event schema.
+    pub eve_log_path: PathBuf,
+    /// Unix-socket path the stats reader polls.
+    pub stats_socket_path: PathBuf,
+    /// HOME_NET CIDRs — Suricata's "trusted" address set. Maps
+    /// to the operator's `branch.lan` / `dc.dmz` networks from
+    /// the policy bundle.
+    pub home_net: Vec<String>,
+    /// EXTERNAL_NET — usually `!$HOME_NET` but operators with
+    /// site-to-site overlays sometimes want to flip this.
+    pub external_net: Vec<String>,
+    /// Application layer toggles keyed by parser name (`tls`,
+    /// `http`, `dns`, `smb`). `true` enables the parser. Unknown
+    /// names are passed through (Suricata silently ignores them)
+    /// so the operator can experiment with new parsers without
+    /// requiring a `sng-ips` release.
+    pub app_layer_enabled: BTreeMap<String, bool>,
+    /// Detect-engine drop policy override. `Some(true)` forces
+    /// drop on alert regardless of [`Self::runtime`]; `None`
+    /// inherits from runtime mode.
+    pub force_drop_on_alert: Option<bool>,
+    /// Maximum number of detection threads. `None` = auto.
+    pub max_pending_packets: Option<u32>,
+}
+
+impl IpsConfigInput {
+    /// Build a sane default config for the supplied runtime.
+    /// Operators typically only override the interface, rule
+    /// path, log paths, and HOME_NET — every other knob has a
+    /// safe default.
+    #[must_use]
+    pub fn defaults(runtime: IpsRuntime) -> Self {
+        let mut app_layer = BTreeMap::new();
+        for parser in ["tls", "http", "dns", "smb", "ssh", "smtp", "ftp"] {
+            app_layer.insert(parser.to_owned(), true);
+        }
+        // Pinned to the same `/{etc,var/log,run,var/lib}/sng/...`
+        // namespace `IpsManagerConfig::default()` uses. The two
+        // defaults *must* agree on `eve_log_path` — the manager's
+        // tail task is bound to `IpsManagerConfig::eve_log_path`
+        // and would silently drop every alert if Suricata wrote to
+        // a different path. Keeping all four paths under the same
+        // root avoids the foot-gun where a caller constructs one
+        // half from defaults and the other half by hand.
+        Self {
+            rule_file_path: PathBuf::from("/var/lib/sng/rules/sng.rules"),
+            interface: "eth0".to_owned(),
+            runtime,
+            eve_log_path: PathBuf::from("/var/log/sng/eve.json"),
+            stats_socket_path: PathBuf::from("/run/sng/suricata-command.socket"),
+            home_net: vec!["10.0.0.0/8".to_owned(), "192.168.0.0/16".to_owned()],
+            external_net: vec!["!$HOME_NET".to_owned()],
+            app_layer_enabled: app_layer,
+            force_drop_on_alert: None,
+            max_pending_packets: Some(1024),
+        }
+    }
+}
+
+/// Rendered config + the SHA-256 of the rendered text. The
+/// manager hashes the rendered bytes to decide whether a
+/// reload is actually needed: two identical inputs render to the
+/// same byte string and therefore the same digest, so a config
+/// rotation that does not change anything substantive does not
+/// trigger a kernel restart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuricataConfig {
+    text: String,
+    digest: [u8; 32],
+}
+
+impl SuricataConfig {
+    /// Rendered YAML text.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Rendered YAML as raw bytes (convenience for writers that
+    /// take `&[u8]`).
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        self.text.as_bytes()
+    }
+
+    /// SHA-256 of the rendered text. Stable across runs for the
+    /// same input.
+    #[must_use]
+    pub const fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+
+    /// Hex-encoded digest — useful for log messages and
+    /// telemetry attributes.
+    #[must_use]
+    pub fn digest_hex(&self) -> String {
+        hex::encode(self.digest)
+    }
+}
+
+/// Stateless YAML renderer. The struct exists so the public API
+/// is method-shaped and the type can grow cache / pool state in
+/// the future without breaking call sites.
+#[derive(Clone, Debug, Default)]
+pub struct ConfigGenerator {
+    _private: (),
+}
+
+impl ConfigGenerator {
+    /// Construct a generator.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { _private: () }
+    }
+
+    /// Render `input` to a [`SuricataConfig`].
+    pub fn render(&self, input: &IpsConfigInput) -> Result<SuricataConfig, IpsError> {
+        // Validate strings up-front so we never emit a half-written
+        // document that would crash `suricata -T` with a confusing
+        // error.
+        validate_plain(&input.interface, "interface")?;
+        validate_path(&input.rule_file_path, "rule_file_path")?;
+        validate_path(&input.eve_log_path, "eve_log_path")?;
+        validate_path(&input.stats_socket_path, "stats_socket_path")?;
+        for net in &input.home_net {
+            validate_plain(net, "home_net entry")?;
+        }
+        for net in &input.external_net {
+            validate_plain(net, "external_net entry")?;
+        }
+        for parser in input.app_layer_enabled.keys() {
+            // Parser names are emitted as *unquoted* YAML keys at
+            // `app-layer.protocols.<name>` (see render below).
+            // `validate_plain` only blocks the characters the
+            // value-context writer cannot escape (`"`, `\`,
+            // control chars), but unquoted YAML keys are far more
+            // restrictive: a `:` followed by whitespace, ` #`, or a
+            // leading indicator (`[`, `]`, `{`, `}`, `,`, `&`,
+            // `*`, `!`, `|`, `>`, `'`, `"`, `%`, `@`, `` ` ``)
+            // either ends the key, starts a comment, or starts a
+            // YAML flow/anchor/alias construct. Suricata's actual
+            // parser-name table (`tls`, `http`, `dns`, `smb`,
+            // `ssh`, `smtp`, `ftp`, `ikev2`, `krb5`, `nfs`, `ntp`,
+            // `snmp`, `dhcp`, ...) is uniformly lowercase
+            // alphanumeric with a permissive underscore/hyphen
+            // allowance for future names — so the safe set
+            // `[a-z][a-z0-9_-]*` is what Suricata can actually
+            // dispatch to, and any operator-supplied name outside
+            // that set would have made `suricata -T` reject the
+            // config anyway, just with a less useful error.
+            validate_yaml_key(parser, "app_layer parser name")?;
+        }
+
+        let mut out = String::with_capacity(2048);
+        out.push_str("%YAML 1.1\n");
+        out.push_str("---\n");
+        // Header marker — useful for operators grepping a
+        // running file to confirm SNG wrote it.
+        out.push_str("# Generated by sng-ips ConfigGenerator. Do not edit by hand.\n");
+
+        // Variables block. HOME_NET / EXTERNAL_NET are
+        // referenced by every rule so they must be first.
+        out.push_str("vars:\n");
+        out.push_str("  address-groups:\n");
+        // `write!` into the buffer rather than allocating an
+        // intermediate `String` per line — clippy's
+        // `format_push_string` lint catches the allocation, but
+        // more importantly this keeps the YAML emitter
+        // allocation-free per line on the hot path. The `_` bind
+        // is needed because `Write` for `String` is infallible
+        // but the trait method still returns `fmt::Result`.
+        let _ = writeln!(out, "    HOME_NET: \"{}\"", join_quoted(&input.home_net));
+        let _ = writeln!(
+            out,
+            "    EXTERNAL_NET: \"{}\"",
+            join_quoted(&input.external_net)
+        );
+
+        // Default rule path so a SIGHUP-driven reload picks the
+        // staged file up without restating it elsewhere.
+        out.push_str("default-rule-path: \"");
+        out.push_str(parent_or_root(&input.rule_file_path));
+        out.push_str("\"\n");
+        out.push_str("rule-files:\n");
+        out.push_str("  - \"");
+        out.push_str(file_name(&input.rule_file_path));
+        out.push_str("\"\n");
+
+        // Detection engine — most of the knobs are at default;
+        // we only override what differs from upstream Suricata
+        // defaults.
+        out.push_str("detect:\n");
+        // Suricata's own configuration template uses `yes`/`no`
+        // for every boolean knob; mixing Rust-flavoured
+        // `true`/`false` on a single line (Suricata accepts
+        // both, but the rest of this generator emits `yes`/`no`)
+        // is purely a readability hazard for operators who diff
+        // the rendered YAML against upstream defaults. Pick the
+        // upstream convention and stay consistent.
+        let drop_on_alert = input
+            .force_drop_on_alert
+            .unwrap_or_else(|| input.runtime.detect_default_drop());
+        let _ = writeln!(out, "  drop-on-alert: {}", yaml_bool(drop_on_alert));
+
+        if let Some(max_pending) = input.max_pending_packets {
+            let _ = writeln!(out, "max-pending-packets: {max_pending}");
+        }
+
+        // Capture: af-packet stanza. Suricata accepts a list so
+        // operators can later bind multiple NICs.
+        out.push_str("af-packet:\n");
+        let _ = writeln!(out, "  - interface: \"{}\"", input.interface);
+        let _ = writeln!(
+            out,
+            "    copy-mode: {}",
+            input.runtime.af_packet_copy_mode()
+        );
+        out.push_str("    copy-iface: \"\"\n");
+        out.push_str("    cluster-id: 99\n");
+        out.push_str("    cluster-type: cluster_flow\n");
+        out.push_str("    defrag: yes\n");
+        out.push_str("    use-mmap: yes\n");
+        out.push_str("    tpacket-v3: yes\n");
+
+        // App layer parsers. BTreeMap iteration is sorted, so
+        // the output is stable.
+        out.push_str("app-layer:\n");
+        out.push_str("  protocols:\n");
+        for (parser, enabled) in &input.app_layer_enabled {
+            let _ = writeln!(
+                out,
+                "    {parser}:\n      enabled: {}",
+                if *enabled { "yes" } else { "no" }
+            );
+        }
+
+        // Outputs: EVE JSON file the manager tails, plus a
+        // stats unix socket the supervisor reads.
+        out.push_str("outputs:\n");
+        out.push_str("  - eve-log:\n");
+        out.push_str("      enabled: yes\n");
+        out.push_str("      filetype: regular\n");
+        let _ = writeln!(out, "      filename: \"{}\"", input.eve_log_path.display());
+        out.push_str("      types:\n");
+        // Match the EVE record types our `eve.rs` parser knows
+        // about. Anything else is decoded as `Unknown` but not
+        // dropped, so adding a type here later is forward-safe.
+        //
+        // `stats` is critical and must NOT be removed: the manager's
+        // EVE tail relies on `event_type: stats` records to feed
+        // packet/drop counters into `SuricataProcess::push_stats`,
+        // which is what drives `StatsDelta::drop_ratio()` and in
+        // turn the `HealthMonitor`'s `Degraded` (>=1%) and `Failed`
+        // (>=25%) drop-ratio transitions (`health.rs:227-231`). The
+        // separate top-level `stats:` output stanza below uses
+        // `filetype: unix_stream` and is for the `suricatasc`
+        // command socket — it does not write into the EVE JSON
+        // file. Without `stats` in *this* list, Suricata never
+        // emits stats records into `eve.json`, the tail never sees
+        // them, `push_stats` is never invoked, drop counts stay
+        // pinned at zero, `drop_ratio` always returns 0.0 (its
+        // 0/0 guard), and the entire drop-ratio branch of the
+        // health machine is dead code in production. The
+        // regression test `render_includes_stats_in_eve_types` in
+        // this file pins the invariant.
+        for ty in [
+            "alert", "anomaly", "dns", "http", "tls", "flow", "fileinfo", "stats",
+        ] {
+            let _ = writeln!(out, "        - {ty}");
+        }
+        out.push_str("  - stats:\n");
+        out.push_str("      enabled: yes\n");
+        out.push_str("      filetype: unix_stream\n");
+        let _ = writeln!(
+            out,
+            "      filename: \"{}\"",
+            input.stats_socket_path.display()
+        );
+
+        let bytes = out.as_bytes();
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let digest_bytes: [u8; 32] = hasher.finalize().into();
+        Ok(SuricataConfig {
+            text: out,
+            digest: digest_bytes,
+        })
+    }
+}
+
+fn validate_plain(s: &str, field: &str) -> Result<(), IpsError> {
+    if s.is_empty() {
+        return Err(IpsError::Config(format!("{field} must not be empty")));
+    }
+    for c in s.chars() {
+        if c == '"' || c == '\\' || c.is_control() {
+            return Err(IpsError::Config(format!(
+                "{field} {s:?} contains a character ({c:?}) the YAML writer cannot escape",
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate a string that will be emitted as an *unquoted* YAML
+/// scalar key. The accepted set is intentionally narrow — only
+/// what cannot trigger any YAML structural interpretation:
+/// lowercase ASCII letters, ASCII digits, underscore, and
+/// hyphen, with a required leading letter so the value cannot
+/// be misread as a number, a tag (`!foo`), an anchor (`&foo`),
+/// or a flow construct.
+///
+/// Anything outside this set could be mis-parsed by Suricata's
+/// YAML loader (e.g. a key containing `: ` would split into a
+/// nested mapping, a leading `[` would open a flow sequence,
+/// `#` would start a comment) and crash `suricata -T` with an
+/// error far less obvious than this validator's. The contract
+/// the module doc states — "refuses to emit anything that would
+/// require quoting semantics it does not implement" — only
+/// holds if every unquoted-key write goes through this helper.
+fn validate_yaml_key(s: &str, field: &str) -> Result<(), IpsError> {
+    if s.is_empty() {
+        return Err(IpsError::Config(format!("{field} must not be empty")));
+    }
+    let mut chars = s.chars();
+    // `s.is_empty()` checked above, so `next()` is `Some`. We
+    // still defensively `match` instead of `expect`/`unwrap` to
+    // keep clippy's `expect_used` lint happy in the lib config
+    // (this code is on the bundle-install path, not a test).
+    let Some(first) = chars.next() else {
+        return Err(IpsError::Config(format!("{field} must not be empty")));
+    };
+    if !first.is_ascii_lowercase() {
+        return Err(IpsError::Config(format!(
+            "{field} {s:?} must start with a lowercase ASCII letter; got {first:?}"
+        )));
+    }
+    for c in std::iter::once(first).chain(chars) {
+        let ok = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
+        if !ok {
+            return Err(IpsError::Config(format!(
+                "{field} {s:?} contains {c:?}; unquoted YAML keys only accept [a-z0-9_-]"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_path(p: &std::path::Path, field: &str) -> Result<(), IpsError> {
+    // Fail-closed on non-UTF-8 paths. `Path::to_string_lossy`
+    // replaces invalid UTF-8 byte sequences with U+FFFD, which
+    // would then sail past `validate_plain`'s `c.is_control()` /
+    // `"` / `\` checks even though the byte sequence Suricata
+    // actually sees on the YAML line could contain those
+    // characters. The agent ships on Linux where paths are
+    // bytes (not guaranteed UTF-8), so a maliciously crafted
+    // SuricataInputConfig with a path of e.g.
+    // `0xff" \n redirect: /tmp/evil.yaml \n#` would slip past
+    // `validate_plain` after the lossy conversion. Using
+    // `Path::to_str` returns `None` on non-UTF-8 input and we
+    // reject the bundle outright — same trust-boundary posture
+    // as the rule-id / parser-name validators above.
+    let s = p.to_str().ok_or_else(|| {
+        IpsError::Config(format!(
+            "{field} {} is not valid UTF-8; Suricata's YAML loader \
+             requires UTF-8 paths and non-UTF-8 byte sequences cannot \
+             be safely emitted into the rendered config",
+            p.display()
+        ))
+    })?;
+    validate_plain(s, field)
+}
+
+fn parent_or_root(path: &std::path::Path) -> &str {
+    path.parent()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("/")
+}
+
+fn file_name(path: &std::path::Path) -> &str {
+    path.file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("")
+}
+
+fn join_quoted(parts: &[String]) -> String {
+    // HOME_NET / EXTERNAL_NET are emitted as Suricata's
+    // comma-separated bracketed list inside a YAML string. The
+    // wrapping double-quotes are added by the caller.
+    let inner = parts.join(",");
+    format!("[{inner}]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn baseline() -> IpsConfigInput {
+        IpsConfigInput::defaults(IpsRuntime::Inline)
+    }
+
+    #[test]
+    fn render_inline_emits_ips_copy_mode_and_drop_on_alert() {
+        let g = ConfigGenerator::new();
+        let cfg = g.render(&baseline()).expect("render");
+        let t = cfg.text();
+        assert!(t.contains("copy-mode: ips"), "{t}");
+        assert!(t.contains("drop-on-alert: yes"), "{t}");
+    }
+
+    #[test]
+    fn render_ids_mode_does_not_drop_by_default() {
+        let g = ConfigGenerator::new();
+        let cfg = g
+            .render(&IpsConfigInput::defaults(IpsRuntime::Ids))
+            .unwrap();
+        let t = cfg.text();
+        assert!(t.contains("copy-mode: none"), "{t}");
+        assert!(t.contains("drop-on-alert: no"), "{t}");
+    }
+
+    #[test]
+    fn render_force_drop_overrides_runtime() {
+        let mut input = IpsConfigInput::defaults(IpsRuntime::Ids);
+        input.force_drop_on_alert = Some(true);
+        let cfg = ConfigGenerator::new().render(&input).unwrap();
+        assert!(cfg.text().contains("drop-on-alert: yes"));
+    }
+
+    #[test]
+    fn render_emits_home_net_and_external_net() {
+        let mut input = baseline();
+        input.home_net = vec!["172.16.0.0/12".into(), "fd00::/8".into()];
+        input.external_net = vec!["!$HOME_NET".into()];
+        let cfg = ConfigGenerator::new().render(&input).unwrap();
+        let t = cfg.text();
+        assert!(t.contains(r#"HOME_NET: "[172.16.0.0/12,fd00::/8]""#), "{t}");
+        assert!(t.contains(r#"EXTERNAL_NET: "[!$HOME_NET]""#), "{t}");
+    }
+
+    #[test]
+    fn render_emits_rule_file_path_and_default_rule_path() {
+        let mut input = baseline();
+        input.rule_file_path = PathBuf::from("/opt/sng/ips/rules/staged.rules");
+        let cfg = ConfigGenerator::new().render(&input).unwrap();
+        let t = cfg.text();
+        assert!(
+            t.contains(r#"default-rule-path: "/opt/sng/ips/rules""#),
+            "{t}"
+        );
+        assert!(t.contains(r#"  - "staged.rules""#), "{t}");
+    }
+
+    #[test]
+    fn render_emits_eve_and_stats_outputs() {
+        let mut input = baseline();
+        input.eve_log_path = PathBuf::from("/var/log/sng/eve.json");
+        input.stats_socket_path = PathBuf::from("/run/sng/suricata.sock");
+        let cfg = ConfigGenerator::new().render(&input).unwrap();
+        let t = cfg.text();
+        assert!(t.contains(r#"filename: "/var/log/sng/eve.json""#), "{t}");
+        assert!(t.contains(r#"filename: "/run/sng/suricata.sock""#), "{t}");
+        // Every EVE type the manager normalises must be enabled
+        // in the outputs stanza.
+        for ty in [
+            "alert", "anomaly", "dns", "http", "tls", "flow", "fileinfo", "stats",
+        ] {
+            assert!(t.contains(&format!("- {ty}\n")), "{t} missing type {ty}");
+        }
+    }
+
+    /// Regression test for the health-monitor wiring: the EVE
+    /// log's `types` list must include `stats`, otherwise
+    /// Suricata never writes `event_type: stats` records into the
+    /// EVE JSON file, the manager's tail never calls
+    /// `SuricataProcess::push_stats`, `packets_dropped` stays at
+    /// zero forever, and the health monitor's drop-ratio
+    /// thresholds (1% Degraded / 25% Failed) become dead code in
+    /// production. The separate top-level `stats:` output stanza
+    /// is for the `suricatasc` command socket and does NOT cover
+    /// this path. This test pins the invariant at the lowest
+    /// level so a future trim of the types list cannot silently
+    /// reintroduce the bug.
+    #[test]
+    fn render_includes_stats_in_eve_types() {
+        let cfg = ConfigGenerator::new();
+        let input = baseline();
+        let rendered = cfg.render(&input).unwrap();
+        let t = rendered.text();
+        // The `types:` key for the eve-log stanza must be
+        // followed by an enumeration that includes `stats`. We
+        // assert on the line-anchored form to avoid being fooled
+        // by the unrelated top-level `stats:` block (which is a
+        // YAML key at column 2, not a list item under `types:`).
+        assert!(
+            t.contains("        - stats\n"),
+            "eve-log types list must include `stats`; rendered: {t}"
+        );
+        // And the eve-log stanza itself must precede the
+        // stats-socket stanza (sanity that we are reading the
+        // types we think we are).
+        let eve_log_pos = t.find("  - eve-log:").expect("eve-log stanza missing");
+        let stats_block_pos = t.find("  - stats:").expect("stats socket stanza missing");
+        assert!(
+            eve_log_pos < stats_block_pos,
+            "eve-log stanza must precede the stats unix-socket stanza"
+        );
+    }
+
+    #[test]
+    fn render_emits_app_layer_parsers_in_sorted_order() {
+        let mut input = baseline();
+        input.app_layer_enabled.clear();
+        input.app_layer_enabled.insert("tls".into(), true);
+        input.app_layer_enabled.insert("http".into(), false);
+        input.app_layer_enabled.insert("dns".into(), true);
+        let cfg = ConfigGenerator::new().render(&input).unwrap();
+        let t = cfg.text();
+        // BTreeMap keeps keys sorted, so iteration order is
+        // deterministic regardless of insertion order. The test
+        // pins the order to defend against an accidental switch
+        // to a HashMap.
+        let dns_pos = t.find("    dns:\n      enabled: yes").unwrap();
+        let http_pos = t.find("    http:\n      enabled: no").unwrap();
+        let tls_pos = t.find("    tls:\n      enabled: yes").unwrap();
+        assert!(dns_pos < http_pos, "{t}");
+        assert!(http_pos < tls_pos, "{t}");
+    }
+
+    #[test]
+    fn render_is_byte_deterministic_for_identical_inputs() {
+        let g = ConfigGenerator::new();
+        let a = g.render(&baseline()).unwrap();
+        let b = g.render(&baseline()).unwrap();
+        assert_eq!(a.text(), b.text());
+        assert_eq!(a.digest(), b.digest());
+    }
+
+    #[test]
+    fn render_changes_digest_when_interface_changes() {
+        let mut input1 = baseline();
+        input1.interface = "eth0".into();
+        let mut input2 = baseline();
+        input2.interface = "eth1".into();
+        let g = ConfigGenerator::new();
+        let cfg1 = g.render(&input1).unwrap();
+        let cfg2 = g.render(&input2).unwrap();
+        assert_ne!(cfg1.digest(), cfg2.digest());
+    }
+
+    #[test]
+    fn render_rejects_empty_interface() {
+        let mut input = baseline();
+        input.interface = String::new();
+        let err = ConfigGenerator::new().render(&input).unwrap_err();
+        match err {
+            IpsError::Config(m) => assert!(m.contains("interface")),
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_rejects_interface_with_control_char() {
+        let mut input = baseline();
+        input.interface = "eth0\nfoo".into();
+        let err = ConfigGenerator::new().render(&input).unwrap_err();
+        assert!(matches!(err, IpsError::Config(_)));
+    }
+
+    #[test]
+    fn render_rejects_quote_in_home_net() {
+        // YAML writer cannot safely escape a literal `"` in the
+        // bracketed-list shape it emits — better to surface a
+        // structured error than to write a malformed file.
+        let mut input = baseline();
+        input.home_net.push(r#"10.0.0.0/8" injection"#.into());
+        let err = ConfigGenerator::new().render(&input).unwrap_err();
+        assert!(matches!(err, IpsError::Config(_)));
+    }
+
+    #[test]
+    fn render_rejects_backslash_in_paths() {
+        let mut input = baseline();
+        input.rule_file_path = PathBuf::from(r"/etc/suricata\bad");
+        let err = ConfigGenerator::new().render(&input).unwrap_err();
+        assert!(matches!(err, IpsError::Config(_)));
+    }
+
+    /// Regression: `validate_path` used to call
+    /// `Path::to_string_lossy()` which substitutes U+FFFD for
+    /// any non-UTF-8 byte. A crafted path containing `0xff"`
+    /// would become `"\u{fffd}\""` after the lossy conversion,
+    /// at which point `validate_plain` no longer sees the `"`
+    /// in its original position because Rust counts the
+    /// replacement as one `char`. Switching to `Path::to_str`
+    /// fails closed: a non-UTF-8 path is rejected with a
+    /// `Config` error before any rendering happens.
+    #[test]
+    #[cfg(unix)]
+    fn render_rejects_non_utf8_path_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        // Construct a `PathBuf` whose raw bytes are NOT valid
+        // UTF-8 (lone continuation byte 0x80 in a position that
+        // can't start a multi-byte sequence). `Path::to_str`
+        // returns `None`; `Path::to_string_lossy` returned a
+        // U+FFFD-substituted string that previously sailed past
+        // the charset check.
+        let mut bytes = b"/etc/suricata-".to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b".rules");
+        let bad: PathBuf = OsString::from_vec(bytes).into();
+
+        let mut input = baseline();
+        input.rule_file_path = bad;
+        let err = ConfigGenerator::new().render(&input).unwrap_err();
+        match err {
+            IpsError::Config(m) => {
+                assert!(
+                    m.contains("rule_file_path"),
+                    "error must name the offending field: {m}"
+                );
+                assert!(
+                    m.contains("not valid UTF-8"),
+                    "error must explain the failure mode so an operator can fix the bundle: {m}"
+                );
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_rejects_app_layer_parser_name_with_colon_space() {
+        // `tls: bad` would pass the old `validate_plain` (no `"`,
+        // `\`, or control chars) but be emitted unquoted as
+        //     tls: bad:
+        //       enabled: yes
+        // which YAML parses as key `tls` mapping to `bad:` —
+        // structurally invalid and `suricata -T` rejects the
+        // file. Defensive validator must catch it up-front.
+        let mut input = baseline();
+        input.app_layer_enabled.insert("tls: bad".into(), true);
+        let err = ConfigGenerator::new().render(&input).unwrap_err();
+        match err {
+            IpsError::Config(m) => {
+                assert!(
+                    m.contains("app_layer parser name"),
+                    "expected app_layer parser name in error, got: {m}"
+                );
+                assert!(
+                    m.contains("[a-z0-9_-]"),
+                    "error should cite the accepted charset for diagnosability: {m}"
+                );
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_rejects_app_layer_parser_name_with_leading_indicator() {
+        // Leading `[` would start a flow sequence; leading `&`
+        // an anchor; leading `*` an alias. All would corrupt the
+        // document. Rule out by requiring a lowercase ASCII
+        // letter as the first char.
+        for bad in ["[tls", "&tls", "*tls", "!tls", "0tls", "Tls", "-tls"] {
+            let mut input = baseline();
+            input.app_layer_enabled.clear();
+            input.app_layer_enabled.insert(bad.into(), true);
+            let err = ConfigGenerator::new().render(&input).expect_err(bad);
+            assert!(
+                matches!(err, IpsError::Config(_)),
+                "expected Config error for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_rejects_app_layer_parser_name_with_uppercase_or_punctuation() {
+        // YAML accepts uppercase keys but Suricata's parser
+        // dispatch is case-sensitive lowercase; `# foo` would
+        // start a YAML comment; spaces would split the key.
+        for bad in ["TLS", "tls.v3", "tls v3", "tls#1", "tls,1"] {
+            let mut input = baseline();
+            input.app_layer_enabled.clear();
+            input.app_layer_enabled.insert(bad.into(), true);
+            let err = ConfigGenerator::new().render(&input).expect_err(bad);
+            assert!(
+                matches!(err, IpsError::Config(_)),
+                "expected Config error for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_accepts_app_layer_parser_names_with_underscores_and_digits() {
+        // Future Suricata parsers may use digits / underscores /
+        // hyphens (e.g. `ikev2`, `mqtt_v5`, `dnp3-secure`). The
+        // validator must not reject them.
+        let mut input = baseline();
+        input.app_layer_enabled.clear();
+        for ok in ["tls", "ikev2", "mqtt_v5", "dnp3-secure", "krb5"] {
+            input.app_layer_enabled.insert(ok.into(), true);
+        }
+        let cfg = ConfigGenerator::new()
+            .render(&input)
+            .expect("valid parser names must render");
+        for ok in ["tls", "ikev2", "mqtt_v5", "dnp3-secure", "krb5"] {
+            assert!(
+                cfg.text()
+                    .contains(&format!("    {ok}:\n      enabled: yes")),
+                "missing parser {ok} in {}",
+                cfg.text()
+            );
+        }
+    }
+
+    #[test]
+    fn render_max_pending_packets_renders_only_when_set() {
+        let mut input = baseline();
+        input.max_pending_packets = Some(2048);
+        let with_set = ConfigGenerator::new().render(&input).unwrap();
+        assert!(with_set.text().contains("max-pending-packets: 2048"));
+        input.max_pending_packets = None;
+        let without = ConfigGenerator::new().render(&input).unwrap();
+        assert!(!without.text().contains("max-pending-packets:"));
+    }
+
+    #[test]
+    fn digest_hex_is_64_lowercase_chars() {
+        let cfg = ConfigGenerator::new().render(&baseline()).unwrap();
+        let h = cfg.digest_hex();
+        assert_eq!(h.len(), 64);
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+    }
+
+    #[test]
+    fn defaults_inline_enables_drop_and_ips_mode() {
+        let i = IpsConfigInput::defaults(IpsRuntime::Inline);
+        assert_eq!(i.runtime, IpsRuntime::Inline);
+        assert!(i.app_layer_enabled["tls"]);
+        assert!(i.app_layer_enabled["http"]);
+        assert!(i.app_layer_enabled["dns"]);
+    }
+
+    #[test]
+    fn defaults_ids_does_not_force_drop() {
+        let i = IpsConfigInput::defaults(IpsRuntime::Ids);
+        assert_eq!(i.runtime, IpsRuntime::Ids);
+        assert_eq!(i.force_drop_on_alert, None);
+    }
+
+    #[test]
+    fn parent_or_root_falls_back_to_root_for_filename_only_path() {
+        // file_name-only paths report no parent → should fall
+        // back to "/" rather than panic.
+        assert_eq!(parent_or_root(std::path::Path::new("sng.rules")), "/");
+    }
+
+    #[test]
+    fn file_name_returns_basename_or_empty() {
+        assert_eq!(file_name(std::path::Path::new("/a/b/c.rules")), "c.rules");
+        assert_eq!(file_name(std::path::Path::new("/")), "");
+    }
+
+    #[test]
+    fn join_quoted_handles_empty_list() {
+        assert_eq!(join_quoted(&[]), "[]");
+    }
+
+    #[test]
+    fn join_quoted_comma_joins_entries() {
+        assert_eq!(
+            join_quoted(&["10.0.0.0/8".into(), "192.168.0.0/16".into()]),
+            "[10.0.0.0/8,192.168.0.0/16]"
+        );
+    }
+}
