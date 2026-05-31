@@ -95,6 +95,19 @@ pub struct UpdaterStats {
     /// divergent from the bootloader's view; operators must
     /// manually reconcile the metadata partition.
     pub install_post_commit_layout_sync_failures: AtomicU64,
+    /// Number of install attempts refused at the door because
+    /// a prior install left the orchestrator in post-commit
+    /// layout divergence (see
+    /// [`Self::install_post_commit_layout_sync_failures`]).
+    /// The follow-up install never acquired the install lock
+    /// and never touched the bank writer; the counter ticks
+    /// every time an operator calls `install_*` while the
+    /// divergence flag is set. Distinct from
+    /// `install_concurrency_rejections` because the cause is
+    /// not in-flight contention but a structural block that
+    /// only an operator can clear via
+    /// [`crate::service::UpdaterService::clear_layout_divergence`].
+    pub install_layout_diverged_rejections: AtomicU64,
 }
 
 impl UpdaterStats {
@@ -143,6 +156,9 @@ impl UpdaterStats {
                 .load(Ordering::Relaxed),
             install_post_commit_layout_sync_failures: self
                 .install_post_commit_layout_sync_failures
+                .load(Ordering::Relaxed),
+            install_layout_diverged_rejections: self
+                .install_layout_diverged_rejections
                 .load(Ordering::Relaxed),
         }
     }
@@ -199,6 +215,11 @@ pub struct UpdaterStatsSnapshot {
     /// retry; the install is committed but the layout cache
     /// has diverged.
     pub install_post_commit_layout_sync_failures: u64,
+    /// Install attempts refused because the orchestrator is in
+    /// post-commit layout divergence. Cleared only by an
+    /// operator-issued
+    /// `UpdaterService::clear_layout_divergence` call.
+    pub install_layout_diverged_rejections: u64,
 }
 
 impl UpdaterStatsSnapshot {

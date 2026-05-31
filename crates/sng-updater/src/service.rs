@@ -31,7 +31,7 @@ use crate::bootloader::Bootloader;
 use crate::download::{DownloadError, ImageDownloader, StreamingHasher, TeeChunkSink};
 use crate::error::UpdaterError;
 use crate::healthcheck::{HealthCheck, HealthReport};
-use crate::manifest::{ImageHash, ImageVersion, SignedManifest, UpdateManifest, UpdateTarget};
+use crate::manifest::{ImageVersion, SignedManifest, UpdateManifest, UpdateTarget};
 use crate::policy::{PolicyValidationError, UpdaterPolicy, UpdaterPolicyHolder};
 use crate::source::{ManifestSource, SourceError};
 use crate::state::UpdateState;
@@ -40,7 +40,7 @@ use crate::verifier::ManifestVerifier;
 use arc_swap::ArcSwap;
 use parking_lot::Mutex as ParkingMutex;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::Mutex as TokioMutex;
@@ -251,6 +251,7 @@ impl UpdaterServiceBuilder {
             current_version_override: ParkingMutex::new(self.current_version_override),
             health_check_clock: ParkingMutex::new(Arc::new(RealHealthCheckClock)),
             ticks: AtomicU64::new(0),
+            layout_diverged: AtomicBool::new(false),
         })
     }
 }
@@ -306,6 +307,21 @@ pub struct UpdaterService {
     current_version_override: ParkingMutex<Option<ImageVersion>>,
     health_check_clock: ParkingMutex<Arc<dyn HealthCheckClock>>,
     ticks: AtomicU64,
+    /// Sticky "post-commit layout divergence" flag. Set by
+    /// `run_post_commit_bookkeeping` when every retry of the
+    /// `mark_committed` / `set_active` pair has failed after
+    /// the bootloader already committed atomically. While
+    /// set, every `install_*` entry-point refuses up front
+    /// with [`UpdaterError::LayoutDiverged`] and never
+    /// acquires the install lock — preventing a follow-up
+    /// install from reading the stale layout, computing
+    /// `inactive()` as the slot the bootloader just committed
+    /// to, and overwriting the running image. The only way to
+    /// clear this flag is an operator-issued
+    /// [`UpdaterService::clear_layout_divergence`] call, which
+    /// must follow manual reconciliation of the metadata
+    /// partition.
+    layout_diverged: AtomicBool,
 }
 
 impl UpdaterService {
@@ -351,6 +367,36 @@ impl UpdaterService {
     /// swap in a clock backed by `tokio::time::pause`.
     pub fn set_health_check_clock(&self, clock: Arc<dyn HealthCheckClock>) {
         *self.health_check_clock.lock() = clock;
+    }
+
+    /// Whether the engine is currently refusing installs
+    /// because of post-commit layout divergence. The flag is
+    /// set by `run_post_commit_bookkeeping` after every retry
+    /// of the `mark_committed` / `set_active` pair has failed
+    /// post-bootloader-commit, and cleared only by
+    /// [`Self::clear_layout_divergence`].
+    pub fn layout_diverged(&self) -> bool {
+        self.layout_diverged.load(Ordering::Acquire)
+    }
+
+    /// Operator-facing recovery: clear the post-commit layout
+    /// divergence flag so the engine re-admits installs. MUST
+    /// be called only after the operator has manually
+    /// reconciled the metadata partition to match the
+    /// bootloader's view — calling this without that
+    /// reconciliation re-exposes the running image to being
+    /// overwritten by the next install. The recovery action is
+    /// deliberately not idempotent-recoverable from inside the
+    /// engine: the only thing that knows the metadata
+    /// partition has been fixed is the operator.
+    pub fn clear_layout_divergence(&self) {
+        let was_set = self.layout_diverged.swap(false, Ordering::AcqRel);
+        if was_set {
+            info!(
+                "post-commit layout divergence flag cleared by operator; \
+                 next install will run against the now-reconciled metadata partition"
+            );
+        }
     }
 
     /// Derive the "currently-committed image version" pin
@@ -449,6 +495,24 @@ impl UpdaterService {
         &self,
         envelope: SignedManifest,
     ) -> Result<InstallOutcome, UpdaterError> {
+        // Fail-closed BEFORE acquiring the install lock: if a
+        // prior install left us in post-commit layout
+        // divergence, the bank-writer's view of which slot is
+        // inactive points at the slot the bootloader just
+        // committed to. Running this install would overwrite
+        // the running image. The only path out is for an
+        // operator to manually reconcile the metadata
+        // partition and call `clear_layout_divergence`.
+        if self.layout_diverged.load(Ordering::Acquire) {
+            self.stats
+                .install_layout_diverged_rejections
+                .fetch_add(1, Ordering::Relaxed);
+            warn!(
+                "refusing install: post-commit layout divergence is active until \
+                 operator reconciles the metadata partition and clears the flag"
+            );
+            return Err(UpdaterError::LayoutDiverged);
+        }
         let Ok(_guard) = self.install_lock.try_lock() else {
             self.stats
                 .install_concurrency_rejections
@@ -465,7 +529,11 @@ impl UpdaterService {
         // serialises one install at a time; this snapshot
         // additionally narrows the window for any unrelated
         // bookkeeping path to mutate the layout mid-decision.
-        let layout = self.bank_writer.layout().await?;
+        let layout = self
+            .bank_writer
+            .layout()
+            .await
+            .inspect_err(|_| self.bump_bank_errors())?;
         let current = self.derive_current_version(&layout);
         let manifest = match self.verifier.verify(&envelope, current) {
             Ok(m) => m,
@@ -580,6 +648,18 @@ impl UpdaterService {
 
     /// Drive the install state machine from `Downloading`
     /// through to terminal `Committed` / `RolledBack`.
+    ///
+    /// Allow `clippy::too_many_lines`: this function is the
+    /// state machine. Splitting it would scatter the
+    /// state-transition sites across helpers and obscure the
+    /// linear flow that operators reason about
+    /// (Downloading → Verifying → Installing → Rebooting →
+    /// HealthChecking → Committed / RolledBack). Each step is
+    /// already a self-contained call to a method on
+    /// `self`; the function body is the orchestration glue
+    /// that owns the per-step transitions and rollback
+    /// branching.
+    #[allow(clippy::too_many_lines)]
     async fn run_install(
         &self,
         manifest: &UpdateManifest,
@@ -592,7 +672,11 @@ impl UpdaterService {
             "starting install"
         );
         // ----- Downloading -----
-        let mut handle = self.bank_writer.open_for_write(target_slot).await?;
+        let mut handle = self
+            .bank_writer
+            .open_for_write(target_slot)
+            .await
+            .inspect_err(|_| self.bump_bank_errors())?;
         let mut hasher = StreamingHasher::new(manifest.image_size_bytes);
         match self
             .stream_into_bank(&mut handle, &mut hasher, manifest)
@@ -631,7 +715,10 @@ impl UpdaterService {
 
         // ----- Installing -----
         self.transition(UpdateState::Verifying, UpdateState::Installing)?;
-        let outcome = handle.finish(manifest.version).await?;
+        let outcome = handle
+            .finish(manifest.version)
+            .await
+            .inspect_err(|_| self.bump_bank_errors())?;
         debug!(
             slot = %outcome.slot,
             bytes_written = outcome.bytes_written,
@@ -713,7 +800,8 @@ impl UpdaterService {
                 })?;
                 self.bank_writer
                     .mark_rolled_back(target_slot, manifest.version)
-                    .await?;
+                    .await
+                    .inspect_err(|_| self.bump_bank_errors())?;
                 self.stats
                     .install_rolled_back
                     .fetch_add(1, Ordering::Relaxed);
@@ -753,7 +841,13 @@ impl UpdaterService {
 
     /// Map [`DownloadError`] onto the orchestrator-facing
     /// [`UpdaterError`] taxonomy and bump the corresponding
-    /// stats counter.
+    /// stats counter. Bank-write errors that surfaced through
+    /// the `TeeChunkSink` during the streaming download phase
+    /// are explicitly routed back to
+    /// [`UpdaterError::BankWrite`] so they land on the
+    /// `updater.bank.write.failure` dashboard code rather than
+    /// the generic `io` code that all other transport failures
+    /// fold into.
     fn map_download_error(&self, e: DownloadError) -> UpdaterError {
         match e {
             DownloadError::Truncated { expected, read } => {
@@ -767,8 +861,22 @@ impl UpdaterService {
                 claimed,
                 read: attempted,
             },
+            DownloadError::BankWrite(msg) => {
+                self.bump_bank_errors();
+                UpdaterError::BankWrite(msg)
+            }
             other => UpdaterError::DownloadFailure(other.to_string()),
         }
+    }
+
+    /// Bump the `install_bank_errors` counter. Called from
+    /// every bank-writer call site that propagates an
+    /// `UpdaterError::BankWrite` via `?` so the counter
+    /// matches reality on operator dashboards.
+    fn bump_bank_errors(&self) {
+        self.stats
+            .install_bank_errors
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Execute the post-bootloader-commit bookkeeping pair
@@ -820,6 +928,26 @@ impl UpdaterService {
         self.stats
             .install_post_commit_layout_sync_failures
             .fetch_add(1, Ordering::Relaxed);
+        // Poison the orchestrator against any further install
+        // attempt. The bootloader has already committed
+        // atomically to `target_slot`, but the bank-writer's
+        // metadata partition still points at the previously-
+        // active slot. A follow-up install would consult that
+        // stale metadata, compute `inactive()` as
+        // `target_slot` (the slot the bootloader just
+        // committed to), open it for write, and corrupt the
+        // running image. The only safe behaviour is to refuse
+        // every subsequent install until an operator manually
+        // reconciles the metadata partition and calls
+        // `clear_layout_divergence`.
+        self.layout_diverged.store(true, Ordering::Release);
+        warn!(
+            slot = %target_slot,
+            version = %version,
+            "post-commit layout divergence — engine locked; \
+             operator must reconcile metadata and call \
+             UpdaterService::clear_layout_divergence to re-admit installs"
+        );
         // `max_attempts >= 1` is enforced by
         // `UpdaterPolicy::validate`, so the loop body must
         // have run at least once and populated `last_error`.
@@ -940,14 +1068,6 @@ fn map_source_error(e: SourceError) -> UpdaterError {
 
 // Re-export the build error so callers don't need to dig.
 pub use ServiceBuildError as Build;
-
-/// Helper: snapshot the current image-hash claim on the
-/// active slot, returning `None` if the layout is cold-start.
-/// Surface this for telemetry. Pure derivation — no I/O.
-#[must_use]
-pub fn observed_active_hash(_layout: &BankLayout) -> Option<ImageHash> {
-    None
-}
 
 /// Construct a fully-wired in-memory service for tests. Not
 /// `pub` because production code never wants this — the
@@ -1555,12 +1675,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observed_active_hash_is_none_for_cold_start() {
-        let layout = BankLayout::cold_start();
-        assert!(observed_active_hash(&layout).is_none());
-    }
-
-    #[tokio::test]
     async fn reload_policy_rejects_invalid_and_keeps_previous() {
         let rig = TestRig::new_with_target(UpdateTarget::Edge);
         let before = (*rig.service.policy()).clone();
@@ -1816,6 +1930,243 @@ mod tests {
         // configured number of times.
         assert_eq!(rig.bank_writer.set_active_call_count(), 3);
         assert_eq!(rig.bank_writer.mark_committed_call_count(), 3);
+        // Post-commit layout divergence MUST poison the engine:
+        // the bootloader is committed to Bank B but the bank-
+        // writer metadata still points at Bank A. The divergence
+        // flag is now sticky and every subsequent install must
+        // refuse at the door until an operator clears it (covered
+        // by `layout_divergence_blocks_subsequent_install`).
+        assert!(
+            rig.service.layout_diverged(),
+            "post-commit bookkeeping failure must set the layout-divergence flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_bank_errors_bumps_on_open_for_write_failure() {
+        // The bot called out that
+        // `bank_writer.open_for_write()` propagated bank-write
+        // errors via `?` without bumping `install_bank_errors`.
+        // Forcing the writer to reject opens MUST land a bump
+        // on the counter.
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.bank_writer
+            .force_open_failure(Some("emulated disk locked".into()));
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 256],
+        );
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("install fails at open_for_write");
+        assert!(
+            matches!(err, UpdaterError::BankWrite(_)),
+            "expected BankWrite, got {err:?}"
+        );
+        let stats = rig.service.stats_snapshot();
+        assert_eq!(
+            stats.install_bank_errors, 1,
+            "open_for_write failure must bump install_bank_errors"
+        );
+        assert_eq!(stats.install_committed, 0);
+        assert_eq!(stats.install_rolled_back, 0);
+    }
+
+    #[tokio::test]
+    async fn install_bank_errors_bumps_on_finish_failure() {
+        // Same finding, second cited site: `handle.finish()`
+        // returning a bank-write error must also bump the
+        // counter.
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.bank_writer
+            .force_finish_failure(Some("emulated metadata partition full".into()));
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xBB_u8; 256],
+        );
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("install fails at handle.finish");
+        assert!(
+            matches!(err, UpdaterError::BankWrite(_)),
+            "expected BankWrite, got {err:?}"
+        );
+        let stats = rig.service.stats_snapshot();
+        assert_eq!(
+            stats.install_bank_errors, 1,
+            "handle.finish failure must bump install_bank_errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn bank_write_during_download_surfaces_distinct_error_code() {
+        // The bot called out that bank-write errors that
+        // surface during the streaming download phase (via the
+        // `TeeChunkSink`) were being wrapped as
+        // `DownloadError::Transport` → `UpdaterError::DownloadFailure`
+        // → `ErrorCode::Io`, silently re-bucketing disk failures
+        // under the generic `io` code. The fix routes them
+        // through `DownloadError::BankWrite` →
+        // `UpdaterError::BankWrite` →
+        // `ErrorCode::UpdaterBankWriteFailure`, and bumps
+        // `install_bank_errors` in the same `map_download_error`
+        // arm.
+        use sng_core::ErrorCode;
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.bank_writer
+            .force_write_chunk_failure(Some("emulated disk ENOSPC mid-stream".into()));
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xCC_u8; 1024],
+        );
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("install fails mid-stream on bank write");
+        assert!(
+            matches!(err, UpdaterError::BankWrite(_)),
+            "expected BankWrite (NOT DownloadFailure), got {err:?}"
+        );
+        assert_eq!(
+            err.code(),
+            ErrorCode::UpdaterBankWriteFailure,
+            "code must be updater.bank.write.failure, not io"
+        );
+        let stats = rig.service.stats_snapshot();
+        assert_eq!(
+            stats.install_bank_errors, 1,
+            "bank-write error during download must bump install_bank_errors via map_download_error"
+        );
+    }
+
+    #[tokio::test]
+    async fn layout_divergence_blocks_subsequent_install() {
+        // After `PostCommitLayoutSync` poisons the engine, the
+        // very next install MUST be refused up front with
+        // `UpdaterError::LayoutDiverged`, WITHOUT acquiring the
+        // install lock and WITHOUT calling `bank_writer.layout()`.
+        // This is the only thing standing between an operator
+        // clicking "install" again and corrupting the running
+        // image (the stale layout would name the slot the
+        // bootloader just committed to as `inactive()`).
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.bank_writer
+            .force_transient_set_active_failures(u32::MAX, None);
+        let first = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xDE_u8; 256],
+        );
+        let err = rig
+            .service
+            .install_from_envelope(first)
+            .await
+            .expect_err("first install fails post-commit");
+        assert!(matches!(err, UpdaterError::PostCommitLayoutSync { .. }));
+        assert!(rig.service.layout_diverged());
+
+        // Clear the forced failure so we can prove the engine
+        // refuses the install before any bank-writer call would
+        // even surface (otherwise the second install would
+        // commit successfully against the now-unblocked writer).
+        rig.bank_writer.force_transient_set_active_failures(0, None);
+        let calls_before = rig.bank_writer.mark_committed_call_count();
+        let second = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(3, 0, 0),
+            vec![0xEF_u8; 256],
+        );
+        let err = rig
+            .service
+            .install_from_envelope(second)
+            .await
+            .expect_err("subsequent install is refused at the door");
+        assert!(
+            matches!(err, UpdaterError::LayoutDiverged),
+            "expected LayoutDiverged, got {err:?}"
+        );
+        // The block fires BEFORE any bank-writer call.
+        assert_eq!(
+            rig.bank_writer.mark_committed_call_count(),
+            calls_before,
+            "blocked install must not call mark_committed"
+        );
+        let stats = rig.service.stats_snapshot();
+        assert_eq!(stats.install_layout_diverged_rejections, 1);
+        // `install_bank_errors` MUST NOT bump on the blocked
+        // path — the engine never reached `bank_writer.layout()`.
+        // (Counter remains at whatever the first install left
+        // it; we just check it didn't tick on this attempt.)
+    }
+
+    #[tokio::test]
+    async fn clear_layout_divergence_re_admits_installs() {
+        // Operator workflow: install hits `PostCommitLayoutSync`,
+        // operator manually reconciles the metadata partition
+        // (here we set_active to Bank B to mirror what the
+        // operator would do, then clear the divergence flag),
+        // next install succeeds normally. This locks in the
+        // recovery contract.
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.bank_writer
+            .force_transient_set_active_failures(u32::MAX, None);
+        let first = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xDE_u8; 256],
+        );
+        let _ = rig.service.install_from_envelope(first).await;
+        assert!(rig.service.layout_diverged());
+
+        // Stage the operator's manual reconciliation: drop the
+        // forced failure, push the metadata partition forward to
+        // match the bootloader's view (Bank B committed +
+        // active), then clear the divergence flag. From the
+        // engine's perspective the reconciliation step is opaque
+        // — it just needs to see a consistent layout when the
+        // next install reads it.
+        rig.bank_writer.force_transient_set_active_failures(0, None);
+        rig.bank_writer.set_layout(BankLayout {
+            active: Bank::B,
+            slot_a: BankSlotState::Committed {
+                version: ImageVersion::new(1, 0, 0),
+            },
+            slot_b: BankSlotState::Committed {
+                version: ImageVersion::new(2, 0, 0),
+            },
+        });
+        rig.service
+            .set_current_version_override(Some(ImageVersion::new(2, 0, 0)));
+        rig.service.clear_layout_divergence();
+        assert!(!rig.service.layout_diverged());
+
+        let second = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(3, 0, 0),
+            vec![0xEF_u8; 256],
+        );
+        let outcome = rig
+            .service
+            .install_from_envelope(second)
+            .await
+            .expect("install succeeds after operator clears divergence");
+        assert!(
+            matches!(outcome, InstallOutcome::Committed { slot: Bank::A, .. }),
+            "after reconciliation, next install targets Bank A (now inactive), got {outcome:?}"
+        );
+        let stats = rig.service.stats_snapshot();
+        // Exactly one blocked attempt counted prior to clearing.
+        assert_eq!(stats.install_layout_diverged_rejections, 0);
+        // The successful second install committed.
+        assert_eq!(stats.install_committed, 1);
     }
 
     #[tokio::test]

@@ -229,6 +229,22 @@ pub enum ErrorCode {
     /// fundamentally succeeded (the bootloader committed); only
     /// the orchestrator-side cache diverged.
     UpdaterPostCommitLayoutSync,
+    /// Install refused because the orchestrator is in
+    /// post-commit layout divergence: a prior install committed
+    /// on the bootloader but failed every retry of the
+    /// bank-writer bookkeeping step (see
+    /// [`Self::UpdaterPostCommitLayoutSync`]). The bootloader
+    /// is pinned to one slot while the bank-writer metadata
+    /// still believes the other slot is active. A follow-up
+    /// install would target the wrong slot (the one the
+    /// bootloader just committed to) and corrupt the running
+    /// image. The engine fails closed and refuses every install
+    /// attempt until an operator reconciles the metadata
+    /// partition AND clears the divergence flag. Distinct from
+    /// [`Self::UpdaterPostCommitLayoutSync`] because the
+    /// originating install is over; this code surfaces the
+    /// *blocked* state of every subsequent install.
+    UpdaterLayoutDiverged,
     /// Update manifest was published for a different appliance
     /// target than the running binary. Mirrors
     /// [`Self::PolicyBundleTargetMismatch`]: e.g. an `sng-agent`
@@ -340,6 +356,7 @@ impl ErrorCode {
                 "updater.manifest.reinstall_of_rolled_back"
             }
             Self::UpdaterPostCommitLayoutSync => "updater.commit.layout_sync_failure",
+            Self::UpdaterLayoutDiverged => "updater.commit.layout_diverged",
             Self::UpdaterManifestTargetMismatch => "updater.manifest.target.mismatch",
             Self::UpdaterImageHashMismatch => "updater.image.hash.mismatch",
             Self::UpdaterImageSizeExceeded => "updater.image.size.exceeded",
@@ -520,6 +537,10 @@ mod tests {
             (
                 ErrorCode::UpdaterPostCommitLayoutSync,
                 "updater.commit.layout_sync_failure",
+            ),
+            (
+                ErrorCode::UpdaterLayoutDiverged,
+                "updater.commit.layout_diverged",
             ),
             (
                 ErrorCode::UpdaterManifestTargetMismatch,

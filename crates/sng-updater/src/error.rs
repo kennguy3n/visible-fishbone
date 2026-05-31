@@ -99,6 +99,26 @@ pub enum UpdaterError {
         /// Last error message surfaced by the bank writer.
         last_error: String,
     },
+    /// Install refused because the orchestrator is in
+    /// post-commit layout divergence: a prior install hit
+    /// [`Self::PostCommitLayoutSync`] and the bootloader
+    /// committed atomically to one slot while the bank-writer
+    /// metadata still points at the previously-active slot.
+    /// Until an operator manually reconciles the metadata
+    /// partition and calls
+    /// [`crate::service::UpdaterService::clear_layout_divergence`],
+    /// the engine MUST refuse every install attempt — a
+    /// follow-up install would consult the stale layout,
+    /// compute `inactive()` as the slot the bootloader just
+    /// committed to, and `open_for_write` would succeed,
+    /// overwriting the running image. This is the only path
+    /// in the engine that fails closed without consulting the
+    /// state machine or the install lock.
+    #[error(
+        "post-commit layout divergence active; refusing install until operator reconciles \
+         the metadata partition and clears the divergence flag"
+    )]
+    LayoutDiverged,
     /// Manifest was published for a different appliance target
     /// than the running binary. e.g. an `sng-agent` updater
     /// asked to consume an `sng-edge` manifest.
@@ -202,6 +222,7 @@ impl UpdaterError {
                 ErrorCode::UpdaterReinstallOfRolledBackVersion
             }
             Self::PostCommitLayoutSync { .. } => ErrorCode::UpdaterPostCommitLayoutSync,
+            Self::LayoutDiverged => ErrorCode::UpdaterLayoutDiverged,
             Self::TargetMismatch { .. } => ErrorCode::UpdaterManifestTargetMismatch,
             Self::ImageHashMismatch { .. } | Self::ImageTruncated { .. } => {
                 ErrorCode::UpdaterImageHashMismatch
@@ -295,6 +316,27 @@ mod tests {
             ErrorCode::UpdaterReinstallOfRolledBackVersion
         );
         assert_ne!(stale.code(), reinstall.code());
+    }
+
+    #[test]
+    fn layout_diverged_has_distinct_code_from_post_commit_sync() {
+        // PostCommitLayoutSync is the *originating* event — the
+        // single install that committed on the bootloader but
+        // couldn't update the metadata partition. LayoutDiverged
+        // is the *follow-up* state: every subsequent install is
+        // refused at the door until an operator clears the flag.
+        // Distinct dashboard codes let operators see both the
+        // one-time event and the ongoing block separately.
+        let originating = UpdaterError::PostCommitLayoutSync {
+            slot: crate::bank::Bank::B,
+            version: ImageVersion::new(2, 0, 0),
+            attempts: 3,
+            last_error: "forced: emulated transient io".into(),
+        };
+        let blocked = UpdaterError::LayoutDiverged;
+        assert_eq!(originating.code(), ErrorCode::UpdaterPostCommitLayoutSync);
+        assert_eq!(blocked.code(), ErrorCode::UpdaterLayoutDiverged);
+        assert_ne!(originating.code(), blocked.code());
     }
 
     #[test]

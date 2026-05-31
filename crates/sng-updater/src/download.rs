@@ -190,7 +190,14 @@ impl ChunkSink for TeeChunkSink<'_> {
 }
 
 fn map_bank_error(e: &UpdaterError) -> DownloadError {
-    DownloadError::Transport(format!("bank writer rejected chunk: {e}"))
+    // Carry bank-write errors through a DISTINCT variant so the
+    // orchestrator's `map_download_error` can reclassify them
+    // back to `UpdaterError::BankWrite` (and thus to
+    // `ErrorCode::UpdaterBankWriteFailure`). Folding them into
+    // `Transport` would silently re-bucket bank-disk failures
+    // under `ErrorCode::Io` on operator dashboards — see the
+    // `DownloadError::BankWrite` variant doc.
+    DownloadError::BankWrite(e.to_string())
 }
 
 /// Errors a downloader implementation may surface. Distinct
@@ -228,6 +235,20 @@ pub enum DownloadError {
         /// Cumulative bytes the downloader tried to feed.
         attempted: u64,
     },
+    /// The bank-write handle rejected a streaming chunk —
+    /// surfaced by [`TeeChunkSink`] when the underlying
+    /// [`crate::bank::WriteHandle::write_chunk`] call returned
+    /// an [`UpdaterError::BankWrite`]. Distinct from
+    /// [`Self::Transport`] so the orchestrator's
+    /// `map_download_error` can route this back to
+    /// `UpdaterError::BankWrite` and the
+    /// `updater.bank.write.failure` dashboard code instead of
+    /// silently re-bucketing every disk-side failure under the
+    /// generic `io` code. The message body carries the
+    /// underlying error's Display so the operator-facing
+    /// detail is preserved.
+    #[error("bank write: {0}")]
+    BankWrite(String),
 }
 
 /// Image-bytes adapter trait. Production implementations sit

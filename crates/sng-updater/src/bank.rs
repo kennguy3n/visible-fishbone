@@ -310,6 +310,12 @@ struct InMemoryInner {
     /// Optional override that makes every subsequent
     /// `finish` fail with the supplied message.
     fail_finish_with: Mutex<Option<String>>,
+    /// Optional override that makes every subsequent
+    /// `WriteHandle::write_chunk` fail with the supplied
+    /// message. Set via [`InMemoryBankWriter::force_write_chunk_failure`].
+    /// Used to exercise the download-phase bank-write error
+    /// path in tests.
+    fail_write_chunk_with: Mutex<Option<String>>,
     /// Optional countdown of `set_active` failures — each
     /// remaining tick decrements and surfaces a forced error.
     /// When the counter reaches zero the call succeeds. Used
@@ -380,6 +386,17 @@ impl InMemoryBankWriter {
         *self.inner.fail_finish_with.lock() = msg;
     }
 
+    /// Force every subsequent `WriteHandle::write_chunk` call
+    /// to fail with the supplied message. Used to exercise
+    /// the download-phase bank-write error mapping in the
+    /// orchestrator (so the test can confirm bank failures
+    /// during streaming surface as `UpdaterError::BankWrite`
+    /// and `ErrorCode::UpdaterBankWriteFailure`, not as a
+    /// generic transport-level download failure).
+    pub fn force_write_chunk_failure(&self, msg: Option<String>) {
+        *self.inner.fail_write_chunk_with.lock() = msg;
+    }
+
     /// Force the next `count` `set_active` calls to fail with
     /// the supplied message (or a default). After the counter
     /// is exhausted, calls succeed normally. Used to exercise
@@ -437,6 +454,9 @@ struct InMemoryWriteHandle {
 #[async_trait]
 impl WriteHandle for InMemoryWriteHandle {
     async fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), UpdaterError> {
+        if let Some(msg) = self.inner.fail_write_chunk_with.lock().clone() {
+            return Err(UpdaterError::BankWrite(format!("forced: {msg}")));
+        }
         self.buffer.extend_from_slice(chunk);
         Ok(())
     }
