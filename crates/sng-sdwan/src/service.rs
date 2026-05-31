@@ -345,13 +345,75 @@ impl SdwanService {
     /// [`SdwanStats::record_bundle_load_failure`], and
     /// returns the error.
     ///
+    /// ## Sticky-cache handling on transition to
+    /// `sticky_window_ms == 0`
+    ///
+    /// When the new policy disables stickiness
+    /// (`sticky_window_ms == 0`), this method **drops
+    /// every entry currently in the sticky-flow cache**
+    /// and adds the dropped count to [`Self::evictions`].
+    /// Without this, entries written under the prior
+    /// (non-zero) window would survive indefinitely:
+    /// `evaluate` skips `sticky_lookup` under the same
+    /// guard and `finalise` skips `sticky_insert` under
+    /// the same guard, so no future code path would
+    /// observe (and therefore prune) them. The entries
+    /// have no functional effect on path selection while
+    /// stickiness is disabled — both selection guards
+    /// short-circuit before they touch the cache — but
+    /// they would corrupt the cache's
+    /// "size = current sticky-pinned flow count"
+    /// invariant that operator dashboards and the
+    /// in-crate test suite rely on. Clearing here keeps
+    /// `sticky.len()` honest the moment the operator
+    /// disables stickiness, and the eviction-counter
+    /// bump leaves an audit trail of when the drop
+    /// happened. Reloads where the new policy keeps a
+    /// non-zero window (including a window *shorter* than
+    /// the previous one) leave the cache untouched —
+    /// existing pins continue to honour their original
+    /// absolute `pinned_until_ms` wall-clock expiry; this
+    /// is by design and exercised by
+    /// `sticky_pin_survives_in_place_policy_reload`.
+    ///
     /// # Errors
     ///
     /// - [`SdwanError::InvalidPolicy`] when the candidate
     ///   policy fails [`SdwanPolicy::validate`].
     pub fn reload_policy(&self, policy: SdwanPolicy) -> Result<(), SdwanError> {
+        // Snapshot the disable-flag before handing
+        // ownership to `try_replace`. We use the
+        // candidate's flag (not the previous policy's)
+        // because the swap is the point at which
+        // selection starts honouring the new
+        // `sticky_window_ms == 0` semantics; entries
+        // written under the old window are now orphans
+        // from the new policy's perspective regardless of
+        // what the old policy said.
+        let new_disables_sticky = policy.sticky_window_ms == 0;
         match self.policy.try_replace(policy) {
             Ok(()) => {
+                if new_disables_sticky {
+                    // Take the lock once, snapshot the
+                    // length, then clear. The mutex is
+                    // dropped before `fetch_add` so the
+                    // evaluation hot path is never blocked
+                    // by an evictions-bookkeeping write.
+                    // `g.len()` always fits a u64 — the
+                    // cache is capped by
+                    // `SdwanServiceConfig::sticky_cache_capacity`
+                    // (a `usize`) and we never store more
+                    // entries than fit on the host.
+                    let dropped = {
+                        let mut g = self.sticky.lock();
+                        let n = g.len() as u64;
+                        g.clear();
+                        n
+                    };
+                    if dropped > 0 {
+                        self.evictions.fetch_add(dropped, Ordering::Relaxed);
+                    }
+                }
                 self.stats.record_bundle_load();
                 Ok(())
             }
@@ -1440,6 +1502,187 @@ mod tests {
         let d2 = svc.evaluate(&req("flow-reload", TrafficClass::Interactive, NOW + 5_000));
         assert_eq!(d2.path_id, Some(PathId::new("mpls")));
         assert_eq!(d2.reason, SteeringReason::StickyPinned);
+    }
+
+    /// Devin Review (PR #32 sweep) flagged that the
+    /// sticky cache had no cleanup path when an operator
+    /// reloaded the policy with `sticky_window_ms = 0`:
+    /// the producer-side guard in `finalise` and the
+    /// consumer-side guard in `evaluate` both
+    /// short-circuit the cache, so entries written under
+    /// the prior (non-zero) window would survive
+    /// indefinitely until the operator re-enabled
+    /// stickiness or the process restarted. The fix is
+    /// in `reload_policy`: when the new policy has
+    /// `sticky_window_ms == 0`, drop every entry and
+    /// bump `evictions` by the dropped count. This test
+    /// exercises that contract on a populated cache.
+    #[test]
+    fn reload_to_zero_sticky_window_clears_cache_and_bumps_evictions() {
+        let (svc, _rx) = build(
+            // Start with a non-zero window so the cache
+            // can actually populate; the build helper's
+            // default policy has a non-zero
+            // `sticky_window_ms`, but we make the
+            // intent explicit here so future-default
+            // drift doesn't silently invalidate the
+            // setup.
+            SdwanPolicy {
+                sticky_window_ms: 60_000,
+                ..SdwanPolicy::default()
+            },
+            vec![Path::new("mpls", [TrafficClass::Interactive])],
+            vec![(PathId::new("mpls"), PathProbe::new(10.0, 0.0, 0.0, NOW))],
+        );
+
+        // Populate the cache with 7 distinct flows.
+        for i in 0..7 {
+            let flow = format!("flow-precleartest-{i}");
+            let _ = svc.evaluate(&req(&flow, TrafficClass::Interactive, NOW));
+        }
+        assert_eq!(
+            svc.sticky.lock().len(),
+            7,
+            "precondition: cache should be populated before the reload"
+        );
+        let evictions_before = svc.evictions();
+
+        // Reload to a policy with `sticky_window_ms = 0`.
+        // The cache must be drained as a side-effect of
+        // the reload, and `evictions` must grow by
+        // exactly the dropped count so dashboards can
+        // attribute the drop.
+        svc.reload_policy(SdwanPolicy {
+            sticky_window_ms: 0,
+            ..SdwanPolicy::default()
+        })
+        .expect("reload to zero-window policy must succeed");
+
+        assert_eq!(
+            svc.sticky.lock().len(),
+            0,
+            "reload to sticky_window_ms == 0 must drop every cache entry; \
+             otherwise the cache reports stale entries that no future code \
+             path will observe or prune"
+        );
+        assert_eq!(
+            svc.evictions(),
+            evictions_before + 7,
+            "evictions counter must record exactly the dropped count \
+             so operator dashboards can correlate the drop to the reload"
+        );
+
+        // Subsequent evaluations must NOT repopulate the
+        // cache (the producer-side guard in `finalise`
+        // still short-circuits under the new policy).
+        for i in 0..3 {
+            let flow = format!("flow-postcleartest-{i}");
+            let _ = svc.evaluate(&req(&flow, TrafficClass::Interactive, NOW + 100));
+        }
+        assert_eq!(
+            svc.sticky.lock().len(),
+            0,
+            "cache must stay empty after the reload to zero-window: \
+             `finalise`'s sticky_window_ms > 0 guard still gates all inserts"
+        );
+    }
+
+    /// Reloading to a policy that keeps stickiness
+    /// *enabled* (even with a different non-zero window)
+    /// must leave the cache intact. This is the negative
+    /// companion to `reload_to_zero_sticky_window_clears_cache_*`
+    /// — we don't want the clear-on-disable code path
+    /// to over-trigger and wipe the cache on any window
+    /// change. Together with
+    /// `sticky_pin_survives_in_place_policy_reload`
+    /// (which asserts pin honour across reload) this
+    /// pins down the full reload-policy×sticky-state
+    /// matrix.
+    #[test]
+    fn reload_with_nonzero_sticky_window_preserves_cache_and_evictions() {
+        let (svc, _rx) = build(
+            SdwanPolicy {
+                sticky_window_ms: 60_000,
+                ..SdwanPolicy::default()
+            },
+            vec![Path::new("mpls", [TrafficClass::Interactive])],
+            vec![(PathId::new("mpls"), PathProbe::new(10.0, 0.0, 0.0, NOW))],
+        );
+
+        // Populate the cache.
+        for i in 0..5 {
+            let flow = format!("flow-preserved-{i}");
+            let _ = svc.evaluate(&req(&flow, TrafficClass::Interactive, NOW));
+        }
+        assert_eq!(svc.sticky.lock().len(), 5);
+        let evictions_before = svc.evictions();
+
+        // Reload to a shorter (but still non-zero) window.
+        // The clear-on-disable path must NOT fire here:
+        // existing pins continue to honour their original
+        // absolute `pinned_until_ms` wall-clock expiry.
+        svc.reload_policy(SdwanPolicy {
+            sticky_window_ms: 30_000,
+            ..SdwanPolicy::default()
+        })
+        .expect("reload to shorter-but-nonzero-window policy must succeed");
+
+        assert_eq!(
+            svc.sticky.lock().len(),
+            5,
+            "reload to a non-zero window must not drop existing entries"
+        );
+        assert_eq!(
+            svc.evictions(),
+            evictions_before,
+            "evictions counter must not move on a non-zero-window reload"
+        );
+
+        // And the entries must still actually serve
+        // sticky-pin lookups under the new policy.
+        let d = svc.evaluate(&req(
+            "flow-preserved-0",
+            TrafficClass::Interactive,
+            NOW + 1_000,
+        ));
+        assert_eq!(d.reason, SteeringReason::StickyPinned);
+    }
+
+    /// Idempotency check: a reload to `sticky_window_ms ==
+    /// 0` when the cache is already empty (e.g. because
+    /// the previous policy was also zero-window) must
+    /// succeed without touching the evictions counter.
+    /// Without the `dropped > 0` guard inside
+    /// `reload_policy`, the counter would still record a
+    /// `fetch_add(0)` — harmless functionally, but the
+    /// explicit zero-skip is documented behaviour and
+    /// worth pinning down.
+    #[test]
+    fn reload_to_zero_sticky_window_on_empty_cache_is_a_no_op() {
+        let (svc, _rx) = build(
+            SdwanPolicy {
+                sticky_window_ms: 0,
+                ..SdwanPolicy::default()
+            },
+            vec![Path::new("mpls", [TrafficClass::Interactive])],
+            vec![(PathId::new("mpls"), PathProbe::new(10.0, 0.0, 0.0, NOW))],
+        );
+
+        assert_eq!(svc.sticky.lock().len(), 0);
+        let evictions_before = svc.evictions();
+
+        svc.reload_policy(SdwanPolicy {
+            sticky_window_ms: 0,
+            ..SdwanPolicy::default()
+        })
+        .expect("idempotent zero-window reload must succeed");
+
+        assert_eq!(svc.sticky.lock().len(), 0);
+        assert_eq!(
+            svc.evictions(),
+            evictions_before,
+            "no entries dropped means evictions must not move"
+        );
     }
 
     #[test]
