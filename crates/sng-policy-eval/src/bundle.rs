@@ -268,6 +268,61 @@ fn build_vertex_indices(rules: &[Rule]) -> (HashMap<String, Subject>, HashMap<St
     (subjects, predicates)
 }
 
+/// Build a fail-closed skeleton bundle body for the given
+/// target. The body contains zero rules and a `deny` default
+/// verb — so every flow evaluated against the resulting
+/// [`LoadedBundle`] returns [`Verb::Deny`].
+///
+/// This is the canonical "we haven't pulled a real bundle yet"
+/// boot fixture used by the binary crates (`sng-edge`,
+/// `sng-agent`) so the policy engine is constructible at boot
+/// before the control-plane puller has delivered the first real
+/// bundle. The architectural contract is "fail closed if the
+/// puller never reaches the control plane" — the skeleton
+/// implements that contract directly.
+///
+/// `graph_id` is the canonical "skeleton" UUID
+/// (`00000000-0000-0000-0000-000000000001`) so operator
+/// dashboards can render a clear "boot skeleton, not a pulled
+/// bundle" label without parsing the default verb.
+///
+/// The body is a valid input to [`LoadedBundle::from_body`] for
+/// the same target. It is NOT signed — the binary's
+/// initialisation path must construct the [`crate::PolicyEngine`]
+/// directly via [`crate::PolicyEngine::from_body`] without a
+/// [`sng_core::policy::PolicyVerifier`]. The first real
+/// bundle pulled from the control plane MUST go through the
+/// verifier before [`crate::PolicyEngine::swap`] is called.
+///
+/// # Panics
+///
+/// Never. The internal [`rmp_serde::to_vec_named`] call is
+/// infallible for the fully-populated [`RawBundle`] this helper
+/// constructs (no skipped fields, all primitives, no nested
+/// types that could fail to encode).
+#[must_use]
+#[allow(
+    clippy::expect_used,
+    reason = "RawBundle is fully populated with primitives + Vec<u8>; \
+              rmp_serde::to_vec_named cannot fail on this shape. Documented \
+              in the # Panics section above."
+)]
+pub fn deny_all_skeleton_body(target: BundleTarget) -> Vec<u8> {
+    let raw = RawBundle {
+        schema_version: MAX_SUPPORTED_SCHEMA_VERSION,
+        target,
+        graph_id: "00000000-0000-0000-0000-000000000001".into(),
+        graph_version: 0,
+        compiler: "sng-bundle-skeleton".into(),
+        default_action: "deny".into(),
+        rules_json: b"[]".to_vec(),
+        steering_json: Vec::new(),
+        compiled_at: Utc::now(),
+    };
+    // Infallible for the fully-populated RawBundle above.
+    rmp_serde::to_vec_named(&raw).expect("deny-all skeleton bundle body must encode infallibly")
+}
+
 /// Parse the `d` field. The Go side stores this as a free-form
 /// string; we attempt to map it onto the typed [`Verb`] enum and
 /// fall back to `Deny` (the architectural safe baseline) on any
@@ -324,6 +379,32 @@ mod tests {
         assert_eq!(loaded.rule_count(), 0);
         assert_eq!(loaded.default_verb, Verb::Deny);
         assert!(loaded.steering_raw.is_none());
+    }
+
+    #[test]
+    fn deny_all_skeleton_decodes_to_deny_default_for_every_target() {
+        for target in [
+            BundleTarget::Edge,
+            BundleTarget::Endpoint,
+            BundleTarget::Cloud,
+            BundleTarget::Mobile,
+        ] {
+            let body = deny_all_skeleton_body(target);
+            let loaded = LoadedBundle::from_body(&body, target).unwrap();
+            assert_eq!(loaded.target, target);
+            assert_eq!(loaded.default_verb, Verb::Deny);
+            assert_eq!(loaded.rule_count(), 0);
+            assert!(loaded.steering_raw.is_none());
+            assert_eq!(loaded.compiler, "sng-bundle-skeleton");
+            assert_eq!(loaded.graph_version, 0);
+        }
+    }
+
+    #[test]
+    fn deny_all_skeleton_rejects_mismatched_target() {
+        let body = deny_all_skeleton_body(BundleTarget::Edge);
+        let err = LoadedBundle::from_body(&body, BundleTarget::Endpoint).unwrap_err();
+        assert!(matches!(err, PolicyEvalError::TargetMismatch { .. }));
     }
 
     #[test]

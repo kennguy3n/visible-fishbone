@@ -1,0 +1,71 @@
+[package]
+name = "sng-edge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ShieldNet Gateway edge (branch/site) appliance binary: composes every Phase-2 library crate behind the sng-core::supervisor harness."
+
+# Two artefacts: the `sng-edge` binary that operators run on the
+# branch/site VM, and the library half of the same crate that the
+# integration-test harness (`tests/*.rs`) links against so the
+# composition is exercised end-to-end without spawning a real
+# child process.
+[[bin]]
+name = "sng-edge"
+path = "src/main.rs"
+
+[lib]
+name = "sng_edge"
+path = "src/lib.rs"
+
+[dependencies]
+sng-core = { workspace = true }
+sng-pal = { workspace = true }
+sng-comms = { workspace = true }
+sng-policy-eval = { workspace = true }
+sng-telemetry = { workspace = true }
+sng-dns = { workspace = true }
+sng-fw = { workspace = true }
+sng-ips = { workspace = true }
+sng-swg = { workspace = true }
+sng-ztna = { workspace = true }
+sng-sdwan = { workspace = true }
+sng-updater = { workspace = true }
+
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt-multi-thread", "signal"] }
+async-trait = { workspace = true }
+arc-swap = { workspace = true }
+parking_lot = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+clap = { workspace = true }
+
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
+url = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "macros", "rt-multi-thread", "sync", "time"] }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+rand = { workspace = true }
+rcgen = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

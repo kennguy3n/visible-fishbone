@@ -23,6 +23,8 @@ members = [
     "crates/sng-ztna",
     "crates/sng-sdwan",
     "crates/sng-updater",
+    "crates/sng-edge",
+    "crates/sng-agent",
 ]
 resolver = "3"
 
@@ -83,6 +85,14 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 thiserror = "2"
 anyhow = "1"
 async-trait = "0.1"
+
+# CLI parsing. Used by the two binary crates (sng-edge, sng-agent)
+# for their `--config`, `--health-bind`, `--updater-backend` etc.
+# command-line surface. derive feature is the canonical clap usage
+# pattern; env feature lets each `--flag` accept an env-var fallback
+# (e.g. SNG_EDGE_CONFIG) so systemd / container manifests can drop
+# the operator into the same shape as a CLI invocation.
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 
 # Utilities.
 bytes = "1"
