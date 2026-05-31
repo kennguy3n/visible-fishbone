@@ -148,10 +148,31 @@ impl LocalCategoryDb {
         // §3.3 treats the path component as case-sensitive, and
         // operators write the literal path their backend serves.
         //
-        // Without this normalisation the case-sensitive `dedup`
-        // below silently keeps both rows; at lookup time the
-        // case-insensitive `host_matches` would walk both, the
-        // earlier sort tie-break would win, and an operator-
+        // Canonicalise the category string to ASCII lowercase for
+        // the same reason: the deny-list comparison in
+        // `auth.rs:evaluate` already lowercases the category
+        // before binary-searching, and the deny-list itself is
+        // stored lowercase (sorted + deduped at handler build
+        // time — see `ExtAuthzHandlerBuilder::build`). Two feed
+        // entries that share host+path but differ only in
+        // category casing (`"Adult"` vs `"adult"`) would survive
+        // `dedup()` (which keys on `PartialEq` over the whole
+        // `CategoryEntry` including category), both walk to the
+        // same deny verdict, but the verdict's `reason` field
+        // would carry whichever casing won the sort tie-break.
+        // That feeds *two* `category = '…'` rows into downstream
+        // dashboards for what is logically one category, splitting
+        // per-category counts and breaking deny-list audit trails
+        // that group by category. Storing the canonical lowercase
+        // form means the dedup collapses semantic duplicates and
+        // every verdict reason carries the canonical bytes —
+        // dashboards see one row per category regardless of feed
+        // casing.
+        //
+        // Without these two normalisations the case-sensitive
+        // `dedup` below silently keeps both rows; at lookup time
+        // the case-insensitive `host_matches` would walk both,
+        // the earlier sort tie-break would win, and an operator-
         // authored override with different casing could be
         // silently shadowed by an industry-default entry of the
         // same suffix. The bypass list applies the same
@@ -161,6 +182,7 @@ impl LocalCategoryDb {
         // and category feeds together does not see a divergence.
         for e in &mut entries {
             e.host = e.host.to_ascii_lowercase();
+            e.category.0 = e.category.0.to_ascii_lowercase();
         }
         entries.sort_by(|a, b| {
             // Primary: descending by stripped-host length
@@ -468,6 +490,57 @@ mod tests {
         assert_eq!(
             db.categorize_sync("online.chase.com", "/"),
             Some(Category::new("tls.finance"))
+        );
+    }
+
+    #[test]
+    fn install_canonicalizes_category_case_for_dedup() {
+        // Regression test: two entries that share host + path
+        // but differ only in category casing (`"Adult"` vs
+        // `"adult"`) must collapse to a single index row.
+        //
+        // Before this fix, the case-sensitive `Vec::dedup`
+        // (which keys on `PartialEq` over the whole
+        // `CategoryEntry`) kept both rows. At lookup time the
+        // case-insensitive `host_matches` would walk both, the
+        // earlier sort tie-break (input-order preserving stable
+        // sort) would win, and the verdict reason field would
+        // carry whichever casing happened to land first.
+        // Downstream dashboards grouping by `category` then saw
+        // *two* rows for what is logically one category,
+        // splitting per-category counts and breaking deny-list
+        // audit trails that group by category. The
+        // `auth.rs:evaluate` deny-list lookup already
+        // lowercased the cat before binary-searching the
+        // canonical-lowercase deny list, so the deny verdict
+        // itself was correct — but the reason string was not.
+        let db = LocalCategoryDb::new(vec![
+            ce("example.com", None, "Adult"),
+            ce("example.com", None, "adult"),
+        ]);
+        assert_eq!(db.len(), 1);
+        // The collapsed row stores the canonical (lowercase)
+        // category so every verdict reason carries the same
+        // bytes regardless of feed casing.
+        assert_eq!(
+            db.categorize_sync("example.com", "/"),
+            Some(Category::new("adult"))
+        );
+    }
+
+    #[test]
+    fn install_normalizes_category_case_in_verdict_reason() {
+        // Even when there is only one entry (no dedup to test),
+        // the category casing in the verdict reason must match
+        // the canonical (lowercase) form so downstream consumers
+        // never see uppercase characters in the `category` field
+        // of a deny verdict — that would split per-category
+        // counts across casings even if the feed itself is
+        // consistent.
+        let db = LocalCategoryDb::new(vec![ce("example.com", None, "BUSINESS.SAAS")]);
+        assert_eq!(
+            db.categorize_sync("example.com", "/"),
+            Some(Category::new("business.saas"))
         );
     }
 }

@@ -150,11 +150,68 @@ impl SwgEventSource {
 
 #[async_trait]
 impl EventSource for SwgEventSource {
+    /// Lift a [`VerdictEvent`] into the shared
+    /// [`TelemetryEvent::Http`] envelope. The wire envelope's
+    /// `tenant_id` / `device_id` / `site_id` are stamped by the
+    /// pipeline's [`sng_telemetry::Enricher`] from the boot-time
+    /// [`sng_telemetry::AgentIdentity`], which is the same
+    /// pattern every other producer in this workspace
+    /// ([`sng_ips::IpsEventSource`], the DNS event source, the
+    /// ZTNA event source) uses. The [`Pipeline::new`] constructor
+    /// verifies that the producer-side enricher and the
+    /// egress-side `sng_comms::EnrichmentContext` agree on
+    /// identity before the pipeline accepts any source, so SWG
+    /// envelopes inherit the same identity check every other
+    /// source goes through.
+    ///
+    /// # Per-request `tenant_id` / `principal_id`
+    ///
+    /// [`VerdictEvent`] carries `tenant_id` and `principal_id`
+    /// extracted from the per-request `x-sng-tenant` /
+    /// `x-sng-principal` headers ([`crate::auth`]). These are
+    /// **pre-pipeline** attributes — they drive rate-limit bucket
+    /// keys ([`crate::rate_limit`]) and deny-list scoping inside
+    /// the verdict layer, and they are intentionally **not**
+    /// propagated through the shared `TelemetryEvent::Http`
+    /// envelope:
+    ///
+    /// 1. The shared [`sng_core::events::HttpEvent`] schema is
+    ///    bound to the single-tenant edge-agent contract every
+    ///    other producer in the workspace honours — extending it
+    ///    with per-event tenant / principal fields would be a
+    ///    cross-repo schema lift (Go writer, ClickHouse columns,
+    ///    pipeline dashboards) that is out of scope for the
+    ///    ext-authz hot path.
+    /// 2. In a single-tenant SWG deployment (the deployment the
+    ///    `sng-swg` crate is shipped for today) the per-request
+    ///    `tenant_id` is always equal to the agent's bound
+    ///    `AgentIdentity::tenant_id`. Stamping the agent identity
+    ///    on the envelope is therefore semantically equivalent to
+    ///    stamping the per-request id, and the redundant copy
+    ///    would only bloat the wire.
+    /// 3. A future multi-tenant gateway deployment (one agent
+    ///    serving traffic for multiple tenants — a control-plane
+    ///    deployment model not currently supported) requires
+    ///    either growing
+    ///    [`sng_telemetry::EnrichmentContext`] with per-event
+    ///    tenant / principal overrides, or adding a SWG-specific
+    ///    `TelemetryEvent::SwgRequest` variant. Either path is a
+    ///    pipeline-layer addition and is intentionally deferred
+    ///    until the multi-tenant deployment shape is committed.
+    ///    Until then, an operator running multi-tenant SWG must
+    ///    deploy one agent per tenant — the same constraint every
+    ///    other producer in this workspace operates under.
+    ///
+    /// Downstream consumers that need per-tenant or per-principal
+    /// detail (rate-limit dashboards, abuse-investigation tools)
+    /// read [`VerdictEvent`] directly from the [`SwgEventSink`]
+    /// via a second consumer tap rather than through the shared
+    /// `TelemetryEvent` pipeline — the verdict event channel is
+    /// public ([`SwgEventSource::channel`]) so a second sink can
+    /// be attached at boot if the operator wires one. The shared
+    /// pipeline tap deliberately drops the SWG-specific detail so
+    /// the wire envelope keeps its single-tenant invariant.
     async fn recv(&mut self) -> Option<TelemetryEvent> {
-        // Lift VerdictEvent → HttpEvent and drop the
-        // swg-specific detail. Downstream telemetry consumers
-        // can re-derive the SWG distinction from the verdict +
-        // reason fields on the HttpEvent if they need it.
         self.rx.recv().await.map(|v| TelemetryEvent::Http(v.http))
     }
 }
