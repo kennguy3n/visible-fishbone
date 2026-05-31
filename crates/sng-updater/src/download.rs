@@ -368,25 +368,25 @@ impl ImageDownloader for InMemoryDownloader {
         let total = bytes.len() as u64;
         let mut written: u64 = 0;
         for chunk in bytes.chunks(chunk_size) {
-            if let Some(tr) = truncate_at
-                && written.saturating_add(chunk.len() as u64) > tr
-            {
-                // The truncation budget is capped by
-                // `truncate_after` (test-supplied) so the
-                // remaining-bytes value is always within
-                // `usize::MAX` on any platform we ship to;
-                // the cast is defensive and never truncates
-                // in practice. We use `try_from` to make the
-                // bound explicit.
-                let take = usize::try_from(tr.saturating_sub(written)).unwrap_or(usize::MAX);
-                if take > 0 {
-                    sink.write_chunk(&chunk[..take]).await?;
-                    written += take as u64;
+            if let Some(tr) = truncate_at {
+                if written.saturating_add(chunk.len() as u64) > tr {
+                    // The truncation budget is capped by
+                    // `truncate_after` (test-supplied) so the
+                    // remaining-bytes value is always within
+                    // `usize::MAX` on any platform we ship
+                    // to; the cast is defensive and never
+                    // truncates in practice. We use
+                    // `try_from` to make the bound explicit.
+                    let take = usize::try_from(tr.saturating_sub(written)).unwrap_or(usize::MAX);
+                    if take > 0 {
+                        sink.write_chunk(&chunk[..take]).await?;
+                        written += take as u64;
+                    }
+                    return Err(DownloadError::Truncated {
+                        expected: declared_size,
+                        read: written,
+                    });
                 }
-                return Err(DownloadError::Truncated {
-                    expected: declared_size,
-                    read: written,
-                });
             }
             sink.write_chunk(chunk).await?;
             written += chunk.len() as u64;
