@@ -174,7 +174,13 @@ impl ExtAuthzResponse {
                 action: "rate_limit".into(),
                 status: Some(429),
                 reason: v.reason.clone(),
-                retry_after_secs: None,
+                // Copy the verdict's retry timing verbatim onto
+                // the wire response so Envoy can stamp it onto
+                // the 429's `Retry-After` header. The verdict
+                // constructor guarantees `Some` on the RateLimit
+                // arm — falling back to `None` here would be a
+                // silent regression of the ext-authz contract.
+                retry_after_secs: v.retry_after_secs,
                 category: v.category.clone(),
             },
         }
@@ -439,7 +445,17 @@ impl ExtAuthzHandler {
             .rate_limiter
             .acquire(&ctx.tenant_id, &ctx.principal_id);
         if !rate.permitted {
-            let mut v = Verdict::rate_limit(format!("rate_limit.{}", rate.bucket_key));
+            // Thread the limiter's retry_after_secs through the
+            // verdict so [`ExtAuthzResponse::from_verdict`] can
+            // surface it on the wire and Envoy can stamp a
+            // `Retry-After` header on the 429. Without this,
+            // clients have no back-off signal and tend to
+            // retry aggressively, amplifying the overload that
+            // triggered the rate limit in the first place.
+            let mut v = Verdict::rate_limit(
+                format!("rate_limit.{}", rate.bucket_key),
+                rate.retry_after_secs,
+            );
             v.category = Some("rate_limit.bucket".into());
             return v;
         }
@@ -639,6 +655,95 @@ mod tests {
             .unwrap();
         assert_eq!(r.action, "rate_limit");
         assert_eq!(r.status, Some(429));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_response_carries_retry_after_secs_from_limiter() {
+        // Regression test for the ext-authz contract: the rate
+        // limiter computes a `retry_after_secs` value the
+        // moment a bucket is exhausted, and that value MUST
+        // reach Envoy on the wire so it can stamp a
+        // `Retry-After` header on the 429. Previously
+        // `Verdict::rate_limit` dropped the value on the floor
+        // and `ExtAuthzResponse::from_verdict` unconditionally
+        // emitted `retry_after_secs: None`, defeating the
+        // computed timing. This test pins the propagation:
+        //   limiter -> Verdict::retry_after_secs
+        //          -> ExtAuthzResponse::retry_after_secs
+        //          -> serialised JSON Envoy reads
+        let (h, _cap) = make_handler(vec![]);
+        // Exhaust the bucket.
+        for _ in 0..2 {
+            let _ = h
+                .handle_request(req("biz.example", "/", None, None))
+                .await
+                .unwrap();
+        }
+        // First rejection: surfaced on the typed response.
+        let r = h
+            .handle_request(req("biz.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.action, "rate_limit");
+        assert_eq!(r.status, Some(429));
+        let retry = r.retry_after_secs.expect(
+            "rate_limit responses MUST carry retry_after_secs \
+             so Envoy can stamp it onto the Retry-After header",
+        );
+        assert!(
+            retry >= 1,
+            "limiter promises retry_after >= 1 on rejection; got {retry}"
+        );
+
+        // Round-trip via the JSON byte path Envoy actually
+        // calls, to pin the wire shape. `handle_json_bytes` is
+        // what an HTTP listener wraps in production.
+        // Use the same `(tenant, principal)` bucket key as the
+        // exhaustion loop above (the helper `req()` defaults
+        // both to `tenant-1` / `principal-1`); otherwise the
+        // limiter sees a fresh bucket and would permit the
+        // request, leaving the wire-shape assertion untested.
+        let body = serde_json::to_vec(&ExtAuthzRequest {
+            headers: vec![
+                (":method".into(), "GET".into()),
+                (":scheme".into(), "https".into()),
+                (":path".into(), "/".into()),
+                ("host".into(), "biz.example".into()),
+                ("x-sng-tenant".into(), "tenant-1".into()),
+                ("x-sng-principal".into(), "principal-1".into()),
+            ],
+            body_sha256: None,
+        })
+        .unwrap();
+        let raw = h.handle_json_bytes(&body).await;
+        let on_wire: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(on_wire["action"], "rate_limit");
+        assert_eq!(on_wire["status"], 429);
+        assert!(
+            on_wire["retry_after_secs"].is_u64(),
+            "wire shape MUST include retry_after_secs as an unsigned integer; \
+             got {raw:?}",
+            raw = String::from_utf8_lossy(&raw)
+        );
+        assert!(on_wire["retry_after_secs"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn from_verdict_drops_retry_after_secs_on_non_rate_limit_actions() {
+        // Defence-in-depth: even if a future caller sets
+        // `Verdict::retry_after_secs = Some(...)` on a non-
+        // rate-limit verdict by mistake, the wire encoder must
+        // not leak it onto allow / deny / bypass responses.
+        // The serde field is `skip_serializing_if = "is_none"`
+        // so emitting `None` here is the contract.
+        let allow = ExtAuthzResponse::from_verdict(&Verdict::allow_uncategorized());
+        assert_eq!(allow.retry_after_secs, None);
+        let bypass = ExtAuthzResponse::from_verdict(&Verdict::bypass("bypass.tls.healthcare"));
+        assert_eq!(bypass.retry_after_secs, None);
+        let deny = ExtAuthzResponse::from_verdict(&Verdict::deny("deny.malware.sha256"));
+        assert_eq!(deny.retry_after_secs, None);
+        let rate = ExtAuthzResponse::from_verdict(&Verdict::rate_limit("rate_limit.tenant", 45));
+        assert_eq!(rate.retry_after_secs, Some(45));
     }
 
     #[tokio::test]

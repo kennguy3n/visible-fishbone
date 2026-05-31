@@ -73,6 +73,20 @@ pub struct Verdict {
     /// not produced by the categoriser (bypass, rate limit,
     /// malware).
     pub category: Option<String>,
+    /// Seconds the client should wait before retrying. `Some` only
+    /// when `action == Action::RateLimit`; `None` otherwise.
+    ///
+    /// The rate limiter computes this in
+    /// [`crate::rate_limit::RateLimitDecision::retry_after_secs`];
+    /// the handler threads it through here so
+    /// [`crate::auth::ExtAuthzResponse::from_verdict`] can copy it
+    /// onto the wire response. Envoy reads the wire response and
+    /// stamps it onto a `Retry-After` header on the 429 — without
+    /// the value, clients have no signal to back off and may keep
+    /// hammering the SWG, amplifying the overload that triggered
+    /// the rate limit in the first place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u64>,
 }
 
 impl Verdict {
@@ -86,6 +100,7 @@ impl Verdict {
             action: Action::Allow,
             reason: reason.into(),
             category: None,
+            retry_after_secs: None,
         }
     }
 
@@ -108,6 +123,7 @@ impl Verdict {
             action: Action::Allow,
             reason: format!("allow.{c}"),
             category: Some(c),
+            retry_after_secs: None,
         }
     }
 
@@ -119,6 +135,7 @@ impl Verdict {
             action: Action::Deny,
             reason: reason.into(),
             category: None,
+            retry_after_secs: None,
         }
     }
 
@@ -130,6 +147,7 @@ impl Verdict {
             action: Action::Deny,
             reason: format!("deny.{c}"),
             category: Some(c),
+            retry_after_secs: None,
         }
     }
 
@@ -140,17 +158,29 @@ impl Verdict {
             action: Action::Bypass,
             reason: reason.into(),
             category: None,
+            retry_after_secs: None,
         }
     }
 
     /// Rate-limited verdict. The reason carries the bucket
-    /// identifier for dashboards.
+    /// identifier for dashboards; `retry_after_secs` is the
+    /// number of seconds the client should wait before
+    /// retrying — sourced from
+    /// [`crate::rate_limit::RateLimitDecision::retry_after_secs`]
+    /// and surfaced verbatim on the ext-authz wire response so
+    /// Envoy can stamp it onto the `Retry-After` header of the
+    /// 429. The argument is mandatory (not `Option<u64>`)
+    /// because every rate-limit decision comes from the limiter
+    /// and the limiter always computes a value — making it
+    /// optional would invite a future caller to forget the
+    /// retry signal and silently regress the wire contract.
     #[must_use]
-    pub fn rate_limit(reason: impl Into<String>) -> Self {
+    pub fn rate_limit(reason: impl Into<String>, retry_after_secs: u64) -> Self {
         Self {
             action: Action::RateLimit,
             reason: reason.into(),
             category: None,
+            retry_after_secs: Some(retry_after_secs),
         }
     }
 
@@ -268,7 +298,7 @@ mod tests {
         assert!(Verdict::allow_uncategorized().is_completing());
         assert!(Verdict::bypass("bypass.tls.healthcare").is_completing());
         assert!(!Verdict::deny("deny.malware.sha256").is_completing());
-        assert!(!Verdict::rate_limit("rate_limit.tenant").is_completing());
+        assert!(!Verdict::rate_limit("rate_limit.tenant", 30).is_completing());
     }
 
     #[test]

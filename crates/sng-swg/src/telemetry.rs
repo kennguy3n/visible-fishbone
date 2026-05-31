@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn rate_limit_action_folds_onto_deny() {
         let ctx = sample_ctx();
-        let v = SwgVerdict::rate_limit("rate_limit.tenant");
+        let v = SwgVerdict::rate_limit("rate_limit.tenant", 60);
         let ev = VerdictEvent::from_context(&ctx, v);
         assert_eq!(ev.http.verdict, Verdict::Deny);
     }
