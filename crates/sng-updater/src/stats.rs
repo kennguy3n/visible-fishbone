@@ -62,8 +62,39 @@ pub struct UpdaterStats {
     /// Number of health-check probe calls served end-to-end
     /// (across all installs).
     pub health_check_probes: AtomicU64,
-    /// Number of health-check timeouts surfaced.
+    /// Number of *window-level* health-check timeouts
+    /// surfaced — the install was rolled back because the
+    /// whole `health_check_window` elapsed without enough
+    /// consecutive healthy probes.
     pub health_check_timeouts: AtomicU64,
+    /// Number of *per-probe* health-check timeouts surfaced.
+    /// A single probe took longer than
+    /// `health_check_timeout` to return; the install is
+    /// rolled back without waiting for the window to elapse.
+    /// Distinct from `health_check_timeouts` because the
+    /// operator response differs (one slow probe vs. a probe
+    /// that never came back healthy).
+    pub health_check_probe_timeouts: AtomicU64,
+    /// Number of installs refused because the target slot's
+    /// last state was `RolledBack` at the requested version
+    /// and `allow_reinstall_of_rolled_back_version` is
+    /// disabled. Distinct from `manifest_stale_errors`
+    /// because the manifest is NOT stale relative to the
+    /// committed slot.
+    pub install_reinstall_of_rolled_back_rejections: AtomicU64,
+    /// Number of transient post-commit bookkeeping retries
+    /// performed by the orchestrator after `bootloader.commit`
+    /// succeeded but `mark_committed` or `set_active`
+    /// surfaced a transient error. Each retry contributes one
+    /// increment.
+    pub install_post_commit_layout_sync_retries: AtomicU64,
+    /// Number of installs that committed on the bootloader
+    /// but failed every retry of the bank-writer bookkeeping
+    /// step. The install IS committed (the appliance will
+    /// boot the new slot) but the in-process layout is
+    /// divergent from the bootloader's view; operators must
+    /// manually reconcile the metadata partition.
+    pub install_post_commit_layout_sync_failures: AtomicU64,
 }
 
 impl UpdaterStats {
@@ -103,6 +134,16 @@ impl UpdaterStats {
                 .load(Ordering::Relaxed),
             health_check_probes: self.health_check_probes.load(Ordering::Relaxed),
             health_check_timeouts: self.health_check_timeouts.load(Ordering::Relaxed),
+            health_check_probe_timeouts: self.health_check_probe_timeouts.load(Ordering::Relaxed),
+            install_reinstall_of_rolled_back_rejections: self
+                .install_reinstall_of_rolled_back_rejections
+                .load(Ordering::Relaxed),
+            install_post_commit_layout_sync_retries: self
+                .install_post_commit_layout_sync_retries
+                .load(Ordering::Relaxed),
+            install_post_commit_layout_sync_failures: self
+                .install_post_commit_layout_sync_failures
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -145,8 +186,19 @@ pub struct UpdaterStatsSnapshot {
     pub install_concurrency_rejections: u64,
     /// Health-check probe calls served.
     pub health_check_probes: u64,
-    /// Health-check timeouts surfaced.
+    /// Window-level health-check timeouts surfaced.
     pub health_check_timeouts: u64,
+    /// Per-probe health-check timeouts surfaced.
+    pub health_check_probe_timeouts: u64,
+    /// Installs refused because the target slot's last state
+    /// was `RolledBack` at the requested version.
+    pub install_reinstall_of_rolled_back_rejections: u64,
+    /// Transient post-commit bookkeeping retries performed.
+    pub install_post_commit_layout_sync_retries: u64,
+    /// Installs whose post-commit bookkeeping failed every
+    /// retry; the install is committed but the layout cache
+    /// has diverged.
+    pub install_post_commit_layout_sync_failures: u64,
 }
 
 impl UpdaterStatsSnapshot {

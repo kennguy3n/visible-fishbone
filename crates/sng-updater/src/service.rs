@@ -90,9 +90,20 @@ pub enum RollbackReason {
         /// Last probe's details.
         details: String,
     },
-    /// Health check window elapsed without enough consecutive
-    /// healthy probes.
+    /// Window-level health check timeout: the whole
+    /// `health_check_window` elapsed without enough
+    /// consecutive healthy probes. Distinct from
+    /// [`Self::HealthCheckProbeTimeout`] because the
+    /// operator response differs (probes ran but did not
+    /// stabilise vs. a single probe never returned).
     HealthCheckTimeout,
+    /// A single health-check probe did not return within
+    /// `health_check_timeout`. The install is rolled back
+    /// without waiting for the window to elapse. Distinct
+    /// from [`Self::HealthCheckTimeout`] so dashboards can
+    /// break out "slow probe" vs. "probes ran but never
+    /// stabilised."
+    HealthCheckProbeTimeout,
     /// Health check probe itself errored (the trait surfaced
     /// `UpdaterError::HealthCheckFailed`).
     HealthCheckErrored {
@@ -342,15 +353,19 @@ impl UpdaterService {
         *self.health_check_clock.lock() = clock;
     }
 
-    /// Pull the current bank layout and derive the
-    /// "currently-committed image version" pin. Used by the
-    /// verifier as the downgrade comparison anchor.
-    async fn current_version(&self) -> Result<Option<ImageVersion>, UpdaterError> {
+    /// Derive the "currently-committed image version" pin
+    /// from an already-fetched [`BankLayout`]. Used by the
+    /// verifier as the downgrade comparison anchor. The
+    /// cold-start override (set by the builder or
+    /// [`Self::set_current_version_override`]) wins over the
+    /// layout's active-slot version so a factory image that
+    /// has not yet recorded its version in the metadata
+    /// partition still anchors downgrade comparisons.
+    fn derive_current_version(&self, layout: &BankLayout) -> Option<ImageVersion> {
         if let Some(v) = *self.current_version_override.lock() {
-            return Ok(Some(v));
+            return Some(v);
         }
-        let layout = self.bank_writer.layout().await?;
-        Ok(layout.active_version())
+        layout.active_version()
     }
 
     fn transition(&self, from: UpdateState, to: UpdateState) -> Result<UpdateState, UpdaterError> {
@@ -440,7 +455,18 @@ impl UpdaterService {
                 .fetch_add(1, Ordering::Relaxed);
             return Err(UpdaterError::InstallBusy);
         };
-        let current = self.current_version().await?;
+        // Snapshot the bank layout ONCE at the top of the
+        // install. The downstream `current_version` lookup,
+        // the inactive-slot decision and the rolled-back
+        // refusal check all read from the same snapshot, so
+        // they cannot disagree even if a future refactor
+        // introduced a second concurrent writer of the
+        // metadata partition. The `install_lock` already
+        // serialises one install at a time; this snapshot
+        // additionally narrows the window for any unrelated
+        // bookkeeping path to mutate the layout mid-decision.
+        let layout = self.bank_writer.layout().await?;
+        let current = self.derive_current_version(&layout);
         let manifest = match self.verifier.verify(&envelope, current) {
             Ok(m) => m,
             Err(e) => {
@@ -464,7 +490,6 @@ impl UpdaterService {
         // hard-cap-derived policy. We DO still pass the raw
         // manifest's declared size to the hasher so the
         // downloader knows when to surface Truncated.
-        let layout = self.bank_writer.layout().await?;
         let target_slot = layout.inactive();
         self.enforce_no_reinstall_of_rolled_back(&layout, target_slot, &manifest, &policy)?;
         self.transition(UpdateState::Idle, UpdateState::Downloading)?;
@@ -492,7 +517,6 @@ impl UpdaterService {
 
     /// Helper that enforces the
     /// `allow_reinstall_of_rolled_back_version` policy.
-    #[allow(clippy::unused_self)]
     fn enforce_no_reinstall_of_rolled_back(
         &self,
         layout: &BankLayout,
@@ -512,9 +536,12 @@ impl UpdaterService {
                 slot = %target_slot,
                 "refusing to re-install version that was rolled back from this slot"
             );
-            return Err(UpdaterError::ManifestStale {
-                found: manifest.version,
-                current: *version,
+            self.stats
+                .install_reinstall_of_rolled_back_rejections
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(UpdaterError::ReinstallOfRolledBackVersion {
+                version: manifest.version,
+                slot: target_slot,
             });
         }
         Ok(())
@@ -633,35 +660,38 @@ impl UpdaterService {
         let probe_outcome = self.run_health_check_loop().await;
         match probe_outcome {
             HealthLoopOutcome::Healthy => {
-                // Execute the commit-side-effects BEFORE the
-                // state transition to `Committed`. If any of
-                // bootloader.commit / mark_committed /
-                // set_active fails, the state machine stays
-                // in `HealthChecking`, the `?` propagates the
-                // error, and `install_from_envelope`'s
-                // error-handler force-resets to `Idle` — so
-                // the operator never observes a `Committed`
-                // state that the persistence layer never
-                // actually committed.
+                // The bootloader commit IS the atomic
+                // point-of-no-return for the install: once
+                // it returns Ok, the appliance WILL boot the
+                // new slot on next reboot regardless of what
+                // the bank-writer bookkeeping does. So we
+                // sequence bootloader.commit FIRST, then
+                // retry the bank-writer bookkeeping
+                // (mark_committed + set_active) with bounded
+                // backoff to absorb transient I/O on the
+                // metadata partition.
+                //
+                // If the bootloader commit fails, the
+                // install aborts cleanly: the previous slot
+                // stays active, the layout is untouched, and
+                // the error-handler force-resets the state
+                // machine to Idle.
+                //
+                // If the bookkeeping fails every retry, the
+                // install IS committed on the bootloader but
+                // the in-process layout cache has diverged.
+                // We surface a DISTINCT error
+                // (`PostCommitLayoutSync`) so operators see
+                // exactly that — and the state machine still
+                // resets to Idle so future installs are not
+                // blocked.
                 self.bootloader.commit().await.inspect_err(|_| {
                     self.stats
                         .install_bootloader_errors
                         .fetch_add(1, Ordering::Relaxed);
                 })?;
-                self.bank_writer
-                    .mark_committed(target_slot, manifest.version)
+                self.run_post_commit_bookkeeping(target_slot, manifest.version)
                     .await?;
-                // Mirror the bootloader's active-slot pin
-                // into the bank-writer layout so the next
-                // install picks the OTHER (now-inactive)
-                // slot. In a real deployment this is a
-                // metadata-partition rewrite that the
-                // bootloader publishes atomically alongside
-                // its own EFI / grub.cfg update; the
-                // orchestrator issues both calls so the
-                // in-process layout cache stays consistent
-                // even between reboots.
-                self.bank_writer.set_active(target_slot).await?;
                 self.stats.install_committed.fetch_add(1, Ordering::Relaxed);
                 self.transition(UpdateState::HealthChecking, UpdateState::Committed)?;
                 self.transition(UpdateState::Committed, UpdateState::Idle)?;
@@ -741,6 +771,88 @@ impl UpdaterService {
         }
     }
 
+    /// Execute the post-bootloader-commit bookkeeping pair
+    /// (`mark_committed` followed by `set_active`) with
+    /// bounded retry and exponential backoff. The bootloader
+    /// has already committed atomically when this is called,
+    /// so the install IS committed; the only question is
+    /// whether the metadata-partition rewrite succeeds before
+    /// the orchestrator gives up and surfaces a divergence
+    /// error.
+    ///
+    /// Each attempt re-runs BOTH calls (the second succeeding
+    /// does not get rolled back if the first failed because
+    /// `mark_committed` is idempotent — the state machine
+    /// treats a slot already Committed at the requested
+    /// version as a no-op).
+    async fn run_post_commit_bookkeeping(
+        &self,
+        target_slot: Bank,
+        version: ImageVersion,
+    ) -> Result<(), UpdaterError> {
+        let policy = self.policy.load();
+        let max_attempts = policy.post_commit_bookkeeping_max_attempts;
+        let mut backoff = policy.post_commit_bookkeeping_backoff;
+        let mut last_error: Option<UpdaterError> = None;
+        let clock = self.health_check_clock.lock().clone();
+        for attempt in 1..=max_attempts {
+            match self.try_post_commit_bookkeeping(target_slot, version).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    warn!(
+                        attempt,
+                        max_attempts,
+                        error = %e,
+                        slot = %target_slot,
+                        "post-commit bookkeeping failed; retrying after backoff"
+                    );
+                    self.stats
+                        .install_post_commit_layout_sync_retries
+                        .fetch_add(1, Ordering::Relaxed);
+                    last_error = Some(e);
+                    if attempt < max_attempts {
+                        clock.sleep(backoff).await;
+                        backoff = backoff.saturating_mul(2);
+                    }
+                }
+            }
+        }
+        self.stats
+            .install_post_commit_layout_sync_failures
+            .fetch_add(1, Ordering::Relaxed);
+        // `max_attempts >= 1` is enforced by
+        // `UpdaterPolicy::validate`, so the loop body must
+        // have run at least once and populated `last_error`.
+        // The fallback string is therefore never observed in
+        // practice but keeps the code free of `.expect()` /
+        // `.unwrap()` per the workspace clippy lints.
+        let last_error_str = last_error
+            .as_ref()
+            .map_or_else(|| "no error recorded".to_string(), ToString::to_string);
+        Err(UpdaterError::PostCommitLayoutSync {
+            slot: target_slot,
+            version,
+            attempts: max_attempts,
+            last_error: last_error_str,
+        })
+    }
+
+    /// One iteration of the post-commit bookkeeping pair.
+    /// `mark_committed` MUST run before `set_active` so the
+    /// `active` pointer is never advanced to a slot whose
+    /// state has not yet been recorded as `Committed`.
+    async fn try_post_commit_bookkeeping(
+        &self,
+        target_slot: Bank,
+        version: ImageVersion,
+    ) -> Result<(), UpdaterError> {
+        self.bank_writer
+            .mark_committed(target_slot, version)
+            .await?;
+        self.bank_writer.set_active(target_slot).await?;
+        Ok(())
+    }
+
     async fn run_health_check_loop(&self) -> HealthLoopOutcome {
         let policy = self.policy.load();
         let deadline = Instant::now() + policy.health_check_window;
@@ -783,15 +895,23 @@ impl UpdaterService {
                     };
                 }
                 Err(_) => {
-                    // Per-probe timeout. Treat the same as
-                    // an unhealthy probe — the orchestrator
-                    // gives up on the install. (We do NOT
-                    // bump health_check_timeouts here — that
-                    // counter is reserved for the
-                    // window-level timeout.)
+                    // Per-probe timeout: the trait did not
+                    // return within `health_check_timeout`.
+                    // Distinct from the window-level timeout
+                    // above because the operator response
+                    // differs (one slow probe vs. probes that
+                    // ran but never stabilised). We bump
+                    // `health_check_probe_timeouts` and
+                    // surface
+                    // `RollbackReason::HealthCheckProbeTimeout`
+                    // so dashboards can break the two cases
+                    // apart.
+                    self.stats
+                        .health_check_probe_timeouts
+                        .fetch_add(1, Ordering::Relaxed);
                     warn!("health probe per-call timeout — rolling back");
                     return HealthLoopOutcome::Unhealthy {
-                        reason: RollbackReason::HealthCheckTimeout,
+                        reason: RollbackReason::HealthCheckProbeTimeout,
                     };
                 }
             }
@@ -1231,7 +1351,19 @@ mod tests {
             .install_from_envelope(env)
             .await
             .expect_err("reinstall");
-        assert!(matches!(err, UpdaterError::ManifestStale { .. }));
+        assert!(matches!(
+            err,
+            UpdaterError::ReinstallOfRolledBackVersion {
+                version,
+                slot: Bank::B,
+            } if version == ImageVersion::new(2, 0, 0)
+        ));
+        // Distinct stats counter bumps so dashboards can
+        // alert on this case independently of the generic
+        // "manifest stale" downgrade path.
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.install_reinstall_of_rolled_back_rejections, 1);
+        assert_eq!(snap.manifest_stale_errors, 0);
     }
 
     #[tokio::test]
@@ -1598,6 +1730,143 @@ mod tests {
             stats.install_bootloader_errors >= 1,
             "bootloader-error counter must be bumped"
         );
+    }
+
+    #[tokio::test]
+    async fn post_commit_bookkeeping_retries_then_succeeds() {
+        // Bootloader.commit succeeds. set_active fails twice
+        // (transient I/O), then succeeds. With the default
+        // post_commit_bookkeeping_max_attempts = 3, the
+        // install should still commit cleanly, the retry
+        // counter should bump twice, and NO sync-failure
+        // should be recorded.
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.bank_writer.force_transient_set_active_failures(
+            2,
+            Some("emulated metadata partition contention".into()),
+        );
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xCC_u8; 256],
+        );
+        let outcome = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect("install commits after retry");
+        assert!(matches!(outcome, InstallOutcome::Committed { .. }));
+        // set_active was called 3 times (2 failures + 1
+        // success). mark_committed was called 3 times too
+        // (each retry re-runs the full bookkeeping pair).
+        assert_eq!(rig.bank_writer.set_active_call_count(), 3);
+        assert_eq!(rig.bank_writer.mark_committed_call_count(), 3);
+        let stats = rig.service.stats_snapshot();
+        assert_eq!(stats.install_post_commit_layout_sync_retries, 2);
+        assert_eq!(stats.install_post_commit_layout_sync_failures, 0);
+        assert_eq!(stats.install_committed, 1);
+        assert_eq!(rig.service.current_state(), UpdateState::Idle);
+    }
+
+    #[tokio::test]
+    async fn post_commit_bookkeeping_surfaces_divergence_after_exhausting_retries() {
+        // Bootloader.commit succeeds. Every set_active fails
+        // (permanent I/O). The install IS committed on the
+        // bootloader so the operator-facing error MUST be the
+        // distinct `PostCommitLayoutSync` variant — not the
+        // generic BankWrite — so dashboards can alert on
+        // bookkeeping-divergence separately from "the install
+        // never committed at all".
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.bank_writer.force_transient_set_active_failures(
+            u32::MAX,
+            Some("emulated permanent metadata IO failure".into()),
+        );
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xDD_u8; 256],
+        );
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("install surfaces divergence");
+        assert!(
+            matches!(
+                err,
+                UpdaterError::PostCommitLayoutSync {
+                    slot: Bank::B,
+                    version,
+                    attempts: 3,
+                    ..
+                } if version == ImageVersion::new(2, 0, 0)
+            ),
+            "expected PostCommitLayoutSync, got {err:?}"
+        );
+        let stats = rig.service.stats_snapshot();
+        assert_eq!(stats.install_post_commit_layout_sync_retries, 3);
+        assert_eq!(stats.install_post_commit_layout_sync_failures, 1);
+        // The state machine still resets to Idle so future
+        // installs (e.g. an operator manually reconciling
+        // the metadata partition then retrying) are not
+        // blocked by a stuck state.
+        assert_eq!(rig.service.current_state(), UpdateState::Idle);
+        // The bookkeeping pair was attempted exactly the
+        // configured number of times.
+        assert_eq!(rig.bank_writer.set_active_call_count(), 3);
+        assert_eq!(rig.bank_writer.mark_committed_call_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn per_probe_timeout_rolls_back_with_dedicated_reason_and_counter() {
+        // A single health-check probe takes longer than the
+        // configured per-probe timeout. The install must
+        // roll back with
+        // `RollbackReason::HealthCheckProbeTimeout` (NOT the
+        // window-level `HealthCheckTimeout`) and the
+        // `health_check_probe_timeouts` counter must bump,
+        // distinct from `health_check_timeouts`.
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        // Each probe sleeps 100 ms; per-probe timeout below
+        // is 20 ms; window is wide enough that the window
+        // deadline does NOT fire first.
+        rig.health_check
+            .set_delay(std::time::Duration::from_millis(100));
+        let policy = UpdaterPolicy {
+            health_check_timeout: std::time::Duration::from_millis(20),
+            health_check_interval: std::time::Duration::from_millis(5),
+            health_check_window: std::time::Duration::from_secs(5),
+            ..(*rig.service.policy()).clone()
+        };
+        rig.service.reload_policy(policy).expect("reload");
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xEE_u8; 256],
+        );
+        let outcome = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect("rollback path returns Ok with RolledBack outcome");
+        assert!(
+            matches!(
+                outcome,
+                InstallOutcome::RolledBack {
+                    reason: RollbackReason::HealthCheckProbeTimeout,
+                    ..
+                }
+            ),
+            "expected RolledBack/HealthCheckProbeTimeout, got {outcome:?}"
+        );
+        let stats = rig.service.stats_snapshot();
+        assert_eq!(stats.health_check_probe_timeouts, 1);
+        // The window-level timeout counter must NOT also
+        // bump — these are distinct dashboards.
+        assert_eq!(stats.health_check_timeouts, 0);
+        assert_eq!(stats.install_rolled_back, 1);
+        assert_eq!(rig.service.current_state(), UpdateState::Idle);
     }
 
     // Silence unused — the `StaticManifestSource` import is

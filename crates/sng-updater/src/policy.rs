@@ -43,6 +43,18 @@ pub const DEFAULT_MAX_IMAGE_BYTES: u64 = 1024 * 1024 * 1024;
 /// can raise it.
 pub const DEFAULT_MIN_HEALTHY_PROBES: u32 = 1;
 
+/// Default number of attempts for the post-bootloader-commit
+/// bookkeeping pair (`mark_committed` + `set_active`). The
+/// bootloader has already committed atomically when this
+/// runs; the retries absorb transient I/O on the
+/// metadata-partition rewrite before the orchestrator gives
+/// up and surfaces a divergence error.
+pub const DEFAULT_POST_COMMIT_BOOKKEEPING_MAX_ATTEMPTS: u32 = 3;
+
+/// Default initial backoff between post-commit bookkeeping
+/// retries. Doubled on each successive attempt (saturating).
+pub const DEFAULT_POST_COMMIT_BOOKKEEPING_BACKOFF: Duration = Duration::from_millis(50);
+
 /// Operator-tunable policy that gates the install flow.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UpdaterPolicy {
@@ -66,6 +78,18 @@ pub struct UpdaterPolicy {
     /// to `true` after they have manually root-caused the
     /// previous failure.
     pub allow_reinstall_of_rolled_back_version: bool,
+    /// Number of attempts the orchestrator makes for the
+    /// post-bootloader-commit bookkeeping pair
+    /// (`mark_committed` + `set_active`) before surfacing a
+    /// `PostCommitLayoutSync` divergence error. Must be at
+    /// least 1. The bootloader is already committed at this
+    /// point so the install IS committed; the retries are
+    /// pure bookkeeping reconciliation.
+    pub post_commit_bookkeeping_max_attempts: u32,
+    /// Initial backoff between post-commit bookkeeping
+    /// retries. Doubled on each successive attempt
+    /// (saturating). Must be > 0.
+    pub post_commit_bookkeeping_backoff: Duration,
 }
 
 impl Default for UpdaterPolicy {
@@ -77,6 +101,8 @@ impl Default for UpdaterPolicy {
             health_check_interval: DEFAULT_HEALTH_CHECK_INTERVAL,
             min_healthy_probes: DEFAULT_MIN_HEALTHY_PROBES,
             allow_reinstall_of_rolled_back_version: false,
+            post_commit_bookkeeping_max_attempts: DEFAULT_POST_COMMIT_BOOKKEEPING_MAX_ATTEMPTS,
+            post_commit_bookkeeping_backoff: DEFAULT_POST_COMMIT_BOOKKEEPING_BACKOFF,
         }
     }
 }
@@ -114,6 +140,12 @@ impl UpdaterPolicy {
         if self.min_healthy_probes == 0 {
             return Err(PolicyValidationError::MinHealthyProbesZero);
         }
+        if self.post_commit_bookkeeping_max_attempts == 0 {
+            return Err(PolicyValidationError::PostCommitBookkeepingMaxAttemptsZero);
+        }
+        if self.post_commit_bookkeeping_backoff.is_zero() {
+            return Err(PolicyValidationError::PostCommitBookkeepingBackoffZero);
+        }
         Ok(())
     }
 }
@@ -150,6 +182,12 @@ pub enum PolicyValidationError {
     /// `min_healthy_probes` was zero.
     #[error("min_healthy_probes must be >= 1")]
     MinHealthyProbesZero,
+    /// `post_commit_bookkeeping_max_attempts` was zero.
+    #[error("post_commit_bookkeeping_max_attempts must be >= 1")]
+    PostCommitBookkeepingMaxAttemptsZero,
+    /// `post_commit_bookkeeping_backoff` was zero.
+    #[error("post_commit_bookkeeping_backoff must be > 0")]
+    PostCommitBookkeepingBackoffZero,
 }
 
 /// Hot-swappable holder for [`UpdaterPolicy`]. Reads on the
@@ -205,6 +243,38 @@ mod tests {
         assert_eq!(p.health_check_interval, DEFAULT_HEALTH_CHECK_INTERVAL);
         assert_eq!(p.min_healthy_probes, DEFAULT_MIN_HEALTHY_PROBES);
         assert!(!p.allow_reinstall_of_rolled_back_version);
+        assert_eq!(
+            p.post_commit_bookkeeping_max_attempts,
+            DEFAULT_POST_COMMIT_BOOKKEEPING_MAX_ATTEMPTS
+        );
+        assert_eq!(
+            p.post_commit_bookkeeping_backoff,
+            DEFAULT_POST_COMMIT_BOOKKEEPING_BACKOFF
+        );
+    }
+
+    #[test]
+    fn zero_post_commit_attempts_rejected() {
+        let p = UpdaterPolicy {
+            post_commit_bookkeeping_max_attempts: 0,
+            ..UpdaterPolicy::default()
+        };
+        assert!(matches!(
+            p.validate(),
+            Err(PolicyValidationError::PostCommitBookkeepingMaxAttemptsZero)
+        ));
+    }
+
+    #[test]
+    fn zero_post_commit_backoff_rejected() {
+        let p = UpdaterPolicy {
+            post_commit_bookkeeping_backoff: Duration::ZERO,
+            ..UpdaterPolicy::default()
+        };
+        assert!(matches!(
+            p.validate(),
+            Err(PolicyValidationError::PostCommitBookkeepingBackoffZero)
+        ));
     }
 
     #[test]

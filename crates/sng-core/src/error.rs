@@ -204,6 +204,31 @@ pub enum ErrorCode {
     /// target mismatch means the artifact was published for the
     /// wrong appliance class.
     UpdaterManifestStale,
+    /// Operator-issued install was refused because the requested
+    /// version matches a version that was previously rolled back
+    /// from the *target* (inactive) slot. The current policy
+    /// (`allow_reinstall_of_rolled_back_version = false`) treats
+    /// re-shipping a rolled-back release as an operator mistake
+    /// — typically a regressed release reappearing on the
+    /// manifest source — and fails closed. Distinct from
+    /// [`Self::UpdaterManifestStale`] because the manifest is
+    /// not stale relative to the *committed* slot: the appliance
+    /// is still running the rolled-back version's predecessor,
+    /// and the operator response is "investigate the release
+    /// pipeline that re-published a known-bad version" rather
+    /// than "re-cut the manifest with a higher version number."
+    UpdaterReinstallOfRolledBackVersion,
+    /// Post-bootloader-commit bookkeeping (mark_committed and
+    /// set_active on the bank writer) failed even after the
+    /// orchestrator retried with backoff. The bootloader was
+    /// committed atomically, so the appliance WILL boot the new
+    /// slot — but the bank-writer metadata is now out of sync
+    /// with the bootloader's view. Operators must manually
+    /// reconcile the metadata partition. Distinct from
+    /// [`Self::UpdaterBankWriteFailure`] because the install
+    /// fundamentally succeeded (the bootloader committed); only
+    /// the orchestrator-side cache diverged.
+    UpdaterPostCommitLayoutSync,
     /// Update manifest was published for a different appliance
     /// target than the running binary. Mirrors
     /// [`Self::PolicyBundleTargetMismatch`]: e.g. an `sng-agent`
@@ -311,6 +336,10 @@ impl ErrorCode {
             Self::UpdaterManifestSignatureInvalid => "updater.manifest.signature.invalid",
             Self::UpdaterManifestSigningKeyUnknown => "updater.manifest.signing_key.unknown",
             Self::UpdaterManifestStale => "updater.manifest.stale",
+            Self::UpdaterReinstallOfRolledBackVersion => {
+                "updater.manifest.reinstall_of_rolled_back"
+            }
+            Self::UpdaterPostCommitLayoutSync => "updater.commit.layout_sync_failure",
             Self::UpdaterManifestTargetMismatch => "updater.manifest.target.mismatch",
             Self::UpdaterImageHashMismatch => "updater.image.hash.mismatch",
             Self::UpdaterImageSizeExceeded => "updater.image.size.exceeded",
@@ -484,6 +513,14 @@ mod tests {
                 "updater.manifest.signing_key.unknown",
             ),
             (ErrorCode::UpdaterManifestStale, "updater.manifest.stale"),
+            (
+                ErrorCode::UpdaterReinstallOfRolledBackVersion,
+                "updater.manifest.reinstall_of_rolled_back",
+            ),
+            (
+                ErrorCode::UpdaterPostCommitLayoutSync,
+                "updater.commit.layout_sync_failure",
+            ),
             (
                 ErrorCode::UpdaterManifestTargetMismatch,
                 "updater.manifest.target.mismatch",

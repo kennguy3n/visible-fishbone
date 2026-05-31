@@ -34,6 +34,7 @@ use crate::manifest::ImageVersion;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
 
 /// Identifier for one of the two banks.
@@ -309,6 +310,27 @@ struct InMemoryInner {
     /// Optional override that makes every subsequent
     /// `finish` fail with the supplied message.
     fail_finish_with: Mutex<Option<String>>,
+    /// Optional countdown of `set_active` failures — each
+    /// remaining tick decrements and surfaces a forced error.
+    /// When the counter reaches zero the call succeeds. Used
+    /// to exercise the post-commit retry loop in the
+    /// orchestrator.
+    set_active_failures_remaining: Mutex<u32>,
+    /// Optional message to attach to the forced `set_active`
+    /// failures (defaults to `"emulated transient io"`).
+    set_active_failure_message: Mutex<Option<String>>,
+    /// Total `set_active` invocations — used by tests to
+    /// confirm the retry loop actually ran the configured
+    /// number of times.
+    set_active_call_count: AtomicU32,
+    /// Optional countdown of `mark_committed` failures.
+    /// Same semantics as `set_active_failures_remaining`.
+    mark_committed_failures_remaining: Mutex<u32>,
+    /// Optional message to attach to the forced
+    /// `mark_committed` failures.
+    mark_committed_failure_message: Mutex<Option<String>>,
+    /// Total `mark_committed` invocations.
+    mark_committed_call_count: AtomicU32,
 }
 
 impl InMemoryBankWriter {
@@ -356,6 +378,39 @@ impl InMemoryBankWriter {
     /// Force every subsequent `finish` call to fail.
     pub fn force_finish_failure(&self, msg: Option<String>) {
         *self.inner.fail_finish_with.lock() = msg;
+    }
+
+    /// Force the next `count` `set_active` calls to fail with
+    /// the supplied message (or a default). After the counter
+    /// is exhausted, calls succeed normally. Used to exercise
+    /// the orchestrator's post-commit retry loop without
+    /// reaching for real I/O failures.
+    pub fn force_transient_set_active_failures(&self, count: u32, msg: Option<String>) {
+        *self.inner.set_active_failures_remaining.lock() = count;
+        *self.inner.set_active_failure_message.lock() = msg;
+    }
+
+    /// Number of `set_active` calls observed since the writer
+    /// was constructed.
+    #[must_use]
+    pub fn set_active_call_count(&self) -> u32 {
+        self.inner.set_active_call_count.load(Ordering::Relaxed)
+    }
+
+    /// Force the next `count` `mark_committed` calls to fail
+    /// with the supplied message. Mirror of
+    /// `force_transient_set_active_failures` for the other half
+    /// of the post-commit bookkeeping pair.
+    pub fn force_transient_mark_committed_failures(&self, count: u32, msg: Option<String>) {
+        *self.inner.mark_committed_failures_remaining.lock() = count;
+        *self.inner.mark_committed_failure_message.lock() = msg;
+    }
+
+    /// Number of `mark_committed` calls observed since the
+    /// writer was constructed.
+    #[must_use]
+    pub fn mark_committed_call_count(&self) -> u32 {
+        self.inner.mark_committed_call_count.load(Ordering::Relaxed)
     }
 
     /// Cheap shareable handle.
@@ -468,6 +523,22 @@ impl BankWriter for InMemoryBankWriter {
     }
 
     async fn mark_committed(&self, slot: Bank, version: ImageVersion) -> Result<(), UpdaterError> {
+        self.inner
+            .mark_committed_call_count
+            .fetch_add(1, Ordering::Relaxed);
+        {
+            let mut remaining = self.inner.mark_committed_failures_remaining.lock();
+            if *remaining > 0 {
+                *remaining -= 1;
+                let msg = self
+                    .inner
+                    .mark_committed_failure_message
+                    .lock()
+                    .clone()
+                    .unwrap_or_else(|| "emulated transient io".into());
+                return Err(UpdaterError::BankWrite(format!("forced: {msg}")));
+            }
+        }
         let mut layout = self.inner.layout.lock();
         let new_state = BankSlotState::Committed { version };
         match slot {
@@ -478,6 +549,22 @@ impl BankWriter for InMemoryBankWriter {
     }
 
     async fn set_active(&self, slot: Bank) -> Result<(), UpdaterError> {
+        self.inner
+            .set_active_call_count
+            .fetch_add(1, Ordering::Relaxed);
+        {
+            let mut remaining = self.inner.set_active_failures_remaining.lock();
+            if *remaining > 0 {
+                *remaining -= 1;
+                let msg = self
+                    .inner
+                    .set_active_failure_message
+                    .lock()
+                    .clone()
+                    .unwrap_or_else(|| "emulated transient io".into());
+                return Err(UpdaterError::BankWrite(format!("forced: {msg}")));
+            }
+        }
         self.inner.layout.lock().active = slot;
         Ok(())
     }

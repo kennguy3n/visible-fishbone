@@ -362,8 +362,8 @@ async fn rolled_back_version_cannot_be_re_installed_by_default() {
         .await
         .expect_err("re-install refused");
     assert!(
-        matches!(err, UpdaterError::ManifestStale { .. }),
-        "expected ManifestStale, got {err:?}"
+        matches!(err, UpdaterError::ReinstallOfRolledBackVersion { .. }),
+        "expected ReinstallOfRolledBackVersion, got {err:?}"
     );
 }
 

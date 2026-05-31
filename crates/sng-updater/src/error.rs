@@ -59,6 +59,46 @@ pub enum UpdaterError {
         /// Version of the image currently committed on disk.
         current: ImageVersion,
     },
+    /// Install refused because the requested version matches the
+    /// version that was previously rolled back from the *target*
+    /// (inactive) slot. Distinct from [`Self::ManifestStale`]
+    /// because the manifest is NOT stale relative to the
+    /// committed slot — the operator response differs (the
+    /// release pipeline is republishing a known-bad version, not
+    /// shipping a downgrade).
+    #[error(
+        "refusing to re-install version {version} on slot {slot} which was previously rolled back"
+    )]
+    ReinstallOfRolledBackVersion {
+        /// Version on the rejected manifest, which matches the
+        /// `RolledBack` record on `slot`.
+        version: ImageVersion,
+        /// Target slot that holds the matching `RolledBack`
+        /// state.
+        slot: crate::bank::Bank,
+    },
+    /// Post-bootloader-commit bookkeeping (`mark_committed` /
+    /// `set_active` on the bank writer) failed even after the
+    /// orchestrator retried with backoff. The bootloader was
+    /// committed atomically, so the appliance WILL boot the new
+    /// slot — but the bank-writer metadata is now out of sync
+    /// with the bootloader's view. Operators must manually
+    /// reconcile the metadata partition.
+    #[error(
+        "post-commit layout sync failed after {attempts} attempts on slot {slot} \
+         (install IS committed on the bootloader; metadata divergence): {last_error}"
+    )]
+    PostCommitLayoutSync {
+        /// Slot whose post-commit bookkeeping diverged.
+        slot: crate::bank::Bank,
+        /// Version that was committed.
+        version: ImageVersion,
+        /// Number of attempts the orchestrator made before
+        /// giving up.
+        attempts: u32,
+        /// Last error message surfaced by the bank writer.
+        last_error: String,
+    },
     /// Manifest was published for a different appliance target
     /// than the running binary. e.g. an `sng-agent` updater
     /// asked to consume an `sng-edge` manifest.
@@ -158,6 +198,10 @@ impl UpdaterError {
             }
             Self::SignatureInvalid => ErrorCode::UpdaterManifestSignatureInvalid,
             Self::ManifestStale { .. } => ErrorCode::UpdaterManifestStale,
+            Self::ReinstallOfRolledBackVersion { .. } => {
+                ErrorCode::UpdaterReinstallOfRolledBackVersion
+            }
+            Self::PostCommitLayoutSync { .. } => ErrorCode::UpdaterPostCommitLayoutSync,
             Self::TargetMismatch { .. } => ErrorCode::UpdaterManifestTargetMismatch,
             Self::ImageHashMismatch { .. } | Self::ImageTruncated { .. } => {
                 ErrorCode::UpdaterImageHashMismatch
@@ -226,6 +270,49 @@ mod tests {
             current: ImageVersion::new(1, 2, 3),
         };
         assert_eq!(e.code(), ErrorCode::UpdaterManifestStale);
+    }
+
+    #[test]
+    fn reinstall_of_rolled_back_has_distinct_code_from_stale() {
+        // Stale and ReinstallOfRolledBackVersion are operator-
+        // facing-distinct concepts: "stale" means the manifest
+        // is older than the running release; "reinstall of
+        // rolled-back" means the release pipeline is re-publishing
+        // a version that was previously rolled back from the
+        // target slot. Dashboards must be able to alert on these
+        // separately because the remediation differs.
+        let stale = UpdaterError::ManifestStale {
+            found: ImageVersion::new(1, 0, 0),
+            current: ImageVersion::new(1, 2, 3),
+        };
+        let reinstall = UpdaterError::ReinstallOfRolledBackVersion {
+            version: ImageVersion::new(2, 0, 0),
+            slot: crate::bank::Bank::B,
+        };
+        assert_eq!(stale.code(), ErrorCode::UpdaterManifestStale);
+        assert_eq!(
+            reinstall.code(),
+            ErrorCode::UpdaterReinstallOfRolledBackVersion
+        );
+        assert_ne!(stale.code(), reinstall.code());
+    }
+
+    #[test]
+    fn post_commit_layout_sync_maps_to_distinct_code() {
+        // The install is committed on the bootloader; only the
+        // orchestrator-side cache diverged. Operators must be
+        // able to alert on this separately from generic bank-
+        // write failure because the remediation differs (manual
+        // metadata reconciliation vs. retry the install).
+        let e = UpdaterError::PostCommitLayoutSync {
+            slot: crate::bank::Bank::B,
+            version: ImageVersion::new(2, 0, 0),
+            attempts: 3,
+            last_error: "forced: emulated transient io".into(),
+        };
+        assert_eq!(e.code(), ErrorCode::UpdaterPostCommitLayoutSync);
+        let bw = UpdaterError::BankWrite("io error".into());
+        assert_ne!(e.code(), bw.code());
     }
 
     #[test]
