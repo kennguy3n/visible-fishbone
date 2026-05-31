@@ -301,7 +301,16 @@ async fn run_flush_loop(
                                 delay_ms,
                                 "telemetry egress connect failed; will retry"
                             );
-                            tokio::time::sleep(delay).await;
+                            // Race the backoff against shutdown so an
+                            // operator-initiated drain during a long retry
+                            // interval (default `backoff_max` is 30s —
+                            // exactly the supervisor's per-subsystem drain
+                            // budget) doesn't park here until the budget
+                            // elapses.
+                            tokio::select! {
+                                () = shutdown.wait() => break,
+                                () = tokio::time::sleep(delay) => {}
+                            }
                             continue;
                         }
                     }

@@ -271,7 +271,16 @@ impl Subsystem for CommsSubsystem {
                                         delay_ms,
                                         "control plane connect failed, will retry after delay"
                                     );
-                                    tokio::time::sleep(delay).await;
+                                    // Race the backoff against shutdown so an
+                                    // operator-initiated drain during a long
+                                    // retry interval (default `backoff_max`
+                                    // is 30s — exactly the supervisor's
+                                    // per-subsystem drain budget) doesn't
+                                    // park here until the budget elapses.
+                                    tokio::select! {
+                                        () = shutdown.wait() => break,
+                                        () = tokio::time::sleep(delay) => {}
+                                    }
                                     continue;
                                 }
                             }

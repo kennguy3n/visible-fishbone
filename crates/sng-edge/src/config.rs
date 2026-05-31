@@ -301,7 +301,12 @@ impl Default for IpsConfig {
             config_path: default_suricata_config_path(),
             eve_log_path: default_suricata_eve_log_path(),
             suricata_binary: None,
-            enable: false,
+            // Must match the field-level `#[serde(default = "default_true")]`
+            // above. Diverging here means a TOML containing `[ips]` with any
+            // custom field but no `enable` boots the IPS subsystem (and
+            // launches Suricata), while omitting `[ips]` entirely does not
+            // — a split-brain operator footgun. Keep them in lockstep.
+            enable: default_true(),
             interface: default_ips_interface(),
             rule_file_path: default_ips_rule_file_path(),
             staging_dir: default_ips_staging_dir(),
@@ -360,7 +365,10 @@ impl Default for SwgConfig {
         Self {
             config_path: default_envoy_config_path(),
             envoy_binary: None,
-            enable: false,
+            // Must match the field-level `#[serde(default = "default_true")]`
+            // above. See the matching note on `IpsConfig::default` for the
+            // operator-footgun rationale.
+            enable: default_true(),
         }
     }
 }
@@ -541,6 +549,16 @@ fn validate(cfg: &EdgeConfig) -> Result<(), String> {
     }
     if cfg.ztna.max_inflight == 0 {
         return Err("ztna.max_inflight must be > 0".into());
+    }
+    // Every channel capacity is fed straight into `mpsc::channel(N)` /
+    // `broadcast::channel(N)`, both of which panic on `N == 0`. Catching
+    // it here turns an operator typo into a clean `ConfigError::Invariant`
+    // at load time instead of a thread-panic at first subsystem startup.
+    if cfg.telemetry.event_channel_capacity == 0 {
+        return Err("telemetry.event_channel_capacity must be > 0".into());
+    }
+    if cfg.ips.event_channel_capacity == 0 {
+        return Err("ips.event_channel_capacity must be > 0".into());
     }
     Ok(())
 }
@@ -816,6 +834,154 @@ backoff_max     = "10s"
             panic!("expected Invariant error, got {err:?}");
         };
         assert!(message.contains("backoff_initial"));
+    }
+
+    /// Regression: `IpsConfig::default()` previously returned
+    /// `enable = false` while the field-level
+    /// `#[serde(default = "default_true")]` made `enable` default
+    /// to `true` whenever `[ips]` was present but the `enable` key
+    /// was omitted. The two must agree so an operator who customises
+    /// any IPS field without naming `enable` doesn't accidentally
+    /// launch Suricata. This test fails before the fix and passes
+    /// after.
+    #[test]
+    fn ips_default_matches_field_level_serde_default() {
+        let f = NamedTempFile::new().unwrap();
+        // `[ips]` with one non-`enable` field forces serde to fill
+        // `enable` from the field-level default (`default_true`).
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[ips]
+interface = "eth1"
+"#,
+        )
+        .unwrap();
+        let cfg = load_from_path(f.path()).unwrap();
+        assert!(
+            cfg.ips.enable,
+            "[ips] with a custom field should default `enable = true` via serde"
+        );
+        assert!(
+            IpsConfig::default().enable,
+            "IpsConfig::default() must match the field-level serde default"
+        );
+    }
+
+    /// Regression: same shape as
+    /// [`ips_default_matches_field_level_serde_default`] for the SWG
+    /// section. `SwgConfig::default()` returned `enable = false`
+    /// while the per-field serde default was `true`.
+    #[test]
+    fn swg_default_matches_field_level_serde_default() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[swg]
+config_path = "/etc/envoy/envoy.yaml"
+"#,
+        )
+        .unwrap();
+        let cfg = load_from_path(f.path()).unwrap();
+        assert!(
+            cfg.swg.enable,
+            "[swg] with a custom field should default `enable = true` via serde"
+        );
+        assert!(
+            SwgConfig::default().enable,
+            "SwgConfig::default() must match the field-level serde default"
+        );
+    }
+
+    /// Regression: zero-capacity channel sizes were previously
+    /// accepted at load time and would panic at runtime when
+    /// `mpsc::channel(0)` ran during subsystem startup. The
+    /// validator must reject them up front.
+    #[test]
+    fn validate_rejects_zero_telemetry_event_channel_capacity() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[telemetry]
+event_channel_capacity = 0
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("telemetry.event_channel_capacity"),
+            "message did not name the bad field: {message}"
+        );
+    }
+
+    /// Same shape as
+    /// [`validate_rejects_zero_telemetry_event_channel_capacity`]
+    /// for the IPS event channel. The Suricata wrapper similarly
+    /// panics on `mpsc::channel(0)` during boot.
+    #[test]
+    fn validate_rejects_zero_ips_event_channel_capacity() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[ips]
+event_channel_capacity = 0
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("ips.event_channel_capacity"),
+            "message did not name the bad field: {message}"
+        );
     }
 
     #[test]

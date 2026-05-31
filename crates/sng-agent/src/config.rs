@@ -383,6 +383,13 @@ fn validate(cfg: &AgentConfig) -> Result<(), String> {
     if cfg.tunnel.reconcile_interval.is_zero() {
         return Err("tunnel.reconcile_interval must be > 0".into());
     }
+    // The telemetry capacity is fed straight into `mpsc::channel(N)` /
+    // `broadcast::channel(N)`, both of which panic on `N == 0`. Catching
+    // it here turns an operator typo into a clean `ConfigError::Invariant`
+    // at load time instead of a thread-panic at first subsystem startup.
+    if cfg.telemetry.event_channel_capacity == 0 {
+        return Err("telemetry.event_channel_capacity must be > 0".into());
+    }
     Ok(())
 }
 
@@ -621,5 +628,40 @@ client_key  = "/etc/sng/client.key"
     fn parse_rejects_missing_path() {
         let err = load_from_path(std::path::Path::new("/nonexistent/sng-agent.toml")).unwrap_err();
         assert!(matches!(err, ConfigError::Read { .. }));
+    }
+
+    /// Regression: zero-capacity `telemetry.event_channel_capacity`
+    /// would have panicked at runtime when `mpsc::channel(0)` ran
+    /// during subsystem startup. The validator must reject it up
+    /// front so the operator gets a `ConfigError::Invariant` at
+    /// load time instead.
+    #[test]
+    fn validate_rejects_zero_telemetry_event_channel_capacity() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[telemetry]
+event_channel_capacity = 0
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("telemetry.event_channel_capacity"),
+            "message did not name the bad field: {message}"
+        );
     }
 }

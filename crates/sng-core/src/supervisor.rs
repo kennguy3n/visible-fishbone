@@ -653,8 +653,18 @@ async fn health_aggregator_loop(
     shutdown: ShutdownSignal,
 ) {
     let mut ticker = tokio::time::interval(interval);
-    // Skip immediate-first-tick burst.
+    // `tokio::time::interval` is documented to fire its first tick
+    // immediately on `tick().await`. The `Delay` missed-tick policy
+    // controls how lagging ticks are coalesced — it does NOT suppress
+    // that immediate first tick. Consume it explicitly so the health
+    // aggregator's first probe lands one `interval` after subsystem
+    // spawn (i.e. once subsystems have had a chance to reach steady
+    // state) rather than racing them at t=0.
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tokio::select! {
+        _ = ticker.tick() => {}
+        () = shutdown.wait() => return,
+    }
     loop {
         tokio::select! {
             _ = ticker.tick() => {
@@ -777,12 +787,22 @@ mod tests {
         /// Run task ignores shutdown and sleeps far longer than
         /// the drain budget — used to exercise the timeout path.
         IgnoreShutdown,
+        /// Run task races a long sleep against the shutdown
+        /// signal in a `tokio::select!`. Models the
+        /// reconnect-backoff loops in `sng-{agent,edge}::comms`
+        /// and `::telemetry`: when `client.connect()` fails,
+        /// each loop must race the backoff `sleep` against
+        /// `shutdown.wait()` so an operator-initiated drain
+        /// during a long retry interval does not get parked
+        /// for the full backoff_max.
+        LongSleepRacedWithShutdown,
     }
 
     struct TestSubsystem {
         name: &'static str,
         saw_shutdown: Arc<AtomicBool>,
         start_count: Arc<AtomicU32>,
+        check_count: Arc<AtomicU32>,
         health: HealthStatus,
         behavior: RunBehavior,
     }
@@ -793,6 +813,7 @@ mod tests {
                 name,
                 saw_shutdown: Arc::new(AtomicBool::new(false)),
                 start_count: Arc::new(AtomicU32::new(0)),
+                check_count: Arc::new(AtomicU32::new(0)),
                 health: HealthStatus::Up,
                 behavior: RunBehavior::DrainOnShutdown,
             })
@@ -803,6 +824,7 @@ mod tests {
                 name,
                 saw_shutdown: Arc::new(AtomicBool::new(false)),
                 start_count: Arc::new(AtomicU32::new(0)),
+                check_count: Arc::new(AtomicU32::new(0)),
                 health: HealthStatus::Up,
                 behavior,
             })
@@ -813,6 +835,7 @@ mod tests {
                 name,
                 saw_shutdown: Arc::new(AtomicBool::new(false)),
                 start_count: Arc::new(AtomicU32::new(0)),
+                check_count: Arc::new(AtomicU32::new(0)),
                 health,
                 behavior: RunBehavior::DrainOnShutdown,
             })
@@ -848,6 +871,22 @@ mod tests {
                         saw_shutdown.store(true, Ordering::Relaxed);
                         Ok(())
                     }
+                    RunBehavior::LongSleepRacedWithShutdown => {
+                        // 60s is well beyond the supervisor's default
+                        // 30s drain budget; if shutdown does NOT
+                        // preempt the sleep the supervisor will
+                        // report `DrainOutcome::Timeout`. Passing
+                        // this test requires the `tokio::select!`
+                        // arm to win the race and set
+                        // `saw_shutdown`.
+                        tokio::select! {
+                            () = shutdown.wait() => {
+                                saw_shutdown.store(true, Ordering::Relaxed);
+                            }
+                            () = sleep(Duration::from_secs(60)) => {}
+                        }
+                        Ok(())
+                    }
                     // Already filtered above; keep the arm so
                     // future variants surface as a compile error
                     // rather than a silent fall-through.
@@ -864,6 +903,7 @@ mod tests {
             self.name
         }
         async fn check(&self) -> SubsystemHealth {
+            self.check_count.fetch_add(1, Ordering::Relaxed);
             SubsystemHealth {
                 name: self.name.into(),
                 status: self.health,
@@ -1046,6 +1086,141 @@ mod tests {
         let snap = supervisor.health_snapshot().await;
         assert_eq!(snap.status, HealthStatus::Down);
         assert!(snap.subsystems.is_empty());
+    }
+
+    /// Regression: the original health aggregator wrapper said
+    /// "Skip immediate-first-tick burst" but only set
+    /// `MissedTickBehavior::Delay` — which controls how missed
+    /// ticks are coalesced, NOT whether the first call to
+    /// `tick().await` resolves immediately. The fix consumes
+    /// the immediate first tick explicitly before entering the
+    /// loop, so the first probe lands one `interval` after
+    /// supervisor spawn (giving subsystems time to reach a
+    /// steady state).
+    ///
+    /// We exercise this by configuring a 1-second health
+    /// interval and firing shutdown after only ~100ms. If the
+    /// first tick still fired immediately the `check_count`
+    /// would observe at least one probe; with the fix it sees
+    /// none.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn health_aggregator_first_tick_does_not_fire_immediately() {
+        let a = TestSubsystem::new("a");
+        let supervisor = Supervisor::builder()
+            .with_subsystem(Arc::clone(&a))
+            .with_health_interval(Duration::from_secs(1))
+            .build();
+        let trigger = supervisor.shutdown_trigger();
+        let handle = tokio::spawn(supervisor.run());
+
+        // Yield so the spawn-and-tick race resolves in favour of
+        // the aggregator's first `select!` arm. Then advance the
+        // paused clock by a fraction of the interval — not enough
+        // to deliver a tick.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        trigger.fire();
+
+        let _ = timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("supervisor returned within budget")
+            .expect("join ok")
+            .expect("run ok");
+
+        assert_eq!(
+            a.check_count.load(Ordering::Relaxed),
+            0,
+            "health probe must NOT fire before the first interval elapses"
+        );
+    }
+
+    /// Companion to the previous test: once the interval has
+    /// actually elapsed, the aggregator must probe at every tick.
+    /// Guards against an over-eager fix that consumed the first
+    /// tick AND the wakeup signal.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn health_aggregator_probes_after_interval_elapses() {
+        let a = TestSubsystem::new("a");
+        let supervisor = Supervisor::builder()
+            .with_subsystem(Arc::clone(&a))
+            .with_health_interval(Duration::from_millis(100))
+            .build();
+        let trigger = supervisor.shutdown_trigger();
+        let handle = tokio::spawn(supervisor.run());
+
+        tokio::task::yield_now().await;
+        // Advance past 3 intervals plus a margin so the aggregator
+        // has a chance to be polled. Yield between advances so
+        // each interval the supervisor's runtime gets to wake.
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_millis(150)).await;
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+        }
+        trigger.fire();
+
+        let _ = timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("supervisor returned within budget")
+            .expect("join ok")
+            .expect("run ok");
+
+        assert!(
+            a.check_count.load(Ordering::Relaxed) >= 2,
+            "expected at least 2 probes after 3 intervals elapsed, saw {}",
+            a.check_count.load(Ordering::Relaxed)
+        );
+    }
+
+    /// Regression: every reconnect-backoff loop in
+    /// `sng-{agent,edge}::comms` and `::telemetry` calls
+    /// `tokio::time::sleep(backoff)` after a `client.connect()`
+    /// failure. Before the wave-1 fix that sleep was bare —
+    /// shutdown could not preempt it, so a drain fired during
+    /// the retry interval (default `backoff_max = 30s`, which
+    /// also happens to be the supervisor's per-subsystem drain
+    /// budget) would park the subsystem for the full budget and
+    /// report `DrainOutcome::Timeout`.
+    ///
+    /// This test pins down the new behaviour: a subsystem whose
+    /// run loop races a 60-second sleep against `shutdown.wait()`
+    /// must observe the shutdown signal and exit cleanly within
+    /// the drain budget, well under the bare-sleep value.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn backoff_sleep_raced_against_shutdown_drains_promptly() {
+        let racer =
+            TestSubsystem::with_behavior("comms-like", RunBehavior::LongSleepRacedWithShutdown);
+        let supervisor = Supervisor::builder()
+            // Pick a drain budget shorter than the 60s in-loop
+            // sleep so a regression (bare sleep) would surface
+            // as `DrainOutcome::Timeout` rather than passing by
+            // accident.
+            .with_subsystem_and_drain(Arc::clone(&racer), Duration::from_secs(5))
+            .build();
+        let trigger = supervisor.shutdown_trigger();
+        let handle = tokio::spawn(supervisor.run());
+
+        // Let the subsystem reach its `tokio::select!` arm.
+        tokio::task::yield_now().await;
+        trigger.fire();
+
+        let report = timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("supervisor returned within budget")
+            .expect("join ok")
+            .expect("run ok");
+
+        assert_eq!(report.drain_results.len(), 1);
+        let drain = &report.drain_results[0];
+        assert!(
+            drain.outcome.is_ok(),
+            "expected clean drain, got {:?}",
+            drain.outcome
+        );
+        assert!(
+            racer.saw_shutdown.load(Ordering::Relaxed),
+            "shutdown signal must have preempted the 60s backoff sleep"
+        );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
