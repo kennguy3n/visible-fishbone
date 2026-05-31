@@ -209,7 +209,65 @@ impl LocalCategoryDb {
             e.host = e.host.to_ascii_lowercase();
             e.category.0 = e.category.0.to_ascii_lowercase();
         }
+
+        // # Same-(host, path_prefix) conflict resolution
+        //
+        // Two feed entries that share canonical (host,
+        // path_prefix) but differ on `category` are *not*
+        // identical; `Vec::dedup` keys on `PartialEq` over the
+        // whole struct so it would only collapse byte-identical
+        // rows. That left a hole: a future operator-override
+        // surface ("`with_extensions`" mirroring the bypass
+        // list's append-then-merge contract) would silently get
+        // first-wins precedence here while [`BypassList`] just
+        // unified its construction paths on last-wins. Two
+        // crates in the same module shipping opposite override
+        // semantics is a maintenance hazard — enforce parity
+        // now so the next surface inherits the right contract.
+        //
+        // The merge happens before the host-specificity sort so
+        // the conflict-resolution adjacency key is exactly
+        // `(host, path_prefix)`. We use a stable sort on that
+        // key to keep same-(host, path_prefix) entries in input
+        // order, then walk the adjacency window picking the
+        // last entry — that's the entry appended later by the
+        // caller (the override source). Finally we re-sort by
+        // host-specificity descending so the runtime walk hits
+        // the most-specific match first.
+        //
+        // SORT-STABILITY INVARIANT — DO NOT change `sort_by` to
+        // `sort_unstable_by`: the last-wins contract above
+        // depends on `Vec::sort_by` being a *stable* sort
+        // (documented at
+        // <https://doc.rust-lang.org/std/vec/struct.Vec.html#method.sort_by>).
+        // With a stable sort, two entries that compare equal
+        // (same host + same path_prefix) keep their relative
+        // input order, so the later one lands *after* the
+        // earlier one in the sorted vector and the merge loop
+        // replaces the earlier entry with it. An unstable sort
+        // would be free to swap them, silently flipping the
+        // merge to first-wins — catastrophic for a future
+        // `with_extensions`-style override surface that appends
+        // operator entries after the defaults and relies on
+        // this contract.
         entries.sort_by(|a, b| {
+            a.host
+                .cmp(&b.host)
+                .then_with(|| a.path_prefix.cmp(&b.path_prefix))
+        });
+        let mut merged: Vec<CategoryEntry> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Some(last) = merged.last_mut() {
+                if last.host == entry.host && last.path_prefix == entry.path_prefix {
+                    *last = entry;
+                    continue;
+                }
+            }
+            merged.push(entry);
+        }
+
+        // Re-sort by host-specificity for the runtime walk.
+        merged.sort_by(|a, b| {
             // Primary: descending by stripped-host length
             // (longest suffix first).
             let host_cmp = sort_key(&b.host).cmp(&sort_key(&a.host));
@@ -232,13 +290,9 @@ impl LocalCategoryDb {
             let ap = a.path_prefix.as_deref().unwrap_or("");
             bp.len().cmp(&ap.len()).then_with(|| ap.cmp(bp))
         });
-        // Dedup identical entries — the same suffix and the
-        // same category and the same path-prefix from two feeds
-        // (industry default + operator extension) collapse to
-        // one.
-        entries.dedup();
-        let n = entries.len();
-        self.inner.store(Arc::new(CategoryIndex { entries }));
+        let n = merged.len();
+        self.inner
+            .store(Arc::new(CategoryIndex { entries: merged }));
         n
     }
 
@@ -566,6 +620,106 @@ mod tests {
         assert_eq!(
             db.categorize_sync("example.com", "/"),
             Some(Category::new("business.saas"))
+        );
+    }
+
+    #[test]
+    fn install_uses_last_wins_on_same_host_and_path_prefix() {
+        // Regression test for the Devin Review finding on the
+        // first-wins / last-wins asymmetry. The fix
+        // (`93f3add`) unified both [`BypassList`] constructors
+        // on last-wins. The categoriser previously kept
+        // first-wins via `Vec::dedup` on the whole entry, which
+        // would silently flip the meaning of any future
+        // operator-override surface ("with_extensions" mirror).
+        //
+        // Two entries share the same host + path_prefix but
+        // differ on category. The later one is the operator's
+        // override and must win.
+        let db = LocalCategoryDb::new(vec![
+            ce("example.com", None, "business.saas"),
+            ce("example.com", None, "social.media"),
+        ]);
+        // The matcher must return the *last* category, not the
+        // first one in the sort-tie-break order.
+        assert_eq!(
+            db.categorize_sync("example.com", "/"),
+            Some(Category::new("social.media"))
+        );
+        // Index must contain exactly one entry — the merge
+        // collapses the conflict.
+        assert_eq!(db.len(), 1);
+    }
+
+    #[test]
+    fn install_last_wins_holds_for_wildcard_hosts_with_path_prefix() {
+        // Conflict resolution must apply to the entire (host,
+        // path_prefix) key, not just bare host. A wildcard
+        // entry with a path prefix that an operator later
+        // overrides to a different category must end up with
+        // the operator's category.
+        let db = LocalCategoryDb::new(vec![
+            ce("*.example.com", Some("/research"), "business.research"),
+            // Operator override appended later:
+            ce("*.example.com", Some("/research"), "gambling"),
+        ]);
+        assert_eq!(
+            db.categorize_sync("docs.example.com", "/research/quarterly.pdf"),
+            Some(Category::new("gambling"))
+        );
+        // And the unrelated path keeps falling through —
+        // last-wins is scoped to the matched (host,
+        // path_prefix), not the host alone.
+        assert_eq!(db.categorize_sync("docs.example.com", "/news"), None);
+        assert_eq!(db.len(), 1);
+    }
+
+    #[test]
+    fn install_last_wins_preserves_distinct_path_prefix_entries() {
+        // Different path prefixes under the same host are NOT
+        // collisions and must both survive. This test pins that
+        // the merge loop's adjacency key is (host, path_prefix),
+        // not host alone.
+        let db = LocalCategoryDb::new(vec![
+            ce("example.com", Some("/news"), "news"),
+            ce("example.com", Some("/finance"), "business.finance"),
+            ce("example.com", None, "social.media"),
+        ]);
+        assert_eq!(db.len(), 3);
+        assert_eq!(
+            db.categorize_sync("example.com", "/news/today"),
+            Some(Category::new("news"))
+        );
+        assert_eq!(
+            db.categorize_sync("example.com", "/finance/q1"),
+            Some(Category::new("business.finance"))
+        );
+        // The path-less entry catches everything else.
+        assert_eq!(
+            db.categorize_sync("example.com", "/about"),
+            Some(Category::new("social.media"))
+        );
+    }
+
+    #[test]
+    fn install_last_wins_canonicalises_before_merge() {
+        // The merge must run *after* host + category
+        // canonicalisation so that two entries that differ only
+        // in input casing still collide. Otherwise an operator
+        // override using the canonical lowercase form against a
+        // mixed-case industry default would be filed under a
+        // separate (host, path_prefix) key and both rows would
+        // survive — first-wins via sort tie-break, defeating
+        // the override.
+        let db = LocalCategoryDb::new(vec![
+            ce("Example.COM", None, "business.saas"),
+            // Operator override appended later, canonical form:
+            ce("example.com", None, "social.media"),
+        ]);
+        assert_eq!(db.len(), 1);
+        assert_eq!(
+            db.categorize_sync("example.com", "/"),
+            Some(Category::new("social.media"))
         );
     }
 }

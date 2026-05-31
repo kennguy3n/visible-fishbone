@@ -53,6 +53,21 @@ macro_rules! ln {
 /// a renderer/supervisor port mismatch.
 pub const DEFAULT_ADMIN_PORT: u16 = 9901;
 
+/// Default per-request ext-authz timeout, in milliseconds.
+///
+/// 250 ms is generous for the in-process providers sng-swg
+/// ships at launch ([`crate::categorizer::LocalCategoryDb`] +
+/// [`crate::malware::StaticMalwareList`]) where the verdict
+/// path is microsecond-level work over an `ArcSwap` snapshot.
+/// Remote providers (Cisco Talos, custom HTTPS feeds, managed
+/// verdict services) typically need a larger budget; operators
+/// configuring such a provider should raise
+/// [`ListenerConfig::ext_authz_timeout_ms`] to at least the 99th-
+/// percentile latency of the upstream, otherwise Envoy will
+/// fail-closed deny every request whose verdict overruns this
+/// window.
+pub const DEFAULT_EXT_AUTHZ_TIMEOUT_MS: u32 = 250;
+
 /// Top-level Envoy config the supervisor renders into YAML.
 ///
 /// Holds *only* the fields the SWG actually controls; anything
@@ -108,6 +123,7 @@ impl EnvoyConfig {
                 ext_authz_cluster: "ext_authz".into(),
                 forward_proxy_cluster: "dynamic_forward_proxy".into(),
                 tls_bypass_sni_suffixes: Vec::new(),
+                ext_authz_timeout_ms: DEFAULT_EXT_AUTHZ_TIMEOUT_MS,
             }],
             clusters: vec![
                 ClusterConfig {
@@ -145,6 +161,21 @@ impl EnvoyConfig {
 /// lives in the rendered config so the operator can see what's
 /// in scope, but the runtime decision is made by
 /// [`crate::bypass::BypassList`].
+///
+/// `ext_authz_timeout_ms` is the per-request timeout the rendered
+/// Envoy YAML stamps on the `envoy.filters.http.ext_authz`
+/// HTTP-service block. With the in-process providers sng-swg
+/// ships today (`LocalCategoryDb` + `StaticMalwareList`) the
+/// verdict path is microsecond-level so the
+/// [`DEFAULT_EXT_AUTHZ_TIMEOUT_MS`] default of 250 ms is
+/// generous. A future remote provider (Cisco Talos, custom HTTPS
+/// feed, managed verdict service) can need longer — exposing the
+/// timeout as a per-listener field is what lets an operator dial
+/// it up without forking the renderer. Envoy interprets the
+/// rendered value as a fail-closed deny on expiry, so under-sizing
+/// it for a slow upstream causes Envoy to deny every request; the
+/// hardcoded 250 ms is therefore the wrong default to bake in at
+/// the wire format.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListenerConfig {
     pub name: String,
@@ -153,6 +184,14 @@ pub struct ListenerConfig {
     pub ext_authz_cluster: String,
     pub forward_proxy_cluster: String,
     pub tls_bypass_sni_suffixes: Vec<String>,
+    /// Per-request timeout, in milliseconds, stamped on the
+    /// rendered Envoy `ext_authz` HTTP service block. Rendered as
+    /// `<seconds>s` (e.g. `0.250s`, `1.500s`, `5s`). Set to a
+    /// value at least as large as the worst-case verdict latency
+    /// of the configured `UrlCategorizer` /
+    /// `MalwareVerdictProvider`. Defaults to
+    /// [`DEFAULT_EXT_AUTHZ_TIMEOUT_MS`] (250 ms).
+    pub ext_authz_timeout_ms: u32,
 }
 
 /// One Envoy cluster. The field set is deliberately minimal —
@@ -289,7 +328,11 @@ fn render_listener(out: &mut String, l: &ListenerConfig) -> Result<(), SwgError>
         "                  cluster: {}",
         quoted(&l.ext_authz_cluster)?
     );
-    ln!(out, "                  timeout: 0.250s");
+    ln!(
+        out,
+        "                  timeout: {}",
+        format_envoy_seconds(l.ext_authz_timeout_ms)
+    );
     ln!(out, "          - name: envoy.filters.http.router");
     ln!(out, "            typed_config:");
     ln!(
@@ -462,6 +505,32 @@ fn parse_host_port(ep: &str) -> Result<(&str, u16), SwgError> {
         .parse()
         .map_err(|e| SwgError::Config(format!("endpoint port not u16 ({ep}): {e}")))?;
     Ok((host, port))
+}
+
+/// Render a millisecond integer as the seconds-string shape
+/// Envoy's protobuf `Duration` parser accepts in YAML (e.g.
+/// `0.250s`, `1.500s`, `5s`, `30s`).
+///
+/// Envoy 1.30+ parses durations from the typed config layer via
+/// `google.protobuf.Duration` (`<seconds>[.<fraction>]s`). We
+/// emit the canonical lowest-precision form so the YAML stays
+/// stable (no trailing zeroes, no scientific notation) across
+/// renders. Sub-second values are emitted with millisecond
+/// precision (`0.250s`); whole-second values drop the
+/// fractional part (`5s`). Pinned by
+/// `format_envoy_seconds_renders_canonical_form`.
+fn format_envoy_seconds(ms: u32) -> String {
+    let secs = ms / 1_000;
+    let frac_ms = ms % 1_000;
+    if frac_ms == 0 {
+        format!("{secs}s")
+    } else {
+        // Three-digit zero-padded fraction so 50 ms renders as
+        // `0.050s` not `0.50s` (which protobuf parses as 500 ms,
+        // a 10x discrepancy that would silently widen the timeout
+        // by an order of magnitude).
+        format!("{secs}.{frac_ms:03}s")
+    }
 }
 
 /// Render a string scalar with quoting and escaping rules that
@@ -915,5 +984,123 @@ mod tests {
         cfg.clusters[0].name = "bad\0cluster".into();
         let err = render_envoy_yaml(&cfg).expect_err("must fail");
         assert!(matches!(err, SwgError::Config(_)), "{err:?}");
+    }
+
+    #[test]
+    fn format_envoy_seconds_renders_canonical_form() {
+        // Sub-second values keep three-digit millisecond
+        // precision so 50 ms doesn't render as `0.50s` (which
+        // protobuf's Duration parser would read as 500 ms — a
+        // silent 10x widening of the timeout).
+        assert_eq!(format_envoy_seconds(250), "0.250s");
+        assert_eq!(format_envoy_seconds(50), "0.050s");
+        assert_eq!(format_envoy_seconds(1), "0.001s");
+        // Whole-second values drop the fractional part so the
+        // wire shape stays stable across renders.
+        assert_eq!(format_envoy_seconds(1_000), "1s");
+        assert_eq!(format_envoy_seconds(5_000), "5s");
+        assert_eq!(format_envoy_seconds(30_000), "30s");
+        // Mixed (whole + fractional) keep the fractional part.
+        assert_eq!(format_envoy_seconds(1_500), "1.500s");
+        assert_eq!(format_envoy_seconds(2_750), "2.750s");
+        // Zero is a degenerate "no timeout" value — Envoy
+        // interprets `0s` as "disabled". We emit the canonical
+        // form so an operator who wants this gets the wire shape
+        // their intent maps to.
+        assert_eq!(format_envoy_seconds(0), "0s");
+    }
+
+    #[test]
+    fn default_ext_authz_timeout_renders_as_250ms() {
+        // The historical hardcoded `timeout: 0.250s` was the
+        // wire-format default for the in-process providers
+        // sng-swg ships at launch. The fix promotes the timeout
+        // to a per-listener field — this test pins that the
+        // default rendered value did not regress when the field
+        // became dynamic. An operator using only
+        // `minimal_forward_proxy()` (no override) must see
+        // exactly the same Envoy YAML the historical renderer
+        // produced.
+        let cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        assert_eq!(
+            cfg.listeners[0].ext_authz_timeout_ms,
+            DEFAULT_EXT_AUTHZ_TIMEOUT_MS
+        );
+        assert_eq!(DEFAULT_EXT_AUTHZ_TIMEOUT_MS, 250);
+        let s = render_envoy_yaml(&cfg).unwrap();
+        // Pin the rendered substring so a future field rename
+        // (`ext_authz_timeout_ms` -> ?) that forgets to update
+        // the renderer trips this test.
+        assert!(
+            s.contains("                  timeout: 0.250s\n"),
+            "default ext-authz timeout must render as 0.250s; got:\n{s}",
+        );
+    }
+
+    #[test]
+    fn ext_authz_timeout_override_renders_dynamically() {
+        // Regression test for the Devin Review finding: the
+        // historical renderer hardcoded `timeout: 0.250s`,
+        // which was generous for the in-process providers but
+        // would have caused Envoy to fail-closed deny every
+        // request once a remote provider (Cisco Talos, custom
+        // HTTPS feed, managed verdict service) was wired in and
+        // its 99th-percentile latency overran the 250 ms
+        // window. The fix promotes the timeout to a per-listener
+        // field; this test pins that the override actually
+        // lands in the rendered Envoy YAML at the ext_authz
+        // HTTP service block, not just that the field is
+        // settable.
+        //
+        // Multi-second override (remote provider envelope):
+        let mut cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        cfg.listeners[0].ext_authz_timeout_ms = 5_000;
+        let s = render_envoy_yaml(&cfg).unwrap();
+        assert!(
+            s.contains("                  timeout: 5s\n"),
+            "5s override must render at the ext_authz timeout slot; got:\n{s}",
+        );
+        // The default value must NOT appear anywhere in the
+        // rendered YAML for the override path — a future
+        // refactor that drops the field reference would still
+        // pass the override assertion if it emitted both
+        // timeouts.
+        assert!(
+            !s.contains("                  timeout: 0.250s\n"),
+            "default 250ms timeout must not leak into the rendered output \
+             when the operator has overridden it; got:\n{s}",
+        );
+
+        // Sub-second override (slightly slower in-process
+        // provider envelope):
+        cfg.listeners[0].ext_authz_timeout_ms = 750;
+        let s = render_envoy_yaml(&cfg).unwrap();
+        assert!(
+            s.contains("                  timeout: 0.750s\n"),
+            "750ms override must render at the ext_authz timeout slot; got:\n{s}",
+        );
+
+        // Multi-listener override — each listener carries its
+        // own timeout so a mixed in-process / remote-provider
+        // deployment can size each one independently.
+        let mut cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        cfg.listeners.push(ListenerConfig {
+            name: "swg_forward_remote".into(),
+            address: "0.0.0.0".into(),
+            port: 9443,
+            ext_authz_cluster: "ext_authz_remote".into(),
+            forward_proxy_cluster: "dynamic_forward_proxy".into(),
+            tls_bypass_sni_suffixes: Vec::new(),
+            ext_authz_timeout_ms: 3_000,
+        });
+        let s = render_envoy_yaml(&cfg).unwrap();
+        assert!(
+            s.contains("                  timeout: 0.250s\n"),
+            "first listener's 250ms timeout must still render; got:\n{s}",
+        );
+        assert!(
+            s.contains("                  timeout: 3s\n"),
+            "second listener's 3s timeout must render; got:\n{s}",
+        );
     }
 }

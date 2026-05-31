@@ -110,7 +110,10 @@ pub mod verdict;
 pub use auth::{ExtAuthzHandler, ExtAuthzRequest, ExtAuthzResponse};
 pub use bypass::{BypassDecision, BypassList, BypassReason};
 pub use categorizer::{Category, CategoryEntry, LocalCategoryDb, UrlCategorizer};
-pub use config::{EnvoyConfig, ListenerConfig, render_envoy_yaml};
+pub use config::{
+    DEFAULT_ADMIN_PORT, DEFAULT_EXT_AUTHZ_TIMEOUT_MS, EnvoyConfig, ListenerConfig,
+    render_envoy_yaml,
+};
 pub use error::SwgError;
 pub use health::{HealthReport, HealthState, ManagerHealth};
 pub use malware::{MalwareVerdict, MalwareVerdictProvider, StaticMalwareList};
