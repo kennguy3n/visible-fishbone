@@ -23,8 +23,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::Mutex as AsyncMutex;
+use tracing::{debug, warn};
 
 use crate::error::SwgError;
 
@@ -95,6 +97,18 @@ pub trait EnvoyProcess: Send + Sync + std::fmt::Debug {
     /// the manager has observed a PID — not once Envoy has
     /// finished binding its listeners. The manager calls
     /// [`Self::is_alive`] on a backoff to gate "fully up".
+    ///
+    /// Implementations that pipe Envoy's stdout / stderr (the
+    /// production [`ShellEnvoy`] backend does, so boot
+    /// diagnostics aren't lost) MUST also spawn reader tasks
+    /// that continuously drain those pipes. Once Envoy fills
+    /// the kernel's ~64 KiB pipe buffer the next `write(2)`
+    /// blocks, freezing the event loop while `kill(0)` and
+    /// `try_wait()` still report the process alive — the
+    /// supervisor's [`Self::is_alive`] check cannot see the
+    /// deadlock. The shipped backend wires drainers immediately
+    /// after `spawn()` and exercises the path in
+    /// `child_with_high_stdout_volume_does_not_deadlock`.
     async fn start(&self, config_path: &Path) -> Result<(), SwgError>;
     /// Graceful stop. Implementations should send `Shutdown`,
     /// wait up to the configured grace window, then escalate.
@@ -238,15 +252,46 @@ impl EnvoyProcess for ShellEnvoy {
             // hot-restart), so the epoch stays at zero.
             .arg("--restart-epoch")
             .arg("0")
+            // stdout/stderr are piped so we can forward them to
+            // tracing — Envoy writes its access log + stats to
+            // the configured sinks but reserves stdout / stderr
+            // for boot diagnostics, fatal load errors, panic
+            // backtraces, and the only-on-stderr messages that
+            // surface when `--mode validate` accepted the config
+            // but the live process refuses to come up.
+            // `Stdio::null()` would lose those entirely. But
+            // leaving the pipes alive *without* a reader
+            // deadlocks Envoy once the ~64KiB kernel pipe buffer
+            // fills (`write(2)` blocks on a full pipe), causing
+            // the process to appear alive to `kill(0)` /
+            // `try_wait()` while the event loop silently freezes
+            // and traffic stops moving — the manager's
+            // `is_alive()` would keep returning `true` and the
+            // health monitor would not trip. Spawning drainer
+            // tasks below keeps the pipes empty and lifts the
+            // lines into structured logs. Same pattern as
+            // `sng-ips::process::ShellSuricata::start`.
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Drop the child on supervisor exit so a panicking
             // supervisor doesn't leak an Envoy process.
             .kill_on_drop(true);
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|e| SwgError::Process(format!("spawn envoy: {e}")))?;
+        // Hand stdout / stderr off to dedicated drainer tasks.
+        // `Child::stdout` / `Child::stderr` are `Option<Owned>`
+        // handles that we `take()` so the tasks own them
+        // outright — once `kill_on_drop(true)` fires the pipes
+        // close and the drainers exit on EOF, so we do not need
+        // to track or join them explicitly.
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(drain_child_stdout(stdout));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(drain_child_stderr(stderr));
+        }
         state.child = Some(child);
         state.status = ProcessStatus::Running;
         Ok(())
@@ -584,6 +629,62 @@ impl EnvoyProcess for MockEnvoy {
     }
 }
 
+/// Drain Envoy's stdout into structured logs.
+///
+/// Stdout carries Envoy's startup banner (listener bringup,
+/// cluster init, runtime overlay load) and any unstructured
+/// operator messages. None of it is access-log telemetry —
+/// access logs go to the configured sinks — so we forward at
+/// `debug` level so the volume doesn't drown out the manager's
+/// own info-level lifecycle messages, while still being
+/// available with `RUST_LOG=sng_swg=debug` when triaging a
+/// stuck start.
+///
+/// The task exits cleanly when stdout closes (process exit or
+/// pipe drop triggered by `kill_on_drop`). Any read error is
+/// logged once at `warn` and the task ends — we deliberately do
+/// not retry, because a broken pipe means the child is gone and
+/// the manager's `is_alive()` check will pick that up.
+async fn drain_child_stdout(stdout: ChildStdout) {
+    let mut lines = BufReader::new(stdout).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => debug!(target: "sng_swg::envoy", "envoy stdout: {line}"),
+            Ok(None) => break,
+            Err(e) => {
+                warn!(target: "sng_swg::envoy", "envoy stdout drain error: {e}");
+                break;
+            }
+        }
+    }
+}
+
+/// Drain Envoy's stderr into structured logs.
+///
+/// Stderr is the channel Envoy uses for the diagnostics an
+/// operator actually needs to debug a non-starting proxy: bind
+/// failures (EADDRINUSE), TLS-context init errors, fatal
+/// extension load failures, panic backtraces, and the
+/// startup-time validation errors that surface even when
+/// `--mode validate` accepted the config statically. We forward
+/// at `warn` because every line here is by Envoy's convention
+/// something the binary considered worth printing outside the
+/// access-log pipeline, and losing them to `Stdio::null()`
+/// would make a failing `start()` undebuggable from logs alone.
+async fn drain_child_stderr(stderr: ChildStderr) {
+    let mut lines = BufReader::new(stderr).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => warn!(target: "sng_swg::envoy", "envoy stderr: {line}"),
+            Ok(None) => break,
+            Err(e) => {
+                warn!(target: "sng_swg::envoy", "envoy stderr drain error: {e}");
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,5 +885,74 @@ mod tests {
         assert_eq!(s.binary, PathBuf::from("/usr/local/bin/envoy"));
         assert_eq!(s.admin_port, 15001);
         assert_eq!(s.grace_period, Duration::from_secs(30));
+    }
+
+    /// Regression test for the stdout/stderr drainer.
+    ///
+    /// `ShellEnvoy::start` pipes both stdout and stderr so the
+    /// supervisor can lift Envoy's boot diagnostics into
+    /// structured logs. The Linux kernel buffers each pipe at
+    /// ~64 KiB by default; once that buffer fills, `write(2)`
+    /// blocks the writing thread. Envoy is single-event-loop, so
+    /// a blocked stdout write deadlocks the proxy: the process
+    /// still answers `kill(0)` and `try_wait()` returns
+    /// `Ok(None)`, but no traffic moves. The manager's
+    /// `is_alive()` would keep returning `true` and the health
+    /// monitor would never notice.
+    ///
+    /// `start()` spawns `drain_child_stdout` and
+    /// `drain_child_stderr` to keep the pipes empty. This test
+    /// exercises just the drainer side: it spawns a shell that
+    /// spews well past the 64 KiB buffer on both pipes and wires
+    /// the drainers in the same shape `start()` does. Without
+    /// the drainers the inner `child.wait()` deadlocks and the
+    /// timeout fires; with them in place the child completes
+    /// promptly. We can't run the real Envoy binary in CI, but
+    /// the spawn shape is identical so the regression catches
+    /// here translates directly to the production path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_with_high_stdout_volume_does_not_deadlock() {
+        use std::time::Duration as StdDuration;
+        use tokio::time::timeout;
+
+        // Spew ~200 KiB to stdout and ~50 KiB to stderr — both
+        // well past the kernel's 64 KiB default pipe buffer, so
+        // an undrained `Stdio::piped()` handle would block the
+        // child here.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(
+                "for i in $(seq 1 2000); do \
+                   echo 'stdout line padding padding padding padding padding padding padding padding padding'; \
+                 done; \
+                 for i in $(seq 1 500); do \
+                   echo 'stderr line padding padding padding padding padding padding padding padding padding' 1>&2; \
+                 done",
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = cmd
+            .spawn()
+            .expect("/bin/sh must be available on a unix CI runner");
+        // Wire the drainers exactly as `ShellEnvoy::start` does.
+        // Without these spawns the `wait()` below would hang
+        // indefinitely on a stuck SIGPIPE-less child.
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(drain_child_stdout(stdout));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(drain_child_stderr(stderr));
+        }
+        let status = timeout(StdDuration::from_secs(10), child.wait())
+            .await
+            .expect("child must exit within the test timeout — drainer regression?")
+            .expect("child.wait() must succeed");
+        assert!(
+            status.success(),
+            "spew script should exit cleanly, got: {status:?}"
+        );
     }
 }
