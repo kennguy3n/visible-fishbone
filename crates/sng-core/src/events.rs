@@ -183,10 +183,21 @@ pub struct ZtnaEvent {
     /// bucket label (e.g. `unknown_app`, `mfa_stale`,
     /// `not_entitled`, `device_posture_insufficient`,
     /// `tenant_mismatch`) or `allow` on the allow path.
-    /// Always non-empty; the field maps to the
-    /// `ZtnaDecisionReason::as_str()` wire string in
-    /// `sng-ztna`.
-    #[serde(rename = "rsn")]
+    /// Always non-empty when produced by `sng-ztna`; the
+    /// field maps to the `ZtnaDecisionReason::as_str()` wire
+    /// string.
+    ///
+    /// `#[serde(default)]` is load-bearing: producers older
+    /// than this field (any pre-`sng-ztna` brain that emits
+    /// a `ZtnaEvent` envelope without `rsn`) and the
+    /// inverse — newer producer ↔ older consumer mismatch
+    /// during a rolling deploy — must still decode. The
+    /// empty string is the "unspecified" sentinel: dashboards
+    /// already gate on the binary [`Self::decision`] and
+    /// treat a missing reason as legacy-pre-PR-30 data, not
+    /// a deny-bucket label collision (no real reason string
+    /// is ever empty).
+    #[serde(rename = "rsn", default)]
     pub reason: String,
     /// Was the user identity verified (mTLS + IdP).
     #[serde(rename = "iv")]
@@ -330,5 +341,89 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
         let back: AgentEvent = rmp_serde::from_slice(&bytes).expect("decode");
         assert_eq!(ev, back);
+    }
+
+    fn sample_ztna() -> ZtnaEvent {
+        ZtnaEvent {
+            device_id: "device-1".into(),
+            app_id: "salesforce".into(),
+            posture_result: "pass".into(),
+            decision: "allow".into(),
+            reason: "allow".into(),
+            identity_verified: true,
+        }
+    }
+
+    #[test]
+    fn ztna_event_round_trip_preserves_reason() {
+        let ev = sample_ztna();
+        let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
+        let back: ZtnaEvent = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(ev, back);
+        assert_eq!(back.reason, "allow");
+    }
+
+    /// Legacy producer encoded a `ZtnaEvent` envelope without
+    /// the `rsn` key — newer consumer must still decode it
+    /// during a rolling deploy. The `#[serde(default)]` on
+    /// [`ZtnaEvent::reason`] makes this safe; without it the
+    /// decode would fail with `missing field 'rsn'` and the
+    /// envelope would be dropped on the floor.
+    #[test]
+    fn ztna_event_decodes_legacy_wire_without_rsn_key() {
+        // Build a msgpack map that's intentionally missing
+        // the `rsn` key (i.e. the on-the-wire shape of a
+        // legacy producer before this PR landed). Use the
+        // short wire tags exactly as `#[serde(rename = ...)]`
+        // sets them.
+        let mut legacy = std::collections::BTreeMap::new();
+        legacy.insert("did".to_string(), rmpv::Value::from("device-1"));
+        legacy.insert("app".to_string(), rmpv::Value::from("salesforce"));
+        legacy.insert("pst".to_string(), rmpv::Value::from("pass"));
+        legacy.insert("dec".to_string(), rmpv::Value::from("allow"));
+        legacy.insert("iv".to_string(), rmpv::Value::Boolean(true));
+        // Intentionally no "rsn" entry.
+
+        let bytes = rmp_serde::to_vec_named(&legacy).expect("encode legacy");
+        let decoded: ZtnaEvent =
+            rmp_serde::from_slice(&bytes).expect("legacy wire without `rsn` key must still decode");
+
+        assert_eq!(decoded.device_id, "device-1");
+        assert_eq!(decoded.app_id, "salesforce");
+        assert_eq!(decoded.posture_result, "pass");
+        assert_eq!(decoded.decision, "allow");
+        assert!(decoded.identity_verified);
+        // Sentinel for "legacy producer didn't ship a reason"
+        // — dashboards distinguish this from a real reason
+        // string by emptiness, and gate on `decision` for the
+        // allow/deny rollup.
+        assert_eq!(decoded.reason, "");
+    }
+
+    #[test]
+    fn ztna_event_msgpack_uses_short_field_tags() {
+        let ev = sample_ztna();
+        let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
+        let decoded: std::collections::BTreeMap<String, rmpv::Value> =
+            rmp_serde::from_slice(&bytes).expect("decode");
+        let keys: std::collections::BTreeSet<&str> = decoded.keys().map(String::as_str).collect();
+        for required in ["did", "app", "pst", "dec", "rsn", "iv"] {
+            assert!(
+                keys.contains(required),
+                "msgpack key {required} missing; got {keys:?}"
+            );
+        }
+        for forbidden in [
+            "device_id",
+            "app_id",
+            "decision",
+            "reason",
+            "identity_verified",
+        ] {
+            assert!(
+                !keys.contains(forbidden),
+                "Rust field {forbidden} leaked onto the wire; got {keys:?}"
+            );
+        }
     }
 }
