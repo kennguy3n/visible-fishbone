@@ -723,7 +723,28 @@ impl SdwanService {
     /// Try to honour a sticky-pin against the current
     /// candidate set. Returns `Some(decision)` only when
     /// the pinned path is still eligible + fresh +
-    /// in-budget.
+    /// usable + in-budget.
+    ///
+    /// The usability check (`probe_is_usable`) MUST mirror
+    /// the one in the main scoring loop in `evaluate` —
+    /// the floor checks below catch `NaN` (each floor's
+    /// `is_nan()` early-return), but they do NOT catch
+    /// `±INFINITY` when no floor is configured
+    /// (`max_*: None`): `Option::is_none_or(|cap| INF <=
+    /// cap)` returns `true` without invoking the closure,
+    /// so the metric is treated as in-budget. Without the
+    /// `probe_is_usable` short-circuit here, a misbehaving
+    /// adapter that bypasses `PathProbe::new_checked` and
+    /// mints an `INFINITY`-metric probe on a sticky-pinned
+    /// path would silently keep the flow pinned to a path
+    /// whose health signal is uninterpretable — and the
+    /// emitted `SdwanEvent` would carry an `INFINITY` total
+    /// on the wire. The main path uses the same guard
+    /// (see step 3 of `evaluate`); the sticky path must
+    /// stay symmetric so an INFINITY probe drops the
+    /// sticky pin and falls back to re-scoring the rest
+    /// of the candidate set rather than reaffirming the
+    /// broken sticky.
     fn try_sticky(
         &self,
         pinned: &PathId,
@@ -734,6 +755,9 @@ impl SdwanService {
         let path = candidates.iter().find(|p| p.id == *pinned)?;
         let probe = self.probes.get(&path.id)?;
         if !probe.is_fresh(request.now_ms, policy.probe_max_age_ms) {
+            return None;
+        }
+        if !probe_is_usable(&probe) {
             return None;
         }
         if !policy.within_latency_floor(probe.latency_ms)
@@ -1714,6 +1738,130 @@ mod tests {
         // Score is finite — proves the NaN candidate did
         // not leak through scoring.
         let score = d.score.expect("inet path selected → score present");
+        assert!(score.total.is_finite());
+    }
+
+    #[test]
+    fn sticky_pin_drops_when_pinned_path_probe_turns_infinite() {
+        // Regression test: the sticky-pin path was
+        // missing the `probe_is_usable` guard that the
+        // main scoring loop applies, so a misbehaving
+        // adapter that minted an `INFINITY`-metric probe
+        // on a sticky-pinned path would keep the flow
+        // pinned and emit an `INFINITY`-total
+        // `SdwanEvent` on the wire (the floor checks let
+        // INFINITY through when `max_*` is `None` because
+        // `Option::is_none_or` returns true without
+        // calling the closure on the None case).
+        //
+        // The correct behavior is to drop the sticky pin
+        // when the pinned probe becomes non-finite, fall
+        // through to the main scoring loop, and select
+        // whichever candidate still has a usable probe.
+        //
+        // Scenario:
+        // 1. First eval pins `mpls` (better than `inet`).
+        // 2. The `mpls` probe is mutated to carry an
+        //    INFINITY latency — but loss/jitter stay
+        //    zero and no floor is configured, so the
+        //    floor checks alone would NOT reject it.
+        // 3. Second eval, well within the sticky window,
+        //    must drop the sticky pin (because the pinned
+        //    probe is now unusable), re-score, and pick
+        //    `inet` with reason `Best`. The wire score
+        //    must be finite — proving INFINITY did not
+        //    leak through.
+        let probes = Arc::new(MutableProbeProvider::from_probes([
+            (PathId::new("mpls"), PathProbe::new(10.0, 0.0, 0.0, NOW)),
+            (PathId::new("inet"), PathProbe::new(50.0, 0.0, 0.0, NOW)),
+        ]));
+        let (tx, _rx) = telemetry();
+        let svc = SdwanServiceBuilder::new()
+            .with_policy(Arc::new(
+                SdwanPolicyHolder::try_new(SdwanPolicy::default()).unwrap(),
+            ))
+            .with_path_provider(Arc::new(StaticPathProvider::from_paths(vec![
+                Path::new("mpls", [TrafficClass::Interactive]),
+                Path::new("inet", [TrafficClass::Interactive]),
+            ])))
+            .with_probe_provider(Arc::clone(&probes) as Arc<dyn ProbeProvider>)
+            .build(tx);
+
+        // Pin `mpls`.
+        let d1 = svc.evaluate(&req("flow-inf", TrafficClass::Interactive, NOW));
+        assert_eq!(d1.path_id, Some(PathId::new("mpls")));
+        assert_eq!(d1.reason, SteeringReason::Best);
+
+        // Mutate `mpls` to INFINITY latency. The default
+        // policy has `max_latency_ms: None` so the
+        // latency floor check alone would NOT reject it
+        // (this is the exact gap the fix closes).
+        probes.set(
+            PathId::new("mpls"),
+            PathProbe::new(f32::INFINITY, 0.0, 0.0, NOW + 1_000),
+        );
+
+        let d2 = svc.evaluate(&req("flow-inf", TrafficClass::Interactive, NOW + 1_000));
+        // The sticky pin was dropped; the selector
+        // re-scored and `inet` is now the only candidate
+        // with a usable probe.
+        assert_eq!(d2.path_id, Some(PathId::new("inet")));
+        assert_eq!(d2.reason, SteeringReason::Best);
+        let score = d2.score.expect("inet selected → score present");
+        assert!(
+            score.total.is_finite(),
+            "sticky path must NOT leak INFINITY into the wire score; got {}",
+            score.total
+        );
+    }
+
+    #[test]
+    fn sticky_pin_drops_when_pinned_path_probe_turns_nan() {
+        // Symmetric companion to
+        // `sticky_pin_drops_when_pinned_path_probe_turns_infinite`.
+        // The floor checks DO reject NaN early (via each
+        // floor's explicit `is_nan()` early-return), so
+        // before the fix this case was already covered
+        // by the floor checks alone — but the
+        // `probe_is_usable` guard now provides the
+        // primary defense, and this test pins the
+        // contract so a future refactor that loosens
+        // the floor's NaN handling (e.g. moving NaN
+        // handling out of the floor functions into a
+        // dedicated `validate` step) does not silently
+        // regress the sticky path.
+        let probes = Arc::new(MutableProbeProvider::from_probes([
+            (PathId::new("mpls"), PathProbe::new(10.0, 0.0, 0.0, NOW)),
+            (PathId::new("inet"), PathProbe::new(50.0, 0.0, 0.0, NOW)),
+        ]));
+        let (tx, _rx) = telemetry();
+        let svc = SdwanServiceBuilder::new()
+            .with_policy(Arc::new(
+                SdwanPolicyHolder::try_new(SdwanPolicy::default()).unwrap(),
+            ))
+            .with_path_provider(Arc::new(StaticPathProvider::from_paths(vec![
+                Path::new("mpls", [TrafficClass::Interactive]),
+                Path::new("inet", [TrafficClass::Interactive]),
+            ])))
+            .with_probe_provider(Arc::clone(&probes) as Arc<dyn ProbeProvider>)
+            .build(tx);
+
+        let d1 = svc.evaluate(&req("flow-nan-sticky", TrafficClass::Interactive, NOW));
+        assert_eq!(d1.path_id, Some(PathId::new("mpls")));
+
+        probes.set(
+            PathId::new("mpls"),
+            PathProbe::new(f32::NAN, 0.0, 0.0, NOW + 1_000),
+        );
+
+        let d2 = svc.evaluate(&req(
+            "flow-nan-sticky",
+            TrafficClass::Interactive,
+            NOW + 1_000,
+        ));
+        assert_eq!(d2.path_id, Some(PathId::new("inet")));
+        assert_eq!(d2.reason, SteeringReason::Best);
+        let score = d2.score.expect("inet selected → score present");
         assert!(score.total.is_finite());
     }
 
