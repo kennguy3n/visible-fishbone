@@ -1670,7 +1670,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sng-core",
- "sng-policy-eval",
  "sng-telemetry",
  "thiserror",
  "tokio",
