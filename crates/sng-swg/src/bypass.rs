@@ -36,9 +36,17 @@ use sng_fw::sni_suffix_match;
 /// category that produced it (for telemetry drill-down).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BypassEntry {
-    /// Suffix that matches the SNI. `*.` prefix is honoured but
-    /// optional — `bank.com` and `*.bank.com` are equivalent
-    /// because the suffix matcher is permissive by design.
+    /// Suffix that matches the SNI. `*.` prefix is accepted on
+    /// input but canonically stripped at construction time —
+    /// [`BypassList::new`] and [`BypassList::with_extensions`]
+    /// normalise `*.bank.com` to `bank.com` because
+    /// [`sni_suffix_match`] treats both forms as equivalent at
+    /// runtime. Storing a single canonical form keeps the
+    /// merge / dedup paths agreement-by-construction with the
+    /// matcher (an operator-authored `*.chase.com` extension
+    /// then correctly dedups against the industry-default
+    /// `chase.com` entry — see
+    /// `with_extensions_normalizes_wildcard_prefix_against_default`).
     pub suffix: String,
     /// Category that owns this suffix. Surfaces in the verdict
     /// reason as `bypass.tls.<category>` so dashboards can break
@@ -100,27 +108,44 @@ pub struct BypassDecision {
     pub reason: BypassReason,
 }
 
+/// Canonicalise an operator-authored suffix into the form the
+/// bypass list stores internally: ASCII-lowercase, leading `*.`
+/// stripped. The runtime matcher [`sni_suffix_match`] already
+/// normalises both sides this way before comparison, so two
+/// input forms that the matcher treats as equivalent
+/// (`*.bank.com` ≡ `bank.com`, `Chase.COM` ≡ `chase.com`) must
+/// land on the same stored bytes — otherwise the merge / dedup
+/// paths in [`BypassList::new`] and [`BypassList::with_extensions`]
+/// silently keep duplicates and an operator extension that
+/// only differs from a default by `*.` prefix or case fails to
+/// override the default's category.
+fn canonicalize_suffix(raw: &str) -> String {
+    let stripped = raw.strip_prefix("*.").unwrap_or(raw);
+    stripped.to_ascii_lowercase()
+}
+
 impl BypassList {
     /// Build a bypass list from a sequence of entries. The
-    /// constructor first normalises every suffix to ASCII
-    /// lowercase so the dedup and operator-override paths
-    /// agree with the runtime evaluator (which delegates to
-    /// [`sni_suffix_match`], a case-insensitive matcher). It
-    /// then sorts entries by suffix length descending so the
-    /// longest-matching entry wins; ties are broken by the
-    /// suffix string compared lexicographically so the order
-    /// is fully deterministic.
+    /// constructor first normalises every suffix to canonical
+    /// form (ASCII-lowercase, `*.` prefix stripped — see
+    /// [`canonicalize_suffix`]) so the dedup and operator-override
+    /// paths agree with the runtime evaluator (which delegates to
+    /// [`sni_suffix_match`], a case-insensitive and `*.`-prefix-
+    /// agnostic matcher). It then sorts entries by suffix length
+    /// descending so the longest-matching entry wins; ties are
+    /// broken by the suffix string compared lexicographically so
+    /// the order is fully deterministic.
     #[must_use]
     pub fn new(mut entries: Vec<BypassEntry>) -> Self {
-        // Normalise to lowercase before sort + dedup so an
-        // operator-authored `Chase.COM` collides with the
-        // industry-default `chase.com` entry on merge —
-        // otherwise the runtime matcher (case-insensitive)
-        // would see both, the first-in-walk-order would win,
-        // and the operator's intended override could silently
-        // be lost.
+        // Canonicalise to lowercase + `*.`-stripped form before
+        // sort + dedup so an operator-authored `Chase.COM` or
+        // `*.chase.com` collides with the industry-default
+        // `chase.com` entry on merge — otherwise the runtime
+        // matcher (case-insensitive, `*.`-prefix-agnostic) would
+        // see both, the first-in-walk-order would win, and the
+        // operator's intended override could silently be lost.
         for e in &mut entries {
-            e.suffix = e.suffix.to_ascii_lowercase();
+            e.suffix = canonicalize_suffix(&e.suffix);
         }
         entries.sort_by(|a, b| {
             b.suffix
@@ -152,13 +177,17 @@ impl BypassList {
     /// in their environment.
     #[must_use]
     pub fn with_extensions(mut self, mut extra: Vec<BypassEntry>) -> Self {
-        // Normalise extra entries' suffixes to lowercase before
-        // the merge so an operator-authored `Chase.COM` collides
-        // with the industry default `chase.com` on the merge
-        // step. The runtime matcher is case-insensitive; the
-        // merge path must agree.
+        // Canonicalise extra entries' suffixes (lowercase +
+        // `*.`-strip) before the merge so an operator-authored
+        // `Chase.COM` or `*.chase.com` collides with the industry
+        // default `chase.com` on the merge step. The runtime
+        // matcher is case-insensitive and `*.`-prefix-agnostic;
+        // the merge path must agree, otherwise the merged list
+        // carries semantically-equivalent duplicate entries and
+        // operator overrides that only differ from a default by
+        // `*.` prefix silently fail to take effect.
         for e in &mut extra {
-            e.suffix = e.suffix.to_ascii_lowercase();
+            e.suffix = canonicalize_suffix(&e.suffix);
         }
         // Rebuild from the union, then re-sort. Operator entries
         // appear last in the input vector so on dedup they win
@@ -416,6 +445,77 @@ mod tests {
             BypassReason::Matched(e) => assert_eq!(e.category, "tls.tenant-finance"),
             other => panic!("expected operator override, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn with_extensions_normalizes_wildcard_prefix_against_default() {
+        // Regression test: an operator who writes `*.chase.com`
+        // (a common SNI bypass syntax that mirrors how the
+        // defaults are documented in the module-level docs)
+        // must collide-and-override the industry default
+        // `chase.com` entry rather than land alongside it as a
+        // semantically-equivalent duplicate.
+        //
+        // Before canonicalize_suffix stripped the leading `*.`,
+        // the merge dedup was exact-string equality between
+        // `*.chase.com` and `chase.com` — so the operator's
+        // intended override would be carried as a *second*
+        // entry, and `len()` / telemetry would report two
+        // semantically-equivalent rows. The length-desc re-sort
+        // in `new()` happened to put `*.chase.com` first so the
+        // runtime walk picked the operator's category, but the
+        // duplicate row stayed in the list, polluting the
+        // control-plane review surface and inflating bundle
+        // digest churn on no-op operator edits.
+        //
+        // With canonicalization, both forms land on the same
+        // stored bytes (`chase.com`), the dedup loop replaces
+        // the default's entry with the operator's, and the
+        // merged list has exactly one Chase entry carrying
+        // the operator's category.
+        let bl = BypassList::industry_defaults()
+            .with_extensions(vec![entry("*.chase.com", "tls.tenant-strict")]);
+        // Operator's category wins.
+        let d = bl.evaluate(Some("online.chase.com"));
+        assert!(d.bypass);
+        match &d.reason {
+            BypassReason::Matched(e) => {
+                assert_eq!(e.category, "tls.tenant-strict");
+                // And the stored suffix is the canonical
+                // stripped form — not the operator's `*.` input.
+                assert_eq!(e.suffix, "chase.com");
+            }
+            other => panic!("expected operator override with `*.` prefix, got {other:?}"),
+        }
+        // And there is *exactly one* Chase entry in the merged
+        // list, not two — the `*.chase.com` operator input did
+        // not land alongside the default's `chase.com`.
+        let chase_entries: Vec<_> = bl.iter().filter(|e| e.suffix == "chase.com").collect();
+        assert_eq!(
+            chase_entries.len(),
+            1,
+            "`*.chase.com` operator input must canonicalize to dedup against default `chase.com`, \
+             not coexist as a semantic duplicate: {:?}",
+            bl.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn new_strips_wildcard_prefix_to_canonical_form() {
+        // The constructor stores suffixes in canonical form
+        // (lowercase + `*.` stripped) so consumers that iterate
+        // entries see the matcher-equivalent canonical bytes,
+        // not whatever input form the operator typed. Two
+        // entries that differ only in `*.` prefix collapse to
+        // one row.
+        let bl = BypassList::new(vec![
+            entry("*.bank.com", "tls.finance"),
+            entry("bank.com", "tls.finance"),
+        ]);
+        assert_eq!(bl.len(), 1);
+        let only = bl.iter().next().unwrap();
+        assert_eq!(only.suffix, "bank.com");
+        assert_eq!(only.category, "tls.finance");
     }
 
     #[test]
