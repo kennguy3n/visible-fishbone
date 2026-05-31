@@ -28,7 +28,13 @@ use std::sync::Arc;
 /// because the underlying string lives inside the
 /// `Arc<str>`-backed pool that policy/probe providers
 /// share.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Derives `PartialOrd` / `Ord` (lex on the underlying
+/// `String`) so the selector can deterministically
+/// tie-break two candidates with mathematically equal
+/// scores by preferring the lex-smaller id. See
+/// `SdwanService::evaluate` for where this is consumed.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PathId(pub String);
 

@@ -51,9 +51,10 @@ pub struct SteeringRequest {
 }
 
 impl SteeringRequest {
-    /// Convenience constructor with a real-time class
+    /// Convenience constructor with an interactive class
     /// and now_ms = 0. Tests should set fields
-    /// explicitly with struct syntax.
+    /// explicitly with struct syntax when they need a
+    /// different [`TrafficClass`] or a non-zero clock.
     #[must_use]
     pub fn new(flow_key: impl Into<String>, tenant_id: impl Into<String>) -> Self {
         Self {
