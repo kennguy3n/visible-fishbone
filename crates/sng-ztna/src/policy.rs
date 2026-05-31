@@ -160,6 +160,81 @@ impl ZtnaDecisionReason {
     }
 }
 
+/// Tri-state outcome of the device posture check.
+///
+/// Replaces the prior `bool posture_pass` field on
+/// [`ZtnaDecision`] so dashboards can distinguish a
+/// genuine posture failure ([`Self::Fail`]) from a
+/// deny that short-circuited before the posture check
+/// ran ([`Self::NotEvaluated`]).
+///
+/// # Wire form
+///
+/// Mapped to a stable lowercase string by
+/// [`Self::as_str`] and emitted on
+/// [`sng_core::events::ZtnaEvent::posture_result`] (Rust
+/// side) / `ZTNAEvent.PostureResult` (Go side). The
+/// wire alphabet is `"pass" | "fail" | "not_evaluated"`.
+/// Older consumers that only know `"pass"` / `"fail"`
+/// will see `"not_evaluated"` as an unknown bucket —
+/// safer than the previous behavior of stamping
+/// `"fail"` on every non-posture deny, which made the
+/// field literally lie about whether the device's
+/// posture had failed.
+///
+/// # Why a tri-state and not just two booleans
+///
+/// A `(posture_evaluated, posture_passed)` pair would
+/// encode the same information but invites the
+/// `(false, true)` impossible state. The enum makes
+/// the invariant unrepresentable at the type level —
+/// `Pass` and `Fail` are only reachable after the
+/// posture check actually ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostureResult {
+    /// The posture check ran and the device satisfied
+    /// the app's [`PostureRequirement`]. Set on the
+    /// allow path and on any deny that occurred after
+    /// the posture check passed (none today — the
+    /// evaluator currently denies immediately when the
+    /// posture check fails — but the variant exists so
+    /// a future check ordered after posture can produce
+    /// a `(deny, Pass)` decision).
+    Pass,
+    /// The posture check ran and the device failed it
+    /// — either because the attestation was stale
+    /// ([`ZtnaDecisionReason::DevicePostureStale`]) or
+    /// the requirement was unsatisfied
+    /// ([`ZtnaDecisionReason::DevicePostureInsufficient`]).
+    Fail,
+    /// The decision short-circuited before the posture
+    /// check ran. Set on
+    /// [`ZtnaDecisionReason::TenantMismatch`],
+    /// [`ZtnaDecisionReason::NotEntitled`],
+    /// [`ZtnaDecisionReason::MfaStale`], and any other
+    /// pre-posture deny added in the future. Dashboards
+    /// that bucket on "device-related" denies should
+    /// treat this as orthogonal to the
+    /// posture-pass / posture-fail axis.
+    NotEvaluated,
+}
+
+impl PostureResult {
+    /// Stable wire-form string used in the
+    /// [`sng_core::events::ZtnaEvent::posture_result`]
+    /// field (and the Go-side `ZTNAEvent.PostureResult`
+    /// peer).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::NotEvaluated => "not_evaluated",
+        }
+    }
+}
+
 /// The decision the evaluator returns. The brain
 /// converts this into a wire
 /// [`sng_core::envelope::Verdict`] and a
@@ -171,37 +246,52 @@ pub struct ZtnaDecision {
     /// Structured reason — for both allows (= `Allow`)
     /// and denies (= a specific failure cause).
     pub reason: ZtnaDecisionReason,
-    /// Whether the device posture met the app's
-    /// requirement. Surfaced to the
+    /// Tri-state outcome of the device posture check.
+    /// Surfaced to the
     /// [`sng_core::events::ZtnaEvent::posture_result`]
-    /// field. False on any deny path that didn't reach
-    /// the posture check (e.g. `UnknownApp`) so
-    /// dashboards see a single boolean.
-    pub posture_pass: bool,
+    /// field so dashboards can distinguish a genuine
+    /// posture failure from a deny that short-circuited
+    /// before the posture check ran (e.g. a tenant
+    /// mismatch or a stale MFA assertion).
+    ///
+    /// The previous shape (`posture_pass: bool`)
+    /// collapsed these two cases into `false`, which
+    /// made `posture_result = "fail"` ambiguous on the
+    /// wire — it could mean either "the device's
+    /// posture failed" or "this deny short-circuited
+    /// before posture was even checked." Splitting them
+    /// out via [`PostureResult`] keeps the field name's
+    /// promise.
+    pub posture_result: PostureResult,
 }
 
 impl ZtnaDecision {
-    /// Convenience: allow with `posture_pass=true`.
+    /// Convenience: allow with
+    /// `posture_result=PostureResult::Pass`. The allow
+    /// path always traverses the posture check, so
+    /// `Pass` is the only valid spelling for the
+    /// posture outcome on an allow.
     #[must_use]
     pub const fn allow() -> Self {
         Self {
             allow: true,
             reason: ZtnaDecisionReason::Allow,
-            posture_pass: true,
+            posture_result: PostureResult::Pass,
         }
     }
 
-    /// Convenience: deny with the given reason; the
-    /// caller supplies whether the posture check passed
-    /// before the deny was raised (it's still useful for
-    /// dashboards to know whether the deny was posture-
-    /// related or identity-related).
+    /// Convenience: deny with the given reason and
+    /// posture result. The caller is responsible for
+    /// supplying the correct posture-check outcome:
+    /// [`PostureResult::Fail`] for posture-related
+    /// denies, [`PostureResult::NotEvaluated`] for
+    /// pre-posture short-circuits.
     #[must_use]
-    pub const fn deny(reason: ZtnaDecisionReason, posture_pass: bool) -> Self {
+    pub const fn deny(reason: ZtnaDecisionReason, posture_result: PostureResult) -> Self {
         Self {
             allow: false,
             reason,
-            posture_pass,
+            posture_result,
         }
     }
 }
@@ -435,10 +525,30 @@ pub struct EvaluationInputs<'a> {
 ///    posture must satisfy the app's
 ///    [`PostureRequirement`].
 ///
-/// On every deny the [`ZtnaDecision::posture_pass`]
-/// flag reflects whether the posture check passed
-/// (or, for denies that short-circuit before the posture
-/// check, `false`).
+/// On every deny the [`ZtnaDecision::posture_result`]
+/// field reflects whether the posture check ran and
+/// what it found:
+///
+/// - [`PostureResult::Pass`] — only on the allow path
+///   (the evaluator currently denies immediately on a
+///   posture failure, so a `(deny, Pass)` decision is
+///   unreachable today but the variant is reserved for
+///   future checks ordered after posture).
+/// - [`PostureResult::Fail`] — on denies in steps 4-5
+///   ([`ZtnaDecisionReason::DevicePostureStale`] and
+///   [`ZtnaDecisionReason::DevicePostureInsufficient`]),
+///   i.e. the posture check ran and failed.
+/// - [`PostureResult::NotEvaluated`] — on denies in
+///   steps 1-3 ([`ZtnaDecisionReason::TenantMismatch`],
+///   [`ZtnaDecisionReason::NotEntitled`],
+///   [`ZtnaDecisionReason::MfaStale`]), i.e. the
+///   evaluator short-circuited before the posture check
+///   ran. The prior shape collapsed this case into
+///   `posture_pass=false`, which made the wire field
+///   ambiguous — a dashboard couldn't tell whether a
+///   `posture_result=fail` row meant "device posture
+///   failed" or "deny landed before posture was even
+///   checked."
 //
 // `EvaluationInputs` holds three references plus a `u64`,
 // so passing by value is essentially the same cost as
@@ -463,7 +573,10 @@ pub fn evaluate_policy(policy: &ZtnaPolicy, inputs: EvaluationInputs<'_>) -> Ztn
     if !policy.tenant_id.is_empty()
         && (device.tenant_id != policy.tenant_id || identity.tenant_id != policy.tenant_id)
     {
-        return ZtnaDecision::deny(ZtnaDecisionReason::TenantMismatch, false);
+        return ZtnaDecision::deny(
+            ZtnaDecisionReason::TenantMismatch,
+            PostureResult::NotEvaluated,
+        );
     }
 
     // 2. Group entitlement. Empty `required_groups`
@@ -475,23 +588,29 @@ pub fn evaluate_policy(policy: &ZtnaPolicy, inputs: EvaluationInputs<'_>) -> Ztn
             .iter()
             .any(|g| identity.groups.contains(g));
         if !entitled {
-            return ZtnaDecision::deny(ZtnaDecisionReason::NotEntitled, false);
+            return ZtnaDecision::deny(
+                ZtnaDecisionReason::NotEntitled,
+                PostureResult::NotEvaluated,
+            );
         }
     }
 
     // 3. MFA freshness.
     if !identity.mfa_fresh(now_ms, policy.mfa_max_age_ms) {
-        return ZtnaDecision::deny(ZtnaDecisionReason::MfaStale, false);
+        return ZtnaDecision::deny(ZtnaDecisionReason::MfaStale, PostureResult::NotEvaluated);
     }
 
     // 4. Device posture freshness.
     if !device.posture_fresh(now_ms, policy.device_posture_max_age_ms) {
-        return ZtnaDecision::deny(ZtnaDecisionReason::DevicePostureStale, false);
+        return ZtnaDecision::deny(ZtnaDecisionReason::DevicePostureStale, PostureResult::Fail);
     }
 
     // 5. Device posture sufficiency.
     if !app.posture_requirement.satisfied_by(&device.posture) {
-        return ZtnaDecision::deny(ZtnaDecisionReason::DevicePostureInsufficient, false);
+        return ZtnaDecision::deny(
+            ZtnaDecisionReason::DevicePostureInsufficient,
+            PostureResult::Fail,
+        );
     }
 
     ZtnaDecision::allow()
@@ -650,7 +769,7 @@ mod tests {
         let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
         assert!(dec.allow);
         assert_eq!(dec.reason, ZtnaDecisionReason::Allow);
-        assert!(dec.posture_pass);
+        assert_eq!(dec.posture_result, PostureResult::Pass);
     }
 
     #[test]
@@ -662,7 +781,9 @@ mod tests {
         let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
         assert!(!dec.allow);
         assert_eq!(dec.reason, ZtnaDecisionReason::NotEntitled);
-        assert!(!dec.posture_pass);
+        // Short-circuited before the posture check ran
+        // — not_evaluated, not fail.
+        assert_eq!(dec.posture_result, PostureResult::NotEvaluated);
     }
 
     #[test]
@@ -807,7 +928,7 @@ mod tests {
 
     #[test]
     fn decision_serde_roundtrips_via_json() {
-        let dec = ZtnaDecision::deny(ZtnaDecisionReason::MfaStale, false);
+        let dec = ZtnaDecision::deny(ZtnaDecisionReason::MfaStale, PostureResult::NotEvaluated);
         let json = serde_json::to_string(&dec).unwrap();
         let back: ZtnaDecision = serde_json::from_str(&json).unwrap();
         assert_eq!(dec, back);
@@ -851,26 +972,103 @@ mod tests {
     }
 
     #[test]
-    fn allow_decision_constructor_sets_posture_pass() {
+    fn allow_decision_constructor_sets_posture_result_pass() {
         let dec = ZtnaDecision::allow();
         assert!(dec.allow);
-        assert!(dec.posture_pass);
+        assert_eq!(dec.posture_result, PostureResult::Pass);
         assert_eq!(dec.reason, ZtnaDecisionReason::Allow);
     }
 
     #[test]
-    fn deny_decision_constructor_preserves_posture_pass_flag() {
-        // The orchestrator builds an early deny (e.g.
-        // UnknownApp) with posture_pass=false — preserve
-        // that bit on construction.
-        let dec = ZtnaDecision::deny(ZtnaDecisionReason::UnknownApp, false);
+    fn deny_decision_constructor_preserves_posture_result() {
+        // Pre-posture short-circuit deny (e.g. UnknownApp)
+        // emits NotEvaluated so dashboards can distinguish
+        // it from a posture failure.
+        let dec = ZtnaDecision::deny(ZtnaDecisionReason::UnknownApp, PostureResult::NotEvaluated);
         assert!(!dec.allow);
-        assert!(!dec.posture_pass);
-        // For a posture-passed-but-MFA-failed deny, the
-        // orchestrator can pass true; verify it round-
-        // trips.
-        let dec2 = ZtnaDecision::deny(ZtnaDecisionReason::MfaStale, true);
-        assert!(dec2.posture_pass);
+        assert_eq!(dec.posture_result, PostureResult::NotEvaluated);
+        // A posture-related deny carries Fail; verify the
+        // constructor preserves whatever the caller passes
+        // (the right variant is chosen by the call site,
+        // not the constructor).
+        let dec2 = ZtnaDecision::deny(
+            ZtnaDecisionReason::DevicePostureInsufficient,
+            PostureResult::Fail,
+        );
+        assert_eq!(dec2.posture_result, PostureResult::Fail);
+        // And the constructor also accepts Pass on a deny
+        // — the variant is reserved for future checks
+        // ordered after the posture check (today the
+        // evaluator denies immediately on posture fail,
+        // but a future `(deny, Pass)` is structurally
+        // valid).
+        let dec3 = ZtnaDecision::deny(ZtnaDecisionReason::MfaStale, PostureResult::Pass);
+        assert_eq!(dec3.posture_result, PostureResult::Pass);
+    }
+
+    #[test]
+    fn posture_result_wire_alphabet_is_stable() {
+        // The wire form is contract-stable across
+        // releases; pin every variant so a renamed
+        // serde tag (or a refactor to a different
+        // string) fails the build.
+        assert_eq!(PostureResult::Pass.as_str(), "pass");
+        assert_eq!(PostureResult::Fail.as_str(), "fail");
+        assert_eq!(PostureResult::NotEvaluated.as_str(), "not_evaluated");
+    }
+
+    #[test]
+    fn posture_result_per_deny_branch_matches_contract() {
+        // Steps 1–3 (pre-posture short-circuits) emit
+        // NotEvaluated; steps 4–5 (posture-related)
+        // emit Fail; allow emits Pass. This pins the
+        // doc on evaluate_policy as executable contract.
+        let p = policy("t1");
+        let a = app("wiki", PostureRequirement::Basic, &["eng"]);
+
+        // Step 1: tenant mismatch — NotEvaluated.
+        let d_wrong = device("t2", DevicePosture::pristine(now()));
+        let u_ok = user("t1", &["eng"], now());
+        let dec = evaluate_policy(&p, inputs(&a, &d_wrong, &u_ok, now()));
+        assert_eq!(dec.reason, ZtnaDecisionReason::TenantMismatch);
+        assert_eq!(dec.posture_result, PostureResult::NotEvaluated);
+
+        // Step 2: not entitled — NotEvaluated.
+        let d = device("t1", DevicePosture::pristine(now()));
+        let u_wrong_group = user("t1", &["sales"], now());
+        let dec = evaluate_policy(&p, inputs(&a, &d, &u_wrong_group, now()));
+        assert_eq!(dec.reason, ZtnaDecisionReason::NotEntitled);
+        assert_eq!(dec.posture_result, PostureResult::NotEvaluated);
+
+        // Step 3: MFA stale — NotEvaluated.
+        let u_stale_mfa = user("t1", &["eng"], now() - 10 * 60 * 60 * 1_000);
+        let dec = evaluate_policy(&p, inputs(&a, &d, &u_stale_mfa, now()));
+        assert_eq!(dec.reason, ZtnaDecisionReason::MfaStale);
+        assert_eq!(dec.posture_result, PostureResult::NotEvaluated);
+
+        // Step 4: posture stale — Fail.
+        let mut stale_posture = DevicePosture::pristine(now());
+        stale_posture.attested_at_ms = now() - 13 * 60 * 60 * 1_000;
+        let d_stale = device("t1", stale_posture);
+        let dec = evaluate_policy(&p, inputs(&a, &d_stale, &u_ok, now()));
+        assert_eq!(dec.reason, ZtnaDecisionReason::DevicePostureStale);
+        assert_eq!(dec.posture_result, PostureResult::Fail);
+
+        // Step 5: posture insufficient — Fail. Build a
+        // *fresh-attested* unmanaged posture so the
+        // staleness check (step 4) doesn't fire first.
+        let a_strict = app("admin", PostureRequirement::Strict, &["eng"]);
+        let mut unmanaged_fresh = DevicePosture::unmanaged();
+        unmanaged_fresh.attested_at_ms = now();
+        let d_unmanaged = device("t1", unmanaged_fresh);
+        let dec = evaluate_policy(&p, inputs(&a_strict, &d_unmanaged, &u_ok, now()));
+        assert_eq!(dec.reason, ZtnaDecisionReason::DevicePostureInsufficient);
+        assert_eq!(dec.posture_result, PostureResult::Fail);
+
+        // Allow path — Pass.
+        let dec = evaluate_policy(&p, inputs(&a, &d, &u_ok, now()));
+        assert!(dec.allow);
+        assert_eq!(dec.posture_result, PostureResult::Pass);
     }
 
     #[test]
