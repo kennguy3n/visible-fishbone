@@ -402,10 +402,62 @@ fn render_endpoint(out: &mut String, ep: &str) -> Result<(), SwgError> {
     Ok(())
 }
 
+/// Split a `host:port` endpoint string into its parts.
+///
+/// Two shapes are accepted:
+///
+/// 1. **IPv4 / hostname.** `10.0.0.5:8080`, `example.com:443`.
+///    A single `rsplit_once(':')` is unambiguous — there is
+///    exactly one colon in the input.
+/// 2. **IPv6 bracketed.** `[::1]:8080`, `[2001:db8::1]:443`.
+///    RFC 3986 §3.2.2 mandates square brackets around the IPv6
+///    address in `host:port` notation so the colon-rich IPv6
+///    literal doesn't ambiguate with the port separator. The
+///    host slice returned to the caller is the address inside
+///    the brackets — bare `::1`, not `[::1]` — because Envoy's
+///    `socket_address.address` field expects the unbracketed
+///    form (the brackets are URI-level syntax, not part of the
+///    address itself). Rendering `[::1]` would either be
+///    rejected by `envoy --mode validate` or, worse, accepted
+///    on a lenient Envoy build and silently treated as a
+///    literal hostname string — neither of which connects to
+///    the intended IPv6 upstream.
+///
+/// Without the bracket-aware split, a naive `rsplit_once(':')`
+/// on `[::1]:8080` yields `host = "[::1]"`, `port = "8080"`,
+/// and the renderer emits `address: "[::1]"` into the Envoy
+/// YAML. The current production wiring doesn't hit this path
+/// (ext-authz uses a unix socket, the forward-proxy cluster is
+/// endpointless `dynamic_forward_proxy`), but an operator who
+/// adds a custom IPv6 upstream cluster via the future
+/// `extra_yaml` hook would silently produce a non-functional
+/// config. Handle the bracket shape correctly at the renderer
+/// layer so the failure mode is "port number rejected as not
+/// `u16`" (loud, surfaced at install-time) rather than
+/// "silently emits unreachable upstream" (quiet, surfaced only
+/// when the cluster is exercised in production).
 fn parse_host_port(ep: &str) -> Result<(&str, u16), SwgError> {
-    let (host, port) = ep
-        .rsplit_once(':')
-        .ok_or_else(|| SwgError::Config(format!("endpoint missing port: {ep}")))?;
+    let (host, port) = if let Some(rest) = ep.strip_prefix('[') {
+        // RFC 3986 §3.2.2 bracketed IPv6 form: `[<addr>]:<port>`.
+        // Find the matching `]` and require `:` immediately
+        // after — anything else (no `]`, no `:` after `]`, or
+        // characters between `]` and `:`) is a malformed
+        // endpoint and surfaces a `Config` error at install
+        // time rather than rendering an invalid YAML the
+        // operator only discovers at process-start.
+        let close = rest
+            .find(']')
+            .ok_or_else(|| SwgError::Config(format!("endpoint missing closing bracket: {ep}")))?;
+        let host = &rest[..close];
+        let after = &rest[close + 1..];
+        let port = after.strip_prefix(':').ok_or_else(|| {
+            SwgError::Config(format!("endpoint missing port after bracketed host: {ep}"))
+        })?;
+        (host, port)
+    } else {
+        ep.rsplit_once(':')
+            .ok_or_else(|| SwgError::Config(format!("endpoint missing port: {ep}")))?
+    };
     let port: u16 = port
         .parse()
         .map_err(|e| SwgError::Config(format!("endpoint port not u16 ({ep}): {e}")))?;
@@ -768,6 +820,79 @@ mod tests {
         let (h, p) = parse_host_port("example.com:443").unwrap();
         assert_eq!(h, "example.com");
         assert_eq!(p, 443);
+    }
+
+    #[test]
+    fn parse_host_port_handles_bracketed_ipv6_loopback() {
+        // RFC 3986 §3.2.2 bracketed IPv6 form. The host slice
+        // must be the address inside the brackets — Envoy's
+        // socket_address.address field expects the unbracketed
+        // form, so emitting `[::1]` would either be rejected at
+        // validate-time or silently treated as a literal
+        // hostname string.
+        let (h, p) = parse_host_port("[::1]:8080").unwrap();
+        assert_eq!(h, "::1");
+        assert_eq!(p, 8080);
+    }
+
+    #[test]
+    fn parse_host_port_handles_bracketed_ipv6_full() {
+        let (h, p) = parse_host_port("[2001:db8::1]:443").unwrap();
+        assert_eq!(h, "2001:db8::1");
+        assert_eq!(p, 443);
+    }
+
+    #[test]
+    fn parse_host_port_rejects_bracketed_without_close() {
+        let err = parse_host_port("[::1:8080").expect_err("must reject");
+        match err {
+            SwgError::Config(m) => assert!(m.contains("missing closing bracket"), "{m}"),
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_host_port_rejects_bracketed_without_port_separator() {
+        // `[::1]` with no `:<port>` after the close-bracket
+        // must surface as a Config error at install time, not
+        // render an invalid YAML the operator only discovers
+        // when Envoy fails to start.
+        let err = parse_host_port("[::1]").expect_err("must reject");
+        match err {
+            SwgError::Config(m) => assert!(m.contains("missing port after bracketed host"), "{m}"),
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_endpoint_emits_unbracketed_ipv6_for_envoy_socket_address() {
+        // End-to-end check: a bracketed IPv6 cluster endpoint
+        // must reach the rendered YAML as the unbracketed form
+        // so Envoy's socket_address.address field accepts it.
+        let cfg = EnvoyConfig {
+            listeners: Vec::new(),
+            clusters: vec![ClusterConfig {
+                name: "ipv6_upstream".into(),
+                endpoints: vec!["[2001:db8::1]:443".into()],
+                connect_timeout_ms: 1_000,
+            }],
+            admin_port: DEFAULT_ADMIN_PORT,
+        };
+        let s = render_envoy_yaml(&cfg).expect("render must succeed");
+        // Address line carries the bare IPv6 literal, NOT the
+        // bracketed URI form.
+        assert!(
+            s.contains("address: \"2001:db8::1\""),
+            "expected unbracketed IPv6 address in rendered YAML, got:\n{s}"
+        );
+        // Defensive: no bracketed form anywhere — a regression
+        // that re-introduces the naive rsplit would render
+        // `address: "[2001:db8::1]"`, which this assertion
+        // catches.
+        assert!(
+            !s.contains("address: \"[2001"),
+            "rendered YAML must not contain bracketed IPv6 address, got:\n{s}"
+        );
     }
 
     #[test]
