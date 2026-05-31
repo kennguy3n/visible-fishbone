@@ -372,12 +372,30 @@ impl SdwanService {
 
     /// Evaluate one steering request.
     ///
-    /// Sync, allocation-light: on the selected-path path
-    /// the function allocates only for the one
-    /// [`SdwanEvent`] handed to telemetry (and only when
-    /// telemetry actually accepts the event — a dropped
-    /// `try_send` returns the unsent event so no
-    /// downstream allocator is touched).
+    /// Sync, bounded-allocation. Per-call allocations on
+    /// the steady-state path are dominated by the
+    /// `PathProvider::candidates` return — a fresh
+    /// `Vec<Arc<Path>>` whose length is the count of
+    /// paths eligible for `request.traffic_class` (one
+    /// `Arc` clone per eligible path). Beyond that, the
+    /// function allocates only for the one [`SdwanEvent`]
+    /// handed to telemetry (and only when telemetry
+    /// actually accepts the event — a dropped `try_send`
+    /// returns the unsent event so no downstream
+    /// allocator is touched). Production catalogs hold
+    /// a small constant number of underlays (typically
+    /// well under 16 per tenant), so the per-call vector
+    /// is a fixed-size, short-lived allocation rather
+    /// than a growth surface.
+    ///
+    /// Provider implementations that need to drop the
+    /// per-call `Vec` allocation entirely (e.g. for an
+    /// MPSC-bound data-path running at millions of
+    /// evaluations per second) can offer a borrow-shaped
+    /// API in a future revision; the current
+    /// [`PathProvider`] trait shape returns owned
+    /// `Arc<Path>` so the borrow checker doesn't tie the
+    /// scoring loop to the provider's internal lock.
     ///
     /// # Errors
     ///
@@ -547,7 +565,7 @@ impl SdwanService {
             (Some((path, score)), SteeringReason::FallbackBelowFloor)
         } else {
             // Defensive: should be unreachable because
-            // `had_fresh_candidate` is true iff we
+            // `had_usable_candidate` is true iff we
             // populated at least one of the two
             // best_* slots above. The `debug_assert!`
             // ensures a logic regression that breaks
@@ -558,7 +576,7 @@ impl SdwanService {
             // path.
             debug_assert!(
                 false,
-                "evaluate: had_fresh_candidate=true but both best_in_budget and best_fallback are None (invariant broken)"
+                "evaluate: had_usable_candidate=true but both best_in_budget and best_fallback are None (invariant broken)"
             );
             (None, SteeringReason::AllProbesStale)
         };
