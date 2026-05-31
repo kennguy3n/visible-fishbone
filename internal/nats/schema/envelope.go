@@ -264,9 +264,50 @@ func WrapFlowEvent(envMeta Envelope, trafficClass string, flow FlowEvent) (Envel
 	return envMeta, nil
 }
 
-// PackPayload marshals any msgpack-serializable typed payload into
+// Payload is the interface every typed event payload embedded in
+// an [Envelope] must implement. The single [Payload.Validate]
+// method is the producer-side invariant check (e.g.
+// [ZTNAEvent.Validate] rejects an empty Reason field).
+//
+// All event-class structs in this package satisfy this interface
+// via their value-receiver Validate method ([FlowEvent], [DNSEvent],
+// [HTTPEvent], [IPSEvent], [ZTNAEvent], [SDWANEvent], [AgentEvent]).
+//
+// # Producer / consumer asymmetry
+//
+// Validate is a *producer-side* contract — it is called by
+// [PackPayload] so a control-plane emitter that constructs a
+// malformed payload (e.g. a [ZTNAEvent] with an unset Reason)
+// surfaces a deterministic error at marshal time instead of
+// silently emitting a broken envelope on the wire.
+//
+// Consumers must NOT call Validate on inbound payloads from
+// legacy producers when a Validate rule was added in a later
+// schema version: the empty-string sentinel for [ZTNAEvent].Reason
+// (see [ZTNAEvent.IsLegacy]) is a valid wire shape for cross-
+// version rolling deploys, but [ZTNAEvent.Validate] explicitly
+// rejects it. Decoders should call [Unmarshal] to validate the
+// envelope itself and then dispatch payload decoding via
+// [UnpackPayload], which never calls Validate.
+type Payload interface {
+	Validate() error
+}
+
+// PackPayload validates and marshals a typed event payload into
 // the opaque bytes the envelope carries.
-func PackPayload(payload any) ([]byte, error) {
+//
+// The [Payload.Validate] check is the architectural guarantee
+// that no malformed payload reaches the wire: producers that
+// previously had to remember to call Validate themselves before
+// marshaling (a footgun easily missed in a new emitter, see the
+// [ZTNAEvent] wire-contract doc) now get the invariant enforced
+// at the API boundary. The marshaled bytes are still opaque to
+// the envelope; the typed payload is recovered on the consumer
+// side via [UnpackPayload].
+func PackPayload(payload Payload) ([]byte, error) {
+	if err := payload.Validate(); err != nil {
+		return nil, fmt.Errorf("payload validate: %w", err)
+	}
 	b, err := msgpack.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("msgpack marshal payload: %w", err)

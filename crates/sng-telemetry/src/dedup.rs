@@ -135,7 +135,15 @@ fn hash_ztna(e: &ZtnaEvent, h: &mut DefaultHasher) {
     e.device_id.hash(h);
     e.app_id.hash(h);
     e.posture_result.hash(h);
+    // Both `decision` ("allow" / "deny") and `reason`
+    // (the detailed bucket label, e.g. `mfa_stale`,
+    // `device_posture_insufficient`, `tenant_mismatch`)
+    // participate in the dedup key. Without `reason`, two
+    // denies on the same (device, app) for different
+    // structural reasons would collapse to one wire event
+    // and dashboards would lose the per-cause breakdown.
     e.decision.hash(h);
+    e.reason.hash(h);
     e.identity_verified.hash(h);
 }
 

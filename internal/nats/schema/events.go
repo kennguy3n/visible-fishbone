@@ -124,21 +124,99 @@ func (i IPSEvent) Validate() error {
 }
 
 // ZTNAEvent is a Zero-Trust Network Access decision record.
+//
+// The `Reason` field carries the structured, stable wire string for
+// the deny / allow bucket (e.g. "mfa_stale", "device_posture_insufficient",
+// "tenant_mismatch", "allow") so dashboards can break decisions down by
+// cause without parsing a free-form message. It mirrors the Rust-side
+// `sng_ztna::policy::ZtnaDecisionReason::as_str()` field-for-field and
+// participates in the dedup fingerprint at
+// `crates/sng-telemetry/src/dedup.rs::hash_ztna` — without it, two denies
+// on the same (device, app) for different structural causes would collapse
+// to a single wire event.
+//
+// # Producer / consumer wire-contract asymmetry
+//
+// The Rust-side counterpart at `crates/sng-core/src/events.rs::ZtnaEvent.reason`
+// carries `#[serde(default)]` so a consumer decoding an envelope from a
+// pre-PR-30 producer (one that doesn't yet emit `rsn`) decodes the field
+// to the empty string instead of failing the whole envelope. This Go
+// struct's `Reason` field decodes the same way: msgpack's default for
+// `string` is `""`, and `UnpackPayload` does not call `Validate`.
+//
+// The `Validate` method below is a *producer-side* contract — it
+// catches malformed events at the source (e.g. a control-plane emitter
+// constructing a `ZTNAEvent` with an unset `Reason`). Consumers must
+// NOT call `Validate` on inbound payloads from a legacy producer: an
+// empty `Reason` is a valid wire shape for cross-version rolling
+// deploys, and the binary `Decision` field is the source of truth for
+// the allow/deny rollup. See the `IsLegacy` helper for the canonical
+// way to detect a pre-PR-30 envelope on the consumer side.
 type ZTNAEvent struct {
-	DeviceID         string `msgpack:"did"`
-	AppID            string `msgpack:"app"`
-	PostureResult    string `msgpack:"pst"` // pass|fail
+	DeviceID string `msgpack:"did"`
+	AppID    string `msgpack:"app"`
+	// PostureResult is the wire form of the tri-state
+	// posture-check outcome. Stable alphabet:
+	//
+	//   - "pass"          — posture check ran and the
+	//                       device satisfied the app's
+	//                       posture requirement.
+	//   - "fail"          — posture check ran and the
+	//                       device failed it (stale
+	//                       attestation OR requirement
+	//                       unsatisfied).
+	//   - "not_evaluated" — the decision short-circuited
+	//                       before the posture check ran
+	//                       (e.g. unknown_app,
+	//                       tenant_mismatch, not_entitled,
+	//                       mfa_stale).
+	//
+	// The "not_evaluated" value was added to honor the
+	// field's name — dashboards previously could not
+	// distinguish a deny caused by a posture failure from
+	// a deny that short-circuited before the posture
+	// check ran (both stamped "fail"). Old consumers that
+	// only know "pass" / "fail" will see "not_evaluated"
+	// as an unknown bucket, which is safer than the prior
+	// behavior of literally lying about whether the
+	// device's posture had failed.
+	//
+	// Mirrors the Rust-side
+	// `sng_ztna::policy::PostureResult` enum
+	// field-for-field; see that type's wire-form doc for
+	// the full rationale.
+	PostureResult    string `msgpack:"pst"` // pass|fail|not_evaluated
 	Decision         string `msgpack:"dec"` // allow|deny
+	Reason           string `msgpack:"rsn"` // detailed structured reason; see ZtnaDecisionReason in sng-ztna
 	IdentityVerified bool   `msgpack:"iv"`
 }
 
-// Validate enforces required-field invariants for ZTNAEvent.
+// IsLegacy reports whether this envelope was emitted by a pre-PR-30
+// producer that didn't yet ship the `Reason` field. Dashboards that
+// bucket by `Reason` should treat the empty string as a "legacy"
+// sentinel and fall back to the binary `Decision` for the allow/deny
+// rollup. See the `ZTNAEvent` doc comment for the full wire-contract
+// asymmetry rationale.
+func (z ZTNAEvent) IsLegacy() bool {
+	return z.Reason == ""
+}
+
+// Validate enforces required-field invariants for ZTNAEvent on the
+// *producer* side. It must NOT be called on inbound payloads from
+// legacy producers — empty `Reason` is a valid wire shape during
+// rolling deploys (see the `ZTNAEvent` doc comment and the Rust-side
+// `#[serde(default)]` at `crates/sng-core/src/events.rs::ZtnaEvent.reason`).
+// Use `IsLegacy` instead for consumer-side handling of pre-PR-30
+// envelopes.
 func (z ZTNAEvent) Validate() error {
 	if z.AppID == "" {
 		return fmt.Errorf("ztna.app_id is required: %w", ErrInvalid)
 	}
 	if z.Decision == "" {
 		return fmt.Errorf("ztna.decision is required: %w", ErrInvalid)
+	}
+	if z.Reason == "" {
+		return fmt.Errorf("ztna.reason is required: %w", ErrInvalid)
 	}
 	return nil
 }
