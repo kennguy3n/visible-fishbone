@@ -508,8 +508,29 @@ fn render_cluster(out: &mut String, c: &ClusterConfig) -> Result<(), SwgError> {
     // dynamic_forward_proxy cluster: the no-endpoint shape Envoy
     // resolves DNS on demand per upstream request. Non-empty
     // endpoint list → STATIC cluster with a load_assignment.
+    //
+    // Envoy's cluster proto puts `type` (`DiscoveryType` enum:
+    // STATIC / STRICT_DNS / LOGICAL_DNS / EDS / ORIGINAL_DST) and
+    // `cluster_type` (`CustomClusterType` message for extension
+    // clusters like `envoy.clusters.dynamic_forward_proxy`) in a
+    // `oneof discovery_type` — exactly one of them must be set
+    // per cluster. Setting both is a protobuf-level oneof
+    // violation that newer Envoy versions reject at parse time
+    // (`envoy --mode validate` fails with "more than one value
+    // set in oneof"); older versions silently kept the last-set
+    // field, with `cluster_type` always winning. The canonical
+    // Envoy upstream example for dynamic_forward_proxy
+    // (https://www.envoyproxy.io/docs/envoy/latest/configuration/
+    // http/http_filters/dynamic_forward_proxy_filter) sets only
+    // `cluster_type`, never `type`, for exactly this reason.
+    //
+    // `lb_policy: CLUSTER_PROVIDED` stays — the LB-policy enum is
+    // a separate field from `discovery_type`, and dynamic_forward_proxy
+    // is documented to require `CLUSTER_PROVIDED` (the cluster
+    // extension manages its own host set, so Envoy's normal
+    // round-robin / least-request LBs would race with the
+    // DNS-cache shape).
     if c.endpoints.is_empty() {
-        ln!(out, "    type: STRICT_DNS");
         ln!(out, "    lb_policy: CLUSTER_PROVIDED");
         ln!(
             out,
@@ -880,7 +901,6 @@ mod tests {
             admin_port: DEFAULT_ADMIN_PORT,
         };
         let s = render_envoy_yaml(&cfg).unwrap();
-        assert!(s.contains("type: STRICT_DNS"));
         assert!(s.contains("dynamic_forward_proxy_cache_config"));
         // `format_envoy_seconds` canonical form: 5_000 ms is
         // exactly 5 seconds so the fractional part is elided. The
@@ -891,6 +911,94 @@ mod tests {
         // both slots through `format_envoy_seconds` collapses
         // them to one canonical form.
         assert!(s.contains("connect_timeout: 5s"), "got\n{s}");
+    }
+
+    #[test]
+    fn dynamic_forward_proxy_omits_type_field_to_satisfy_oneof_invariant() {
+        // Envoy's `Cluster` proto puts `type` (`DiscoveryType` enum)
+        // and `cluster_type` (`CustomClusterType` message) in a
+        // `oneof discovery_type` — setting both is a protobuf-level
+        // violation that newer Envoy versions reject at parse time
+        // with "more than one value set in oneof". The endpointless
+        // (dynamic_forward_proxy) render path therefore emits ONLY
+        // `cluster_type`, never `type`. Pin that invariant so a
+        // future regression that adds `type: STRICT_DNS` back fails
+        // here loudly rather than at a downstream `envoy --mode
+        // validate` cycle.
+        //
+        // `lb_policy: CLUSTER_PROVIDED` stays (separate field from
+        // discovery_type, and dynamic_forward_proxy is documented
+        // to require it). The STATIC path keeps emitting `type:
+        // STATIC` — that's the same oneof field, just the
+        // built-in enum side, and is correct.
+        let cfg = EnvoyConfig {
+            listeners: Vec::new(),
+            clusters: vec![ClusterConfig {
+                name: "fwd".into(),
+                endpoints: Vec::new(),
+                connect_timeout_ms: 5_000,
+            }],
+            admin_port: DEFAULT_ADMIN_PORT,
+        };
+        let s = render_envoy_yaml(&cfg).unwrap();
+        assert!(
+            !s.contains("type: STRICT_DNS"),
+            "endpointless cluster must NOT emit `type:` alongside `cluster_type:` \
+             (oneof discovery_type violation); got\n{s}"
+        );
+        assert!(
+            !s.contains("type: LOGICAL_DNS"),
+            "endpointless cluster must NOT emit `type:` alongside `cluster_type:` \
+             (oneof discovery_type violation); got\n{s}"
+        );
+        assert!(
+            s.contains("lb_policy: CLUSTER_PROVIDED"),
+            "endpointless cluster must keep `lb_policy: CLUSTER_PROVIDED` \
+             (required by dynamic_forward_proxy); got\n{s}"
+        );
+        assert!(
+            s.contains("cluster_type:"),
+            "endpointless cluster must emit `cluster_type:`; got\n{s}"
+        );
+        assert!(
+            s.contains("envoy.clusters.dynamic_forward_proxy"),
+            "endpointless cluster must name the dynamic_forward_proxy extension; got\n{s}"
+        );
+    }
+
+    #[test]
+    fn static_cluster_still_emits_type_static_on_oneof_field() {
+        // Mirror invariant on the STATIC side of the oneof: when
+        // `endpoints` is non-empty we go through the
+        // `load_assignment` shape and `type: STATIC` IS the
+        // discovery_type setting. Pin that the STATIC path keeps
+        // emitting exactly one oneof field (`type`, not
+        // `cluster_type`) so a future refactor that incorrectly
+        // unifies the two paths cannot silently drop the
+        // discovery type.
+        let cfg = EnvoyConfig {
+            listeners: Vec::new(),
+            clusters: vec![ClusterConfig {
+                name: "ext_authz".into(),
+                endpoints: vec!["127.0.0.1:9001".into()],
+                connect_timeout_ms: 1_000,
+            }],
+            admin_port: DEFAULT_ADMIN_PORT,
+        };
+        let s = render_envoy_yaml(&cfg).unwrap();
+        assert!(
+            s.contains("type: STATIC"),
+            "STATIC cluster must emit `type: STATIC`; got\n{s}"
+        );
+        assert!(
+            !s.contains("cluster_type:"),
+            "STATIC cluster must NOT emit `cluster_type:` (oneof discovery_type \
+             violation); got\n{s}"
+        );
+        assert!(
+            !s.contains("dynamic_forward_proxy"),
+            "STATIC cluster must not leak dynamic_forward_proxy strings; got\n{s}"
+        );
     }
 
     #[test]
