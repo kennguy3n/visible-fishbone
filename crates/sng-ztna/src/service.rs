@@ -71,10 +71,44 @@ pub const fn decision_to_verdict(decision: &ZtnaDecision) -> Verdict {
 /// Configuration for [`ZtnaService`].
 #[derive(Clone, Debug)]
 pub struct ZtnaServiceConfig {
-    /// Maximum number of concurrent ZTNA sessions the
-    /// brain advertises. The brain itself does not hold
-    /// session state; the counter is plumbed through so
-    /// the producer can shed load when the bucket fills.
+    /// Producer-enforced ceiling on the number of
+    /// concurrent ZTNA sessions the brain advertises
+    /// it is willing to evaluate access requests for.
+    ///
+    /// # Enforcement contract
+    ///
+    /// The ZTNA brain is **stateless per-request** — it
+    /// has no notion of a "session" beyond the single
+    /// [`crate::request::AccessRequest`] currently being
+    /// evaluated. Session lifecycle (TCP connection up
+    /// / down, idle-timeout, user-initiated logout,
+    /// proxy-side reaper) is owned exclusively by the
+    /// **producer layer** (`sng-edge` proxy /
+    /// `sng-agent` endpoint client), which is the only
+    /// component with the visibility to count live
+    /// sessions across the data path.
+    ///
+    /// This field is therefore an **advisory ceiling**:
+    /// the brain plumbs it through via
+    /// [`ZtnaService::max_sessions`] so the producer
+    /// can read the configured cap (operator-set in the
+    /// policy bundle) and shed load *before* calling
+    /// [`ZtnaService::evaluate`] when its own live-
+    /// session counter would exceed the ceiling. "Shed
+    /// load" concretely means: return a 429-class
+    /// transport-level error to the originating flow,
+    /// or queue / reject the new connection, without
+    /// the request ever reaching the brain.
+    ///
+    /// Brain-side enforcement would be structurally
+    /// wrong: a counter incremented on `Allow` and
+    /// decremented on "session end" requires the brain
+    /// to be notified of every session termination,
+    /// which crosses the per-request boundary that
+    /// makes the brain trivially sharable across
+    /// producer instances (multiple `sng-edge`
+    /// processes can call into a single brain via
+    /// `Arc<ZtnaService>`).
     pub max_sessions: usize,
 }
 
@@ -224,8 +258,14 @@ impl ZtnaService {
         &self.policy
     }
 
-    /// Configured max session count — surfaced for the
-    /// producer's shed-load logic.
+    /// Producer-side advisory ceiling on concurrent
+    /// sessions. See the doc comment on
+    /// [`ZtnaServiceConfig::max_sessions`] for the full
+    /// enforcement contract: this returns the
+    /// configured cap, but the brain does not count
+    /// or reject — the producer (`sng-edge` /
+    /// `sng-agent`) reads this value and sheds load
+    /// before calling [`Self::evaluate`].
     #[must_use]
     pub fn max_sessions(&self) -> usize {
         self.cfg.max_sessions
