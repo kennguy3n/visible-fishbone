@@ -152,6 +152,28 @@ pub enum UpdaterError {
         /// reached (always `> claimed`).
         read: u64,
     },
+    /// Manifest's declared image size exceeds the operator's
+    /// `max_image_bytes` policy ceiling. Distinct from
+    /// [`Self::ImageSizeExceeded`] because nothing has been
+    /// downloaded — the manifest's own size claim already
+    /// violates the policy, so the engine refuses up front
+    /// before touching the network. Both variants map to
+    /// [`ErrorCode::UpdaterImageSizeExceeded`] so existing
+    /// operator dashboards keyed on the workspace-stable code
+    /// continue to bucket "image too big" alerts together; the
+    /// variant split is purely so log messages don't mislead
+    /// operators into looking for a download-time overflow when
+    /// the rejection actually happened pre-network.
+    #[error(
+        "manifest declares image size {manifest_declared} bytes which exceeds operator policy \
+         ceiling of {policy_max} bytes (rejected before download)"
+    )]
+    ManifestSizeExceedsPolicy {
+        /// Size the manifest declared.
+        manifest_declared: u64,
+        /// Operator policy's `max_image_bytes` ceiling.
+        policy_max: u64,
+    },
     /// Image download underflowed the declared size — the
     /// upstream closed the stream before delivering all the
     /// bytes the manifest promised. Surfaced as a hash mismatch
@@ -227,7 +249,9 @@ impl UpdaterError {
             Self::ImageHashMismatch { .. } | Self::ImageTruncated { .. } => {
                 ErrorCode::UpdaterImageHashMismatch
             }
-            Self::ImageSizeExceeded { .. } => ErrorCode::UpdaterImageSizeExceeded,
+            Self::ImageSizeExceeded { .. } | Self::ManifestSizeExceedsPolicy { .. } => {
+                ErrorCode::UpdaterImageSizeExceeded
+            }
             Self::DownloadFailure(_) => ErrorCode::Io,
             Self::BankWrite(_) => ErrorCode::UpdaterBankWriteFailure,
             Self::Bootloader(_) => ErrorCode::UpdaterBootloaderFailure,
@@ -393,6 +417,34 @@ mod tests {
             read: 1025,
         };
         assert_eq!(e.code(), ErrorCode::UpdaterImageSizeExceeded);
+    }
+
+    #[test]
+    fn manifest_size_exceeds_policy_maps_to_size_exceeded() {
+        // Same workspace-stable error code as ImageSizeExceeded
+        // so existing operator dashboards continue to bucket
+        // "image too big" alerts together — the variant split
+        // is purely so the Display message identifies the
+        // pre-network policy rejection vs. a download-time
+        // overflow.
+        let e = UpdaterError::ManifestSizeExceedsPolicy {
+            manifest_declared: 2 * 1024 * 1024 * 1024,
+            policy_max: 1024 * 1024 * 1024,
+        };
+        assert_eq!(e.code(), ErrorCode::UpdaterImageSizeExceeded);
+        let msg = e.to_string();
+        assert!(
+            msg.contains("manifest declares image size"),
+            "policy-rejection Display must identify the pre-download check, got: {msg}"
+        );
+        assert!(
+            msg.contains("operator policy"),
+            "policy-rejection Display must name the policy ceiling, got: {msg}"
+        );
+        assert!(
+            msg.contains("rejected before download"),
+            "policy-rejection Display must tell operators no download occurred, got: {msg}"
+        );
     }
 
     #[test]

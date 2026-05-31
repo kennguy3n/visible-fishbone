@@ -549,9 +549,9 @@ impl UpdaterService {
         // up front.
         let policy = self.policy.load();
         if manifest.image_size_bytes > policy.max_image_bytes {
-            return Err(UpdaterError::ImageSizeExceeded {
-                claimed: policy.max_image_bytes,
-                read: manifest.image_size_bytes,
+            return Err(UpdaterError::ManifestSizeExceedsPolicy {
+                manifest_declared: manifest.image_size_bytes,
+                policy_max: policy.max_image_bytes,
             });
         }
         // Cap manifest's declared size against the
@@ -1446,7 +1446,32 @@ mod tests {
             .install_from_envelope(env)
             .await
             .expect_err("oversize");
-        assert!(matches!(err, UpdaterError::ImageSizeExceeded { .. }));
+        // Pre-network policy rejection must surface as the
+        // dedicated `ManifestSizeExceedsPolicy` variant, NOT
+        // the download-time `ImageSizeExceeded`. The two
+        // variants share `ErrorCode::UpdaterImageSizeExceeded`
+        // so existing dashboards bucket them together, but the
+        // Display message must tell operators no download
+        // occurred — otherwise log triage points at the wrong
+        // place. Asserting on the fields also pins down that
+        // the values are not inverted (the bug this variant
+        // was added to fix).
+        match err {
+            UpdaterError::ManifestSizeExceedsPolicy {
+                manifest_declared,
+                policy_max,
+            } => {
+                assert_eq!(
+                    manifest_declared, 1024,
+                    "manifest's declared size must be the payload size, not the policy ceiling"
+                );
+                assert_eq!(
+                    policy_max, 64,
+                    "policy_max must be the operator's ceiling, not the manifest's claim"
+                );
+            }
+            other => panic!("expected ManifestSizeExceedsPolicy, got {other:?}"),
+        }
     }
 
     #[tokio::test]
