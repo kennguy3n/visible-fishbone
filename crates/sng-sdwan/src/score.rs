@@ -121,6 +121,30 @@ pub fn score_path(probe: &PathProbe, weights: &ScoreWeights, static_bias: f32) -
     let loss_component = weights.loss * probe.loss_pct;
     let jitter_component = weights.jitter * probe.jitter_ms;
     let total = latency_component + loss_component + jitter_component + static_bias;
+    // Finite-input overflow guard. The input gate above
+    // proves every factor on the right-hand side is
+    // finite, but `f * g` where both `f` and `g` are
+    // finite can still overflow to ±INFINITY (e.g.
+    // `f32::MAX/2 * 3.0`), and `f + g` over an
+    // INFINITY component can mint NaN (`INFINITY +
+    // -INFINITY`). The selector orders strictly on
+    // `total`, so an INFINITY total is functionally
+    // never-winning — but it also leaks a non-finite
+    // value into the `ScoreBreakdown` that telemetry
+    // dashboards consume as a numeric metric. Snap any
+    // non-finite total back to `worst()` so the wire
+    // shape is strictly `{ all-finite OR all-INFINITY
+    // (worst) }` — never a mix. Cheap (`is_finite` is
+    // a single bit test) and only fires under
+    // misconfigured/adversarial inputs that bypassed
+    // `SdwanPolicy::validate`.
+    if !total.is_finite()
+        || !latency_component.is_finite()
+        || !loss_component.is_finite()
+        || !jitter_component.is_finite()
+    {
+        return ScoreBreakdown::worst();
+    }
     ScoreBreakdown::new(
         latency_component,
         loss_component,
@@ -221,6 +245,54 @@ mod tests {
             "NaN weight must collapse to worst, got {}",
             s.total
         );
+    }
+
+    /// Adversarial / misconfigured input passes the
+    /// finite-input gate but overflows arithmetically to
+    /// +INFINITY when multiplied. The post-arithmetic
+    /// guard must snap this back to `worst()` so the
+    /// `ScoreBreakdown` wire shape is never "some
+    /// components finite, total = +INFINITY" (which would
+    /// leak into telemetry dashboards as a non-finite
+    /// numeric value).
+    #[test]
+    fn finite_input_overflow_to_infinity_collapses_to_worst() {
+        let probe = PathProbe::new(f32::MAX / 2.0, 0.0, 0.0, 0);
+        let w = weights(3.0, 1.0, 1.0);
+        let s = score_path(&probe, &w, 0.0);
+        assert!(
+            s.total.is_infinite() && s.total > 0.0,
+            "finite-input arithmetic overflow must collapse to worst, got total={}",
+            s.total
+        );
+        // The wire shape is "all components +INFINITY" —
+        // never a mix of finite components + infinite total
+        // (which would confuse dashboards that bucket on
+        // the dominant component).
+        assert!(s.latency_component.is_infinite() && s.latency_component > 0.0);
+        assert!(s.loss_component.is_infinite() && s.loss_component > 0.0);
+        assert!(s.jitter_component.is_infinite() && s.jitter_component > 0.0);
+    }
+
+    /// `worst()` already-non-finite paths must still
+    /// short-circuit cleanly when summed against a
+    /// finite static bias — this is the `INF + finite = INF`
+    /// path that the post-arithmetic guard catches as
+    /// non-finite total.
+    #[test]
+    fn overflow_against_negative_bias_does_not_mint_nan() {
+        // Without the post-arithmetic guard, an
+        // overflowed +INFINITY component + a very
+        // negative bias could mathematically produce NaN
+        // (`+INFINITY + -INFINITY`). Construct a case
+        // where the arithmetic walks that knife-edge and
+        // confirm the result still collapses to `worst()`
+        // (`+INFINITY`), never NaN.
+        let probe = PathProbe::new(f32::MAX, 0.0, 0.0, 0);
+        let w = weights(2.0, 1.0, 1.0);
+        let s = score_path(&probe, &w, -f32::MAX);
+        assert!(s.total.is_infinite() && s.total > 0.0);
+        assert!(!s.total.is_nan(), "total must never be NaN");
     }
 
     #[test]
