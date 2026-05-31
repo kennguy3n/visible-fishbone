@@ -27,6 +27,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 
 /// Pluggable monotonic clock. The production implementation
 /// returns the OS monotonic clock; the test implementation
@@ -283,18 +284,43 @@ impl RateLimiter {
     /// construction; threading the eviction policy through the
     /// limiter keeps the dependency arrow pointing the right
     /// way.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvictionTaskSpawnError::ZeroInterval`] when the
+    /// caller passes `Duration::ZERO` for `interval` — a zero
+    /// interval would tight-loop the eviction task and pin a
+    /// tokio worker thread, so we surface the misconfiguration
+    /// at construction time instead of in production at 100%
+    /// CPU.
+    ///
+    /// Returns [`EvictionTaskSpawnError::NoTokioRuntime`] when
+    /// the caller invokes this method outside an active tokio
+    /// runtime context. `tokio::spawn` itself panics in that
+    /// case ("there is no reactor running, must be called from
+    /// the context of a Tokio 1.x runtime"); we detect the
+    /// missing runtime up-front via
+    /// [`tokio::runtime::Handle::try_current`] and return a
+    /// typed error so the wiring layer can surface the
+    /// misconfiguration (e.g. constructing the limiter outside
+    /// `#[tokio::main]`) as a recoverable Result rather than an
+    /// async-runtime panic that aborts the supervisor.
     pub fn spawn_eviction_task(
         &self,
         idle_max: Duration,
         interval: Duration,
-    ) -> EvictionTaskHandle {
-        assert!(
-            !interval.is_zero(),
-            "rate-limiter eviction interval must be > 0"
-        );
+    ) -> Result<EvictionTaskHandle, EvictionTaskSpawnError> {
+        if interval.is_zero() {
+            return Err(EvictionTaskSpawnError::ZeroInterval);
+        }
+        // Check the runtime is reachable BEFORE calling
+        // `tokio::spawn`. `tokio::spawn` panics when invoked
+        // outside a runtime; we want a typed Result so callers
+        // can surface the misconfiguration without a panic.
+        let runtime_handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| EvictionTaskSpawnError::NoTokioRuntime)?;
         let limiter = self.clone();
-        let handle = tokio::spawn(async move {
+        let handle = runtime_handle.spawn(async move {
             // Phase the first tick a full interval out — booting
             // the SWG and immediately evicting a bucket the
             // operator literally just inserted would be confusing
@@ -310,8 +336,34 @@ impl RateLimiter {
                 limiter.evict_idle(idle_max);
             }
         });
-        EvictionTaskHandle { handle }
+        Ok(EvictionTaskHandle { handle })
     }
+}
+
+/// Errors produced by [`RateLimiter::spawn_eviction_task`].
+///
+/// Both variants are construction-time misconfigurations — the
+/// background task itself can't fail at runtime (its loop
+/// receives no external input beyond the operator-supplied
+/// `idle_max` and `interval`). The typed Result lets the wiring
+/// layer turn either case into a structured operator error
+/// instead of a tokio runtime panic.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum EvictionTaskSpawnError {
+    /// `interval` was `Duration::ZERO`. A zero interval would
+    /// tight-loop the eviction task and pin a tokio worker
+    /// thread. The caller must pass a positive interval (the
+    /// production default is 60s).
+    #[error("rate-limiter eviction interval must be > 0")]
+    ZeroInterval,
+
+    /// `spawn_eviction_task` was invoked outside an active tokio
+    /// runtime. The caller must invoke this method from within a
+    /// runtime context (e.g. inside `#[tokio::main]` or
+    /// [`tokio::runtime::Runtime::block_on`]); otherwise the
+    /// `tokio::spawn` call would panic.
+    #[error("spawn_eviction_task must be called within an active tokio runtime context")]
+    NoTokioRuntime,
 }
 
 /// Handle to a background eviction task spawned via
@@ -499,7 +551,9 @@ mod tests {
         clock.advance(Duration::from_secs(60));
         // Spawn the background task; interval is small enough
         // that we observe an eviction inside a 200ms sleep.
-        let handle = rl.spawn_eviction_task(Duration::from_secs(30), Duration::from_millis(20));
+        let handle = rl
+            .spawn_eviction_task(Duration::from_secs(30), Duration::from_millis(20))
+            .expect("spawn must succeed inside a tokio runtime");
         // Wait long enough for at least two interval ticks. The
         // first tick is the "skip the immediate-tick" one, the
         // second is the real evict_idle.
@@ -528,26 +582,44 @@ mod tests {
         // assert this by capturing the JoinHandle's is_finished
         // signal after the abort.
         let (rl, _clock) = limiter_with_test_clock(1.0, 1.0);
-        let handle = rl.spawn_eviction_task(Duration::from_secs(30), Duration::from_millis(20));
+        let handle = rl
+            .spawn_eviction_task(Duration::from_secs(30), Duration::from_millis(20))
+            .expect("spawn must succeed inside a tokio runtime");
         handle.abort();
         // The abort propagates on the next scheduler turn.
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(handle.is_finished(), "abort must terminate the task");
     }
 
-    #[test]
-    #[should_panic(expected = "interval")]
-    fn spawn_eviction_task_panics_on_zero_interval() {
+    #[tokio::test]
+    async fn spawn_eviction_task_returns_zero_interval_error_without_panicking() {
         // Zero interval would tight-loop the eviction task,
-        // pinning a worker thread. Surface the misconfiguration
-        // at construction, not in production at 100% CPU.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let (rl, _clock) = limiter_with_test_clock(1.0, 1.0);
-            let _ = rl.spawn_eviction_task(Duration::from_secs(30), Duration::ZERO);
-        });
+        // pinning a worker thread. We surface the
+        // misconfiguration via a typed `Result` rather than a
+        // panic so the operator wiring layer can convert it into
+        // a structured supervisor error without unwinding.
+        let (rl, _clock) = limiter_with_test_clock(1.0, 1.0);
+        let err = rl
+            .spawn_eviction_task(Duration::from_secs(30), Duration::ZERO)
+            .expect_err("zero interval must surface as Err");
+        assert_eq!(err, EvictionTaskSpawnError::ZeroInterval);
+    }
+
+    #[test]
+    fn spawn_eviction_task_returns_no_runtime_error_when_called_outside_tokio() {
+        // Regression test for the bot's finding: pre-`Result`
+        // shape, calling `spawn_eviction_task` outside an active
+        // tokio runtime panicked via the implicit `tokio::spawn`
+        // panic ("there is no reactor running…"). The typed
+        // Result lets the wiring layer surface the
+        // misconfiguration without an async-runtime unwind. We
+        // use a plain `#[test]` (no `#[tokio::test]`) so the
+        // current thread has no runtime context attached.
+        let (rl, _clock) = limiter_with_test_clock(1.0, 1.0);
+        let err = rl
+            .spawn_eviction_task(Duration::from_secs(30), Duration::from_millis(20))
+            .expect_err("missing runtime must surface as Err");
+        assert_eq!(err, EvictionTaskSpawnError::NoTokioRuntime);
     }
 
     #[test]

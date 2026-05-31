@@ -158,6 +158,16 @@ pub enum ErrorCode {
     /// malformed body). The handler returns a 400 to Envoy and
     /// the request is denied via the proxy's failure-mode.
     SwgExtAuthzDecode,
+    /// Operator-issued `install` or `stop` on the SWG supervisor
+    /// could not acquire the install serialisation lock within
+    /// the configured `install_lock_timeout`. Distinct from
+    /// [`Self::SwgProcessFailure`] because the corresponding
+    /// operator response differs: a process failure means Envoy
+    /// is unhealthy (investigate logs / restart the supervisor),
+    /// while an install-busy is pure backpressure (lower the
+    /// install rate, extend the timeout, or wait for the
+    /// in-flight install to drain).
+    SwgInstallBusy,
     /// Catch-all for failures that genuinely do not fit one of
     /// the more specific buckets. Use sparingly — a new code is
     /// almost always preferable so dashboards can break the rate
@@ -204,6 +214,7 @@ impl ErrorCode {
             Self::SwgCategoryBundleBodyDecode => "swg.category.bundle.body.decode",
             Self::SwgConfigValidate => "swg.config.validate",
             Self::SwgExtAuthzDecode => "swg.ext_authz.decode",
+            Self::SwgInstallBusy => "swg.install.busy",
             Self::Other => "other",
         }
     }
@@ -353,6 +364,7 @@ mod tests {
             ),
             (ErrorCode::SwgConfigValidate, "swg.config.validate"),
             (ErrorCode::SwgExtAuthzDecode, "swg.ext_authz.decode"),
+            (ErrorCode::SwgInstallBusy, "swg.install.busy"),
             (ErrorCode::Other, "other"),
         ];
         for (code, expected) in cases {

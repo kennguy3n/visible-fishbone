@@ -69,6 +69,19 @@ pub enum SwgError {
     /// well-formed [`crate::verdict::RequestContext`].
     #[error("ext_authz request decode error: {0}")]
     ExtAuthzDecode(String),
+
+    /// [`crate::manager::SwgManager::stop`] could not acquire
+    /// the internal `install_lock` within the
+    /// [`crate::manager::SwgManagerConfig::install_lock_timeout`]
+    /// budget. The supervisor is currently mid-install; the
+    /// caller should retry once the install completes or escalate
+    /// to a forced teardown if the install appears stuck. This
+    /// variant is only emitted when the operator opted in to a
+    /// bounded wait by setting `install_lock_timeout` to
+    /// `Some(_)` — the default `None` waits indefinitely and
+    /// never produces `InstallBusy`.
+    #[error("install/stop is busy: install_lock_timeout elapsed before lock was acquired")]
+    InstallBusy,
 }
 
 impl SwgError {
@@ -86,6 +99,13 @@ impl SwgError {
             Self::CategoryBundleStale { .. } => ErrorCode::SwgCategoryBundleStale,
             Self::CategoryBundleBodyDecode(_) => ErrorCode::SwgCategoryBundleBodyDecode,
             Self::ExtAuthzDecode(_) => ErrorCode::SwgExtAuthzDecode,
+            // `InstallBusy` is a backpressure signal — operator
+            // response (lower install rate, extend timeout, wait
+            // for in-flight install) differs from a process
+            // failure (investigate Envoy logs, restart the
+            // supervisor) so it gets its own dedicated
+            // dashboard-visible code.
+            Self::InstallBusy => ErrorCode::SwgInstallBusy,
         }
     }
 }
@@ -120,6 +140,7 @@ mod tests {
             },
             SwgError::CategoryBundleBodyDecode("x".into()),
             SwgError::ExtAuthzDecode("x".into()),
+            SwgError::InstallBusy,
         ];
         for err in cases {
             let s = err.code().as_str();

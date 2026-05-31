@@ -400,6 +400,15 @@ struct MockState {
     /// Scripted is_alive outcome. None means "report true while
     /// status == Running"; Some(b) overrides.
     is_alive_override: Option<bool>,
+    /// Optional gate used by tests to pause `validate_config`
+    /// mid-flight so concurrent install / stop / probe paths can
+    /// race against a known suspension point. The gate is read
+    /// inside `validate_config`, the lock is dropped, and the
+    /// gated call awaits `gate.notified()`. Tests release the
+    /// pause by calling `gate.notify_one()`. When `None`,
+    /// validate completes synchronously — the v0 default for
+    /// every existing test.
+    validate_gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl MockEnvoy {
@@ -440,6 +449,26 @@ impl MockEnvoy {
     pub fn with_alive(self, alive: bool) -> Self {
         self.inner.lock().is_alive_override = Some(alive);
         self
+    }
+
+    /// Install a gate that pauses every subsequent
+    /// `validate_config` call until the returned
+    /// [`tokio::sync::Notify`] receives a `notify_one()`. Used
+    /// by concurrency tests that need a deterministic suspension
+    /// point inside the install flow (so they can race a
+    /// concurrent `stop()` against an in-flight install without
+    /// real wall-clock timing).
+    ///
+    /// Returns the [`Arc<tokio::sync::Notify>`] the test
+    /// retains; calling `notify_one()` on it releases the next
+    /// gated validate. Each gated call consumes one
+    /// `notify_one()` (the gate is single-permit, like a tokio
+    /// `Notify`).
+    #[must_use]
+    pub fn install_validate_gate(&self) -> Arc<tokio::sync::Notify> {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        self.inner.lock().validate_gate = Some(notify.clone());
+        notify
     }
 
     /// Snapshot of recorded events — used by tests to assert
@@ -501,15 +530,25 @@ impl EnvoyProcess for MockEnvoy {
     }
 
     async fn validate_config(&self, config_path: &Path) -> Result<(), SwgError> {
-        let mut g = self.inner.lock();
-        g.validated.push(config_path.to_path_buf());
-        // Clone the scripted error so the same value is returned
-        // on every call. `SwgError: Clone` (see error.rs) makes
-        // this exhaustive across every variant — a future variant
-        // added to the taxonomy doesn't silently drop to `Ok(())`
-        // the way a per-variant match did before.
-        match &g.validate_result {
-            Some(err) => Err(err.clone()),
+        // Snapshot the scripted outcome and the gate under the
+        // sync lock, then release the lock before awaiting the
+        // gate — a sync `parking_lot::Mutex` held across an
+        // `.await` would block the tokio worker.
+        let (gate, err) = {
+            let mut g = self.inner.lock();
+            g.validated.push(config_path.to_path_buf());
+            // Clone the scripted error so the same value is returned
+            // on every call. `SwgError: Clone` (see error.rs) makes
+            // this exhaustive across every variant — a future variant
+            // added to the taxonomy doesn't silently drop to `Ok(())`
+            // the way a per-variant match did before.
+            (g.validate_gate.clone(), g.validate_result.clone())
+        };
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        match err {
+            Some(err) => Err(err),
             None => Ok(()),
         }
     }

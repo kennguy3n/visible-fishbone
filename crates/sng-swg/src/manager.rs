@@ -50,17 +50,38 @@ pub struct SwgManagerConfig {
     /// Maximum verdict staleness before the health monitor
     /// declares Degraded.
     pub verdict_staleness_window: Duration,
+    /// Maximum time [`SwgManager::install`] or [`SwgManager::stop`]
+    /// will wait to acquire the internal `install_lock` before
+    /// surfacing a busy outcome.
+    ///
+    /// The `install_lock` serialises the entire install body
+    /// (render → dedup → write → validate → rename → restart →
+    /// commit) and `stop()`, so a slow Envoy graceful-stop
+    /// (`grace_period` SIGTERM + SIGKILL escalation in
+    /// [`crate::process::ShellEnvoy::stop`]) can block every
+    /// subsequent caller for up to the full grace window.
+    /// `None` (the default) waits indefinitely; `Some(d)` bounds
+    /// the wait — install returns
+    /// [`InstallOutcome::Busy`] and stop returns
+    /// [`SwgError::InstallBusy`] when the timeout expires, so the
+    /// caller (typically the policy-bundle controller) can
+    /// reschedule rather than queueing arbitrary amounts of
+    /// pending installs.
+    pub install_lock_timeout: Option<Duration>,
 }
 
 impl SwgManagerConfig {
     /// Defaults: `/etc/sng/envoy.yaml`, `FailMode::Open`,
-    /// 30-second verdict staleness window.
+    /// 30-second verdict staleness window, install-lock wait is
+    /// unbounded (matches the pre-timeout behaviour so existing
+    /// operators see no change).
     #[must_use]
     pub fn defaults() -> Self {
         Self {
             config_path: PathBuf::from("/etc/sng/envoy.yaml"),
             fail_mode: FailMode::Open,
             verdict_staleness_window: Duration::from_secs(30),
+            install_lock_timeout: None,
         }
     }
 }
@@ -177,12 +198,28 @@ impl SwgManager {
     /// dedup hit from a real reload so the caller can surface
     /// the difference on operator dashboards.
     ///
-    /// Concurrency: the body is serialised by an internal
-    /// [`tokio::sync::Mutex`] so two concurrent install calls do
-    /// not both race past the digest dedup and try to validate,
-    /// rename, and restart Envoy. The lock is acquired before
-    /// the digest comparison so the dedup check sees the
-    /// post-commit state of whatever install ran just before it.
+    /// # Concurrency
+    ///
+    /// The body is serialised by an internal
+    /// [`tokio::sync::Mutex`] (`install_lock`) so two concurrent
+    /// install calls do not both race past the digest dedup and
+    /// try to validate, rename, and restart Envoy. The lock is
+    /// acquired before the digest comparison so the dedup check
+    /// sees the post-commit state of whatever install ran just
+    /// before it.
+    ///
+    /// The lock is held across [`EnvoyProcess::restart`], which
+    /// in the production [`crate::process::ShellEnvoy`] backend
+    /// performs a SIGTERM + `grace_period` wait + SIGKILL
+    /// escalation. A slow Envoy graceful-stop therefore can
+    /// block every concurrent `install()` caller for up to the
+    /// full grace window. Operators that want a bounded wait can
+    /// set
+    /// [`SwgManagerConfig::install_lock_timeout`] — when the
+    /// timeout expires before the lock is acquired, `install()`
+    /// returns [`InstallOutcome::Busy`] without touching disk or
+    /// signalling Envoy. The default is `None` (unbounded wait)
+    /// to preserve the historical contract.
     pub async fn install(&self, cfg: EnvoyConfig) -> Result<InstallOutcome, SwgError> {
         // Render before acquiring the lock — render is pure CPU
         // and can happen concurrently across installers without
@@ -190,7 +227,12 @@ impl SwgManager {
         // validate + rename + restart need serialisation.
         let rendered = render_envoy_yaml(&cfg)?;
         let digest = digest_envoy_yaml(&rendered);
-        let _guard = self.state.install_lock.lock().await;
+        let _guard = match self.acquire_install_lock().await {
+            Ok(g) => g,
+            Err(LockAcquireError::Timeout) => {
+                return Ok(InstallOutcome::Busy { digest });
+            }
+        };
         if let Some(prev) = self.state.last_digest.load().as_ref().clone() {
             if prev == digest {
                 return Ok(InstallOutcome::NoOp { digest });
@@ -251,12 +293,56 @@ impl SwgManager {
     /// Graceful stop. Sends Shutdown via the process trait;
     /// clears the in-memory config + digest so a subsequent
     /// install fully re-installs.
+    ///
+    /// # Concurrency
+    ///
+    /// `stop()` acquires the same `install_lock` that
+    /// [`Self::install`] holds, so a stop issued while an
+    /// install is mid-flight waits for the install to commit (or
+    /// fail and roll back) before tearing down the process.
+    /// Without this, a stop could land between the validate +
+    /// rename + restart steps of a concurrent install, leaving
+    /// the in-memory `last_config` / `last_digest` populated
+    /// from the freshly-installed bundle even though the
+    /// operator's most recent stated intent was `stop`. Holding
+    /// the lock makes the install ↔ stop ordering deterministic
+    /// (last writer wins under the lock).
+    ///
+    /// When [`SwgManagerConfig::install_lock_timeout`] is set,
+    /// `stop()` honours it the same way `install()` does — a
+    /// timeout surfaces as [`SwgError::InstallBusy`] rather than
+    /// blocking forever on a stuck installer. Without a timeout
+    /// (the default), `stop()` waits indefinitely.
     pub async fn stop(&self) -> Result<(), SwgError> {
+        let _guard = match self.acquire_install_lock().await {
+            Ok(g) => g,
+            Err(LockAcquireError::Timeout) => {
+                return Err(SwgError::InstallBusy);
+            }
+        };
         self.process.stop().await?;
         self.state.last_config.store(Arc::new(None));
         self.state.last_digest.store(Arc::new(None));
         *self.state.last_verdict_at.lock() = None;
         Ok(())
+    }
+
+    /// Acquire `install_lock` honouring
+    /// [`SwgManagerConfig::install_lock_timeout`]. Returns the
+    /// owned guard on success or a typed timeout error so the
+    /// caller can map it to the variant appropriate to its
+    /// surface (an `Ok(InstallOutcome::Busy)` for `install`, an
+    /// `Err(SwgError::InstallBusy)` for `stop`).
+    async fn acquire_install_lock(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, LockAcquireError> {
+        match self.cfg.install_lock_timeout {
+            None => Ok(self.state.install_lock.lock().await),
+            Some(d) => match tokio::time::timeout(d, self.state.install_lock.lock()).await {
+                Ok(guard) => Ok(guard),
+                Err(_) => Err(LockAcquireError::Timeout),
+            },
+        }
     }
 
     /// Run a single health probe + return the snapshot.
@@ -316,6 +402,13 @@ pub enum InstallOutcome {
     /// Rendered config matched the installed digest — no kernel
     /// action taken.
     NoOp { digest: String },
+    /// The caller's
+    /// [`SwgManagerConfig::install_lock_timeout`] elapsed before
+    /// the install acquired the internal `install_lock`. No
+    /// filesystem or process work was performed; the caller can
+    /// reschedule. Carries the digest of the candidate render so
+    /// the caller can correlate which install was deferred.
+    Busy { digest: String },
 }
 
 impl InstallOutcome {
@@ -325,13 +418,38 @@ impl InstallOutcome {
         matches!(self, Self::Reloaded { .. })
     }
 
+    /// True when the outcome was a no-op dedup hit. Distinct
+    /// from [`Self::was_busy`] because dedup is the
+    /// "already-current" state while busy is the
+    /// "could-not-attempt" state.
+    #[must_use]
+    pub const fn was_noop(&self) -> bool {
+        matches!(self, Self::NoOp { .. })
+    }
+
+    /// True when the install hit the
+    /// [`SwgManagerConfig::install_lock_timeout`] and was
+    /// deferred without touching the process or filesystem.
+    #[must_use]
+    pub const fn was_busy(&self) -> bool {
+        matches!(self, Self::Busy { .. })
+    }
+
     /// Pull the digest regardless of variant.
     #[must_use]
     pub fn digest(&self) -> &str {
         match self {
-            Self::Reloaded { digest } | Self::NoOp { digest } => digest,
+            Self::Reloaded { digest } | Self::NoOp { digest } | Self::Busy { digest } => digest,
         }
     }
+}
+
+/// Internal error from [`SwgManager::acquire_install_lock`].
+/// Kept private to the module — callers map it to the
+/// surface-appropriate user-visible type (`InstallOutcome::Busy`
+/// or `SwgError::InstallBusy`).
+enum LockAcquireError {
+    Timeout,
 }
 
 /// Derive the staging-file path used during write-validate-
@@ -339,7 +457,7 @@ impl InstallOutcome {
 /// is intra-directory (atomic on every POSIX filesystem and on
 /// NTFS via `MoveFileExW`).
 ///
-/// `<config>.yaml` \u2192 `<config>.yaml.staging`. Extension-extension
+/// `<config>.yaml` → `<config>.yaml.staging`. Extension-extension
 /// avoids surprising operators who scan for `.yaml` and want a
 /// stable filename without a staging suffix surfacing through.
 fn staging_path_for(config_path: &std::path::Path) -> std::path::PathBuf {
@@ -365,6 +483,7 @@ mod tests {
             config_path: tmp.path().join("envoy.yaml"),
             fail_mode: FailMode::Open,
             verdict_staleness_window: Duration::from_secs(30),
+            install_lock_timeout: None,
         };
         let m = SwgManager::new(cfg, mock.clone());
         (m, mock)
@@ -449,6 +568,7 @@ mod tests {
             config_path: tmp.path().join("envoy.yaml"),
             fail_mode: FailMode::Open,
             verdict_staleness_window: Duration::from_secs(30),
+            install_lock_timeout: None,
         };
         let m = SwgManager::new(cfgm, mock);
         let cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
@@ -460,7 +580,7 @@ mod tests {
         // Previous in-memory state untouched.
         assert!(m.current_digest().is_none());
         // Write-validate-rename: the live config path must NOT
-        // exist on disk \u2014 the candidate bytes never crossed the
+        // exist on disk — the candidate bytes never crossed the
         // validate gate, so they must not be visible as the
         // live config. A crash-restart at this point should find
         // either nothing (cold-boot path) or the previous good
@@ -483,7 +603,7 @@ mod tests {
         // Pin the write-validate-rename invariant on the warm
         // path: a successful first install leaves the live
         // config on disk. A second install whose candidate fails
-        // validate must NOT corrupt that live config \u2014 a
+        // validate must NOT corrupt that live config — a
         // crash-restart between the failed validate and the next
         // successful install must read the previous good bytes.
         let tmp = TempDir::new().unwrap();
@@ -492,6 +612,7 @@ mod tests {
             config_path: tmp.path().join("envoy.yaml"),
             fail_mode: FailMode::Open,
             verdict_staleness_window: Duration::from_secs(30),
+            install_lock_timeout: None,
         };
         let mgr = SwgManager::new(cfgm, mock.clone());
 
@@ -576,6 +697,7 @@ mod tests {
             config_path: tmp.path().join("envoy.yaml"),
             fail_mode: FailMode::Closed,
             verdict_staleness_window: Duration::from_secs(30),
+            install_lock_timeout: None,
         };
         let m = SwgManager::new(cfgm, mock);
         let cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
@@ -648,6 +770,204 @@ mod tests {
         assert!(!n.was_reloaded());
         assert_eq!(r.digest(), "abc");
         assert_eq!(n.digest(), "abc");
+    }
+
+    #[tokio::test]
+    async fn install_outcome_busy_classifier_distinguishes_busy_from_reloaded_and_noop() {
+        // The three classifiers (`was_reloaded`, `was_noop`,
+        // `was_busy`) partition the outcome space exactly once
+        // — a downstream consumer should be able to dispatch on
+        // these without further matching.
+        let r = InstallOutcome::Reloaded {
+            digest: "abc".into(),
+        };
+        let n = InstallOutcome::NoOp {
+            digest: "abc".into(),
+        };
+        let b = InstallOutcome::Busy {
+            digest: "abc".into(),
+        };
+        assert!(r.was_reloaded() && !r.was_noop() && !r.was_busy());
+        assert!(!n.was_reloaded() && n.was_noop() && !n.was_busy());
+        assert!(!b.was_reloaded() && !b.was_noop() && b.was_busy());
+        assert_eq!(b.digest(), "abc");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn install_returns_busy_when_lock_acquisition_exceeds_timeout() {
+        // Pin the `install_lock_timeout` escape hatch: if the
+        // lock is held by an in-flight install for longer than
+        // the configured timeout, the second install returns
+        // `Busy` without touching the process or filesystem.
+        // We use `start_paused = true` so virtual tokio time
+        // drives the timeout deterministically rather than
+        // racing the wall clock.
+        let tmp = TempDir::new().unwrap();
+        let mock = Arc::new(MockEnvoy::new());
+        let gate = mock.install_validate_gate();
+        let cfgm = SwgManagerConfig {
+            config_path: tmp.path().join("envoy.yaml"),
+            fail_mode: FailMode::Open,
+            verdict_staleness_window: Duration::from_secs(30),
+            install_lock_timeout: Some(Duration::from_millis(50)),
+        };
+        let m = SwgManager::new(cfgm, mock.clone());
+
+        // First install: hangs inside validate (the mock awaits
+        // the gate). We spawn it onto a task so the test body
+        // continues without blocking on the gate itself.
+        let m_slow = m.clone();
+        let cfg_slow = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        let slow = tokio::spawn(async move { m_slow.install(cfg_slow).await });
+
+        // Yield so the slow install reaches the gate and holds
+        // the install_lock.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // Second install: races for the same lock. Different
+        // digest so it would not dedup. The timeout elapses
+        // before the first install completes (because the gate
+        // is still closed) — install must return Busy.
+        let mut cfg_busy = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        cfg_busy.listeners[0].port = 9443;
+        let busy_outcome = m.install(cfg_busy).await.unwrap();
+        assert!(
+            busy_outcome.was_busy(),
+            "second install must return Busy when lock_timeout expires; got {busy_outcome:?}"
+        );
+
+        // Releasing the gate lets the first install commit; we
+        // observe it succeeded and that the busy install never
+        // touched validate or start (so the mock only saw the
+        // single first-install validate + start).
+        gate.notify_one();
+        let slow_outcome = slow.await.unwrap().unwrap();
+        assert!(slow_outcome.was_reloaded());
+        let rec = mock.recorded();
+        assert_eq!(
+            rec.validated.len(),
+            1,
+            "the Busy install must not have run validate",
+        );
+        assert_eq!(
+            rec.started_with.len(),
+            1,
+            "the Busy install must not have started envoy",
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_returns_install_busy_when_lock_acquisition_exceeds_timeout() {
+        // The same escape hatch applies to `stop()` — if an
+        // in-flight install holds the install_lock past the
+        // configured timeout, the operator-issued stop surfaces
+        // `SwgError::InstallBusy` instead of blocking forever.
+        let tmp = TempDir::new().unwrap();
+        let mock = Arc::new(MockEnvoy::new());
+        let gate = mock.install_validate_gate();
+        let cfgm = SwgManagerConfig {
+            config_path: tmp.path().join("envoy.yaml"),
+            fail_mode: FailMode::Open,
+            verdict_staleness_window: Duration::from_secs(30),
+            install_lock_timeout: Some(Duration::from_millis(50)),
+        };
+        let m = SwgManager::new(cfgm, mock.clone());
+
+        let m_slow = m.clone();
+        let cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        let slow = tokio::spawn(async move { m_slow.install(cfg).await });
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        let stop_err = m.stop().await.expect_err("stop must time out");
+        assert!(
+            matches!(stop_err, SwgError::InstallBusy),
+            "stop must surface InstallBusy when lock_timeout expires; got {stop_err:?}",
+        );
+
+        // Release the install so the spawned task can drain;
+        // confirm it would otherwise have completed.
+        gate.notify_one();
+        let slow_outcome = slow.await.unwrap().unwrap();
+        assert!(slow_outcome.was_reloaded());
+    }
+
+    #[tokio::test]
+    async fn stop_serialises_with_in_flight_install_via_install_lock() {
+        // Regression test for the `stop()` vs `install()` race.
+        // Before stop() acquired the install_lock, a stop issued
+        // mid-install could race past install's restart() step
+        // and clear in-memory state out from under the still-
+        // running install, leaving the supervisor in an
+        // inconsistent "stopped but last_config populated" or
+        // "installed but last_config cleared" state depending on
+        // scheduling.
+        //
+        // Now that stop() acquires the same install_lock,
+        // install() must commit fully (or fail) before stop()
+        // runs. We pin this with a gated validate: install hangs
+        // mid-validate (lock held), stop is issued, we assert
+        // stop has NOT yet completed; we release the gate;
+        // install commits; stop then proceeds and clears state.
+        let tmp = TempDir::new().unwrap();
+        let mock = Arc::new(MockEnvoy::new());
+        let gate = mock.install_validate_gate();
+        let cfgm = SwgManagerConfig {
+            config_path: tmp.path().join("envoy.yaml"),
+            fail_mode: FailMode::Open,
+            verdict_staleness_window: Duration::from_secs(30),
+            install_lock_timeout: None,
+        };
+        let m = SwgManager::new(cfgm, mock.clone());
+
+        let m_install = m.clone();
+        let cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        let install = tokio::spawn(async move { m_install.install(cfg).await });
+        // Let install reach the gate.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        let m_stop = m.clone();
+        let stop = tokio::spawn(async move { m_stop.stop().await });
+        // Stop is now contending for the lock; let the scheduler
+        // run it.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // Stop MUST still be pending — install is mid-validate
+        // and holds the lock. If we observed `is_finished()`
+        // here, that would mean stop ran without waiting on the
+        // lock, i.e. the race the fix targets is still live.
+        assert!(
+            !stop.is_finished(),
+            "stop() must block on install_lock while install is mid-flight",
+        );
+
+        // Release the gate → install commits last_config &
+        // last_digest, releases the lock; stop then acquires the
+        // lock and clears state.
+        gate.notify_one();
+        let install_res = install.await.unwrap().unwrap();
+        assert!(install_res.was_reloaded());
+        stop.await.unwrap().unwrap();
+
+        // Post-stop state must be the cleared state — stop ran
+        // after install committed, so its clears observed the
+        // installed state and cleared it. last_digest is None.
+        assert!(
+            m.current_digest().is_none(),
+            "stop must clear digest after install committed",
+        );
+        let rec = mock.recorded();
+        // install: 1 start, 0 stops; stop: 1 stop. Cold-boot
+        // install does start (not restart), so stopped_count
+        // ends up at exactly 1 from the stop() call.
+        assert_eq!(rec.started_with.len(), 1);
+        assert_eq!(
+            rec.stopped_count, 1,
+            "stop() must reach process.stop() once after install commits",
+        );
     }
 
     #[tokio::test]
