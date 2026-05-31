@@ -61,33 +61,60 @@ ext-authz uses at runtime.
 
 ## Wire-format compatibility
 
-The Envoy ext-authz request body uses a stable JSON envelope:
+### Request
+
+The Envoy ext-authz request body has just two top-level fields —
+the full HTTP header map as an array of `[name, value]` pairs
+(which is how serde serialises `Vec<(String, String)>`) and an
+optional pre-computed body hash. SNG-specific fields are
+**carried in headers**, not as top-level JSON keys — `into_context`
+in `auth.rs` extracts them from the header vector at decode time.
 
 ```json
 {
-  "tenant_id": "acme",
-  "principal_id": "user@acme",
-  "url": "https://example.com/page",
-  "method": "GET",
-  "sni": "example.com",
-  "headers": {
-    "user-agent": "Mozilla/5.0",
-    "host": "example.com"
-  }
+  "headers": [
+    [":method", "GET"],
+    [":scheme", "https"],
+    [":path", "/page"],
+    ["host", "example.com"],
+    ["x-sng-tenant", "acme"],
+    ["x-sng-principal", "user@acme"],
+    ["x-sng-sni", "example.com"],
+    ["user-agent", "Mozilla/5.0"]
+  ],
+  "body_sha256": "e3b0c442…"
 }
 ```
 
-The response envelope is:
+The HTTP-pseudo headers `:method`, `:scheme`, `:path`, and the
+`host` header are required. `x-sng-tenant` and `x-sng-principal`
+are required so the handler can drive per-tenant rate-limiting
+and per-principal audit. `x-sng-sni` is optional (set by the
+forward-proxy on intercepted CONNECTs); `x-sng-file-sha256` and
+the JSON `body_sha256` field both feed the malware-verdict path
+(the JSON field is the wire-format slot — the header is the
+Envoy filter-chain handoff slot).
+
+### Response
+
+The response envelope mirrors what Envoy turns into an
+authorisation decision plus the matching deny / 429 response:
 
 ```json
 {
   "action": "allow | deny | bypass | rate_limit",
-  "status": 200 | 403 | 429 | null,
+  "status": 200,
   "reason": "human-readable description",
   "retry_after_secs": 60,
   "category": "social_media"
 }
 ```
+
+`status`, `retry_after_secs`, and `category` are nullable.
+`retry_after_secs` is populated only on the `rate_limit` action
+(it becomes the `Retry-After` header Envoy hands back); `category`
+is populated only when the categoriser produced a value (any
+action).
 
 Both shapes are exercised by [`auth::tests`] round-trip tests so a
 silent rename to either is caught at build time.

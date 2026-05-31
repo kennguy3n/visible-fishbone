@@ -32,18 +32,25 @@ use crate::error::SwgError;
 /// at the trait level (rather than exposing a raw `i32`) so
 /// the mock can validate exactly what it received, and so a
 /// future non-POSIX backend has a clear mapping target.
+///
+/// Note: there is no `Reload` variant. Envoy does not honour
+/// `SIGHUP` for in-process config reload — its documented
+/// hot-restart mechanism requires the legacy `hot-restarter.py`
+/// supervisor or `--restart-epoch` shared-memory machinery,
+/// neither of which this single-process supervisor implements.
+/// Config-change pathways therefore go through
+/// [`EnvoyProcess::restart`], a stop-then-start orchestration
+/// that's honest about being a brief drain + restart rather
+/// than a true hot-swap.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvoySignal {
-    /// Hot-restart with the new config. Envoy's `SIGHUP` is the
-    /// documented reload signal — the parent process forks a
-    /// new worker that picks up the new config, then the old
-    /// worker drains and exits.
-    Reload,
-    /// Re-open log files. Used by log rotation.
+    /// Re-open log files. Used by log rotation. Envoy honours
+    /// `SIGUSR1` for this purpose and the mapping is stable
+    /// across Envoy versions.
     Rotate,
     /// Graceful shutdown — drain connections, flush queues,
-    /// exit.
+    /// exit. `SIGTERM`.
     Shutdown,
 }
 
@@ -54,8 +61,6 @@ impl EnvoySignal {
     #[must_use]
     pub const fn as_posix(self) -> i32 {
         match self {
-            // SIGHUP — Envoy's documented hot-restart signal.
-            Self::Reload => 1,
             // SIGUSR1 — Envoy's documented log-rotate signal.
             Self::Rotate => 10,
             // SIGTERM — graceful shutdown.
@@ -97,6 +102,24 @@ pub trait EnvoyProcess: Send + Sync + std::fmt::Debug {
     /// Send a signal to the running process. Returns
     /// [`SwgError::Process`] if no process is currently running.
     async fn signal(&self, sig: EnvoySignal) -> Result<(), SwgError>;
+    /// Apply a new config to a running supervisor. The default
+    /// implementation is a graceful stop followed by a start
+    /// against the new config path. We do not attempt Envoy
+    /// hot-restart here — Envoy's documented hot-restart
+    /// mechanism requires either the legacy `hot-restarter.py`
+    /// supervisor or the `--restart-epoch` + shared-memory
+    /// machinery, neither of which this single-process
+    /// supervisor implements. The honest semantics for a
+    /// config-change in this architecture is a brief drain +
+    /// restart, which is what the default impl does.
+    ///
+    /// Implementations that bring true hot-restart support
+    /// (e.g. via the Envoy admin API's `/runtime_modify` or by
+    /// re-introducing `hot-restarter.py`) can override this.
+    async fn restart(&self, config_path: &Path) -> Result<(), SwgError> {
+        self.stop().await?;
+        self.start(config_path).await
+    }
     /// Validate a candidate config without actually loading it.
     /// In production this calls `envoy --mode validate`; in the
     /// mock it consults a scripted result.
@@ -396,6 +419,22 @@ impl MockEnvoy {
         self
     }
 
+    /// Arm a validate failure on an already-constructed mock.
+    /// Used by tests that need a successful first install (to
+    /// stage a previous-good config on disk) and then a failing
+    /// second install (to assert the write-validate-rename
+    /// preserves the previous bytes).
+    pub fn set_validate_failure(&self, err: SwgError) {
+        self.inner.lock().validate_result = Some(err);
+    }
+
+    /// Clear any armed validate failure so subsequent calls
+    /// succeed again. Useful for tests that recover the mock to
+    /// the success path after exercising a failure.
+    pub fn clear_validate_failure(&self) {
+        self.inner.lock().validate_result = None;
+    }
+
     /// Force the next `is_alive` calls to return `alive`.
     #[must_use]
     pub fn with_alive(self, alive: bool) -> Self {
@@ -499,13 +538,16 @@ mod tests {
         let m = MockEnvoy::new();
         let path = PathBuf::from("/tmp/envoy.yaml");
         m.start(&path).await.unwrap();
-        m.signal(EnvoySignal::Reload).await.unwrap();
         m.signal(EnvoySignal::Rotate).await.unwrap();
+        m.signal(EnvoySignal::Shutdown).await.unwrap();
         m.stop().await.unwrap();
 
         let rec = m.recorded();
         assert_eq!(rec.started_with, vec![path]);
-        assert_eq!(rec.signals, vec![EnvoySignal::Reload, EnvoySignal::Rotate]);
+        assert_eq!(
+            rec.signals,
+            vec![EnvoySignal::Rotate, EnvoySignal::Shutdown]
+        );
         assert_eq!(rec.stopped_count, 1);
         assert_eq!(rec.status, ProcessStatus::Stopped);
     }
@@ -534,7 +576,7 @@ mod tests {
         // restart.
         let m = MockEnvoy::new();
         let err = m
-            .signal(EnvoySignal::Reload)
+            .signal(EnvoySignal::Rotate)
             .await
             .expect_err("signal-while-stopped must fail");
         match err {
@@ -638,11 +680,28 @@ mod tests {
     fn envoy_signal_posix_mapping_is_stable() {
         // The shell backend has to send the *same* POSIX
         // numbers; this lock-in test prevents a refactor from
-        // remapping Reload → SIGUSR1 (Envoy would not reload)
+        // remapping Rotate → SIGTERM (logs would not rotate)
         // or Shutdown → SIGKILL (Envoy would not drain).
-        assert_eq!(EnvoySignal::Reload.as_posix(), 1);
         assert_eq!(EnvoySignal::Rotate.as_posix(), 10);
         assert_eq!(EnvoySignal::Shutdown.as_posix(), 15);
+    }
+
+    #[tokio::test]
+    async fn mock_restart_default_impl_stops_then_starts() {
+        // The trait default for `restart()` is stop + start;
+        // the mock doesn't override it. This pins the
+        // expected sequence so a future override on MockEnvoy
+        // (e.g. to record a dedicated `restarts: Vec<...>`)
+        // doesn't silently drop the stop call.
+        let m = MockEnvoy::new();
+        let path = PathBuf::from("/tmp/envoy.yaml");
+        m.start(&path).await.unwrap();
+        m.restart(&path).await.unwrap();
+        let rec = m.recorded();
+        // Two starts (initial + post-restart), one stop.
+        assert_eq!(rec.started_with.len(), 2, "restart must call start");
+        assert_eq!(rec.stopped_count, 1, "restart must call stop");
+        assert_eq!(rec.status, ProcessStatus::Running);
     }
 
     #[test]

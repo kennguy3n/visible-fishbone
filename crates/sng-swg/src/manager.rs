@@ -33,7 +33,7 @@ use tokio::time::Instant;
 use crate::config::{EnvoyConfig, digest_envoy_yaml, render_envoy_yaml, summarize_listeners};
 use crate::error::SwgError;
 use crate::health::{FailMode, HealthProbe, ManagerHealth, evaluate};
-use crate::process::{EnvoyProcess, EnvoySignal, ProcessStatus};
+use crate::process::{EnvoyProcess, ProcessStatus};
 
 /// Operator-controlled manager configuration. Constructed by the
 /// caller; not mutable post-construction (use [`SwgManager::install`]
@@ -143,12 +143,20 @@ impl SwgManager {
     /// 2. Compute the SHA-256 digest.
     /// 3. If the digest matches the last installed, skip the
     ///    rest (no-op hot-swap).
-    /// 4. Write the YAML to disk.
-    /// 5. Run `envoy --mode validate` on the staged file (the
-    ///    process trait handles the implementation).
-    /// 6. If Envoy is running, send a Reload signal; otherwise
-    ///    start it.
-    /// 7. On success, atomically swap the in-memory config +
+    /// 4. Write the YAML to a staging file (`<config>.staging`).
+    /// 5. Run `envoy --mode validate` on the staging file.
+    /// 6. On validate success, atomically rename the staging
+    ///    file over the live config path so the on-disk live
+    ///    config either stays as the last-good bytes (if
+    ///    validate failed) or jumps to the new bytes (if
+    ///    validate succeeded). A subsequent Envoy crash +
+    ///    restart therefore always reads a config that has
+    ///    passed `--mode validate`.
+    /// 7. If Envoy is running, request a graceful restart;
+    ///    otherwise start it. (The supervisor does not
+    ///    implement Envoy hot-restart — see
+    ///    [`EnvoyProcess::restart`] for the rationale.)
+    /// 8. On success, atomically swap the in-memory config +
     ///    digest.
     ///
     /// Returns the installation outcome — distinguishes a no-op
@@ -162,20 +170,45 @@ impl SwgManager {
                 return Ok(InstallOutcome::NoOp { digest });
             }
         }
-        // Write to disk first so validate + reload point at the
-        // same bytes. The materialise step is gated on the digest
-        // dedup above so we don't churn the filesystem.
-        tokio::fs::write(&self.cfg.config_path, &rendered)
+        // Write-validate-rename: stage the new bytes alongside
+        // the live config, validate the staged file, and only
+        // then atomically rename it onto the live path. If
+        // validate fails, the live config is the previous
+        // good bytes — so an Envoy crash-restart reads a
+        // config that has passed validate, not the candidate
+        // bytes we were trying out.
+        let staging_path = staging_path_for(&self.cfg.config_path);
+        tokio::fs::write(&staging_path, &rendered)
             .await
             .map_err(SwgError::from)?;
-        // Validate before swap so a bad config never makes it
-        // into the running proxy.
-        self.process.validate_config(&self.cfg.config_path).await?;
-        // Reload or start.
+        // Validate the staging file before promoting it.
+        match self.process.validate_config(&staging_path).await {
+            Ok(()) => {}
+            Err(e) => {
+                // Clean up the staging file so a subsequent
+                // failed validate doesn't leave bad bytes
+                // littering the config directory. We deliberately
+                // swallow remove_file errors — the original
+                // validate failure is the operator-actionable
+                // signal; a leftover staging file is a
+                // self-cleaning nuisance the next install
+                // overwrites.
+                let _ = tokio::fs::remove_file(&staging_path).await;
+                return Err(e);
+            }
+        }
+        // Validate passed — atomically promote the staging file
+        // to the live config path. `rename` is atomic on the
+        // same filesystem (which the staging path is, by
+        // construction — it's the same directory).
+        tokio::fs::rename(&staging_path, &self.cfg.config_path)
+            .await
+            .map_err(SwgError::from)?;
+        // Reload (== restart in this supervisor) or start.
         let status = self.process.status().await;
         match status {
             ProcessStatus::Running => {
-                self.process.signal(EnvoySignal::Reload).await?;
+                self.process.restart(&self.cfg.config_path).await?;
             }
             ProcessStatus::Stopped | ProcessStatus::Crashed => {
                 self.process.start(&self.cfg.config_path).await?;
@@ -275,6 +308,23 @@ impl InstallOutcome {
     }
 }
 
+/// Derive the staging-file path used during write-validate-
+/// rename. Lives alongside the live config so the final rename
+/// is intra-directory (atomic on every POSIX filesystem and on
+/// NTFS via `MoveFileExW`).
+///
+/// `<config>.yaml` \u2192 `<config>.yaml.staging`. Extension-extension
+/// avoids surprising operators who scan for `.yaml` and want a
+/// stable filename without a staging suffix surfacing through.
+fn staging_path_for(config_path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = config_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".staging");
+    match config_path.parent() {
+        Some(parent) => parent.join(name),
+        None => std::path::PathBuf::from(name),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,7 +378,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn different_config_reloads_running_envoy_via_sighup() {
+    async fn different_config_restarts_running_envoy() {
+        // The supervisor does not implement Envoy hot-restart —
+        // a config change drives a graceful stop + start through
+        // [`EnvoyProcess::restart`] (default impl), which the
+        // mock records as one extra stop + one extra start.
         let tmp = TempDir::new().unwrap();
         let (m, mock) = manager(&tmp);
         let cfg1 = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
@@ -341,8 +395,21 @@ mod tests {
         assert!(out.was_reloaded());
 
         let rec = mock.recorded();
-        assert_eq!(rec.started_with.len(), 1, "must NOT restart envoy");
-        assert_eq!(rec.signals, vec![EnvoySignal::Reload], "must SIGHUP envoy");
+        // Initial install: 1 start.
+        // Second install: restart() = 1 stop + 1 start = 2 total starts, 1 stop.
+        assert_eq!(
+            rec.started_with.len(),
+            2,
+            "second install must restart (stop + start) the running process"
+        );
+        assert_eq!(
+            rec.stopped_count, 1,
+            "second install must call stop() as the first half of restart"
+        );
+        assert!(
+            rec.signals.is_empty(),
+            "restart goes through stop()/start(), not signal()"
+        );
         assert_eq!(rec.validated.len(), 2, "must validate the new config");
     }
 
@@ -366,6 +433,83 @@ mod tests {
         }
         // Previous in-memory state untouched.
         assert!(m.current_digest().is_none());
+        // Write-validate-rename: the live config path must NOT
+        // exist on disk \u2014 the candidate bytes never crossed the
+        // validate gate, so they must not be visible as the
+        // live config. A crash-restart at this point should find
+        // either nothing (cold-boot path) or the previous good
+        // config bytes (warm path); never the rejected
+        // candidate.
+        assert!(
+            !tmp.path().join("envoy.yaml").exists(),
+            "validate failure must leave no candidate bytes on the live path"
+        );
+        // And the staging file is cleaned up so a future install
+        // doesn't see a stale staging blob.
+        assert!(
+            !tmp.path().join("envoy.yaml.staging").exists(),
+            "validate failure must clean up its own staging file"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_failure_after_first_install_preserves_previous_live_config() {
+        // Pin the write-validate-rename invariant on the warm
+        // path: a successful first install leaves the live
+        // config on disk. A second install whose candidate fails
+        // validate must NOT corrupt that live config \u2014 a
+        // crash-restart between the failed validate and the next
+        // successful install must read the previous good bytes.
+        let tmp = TempDir::new().unwrap();
+        let mock = Arc::new(MockEnvoy::new());
+        let cfgm = SwgManagerConfig {
+            config_path: tmp.path().join("envoy.yaml"),
+            fail_mode: FailMode::Open,
+            verdict_staleness_window: Duration::from_secs(30),
+        };
+        let mgr = SwgManager::new(cfgm, mock.clone());
+
+        // First install: passes validate, writes live config.
+        let initial = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        mgr.install(initial).await.unwrap();
+        let good_bytes = tokio::fs::read_to_string(tmp.path().join("envoy.yaml"))
+            .await
+            .unwrap();
+        assert!(good_bytes.contains("port_value: 8443"));
+
+        // Arm the mock to fail validate on the next call.
+        mock.set_validate_failure(SwgError::ConfigValidate(
+            "candidate has bad upstream cluster".into(),
+        ));
+
+        // Second install: passes the digest dedup (different
+        // port), reaches validate, fails. The live config on
+        // disk must still be the first-install bytes.
+        let mut bad_candidate =
+            EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        bad_candidate.listeners[0].port = 9443;
+        let err = mgr
+            .install(bad_candidate)
+            .await
+            .expect_err("rigged validate failure must surface");
+        match err {
+            SwgError::ConfigValidate(msg) => {
+                assert!(msg.contains("bad upstream cluster"), "{msg}");
+            }
+            other => panic!("expected ConfigValidate, got {other:?}"),
+        }
+
+        let live_bytes_after = tokio::fs::read_to_string(tmp.path().join("envoy.yaml"))
+            .await
+            .unwrap();
+        assert_eq!(
+            live_bytes_after, good_bytes,
+            "failed validate must not corrupt the previous-good live config"
+        );
+        assert!(
+            !tmp.path().join("envoy.yaml.staging").exists(),
+            "failed validate must clean up its staging file"
+        );
     }
 
     #[tokio::test]

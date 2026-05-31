@@ -137,9 +137,23 @@ impl LocalCategoryDb {
     /// `.iter().count()` walk.
     pub fn install(&self, mut entries: Vec<CategoryEntry>) -> usize {
         entries.sort_by(|a, b| {
+            // Primary: descending by stripped-host length
+            // (longest suffix first).
             let host_cmp = sort_key(&b.host).cmp(&sort_key(&a.host));
             if host_cmp != std::cmp::Ordering::Equal {
                 return host_cmp;
+            }
+            // Secondary: an exact-host entry beats a wildcard
+            // entry of the same stripped length. The module
+            // doc promises "exact host wins over `*.host`";
+            // sorting wildcard-after-exact in walk order makes
+            // the linear scan find the exact entry first when
+            // both are present in the index.
+            let a_wc = is_wildcard(&a.host);
+            let b_wc = is_wildcard(&b.host);
+            let wc_cmp = a_wc.cmp(&b_wc);
+            if wc_cmp != std::cmp::Ordering::Equal {
+                return wc_cmp;
             }
             let bp = b.path_prefix.as_deref().unwrap_or("");
             let ap = a.path_prefix.as_deref().unwrap_or("");
@@ -199,10 +213,19 @@ impl UrlCategorizer for LocalCategoryDb {
 }
 
 // A sort key that boils a host pattern down to "longer is more
-// specific". `*.foo` and `foo` get equal weight; the dedup pass
-// keeps the one that came first after the stable sort.
+// specific". `*.foo` and `foo` get equal weight on the length
+// axis; [`install`] adds a secondary tie-break that puts the
+// exact (non-wildcard) entry before the wildcard so the
+// module-doc precedence rules hold.
 fn sort_key(host: &str) -> usize {
     host.strip_prefix("*.").unwrap_or(host).len()
+}
+
+// Whether the host pattern is a wildcard (`*.foo`) vs an exact
+// host (`foo`). Used as a secondary sort key so exact entries
+// appear before wildcard entries of the same stripped length.
+fn is_wildcard(host: &str) -> bool {
+    host.starts_with("*.")
 }
 
 // Host comparator. Matches `*.suffix` against any depth of

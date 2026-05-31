@@ -214,6 +214,16 @@ struct HandlerInner {
     /// after a binary_search, which beats HashSet on the typical
     /// 50-200 entry list.
     deny_categories: Vec<String>,
+    /// When true, [`MalwareVerdict::Suspicious`] (heuristic-only
+    /// match — classifier not confident enough to deny outright)
+    /// is promoted to Deny on the response-side malware check.
+    /// When false (the documented default), `Suspicious` is
+    /// treated the same as `Clean` so a heuristic-only match
+    /// does not produce a false-positive block. The flag is set
+    /// at builder-time by the operator-controlled SWG config —
+    /// a deployment that wants the higher-vigilance posture
+    /// opts in explicitly.
+    elevated_risk_mode: bool,
 }
 
 impl std::fmt::Debug for ExtAuthzHandler {
@@ -241,6 +251,7 @@ pub struct ExtAuthzHandlerBuilder {
     rate_limiter: Option<RateLimiter>,
     telemetry: Option<Arc<dyn TelemetryEmitter>>,
     deny_categories: Vec<String>,
+    elevated_risk_mode: bool,
 }
 
 impl std::fmt::Debug for ExtAuthzHandlerBuilder {
@@ -252,6 +263,7 @@ impl std::fmt::Debug for ExtAuthzHandlerBuilder {
             .field("rate_limiter_set", &self.rate_limiter.is_some())
             .field("telemetry_set", &self.telemetry.is_some())
             .field("deny_categories", &self.deny_categories)
+            .field("elevated_risk_mode", &self.elevated_risk_mode)
             .finish()
     }
 }
@@ -269,6 +281,7 @@ impl ExtAuthzHandlerBuilder {
             rate_limiter: None,
             telemetry: None,
             deny_categories: Vec::new(),
+            elevated_risk_mode: false,
         }
     }
 
@@ -311,6 +324,23 @@ impl ExtAuthzHandlerBuilder {
         self
     }
 
+    /// Opt in to elevated-risk posture: promote
+    /// [`MalwareVerdict::Suspicious`] (heuristic-only match) to
+    /// Deny. The default posture (false) treats `Suspicious` the
+    /// same as `Clean`, matching the contract documented on the
+    /// [`MalwareVerdict::Suspicious`] variant.
+    ///
+    /// Use this for tenants where heuristic-only matches should
+    /// block out of caution (regulated industries, IR-mode
+    /// activations). The default is conservative because
+    /// auto-denying on heuristic-only matches causes
+    /// false-positive blocks on legitimate downloads.
+    #[must_use]
+    pub fn with_elevated_risk_mode(mut self, on: bool) -> Self {
+        self.elevated_risk_mode = on;
+        self
+    }
+
     /// Build the handler. Returns an error when any required
     /// dep was not set.
     pub fn build(mut self) -> Result<ExtAuthzHandler, SwgError> {
@@ -341,6 +371,7 @@ impl ExtAuthzHandlerBuilder {
                     .telemetry
                     .ok_or_else(|| SwgError::Config("telemetry emitter not set".into()))?,
                 deny_categories: self.deny_categories,
+                elevated_risk_mode: self.elevated_risk_mode,
             }),
         })
     }
@@ -476,12 +507,25 @@ impl ExtAuthzHandler {
         // 4. Malware verdict on response body hash. Only kicks
         //    in when an upstream scanner has supplied a hash —
         //    a missing hash is *not* a deny signal.
+        //
+        //    `Suspicious` is the heuristic-only verdict: the
+        //    provider matched a heuristic but is not confident
+        //    enough to call the file Malicious. The variant doc
+        //    contract is "treat as Clean by default; promote to
+        //    Deny only under elevated-risk mode". Auto-denying
+        //    on heuristic-only matches without operator opt-in
+        //    causes false-positive blocks on legitimate
+        //    downloads, which is why the default is
+        //    conservative.
         if let Some(hash) = ctx.file_hash.as_deref() {
             match self.inner.malware.verdict(hash).await {
-                MalwareVerdict::Malicious | MalwareVerdict::Suspicious => {
+                MalwareVerdict::Malicious => {
                     return Verdict::deny_categorized("malware.detected");
                 }
-                MalwareVerdict::Clean | MalwareVerdict::Unknown => {}
+                MalwareVerdict::Suspicious if self.inner.elevated_risk_mode => {
+                    return Verdict::deny_categorized("malware.suspicious");
+                }
+                MalwareVerdict::Suspicious | MalwareVerdict::Clean | MalwareVerdict::Unknown => {}
             }
         }
         match category {

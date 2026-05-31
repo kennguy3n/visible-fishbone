@@ -102,12 +102,26 @@ pub struct BypassDecision {
 
 impl BypassList {
     /// Build a bypass list from a sequence of entries. The
-    /// constructor sorts entries by suffix length descending so
-    /// the longest-matching entry wins; ties are broken by the
-    /// suffix string compared lexicographically so the order is
-    /// fully deterministic.
+    /// constructor first normalises every suffix to ASCII
+    /// lowercase so the dedup and operator-override paths
+    /// agree with the runtime evaluator (which delegates to
+    /// [`sni_suffix_match`], a case-insensitive matcher). It
+    /// then sorts entries by suffix length descending so the
+    /// longest-matching entry wins; ties are broken by the
+    /// suffix string compared lexicographically so the order
+    /// is fully deterministic.
     #[must_use]
     pub fn new(mut entries: Vec<BypassEntry>) -> Self {
+        // Normalise to lowercase before sort + dedup so an
+        // operator-authored `Chase.COM` collides with the
+        // industry-default `chase.com` entry on merge —
+        // otherwise the runtime matcher (case-insensitive)
+        // would see both, the first-in-walk-order would win,
+        // and the operator's intended override could silently
+        // be lost.
+        for e in &mut entries {
+            e.suffix = e.suffix.to_ascii_lowercase();
+        }
         entries.sort_by(|a, b| {
             b.suffix
                 .len()
@@ -137,7 +151,15 @@ impl BypassList {
     /// operator demotes a default category they don't recognise
     /// in their environment.
     #[must_use]
-    pub fn with_extensions(mut self, extra: Vec<BypassEntry>) -> Self {
+    pub fn with_extensions(mut self, mut extra: Vec<BypassEntry>) -> Self {
+        // Normalise extra entries' suffixes to lowercase before
+        // the merge so an operator-authored `Chase.COM` collides
+        // with the industry default `chase.com` on the merge
+        // step. The runtime matcher is case-insensitive; the
+        // merge path must agree.
+        for e in &mut extra {
+            e.suffix = e.suffix.to_ascii_lowercase();
+        }
         // Rebuild from the union, then re-sort. Operator entries
         // appear last in the input vector so on dedup they win
         // the category for an exact-suffix collision.
