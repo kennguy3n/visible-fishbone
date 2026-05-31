@@ -51,16 +51,33 @@ use crate::verdict::{Action, RequestContext, Verdict};
 /// Optional headers:
 /// * `x-sng-sni` — TLS SNI when the request originates from an
 ///   intercepted CONNECT
-/// * `x-sng-file-sha256` — when the request body has been
-///   pre-hashed by an inline scanner
+///
+/// The pre-hashed request body sha256 is **not** carried in a
+/// header — it lives on the dedicated [`Self::body_sha256`]
+/// field below. The split is intentional: the ext_authz emitter
+/// in Envoy attaches the body hash on a wire-format-specific
+/// slot (`request.attributes.request.http.body_sha256` on the
+/// gRPC ext_authz API; the HTTP ext_authz transport surfaces it
+/// as a dedicated request field rather than as a free-form
+/// header) so [`Self::into_context`] reads it directly out of
+/// `body_sha256` and does not look at any `x-sng-file-sha256`
+/// header. An operator who configures Envoy's HTTP ext_authz
+/// `allowed_headers` to forward `x-sng-file-sha256` MUST also
+/// configure the filter chain that promotes the header value
+/// into the request envelope's `body_sha256` field before
+/// hitting this endpoint — the handler itself ignores headers
+/// for the hash payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtAuthzRequest {
     /// Flat header map. Lower-cased keys are required (the
     /// Envoy ext-authz emitter lowercases by default).
     pub headers: Vec<(String, String)>,
-    /// Optional file hash on the request body. When present the
-    /// handler queries the malware provider; when absent the
-    /// handler skips the malware lookup entirely.
+    /// Pre-hashed request body sha256, hex-encoded lowercase.
+    /// This is the **only** slot the handler reads for the file
+    /// hash — see the doc comment on the enclosing struct for
+    /// why no `x-sng-file-sha256` header is consulted. When
+    /// present the handler queries the malware provider; when
+    /// absent the handler skips the malware lookup entirely.
     pub body_sha256: Option<String>,
 }
 

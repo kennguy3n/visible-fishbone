@@ -261,14 +261,54 @@ fn render_listener(out: &mut String, l: &ListenerConfig) -> Result<(), SwgError>
     // operators can see the in-effect list on `envoy_config.yaml`
     // inspection. The runtime decision uses BypassList; this is
     // purely operator-visible documentation that lives next to
-    // the listener it applies to.
+    // the listener it applies to. Defense in depth: pass each
+    // suffix through `sanitize_for_comment` instead of raw `{}`
+    // interpolation. DNS SNI suffixes cannot contain newlines or
+    // control chars in practice (the IDNA label set is a strict
+    // subset of LDH), and the runtime BypassList path doesn't
+    // care about the comment block at all — but a single stray
+    // `\n` in an operator-supplied suffix would terminate the
+    // comment and inject the rest of the suffix as real YAML
+    // content into the listener stanza. The validator at
+    // `envoy --mode validate` would catch the resulting parse
+    // error, but the resulting failure mode is opaque
+    // ("unknown field foo") rather than a useful operator
+    // message. Sanitizing here keeps the comment self-contained
+    // regardless of what reached `tls_bypass_sni_suffixes`.
     if !l.tls_bypass_sni_suffixes.is_empty() {
         ln!(out, "    # tls_bypass_sni_suffixes:");
         for s in &l.tls_bypass_sni_suffixes {
-            ln!(out, "    #   - {}", s);
+            ln!(out, "    #   - {}", sanitize_for_comment(s));
         }
     }
     Ok(())
+}
+
+/// Sanitize a string for inclusion in a YAML `#`-prefixed
+/// comment line. Any character that could cause the comment to
+/// terminate early (newline, carriage return) or render as an
+/// invisible glyph (control chars, NUL) is replaced with the
+/// Unicode escape form `\u{XXXX}` so the comment remains
+/// single-line and self-describing. This is intentionally
+/// lossy — the bypass list itself is loaded from
+/// `tls_bypass_sni_suffixes` (a structured `Vec<String>`),
+/// never round-tripped from this comment block, so a lossy
+/// representation here cannot affect runtime behavior.
+fn sanitize_for_comment(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' | '\r' | '\t' | '\0' => {
+                let _ = write!(out, "\\u{{{:04X}}}", c as u32);
+            }
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{{{:04X}}}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn render_cluster(out: &mut String, c: &ClusterConfig) -> Result<(), SwgError> {
@@ -533,6 +573,65 @@ mod tests {
         match err {
             SwgError::Config(m) => assert!(m.contains("U+0001"), "{m}"),
             other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sanitize_for_comment_escapes_newline_and_cr_and_tab() {
+        // Sanity: regular ascii passes through untouched (DNS
+        // labels are always LDH so this is the production
+        // hot-path).
+        assert_eq!(sanitize_for_comment("bank.com"), "bank.com");
+
+        // A stray newline would terminate the YAML comment and
+        // inject the rest of the suffix as raw YAML content into
+        // the listener stanza. We collapse it into a printable
+        // escape so the comment block stays single-line.
+        assert_eq!(sanitize_for_comment("bad\nsuffix"), "bad\\u{000A}suffix");
+
+        // Carriage return and tab are likewise escaped so the
+        // comment renders as a single readable line regardless
+        // of what reached the field.
+        assert_eq!(
+            sanitize_for_comment("\rbank\tcom"),
+            "\\u{000D}bank\\u{0009}com"
+        );
+
+        // Arbitrary low-control byte falls into the same escape
+        // path — defense in depth against any byte stream that
+        // makes it through deserialisation.
+        assert_eq!(sanitize_for_comment("\x01"), "\\u{0001}");
+    }
+
+    #[test]
+    fn rendered_comment_block_stays_single_line_under_adversarial_suffix() {
+        // End-to-end check: render a listener with an
+        // adversarial suffix and confirm the YAML comment block
+        // remains structurally intact. Specifically: the line
+        // for the suffix starts with the `#   -` marker (i.e.
+        // the newline injection did not escape out of the
+        // comment and the rest did not become real YAML).
+        let mut cfg = sample();
+        cfg.listeners[0].tls_bypass_sni_suffixes =
+            vec!["benign.com".into(), "adversarial\nfield: pwn".into()];
+        let s = render_envoy_yaml(&cfg).expect("render must succeed");
+        // The benign entry must render verbatim.
+        assert!(s.contains("    #   - benign.com"), "{s}");
+        // The adversarial entry must be present as a comment
+        // line (no real `field:` key leaking into the listener
+        // stanza after the comment block).
+        assert!(
+            s.contains("    #   - adversarial\\u{000A}field: pwn"),
+            "{s}"
+        );
+        // Negative assertion: no bare `field: pwn` at the start
+        // of a YAML line (which would have happened with the
+        // pre-sanitization renderer).
+        for line in s.lines() {
+            assert!(
+                !line.trim_start().starts_with("field: pwn"),
+                "newline injection produced a real YAML key: {line:?}"
+            );
         }
     }
 

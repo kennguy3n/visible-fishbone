@@ -674,6 +674,16 @@ mod tests {
             },
             SwgError::CategoryBundleBodyDecode("trailing bytes".into()),
             SwgError::ExtAuthzDecode("missing url".into()),
+            // `InstallBusy` is a unit variant so `Clone` is
+            // trivial, but the test's stated contract is one
+            // case per discriminant (so a future variant
+            // addition cannot silently regress the mock's
+            // clone-based round-trip path). Keep this entry
+            // even though the field-free shape makes the
+            // failure mode unlikely — it documents intent and
+            // gives the `format!("{err:?}")` assertion a real
+            // payload to compare against for this discriminant.
+            SwgError::InstallBusy,
         ];
         for scripted in cases {
             let label = format!("{scripted:?}");
