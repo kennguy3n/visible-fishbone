@@ -509,15 +509,35 @@ impl ExtAuthzHandler {
         }
 
         // 3. Categorise + apply deny list.
-        let category = self
+        //
+        // The verdict's `category` field is canonicalised to
+        // ASCII lowercase here rather than carried through with
+        // whatever casing the categoriser returned. For the
+        // in-process [`LocalCategoryDb`] this is a no-op — the
+        // local install path already lowercases entries on swap
+        // — but `UrlCategorizer` is a `pub` trait designed for
+        // remote providers (Cisco Talos, custom HTTPS feed,
+        // managed verdict service) that we cannot guarantee
+        // return canonical-cased category strings. Without this
+        // canonicalisation a remote provider that emits `"Adult"`
+        // for one tenant and `"adult"` for another would feed
+        // two distinct `category = '…'` rows into the operator
+        // dashboards for what is logically one category,
+        // splitting per-category counts and breaking the
+        // deny-list audit trail that groups by category. Doing
+        // the lowercase once here is symmetric with the
+        // `LocalCategoryDb::install` canonicalisation and with
+        // the binary-search lookup against the already-lowercased
+        // `deny_categories` table that follows.
+        let category_canonical = self
             .inner
             .categorizer
             .categorize(&ctx.host, &ctx.path)
-            .await;
-        if let Some(cat) = category.as_ref() {
-            let lc = cat.0.to_ascii_lowercase();
-            if self.inner.deny_categories.binary_search(&lc).is_ok() {
-                return Verdict::deny_categorized(cat.0.clone());
+            .await
+            .map(|c| c.0.to_ascii_lowercase());
+        if let Some(cat) = &category_canonical {
+            if self.inner.deny_categories.binary_search(cat).is_ok() {
+                return Verdict::deny_categorized(cat.clone());
             }
         }
 
@@ -545,8 +565,14 @@ impl ExtAuthzHandler {
                 MalwareVerdict::Suspicious | MalwareVerdict::Clean | MalwareVerdict::Unknown => {}
             }
         }
-        match category {
-            Some(cat) => Verdict::allow_categorized(cat.0),
+        match category_canonical {
+            // Use the canonicalised category for the allow path
+            // too — same rationale as the deny path above: the
+            // verdict's `category` field is operator-facing
+            // telemetry and must carry one canonical form per
+            // logical category regardless of which provider
+            // returned it.
+            Some(cat) => Verdict::allow_categorized(cat),
             None => Verdict::allow_uncategorized(),
         }
     }
@@ -988,6 +1014,113 @@ mod tests {
         assert!(!json.contains("status"), "{json}");
         assert!(!json.contains("retry_after"), "{json}");
         assert!(!json.contains("category"), "{json}");
+    }
+
+    /// Mock categoriser that returns whatever category casing was
+    /// preconfigured, mimicking a remote provider that surfaces
+    /// non-canonical (e.g. `"Adult"`) category strings. The
+    /// in-process `LocalCategoryDb` already lowercases on install,
+    /// so a regression test for the handler-side canonicalisation
+    /// needs a categoriser whose return value is *not* run through
+    /// the local install path.
+    #[derive(Debug)]
+    struct MixedCaseRemoteCategorizer {
+        category: Option<Category>,
+    }
+    #[async_trait::async_trait]
+    impl UrlCategorizer for MixedCaseRemoteCategorizer {
+        async fn categorize(&self, _host: &str, _path: &str) -> Option<Category> {
+            self.category.clone()
+        }
+    }
+
+    fn make_handler_with_categorizer(
+        cats: Arc<dyn UrlCategorizer>,
+        deny: Vec<&str>,
+    ) -> (ExtAuthzHandler, Arc<CapturingEmitter>) {
+        let cap = Arc::new(CapturingEmitter::default());
+        let bypass = Arc::new(BypassList::new(Vec::new()));
+        let mal: Arc<dyn MalwareVerdictProvider> = Arc::new(NullMalwareProvider);
+        let clock = Arc::new(TestClock::new());
+        let rl = RateLimiter::new(100.0, 50.0, clock);
+        let h = ExtAuthzHandlerBuilder::new()
+            .with_categorizer(cats)
+            .with_malware(mal)
+            .with_bypass(bypass)
+            .with_rate_limiter(rl)
+            .with_telemetry(cap.clone() as Arc<dyn TelemetryEmitter>)
+            .with_deny_categories(deny.into_iter().map(Into::into).collect())
+            .build()
+            .unwrap();
+        (h, cap)
+    }
+
+    #[tokio::test]
+    async fn deny_verdict_carries_canonical_lowercase_category_from_mixed_case_provider() {
+        // Regression: a future remote provider could return a
+        // category in non-canonical casing (`"Adult"` rather than
+        // `"adult"`). The verdict's `category` field is
+        // operator-facing telemetry and must collapse to one
+        // canonical row per logical category regardless of which
+        // provider returned it, or the per-category counts on
+        // operator dashboards split into two rows for what is
+        // semantically one category. Pin: the deny verdict's
+        // category field is lowercased exactly once, at the
+        // handler boundary, so the local-DB and remote-provider
+        // paths produce identical verdict telemetry.
+        let mixed = Arc::new(MixedCaseRemoteCategorizer {
+            category: Some(Category("Adult".into())),
+        });
+        let (h, cap) = make_handler_with_categorizer(mixed, vec!["adult"]);
+        let resp = h
+            .handle_request(req("evil.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(
+            resp.category.as_deref(),
+            Some("adult"),
+            "verdict category must be canonical lowercase, got: {resp:?}",
+        );
+        let events = cap.events.lock();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].swg_verdict.category.as_deref(),
+            Some("adult"),
+            "telemetry event category must be canonical lowercase, got: {:?}",
+            events[0],
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_verdict_carries_canonical_lowercase_category_from_mixed_case_provider() {
+        // Same canonicalisation invariant on the *allow* path —
+        // a non-denied category emitted by a remote provider in
+        // mixed case must still surface as canonical lowercase on
+        // the verdict so dashboards group it with the matching
+        // local-DB entries.
+        let mixed = Arc::new(MixedCaseRemoteCategorizer {
+            category: Some(Category("Business.SaaS".into())),
+        });
+        let (h, cap) = make_handler_with_categorizer(mixed, vec![]);
+        let resp = h
+            .handle_request(req("ok.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+        assert_eq!(
+            resp.category.as_deref(),
+            Some("business.saas"),
+            "verdict category must be canonical lowercase, got: {resp:?}",
+        );
+        let events = cap.events.lock();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].swg_verdict.category.as_deref(),
+            Some("business.saas"),
+            "telemetry event category must be canonical lowercase, got: {:?}",
+            events[0],
+        );
     }
 
     #[tokio::test]

@@ -165,13 +165,16 @@ impl LocalCategoryDb {
         // sort + dedup so two entries the runtime matcher treats
         // as equivalent (`Example.COM` ≡ `example.com`,
         // `*.Chase.COM` ≡ `*.chase.com`) collapse to a single
-        // row rather than surviving as semantic duplicates. The
-        // `*.` prefix is preserved because it carries the
-        // exact-vs-wildcard precedence the secondary sort relies
-        // on; only the bytes after the optional `*.` are
-        // lowercased. Path prefixes stay case-sensitive — RFC 3986
-        // §3.3 treats the path component as case-sensitive, and
-        // operators write the literal path their backend serves.
+        // row rather than surviving as semantic duplicates.
+        // `to_ascii_lowercase` walks the whole string including
+        // the `*.` prefix, but `*` (0x2A) and `.` (0x2E) have no
+        // uppercase forms so they pass through unchanged — the
+        // wildcard sentinel survives the canonicalisation byte-
+        // for-byte and continues to drive the exact-vs-wildcard
+        // secondary sort. Path prefixes stay case-sensitive —
+        // RFC 3986 §3.3 treats the path component as case-
+        // sensitive, and operators write the literal path their
+        // backend serves.
         //
         // Canonicalise the category string to ASCII lowercase for
         // the same reason: the deny-list comparison in

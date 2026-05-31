@@ -68,6 +68,27 @@ pub const DEFAULT_ADMIN_PORT: u16 = 9901;
 /// window.
 pub const DEFAULT_EXT_AUTHZ_TIMEOUT_MS: u32 = 250;
 
+/// Free function returning [`DEFAULT_EXT_AUTHZ_TIMEOUT_MS`], used
+/// as the [`ListenerConfig::ext_authz_timeout_ms`]
+/// `#[serde(default)]` helper.
+///
+/// The field was added after the wire format already shipped, so
+/// older persisted bundles do *not* carry an
+/// `ext_authz_timeout_ms` key. Without a serde default the
+/// missing field would fail deserialisation with
+/// `missing field `ext_authz_timeout_ms``, which would break
+/// every round-trip path the control plane has for stored
+/// bundles (cache reload, replay log, on-disk bundle store, any
+/// external bundle producer that hasn't been re-rendered against
+/// the new schema). Surfacing this as a typed default keeps the
+/// wire format forward-compatible: an older producer's bundle
+/// loads at the historical hardcoded 250 ms timeout, exactly as
+/// it would have rendered before the field existed.
+#[must_use]
+fn default_ext_authz_timeout_ms() -> u32 {
+    DEFAULT_EXT_AUTHZ_TIMEOUT_MS
+}
+
 /// Top-level Envoy config the supervisor renders into YAML.
 ///
 /// Holds *only* the fields the SWG actually controls; anything
@@ -191,6 +212,27 @@ pub struct ListenerConfig {
     /// of the configured `UrlCategorizer` /
     /// `MalwareVerdictProvider`. Defaults to
     /// [`DEFAULT_EXT_AUTHZ_TIMEOUT_MS`] (250 ms).
+    ///
+    /// # Zero is rejected at render time
+    ///
+    /// Envoy's protobuf `Duration` parser reads `0s` as
+    /// *"disabled"* — the ext-authz call would have **no**
+    /// timeout, so a hung verdict provider would stall every
+    /// in-flight request indefinitely rather than tripping
+    /// Envoy's fail-closed deny. Because sng-swg's whole reason
+    /// for sitting in front of Envoy is to fail-closed when the
+    /// verdict pipeline is unhealthy, a zero value is a
+    /// foot-gun: a typo in a persisted bundle
+    /// (`ext_authz_timeout_ms: 0`), a default-initialised struct
+    /// literal, or a careless field elision would silently widen
+    /// the timeout to "no timeout" with no operator-visible
+    /// signal. [`render_envoy_yaml`] therefore rejects
+    /// `ext_authz_timeout_ms == 0` as [`SwgError::Config`] at
+    /// install time. Operators who genuinely want unbounded
+    /// verdict latency must do it explicitly via an extension
+    /// point we do not currently expose, rather than by leaving
+    /// this field zero.
+    #[serde(default = "default_ext_authz_timeout_ms")]
     pub ext_authz_timeout_ms: u32,
 }
 
@@ -232,6 +274,22 @@ pub struct ClusterConfig {
 /// safely escape (newline + double-quote + backslash are
 /// handled; raw NUL byte is not).
 pub fn render_envoy_yaml(cfg: &EnvoyConfig) -> Result<String, SwgError> {
+    // Reject the fail-closed-disable foot-gun before we touch
+    // the output buffer. Envoy reads `0s` as "no timeout"; a
+    // zero on a fail-closed-deny gate is exactly the
+    // configuration we never want to render to disk. See the
+    // `ListenerConfig::ext_authz_timeout_ms` doc for the
+    // failure mode this prevents.
+    for l in &cfg.listeners {
+        if l.ext_authz_timeout_ms == 0 {
+            return Err(SwgError::Config(format!(
+                "listener {:?} has ext_authz_timeout_ms = 0, which Envoy interprets \
+                 as \"disabled\"; sng-swg requires a positive timeout so the \
+                 ext_authz hop preserves fail-closed deny on verdict-provider hangs",
+                l.name
+            )));
+        }
+    }
     let mut out = String::with_capacity(2048);
     // Header — version-pin the bootstrap schema so a future
     // Envoy that changes shape doesn't silently load a stale
@@ -396,12 +454,20 @@ fn sanitize_for_comment(s: &str) -> String {
 
 fn render_cluster(out: &mut String, c: &ClusterConfig) -> Result<(), SwgError> {
     ln!(out, "  - name: {}", quoted(&c.name)?);
-    // Connect timeout — render seconds with fractional millis
-    // so the YAML is human-readable while still preserving
-    // millisecond precision.
-    let secs = c.connect_timeout_ms / 1_000;
-    let millis = c.connect_timeout_ms % 1_000;
-    ln!(out, "    connect_timeout: {secs}.{millis:03}s");
+    // Connect timeout — route through `format_envoy_seconds` so
+    // both protobuf-Duration slots in the rendered YAML
+    // (`connect_timeout` here, `timeout` in the ext_authz HTTP
+    // service block) emit the same canonical form. Two
+    // independent formatters in the same renderer would let a
+    // future schema change on one path silently diverge from the
+    // other, and would split the digest-dedup hash space
+    // unnecessarily (`5.000s` vs `5s` hash to different
+    // outputs even though Envoy reads them identically).
+    ln!(
+        out,
+        "    connect_timeout: {}",
+        format_envoy_seconds(c.connect_timeout_ms)
+    );
     // dynamic_forward_proxy cluster: the no-endpoint shape Envoy
     // resolves DNS on demand per upstream request. Non-empty
     // endpoint list → STATIC cluster with a load_assignment.
@@ -760,6 +826,8 @@ mod tests {
         assert!(s.contains("address: \"10.0.0.5\""));
         assert!(s.contains("port_value: 8080"));
         // connect_timeout: 1500ms → 1.500s.
+        // `format_envoy_seconds` canonical form: 1500 ms has a
+        // fractional component, so the dotted shape stays.
         assert!(s.contains("connect_timeout: 1.500s"), "got\n{s}");
     }
 
@@ -777,7 +845,15 @@ mod tests {
         let s = render_envoy_yaml(&cfg).unwrap();
         assert!(s.contains("type: STRICT_DNS"));
         assert!(s.contains("dynamic_forward_proxy_cache_config"));
-        assert!(s.contains("connect_timeout: 5.000s"));
+        // `format_envoy_seconds` canonical form: 5_000 ms is
+        // exactly 5 seconds so the fractional part is elided. The
+        // historical inline formatter emitted `5.000s`, which is
+        // semantically identical to Envoy but split the
+        // digest-dedup hash space against the ext_authz timeout
+        // slot's `5s` rendering for the same duration. Routing
+        // both slots through `format_envoy_seconds` collapses
+        // them to one canonical form.
+        assert!(s.contains("connect_timeout: 5s"), "got\n{s}");
     }
 
     #[test]
@@ -1101,6 +1177,180 @@ mod tests {
         assert!(
             s.contains("                  timeout: 3s\n"),
             "second listener's 3s timeout must render; got:\n{s}",
+        );
+    }
+
+    #[test]
+    fn connect_timeout_renders_via_format_envoy_seconds_for_parity() {
+        // Both protobuf-Duration slots in the rendered YAML must
+        // route through `format_envoy_seconds` so a whole-second
+        // value emits the same canonical form regardless of which
+        // slot it lands in. The historical inline formatter
+        // hardcoded `{secs}.{millis:03}s`, which made
+        // `connect_timeout: 5_000` render as `5.000s` while the
+        // ext_authz `timeout: 5_000` rendered as `5s` — two wire
+        // shapes for the same duration, splitting the
+        // digest-dedup hash space and giving two future schema
+        // changes opposite-direction drift surfaces. The fix
+        // unifies both paths on `format_envoy_seconds`; pin the
+        // unified behaviour so a future refactor that reintroduces
+        // an inline `{millis:03}` formatter trips this test.
+        let cfg = EnvoyConfig {
+            listeners: Vec::new(),
+            clusters: vec![
+                ClusterConfig {
+                    name: "five_sec".into(),
+                    endpoints: vec!["10.0.0.5:8080".into()],
+                    connect_timeout_ms: 5_000,
+                },
+                ClusterConfig {
+                    name: "one_sec".into(),
+                    endpoints: vec!["10.0.0.6:8080".into()],
+                    connect_timeout_ms: 1_000,
+                },
+                ClusterConfig {
+                    name: "frac".into(),
+                    endpoints: vec!["10.0.0.7:8080".into()],
+                    connect_timeout_ms: 750,
+                },
+            ],
+            admin_port: DEFAULT_ADMIN_PORT,
+        };
+        let s = render_envoy_yaml(&cfg).unwrap();
+        // Whole seconds: bare integer form, not `5.000s`.
+        assert!(
+            s.contains("    connect_timeout: 5s\n"),
+            "5000ms must render as `5s` to match ext_authz parity; got:\n{s}",
+        );
+        assert!(
+            s.contains("    connect_timeout: 1s\n"),
+            "1000ms must render as `1s` to match ext_authz parity; got:\n{s}",
+        );
+        // Sub-second: three-digit zero-padded fraction so 750 ms
+        // doesn't render as `0.75s` (which protobuf parses as
+        // 750 ms — same as we want — but the canonical form is
+        // explicit about ms precision).
+        assert!(
+            s.contains("    connect_timeout: 0.750s\n"),
+            "750ms must render as `0.750s`; got:\n{s}",
+        );
+        // The historical `5.000s` form must NOT appear anywhere
+        // in the output — a regression that flipped one slot back
+        // to the inline formatter would still pass the `5s` check
+        // by leaking the older form into the other slots.
+        assert!(
+            !s.contains("connect_timeout: 5.000s"),
+            "historical inline `5.000s` form must not appear; got:\n{s}",
+        );
+    }
+
+    #[test]
+    fn render_rejects_zero_ext_authz_timeout_as_fail_closed_guard() {
+        // Envoy's protobuf `Duration` parser reads `0s` as
+        // "disabled" — the ext_authz hop would have no timeout,
+        // so a hung verdict provider would stall every in-flight
+        // request indefinitely rather than tripping the
+        // fail-closed deny that sng-swg sits in front of Envoy to
+        // enforce. Reject this at render time so a typo in a
+        // persisted bundle (`ext_authz_timeout_ms: 0`), a
+        // default-initialised struct literal in test code, or a
+        // careless field elision surfaces as a loud Config error
+        // at install rather than silently widening the timeout
+        // to unbounded.
+        let mut cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        cfg.listeners[0].ext_authz_timeout_ms = 0;
+        let err = render_envoy_yaml(&cfg).expect_err("zero timeout must reject");
+        match err {
+            SwgError::Config(msg) => {
+                assert!(
+                    msg.contains("ext_authz_timeout_ms = 0"),
+                    "error must name the offending field; got: {msg}",
+                );
+                assert!(
+                    msg.contains("disabled"),
+                    "error must explain the Envoy parse semantic; got: {msg}",
+                );
+                assert!(
+                    msg.contains("fail-closed"),
+                    "error must connect the rejection to the safety invariant; got: {msg}",
+                );
+            }
+            other => panic!("expected SwgError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_rejects_zero_ext_authz_timeout_on_any_listener_not_just_first() {
+        // Multi-listener deployments split per-tenant or
+        // per-cluster traffic across separate listeners; the
+        // fail-closed-disable check must walk every listener so a
+        // second listener with a zero timeout doesn't slip
+        // through because the first listener's value is sane.
+        let mut cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        cfg.listeners.push(ListenerConfig {
+            name: "swg_forward_secondary".into(),
+            address: "0.0.0.0".into(),
+            port: 9443,
+            ext_authz_cluster: "ext_authz".into(),
+            forward_proxy_cluster: "dynamic_forward_proxy".into(),
+            tls_bypass_sni_suffixes: Vec::new(),
+            ext_authz_timeout_ms: 0,
+        });
+        let err = render_envoy_yaml(&cfg).expect_err("zero on any listener must reject");
+        match err {
+            SwgError::Config(msg) => {
+                // Name the offending listener so an operator with
+                // a many-listener bundle can find the typo.
+                assert!(
+                    msg.contains("swg_forward_secondary"),
+                    "error must name the offending listener; got: {msg}",
+                );
+            }
+            other => panic!("expected SwgError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listener_config_deserializes_without_ext_authz_timeout_field() {
+        // Forward compatibility: bundles serialised before the
+        // `ext_authz_timeout_ms` field was added must still
+        // deserialise, with the field falling back to
+        // `DEFAULT_EXT_AUTHZ_TIMEOUT_MS`. Without
+        // `#[serde(default)]` on the field, an older bundle
+        // would fail with `missing field 'ext_authz_timeout_ms'`
+        // and the control-plane round-trip path (cache reload,
+        // replay log, on-disk bundle store) would break across
+        // the version boundary.
+        let json = r#"{
+            "name": "legacy",
+            "address": "0.0.0.0",
+            "port": 8443,
+            "ext_authz_cluster": "ext_authz",
+            "forward_proxy_cluster": "dynamic_forward_proxy",
+            "tls_bypass_sni_suffixes": []
+        }"#;
+        let l: ListenerConfig =
+            serde_json::from_str(json).expect("legacy JSON without ext_authz_timeout_ms must load");
+        assert_eq!(
+            l.ext_authz_timeout_ms, DEFAULT_EXT_AUTHZ_TIMEOUT_MS,
+            "missing field must fall back to the documented default",
+        );
+        // And the loaded shape must render successfully — i.e.
+        // the default value doesn't trip the fail-closed-disable
+        // guard.
+        let cfg = EnvoyConfig {
+            listeners: vec![l],
+            clusters: vec![ClusterConfig {
+                name: "ext_authz".into(),
+                endpoints: vec!["unix:///x".into()],
+                connect_timeout_ms: 1_000,
+            }],
+            admin_port: DEFAULT_ADMIN_PORT,
+        };
+        let s = render_envoy_yaml(&cfg).expect("legacy bundle must render");
+        assert!(
+            s.contains("                  timeout: 0.250s\n"),
+            "legacy bundle must inherit the historical 250ms timeout; got:\n{s}",
         );
     }
 }
