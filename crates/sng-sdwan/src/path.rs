@@ -184,7 +184,7 @@ impl Path {
     /// True iff this path is eligible for `class`.
     #[must_use]
     pub fn eligible(&self, class: TrafficClass) -> bool {
-        self.eligible_classes.iter().any(|c| *c == class)
+        self.eligible_classes.contains(&class)
     }
 
     /// Value-domain validation. Bundle adapters call this
