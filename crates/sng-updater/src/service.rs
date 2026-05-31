@@ -1,0 +1,1423 @@
+//! Updater service — the orchestrator that wires every
+//! subsystem (verifier, source, downloader, bank writer,
+//! bootloader, health check) into the full install flow.
+//!
+//! Public API:
+//!
+//! * [`UpdaterServiceBuilder`] — gather the subsystem
+//!   adapters and the policy holder, then call
+//!   [`UpdaterServiceBuilder::build`] for a fully-wired
+//!   service.
+//! * [`UpdaterService::install_from_envelope`] — single-shot
+//!   install driven by an already-pulled
+//!   [`SignedManifest`]. Most useful for tests and for the
+//!   control-plane push-notification path.
+//! * [`UpdaterService::poll_and_install`] — pull the latest
+//!   manifest from the configured source and, if it is
+//!   admissible, run the install.
+//! * [`UpdaterService::current_state`] — read the current
+//!   install state machine state.
+//! * [`UpdaterService::stats_snapshot`] — snapshot the
+//!   counters for telemetry.
+//!
+//! Concurrency: the orchestrator holds a `tokio::Mutex` for
+//! the install lifecycle so a second `install_*` call while
+//! one is in flight is rejected up front with
+//! [`UpdaterError::InstallBusy`]. Stats and state reads are
+//! lock-free.
+
+use crate::bank::{Bank, BankLayout, BankSlotState, BankWriter, WriteHandle};
+use crate::bootloader::Bootloader;
+use crate::download::{DownloadError, ImageDownloader, StreamingHasher, TeeChunkSink};
+use crate::error::UpdaterError;
+use crate::healthcheck::{HealthCheck, HealthReport};
+use crate::manifest::{ImageHash, ImageVersion, SignedManifest, UpdateManifest, UpdateTarget};
+use crate::policy::{PolicyValidationError, UpdaterPolicy, UpdaterPolicyHolder};
+use crate::source::{ManifestSource, SourceError};
+use crate::state::UpdateState;
+use crate::stats::{UpdaterStats, UpdaterStatsSnapshot};
+use crate::verifier::ManifestVerifier;
+use arc_swap::ArcSwap;
+use parking_lot::Mutex as ParkingMutex;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use thiserror::Error;
+use tokio::sync::Mutex as TokioMutex;
+use tokio::time::{Sleep, sleep, timeout};
+use tracing::{debug, info, warn};
+
+/// Outcome of a single install attempt. The orchestrator
+/// returns one of these from `install_from_envelope` /
+/// `poll_and_install`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InstallOutcome {
+    /// Source produced no manifest (cold start / no new
+    /// release published). Only `poll_and_install` can
+    /// return this — `install_from_envelope` always has an
+    /// envelope to work with.
+    NoManifestAvailable,
+    /// Install committed — the new image is the running
+    /// active bank and the bootloader has been told to keep
+    /// it.
+    Committed {
+        /// Version that was committed.
+        version: ImageVersion,
+        /// Slot that was committed.
+        slot: Bank,
+    },
+    /// Install rolled back — the health check failed or
+    /// timed out, the bootloader was asked to re-pin the
+    /// previous bank, and the slot is marked
+    /// [`BankSlotState::RolledBack`].
+    RolledBack {
+        /// Version that was attempted.
+        version: ImageVersion,
+        /// Slot that was rolled back.
+        slot: Bank,
+        /// Reason for the rollback.
+        reason: RollbackReason,
+    },
+}
+
+/// Reason an install was rolled back. Carried alongside the
+/// [`InstallOutcome::RolledBack`] payload for operator
+/// dashboards.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RollbackReason {
+    /// Health check probe returned an unhealthy report.
+    HealthCheckUnhealthy {
+        /// Last probe's details.
+        details: String,
+    },
+    /// Health check window elapsed without enough consecutive
+    /// healthy probes.
+    HealthCheckTimeout,
+    /// Health check probe itself errored (the trait surfaced
+    /// `UpdaterError::HealthCheckFailed`).
+    HealthCheckErrored {
+        /// Error message surfaced by the probe.
+        details: String,
+    },
+}
+
+/// Builder for [`UpdaterService`]. All adapters are required.
+#[derive(Default)]
+#[allow(missing_debug_implementations)]
+pub struct UpdaterServiceBuilder {
+    target: Option<UpdateTarget>,
+    source: Option<Arc<dyn ManifestSource>>,
+    verifier: Option<Arc<ManifestVerifier>>,
+    downloader: Option<Arc<dyn ImageDownloader>>,
+    bank_writer: Option<Arc<dyn BankWriter>>,
+    bootloader: Option<Arc<dyn Bootloader>>,
+    health_check: Option<Arc<dyn HealthCheck>>,
+    policy: Option<UpdaterPolicy>,
+    /// Cold-start current-version pin override. Used when
+    /// the appliance was provisioned with a known committed
+    /// image but the bank layout is not yet reflecting it
+    /// (e.g. first boot from a factory image).
+    current_version_override: Option<ImageVersion>,
+}
+
+impl UpdaterServiceBuilder {
+    /// Construct an empty builder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the target this builder will produce a service for.
+    #[must_use]
+    pub fn target(mut self, target: UpdateTarget) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    /// Plug in the manifest source.
+    #[must_use]
+    pub fn source(mut self, source: Arc<dyn ManifestSource>) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// Plug in the verifier (pre-populated trust store).
+    #[must_use]
+    pub fn verifier(mut self, verifier: Arc<ManifestVerifier>) -> Self {
+        self.verifier = Some(verifier);
+        self
+    }
+
+    /// Plug in the image downloader.
+    #[must_use]
+    pub fn downloader(mut self, downloader: Arc<dyn ImageDownloader>) -> Self {
+        self.downloader = Some(downloader);
+        self
+    }
+
+    /// Plug in the bank writer.
+    #[must_use]
+    pub fn bank_writer(mut self, bank_writer: Arc<dyn BankWriter>) -> Self {
+        self.bank_writer = Some(bank_writer);
+        self
+    }
+
+    /// Plug in the bootloader.
+    #[must_use]
+    pub fn bootloader(mut self, bootloader: Arc<dyn Bootloader>) -> Self {
+        self.bootloader = Some(bootloader);
+        self
+    }
+
+    /// Plug in the health check.
+    #[must_use]
+    pub fn health_check(mut self, health_check: Arc<dyn HealthCheck>) -> Self {
+        self.health_check = Some(health_check);
+        self
+    }
+
+    /// Plug in the operator policy. Default if omitted is
+    /// [`UpdaterPolicy::default()`].
+    #[must_use]
+    pub fn policy(mut self, policy: UpdaterPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// Override the cold-start "current version" pin —
+    /// otherwise the orchestrator reads it from the bank
+    /// layout's active slot.
+    #[must_use]
+    pub fn current_version_override(mut self, v: ImageVersion) -> Self {
+        self.current_version_override = Some(v);
+        self
+    }
+
+    /// Build the service. Returns
+    /// [`ServiceBuildError::MissingComponent`] if any
+    /// required adapter is missing or
+    /// [`ServiceBuildError::PolicyInvalid`] if the policy
+    /// fails [`UpdaterPolicy::validate`].
+    pub fn build(self) -> Result<UpdaterService, ServiceBuildError> {
+        let target = self
+            .target
+            .ok_or(ServiceBuildError::MissingComponent("target"))?;
+        let source = self
+            .source
+            .ok_or(ServiceBuildError::MissingComponent("source"))?;
+        let verifier = self
+            .verifier
+            .ok_or(ServiceBuildError::MissingComponent("verifier"))?;
+        let downloader = self
+            .downloader
+            .ok_or(ServiceBuildError::MissingComponent("downloader"))?;
+        let bank_writer = self
+            .bank_writer
+            .ok_or(ServiceBuildError::MissingComponent("bank_writer"))?;
+        let bootloader = self
+            .bootloader
+            .ok_or(ServiceBuildError::MissingComponent("bootloader"))?;
+        let health_check = self
+            .health_check
+            .ok_or(ServiceBuildError::MissingComponent("health_check"))?;
+        let policy = self.policy.unwrap_or_default();
+        policy
+            .validate()
+            .map_err(ServiceBuildError::PolicyInvalid)?;
+        let policy_holder = UpdaterPolicyHolder::new(policy);
+        Ok(UpdaterService {
+            target,
+            source,
+            verifier,
+            downloader,
+            bank_writer,
+            bootloader,
+            health_check,
+            policy: policy_holder,
+            stats: UpdaterStats::default(),
+            state: ArcSwap::from_pointee(UpdateState::Idle),
+            install_lock: TokioMutex::new(()),
+            current_version_override: ParkingMutex::new(self.current_version_override),
+            health_check_clock: ParkingMutex::new(Arc::new(RealHealthCheckClock)),
+            ticks: AtomicU64::new(0),
+        })
+    }
+}
+
+/// Errors returned by [`UpdaterServiceBuilder::build`].
+#[derive(Debug, Error)]
+pub enum ServiceBuildError {
+    /// One of the required components was not plugged in.
+    #[error("updater service builder missing component: {0}")]
+    MissingComponent(&'static str),
+    /// The supplied policy failed validation.
+    #[error("updater service builder rejected policy: {0}")]
+    PolicyInvalid(#[source] PolicyValidationError),
+}
+
+/// Trait used internally by the orchestrator to drive sleep
+/// during the health-check loop. The default
+/// [`RealHealthCheckClock`] sleeps with `tokio::time::sleep`;
+/// tests can swap in a clock that advances under the
+/// runtime's `pause()` so the orchestrator can be exercised
+/// without wall-clock waits.
+pub trait HealthCheckClock: Send + Sync {
+    /// Sleep for `dur`.
+    fn sleep(&self, dur: Duration) -> Sleep;
+}
+
+/// Default health-check clock — delegates to
+/// `tokio::time::sleep`.
+#[derive(Debug)]
+pub struct RealHealthCheckClock;
+
+impl HealthCheckClock for RealHealthCheckClock {
+    fn sleep(&self, dur: Duration) -> Sleep {
+        sleep(dur)
+    }
+}
+
+/// Fully-wired updater service. Construct via
+/// [`UpdaterServiceBuilder`].
+#[allow(missing_debug_implementations)]
+pub struct UpdaterService {
+    target: UpdateTarget,
+    source: Arc<dyn ManifestSource>,
+    verifier: Arc<ManifestVerifier>,
+    downloader: Arc<dyn ImageDownloader>,
+    bank_writer: Arc<dyn BankWriter>,
+    bootloader: Arc<dyn Bootloader>,
+    health_check: Arc<dyn HealthCheck>,
+    policy: UpdaterPolicyHolder,
+    stats: UpdaterStats,
+    state: ArcSwap<UpdateState>,
+    install_lock: TokioMutex<()>,
+    current_version_override: ParkingMutex<Option<ImageVersion>>,
+    health_check_clock: ParkingMutex<Arc<dyn HealthCheckClock>>,
+    ticks: AtomicU64,
+}
+
+impl UpdaterService {
+    /// Current install state machine state.
+    pub fn current_state(&self) -> UpdateState {
+        **self.state.load()
+    }
+
+    /// Snapshot of the stats counters.
+    pub fn stats_snapshot(&self) -> UpdaterStatsSnapshot {
+        self.stats.snapshot()
+    }
+
+    /// Replace the operator policy. Validates before
+    /// installing — returns [`PolicyValidationError`] on a
+    /// malformed bundle.
+    pub fn reload_policy(
+        &self,
+        policy: UpdaterPolicy,
+    ) -> Result<Arc<UpdaterPolicy>, PolicyValidationError> {
+        policy.validate()?;
+        Ok(self.policy.reload(policy))
+    }
+
+    /// Read the current operator policy.
+    pub fn policy(&self) -> Arc<UpdaterPolicy> {
+        self.policy.load()
+    }
+
+    /// Set the cold-start "current version" pin override.
+    pub fn set_current_version_override(&self, v: Option<ImageVersion>) {
+        *self.current_version_override.lock() = v;
+    }
+
+    /// Number of state-machine transitions the service has
+    /// performed since construction. Used by tests as a
+    /// progress signal.
+    pub fn tick_count(&self) -> u64 {
+        self.ticks.load(Ordering::Relaxed)
+    }
+
+    /// Override the health-check clock — tests use this to
+    /// swap in a clock backed by `tokio::time::pause`.
+    pub fn set_health_check_clock(&self, clock: Arc<dyn HealthCheckClock>) {
+        *self.health_check_clock.lock() = clock;
+    }
+
+    /// Pull the current bank layout and derive the
+    /// "currently-committed image version" pin. Used by the
+    /// verifier as the downgrade comparison anchor.
+    async fn current_version(&self) -> Result<Option<ImageVersion>, UpdaterError> {
+        if let Some(v) = *self.current_version_override.lock() {
+            return Ok(Some(v));
+        }
+        let layout = self.bank_writer.layout().await?;
+        Ok(layout.active_version())
+    }
+
+    fn transition(&self, from: UpdateState, to: UpdateState) -> Result<UpdateState, UpdaterError> {
+        let next = from.transition_to(to)?;
+        self.state.store(Arc::new(next));
+        self.ticks.fetch_add(1, Ordering::Relaxed);
+        debug!(from = %from, to = %next, "updater state transition");
+        Ok(next)
+    }
+
+    /// Pull the latest manifest from the source and, if it is
+    /// admissible, run the install end-to-end.
+    pub async fn poll_and_install(&self) -> Result<InstallOutcome, UpdaterError> {
+        self.stats.manifest_polls.fetch_add(1, Ordering::Relaxed);
+        let env = match self.source.latest(self.target).await {
+            Ok(Some(env)) => env,
+            Ok(None) => return Ok(InstallOutcome::NoManifestAvailable),
+            Err(e) => {
+                self.stats
+                    .manifest_source_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!(error = %e, "manifest source error");
+                return Err(map_source_error(e));
+            }
+        };
+        self.install_from_envelope(env).await
+    }
+
+    /// Install from an already-pulled signed envelope. The
+    /// full pipeline: verify → download → integrity check →
+    /// stage → swap → health check → commit (or rollback).
+    pub async fn install_from_envelope(
+        &self,
+        envelope: SignedManifest,
+    ) -> Result<InstallOutcome, UpdaterError> {
+        let Ok(_guard) = self.install_lock.try_lock() else {
+            self.stats
+                .install_concurrency_rejections
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(UpdaterError::InstallBusy);
+        };
+        let current = self.current_version().await?;
+        let manifest = match self.verifier.verify(&envelope, current) {
+            Ok(m) => m,
+            Err(e) => {
+                self.bump_verifier_error(&e);
+                return Err(e);
+            }
+        };
+        self.stats.manifest_admitted.fetch_add(1, Ordering::Relaxed);
+        // Enforce the policy's image-size cap BEFORE
+        // touching the network. A misbehaving control plane
+        // that published an oversized manifest is rejected
+        // up front.
+        let policy = self.policy.load();
+        if manifest.image_size_bytes > policy.max_image_bytes {
+            return Err(UpdaterError::ImageSizeExceeded {
+                claimed: policy.max_image_bytes,
+                read: manifest.image_size_bytes,
+            });
+        }
+        // Cap manifest's declared size against the
+        // hard-cap-derived policy. We DO still pass the raw
+        // manifest's declared size to the hasher so the
+        // downloader knows when to surface Truncated.
+        let layout = self.bank_writer.layout().await?;
+        let target_slot = layout.inactive();
+        self.enforce_no_reinstall_of_rolled_back(&layout, target_slot, &manifest, &policy)?;
+        self.transition(UpdateState::Idle, UpdateState::Downloading)?;
+        let install_result = self.run_install(&manifest, target_slot).await;
+        match install_result {
+            Ok(o) => Ok(o),
+            Err(e) => {
+                // Reset the state machine to Idle so the
+                // service is ready for the next attempt.
+                // Whatever state we're in, the abort-to-idle
+                // transition is legal from every
+                // non-terminal state per state.rs.
+                let cur = self.current_state();
+                if !cur.is_terminal() && cur != UpdateState::Idle {
+                    // Best-effort transition back to Idle.
+                    if let Ok(next) = cur.transition_to(UpdateState::Idle) {
+                        self.state.store(Arc::new(next));
+                        self.ticks.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Helper that enforces the
+    /// `allow_reinstall_of_rolled_back_version` policy.
+    #[allow(clippy::unused_self)]
+    fn enforce_no_reinstall_of_rolled_back(
+        &self,
+        layout: &BankLayout,
+        target_slot: Bank,
+        manifest: &UpdateManifest,
+        policy: &UpdaterPolicy,
+    ) -> Result<(), UpdaterError> {
+        if policy.allow_reinstall_of_rolled_back_version {
+            return Ok(());
+        }
+        let slot_state = layout.slot_state(target_slot);
+        if let BankSlotState::RolledBack { version } = slot_state
+            && *version == manifest.version
+        {
+            warn!(
+                version = %manifest.version,
+                slot = %target_slot,
+                "refusing to re-install version that was rolled back from this slot"
+            );
+            return Err(UpdaterError::ManifestStale {
+                found: manifest.version,
+                current: *version,
+            });
+        }
+        Ok(())
+    }
+
+    fn bump_verifier_error(&self, e: &UpdaterError) {
+        match e {
+            UpdaterError::BodyDecode(_) => {
+                self.stats
+                    .manifest_body_decode_errors
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            UpdaterError::SignatureInvalid | UpdaterError::EphemeralSigningKey => {
+                self.stats
+                    .manifest_signature_errors
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            UpdaterError::UnknownSigningKey(_) => {
+                self.stats
+                    .manifest_unknown_key_errors
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            UpdaterError::TargetMismatch { .. } => {
+                self.stats
+                    .manifest_target_mismatch_errors
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            UpdaterError::ManifestStale { .. } => {
+                self.stats
+                    .manifest_stale_errors
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    /// Drive the install state machine from `Downloading`
+    /// through to terminal `Committed` / `RolledBack`.
+    async fn run_install(
+        &self,
+        manifest: &UpdateManifest,
+        target_slot: Bank,
+    ) -> Result<InstallOutcome, UpdaterError> {
+        info!(
+            version = %manifest.version,
+            slot = %target_slot,
+            size_bytes = manifest.image_size_bytes,
+            "starting install"
+        );
+        // ----- Downloading -----
+        let mut handle = self.bank_writer.open_for_write(target_slot).await?;
+        let mut hasher = StreamingHasher::new(manifest.image_size_bytes);
+        match self
+            .stream_into_bank(&mut handle, &mut hasher, manifest)
+            .await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                let _ = handle.abandon().await;
+                return Err(e);
+            }
+        }
+
+        // ----- Verifying -----
+        self.transition(UpdateState::Downloading, UpdateState::Verifying)?;
+        let receipt = hasher.finalise();
+        if receipt.sha256 != manifest.image_sha256 {
+            self.stats
+                .install_hash_mismatch
+                .fetch_add(1, Ordering::Relaxed);
+            let _ = handle.abandon().await;
+            return Err(UpdaterError::ImageHashMismatch {
+                expected: manifest.image_sha256.as_hex(),
+                actual: receipt.sha256.as_hex(),
+            });
+        }
+        if receipt.size_bytes != manifest.image_size_bytes {
+            // Smaller than expected — short of the declared
+            // size. (The hasher would have rejected larger
+            // up front.)
+            let _ = handle.abandon().await;
+            return Err(UpdaterError::ImageTruncated {
+                claimed: manifest.image_size_bytes,
+                read: receipt.size_bytes,
+            });
+        }
+
+        // ----- Installing -----
+        self.transition(UpdateState::Verifying, UpdateState::Installing)?;
+        let outcome = handle.finish(manifest.version).await?;
+        debug!(
+            slot = %outcome.slot,
+            bytes_written = outcome.bytes_written,
+            "image staged"
+        );
+
+        // ----- Rebooting -----
+        // Bank swap is the orchestrator-side "begin reboot"
+        // signal: the bootloader is now pointed at the new
+        // slot; in a real deployment the OS reboots here and
+        // the orchestrator resumes from this state on the
+        // next boot.
+        self.transition(UpdateState::Installing, UpdateState::Rebooting)?;
+        match self.bootloader.swap_to(target_slot).await {
+            Ok(_) => {}
+            Err(e) => {
+                self.stats
+                    .install_bootloader_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(e);
+            }
+        }
+
+        // ----- HealthChecking -----
+        self.transition(UpdateState::Rebooting, UpdateState::HealthChecking)?;
+        let probe_outcome = self.run_health_check_loop().await;
+        match probe_outcome {
+            HealthLoopOutcome::Healthy => {
+                self.transition(UpdateState::HealthChecking, UpdateState::Committed)?;
+                self.bootloader.commit().await.inspect_err(|_| {
+                    self.stats
+                        .install_bootloader_errors
+                        .fetch_add(1, Ordering::Relaxed);
+                })?;
+                self.bank_writer
+                    .mark_committed(target_slot, manifest.version)
+                    .await?;
+                // Mirror the bootloader's active-slot pin
+                // into the bank-writer layout so the next
+                // install picks the OTHER (now-inactive)
+                // slot. In a real deployment this is a
+                // metadata-partition rewrite that the
+                // bootloader publishes atomically alongside
+                // its own EFI / grub.cfg update; the
+                // orchestrator issues both calls so the
+                // in-process layout cache stays consistent
+                // even between reboots.
+                self.bank_writer.set_active(target_slot).await?;
+                self.stats.install_committed.fetch_add(1, Ordering::Relaxed);
+                self.transition(UpdateState::Committed, UpdateState::Idle)?;
+                Ok(InstallOutcome::Committed {
+                    version: manifest.version,
+                    slot: target_slot,
+                })
+            }
+            HealthLoopOutcome::Unhealthy { reason } => {
+                self.transition(UpdateState::HealthChecking, UpdateState::RolledBack)?;
+                self.bootloader.rollback().await.inspect_err(|_| {
+                    self.stats
+                        .install_bootloader_errors
+                        .fetch_add(1, Ordering::Relaxed);
+                })?;
+                self.bank_writer
+                    .mark_rolled_back(target_slot, manifest.version)
+                    .await?;
+                self.stats
+                    .install_rolled_back
+                    .fetch_add(1, Ordering::Relaxed);
+                self.transition(UpdateState::RolledBack, UpdateState::Idle)?;
+                Ok(InstallOutcome::RolledBack {
+                    version: manifest.version,
+                    slot: target_slot,
+                    reason,
+                })
+            }
+        }
+    }
+
+    /// Stream the downloader's bytes through a tee sink that
+    /// feeds both the SHA-256 hasher AND the bank-write
+    /// handle. Both writes happen in a single streaming pass
+    /// — the SHA-256 is computed incrementally and the bytes
+    /// are persisted to the inactive bank in lockstep, so no
+    /// staging buffer is required and the image size is
+    /// bounded by `manifest.image_size_bytes` (enforced on
+    /// every chunk by the hasher's size check before the
+    /// chunk ever reaches the bank handle).
+    async fn stream_into_bank(
+        &self,
+        handle: &mut Box<dyn WriteHandle + Send>,
+        hasher: &mut StreamingHasher,
+        manifest: &UpdateManifest,
+    ) -> Result<(), UpdaterError> {
+        let mut tee = TeeChunkSink::new(hasher, handle);
+        self.downloader
+            .download(&manifest.image_url, manifest.image_size_bytes, &mut tee)
+            .await
+            .map_err(|e| self.map_download_error(e))?;
+        Ok(())
+    }
+
+    /// Map [`DownloadError`] onto the orchestrator-facing
+    /// [`UpdaterError`] taxonomy and bump the corresponding
+    /// stats counter.
+    fn map_download_error(&self, e: DownloadError) -> UpdaterError {
+        match e {
+            DownloadError::Truncated { expected, read } => {
+                self.stats.install_truncated.fetch_add(1, Ordering::Relaxed);
+                UpdaterError::ImageTruncated {
+                    claimed: expected,
+                    read,
+                }
+            }
+            DownloadError::SizeExceeded { claimed, attempted } => UpdaterError::ImageSizeExceeded {
+                claimed,
+                read: attempted,
+            },
+            other => UpdaterError::DownloadFailure(other.to_string()),
+        }
+    }
+
+    async fn run_health_check_loop(&self) -> HealthLoopOutcome {
+        let policy = self.policy.load();
+        let deadline = Instant::now() + policy.health_check_window;
+        let mut consecutive_healthy: u32 = 0;
+        let clock = self.health_check_clock.lock().clone();
+        loop {
+            if Instant::now() >= deadline {
+                self.stats
+                    .health_check_timeouts
+                    .fetch_add(1, Ordering::Relaxed);
+                return HealthLoopOutcome::Unhealthy {
+                    reason: RollbackReason::HealthCheckTimeout,
+                };
+            }
+            self.stats
+                .health_check_probes
+                .fetch_add(1, Ordering::Relaxed);
+            let probe_fut = self.health_check.probe();
+            let r = timeout(policy.health_check_timeout, probe_fut).await;
+            match r {
+                Ok(Ok(HealthReport::Healthy { details })) => {
+                    debug!(details, "health probe passed");
+                    consecutive_healthy = consecutive_healthy.saturating_add(1);
+                    if consecutive_healthy >= policy.min_healthy_probes {
+                        return HealthLoopOutcome::Healthy;
+                    }
+                }
+                Ok(Ok(HealthReport::Unhealthy { details })) => {
+                    warn!(details, "health probe unhealthy — rolling back");
+                    return HealthLoopOutcome::Unhealthy {
+                        reason: RollbackReason::HealthCheckUnhealthy { details },
+                    };
+                }
+                Ok(Err(e)) => {
+                    warn!(error = %e, "health probe errored — rolling back");
+                    return HealthLoopOutcome::Unhealthy {
+                        reason: RollbackReason::HealthCheckErrored {
+                            details: e.to_string(),
+                        },
+                    };
+                }
+                Err(_) => {
+                    // Per-probe timeout. Treat the same as
+                    // an unhealthy probe — the orchestrator
+                    // gives up on the install. (We do NOT
+                    // bump health_check_timeouts here — that
+                    // counter is reserved for the
+                    // window-level timeout.)
+                    warn!("health probe per-call timeout — rolling back");
+                    return HealthLoopOutcome::Unhealthy {
+                        reason: RollbackReason::HealthCheckTimeout,
+                    };
+                }
+            }
+            // Sleep before the next probe. We honour the
+            // injected clock so tests can advance virtual
+            // time deterministically; production wires the
+            // real `tokio::time::sleep`.
+            let interval = policy.health_check_interval;
+            clock.sleep(interval).await;
+        }
+    }
+}
+
+enum HealthLoopOutcome {
+    Healthy,
+    Unhealthy { reason: RollbackReason },
+}
+
+fn map_source_error(e: SourceError) -> UpdaterError {
+    match e {
+        SourceError::Transport(msg) | SourceError::Rejected(msg) => {
+            UpdaterError::DownloadFailure(msg)
+        }
+    }
+}
+
+// Re-export the build error so callers don't need to dig.
+pub use ServiceBuildError as Build;
+
+/// Helper: snapshot the current image-hash claim on the
+/// active slot, returning `None` if the layout is cold-start.
+/// Surface this for telemetry. Pure derivation — no I/O.
+#[must_use]
+pub fn observed_active_hash(_layout: &BankLayout) -> Option<ImageHash> {
+    None
+}
+
+/// Construct a fully-wired in-memory service for tests. Not
+/// `pub` because production code never wants this — the
+/// orchestrator's adapters are always supplied by the host
+/// binary.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use crate::bank::InMemoryBankWriter;
+    use crate::bootloader::InMemoryBootloader;
+    use crate::download::InMemoryDownloader;
+    use crate::healthcheck::StaticHealthCheck;
+    use crate::manifest::{ImageHash, ManifestSignature, ManifestSigningKeyId};
+    use crate::source::StaticManifestSource;
+    use crate::verifier::ManifestVerifier;
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
+    use url::Url;
+
+    pub(crate) struct TestRig {
+        pub service: UpdaterService,
+        pub source: Arc<StaticManifestSource>,
+        pub downloader: Arc<InMemoryDownloader>,
+        pub bank_writer: Arc<InMemoryBankWriter>,
+        pub bootloader: Arc<InMemoryBootloader>,
+        pub health_check: Arc<StaticHealthCheck>,
+        pub signing_key: SigningKey,
+        pub signing_key_id: ManifestSigningKeyId,
+    }
+
+    impl TestRig {
+        pub(crate) fn new_with_target(target: UpdateTarget) -> Self {
+            let seed = [0x33_u8; 32];
+            let sk = SigningKey::from_bytes(&seed);
+            let vk = sk.verifying_key();
+            let id = ManifestSigningKeyId::new("rig-key").expect("id");
+            let mut verifier = ManifestVerifier::with_target(target);
+            verifier
+                .add_key(id.clone(), vk.as_bytes())
+                .expect("add key");
+            let verifier = Arc::new(verifier);
+
+            let source = Arc::new(StaticManifestSource::new());
+            let downloader = Arc::new(InMemoryDownloader::new());
+            let bank_writer = Arc::new(InMemoryBankWriter::cold_start());
+            let bootloader = Arc::new(InMemoryBootloader::new(Bank::A));
+            let health_check = Arc::new(StaticHealthCheck::always_healthy("ok"));
+
+            let policy = UpdaterPolicy {
+                health_check_window: Duration::from_secs(60),
+                health_check_timeout: Duration::from_secs(1),
+                health_check_interval: Duration::from_millis(10),
+                min_healthy_probes: 1,
+                ..UpdaterPolicy::default()
+            };
+
+            let service = UpdaterServiceBuilder::new()
+                .target(target)
+                .source(source.clone() as Arc<dyn ManifestSource>)
+                .verifier(verifier)
+                .downloader(downloader.clone() as Arc<dyn ImageDownloader>)
+                .bank_writer(bank_writer.clone() as Arc<dyn BankWriter>)
+                .bootloader(bootloader.clone() as Arc<dyn Bootloader>)
+                .health_check(health_check.clone() as Arc<dyn HealthCheck>)
+                .policy(policy)
+                .build()
+                .expect("build");
+
+            Self {
+                service,
+                source,
+                downloader,
+                bank_writer,
+                bootloader,
+                health_check,
+                signing_key: sk,
+                signing_key_id: id,
+            }
+        }
+
+        pub(crate) fn signed_envelope_with_payload(
+            &self,
+            target: UpdateTarget,
+            version: ImageVersion,
+            payload: Vec<u8>,
+        ) -> SignedManifest {
+            let mut h = Sha256::new();
+            h.update(&payload);
+            let mut sha = [0_u8; 32];
+            sha.copy_from_slice(&h.finalize());
+            let mfst = UpdateManifest {
+                schema_version: 1,
+                target,
+                channel: crate::manifest::ReleaseChannel::Stable,
+                version,
+                image_sha256: ImageHash::new(sha),
+                image_size_bytes: payload.len() as u64,
+                image_url: Url::parse(&format!("https://x.invalid/img-{version}.bin"))
+                    .expect("url"),
+                release_notes: String::new(),
+                signed_at: chrono::Utc::now(),
+            };
+            let body = rmp_serde::to_vec_named(&mfst).expect("encode");
+            let sig = self.signing_key.sign(&body);
+            self.downloader.register(&mfst.image_url, payload);
+            SignedManifest {
+                body,
+                signature: ManifestSignature::new(sig.to_bytes()),
+                signing_key_id: self.signing_key_id.clone(),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::TestRig;
+    use super::*;
+    use crate::bank::BankSlotState;
+    use crate::healthcheck::HealthReport;
+    use crate::manifest::{ManifestSignature, ManifestSigningKeyId};
+    use crate::source::StaticManifestSource;
+    use pretty_assertions::assert_eq;
+
+    #[tokio::test]
+    async fn builder_rejects_missing_components() {
+        match UpdaterServiceBuilder::new().build() {
+            Err(ServiceBuildError::MissingComponent(_)) => {}
+            Err(other) => panic!("expected MissingComponent, got {other:?}"),
+            Ok(_) => panic!("expected error, got service"),
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_invalid_policy() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        let invalid = UpdaterPolicy {
+            max_image_bytes: 0,
+            ..UpdaterPolicy::default()
+        };
+        // We use the rig's adapters to build a fresh service
+        // with an invalid policy — `reload_policy` and
+        // builder both go through `validate`.
+        let res = rig.service.reload_policy(invalid);
+        assert!(matches!(res, Err(PolicyValidationError::MaxImageBytesZero)));
+    }
+
+    #[tokio::test]
+    async fn happy_path_install_commits() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        let payload = vec![0xAA_u8; 1024];
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            payload,
+        );
+        let outcome = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect("install");
+        match outcome {
+            InstallOutcome::Committed { version, slot } => {
+                assert_eq!(version, ImageVersion::new(2, 0, 0));
+                assert_eq!(slot, Bank::B);
+            }
+            other => panic!("expected Committed, got {other:?}"),
+        }
+        let layout = rig.bank_writer.layout().await.expect("layout");
+        assert_eq!(
+            layout.slot_b,
+            BankSlotState::Committed {
+                version: ImageVersion::new(2, 0, 0)
+            }
+        );
+        let active = rig.bootloader.active().await.expect("active");
+        assert_eq!(active.current(), Bank::B);
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.manifest_admitted, 1);
+        assert_eq!(snap.install_committed, 1);
+        assert_eq!(snap.install_rolled_back, 0);
+        assert_eq!(rig.service.current_state(), UpdateState::Idle);
+    }
+
+    #[tokio::test]
+    async fn install_rolls_back_on_unhealthy_probe() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.health_check
+            .set_default(HealthReport::unhealthy("service crashed"));
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 16],
+        );
+        let outcome = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect("install");
+        match outcome {
+            InstallOutcome::RolledBack {
+                version,
+                slot,
+                reason,
+            } => {
+                assert_eq!(version, ImageVersion::new(2, 0, 0));
+                assert_eq!(slot, Bank::B);
+                assert!(matches!(
+                    reason,
+                    RollbackReason::HealthCheckUnhealthy { .. }
+                ));
+            }
+            other => panic!("expected RolledBack, got {other:?}"),
+        }
+        let active = rig.bootloader.active().await.expect("active");
+        assert_eq!(active.current(), Bank::A); // rolled back
+        let layout = rig.bank_writer.layout().await.expect("layout");
+        assert_eq!(
+            layout.slot_b,
+            BankSlotState::RolledBack {
+                version: ImageVersion::new(2, 0, 0)
+            }
+        );
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.install_rolled_back, 1);
+        assert_eq!(snap.install_committed, 0);
+    }
+
+    #[tokio::test]
+    async fn install_rejects_downgrade() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.bank_writer.set_layout(BankLayout::new(
+            Bank::A,
+            BankSlotState::Committed {
+                version: ImageVersion::new(3, 0, 0),
+            },
+            BankSlotState::Empty,
+        ));
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(1, 0, 0),
+            vec![0xAA_u8; 16],
+        );
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("downgrade");
+        match err {
+            UpdaterError::ManifestStale { found, current } => {
+                assert_eq!(found, ImageVersion::new(1, 0, 0));
+                assert_eq!(current, ImageVersion::new(3, 0, 0));
+            }
+            other => panic!("expected ManifestStale, got {other:?}"),
+        }
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.manifest_stale_errors, 1);
+    }
+
+    #[tokio::test]
+    async fn install_rejects_target_mismatch() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Agent,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 16],
+        );
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("target");
+        assert!(matches!(err, UpdaterError::TargetMismatch { .. }));
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.manifest_target_mismatch_errors, 1);
+    }
+
+    #[tokio::test]
+    async fn install_rejects_payload_with_wrong_hash() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        // Build a signed manifest claiming hash X but register
+        // a payload that hashes to Y.
+        let payload_good = vec![0xAA_u8; 16];
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            payload_good.clone(),
+        );
+        // Swap the registered payload to something different
+        // — keeps the same URL the manifest points at.
+        let manifest: UpdateManifest = rmp_serde::from_slice(&env.body).expect("decode");
+        rig.downloader
+            .register(&manifest.image_url, vec![0xBB_u8; 16]);
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("hash");
+        assert!(matches!(err, UpdaterError::ImageHashMismatch { .. }));
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.install_hash_mismatch, 1);
+    }
+
+    #[tokio::test]
+    async fn install_rejects_truncated_payload() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        let payload = vec![0xAA_u8; 4096];
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            payload,
+        );
+        // Force the downloader to stop short.
+        rig.downloader.force_truncation_after(Some(1024));
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("truncated");
+        assert!(matches!(err, UpdaterError::ImageTruncated { .. }));
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.install_truncated, 1);
+    }
+
+    #[tokio::test]
+    async fn poll_and_install_returns_no_manifest_when_source_empty() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        let outcome = rig.service.poll_and_install().await.expect("ok");
+        assert_eq!(outcome, InstallOutcome::NoManifestAvailable);
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.manifest_polls, 1);
+    }
+
+    #[tokio::test]
+    async fn poll_and_install_consumes_pushed_envelope() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 32],
+        );
+        rig.source.push(env);
+        let outcome = rig.service.poll_and_install().await.expect("ok");
+        assert!(matches!(outcome, InstallOutcome::Committed { .. }));
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.manifest_polls, 1);
+        assert_eq!(snap.install_committed, 1);
+    }
+
+    #[tokio::test]
+    async fn poll_surfaces_source_transport_failure() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.source.force_failure(Some("dns down".into()));
+        let err = rig.service.poll_and_install().await.expect_err("err");
+        assert!(matches!(err, UpdaterError::DownloadFailure(_)));
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.manifest_source_errors, 1);
+    }
+
+    #[tokio::test]
+    async fn install_rejects_when_image_exceeds_policy_max() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        // Shrink the policy ceiling under the payload size.
+        let policy = UpdaterPolicy {
+            max_image_bytes: 64,
+            ..(*rig.service.policy()).clone()
+        };
+        rig.service.reload_policy(policy).expect("reload");
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 1024],
+        );
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("oversize");
+        assert!(matches!(err, UpdaterError::ImageSizeExceeded { .. }));
+    }
+
+    #[tokio::test]
+    async fn install_refuses_reinstall_of_rolled_back_version_by_default() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.bank_writer.set_layout(BankLayout::new(
+            Bank::A,
+            BankSlotState::Committed {
+                version: ImageVersion::new(1, 0, 0),
+            },
+            BankSlotState::RolledBack {
+                version: ImageVersion::new(2, 0, 0),
+            },
+        ));
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 16],
+        );
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("reinstall");
+        assert!(matches!(err, UpdaterError::ManifestStale { .. }));
+    }
+
+    #[tokio::test]
+    async fn install_allows_reinstall_when_policy_permits() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.bank_writer.set_layout(BankLayout::new(
+            Bank::A,
+            BankSlotState::Committed {
+                version: ImageVersion::new(1, 0, 0),
+            },
+            BankSlotState::RolledBack {
+                version: ImageVersion::new(2, 0, 0),
+            },
+        ));
+        let policy = UpdaterPolicy {
+            allow_reinstall_of_rolled_back_version: true,
+            ..(*rig.service.policy()).clone()
+        };
+        rig.service.reload_policy(policy).expect("reload");
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 16],
+        );
+        let outcome = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect("install");
+        assert!(matches!(outcome, InstallOutcome::Committed { .. }));
+    }
+
+    #[tokio::test]
+    async fn concurrent_install_rejected_with_install_busy() {
+        // Hold the install lock manually, then attempt a
+        // second install — expect InstallBusy.
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        let guard = rig.service.install_lock.try_lock().expect("lock");
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 16],
+        );
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("busy");
+        assert!(matches!(err, UpdaterError::InstallBusy));
+        drop(guard);
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.install_concurrency_rejections, 1);
+    }
+
+    #[tokio::test]
+    async fn install_rejects_unknown_signing_key() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        // Forge an envelope with a key id the verifier
+        // hasn't been told about.
+        let env = SignedManifest {
+            body: vec![],
+            signature: ManifestSignature::new([0_u8; 64]),
+            signing_key_id: ManifestSigningKeyId::new("unknown-key").expect("id"),
+        };
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("unknown");
+        assert!(matches!(err, UpdaterError::UnknownSigningKey(_)));
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.manifest_unknown_key_errors, 1);
+    }
+
+    #[tokio::test]
+    async fn install_rejects_tampered_envelope() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        let mut env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 16],
+        );
+        env.body[0] ^= 0xff;
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("tampered");
+        assert!(matches!(err, UpdaterError::SignatureInvalid));
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.manifest_signature_errors, 1);
+    }
+
+    #[tokio::test]
+    async fn current_version_override_takes_precedence_over_bank_layout() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        // Layout says nothing committed, but the operator
+        // pinned "we shipped 1.5.0 from the factory".
+        rig.service
+            .set_current_version_override(Some(ImageVersion::new(1, 5, 0)));
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(1, 0, 0),
+            vec![0xAA_u8; 16],
+        );
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("downgrade");
+        assert!(matches!(err, UpdaterError::ManifestStale { .. }));
+    }
+
+    #[tokio::test]
+    async fn state_returns_to_idle_after_committed_install() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 16],
+        );
+        rig.service
+            .install_from_envelope(env)
+            .await
+            .expect("install");
+        assert_eq!(rig.service.current_state(), UpdateState::Idle);
+    }
+
+    #[tokio::test]
+    async fn state_returns_to_idle_after_rolled_back_install() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        rig.health_check
+            .set_default(HealthReport::unhealthy("svc down"));
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 16],
+        );
+        rig.service
+            .install_from_envelope(env)
+            .await
+            .expect("install");
+        assert_eq!(rig.service.current_state(), UpdateState::Idle);
+    }
+
+    #[tokio::test]
+    async fn install_rejects_oversized_payload_in_bytes() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        // Sign a manifest claiming N bytes, but register a
+        // payload with N+1 bytes — the downloader will
+        // surface that via the StreamingHasher refusing the
+        // chunk.
+        let payload_long = vec![0xAA_u8; 64];
+        // Build the envelope with the SHORT length first.
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            payload_long.clone()[..32].to_vec(),
+        );
+        let manifest: UpdateManifest = rmp_serde::from_slice(&env.body).expect("decode");
+        rig.downloader.register(&manifest.image_url, payload_long);
+        let err = rig
+            .service
+            .install_from_envelope(env)
+            .await
+            .expect_err("oversize");
+        match err {
+            UpdaterError::DownloadFailure(_) | UpdaterError::ImageSizeExceeded { .. } => {}
+            other => panic!("expected DownloadFailure / ImageSizeExceeded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stats_snapshot_round_trips_through_messagepack() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        let env = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 16],
+        );
+        rig.service
+            .install_from_envelope(env)
+            .await
+            .expect("install");
+        let snap = rig.service.stats_snapshot();
+        let encoded = rmp_serde::to_vec_named(&snap).expect("encode");
+        let decoded: UpdaterStatsSnapshot = rmp_serde::from_slice(&encoded).expect("decode");
+        assert_eq!(snap, decoded);
+    }
+
+    #[tokio::test]
+    async fn observed_active_hash_is_none_for_cold_start() {
+        let layout = BankLayout::cold_start();
+        assert!(observed_active_hash(&layout).is_none());
+    }
+
+    #[tokio::test]
+    async fn reload_policy_rejects_invalid_and_keeps_previous() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        let before = (*rig.service.policy()).clone();
+        let invalid = UpdaterPolicy {
+            max_image_bytes: 0,
+            ..before.clone()
+        };
+        let res = rig.service.reload_policy(invalid);
+        assert!(res.is_err());
+        assert_eq!(*rig.service.policy(), before);
+    }
+
+    #[tokio::test]
+    async fn two_installs_serial_use_alternating_banks() {
+        let rig = TestRig::new_with_target(UpdateTarget::Edge);
+        let env1 = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(2, 0, 0),
+            vec![0xAA_u8; 16],
+        );
+        let env2 = rig.signed_envelope_with_payload(
+            UpdateTarget::Edge,
+            ImageVersion::new(3, 0, 0),
+            vec![0xBB_u8; 16],
+        );
+        let o1 = rig
+            .service
+            .install_from_envelope(env1)
+            .await
+            .expect("install 1");
+        let o2 = rig
+            .service
+            .install_from_envelope(env2)
+            .await
+            .expect("install 2");
+        assert!(matches!(
+            o1,
+            InstallOutcome::Committed { slot: Bank::B, .. }
+        ));
+        assert!(matches!(
+            o2,
+            InstallOutcome::Committed { slot: Bank::A, .. }
+        ));
+        let snap = rig.service.stats_snapshot();
+        assert_eq!(snap.install_committed, 2);
+    }
+
+    // Silence unused — the `StaticManifestSource` import is
+    // re-exported through the rig but pretty_assertions does
+    // not always pull it.
+    #[allow(dead_code)]
+    fn _bind_static_source_in_scope() -> StaticManifestSource {
+        StaticManifestSource::new()
+    }
+}

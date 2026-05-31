@@ -168,6 +168,98 @@ pub enum ErrorCode {
     /// install rate, extend the timeout, or wait for the
     /// in-flight install to drain).
     SwgInstallBusy,
+    /// Self-update engine could not decode an update manifest
+    /// envelope. The signed body bytes are not a well-formed
+    /// `manifestPayload` MessagePack map — either the engine and
+    /// the control plane disagree on the manifest schema version
+    /// or the body bytes were truncated in transit. Distinct from
+    /// [`Self::UpdaterManifestSignatureInvalid`] because the
+    /// operator response differs: a decode failure means the
+    /// release pipeline is producing malformed manifests, while a
+    /// signature failure means the signing key is wrong (or the
+    /// bytes were tampered with).
+    UpdaterManifestBodyDecode,
+    /// Update manifest failed Ed25519 signature verification
+    /// against the trust store. The bytes were tampered with or
+    /// the signing key id does not match the public key the
+    /// operator installed at agent enrolment.
+    UpdaterManifestSignatureInvalid,
+    /// Update manifest was signed with a key id that is not in
+    /// the trust store. Mirrors
+    /// [`Self::PolicyBundleSigningKeyUnknown`] for the manifest
+    /// pipeline: either the operator forgot to install the key,
+    /// or the manifest was signed by a foreign key. The engine
+    /// fails closed and the previous image stays committed.
+    UpdaterManifestSigningKeyUnknown,
+    /// Update manifest version is less than or equal to the
+    /// currently-committed image version. Downgrade prevention.
+    /// The engine refuses to even download the image bytes for a
+    /// stale manifest — downgrades are a security-relevant
+    /// rollback to an older image whose vulnerabilities have
+    /// since been patched. Distinct from
+    /// [`Self::UpdaterManifestTargetMismatch`] because the
+    /// operator response differs: a downgrade means the operator
+    /// is intentionally pinning the wrong release (or the
+    /// release pipeline is republishing an old artifact), while a
+    /// target mismatch means the artifact was published for the
+    /// wrong appliance class.
+    UpdaterManifestStale,
+    /// Update manifest was published for a different appliance
+    /// target than the running binary. Mirrors
+    /// [`Self::PolicyBundleTargetMismatch`]: e.g. an `sng-agent`
+    /// trying to apply an `sng-edge` manifest. The engine fails
+    /// closed and the previous image stays committed.
+    UpdaterManifestTargetMismatch,
+    /// Downloaded image bytes hashed to a value that does not
+    /// match the manifest's `sha256` claim. Either the download
+    /// was corrupted in transit or the manifest's hash claim is
+    /// stale relative to the published artifact. The engine
+    /// discards the partial download and the previous image stays
+    /// committed. Distinct from
+    /// [`Self::UpdaterManifestSignatureInvalid`] because the
+    /// signed manifest itself can be valid while the image bytes
+    /// the URL serves are not the bytes the operator signed.
+    UpdaterImageHashMismatch,
+    /// Image download exceeded the per-attempt size budget
+    /// declared in [`Self::UpdaterManifestBodyDecode`]'s
+    /// `image_size_bytes` field. Defends against an upstream
+    /// serving an unbounded body that would exhaust local disk
+    /// before the hash check ran.
+    UpdaterImageSizeExceeded,
+    /// Inactive bank could not be written: the slot does not
+    /// exist, or the underlying writer returned an error
+    /// (typically I/O on the persistence layer). The engine
+    /// aborts the install and the previous image stays committed.
+    UpdaterBankWriteFailure,
+    /// Bootloader rejected the atomic bank-swap request. The
+    /// previous image stays committed.
+    UpdaterBootloaderFailure,
+    /// Health check after boot timed out before reporting
+    /// healthy. The supervisor rolls back to the previously-
+    /// committed bank and surfaces this code on the rollback
+    /// event so dashboards can break out
+    /// "timed out" vs. "actively reported unhealthy".
+    UpdaterHealthCheckTimeout,
+    /// Health check after boot actively reported unhealthy. The
+    /// supervisor rolls back to the previously-committed bank.
+    /// Distinct from [`Self::UpdaterHealthCheckTimeout`] because
+    /// the operator response differs: a timeout means the new
+    /// image never came up, while an unhealthy report means it
+    /// did come up but failed an active probe.
+    UpdaterHealthCheckFailed,
+    /// Operator-issued `install` on the updater could not
+    /// acquire the install serialisation lock — another install
+    /// is already in progress. Mirrors
+    /// [`Self::SwgInstallBusy`] for the updater plane: pure
+    /// backpressure, not a failure of the in-flight install.
+    UpdaterInstallBusy,
+    /// The state machine was driven from a state from which the
+    /// requested transition is not allowed (e.g. `commit` from
+    /// `Downloading`, or `install` from `HealthChecking`). The
+    /// install is aborted; the previous image stays committed.
+    /// Indicates a caller bug — the state machine is the
+    /// authoritative source for legal transitions.
+    UpdaterStateInvalidTransition,
     /// Catch-all for failures that genuinely do not fit one of
     /// the more specific buckets. Use sparingly — a new code is
     /// almost always preferable so dashboards can break the rate
@@ -215,6 +307,19 @@ impl ErrorCode {
             Self::SwgConfigValidate => "swg.config.validate",
             Self::SwgExtAuthzDecode => "swg.ext_authz.decode",
             Self::SwgInstallBusy => "swg.install.busy",
+            Self::UpdaterManifestBodyDecode => "updater.manifest.body.decode",
+            Self::UpdaterManifestSignatureInvalid => "updater.manifest.signature.invalid",
+            Self::UpdaterManifestSigningKeyUnknown => "updater.manifest.signing_key.unknown",
+            Self::UpdaterManifestStale => "updater.manifest.stale",
+            Self::UpdaterManifestTargetMismatch => "updater.manifest.target.mismatch",
+            Self::UpdaterImageHashMismatch => "updater.image.hash.mismatch",
+            Self::UpdaterImageSizeExceeded => "updater.image.size.exceeded",
+            Self::UpdaterBankWriteFailure => "updater.bank.write.failure",
+            Self::UpdaterBootloaderFailure => "updater.bootloader.failure",
+            Self::UpdaterHealthCheckTimeout => "updater.health_check.timeout",
+            Self::UpdaterHealthCheckFailed => "updater.health_check.failed",
+            Self::UpdaterInstallBusy => "updater.install.busy",
+            Self::UpdaterStateInvalidTransition => "updater.state.invalid_transition",
             Self::Other => "other",
         }
     }
@@ -294,6 +399,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn error_code_strings_are_stable_dotted_lowercase() {
         // Stability test: changing any of these is a breaking
         // change to dashboards and runbooks on the Go side. Any
@@ -365,6 +471,52 @@ mod tests {
             (ErrorCode::SwgConfigValidate, "swg.config.validate"),
             (ErrorCode::SwgExtAuthzDecode, "swg.ext_authz.decode"),
             (ErrorCode::SwgInstallBusy, "swg.install.busy"),
+            (
+                ErrorCode::UpdaterManifestBodyDecode,
+                "updater.manifest.body.decode",
+            ),
+            (
+                ErrorCode::UpdaterManifestSignatureInvalid,
+                "updater.manifest.signature.invalid",
+            ),
+            (
+                ErrorCode::UpdaterManifestSigningKeyUnknown,
+                "updater.manifest.signing_key.unknown",
+            ),
+            (ErrorCode::UpdaterManifestStale, "updater.manifest.stale"),
+            (
+                ErrorCode::UpdaterManifestTargetMismatch,
+                "updater.manifest.target.mismatch",
+            ),
+            (
+                ErrorCode::UpdaterImageHashMismatch,
+                "updater.image.hash.mismatch",
+            ),
+            (
+                ErrorCode::UpdaterImageSizeExceeded,
+                "updater.image.size.exceeded",
+            ),
+            (
+                ErrorCode::UpdaterBankWriteFailure,
+                "updater.bank.write.failure",
+            ),
+            (
+                ErrorCode::UpdaterBootloaderFailure,
+                "updater.bootloader.failure",
+            ),
+            (
+                ErrorCode::UpdaterHealthCheckTimeout,
+                "updater.health_check.timeout",
+            ),
+            (
+                ErrorCode::UpdaterHealthCheckFailed,
+                "updater.health_check.failed",
+            ),
+            (ErrorCode::UpdaterInstallBusy, "updater.install.busy"),
+            (
+                ErrorCode::UpdaterStateInvalidTransition,
+                "updater.state.invalid_transition",
+            ),
             (ErrorCode::Other, "other"),
         ];
         for (code, expected) in cases {

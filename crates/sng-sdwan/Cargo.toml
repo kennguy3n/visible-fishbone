@@ -15,7 +15,6 @@ sng-telemetry = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
 arc-swap = { workspace = true }
 parking_lot = { workspace = true }
-async-trait = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
