@@ -169,6 +169,23 @@ impl BypassList {
         // suffix appear adjacent; the dedup logic below keeps
         // the *last* one (operator override) when categories
         // differ.
+        //
+        // SORT-STABILITY INVARIANT — DO NOT change `sort_by` to
+        // `sort_unstable_by`: the operator-override contract
+        // depends on `Vec::sort_by` being a *stable* sort
+        // (documented at <https://doc.rust-lang.org/std/vec/struct.Vec.html#method.sort_by>).
+        // With a stable sort, two entries that compare equal
+        // (same suffix) keep their relative input order, so the
+        // operator entry — which `extend`'s above appended after
+        // the defaults — lands *after* the matching default in
+        // the sorted vector. The dedup loop below replaces the
+        // first occurrence with the next equal-suffix entry, so
+        // the operator's category wins. An unstable sort would
+        // be free to swap them, silently flipping the merge so
+        // the *default* category overrides the operator —
+        // catastrophic for the only reason `with_extensions`
+        // exists. Pinned by
+        // `operator_extension_overrides_default_category`.
         combined.sort_by(|a, b| a.suffix.cmp(&b.suffix));
         let mut merged: Vec<BypassEntry> = Vec::with_capacity(combined.len());
         for entry in combined {

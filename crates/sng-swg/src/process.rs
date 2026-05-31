@@ -164,13 +164,18 @@ struct ShellState {
 
 impl ShellEnvoy {
     /// Construct a shell backend with sensible defaults: `envoy`
-    /// resolved via `PATH`, admin port 9901, 10-second graceful
-    /// stop window.
+    /// resolved via `PATH`, admin port
+    /// [`crate::config::DEFAULT_ADMIN_PORT`], 10-second graceful
+    /// stop window. The default admin port is shared with the
+    /// renderer so a caller that picks defaults for both does
+    /// not produce a renderer/supervisor mismatch — see the
+    /// admin-port consistency note on
+    /// [`crate::config::EnvoyConfig`].
     #[must_use]
     pub fn new() -> Self {
         Self {
             binary: PathBuf::from("envoy"),
-            admin_port: 9901,
+            admin_port: crate::config::DEFAULT_ADMIN_PORT,
             grace_period: Duration::from_secs(10),
             state: Arc::new(AsyncMutex::new(ShellState::default())),
         }

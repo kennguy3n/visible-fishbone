@@ -261,8 +261,25 @@ impl RateLimiter {
         let now = self.clock.now();
         let mut buckets = self.buckets.lock();
         buckets.retain(|_, b| {
-            now.checked_sub(b.last_refill)
-                .is_some_and(|age| age < idle_max)
+            // Mirror `acquire`'s defensive backward-clock
+            // handling. `checked_sub` returns `None` when
+            // `last_refill > now` (a non-monotonic clock — only
+            // reachable in tests via `TestClock::set`, but the
+            // production `SystemClock`'s `LazyLock` anchor is
+            // monotonic *by guarantee*, not by inspection of the
+            // call site). Without this branch, a backward jump
+            // would cause this method to evict every bucket
+            // whose `last_refill` post-dated the new `now` —
+            // including buckets a concurrent `acquire` just
+            // populated — silently destroying state that
+            // `acquire` itself takes care to preserve. Keeping
+            // them on the backward edge matches the documented
+            // invariant that idle eviction is bounded-memory
+            // hygiene, not a correctness-bearing decision.
+            let Some(age) = now.checked_sub(b.last_refill) else {
+                return true;
+            };
+            age < idle_max
         });
     }
 
@@ -533,6 +550,54 @@ mod tests {
         // A fresh acquire repopulates a single bucket.
         assert!(rl.acquire("t1", "p1").permitted);
         assert_eq!(rl.bucket_count(), 1);
+    }
+
+    #[test]
+    fn evict_idle_preserves_buckets_under_backward_clock() {
+        // Regression test for the bot's `evict_idle` finding:
+        // `acquire` defensively handles a non-monotonic clock
+        // (`last_refill > now`) by treating `elapsed` as zero so
+        // the bucket is preserved with whatever tokens it had.
+        // The original `evict_idle` used
+        // `now.checked_sub(b.last_refill).is_some_and(..)` —
+        // `is_some_and` evaluates `false` when `checked_sub`
+        // returns `None`, which would cause `retain` to DROP
+        // the bucket on a backward clock edge. That asymmetry
+        // meant a `TestClock::set` going backwards could
+        // silently destroy bucket state mid-flight, even though
+        // `SystemClock`'s `LazyLock` anchor makes that
+        // impossible in production. The fix mirrors `acquire`'s
+        // `let-else return true` so backward clocks preserve
+        // the bucket. This test pins the defensive parity so a
+        // future refactor can't silently re-introduce the
+        // asymmetry.
+        let clock = TestClock::new();
+        clock.set(Duration::from_secs(100));
+        let rl = RateLimiter::new(2.0, 1.0, Arc::new(clock.clone()));
+        // Populate a bucket at t=100.
+        assert!(rl.acquire("t1", "p1").permitted);
+        assert_eq!(rl.bucket_count(), 1);
+        // Jump the clock backwards to t=50 — `last_refill` is
+        // now strictly greater than `now`, so `checked_sub`
+        // returns `None`. With the pre-fix `is_some_and(..)`
+        // gating, the bucket would be incorrectly evicted.
+        clock.set(Duration::from_secs(50));
+        rl.evict_idle(Duration::from_secs(30));
+        assert_eq!(
+            rl.bucket_count(),
+            1,
+            "backward clock must preserve buckets, not evict them",
+        );
+        // And once the clock recovers and the bucket genuinely
+        // ages out, eviction still works — i.e. the defensive
+        // branch hasn't disabled the normal path.
+        clock.set(Duration::from_secs(200));
+        rl.evict_idle(Duration::from_secs(30));
+        assert_eq!(
+            rl.bucket_count(),
+            0,
+            "forward clock past idle_max must still evict",
+        );
     }
 
     #[tokio::test]

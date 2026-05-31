@@ -47,13 +47,33 @@ macro_rules! ln {
     }};
 }
 
+/// Default Envoy admin port. Shared with
+/// [`crate::process::ShellEnvoy::new`] so a caller that
+/// constructs both with their default values does not produce
+/// a renderer/supervisor port mismatch.
+pub const DEFAULT_ADMIN_PORT: u16 = 9901;
+
 /// Top-level Envoy config the supervisor renders into YAML.
 ///
 /// Holds *only* the fields the SWG actually controls; anything
-/// that's static across deployments (admin port, threading
-/// model, logging) lives as a literal in
-/// [`render_envoy_yaml`] so an operator can't mis-configure it
-/// out from under the supervisor.
+/// that's static across deployments (threading model, logging)
+/// lives as a literal in [`render_envoy_yaml`] so an operator
+/// can't mis-configure it out from under the supervisor.
+///
+/// # Admin-port consistency
+///
+/// [`Self::admin_port`] **must** match the
+/// [`crate::process::ShellEnvoy::admin_port`] the supervisor
+/// healthcheck probes. The renderer emits whatever the field
+/// holds; the supervisor probes whatever `ShellEnvoy` was
+/// constructed with. The wiring layer is responsible for
+/// passing the same value to both (e.g. derive `ShellEnvoy`'s
+/// admin port from `EnvoyConfig::admin_port` at construction).
+/// [`EnvoyConfig::minimal_forward_proxy`] and the [`Default`]
+/// initialiser for `ShellEnvoy` both pick
+/// [`DEFAULT_ADMIN_PORT`] so callers using the defaults are
+/// safe; an operator that overrides one must override the
+/// other.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvoyConfig {
     /// One or more listeners. Typically a single listener on
@@ -66,6 +86,11 @@ pub struct EnvoyConfig {
     /// HTTP service on a unix socket) plus a generic
     /// `dynamic_forward_proxy` cluster.
     pub clusters: Vec<ClusterConfig>,
+    /// TCP port the Envoy admin endpoint binds on `127.0.0.1`.
+    /// The supervisor's healthcheck must probe this port. Defaults
+    /// to [`DEFAULT_ADMIN_PORT`]. See the struct doc on
+    /// admin-port consistency.
+    pub admin_port: u16,
 }
 
 impl EnvoyConfig {
@@ -99,7 +124,17 @@ impl EnvoyConfig {
                     connect_timeout_ms: 5_000,
                 },
             ],
+            admin_port: DEFAULT_ADMIN_PORT,
         }
+    }
+
+    /// Override the admin port. Use in tandem with
+    /// [`crate::process::ShellEnvoy::with_admin_port`] so the
+    /// rendered config and the supervisor healthcheck agree.
+    #[must_use]
+    pub fn with_admin_port(mut self, port: u16) -> Self {
+        self.admin_port = port;
+        self
     }
 }
 
@@ -167,7 +202,12 @@ pub fn render_envoy_yaml(cfg: &EnvoyConfig) -> Result<String, SwgError> {
     out.push_str("  address:\n");
     out.push_str("    socket_address:\n");
     out.push_str("      address: 127.0.0.1\n");
-    out.push_str("      port_value: 9901\n");
+    // Bind whatever port the operator wired into the config.
+    // Mirrored against `ShellEnvoy::admin_port` by the wiring
+    // layer so the supervisor's healthcheck reaches the bound
+    // port; see the [`EnvoyConfig`] doc on admin-port
+    // consistency.
+    ln!(out, "      port_value: {}", cfg.admin_port);
     out.push_str("static_resources:\n");
 
     // listeners ----
@@ -460,6 +500,73 @@ mod tests {
     }
 
     #[test]
+    fn admin_port_default_is_9901_and_renders_into_admin_block() {
+        // The renderer used to hardcode `port_value: 9901` in
+        // the admin block, which silently disagreed with
+        // `ShellEnvoy::admin_port` whenever an operator overrode
+        // the supervisor's healthcheck port. The fix promotes
+        // the admin port to a struct field so the renderer
+        // emits whatever the operator wired in. This test pins
+        // the default value matches `DEFAULT_ADMIN_PORT` and the
+        // renderer emits that exact value inside the admin
+        // socket_address block (not just somewhere in the file —
+        // a listener that happens to bind 9901 would otherwise
+        // give a false positive).
+        let cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        assert_eq!(cfg.admin_port, DEFAULT_ADMIN_PORT);
+        let s = render_envoy_yaml(&cfg).unwrap();
+        let admin_block = "admin:\n  address:\n    socket_address:\n      address: 127.0.0.1\n      port_value: 9901\n";
+        assert!(
+            s.contains(admin_block),
+            "default admin port must render as 9901 inside the admin block; got:\n{s}",
+        );
+    }
+
+    #[test]
+    fn admin_port_override_renders_into_admin_block() {
+        // Regression test for the bot's renderer/supervisor
+        // divergence finding. The pre-fix renderer hardcoded
+        // 9901 in the admin block, so an operator who wired
+        // `with_admin_port(15001)` on the supervisor would
+        // healthcheck a port Envoy never bound. The fix threads
+        // the configured port through the renderer; this test
+        // pins that the override actually lands in the admin
+        // block, not just that the field is settable.
+        let cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock")
+            .with_admin_port(15_001);
+        let s = render_envoy_yaml(&cfg).unwrap();
+        let admin_block = "admin:\n  address:\n    socket_address:\n      address: 127.0.0.1\n      port_value: 15001\n";
+        assert!(
+            s.contains(admin_block),
+            "overridden admin port must render in the admin block; got:\n{s}",
+        );
+        // And the default 9901 must NOT appear there — a future
+        // refactor that drops the field reference would still
+        // pass the override assertion if it emitted both ports.
+        assert!(
+            !s.contains("      port_value: 9901\n"),
+            "default admin port must not leak into the rendered output \
+             when the operator has overridden it; got:\n{s}",
+        );
+    }
+
+    #[test]
+    fn admin_port_change_flips_render_digest() {
+        // The supervisor's hot-swap dedup keys on the rendered
+        // config's SHA-256. If the renderer ignored
+        // `admin_port`, two configs differing only in admin port
+        // would hash equal and the supervisor would skip the
+        // restart needed to actually move the admin endpoint.
+        // This test pins that the admin_port participates in the
+        // digest.
+        let mut cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        let d0 = digest_envoy_yaml(&render_envoy_yaml(&cfg).unwrap());
+        cfg.admin_port = 15_001;
+        let d1 = digest_envoy_yaml(&render_envoy_yaml(&cfg).unwrap());
+        assert_ne!(d0, d1, "admin_port must participate in the rendered digest");
+    }
+
+    #[test]
     fn render_is_deterministic_across_calls() {
         // The supervisor's hot-swap digest dedup depends on
         // this property: two renders of the same input must be
@@ -509,6 +616,7 @@ mod tests {
                 endpoints: vec!["unix:///var/run/sng/extauthz.sock".into()],
                 connect_timeout_ms: 100,
             }],
+            admin_port: DEFAULT_ADMIN_PORT,
         };
         let s = render_envoy_yaml(&cfg).unwrap();
         assert!(s.contains("pipe:"));
@@ -525,6 +633,7 @@ mod tests {
                 endpoints: vec!["10.0.0.5:8080".into()],
                 connect_timeout_ms: 1_500,
             }],
+            admin_port: DEFAULT_ADMIN_PORT,
         };
         let s = render_envoy_yaml(&cfg).unwrap();
         assert!(s.contains("address: \"10.0.0.5\""));
@@ -542,6 +651,7 @@ mod tests {
                 endpoints: Vec::new(),
                 connect_timeout_ms: 5_000,
             }],
+            admin_port: DEFAULT_ADMIN_PORT,
         };
         let s = render_envoy_yaml(&cfg).unwrap();
         assert!(s.contains("type: STRICT_DNS"));
