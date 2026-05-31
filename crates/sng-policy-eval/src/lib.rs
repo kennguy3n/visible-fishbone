@@ -63,7 +63,7 @@ pub mod rule;
 pub mod steering;
 pub mod verdict;
 
-pub use bundle::{LoadedBundle, MAX_SUPPORTED_SCHEMA_VERSION};
+pub use bundle::{LoadedBundle, MAX_SUPPORTED_SCHEMA_VERSION, deny_all_skeleton_body};
 pub use engine::PolicyEngine;
 pub use error::PolicyEvalError;
 pub use flow::{Flow, FlowBuilder};

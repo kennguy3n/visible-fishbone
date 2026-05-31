@@ -99,11 +99,12 @@ pub use config::{ConfigGenerator, IpsConfigInput, IpsRuntime, SuricataConfig};
 pub use error::IpsError;
 pub use eve::{EveAlert, EveAnomaly, EveDns, EveFileinfo, EveFlow, EveHttp, EveRecord, EveTls};
 pub use health::{FailMode, HealthState, HealthTransition};
-pub use manager::{IpsManager, IpsManagerConfig};
+pub use manager::{IpsManager, IpsManagerConfig, IpsManagerStatus, SupervisorHandles};
 pub use process::{
     MockSuricata, ProcessStatus, ShellSuricata, SuricataProcess, SuricataSignal, SuricataStats,
 };
 pub use rules::{
-    IpsRuleBundle, IpsRuleBundleClaims, IpsRuleVerifier, RuleStager, RuleStagerConfig,
+    AlwaysValidValidator, FsRuleStager, IpsRuleBundle, IpsRuleBundleClaims, IpsRuleVerifier,
+    RuleStager, RuleStagerConfig, RuleValidator, SuricataValidator,
 };
-pub use telemetry::IpsEventSource;
+pub use telemetry::{IpsEventSink, IpsEventSource, SinkSendError};

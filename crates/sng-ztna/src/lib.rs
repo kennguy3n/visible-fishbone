@@ -119,5 +119,5 @@ pub use policy::{
     evaluate_policy,
 };
 pub use request::AccessRequest;
-pub use service::{ZtnaService, ZtnaServiceBuilder};
+pub use service::{ZtnaService, ZtnaServiceBuilder, ZtnaServiceConfig};
 pub use stats::{ZtnaStats, ZtnaStatsSnapshot};

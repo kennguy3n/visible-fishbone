@@ -77,7 +77,11 @@
 //!   trait + signal pair every long-running module in the
 //!   workspace plugs into so a single `Ctrl-C` /
 //!   `systemctl stop sng-agent` drains every subsystem in
-//!   bounded time.
+//!   bounded time. The [`supervisor`] module then composes
+//!   those primitives into a runnable [`supervisor::Supervisor`]
+//!   that the two binary crates (`sng-edge`, `sng-agent`) and
+//!   the integration-test harness use as their `main`-level
+//!   orchestrator.
 //!
 //! The crate is `#![forbid(unsafe_code)]` and ships under the
 //! same workspace-pedantic-clippy lint profile as the rest of the
@@ -90,6 +94,7 @@ pub mod events;
 pub mod ids;
 pub mod lifecycle;
 pub mod policy;
+pub mod supervisor;
 pub mod traffic_class;
 
 pub use config::{AgentMode, Config, ConfigError};
@@ -103,9 +108,17 @@ pub use ids::{
     ClaimTokenId, DeviceId, EventId, InvalidPolicySigningKeyId, PolicyBundleId, PolicyGraphId,
     PolicySigningKeyId, SiteId, TenantId,
 };
-pub use lifecycle::{Health, HealthCheck, HealthStatus, ShutdownSignal, ShutdownTrigger};
+pub use lifecycle::{
+    DrainTimeout, Health, HealthCheck, HealthStatus, ShutdownSignal, ShutdownTrigger,
+    SubsystemHealth,
+};
 pub use policy::{
     AddKeyError, BundleSignature, BundleTarget, PolicyBundle, PolicyBundleClaims, PolicyVerifier,
     UnknownBundleTarget, VerificationError,
+};
+pub use supervisor::{
+    DEFAULT_DRAIN_BUDGET, DEFAULT_HEALTH_INTERVAL, DEFAULT_HEALTH_PROBE_BUDGET, DrainOutcome,
+    DrainResult, Subsystem, SubsystemError, SubsystemHandle, Supervisor, SupervisorBuilder,
+    SupervisorExit, SupervisorReport, SupervisorRunError,
 };
 pub use traffic_class::TrafficClass;
