@@ -43,11 +43,19 @@ pub enum SteeringReason {
     /// [`TrafficClass`]. The data path is expected to
     /// map this to a deny verdict.
     NoAvailablePath,
-    /// Every path eligible for the class was either
-    /// stale (no probe within `probe_max_age_ms`) or out
-    /// of SLO floor. Distinct from `NoAvailablePath` so
-    /// ops can tell "we have paths but their probes are
-    /// stale" from "the path catalog is empty".
+    /// Every path eligible for the class lacked usable
+    /// probe data. "Usable" here means: a probe exists,
+    /// was observed within `probe_max_age_ms` of
+    /// `now_ms`, AND every metric on it (`latency_ms`,
+    /// `loss_pct`, `jitter_ms`) is finite (not NaN, not
+    /// ±INFINITY). A NaN-metric probe is informationally
+    /// equivalent to a missing one — the selector cannot
+    /// score it without leaking a non-finite total onto
+    /// the wire event — so it counts as "stale" for the
+    /// purposes of this reason. Distinct from
+    /// `NoAvailablePath` so ops can tell "we have paths
+    /// but their probes are stale / broken" from "the
+    /// path catalog is empty".
     AllProbesStale,
 }
 

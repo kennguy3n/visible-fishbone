@@ -258,11 +258,22 @@ pub struct SdwanService {
     probes: Arc<dyn ProbeProvider>,
     stats: Arc<SdwanStats>,
     telemetry: mpsc::Sender<TelemetryEvent>,
-    // Sticky-flow cache. The inner string is the
-    // PathId.0 value — we store the raw string rather
-    // than a PathId to avoid one indirection per
-    // lookup. Production calls hold the mutex for
-    // microseconds.
+    // Sticky-flow cache. The map is keyed by
+    // [`crate::request::SteeringRequest::flow_key`] —
+    // the producer's stable per-flow identifier (5-tuple
+    // hash, app-flow id, etc.) — NOT by [`PathId`]. The
+    // value carries the previously-selected
+    // [`PathId`] plus the pin's expiry, so the next
+    // request for the same flow can short-circuit
+    // re-scoring (see `sticky_lookup` / `sticky_insert`
+    // below). Keying by flow rather than path is what
+    // makes the cache a flow-pinning mechanism — keying
+    // by path would only let us memoise per-path
+    // recently-computed state, which is not what
+    // sticky-flow means. The value type is `String`
+    // (instead of holding a `&str` borrow) because the
+    // map outlives any one request's `flow_key` slice.
+    // Production calls hold the mutex for microseconds.
     sticky: Arc<Mutex<HashMap<String, StickyPin>>>,
     // Eviction counter — exposed for observability so
     // operators can see how often the sticky cache is
@@ -378,6 +389,20 @@ impl SdwanService {
     /// empty path table, an empty probe table) collapse
     /// to a [`SteeringReason::NoAvailablePath`] /
     /// [`SteeringReason::AllProbesStale`] decision.
+    // `clippy::float_cmp` is suppressed at the function
+    // level because the score tie-break inside this
+    // function intentionally uses strict `==` (see the
+    // long-form comment at the `breakdown.total ==
+    // prev.total` site) — an epsilon-window compare
+    // would let two paths with distinguishable but very
+    // close scores fall into the tie-break path and
+    // silently override the primary `<`-ordering. Both
+    // sides of the equality are guaranteed finite by
+    // `probe_is_usable` + `score_path`'s overflow clamp
+    // upstream. Hand-attribute-on-expressions is
+    // unstable, so the allow lives on the whole
+    // function.
+    #[allow(clippy::float_cmp)]
     pub fn evaluate(&self, request: &SteeringRequest) -> SteeringDecision {
         // Snapshot the policy exactly once for the whole
         // evaluation. The same `Arc<SdwanPolicy>` is then
@@ -412,13 +437,42 @@ impl SdwanService {
             }
         }
 
-        // Step 3: score every candidate that has a fresh
-        // probe; remember the best in-budget candidate
-        // and the best out-of-budget fallback
+        // Step 3: score every candidate that has a fresh,
+        // usable probe; remember the best in-budget
+        // candidate and the best out-of-budget fallback
         // separately.
+        //
+        // Two filters apply before scoring:
+        //
+        // 1. Freshness — `is_fresh` rejects probes older
+        //    than `policy_snap.probe_max_age_ms`. A stale
+        //    probe contains no information about the
+        //    *current* state of the path.
+        // 2. Usability — `probe_is_usable` rejects probes
+        //    carrying non-finite metric values (NaN /
+        //    ±INFINITY on `latency_ms`, `loss_pct`, or
+        //    `jitter_ms`). `PathProbe::new_checked` rejects
+        //    these at construction, but `PathProbe::new`
+        //    (the doc-comment "unchecked" constructor used
+        //    by adapters that have already validated
+        //    upstream) does not — so a misbehaving adapter
+        //    can mint a probe whose metric is NaN. Scoring
+        //    such a probe via `score_path` collapses the
+        //    total to `worst()` (`+INFINITY`) — and if it
+        //    is the sole candidate, the selector would
+        //    pick it as a `FallbackBelowFloor` winner with
+        //    a `+INFINITY` score on the wire event. That
+        //    is the wrong fail-mode: a probe whose metric
+        //    is NaN tells us *nothing* about the path's
+        //    health, so the selector must treat it as
+        //    unusable (same shape as stale) and fall
+        //    through to `AllProbesStale` rather than
+        //    selecting a path with infinite-score
+        //    telemetry. The `had_usable_candidate` flag
+        //    drives that fall-through.
         let mut best_in_budget: Option<(Arc<Path>, ScoreBreakdown)> = None;
         let mut best_fallback: Option<(Arc<Path>, ScoreBreakdown)> = None;
-        let mut had_fresh_candidate = false;
+        let mut had_usable_candidate = false;
 
         for path in &candidates {
             let Some(probe) = self.probes.get(&path.id) else {
@@ -427,28 +481,55 @@ impl SdwanService {
             if !probe.is_fresh(request.now_ms, policy_snap.probe_max_age_ms) {
                 continue;
             }
-            had_fresh_candidate = true;
+            if !probe_is_usable(&probe) {
+                continue;
+            }
+            had_usable_candidate = true;
             let breakdown = score_path(&probe, &policy_snap.weights, path.static_bias);
             let in_budget = policy_snap.within_latency_floor(probe.latency_ms)
                 && policy_snap.within_loss_floor(probe.loss_pct)
                 && policy_snap.within_jitter_floor(probe.jitter_ms);
             if in_budget {
-                if best_in_budget
-                    .as_ref()
-                    .is_none_or(|(_, prev)| breakdown.total < prev.total)
-                {
+                // Tie-break on `path.id` for deterministic
+                // selection across runs. Reasoning: HashMap
+                // iteration order is implementation-defined,
+                // so two paths with mathematically equal
+                // scores would otherwise pick "whichever the
+                // map yields first this call", which churns
+                // dashboards and complicates regression
+                // tests. Using `<=` here would also pick the
+                // *last* candidate encountered (still
+                // non-deterministic on HashMap order); the
+                // explicit `path.id < prev_path.id` tie-break
+                // gives a stable winner (lex-smallest id).
+                // Cost: one extra `PathId` compare on a true
+                // numeric tie, which is rare in practice
+                // (probes vary by milliseconds).
+                //
+                // The `==` branch below uses strict
+                // float equality intentionally — see the
+                // function-level `clippy::float_cmp` allow
+                // on `evaluate` for the full rationale.
+                if best_in_budget.as_ref().is_none_or(|(prev_path, prev)| {
+                    breakdown.total < prev.total
+                        || (breakdown.total == prev.total && path.id < prev_path.id)
+                }) {
                     best_in_budget = Some((Arc::clone(path), breakdown));
                 }
-            } else if best_fallback
-                .as_ref()
-                .is_none_or(|(_, prev)| breakdown.total < prev.total)
-            {
+            } else if best_fallback.as_ref().is_none_or(|(prev_path, prev)| {
+                breakdown.total < prev.total
+                    || (breakdown.total == prev.total && path.id < prev_path.id)
+            }) {
                 best_fallback = Some((Arc::clone(path), breakdown));
             }
         }
 
-        // Step 4: no candidate had a fresh probe at all.
-        if !had_fresh_candidate {
+        // Step 4: no candidate had a usable probe at all
+        // (every probe was either stale or non-finite).
+        // `AllProbesStale` is the wire-stable label for
+        // both shapes — see the variant doc on
+        // `SteeringReason::AllProbesStale`.
+        if !had_usable_candidate {
             return self.finalise(
                 request,
                 SteeringDecision::no_path(SteeringReason::AllProbesStale, request.traffic_class),
@@ -671,6 +752,28 @@ impl SdwanService {
     }
 }
 
+/// True iff every metric on `probe` is finite.
+///
+/// `PathProbe::new_checked` rejects non-finite metrics
+/// (NaN / ±INFINITY on latency / loss / jitter) at
+/// construction time, but the doc-comment "unchecked"
+/// `PathProbe::new` constructor — which adapters that
+/// validate upstream are free to call — does not. The
+/// selector therefore re-checks before scoring so a
+/// misbehaving adapter that bypasses `new_checked`
+/// cannot (a) mint a non-finite total that lands on the
+/// wire [`SteeringDecision::score`] (which feeds
+/// dashboards as a numeric metric) or (b) become the
+/// only available `FallbackBelowFloor` winner with an
+/// `+INFINITY` score. NaN probes carry no information
+/// about path health, so the architecturally correct
+/// fail-mode is to treat them identically to stale
+/// probes — fall through to `AllProbesStale` if the NaN
+/// probe is the sole candidate.
+fn probe_is_usable(probe: &PathProbe) -> bool {
+    probe.latency_ms.is_finite() && probe.loss_pct.is_finite() && probe.jitter_ms.is_finite()
+}
+
 /// Build a wire-shape [`SdwanEvent`] from a decision and
 /// the raw probe used to score the winning path. The
 /// `SdwanEvent` wire schema (see
@@ -872,47 +975,60 @@ mod tests {
     }
 
     #[test]
-    fn sticky_pin_kicks_in_on_second_evaluation() {
-        // First evaluation: picks `mpls` (Best).
-        // Second evaluation (well within sticky window):
-        // even though `inet` now has a better probe,
-        // sticky-pin keeps the flow on `mpls`.
-        let (svc, _rx) = build(
-            SdwanPolicy::default(),
-            vec![
+    fn sticky_pin_kicks_in_on_second_evaluation_within_same_service() {
+        // Cross-evaluation sticky pinning on a SINGLE
+        // service instance: the first evaluation pins the
+        // flow to `mpls` (the better path under the
+        // initial probe values); the underlying probe
+        // table then swaps so `inet` is the better path;
+        // the second evaluation, well within the sticky
+        // window, must STILL return `mpls` with reason
+        // [`SteeringReason::StickyPinned`].
+        //
+        // Two test-only details that keep this exercising
+        // the right invariant:
+        // 1. A `MutableProbeProvider` (defined in this
+        //    test module) lets us mutate the probe table
+        //    *between* `evaluate` calls without rebuilding
+        //    the service, so the sticky cache (which
+        //    lives on the service) actually carries
+        //    across the two evaluations.
+        // 2. We assert `d1.reason == Best` AND
+        //    `d2.reason == StickyPinned` to distinguish
+        //    "sticky pin honored" from "selector
+        //    re-picked the same path by coincidence".
+        //
+        // The cross-policy-reload variant of this case is
+        // covered separately by
+        // `sticky_pin_survives_in_place_policy_reload`.
+        let probes = Arc::new(MutableProbeProvider::from_probes([
+            (PathId::new("mpls"), PathProbe::new(10.0, 0.0, 0.0, NOW)),
+            (PathId::new("inet"), PathProbe::new(100.0, 0.0, 0.0, NOW)),
+        ]));
+        let (tx, _rx) = telemetry();
+        let svc = SdwanServiceBuilder::new()
+            .with_policy(Arc::new(
+                SdwanPolicyHolder::try_new(SdwanPolicy::default()).unwrap(),
+            ))
+            .with_path_provider(Arc::new(StaticPathProvider::from_paths(vec![
                 Path::new("mpls", [TrafficClass::Interactive]),
                 Path::new("inet", [TrafficClass::Interactive]),
-            ],
-            vec![
-                (PathId::new("mpls"), PathProbe::new(10.0, 0.0, 0.0, NOW)),
-                (PathId::new("inet"), PathProbe::new(100.0, 0.0, 0.0, NOW)),
-            ],
-        );
+            ])))
+            .with_probe_provider(Arc::clone(&probes) as Arc<dyn ProbeProvider>)
+            .build(tx);
+
         let d1 = svc.evaluate(&req("flow-s", TrafficClass::Interactive, NOW));
         assert_eq!(d1.path_id, Some(PathId::new("mpls")));
         assert_eq!(d1.reason, SteeringReason::Best);
 
-        // Now swap: inet is the better path. Without
-        // stickiness, the selector would switch.
-        let (svc, _rx) = build(
-            SdwanPolicy::default(),
-            vec![
-                Path::new("mpls", [TrafficClass::Interactive]),
-                Path::new("inet", [TrafficClass::Interactive]),
-            ],
-            vec![
-                (PathId::new("mpls"), PathProbe::new(100.0, 0.0, 0.0, NOW)),
-                (PathId::new("inet"), PathProbe::new(10.0, 0.0, 0.0, NOW)),
-            ],
-        );
-        // Two back-to-back calls on the same service /
-        // same flow_key — second should sticky-pin.
-        let _ = svc.evaluate(&req("flow-s", TrafficClass::Interactive, NOW));
+        // Swap the probe table so `inet` is now the
+        // better path. Without sticky-pin, the next
+        // evaluation would switch.
+        probes.set(PathId::new("mpls"), PathProbe::new(100.0, 0.0, 0.0, NOW));
+        probes.set(PathId::new("inet"), PathProbe::new(10.0, 0.0, 0.0, NOW));
+
         let d2 = svc.evaluate(&req("flow-s", TrafficClass::Interactive, NOW + 1_000));
-        // Note: the first call inside *this* service
-        // pinned to `inet` (the new winner). The second
-        // call should sticky to `inet`, NOT switch.
-        assert_eq!(d2.path_id, Some(PathId::new("inet")));
+        assert_eq!(d2.path_id, Some(PathId::new("mpls")));
         assert_eq!(d2.reason, SteeringReason::StickyPinned);
     }
 
@@ -1550,5 +1666,124 @@ mod tests {
         // sticky_lookup should evict.
         let _ = svc.evaluate(&req("flow-e", TrafficClass::Interactive, NOW + 1_000));
         assert!(svc.evictions() >= 1);
+    }
+
+    #[test]
+    fn nan_metric_sole_candidate_falls_through_to_all_probes_stale() {
+        // A path whose probe carries a NaN metric must
+        // NOT be selected as a `FallbackBelowFloor`
+        // winner, even if it is the only candidate.
+        // The selector treats unusable probes (non-finite
+        // metrics) identically to stale ones, so the
+        // outcome is `AllProbesStale` — fail-closed
+        // rather than emitting a `+INFINITY` score on the
+        // wire event. See `probe_is_usable` and the
+        // doc on `SteeringReason::AllProbesStale`.
+        let (svc, _rx) = build(
+            SdwanPolicy::default(),
+            vec![Path::new("mpls", [TrafficClass::Interactive])],
+            vec![(PathId::new("mpls"), PathProbe::new(f32::NAN, 0.0, 0.0, NOW))],
+        );
+        let d = svc.evaluate(&req("flow-nan", TrafficClass::Interactive, NOW));
+        assert_eq!(d.path_id, None);
+        assert_eq!(d.reason, SteeringReason::AllProbesStale);
+        assert!(d.score.is_none());
+    }
+
+    #[test]
+    fn nan_metric_candidate_loses_to_finite_candidate() {
+        // When a NaN-metric path coexists with a healthy
+        // finite-metric path, the healthy one wins
+        // outright — the NaN candidate is filtered before
+        // scoring rather than competing on a `worst()`
+        // collapsed score.
+        let (svc, _rx) = build(
+            SdwanPolicy::default(),
+            vec![
+                Path::new("mpls", [TrafficClass::Interactive]),
+                Path::new("inet", [TrafficClass::Interactive]),
+            ],
+            vec![
+                (PathId::new("mpls"), PathProbe::new(f32::NAN, 0.0, 0.0, NOW)),
+                (PathId::new("inet"), PathProbe::new(20.0, 0.1, 0.5, NOW)),
+            ],
+        );
+        let d = svc.evaluate(&req("flow-mixed", TrafficClass::Interactive, NOW));
+        assert_eq!(d.path_id, Some(PathId::new("inet")));
+        assert_eq!(d.reason, SteeringReason::Best);
+        // Score is finite — proves the NaN candidate did
+        // not leak through scoring.
+        let score = d.score.expect("inet path selected → score present");
+        assert!(score.total.is_finite());
+    }
+
+    #[test]
+    fn equal_scored_paths_break_ties_deterministically_by_path_id() {
+        // Two paths with identical probes produce
+        // identical scores. The selector must
+        // deterministically prefer the lex-smaller
+        // `PathId` ("alpha" < "beta") so dashboards and
+        // regression tests don't see HashMap iteration
+        // order leak into the decision.
+        //
+        // Re-running the same evaluation many times must
+        // ALWAYS pick the same winner — there is no
+        // sticky-pin protection here because each
+        // iteration uses a fresh service (no carry-over
+        // between calls).
+        for _ in 0..32 {
+            let (svc, _rx) = build(
+                SdwanPolicy::default(),
+                vec![
+                    Path::new("beta", [TrafficClass::Interactive]),
+                    Path::new("alpha", [TrafficClass::Interactive]),
+                ],
+                vec![
+                    (PathId::new("beta"), PathProbe::new(10.0, 0.0, 0.0, NOW)),
+                    (PathId::new("alpha"), PathProbe::new(10.0, 0.0, 0.0, NOW)),
+                ],
+            );
+            let d = svc.evaluate(&req("flow-tied", TrafficClass::Interactive, NOW));
+            assert_eq!(d.path_id, Some(PathId::new("alpha")));
+            assert_eq!(d.reason, SteeringReason::Best);
+        }
+    }
+
+    /// Test-only probe provider whose backing map is
+    /// behind a [`parking_lot::Mutex`]. Lets a single
+    /// test mutate the probe table between `evaluate`
+    /// calls — required for tests that need to observe
+    /// the *service's* sticky cache (which lives on the
+    /// service) across an underlying probe change.
+    /// Production calls always use
+    /// [`crate::probe::StaticProbeProvider`].
+    #[derive(Debug, Default)]
+    struct MutableProbeProvider {
+        by_id: Mutex<HashMap<PathId, PathProbe>>,
+    }
+
+    impl MutableProbeProvider {
+        fn from_probes<I>(probes: I) -> Self
+        where
+            I: IntoIterator<Item = (PathId, PathProbe)>,
+        {
+            let mut map = HashMap::new();
+            for (id, probe) in probes {
+                map.insert(id, probe);
+            }
+            Self {
+                by_id: Mutex::new(map),
+            }
+        }
+
+        fn set(&self, id: PathId, probe: PathProbe) {
+            self.by_id.lock().insert(id, probe);
+        }
+    }
+
+    impl ProbeProvider for MutableProbeProvider {
+        fn get(&self, path_id: &PathId) -> Option<PathProbe> {
+            self.by_id.lock().get(path_id).copied()
+        }
     }
 }
