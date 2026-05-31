@@ -116,6 +116,8 @@ pub use health::{HealthReport, HealthState, ManagerHealth};
 pub use malware::{MalwareVerdict, MalwareVerdictProvider, StaticMalwareList};
 pub use manager::{SwgManager, SwgSnapshot};
 pub use process::{EnvoyProcess, MockEnvoy, ShellEnvoy};
-pub use rate_limit::{Clock, RateLimitDecision, RateLimiter, SystemClock, TestClock};
+pub use rate_limit::{
+    Clock, EvictionTaskHandle, RateLimitDecision, RateLimiter, SystemClock, TestClock,
+};
 pub use telemetry::{TelemetryEmitter, VerdictEvent};
 pub use verdict::{Action, RequestContext, Verdict};

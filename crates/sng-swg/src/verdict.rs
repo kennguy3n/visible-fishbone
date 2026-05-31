@@ -227,14 +227,26 @@ pub struct RequestContext {
 }
 
 impl RequestContext {
-    /// Normalise the context's case-sensitive fields. The decoder
-    /// already does this on construction, but the helper is
-    /// exposed for callers building a context by hand in tests so
-    /// the normalisation contract has one source of truth.
+    /// Normalise the context's case-sensitive fields and strip
+    /// the query component from `path`. The decoder already does
+    /// this on construction, but the helper is exposed for
+    /// callers building a context by hand in tests so the
+    /// normalisation contract has one source of truth.
+    ///
+    /// Stripping the query is a contract obligation, not a
+    /// cosmetic detail: the field's doc comment promises "no
+    /// query", the categoriser indexes on `host` + `path` (not
+    /// per-request query), and the verdict telemetry serialises
+    /// the path verbatim — leaving the query in would surface
+    /// session tokens, OAuth state, and other PII-shaped
+    /// secrets through the wire-level dashboards.
     pub fn normalize(&mut self) {
         self.method = self.method.to_ascii_lowercase();
         self.scheme = self.scheme.to_ascii_lowercase();
         self.host = self.host.to_ascii_lowercase();
+        if let Some(idx) = self.path.find('?') {
+            self.path.truncate(idx);
+        }
         if let Some(s) = self.sni.as_mut() {
             *s = s.to_ascii_lowercase();
         }
@@ -321,10 +333,73 @@ mod tests {
         assert_eq!(ctx.scheme, "https");
         assert_eq!(ctx.host, "bank.example");
         assert_eq!(ctx.sni.as_deref(), Some("bank.example"));
-        // Path is left untouched — Envoy already normalises path
-        // segments and the URL feed indexes on the unmodified
-        // path form.
+        // Path casing is left untouched — Envoy already
+        // normalises path segments and the URL feed indexes on
+        // the path form Envoy emits. Only the query component is
+        // stripped (see request_context_normalize_strips_query).
         assert_eq!(ctx.path, "/Login");
+    }
+
+    #[test]
+    fn request_context_normalize_strips_query() {
+        // Wire contract: `RequestContext::path` is documented as
+        // "Request path (with leading slash, no query)". HTTP/2's
+        // `:path` pseudo-header includes the query, so the
+        // decoder hands us "/checkout?token=…" and `normalize()`
+        // must drop the `?token=…` tail before the categoriser
+        // ever sees it. Leaving the query would:
+        //   * make per-request cache lookups miss (the URL feed
+        //     indexes on host+path, never query),
+        //   * leak session tokens / OAuth `state` / OTP material
+        //     into the verdict telemetry the dashboards index on,
+        //   * silently drift from the field's own docstring.
+        // Pin both the empty-query and dense-query cases.
+        let mut ctx = RequestContext {
+            tenant_id: "tenant-1".into(),
+            principal_id: "device-42".into(),
+            method: "GET".into(),
+            scheme: "HTTPS".into(),
+            host: "bank.example".into(),
+            path: "/checkout?session=abc123&csrf=deadbeef".into(),
+            sni: None,
+            file_hash: None,
+        };
+        ctx.normalize();
+        assert_eq!(ctx.path, "/checkout");
+
+        // A path with a question-mark in the middle of a
+        // percent-encoded value is still stripped at the first
+        // literal `?` — by the time `:path` reaches the SWG the
+        // URI is already in its on-wire form (Envoy does not
+        // decode `%3F`), so any literal `?` is unambiguously the
+        // query delimiter.
+        let mut ctx = RequestContext {
+            tenant_id: "tenant-1".into(),
+            principal_id: "device-42".into(),
+            method: "GET".into(),
+            scheme: "HTTPS".into(),
+            host: "bank.example".into(),
+            path: "/p%3Fnotquery/page?actual=query".into(),
+            sni: None,
+            file_hash: None,
+        };
+        ctx.normalize();
+        assert_eq!(ctx.path, "/p%3Fnotquery/page");
+
+        // Path with no query is preserved verbatim — no spurious
+        // truncation on the common case.
+        let mut ctx = RequestContext {
+            tenant_id: "tenant-1".into(),
+            principal_id: "device-42".into(),
+            method: "GET".into(),
+            scheme: "HTTPS".into(),
+            host: "bank.example".into(),
+            path: "/api/v1/users".into(),
+            sni: None,
+            file_hash: None,
+        };
+        ctx.normalize();
+        assert_eq!(ctx.path, "/api/v1/users");
     }
 
     #[test]

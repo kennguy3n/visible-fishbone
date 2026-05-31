@@ -28,6 +28,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
 use crate::config::{EnvoyConfig, digest_envoy_yaml, render_envoy_yaml, summarize_listeners};
@@ -102,6 +103,18 @@ struct State {
     /// the handler (via the [`SwgManager::mark_verdict_emitted`]
     /// hook). Used by the health monitor to compute staleness.
     last_verdict_at: Mutex<Option<Instant>>,
+    /// Serialises [`SwgManager::install`] against itself so two
+    /// concurrent installs do not race past the digest dedup
+    /// and both try to validate / rename / restart Envoy. The
+    /// individual `ArcSwap`s above are atomic per-field, but
+    /// `install()` performs a multi-step transition (digest read
+    /// → staging write → validate → rename → restart → memory
+    /// swap) that needs to be atomic *as a whole* to make the
+    /// dedup path actually skip redundant restarts. An
+    /// `AsyncMutex` is the right primitive because the install
+    /// body awaits on filesystem and process I/O — a sync mutex
+    /// held across those awaits would block tokio workers.
+    install_lock: AsyncMutex<()>,
 }
 
 impl std::fmt::Debug for SwgManager {
@@ -126,6 +139,7 @@ impl SwgManager {
                 last_config: ArcSwap::from_pointee(None),
                 last_digest: ArcSwap::from_pointee(None),
                 last_verdict_at: Mutex::new(None),
+                install_lock: AsyncMutex::new(()),
             }),
         }
     }
@@ -162,9 +176,21 @@ impl SwgManager {
     /// Returns the installation outcome — distinguishes a no-op
     /// dedup hit from a real reload so the caller can surface
     /// the difference on operator dashboards.
+    ///
+    /// Concurrency: the body is serialised by an internal
+    /// [`tokio::sync::Mutex`] so two concurrent install calls do
+    /// not both race past the digest dedup and try to validate,
+    /// rename, and restart Envoy. The lock is acquired before
+    /// the digest comparison so the dedup check sees the
+    /// post-commit state of whatever install ran just before it.
     pub async fn install(&self, cfg: EnvoyConfig) -> Result<InstallOutcome, SwgError> {
+        // Render before acquiring the lock — render is pure CPU
+        // and can happen concurrently across installers without
+        // ordering hazards. Only the dedup compare + write +
+        // validate + rename + restart need serialisation.
         let rendered = render_envoy_yaml(&cfg)?;
         let digest = digest_envoy_yaml(&rendered);
+        let _guard = self.state.install_lock.lock().await;
         if let Some(prev) = self.state.last_digest.load().as_ref().clone() {
             if prev == digest {
                 return Ok(InstallOutcome::NoOp { digest });
@@ -622,5 +648,47 @@ mod tests {
         assert!(!n.was_reloaded());
         assert_eq!(r.digest(), "abc");
         assert_eq!(n.digest(), "abc");
+    }
+
+    #[tokio::test]
+    async fn concurrent_installs_of_identical_config_dedup_via_install_lock() {
+        // The install body has to be serialised under
+        // `install_lock` for the digest-dedup short-circuit to be
+        // meaningful. Without the lock, two concurrent installs
+        // from a cold boot would both observe `last_digest =
+        // None`, both proceed to write + validate + rename +
+        // start Envoy, and the operator would see two restarts
+        // for one config rotation. With the lock, the second
+        // caller waits for the first to commit `last_digest`,
+        // then observes the post-commit digest and short-circuits
+        // to `NoOp`. We pin both observable effects: exactly one
+        // validate + exactly one start, plus exactly one
+        // `Reloaded` outcome with the other being `NoOp`.
+        let tmp = TempDir::new().unwrap();
+        let (m, mock) = manager(&tmp);
+        let cfg = EnvoyConfig::minimal_forward_proxy("unix:///var/run/sng/ext_authz.sock");
+        let (ra, rb) = tokio::join!(m.install(cfg.clone()), m.install(cfg));
+        let ra = ra.unwrap();
+        let rb = rb.unwrap();
+        // Exactly one of the two outcomes is a reload — the
+        // other is the dedup NoOp.
+        let reloaded = [&ra, &rb].iter().filter(|o| o.was_reloaded()).count();
+        let noop = [&ra, &rb].iter().filter(|o| !o.was_reloaded()).count();
+        assert_eq!(
+            reloaded, 1,
+            "exactly one install must reload; got {ra:?} / {rb:?}",
+        );
+        assert_eq!(noop, 1, "exactly one install must NoOp");
+        let rec = mock.recorded();
+        assert_eq!(
+            rec.validated.len(),
+            1,
+            "two concurrent identical installs must validate once",
+        );
+        assert_eq!(
+            rec.started_with.len(),
+            1,
+            "two concurrent identical installs must start envoy once",
+        );
     }
 }

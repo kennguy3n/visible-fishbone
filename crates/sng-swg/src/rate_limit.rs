@@ -252,7 +252,10 @@ impl RateLimiter {
 
     /// Drop buckets that have been idle for more than `idle_max`
     /// — bounded memory hygiene for a long-running supervisor.
-    /// The manager calls this on a periodic timer.
+    /// Operator wiring usually calls this from a periodic
+    /// background task via [`Self::spawn_eviction_task`], but the
+    /// method is `pub` so an operator with their own scheduler
+    /// (e.g. a manager-owned health tick) can drive it directly.
     pub fn evict_idle(&self, idle_max: Duration) {
         let now = self.clock.now();
         let mut buckets = self.buckets.lock();
@@ -260,6 +263,91 @@ impl RateLimiter {
             now.checked_sub(b.last_refill)
                 .is_some_and(|age| age < idle_max)
         });
+    }
+
+    /// Spawn a background tokio task that calls
+    /// [`Self::evict_idle`] every `interval`, dropping any
+    /// bucket idle for longer than `idle_max`. Returns an
+    /// [`EvictionTaskHandle`] — the caller keeps it alive for as
+    /// long as eviction should run and drops it to stop the
+    /// task.
+    ///
+    /// Why this lives on the limiter instead of the manager:
+    /// the rate limiter owns its bucket-map memory footprint, so
+    /// the eviction policy belongs alongside the data it bounds.
+    /// The manager doesn't hold a reference to the limiter —
+    /// the limiter is owned by [`crate::auth::ExtAuthzHandler`],
+    /// which is constructed in the deployment layer next to the
+    /// manager. Driving eviction from the manager would require
+    /// threading a back-reference through every handler
+    /// construction; threading the eviction policy through the
+    /// limiter keeps the dependency arrow pointing the right
+    /// way.
+    #[must_use]
+    pub fn spawn_eviction_task(
+        &self,
+        idle_max: Duration,
+        interval: Duration,
+    ) -> EvictionTaskHandle {
+        assert!(
+            !interval.is_zero(),
+            "rate-limiter eviction interval must be > 0"
+        );
+        let limiter = self.clone();
+        let handle = tokio::spawn(async move {
+            // Phase the first tick a full interval out — booting
+            // the SWG and immediately evicting a bucket the
+            // operator literally just inserted would be confusing
+            // and would force every test to advance the clock
+            // before observing the first refill.
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the first immediate tick that
+            // `tokio::time::interval` emits on creation.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                limiter.evict_idle(idle_max);
+            }
+        });
+        EvictionTaskHandle { handle }
+    }
+}
+
+/// Handle to a background eviction task spawned via
+/// [`RateLimiter::spawn_eviction_task`]. Dropping the handle
+/// aborts the task; calling [`EvictionTaskHandle::abort`]
+/// explicitly is equivalent and useful when the caller wants the
+/// task to stop while keeping the handle borrowed.
+#[derive(Debug)]
+pub struct EvictionTaskHandle {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl EvictionTaskHandle {
+    /// Abort the background eviction task. Idempotent — calling
+    /// `abort` on an already-finished task is a no-op.
+    pub fn abort(&self) {
+        self.handle.abort();
+    }
+
+    /// Whether the eviction task has finished (almost always
+    /// `false` for a healthy task — the loop runs forever until
+    /// aborted). Useful in tests to assert the task is still
+    /// alive while exercising the rest of the supervisor.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+}
+
+impl Drop for EvictionTaskHandle {
+    fn drop(&mut self) {
+        // Drop-on-handle is the documented stop mechanism — the
+        // background task has no destructor work to do (it only
+        // holds a clone of the limiter Arc) so abort is the
+        // right primitive.
+        self.handle.abort();
     }
 }
 
@@ -393,6 +481,73 @@ mod tests {
         // A fresh acquire repopulates a single bucket.
         assert!(rl.acquire("t1", "p1").permitted);
         assert_eq!(rl.bucket_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn spawn_eviction_task_periodically_calls_evict_idle() {
+        // Wiring contract for the bounded-memory hygiene
+        // background task. We control the bucket-age clock via
+        // TestClock (so the limiter sees buckets as "old enough
+        // to evict") and let real tokio time drive the ticker
+        // (so we don't need to pause the runtime).
+        let (rl, clock) = limiter_with_test_clock(1.0, 1.0);
+        assert!(rl.acquire("t1", "p1").permitted);
+        assert!(rl.acquire("t1", "p2").permitted);
+        assert_eq!(rl.bucket_count(), 2);
+        // Age the buckets past the idle threshold on the
+        // limiter's clock so the next eviction tick drops both.
+        clock.advance(Duration::from_secs(60));
+        // Spawn the background task; interval is small enough
+        // that we observe an eviction inside a 200ms sleep.
+        let handle = rl.spawn_eviction_task(Duration::from_secs(30), Duration::from_millis(20));
+        // Wait long enough for at least two interval ticks. The
+        // first tick is the "skip the immediate-tick" one, the
+        // second is the real evict_idle.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            rl.bucket_count(),
+            0,
+            "spawn_eviction_task must drive evict_idle on its interval",
+        );
+        assert!(
+            !handle.is_finished(),
+            "the eviction task must loop forever until dropped",
+        );
+        // Drop the handle and confirm the task is aborted on the
+        // next yield to the scheduler.
+        drop(handle);
+        // Give the runtime a chance to observe the abort.
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    async fn spawn_eviction_task_handle_stops_loop_when_dropped() {
+        // Drop semantics — the handle owns the task lifetime, so
+        // a caller that no longer wants eviction can just drop
+        // the handle and trust the background task to stop. We
+        // assert this by capturing the JoinHandle's is_finished
+        // signal after the abort.
+        let (rl, _clock) = limiter_with_test_clock(1.0, 1.0);
+        let handle = rl.spawn_eviction_task(Duration::from_secs(30), Duration::from_millis(20));
+        handle.abort();
+        // The abort propagates on the next scheduler turn.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(handle.is_finished(), "abort must terminate the task");
+    }
+
+    #[test]
+    #[should_panic(expected = "interval")]
+    fn spawn_eviction_task_panics_on_zero_interval() {
+        // Zero interval would tight-loop the eviction task,
+        // pinning a worker thread. Surface the misconfiguration
+        // at construction, not in production at 100% CPU.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (rl, _clock) = limiter_with_test_clock(1.0, 1.0);
+            let _ = rl.spawn_eviction_task(Duration::from_secs(30), Duration::ZERO);
+        });
     }
 
     #[test]

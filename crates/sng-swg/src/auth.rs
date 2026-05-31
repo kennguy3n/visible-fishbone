@@ -864,6 +864,33 @@ mod tests {
     }
 
     #[test]
+    fn ext_authz_request_into_context_strips_query_from_path() {
+        // HTTP/2's `:path` pseudo-header includes the query, but
+        // the `RequestContext::path` field is documented as
+        // query-free. The decoder must therefore strip the query
+        // before downstream code (categoriser, telemetry, verdict
+        // dashboards) sees it — otherwise session tokens, OAuth
+        // state, OTP material, and other PII-shaped query
+        // parameters surface in the wire-level verdict events.
+        let r = ExtAuthzRequest {
+            headers: vec![
+                (":method".into(), "GET".into()),
+                (":scheme".into(), "https".into()),
+                (
+                    ":path".into(),
+                    "/oauth/callback?code=secret123&state=xyz".into(),
+                ),
+                ("host".into(), "bank.example".into()),
+                ("x-sng-tenant".into(), "t".into()),
+                ("x-sng-principal".into(), "p".into()),
+            ],
+            body_sha256: None,
+        };
+        let ctx = r.into_context().unwrap();
+        assert_eq!(ctx.path, "/oauth/callback");
+    }
+
+    #[test]
     fn ext_authz_request_into_context_treats_empty_header_as_missing() {
         // An empty header value satisfies the "required header"
         // check syntactically but carries no information — the
