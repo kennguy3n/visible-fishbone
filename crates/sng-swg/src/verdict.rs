@@ -250,6 +250,28 @@ impl RequestContext {
         if let Some(s) = self.sni.as_mut() {
             *s = s.to_ascii_lowercase();
         }
+        // `MalwareVerdictProvider::verdict` is documented as
+        // taking hex-encoded lowercase SHA-256 — callers must
+        // normalise before querying so the provider's internal
+        // storage can be case-sensitive (see
+        // `MalwareVerdictProvider` doc comment in `malware.rs`).
+        // Envoy and upstream feeds aren't consistent on hex case:
+        // RFC 3548 §6 says hex is case-insensitive but
+        // implementations differ — OpenSSL emits lowercase,
+        // browsers emit uppercase, and several threat-intel feeds
+        // ship mixed-case. Lowercasing here means the verdict
+        // pipeline has one source of truth, and a future
+        // `MalwareVerdictProvider` impl that compares hashes
+        // byte-for-byte against an internal lowercase map (the
+        // `StaticMalwareList` pattern in `malware.rs:117-120`)
+        // cannot silently miss a known-bad hash because Envoy
+        // forwarded it uppercase. The verdict response also
+        // serialises `file_hash` into telemetry, so normalising
+        // here also collapses dashboard cardinality from
+        // "same-hash-different-case" duplicates.
+        if let Some(h) = self.file_hash.as_mut() {
+            *h = h.to_ascii_lowercase();
+        }
     }
 }
 
@@ -400,6 +422,50 @@ mod tests {
         };
         ctx.normalize();
         assert_eq!(ctx.path, "/api/v1/users");
+    }
+
+    #[test]
+    fn request_context_normalize_lowercases_file_hash() {
+        // `MalwareVerdictProvider::verdict` contract (malware.rs:74-78)
+        // says "The hash is hex-encoded lowercase; callers must
+        // normalise before querying". A mixed-case hash forwarded
+        // by Envoy must be lowercased on the way in or the
+        // provider would silently miss a known-bad hash.
+        //
+        // Pin both the mixed-case → lowercase transform AND that
+        // `None` stays `None` (response-side decisions only carry
+        // `file_hash` when Envoy is asking for a response decision —
+        // request-side decisions have no body to hash).
+        let mut ctx = RequestContext {
+            tenant_id: "tenant-1".into(),
+            principal_id: "device-42".into(),
+            method: "GET".into(),
+            scheme: "HTTPS".into(),
+            host: "bank.example".into(),
+            path: "/download".into(),
+            sni: None,
+            file_hash: Some(
+                "ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789".into(),
+            ),
+        };
+        ctx.normalize();
+        assert_eq!(
+            ctx.file_hash.as_deref(),
+            Some("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+        );
+
+        let mut ctx = RequestContext {
+            tenant_id: "tenant-1".into(),
+            principal_id: "device-42".into(),
+            method: "GET".into(),
+            scheme: "HTTPS".into(),
+            host: "bank.example".into(),
+            path: "/login".into(),
+            sni: None,
+            file_hash: None,
+        };
+        ctx.normalize();
+        assert_eq!(ctx.file_hash, None);
     }
 
     #[test]

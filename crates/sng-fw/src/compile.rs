@@ -446,7 +446,42 @@ fn render_script(
         }
     }
 
-    // Filter chain hooked at input + forward priority `filter`.
+    // Two filter chains are emitted: `forward` carries every
+    // operator rule, `input` carries only the chain-default
+    // policy. The asymmetry is deliberate, not an oversight:
+    //
+    // * `FirewallRule` is a zone-to-zone (`from_zones` ×
+    //   `to_zones`) routing predicate — see `rule.rs`
+    //   `FirewallRule` and `engine.rs` `evaluate`. Zone-to-zone
+    //   semantics inherently describe *forwarded* traffic
+    //   between two zones; packets terminated on the edge VM
+    //   itself (SSH to the management port, the local
+    //   sng-telemetry receiver, a kubelet probe) have no
+    //   `to_zone` because the box is not "in" any zone — it
+    //   *owns* the zones. Applying zone rules to such traffic
+    //   would silently classify management plane traffic into
+    //   whatever zone happens to alphabetise first (the
+    //   tie-break path in `zone.rs:309`), which is the opposite
+    //   of zero-trust posture.
+    //
+    // * The `input` chain is therefore intentionally minimal:
+    //   it just locks the chain policy to the same default
+    //   (typically `drop` for `Deny`) so unsolicited traffic
+    //   *to* the box is uniformly rejected. Hardening of
+    //   management ports (SSH allowlist, telemetry mTLS, etc.)
+    //   is owned by the host's own systemd unit / kubelet
+    //   network policy, not by the data-plane firewall — those
+    //   live below this layer.
+    //
+    // * If a future rule type needs to filter
+    //   terminated-on-host traffic, it should be a new rule
+    //   shape (e.g. `LocalRule` with `interface` + protocol +
+    //   port, no zones), not a quiet promotion of the existing
+    //   forwarding rules into `input` — promoting them would
+    //   misapply zone semantics and create exactly the
+    //   classify-vs-kernel split-brain that
+    //   `reject_cross_zone_overlap` (zone.rs:370) and the
+    //   `flush table` directive above were added to prevent.
     out.push_str(
         "add chain inet sng_filter input { type filter hook input priority filter; policy ",
     );
