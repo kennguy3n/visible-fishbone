@@ -22,14 +22,25 @@ pub enum SteeringReason {
     /// A path was selected — the lowest-scoring fresh,
     /// in-budget candidate.
     Best,
-    /// The lowest-scoring candidate failed at least one
-    /// SLO floor (latency / loss / jitter), so the
-    /// selector fell through to the next-best candidate
-    /// that did fit the floor. The decision still
-    /// surfaces the *winning* path id; this reason just
-    /// tells dashboards that a degraded fallback was in
-    /// play. Useful for ops alerting on "we're
-    /// regularly running on the backup path".
+    /// No fresh + usable candidate was in budget — every
+    /// scored candidate exceeded at least one SLO floor
+    /// (latency / loss / jitter) — so the selector
+    /// chose the *least-bad* out-of-budget candidate
+    /// (lowest scoring path among those that failed a
+    /// floor). The decision still surfaces the *winning*
+    /// path id; this reason just tells dashboards that
+    /// the winning path is degraded relative to the
+    /// policy's SLO floors.
+    ///
+    /// Note: this is "fallback" in the sense that policy
+    /// **fell through to** out-of-budget candidates after
+    /// finding nothing in-budget — NOT in the sense that
+    /// some other in-budget candidate exists. If any
+    /// in-budget candidate existed it would have won as
+    /// [`Self::Best`] instead.
+    ///
+    /// Useful for ops alerting on "we're regularly
+    /// running on a path below floor".
     FallbackBelowFloor,
     /// The flow stayed pinned to its previously-selected
     /// path because the [`crate::policy::SdwanPolicy::sticky_window_ms`]

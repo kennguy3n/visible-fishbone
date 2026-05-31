@@ -447,11 +447,26 @@ impl SdwanService {
         // selected path is still eligible + fresh +
         // in-budget, we keep the flow pinned to avoid
         // re-pinning TCP sessions every probe cycle.
-        if let Some(pinned) = self.sticky_lookup(&request.flow_key, request.now_ms) {
-            if let Some(sticky_decision) =
-                self.try_sticky(&pinned, &candidates, &policy_snap, request)
-            {
-                return self.finalise(request, sticky_decision, &policy_snap);
+        //
+        // Short-circuit when stickiness is disabled
+        // (`policy.sticky_window_ms == 0`). The cache is
+        // guaranteed empty in that mode because
+        // `finalise` skips `sticky_insert` under the same
+        // guard (see comment at the `sticky_insert` call
+        // site below) — so `sticky_lookup` would return
+        // `None` after paying an uncontended mutex
+        // acquire/release on every evaluation. This
+        // mirrors the producer-side guard exactly so a
+        // future change to one branch surfaces a
+        // structural asymmetry rather than a silent perf
+        // regression.
+        if policy_snap.sticky_window_ms > 0 {
+            if let Some(pinned) = self.sticky_lookup(&request.flow_key, request.now_ms) {
+                if let Some(sticky_decision) =
+                    self.try_sticky(&pinned, &candidates, &policy_snap, request)
+                {
+                    return self.finalise(request, sticky_decision, &policy_snap);
+                }
             }
         }
 
@@ -743,26 +758,42 @@ impl SdwanService {
     /// the pinned path is still eligible + fresh +
     /// usable + in-budget.
     ///
-    /// The usability check (`probe_is_usable`) MUST mirror
-    /// the one in the main scoring loop in `evaluate` —
-    /// the floor checks below catch `NaN` (each floor's
-    /// `is_nan()` early-return), but they do NOT catch
-    /// `±INFINITY` when no floor is configured
-    /// (`max_*: None`): `Option::is_none_or(|cap| INF <=
-    /// cap)` returns `true` without invoking the closure,
-    /// so the metric is treated as in-budget. Without the
-    /// `probe_is_usable` short-circuit here, a misbehaving
-    /// adapter that bypasses `PathProbe::new_checked` and
-    /// mints an `INFINITY`-metric probe on a sticky-pinned
-    /// path would silently keep the flow pinned to a path
-    /// whose health signal is uninterpretable — and the
-    /// emitted `SdwanEvent` would carry an `INFINITY` total
-    /// on the wire. The main path uses the same guard
-    /// (see step 3 of `evaluate`); the sticky path must
-    /// stay symmetric so an INFINITY probe drops the
-    /// sticky pin and falls back to re-scoring the rest
-    /// of the candidate set rather than reaffirming the
-    /// broken sticky.
+    /// # Why `probe_is_usable` runs alongside the floors
+    ///
+    /// The floor methods are already self-defending —
+    /// [`SdwanPolicy::within_latency_floor`],
+    /// [`SdwanPolicy::within_loss_floor`], and
+    /// [`SdwanPolicy::within_jitter_floor`] each
+    /// `return false` on `!is_finite()`, which rejects
+    /// NaN AND ±INFINITY in one check, regardless of
+    /// whether a `max_*` cap is configured. So a sticky
+    /// path whose probe carries a non-finite metric
+    /// would already be dropped from the pin via the
+    /// floor checks alone.
+    ///
+    /// `probe_is_usable` is therefore *not* load-bearing
+    /// for the INFINITY-without-floor edge case the
+    /// floors used to miss (that gap closed when the
+    /// floors moved from `is_nan()` to `is_finite()` —
+    /// see `crates/sng-sdwan/src/policy.rs`). It stays
+    /// here for two orthogonal reasons:
+    ///
+    /// 1. **Defense in depth** — if a future refactor
+    ///    weakens the floors back to `is_nan()`-only
+    ///    (or adds a new non-finite hot path), the
+    ///    sticky branch fails closed on non-finite input
+    ///    at the explicit guard rather than via the
+    ///    floors' implicit invariant.
+    /// 2. **Semantic clarity** — `probe_is_usable`
+    ///    encodes "this probe carries no information
+    ///    about the path", which is a different
+    ///    classification from "this probe shows the path
+    ///    failed a floor". Surfacing the unusable case
+    ///    explicitly lets the sticky branch drop the pin
+    ///    and re-score (rather than reaffirming a pin
+    ///    on an information-free signal), and it mirrors
+    ///    the `had_usable_candidate` partition in
+    ///    [`Self::evaluate`].
     fn try_sticky(
         &self,
         pinned: &PathId,
@@ -1286,6 +1317,63 @@ mod tests {
         // counter is untouched here as the cleanest
         // observable signal.
         assert_eq!(svc.evictions(), 0);
+    }
+
+    /// Companion symmetry test: with `sticky_window_ms ==
+    /// 0` the producer-side guard in `finalise` already
+    /// keeps the cache empty, but the consumer-side
+    /// guard in `evaluate` still has work to do — without
+    /// it, every `evaluate` call would pay an uncontended
+    /// `parking_lot::Mutex` acquire/release inside
+    /// `sticky_lookup` only to walk an empty `HashMap`.
+    /// This test exercises the producer-side
+    /// short-circuit (no inserts ever happened) plus
+    /// asserts the consumer-side short-circuit explicitly
+    /// by pre-seeding the cache and confirming
+    /// `sticky_lookup` is bypassed: with
+    /// `sticky_window_ms == 0` the seeded pin must be
+    /// ignored.
+    #[test]
+    fn sticky_window_zero_skips_sticky_lookup() {
+        let policy = SdwanPolicy {
+            sticky_window_ms: 0,
+            ..SdwanPolicy::default()
+        };
+        let (svc, _rx) = build(
+            policy,
+            vec![
+                Path::new("mpls", [TrafficClass::Interactive]),
+                Path::new("ix", [TrafficClass::Interactive]),
+            ],
+            vec![
+                (PathId::new("mpls"), PathProbe::new(50.0, 1.0, 5.0, NOW)),
+                (PathId::new("ix"), PathProbe::new(10.0, 0.0, 0.0, NOW)),
+            ],
+        );
+
+        // Pre-seed: pretend a prior policy with a long
+        // sticky window pinned this flow to the slow mpls
+        // path. With `sticky_window_ms == 0` the consumer
+        // guard must skip the lookup entirely — the
+        // selection must fall through to the main scoring
+        // loop and pick the lower-scoring `ix` path,
+        // proving the seeded pin was NOT consulted.
+        svc.sticky.lock().insert(
+            "flow-seed".to_string(),
+            super::StickyPin {
+                path_id: PathId::new("mpls"),
+                pinned_until_ms: NOW + 60_000,
+            },
+        );
+
+        let d = svc.evaluate(&req("flow-seed", TrafficClass::Interactive, NOW));
+        assert_eq!(
+            d.path_id,
+            Some(PathId::new("ix")),
+            "sticky_window_ms == 0 must short-circuit sticky_lookup; \
+             the seeded pin to mpls must NOT be honoured"
+        );
+        assert_eq!(d.reason, SteeringReason::Best);
     }
 
     /// Companion test: with a non-zero window, the cache

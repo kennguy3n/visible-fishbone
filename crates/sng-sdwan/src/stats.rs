@@ -34,8 +34,16 @@ pub struct SdwanStats {
     /// dashboards can spot "catalog hole" vs. "probe
     /// pipeline broken".
     reason_no_available_path: AtomicU64,
-    /// Every candidate's probe was stale (or out of
-    /// floor).
+    /// No candidate had a *usable* probe — every
+    /// candidate either lacked a probe entirely, had one
+    /// older than `policy.probe_max_age_ms`, or carried
+    /// non-finite metrics that fail `probe_is_usable`.
+    /// Distinct from `reason_fallback_below_floor`:
+    /// out-of-budget candidates with usable probes are
+    /// still selectable and land in
+    /// `reason_fallback_below_floor`, NOT here. This
+    /// counter only increments when the selector had
+    /// nothing scoreable at all.
     reason_all_probes_stale: AtomicU64,
     /// Successful policy bundle reloads.
     bundle_loads: AtomicU64,
