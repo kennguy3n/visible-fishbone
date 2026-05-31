@@ -136,6 +136,32 @@ impl LocalCategoryDb {
     /// log "installed N categories" without a follow-up
     /// `.iter().count()` walk.
     pub fn install(&self, mut entries: Vec<CategoryEntry>) -> usize {
+        // Canonicalise the host field to ASCII lowercase before
+        // sort + dedup so two entries the runtime matcher treats
+        // as equivalent (`Example.COM` ≡ `example.com`,
+        // `*.Chase.COM` ≡ `*.chase.com`) collapse to a single
+        // row rather than surviving as semantic duplicates. The
+        // `*.` prefix is preserved because it carries the
+        // exact-vs-wildcard precedence the secondary sort relies
+        // on; only the bytes after the optional `*.` are
+        // lowercased. Path prefixes stay case-sensitive — RFC 3986
+        // §3.3 treats the path component as case-sensitive, and
+        // operators write the literal path their backend serves.
+        //
+        // Without this normalisation the case-sensitive `dedup`
+        // below silently keeps both rows; at lookup time the
+        // case-insensitive `host_matches` would walk both, the
+        // earlier sort tie-break would win, and an operator-
+        // authored override with different casing could be
+        // silently shadowed by an industry-default entry of the
+        // same suffix. The bypass list applies the same
+        // normalisation in `BypassList::new`/`with_extensions`;
+        // keeping the two construction paths symmetric means a
+        // future control-plane validator that lints the bypass
+        // and category feeds together does not see a divergence.
+        for e in &mut entries {
+            e.host = e.host.to_ascii_lowercase();
+        }
         entries.sort_by(|a, b| {
             // Primary: descending by stripped-host length
             // (longest suffix first).
@@ -401,6 +427,47 @@ mod tests {
         assert_eq!(
             db.categorize_sync("example.com", "/"),
             Some(Category::new("business.saas"))
+        );
+    }
+
+    #[test]
+    fn install_canonicalizes_host_case_for_dedup() {
+        // Regression test: two entries that the runtime matcher
+        // treats as equivalent (`Example.COM` ≡ `example.com`)
+        // must collapse to a single index row, not survive as
+        // semantic duplicates that pollute the longest-prefix
+        // walk and inflate bundle-digest churn. Path prefix is
+        // case-sensitive by RFC 3986 and is intentionally not
+        // folded.
+        let db = LocalCategoryDb::new(vec![
+            ce("Example.COM", None, "business.saas"),
+            ce("example.com", None, "business.saas"),
+        ]);
+        assert_eq!(db.len(), 1);
+        // The collapsed entry stores the canonical (lowercase)
+        // host so downstream consumers that iterate the index
+        // see matcher-equivalent bytes, not whatever input casing
+        // the operator typed.
+        assert_eq!(
+            db.categorize_sync("example.com", "/"),
+            Some(Category::new("business.saas"))
+        );
+    }
+
+    #[test]
+    fn install_canonicalizes_wildcard_host_case_for_dedup() {
+        // The wildcard pattern `*.Chase.COM` and `*.chase.com`
+        // must also collapse — the `*.` prefix bytes are
+        // preserved (they drive the exact-vs-wildcard secondary
+        // sort) but the suffix after the wildcard is lowercased.
+        let db = LocalCategoryDb::new(vec![
+            ce("*.Chase.COM", None, "tls.finance"),
+            ce("*.chase.com", None, "tls.finance"),
+        ]);
+        assert_eq!(db.len(), 1);
+        assert_eq!(
+            db.categorize_sync("online.chase.com", "/"),
+            Some(Category::new("tls.finance"))
         );
     }
 }
