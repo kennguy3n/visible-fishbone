@@ -131,6 +131,43 @@ pub enum ErrorCode {
     /// supervisor logs and continues so a single malformed line
     /// does not stop the tail reader.
     IpsEveDecode,
+    /// Envoy supervisor failed to spawn, signal, or wait on the
+    /// child process. Mirrors [`Self::IpsProcessFailure`] but for
+    /// the SWG plane so dashboards can break out per-subsystem.
+    SwgProcessFailure,
+    /// Envoy config render produced an invalid YAML document
+    /// (impossible character in a string the writer cannot
+    /// escape). Surfaces a bug in `sng-swg::config`.
+    SwgConfigInvalid,
+    /// URL category bundle failed Ed25519 signature verification.
+    SwgCategoryBundleSignatureInvalid,
+    /// URL category bundle was signed with a key id the operator
+    /// trust store does not know about.
+    SwgCategoryBundleSigningKeyUnknown,
+    /// URL category bundle version is older than or equal to the
+    /// installed bundle. Downgrade protection.
+    SwgCategoryBundleStale,
+    /// URL category bundle body failed to decode.
+    SwgCategoryBundleBodyDecode,
+    /// `envoy --mode validate` dry-run on the staged config
+    /// failed — the new config is syntactically invalid, the
+    /// supervisor keeps the previous config installed.
+    SwgConfigValidate,
+    /// Ext-authz request from Envoy could not be decoded into a
+    /// well-formed `RequestContext` (missing required header,
+    /// malformed body). The handler returns a 400 to Envoy and
+    /// the request is denied via the proxy's failure-mode.
+    SwgExtAuthzDecode,
+    /// Operator-issued `install` or `stop` on the SWG supervisor
+    /// could not acquire the install serialisation lock within
+    /// the configured `install_lock_timeout`. Distinct from
+    /// [`Self::SwgProcessFailure`] because the corresponding
+    /// operator response differs: a process failure means Envoy
+    /// is unhealthy (investigate logs / restart the supervisor),
+    /// while an install-busy is pure backpressure (lower the
+    /// install rate, extend the timeout, or wait for the
+    /// in-flight install to drain).
+    SwgInstallBusy,
     /// Catch-all for failures that genuinely do not fit one of
     /// the more specific buckets. Use sparingly — a new code is
     /// almost always preferable so dashboards can break the rate
@@ -169,6 +206,15 @@ impl ErrorCode {
             Self::IpsRuleBodyEncode => "ips.rule.body.encode",
             Self::IpsRuleValidate => "ips.rule.validate",
             Self::IpsEveDecode => "ips.eve.decode",
+            Self::SwgProcessFailure => "swg.process.failure",
+            Self::SwgConfigInvalid => "swg.config.invalid",
+            Self::SwgCategoryBundleSignatureInvalid => "swg.category.bundle.signature.invalid",
+            Self::SwgCategoryBundleSigningKeyUnknown => "swg.category.bundle.signing_key.unknown",
+            Self::SwgCategoryBundleStale => "swg.category.bundle.stale",
+            Self::SwgCategoryBundleBodyDecode => "swg.category.bundle.body.decode",
+            Self::SwgConfigValidate => "swg.config.validate",
+            Self::SwgExtAuthzDecode => "swg.ext_authz.decode",
+            Self::SwgInstallBusy => "swg.install.busy",
             Self::Other => "other",
         }
     }
@@ -298,6 +344,27 @@ mod tests {
             (ErrorCode::IpsRuleBodyEncode, "ips.rule.body.encode"),
             (ErrorCode::IpsRuleValidate, "ips.rule.validate"),
             (ErrorCode::IpsEveDecode, "ips.eve.decode"),
+            (ErrorCode::SwgProcessFailure, "swg.process.failure"),
+            (ErrorCode::SwgConfigInvalid, "swg.config.invalid"),
+            (
+                ErrorCode::SwgCategoryBundleSignatureInvalid,
+                "swg.category.bundle.signature.invalid",
+            ),
+            (
+                ErrorCode::SwgCategoryBundleSigningKeyUnknown,
+                "swg.category.bundle.signing_key.unknown",
+            ),
+            (
+                ErrorCode::SwgCategoryBundleStale,
+                "swg.category.bundle.stale",
+            ),
+            (
+                ErrorCode::SwgCategoryBundleBodyDecode,
+                "swg.category.bundle.body.decode",
+            ),
+            (ErrorCode::SwgConfigValidate, "swg.config.validate"),
+            (ErrorCode::SwgExtAuthzDecode, "swg.ext_authz.decode"),
+            (ErrorCode::SwgInstallBusy, "swg.install.busy"),
             (ErrorCode::Other, "other"),
         ];
         for (code, expected) in cases {

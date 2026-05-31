@@ -1,0 +1,728 @@
+//! URL categorisation.
+//!
+//! The categoriser maps a request (host + path) to a category
+//! string the verdict layer interprets as an allow / deny /
+//! redirect. Categories are operator-defined dotted strings
+//! ("business.saas", "gambling", "social.media",
+//! "adult.content") so the same category vocabulary can be
+//! reused by the DNS subsystem (`sng-dns`) and the firewall L7
+//! AppId table — having a single dotted namespace lets a single
+//! dashboard count categorised hits across the three planes
+//! without per-subsystem mapping.
+//!
+//! The pluggable provider trait is [`UrlCategorizer`]. At launch
+//! a single implementation ships: [`LocalCategoryDb`], an
+//! in-memory lookup backed by a hot-swappable
+//! [`arc_swap::ArcSwap`] of `(host, path_prefix) -> category`
+//! entries sourced from a signed control-plane bundle. A
+//! production deployment can plug a remote provider in behind
+//! the same trait surface (the trait is `async` so an HTTPS feed
+//! or a managed verdict service slots in without disturbing the
+//! ext-authz handler).
+//!
+//! Lookup semantics:
+//!   1. Exact host + path-prefix match wins.
+//!   2. Suffix-host (`*.example.com`) + path-prefix match next.
+//!   3. Exact host with no path constraint last.
+//!   4. No match -> `None`. The verdict layer maps `None` to an
+//!      uncategorised allow by default; the manager can override
+//!      this with a deny-default policy at install time.
+//!
+//! Lookup is an O(n) linear scan over a pre-sorted entry vector.
+//! [`LocalCategoryDb::install`] sorts entries by host-specificity
+//! descending (with `(exact-before-wildcard, path-prefix-desc)`
+//! as secondary tie-breaks) so the first entry that matches under
+//! [`host_matches`] + path-prefix is also the most-specific
+//! match — the scan can return on first hit. The categoriser is
+//! intentionally *not* a trie or hash-bucketed structure:
+//!
+//! 1. The wildcard host pattern (`*.example.com`) and the path
+//!    prefix both require *containment* matching, not exact
+//!    equality, so a hash on either field would force a fallback
+//!    scan for the wildcard / prefix cases — defeating the
+//!    hash's purpose.
+//! 2. Category feeds in production deployments are hundreds to
+//!    low-thousands of entries (the operator deny-list is even
+//!    smaller); a linear scan over a `Vec<CategoryEntry>` with a
+//!    pre-sorted layout fits in L1 / L2 cache, branch-predicts
+//!    well, and benchmarks faster than a trie walk at this size.
+//! 3. Hot-swap via [`arc_swap::ArcSwap`] is trivial on a flat
+//!    vector — a trie would need either a copy-on-write rebuild
+//!    on every install or a concurrent-safe trie crate
+//!    (`crossbeam-skiplist` etc.) that doesn't carry its weight
+//!    at this entry count.
+//!
+//! A future migration to a host-bucketed `HashMap<&str,
+//! Vec<CategoryEntry>>` is plausible once feed sizes cross
+//! ~10k entries, but the current shape is the right tradeoff
+//! for the deployment envelope sng-swg ships today.
+
+use arc_swap::ArcSwap;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use sng_fw::sni_suffix_match;
+use std::sync::Arc;
+
+/// Operator-defined category. Stored as an owned string so
+/// operator-extension categories are no-allocation on the
+/// per-request lookup path.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Category(pub String);
+
+impl Category {
+    /// Wrap a string slice in a Category. Mostly for tests and
+    /// constants.
+    #[must_use]
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// The wrapped string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Category {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// One entry in the URL category feed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CategoryEntry {
+    /// Hostname to match. May start with `*.` to express
+    /// "match this suffix". The matcher reuses
+    /// [`sng_fw::sni_suffix_match`] so an entry like
+    /// `*.gambling.example` matches both `gambling.example` and
+    /// `roulette.gambling.example`.
+    pub host: String,
+    /// Optional path prefix the request path must start with for
+    /// the entry to match. None matches every path under the
+    /// hostname.
+    pub path_prefix: Option<String>,
+    /// Category the matched request resolves to.
+    pub category: Category,
+}
+
+/// Pluggable URL categoriser. The trait is `async` so a remote
+/// provider that calls an external feed (Cisco Talos, Cyren,
+/// custom in-house) slots in behind the same surface as the
+/// local lookup.
+#[async_trait]
+pub trait UrlCategorizer: Send + Sync + std::fmt::Debug {
+    /// Look up the category for a request. Returns `None` when no
+    /// entry matches.
+    async fn categorize(&self, host: &str, path: &str) -> Option<Category>;
+}
+
+/// Local in-memory categoriser. The dataset is held in an
+/// [`ArcSwap`] so a control-plane bundle install can swap the
+/// table in atomically without taking a write lock on the
+/// per-request path.
+#[derive(Debug)]
+pub struct LocalCategoryDb {
+    inner: ArcSwap<CategoryIndex>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct CategoryIndex {
+    // Entries sorted by host-suffix length descending, then by
+    // path-prefix length descending. The matcher walks in this
+    // order so the most specific (longest host suffix + longest
+    // path prefix) entry wins.
+    entries: Vec<CategoryEntry>,
+}
+
+impl Default for LocalCategoryDb {
+    fn default() -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(CategoryIndex::default()),
+        }
+    }
+}
+
+impl LocalCategoryDb {
+    /// Build a new local categoriser preloaded with a set of
+    /// entries. The constructor sorts the entries into the
+    /// match-walk order so subsequent `categorize_sync` calls
+    /// touch only an immutable snapshot.
+    #[must_use]
+    pub fn new(entries: Vec<CategoryEntry>) -> Self {
+        let db = Self::default();
+        db.install(entries);
+        db
+    }
+
+    /// Atomically swap in a new entry set. Returns the number of
+    /// entries installed (after sort + dedup) so the manager can
+    /// log "installed N categories" without a follow-up
+    /// `.iter().count()` walk.
+    pub fn install(&self, mut entries: Vec<CategoryEntry>) -> usize {
+        // Canonicalise the host field to ASCII lowercase before
+        // sort + dedup so two entries the runtime matcher treats
+        // as equivalent (`Example.COM` ≡ `example.com`,
+        // `*.Chase.COM` ≡ `*.chase.com`) collapse to a single
+        // row rather than surviving as semantic duplicates.
+        // `to_ascii_lowercase` walks the whole string including
+        // the `*.` prefix, but `*` (0x2A) and `.` (0x2E) have no
+        // uppercase forms so they pass through unchanged — the
+        // wildcard sentinel survives the canonicalisation byte-
+        // for-byte and continues to drive the exact-vs-wildcard
+        // secondary sort. Path prefixes stay case-sensitive —
+        // RFC 3986 §3.3 treats the path component as case-
+        // sensitive, and operators write the literal path their
+        // backend serves.
+        //
+        // Canonicalise the category string to ASCII lowercase for
+        // the same reason: the deny-list comparison in
+        // `auth.rs:evaluate` already lowercases the category
+        // before binary-searching, and the deny-list itself is
+        // stored lowercase (sorted + deduped at handler build
+        // time — see `ExtAuthzHandlerBuilder::build`). Two feed
+        // entries that share host+path but differ only in
+        // category casing (`"Adult"` vs `"adult"`) would survive
+        // `dedup()` (which keys on `PartialEq` over the whole
+        // `CategoryEntry` including category), both walk to the
+        // same deny verdict, but the verdict's `reason` field
+        // would carry whichever casing won the sort tie-break.
+        // That feeds *two* `category = '…'` rows into downstream
+        // dashboards for what is logically one category, splitting
+        // per-category counts and breaking deny-list audit trails
+        // that group by category. Storing the canonical lowercase
+        // form means the dedup collapses semantic duplicates and
+        // every verdict reason carries the canonical bytes —
+        // dashboards see one row per category regardless of feed
+        // casing.
+        //
+        // Without these two normalisations the case-sensitive
+        // `dedup` below silently keeps both rows; at lookup time
+        // the case-insensitive `host_matches` would walk both,
+        // the earlier sort tie-break would win, and an operator-
+        // authored override with different casing could be
+        // silently shadowed by an industry-default entry of the
+        // same suffix. The bypass list applies the same
+        // normalisation in `BypassList::new`/`with_extensions`;
+        // keeping the two construction paths symmetric means a
+        // future control-plane validator that lints the bypass
+        // and category feeds together does not see a divergence.
+        for e in &mut entries {
+            e.host = e.host.to_ascii_lowercase();
+            e.category.0 = e.category.0.to_ascii_lowercase();
+        }
+
+        // # Same-(host, path_prefix) conflict resolution
+        //
+        // Two feed entries that share canonical (host,
+        // path_prefix) but differ on `category` are *not*
+        // identical; `Vec::dedup` keys on `PartialEq` over the
+        // whole struct so it would only collapse byte-identical
+        // rows. That left a hole: a future operator-override
+        // surface ("`with_extensions`" mirroring the bypass
+        // list's append-then-merge contract) would silently get
+        // first-wins precedence here while [`BypassList`] just
+        // unified its construction paths on last-wins. Two
+        // crates in the same module shipping opposite override
+        // semantics is a maintenance hazard — enforce parity
+        // now so the next surface inherits the right contract.
+        //
+        // The merge happens before the host-specificity sort so
+        // the conflict-resolution adjacency key is exactly
+        // `(host, path_prefix)`. We use a stable sort on that
+        // key to keep same-(host, path_prefix) entries in input
+        // order, then walk the adjacency window picking the
+        // last entry — that's the entry appended later by the
+        // caller (the override source). Finally we re-sort by
+        // host-specificity descending so the runtime walk hits
+        // the most-specific match first.
+        //
+        // SORT-STABILITY INVARIANT — DO NOT change `sort_by` to
+        // `sort_unstable_by`: the last-wins contract above
+        // depends on `Vec::sort_by` being a *stable* sort
+        // (documented at
+        // <https://doc.rust-lang.org/std/vec/struct.Vec.html#method.sort_by>).
+        // With a stable sort, two entries that compare equal
+        // (same host + same path_prefix) keep their relative
+        // input order, so the later one lands *after* the
+        // earlier one in the sorted vector and the merge loop
+        // replaces the earlier entry with it. An unstable sort
+        // would be free to swap them, silently flipping the
+        // merge to first-wins — catastrophic for a future
+        // `with_extensions`-style override surface that appends
+        // operator entries after the defaults and relies on
+        // this contract.
+        entries.sort_by(|a, b| {
+            a.host
+                .cmp(&b.host)
+                .then_with(|| a.path_prefix.cmp(&b.path_prefix))
+        });
+        let mut merged: Vec<CategoryEntry> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Some(last) = merged.last_mut() {
+                if last.host == entry.host && last.path_prefix == entry.path_prefix {
+                    *last = entry;
+                    continue;
+                }
+            }
+            merged.push(entry);
+        }
+
+        // Re-sort by host-specificity for the runtime walk.
+        merged.sort_by(|a, b| {
+            // Primary: descending by stripped-host length
+            // (longest suffix first).
+            let host_cmp = sort_key(&b.host).cmp(&sort_key(&a.host));
+            if host_cmp != std::cmp::Ordering::Equal {
+                return host_cmp;
+            }
+            // Secondary: an exact-host entry beats a wildcard
+            // entry of the same stripped length. The module
+            // doc promises "exact host wins over `*.host`";
+            // sorting wildcard-after-exact in walk order makes
+            // the linear scan find the exact entry first when
+            // both are present in the index.
+            let a_wc = is_wildcard(&a.host);
+            let b_wc = is_wildcard(&b.host);
+            let wc_cmp = a_wc.cmp(&b_wc);
+            if wc_cmp != std::cmp::Ordering::Equal {
+                return wc_cmp;
+            }
+            let bp = b.path_prefix.as_deref().unwrap_or("");
+            let ap = a.path_prefix.as_deref().unwrap_or("");
+            bp.len().cmp(&ap.len()).then_with(|| ap.cmp(bp))
+        });
+        let n = merged.len();
+        self.inner
+            .store(Arc::new(CategoryIndex { entries: merged }));
+        n
+    }
+
+    /// How many entries are currently installed.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.load().entries.len()
+    }
+
+    /// Whether the categoriser has any entries installed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.load().entries.is_empty()
+    }
+
+    /// Synchronous lookup. Exposed as a separate entry point
+    /// because the local categoriser does no IO and the manager's
+    /// in-process fast path does not need an async hop.
+    #[must_use]
+    pub fn categorize_sync(&self, host: &str, path: &str) -> Option<Category> {
+        let snap = self.inner.load();
+        for entry in &snap.entries {
+            if !host_matches(&entry.host, host) {
+                continue;
+            }
+            if let Some(prefix) = entry.path_prefix.as_deref() {
+                if !path.starts_with(prefix) {
+                    continue;
+                }
+            }
+            return Some(entry.category.clone());
+        }
+        None
+    }
+}
+
+// The local categoriser implements the async trait by delegating
+// to the synchronous fast path — no IO involved so blocking the
+// runtime is fine.
+#[async_trait]
+impl UrlCategorizer for LocalCategoryDb {
+    async fn categorize(&self, host: &str, path: &str) -> Option<Category> {
+        self.categorize_sync(host, path)
+    }
+}
+
+// A sort key that boils a host pattern down to "longer is more
+// specific". `*.foo` and `foo` get equal weight on the length
+// axis; [`install`] adds a secondary tie-break that puts the
+// exact (non-wildcard) entry before the wildcard so the
+// module-doc precedence rules hold.
+fn sort_key(host: &str) -> usize {
+    host.strip_prefix("*.").unwrap_or(host).len()
+}
+
+// Whether the host pattern is a wildcard (`*.foo`) vs an exact
+// host (`foo`). Used as a secondary sort key so exact entries
+// appear before wildcard entries of the same stripped length.
+fn is_wildcard(host: &str) -> bool {
+    host.starts_with("*.")
+}
+
+// Host comparator. Matches `*.suffix` against any depth of
+// subdomain and the apex; exact (non-wildcard) entries match the
+// exact hostname. Both forms case-fold via sni_suffix_match.
+fn host_matches(entry_host: &str, request_host: &str) -> bool {
+    if let Some(suffix) = entry_host.strip_prefix("*.") {
+        // *.foo style — permissive match including the apex.
+        sni_suffix_match(suffix, request_host)
+    } else {
+        // Exact match, case-insensitive.
+        entry_host.eq_ignore_ascii_case(request_host)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn ce(host: &str, path: Option<&str>, cat: &str) -> CategoryEntry {
+        CategoryEntry {
+            host: host.into(),
+            path_prefix: path.map(str::to_owned),
+            category: Category::new(cat),
+        }
+    }
+
+    #[test]
+    fn empty_db_returns_none() {
+        let db = LocalCategoryDb::default();
+        assert_eq!(db.categorize_sync("anywhere.example", "/"), None);
+        assert!(db.is_empty());
+    }
+
+    #[test]
+    fn exact_host_matches() {
+        let db = LocalCategoryDb::new(vec![ce("example.com", None, "business.saas")]);
+        assert_eq!(
+            db.categorize_sync("example.com", "/"),
+            Some(Category::new("business.saas"))
+        );
+        // A subdomain of an exact (non-wildcard) host MUST NOT
+        // match — the operator wrote the apex literally because
+        // they only meant the apex.
+        assert_eq!(db.categorize_sync("api.example.com", "/"), None);
+    }
+
+    #[test]
+    fn wildcard_host_matches_subdomains_and_apex() {
+        let db = LocalCategoryDb::new(vec![ce("*.gambling.example", None, "gambling")]);
+        assert_eq!(
+            db.categorize_sync("gambling.example", "/"),
+            Some(Category::new("gambling")),
+            "apex must match"
+        );
+        assert_eq!(
+            db.categorize_sync("roulette.gambling.example", "/"),
+            Some(Category::new("gambling")),
+            "single-label subdomain must match"
+        );
+        assert_eq!(
+            db.categorize_sync("eu.live.gambling.example", "/"),
+            Some(Category::new("gambling")),
+            "multi-label subdomain must match (permissive SNI semantics)"
+        );
+    }
+
+    #[test]
+    fn path_prefix_filters_inside_host() {
+        // An operator wants to categorise "everything under
+        // example.com/admin" as restricted but leave the rest
+        // alone. The path-prefix filter must apply *before*
+        // the more general host-only entry.
+        let db = LocalCategoryDb::new(vec![
+            ce("example.com", Some("/admin"), "internal.admin"),
+            ce("example.com", None, "business.saas"),
+        ]);
+        assert_eq!(
+            db.categorize_sync("example.com", "/admin/users"),
+            Some(Category::new("internal.admin"))
+        );
+        assert_eq!(
+            db.categorize_sync("example.com", "/home"),
+            Some(Category::new("business.saas"))
+        );
+    }
+
+    #[test]
+    fn longest_path_prefix_wins_within_host() {
+        // Two path-prefix entries for the same host — the more
+        // specific (longer) prefix must take precedence.
+        let db = LocalCategoryDb::new(vec![
+            ce("example.com", Some("/v2/admin"), "internal.admin_v2"),
+            ce("example.com", Some("/v2"), "internal.api_v2"),
+        ]);
+        assert_eq!(
+            db.categorize_sync("example.com", "/v2/admin/users"),
+            Some(Category::new("internal.admin_v2"))
+        );
+        assert_eq!(
+            db.categorize_sync("example.com", "/v2/users"),
+            Some(Category::new("internal.api_v2"))
+        );
+    }
+
+    #[test]
+    fn longest_host_wins_across_entries() {
+        // *.internal.bank.com is more specific than *.bank.com;
+        // the categoriser must walk in longest-host-first order.
+        let db = LocalCategoryDb::new(vec![
+            ce("*.bank.com", None, "tls.finance"),
+            ce("*.internal.bank.com", None, "tls.internal"),
+        ]);
+        assert_eq!(
+            db.categorize_sync("app.internal.bank.com", "/"),
+            Some(Category::new("tls.internal"))
+        );
+        assert_eq!(
+            db.categorize_sync("login.bank.com", "/"),
+            Some(Category::new("tls.finance"))
+        );
+    }
+
+    #[test]
+    fn duplicate_entries_collapse() {
+        // The control-plane fetch can deliver overlapping
+        // sources (industry default + operator extension that
+        // re-asserts the same suffix and category). Dedup must
+        // collapse those so the matcher walk is not O(N
+        // duplicates).
+        let db = LocalCategoryDb::new(vec![
+            ce("example.com", None, "business.saas"),
+            ce("example.com", None, "business.saas"),
+        ]);
+        assert_eq!(db.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn async_trait_path_returns_same_category() {
+        // The async surface is a thin delegation; lock the
+        // contract so a future remote provider that wraps a
+        // local cache cannot silently drop the cache fast path.
+        let db = LocalCategoryDb::new(vec![ce("example.com", None, "business.saas")]);
+        let trait_obj: &dyn UrlCategorizer = &db;
+        let cat = trait_obj.categorize("example.com", "/").await;
+        assert_eq!(cat, Some(Category::new("business.saas")));
+    }
+
+    #[test]
+    fn install_atomically_replaces_dataset() {
+        // The bundle hot-swap path calls install() on the live
+        // categoriser. After install, lookups must see the new
+        // dataset; the old one must be inaccessible.
+        let db = LocalCategoryDb::new(vec![ce("old.example", None, "old.cat")]);
+        let n = db.install(vec![ce("new.example", None, "new.cat")]);
+        assert_eq!(n, 1);
+        assert_eq!(db.categorize_sync("old.example", "/"), None);
+        assert_eq!(
+            db.categorize_sync("new.example", "/"),
+            Some(Category::new("new.cat"))
+        );
+    }
+
+    #[test]
+    fn case_insensitive_host_match() {
+        // Production traffic arrives lowercased after
+        // RequestContext::normalize, but a defensive matcher
+        // still folds case so a future caller (e.g. a control
+        // plane validator) that forgets to normalise doesn't
+        // silently miss.
+        let db = LocalCategoryDb::new(vec![ce("Example.COM", None, "business.saas")]);
+        assert_eq!(
+            db.categorize_sync("example.com", "/"),
+            Some(Category::new("business.saas"))
+        );
+    }
+
+    #[test]
+    fn install_canonicalizes_host_case_for_dedup() {
+        // Regression test: two entries that the runtime matcher
+        // treats as equivalent (`Example.COM` ≡ `example.com`)
+        // must collapse to a single index row, not survive as
+        // semantic duplicates that pollute the longest-prefix
+        // walk and inflate bundle-digest churn. Path prefix is
+        // case-sensitive by RFC 3986 and is intentionally not
+        // folded.
+        let db = LocalCategoryDb::new(vec![
+            ce("Example.COM", None, "business.saas"),
+            ce("example.com", None, "business.saas"),
+        ]);
+        assert_eq!(db.len(), 1);
+        // The collapsed entry stores the canonical (lowercase)
+        // host so downstream consumers that iterate the index
+        // see matcher-equivalent bytes, not whatever input casing
+        // the operator typed.
+        assert_eq!(
+            db.categorize_sync("example.com", "/"),
+            Some(Category::new("business.saas"))
+        );
+    }
+
+    #[test]
+    fn install_canonicalizes_wildcard_host_case_for_dedup() {
+        // The wildcard pattern `*.Chase.COM` and `*.chase.com`
+        // must also collapse — the `*.` prefix bytes are
+        // preserved (they drive the exact-vs-wildcard secondary
+        // sort) but the suffix after the wildcard is lowercased.
+        let db = LocalCategoryDb::new(vec![
+            ce("*.Chase.COM", None, "tls.finance"),
+            ce("*.chase.com", None, "tls.finance"),
+        ]);
+        assert_eq!(db.len(), 1);
+        assert_eq!(
+            db.categorize_sync("online.chase.com", "/"),
+            Some(Category::new("tls.finance"))
+        );
+    }
+
+    #[test]
+    fn install_canonicalizes_category_case_for_dedup() {
+        // Regression test: two entries that share host + path
+        // but differ only in category casing (`"Adult"` vs
+        // `"adult"`) must collapse to a single index row.
+        //
+        // Before this fix, the case-sensitive `Vec::dedup`
+        // (which keys on `PartialEq` over the whole
+        // `CategoryEntry`) kept both rows. At lookup time the
+        // case-insensitive `host_matches` would walk both, the
+        // earlier sort tie-break (input-order preserving stable
+        // sort) would win, and the verdict reason field would
+        // carry whichever casing happened to land first.
+        // Downstream dashboards grouping by `category` then saw
+        // *two* rows for what is logically one category,
+        // splitting per-category counts and breaking deny-list
+        // audit trails that group by category. The
+        // `auth.rs:evaluate` deny-list lookup already
+        // lowercased the cat before binary-searching the
+        // canonical-lowercase deny list, so the deny verdict
+        // itself was correct — but the reason string was not.
+        let db = LocalCategoryDb::new(vec![
+            ce("example.com", None, "Adult"),
+            ce("example.com", None, "adult"),
+        ]);
+        assert_eq!(db.len(), 1);
+        // The collapsed row stores the canonical (lowercase)
+        // category so every verdict reason carries the same
+        // bytes regardless of feed casing.
+        assert_eq!(
+            db.categorize_sync("example.com", "/"),
+            Some(Category::new("adult"))
+        );
+    }
+
+    #[test]
+    fn install_normalizes_category_case_in_verdict_reason() {
+        // Even when there is only one entry (no dedup to test),
+        // the category casing in the verdict reason must match
+        // the canonical (lowercase) form so downstream consumers
+        // never see uppercase characters in the `category` field
+        // of a deny verdict — that would split per-category
+        // counts across casings even if the feed itself is
+        // consistent.
+        let db = LocalCategoryDb::new(vec![ce("example.com", None, "BUSINESS.SAAS")]);
+        assert_eq!(
+            db.categorize_sync("example.com", "/"),
+            Some(Category::new("business.saas"))
+        );
+    }
+
+    #[test]
+    fn install_uses_last_wins_on_same_host_and_path_prefix() {
+        // Regression test for the Devin Review finding on the
+        // first-wins / last-wins asymmetry. The fix
+        // (`93f3add`) unified both [`BypassList`] constructors
+        // on last-wins. The categoriser previously kept
+        // first-wins via `Vec::dedup` on the whole entry, which
+        // would silently flip the meaning of any future
+        // operator-override surface ("with_extensions" mirror).
+        //
+        // Two entries share the same host + path_prefix but
+        // differ on category. The later one is the operator's
+        // override and must win.
+        let db = LocalCategoryDb::new(vec![
+            ce("example.com", None, "business.saas"),
+            ce("example.com", None, "social.media"),
+        ]);
+        // The matcher must return the *last* category, not the
+        // first one in the sort-tie-break order.
+        assert_eq!(
+            db.categorize_sync("example.com", "/"),
+            Some(Category::new("social.media"))
+        );
+        // Index must contain exactly one entry — the merge
+        // collapses the conflict.
+        assert_eq!(db.len(), 1);
+    }
+
+    #[test]
+    fn install_last_wins_holds_for_wildcard_hosts_with_path_prefix() {
+        // Conflict resolution must apply to the entire (host,
+        // path_prefix) key, not just bare host. A wildcard
+        // entry with a path prefix that an operator later
+        // overrides to a different category must end up with
+        // the operator's category.
+        let db = LocalCategoryDb::new(vec![
+            ce("*.example.com", Some("/research"), "business.research"),
+            // Operator override appended later:
+            ce("*.example.com", Some("/research"), "gambling"),
+        ]);
+        assert_eq!(
+            db.categorize_sync("docs.example.com", "/research/quarterly.pdf"),
+            Some(Category::new("gambling"))
+        );
+        // And the unrelated path keeps falling through —
+        // last-wins is scoped to the matched (host,
+        // path_prefix), not the host alone.
+        assert_eq!(db.categorize_sync("docs.example.com", "/news"), None);
+        assert_eq!(db.len(), 1);
+    }
+
+    #[test]
+    fn install_last_wins_preserves_distinct_path_prefix_entries() {
+        // Different path prefixes under the same host are NOT
+        // collisions and must both survive. This test pins that
+        // the merge loop's adjacency key is (host, path_prefix),
+        // not host alone.
+        let db = LocalCategoryDb::new(vec![
+            ce("example.com", Some("/news"), "news"),
+            ce("example.com", Some("/finance"), "business.finance"),
+            ce("example.com", None, "social.media"),
+        ]);
+        assert_eq!(db.len(), 3);
+        assert_eq!(
+            db.categorize_sync("example.com", "/news/today"),
+            Some(Category::new("news"))
+        );
+        assert_eq!(
+            db.categorize_sync("example.com", "/finance/q1"),
+            Some(Category::new("business.finance"))
+        );
+        // The path-less entry catches everything else.
+        assert_eq!(
+            db.categorize_sync("example.com", "/about"),
+            Some(Category::new("social.media"))
+        );
+    }
+
+    #[test]
+    fn install_last_wins_canonicalises_before_merge() {
+        // The merge must run *after* host + category
+        // canonicalisation so that two entries that differ only
+        // in input casing still collide. Otherwise an operator
+        // override using the canonical lowercase form against a
+        // mixed-case industry default would be filed under a
+        // separate (host, path_prefix) key and both rows would
+        // survive — first-wins via sort tie-break, defeating
+        // the override.
+        let db = LocalCategoryDb::new(vec![
+            ce("Example.COM", None, "business.saas"),
+            // Operator override appended later, canonical form:
+            ce("example.com", None, "social.media"),
+        ]);
+        assert_eq!(db.len(), 1);
+        assert_eq!(
+            db.categorize_sync("example.com", "/"),
+            Some(Category::new("social.media"))
+        );
+    }
+}

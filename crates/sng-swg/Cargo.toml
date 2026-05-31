@@ -1,0 +1,71 @@
+[package]
+name = "sng-swg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ShieldNet Gateway Secure Web Gateway subsystem — Envoy ext-authz integration, URL categorisation, malware verdict provider, TLS bypass evaluation"
+
+[dependencies]
+# Shared workspace types: tenant ids, request/response envelopes,
+# verdict events, the error code taxonomy, lifecycle hooks.
+sng-core = { workspace = true }
+# Telemetry pipeline source — SWG publishes per-request verdict
+# events into the shared event channel rather than re-implementing
+# its own pipeline.
+sng-telemetry = { workspace = true }
+# TLS bypass list semantics are derived from the firewall's SNI
+# matcher (`l7::sni_suffix_match`) so the SWG decrypt-or-bypass
+# decision uses the same operator-curated permissive suffix
+# semantics, not RFC 6125 strict (which lives in
+# `sng-policy-eval::matcher`).
+sng-fw = { workspace = true }
+
+# Async runtime: Envoy supervision (spawn / wait / SIGHUP), an
+# ext-authz HTTP listener Envoy calls per request, the
+# categoriser / malware provider HTTP refresh poll, and the
+# config-rotation reload path.
+tokio = { workspace = true, features = ["process", "io-util", "sync", "fs", "time", "macros", "rt-multi-thread", "net"] }
+async-trait = { workspace = true }
+
+# JSON: Envoy ext-authz HTTP request / response shape (the proxy
+# POSTs the candidate request to the auth server and reads the
+# verdict back as JSON). YAML generation is hand-rolled (no
+# yaml-rust dep — the file is short and the structure is fully
+# under our control, so a writer avoids a 300 kLoC parser).
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Lockless config swap on the hot per-request path. The verdict
+# tables (categoriser + malware + bypass) are wrapped in ArcSwap
+# so a control-plane refresh installs a new snapshot without
+# blocking the ext-authz handler.
+arc-swap = { workspace = true }
+parking_lot = { workspace = true }
+
+# Error taxonomy + structured logging.
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Hashing — we SHA-256 the rendered Envoy config to skip a
+# kernel-side restart when nothing has changed, the same hot-swap
+# digest pattern sng-fw uses for nftables scripts.
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+# Note: the rate limiter's `SystemClock` anchor uses
+# `std::sync::LazyLock<Instant>` (stabilised in Rust 1.80) so we
+# do not need `once_cell` for the monotonic-clock epoch. If a
+# future site needs a `Lazy<T>` for a type that can't be inlined
+# behind a `LazyLock` (e.g. a closure that closes over runtime
+# state), add `once_cell = { workspace = true }` back here.
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "macros", "io-util", "sync", "fs", "net"] }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

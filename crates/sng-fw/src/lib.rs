@@ -47,7 +47,9 @@ pub use compile::{CompiledRuleSet, RuleCompiler};
 pub use conntrack::{ConntrackState, ConntrackTracker, FlowDirection};
 pub use engine::{EvaluationContext, FirewallEngine, FirewallVerdict, FlowKey};
 pub use error::FirewallError;
-pub use l7::{AppIdentifier, HttpMatch, L7Match, L7Protocol, SignatureScanner, SniExtractor};
+pub use l7::{
+    AppIdentifier, HttpMatch, L7Match, L7Protocol, SignatureScanner, SniExtractor, sni_suffix_match,
+};
 pub use nat::{NatRule, NatTable, NatType};
 pub use nftables::{MockNftables, NftablesBackend, NftablesScript, ShellNftables};
 pub use rule::{FirewallRule, PortRange, Protocol, RuleAction, RuleMatch};

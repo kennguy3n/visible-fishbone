@@ -1618,6 +1618,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "sng-swg"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "hex",
+ "parking_lot",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sng-core",
+ "sng-fw",
+ "sng-telemetry",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sng-telemetry"
 version = "0.1.0"
 dependencies = [
