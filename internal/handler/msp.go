@@ -219,7 +219,62 @@ func toBindingResponse(b repository.MSPTenantBinding) MSPTenantBindingResponse {
 
 // ---- CRUD ----------------------------------------------------------------
 
+// requirePlatformPermission gates the platform-scoped MSP routes
+// (GET and POST /api/v1/msps) which have no msp_id in their URL
+// and therefore cannot be wrapped with RequireMSPScope. Direct
+// call inside the handler body, as the Register doc-comment
+// already promises. The previous implementation registered these
+// routes without any auth at all — round-2 of Devin Review on
+// PR #42 caught the privilege-escalation surface (any
+// authenticated user, including a tenant-scoped operator, could
+// list every MSP in the platform or create a new one).
+//
+// Returns true when the handler should proceed and false (after
+// writing the 401/403/500) when it must return.
+func (h *MSPHandler) requirePlatformPermission(w http.ResponseWriter, r *http.Request, permission string) bool {
+	userID := middleware.UserIDFromContext(r.Context())
+	if userID == uuid.Nil {
+		WriteError(w, http.StatusUnauthorized, "unauthenticated",
+			"platform-scoped msp routes require an authenticated user identity")
+		return false
+	}
+	allowed, err := h.authz.AuthorizePlatform(r.Context(), userID, permission)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "authorization_failed",
+			"failed to evaluate platform authorization")
+		return false
+	}
+	if !allowed {
+		WriteError(w, http.StatusForbidden, "platform_forbidden",
+			"credentials do not authorise platform-scoped msp operations")
+		return false
+	}
+	return true
+}
+
+// validMSPStatus filters request-supplied status strings against
+// the repository's enum. Empty is accepted (defaults to active
+// per the memory + postgres Create paths). Anything else must
+// match one of the three lifecycle values; otherwise the handler
+// returns 400 instead of letting an arbitrary string flow through
+// to the repo (memory: written verbatim; postgres: would be
+// caught by the CHECK constraint as a generic 23514, but only at
+// write time and only on postgres backends).
+func validMSPStatus(s string) bool {
+	switch repository.MSPStatus(s) {
+	case "",
+		repository.MSPStatusActive,
+		repository.MSPStatusSuspended,
+		repository.MSPStatusDeleted:
+		return true
+	}
+	return false
+}
+
 func (h *MSPHandler) list(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformPermission(w, r, "msp.read") {
+		return
+	}
 	// OpenAPI publishes the cursor parameter as `?after=`. The
 	// shared QueryLimit/Page helpers, the tenant handler, and the
 	// integration handler all use the same name. A copy-paste of
@@ -246,6 +301,9 @@ func (h *MSPHandler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MSPHandler) create(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformPermission(w, r, "msp.write") {
+		return
+	}
 	var req MSPRequest
 	if !DecodeJSON(w, r, &req) {
 		return
@@ -260,6 +318,18 @@ func (h *MSPHandler) create(w http.ResponseWriter, r *http.Request) {
 	// `invalid_argument` that bubbles up from the repo.
 	if req.Slug == "" {
 		WriteError(w, http.StatusBadRequest, "invalid_param", "slug is required")
+		return
+	}
+	// Status, when supplied, must match the repository enum. The
+	// memory repo writes the verbatim string (no CHECK
+	// constraint), so without this guard a client could POST
+	// `"status": "corrupt-state"` and have it persist. Postgres
+	// would reject via CHECK at write time but only when the
+	// postgres backend is wired; we want consistent boundary
+	// validation across both backends.
+	if !validMSPStatus(req.Status) {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			"status must be one of active, suspended, deleted (or omitted to default to active)")
 		return
 	}
 	m := repository.MSP{
@@ -308,6 +378,11 @@ func (h *MSPHandler) update(w http.ResponseWriter, r *http.Request) {
 		Settings: req.Settings,
 	}
 	if req.Status != nil {
+		if !validMSPStatus(*req.Status) {
+			WriteError(w, http.StatusBadRequest, "invalid_param",
+				"status must be one of active, suspended, deleted")
+			return
+		}
 		s := repository.MSPStatus(*req.Status)
 		patch.Status = &s
 	}
@@ -326,6 +401,13 @@ func (h *MSPHandler) setStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	var req MSPStatusRequest
 	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	// Status is required on this endpoint (not the partial-update
+	// PATCH), so reject empty along with bogus enum strings.
+	if req.Status == "" || !validMSPStatus(req.Status) {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			"status must be one of active, suspended, deleted")
 		return
 	}
 	updated, err := h.msps.UpdateStatus(r.Context(), id, repository.MSPStatus(req.Status))
@@ -403,6 +485,13 @@ func (h *MSPHandler) assignTenant(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength != 0 {
 		var req AssignTenantRequest
 		dec := json.NewDecoder(r.Body)
+		// DisallowUnknownFields makes a typo like
+		// `{"relasionship":"co_manager"}` surface as a 400
+		// rather than silently falling through to the default
+		// `owner` because `Relationship` parsed as the
+		// zero-value. Same shape as the integration handler's
+		// PATCH decoder.
+		dec.DisallowUnknownFields()
 		if err := dec.Decode(&req); err != nil {
 			if errors.Is(err, io.EOF) {
 				// chunked transfer with zero bytes — treat as
@@ -641,13 +730,19 @@ func (h *MSPHandler) setBranding(w http.ResponseWriter, r *http.Request) {
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
-	if _, err := h.branding.SetTenantBranding(r.Context(), tenantID, req); err != nil {
+	// SetTenantBranding returns the updated tenant row, so the
+	// follow-up resolution can skip an otherwise-redundant
+	// Get(tenant): branding.Resolve would re-fetch the same row
+	// we already have in hand. ResolveForTenant operates on the
+	// supplied tenant + at most one MSP fetch, saving one DB
+	// roundtrip per setBranding call (called out by round-2
+	// review on msp.go:644-655).
+	updated, err := h.branding.SetTenantBranding(r.Context(), tenantID, req)
+	if err != nil {
 		WriteRepositoryError(w, err)
 		return
 	}
-	// Return the freshly-resolved (post-merge) view so the client
-	// sees the effective branding after the override is applied.
-	b, err := h.branding.Resolve(r.Context(), tenantID)
+	b, err := h.branding.ResolveForTenant(r.Context(), updated)
 	if err != nil {
 		WriteRepositoryError(w, err)
 		return

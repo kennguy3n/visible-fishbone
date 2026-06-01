@@ -73,6 +73,56 @@ func (svc *Service) AuthorizeMSP(
 	return false, nil
 }
 
+// AuthorizePlatform reports whether the user holds a platform-scoped
+// role granting `permission`. Used by the MSP CRUD list/create
+// endpoints which operate above any specific MSP — there is no
+// msp_id to gate against, so AuthorizeMSP (which rejects
+// mspID=uuid.Nil) is unsuitable.
+//
+// Decision rule:
+//  1. Any role with scope=platform and permission in the role's
+//     set (or `"*"`) → allow.
+//  2. Otherwise → deny.
+//
+// Note: MSP-scoped grants are NOT considered platform authority. An
+// operator with msp_admin on a single MSP must not be able to list
+// or create OTHER MSPs — round-2 plugged that privilege-escalation
+// path on `GET/POST /api/v1/msps`.
+//
+// Returns (false, nil) on a clean deny. Returns a non-nil error
+// only when the underlying storage call fails (e.g. db down).
+func (svc *Service) AuthorizePlatform(
+	ctx context.Context,
+	userID uuid.UUID,
+	permission string,
+) (bool, error) {
+	if userID == uuid.Nil || permission == "" {
+		return false, fmt.Errorf("authorize platform: %w", repository.ErrInvalidArgument)
+	}
+	grants, err := svc.roles.GetUserRoles(ctx, userID)
+	if err != nil {
+		return false, fmt.Errorf("authorize platform: get user roles: %w", err)
+	}
+	for _, g := range grants {
+		role, err := svc.roles.Get(ctx, g.RoleID)
+		if err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				// Stale grant (role was deleted) — skip; don't
+				// fail the whole authorize call.
+				continue
+			}
+			return false, fmt.Errorf("authorize platform: get role %s: %w", g.RoleID, err)
+		}
+		if role.Scope != repository.RoleScopePlatform {
+			continue
+		}
+		if rolePermits(role, permission) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // ListAuthorizedTenants returns every tenant under `mspID` that the
 // user is authorized to act on. Composition rule:
 //

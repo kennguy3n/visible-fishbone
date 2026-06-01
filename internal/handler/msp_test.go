@@ -26,6 +26,23 @@ type allowAllAuthz struct{}
 func (allowAllAuthz) AuthorizeMSP(_ context.Context, _, _ uuid.UUID, _ string) (bool, error) {
 	return true, nil
 }
+func (allowAllAuthz) AuthorizePlatform(_ context.Context, _ uuid.UUID, _ string) (bool, error) {
+	return true, nil
+}
+
+// scopedAuthz returns AuthorizeMSP=true (so MSP-scoped routes
+// still pass) but AuthorizePlatform=false. Used to pin that the
+// platform gate on list/create rejects MSP-scoped operators even
+// when they hold MSP-scoped grants. Mirrors the privilege-escalation
+// scenario flagged in round-2.
+type scopedAuthz struct{}
+
+func (scopedAuthz) AuthorizeMSP(_ context.Context, _, _ uuid.UUID, _ string) (bool, error) {
+	return true, nil
+}
+func (scopedAuthz) AuthorizePlatform(_ context.Context, _ uuid.UUID, _ string) (bool, error) {
+	return false, nil
+}
 
 // stubBulkAuthz returns the seed tenants — used by BulkService
 // in handler-level tests.
@@ -77,6 +94,21 @@ func setupMSPHandler(t *testing.T, withBranding bool) (
 	*svctenant.BrandingResolver,
 ) {
 	t.Helper()
+	return setupMSPHandlerWithAuthz(t, withBranding, allowAllAuthz{})
+}
+
+// setupMSPHandlerWithAuthz lets a test swap in a permission-denying
+// authorizer (e.g. scopedAuthz) to exercise the platform-scope
+// gates on `GET/POST /api/v1/msps`. The rest of the wiring matches
+// setupMSPHandler exactly.
+func setupMSPHandlerWithAuthz(t *testing.T, withBranding bool, authz handler.MSPAuthorizer) (
+	*http.ServeMux,
+	*memory.MSPRepository,
+	*memory.TenantRepository,
+	*svctenant.BulkService,
+	*svctenant.BrandingResolver,
+) {
+	t.Helper()
 	store := memory.NewStore()
 	msps := memory.NewMSPRepository(store)
 	tenants := memory.NewTenantRepository(store)
@@ -85,7 +117,7 @@ func setupMSPHandler(t *testing.T, withBranding bool) (
 	if withBranding {
 		branding = svctenant.NewBrandingResolver(tenants, msps)
 	}
-	h := handler.NewMSPHandler(repoMSPService{repo: msps}, bulk, branding, allowAllAuthz{})
+	h := handler.NewMSPHandler(repoMSPService{repo: msps}, bulk, branding, authz)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	return mux, msps, tenants, bulk, branding
@@ -555,5 +587,234 @@ func TestMSPHandler_CreateRejectsMissingSlug(t *testing.T) {
 	}
 	if body.Error.Message != "slug is required" {
 		t.Fatalf("error.message = %q, want 'slug is required'", body.Error.Message)
+	}
+}
+
+// === round-2 fixes ========================================================
+
+// TestMSPHandler_ListRequiresPlatformAuth pins the round-2 fix on the
+// privilege-escalation bug: `GET /api/v1/msps` previously had no
+// auth gate at all, so any authenticated user (including someone
+// whose entire grant footprint is a single tenant-scoped role)
+// could enumerate every MSP on the platform.
+//
+// scopedAuthz returns AuthorizePlatform=false but AuthorizeMSP=true
+// — i.e. it models an msp-scoped operator. The fix must reject the
+// list call with 403 regardless of whether AuthorizeMSP would allow
+// it.
+func TestMSPHandler_ListRequiresPlatformAuth(t *testing.T) {
+	t.Parallel()
+	mux, _, _, _, _ := setupMSPHandlerWithAuthz(t, false, scopedAuthz{})
+	rec := doMSPJSON(t, mux, http.MethodGet, "/api/v1/msps", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body=%s, want 403 (platform gate must reject msp-scoped operators)",
+			rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "platform_forbidden" {
+		t.Fatalf("error.code = %q, want platform_forbidden", body.Error.Code)
+	}
+}
+
+// TestMSPHandler_CreateRequiresPlatformAuth mirrors the list test but
+// for `POST /api/v1/msps` — the privilege escalation was that an
+// arbitrary authenticated user could create a new MSP and (because
+// the seed-grant path stamps the creator as msp_admin) immediately
+// inherit MSP-scoped powers over it.
+func TestMSPHandler_CreateRequiresPlatformAuth(t *testing.T) {
+	t.Parallel()
+	mux, _, _, _, _ := setupMSPHandlerWithAuthz(t, false, scopedAuthz{})
+	rec := doMSPJSON(t, mux, http.MethodPost, "/api/v1/msps",
+		handler.MSPRequest{Name: "Acme", Slug: "acme"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body=%s, want 403 on create", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMSPHandler_ListRequiresAuthentication pins the unauthenticated
+// path: a request with no user UUID stamped on the context
+// (e.g. someone bypassing the auth middleware) must be rejected
+// with 401, not silently allowed.
+func TestMSPHandler_ListRequiresAuthentication(t *testing.T) {
+	t.Parallel()
+	mux, _, _, _, _ := setupMSPHandler(t, false)
+	// Construct the request directly so we can omit
+	// WithUserIDForTest — that's what models the "no
+	// authenticated user" case.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/msps", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d body=%s, want 401", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMSPHandler_CreateRejectsInvalidStatus pins the data-integrity
+// fix: previously the handler passed req.Status verbatim into
+// `repository.MSPStatus(req.Status)`, so a client posting
+// `"status":"corrupt-state"` got that arbitrary string written to
+// the row (in-memory backend) or rejected with a generic 23514
+// CHECK violation (postgres). Round-2 validates at the handler
+// boundary so the 400 is consistent across backends.
+func TestMSPHandler_CreateRejectsInvalidStatus(t *testing.T) {
+	t.Parallel()
+	mux, _, _, _, _ := setupMSPHandler(t, false)
+	rec := doMSPJSON(t, mux, http.MethodPost, "/api/v1/msps",
+		handler.MSPRequest{Name: "Acme", Slug: "acme-bad", Status: "corrupt-state"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "invalid_param" {
+		t.Fatalf("error.code = %q, want invalid_param", body.Error.Code)
+	}
+	// Sanity-check known-good values still pass.
+	for _, st := range []string{"", "active", "suspended"} {
+		rec := doMSPJSON(t, mux, http.MethodPost, "/api/v1/msps",
+			handler.MSPRequest{Name: "Acme " + st, Slug: "acme-" + st + "-ok", Status: st})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status %q rejected (code=%d body=%s), want allow",
+				st, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestMSPHandler_UpdateRejectsInvalidStatus checks the same enum
+// guard on the PATCH update path. Without it, a client could
+// PATCH `{"status":"corrupt-state"}` and the memory backend would
+// write the raw string into MSPPatch.Status.
+func TestMSPHandler_UpdateRejectsInvalidStatus(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	m, err := msps.Create(context.Background(),
+		repository.MSP{Name: "Acme", Slug: "acme-patch-status"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	bad := "corrupt-state"
+	rec := doMSPJSON(t, mux, http.MethodPatch, "/api/v1/msps/"+m.ID.String(),
+		handler.MSPPatchRequest{Status: &bad})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMSPHandler_SetStatusRejectsInvalidStatus covers the dedicated
+// `POST /api/v1/msps/{id}/status` endpoint. The handler also
+// requires a non-empty status (unlike PATCH where omitting it is
+// "no change").
+func TestMSPHandler_SetStatusRejectsInvalidStatus(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	m, err := msps.Create(context.Background(),
+		repository.MSP{Name: "Acme", Slug: "acme-set-status"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	for _, st := range []string{"", "corrupt-state"} {
+		rec := doMSPJSON(t, mux, http.MethodPost,
+			"/api/v1/msps/"+m.ID.String()+"/status",
+			handler.MSPStatusRequest{Status: st})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status %q: code=%d body=%s, want 400",
+				st, rec.Code, rec.Body.String())
+		}
+	}
+	// Sanity-check a valid value still works.
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/status",
+		handler.MSPStatusRequest{Status: "suspended"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid suspended: code=%d body=%s, want 200",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestMSPHandler_AssignTenant_RejectsUnknownFields pins the
+// DisallowUnknownFields fix. A typo like `relasionship` would
+// previously parse as zero-value `Relationship` (silently
+// defaulting to `owner`); the fix makes it surface as a 400.
+func TestMSPHandler_AssignTenant_RejectsUnknownFields(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+	m, _ := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-unknown"})
+	tn, _ := tenants.Create(ctx, repository.Tenant{Name: "tu", Slug: "tu-unknown"})
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/tenants/"+tn.ID.String(),
+		map[string]string{"relasionship": "co_manager"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400 (unknown field 'relasionship' must reject)",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestMSPHandler_SetBranding_ReflectsOverrideWithoutRefetch pins the
+// optimization: setBranding must return the freshly-merged branding
+// computed from the tenant row returned by SetTenantBranding,
+// without an extra Get round-trip. Equivalently, the response must
+// agree with what Resolve returns immediately afterwards. We also
+// pin that the override actually applied (primary_color = "#0f0").
+func TestMSPHandler_SetBranding_ReflectsOverrideWithoutRefetch(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _, branding := setupMSPHandler(t, true)
+	ctx := context.Background()
+	m, err := msps.Create(ctx, repository.MSP{
+		Name:     "Acme",
+		Slug:     "acme-brand-2",
+		Branding: repository.MSPBranding{PrimaryColor: "#abc", LogoURL: "msp-logo"},
+	})
+	if err != nil {
+		t.Fatalf("seed msp: %v", err)
+	}
+	mID := m.ID
+	tn, err := tenants.Create(ctx, repository.Tenant{
+		Name: "Tenant", Slug: "tenant-brand-2", MSPID: &mID,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	rec := doMSPJSON(t, mux, http.MethodPut,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding",
+		repository.MSPBranding{PrimaryColor: "#0f0"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got handler.BrandingResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Tenant override applied.
+	if got.PrimaryColor != "#0f0" {
+		t.Fatalf("primary_color = %q, want #0f0 (tenant override)", got.PrimaryColor)
+	}
+	// MSP layer still merged through for unset fields.
+	if got.LogoURL != "msp-logo" {
+		t.Fatalf("logo_url = %q, want msp-logo (fallthrough from MSP layer)",
+			got.LogoURL)
+	}
+	// Cross-check against a fresh Resolve — they must agree.
+	resolved, err := branding.Resolve(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if resolved.PrimaryColor != got.PrimaryColor || resolved.LogoURL != got.LogoURL {
+		t.Fatalf("setBranding response %+v disagrees with fresh Resolve %+v",
+			got, resolved)
 	}
 }

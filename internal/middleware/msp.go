@@ -19,6 +19,15 @@ type MSPAuthorizer interface {
 	// (or platform-wildcard) grant carrying the given permission
 	// against the given MSP.
 	AuthorizeMSP(ctx context.Context, userID, mspID uuid.UUID, permission string) (bool, error)
+
+	// AuthorizePlatform reports whether the user holds a
+	// platform-scoped grant carrying the given permission. Used
+	// by routes that operate above any specific MSP (notably
+	// `GET /api/v1/msps` and `POST /api/v1/msps`, where no
+	// msp_id is in the URL). MSP-scoped grants do NOT satisfy
+	// this check — an operator with msp_admin on one MSP must
+	// not be able to enumerate or create others.
+	AuthorizePlatform(ctx context.Context, userID uuid.UUID, permission string) (bool, error)
 }
 
 // RequireMSP ensures the resolved MSP ID matches the `msp_id` path

@@ -69,10 +69,23 @@ func (r *BrandingResolver) Resolve(ctx context.Context, tenantID uuid.UUID) (rep
 	if err != nil {
 		return repository.MSPBranding{}, fmt.Errorf("branding resolve: get tenant: %w", err)
 	}
+	return r.ResolveForTenant(ctx, tn)
+}
 
-	// Start from the platform default and overlay each layer in
-	// reverse priority order. This makes the per-field merge a
-	// single helper (mergeBranding) applied per layer.
+// ResolveForTenant computes the effective branding starting from
+// an already-fetched tenant row. Callers that have just performed
+// a tenant write (e.g. setBranding's SetTenantBranding) avoid the
+// duplicate Get the all-in-one Resolve would otherwise issue.
+//
+// Layered identically to Resolve:
+//  1. Tenant override (per-field) — already on the supplied tn.
+//  2. MSP default — fetched only when tn.MSPID is non-nil.
+//  3. Platform DefaultBranding fallback.
+//
+// ErrNotFound on the MSP fetch is tolerated (dangling MSPID) so a
+// soft-deleted MSP cannot break branding resolution for tenants
+// whose denormalised pointer was not cleared.
+func (r *BrandingResolver) ResolveForTenant(ctx context.Context, tn repository.Tenant) (repository.MSPBranding, error) {
 	out := DefaultBranding
 
 	// Layer 2: MSP default, if the tenant has an owner MSP. A

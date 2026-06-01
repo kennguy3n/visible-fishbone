@@ -31,6 +31,14 @@ func (s *stubMSPAuthz) AuthorizeMSP(_ context.Context, userID, mspID uuid.UUID, 
 	return s.allow, s.err
 }
 
+// AuthorizePlatform exists only to satisfy the MSPAuthorizer
+// interface — RequireMSPScope (the middleware under test) never
+// calls it. Default deny so an accidental wire-up surfaces as a
+// 403 in tests rather than passing silently.
+func (s *stubMSPAuthz) AuthorizePlatform(_ context.Context, _ uuid.UUID, _ string) (bool, error) {
+	return false, nil
+}
+
 func TestRequireMSP_StampsContext(t *testing.T) {
 	t.Parallel()
 	mspID := uuid.New()

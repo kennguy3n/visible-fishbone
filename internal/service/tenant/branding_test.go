@@ -219,3 +219,50 @@ func TestClearTenantBranding_RemovesBrandingKey(t *testing.T) {
 		t.Errorf("branding key still present: %s", string(updated.Settings))
 	}
 }
+
+// TestBrandingResolveForTenant_AgreesWithResolve pins the round-2
+// optimization on PR #42: the BrandingResolver.ResolveForTenant
+// helper (operating on a pre-fetched Tenant) must produce the
+// same result as the full Resolve. Used by the MSP setBranding
+// handler to skip the second tenant Get round-trip after
+// SetTenantBranding.
+func TestBrandingResolveForTenant_AgreesWithResolve(t *testing.T) {
+	t.Parallel()
+	resolver, tenants, msps, tn, msp := brandingFixtures(t)
+	ctx := context.Background()
+	if _, err := msps.AssignTenant(ctx, msp.ID, tn.ID, repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	updated, err := resolver.SetTenantBranding(ctx, tn.ID, repository.MSPBranding{
+		PrimaryColor: "#abcdef",
+	})
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	// Sanity: the in-hand tenant carries the override that the
+	// repo just persisted. (If it didn't, the optimization
+	// would silently drop the override.)
+	viaHelper, err := resolver.ResolveForTenant(ctx, updated)
+	if err != nil {
+		t.Fatalf("resolve via helper: %v", err)
+	}
+	viaResolve, err := resolver.Resolve(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if viaHelper != viaResolve {
+		t.Fatalf("ResolveForTenant produced %+v, Resolve produced %+v — must agree",
+			viaHelper, viaResolve)
+	}
+	if viaHelper.PrimaryColor != "#abcdef" {
+		t.Fatalf("override not applied: %+v", viaHelper)
+	}
+	if viaHelper.LogoURL != msp.Branding.LogoURL {
+		t.Fatalf("MSP fallthrough lost: %+v", viaHelper)
+	}
+	// Compile-time hint: tenants is unused if no extra
+	// assertions are added below. Keep the param so future
+	// extensions can verify the per-tenant settings JSONB
+	// shape directly via tenants.Get.
+	_ = tenants
+}

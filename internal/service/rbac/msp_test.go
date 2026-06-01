@@ -274,3 +274,105 @@ func TestGrantMSPRole_StampsScopeAndAuthorizes(t *testing.T) {
 		t.Fatalf("expected allow after grant, got ok=%v err=%v", ok, err)
 	}
 }
+
+// TestAuthorizePlatform_DeniesWithoutGrant exercises the deny path
+// of the round-2 fix on PR #42. With no platform-scoped grant, the
+// caller must be rejected. This is the security floor — an MSP
+// list/create attempt with no grant must never pass.
+func TestAuthorizePlatform_DeniesWithoutGrant(t *testing.T) {
+	svc, _, _, _, userID, _ := mspRBACFixtures(t)
+	ok, err := svc.AuthorizePlatform(context.Background(), userID, "msp.read")
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	if ok {
+		t.Fatal("expected deny without grant")
+	}
+}
+
+// TestAuthorizePlatform_AllowsPlatformScopedGrant covers the happy
+// path: a platform-scoped grant carrying the literal permission
+// allows the caller.
+func TestAuthorizePlatform_AllowsPlatformScopedGrant(t *testing.T) {
+	svc, _, _, roleRepo, userID, _ := mspRBACFixtures(t)
+	role := mustSeedRole(t, roleRepo, repository.Role{
+		Name: "platform_msp_admin", Scope: repository.RoleScopePlatform,
+		Permissions: []string{"msp.read", "msp.write"},
+	})
+	if err := roleRepo.AssignRole(context.Background(), repository.UserRole{
+		UserID: userID, RoleID: role.ID,
+	}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	ok, err := svc.AuthorizePlatform(context.Background(), userID, "msp.read")
+	if err != nil || !ok {
+		t.Fatalf("expected allow with platform-scoped grant, got ok=%v err=%v", ok, err)
+	}
+}
+
+// TestAuthorizePlatform_PlatformWildcardAllows verifies the `*`
+// wildcard short-circuit so a platform_admin (`Permissions: ["*"]`)
+// can manage MSPs without needing an explicit msp.read enumeration.
+func TestAuthorizePlatform_PlatformWildcardAllows(t *testing.T) {
+	svc, _, _, roleRepo, userID, _ := mspRBACFixtures(t)
+	role := mustSeedRole(t, roleRepo, repository.Role{
+		Name: "platform_admin", Scope: repository.RoleScopePlatform,
+		Permissions: []string{rbac.PermWildcard},
+	})
+	if err := roleRepo.AssignRole(context.Background(), repository.UserRole{
+		UserID: userID, RoleID: role.ID,
+	}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	ok, err := svc.AuthorizePlatform(context.Background(), userID, "msp.write")
+	if err != nil || !ok {
+		t.Fatalf("expected allow with platform wildcard, got ok=%v err=%v", ok, err)
+	}
+}
+
+// TestAuthorizePlatform_RejectsMSPScopedGrant is the security
+// invariant that motivated the round-2 fix: an msp_admin grant on
+// ONE MSP must not satisfy a platform-scope check, otherwise that
+// operator could enumerate or create OTHER MSPs.
+func TestAuthorizePlatform_RejectsMSPScopedGrant(t *testing.T) {
+	svc, _, _, roleRepo, userID, mspID := mspRBACFixtures(t)
+	role := mustSeedRole(t, roleRepo, repository.Role{
+		Name: "msp_admin", Scope: repository.RoleScopeMSP,
+		Permissions: []string{rbac.PermWildcard, "msp.read", "msp.write"},
+	})
+	scope := mspID
+	if err := roleRepo.AssignRole(context.Background(), repository.UserRole{
+		UserID: userID, RoleID: role.ID, ScopeID: &scope,
+	}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	ok, err := svc.AuthorizePlatform(context.Background(), userID, "msp.read")
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	if ok {
+		t.Fatal("MSP-scoped grant must NOT satisfy platform authz — privilege escalation surface")
+	}
+}
+
+// TestAuthorizePlatform_RejectsInvalidInputs pins the input
+// validation: nil user UUID or empty permission strings must error
+// rather than silently denying (the latter would mask programmer
+// bugs at call sites).
+func TestAuthorizePlatform_RejectsInvalidInputs(t *testing.T) {
+	svc, _, _, _, userID, _ := mspRBACFixtures(t)
+	if _, err := svc.AuthorizePlatform(context.Background(), uuid.Nil, "msp.read"); err == nil {
+		t.Fatal("nil user should error")
+	}
+	if _, err := svc.AuthorizePlatform(context.Background(), userID, ""); err == nil {
+		t.Fatal("empty permission should error")
+	}
+	if !errors.Is(err1(svc.AuthorizePlatform(context.Background(), uuid.Nil, "msp.read")),
+		repository.ErrInvalidArgument) {
+		t.Fatal("invalid input error must wrap repository.ErrInvalidArgument")
+	}
+}
+
+// err1 returns the error out of a (bool, error) tuple. Helper used
+// only by the invalid-input test above.
+func err1(_ bool, err error) error { return err }
