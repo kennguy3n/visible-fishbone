@@ -79,8 +79,17 @@ type DedupKey struct {
 // element when the count exceeds the capacity.
 //
 // Safe for concurrent use.
+//
+// Lock choice: sync.RWMutex (not Mutex) because `Seen` is
+// invoked on the hot path before every downstream write and
+// only reads from the index maps — it never mutates the LRU
+// order, never calls *list.List mutators, and uses atomic
+// counters for hits/misses. Concurrent `Seen` callers can
+// safely fan out under RLock; `Add` / `SeenOrAdd` / `Len`
+// / `Stats` take the write lock since they touch the list
+// or the maps. See PR #38 Devin Review thread on dedup.go:138.
 type LRUDedup struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	capacity int
 	order    *list.List               // back = least-recent
 	deviceMu map[deviceSeqKey]*list.Element
@@ -136,8 +145,8 @@ func NewLRUDedup(capacity int) *LRUDedup {
 // retry on the redelivered envelope rather than being silently
 // dedup-suppressed.
 func (d *LRUDedup) Seen(key DedupKey) bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	if key.SequenceNumber > 0 && key.DeviceID != uuid.Nil {
 		if _, ok := d.deviceMu[deviceSeqKey{device: key.DeviceID, seq: key.SequenceNumber}]; ok {
 			d.hits.Add(1)
@@ -251,10 +260,12 @@ func (d *LRUDedup) evictOldestLocked() {
 	d.evicted.Add(1)
 }
 
-// Len reports the current number of entries.
+// Len reports the current number of entries. Read under
+// RLock — `*list.List.Len()` is a single int load and the
+// hot path doesn't need to coordinate with concurrent Add.
 func (d *LRUDedup) Len() int {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	return d.order.Len()
 }
 
