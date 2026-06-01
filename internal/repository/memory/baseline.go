@@ -59,6 +59,9 @@ func (r *BaselineModelRepository) GetForDimension(
 	dimension string,
 	windowSeconds int,
 ) (repository.BaselineModel, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.BaselineModel{}, err
+	}
 	if tenantID == uuid.Nil {
 		return repository.BaselineModel{}, repository.ErrInvalidArgument
 	}
@@ -85,6 +88,9 @@ func (r *BaselineModelRepository) Upsert(
 	tenantID uuid.UUID,
 	m repository.BaselineModel,
 ) (repository.BaselineModel, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.BaselineModel{}, err
+	}
 	if tenantID == uuid.Nil || m.Dimension == "" || m.WindowSeconds <= 0 {
 		return repository.BaselineModel{}, repository.ErrInvalidArgument
 	}
@@ -147,6 +153,9 @@ func (r *BaselineModelRepository) List(
 	tenantID uuid.UUID,
 	page repository.Page,
 ) (repository.PageResult[repository.BaselineModel], error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.PageResult[repository.BaselineModel]{}, err
+	}
 	if tenantID == uuid.Nil {
 		return repository.PageResult[repository.BaselineModel]{}, repository.ErrInvalidArgument
 	}
@@ -182,6 +191,9 @@ func (r *BaselineModelRepository) UpdateThreshold(
 	windowSeconds int,
 	zThreshold float64,
 ) (repository.BaselineModel, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.BaselineModel{}, err
+	}
 	if tenantID == uuid.Nil || dimension == "" {
 		return repository.BaselineModel{}, repository.ErrInvalidArgument
 	}

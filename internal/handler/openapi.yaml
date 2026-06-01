@@ -1037,24 +1037,44 @@ paths:
       tags: [alert]
       operationId: createAlertSuppression
       summary: Add a (Kind, Dimension) suppression rule
+      description: |
+        Creates a suppression rule that auto-routes matching future
+        alerts into the terminal AlertStateSuppressed state at emit
+        time. At least one of `kind` or `dimension` must be provided
+        (the rule is the conjunction of the supplied matchers); both
+        may be set for a tighter match. `reason` is required so the
+        audit surface always carries a human-readable explanation
+        for why a class of alerts is being filtered.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [kind]
+              required: [reason]
               properties:
-                kind: { type: string }
-                dimension: { type: string }
-                reason: { type: string }
-                expires_at: { type: string, format: date-time }
+                kind:
+                  type: string
+                  description: "Alert kind to suppress, e.g. baseline_zscore_anomaly. Either `kind` or `dimension` must be set."
+                dimension:
+                  type: string
+                  description: "Baseline dimension to suppress (e.g. flow_bytes_inbound). Either `kind` or `dimension` must be set."
+                reason: { type: string, description: "Operator-visible audit note documenting why this rule exists." }
+                expires_at:
+                  type: string
+                  format: date-time
+                  description: "Optional auto-expiry; the rule stops applying once expires_at has passed (the row remains for audit)."
       responses:
         "201":
           description: rule created
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AlertSuppression" }
+        "400":
+          description: "neither kind nor dimension provided, or reason missing"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /tenants/{tenant_id}/alert-suppressions/{rule_id}:
     parameters:
       - $ref: "#/components/parameters/TenantPathID"
@@ -1117,13 +1137,12 @@ paths:
           application/json:
             schema:
               type: object
-              required: [classification]
+              required: [decision]
               properties:
-                classification:
+                decision:
                   type: string
                   enum: [true_positive, false_positive, noise]
-                actor: { type: string, format: uuid }
-                note: { type: string }
+                notes: { type: string, description: "Free-form operator note explaining the decision." }
       responses:
         "201":
           description: feedback recorded
@@ -1603,48 +1622,80 @@ components:
         updated_at: { type: string, format: date-time }
     Alert:
       type: object
-      required: [id, tenant_id, kind, dimension, value, score, state, opened_at]
+      required:
+        - id
+        - tenant_id
+        - kind
+        - severity
+        - dimension
+        - observed_value
+        - baseline_mean
+        - baseline_stddev
+        - z_score
+        - window_start
+        - window_end
+        - summary
+        - state
+        - created_at
+        - updated_at
       properties:
         id: { type: string, format: uuid }
         tenant_id: { type: string, format: uuid }
-        kind: { type: string }
-        dimension: { type: string }
-        value: { type: number, format: double }
-        score:
+        kind: { type: string, description: "Detector kind, e.g. baseline_zscore_anomaly." }
+        severity: { type: string, enum: [info, warning, critical] }
+        dimension: { type: string, description: "Baseline dimension the alert was generated against." }
+        observed_value: { type: number, format: double, description: "Observation that tripped the detector." }
+        baseline_mean: { type: number, format: double }
+        baseline_stddev: { type: number, format: double }
+        z_score:
           description: max(|z_welford|, |z_ewma|) — the deviation score that tripped the detector
           type: number
           format: double
-        threshold: { type: number, format: double }
-        state: { type: string, enum: [open, acknowledged, resolved, suppressed] }
-        rationale: { type: string }
-        opened_at: { type: string, format: date-time }
-        acknowledged_at: { type: string, format: date-time }
-        acknowledged_by: { type: string, format: uuid }
-        resolved_at: { type: string, format: date-time }
-        resolved_by: { type: string, format: uuid }
-        suppression_id: { type: string, format: uuid }
-        metadata:
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        summary: { type: string, description: "Human-readable rationale string the detector emitted with the alert." }
+        evidence:
+          description: "Detector-supplied JSON payload (statistical context, thresholds, etc.)."
           type: object
           additionalProperties: true
+        state: { type: string, enum: [open, acknowledged, resolved, suppressed] }
+        suppressed_by: { type: string, format: uuid, description: "Suppression rule ID that auto-routed this alert to the suppressed state, if any." }
+        acknowledged_by: { type: string, format: uuid }
+        acknowledged_at: { type: string, format: date-time }
+        resolved_by: { type: string, format: uuid }
+        resolved_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     AlertSuppression:
       type: object
-      required: [id, tenant_id, kind, created_at]
+      required: [id, tenant_id, reason, created_at]
       properties:
         id: { type: string, format: uuid }
         tenant_id: { type: string, format: uuid }
-        kind: { type: string }
-        dimension: { type: string }
+        kind:
+          type: string
+          description: "Alert kind matched by this rule. Either kind or dimension (or both) is set; nil means match any kind within the supplied dimension."
+        dimension:
+          type: string
+          description: "Baseline dimension matched by this rule. Either kind or dimension (or both) is set; nil means match any dimension within the supplied kind."
         reason: { type: string }
+        created_by:
+          type: string
+          format: uuid
+          description: "Operator who created the rule. Derived from the JWT sub / API-key owner server-side."
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
     AlertFeedback:
       type: object
-      required: [id, alert_id, tenant_id, classification, created_at]
+      required: [id, alert_id, tenant_id, decision, created_at]
       properties:
         id: { type: string, format: uuid }
         alert_id: { type: string, format: uuid }
         tenant_id: { type: string, format: uuid }
-        classification: { type: string, enum: [true_positive, false_positive, noise] }
-        actor: { type: string, format: uuid }
-        note: { type: string }
+        decision: { type: string, enum: [true_positive, false_positive, noise] }
+        notes: { type: string }
+        created_by:
+          type: string
+          format: uuid
+          description: "Operator who recorded the feedback. Derived from the JWT sub / API-key owner server-side — clients must not set this."
         created_at: { type: string, format: date-time }
