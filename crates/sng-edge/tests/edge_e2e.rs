@@ -440,15 +440,14 @@ async fn spawn_control_plane(
 /// `PolicyBundleClaims::from_body` and `sng-policy-eval`'s
 /// `LoadedBundle::from_body` decode out of the signed bundle
 /// body. The Go compiler emits MessagePack with the short
-/// field tags (`v`, `t`, `g`, …) and serialises the
-/// `PolicyGraphId` as the 16-byte raw UUID (because `uuid`'s
-/// `serde` impl emits binary in non-human-readable formats),
-/// not the hyphenated string. The decoder on this side
-/// (`sng-core`'s `PolicyGraphId`, via `#[serde(transparent)]`
-/// over `Uuid`) is symmetric — encoding the graph id as a
-/// string would land in the `decode claims: invalid type:
-/// string "…", expected a 16 byte array` failure path the
-/// puller surfaces as `pull_failures`.
+/// field tags (`v`, `t`, `g`, …) and serialises the graph
+/// id as a MessagePack string carrying the canonical 36-char
+/// hyphenated UUID. Both decoders on this side type
+/// `graph_id` as `String` (see
+/// [`sng_core::policy::PolicyBundleClaims`] for the rationale
+/// — keeping the field free-form ensures the claims verifier
+/// here and the full-bundle decoder in `sng-policy-eval`
+/// agree on the same body bit-for-bit).
 #[derive(Serialize)]
 struct WireBundle<'a> {
     #[serde(rename = "v")]
@@ -1010,42 +1009,27 @@ async fn comms_reconnects_after_control_plane_transient_outage() {
         "comms did not classify the 503 as a pull_failure",
     );
 
-    // Phase 3: restore 200, then expect another fresh pull to
-    // land. We bump the bundle's graph_version so the puller's
-    // `If-None-Match` cache does NOT short-circuit to a 304.
-    let (body3, sig_b64_3, etag3, signing3, kid3) =
-        build_signed_bundle(BundleTarget::Edge, &graph_id_str, 4);
-    // Same key id intentionally so we don't need to seed a
-    // second trusted key (the puller's trust store is keyed by
-    // kid, not key bytes).
-    let _ = kid3;
-    let _ = signing3;
-    {
-        // Atomic-ish swap: drop the 503 flag and replace the
-        // bundle bytes / signature in one cycle. The reader
-        // (handler task) takes a snapshot per request so a
-        // brief inconsistency only manifests as one extra 503
-        // or one extra 200 with stale bytes — neither breaks
-        // the assertion (we wait for a strictly newer
-        // pulls_fresh count below).
-        bundle.return_503.store(false, Ordering::Release);
-        // SAFETY: There are no other writers to these fields
-        // after `spawn_control_plane` returned; the handler
-        // task only reads them. We rebuild the BundleState
-        // by smuggling the new bytes through a parallel Arc
-        // because BundleState fields are not Mutex'd.
-    }
-    // Simpler: kill the old server and spin up a new one on a
-    // *new* port pointing at the v=4 bundle. That requires
-    // updating the `endpoint` the client connects to, which
-    // is baked into `ControlPlaneClient` at build_edge time —
-    // so we can't change endpoints mid-flight. Instead we use
-    // the `return_503` flip we just released + the unchanged
-    // bundle bytes; pulls after the flip will hit `If-None-Match`
-    // against the cached etag and return 304 NotModified (also
-    // counted in stats), which proves the connection is alive
-    // and the comms loop is making progress past the outage.
-    let _ = (body3, sig_b64_3, etag3);
+    // Phase 3: clear the 503 flag. The unchanged bundle bytes
+    // stay in BundleState, so subsequent pulls hit
+    // `If-None-Match` against the cached etag and the mock
+    // returns 304 NotModified — proving the connection is
+    // alive and the comms loop is making progress past the
+    // outage.
+    //
+    // We deliberately do NOT rotate the bundle to a higher
+    // `graph_version` here, even though that would also
+    // satisfy the "comms recovered" check. `BundleState`'s
+    // body / sig / etag / kid fields are not Mutex-guarded
+    // (the handler task reads them lock-free), and rotating
+    // them in-flight would require either Mutex-ing every
+    // field or restarting the listener on a new port — both
+    // are more complexity than the test needs to demonstrate
+    // recovery. The 304 path is sufficient because the
+    // puller surfaces it through `pulls_not_modified` (which
+    // the assertion below watches) and the recovery only
+    // requires that the comms loop *makes progress* past the
+    // outage, not that it observes a NEW bundle.
+    bundle.return_503.store(false, Ordering::Release);
 
     wait_until("post-outage 304 or 200", Duration::from_secs(5), || {
         let post_fresh = stats_for_assert.pulls_fresh.load(Ordering::Relaxed);
