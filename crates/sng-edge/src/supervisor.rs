@@ -440,7 +440,38 @@ fn pipeline_handle_to_telemetry_sender(
                 // subsystem's `start()` spawn task never
                 // joins, and the supervisor drain deadlocks
                 // \u2014 a real production-shutdown bug.
+                //
+                // Before exiting, drain any events still
+                // buffered in the bridge's own
+                // `mpsc::Receiver<TelemetryEvent>` and forward
+                // them through `handle.try_submit`. The drain
+                // is bounded (the channel capacity is 1024)
+                // and uses non-blocking `try_recv` +
+                // `try_submit`, so it cannot stall the
+                // supervisor drain regardless of how slow the
+                // pipeline's downstream `recv()` loop is.
+                // Without this drain step, events that
+                // producer subsystems (DNS / IPS / ZTNA / etc.)
+                // had already enqueued via the bridge's
+                // `mpsc::Sender` \u2014 but the bridge hadn't yet
+                // forwarded to the pipeline \u2014 would be
+                // silently lost during the shutdown race
+                // window. The pipeline subsystem itself
+                // applies its own drain budget to whatever we
+                // hand off via `try_submit` here, so this
+                // bridge-side drain only ever attempts an
+                // in-process channel-to-channel move and the
+                // pipeline\u2019s own drain timing semantics are
+                // unchanged.
                 () = shutdown.wait() => {
+                    while let Ok(event) = rx.try_recv() {
+                        if let Err(err) = handle.try_submit(event) {
+                            tracing::debug!(
+                                target: "sng_edge::telemetry_bridge",
+                                "pipeline submit rejected event during shutdown drain: {err:?}"
+                            );
+                        }
+                    }
                     break;
                 }
                 ev = rx.recv() => {
