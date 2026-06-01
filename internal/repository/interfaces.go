@@ -586,8 +586,12 @@ type AlertRepository interface {
 	// Acknowledge transitions an alert from Open to
 	// Acknowledged. Idempotent: re-acknowledging an already-
 	// acknowledged alert is a no-op (returns the unchanged
-	// row). Returns ErrInvalidArgument when the alert is in
-	// a terminal state.
+	// row). Returns ErrConflict when the alert is in a
+	// terminal state (Resolved / Suppressed) — the handler's
+	// writeAlertStateError helper maps that to a 409 with a
+	// 'terminal state' message rather than the generic
+	// 'uniqueness constraint' fall-through. See PR #40
+	// round-7 ANALYSIS_0003.
 	Acknowledge(
 		ctx context.Context,
 		tenantID, id uuid.UUID,
@@ -596,8 +600,10 @@ type AlertRepository interface {
 	) (Alert, error)
 
 	// Resolve transitions an alert from Open or Acknowledged
-	// to Resolved. Returns ErrInvalidArgument when the alert
-	// is in a terminal state.
+	// to Resolved. Returns ErrConflict when the alert is
+	// already in a different terminal state (Suppressed);
+	// re-resolving an already-Resolved alert is idempotent
+	// and returns the unchanged row.
 	Resolve(
 		ctx context.Context,
 		tenantID, id uuid.UUID,

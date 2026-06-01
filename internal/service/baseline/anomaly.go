@@ -43,11 +43,22 @@ type DetectorOptions struct {
 	// Below this the estimator is too unstable. Defaults to
 	// the package's MinWarmupSamples constant.
 	MinWarmupSamples int64
-	// WarningZScore is the threshold above which an alert is
-	// emitted with severity=warning when the model's
-	// ZThreshold doesn't override it. The Detector emits
-	// max(model.ZThreshold, WarningZScore) at warning, and
-	// 1.5x that value at critical.
+	// WarningZScore is the **cold-start default** ZThreshold
+	// stamped onto a freshly materialised BaselineModel when
+	// no row exists yet for (tenant, dim, window). Once a row
+	// is persisted the BaselineModel's own ZThreshold takes
+	// over — the Detector emits at maxAbsZ >= model.ZThreshold
+	// (warning) or maxAbsZ >= 1.5 * model.ZThreshold (critical),
+	// regardless of WarningZScore.
+	//
+	// In particular the Detector does **not** floor the
+	// effective threshold at WarningZScore: that would silently
+	// override an operator's lower threshold (e.g. a 2.5σ
+	// override on a noisy dimension) or the feedback tuning
+	// loop's downward nudges (alert.FeedbackTuningOptions
+	// MinZThreshold defaults to 2.0σ), which would make the
+	// REST baseline.z_threshold field a lie. See PR #40 round-7
+	// BUG_0001.
 	WarningZScore float64
 }
 
@@ -98,17 +109,23 @@ func (d *Detector) SetClock(fn func() time.Time) {
 //  1. Load the current Baseline.
 //  2. Score the observation against the loaded Baseline.
 //  3. Fold the observation into the Baseline and persist.
-//  4. If max(|zW|, |zE|) >= max(model.ZThreshold, WarningZScore)
-//     AND samples >= MinWarmupSamples, emit an alert.
+//  4. If max(|zW|, |zE|) >= model.ZThreshold AND samples >=
+//     MinWarmupSamples, emit an alert. The threshold honoured
+//     here is the BaselineModel's persisted ZThreshold — any
+//     operator override (PUT /baselines/.../threshold) or
+//     feedback tuning nudge is respected verbatim. The
+//     DetectorOptions.WarningZScore field is **only** the
+//     cold-start default applied when no row exists yet.
 //
 // Returns (foldedBaseline, alert?, error). alert is non-nil
 // only when an alert was emitted; err is non-nil only when
 // either the baseline persist OR the alert emit failed (i.e.
 // "we did not score" vs "we scored but couldn't persist").
 //
-// Cold-start (no row exists) inserts a fresh Baseline; no alert
-// is emitted on the first observation regardless of score
-// because the estimator has nothing to compare against.
+// Cold-start (no row exists) inserts a fresh Baseline (stamped
+// with DetectorOptions.WarningZScore as the initial ZThreshold);
+// no alert is emitted on the first observation regardless of
+// score because the estimator has nothing to compare against.
 func (d *Detector) ObserveAndScore(
 	ctx context.Context,
 	tenantID uuid.UUID,
@@ -160,7 +177,11 @@ func (d *Detector) ObserveAndScore(
 				Dimension:     dimension,
 				WindowSeconds: windowSeconds,
 				Alpha:         DefaultAlpha,
-				ZThreshold:    DefaultZThreshold,
+				// Cold-start default — once persisted, the
+				// operator + feedback tuning loop own this
+				// value via UpdateThreshold. See
+				// DetectorOptions.WarningZScore doc.
+				ZThreshold: d.opts.WarningZScore,
 			}
 		} else if err != nil {
 			return repository.BaselineModel{}, nil, fmt.Errorf("anomaly load baseline: %w", err)
@@ -198,10 +219,14 @@ func (d *Detector) ObserveAndScore(
 	}
 
 	// 4. Emit gate. Warmup AND score-above-threshold both required.
+	//
+	// We honour cur.ZThreshold verbatim. Pre-round-7 this took
+	// max(cur.ZThreshold, d.opts.WarningZScore) which silently
+	// overrode operator + feedback-tuned thresholds below the
+	// default 3.0σ. WarningZScore is now only the cold-start
+	// default applied above when no row exists. See PR #40
+	// round-7 BUG_0001 and the BaselineModel.ZThreshold doc.
 	threshold := cur.ZThreshold
-	if d.opts.WarningZScore > threshold {
-		threshold = d.opts.WarningZScore
-	}
 	if cur.Samples < d.opts.MinWarmupSamples || maxZ < threshold {
 		return saved, nil, nil
 	}

@@ -284,8 +284,23 @@ func (h *AlertHandler) createSuppression(w http.ResponseWriter, r *http.Request)
 		WriteError(w, http.StatusBadRequest, "invalid_argument", "reason is required")
 		return
 	}
+	// Normalise + reject empty-string pointers. A request like
+	// `{"kind": "", "reason": "x"}` decodes to a non-nil
+	// *string("") which the matcher (AlertSuppression.Matches)
+	// would compare with `"" != alertKind`, always returning
+	// false — i.e. a silently-dead rule. Same anti-pattern the
+	// AppRegistryOverrideRequest schema guards against. Strip
+	// the empties to nil before the "at least one provided"
+	// check so the operator gets a 400 instead of a 201 they
+	// will silently never see fire. See PR #40 round-7 BUG_0002.
+	if body.Kind != nil && *body.Kind == "" {
+		body.Kind = nil
+	}
+	if body.Dimension != nil && *body.Dimension == "" {
+		body.Dimension = nil
+	}
 	if body.Kind == nil && body.Dimension == nil {
-		WriteError(w, http.StatusBadRequest, "invalid_argument", "at least one of kind / dimension must be provided")
+		WriteError(w, http.StatusBadRequest, "invalid_argument", "at least one of kind / dimension must be provided and non-empty")
 		return
 	}
 	saved, err := h.router.CreateSuppression(r.Context(), tenantID, repository.AlertSuppression{

@@ -266,6 +266,50 @@ func TestAlertHandler_TerminalStateConflict(t *testing.T) {
 	}
 }
 
+// TestAlertHandler_CreateSuppressionRejectsEmptyMatchers pins
+// PR #40 round-7 BUG_0002: empty-string kind / dimension
+// pointers must be rejected with 400, not silently accepted
+// to produce a dead suppression rule. The original handler
+// only checked for nil pointers, so `{"kind": ""}` decoded to
+// *string("") (non-nil) and slipped through to create a rule
+// whose Matches() method always returned false.
+func TestAlertHandler_CreateSuppressionRejectsEmptyMatchers(t *testing.T) {
+	t.Parallel()
+	router, _, tenantID, token := newBaselineAlertTestRouter(t)
+
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"both nil", map[string]any{"reason": "x"}},
+		{"empty kind only", map[string]any{"kind": "", "reason": "x"}},
+		{"empty dimension only", map[string]any{"dimension": "", "reason": "x"}},
+		{"both empty", map[string]any{"kind": "", "dimension": "", "reason": "x"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := doJSON(t, router, http.MethodPost,
+				"/api/v1/tenants/"+tenantID.String()+"/alert-suppressions", token, tc.body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), "non-empty") {
+				t.Errorf("400 body should explain non-empty requirement, got: %s", rr.Body.String())
+			}
+		})
+	}
+
+	// And a "kind=non-empty, dimension=empty" request MUST
+	// succeed — the empty pointer is normalised to nil and the
+	// kind matcher is honoured.
+	rr := doJSON(t, router, http.MethodPost,
+		"/api/v1/tenants/"+tenantID.String()+"/alert-suppressions", token,
+		map[string]any{"kind": "anomaly.bytes_total", "dimension": "", "reason": "x"})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("non-empty kind + empty dimension should succeed, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestAlertHandler_FeedbackRoundTrip(t *testing.T) {
 	t.Parallel()
 	router, store, tenantID, token := newBaselineAlertTestRouter(t)
