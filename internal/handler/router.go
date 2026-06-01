@@ -28,6 +28,7 @@ type RouterDeps struct {
 	Baseline         *BaselineHandler
 	Alert            *AlertHandler
 	Integrations     *IntegrationHandler
+	MSP              *MSPHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
 	RateLimiter      *middleware.RateLimiter
@@ -96,6 +97,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.Integrations != nil {
 		deps.Integrations.Register(apiMux)
+	}
+	if deps.MSP != nil {
+		deps.MSP.Register(apiMux)
 	}
 
 	apiChain := middleware.Chain(

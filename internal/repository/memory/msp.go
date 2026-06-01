@@ -369,4 +369,3 @@ func cloneBinding(b repository.MSPTenantBinding) repository.MSPTenantBinding {
 	}
 	return out
 }
-

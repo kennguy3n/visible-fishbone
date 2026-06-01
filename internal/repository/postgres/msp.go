@@ -28,10 +28,10 @@ const mspSelectColumns = `
 
 func scanMSP(row pgx.Row) (repository.MSP, error) {
 	var (
-		m         repository.MSP
-		brandBuf  []byte
-		setBuf    []byte
-		deleted   *deletedAtScan
+		m        repository.MSP
+		brandBuf []byte
+		setBuf   []byte
+		deleted  *deletedAtScan
 	)
 	deleted = &deletedAtScan{}
 	if err := row.Scan(

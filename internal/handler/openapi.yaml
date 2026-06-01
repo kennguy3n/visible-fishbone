@@ -1416,6 +1416,309 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/IntegrationDelivery" }
         "404": { description: not found }
+  /msps:
+    get:
+      tags: [msps]
+      operationId: listMSPs
+      summary: List MSPs
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: page of MSPs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/MSP" }
+                  next_cursor: { type: string }
+    post:
+      tags: [msps]
+      operationId: createMSP
+      summary: Create an MSP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MSPCreateRequest" }
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MSP" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /msps/{msp_id}:
+    parameters: [ { $ref: "#/components/parameters/MSPPathID" } ]
+    get:
+      tags: [msps]
+      operationId: getMSP
+      summary: Get MSP by id
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MSP" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [msps]
+      operationId: updateMSP
+      summary: Update MSP (sparse PATCH)
+      description: |
+        Pointer-shaped patch semantics: omitting a field leaves
+        the corresponding column untouched. Supplying a field as
+        its zero value (e.g. `slug: ""`, `branding: {}`) clears
+        it. Same convention as `PATCH /tenants/{tenant_id}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MSPPatchRequest" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MSP" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [msps]
+      operationId: deleteMSP
+      summary: Soft-delete an MSP
+      description: |
+        Soft-delete: the row remains with `status=deleted`. The
+        cascade removes every `msp_tenants` row for the MSP and
+        clears the denormalised `tenants.msp_id` pointer on every
+        owned tenant.
+      responses:
+        "204": { description: deleted }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /msps/{msp_id}/status:
+    parameters: [ { $ref: "#/components/parameters/MSPPathID" } ]
+    post:
+      tags: [msps]
+      operationId: updateMSPStatus
+      summary: Update MSP status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: "#/components/schemas/MSPStatus" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MSP" }
+        "404": { $ref: "#/components/responses/Error" }
+  /msps/{msp_id}/tenants:
+    parameters: [ { $ref: "#/components/parameters/MSPPathID" } ]
+    get:
+      tags: [msps]
+      operationId: listMSPTenants
+      summary: List the tenant cohort under an MSP
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: page of bindings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/MSPTenantBinding" }
+                  next_cursor: { type: string }
+  /msps/{msp_id}/tenants/{tenant_id}:
+    parameters:
+      - $ref: "#/components/parameters/MSPPathID"
+      - $ref: "#/components/parameters/TenantPathID"
+    post:
+      tags: [msps]
+      operationId: assignMSPTenant
+      summary: Bind a tenant to an MSP
+      description: |
+        Binds the (msp, tenant) pair with the given relationship.
+        When `relationship=owner` (the default) the cascade also
+        sets `tenants.msp_id = msp_id`, evicting any prior owner
+        binding (the partial UNIQUE index in migration 015
+        enforces at most one owner per tenant).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MSPAssignTenantRequest" }
+      responses:
+        "201":
+          description: bound
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MSPTenantBinding" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [msps]
+      operationId: unassignMSPTenant
+      summary: Unbind a tenant from an MSP
+      description: |
+        If the binding was the owner, the cascade also clears
+        `tenants.msp_id`. Non-owner bindings only remove the
+        join row.
+      responses:
+        "204": { description: unbound }
+        "404": { $ref: "#/components/responses/Error" }
+  /msps/{msp_id}/bulk/policy-templates:
+    parameters: [ { $ref: "#/components/parameters/MSPPathID" } ]
+    post:
+      tags: [msps]
+      operationId: bulkApplyPolicyTemplate
+      summary: Apply a policy graph to every authorized tenant under the MSP
+      description: |
+        Fans the supplied policy graph across the per-user
+        authorized tenant subset. Concurrency is bounded by
+        `DefaultBulkConcurrency` (16). Partial failures NEVER
+        abort the run — every per-tenant outcome surfaces in
+        the response body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [template]
+              properties:
+                template:
+                  type: object
+                  additionalProperties: true
+                  description: same shape `PUT /tenants/{tenant_id}/policies/graph` accepts
+      responses:
+        "202": { $ref: "#/components/responses/BulkResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /msps/{msp_id}/bulk/sites:
+    parameters: [ { $ref: "#/components/parameters/MSPPathID" } ]
+    post:
+      tags: [msps]
+      operationId: bulkProvisionSites
+      summary: Provision one site per authorized tenant under the MSP
+      description: |
+        The template is applied verbatim to every tenant. Slug
+        collisions surface as per-tenant errors and do not abort
+        the run.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                template: { type: string, enum: [branch, hub, cloud_only, home_office] }
+                config:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "202": { $ref: "#/components/responses/BulkResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /msps/{msp_id}/bulk/claim-tokens:
+    parameters: [ { $ref: "#/components/parameters/MSPPathID" } ]
+    post:
+      tags: [msps]
+      operationId: bulkGenerateClaimTokens
+      summary: Issue claim tokens for every authorized tenant under the MSP
+      description: |
+        Plaintext claim tokens are returned ONCE in the
+        response body. They are NEVER persisted in plaintext
+        anywhere else; operators must capture them at request
+        time. Partial failures (e.g. issued 3 of 5 before a
+        repo error) surface with the tokens-issued-so-far in
+        the per-tenant outcome.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [count]
+              properties:
+                count: { type: integer, minimum: 1 }
+                ttl_seconds: { type: integer, minimum: 0 }
+      responses:
+        "202": { $ref: "#/components/responses/BulkResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/branding:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [msps]
+      operationId: getTenantBranding
+      summary: Resolve the effective branding for a tenant
+      description: |
+        Walks the branding resolution chain tenant override >
+        MSP default > platform default. Every response field is
+        populated; the resolver guarantees a fully-resolved
+        MSPBranding.
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MSPBranding" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [msps]
+      operationId: setTenantBranding
+      summary: Write the per-tenant branding override
+      description: |
+        Per-field overlay: a tenant override that only sets
+        `primary_color` inherits LogoURL etc from the MSP (or
+        platform) default. The response body is the freshly
+        resolved view (post-merge), so the client doesn't need
+        a second roundtrip.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MSPBranding" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MSPBranding" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [msps]
+      operationId: clearTenantBranding
+      summary: Remove the per-tenant branding override
+      description: |
+        Restores full inheritance from the MSP (or platform)
+        default. Unrelated keys in `tenants.settings` are
+        preserved.
+      responses:
+        "204": { description: cleared }
+        "404": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     BearerJWT:
@@ -1446,6 +1749,11 @@ components:
       name: id
       required: true
       schema: { type: string, format: uuid }
+    MSPPathID:
+      in: path
+      name: msp_id
+      required: true
+      schema: { type: string, format: uuid }
     After:
       in: query
       name: after
@@ -1470,6 +1778,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Device" }
+    BulkResult:
+      description: per-tenant bulk operation result
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/MSPBulkResult" }
     Error:
       description: error
       content:
@@ -1856,6 +2169,121 @@ components:
             ServiceNow incident number, etc.) recorded once the
             destination accepts the payload.
         created_at: { type: string, format: date-time }
+    MSPStatus:
+      type: string
+      enum: [active, suspended, deleted]
+      description: |
+        Lifecycle states for an MSP. `deleted` is the soft-delete
+        terminal state — the row stays in the table; only the
+        cascade clears `tenants.msp_id` pointers for the cohort.
+    MSPRelationship:
+      type: string
+      enum: [owner, co_manager]
+      description: |
+        Distinguishes the primary owner from co-managers in the
+        msp_tenants join. At most one `owner` per tenant — the
+        partial UNIQUE index in migration 015 enforces it.
+    MSPBranding:
+      type: object
+      description: |
+        Shared visual identity an MSP applies to its tenant
+        cohort. All fields are optional in the source object;
+        when surfaced via `GET /tenants/{tenant_id}/branding`
+        every field is guaranteed populated by the resolver.
+      properties:
+        logo_url: { type: string }
+        primary_color: { type: string }
+        secondary_color: { type: string }
+        custom_domain: { type: string }
+        portal_support_to: { type: string }
+    MSP:
+      type: object
+      required: [id, name, slug, status, branding, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        status: { $ref: "#/components/schemas/MSPStatus" }
+        branding: { $ref: "#/components/schemas/MSPBranding" }
+        settings:
+          type: object
+          additionalProperties: true
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    MSPCreateRequest:
+      type: object
+      required: [name, slug]
+      properties:
+        name: { type: string }
+        slug: { type: string }
+        status: { $ref: "#/components/schemas/MSPStatus" }
+        branding: { $ref: "#/components/schemas/MSPBranding" }
+        settings:
+          type: object
+          additionalProperties: true
+    MSPPatchRequest:
+      type: object
+      description: |
+        Pointer-shaped sparse PATCH. Omitting a field leaves the
+        corresponding column untouched. Supplying a field as
+        its zero value clears it.
+      properties:
+        name: { type: string }
+        slug: { type: string }
+        status: { $ref: "#/components/schemas/MSPStatus" }
+        branding: { $ref: "#/components/schemas/MSPBranding" }
+        settings:
+          type: object
+          additionalProperties: true
+    MSPTenantBinding:
+      type: object
+      required: [msp_id, tenant_id, relationship, created_at]
+      properties:
+        msp_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        relationship: { $ref: "#/components/schemas/MSPRelationship" }
+        created_at: { type: string, format: date-time }
+    MSPAssignTenantRequest:
+      type: object
+      properties:
+        relationship: { $ref: "#/components/schemas/MSPRelationship" }
+      description: |
+        Optional body. When omitted, the binding defaults to
+        `owner` and cascades to set `tenants.msp_id`.
+    MSPBulkOutcome:
+      type: object
+      required: [tenant_id]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        error:
+          type: string
+          description: per-tenant failure message; omitted on success
+        policy_version:
+          type: integer
+          description: new policy graph version (ApplyPolicyTemplate only)
+        site_id:
+          type: string
+          format: uuid
+          description: provisioned site id (BulkProvisionSites only)
+        claim_tokens:
+          type: array
+          items: { type: string }
+          description: |
+            plaintext claim tokens issued (BulkGenerateClaimTokens
+            only). Captured ONCE in this response; never
+            persisted in plaintext anywhere else.
+    MSPBulkResult:
+      type: object
+      required: [successes, failures, started_at, ended_at]
+      properties:
+        successes:
+          type: array
+          items: { $ref: "#/components/schemas/MSPBulkOutcome" }
+        failures:
+          type: array
+          items: { $ref: "#/components/schemas/MSPBulkOutcome" }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
     APIKeyCreateRequest:
       type: object
       required: [name, subject]
