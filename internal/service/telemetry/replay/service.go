@@ -281,6 +281,10 @@ func (s *Service) Replay(
 	if maxEvents <= 0 {
 		maxEvents = DefaultReplayMaxEvents
 	}
+	objectsPerStep := opts.ObjectsPerStep
+	if objectsPerStep <= 0 {
+		objectsPerStep = DefaultReplayBatchSize
+	}
 
 	s.mu.Lock()
 	if s.running {
@@ -318,72 +322,101 @@ func (s *Service) Replay(
 	affectedDevices := make(map[uuid.UUID]struct{})
 	affectedSites := make(map[uuid.UUID]struct{})
 
+	// Process refs in batches of ObjectsPerStep. The per-object
+	// work is identical to the prior unbatched version; the
+	// outer batch boundary gives operator-visible progress
+	// logging and a natural checkpoint boundary for PR B's
+	// resumable simulator (the cursor persists at
+	// "next batch start", not mid-object). The in-flight
+	// envelope working set is bounded — a single batch holds
+	// at most objectsPerStep × MaxEventsPerObject decoded
+	// envelopes in memory (default 4 × 25,000 ≈ 100k rows,
+	// well under a worker's GB budget at ~300 B per envelope).
 scanLoop:
-	for _, ref := range refs {
+	for batchStart := 0; batchStart < len(refs); batchStart += objectsPerStep {
 		if ctx.Err() != nil {
 			break scanLoop
 		}
-		body, _, err := s.reader.OpenSealedObject(ctx, ref)
-		if err != nil {
-			logger.Warn("replay: open sealed object",
-				slog.String("data_key", ref.DataKey),
-				slog.Any("error", err))
-			continue
+		if report.Total >= maxEvents {
+			break scanLoop
 		}
-		envs, decodeErr := decodeSealedBatch(body)
-		_ = body.Close()
-		if decodeErr != nil {
-			// Partial decode is the right trade-off: the
-			// archiver writes JSON-Lines with one envelope
-			// per row, so a single corrupted row in a 25k-
-			// row sealed object should not blank-line the
-			// other 24,999 rows in the impact report. The
-			// decoder returns whatever rows it could parse
-			// alongside the first error; surface the error
-			// via a warn but keep the good rows.
-			logger.Warn("replay: partial decode of sealed object",
-				slog.String("data_key", ref.DataKey),
-				slog.Int("partial_envs", len(envs)),
-				slog.Any("error", decodeErr))
+		batchEnd := batchStart + objectsPerStep
+		if batchEnd > len(refs) {
+			batchEnd = len(refs)
 		}
-		if len(envs) == 0 {
-			continue
-		}
-		report.ObjectsScanned++
+		logger.Debug("replay: batch start",
+			slog.Int("batch_start", batchStart),
+			slog.Int("batch_end", batchEnd),
+			slog.Int("objects_per_step", objectsPerStep),
+			slog.Int("total_objects", len(refs)))
 
-		for _, env := range envs {
+		for _, ref := range refs[batchStart:batchEnd] {
 			if ctx.Err() != nil {
 				break scanLoop
 			}
-			if report.Total >= maxEvents {
-				logger.Info("replay: MaxEvents reached",
-					slog.Int("max", maxEvents))
-				break scanLoop
-			}
-			report.Total++
-
-			prevVerdict, prevErr := prev.Evaluate(ctx, env)
-			nextVerdict, nextErr := next.Evaluate(ctx, env)
-			if prevErr != nil {
-				report.PrevErrors++
-			}
-			if nextErr != nil {
-				report.NextErrors++
-			}
-			// An envelope that one side could not evaluate is
-			// excluded from the transition matrix — the
-			// matrix counts only resolved transitions. The
-			// envelope is still in Total so the operator
-			// sees the volume.
-			if prevErr != nil || nextErr != nil {
+			body, _, err := s.reader.OpenSealedObject(ctx, ref)
+			if err != nil {
+				logger.Warn("replay: open sealed object",
+					slog.String("data_key", ref.DataKey),
+					slog.Any("error", err))
 				continue
 			}
-			transitions[verdictPair{prev: prevVerdict, next: nextVerdict}]++
-			if prevVerdict != nextVerdict {
-				report.Changed++
-				affectedDevices[env.DeviceID] = struct{}{}
-				if env.SiteID != nil {
-					affectedSites[*env.SiteID] = struct{}{}
+			envs, decodeErr := decodeSealedBatch(body)
+			_ = body.Close()
+			if decodeErr != nil {
+				// Partial decode is the right trade-off:
+				// the archiver writes JSON-Lines with one
+				// envelope per row, so a single corrupted
+				// row in a 25k-row sealed object should
+				// not blank-line the other 24,999 rows in
+				// the impact report. The decoder returns
+				// whatever rows it could parse alongside
+				// the first error; surface the error via
+				// a warn but keep the good rows.
+				logger.Warn("replay: partial decode of sealed object",
+					slog.String("data_key", ref.DataKey),
+					slog.Int("partial_envs", len(envs)),
+					slog.Any("error", decodeErr))
+			}
+			if len(envs) == 0 {
+				continue
+			}
+			report.ObjectsScanned++
+
+			for _, env := range envs {
+				if ctx.Err() != nil {
+					break scanLoop
+				}
+				if report.Total >= maxEvents {
+					logger.Info("replay: MaxEvents reached",
+						slog.Int("max", maxEvents))
+					break scanLoop
+				}
+				report.Total++
+
+				prevVerdict, prevErr := prev.Evaluate(ctx, env)
+				nextVerdict, nextErr := next.Evaluate(ctx, env)
+				if prevErr != nil {
+					report.PrevErrors++
+				}
+				if nextErr != nil {
+					report.NextErrors++
+				}
+				// An envelope that one side could not
+				// evaluate is excluded from the transition
+				// matrix — the matrix counts only resolved
+				// transitions. The envelope is still in
+				// Total so the operator sees the volume.
+				if prevErr != nil || nextErr != nil {
+					continue
+				}
+				transitions[verdictPair{prev: prevVerdict, next: nextVerdict}]++
+				if prevVerdict != nextVerdict {
+					report.Changed++
+					affectedDevices[env.DeviceID] = struct{}{}
+					if env.SiteID != nil {
+						affectedSites[*env.SiteID] = struct{}{}
+					}
 				}
 			}
 		}

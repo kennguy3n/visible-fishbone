@@ -475,20 +475,62 @@ func (a *Archiver) flushPartition(ctx context.Context, key archiverPartitionKey)
 	if !ok {
 		return nil
 	}
+	// Swap-and-restore: take the in-flight slice out of the
+	// partition so concurrent Archive() calls can keep appending
+	// onto a fresh slice, but on ANY failure below we re-prepend
+	// the in-flight slice so a later flush retries the same
+	// events. This mirrors the ClickHouse writer's requeueBatch
+	// pattern (writer.go) — both the hot path and the cold path
+	// MUST hold the buffer until upload is confirmed, otherwise
+	// a single transient S3 / serialization / zstd failure
+	// silently loses up to MaxEventsPerObject events. The Archive
+	// API contract is "buffered for sealing", not "successfully
+	// archived", so the restore-on-failure semantics keep
+	// callers honest.
 	partition.mu.Lock()
 	if len(partition.events) == 0 {
 		partition.mu.Unlock()
 		return nil
 	}
-	events := partition.events
+	inFlight := partition.events
+	inFlightRawBytes := partition.rawBytes
+	openedAt := partition.openedAt
 	partition.events = nil
 	partition.rawBytes = 0
-	openedAt := partition.openedAt
 	partition.mu.Unlock()
+
+	// requeue re-prepends the in-flight slice onto the partition
+	// (in FIFO order — the in-flight events were emitted before
+	// any events appended by concurrent Archive() calls during
+	// the upload window). Called under defer-on-error below so
+	// every error path restores the buffer; the happy path
+	// resets the flag before returning.
+	restored := false
+	requeue := func() {
+		partition.mu.Lock()
+		defer partition.mu.Unlock()
+		if len(partition.events) == 0 {
+			partition.events = inFlight
+		} else {
+			merged := make([]sealedEvent, 0, len(inFlight)+len(partition.events))
+			merged = append(merged, inFlight...)
+			merged = append(merged, partition.events...)
+			partition.events = merged
+		}
+		partition.rawBytes += inFlightRawBytes
+		if partition.openedAt.IsZero() || openedAt.Before(partition.openedAt) {
+			partition.openedAt = openedAt
+		}
+	}
+	defer func() {
+		if !restored {
+			requeue()
+		}
+	}()
 
 	// Serialize → zstd → seal.
 	var jsonBuf bytes.Buffer
-	for _, ev := range events {
+	for _, ev := range inFlight {
 		line, err := json.Marshal(ev)
 		if err != nil {
 			return fmt.Errorf("marshal event: %w", err)
@@ -524,7 +566,7 @@ func (a *Archiver) flushPartition(ctx context.Context, key archiverPartitionKey)
 		Year:          key.year,
 		Month:         key.month,
 		Day:           key.day,
-		EventCount:    len(events),
+		EventCount:    len(inFlight),
 		RawSHA256:     hex.EncodeToString(rawHash[:]),
 		SealedSHA256:  hex.EncodeToString(sealedHash[:]),
 		RawBytes:      len(rawBytes),
@@ -542,13 +584,18 @@ func (a *Archiver) flushPartition(ctx context.Context, key archiverPartitionKey)
 	if err := a.uploadManifest(ctx, manifestKey, manifestBytes); err != nil {
 		return fmt.Errorf("upload manifest: %w", err)
 	}
+	// Upload confirmed end-to-end (data + manifest both landed).
+	// Mark restored so the defer'd requeue is skipped — the
+	// in-flight slice is now durable in S3 and must NOT be
+	// re-archived.
+	restored = true
 	a.stats.ObjectsSealed.Add(1)
 	a.stats.BytesArchivedSealed.Add(uint64(len(sealedBytes)))
 	a.logger.Info("s3: sealed archive uploaded",
 		slog.String("tenant", key.tenant.String()),
 		slog.String("data_key", dataKey),
 		slog.String("manifest_key", manifestKey),
-		slog.Int("events", len(events)),
+		slog.Int("events", len(inFlight)),
 		slog.Int("raw_bytes", len(rawBytes)),
 		slog.Int("sealed_bytes", len(sealedBytes)),
 		slog.String("sealed_sha256", manifest.SealedSHA256))

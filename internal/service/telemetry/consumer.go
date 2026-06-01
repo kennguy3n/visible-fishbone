@@ -325,23 +325,19 @@ func (l *PerTenantLimiter) bucketFor(id uuid.UUID, desired TenantLimit) *tenantB
 	b, ok := l.buckets[id]
 	l.mu.RUnlock()
 	if ok {
-		b.mu.Lock()
-		if b.cur.Rate != desired.Rate {
-			b.bucket.SetLimit(desired.Rate)
-			b.cur.Rate = desired.Rate
-		}
-		if b.cur.Burst != desired.Burst {
-			b.bucket.SetBurst(desired.Burst)
-			b.cur.Burst = desired.Burst
-		}
-		b.mu.Unlock()
+		applyDesiredBudget(b, desired)
 		return b
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	// Re-check under the write lock — another goroutine may
-	// have inserted concurrently.
+	// have inserted concurrently. If so, apply the desired
+	// budget through the same helper the read-lock path uses,
+	// otherwise an operator's just-resolved budget change can
+	// be silently dropped for one request on the loser of the
+	// create race.
 	if b, ok := l.buckets[id]; ok {
+		applyDesiredBudget(b, desired)
 		return b
 	}
 	b = &tenantBucket{
@@ -350,4 +346,23 @@ func (l *PerTenantLimiter) bucketFor(id uuid.UUID, desired TenantLimit) *tenantB
 	}
 	l.buckets[id] = b
 	return b
+}
+
+// applyDesiredBudget reconciles a cached bucket with the
+// resolver's latest desired budget — used by both the read-lock
+// and write-lock paths in bucketFor so the create-race loser
+// applies the same SetLimit / SetBurst the read-lock path would.
+// The bucket's own mutex is taken inside; callers must NOT hold
+// any lock that bucketFor itself uses.
+func applyDesiredBudget(b *tenantBucket, desired TenantLimit) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.cur.Rate != desired.Rate {
+		b.bucket.SetLimit(desired.Rate)
+		b.cur.Rate = desired.Rate
+	}
+	if b.cur.Burst != desired.Burst {
+		b.bucket.SetBurst(desired.Burst)
+		b.cur.Burst = desired.Burst
+	}
 }

@@ -399,12 +399,17 @@ func (c *normCache[K, V]) Get(key K) (V, bool) {
 func (c *normCache[K, V]) Put(key K, value V) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.entries) >= c.capacity {
+	if _, exists := c.entries[key]; !exists && len(c.entries) >= c.capacity {
 		// Bounded random eviction — keeps the cache small
 		// without the overhead of full LRU bookkeeping. The
 		// access pattern is "most events touch the same
 		// handful of tenants per second" so random eviction
 		// is a reasonable approximation of LRU at this size.
+		// Skip eviction when the key already exists — a
+		// TTL-refresh is an in-place update, not a net new
+		// insertion, so evicting a peer entry would silently
+		// kick out another hot tenant for no capacity gain
+		// and degrade the steady-state hit rate.
 		for k := range c.entries {
 			delete(c.entries, k)
 			break
