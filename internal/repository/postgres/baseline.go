@@ -273,7 +273,7 @@ func (r *BaselineModelRepository) UpdateThreshold(
 	windowSeconds int,
 	zThreshold float64,
 ) (repository.BaselineModel, error) {
-	if tenantID == uuid.Nil || dimension == "" || zThreshold <= 0 {
+	if tenantID == uuid.Nil || dimension == "" || windowSeconds <= 0 || zThreshold <= 0 {
 		return repository.BaselineModel{}, repository.ErrInvalidArgument
 	}
 	var out repository.BaselineModel

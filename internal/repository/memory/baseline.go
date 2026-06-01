@@ -194,7 +194,7 @@ func (r *BaselineModelRepository) UpdateThreshold(
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.BaselineModel{}, err
 	}
-	if tenantID == uuid.Nil || dimension == "" {
+	if tenantID == uuid.Nil || dimension == "" || windowSeconds <= 0 {
 		return repository.BaselineModel{}, repository.ErrInvalidArgument
 	}
 	if zThreshold <= 0 {
