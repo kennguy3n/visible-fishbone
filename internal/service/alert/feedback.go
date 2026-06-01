@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"time"
 
@@ -107,9 +108,20 @@ type Feedback struct {
 	baseline repository.BaselineModelRepository
 	opts     FeedbackTuningOptions
 	now      func() time.Time
+	// logger receives operational events from the Run
+	// background loop. It is also used by TuneDimension /
+	// tickOnce to surface per-dimension failures without
+	// aborting the tick. Defaults to slog.Default() when
+	// NewFeedback is called without an explicit logger via
+	// SetLogger — the Run docstring promises a logger is
+	// always present, so the field is never nil at use time.
+	logger *slog.Logger
 }
 
-// NewFeedback constructs a Feedback service.
+// NewFeedback constructs a Feedback service. The tuning loop
+// logs operational events through slog.Default(); callers that
+// want a scoped logger should call SetLogger immediately after
+// construction.
 func NewFeedback(
 	feedback repository.AlertFeedbackRepository,
 	alerts repository.AlertRepository,
@@ -122,7 +134,20 @@ func NewFeedback(
 		baseline: baseline,
 		opts:     opts.fillDefaults(),
 		now:      func() time.Time { return time.Now().UTC() },
+		logger:   slog.Default(),
 	}
+}
+
+// SetLogger overrides the logger used by the Run / tickOnce
+// background loop. Passing nil resets to slog.Default(). Wiring
+// a scoped logger here gives operators a single attribute key
+// (e.g. component=alert-feedback) to filter the tuning loop's
+// diagnostics in production.
+func (f *Feedback) SetLogger(l *slog.Logger) {
+	if l == nil {
+		l = slog.Default()
+	}
+	f.logger = l
 }
 
 // SetClock overrides the wall-clock source; used by tests.
@@ -320,6 +345,8 @@ func (f *Feedback) Run(
 func (f *Feedback) tickOnce(ctx context.Context, tenantsFn func(ctx context.Context) ([]uuid.UUID, error)) {
 	tenants, err := tenantsFn(ctx)
 	if err != nil {
+		f.logger.Warn("feedback tuning tick: tenants enumeration failed",
+			slog.Any("error", err))
 		return
 	}
 	// errgroup.WithContext + SetLimit caps the per-tick goroutine
@@ -331,10 +358,27 @@ func (f *Feedback) tickOnce(ctx context.Context, tenantsFn func(ctx context.Cont
 		g.Go(func() error {
 			pg, err := f.baseline.List(gctx, tenantID, repository.Page{Limit: 1000})
 			if err != nil {
+				// Per-tenant List failure is logged but does
+				// NOT abort the tick: a transient repo error
+				// (pool exhaustion, single tenant's RLS row
+				// missing) must not silently disable threshold
+				// tuning for every other tenant on the same tick.
+				f.logger.Warn("feedback tuning tick: baseline list failed",
+					slog.String("tenant_id", tenantID.String()),
+					slog.Any("error", err))
 				return nil
 			}
 			for _, m := range pg.Items {
-				_, _ = f.TuneDimension(gctx, tenantID, m.Dimension, m.WindowSeconds)
+				if _, err := f.TuneDimension(gctx, tenantID, m.Dimension, m.WindowSeconds); err != nil {
+					f.logger.Warn("feedback tuning tick: TuneDimension failed",
+						slog.String("tenant_id", tenantID.String()),
+						slog.String("dimension", m.Dimension),
+						slog.Int("window_seconds", m.WindowSeconds),
+						slog.Any("error", err))
+					// Continue iterating: a noisy dimension's
+					// failure must not block other dimensions on
+					// the same tenant.
+				}
 			}
 			return nil
 		})

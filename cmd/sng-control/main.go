@@ -444,6 +444,10 @@ func buildRouter(
 		alertFeedbackRepo, alertRepo, baselineRepo,
 		alert.FeedbackTuningOptions{},
 	)
+	// Scope the tuning loop's logger so operators can filter
+	// `component=alert-feedback` to triage missing threshold
+	// adjustments without scrolling through every router log.
+	alertFeedback.SetLogger(logger.With(slog.String("component", "alert-feedback")))
 	// NOTE: baseline.NewService(baselineRepo) is intentionally
 	// NOT constructed here. The Service / Detector pair is
 	// wired by the telemetry consumer (future block) once the
