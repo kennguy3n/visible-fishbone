@@ -31,12 +31,15 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 	"github.com/kennguy3n/visible-fishbone/internal/service/alert"
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
+	"github.com/kennguy3n/visible-fishbone/internal/service/integration"
+	"github.com/kennguy3n/visible-fishbone/internal/service/integration/connectors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
 	"github.com/kennguy3n/visible-fishbone/internal/service/site"
@@ -131,7 +134,7 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, appRegHandler, appSyncer, policySimHandler, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher)
+	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -141,6 +144,13 @@ func run() error {
 	// immediately on boot. Stopped during shutdown below.
 	if err := webhookWorker.Start(rootCtx); err != nil {
 		return fmt.Errorf("start webhook worker: %w", err)
+	}
+	// Same boot ordering as the webhook worker — pending
+	// IntegrationDelivery rows queued by a previous process
+	// resume dispatch before the HTTP server starts accepting
+	// new traffic.
+	if err := integrationWorker.Start(rootCtx); err != nil {
+		return fmt.Errorf("start integration worker: %w", err)
 	}
 
 	// Launch the periodic app-registry sync loop. The Syncer pulls
@@ -251,6 +261,9 @@ func run() error {
 	if err := webhookWorker.Stop(shutdownCtx); err != nil {
 		logger.Warn("sng-control: webhook worker shutdown error", slog.Any("error", err))
 	}
+	if err := integrationWorker.Stop(shutdownCtx); err != nil {
+		logger.Warn("sng-control: integration worker shutdown error", slog.Any("error", err))
+	}
 
 	if err := telShutdown(shutdownCtx); err != nil {
 		logger.Warn("sng-control: telemetry shutdown error", slog.Any("error", err))
@@ -276,7 +289,7 @@ func buildRouter(
 	health *handler.Health,
 	replay *telreplay.Worker,
 	telPub *sngnats.Publisher,
-) (http.Handler, *webhook.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, error) {
+) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, error) {
 	store := postgres.NewStore(pool)
 
 	tenantRepo := store.NewTenantRepository()
@@ -297,6 +310,8 @@ func buildRouter(
 	alertRepo := store.NewAlertRepository()
 	alertSuppressionRepo := store.NewAlertSuppressionRepository()
 	alertFeedbackRepo := store.NewAlertFeedbackRepository()
+	integrationConnectorRepo := store.NewIntegrationConnectorRepository()
+	integrationDeliveryRepo := store.NewIntegrationDeliveryRepository()
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -327,11 +342,11 @@ func buildRouter(
 	// the same in all cases.
 	keyOpts := []policy.KeyOption{}
 	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
 	} else if len(master) > 0 {
 		w, err := policy.NewAESGCMWrapper(master)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
 		}
 		keyOpts = append(keyOpts, policy.WithKeyWrapper(w))
 		logger.Info("policy: AES-256-GCM at-rest wrap enabled for signing seeds")
@@ -342,7 +357,7 @@ func buildRouter(
 	if cfg.Policy.SigningKeyPath != "" {
 		ks, err := policy.LoadKeySignerFromFile(cfg.Policy.SigningKeyPath)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
 		}
 		policySigner = ks
 		fileSigner = ks
@@ -423,7 +438,7 @@ func buildRouter(
 	canarySvc, err := policy.NewCanaryService(policySvc, policyRolloutRepo,
 		policy.WithCanaryLogger(logger))
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
 	}
 	policySimHandler := handler.NewPolicySimulationHandler(
 		policySvc, canarySvc, nil, policyRepo, logger)
@@ -457,6 +472,29 @@ func buildRouter(
 	// suppression matching, which does not require the
 	// score-then-fold service surface.
 
+	// Integration service + worker (Phase 3 Block 4, Task 21).
+	// Registry maps every IntegrationConnectorType to its plugin.
+	// We construct each connector with a shared http.Client so
+	// the deployment's outbound HTTPS budget is uniform across
+	// SIEM / Jira / ServiceNow. Syslog is wired with nil dialer
+	// so the connector falls back to net.Dial / tls.Dial as
+	// appropriate per connector.Scheme. The worker is started
+	// alongside the webhook worker (see Start/Stop sites below).
+	integrationHTTP := &http.Client{Timeout: 15 * time.Second}
+	integrationUA := cfg.AppName + "/sng-control"
+	integrationRegistry := integration.Registry{
+		repository.IntegrationConnectorSyslog:       connectors.NewSyslog(nil, 5*time.Second, hostnameForSyslog()),
+		repository.IntegrationConnectorSIEMWebhook:  connectors.NewSIEM(integrationHTTP, integrationUA),
+		repository.IntegrationConnectorJira:         connectors.NewJira(integrationHTTP, integrationUA),
+		repository.IntegrationConnectorServiceNow:   connectors.NewServiceNow(integrationHTTP, integrationUA),
+	}
+	integrationSvc := integration.New(
+		integrationConnectorRepo, integrationDeliveryRepo, auditRepo,
+		integrationRegistry, logger)
+	integrationWorker := integration.NewDeliveryWorker(
+		integrationConnectorRepo, integrationDeliveryRepo,
+		integrationRegistry, integration.WorkerConfig{}, logger)
+
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:           cfg,
 		Logger:           logger,
@@ -473,6 +511,7 @@ func buildRouter(
 		AppRegistry:      appRegHandler,
 		Baseline:         handler.NewBaselineHandler(baselineRepo, logger),
 		Alert:            handler.NewAlertHandler(alertRouter, alertFeedback, logger),
+		Integrations:     handler.NewIntegrationHandler(integrationSvc),
 		APIKeyLookup:     apiKeySvc,
 		Health:           health,
 		OpenAPISpec:      handler.NewOpenAPIHandler(),
@@ -489,7 +528,7 @@ func buildRouter(
 	// admin `POST /admin/app-registry/sync` endpoint is the only
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
-	return router, webhookWorker, appRegHandler, appSyncer, policySimHandler, nil
+	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, nil
 }
 
 // loadPolicyKeyWrapMaster resolves the AES-GCM master key from
@@ -1033,4 +1072,17 @@ func (a natsAlertAdapter) Publish(ctx context.Context, subject string, data []by
 		return nil
 	}
 	return a.p.Publish(ctx, subject, data, sngnats.PublishOptions{})
+}
+
+// hostnameForSyslog returns the local hostname used as the
+// HOSTNAME field in RFC 5424 syslog frames. Falls back to
+// "sng-control" so a hostname-lookup failure does not crash the
+// connector; operators see the literal "sng-control" in their
+// SIEM and can correlate against the Kubernetes pod metadata.
+func hostnameForSyslog() string {
+	h, err := os.Hostname()
+	if err != nil || h == "" {
+		return "sng-control"
+	}
+	return h
 }

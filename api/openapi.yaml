@@ -1179,6 +1179,243 @@ paths:
           description: feedback deleted
         "404":
           description: no feedback recorded
+  # Integration connectors (syslog / SIEM webhook / Jira /
+  # ServiceNow) share the same Enqueue + DeliveryWorker lifecycle
+  # as the legacy webhook endpoint. The REST surface is symmetric
+  # with /webhooks on purpose so SDK consumers see one mental
+  # model: webhooks are URL destinations, integrations are typed
+  # destinations. The connector Secret is NEVER returned in JSON
+  # responses; clients see a `secret_set` boolean and POST/PATCH
+  # the secret out-of-band. Same invariant as webhook signing
+  # secrets.
+  /tenants/{tenant_id}/integrations:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [integration]
+      operationId: createIntegrationConnector
+      summary: Create an integration connector (syslog / SIEM / Jira / ServiceNow)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IntegrationConnectorCreateRequest" }
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IntegrationConnector" }
+        "400":
+          description: invalid connector kind or unsupported plugin
+    get:
+      tags: [integration]
+      operationId: listIntegrationConnectors
+      summary: List integration connectors (cursor paginated)
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/IntegrationConnector" }
+                  next_cursor: { type: string, nullable: true }
+  /tenants/{tenant_id}/integrations/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - $ref: "#/components/parameters/ResourceID"
+    get:
+      tags: [integration]
+      operationId: getIntegrationConnector
+      summary: Fetch a single connector
+      responses:
+        "200":
+          description: connector
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IntegrationConnector" }
+        "404": { description: not found }
+    patch:
+      tags: [integration]
+      operationId: updateIntegrationConnector
+      summary: Partial update — omit fields to leave them untouched
+      description: |
+        Every field is optional. Omitting `event_types` leaves the
+        existing slice untouched (a `nil` slice means "no change",
+        an empty `[]` means "match every event"). Blank
+        `description` means "no change" — clearing the description
+        currently requires delete + recreate.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IntegrationConnectorUpdateRequest" }
+      responses:
+        "200":
+          description: updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IntegrationConnector" }
+        "404": { description: not found }
+    delete:
+      tags: [integration]
+      operationId: deleteIntegrationConnector
+      summary: Remove the connector
+      responses:
+        "204": { description: removed }
+        "404": { description: not found }
+  /tenants/{tenant_id}/integrations/{id}/test:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - $ref: "#/components/parameters/ResourceID"
+    post:
+      tags: [integration]
+      operationId: testIntegrationConnector
+      summary: Synchronously probe the connector's destination
+      description: |
+        Invokes the plugin's `Test()` method against the
+        configured destination. The updated row (including
+        `last_test_at`, `last_test_result`, `last_test_error`) is
+        returned even on probe failure so the operator portal can
+        render the result in one round-trip. Probe failures
+        surface as HTTP 502 with the connector body wrapped under
+        an `error` object; non-probe failures (row not found, repo
+        write failure) follow the standard repository→HTTP error
+        map.
+      responses:
+        "200":
+          description: probe succeeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IntegrationConnector" }
+        "502":
+          description: probe failed but the result was recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [connector, error]
+                properties:
+                  connector: { $ref: "#/components/schemas/IntegrationConnector" }
+                  error:
+                    type: object
+                    required: [code, message]
+                    properties:
+                      code: { type: string, example: connector_test_failed }
+                      message: { type: string }
+        "404": { description: not found }
+  /tenants/{tenant_id}/integrations/{id}/status:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - $ref: "#/components/parameters/ResourceID"
+    post:
+      tags: [integration]
+      operationId: setIntegrationConnectorStatus
+      summary: Enable or disable a connector
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [active, disabled] }
+      responses:
+        "200":
+          description: updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IntegrationConnector" }
+        "400":
+          description: status must be 'active' or 'disabled'
+        "404": { description: not found }
+  /tenants/{tenant_id}/integrations/{id}/deliveries:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - $ref: "#/components/parameters/ResourceID"
+    get:
+      tags: [integration]
+      operationId: listIntegrationConnectorDeliveries
+      summary: List delivery attempts for this connector
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/IntegrationDelivery" }
+                  next_cursor: { type: string, nullable: true }
+  /tenants/{tenant_id}/integration-deliveries:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [integration]
+      operationId: listIntegrationDeliveries
+      summary: List delivery attempts across all connectors (tenant-wide)
+      description: |
+        Use `?connector_id=...` to scope to a single connector;
+        without it the response is tenant-wide. Same cursor /
+        limit semantics as the per-connector listing.
+      parameters:
+        - name: connector_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/IntegrationDelivery" }
+                  next_cursor: { type: string, nullable: true }
+        "400":
+          description: connector_id is not a valid UUID
+  /tenants/{tenant_id}/integration-deliveries/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - $ref: "#/components/parameters/ResourceID"
+    get:
+      tags: [integration]
+      operationId: getIntegrationDelivery
+      summary: Fetch a single delivery row
+      responses:
+        "200":
+          description: delivery
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IntegrationDelivery" }
+        "404": { description: not found }
 components:
   securitySchemes:
     BearerJWT:
@@ -1453,6 +1690,166 @@ components:
         status: { type: string, enum: [active, disabled] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    # Integration connector schemas. The Secret payload is
+    # write-only: clients POST/PATCH the raw bytes, and the wire
+    # response only ever exposes a `secret_set` boolean. This
+    # mirrors the webhook signing-secret contract.
+    IntegrationConnectorType:
+      type: string
+      enum: [syslog, siem_webhook, jira, servicenow]
+      description: |
+        - syslog: emit alert events as RFC 5424 messages
+        - siem_webhook: generic JSON webhook for SIEM ingest
+        - jira: open a Jira issue per event
+        - servicenow: open a ServiceNow incident per event
+    IntegrationConnectorStatus:
+      type: string
+      enum: [active, disabled]
+    IntegrationConnectorTestResult:
+      type: string
+      enum: ["", success, failure]
+      description: empty when no probe has ever run
+    IntegrationConnectorCreateRequest:
+      type: object
+      required: [type, name]
+      properties:
+        type: { $ref: "#/components/schemas/IntegrationConnectorType" }
+        name: { type: string, description: "operator-readable label, e.g. soc-pagerduty-siem" }
+        description: { type: string }
+        event_types:
+          type: array
+          description: |
+            Event types this connector subscribes to. An empty
+            array means "match every event"; omit the field on
+            POST to default to no events (connector is wired but
+            silent until events are added).
+          items: { type: string }
+        config:
+          description: |
+            Plugin-specific operator-readable configuration. For
+            `syslog`: `{address, transport, app_name, facility}`.
+            For `siem_webhook`: `{url}`. For `jira` /
+            `servicenow`: `{base_url, project_key | table}`. The
+            plugin's Validate() is the source of truth.
+          type: object
+          additionalProperties: true
+        secret:
+          description: |
+            Opaque plugin-specific secret material (e.g. Jira API
+            token, ServiceNow basic-auth blob, SIEM HMAC secret).
+            Write-only — never returned in any response. Encoded
+            as a base64 string or a structured object depending on
+            the plugin; treat as raw bytes.
+    IntegrationConnectorUpdateRequest:
+      type: object
+      description: |
+        Partial update. Every field is optional. Omitting
+        `event_types` leaves the existing slice untouched (`nil` =
+        no change, `[]` = match every event). Blank
+        `description` means "no change".
+      properties:
+        name: { type: string }
+        description: { type: string }
+        event_types:
+          type: array
+          items: { type: string }
+        config:
+          type: object
+          additionalProperties: true
+        secret:
+          description: write-only; setting overwrites the stored secret
+    IntegrationConnector:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - type
+        - name
+        - event_types
+        - secret_set
+        - status
+        - last_test_result
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        type: { $ref: "#/components/schemas/IntegrationConnectorType" }
+        name: { type: string }
+        description: { type: string }
+        event_types:
+          type: array
+          items: { type: string }
+        config:
+          description: |
+            Operator-readable plugin configuration. Decoded back
+            from the stored JSON blob; falls back to a raw string
+            if the stored blob is not valid JSON.
+          type: object
+          additionalProperties: true
+        secret_set:
+          type: boolean
+          description: |
+            true when a secret is stored. The secret bytes are
+            never returned over the wire. To rotate, PATCH a new
+            `secret` value.
+        status: { $ref: "#/components/schemas/IntegrationConnectorStatus" }
+        last_test_result: { $ref: "#/components/schemas/IntegrationConnectorTestResult" }
+        last_test_at: { type: string, format: date-time }
+        last_test_error:
+          type: string
+          description: most recent probe failure message; empty after a successful test
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    IntegrationDeliveryStatus:
+      type: string
+      enum: [pending, in_flight, success, failed, dead_letter]
+      description: |
+        - pending: queued, no attempt yet (or backed off after
+          transient failure)
+        - in_flight: claimed by a worker via SKIP LOCKED
+        - success: terminal — the connector accepted the payload
+        - failed: terminal — exhausted retries
+        - dead_letter: terminal — operator-visible failure that
+          needs manual triage
+    IntegrationDelivery:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - connector_id
+        - event_type
+        - status
+        - attempts
+        - next_retry_at
+        - created_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        connector_id: { type: string, format: uuid }
+        event_type: { type: string, description: "logical event class, e.g. alert.created" }
+        status: { $ref: "#/components/schemas/IntegrationDeliveryStatus" }
+        attempts: { type: integer, minimum: 0 }
+        last_attempt_at: { type: string, format: date-time }
+        last_error: { type: string }
+        next_retry_at:
+          type: string
+          format: date-time
+          description: when the worker will reconsider this row
+        response_status:
+          type: integer
+          description: |
+            HTTP status returned by the destination on the most
+            recent attempt. Omitted for transports without an HTTP
+            layer (syslog) and on rows that have never been
+            attempted.
+        external_reference:
+          type: string
+          description: |
+            Connector-supplied identifier (Jira issue key,
+            ServiceNow incident number, etc.) recorded once the
+            destination accepts the payload.
+        created_at: { type: string, format: date-time }
     APIKeyCreateRequest:
       type: object
       required: [name, subject]
