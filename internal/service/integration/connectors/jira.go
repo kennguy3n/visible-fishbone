@@ -185,6 +185,14 @@ func (j *Jira) transition(
 		return integration.SendResult{ExternalReference: sn.ExternalReference},
 			fmt.Errorf("jira: no transition_map entry for event %q", sn.EventType)
 	}
+	// sn.ExternalReference is set exclusively by Send() above
+	// from the Jira API's resp.Key, which Atlassian guarantees
+	// to match ^[A-Z][A-Z0-9_]*-[0-9]+$ — every character is
+	// safe in a URL path segment, so we don't url.PathEscape
+	// here. If/when we accept operator-supplied refs (e.g. for
+	// bidirectional sync from an existing ticket), wrap with
+	// url.PathEscape and validate against the Atlassian grammar
+	// at the service boundary before reaching this point.
 	path := fmt.Sprintf("/rest/api/3/issue/%s/transitions", sn.ExternalReference)
 	body := map[string]any{
 		"transition": map[string]string{"id": transitionID},
