@@ -401,7 +401,37 @@ pub async fn run_agent(cli: Cli, cfg: AgentConfig) -> Result<SupervisorReport, A
     drop(pal_capture);
     drop(pal_posture);
     drop(pal_tunnel);
-    drop(desired_tunnels_tx);
+    // Do NOT drop `desired_tunnels_tx`. Hold the only
+    // `watch::Sender` for the desired-tunnel-set channel
+    // alive for the entire `supervisor.run().await` so:
+    //
+    //   1. The `PalTunnelSubsystem` reconciler does not
+    //      observe `desired_rx.changed() == Err(...)` on
+    //      every boot. The subsystem is defensively wired
+    //      against that case (the `publisher_alive` guard
+    //      structurally disables the branch — see
+    //      `subsystems/pal_tunnel.rs`), but tripping that
+    //      path on every clean startup also emits a
+    //      `tracing::warn!` log line about the publisher
+    //      having dropped, which would noisy-warn every
+    //      operator boot for what's actually a normal
+    //      production cold-start.
+    //
+    //   2. The watch channel stays open so a follow-up PR
+    //      that wires a real publisher (e.g. desired tunnels
+    //      sourced from `policy_eval` / `ztna` authorisation
+    //      decisions) can plug into the existing sender
+    //      handle without restructuring this function.
+    //
+    // Holding a `watch::Sender` does NOT pin any subsystem
+    // `Arc` and does NOT extend the life of any
+    // `mpsc::Sender` clone on the telemetry / comms
+    // producer side — the desired-tunnel channel is
+    // entirely independent of the supervisor's drain path,
+    // so this assignment is safe with respect to the
+    // drain-deadlock invariant the explicit `drop`s above
+    // establish.
+    let _desired_tunnels_tx = desired_tunnels_tx;
     supervisor.run().await.map_err(AgentBuildError::from)
 }
 
