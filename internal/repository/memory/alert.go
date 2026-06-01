@@ -178,8 +178,11 @@ func (r *AlertRepository) List(
 }
 
 // Acknowledge transitions an alert from Open to Acknowledged.
-// Idempotent on already-acknowledged. Returns ErrInvalidArgument
-// when the alert is terminal (resolved / suppressed).
+// Idempotent on already-acknowledged. Returns ErrConflict
+// when the alert is terminal (resolved / suppressed) —
+// terminal-state rejections are a state-machine conflict,
+// not malformed input, so the handler can map this to 409
+// per the OpenAPI contract.
 func (r *AlertRepository) Acknowledge(
 	ctx context.Context,
 	tenantID, id uuid.UUID,
@@ -199,7 +202,7 @@ func (r *AlertRepository) Acknowledge(
 		return cloneAlert(a), nil
 	}
 	if a.State.IsTerminal() {
-		return repository.Alert{}, repository.ErrInvalidArgument
+		return repository.Alert{}, repository.ErrConflict
 	}
 	a.State = repository.AlertStateAcknowledged
 	if by != nil {
@@ -234,7 +237,7 @@ func (r *AlertRepository) Resolve(
 		if a.State == repository.AlertStateResolved {
 			return cloneAlert(a), nil
 		}
-		return repository.Alert{}, repository.ErrInvalidArgument
+		return repository.Alert{}, repository.ErrConflict
 	}
 	a.State = repository.AlertStateResolved
 	if by != nil {

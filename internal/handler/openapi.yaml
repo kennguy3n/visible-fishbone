@@ -896,7 +896,16 @@ paths:
                 z_threshold:
                   type: number
                   format: double
-                  minimum: 0
+                  # OpenAPI 3.1.0 / JSON Schema 2020-12:
+                  # exclusiveMinimum is the value above which
+                  # the field is accepted. The handler in
+                  # internal/handler/baseline.go rejects
+                  # z_threshold <= 0 with HTTP 400, so the
+                  # spec must encode strict-positivity, not
+                  # just non-negativity (a `minimum: 0` would
+                  # advertise zero as legal and contradict the
+                  # implementation).
+                  exclusiveMinimum: 0
       responses:
         "200":
           description: updated model
@@ -964,15 +973,11 @@ paths:
       tags: [alert]
       operationId: acknowledgeAlert
       summary: Move an alert to the acknowledged state
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                actor: { type: string, format: uuid }
-                note: { type: string }
+      description: |
+        The actor (acknowledged_by) is derived server-side from
+        the authenticated principal (JWT `sub` claim or API-key
+        owner). No request body is accepted — a client cannot
+        override the actor in the audit trail.
       responses:
         "200":
           description: updated alert
@@ -994,15 +999,11 @@ paths:
       tags: [alert]
       operationId: resolveAlert
       summary: Move an alert to the resolved state
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                actor: { type: string, format: uuid }
-                note: { type: string }
+      description: |
+        The actor (resolved_by) is derived server-side from
+        the authenticated principal (JWT `sub` claim or
+        API-key owner). No request body is accepted — a
+        client cannot override the actor in the audit trail.
       responses:
         "200":
           description: updated alert

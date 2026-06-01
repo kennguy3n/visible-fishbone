@@ -125,10 +125,12 @@ func TestAlert_Acknowledge_IdempotentAndTerminalReject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	// Acking a terminal alert is ErrInvalidArgument.
+	// Acking a terminal alert is ErrConflict (state-machine
+	// violation, not malformed input). The handler maps this
+	// to HTTP 409 per the OpenAPI contract.
 	_, err = repo.Acknowledge(ctx(), tnt.ID, saved.ID, &by, at)
-	if !errors.Is(err, repository.ErrInvalidArgument) {
-		t.Fatalf("ack-after-resolve err = %v, want ErrInvalidArgument", err)
+	if !errors.Is(err, repository.ErrConflict) {
+		t.Fatalf("ack-after-resolve err = %v, want ErrConflict", err)
 	}
 }
 
@@ -190,8 +192,10 @@ func TestAlert_Resolve_RejectsSuppressed(t *testing.T) {
 	}
 	by := uuid.New()
 	at := time.Now().UTC()
-	if _, err := repo.Resolve(ctx(), tnt.ID, saved.ID, &by, at); !errors.Is(err, repository.ErrInvalidArgument) {
-		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	// Resolving a suppressed alert is a state-machine
+	// conflict (terminal→terminal), mapped to HTTP 409.
+	if _, err := repo.Resolve(ctx(), tnt.ID, saved.ID, &by, at); !errors.Is(err, repository.ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
 	}
 }
 

@@ -47,7 +47,20 @@ CREATE TABLE IF NOT EXISTS alert_suppressions (
     -- audit log captures "why does this alert never fire".
     reason               TEXT NOT NULL,
 
-    created_by           UUID NOT NULL REFERENCES users(id) ON DELETE SET NULL,
+    -- created_by is nullable for two reasons:
+    --   1) ON DELETE SET NULL on the FK — if we keep NOT NULL
+    --      here, deleting any operator who has ever authored a
+    --      suppression rule would fail with a constraint
+    --      violation, which makes user-offboarding workflows
+    --      brittle (the matching pattern is intentionally
+    --      retained for audit; the link to the now-deleted
+    --      user is what gets nulled).
+    --   2) API-key-only operators have no user mapping (the
+    --      auth middleware passes a nil actor), so requiring
+    --      a non-null FK would 500 those callers. The audit
+    --      surface logs the request principal separately
+    --      regardless of whether a user_id is available.
+    created_by           UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- NULL = never expires; the Router treats expires_at < now()
     -- as "not active" so a forgotten suppression doesn't outlive
@@ -117,7 +130,11 @@ CREATE TABLE IF NOT EXISTS alert_feedback (
     decision             TEXT NOT NULL,
     notes                TEXT,
 
-    created_by           UUID NOT NULL REFERENCES users(id) ON DELETE SET NULL,
+    -- Nullable for the same reason as alert_suppressions.created_by:
+    -- ON DELETE SET NULL + API-key callers without user mapping.
+    -- The decision + alert_id are what the tuning loop needs, the
+    -- author is metadata for the operator timeline.
+    created_by           UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     CONSTRAINT alert_feedback_decision_check

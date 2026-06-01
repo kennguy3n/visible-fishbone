@@ -36,7 +36,6 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
-	"github.com/kennguy3n/visible-fishbone/internal/service/baseline"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
@@ -445,7 +444,14 @@ func buildRouter(
 		alertFeedbackRepo, alertRepo, baselineRepo,
 		alert.FeedbackTuningOptions{},
 	)
-	_ = baseline.NewService(baselineRepo) // future PR D wires Observe path
+	// NOTE: baseline.NewService(baselineRepo) is intentionally
+	// NOT constructed here. The Service / Detector pair is
+	// wired by the telemetry consumer (future block) once the
+	// dispatch path is ready to feed Observations in; until
+	// then, alert.Feedback / alert.Router operate on the
+	// baseline repo directly for threshold tuning and
+	// suppression matching, which does not require the
+	// score-then-fold service surface.
 
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:           cfg,

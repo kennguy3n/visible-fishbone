@@ -123,29 +123,78 @@ func (d *Detector) ObserveAndScore(
 	if kind == "" {
 		kind = "baseline.zscore_exceeded"
 	}
-	// 1. Load (or materialise cold-start) the current Baseline.
-	cur, err := d.svc.repo.GetForDimension(ctx, tenantID, dimension, windowSeconds)
-	if errors.Is(err, repository.ErrNotFound) {
-		cur = repository.BaselineModel{
-			TenantID:      tenantID,
-			Dimension:     dimension,
-			WindowSeconds: windowSeconds,
-			Alpha:         DefaultAlpha,
-			ZThreshold:    DefaultZThreshold,
+	// The load-score-fold-upsert sequence runs inside an
+	// optimistic-lock retry loop matching Service.Observe.
+	// Without the retry, a concurrent Observe / ObserveAndScore
+	// that bumps the baseline's Version between our Get and
+	// Upsert would surface ErrConflict to the caller and the
+	// observation would be lost — silently dropping data is
+	// worse than scoring against a slightly more recent state
+	// (the rescored value reflects the latest mean/EWMA, which
+	// is what we want anyway).
+	//
+	// Each retry re-loads the baseline so the score is computed
+	// against the pre-update state that we are about to fold
+	// into; this preserves the "score against what we have
+	// learned SO FAR" semantics documented at the package head.
+	//
+	// See Service.Observe (engine.go) for the canonical pattern;
+	// the only difference here is we also stash zW / zE / maxZ
+	// across the loop so the alert emit at the bottom uses the
+	// values that match the successfully-persisted baseline.
+	var (
+		cur    repository.BaselineModel
+		saved  repository.BaselineModel
+		zW     float64
+		zE     float64
+		maxZ   float64
+		lastErr error
+	)
+	loaded := false
+	for attempt := 0; attempt < d.svc.maxRetry; attempt++ {
+		// 1. Load (or materialise cold-start) the current Baseline.
+		got, err := d.svc.repo.GetForDimension(ctx, tenantID, dimension, windowSeconds)
+		if errors.Is(err, repository.ErrNotFound) {
+			got = repository.BaselineModel{
+				TenantID:      tenantID,
+				Dimension:     dimension,
+				WindowSeconds: windowSeconds,
+				Alpha:         DefaultAlpha,
+				ZThreshold:    DefaultZThreshold,
+			}
+		} else if err != nil {
+			return repository.BaselineModel{}, nil, fmt.Errorf("anomaly load baseline: %w", err)
 		}
-	} else if err != nil {
-		return repository.BaselineModel{}, nil, fmt.Errorf("anomaly load baseline: %w", err)
+		cur = got
+		loaded = true
+
+		// 2. Score the observation against the PRE-update state.
+		zW, zE = d.svc.engine.Score(cur, obs)
+		maxZ = MaxAbsZ(zW, zE)
+
+		// 3. Fold into the Baseline + persist.
+		folded := d.svc.engine.Fold(cur, obs)
+		var err2 error
+		saved, err2 = d.svc.repo.Upsert(ctx, tenantID, folded)
+		if err2 == nil {
+			lastErr = nil
+			break
+		}
+		if errors.Is(err2, repository.ErrConflict) {
+			// Another writer raced us; re-load and re-score.
+			lastErr = err2
+			continue
+		}
+		return repository.BaselineModel{}, nil, fmt.Errorf("anomaly upsert baseline: %w", err2)
 	}
-
-	// 2. Score the observation against the PRE-update state.
-	zW, zE := d.svc.engine.Score(cur, obs)
-	maxZ := MaxAbsZ(zW, zE)
-
-	// 3. Fold into the Baseline + persist.
-	folded := d.svc.engine.Fold(cur, obs)
-	saved, err := d.svc.repo.Upsert(ctx, tenantID, folded)
-	if err != nil {
-		return repository.BaselineModel{}, nil, fmt.Errorf("anomaly upsert baseline: %w", err)
+	if !loaded {
+		// d.svc.maxRetry <= 0 should be unreachable (NewService
+		// fills the default), but guard anyway so callers don't
+		// observe a zero BaselineModel paired with nil err.
+		return repository.BaselineModel{}, nil, fmt.Errorf("anomaly: invalid maxRetry configuration")
+	}
+	if lastErr != nil {
+		return repository.BaselineModel{}, nil, fmt.Errorf("anomaly upsert baseline: %w", lastErr)
 	}
 
 	// 4. Emit gate. Warmup AND score-above-threshold both required.

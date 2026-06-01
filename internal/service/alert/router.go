@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -186,6 +187,16 @@ func (r *Router) Emit(
 // cache is invalidated by ttl + by direct CreateSuppression /
 // DeleteSuppression calls (those use the same Router instance
 // to mutate, which clears the per-tenant entry).
+//
+// The slice returned to callers is a defensive copy — the
+// cache retains the canonical slice and callers never see a
+// pointer to it. Without this, a caller that mutated the
+// returned slice (e.g. filtered in-place during Emit) would
+// corrupt the cached entry for every subsequent caller, which
+// is the kind of bug that surfaces under hot-path load and
+// is excruciating to track down. The cost is one allocation
+// per Emit; the suppression list is typically a handful of
+// rules per tenant, so the bytes are trivial.
 func (r *Router) activeSuppressions(
 	ctx context.Context,
 	tenantID uuid.UUID,
@@ -193,7 +204,7 @@ func (r *Router) activeSuppressions(
 	now := r.now()
 	r.cacheMu.RLock()
 	if entry, ok := r.cache[tenantID]; ok && entry.expires.After(now) {
-		out := entry.rules
+		out := slices.Clone(entry.rules)
 		r.cacheMu.RUnlock()
 		return out, nil
 	}
@@ -202,13 +213,14 @@ func (r *Router) activeSuppressions(
 	if err != nil {
 		return nil, err
 	}
+	// Cache the canonical slice; hand out a copy.
 	r.cacheMu.Lock()
 	r.cache[tenantID] = suppressionCacheEntry{
 		rules:   fresh,
 		expires: now.Add(suppressionCacheTTL),
 	}
 	r.cacheMu.Unlock()
-	return fresh, nil
+	return slices.Clone(fresh), nil
 }
 
 // InvalidateSuppressionCache drops the cached suppression rules

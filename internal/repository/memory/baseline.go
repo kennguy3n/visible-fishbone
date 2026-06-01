@@ -11,7 +11,7 @@ package memory
 
 import (
 	"context"
-	"sort"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -135,8 +135,13 @@ func (r *BaselineModelRepository) Upsert(
 }
 
 // List enumerates models for a tenant in LastUpdatedAt DESC
-// order. Pagination follows the same cursor scheme as the rest
-// of the memory store.
+// order. Pagination uses the shared paginate() helper for
+// parity with every other memory repository — the cursor
+// encodes (LastUpdatedAt, ID) so callers can resume across
+// hot-write workloads without dropping or duplicating rows.
+// The postgres mirror keys off (last_updated_at, id); the
+// cursor wire shape is opaque (base64 JSON) so the choice
+// of time-field name on the Go side is local detail.
 func (r *BaselineModelRepository) List(
 	ctx context.Context,
 	tenantID uuid.UUID,
@@ -147,27 +152,24 @@ func (r *BaselineModelRepository) List(
 	}
 	r.s.mu.RLock()
 	defer r.s.mu.RUnlock()
-	out := make([]repository.BaselineModel, 0, len(r.s.baselineModels))
+	all := make([]repository.BaselineModel, 0, len(r.s.baselineModels))
 	for _, m := range r.s.baselineModels {
 		if m.TenantID != tenantID {
 			continue
 		}
-		out = append(out, m)
+		all = append(all, m)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].LastUpdatedAt.Equal(out[j].LastUpdatedAt) {
-			return out[i].LastUpdatedAt.After(out[j].LastUpdatedAt)
-		}
-		return out[i].ID.String() > out[j].ID.String()
-	})
-	limit := page.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
-	if limit > len(out) {
-		limit = len(out)
-	}
-	return repository.PageResult[repository.BaselineModel]{Items: out[:limit]}, nil
+	// Sort by LastUpdatedAt DESC, ID DESC tie-breaker — matches
+	// the postgres ORDER BY clause.
+	sorted := sortByCreatedAtDesc(
+		all,
+		func(m repository.BaselineModel) time.Time { return m.LastUpdatedAt },
+		func(m repository.BaselineModel) uuid.UUID { return m.ID },
+		page.Normalize().Order,
+	)
+	return paginate(sorted, page, func(m repository.BaselineModel) cursor {
+		return cursor{CreatedAt: m.LastUpdatedAt, ID: m.ID}
+	}), nil
 }
 
 // UpdateThreshold updates the ZThreshold on a model in-place

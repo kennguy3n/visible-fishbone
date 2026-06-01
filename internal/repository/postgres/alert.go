@@ -11,8 +11,9 @@
 // State machine pre-checks for Acknowledge / Resolve happen
 // inside the SQL via WHERE clauses on `state` — the driver
 // translates "zero rows affected" into either ErrNotFound
-// (the alert vanished) or ErrInvalidArgument (terminal-state
-// transition). This keeps the state machine definitive in SQL:
+// (the alert vanished) or ErrConflict (terminal-state
+// transition; maps to HTTP 409 in the handler). This keeps
+// the state machine definitive in SQL:
 // any non-driver caller hitting the same row sees the same
 // rejections.
 package postgres
@@ -306,10 +307,12 @@ LIMIT $6
 
 // Acknowledge transitions an alert from Open to Acknowledged.
 // Idempotent on already-acknowledged alerts (returns the
-// unchanged row). Rejected when the alert is in a terminal
-// state. The pre-check and the UPDATE are inside the same
-// transaction so the state observed by the pre-check is the
-// state the UPDATE rejects against.
+// unchanged row). Returns ErrConflict when the alert is in a
+// terminal state (resolved / suppressed) — the handler maps
+// this to HTTP 409 per the OpenAPI contract. The pre-check
+// and the UPDATE are inside the same transaction so the
+// state observed by the pre-check is the state the UPDATE
+// rejects against.
 func (r *AlertRepository) Acknowledge(
 	ctx context.Context,
 	tenantID, id uuid.UUID,
@@ -341,7 +344,7 @@ func (r *AlertRepository) Acknowledge(
 			out = scanned
 			return nil
 		case repository.AlertStateResolved, repository.AlertStateSuppressed:
-			return repository.ErrInvalidArgument
+			return repository.ErrConflict
 		}
 		const upd = `
 UPDATE alerts
@@ -354,7 +357,10 @@ RETURNING ` + alertSelectColumns
 		row := tx.QueryRow(ctx, upd, id, optionalUUID(by), at.UTC())
 		scanned, scanErr := scanAlert(row)
 		if errors.Is(scanErr, pgx.ErrNoRows) {
-			return repository.ErrInvalidArgument
+			// Lost the race: another writer transitioned the
+			// row out of 'open' between the pre-scan and the
+			// UPDATE. Treat as terminal-state conflict.
+			return repository.ErrConflict
 		}
 		if scanErr != nil {
 			return fmt.Errorf("update alerts ack: %w", scanErr)
@@ -366,8 +372,9 @@ RETURNING ` + alertSelectColumns
 }
 
 // Resolve transitions an alert to Resolved. Allowed from Open
-// or Acknowledged; rejected when terminal (already Resolved is
-// idempotent and returns the unchanged row).
+// or Acknowledged; returns ErrConflict when terminal (already
+// Resolved is idempotent and returns the unchanged row). The
+// handler maps ErrConflict to HTTP 409 per the OpenAPI contract.
 func (r *AlertRepository) Resolve(
 	ctx context.Context,
 	tenantID, id uuid.UUID,
@@ -399,7 +406,7 @@ func (r *AlertRepository) Resolve(
 			out = scanned
 			return nil
 		case repository.AlertStateSuppressed:
-			return repository.ErrInvalidArgument
+			return repository.ErrConflict
 		}
 		const upd = `
 UPDATE alerts
@@ -412,7 +419,10 @@ RETURNING ` + alertSelectColumns
 		row := tx.QueryRow(ctx, upd, id, optionalUUID(by), at.UTC())
 		scanned, scanErr := scanAlert(row)
 		if errors.Is(scanErr, pgx.ErrNoRows) {
-			return repository.ErrInvalidArgument
+			// Lost the race: another writer transitioned the
+			// row out of 'open'/'acknowledged' between the
+			// pre-scan and the UPDATE. Terminal-state conflict.
+			return repository.ErrConflict
 		}
 		if scanErr != nil {
 			return fmt.Errorf("update alerts resolve: %w", scanErr)
