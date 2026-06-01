@@ -58,7 +58,9 @@
 //! work.
 
 use crate::error::ErrorCode;
-use crate::ids::{PolicyBundleId, PolicyGraphId, PolicySigningKeyId};
+#[cfg(test)]
+use crate::ids::PolicyGraphId;
+use crate::ids::{PolicyBundleId, PolicySigningKeyId};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use chrono::{DateTime, Utc};
@@ -264,10 +266,20 @@ pub struct PolicyBundleClaims {
     #[serde(rename = "t")]
     pub target: BundleTarget,
     /// Source policy graph this bundle was compiled from.
-    /// Matches Go `bundlePayload.GraphID` (`g`), wire shape is
-    /// the canonical 36-char hyphenated UUID.
+    /// Matches Go `bundlePayload.GraphID` (`g`). The Go
+    /// compiler emits the canonical 36-char hyphenated UUID as
+    /// a MessagePack string (NOT a 16-byte binary blob — see
+    /// `sng-policy-eval::bundle::RawBundle.graph_id` which is
+    /// also typed as `String` and decodes the SAME bundle body
+    /// bytes downstream of this verifier). Kept free-form
+    /// (`String`) instead of a typed `PolicyGraphId` so the
+    /// wire codec matches the Go side bit-for-bit and the two
+    /// decoders (claims here, full bundle in
+    /// `sng-policy-eval`) agree on the same body. Parse this
+    /// into a [`PolicyGraphId`] at the call site if a typed id
+    /// is needed for downstream telemetry.
     #[serde(rename = "g")]
-    pub graph_id: PolicyGraphId,
+    pub graph_id: String,
     /// Monotonic graph version. Higher is newer; receivers reject
     /// a bundle whose version is below the currently-loaded one
     /// (replay / downgrade protection, see
@@ -546,7 +558,7 @@ mod tests {
         let claims = PolicyBundleClaims {
             schema_version: 1,
             target,
-            graph_id: PolicyGraphId::new_v4(),
+            graph_id: PolicyGraphId::new_v4().into_uuid().to_string(),
             graph_version,
             compiler: "sng-test/0".to_owned(),
             default_action: "deny".to_owned(),

@@ -55,7 +55,10 @@ use crate::subsystems::{
 };
 use sng_comms::PolicyTrustStore;
 use sng_core::envelope::Platform;
-use sng_core::{BundleTarget, Supervisor, SupervisorBuilder, SupervisorReport, SupervisorRunError};
+use sng_core::{
+    BundleTarget, ShutdownSignal, Supervisor, SupervisorBuilder, SupervisorReport,
+    SupervisorRunError,
+};
 use sng_telemetry::TelemetryEvent;
 use sng_ztna::ZtnaServiceConfig;
 use std::sync::Arc;
@@ -171,11 +174,36 @@ fn bootstrap_bundle_body() -> Vec<u8> {
 /// run loop. Splitting build vs run lets tests inspect the
 /// adapter handles before the supervisor's spawn pass starts.
 ///
+/// # Runtime requirement
+///
+/// Although `build_edge` itself is a sync function, it
+/// spawns the telemetry-bridge task via [`tokio::spawn`].
+/// The caller MUST therefore be executing inside a tokio
+/// runtime — i.e. it must be called from an `async fn` on
+/// a tokio runtime, from inside a `tokio::main`-decorated
+/// function, or from inside a [`tokio::runtime::Runtime`]
+/// `block_on` / `enter` scope. The two real callers are
+/// [`run_edge`] (an `async fn` invoked from
+/// `#[tokio::main]`) and the integration tests (each
+/// decorated with `#[tokio::test]`); both satisfy the
+/// constraint. The signature is deliberately sync because
+/// every per-subsystem build step is itself sync — making
+/// `build_edge` async would force every test harness (and
+/// the binary's `main`) to thread an unnecessary `.await`
+/// through the call site for a single internal
+/// `tokio::spawn`.
+///
 /// # Errors
 ///
 /// Returns [`EdgeBuildError`] for any per-subsystem build
 /// failure or for an unsupported `--updater-backend` /
 /// `--pal-backend` selection.
+///
+/// # Panics
+///
+/// Panics if called from outside a tokio runtime context,
+/// because the telemetry-bridge `tokio::spawn` requires
+/// one.
 pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildError> {
     // Refuse unsupported backends up front so the operator gets
     // a clear error before any subsystem starts allocating disk
@@ -229,9 +257,24 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
         Arc::clone(comms.client()),
     )?);
 
+    // Create the supervisor builder up front so we can pull a
+    // `ShutdownSignal` clone for non-subsystem helper tasks
+    // (specifically the telemetry pipeline-handle bridge
+    // below) BEFORE the supervisor itself is built. The
+    // bridge owns a `PipelineHandle` clone and would
+    // otherwise have no way to observe drain; it would pin
+    // the pipeline's producer-side mpsc sender for the entire
+    // process lifetime and deadlock the telemetry subsystem's
+    // drain. The builder lazily creates the trigger/signal
+    // pair in its `Default` impl so this is always safe.
+    let mut builder = SupervisorBuilder::default()
+        .with_health_interval(cfg.supervisor.health_interval)
+        .with_health_probe_budget(cfg.supervisor.health_probe_budget);
+    let shutdown_signal_for_bridges = builder.shutdown_signal();
+
     // 4. DNS. The telemetry sender is the producer-facing
     //    mpsc::Sender half of the telemetry pipeline.
-    let telemetry_tx = pipeline_handle_to_telemetry_sender(&telemetry);
+    let telemetry_tx = pipeline_handle_to_telemetry_sender(&telemetry, shutdown_signal_for_bridges);
     let dns = Arc::new(DnsSubsystem::new(&cfg.dns, telemetry_tx.clone()));
 
     // 5. Firewall.
@@ -260,13 +303,10 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     // 10. Updater.
     let updater = Arc::new(UpdaterSubsystem::default_in_memory(&cfg.updater)?);
 
-    // Assemble the supervisor. Boot order matters: telemetry +
-    // comms first so producer subsystems have a live channel +
-    // bundle source by the time they spawn, then everything
-    // else.
-    let mut builder = SupervisorBuilder::default()
-        .with_health_interval(cfg.supervisor.health_interval)
-        .with_health_probe_budget(cfg.supervisor.health_probe_budget);
+    // Register subsystems onto the builder we created above.
+    // Boot order matters: telemetry + comms first so producer
+    // subsystems have a live channel + bundle source by the
+    // time they spawn, then everything else.
     builder = builder.with_subsystem(Arc::clone(&telemetry));
     builder = builder.with_subsystem(Arc::clone(&comms));
     builder = builder.with_subsystem(Arc::clone(&policy_eval));
@@ -314,8 +354,70 @@ pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, Edg
         pal_backend = ?cli.pal_backend,
         "sng-edge composed; entering supervisor run loop"
     );
-    let report = built.supervisor.run().await?;
-    Ok(report)
+    // Move `supervisor` out and drop every other subsystem
+    // Arc field BEFORE the supervisor takes over. Each
+    // subsystem stores its own producer-side channel halves
+    // (e.g. `TelemetrySubsystem.handle: PipelineHandle`
+    // wraps an mpsc::Sender) and any extra `Arc<...Subsystem>`
+    // reference outside the supervisor would keep those
+    // channel ends alive across drain \u2014 the telemetry
+    // pipeline can only exit when ALL producer-channel
+    // senders are dropped.
+    //
+    // Rust would already drop the unbound fields at the
+    // destructure site if we wrote `let BuiltEdge {
+    // supervisor, .. } = built;` (a `..` ignore-pattern
+    // moves the unmentioned fields out of the value and
+    // drops them immediately, since they have no binding).
+    // The fully-named destructure plus explicit `drop` of
+    // each field is therefore equivalent in observable
+    // behaviour for the current code, but is preferred here
+    // for two reasons:
+    //
+    //   1. It documents the deadlock-avoidance intent
+    //      explicitly on every field, so a future maintainer
+    //      reading this function understands that each Arc
+    //      must be released before `supervisor.run()` and
+    //      cannot accidentally introduce a long-lived clone
+    //      (e.g. by adding `let t = telemetry.clone();`
+    //      between the destructure and the run call) without
+    //      first deleting the matching `drop(...)` line.
+    //   2. If `BuiltEdge` ever grows a new field, the
+    //      compiler will fail the destructure rather than
+    //      silently extending the deadlock-risky surface
+    //      through `..`. With `..` the field would be silently
+    //      dropped, which still happens to be the right
+    //      behaviour today, but bypasses the chance for the
+    //      author of the new field to think about whether the
+    //      release ordering matters for their addition.
+    //
+    // The supervisor then releases its own internal Arc
+    // references during `run()` per the comment in
+    // `sng_core::Supervisor::run`.
+    let BuiltEdge {
+        supervisor,
+        telemetry,
+        comms,
+        policy_eval,
+        dns,
+        fw,
+        ips,
+        swg,
+        ztna,
+        sdwan,
+        updater,
+    } = built;
+    drop(telemetry);
+    drop(comms);
+    drop(policy_eval);
+    drop(dns);
+    drop(fw);
+    drop(ips);
+    drop(swg);
+    drop(ztna);
+    drop(sdwan);
+    drop(updater);
+    supervisor.run().await.map_err(EdgeBuildError::from)
 }
 
 /// Build the host [`Platform`] descriptor. Stamped onto every
@@ -358,26 +460,108 @@ fn host_platform() -> Platform {
 /// pipeline.
 fn pipeline_handle_to_telemetry_sender(
     telemetry: &Arc<TelemetrySubsystem>,
+    shutdown: ShutdownSignal,
 ) -> mpsc::Sender<TelemetryEvent> {
     let (tx, mut rx) = mpsc::channel::<TelemetryEvent>(1024);
     let handle = telemetry.pipeline_handle();
     tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            // Submit through the canonical PipelineHandle.
-            // We use the non-blocking `try_submit` form so a
-            // saturated pipeline never wedges a producer
-            // subsystem; the dropped event is logged at
-            // debug-level and is accounted for in the
-            // pipeline's own stats counters when the channel
-            // is closed.
-            if let Err(err) = handle.try_submit(event) {
-                tracing::debug!(
-                    target: "sng_edge::telemetry_bridge",
-                    "pipeline submit rejected event: {err:?}"
-                );
+        loop {
+            tokio::select! {
+                // `biased;` so shutdown is polled FIRST on
+                // every loop iteration. The default fair
+                // polling could let a steady stream of
+                // `rx.recv()`-readies starve the shutdown
+                // branch for an arbitrary number of select
+                // cycles \u2014 the buffer-drain step below
+                // makes that semantically harmless (no event
+                // is lost) but it would still delay the
+                // supervisor's observable transition into the
+                // drain phase. Biased polling guarantees that
+                // once `shutdown` fires the very next
+                // iteration breaks out of the loop into the
+                // drain step deterministically, regardless of
+                // how many events are queued ahead of us.
+                biased;
+                // Race shutdown so the bridge releases its
+                // owned `PipelineHandle` (which wraps the
+                // pipeline's producer-side `mpsc::Sender`)
+                // when the supervisor begins drain. Without
+                // this, the bridge keeps one strong sender
+                // reference alive for the entire process
+                // lifetime, the pipeline's `recv()` never
+                // observes channel closure, the telemetry
+                // subsystem's `start()` spawn task never
+                // joins, and the supervisor drain deadlocks
+                // \u2014 a real production-shutdown bug.
+                //
+                // Before exiting, drain any events still
+                // buffered in the bridge's own
+                // `mpsc::Receiver<TelemetryEvent>` and forward
+                // them through `handle.try_submit`. The drain
+                // is bounded (the channel capacity is 1024)
+                // and uses non-blocking `try_recv` +
+                // `try_submit`, so it cannot stall the
+                // supervisor drain regardless of how slow the
+                // pipeline's downstream `recv()` loop is.
+                // Without this drain step, events that
+                // producer subsystems (DNS / IPS / ZTNA / etc.)
+                // had already enqueued via the bridge's
+                // `mpsc::Sender` \u2014 but the bridge hadn't yet
+                // forwarded to the pipeline \u2014 would be
+                // silently lost during the shutdown race
+                // window. The pipeline subsystem itself
+                // applies its own drain budget to whatever we
+                // hand off via `try_submit` here, so this
+                // bridge-side drain only ever attempts an
+                // in-process channel-to-channel move and the
+                // pipeline\u2019s own drain timing semantics are
+                // unchanged.
+                () = shutdown.wait() => {
+                    while let Ok(event) = rx.try_recv() {
+                        if let Err(err) = handle.try_submit(event) {
+                            tracing::debug!(
+                                target: "sng_edge::telemetry_bridge",
+                                "pipeline submit rejected event during shutdown drain: {err:?}"
+                            );
+                        }
+                    }
+                    break;
+                }
+                ev = rx.recv() => {
+                    match ev {
+                        Some(event) => {
+                            // Submit through the canonical
+                            // PipelineHandle. We use the
+                            // non-blocking `try_submit` form
+                            // so a saturated pipeline never
+                            // wedges a producer subsystem;
+                            // the dropped event is logged at
+                            // debug-level and accounted for
+                            // in the pipeline's own stats
+                            // counters when the channel is
+                            // closed.
+                            if let Err(err) = handle.try_submit(event) {
+                                tracing::debug!(
+                                    target: "sng_edge::telemetry_bridge",
+                                    "pipeline submit rejected event: {err:?}"
+                                );
+                            }
+                        }
+                        None => {
+                            // Every producer dropped its
+                            // sender clone \u2014 we're done.
+                            break;
+                        }
+                    }
+                }
             }
         }
-        // Producer side dropped: nothing more to forward.
+        // Explicit drop so the `PipelineHandle` (and the
+        // inner mpsc sender it owns) is released exactly when
+        // the loop exits, regardless of which branch broke us
+        // out. Reads cleaner than relying on the implicit
+        // move-into-closure drop semantics.
+        drop(handle);
     });
     tx
 }

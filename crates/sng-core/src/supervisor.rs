@@ -266,15 +266,31 @@ pub struct SupervisorBuilder {
     default_drain_budget: Duration,
     health_interval: Duration,
     health_probe_budget: Duration,
+    /// Trigger / signal pair. Created up front (instead of in
+    /// `build()`) so callers that need to thread the shutdown
+    /// signal into non-subsystem helper tasks (e.g. the
+    /// telemetry pipeline-handle bridge in `sng-edge` /
+    /// `sng-agent` that forwards `mpsc::Sender<TelemetryEvent>`
+    /// events into the canonical [`PipelineHandle`]) can pull
+    /// a clone via [`Self::shutdown_signal`] before the
+    /// supervisor itself exists. Without this, those helper
+    /// tasks have no way to observe shutdown and end up
+    /// pinning channel halves past drain \u2014 a real deadlock
+    /// in the appliance's `run()` shutdown path.
+    trigger: Arc<ShutdownTrigger>,
+    signal: ShutdownSignal,
 }
 
 impl Default for SupervisorBuilder {
     fn default() -> Self {
+        let (trigger, signal) = ShutdownTrigger::new();
         Self {
             entries: Vec::new(),
             default_drain_budget: DEFAULT_DRAIN_BUDGET,
             health_interval: DEFAULT_HEALTH_INTERVAL,
             health_probe_budget: DEFAULT_HEALTH_PROBE_BUDGET,
+            trigger: Arc::new(trigger),
+            signal,
         }
     }
 }
@@ -366,14 +382,34 @@ impl SupervisorBuilder {
         self
     }
 
+    /// Clone of the shutdown signal that the future
+    /// [`Supervisor`] will fire on drain. Available before
+    /// [`Self::build`] so wiring code can thread shutdown
+    /// awareness into helper tasks that don't fit the
+    /// `Subsystem` shape but still need to release channel
+    /// halves or pipeline handles on drain (e.g. the
+    /// telemetry bridge spawn in `sng-edge` / `sng-agent`).
+    #[must_use]
+    pub fn shutdown_signal(&self) -> ShutdownSignal {
+        self.signal.clone()
+    }
+
+    /// Clone of the shutdown trigger. Useful for the same
+    /// reasons as [`Self::shutdown_signal`] when the caller
+    /// needs to initiate shutdown from within a helper task
+    /// (e.g. a fatal-error escalation path).
+    #[must_use]
+    pub fn shutdown_trigger(&self) -> Arc<ShutdownTrigger> {
+        Arc::clone(&self.trigger)
+    }
+
     /// Finalise the builder.
     #[must_use]
     pub fn build(self) -> Supervisor {
-        let (trigger, signal) = ShutdownTrigger::new();
         Supervisor {
             entries: self.entries,
-            trigger: Arc::new(trigger),
-            signal,
+            trigger: self.trigger,
+            signal: self.signal,
             health_interval: self.health_interval,
             health_probe_budget: self.health_probe_budget,
         }
@@ -465,8 +501,33 @@ impl Supervisor {
     /// run-loop-side failure is captured in the
     /// [`SupervisorReport`]'s `drain_results` instead.
     pub async fn run(self) -> Result<SupervisorReport, SupervisorRunError> {
+        // Destructure up front so we can drop `entries`
+        // explicitly after spawn. Holding `entries` across the
+        // run loop is a real correctness problem: every entry
+        // owns an `Arc<dyn Subsystem>` which keeps the
+        // underlying adapter struct (and any owned channel
+        // halves / handles it stores as fields) alive. A
+        // canonical offender is `sng_edge::TelemetrySubsystem`,
+        // which stores a `PipelineHandle` as a field — any
+        // extra `Arc<TelemetrySubsystem>` reference held past
+        // drain start prevents the producer-channel sender
+        // count from hitting zero, which prevents the
+        // pipeline's `run()` from observing channel closure,
+        // which prevents the telemetry subsystem's spawn task
+        // from joining, which deadlocks drain. The fix is
+        // structural: stop holding the entries vector once
+        // every subsystem is spawned and the health aggregator
+        // has its own per-entry `Arc<dyn HealthCheck>` clones.
+        let Supervisor {
+            entries,
+            trigger,
+            signal,
+            health_interval,
+            health_probe_budget,
+        } = self;
+
         info!(
-            subsystems = self.entries.len(),
+            subsystems = entries.len(),
             "supervisor starting registered subsystems"
         );
 
@@ -478,60 +539,125 @@ impl Supervisor {
         // where some subsystems are running and others never
         // got the chance — the operator either gets a clean
         // boot or a clean drain.
-        let mut handles: Vec<InFlightHandle> = Vec::with_capacity(self.entries.len());
-        for entry in &self.entries {
+        let mut handles: Vec<InFlightHandle> = Vec::with_capacity(entries.len());
+        let mut health_entries: Vec<(Arc<dyn HealthCheck>, Duration)> =
+            Vec::with_capacity(entries.len());
+        for entry in &entries {
             let name = entry.subsystem.name().to_owned();
-            match entry.subsystem.start(self.signal.clone()).await {
+            match entry.subsystem.start(signal.clone()).await {
                 Ok(handle) => {
                     info!(subsystem = %name, "subsystem started");
                     handles.push((name, handle, entry.drain_budget));
+                    health_entries.push((Arc::clone(&entry.health), health_probe_budget));
                 }
                 Err(e) => {
                     error!(subsystem = %name, error = %e, "subsystem failed to start; aborting boot");
                     // Drain the already-spawned subsystems.
-                    self.trigger.fire();
-                    let _ = drain_handles(handles).await;
+                    // Drop the entries vec first so the
+                    // already-spawned subsystems can release
+                    // their owned channel ends during drain
+                    // (see the long-form comment at the top of
+                    // `run` for the deadlock this guards).
+                    drop(entries);
+                    trigger.fire();
+                    let _ = drain_handles_parallel(handles).await;
                     return Err(SupervisorRunError::StartFailed { name, error: e });
                 }
             }
         }
+
+        // Every subsystem is spawned; release the supervisor's
+        // own `Arc<dyn Subsystem>` references now. The spawned
+        // tasks captured their own clones of whatever subsystem
+        // state they need (typically inner `Arc` fields), so
+        // dropping the entries vec here doesn't cancel any
+        // running task — it just frees the supervisor-side
+        // reference that would otherwise pin subsystem state
+        // (like `TelemetrySubsystem.handle`) past the drain
+        // boundary. The health aggregator holds the remaining
+        // `Arc<dyn HealthCheck>` clones, and those are drained
+        // before the per-subsystem drain so subsystem refs
+        // collapse to "spawn-closure-owned only" before we
+        // join the spawn tasks.
+        drop(entries);
 
         // Spawn the health aggregator. It loops on the
         // configured interval, emitting a tracing event for
         // each composite snapshot. The aggregator itself
         // selects on the shutdown signal so it exits cleanly
         // when drain begins.
-        let health_signal = self.signal.clone();
-        let health_entries: Vec<(Arc<dyn HealthCheck>, Duration)> = self
-            .entries
-            .iter()
-            .map(|e| (Arc::clone(&e.health), self.health_probe_budget))
-            .collect();
-        let health_interval = self.health_interval;
-        let health_task = tokio::spawn(async move {
+        let health_signal = signal.clone();
+        let mut health_task = tokio::spawn(async move {
             health_aggregator_loop(health_entries, health_interval, health_signal).await;
         });
 
         // Wait for the first reason to drain.
-        let exit_reason = self.await_exit(&mut handles).await;
+        let exit_reason = await_exit(&signal, &mut handles).await;
 
         info!(
             reason = ?exit_reason,
             "supervisor entering drain"
         );
-        self.trigger.fire();
+        trigger.fire();
 
-        // Drain every subsystem.
-        let drain_results = drain_handles(handles).await;
-
-        // Drain the aggregator. It will exit on shutdown
-        // signal, so just await its handle with the default
-        // drain budget — if the aggregator is hung the
-        // supervisor reports a warning but the process still
-        // exits.
-        if let Err(e) = timeout(DEFAULT_DRAIN_BUDGET, health_task).await {
-            warn!(error = %e, "health aggregator did not exit within drain budget");
+        // Drain the health aggregator FIRST. The aggregator
+        // holds `Arc<dyn HealthCheck>` clones of every
+        // subsystem, and those clones cross-pin subsystem
+        // state (e.g. `TelemetrySubsystem.handle`'s producer
+        // channel sender). Draining the aggregator before the
+        // per-subsystem drain ensures those Arcs are released
+        // first, so when we wait on each subsystem's spawn
+        // task it can actually exit (its run loop no longer
+        // has any extra subsystem-Arc references holding its
+        // channels open). If the aggregator wedges, we cap
+        // the wait at the default drain budget, then ABORT
+        // the spawn task and join the abort \u2014 a tokio
+        // `JoinHandle` does NOT cancel its task on drop, so
+        // letting the timeout future drop the handle would
+        // leave the aggregator task running with its
+        // `Arc<dyn HealthCheck>` clones still pinning the
+        // subsystem state we're trying to release. Aborting
+        // and re-joining guarantees those Arcs are dropped
+        // before per-subsystem drain begins, which is the
+        // whole point of draining the aggregator first.
+        match timeout(DEFAULT_DRAIN_BUDGET, &mut health_task).await {
+            Ok(_) => {}
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "health aggregator did not exit within drain budget; aborting"
+                );
+                health_task.abort();
+                // Await the aborted task. `abort()` cancels
+                // on the next await point; the JoinHandle
+                // resolves with `Err(JoinError { is_cancelled
+                // = true })`. The await is guaranteed bounded
+                // because there is no async work left for the
+                // task to do once cancelled. Once this future
+                // resolves the spawn task is dropped, which
+                // drops its captured `health_entries` vec, which
+                // drops every `Arc<dyn HealthCheck>` clone the
+                // aggregator was holding.
+                let _ = health_task.await;
+            }
         }
+
+        // Drain every subsystem IN PARALLEL with its own
+        // per-subsystem budget. Sequential drain (the previous
+        // shape) meant that one slow subsystem blocked every
+        // subsequent subsystem from even starting to drain —
+        // and worse, it created a hard ordering dependency
+        // between subsystems that consume each other's
+        // channel halves (the telemetry pipeline cannot drain
+        // until every producer subsystem has dropped its
+        // pipeline sender). Parallel drain removes that
+        // ordering: each subsystem races its own budget,
+        // producers and consumers drain in step, and the
+        // overall wall-clock drain time is bounded by the
+        // single slowest subsystem rather than the sum of all
+        // budgets. Each per-subsystem `Err` is still surfaced
+        // into the report individually.
+        let drain_results = drain_handles_parallel(handles).await;
 
         info!(
             clean = drain_results.iter().all(|r| matches!(r.outcome, Ok(()))),
@@ -542,45 +668,48 @@ impl Supervisor {
             drain_results,
         })
     }
+}
 
-    /// Await whichever of (OS signal | external trigger | early
-    /// subsystem exit) resolves first. The mutable borrow on
-    /// `handles` lets us watch every spawned task for an early
-    /// exit without owning the vector.
-    async fn await_exit(&self, handles: &mut Vec<InFlightHandle>) -> SupervisorExit {
-        // OS signal future. On Unix we wait on either SIGINT
-        // or SIGTERM; on Windows the only portable equivalent
-        // is `tokio::signal::ctrl_c`. Either resolves to a
-        // single `OsSignal` exit reason.
-        let os_signal_fut = wait_for_os_shutdown_signal();
-        tokio::pin!(os_signal_fut);
+/// Await whichever of (OS signal | external trigger | early
+/// subsystem exit) resolves first. The mutable borrow on
+/// `handles` lets us watch every spawned task for an early
+/// exit without owning the vector. Lifted out of `Supervisor`
+/// so it can be called after the supervisor has been
+/// destructured (we need `signal` but not `self.entries`
+/// during the wait).
+async fn await_exit(signal: &ShutdownSignal, handles: &mut Vec<InFlightHandle>) -> SupervisorExit {
+    // OS signal future. On Unix we wait on either SIGINT
+    // or SIGTERM; on Windows the only portable equivalent
+    // is `tokio::signal::ctrl_c`. Either resolves to a
+    // single `OsSignal` exit reason.
+    let os_signal_fut = wait_for_os_shutdown_signal();
+    tokio::pin!(os_signal_fut);
 
-        // External trigger future. Resolves when the shutdown
-        // trigger was fired by anything other than the
-        // supervisor's own drain logic (tests; subsystems that
-        // hold a clone of the trigger).
-        let trigger_signal = self.signal.clone();
-        let trigger_fut = async move { trigger_signal.wait().await };
-        tokio::pin!(trigger_fut);
+    // External trigger future. Resolves when the shutdown
+    // trigger was fired by anything other than the
+    // supervisor's own drain logic (tests; subsystems that
+    // hold a clone of the trigger).
+    let trigger_signal = signal.clone();
+    let trigger_fut = async move { trigger_signal.wait().await };
+    tokio::pin!(trigger_fut);
 
-        loop {
-            // We can't `select!` over an arbitrary-sized vector
-            // of join handles with a fixed-arms macro, so we
-            // pick one *biased* path: first check the OS /
-            // trigger, then poll each handle non-blocking for
-            // an early exit. The tradeoff is a short polling
-            // delay on early exit (capped at 100 ms), which is
-            // acceptable because early exit is itself a
-            // pathological event — the supervisor's job is to
-            // surface it, not to react to it within microseconds.
-            tokio::select! {
-                biased;
-                () = &mut os_signal_fut => return SupervisorExit::OsSignal,
-                () = &mut trigger_fut => return SupervisorExit::ExternalTrigger,
-                () = tokio::time::sleep(Duration::from_millis(100)) => {
-                    if let Some(name) = poll_for_early_exit(handles) {
-                        return SupervisorExit::SubsystemExitedEarly(name);
-                    }
+    loop {
+        // We can't `select!` over an arbitrary-sized vector
+        // of join handles with a fixed-arms macro, so we
+        // pick one *biased* path: first check the OS /
+        // trigger, then poll each handle non-blocking for
+        // an early exit. The tradeoff is a short polling
+        // delay on early exit (capped at 100 ms), which is
+        // acceptable because early exit is itself a
+        // pathological event — the supervisor's job is to
+        // surface it, not to react to it within microseconds.
+        tokio::select! {
+            biased;
+            () = &mut os_signal_fut => return SupervisorExit::OsSignal,
+            () = &mut trigger_fut => return SupervisorExit::ExternalTrigger,
+            () = tokio::time::sleep(Duration::from_millis(100)) => {
+                if let Some(name) = poll_for_early_exit(handles) {
+                    return SupervisorExit::SubsystemExitedEarly(name);
                 }
             }
         }
@@ -605,43 +734,102 @@ fn poll_for_early_exit(handles: &[InFlightHandle]) -> Option<String> {
     None
 }
 
-/// Drain every spawned subsystem, respecting per-subsystem
-/// drain budgets. See [`Supervisor::run`] for the contract.
-async fn drain_handles(handles: Vec<InFlightHandle>) -> Vec<DrainResult> {
-    let mut results = Vec::with_capacity(handles.len());
-    for (name, handle, budget) in handles {
-        let outcome = match timeout(budget, handle).await {
-            Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(e))) => Err(DrainOutcome::Failed {
-                name: name.clone(),
-                error: e,
-            }),
-            Ok(Err(join_err)) => {
-                // `JoinError::is_panic` is the canonical way to
-                // distinguish a panic from a cancellation; we
-                // never cancel inside the supervisor (drain is
-                // co-operative via the shutdown signal), so a
-                // join error is always a panic in practice.
+/// Drain every spawned subsystem in PARALLEL, respecting
+/// per-subsystem drain budgets. Each subsystem races its own
+/// budget independently; sequential drain (the previous shape)
+/// created a hard ordering problem when subsystems consumed
+/// each other's channel halves — the telemetry pipeline, for
+/// example, cannot drain until every producer subsystem has
+/// dropped its pipeline sender. With parallel drain the
+/// producers and consumers drain in step and the overall
+/// wall-clock drain time is bounded by the single slowest
+/// subsystem rather than the sum of all budgets.
+///
+/// The result vector preserves registration order so the
+/// supervisor report still reads top-to-bottom in the order
+/// the operator registered the subsystems.
+async fn drain_handles_parallel(handles: Vec<InFlightHandle>) -> Vec<DrainResult> {
+    // Spawn one drain task per subsystem so they all race
+    // their own timeouts concurrently. `tokio::spawn` keeps
+    // the tasks on the same runtime as the supervisor so we
+    // don't need any extra runtime configuration. Collecting
+    // the join handles in registration order lets us return
+    // a `Vec<DrainResult>` in the same order \u2014 awaiting one
+    // after another doesn't serialise the work itself,
+    // because each drain task was already polled by the
+    // executor in parallel; we're just collecting their
+    // results in a stable order. If one of the drain tasks
+    // itself panics (which shouldn't happen because
+    // `drain_single_handle` doesn't have any panic-bearing
+    // code paths), we synthesise a `DrainOutcome::Panicked`
+    // for the report so the operator still sees a row.
+    let drain_tasks: Vec<(String, JoinHandle<DrainResult>)> = handles
+        .into_iter()
+        .map(|(name, handle, budget)| {
+            let task_name = name.clone();
+            let task = tokio::spawn(async move { drain_single_handle(name, handle, budget).await });
+            (task_name, task)
+        })
+        .collect();
+
+    let mut results = Vec::with_capacity(drain_tasks.len());
+    for (name, task) in drain_tasks {
+        match task.await {
+            Ok(result) => results.push(result),
+            Err(join_err) => {
+                // The drain wrapper itself crashed. Surface
+                // it as a panicked drain rather than silently
+                // dropping the subsystem from the report.
                 let message = if join_err.is_panic() {
-                    format!("{join_err}")
+                    format!("drain wrapper panicked: {join_err}")
                 } else {
-                    format!("join error: {join_err}")
+                    format!("drain wrapper join error: {join_err}")
                 };
-                Err(DrainOutcome::Panicked {
+                results.push(DrainResult {
                     name: name.clone(),
-                    message,
-                })
+                    outcome: Err(DrainOutcome::Panicked { name, message }),
+                });
             }
-            Err(_elapsed) => Err(DrainOutcome::Timeout(DrainTimeout(name.clone(), budget))),
-        };
-        if let Err(ref e) = outcome {
-            warn!(subsystem = %name, error = %e, "subsystem drain non-clean");
-        } else {
-            info!(subsystem = %name, "subsystem drained cleanly");
         }
-        results.push(DrainResult { name, outcome });
     }
     results
+}
+
+async fn drain_single_handle(
+    name: String,
+    handle: SubsystemHandle,
+    budget: Duration,
+) -> DrainResult {
+    let outcome = match timeout(budget, handle).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(e))) => Err(DrainOutcome::Failed {
+            name: name.clone(),
+            error: e,
+        }),
+        Ok(Err(join_err)) => {
+            // `JoinError::is_panic` is the canonical way to
+            // distinguish a panic from a cancellation; we
+            // never cancel inside the supervisor (drain is
+            // co-operative via the shutdown signal), so a
+            // join error is always a panic in practice.
+            let message = if join_err.is_panic() {
+                format!("{join_err}")
+            } else {
+                format!("join error: {join_err}")
+            };
+            Err(DrainOutcome::Panicked {
+                name: name.clone(),
+                message,
+            })
+        }
+        Err(_elapsed) => Err(DrainOutcome::Timeout(DrainTimeout(name.clone(), budget))),
+    };
+    if let Err(ref e) = outcome {
+        warn!(subsystem = %name, error = %e, "subsystem drain non-clean");
+    } else {
+        info!(subsystem = %name, "subsystem drained cleanly");
+    }
+    DrainResult { name, outcome }
 }
 
 /// Health aggregator loop. Polls every registered subsystem at

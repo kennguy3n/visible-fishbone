@@ -125,23 +125,37 @@ impl Subsystem for PalTunnelSubsystem {
             // waiting `reconcile_interval`.
             reconcile_once(&*provider, &desired_rx, &stats).await;
 
+            // Track whether the desired-set publisher is still
+            // alive. Once it drops, `desired_rx.changed()`
+            // becomes immediately-ready with `Err` on every
+            // poll — without disabling the branch the
+            // `tokio::select!` below would burn CPU between
+            // ticker ticks because the Err branch is always
+            // selectable. The `, if publisher_alive` guard is
+            // the canonical tokio pattern for "structurally
+            // disable a `select!` branch": when the guard is
+            // false the branch's future is not constructed
+            // and not polled, so the loop falls back to
+            // shutdown + ticker only. The receiver itself is
+            // retained because `desired_rx.borrow()` inside
+            // `reconcile_once` still surfaces the
+            // last-known-good set so subsequent ticker-driven
+            // reconciles keep that set realised.
+            let mut publisher_alive = true;
             loop {
                 tokio::select! {
                     () = shutdown.wait() => break,
                     _ = ticker.tick() => {
                         reconcile_once(&*provider, &desired_rx, &stats).await;
                     }
-                    res = desired_rx.changed() => {
+                    res = desired_rx.changed(), if publisher_alive => {
                         if res.is_err() {
-                            // Sender dropped — no further
-                            // updates will arrive. Continue
-                            // honouring the tick loop so the
-                            // last-known-good set stays
-                            // reconciled.
+                            publisher_alive = false;
                             tracing::warn!(
                                 target: "sng_agent::pal_tunnel",
                                 "desired tunnel set publisher dropped; \
-                                 holding last-known-good set"
+                                 holding last-known-good set, falling \
+                                 back to ticker-only reconcile"
                             );
                             continue;
                         }
@@ -368,6 +382,70 @@ mod tests {
         trigger.fire();
         handle.await.expect("join").expect("clean shutdown");
         drop(tx);
+    }
+
+    /// Regression: when the only `watch::Sender` half of the
+    /// desired-tunnel-set channel is dropped before / during
+    /// the supervisor run, `desired_rx.changed()` becomes
+    /// immediately-ready with `Err` on every poll. Prior to
+    /// the `publisher_alive` guard the `tokio::select!`
+    /// branch would keep firing back-to-back via
+    /// `continue`, burning a CPU between ticks. This test
+    /// pins down the fix: with the sender dropped at start,
+    /// the reconcile cycle count over a known wall-clock
+    /// window stays bounded by the ticker (not the busy
+    /// loop), and the subsystem still drains cleanly on
+    /// shutdown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_desired_sender_does_not_busy_loop() {
+        let (tx, rx) = watch::channel(vec![cfg("t1")]);
+        // Drop the only sender BEFORE starting the subsystem.
+        // The receiver still surfaces the initial value via
+        // `borrow()`, but `changed()` returns Err immediately.
+        drop(tx);
+
+        let provider = Arc::new(InMemoryTunnelProvider::new());
+        let reconcile_interval = Duration::from_millis(25);
+        let subsys = PalTunnelSubsystem::new(
+            &TunnelCadenceConfig { reconcile_interval },
+            provider.clone(),
+            rx,
+        );
+        let (trigger, signal) = ShutdownTrigger::new();
+        let stats = Arc::clone(subsys.stats());
+        let handle = subsys.start(signal).await.expect("start");
+
+        // Sleep long enough to span ~8 ticker cycles. Without
+        // the fix the reconcile count would land in the
+        // thousands; with the fix it tracks the ticker.
+        let window = Duration::from_millis(200);
+        tokio::time::sleep(window).await;
+        let reconciles_during_window = stats.reconciles.load(Ordering::Relaxed);
+
+        // Conservative upper bound: 8 ticks at 25ms + initial
+        // boot reconcile + slack for scheduler jitter. A
+        // regression of the busy-loop fix lands this in the
+        // hundreds-to-thousands range.
+        assert!(
+            reconciles_during_window < 50,
+            "pal_tunnel reconciled {reconciles_during_window} times in {window:?} \
+             — busy-loop regression suspected (expected ≲ ticker cadence)",
+        );
+
+        trigger.fire();
+        // Tight drain budget proves the dropped-sender case
+        // doesn't starve the shutdown branch.
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("subsystem did not drain within 2s of shutdown")
+            .expect("join")
+            .expect("clean shutdown");
+
+        // Last-known-good set was honoured: the boot reconcile
+        // brought up `t1` from the initial channel value, and
+        // shutdown tore it back down.
+        assert!(provider.list().await.unwrap().is_empty());
+        assert!(stats.starts_ok.load(Ordering::Relaxed) >= 1);
     }
 
     #[tokio::test]
