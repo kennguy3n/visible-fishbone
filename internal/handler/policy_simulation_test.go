@@ -300,6 +300,45 @@ func TestSimulationHandler_ListRollouts_PaginatesAndSerialises(t *testing.T) {
 	}
 }
 
+// TestSimulationHandler_ListRollouts_OmitsEmptyNextCursor pins the
+// round-5 fix: the typed envelope with `omitempty` MUST omit the
+// `next_cursor` JSON key when there is no further page, rather
+// than serialising it as `"next_cursor": ""`. Matches the
+// alert/baseline/integration handlers; preserves the OpenAPI
+// `nullable: true` contract for spec-strict SDK validators.
+func TestSimulationHandler_ListRollouts_OmitsEmptyNextCursor(t *testing.T) {
+	t.Parallel()
+	f := newSimHandlerFixture(t)
+	rl, _, err := f.canary.StartDryRun(context.Background(), f.tenant.ID, policy.StartDryRunInput{
+		ProposedGraph: f.graph.Graph,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := f.canary.Rollback(context.Background(), f.tenant.ID, rl.ID, nil, ""); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	req := makeRequest(t, http.MethodGet,
+		"/api/v1/tenants/"+f.tenant.ID.String()+"/policy/rollouts?limit=10",
+		nil,
+		map[string]string{"tenant_id": f.tenant.ID.String()},
+	)
+	rec := httptest.NewRecorder()
+	f.handler.listRollouts(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var raw map[string]json.RawMessage
+	decodeBody(t, rec, &raw)
+	if _, ok := raw["next_cursor"]; ok {
+		t.Fatalf("next_cursor key present on terminal page; expected omitted: body=%s",
+			rec.Body.String())
+	}
+	if _, ok := raw["items"]; !ok {
+		t.Fatalf("items key missing: body=%s", rec.Body.String())
+	}
+}
+
 func TestSimulationHandler_GetRollout_404OnUnknown(t *testing.T) {
 	t.Parallel()
 	f := newSimHandlerFixture(t)
