@@ -15,11 +15,19 @@ branch edge image, one telemetry fabric, one support path.
 Positioning: **"Fortinet economics + Zscaler simplicity + Palo
 Alto-grade management discipline."**
 
-This repository contains the Rust workspace for the SNG **enforcement
-plane**: the branch / site edge appliance binary (`sng-edge`), the
-cross-platform endpoint client binary (`sng-agent`), and the twelve
-library crates they compose. The SaaS control plane lives in
-[`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform).
+This repository is the SNG monorepo: it contains both the Rust
+**enforcement plane** (`crates/sng-*` — the branch / site edge
+appliance binary `sng-edge`, the cross-platform endpoint client
+binary `sng-agent`, and the twelve library crates they compose)
+and the SNG-specific Go **control plane** (`cmd/sng-control`,
+`cmd/sng-migrate`, `internal/`, `migrations/`, `api/openapi.yaml`)
+that issues signed policy bundles, signed update manifests, and
+receives telemetry. The broader SN360 multi-product security-event
+platform (Wazuh-based correlation, IOC distribution, SBOM /
+inventory, MSP portal across all SN360 products) lives in
+[`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform);
+SNG integrates with it for cross-product features but does not
+depend on it for the gateway product itself.
 
 ## SN360 Family
 
@@ -51,10 +59,13 @@ plane, policy model, and telemetry fabric.
 | **DLP for web + SaaS** | Planned | Control plane + edge appliance |
 | **Hardware appliance SKUs (TPM-rooted)** | Planned | Branch edge |
 
-The control-plane side of the product — admin UI, MSP portal,
-tenant + identity service, policy graph compiler, AI assistant,
-ClickHouse hot analytics, S3 cold archive, NATS JetStream
-ingestion — lives in [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform).
+The SNG control plane in this repo (`cmd/sng-control`, `internal/`,
+`migrations/`, `api/openapi.yaml`) is the Go service that compiles
+the policy graph, signs bundles, accepts telemetry, and serves the
+REST API. Operator-facing concerns — admin UI, MSP portal,
+tenant + identity service, ClickHouse hot analytics, S3 cold
+archive, AI assistant — are shared across the SN360 family and
+live in [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform).
 
 ## Architecture Overview
 
@@ -107,16 +118,16 @@ performance-sensitive edge component.
 |---|---|---|
 | Edge enforcement (packet path, policy evaluator, local collectors, parsers) | **Rust** | Matches `sn360-agent-vm` and `sn360-agent-k8s` performance budgets |
 | Endpoint client (traffic steering, posture, ZTNA) | **Rust**, cross-platform | Mirrors the [`sn360-desktop-agent`](https://github.com/kennguy3n/sn360-desktop-agent) architecture (`sda-pal` → `sng-pal`) |
-| Control plane services | **Go** | Lives in [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform); matches the SN360 Access Gateway / TRDS / IOCFS / SIS service shape |
-| Admin UI | **TypeScript + React** | In the control-plane repo |
-| Policy / metadata storage | **PostgreSQL** | Row-level security per tenant, in the control-plane repo |
+| SNG control plane (`cmd/sng-control`, `internal/`, `api/`) | **Go** | In-repo; PostgreSQL-backed with `sng.tenant_id` GUC-driven row-level security (see [`docs/deploy.md`](./docs/deploy.md)) |
+| Admin UI / MSP portal / shared cross-product surfaces | **TypeScript + React** | In [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform) |
+| Policy / metadata storage | **PostgreSQL** | Row-level security per tenant; schema in `migrations/`, runbook in [`docs/deploy.md`](./docs/deploy.md) |
 | Hot analytics | **ClickHouse** | Normalized telemetry, 30-90 day retention |
 | Cold retention | **S3-compatible object storage** | Compressed event archive, 1+ year |
-| Eventing / pipeline | **NATS JetStream** | Same fabric as `sn360-es` and the control-plane repo |
+| Eventing / pipeline | **NATS JetStream** | Same fabric as `sn360-es` and the SN360 platform repo |
 | L7 proxying (SWG) | **Envoy** | Forward proxy with ext-authz handoff to `sng-swg` |
 | IDS/IPS | **Suricata** | Inline on edge VM via `sng-ips`; longer-term opt-in eBPF fast-path |
 | Container platform | Managed **Kubernetes** / **k3s** | Control plane only |
-| Infrastructure as code | **Terraform** | Tenant Terraform provider in the control-plane repo |
+| Infrastructure as code | **Terraform** | Tenant Terraform provider in the SN360 platform repo |
 | Agent ↔ gateway wire | **TLS 1.3 + MessagePack + HTTP/2** | SN360 native protocol, same as SDA / VMA / SKA |
 | Artifact signing | **Ed25519** | Policy bundles, action jobs, edge images, endpoint installers |
 
@@ -216,6 +227,7 @@ cloud, identity provider, MSP context).
 | [`PROPOSAL.md`](./PROPOSAL.md) | Product design proposal — competitive baseline, SME constraints, capability scope, reference architecture, AI / data / security model, commercial model, risk register |
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | System architecture — topology diagrams, control plane services, edge VM internals, endpoint client internals, telemetry pipeline, data tiering, security model, SN360 integration points, wire protocol |
 | [`docs/TRAFFIC_CLASSIFICATION.md`](./docs/TRAFFIC_CLASSIFICATION.md) | Traffic classification and steering framework — six traffic classes, per-deployment-mode steering tables, app registry overrides, byte-deterministic bundle layout |
+| [`docs/deploy.md`](./docs/deploy.md) | Control-plane deployment runbook — PostgreSQL role hierarchy, RLS GUC contract, migration runner privileges, policy signing-key modes, API-key cap |
 | [`SECURITY.md`](./SECURITY.md) | Security policy — supported versions, reporting process, response SLAs, scope, crypto / signing posture |
 | Per-crate `README.md` | Each library / binary crate carries its own README under [`crates/`](./crates) covering module surface, wire-format compatibility, and local verification commands |
 

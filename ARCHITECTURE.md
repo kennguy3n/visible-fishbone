@@ -7,13 +7,16 @@
 > (the six-class steering framework). Modeled after
 > [`sn360-es/internal/docs/ARCHITECTURE.md`](https://github.com/kennguy3n/sn360-es/blob/main/internal/docs/ARCHITECTURE.md).
 >
-> This document covers the entire SNG product. Code for the
-> enforcement plane (`sng-edge`, `sng-agent`, and the twelve
-> library crates) lives in this repo. Code for the control plane
-> (the Go services described in §3) lives in the sibling
-> [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform)
-> repo — references to control-plane source paths (`internal/…`,
-> `cmd/…`) in the sections below point at that repo.
+> This document covers the entire SNG product. Both planes live
+> in this monorepo: the Rust enforcement plane (`sng-edge`,
+> `sng-agent`, and the twelve library crates under `crates/`)
+> and the Go control plane (`cmd/sng-control`, `cmd/sng-migrate`,
+> packages under `internal/`, schema in `migrations/`, REST
+> surface in `api/openapi.yaml`). The broader SN360 multi-product
+> security-event platform — shared correlation, IOC distribution,
+> SBOM inventory, MSP portal across all SN360 products — lives
+> in [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform);
+> §11 describes the cross-product integration points.
 
 ---
 
@@ -264,17 +267,15 @@ the foundation for the cloud-only deployment mode's unit economics
   steering table; `cloud` only the classes that reach the cloud
   proxy (`INSPECT_FULL`, `TUNNEL_PRIVATE`, `BLOCK`); `endpoint` and
   `mobile` receive DNS verification + steering decisions.
-- **Demotion engine** (`internal/service/appdb/demotion.go` in
-  the control-plane repo) subscribes to runtime threat signals
-  (threat feed, cert-pin mismatch, IP-range mismatch, anomaly
-  detector) and installs short-TTL overrides on the affected
-  tenants. Global signals (threat feed, cert mismatch) fan out
-  across every active tenant.
-- **Vendor sync** (`internal/service/appdb/sync.go` in the
-  control-plane repo) periodically pulls Microsoft 365 endpoints
-  JSON, Google IP ranges JSON, AWS IP ranges JSON, and any custom
-  `{ domains, ip_ranges }` feed registered against an app's
-  `metadata_url`.
+- **Demotion engine** (`internal/service/appdb/demotion.go`)
+  subscribes to runtime threat signals (threat feed, cert-pin
+  mismatch, IP-range mismatch, anomaly detector) and installs
+  short-TTL overrides on the affected tenants. Global signals
+  (threat feed, cert mismatch) fan out across every active tenant.
+- **Vendor sync** (`internal/service/appdb/sync.go`) periodically
+  pulls Microsoft 365 endpoints JSON, Google IP ranges JSON, AWS
+  IP ranges JSON, and any custom `{ domains, ip_ranges }` feed
+  registered against an app's `metadata_url`.
 - **Byte determinism**: the compiled steering rule set is sorted
   in canonical order (domains, IPs, pins, app refs) so two
   compilations of the same catalog produce identical bytes —
@@ -284,7 +285,7 @@ the foundation for the cloud-only deployment mode's unit economics
   `traffic_class` it was matched against; ClickHouse stores it as a
   `LowCardinality(String)` column so per-class cost attribution is
   a single GROUP BY. See `internal/service/telemetry/clickhouse`
-  in the control-plane repo.
+  for the writer.
 
 See `docs/TRAFFIC_CLASSIFICATION.md` for the full design.
 
@@ -488,7 +489,7 @@ Key properties:
 
 ### 7.4 Tenant Isolation
 
-Same posture as `sn360-security-platform`:
+Same posture as the rest of the SN360 family:
 
 - **Postgres**: Row-Level Security with a per-connection
   `tenant_id` GUC; every query is automatically scoped. No raw

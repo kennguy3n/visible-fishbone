@@ -41,9 +41,9 @@ touching the kernel.
 ## Wire-format compatibility
 
 The serialised rule / config shapes round-trip through the Go-
-side compiler output (`internal/service/policy/` in the control-
-plane repo) so a rule edited in the operator portal compiles
-into the exact YAML / signature pack the edge consumes.
+side compiler output (`internal/service/policy/`) so a rule
+edited in the operator portal compiles into the exact YAML /
+signature pack the edge consumes.
 
 ## Local verification
 
