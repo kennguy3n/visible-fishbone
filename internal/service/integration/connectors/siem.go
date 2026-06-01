@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -139,6 +140,7 @@ type parsedSIEMConfig struct {
 	tsHeader          string
 	headers           map[string]string
 	indexOrSourcetype string
+	insecureSkipTLS   bool
 }
 
 func (s *SIEM) parse(configRaw, secretRaw json.RawMessage) (parsedSIEMConfig, SIEMSecret, error) {
@@ -175,6 +177,7 @@ func (s *SIEM) parse(configRaw, secretRaw json.RawMessage) (parsedSIEMConfig, SI
 		tsHeader:          tsHeader,
 		headers:           cfg.Headers,
 		indexOrSourcetype: cfg.IndexOrSourcetype,
+		insecureSkipTLS:   cfg.InsecureSkipTLS,
 	}
 
 	var sec SIEMSecret
@@ -235,12 +238,20 @@ func (s *SIEM) post(
 	if err != nil {
 		return 0, nil, fmt.Errorf("siem build request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", s.userAgent)
-	req.Header.Set("X-Sng-Event", eventType)
+	// Apply operator-supplied custom headers FIRST so the defaults
+	// and security-critical headers below cannot be silently
+	// overridden. Earlier ordering (operator-last) allowed a
+	// misconfigured `Content-Type: text/xml` to break JSON parsing
+	// at the SIEM receiver; this ordering also pins User-Agent,
+	// X-Sng-Event, Authorization, and the HMAC sig/ts headers so
+	// signature verification always sees the values the connector
+	// actually signed.
 	for k, v := range cfg.headers {
 		req.Header.Set(k, v)
 	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", s.userAgent)
+	req.Header.Set("X-Sng-Event", eventType)
 	if sec.AuthHeaderValue != "" {
 		req.Header.Set("Authorization", sec.AuthHeaderValue)
 	}
@@ -252,7 +263,25 @@ func (s *SIEM) post(
 		req.Header.Set(cfg.tsHeader, ts)
 		req.Header.Set(cfg.sigHeader, "v1="+hex.EncodeToString(mac.Sum(nil)))
 	}
-	resp, err := s.client.Do(req)
+	doer := s.client
+	if cfg.insecureSkipTLS {
+		// Per-connector InsecureSkipVerify cannot be applied to
+		// the shared http.Client (it is shared across tenants and
+		// connectors), so we build a one-shot client with a
+		// custom Transport for this call. Used for self-signed
+		// lab destinations only — production deployments should
+		// leave insecure_skip_tls=false and trust the system CA
+		// store. The allocation cost is negligible because the
+		// flag is rare and SIEM Send latency is dominated by the
+		// network round-trip.
+		doer = &http.Client{
+			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			},
+		}
+	}
+	resp, err := doer.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}

@@ -211,3 +211,114 @@ func TestSIEM_Parse_RejectsInvalidConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestSIEM_Send_CustomHeadersCannotOverrideDefaults pins the
+// header-ordering invariant: operator-supplied cfg.Headers are
+// applied BEFORE the connector's defaults and security-critical
+// headers. A misconfigured `Content-Type: text/xml` from cfg
+// must not break JSON parsing at the SIEM receiver; the HMAC
+// signature/timestamp headers must always be the values the
+// connector signed.
+func TestSIEM_Send_CustomHeadersCannotOverrideDefaults(t *testing.T) {
+	srv := &stubHTTP{}
+	s := NewSIEM(srv, "sng-ua")
+	cfg, _ := json.Marshal(SIEMConfig{
+		Endpoint: "https://siem/",
+		Headers: map[string]string{
+			"Content-Type":    "text/xml",
+			"User-Agent":      "operator-ua",
+			"X-Sng-Event":     "operator-event",
+			"X-Sng-Signature": "operator-sig",
+			"X-Sng-Timestamp": "operator-ts",
+			"Authorization":   "operator-auth",
+			"X-Operator":      "trace-id-42",
+		},
+	})
+	sec, _ := json.Marshal(SIEMSecret{HMACKey: "k", AuthHeaderValue: "Bearer real"})
+	_, err := s.Send(context.Background(), integration.Sendable{
+		EventType: "alert.created",
+		Payload:   []byte(`{"a":1}`),
+		Config:    cfg,
+		Secret:    sec,
+		Now:       time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	req := srv.requests[0]
+	// Defaults & security headers must win over operator config.
+	if got := req.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type override leaked: %q", got)
+	}
+	if got := req.Header.Get("User-Agent"); got != "sng-ua" {
+		t.Fatalf("User-Agent override leaked: %q", got)
+	}
+	if got := req.Header.Get("X-Sng-Event"); got != "alert.created" {
+		t.Fatalf("X-Sng-Event override leaked: %q", got)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer real" {
+		t.Fatalf("Authorization override leaked: %q", got)
+	}
+	if got := req.Header.Get("X-Sng-Signature"); got == "operator-sig" {
+		t.Fatalf("HMAC sig override leaked: %q", got)
+	}
+	if got := req.Header.Get("X-Sng-Timestamp"); got == "operator-ts" {
+		t.Fatalf("HMAC ts override leaked: %q", got)
+	}
+	// Non-reserved operator headers MUST pass through.
+	if got := req.Header.Get("X-Operator"); got != "trace-id-42" {
+		t.Fatalf("custom operator header dropped: %q", got)
+	}
+}
+
+// TestSIEM_Send_InsecureSkipTLSAppliedToTransport pins that the
+// per-connector InsecureSkipTLS flag actually reaches the HTTP
+// transport. Before fix: the field was parsed but silently
+// ignored — operators with self-signed lab SIEM destinations
+// would set the flag and still see TLS verification failures
+// against the shared client.
+//
+// The test verifies behavior indirectly via the stubHTTP doer:
+// when insecure_skip_tls=true the connector must NOT route the
+// request through the shared client (which is the only path
+// where an InsecureSkipVerify=false TLS check could fire), and
+// instead constructs a one-shot client. We assert that fact by
+// observing that the shared stubHTTP receives ZERO requests
+// when the flag is set.
+func TestSIEM_Send_InsecureSkipTLSAppliedToTransport(t *testing.T) {
+	shared := &stubHTTP{}
+	s := NewSIEM(shared, "ua")
+	// Point at a clearly non-routable address so the one-shot
+	// http.Client's Do() fails fast with a transport error,
+	// confirming we routed AROUND the shared stub.
+	cfg, _ := json.Marshal(SIEMConfig{
+		Endpoint:        "http://127.0.0.1:1/", // nothing listens on TCP port 1
+		InsecureSkipTLS: true,
+	})
+	_, err := s.Send(context.Background(), integration.Sendable{
+		EventType: "alert.created",
+		Payload:   []byte(`{}`),
+		Config:    cfg,
+		Now:       time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatalf("expected transport error when insecure_skip_tls=true routes away from stub")
+	}
+	if len(shared.requests) != 0 {
+		t.Fatalf("insecure_skip_tls=true should bypass shared client, got %d req(s)", len(shared.requests))
+	}
+	// Sanity: the same connector with insecure_skip_tls=false
+	// routes through the shared stub as before.
+	cfg2, _ := json.Marshal(SIEMConfig{Endpoint: "https://siem/"})
+	if _, err := s.Send(context.Background(), integration.Sendable{
+		EventType: "alert.created",
+		Payload:   []byte(`{}`),
+		Config:    cfg2,
+		Now:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Send via shared client: %v", err)
+	}
+	if len(shared.requests) != 1 {
+		t.Fatalf("default flow should hit shared stub once, got %d", len(shared.requests))
+	}
+}
