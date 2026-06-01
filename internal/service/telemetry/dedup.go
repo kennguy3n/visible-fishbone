@@ -85,9 +85,14 @@ type DedupKey struct {
 // only reads from the index maps — it never mutates the LRU
 // order, never calls *list.List mutators, and uses atomic
 // counters for hits/misses. Concurrent `Seen` callers can
-// safely fan out under RLock; `Add` / `SeenOrAdd` / `Len`
-// / `Stats` take the write lock since they touch the list
-// or the maps. See PR #38 Devin Review thread on dedup.go:138.
+// safely fan out under RLock; `Add` / `SeenOrAdd` take the
+// write lock since they touch the list or the maps; `Len`
+// and `Stats` take the **read** lock — they only read
+// `order.Len()` plus the atomic counters, all of which are
+// safe under RLock. See PR #38 Devin Review thread on
+// dedup.go:138 (round-4 ack of the RLock-safe path on Seen)
+// and round-6 doc audit reconciling the comment with the
+// actual lock each method takes.
 type LRUDedup struct {
 	mu       sync.RWMutex
 	capacity int
