@@ -228,11 +228,18 @@ func (r *PolicyRolloutRepository) UpdateStage(
 	updatedBy *uuid.UUID,
 	at time.Time,
 	promoteGraphID *uuid.UUID,
+	demoteGraphID *uuid.UUID,
 ) (repository.PolicyRollout, error) {
 	if next == "" {
 		return repository.PolicyRollout{}, repository.ErrInvalidArgument
 	}
 	if next == repository.PolicyRolloutStageCanary && (canaryPercent < 0 || canaryPercent > 100) {
+		return repository.PolicyRollout{}, repository.ErrInvalidArgument
+	}
+	// Promote + demote are mutually exclusive: a single stage
+	// transition cannot both make a draft live and unmake it.
+	// Mirror the memory impl's rejection.
+	if promoteGraphID != nil && demoteGraphID != nil {
 		return repository.PolicyRollout{}, repository.ErrInvalidArgument
 	}
 	var out repository.PolicyRollout
@@ -297,6 +304,28 @@ RETURNING `+policyRolloutSelectColumns,
 				  AND tenant_id = $2::uuid
 			`, *promoteGraphID, tenantID); err != nil {
 				return fmt.Errorf("promote draft graph: %w", err)
+			}
+		}
+		// Demotion side-effect, also inside the same tx so
+		// the stage advance to rolled_back and the graph
+		// going back to draft commit atomically. The
+		// CanaryService passes the rollout's graph_id here
+		// when rolling back FROM canary or full: the
+		// proposed graph was promoted to live on the
+		// dry_run -> canary | full edge, and rollback must
+		// flip it back so the previous live graph again
+		// wins GetCurrentGraph. The UPDATE is intentionally
+		// idempotent (no-op if is_draft is already true),
+		// so re-running this transaction on retry stays
+		// safe. RLS via the tenant GUC scopes the row.
+		if demoteGraphID != nil {
+			if _, err := tx.Exec(ctx, `
+				UPDATE policy_graphs
+				SET is_draft = true
+				WHERE id = $1::uuid
+				  AND tenant_id = $2::uuid
+			`, *demoteGraphID, tenantID); err != nil {
+				return fmt.Errorf("demote graph back to draft: %w", err)
 			}
 		}
 		out = scanned

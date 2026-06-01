@@ -451,6 +451,19 @@ type PolicyRolloutRepository interface {
 	// call leaves a failure window in which the rollout state
 	// and the graph "live" state can disagree (see PR #39
 	// Devin Review ANALYSIS_0001). Pass nil to skip promotion.
+	//
+	// demoteGraphID, when non-nil, flips is_draft = true on
+	// that graph row inside the SAME transaction as the stage
+	// update. The CanaryService passes this when a rollout is
+	// rolled back FROM canary or full: the proposed graph was
+	// promoted to live on the dry_run -> canary | full edge,
+	// and must be demoted back to draft on rollback so
+	// GetCurrentGraph (which filters is_draft = false) once
+	// again returns the previous live graph instead of the
+	// just-rolled-back proposal (see PR #39 Devin Review
+	// BUG_0001 round 3). promoteGraphID and demoteGraphID
+	// are mutually exclusive — passing both returns
+	// ErrInvalidArgument.
 	UpdateStage(
 		ctx context.Context,
 		tenantID, id uuid.UUID,
@@ -460,5 +473,6 @@ type PolicyRolloutRepository interface {
 		updatedBy *uuid.UUID,
 		at time.Time,
 		promoteGraphID *uuid.UUID,
+		demoteGraphID *uuid.UUID,
 	) (PolicyRollout, error)
 }

@@ -103,7 +103,7 @@ func TestRollout_UpdateStage_MonotonicForward(t *testing.T) {
 	now := time.Now()
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID, c.next, c.percent, "promoted", nil, now, nil)
+			_, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID, c.next, c.percent, "promoted", nil, now, nil, nil)
 			if !errors.Is(err, c.wantErr) {
 				t.Fatalf("err = %v, want %v", err, c.wantErr)
 			}
@@ -121,12 +121,12 @@ func TestRollout_UpdateStage_BackwardRejected(t *testing.T) {
 	now := time.Now()
 	// dry_run -> canary
 	if _, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID,
-		repository.PolicyRolloutStageCanary, 25, "", nil, now, nil); err != nil {
+		repository.PolicyRolloutStageCanary, 25, "", nil, now, nil, nil); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
 	// canary -> dry_run is illegal.
 	if _, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID,
-		repository.PolicyRolloutStageDryRun, 0, "", nil, now, nil); !errors.Is(err, repository.ErrInvalidArgument) {
+		repository.PolicyRolloutStageDryRun, 0, "", nil, now, nil, nil); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("backward err = %v, want ErrInvalidArgument", err)
 	}
 }
@@ -138,17 +138,17 @@ func TestRollout_UpdateStage_RolledBackFromAnyNonTerminal(t *testing.T) {
 	// From dry_run
 	saved, _ := repo.Create(ctx(), tnt.ID, makeRollout(tnt.ID, g.ID))
 	if _, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID,
-		repository.PolicyRolloutStageRolledBack, 0, "abort", nil, now, nil); err != nil {
+		repository.PolicyRolloutStageRolledBack, 0, "abort", nil, now, nil, nil); err != nil {
 		t.Fatalf("dry_run -> rolled_back: %v", err)
 	}
 	// From canary
 	saved2, _ := repo.Create(ctx(), tnt.ID, makeRollout(tnt.ID, g.ID))
 	if _, err := repo.UpdateStage(ctx(), tnt.ID, saved2.ID,
-		repository.PolicyRolloutStageCanary, 50, "", nil, now, nil); err != nil {
+		repository.PolicyRolloutStageCanary, 50, "", nil, now, nil, nil); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
 	if _, err := repo.UpdateStage(ctx(), tnt.ID, saved2.ID,
-		repository.PolicyRolloutStageRolledBack, 0, "abort", nil, now, nil); err != nil {
+		repository.PolicyRolloutStageRolledBack, 0, "abort", nil, now, nil, nil); err != nil {
 		t.Fatalf("canary -> rolled_back: %v", err)
 	}
 }
@@ -159,7 +159,7 @@ func TestRollout_GetActive_PrefersMostRecentNonTerminal(t *testing.T) {
 	now := time.Now()
 	older, _ := repo.Create(ctx(), tnt.ID, makeRollout(tnt.ID, g.ID))
 	if _, err := repo.UpdateStage(ctx(), tnt.ID, older.ID,
-		repository.PolicyRolloutStageRolledBack, 0, "", nil, now, nil); err != nil {
+		repository.PolicyRolloutStageRolledBack, 0, "", nil, now, nil, nil); err != nil {
 		t.Fatalf("rollback older: %v", err)
 	}
 	newer, _ := repo.Create(ctx(), tnt.ID, makeRollout(tnt.ID, g.ID))
@@ -178,7 +178,7 @@ func TestRollout_GetActive_ErrNotFoundWhenAllTerminal(t *testing.T) {
 	now := time.Now()
 	saved, _ := repo.Create(ctx(), tnt.ID, makeRollout(tnt.ID, g.ID))
 	if _, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID,
-		repository.PolicyRolloutStageRolledBack, 0, "", nil, now, nil); err != nil {
+		repository.PolicyRolloutStageRolledBack, 0, "", nil, now, nil, nil); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
 	if _, err := repo.GetActive(ctx(), tnt.ID); !errors.Is(err, repository.ErrNotFound) {
@@ -200,7 +200,7 @@ func TestRollout_List_OrdersByCreatedAtDesc(t *testing.T) {
 		// Roll back so the next Create doesn't trip a "one active at a time"
 		// concept the service layer enforces (not the repo).
 		_, _ = repo.UpdateStage(ctx(), tnt.ID, saved.ID,
-			repository.PolicyRolloutStageRolledBack, 0, "", nil, time.Now(), nil)
+			repository.PolicyRolloutStageRolledBack, 0, "", nil, time.Now(), nil, nil)
 	}
 	page, err := repo.List(ctx(), tnt.ID, repository.Page{Limit: 10})
 	if err != nil {
@@ -221,11 +221,11 @@ func TestRollout_UpdateStage_RejectsBadCanaryPercent(t *testing.T) {
 	saved, _ := repo.Create(ctx(), tnt.ID, makeRollout(tnt.ID, g.ID))
 	now := time.Now()
 	if _, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID,
-		repository.PolicyRolloutStageCanary, 150, "", nil, now, nil); !errors.Is(err, repository.ErrInvalidArgument) {
+		repository.PolicyRolloutStageCanary, 150, "", nil, now, nil, nil); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("err = %v, want ErrInvalidArgument", err)
 	}
 	if _, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID,
-		repository.PolicyRolloutStageCanary, -1, "", nil, now, nil); !errors.Is(err, repository.ErrInvalidArgument) {
+		repository.PolicyRolloutStageCanary, -1, "", nil, now, nil, nil); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("err = %v, want ErrInvalidArgument", err)
 	}
 }
@@ -265,12 +265,12 @@ func TestRollout_UpdateStage_SameStageAllowed(t *testing.T) {
 	now := time.Now()
 	// dry_run -> canary @25%
 	if _, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID,
-		repository.PolicyRolloutStageCanary, 25, "initial canary", nil, now, nil); err != nil {
+		repository.PolicyRolloutStageCanary, 25, "initial canary", nil, now, nil, nil); err != nil {
 		t.Fatalf("advance to canary: %v", err)
 	}
 	// canary -> canary @50%: same stage, new percent + notes. Must succeed.
 	updated, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID,
-		repository.PolicyRolloutStageCanary, 50, "bumped canary to 50%", nil, now.Add(time.Minute), nil)
+		repository.PolicyRolloutStageCanary, 50, "bumped canary to 50%", nil, now.Add(time.Minute), nil, nil)
 	if err != nil {
 		t.Fatalf("same-stage update: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestRollout_UpdateStage_NonForwardTransitionsStillRejected(t *testing.T) {
 	// dry_run -> completed (skip canary / full) is illegal — the
 	// state machine only allows dry_run -> canary | full.
 	if _, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID,
-		repository.PolicyRolloutStageCompleted, 100, "", nil, now, nil); !errors.Is(err, repository.ErrInvalidArgument) {
+		repository.PolicyRolloutStageCompleted, 100, "", nil, now, nil, nil); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("dry_run -> completed err = %v, want ErrInvalidArgument", err)
 	}
 }

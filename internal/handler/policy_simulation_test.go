@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -61,7 +62,7 @@ func newSimHandlerFixture(t *testing.T) *simHandlerFixture {
 		t.Fatalf("new canary: %v", err)
 	}
 	// Simulator left nil — exercises the 503 path for /simulations.
-	h := NewPolicySimulationHandler(svc, canary, nil, policyRepo)
+	h := NewPolicySimulationHandler(svc, canary, nil, policyRepo, nil)
 	return &simHandlerFixture{
 		handler:  h,
 		tenant:   tnt,
@@ -333,7 +334,7 @@ func TestSimulationHandler_GetSimulation_ReturnsNotFound(t *testing.T) {
 func TestNewPolicySimulationHandler_NilSimulator_Permitted(t *testing.T) {
 	t.Parallel()
 	// Construct with nil sim → no panic; SetSimulator(nil) is a no-op.
-	h := NewPolicySimulationHandler(nil, nil, nil, nil)
+	h := NewPolicySimulationHandler(nil, nil, nil, nil, nil)
 	if h == nil {
 		t.Fatalf("nil handler returned")
 	}
@@ -423,3 +424,70 @@ func (s *stubTelemetrySource) ListEvents(_ context.Context, _ uuid.UUID, _ []sch
 }
 
 var _ policy.TelemetrySource = (*stubTelemetrySource)(nil)
+
+// TestSimulationHandler_Simulate_500_OpaqueErrorBody pins the
+// round-3 BUG_0002 fix: when the simulator returns an internal
+// failure (anything not in the typed errors-as values list), the
+// HTTP response body MUST NOT carry the raw err.Error() string.
+// The previous default branch did `WriteError(..., err.Error())`,
+// leaking pgx / ClickHouse driver wording (and potentially
+// tenant-isolated identifiers) to the caller.
+func TestSimulationHandler_Simulate_500_OpaqueErrorBody(t *testing.T) {
+	t.Parallel()
+	f := newSimHandlerFixture(t)
+	// Wire a simulator backed by a source that returns a
+	// sentinel error so the simulator surfaces a non-typed
+	// failure — the only path that lands on the `default`
+	// arm of the err switch.
+	sentinel := errors.New("clickhouse: query exec: 14:09 syntax: secret_table_name=baseline_models_tenant_xyz")
+	srcStub := &errorTelemetrySource{err: sentinel}
+	sim, err := policy.NewSimulator(srcStub, policy.GraphEvaluatorFactory{})
+	if err != nil {
+		t.Fatalf("new simulator: %v", err)
+	}
+	f.handler.SetSimulator(sim)
+
+	req := makeRequest(t, http.MethodPost,
+		"/api/v1/tenants/"+f.tenant.ID.String()+"/policy/simulations",
+		map[string]any{
+			"proposed": map[string]any{
+				"default_action": "deny",
+				"rules":          []map[string]any{{"id": "x", "domain": "ngfw", "verb": "deny"}},
+			},
+		},
+		map[string]string{"tenant_id": f.tenant.ID.String()},
+	)
+	rec := httptest.NewRecorder()
+	f.handler.simulate(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// The body must not contain any substring of the
+	// sentinel — that's exactly what the bug was.
+	for _, leak := range []string{
+		"clickhouse",
+		"query exec",
+		"baseline_models_tenant_xyz",
+		"secret_table_name",
+		sentinel.Error(),
+	} {
+		if bytes.Contains([]byte(body), []byte(leak)) {
+			t.Fatalf("response body leaks internal error %q; body=%s", leak, body)
+		}
+	}
+}
+
+// errorTelemetrySource returns a fixed error from every fetch
+// so the simulator's Simulate path surfaces a non-typed error
+// (i.e. lands on the default arm of the handler's err switch).
+type errorTelemetrySource struct{ err error }
+
+func (s *errorTelemetrySource) ListFlowEvents(_ context.Context, _ uuid.UUID, _, _ time.Time, _ int) ([]schema.Envelope, error) {
+	return nil, s.err
+}
+func (s *errorTelemetrySource) ListEvents(_ context.Context, _ uuid.UUID, _ []schema.EventClass, _, _ time.Time, _ int) ([]schema.Envelope, error) {
+	return nil, s.err
+}
+
+var _ policy.TelemetrySource = (*errorTelemetrySource)(nil)

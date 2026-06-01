@@ -481,3 +481,101 @@ func TestCanary_Rollback_LeavesDraftUnpromoted(t *testing.T) {
 		t.Fatalf("post-rollback current = %s, want previous %s", cur.ID, f.graph.ID)
 	}
 }
+
+// TestCanary_RollbackFromCanary_DemotesGraph pins the round-3
+// BUG_0001 fix: rolling back a rollout that has already been
+// promoted past dry_run must flip is_draft back to true on the
+// proposed graph so the previous live graph again wins
+// GetCurrentGraph. Without the fix the just-rolled-back
+// proposal would silently keep serving as the live policy
+// (the proposal would still have the higher version and would
+// still have is_draft = false because the dry_run -> canary
+// edge promoted it).
+func TestCanary_RollbackFromCanary_DemotesGraph(t *testing.T) {
+	t.Parallel()
+	f := newCanaryFixture(t)
+	rawProp, _ := json.Marshal(map[string]any{"default_action": "allow"})
+	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenantID,
+		StartDryRunInput{ProposedGraph: rawProp, PreviousGraphID: f.graph.ID})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	draftID := rollout.GraphID
+	// dry_run -> canary promotes the draft.
+	if _, err := f.canary.Advance(context.Background(), f.tenantID, rollout.ID,
+		AdvanceInput{NextStage: repository.PolicyRolloutStageCanary, CanaryPercent: 25}); err != nil {
+		t.Fatalf("advance to canary: %v", err)
+	}
+	promoted, err := f.policyR.GetGraph(context.Background(), f.tenantID, draftID)
+	if err != nil {
+		t.Fatalf("get after promote: %v", err)
+	}
+	if promoted.IsDraft {
+		t.Fatalf("promoted graph still IsDraft — promotion path regressed")
+	}
+	cur, err := f.policyR.GetCurrentGraph(context.Background(), f.tenantID)
+	if err != nil {
+		t.Fatalf("get current after promote: %v", err)
+	}
+	if cur.ID != draftID {
+		t.Fatalf("post-promote current = %s, want proposed %s", cur.ID, draftID)
+	}
+	// Now rollback. The proposal must demote back to draft
+	// so the previous graph again wins GetCurrentGraph.
+	if _, err := f.canary.Rollback(context.Background(), f.tenantID, rollout.ID, nil, "abort"); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	demoted, err := f.policyR.GetGraph(context.Background(), f.tenantID, draftID)
+	if err != nil {
+		t.Fatalf("get after rollback: %v", err)
+	}
+	if !demoted.IsDraft {
+		t.Fatalf("rolled-back proposal still has IsDraft = false — BUG_0001 regressed")
+	}
+	cur, err = f.policyR.GetCurrentGraph(context.Background(), f.tenantID)
+	if err != nil {
+		t.Fatalf("get current after rollback: %v", err)
+	}
+	if cur.ID != f.graph.ID {
+		t.Fatalf("post-rollback current = %s, want previous %s — BUG_0001 regressed",
+			cur.ID, f.graph.ID)
+	}
+}
+
+// TestCanary_RollbackFromFull_DemotesGraph is the same pin
+// as TestCanary_RollbackFromCanary_DemotesGraph but for the
+// dry_run -> full -> rolled_back path. The dry_run -> full
+// edge also promotes the proposal; the rollback must demote
+// it the same way the canary -> rolled_back path does.
+func TestCanary_RollbackFromFull_DemotesGraph(t *testing.T) {
+	t.Parallel()
+	f := newCanaryFixture(t)
+	rawProp, _ := json.Marshal(map[string]any{"default_action": "deny"})
+	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenantID,
+		StartDryRunInput{ProposedGraph: rawProp, PreviousGraphID: f.graph.ID})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	draftID := rollout.GraphID
+	if _, err := f.canary.Advance(context.Background(), f.tenantID, rollout.ID,
+		AdvanceInput{NextStage: repository.PolicyRolloutStageFull}); err != nil {
+		t.Fatalf("advance to full: %v", err)
+	}
+	if _, err := f.canary.Rollback(context.Background(), f.tenantID, rollout.ID, nil, "abort"); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	demoted, err := f.policyR.GetGraph(context.Background(), f.tenantID, draftID)
+	if err != nil {
+		t.Fatalf("get after rollback: %v", err)
+	}
+	if !demoted.IsDraft {
+		t.Fatalf("rolled-back proposal still has IsDraft = false (from full)")
+	}
+	cur, err := f.policyR.GetCurrentGraph(context.Background(), f.tenantID)
+	if err != nil {
+		t.Fatalf("get current after rollback: %v", err)
+	}
+	if cur.ID != f.graph.ID {
+		t.Fatalf("post-rollback current = %s, want previous %s", cur.ID, f.graph.ID)
+	}
+}

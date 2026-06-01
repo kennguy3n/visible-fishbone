@@ -85,6 +85,17 @@ func (h *PolicyHandler) Register(mux *http.ServeMux) {
 }
 
 // PolicyGraphResponse is the JSON projection of repository.PolicyGraph.
+//
+// IsDraft mirrors the repository column of the same name: a draft
+// graph is one that has been persisted (StartDryRun put it there)
+// but is NOT live — GetCurrentGraph filters drafts out, so
+// /policy/compile keeps serving the previously-live bundle. The
+// dry_run -> canary | full rollout edge promotes the draft via
+// CanaryService.Advance, and a rollback from canary / full
+// demotes it back. Exposing this on the wire lets operators
+// (and future portal UIs) inspect rollout state without
+// shelling into the database (see PR #39 Devin Review
+// ANALYSIS_0006 round 2).
 type PolicyGraphResponse struct {
 	ID              string          `json:"id"`
 	TenantID        string          `json:"tenant_id"`
@@ -93,6 +104,7 @@ type PolicyGraphResponse struct {
 	CompiledAt      *string         `json:"compiled_at,omitempty"`
 	CompilerVersion string          `json:"compiler_version,omitempty"`
 	CreatedAt       string          `json:"created_at"`
+	IsDraft         bool            `json:"is_draft"`
 }
 
 func toPolicyGraphResponse(g repository.PolicyGraph) PolicyGraphResponse {
@@ -101,6 +113,7 @@ func toPolicyGraphResponse(g repository.PolicyGraph) PolicyGraphResponse {
 		Version: g.Version, Graph: g.Graph,
 		CompilerVersion: g.CompilerVersion,
 		CreatedAt:       g.CreatedAt.Format(time.RFC3339Nano),
+		IsDraft:         g.IsDraft,
 	}
 	if g.CompiledAt != nil {
 		s := g.CompiledAt.Format(time.RFC3339Nano)

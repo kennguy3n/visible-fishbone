@@ -172,9 +172,15 @@ func (r *PolicyRolloutRepository) UpdateStage(
 	updatedBy *uuid.UUID,
 	at time.Time,
 	promoteGraphID *uuid.UUID,
+	demoteGraphID *uuid.UUID,
 ) (repository.PolicyRollout, error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.PolicyRollout{}, err
+	}
+	// Promote + demote in one call would be self-contradictory;
+	// reject early so the postgres and memory impls agree.
+	if promoteGraphID != nil && demoteGraphID != nil {
+		return repository.PolicyRollout{}, repository.ErrInvalidArgument
 	}
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
@@ -190,20 +196,27 @@ func (r *PolicyRolloutRepository) UpdateStage(
 			return repository.PolicyRollout{}, repository.ErrInvalidArgument
 		}
 		rl.CanaryPercent = canaryPercent
-	} else if canaryPercent >= 0 && canaryPercent <= 100 && next != repository.PolicyRolloutStageCanary {
-		// Leaving canary stage — CanaryPercent is no longer
-		// meaningful, but we keep the historical value on the
-		// row so the audit trail records "we ran at N%".
 	}
-	// If the caller requested a draft -> live promotion,
-	// validate the target graph exists for this tenant BEFORE
-	// mutating any rollout state — the memory impl has no
-	// transactions, so failing here is the only way to keep
-	// the rollout and the graph from disagreeing on rollback.
-	// In the postgres impl this is enforced by the FK + the
-	// tenant RLS GUC inside the surrounding withTenant tx.
+	// Leaving canary stage — CanaryPercent is no longer
+	// meaningful, but the row deliberately retains the
+	// historical value so the audit trail records "we ran at
+	// N%". No mutation here; the existing column stays.
+	// If the caller requested a draft -> live promotion OR
+	// the live -> draft demotion, validate the target graph
+	// exists for this tenant BEFORE mutating any rollout
+	// state — the memory impl has no transactions, so failing
+	// here is the only way to keep the rollout and the graph
+	// from disagreeing. In the postgres impl this is enforced
+	// by the FK + the tenant RLS GUC inside the surrounding
+	// withTenant tx.
 	if promoteGraphID != nil {
 		g, gok := r.s.policyGraphs[*promoteGraphID]
+		if !gok || g.TenantID != tenantID {
+			return repository.PolicyRollout{}, repository.ErrNotFound
+		}
+	}
+	if demoteGraphID != nil {
+		g, gok := r.s.policyGraphs[*demoteGraphID]
 		if !gok || g.TenantID != tenantID {
 			return repository.PolicyRollout{}, repository.ErrNotFound
 		}
@@ -224,16 +237,22 @@ func (r *PolicyRolloutRepository) UpdateStage(
 		}
 	}
 	r.s.policyRollouts[id] = rl
-	// Promotion side-effect: flip is_draft = false on the
-	// target graph. Idempotent (no-op if already live). The
-	// postgres impl does the equivalent UPDATE inside the
-	// same withTenant tx so the stage advance + promotion
-	// commit atomically; here we hold s.mu for both writes
-	// which is the memory-equivalent guarantee.
+	// Promotion / demotion side-effect, flipped on the target
+	// graph. Both are idempotent (no-op if the column already
+	// holds the target value). The postgres impl does the
+	// equivalent UPDATE inside the same withTenant tx so the
+	// stage advance + draft flip commit atomically; here we
+	// hold s.mu across both writes which is the memory-
+	// equivalent guarantee.
 	if promoteGraphID != nil {
 		g := r.s.policyGraphs[*promoteGraphID]
 		g.IsDraft = false
 		r.s.policyGraphs[*promoteGraphID] = g
+	}
+	if demoteGraphID != nil {
+		g := r.s.policyGraphs[*demoteGraphID]
+		g.IsDraft = true
+		r.s.policyGraphs[*demoteGraphID] = g
 	}
 	return cloneRollout(rl), nil
 }

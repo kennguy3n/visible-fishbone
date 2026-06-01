@@ -323,21 +323,34 @@ func (s *CanaryService) Advance(
 	// equivalent atomicity guarantee.
 	//
 	// Subsequent transitions (canary -> full, full ->
-	// completed, * -> rolled_back) do not pass a promote
-	// id: by that point the graph is already live (or, for
-	// rollback, it must intentionally stay a draft so audit
-	// history is preserved without polluting GetCurrentGraph).
+	// completed) do not pass a promote id: by that point
+	// the graph is already live and the advance is a
+	// state-machine move on the rollout row.
+	//
+	// Rollback (* -> rolled_back) instead passes a DEMOTE
+	// id when the rollout had already reached canary or
+	// full — by that point the proposed graph is live, and
+	// failing to flip it back to is_draft = true would
+	// leave the just-rolled-back proposal as the result
+	// of GetCurrentGraph until a new graph is published
+	// (see PR #39 Devin Review BUG_0001 round 3). When
+	// rolling back from dry_run the graph never went live,
+	// so no demotion is needed.
 	var promoteID *uuid.UUID
+	var demoteID *uuid.UUID
 	if shouldPromote(current.Stage, in.NextStage) {
 		gid := current.GraphID
 		promoteID = &gid
+	} else if shouldDemote(current.Stage, in.NextStage) {
+		gid := current.GraphID
+		demoteID = &gid
 	}
 
 	now := s.nowFunc().UTC()
 	updated, err := s.rollouts.UpdateStage(
 		ctx, tenantID, rolloutID,
 		in.NextStage, in.CanaryPercent, in.Notes, in.ActorID, now,
-		promoteID,
+		promoteID, demoteID,
 	)
 	if err != nil {
 		return repository.PolicyRollout{}, err
@@ -348,6 +361,7 @@ func (s *CanaryService) Advance(
 		slog.String("stage", string(updated.Stage)),
 		slog.Int("canary_percent", updated.CanaryPercent),
 		slog.Bool("promoted", promoteID != nil),
+		slog.Bool("demoted", demoteID != nil),
 	)
 	return updated, nil
 }
@@ -359,19 +373,43 @@ func (s *CanaryService) Advance(
 // stages where agents start fetching bundles compiled off the
 // candidate graph, so is_draft must flip exactly then.
 //
-// Later transitions (canary -> full, full -> completed) do NOT
-// re-promote: by the time the rollout reaches canary the graph
-// is already is_draft=false, and the subsequent advance is just
-// a state-machine move on the rollout row. Rolling back to
-// rolled_back also returns false: rollback intentionally leaves
-// the draft as a draft so audit queries can still locate the
-// candidate graph without it pre-empting GetCurrentGraph.
+// Later forward transitions (canary -> full, full -> completed)
+// do NOT re-promote: by the time the rollout reaches canary the
+// graph is already is_draft = false, and the subsequent advance
+// is just a state-machine move on the rollout row.
+//
+// Rollback (* -> rolled_back) is handled by shouldDemote below
+// — it never re-promotes, and from dry_run there is no live
+// graph to either promote or demote, so shouldPromote and
+// shouldDemote both return false in that case.
 func shouldPromote(prev, next repository.PolicyRolloutStage) bool {
 	if prev != repository.PolicyRolloutStageDryRun {
 		return false
 	}
 	return next == repository.PolicyRolloutStageCanary ||
 		next == repository.PolicyRolloutStageFull
+}
+
+// shouldDemote returns true when the transition from prev to
+// next requires the proposed graph to be flipped back to
+// is_draft = true. That happens exactly when a rollout that
+// already reached canary or full is rolled back: the
+// dry_run -> canary | full edge promoted the proposed graph
+// to live (shouldPromote above), so the reverse edge has to
+// undo that promotion or GetCurrentGraph would keep returning
+// the rolled-back proposal as the live bundle (see PR #39
+// Devin Review BUG_0001 round 3).
+//
+// Rolling back from dry_run is a no-op for the graph: the
+// proposal never went live, it stays is_draft = true, and
+// audit history retains the row without polluting
+// GetCurrentGraph. Forward transitions never demote.
+func shouldDemote(prev, next repository.PolicyRolloutStage) bool {
+	if next != repository.PolicyRolloutStageRolledBack {
+		return false
+	}
+	return prev == repository.PolicyRolloutStageCanary ||
+		prev == repository.PolicyRolloutStageFull
 }
 
 // Rollback is the dedicated escape hatch from any non-terminal

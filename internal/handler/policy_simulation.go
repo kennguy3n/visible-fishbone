@@ -50,6 +50,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -76,20 +77,27 @@ type PolicySimulationHandler struct {
 	canary  *policy.CanaryService
 	sim     atomic.Pointer[policy.Simulator]
 	policyR repository.PolicyRepository
+	logger  *slog.Logger
 }
 
 // NewPolicySimulationHandler bundles the dependencies the
-// handler needs.
+// handler needs. A nil logger falls back to slog.Default() so
+// callers don't have to plumb one through tests.
 func NewPolicySimulationHandler(
 	p *policy.Service,
 	canary *policy.CanaryService,
 	sim *policy.Simulator,
 	policyR repository.PolicyRepository,
+	logger *slog.Logger,
 ) *PolicySimulationHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	h := &PolicySimulationHandler{
 		policy:  p,
 		canary:  canary,
 		policyR: policyR,
+		logger:  logger,
 	}
 	if sim != nil {
 		h.sim.Store(sim)
@@ -288,7 +296,25 @@ func (h *PolicySimulationHandler) simulate(w http.ResponseWriter, r *http.Reques
 		case errors.Is(err, policy.ErrNoEvaluator):
 			WriteError(w, http.StatusUnprocessableEntity, "no_evaluator", err.Error())
 		default:
-			WriteError(w, http.StatusInternalServerError, "internal_error", err.Error())
+			// Internal-error path: never leak err.Error() to
+			// the client. The simulator can wrap pgx /
+			// ClickHouse driver errors, sql strings, and
+			// pinned device IDs from the replay window —
+			// any of those would surface internal
+			// implementation details (and potentially
+			// tenant-isolated identifiers) to whoever is
+			// calling this endpoint. Server-side audit
+			// still gets the full chain via h.logger, while
+			// the client sees only the stable opaque
+			// "internal_error" string the other handlers
+			// also use (see PR #39 Devin Review BUG_0002
+			// round 3).
+			h.logger.Error("policy.simulate: internal error",
+				"tenant_id", tenantID.String(),
+				"err", err,
+			)
+			WriteError(w, http.StatusInternalServerError, "internal_error",
+				"the simulator could not complete this run; the failure has been logged")
 		}
 		return
 	}

@@ -420,7 +420,7 @@ func buildRouter(
 		return nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
 	}
 	policySimHandler := handler.NewPolicySimulationHandler(
-		policySvc, canarySvc, nil, policyRepo)
+		policySvc, canarySvc, nil, policyRepo, logger)
 
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:           cfg,
