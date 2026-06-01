@@ -174,11 +174,36 @@ fn bootstrap_bundle_body() -> Vec<u8> {
 /// run loop. Splitting build vs run lets tests inspect the
 /// adapter handles before the supervisor's spawn pass starts.
 ///
+/// # Runtime requirement
+///
+/// Although `build_edge` itself is a sync function, it
+/// spawns the telemetry-bridge task via [`tokio::spawn`].
+/// The caller MUST therefore be executing inside a tokio
+/// runtime — i.e. it must be called from an `async fn` on
+/// a tokio runtime, from inside a `tokio::main`-decorated
+/// function, or from inside a [`tokio::runtime::Runtime`]
+/// `block_on` / `enter` scope. The two real callers are
+/// [`run_edge`] (an `async fn` invoked from
+/// `#[tokio::main]`) and the integration tests (each
+/// decorated with `#[tokio::test]`); both satisfy the
+/// constraint. The signature is deliberately sync because
+/// every per-subsystem build step is itself sync — making
+/// `build_edge` async would force every test harness (and
+/// the binary's `main`) to thread an unnecessary `.await`
+/// through the call site for a single internal
+/// `tokio::spawn`.
+///
 /// # Errors
 ///
 /// Returns [`EdgeBuildError`] for any per-subsystem build
 /// failure or for an unsupported `--updater-backend` /
 /// `--pal-backend` selection.
+///
+/// # Panics
+///
+/// Panics if called from outside a tokio runtime context,
+/// because the telemetry-bridge `tokio::spawn` requires
+/// one.
 pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildError> {
     // Refuse unsupported backends up front so the operator gets
     // a clear error before any subsystem starts allocating disk
