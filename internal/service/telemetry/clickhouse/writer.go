@@ -149,6 +149,162 @@ type Config struct {
 	// DialTimeout caps the time spent on initial connection.
 	// Defaults to 5s.
 	DialTimeout time.Duration
+
+	// Retention is the per-tenant retention resolver. The writer
+	// computes a `retain_until` value per row at flush time so
+	// the ClickHouse table's TTL clause auto-drops past-
+	// retention rows. nil → DefaultRetentionDays for every
+	// tenant. Per-tenant lookups are cached behind a short
+	// in-process TTL (see retentionCacheTTL) so a steady-state
+	// flush of N rows pays at most one resolver call per
+	// distinct tenant.
+	Retention RetentionResolver
+
+	// DefaultRetentionDays is the fallback retention applied
+	// when Retention is nil OR a resolver returns 0 (the
+	// "defer to default" sentinel). When the resolver returns a
+	// non-zero value it is authoritative for that tenant and is
+	// used directly — the writer never silently extends a
+	// starter-tier tenant to the default. All values (resolver
+	// or fallback) are then clamped to [MinRetentionDays,
+	// MaxRetentionDays] at the writer boundary so a
+	// misconfigured resolver cannot drive premature truncation
+	// or runaway storage. Defaults to the package-level
+	// DefaultRetentionDays constant (60).
+	DefaultRetentionDays int
+}
+
+// DefaultRetentionDays is the per-row retention fallback used
+// when no resolver is configured (Config.Retention == nil) or
+// the resolver returns 0. Picked at 60 days because it sits in
+// the middle of the (30-90 day) per-tier band specified by the
+// PRD and is the bill-vs-coverage sweet spot for the SME tier.
+// Tenants whose resolver returns a non-zero value get the
+// resolver value directly (clamped to [Min, Max]); the default
+// is NOT a lower bound on per-tenant retention.
+const DefaultRetentionDays = 60
+
+// MinRetentionDays / MaxRetentionDays bound the values a
+// resolver can return. Out-of-range values are clamped at the
+// writer boundary so a misconfigured resolver cannot cause
+// premature truncation or a runaway storage footprint.
+const MinRetentionDays = 30
+const MaxRetentionDays = 90
+
+// retentionCacheTTL is how long a per-tenant retention value is
+// cached before the writer asks the resolver again. 5 minutes
+// matches the operator-perceived latency of a tier change
+// (e.g. an upgrade from pro → enterprise propagates to the
+// archive TTL within 5 min).
+const retentionCacheTTL = 5 * time.Minute
+
+// RetentionResolver returns the per-tenant retention in days.
+// Implementations are typically backed by the tenant service
+// (Tier=enterprise → 90, pro → 60, starter → 30). Returning 0
+// signals "defer to the writer's DefaultRetentionDays". Returned
+// values are clamped to [MinRetentionDays, MaxRetentionDays].
+type RetentionResolver interface {
+	RetentionDays(ctx context.Context, tenantID uuid.UUID) int
+}
+
+// StaticRetentionResolver returns the same retention for every
+// tenant — the simplest resolver, suitable for single-tier
+// deployments.
+type StaticRetentionResolver struct{ Days int }
+
+// RetentionDays implements RetentionResolver.
+func (s StaticRetentionResolver) RetentionDays(_ context.Context, _ uuid.UUID) int {
+	return s.Days
+}
+
+// MapRetentionResolver returns per-tenant retention from an
+// in-memory map with a default fallback for tenants not present.
+// Safe for concurrent read; the inner map must not be mutated
+// after construction (use a fresh map on tier change).
+type MapRetentionResolver struct {
+	Default    int
+	PerTenant  map[uuid.UUID]int
+}
+
+// RetentionDays implements RetentionResolver.
+func (m MapRetentionResolver) RetentionDays(_ context.Context, tenantID uuid.UUID) int {
+	if m.PerTenant != nil {
+		if d, ok := m.PerTenant[tenantID]; ok {
+			return d
+		}
+	}
+	return m.Default
+}
+
+// retentionCacheEntry is the per-tenant cached retention value.
+type retentionCacheEntry struct {
+	days      int
+	expiresAt time.Time
+}
+
+// resolveRetention returns the per-tenant retention in days,
+// consulting the cache first. On a cache miss the writer asks
+// the resolver; a non-zero return is taken as authoritative for
+// that tenant (so e.g. a starter-tier tenant resolving to 30
+// stays at 30 — the package default is NOT a floor). A zero
+// return falls back to Config.DefaultRetentionDays. The final
+// value is then clamped to [MinRetentionDays, MaxRetentionDays]
+// and cached. Cache is mu-guarded so the flush path and Stats
+// reads can interleave safely.
+//
+// The current implementation pins the resolver lookup to the
+// best-effort context.Background() because the flush goroutine
+// must NOT be cancellable on a per-tenant resolver hiccup — the
+// downstream writer goroutine drives durability for every
+// tenant in the batch, and propagating a per-tenant ctx
+// cancellation would risk wedging unrelated tenants. A future
+// resolver that needs cancellation should plumb its own
+// deadline internally.
+//
+// Two distinct clocks are sampled to keep the cache TTL honest:
+// `cacheReadAt` for the cache-hit comparison (so a stale entry
+// from before the call site is correctly invalidated) and
+// `cacheWriteAt` taken *after* the resolver returns so the
+// `expiresAt` window measures TTL from the moment the value
+// became authoritative, not from the moment we entered the
+// function. Pre-round-7 both timestamps were the same `now`
+// captured at entry, which silently shortened the effective
+// TTL by the resolver call duration — fine for the default
+// in-process resolver but measurable when a future resolver is
+// backed by a multi-second remote service. See PR #38 round-7
+// ANALYSIS_0002.
+func (w *Writer) resolveRetention(tenantID uuid.UUID) int {
+	cacheReadAt := time.Now()
+	w.mu.Lock()
+	if w.retentionCache == nil {
+		w.retentionCache = make(map[uuid.UUID]retentionCacheEntry)
+	}
+	if entry, ok := w.retentionCache[tenantID]; ok && cacheReadAt.Before(entry.expiresAt) {
+		w.mu.Unlock()
+		return entry.days
+	}
+	w.mu.Unlock()
+
+	days := w.cfg.DefaultRetentionDays
+	if w.cfg.Retention != nil {
+		if got := w.cfg.Retention.RetentionDays(context.Background(), tenantID); got > 0 {
+			days = got
+		}
+	}
+	if days < MinRetentionDays {
+		days = MinRetentionDays
+	}
+	if days > MaxRetentionDays {
+		days = MaxRetentionDays
+	}
+	cacheWriteAt := time.Now()
+	w.mu.Lock()
+	w.retentionCache[tenantID] = retentionCacheEntry{
+		days:      days,
+		expiresAt: cacheWriteAt.Add(retentionCacheTTL),
+	}
+	w.mu.Unlock()
+	return days
 }
 
 func (c *Config) fillDefaults() {
@@ -169,6 +325,9 @@ func (c *Config) fillDefaults() {
 	}
 	if c.DialTimeout <= 0 {
 		c.DialTimeout = 5 * time.Second
+	}
+	if c.DefaultRetentionDays <= 0 {
+		c.DefaultRetentionDays = DefaultRetentionDays
 	}
 }
 
@@ -234,6 +393,13 @@ type Writer struct {
 	flushed           uint64
 	flushErrors       uint64
 	consecutiveErrors uint64
+
+	// retentionCache memoises RetentionResolver lookups for
+	// retentionCacheTTL so a single flush pays at most one
+	// resolver call per distinct tenant. Map is guarded by mu;
+	// the per-row read path is on the flush goroutine so the
+	// lock contention is bounded.
+	retentionCache map[uuid.UUID]retentionCacheEntry
 	// requeuedBatches counts how many times flushOnce re-enqueued
 	// a swapped-out batch at the head of `pending` because a
 	// transient failure (PrepareBatch reject, network Send
@@ -390,9 +556,10 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Writer, error) 
 			"INSERT INTO %s "+
 				"(event_id, tenant_id, device_id, site_id, timestamp, "+
 				"event_class, platform, schema_version, traffic_class, "+
-				"bytes_in, bytes_out, payload)",
+				"bytes_in, bytes_out, payload, retain_until)",
 			quoteIdentifier(cfg.Table),
 		),
+		retentionCache: make(map[uuid.UUID]retentionCacheEntry),
 	}
 	w.start()
 	return w, nil
@@ -472,6 +639,15 @@ func (w *Writer) EnsureSchema(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("clickhouse: ensure schema: %w", err)
 	}
+	// `retain_until` carries the per-tenant retention floor: the
+	// flush path computes it as `timestamp + retention_days *
+	// 24h` (retention_days clamped to [30, 90]) and the
+	// MergeTree TTL clause auto-drops rows past that point.
+	// Picking a per-row column over a fixed table-wide TTL is
+	// the only way ClickHouse supports per-tenant retention on
+	// a shared table without per-tenant table proliferation —
+	// the latter would explode our partition count and break
+	// the existing tenant_id-anchored ORDER BY layout.
 	createDDL := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
     event_id        UUID,
@@ -486,11 +662,13 @@ CREATE TABLE IF NOT EXISTS %s (
     bytes_in        UInt64 DEFAULT 0,
     bytes_out       UInt64 DEFAULT 0,
     payload         String,
+    retain_until    DateTime64(6, 'UTC') DEFAULT (timestamp + INTERVAL %d DAY),
     ingested_at     DateTime64(6, 'UTC') DEFAULT now64(6, 'UTC')
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(timestamp)
 ORDER BY (tenant_id, event_class, traffic_class, timestamp, event_id)
-SETTINGS index_granularity = 8192`, table)
+TTL toDateTime(retain_until)
+SETTINGS index_granularity = 8192`, table, w.cfg.DefaultRetentionDays)
 	if err := w.conn.Exec(ctx, createDDL); err != nil {
 		return fmt.Errorf("clickhouse: ensure schema: %w", err)
 	}
@@ -518,6 +696,24 @@ SETTINGS index_granularity = 8192`, table)
 		),
 		fmt.Sprintf(
 			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS bytes_out UInt64 DEFAULT 0 AFTER bytes_in",
+			table,
+		),
+		// Per-tenant retention column. Default expression
+		// uses the table-wide DefaultRetentionDays so pre-
+		// existing rows fall back to the configured floor
+		// rather than being immediately TTL-purged. The
+		// MODIFY TTL below activates the per-row purge.
+		fmt.Sprintf(
+			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS retain_until DateTime64(6, 'UTC') DEFAULT (timestamp + INTERVAL %d DAY) AFTER payload",
+			table, w.cfg.DefaultRetentionDays,
+		),
+		// MODIFY TTL is idempotent on ClickHouse — re-issuing
+		// the same TTL expression is a no-op. This activates
+		// the per-row TTL on tables that previously lacked
+		// one. ClickHouse evaluates the TTL on the next merge,
+		// so the activation does not stall flushes.
+		fmt.Sprintf(
+			"ALTER TABLE %s MODIFY TTL toDateTime(retain_until)",
 			table,
 		),
 	} {
@@ -849,6 +1045,16 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 		if trafficClass == "" {
 			trafficClass = "inspect_full"
 		}
+		// Per-tenant retention: derive retain_until from
+		// resolveRetention (cached, clamped to [Min, Max]).
+		// Computed off the envelope timestamp rather than now()
+		// so a replay or back-fill of older events lands with
+		// the same retention floor relative to the event time
+		// — `now() - retention_days` would prematurely truncate
+		// rows written from a long-buffered batch.
+		retentionDays := w.resolveRetention(env.TenantID)
+		retainUntil := env.Timestamp.UTC().Add(time.Duration(retentionDays) * 24 * time.Hour)
+
 		if err := prepared.Append(
 			env.EventID,
 			env.TenantID,
@@ -862,6 +1068,7 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 			env.BytesIn,
 			env.BytesOut,
 			string(env.Payload),
+			retainUntil,
 		); err != nil {
 			// Drop just this row, keep the rest of the batch.
 			// Returning early here would silently lose every

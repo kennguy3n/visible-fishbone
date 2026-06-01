@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -760,5 +761,235 @@ func TestService_HotWriteExhaustionRoutedToDLQ(t *testing.T) {
 	}
 	if m.HotWriteFails < 5 {
 		t.Errorf("expected HotWriteFails >= 5 (full retry budget), got %d", m.HotWriteFails)
+	}
+}
+
+// TestService_RateLimitExhaustionRoutedToDLQ is the regression test
+// for PR #38 round-5 BUG_0001 "Rate-limiter Nak path never checks
+// deliveryExhausted, causing silent message loss instead of
+// documented DLQ routing".
+//
+// Before the fix, the dispatch limiter-rejection branch
+// unconditionally Nak'd. A message that was rate-limited on EVERY
+// delivery attempt (up to MaxDeliver=5) would eventually fall out
+// of the consumer's pending set with no DLQ entry — silent data
+// loss for a tenant configured below the steady-state rate.
+//
+// After the fix, dispatch checks deliveryExhausted *before* the
+// Nak path in BOTH limiter branches and, on the terminal attempt,
+// routes the raw envelope bytes to the DLQ via
+// routeRateLimitExhaustionToDLQ + Term()s the message. The DLQ
+// entry preserves the source subject, headers, delivery count,
+// and a self-describing cause string ("rate-limit exhausted: ...")
+// so dashboards can split "tenant needs a budget bump" from
+// "writer is down".
+//
+// This test wires a limiter with Burst=0 (every Wait returns
+// ErrTenantBlocked immediately), publishes one envelope, and
+// asserts:
+//
+//  1. The DLQ publisher received exactly 1 call with the raw bytes.
+//  2. The DLQ call's cause string is prefixed with
+//     "rate-limit exhausted:" so dashboards can route it without
+//     parsing the wrapped error.
+//  3. The DLQ call's delivery count is >= hotPathMaxDeliver.
+//  4. The hot writer was NEVER called (the limiter stopped every
+//     delivery before it reached hot.Write).
+func TestService_RateLimitExhaustionRoutedToDLQ(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	// Burst=0 → every Wait returns ErrTenantBlocked immediately;
+	// Rate=0 → no refill within the test window. Every delivery
+	// attempt hits the limiter rejection branch.
+	resolver := telemetry.StaticLimitResolver{Limit: telemetry.TenantLimit{Rate: 0, Burst: 0}}
+	limiter := telemetry.NewPerTenantLimiter(resolver)
+
+	svc, err := telemetry.New(js, cfg,
+		telemetry.Config{Durable: "tlm-rl-dlq", DedupRingSize: 16},
+		hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dlq := &recordingDLQ{}
+	svc.WithDLQ(dlq)
+	svc.
+		WithPerTenantLimiter(limiter).
+		WithLimiterWaitBudget(5 * time.Millisecond).
+		WithNakBackoff(200 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	env := schema.Envelope{
+		SchemaVersion: schema.SchemaVersion, EventID: uuid.New(),
+		TenantID: uuid.New(), DeviceID: uuid.New(),
+		Timestamp:  time.Now().UTC(),
+		EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
+		Payload:    newPayload(t),
+	}
+	if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// 5 attempts * (Nak 200ms + JS backoff) ≈ a few seconds; allow
+	// 90s of headroom for CI jitter. Exit as soon as DLQPublished
+	// hits 1.
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		if svc.MetricsSnapshot().DLQPublished >= 1 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	_ = svc.Stop(stopCtx)
+
+	calls := dlq.Snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("DLQ publisher received %d calls, want 1 (rate-limit exhaustion must route to DLQ)", len(calls))
+	}
+	call := calls[0]
+	if call.delivery < uint64(5) {
+		t.Errorf("DLQ delivery count = %d, want >= 5 (terminal attempt only)", call.delivery)
+	}
+	if !strings.HasPrefix(call.cause, "rate-limit exhausted:") {
+		t.Errorf("DLQ cause = %q, want prefix \"rate-limit exhausted:\" (operator dashboard contract)", call.cause)
+	}
+
+	m := svc.MetricsSnapshot()
+	if m.DLQPublished != 1 {
+		t.Errorf("expected DLQPublished = 1, got %d", m.DLQPublished)
+	}
+	if m.DLQPublishFail != 0 {
+		t.Errorf("expected DLQPublishFail = 0 when DLQ accepts, got %d", m.DLQPublishFail)
+	}
+	if hits := len(hot.Snapshot()); hits != 0 {
+		t.Errorf("hot writer hits = %d, want 0 (limiter must shed before hot.Write)", hits)
+	}
+}
+
+func TestService_PerTenantLimiter_NaksWhenBudgetExhausted(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	// Build a per-tenant limiter that allows exactly two events
+	// (the burst) and then no refill within the test window —
+	// every subsequent envelope must be Nak'd by the limiter
+	// gate.
+	resolver := telemetry.StaticLimitResolver{Limit: telemetry.TenantLimit{Rate: 0.001, Burst: 2}}
+	limiter := telemetry.NewPerTenantLimiter(resolver)
+
+	svc, err := telemetry.New(js, cfg, telemetry.Config{Durable: "tlm-ratelimit"}, hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	// Very short wait budget + short Nak backoff so the test
+	// finishes in single-digit seconds. The production defaults
+	// are tuned for production load, not test wall-clock.
+	svc.
+		WithPerTenantLimiter(limiter).
+		WithLimiterWaitBudget(5 * time.Millisecond).
+		WithNakBackoff(200 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	tenant := uuid.New()
+	const total = 6
+	for i := 0; i < total; i++ {
+		env := schema.Envelope{
+			SchemaVersion: schema.SchemaVersion, EventID: uuid.New(),
+			TenantID: tenant, DeviceID: uuid.New(),
+			Timestamp:  time.Now().UTC(),
+			EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
+			Payload:    newPayload(t),
+		}
+		if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
+			t.Fatalf("publish[%d]: %v", i, err)
+		}
+	}
+	// Wait long enough for the consumer to process the burst
+	// AND for the limiter to Nak the remainder a few times.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		m := svc.MetricsSnapshot()
+		if len(hot.Snapshot()) >= 2 && m.Nacked >= uint64(total-2) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	if err := svc.Stop(stopCtx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	hits := len(hot.Snapshot())
+	if hits < 2 {
+		t.Errorf("hot writer hits = %d, want >= 2 (burst budget)", hits)
+	}
+	m := svc.MetricsSnapshot()
+	if m.Nacked < uint64(total-2) {
+		t.Errorf("Nacked = %d, want >= %d (limiter-rejected envelopes)", m.Nacked, total-2)
+	}
+}
+
+func TestService_PerTenantLimiter_NilLimiterIsNoOp(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	svc, err := telemetry.New(js, cfg, telemetry.Config{Durable: "tlm-nilrl"}, hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	// Set limiter to nil explicitly — must be a no-op.
+	svc.WithPerTenantLimiter(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	tenant := uuid.New()
+	for i := 0; i < 4; i++ {
+		env := schema.Envelope{
+			SchemaVersion: schema.SchemaVersion, EventID: uuid.New(),
+			TenantID: tenant, DeviceID: uuid.New(),
+			Timestamp:  time.Now().UTC(),
+			EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
+			Payload:    newPayload(t),
+		}
+		if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(hot.Snapshot()) >= 4 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	_ = svc.Stop(stopCtx)
+	if hits := len(hot.Snapshot()); hits != 4 {
+		t.Errorf("nil limiter: hot writer hits = %d, want 4 (no shedding)", hits)
 	}
 }
