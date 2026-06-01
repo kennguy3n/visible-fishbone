@@ -30,6 +30,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -219,9 +220,15 @@ func toBindingResponse(b repository.MSPTenantBinding) MSPTenantBindingResponse {
 // ---- CRUD ----------------------------------------------------------------
 
 func (h *MSPHandler) list(w http.ResponseWriter, r *http.Request) {
+	// OpenAPI publishes the cursor parameter as `?after=`. The
+	// shared QueryLimit/Page helpers, the tenant handler, and the
+	// integration handler all use the same name. A copy-paste of
+	// `?cursor=` slipped in here originally — spec-compliant
+	// clients would have silently fetched the first page on
+	// every request.
 	page := repository.Page{
 		Limit: QueryLimit(r),
-		After: r.URL.Query().Get("cursor"),
+		After: r.URL.Query().Get("after"),
 	}
 	res, err := h.msps.List(r.Context(), page)
 	if err != nil {
@@ -245,6 +252,14 @@ func (h *MSPHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" {
 		WriteError(w, http.StatusBadRequest, "invalid_param", "name is required")
+		return
+	}
+	// Slug is required by the repo layer (memory: explicit guard;
+	// postgres: NOT NULL column). Surface a precise 400 here so
+	// the client gets `slug is required` rather than the generic
+	// `invalid_argument` that bubbles up from the repo.
+	if req.Slug == "" {
+		WriteError(w, http.StatusBadRequest, "invalid_param", "slug is required")
 		return
 	}
 	m := repository.MSP{
@@ -340,7 +355,8 @@ func (h *MSPHandler) listTenants(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	page := repository.Page{Limit: QueryLimit(r), After: r.URL.Query().Get("cursor")}
+	// `?after=` per OpenAPI; see list() above for the same fix.
+	page := repository.Page{Limit: QueryLimit(r), After: r.URL.Query().Get("after")}
 	res, err := h.msps.ListTenants(r.Context(), id, page)
 	if err != nil {
 		WriteRepositoryError(w, err)
@@ -373,13 +389,28 @@ func (h *MSPHandler) assignTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rel := repository.MSPRelationshipOwner
-	// Body is optional — only decode when Content-Length > 0
-	// signals a body was supplied. A zero-byte POST defaults to
-	// owner.
-	if r.ContentLength > 0 {
+	// Body is optional — assignTenant defaults to `owner` when
+	// no body is supplied. r.ContentLength is:
+	//   *  > 0 for fixed-length bodies (Content-Length header set)
+	//   *  0   when the client explicitly sent no body
+	//   * -1   when the body is sent with Transfer-Encoding: chunked
+	//          (Content-Length unknown until the chunk stream ends)
+	// The previous guard `r.ContentLength > 0` silently ignored
+	// the chunked case — a client streaming `{"relationship":
+	// "co_manager"}` over chunked encoding would get the
+	// compiled-in default `owner` applied silently, with NO error
+	// and no log line. Mirrors the fix on device.go:84.
+	if r.ContentLength != 0 {
 		var req AssignTenantRequest
-		if !DecodeJSON(w, r, &req) {
-			return
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil {
+			if errors.Is(err, io.EOF) {
+				// chunked transfer with zero bytes — treat as
+				// "no body", apply default `owner` relationship.
+			} else {
+				WriteError(w, http.StatusBadRequest, "invalid_body", err.Error())
+				return
+			}
 		}
 		if req.Relationship != "" {
 			rel = repository.MSPRelationship(req.Relationship)
@@ -554,13 +585,16 @@ func (h *MSPHandler) bulkGenerateClaimTokens(w http.ResponseWriter, r *http.Requ
 
 // writeBulkError maps service-level bulk errors. ErrInvalidArgument
 // already maps via WriteRepositoryError; anything else surfaces
-// as 500.
+// as 500 with a generic body. Never leak err.Error() — the bulk
+// path can wrap pgx / errgroup errors that surface internal
+// implementation details (table names, internal tenant IDs).
+// Mirrors policy_simulation.go:299-306 and WriteRepositoryError.
 func writeBulkError(w http.ResponseWriter, err error) {
 	if errors.Is(err, repository.ErrInvalidArgument) {
 		WriteRepositoryError(w, err)
 		return
 	}
-	WriteError(w, http.StatusInternalServerError, "internal_error", err.Error())
+	WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 }
 
 // ---- Branding ------------------------------------------------------------

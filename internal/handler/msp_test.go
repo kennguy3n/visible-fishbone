@@ -365,3 +365,195 @@ func TestMSPHandler_Delete(t *testing.T) {
 		t.Fatalf("expected MSPStatusDeleted, got %q", got.Status)
 	}
 }
+
+// TestMSPHandler_List_UsesAfterCursor pins the round-1 fix: the
+// list handler reads `?after=` (matching the OpenAPI spec), not
+// `?cursor=`. Seeds 3 MSPs, fetches with limit=1 to force a
+// next_cursor, then re-fetches with `?after=<cursor>` and asserts
+// the second page contains the remaining 2 items.
+func TestMSPHandler_List_UsesAfterCursor(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if _, err := msps.Create(ctx, repository.MSP{
+			Name: "x", Slug: "x-" + uuid.NewString(),
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	// Page 1: limit=1 forces a next_cursor.
+	rec := doMSPJSON(t, mux, http.MethodGet, "/api/v1/msps?limit=1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page1 status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var page1 struct {
+		Items      []handler.MSPResponse `json:"items"`
+		NextCursor string                `json:"next_cursor"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&page1); err != nil {
+		t.Fatalf("decode page1: %v", err)
+	}
+	if len(page1.Items) != 1 || page1.NextCursor == "" {
+		t.Fatalf("page1 = %+v, want 1 item + non-empty cursor", page1)
+	}
+	// Page 2: spec-compliant `?after=` (NOT `?cursor=` — the bug).
+	rec = doMSPJSON(t, mux, http.MethodGet, "/api/v1/msps?limit=10&after="+page1.NextCursor, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page2 status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var page2 struct {
+		Items []handler.MSPResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&page2); err != nil {
+		t.Fatalf("decode page2: %v", err)
+	}
+	if len(page2.Items) != 2 {
+		t.Fatalf("page2 returned %d items, want 2 (cursor was ignored — the round-1 bug)",
+			len(page2.Items))
+	}
+}
+
+// TestMSPHandler_ListTenants_UsesAfterCursor pins the round-1 fix
+// on the second `?cursor=`→`?after=` site (tenant bindings list).
+// Same shape as TestMSPHandler_List_UsesAfterCursor.
+func TestMSPHandler_ListTenants_UsesAfterCursor(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+	m, _ := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-after"})
+	for i := 0; i < 3; i++ {
+		tn, err := tenants.Create(ctx, repository.Tenant{Name: "t", Slug: "t-" + uuid.NewString()})
+		if err != nil {
+			t.Fatalf("seed tenant: %v", err)
+		}
+		if _, err := msps.AssignTenant(ctx, m.ID, tn.ID, repository.MSPRelationshipOwner, nil); err != nil {
+			t.Fatalf("assign: %v", err)
+		}
+	}
+	rec := doMSPJSON(t, mux, http.MethodGet, "/api/v1/msps/"+m.ID.String()+"/tenants?limit=1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page1 status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var page1 struct {
+		Items      []handler.MSPTenantBindingResponse `json:"items"`
+		NextCursor string                             `json:"next_cursor"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&page1); err != nil {
+		t.Fatalf("decode page1: %v", err)
+	}
+	if len(page1.Items) != 1 || page1.NextCursor == "" {
+		t.Fatalf("page1 = %+v, want 1 item + non-empty cursor", page1)
+	}
+	rec = doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/msps/"+m.ID.String()+"/tenants?limit=10&after="+page1.NextCursor, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page2 status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var page2 struct {
+		Items []handler.MSPTenantBindingResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&page2); err != nil {
+		t.Fatalf("decode page2: %v", err)
+	}
+	if len(page2.Items) != 2 {
+		t.Fatalf("page2 returned %d items, want 2 (cursor was ignored — the round-1 bug)",
+			len(page2.Items))
+	}
+}
+
+// TestMSPHandler_AssignTenant_DecodesChunkedBody pins the round-1
+// fix on the ContentLength guard. A chunked transfer (ContentLength
+// == -1) was previously rejected by `r.ContentLength > 0`, silently
+// applying the default `owner` relationship to a request that
+// explicitly asked for `co_manager`. The fix changes the guard to
+// `!= 0` and handles `io.EOF` for genuinely empty chunked bodies.
+func TestMSPHandler_AssignTenant_DecodesChunkedBody(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+	m, _ := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-chunk"})
+	tn, _ := tenants.Create(ctx, repository.Tenant{Name: "tc", Slug: "tc-chunk"})
+
+	// Build a raw chunked-transfer request. httptest.NewRequest
+	// derives ContentLength from the body reader's length, but
+	// when we explicitly clear ContentLength to -1 and set the
+	// Transfer-Encoding header, the handler observes the wire
+	// shape an HTTP/1.1 client (or HTTP/2) would send.
+	body := []byte(`{"relationship":"co_manager"}`)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/tenants/"+tn.ID.String(),
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.TransferEncoding = []string{"chunked"}
+	req.ContentLength = -1
+	req = req.WithContext(middleware.WithUserIDForTest(req.Context(), uuid.New()))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp handler.MSPTenantBindingResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Relationship != "co_manager" {
+		t.Fatalf("relationship = %q, want co_manager (chunked body was silently ignored — the round-1 bug)",
+			resp.Relationship)
+	}
+}
+
+// TestMSPHandler_AssignTenant_EmptyBodyDefaultsToOwner ensures the
+// fix preserves the documented `owner` default when no body is
+// supplied (ContentLength == 0).
+func TestMSPHandler_AssignTenant_EmptyBodyDefaultsToOwner(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+	m, _ := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-empty"})
+	tn, _ := tenants.Create(ctx, repository.Tenant{Name: "te", Slug: "te-empty"})
+
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/tenants/"+tn.ID.String(), nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp handler.MSPTenantBindingResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Relationship != "owner" {
+		t.Fatalf("relationship = %q, want owner (default for empty body)", resp.Relationship)
+	}
+}
+
+// TestMSPHandler_CreateRejectsMissingSlug pins the round-1 INFO
+// fix: empty slug now returns 400 `invalid_param` with
+// "slug is required" instead of bubbling up the generic
+// `invalid_argument` from the repo layer.
+func TestMSPHandler_CreateRejectsMissingSlug(t *testing.T) {
+	t.Parallel()
+	mux, _, _, _, _ := setupMSPHandler(t, false)
+	rec := doMSPJSON(t, mux, http.MethodPost, "/api/v1/msps", handler.MSPRequest{Name: "Acme"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	// Verify the precise error message — clients should see
+	// "slug is required" not the generic repo error.
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "invalid_param" {
+		t.Fatalf("error.code = %q, want invalid_param", body.Error.Code)
+	}
+	if body.Error.Message != "slug is required" {
+		t.Fatalf("error.message = %q, want 'slug is required'", body.Error.Message)
+	}
+}
