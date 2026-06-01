@@ -4,8 +4,7 @@
 [![CI](https://github.com/kennguy3n/visible-fishbone/actions/workflows/ci.yml/badge.svg)](https://github.com/kennguy3n/visible-fishbone/actions/workflows/ci.yml)
 
 ShieldNet Gateway (SNG) is the network-layer product in the **SN360
-family**, alongside [ShieldNet Defense](https://github.com/kennguy3n/sn360-es)
-(email security) and [ShieldNet Access](https://github.com/kennguy3n/cautious-fishstick)
+family**, alongside [ShieldNet Defense] and [ShieldNet Access]
 (ZTNA + PAM). SNG delivers NGFW, IDS/IPS, SWG, DNS security, ZTNA,
 VPN replacement, SD-WAN, telemetry, and unified policy orchestration
 as a SaaS-managed, multi-tenant platform with edge enforcement —
