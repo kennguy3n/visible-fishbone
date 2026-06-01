@@ -198,6 +198,14 @@ func (svc *Service) UpdateConnector(
 		}
 		existing.Secret = cloneRawJSON(in.Secret)
 	}
+	// Clear Status before Update so a concurrent SetConnectorStatus
+	// landing between Get and Update is not silently reverted. The
+	// repo Update path treats empty Status as "preserve current"
+	// (memory: `if c.Status != ""` guard; postgres:
+	// `COALESCE(NULLIF($7, ''), status)`). Lifecycle transitions are
+	// the exclusive responsibility of SetConnectorStatus, never
+	// UpdateConnector.
+	existing.Status = ""
 	updated, err := svc.connectors.Update(ctx, tenantID, existing)
 	if err != nil {
 		return repository.IntegrationConnector{}, err

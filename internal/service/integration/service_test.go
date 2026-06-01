@@ -214,6 +214,46 @@ func TestService_UpdateConnector_ClearEventTypes(t *testing.T) {
 	}
 }
 
+// TestService_UpdateConnector_DoesNotRevertConcurrentStatusChange
+// pins the round-3 fix: UpdateConnector must NOT silently revert a
+// concurrent SetConnectorStatus that landed between Get and Update.
+// Previously the service fetched the row (status="active"), let an
+// operator-driven PATCH modify only Name, then wrote the entire
+// row back — including the stale Status — which silently undid any
+// concurrent SetConnectorStatus(disabled). The fix clears
+// existing.Status to "" before Update; both repos preserve current
+// status on empty input.
+func TestService_UpdateConnector_DoesNotRevertConcurrentStatusChange(t *testing.T) {
+	svc, _, _, tn, actor := newSvc(t)
+	c, err := svc.CreateConnector(context.Background(), tn, goodCreateInput(), &actor)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if c.Status != repository.IntegrationConnectorStatusActive {
+		t.Fatalf("seed: status = %s, want active", c.Status)
+	}
+	// Simulate the race: SetConnectorStatus(disabled) lands AFTER
+	// some hypothetical Op-A read the row but BEFORE Op-A's
+	// UpdateConnector write. Then Op-A's UpdateConnector executes.
+	// The disabled status must survive.
+	if _, err := svc.SetConnectorStatus(context.Background(), tn, c.ID,
+		repository.IntegrationConnectorStatusDisabled, &actor); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	updated, err := svc.UpdateConnector(context.Background(), tn, c.ID,
+		integration.UpdateConnectorInput{Name: "renamed-after-disable"}, &actor)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.Status != repository.IntegrationConnectorStatusDisabled {
+		t.Fatalf("status = %s after concurrent disable+update, want disabled (reverted!)",
+			updated.Status)
+	}
+	if updated.Name != "renamed-after-disable" {
+		t.Fatalf("name = %s, update did not apply", updated.Name)
+	}
+}
+
 func TestService_SetConnectorStatus_TogglesAndRejectsInvalid(t *testing.T) {
 	svc, _, _, tn, actor := newSvc(t)
 	c, err := svc.CreateConnector(context.Background(), tn, goodCreateInput(), &actor)
