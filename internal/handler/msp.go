@@ -725,18 +725,31 @@ func (h *MSPHandler) bulkGenerateClaimTokens(w http.ResponseWriter, r *http.Requ
 	WriteJSON(w, http.StatusAccepted, toBulkResultResponse(res))
 }
 
-// writeBulkError maps service-level bulk errors. ErrInvalidArgument
-// already maps via WriteRepositoryError; anything else surfaces
-// as 500 with a generic body. Never leak err.Error() — the bulk
-// path can wrap pgx / errgroup errors that surface internal
-// implementation details (table names, internal tenant IDs).
+// writeBulkError maps service-level bulk errors. Today the
+// RequireMSPScope middleware validates the msp_id UUID and the
+// authz layer rejects unauthorized callers BEFORE the bulk
+// service runs, so ErrNotFound/ErrForbidden from the
+// `authorizedTenants` step is unreachable in the happy-path call
+// flow. But the bulk service is a public function with its own
+// error contract; defence-in-depth mapping here ensures the HTTP
+// surface stays correct if a future caller wires the bulk path
+// without the middleware (e.g. an internal admin tool or a
+// follow-up endpoint surface). Never leak `err.Error()` — the
+// bulk path can wrap pgx / errgroup errors that surface internal
+// implementation details (table names, internal tenant IDs); the
+// repository-error helpers already use generic messages.
 // Mirrors policy_simulation.go:299-306 and WriteRepositoryError.
 func writeBulkError(w http.ResponseWriter, err error) {
-	if errors.Is(err, repository.ErrInvalidArgument) {
+	switch {
+	case errors.Is(err, repository.ErrInvalidArgument),
+		errors.Is(err, repository.ErrNotFound),
+		errors.Is(err, repository.ErrForbidden),
+		errors.Is(err, repository.ErrConflict),
+		errors.Is(err, repository.ErrResourceExhausted):
 		WriteRepositoryError(w, err)
-		return
+	default:
+		WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 	}
-	WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 }
 
 // ---- Branding ------------------------------------------------------------
