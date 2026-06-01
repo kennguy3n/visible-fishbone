@@ -90,6 +90,13 @@ var (
 // The maxEvents argument is an upper bound; a source that has
 // fewer matching events returns the smaller slice rather than
 // padding.
+//
+// ListEvents is the canonical method; classes selects which
+// schema.EventClass values the simulator pulls. Pass a single
+// EventClassFlow to replicate the pre-DNS/HTTP/ZTNA contract.
+//
+// ListFlowEvents is retained for callers that still want the
+// flow-only path; implementations may forward to ListEvents.
 type TelemetrySource interface {
 	ListFlowEvents(
 		ctx context.Context,
@@ -97,6 +104,35 @@ type TelemetrySource interface {
 		since, until time.Time,
 		maxEvents int,
 	) ([]schema.Envelope, error)
+
+	ListEvents(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		classes []schema.EventClass,
+		since, until time.Time,
+		maxEvents int,
+	) ([]schema.Envelope, error)
+}
+
+// DefaultSimulatedEventClasses is the set of schema.EventClass
+// values the simulator pulls when SimulationOptions.EventClasses
+// is unset. Chosen to align with the evaluator's
+// domainMatchesEventClass dispatch (every event class the
+// evaluator can dispatch rules for):
+//
+//   - flow: NGFW / SD-WAN / SWG / ZTNA flow events
+//   - dns:  DNS-domain rules
+//   - http: SWG HTTP-shaped rules
+//   - ztna: dedicated ZTNA verdict events
+//
+// Excluded by default (no rules currently dispatch against
+// them): ips, sdwan (handled via flow), agent, posture.
+// Operators can override by setting SimulationOptions.EventClasses.
+var DefaultSimulatedEventClasses = []schema.EventClass{
+	schema.EventClassFlow,
+	schema.EventClassDNS,
+	schema.EventClassHTTP,
+	schema.EventClassZTNA,
 }
 
 // Evaluator is a pure (graph, envelope) -> verdict function. The
@@ -203,6 +239,12 @@ type SimulationOptions struct {
 	// MaxEvents caps the number of envelopes pulled from the
 	// telemetry source. Zero -> DefaultSimulationMaxEvents.
 	MaxEvents int
+
+	// EventClasses overrides the set of schema.EventClass values
+	// pulled from the telemetry source. Nil/empty ->
+	// DefaultSimulatedEventClasses (flow + dns + http + ztna).
+	// Pass a singleton EventClassFlow to restrict to flow-only.
+	EventClasses []schema.EventClass
 
 	// Logger overrides the simulator's default logger for this
 	// call. Useful when operator-driven runs want a per-run
@@ -329,6 +371,14 @@ func (s *Simulator) Simulate(
 		maxEvents = DefaultSimulationMaxEvents
 	}
 
+	// Pick the event-class set. Defaulting to flow+dns+http+ztna
+	// matches what the evaluator dispatches against; a caller
+	// (e.g. an automated bake-off) can narrow it via opts.
+	classes := opts.EventClasses
+	if len(classes) == 0 {
+		classes = DefaultSimulatedEventClasses
+	}
+
 	prevEval, prevErr := s.buildEvaluator(ctx, prev)
 	nextEval, nextErr := s.buildEvaluator(ctx, next)
 	if prevEval == nil && nextEval == nil {
@@ -363,7 +413,7 @@ func (s *Simulator) Simulate(
 	}
 
 	started := s.nowFunc().UTC()
-	envelopes, err := s.src.ListFlowEvents(ctx, tenantID, since, until, maxEvents)
+	envelopes, err := s.src.ListEvents(ctx, tenantID, classes, since, until, maxEvents)
 	if err != nil {
 		return ImpactReport{}, fmt.Errorf("policy.simulate: list events: %w", err)
 	}

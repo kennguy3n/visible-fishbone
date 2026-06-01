@@ -142,16 +142,43 @@ func (h *clickhouseHandle) Close() error {
 }
 
 // ListFlowEvents returns envelopes for (tenant_id, event_class
-// = "flow") in the given [since, until] window, ordered by
-// (timestamp, event_id) ascending. maxEvents bounds the result
-// — the simulator caps at DefaultSimulationMaxEvents.
+// = "flow") in the given [since, until] window. Preserved as a
+// thin wrapper over ListEvents for callers that only care about
+// flow events (the simulator's pre-DNS/HTTP/ZTNA contract).
+//
+// New code should prefer ListEvents and pass an explicit list of
+// event classes so DNS / HTTP / ZTNA policy changes are also
+// simulated. See ListEvents for window + ordering semantics.
+func (r *Reader) ListFlowEvents(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	since, until time.Time,
+	maxEvents int,
+) ([]schema.Envelope, error) {
+	return r.ListEvents(ctx, tenantID, []schema.EventClass{schema.EventClassFlow}, since, until, maxEvents)
+}
+
+// ListEvents returns envelopes for (tenant_id, event_class IN
+// classes) in the given [since, until] window, ordered by
+// (timestamp, event_id) ascending. maxEvents bounds the result —
+// the simulator caps at DefaultSimulationMaxEvents.
+//
+// classes must be non-empty; each entry must satisfy
+// schema.EventClass.IsValid(). The PRIMARY KEY (tenant_id,
+// event_class, traffic_class, timestamp, event_id) means
+// multi-class queries DO require a sort (the ORDER BY can't be
+// satisfied directly from the index across distinct class
+// values), but the cost is acceptable for the operator-request
+// hot path — the simulator scans bounded windows (24h) capped at
+// 100k events.
 //
 // since is closed; until is open (LT, not LE) so caller-supplied
 // "now" windows are consistent with the writer's
 // "timestamp < now" convention used in the retention path.
-func (r *Reader) ListFlowEvents(
+func (r *Reader) ListEvents(
 	ctx context.Context,
 	tenantID uuid.UUID,
+	classes []schema.EventClass,
 	since, until time.Time,
 	maxEvents int,
 ) ([]schema.Envelope, error) {
@@ -161,6 +188,21 @@ func (r *Reader) ListFlowEvents(
 	if !until.After(since) {
 		return nil, errors.New("clickhouse reader: until must be after since")
 	}
+	if len(classes) == 0 {
+		return nil, errors.New("clickhouse reader: at least one event class required")
+	}
+	classValues := make([]string, 0, len(classes))
+	seen := make(map[schema.EventClass]struct{}, len(classes))
+	for _, c := range classes {
+		if !c.IsValid() {
+			return nil, fmt.Errorf("clickhouse reader: invalid event class %q", c)
+		}
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		classValues = append(classValues, string(c))
+	}
 	if maxEvents <= 0 {
 		maxEvents = 1000
 	}
@@ -168,17 +210,34 @@ func (r *Reader) ListFlowEvents(
 	// Pre-validated table identifier (we own it via the
 	// constructor) is safe to interpolate; everything else is
 	// parameterised so the operator cannot inject SQL via the
-	// tenant_id or window.
+	// tenant_id, classes, or window. The IN list uses positional
+	// placeholders so the ClickHouse driver type-binds each
+	// class as a separate String parameter.
+	placeholders := make([]byte, 0, len(classValues)*2)
+	for i := range classValues {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+	}
 	q := fmt.Sprintf(`SELECT
 event_id, tenant_id, device_id, site_id,
 timestamp, event_class, platform, schema_version,
 traffic_class, bytes_in, bytes_out, payload
 FROM %s
-WHERE tenant_id = ? AND event_class = 'flow'
+WHERE tenant_id = ? AND event_class IN (%s)
   AND timestamp >= ? AND timestamp < ?
 ORDER BY timestamp ASC, event_id ASC
-LIMIT ?`, quoteIdentifier(r.table))
-	rows, err := r.conn.Query(ctx, q, tenantID, since, until, uint64(maxEvents))
+LIMIT ?`, quoteIdentifier(r.table), string(placeholders))
+
+	args := make([]any, 0, 4+len(classValues))
+	args = append(args, tenantID)
+	for _, cv := range classValues {
+		args = append(args, cv)
+	}
+	args = append(args, since, until, uint64(maxEvents))
+
+	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse reader: query: %w", err)
 	}

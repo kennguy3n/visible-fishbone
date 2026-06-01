@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/nats/schema"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
@@ -337,3 +339,87 @@ func TestNewPolicySimulationHandler_NilSimulator_Permitted(t *testing.T) {
 	}
 	h.SetSimulator(nil) // must not panic
 }
+
+// TestSimulationHandler_Simulate_RejectsInvalidProposedGraph
+// pins the post-PR-39-round-2 contract that simulate validates
+// the proposed graph BEFORE handing it to the simulator. Without
+// this guard a malformed graph would surface as a deny-all
+// impact report (correct-by-degradation for production telemetry
+// but misleading for an operator iterating on a draft).
+func TestSimulationHandler_Simulate_RejectsInvalidProposedGraph(t *testing.T) {
+	t.Parallel()
+	f := newSimHandlerFixture(t)
+	// Wire a non-nil simulator so we exercise the pre-validation
+	// branch instead of the 503 short-circuit. Re-use the default
+	// graph evaluator factory since we only care that the request
+	// is rejected before the simulator runs.
+	store := memory.NewStore()
+	srcStub := &stubTelemetrySource{} // implements ListEvents/ListFlowEvents
+	sim, err := policy.NewSimulator(srcStub, policy.GraphEvaluatorFactory{})
+	if err != nil {
+		t.Fatalf("new simulator: %v", err)
+	}
+	f.handler.SetSimulator(sim)
+	_ = store
+
+	req := makeRequest(t, http.MethodPost,
+		"/api/v1/tenants/"+f.tenant.ID.String()+"/policy/simulations",
+		map[string]any{
+			"proposed": map[string]any{
+				// Unknown verb — Validate() rejects this.
+				"default_action": "explode",
+			},
+		},
+		map[string]string{"tenant_id": f.tenant.ID.String()},
+	)
+	rec := httptest.NewRecorder()
+	f.handler.simulate(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if srcStub.calls != 0 {
+		t.Fatalf("simulator pulled events for an invalid graph — pre-validation didn't fire (calls=%d)", srcStub.calls)
+	}
+}
+
+// TestSimulationHandler_StartRollout_RejectsInvalidProposedGraph
+// pins the equivalent guard on the rollout path. CompileDryRun
+// otherwise degrades to a deny-all shadow bundle on ParseGraph
+// failure.
+func TestSimulationHandler_StartRollout_RejectsInvalidProposedGraph(t *testing.T) {
+	t.Parallel()
+	f := newSimHandlerFixture(t)
+	req := makeRequest(t, http.MethodPost,
+		"/api/v1/tenants/"+f.tenant.ID.String()+"/policy/rollouts",
+		map[string]any{
+			"proposed": map[string]any{
+				"default_action": "garbage",
+			},
+		},
+		map[string]string{"tenant_id": f.tenant.ID.String()},
+	)
+	rec := httptest.NewRecorder()
+	f.handler.startRollout(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// stubTelemetrySource is a minimal TelemetrySource that counts
+// calls — used to assert that pre-validation rejects requests
+// without invoking the simulator.
+type stubTelemetrySource struct {
+	calls int
+}
+
+func (s *stubTelemetrySource) ListFlowEvents(_ context.Context, _ uuid.UUID, _, _ time.Time, _ int) ([]schema.Envelope, error) {
+	s.calls++
+	return nil, nil
+}
+
+func (s *stubTelemetrySource) ListEvents(_ context.Context, _ uuid.UUID, _ []schema.EventClass, _, _ time.Time, _ int) ([]schema.Envelope, error) {
+	s.calls++
+	return nil, nil
+}
+
+var _ policy.TelemetrySource = (*stubTelemetrySource)(nil)

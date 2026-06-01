@@ -3,11 +3,14 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/nats/schema"
 )
 
 // stubRows implements driver.Rows over a slice of pre-canned
@@ -186,13 +189,16 @@ func TestReader_ListFlowEvents_DefaultMaxEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	// The last arg of the query is the LIMIT — must be > 0.
-	if len(q.lastArgs) != 4 {
-		t.Fatalf("expected 4 args, got %d", len(q.lastArgs))
+	// After the ListEvents refactor the arg layout is:
+	//   [tenant_id, classes..., since, until, limit]
+	// ListFlowEvents passes a single class, so args = 5 and the
+	// limit is the last entry.
+	if len(q.lastArgs) != 5 {
+		t.Fatalf("expected 5 args (tenant + 1 class + since + until + limit), got %d", len(q.lastArgs))
 	}
-	limit, ok := q.lastArgs[3].(uint64)
+	limit, ok := q.lastArgs[len(q.lastArgs)-1].(uint64)
 	if !ok || limit == 0 {
-		t.Fatalf("LIMIT not defaulted: arg=%v (%T)", q.lastArgs[3], q.lastArgs[3])
+		t.Fatalf("LIMIT not defaulted: arg=%v (%T)", q.lastArgs[len(q.lastArgs)-1], q.lastArgs[len(q.lastArgs)-1])
 	}
 }
 
@@ -289,8 +295,25 @@ func TestReader_ListFlowEvents_TableNameInQuery(t *testing.T) {
 	if !contains(q.lastQuery, "ORDER BY timestamp ASC, event_id ASC") {
 		t.Fatalf("query missing deterministic ORDER BY: %s", q.lastQuery)
 	}
-	if !contains(q.lastQuery, "event_class = 'flow'") {
-		t.Fatalf("query missing event_class filter: %s", q.lastQuery)
+	// After the ListEvents refactor the WHERE clause uses an
+	// IN list with positional placeholders; the actual class
+	// values are bound as args (verified separately by callers
+	// inspecting q.lastArgs). All we assert here is that the
+	// query is parameterised on event_class so a future change
+	// can't accidentally drop the filter.
+	if !contains(q.lastQuery, "event_class IN (") {
+		t.Fatalf("query missing event_class IN-list filter: %s", q.lastQuery)
+	}
+	// The single-class ListFlowEvents path must bind exactly one
+	// placeholder for the class.
+	if !contains(q.lastQuery, "event_class IN (?)") {
+		t.Fatalf("ListFlowEvents query must bind exactly one event_class placeholder: %s", q.lastQuery)
+	}
+	if len(q.lastArgs) < 2 {
+		t.Fatalf("expected at least 2 args, got %d", len(q.lastArgs))
+	}
+	if cls, ok := q.lastArgs[1].(string); !ok || cls != "flow" {
+		t.Fatalf("expected second arg to be class \"flow\", got %v (%T)", q.lastArgs[1], q.lastArgs[1])
 	}
 }
 
@@ -301,4 +324,76 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// ----------------------------------------------------------------
+// ListEvents — multi-class path. These tests pin the contract
+// (IN-list parameterisation, class validation, deduplication)
+// that the simulator depends on for DNS/HTTP/ZTNA simulation.
+// ----------------------------------------------------------------
+
+func TestReader_ListEvents_MultiClassParameterisation(t *testing.T) {
+	t.Parallel()
+	q := &stubQuerier{rows: &stubRows{}}
+	r, _ := NewReader(q, "")
+	_, err := r.ListEvents(context.Background(), uuid.New(),
+		[]schema.EventClass{schema.EventClassFlow, schema.EventClassDNS, schema.EventClassHTTP, schema.EventClassZTNA},
+		time.Unix(0, 0), time.Unix(100, 0), 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	// Four classes -> "IN (?,?,?,?)".
+	if !strings.Contains(q.lastQuery, "event_class IN (?,?,?,?)") {
+		t.Fatalf("query missing IN (?,?,?,?) placeholders: %s", q.lastQuery)
+	}
+	// arg layout: [tenant, flow, dns, http, ztna, since, until, limit]
+	if len(q.lastArgs) != 8 {
+		t.Fatalf("expected 8 args, got %d", len(q.lastArgs))
+	}
+	wantClasses := []string{"flow", "dns", "http", "ztna"}
+	for i, want := range wantClasses {
+		got, ok := q.lastArgs[1+i].(string)
+		if !ok || got != want {
+			t.Fatalf("arg[%d]: want class %q, got %v (%T)", 1+i, want, q.lastArgs[1+i], q.lastArgs[1+i])
+		}
+	}
+	if _, ok := q.lastArgs[7].(uint64); !ok {
+		t.Fatalf("last arg must be uint64 LIMIT, got %T", q.lastArgs[7])
+	}
+}
+
+func TestReader_ListEvents_RejectsEmptyClasses(t *testing.T) {
+	t.Parallel()
+	r, _ := NewReader(&stubQuerier{rows: &stubRows{}}, "")
+	_, err := r.ListEvents(context.Background(), uuid.New(),
+		nil, time.Unix(0, 0), time.Unix(100, 0), 10)
+	if err == nil {
+		t.Fatalf("expected error for empty classes")
+	}
+}
+
+func TestReader_ListEvents_RejectsInvalidClass(t *testing.T) {
+	t.Parallel()
+	r, _ := NewReader(&stubQuerier{rows: &stubRows{}}, "")
+	_, err := r.ListEvents(context.Background(), uuid.New(),
+		[]schema.EventClass{"bogus"}, time.Unix(0, 0), time.Unix(100, 0), 10)
+	if err == nil {
+		t.Fatalf("expected error for invalid class")
+	}
+}
+
+func TestReader_ListEvents_DeduplicatesClasses(t *testing.T) {
+	t.Parallel()
+	q := &stubQuerier{rows: &stubRows{}}
+	r, _ := NewReader(q, "")
+	_, err := r.ListEvents(context.Background(), uuid.New(),
+		[]schema.EventClass{schema.EventClassFlow, schema.EventClassFlow, schema.EventClassDNS},
+		time.Unix(0, 0), time.Unix(100, 0), 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	// Dedup -> 2 placeholders, not 3.
+	if !strings.Contains(q.lastQuery, "event_class IN (?,?)") {
+		t.Fatalf("expected dedup'd IN (?,?), got: %s", q.lastQuery)
+	}
 }

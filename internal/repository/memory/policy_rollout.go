@@ -239,11 +239,31 @@ func (r *PolicyRolloutRepository) UpdateStage(
 }
 
 // validRolloutTransition encodes the monotone-forward state
-// machine: any non-terminal stage may transition to RolledBack
-// (one-way emergency exit); DryRun -> Canary, Canary -> Full,
-// Full -> Completed are the only forward edges. The Postgres
-// driver enforces the same matrix via a CHECK constraint.
+// machine matching the Postgres trigger
+// policy_rollouts_check_transition (migration 010,
+// trg_policy_rollouts_check_transition):
+//
+//   - Same-stage updates are always allowed. This is how the
+//     service layer patches notes / canary_percent / promoteGraphID
+//     without advancing the stage (e.g. bumping canary 1% -> 5%).
+//   - Terminal stages (Completed, RolledBack) reject every other
+//     destination — even RolledBack — because re-rolling-back a
+//     completed rollout would corrupt the audit trail.
+//   - Any non-terminal stage may transition to RolledBack (the
+//     one-way emergency exit).
+//   - DryRun -> Canary | Full, Canary -> Full, Full -> Completed
+//     are the only forward edges.
+//
+// The memory backend MUST mirror the Postgres trigger exactly so
+// callers can rely on identical behaviour regardless of which
+// repository is wired underneath. Prior to this fix the memory
+// impl returned ErrInvalidArgument on same-stage updates, causing
+// any in-place patch to pass against Postgres and fail against
+// memory.
 func validRolloutTransition(from, to repository.PolicyRolloutStage) bool {
+	if from == to {
+		return true
+	}
 	if from.IsTerminal() {
 		return false
 	}

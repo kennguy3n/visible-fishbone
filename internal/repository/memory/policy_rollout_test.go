@@ -3,6 +3,7 @@ package memory_test
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -245,5 +246,66 @@ func TestRollout_Get_RespectsTenantIsolation(t *testing.T) {
 	// Tenant B asking for tenant A's rollout must miss.
 	if _, err := repo.Get(ctx(), tntB.ID, saved.ID); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("cross-tenant Get err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestRollout_UpdateStage_SameStageAllowed pins the
+// memory<->Postgres parity contract: the Postgres trigger
+// policy_rollouts_check_transition allows same-stage updates so
+// the service can patch notes / canary_percent / promoteGraphID
+// without forcing a transition. The memory backend MUST mirror
+// that.
+func TestRollout_UpdateStage_SameStageAllowed(t *testing.T) {
+	s, tnt, g := seedRolloutTenantAndGraph(t)
+	repo := memory.NewPolicyRolloutRepository(s)
+	saved, err := repo.Create(ctx(), tnt.ID, makeRollout(tnt.ID, g.ID))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	now := time.Now()
+	// dry_run -> canary @25%
+	if _, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID,
+		repository.PolicyRolloutStageCanary, 25, "initial canary", nil, now, nil); err != nil {
+		t.Fatalf("advance to canary: %v", err)
+	}
+	// canary -> canary @50%: same stage, new percent + notes. Must succeed.
+	updated, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID,
+		repository.PolicyRolloutStageCanary, 50, "bumped canary to 50%", nil, now.Add(time.Minute), nil)
+	if err != nil {
+		t.Fatalf("same-stage update: %v", err)
+	}
+	if updated.Stage != repository.PolicyRolloutStageCanary {
+		t.Fatalf("Stage = %s, want canary", updated.Stage)
+	}
+	if updated.CanaryPercent != 50 {
+		t.Fatalf("CanaryPercent = %d, want 50", updated.CanaryPercent)
+	}
+	// Notes are appended (matching Postgres's
+	// `notes || E'\n' || $4`), not replaced.
+	if !strings.Contains(updated.Notes, "bumped canary to 50%") {
+		t.Fatalf("Notes = %q, expected to contain 'bumped canary to 50%%'", updated.Notes)
+	}
+	if !strings.Contains(updated.Notes, "initial canary") {
+		t.Fatalf("Notes = %q, expected to retain prior 'initial canary'", updated.Notes)
+	}
+}
+
+// TestRollout_UpdateStage_NonForwardTransitionsStillRejected
+// confirms the same-stage relaxation does NOT weaken any other
+// invariant — backward / illegal-forward transitions remain
+// rejected after the validRolloutTransition fix.
+func TestRollout_UpdateStage_NonForwardTransitionsStillRejected(t *testing.T) {
+	s, tnt, g := seedRolloutTenantAndGraph(t)
+	repo := memory.NewPolicyRolloutRepository(s)
+	saved, err := repo.Create(ctx(), tnt.ID, makeRollout(tnt.ID, g.ID))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	now := time.Now()
+	// dry_run -> completed (skip canary / full) is illegal — the
+	// state machine only allows dry_run -> canary | full.
+	if _, err := repo.UpdateStage(ctx(), tnt.ID, saved.ID,
+		repository.PolicyRolloutStageCompleted, 100, "", nil, now, nil); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("dry_run -> completed err = %v, want ErrInvalidArgument", err)
 	}
 }

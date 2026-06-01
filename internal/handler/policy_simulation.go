@@ -169,6 +169,19 @@ type verdictTransitionResponse struct {
 }
 
 func toSimulationResponse(r policy.ImpactReport) simulationResponse {
+	// All array fields are initialized to non-nil empty slices so the
+	// JSON response always renders [], not null. Clients (the operator
+	// portal, downstream graphs) iterate these fields unconditionally
+	// and would NPE on a null. Allocate with exact-fit capacity since
+	// the input sizes are known.
+	affectedDevices := r.AffectedDevices
+	if affectedDevices == nil {
+		affectedDevices = make([]uuid.UUID, 0)
+	}
+	affectedSites := r.AffectedSites
+	if affectedSites == nil {
+		affectedSites = make([]uuid.UUID, 0)
+	}
 	out := simulationResponse{
 		SimulationID:    r.SimulationID,
 		TenantID:        r.TenantID,
@@ -180,12 +193,13 @@ func toSimulationResponse(r policy.ImpactReport) simulationResponse {
 		NextGraphVer:    r.NextGraphVer,
 		Total:           r.Total,
 		Changed:         r.Changed,
-		AffectedDevices: r.AffectedDevices,
-		AffectedSites:   r.AffectedSites,
+		AffectedDevices: affectedDevices,
+		AffectedSites:   affectedSites,
 		PrevErrors:      r.PrevErrors,
 		NextErrors:      r.NextErrors,
 		StartedAt:       r.StartedAt,
 		FinishedAt:      r.FinishedAt,
+		Transitions:     make([]verdictTransitionResponse, 0, len(r.Transitions)),
 	}
 	for _, t := range r.Transitions {
 		out.Transitions = append(out.Transitions, verdictTransitionResponse{
@@ -213,6 +227,17 @@ func (h *PolicySimulationHandler) simulate(w http.ResponseWriter, r *http.Reques
 	}
 	if len(req.Proposed) == 0 {
 		WriteError(w, http.StatusBadRequest, "invalid_argument", "proposed graph is required")
+		return
+	}
+	// Pre-validate the proposed graph before handing it to the
+	// simulator. Without this, ParseGraph failures inside the
+	// simulator surface as a deny-all impact report (which is the
+	// correct evaluation-fallback for production telemetry but is
+	// misleading for an operator asking "is my proposed graph going
+	// to do what I think?"). A 400 with the parser's error message
+	// is the right answer on the API path.
+	if _, err := policy.ParseGraph(req.Proposed); err != nil {
+		WriteRepositoryError(w, err)
 		return
 	}
 
@@ -345,6 +370,16 @@ func (h *PolicySimulationHandler) startRollout(w http.ResponseWriter, r *http.Re
 	}
 	if len(req.Proposed) == 0 {
 		WriteError(w, http.StatusBadRequest, "invalid_argument", "proposed graph is required")
+		return
+	}
+	// Same rationale as simulate: CompileDryRun degrades to the
+	// legacy verbatim-rules path on ParseGraph failure, which
+	// means a malformed graph would silently produce a shadow
+	// bundle that denies everything. Reject it up front so the
+	// operator sees a precise parser error instead of a deny-all
+	// dry-run after the fact.
+	if _, err := policy.ParseGraph(req.Proposed); err != nil {
+		WriteRepositoryError(w, err)
 		return
 	}
 

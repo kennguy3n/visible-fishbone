@@ -16,28 +16,57 @@ import (
 )
 
 // stubSource is a deterministic in-memory TelemetrySource for
-// tests. ListFlowEvents returns the same slice every call so
-// determinism is testable end-to-end.
+// tests. ListEvents (and ListFlowEvents, which forwards into it
+// to mirror the real ClickHouse Reader contract) returns the
+// same filtered slice every call so determinism is testable
+// end-to-end. classes (when non-nil) restricts the returned
+// envelopes by EventClass — matches the Reader's IN-list filter.
 type stubSource struct {
-	envs []schema.Envelope
-	err  error
-	call int
+	envs        []schema.Envelope
+	err         error
+	call        int
+	lastClasses []schema.EventClass
 }
 
 func (s *stubSource) ListFlowEvents(
+	ctx context.Context,
+	tid uuid.UUID,
+	since, until time.Time,
+	max int,
+) ([]schema.Envelope, error) {
+	return s.ListEvents(ctx, tid, []schema.EventClass{schema.EventClassFlow}, since, until, max)
+}
+
+func (s *stubSource) ListEvents(
 	_ context.Context,
 	_ uuid.UUID,
+	classes []schema.EventClass,
 	_, _ time.Time,
 	_ int,
 ) ([]schema.Envelope, error) {
 	s.call++
+	s.lastClasses = append([]schema.EventClass(nil), classes...)
 	if s.err != nil {
 		return nil, s.err
 	}
-	// Return a defensive copy so the simulator can't mutate the
-	// shared slice.
-	out := make([]schema.Envelope, len(s.envs))
-	copy(out, s.envs)
+	// Filter to the requested classes when set; the real Reader
+	// pushes this filter down to ClickHouse via WHERE event_class
+	// IN (...), so the stub MUST mirror that or simulator tests
+	// will see envelopes the production path wouldn't.
+	wanted := make(map[schema.EventClass]struct{}, len(classes))
+	for _, c := range classes {
+		wanted[c] = struct{}{}
+	}
+	out := make([]schema.Envelope, 0, len(s.envs))
+	for _, e := range s.envs {
+		if len(wanted) == 0 {
+			out = append(out, e)
+			continue
+		}
+		if _, ok := wanted[e.EventClass]; ok {
+			out = append(out, e)
+		}
+	}
 	return out, nil
 }
 
@@ -540,6 +569,97 @@ func TestSimulator_EmptyEventsProducesEmptyReport(t *testing.T) {
 var _ TelemetrySource = (*stubSource)(nil)
 var _ Evaluator = (*stubEvaluator)(nil)
 var _ EvaluatorFactory = (*stubFactory)(nil)
+
+// TestSimulator_DefaultEventClasses pins the simulator's
+// post-PR-39-round-2 contract that it pulls flow+dns+http+ztna
+// by default (matching evaluator.domainMatchesEventClass). Prior
+// to this change the simulator only pulled flow, so DNS/HTTP/
+// ZTNA policy changes silently appeared as zero-impact.
+func TestSimulator_DefaultEventClasses(t *testing.T) {
+	t.Parallel()
+	tenantID := uuid.New()
+	devID := uuid.New()
+	ts := time.Unix(1_700_000_000, 0).UTC()
+	flowEnv := makeFlowEnv(t, tenantID, devID, nil, ts)
+	dnsEnv := makeFlowEnv(t, tenantID, devID, nil, ts.Add(time.Second))
+	dnsEnv.EventID = uuid.New()
+	dnsEnv.EventClass = schema.EventClassDNS
+	httpEnv := makeFlowEnv(t, tenantID, devID, nil, ts.Add(2*time.Second))
+	httpEnv.EventID = uuid.New()
+	httpEnv.EventClass = schema.EventClassHTTP
+	ztnaEnv := makeFlowEnv(t, tenantID, devID, nil, ts.Add(3*time.Second))
+	ztnaEnv.EventID = uuid.New()
+	ztnaEnv.EventClass = schema.EventClassZTNA
+	// Excluded by default — must NOT appear in the simulation.
+	postureEnv := makeFlowEnv(t, tenantID, devID, nil, ts.Add(4*time.Second))
+	postureEnv.EventID = uuid.New()
+	postureEnv.EventClass = schema.EventClassPosture
+
+	src := &stubSource{envs: []schema.Envelope{flowEnv, dnsEnv, httpEnv, ztnaEnv, postureEnv}}
+	prev := newGraph()
+	next := newGraph()
+	factory := &stubFactory{byGraph: map[uuid.UUID]Evaluator{
+		prev.ID: &stubEvaluator{verdict: schema.VerdictAllow},
+		next.ID: &stubEvaluator{verdict: schema.VerdictDeny},
+	}}
+	sim, _ := NewSimulator(src, factory)
+	rep, err := sim.Simulate(context.Background(), tenantID, prev, next,
+		time.Unix(0, 0), time.Unix(1_700_000_999, 0), SimulationOptions{})
+	if err != nil {
+		t.Fatalf("simulate: %v", err)
+	}
+	// 4 simulated (flow+dns+http+ztna), posture excluded by default.
+	if rep.Total != 4 {
+		t.Fatalf("Total = %d, want 4 (posture should be excluded by default)", rep.Total)
+	}
+	if rep.Changed != 4 {
+		t.Fatalf("Changed = %d, want 4 (every event flipped allow->deny)", rep.Changed)
+	}
+	// Confirm the source actually received the default class set.
+	wantClasses := DefaultSimulatedEventClasses
+	if len(src.lastClasses) != len(wantClasses) {
+		t.Fatalf("source classes = %v, want %v", src.lastClasses, wantClasses)
+	}
+	for i, c := range wantClasses {
+		if src.lastClasses[i] != c {
+			t.Fatalf("source classes[%d] = %s, want %s", i, src.lastClasses[i], c)
+		}
+	}
+}
+
+// TestSimulator_CustomEventClasses verifies the override path.
+func TestSimulator_CustomEventClasses(t *testing.T) {
+	t.Parallel()
+	tenantID := uuid.New()
+	devID := uuid.New()
+	ts := time.Unix(1_700_000_000, 0).UTC()
+	flowEnv := makeFlowEnv(t, tenantID, devID, nil, ts)
+	dnsEnv := makeFlowEnv(t, tenantID, devID, nil, ts.Add(time.Second))
+	dnsEnv.EventID = uuid.New()
+	dnsEnv.EventClass = schema.EventClassDNS
+
+	src := &stubSource{envs: []schema.Envelope{flowEnv, dnsEnv}}
+	prev := newGraph()
+	next := newGraph()
+	factory := &stubFactory{byGraph: map[uuid.UUID]Evaluator{
+		prev.ID: &stubEvaluator{verdict: schema.VerdictAllow},
+		next.ID: &stubEvaluator{verdict: schema.VerdictDeny},
+	}}
+	sim, _ := NewSimulator(src, factory)
+	rep, err := sim.Simulate(context.Background(), tenantID, prev, next,
+		time.Unix(0, 0), time.Unix(1_700_000_999, 0), SimulationOptions{
+			EventClasses: []schema.EventClass{schema.EventClassFlow},
+		})
+	if err != nil {
+		t.Fatalf("simulate: %v", err)
+	}
+	if rep.Total != 1 {
+		t.Fatalf("Total = %d, want 1 (flow only)", rep.Total)
+	}
+	if len(src.lastClasses) != 1 || src.lastClasses[0] != schema.EventClassFlow {
+		t.Fatalf("source classes = %v, want [flow]", src.lastClasses)
+	}
+}
 
 // quickJSON keeps the test file self-contained for fixture
 // generation without dragging in encoding/json everywhere.
