@@ -23,13 +23,24 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
+
+// defaultRunConcurrency caps the number of tenants the Run
+// background loop processes in parallel per tick. The choice
+// of 16 trades total tick latency for predictable database
+// load: a single tick at this concurrency caps the open
+// repository connections at roughly 16 (one List per tenant
+// plus a handful of TuneDimension lookups) regardless of the
+// total tenant count. Operators with thousands of tenants no
+// longer see one goroutine — and one set of connection
+// acquisitions — per tenant.
+const defaultRunConcurrency = 16
 
 // FeedbackTuningOptions configure the Feedback tuning loop.
 type FeedbackTuningOptions struct {
@@ -54,6 +65,11 @@ type FeedbackTuningOptions struct {
 	// LowerStep is the (positive) additive nudge subtracted
 	// when both FP and noise rates are low. Defaults to 0.25σ.
 	LowerStep float64
+	// RunConcurrency bounds how many tenants Run processes in
+	// parallel per tick. Zero / negative → defaultRunConcurrency.
+	// A value greater than the tenant count is harmless — the
+	// limiter caps actually-spawned goroutines.
+	RunConcurrency int
 }
 
 func (o FeedbackTuningOptions) fillDefaults() FeedbackTuningOptions {
@@ -74,6 +90,9 @@ func (o FeedbackTuningOptions) fillDefaults() FeedbackTuningOptions {
 	}
 	if o.LowerStep <= 0 {
 		o.LowerStep = 0.25
+	}
+	if o.RunConcurrency <= 0 {
+		o.RunConcurrency = defaultRunConcurrency
 	}
 	return o
 }
@@ -269,12 +288,15 @@ func (f *Feedback) TuneDimension(
 // the repository knows about. Cancellation through ctx stops
 // the loop.
 //
-// Each tick lists every baseline for every tenant; this is
-// O(n_tenants * n_dimensions) but is bounded by the operator-
-// owned baseline catalog size (typically < 100). The loop is
-// resilient: any per-dimension failure is logged via the
-// supplied logger (or slog.Default()) and does NOT abort the
-// tick.
+// Each tick processes every baseline for every tenant. Tenant
+// fan-out is bounded by opts.RunConcurrency (default 16) so
+// the tick produces at most that many in-flight per-tenant
+// goroutines regardless of the operator's tenant count. Per-
+// tenant baseline iteration remains sequential within each
+// goroutine, capping concurrent repository connections at
+// RunConcurrency. The loop is resilient: any per-dimension
+// failure is logged via the supplied logger (or slog.Default())
+// and does NOT abort the tick.
 func (f *Feedback) Run(
 	ctx context.Context,
 	interval time.Duration,
@@ -300,19 +322,22 @@ func (f *Feedback) tickOnce(ctx context.Context, tenantsFn func(ctx context.Cont
 	if err != nil {
 		return
 	}
-	var wg sync.WaitGroup
+	// errgroup.WithContext + SetLimit caps the per-tick goroutine
+	// count and connection-pool pressure at RunConcurrency.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(f.opts.RunConcurrency)
 	for _, tid := range tenants {
-		wg.Add(1)
-		go func(tenantID uuid.UUID) {
-			defer wg.Done()
-			pg, err := f.baseline.List(ctx, tenantID, repository.Page{Limit: 1000})
+		tenantID := tid
+		g.Go(func() error {
+			pg, err := f.baseline.List(gctx, tenantID, repository.Page{Limit: 1000})
 			if err != nil {
-				return
+				return nil
 			}
 			for _, m := range pg.Items {
-				_, _ = f.TuneDimension(ctx, tenantID, m.Dimension, m.WindowSeconds)
+				_, _ = f.TuneDimension(gctx, tenantID, m.Dimension, m.WindowSeconds)
 			}
-		}(tid)
+			return nil
+		})
 	}
-	wg.Wait()
+	_ = g.Wait()
 }

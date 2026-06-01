@@ -317,6 +317,18 @@ LIMIT $6
 // and the UPDATE are inside the same transaction so the
 // state observed by the pre-check is the state the UPDATE
 // rejects against.
+//
+// Concurrency: under READ COMMITTED a concurrent Acknowledge
+// can commit between this transaction's pre-scan and UPDATE.
+// The UPDATE's row lock forces Tx2 to wait for Tx1's commit,
+// then re-evaluates the WHERE clause against the post-commit
+// snapshot — so Tx2's UPDATE matches zero rows. In that case
+// we re-scan the row's current state and:
+//   - if it is now 'acknowledged', return the row idempotently
+//     (Tx2 wanted to ack, and the row IS acked — distinct from
+//     a terminal-state conflict);
+//   - if it raced into a terminal state (resolved/suppressed),
+//     return ErrConflict.
 func (r *AlertRepository) Acknowledge(
 	ctx context.Context,
 	tenantID, id uuid.UUID,
@@ -362,8 +374,21 @@ RETURNING ` + alertSelectColumns
 		scanned, scanErr := scanAlert(row)
 		if errors.Is(scanErr, pgx.ErrNoRows) {
 			// Lost the race: another writer transitioned the
-			// row out of 'open' between the pre-scan and the
-			// UPDATE. Treat as terminal-state conflict.
+			// row between the pre-scan and the UPDATE. Re-scan
+			// the row and decide based on the now-current state.
+			rescan := tx.QueryRow(ctx,
+				`SELECT `+alertSelectColumns+` FROM alerts WHERE id = $1::uuid`, id)
+			rescanAlert, rescanErr := scanAlert(rescan)
+			if errors.Is(rescanErr, pgx.ErrNoRows) {
+				return repository.ErrNotFound
+			}
+			if rescanErr != nil {
+				return fmt.Errorf("post-update rescan alerts: %w", rescanErr)
+			}
+			if rescanAlert.State == repository.AlertStateAcknowledged {
+				out = rescanAlert
+				return nil
+			}
 			return repository.ErrConflict
 		}
 		if scanErr != nil {
@@ -424,8 +449,24 @@ RETURNING ` + alertSelectColumns
 		scanned, scanErr := scanAlert(row)
 		if errors.Is(scanErr, pgx.ErrNoRows) {
 			// Lost the race: another writer transitioned the
-			// row out of 'open'/'acknowledged' between the
-			// pre-scan and the UPDATE. Terminal-state conflict.
+			// row between the pre-scan and the UPDATE. Re-scan
+			// to see the now-current state — a concurrent
+			// Resolve produces the same end state we wanted,
+			// so return idempotent; any other terminal state
+			// (suppressed) is a true conflict.
+			rescan := tx.QueryRow(ctx,
+				`SELECT `+alertSelectColumns+` FROM alerts WHERE id = $1::uuid`, id)
+			rescanAlert, rescanErr := scanAlert(rescan)
+			if errors.Is(rescanErr, pgx.ErrNoRows) {
+				return repository.ErrNotFound
+			}
+			if rescanErr != nil {
+				return fmt.Errorf("post-update rescan alerts: %w", rescanErr)
+			}
+			if rescanAlert.State == repository.AlertStateResolved {
+				out = rescanAlert
+				return nil
+			}
 			return repository.ErrConflict
 		}
 		if scanErr != nil {

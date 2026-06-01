@@ -1672,6 +1672,7 @@ components:
         - z_score
         - window_start
         - window_end
+        - window_seconds
         - summary
         - state
         - created_at
@@ -1691,6 +1692,10 @@ components:
           format: double
         window_start: { type: string, format: date-time }
         window_end: { type: string, format: date-time }
+        window_seconds:
+          type: integer
+          minimum: 1
+          description: "Baseline window size (in seconds) the alert was generated against. Identifies which (dimension, window_seconds) baseline bucket emitted this alert — the same dimension can have multiple buckets (e.g. 60 vs 3600)."
         summary: { type: string, description: "Human-readable rationale string the detector emitted with the alert." }
         evidence:
           description: "Detector-supplied JSON payload (statistical context, thresholds, etc.)."

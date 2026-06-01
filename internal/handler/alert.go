@@ -90,6 +90,7 @@ type alertResponse struct {
 	ZScore         float64         `json:"z_score"`
 	WindowStart    time.Time       `json:"window_start"`
 	WindowEnd      time.Time       `json:"window_end"`
+	WindowSeconds  int             `json:"window_seconds"`
 	Summary        string          `json:"summary"`
 	Evidence       json.RawMessage `json:"evidence,omitempty"`
 	State          string          `json:"state"`
@@ -115,6 +116,7 @@ func toAlertResponse(a repository.Alert) alertResponse {
 		ZScore:         a.ZScore,
 		WindowStart:    a.WindowStart,
 		WindowEnd:      a.WindowEnd,
+		WindowSeconds:  a.WindowSeconds,
 		Summary:        a.Summary,
 		State:          string(a.State),
 		SuppressedBy:   a.SuppressedBy,
