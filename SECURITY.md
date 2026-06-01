@@ -50,8 +50,9 @@ if the issue involves credentials, exploit code, or PII.
 A useful report includes:
 
 - A short description of the vulnerability and its impact.
-- The affected SNG component (`sng-edge`, `sng-agent`, or a
-  named library crate) and the version (`sng-edge --version`,
+- The affected SNG component (`sng-control`, `sng-migrate`,
+  `sng-edge`, `sng-agent`, or a named library crate) and the
+  version (`sng-control --version`, `sng-edge --version`,
   `sng-agent --version`, or the git SHA you built from).
 - The deployment shape: SaaS control plane vs. self-hosted, edge
   VM hypervisor (VMware / KVM / Hyper-V / cloud), endpoint OS

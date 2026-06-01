@@ -16,7 +16,7 @@
 > security-event platform — shared correlation, IOC distribution,
 > SBOM inventory, MSP portal across all SN360 products — lives
 > in [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform);
-> §11 describes the cross-product integration points.
+> §9 describes the cross-product integration points.
 
 ---
 
