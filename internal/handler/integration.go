@@ -24,6 +24,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -102,6 +103,47 @@ type IntegrationConnectorResponse struct {
 	UpdatedAt      string   `json:"updated_at"`
 }
 
+// isSecretSet reports whether a connector's stored secret blob
+// represents a semantically populated secret. A bare length
+// check would report `{}` (an empty JSON object — 2 bytes) as
+// "set" even though it carries no key material; the handler
+// must surface SecretSet=false in that case so the operator
+// portal does not display a misleading "secret configured"
+// state. The function trims whitespace and recognises both
+// `{}` (object) and `[]` (array) as semantically empty.
+//
+// Non-JSON payloads (e.g. raw bytes from a future binary
+// secret format) fall through the JSON branch and are treated
+// as set whenever len > 0 — the conservative default.
+func isSecretSet(secret []byte) bool {
+	if len(secret) == 0 {
+		return false
+	}
+	// Fast-path the two common "empty" JSON shapes without
+	// unmarshalling — keeps this hot on every connector list.
+	trimmed := bytes.TrimSpace(secret)
+	if len(trimmed) == 0 {
+		return false
+	}
+	switch string(trimmed) {
+	case "{}", "[]", "null", `""`:
+		return false
+	}
+	// Decode for any other JSON object/array shape and check if
+	// it actually contains keys/elements. Non-JSON or malformed
+	// payloads (json.Unmarshal returns err) are treated as set
+	// — we don't second-guess opaque secret formats.
+	var asObject map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &asObject); err == nil {
+		return len(asObject) > 0
+	}
+	var asArray []json.RawMessage
+	if err := json.Unmarshal(trimmed, &asArray); err == nil {
+		return len(asArray) > 0
+	}
+	return true
+}
+
 func toIntegrationConnectorResponse(c repository.IntegrationConnector) IntegrationConnectorResponse {
 	resp := IntegrationConnectorResponse{
 		ID:          c.ID.String(),
@@ -114,7 +156,7 @@ func toIntegrationConnectorResponse(c repository.IntegrationConnector) Integrati
 		// is `required` in the OpenAPI schema and a JSON `null`
 		// would violate the contract for spec-compliant clients.
 		EventTypes:     append(make([]string, 0, len(c.EventTypes)), c.EventTypes...),
-		SecretSet:      len(c.Secret) > 0,
+		SecretSet:      isSecretSet(c.Secret),
 		Status:         string(c.Status),
 		LastTestResult: string(c.LastTestResult),
 		LastTestError:  c.LastTestError,
@@ -231,10 +273,16 @@ func (h *IntegrationHandler) list(w http.ResponseWriter, r *http.Request) {
 	for _, c := range res.Items {
 		items = append(items, toIntegrationConnectorResponse(c))
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"items":       items,
-		"next_cursor": res.NextCursor,
-	})
+	// Typed struct with json:omitempty matches the alert/baseline
+	// handlers' wire format: empty NextCursor is omitted entirely
+	// rather than serialised as `"next_cursor": ""`. Spec-strict
+	// SDK generators that treat `nullable: true` as "missing OR
+	// null" reject the empty-string form. Pinned by
+	// TestIntegrationHandler_ListConnectors_OmitsEmptyNextCursor.
+	WriteJSON(w, http.StatusOK, struct {
+		Items      []IntegrationConnectorResponse `json:"items"`
+		NextCursor string                         `json:"next_cursor,omitempty"`
+	}{Items: items, NextCursor: res.NextCursor})
 }
 
 func (h *IntegrationHandler) get(w http.ResponseWriter, r *http.Request) {
@@ -389,10 +437,10 @@ func (h *IntegrationHandler) listDeliveries(w http.ResponseWriter, r *http.Reque
 	for _, d := range res.Items {
 		items = append(items, toIntegrationDeliveryResponse(d))
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"items":       items,
-		"next_cursor": res.NextCursor,
-	})
+	WriteJSON(w, http.StatusOK, struct {
+		Items      []IntegrationDeliveryResponse `json:"items"`
+		NextCursor string                        `json:"next_cursor,omitempty"`
+	}{Items: items, NextCursor: res.NextCursor})
 }
 
 func (h *IntegrationHandler) listAllDeliveries(w http.ResponseWriter, r *http.Request) {
@@ -422,10 +470,10 @@ func (h *IntegrationHandler) listAllDeliveries(w http.ResponseWriter, r *http.Re
 	for _, d := range res.Items {
 		items = append(items, toIntegrationDeliveryResponse(d))
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"items":       items,
-		"next_cursor": res.NextCursor,
-	})
+	WriteJSON(w, http.StatusOK, struct {
+		Items      []IntegrationDeliveryResponse `json:"items"`
+		NextCursor string                        `json:"next_cursor,omitempty"`
+	}{Items: items, NextCursor: res.NextCursor})
 }
 
 func (h *IntegrationHandler) getDelivery(w http.ResponseWriter, r *http.Request) {

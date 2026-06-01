@@ -402,3 +402,33 @@ func TestIntegrationHandler_EventTypesAlwaysArray(t *testing.T) {
 		t.Fatalf("event_types = %s, want []", string(raw))
 	}
 }
+
+// TestIntegrationHandler_ListConnectors_OmitsEmptyNextCursor pins
+// the round-4 fix that integration list endpoints emit
+// `next_cursor` via a typed struct with `json:"...,omitempty"`
+// instead of `map[string]any` — matching the alert + baseline
+// handlers. Empty NextCursor (single-page result) MUST be
+// omitted from the JSON envelope; emitting `"next_cursor": ""`
+// confuses spec-strict SDK generators that treat
+// `nullable: true` as "missing OR null, not empty string".
+func TestIntegrationHandler_ListConnectors_OmitsEmptyNextCursor(t *testing.T) {
+	t.Parallel()
+	router, _, _, tenantID, _, token := newIntegrationTestRouter(
+		t, repository.IntegrationConnectorSIEMWebhook, nil)
+	path := "/api/v1/tenants/" + tenantID.String() + "/integrations"
+
+	// Empty list (no connectors) -> single page, NextCursor "".
+	rec := doJSON(t, router, http.MethodGet, path, token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var asMap map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &asMap); err != nil {
+		t.Fatalf("decode list as map: %v", err)
+	}
+	if _, present := asMap["next_cursor"]; present {
+		t.Fatalf("next_cursor must be omitted when empty; got %s",
+			rec.Body.String())
+	}
+}
+

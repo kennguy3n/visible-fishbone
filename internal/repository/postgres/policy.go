@@ -139,13 +139,24 @@ func (r *PolicyRepository) CreateGraph(ctx context.Context, tenantID uuid.UUID, 
 func (r *PolicyRepository) GetCurrentGraph(ctx context.Context, tenantID uuid.UUID) (repository.PolicyGraph, error) {
 	var out repository.PolicyGraph
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		// Defence-in-depth: predicate on tenant_id explicitly in
+		// addition to the RLS policy. RLS via withTenantRO is the
+		// primary tenant boundary, but a misconfigured connection
+		// (superuser, RLS-bypass role, GUC unset) would silently
+		// return another tenant's graph. The explicit predicate
+		// makes the boundary independent of RLS enforcement state
+		// — the query is correct even if RLS is off. The planner
+		// uses the existing `(tenant_id, is_draft, version DESC)`
+		// composite index either way, so there is no performance
+		// cost to adding the predicate.
 		row := tx.QueryRow(ctx, `
 			SELECT `+policyGraphSelectColumns+`
 			FROM policy_graphs
-			WHERE is_draft = false
+			WHERE tenant_id = $1
+			  AND is_draft = false
 			ORDER BY version DESC
 			LIMIT 1
-		`)
+		`, tenantID)
 		var err error
 		out, err = scanPolicyGraph(row)
 		if errors.Is(err, pgx.ErrNoRows) {

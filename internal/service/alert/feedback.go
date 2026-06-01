@@ -356,31 +356,58 @@ func (f *Feedback) tickOnce(ctx context.Context, tenantsFn func(ctx context.Cont
 	for _, tid := range tenants {
 		tenantID := tid
 		g.Go(func() error {
-			pg, err := f.baseline.List(gctx, tenantID, repository.Page{Limit: 1000})
-			if err != nil {
-				// Per-tenant List failure is logged but does
-				// NOT abort the tick: a transient repo error
-				// (pool exhaustion, single tenant's RLS row
-				// missing) must not silently disable threshold
-				// tuning for every other tenant on the same tick.
-				f.logger.Warn("feedback tuning tick: baseline list failed",
-					slog.String("tenant_id", tenantID.String()),
-					slog.Any("error", err))
-				return nil
-			}
-			for _, m := range pg.Items {
-				if _, err := f.TuneDimension(gctx, tenantID, m.Dimension, m.WindowSeconds); err != nil {
-					f.logger.Warn("feedback tuning tick: TuneDimension failed",
+			// Cursor-loop through every baseline for this
+			// tenant. The previous implementation passed
+			// `Limit: 1000`, which the repository clamps to
+			// `MaxPageLimit = 200` — so high-cardinality
+			// tenants with more than 200 (dimension,
+			// window_seconds) tuples silently dropped the
+			// tail and their thresholds were NEVER tuned. The
+			// page-by-page walk uses the cursor returned by
+			// the repo (DefaultPageLimit per page) and stops
+			// when NextCursor is empty.
+			//
+			// Per-tenant List failure on the FIRST page is
+			// logged and the tenant skipped — a transient repo
+			// error (pool exhaustion, single tenant's RLS row
+			// missing) must not silently disable threshold
+			// tuning for every other tenant on the same tick.
+			// Mid-walk List errors are also logged but break
+			// the walk for THIS tenant (preserving completed
+			// pages' tuning work).
+			cursor := ""
+			for {
+				pg, err := f.baseline.List(gctx, tenantID, repository.Page{After: cursor})
+				if err != nil {
+					f.logger.Warn("feedback tuning tick: baseline list failed",
 						slog.String("tenant_id", tenantID.String()),
-						slog.String("dimension", m.Dimension),
-						slog.Int("window_seconds", m.WindowSeconds),
+						slog.String("cursor", cursor),
 						slog.Any("error", err))
-					// Continue iterating: a noisy dimension's
-					// failure must not block other dimensions on
-					// the same tenant.
+					return nil
+				}
+				for _, m := range pg.Items {
+					if _, err := f.TuneDimension(gctx, tenantID, m.Dimension, m.WindowSeconds); err != nil {
+						f.logger.Warn("feedback tuning tick: TuneDimension failed",
+							slog.String("tenant_id", tenantID.String()),
+							slog.String("dimension", m.Dimension),
+							slog.Int("window_seconds", m.WindowSeconds),
+							slog.Any("error", err))
+						// Continue iterating: a noisy dimension's
+						// failure must not block other dimensions on
+						// the same tenant.
+					}
+				}
+				if pg.NextCursor == "" {
+					return nil
+				}
+				cursor = pg.NextCursor
+				// Honour ctx cancellation between pages so a
+				// long-running per-tenant walk does not pin a
+				// goroutine past the parent context's deadline.
+				if gctx.Err() != nil {
+					return nil
 				}
 			}
-			return nil
 		})
 	}
 	_ = g.Wait()

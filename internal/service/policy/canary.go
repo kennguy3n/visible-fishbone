@@ -68,8 +68,16 @@ var (
 	ErrCanaryRolloutActive = errors.New("policy: active rollout already exists for tenant")
 
 	// ErrCanaryPercent is returned when an invalid
-	// canary_percent (outside 0..100) is supplied.
-	ErrCanaryPercent = errors.New("policy: canary percent must be in [0, 100]")
+	// canary_percent is supplied. The valid range is the
+	// half-open interval (0, 100] — 0 is rejected because a 0%
+	// canary is indistinguishable from "no canary" (the old
+	// graph keeps serving 100% of traffic), and Advance is the
+	// wrong primitive for that state. StartDryRun already covers
+	// "policy is staged but not yet live"; an explicit 0% canary
+	// stage would let an operator silently revert progress
+	// without surfacing the intent. The message uses [1, 100]
+	// so clients are not told 0 is acceptable and then rejected.
+	ErrCanaryPercent = errors.New("policy: canary percent must be in [1, 100]")
 )
 
 // CanaryService orchestrates progressive policy rollouts on top
