@@ -160,19 +160,28 @@ type Config struct {
 	// distinct tenant.
 	Retention RetentionResolver
 
-	// DefaultRetentionDays is the floor / fallback retention
-	// when Retention is nil OR a resolver returns 0. The TTL
-	// applied to each row will be max(DefaultRetentionDays,
-	// resolver value) — the resolver can extend retention for
-	// higher tiers but cannot push it below the floor.
-	// Defaults to DefaultRetentionDays (60).
+	// DefaultRetentionDays is the fallback retention applied
+	// when Retention is nil OR a resolver returns 0 (the
+	// "defer to default" sentinel). When the resolver returns a
+	// non-zero value it is authoritative for that tenant and is
+	// used directly — the writer never silently extends a
+	// starter-tier tenant to the default. All values (resolver
+	// or fallback) are then clamped to [MinRetentionDays,
+	// MaxRetentionDays] at the writer boundary so a
+	// misconfigured resolver cannot drive premature truncation
+	// or runaway storage. Defaults to the package-level
+	// DefaultRetentionDays constant (60).
 	DefaultRetentionDays int
 }
 
-// DefaultRetentionDays is the per-row retention floor when no
-// resolver is configured. Picked at 60 days because it sits in
+// DefaultRetentionDays is the per-row retention fallback used
+// when no resolver is configured (Config.Retention == nil) or
+// the resolver returns 0. Picked at 60 days because it sits in
 // the middle of the (30-90 day) per-tier band specified by the
 // PRD and is the bill-vs-coverage sweet spot for the SME tier.
+// Tenants whose resolver returns a non-zero value get the
+// resolver value directly (clamped to [Min, Max]); the default
+// is NOT a lower bound on per-tenant retention.
 const DefaultRetentionDays = 60
 
 // MinRetentionDays / MaxRetentionDays bound the values a
@@ -234,10 +243,14 @@ type retentionCacheEntry struct {
 }
 
 // resolveRetention returns the per-tenant retention in days,
-// consulting the cache first. Cache misses go to the resolver,
-// then the result is clamped to [MinRetentionDays,
-// MaxRetentionDays] and cached. Cache is mu-guarded so the
-// flush path and Stats reads can interleave safely.
+// consulting the cache first. On a cache miss the writer asks
+// the resolver; a non-zero return is taken as authoritative for
+// that tenant (so e.g. a starter-tier tenant resolving to 30
+// stays at 30 — the package default is NOT a floor). A zero
+// return falls back to Config.DefaultRetentionDays. The final
+// value is then clamped to [MinRetentionDays, MaxRetentionDays]
+// and cached. Cache is mu-guarded so the flush path and Stats
+// reads can interleave safely.
 //
 // The current implementation pins the resolver lookup to the
 // best-effort context.Background() because the flush goroutine

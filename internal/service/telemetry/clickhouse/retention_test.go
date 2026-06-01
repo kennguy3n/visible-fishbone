@@ -249,21 +249,28 @@ func TestResolveRetention_CacheExpiry(t *testing.T) {
 // loose (substring) so reformatting the SQL does not break it
 // — the precise DDL parity is exercised by the integration
 // tests against a real ClickHouse instance.
+//
+// The table-name substrings below are computed from the
+// DefaultTable constant so a rename of either side will fail
+// this test before it can ship to operators (the bug Devin
+// Review caught at PR-time was a hard-coded "telemetry_events"
+// in the migration while DefaultTable was "sng_telemetry";
+// pinning both to the constant eliminates the failure mode).
 func TestMigrationFileMatchesEnsureSchemaIntent(t *testing.T) {
 	t.Parallel()
-	bytes, err := os.ReadFile("../../../../migrations/clickhouse/001_telemetry_events.up.sql")
+	bytes, err := os.ReadFile("../../../../migrations/clickhouse/001_sng_telemetry.up.sql")
 	if err != nil {
 		t.Fatalf("read migration: %v", err)
 	}
 	sql := string(bytes)
 	mustContain := []string{
-		"CREATE TABLE IF NOT EXISTS telemetry_events",
+		"CREATE TABLE IF NOT EXISTS " + DefaultTable,
 		"retain_until",
 		"TTL toDateTime(retain_until)",
 		"ORDER BY (tenant_id, event_class, traffic_class, timestamp, event_id)",
 		"PARTITION BY toYYYYMMDD(timestamp)",
 		"LowCardinality(String)",
-		"ALTER TABLE telemetry_events",
+		"ALTER TABLE " + DefaultTable,
 	}
 	for _, sub := range mustContain {
 		if !strings.Contains(sql, sub) {

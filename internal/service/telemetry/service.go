@@ -500,8 +500,17 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 			// during shutdown is the canonical case) is also
 			// handled as a Nak so the message survives. The
 			// delivery count + MaxDeliver budget keeps an
-			// infinite-loop pathology bounded.
-			_ = msg.NakWithDelay(s.nakBackoff)
+			// infinite-loop pathology bounded. Default the
+			// backoff identically to the ErrTenantBlocked
+			// branch above so a misconfigured Service that
+			// left nakBackoff at zero doesn't trigger
+			// immediate redelivery (which would defeat the
+			// MaxDeliver budget on shutdown-cancel storms).
+			delay := s.nakBackoff
+			if delay <= 0 {
+				delay = DefaultNakBackoff
+			}
+			_ = msg.NakWithDelay(delay)
 			s.metrics.Nacked.Add(1)
 			return
 		}
