@@ -29,15 +29,6 @@ inventory, MSP portal across all SN360 products) lives in
 SNG integrates with it for cross-product features but does not
 depend on it for the gateway product itself.
 
-## SN360 Family
-
-| Product | Repository | Scope |
-|---|---|---|
-| **ShieldNet Defense** | [`sn360-es`](https://github.com/kennguy3n/sn360-es) | Email security for GWS / O365: tiered ML phishing / BEC detection, banners, quarantine, post-delivery remediation, end-user education |
-| **ShieldNet Access** | [`cautious-fishstick`](https://github.com/kennguy3n/cautious-fishstick) | ZTNA with SaaS adapters and PAM |
-| **ShieldNet Gateway** | [`visible-fishbone`](https://github.com/kennguy3n/visible-fishbone) — this repo | Network security gateway: NGFW + IDS/IPS, SWG + DNS, ZTNA + VPN replacement, SD-WAN, edge VM appliance + lightweight endpoint client |
-| **SN360 Security Platform** | [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform) | Shared multi-product platform: identity, RBAC, signed rule distribution (TRDS), IOC distribution (IOCFS), software-inventory (SIS), Wazuh-based correlation, compliance, alert forwarding, MSP portal across every product above |
-
 ## Capabilities
 
 SNG ships in **three enforcement forms** that share a single control
