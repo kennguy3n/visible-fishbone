@@ -173,6 +173,34 @@ func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, statu
 	return out, nil
 }
 
+// SetMSPOwner atomically updates the denormalised tenants.msp_id
+// pointer. Passing a nil mspID clears the binding. The actual
+// msp_tenants row maintenance lives in MSPRepository.AssignTenant /
+// UnassignTenant; this method is the storage primitive both paths
+// share so the denormalised column always tracks the owner row.
+func (r *TenantRepository) SetMSPOwner(ctx context.Context, tenantID uuid.UUID, mspID *uuid.UUID) (repository.Tenant, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.Tenant{}, err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.tenants[tenantID]
+	if !ok {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if mspID == nil {
+		existing.MSPID = nil
+	} else {
+		v := *mspID
+		existing.MSPID = &v
+	}
+	existing.UpdatedAt = r.s.clock()
+	r.s.tenants[tenantID] = existing
+	out := existing
+	out.Settings = cloneJSON(existing.Settings)
+	return out, nil
+}
+
 func (r *TenantRepository) TransitionStatus(ctx context.Context, id uuid.UUID, from, to repository.TenantStatus) (repository.Tenant, error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.Tenant{}, err

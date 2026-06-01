@@ -16,23 +16,28 @@ import (
 type TenantRepository struct{ s *Store }
 
 const tenantSelectColumns = `
-	id, name, slug, status, COALESCE(region, ''), tier,
+	id, name, slug, msp_id, status, COALESCE(region, ''), tier,
 	settings, created_at, updated_at, deleted_at
 `
 
 func scanTenant(row pgx.Row) (repository.Tenant, error) {
 	var (
 		t       repository.Tenant
+		mspID   nullableUUID
 		region  string
 		setBuf  []byte
 		deleted *deletedAtScan
 	)
 	deleted = &deletedAtScan{}
 	if err := row.Scan(
-		&t.ID, &t.Name, &t.Slug, &t.Status, &region, &t.Tier,
+		&t.ID, &t.Name, &t.Slug, &mspID, &t.Status, &region, &t.Tier,
 		&setBuf, &t.CreatedAt, &t.UpdatedAt, deleted,
 	); err != nil {
 		return repository.Tenant{}, err
+	}
+	if mspID.Valid {
+		id := mspID.ID
+		t.MSPID = &id
 	}
 	t.Region = region
 	t.Settings = json.RawMessage(setBuf)
@@ -278,6 +283,34 @@ func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, statu
 	}
 	if err != nil {
 		return repository.Tenant{}, fmt.Errorf("update status: %w", err)
+	}
+	return out, nil
+}
+
+// SetMSPOwner is the storage primitive for the denormalised
+// tenants.msp_id column. The MSP service's AssignTenant /
+// UnassignTenant paths call this alongside the msp_tenants join
+// row update so the denormalised column and the join stay in
+// lockstep. Passing a nil mspID clears the column.
+func (r *TenantRepository) SetMSPOwner(ctx context.Context, tenantID uuid.UUID, mspID *uuid.UUID) (repository.Tenant, error) {
+	if tenantID == uuid.Nil {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	const q = `
+		UPDATE tenants
+		SET msp_id = $2::uuid
+		WHERE id = $1::uuid
+		RETURNING ` + tenantSelectColumns
+	var arg any
+	if mspID != nil {
+		arg = *mspID
+	}
+	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, tenantID, arg))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("set msp owner: %w", err)
 	}
 	return out, nil
 }

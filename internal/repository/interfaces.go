@@ -113,6 +113,13 @@ type TenantRepository interface {
 	// transitions like active->suspended or active->deleted; prefer
 	// it over a Get+UpdateStatus pair.
 	TransitionStatus(ctx context.Context, id uuid.UUID, from, to TenantStatus) (Tenant, error)
+	// SetMSPOwner atomically points the denormalised
+	// `tenants.msp_id` at the given MSP (or clears it when mspID
+	// is nil). Used by MSPRepository.AssignTenant /
+	// UnassignTenant to keep the join row and the denormalised
+	// column in lockstep without a second round trip. Returns
+	// ErrNotFound if the tenant does not exist.
+	SetMSPOwner(ctx context.Context, tenantID uuid.UUID, mspID *uuid.UUID) (Tenant, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 }
 
@@ -743,4 +750,47 @@ type IntegrationDeliveryRepository interface {
 	// deliveries. processingTimeout governs the stuck-row recovery
 	// window; pass 0 to never re-claim.
 	ListPending(ctx context.Context, limit int, processingTimeout time.Duration) ([]IntegrationDelivery, error)
+}
+
+// --- MSP ------------------------------------------------------------------
+
+// MSPRepository owns the msps + msp_tenants tables. Like
+// TenantRepository, MSPRepository is platform-scoped — application
+// authorization (platform_admin sees all; msp_admin sees own row
+// only) decides who can call which methods. The repo just enforces
+// the storage invariants documented in migration 015.
+type MSPRepository interface {
+	Create(ctx context.Context, m MSP) (MSP, error)
+	Get(ctx context.Context, id uuid.UUID) (MSP, error)
+	GetBySlug(ctx context.Context, slug string) (MSP, error)
+	List(ctx context.Context, page Page) (PageResult[MSP], error)
+	// Update applies a sparse, explicit-clear PATCH (same
+	// semantics as TenantRepository.Update).
+	Update(ctx context.Context, id uuid.UUID, patch MSPPatch) (MSP, error)
+	UpdateStatus(ctx context.Context, id uuid.UUID, status MSPStatus) (MSP, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+
+	// AssignTenant inserts (or updates) a msp_tenants row binding
+	// the tenant to this MSP with the given relationship. When
+	// relationship is Owner, also updates `tenants.msp_id` to
+	// point at this MSP and removes any previous owner binding
+	// (the partial UNIQUE index in migration 015 enforces at most
+	// one owner per tenant).
+	//
+	// Returns ErrNotFound if either the MSP or the tenant does
+	// not exist. The implementation runs the binding update and
+	// the tenants.msp_id update inside a single transaction so a
+	// crash mid-flow cannot leave the denormalised column out of
+	// sync with the join.
+	AssignTenant(ctx context.Context, mspID, tenantID uuid.UUID, relationship MSPRelationship, actor *uuid.UUID) (MSPTenantBinding, error)
+	// UnassignTenant removes the (msp, tenant) binding. If the
+	// binding was an Owner, also clears `tenants.msp_id`.
+	// Returns ErrNotFound if no binding exists.
+	UnassignTenant(ctx context.Context, mspID, tenantID uuid.UUID) error
+	// ListTenants returns every tenant binding for the MSP,
+	// ordered by binding creation time descending.
+	ListTenants(ctx context.Context, mspID uuid.UUID, page Page) (PageResult[MSPTenantBinding], error)
+	// ListBindings returns every msp_tenants row for a given
+	// tenant (an inverse lookup — "who manages this tenant?").
+	ListBindings(ctx context.Context, tenantID uuid.UUID) ([]MSPTenantBinding, error)
 }

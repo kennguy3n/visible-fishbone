@@ -43,9 +43,15 @@ const (
 
 // Tenant is the top-level multi-tenancy entity.
 type Tenant struct {
-	ID        uuid.UUID
-	Name      string
-	Slug      string
+	ID   uuid.UUID
+	Name string
+	Slug string
+	// MSPID is the primary owner-binding MSP. Nil when the
+	// tenant is unmanaged (direct platform customer). The denormalised
+	// column is kept in sync with the `msp_tenants` row whose
+	// relationship is 'owner' by the MSP service's AssignTenant /
+	// UnassignTenant path. See migration 015 for the storage rationale.
+	MSPID     *uuid.UUID
 	Status    TenantStatus
 	Region    string
 	Tier      TenantTier
@@ -1012,4 +1018,96 @@ type IntegrationDelivery struct {
 	// remote object referenced here.
 	ExternalReference string
 	CreatedAt         time.Time
+}
+
+// ---------------------------------------------------------------------
+// MSP (Managed Service Provider) hierarchy
+// ---------------------------------------------------------------------
+
+// MSPStatus enumerates the lifecycle stages of an MSP. Mirrors the
+// CHECK constraint on `msps.status`.
+type MSPStatus string
+
+const (
+	MSPStatusActive    MSPStatus = "active"
+	MSPStatusSuspended MSPStatus = "suspended"
+	MSPStatusDeleted   MSPStatus = "deleted"
+)
+
+// MSPRelationship enumerates the kinds of MSP↔tenant bindings.
+// Mirrors the CHECK constraint on `msp_tenants.relationship`.
+//
+//   - Owner       — the primary MSP for the tenant. A tenant has
+//     at most one owner binding at any time (enforced by a
+//     partial UNIQUE index in migration 015). The denormalised
+//     `tenants.msp_id` always points at the owner.
+//   - CoManager   — a secondary read-mostly binding, used for
+//     temporary co-management or staged handoff.
+type MSPRelationship string
+
+const (
+	MSPRelationshipOwner     MSPRelationship = "owner"
+	MSPRelationshipCoManager MSPRelationship = "co_manager"
+)
+
+// IsValid reports whether r is a recognised MSPRelationship enum.
+func (r MSPRelationship) IsValid() bool {
+	switch r {
+	case MSPRelationshipOwner, MSPRelationshipCoManager:
+		return true
+	}
+	return false
+}
+
+// MSPBranding is the shared visual identity an MSP applies to its
+// tenant cohort. Tenants inherit the MSP's branding unless they
+// override individual fields via `tenants.settings.branding`. The
+// resolution chain (tenant override → MSP default → platform
+// default) lives in internal/service/tenant/branding.go.
+//
+// All fields are optional. Empty strings mean "not set" and the
+// resolver falls through to the next layer.
+type MSPBranding struct {
+	LogoURL         string `json:"logo_url,omitempty"`
+	PrimaryColor    string `json:"primary_color,omitempty"`
+	SecondaryColor  string `json:"secondary_color,omitempty"`
+	CustomDomain    string `json:"custom_domain,omitempty"`
+	PortalSupportTo string `json:"portal_support_to,omitempty"`
+}
+
+// MSP is the top-level managed-service-provider entity. NOT
+// RLS-scoped (mirrors Tenant) — application authorization gates
+// who can read which rows.
+type MSP struct {
+	ID        uuid.UUID
+	Name      string
+	Slug      string
+	Status    MSPStatus
+	Branding  MSPBranding
+	Settings  json.RawMessage
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	DeletedAt *time.Time
+}
+
+// MSPPatch is the input to MSPRepository.Update. Same sparse-PATCH
+// semantics as TenantPatch (see its docstring): nil = leave
+// untouched; non-nil = set (including zero value to clear).
+type MSPPatch struct {
+	Name     *string
+	Slug     *string
+	Status   *MSPStatus
+	Branding *MSPBranding
+	Settings *json.RawMessage
+}
+
+// MSPTenantBinding is one row of the msp_tenants join table. The
+// Relationship field distinguishes the primary owner from
+// co-managers.
+type MSPTenantBinding struct {
+	MSPID        uuid.UUID
+	TenantID     uuid.UUID
+	Relationship MSPRelationship
+	CreatedAt    time.Time
+	CreatedBy    *uuid.UUID
 }
