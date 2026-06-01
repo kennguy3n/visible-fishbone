@@ -89,6 +89,7 @@ func seedAlert(t *testing.T, store *memory.Store, tenantID uuid.UUID) repository
 		ZScore:         4.2,
 		WindowStart:    now.Add(-5 * time.Minute),
 		WindowEnd:      now,
+		WindowSeconds:  300,
 		Summary:        "Welford z=4.2 over 100 samples",
 		State:          repository.AlertStateOpen,
 		CreatedAt:      now,

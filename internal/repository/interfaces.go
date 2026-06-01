@@ -661,14 +661,27 @@ type AlertFeedbackRepository interface {
 	Delete(ctx context.Context, tenantID, alertID uuid.UUID) error
 
 	// ListByDimension returns every feedback row for alerts in
-	// the supplied dimension, ordered by created_at DESC. Used
-	// by alert.Feedback.AggregateForTenant to compute the per-
-	// dimension false-positive rate that drives threshold
-	// tuning.
+	// the supplied (dimension, windowSeconds) tuple, ordered by
+	// created_at DESC. Used by alert.Feedback.TuneDimension to
+	// compute the per-(tenant, dimension, window) FP rate that
+	// drives threshold tuning.
+	//
+	// `windowSeconds <= 0` is a sentinel meaning "do not filter
+	// on window_seconds" — the query returns every feedback row
+	// for the dimension regardless of which window the underlying
+	// alert was emitted against. The tuning loop never passes
+	// this sentinel (it always knows the specific window); it
+	// exists for operator-facing tooling that wants a
+	// dimension-wide view across all windows. See PR #40 round-9
+	// ANALYSIS_0002 for why the tuning loop MUST scope by
+	// windowSeconds — aggregating a noisy 60s window's FP rate
+	// into a clean 3600s window's threshold would silently push
+	// the wrong threshold up.
 	ListByDimension(
 		ctx context.Context,
 		tenantID uuid.UUID,
 		dimension string,
+		windowSeconds int,
 		since time.Time,
 	) ([]AlertFeedback, error)
 }

@@ -765,6 +765,12 @@ type Alert struct {
 	ZScore          float64
 	WindowStart     time.Time
 	WindowEnd       time.Time
+	// WindowSeconds is the bucket size of the underlying baseline
+	// model. Snapshot-copied at emit time so the alert.Feedback
+	// tuning loop can scope its FP-rate aggregation to the
+	// matching (dimension, window_seconds) tuple. See PR #40
+	// round-9 ANALYSIS_0002.
+	WindowSeconds   int
 	Summary         string
 	Evidence        []byte // JSON; never persist non-JSON bytes here
 	State           AlertState

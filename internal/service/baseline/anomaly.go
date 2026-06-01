@@ -280,6 +280,7 @@ func (d *Detector) ObserveAndScore(
 		ZScore:         maxZ,
 		WindowStart:    now.Add(-time.Duration(windowSeconds) * time.Second),
 		WindowEnd:      now,
+		WindowSeconds:  windowSeconds,
 		Summary:        summary,
 		Evidence:       evidence,
 		State:          repository.AlertStateOpen,

@@ -93,6 +93,15 @@ CREATE TABLE IF NOT EXISTS alerts (
 
     window_start         TIMESTAMPTZ NOT NULL,
     window_end           TIMESTAMPTZ NOT NULL,
+    -- The bucket size in seconds of the underlying baseline
+    -- model. Snapshot-copied here (rather than derived from
+    -- window_end - window_start) so the feedback tuning loop
+    -- can filter feedback rows by (dimension, window_seconds)
+    -- without ambiguity: a 60s bucket and a 3600s bucket on the
+    -- same dimension are independently-tuned series, and merging
+    -- their FP rates would silently push the wrong threshold up.
+    -- See PR #40 round-9 ANALYSIS_0002.
+    window_seconds       INTEGER NOT NULL CHECK (window_seconds > 0),
 
     -- Human-facing one-liner; the Router formats this from the
     -- emit payload so the operator portal has something to show

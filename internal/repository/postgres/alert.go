@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -41,7 +42,7 @@ type AlertRepository struct{ s *Store }
 const alertSelectColumns = `
 id, tenant_id, kind, severity, dimension,
 observed_value, baseline_mean, baseline_stddev, z_score,
-window_start, window_end,
+window_start, window_end, window_seconds,
 summary, evidence, state,
 suppressed_by, acknowledged_by, acknowledged_at,
 resolved_by, resolved_at,
@@ -67,7 +68,7 @@ func scanAlert(row pgx.Row) (repository.Alert, error) {
 	if err := row.Scan(
 		&a.ID, &a.TenantID, &a.Kind, &severity, &a.Dimension,
 		&a.ObservedValue, &a.BaselineMean, &a.BaselineStdDev, &a.ZScore,
-		&a.WindowStart, &a.WindowEnd,
+		&a.WindowStart, &a.WindowEnd, &a.WindowSeconds,
 		&a.Summary, &evidence, &state,
 		&suppressedBy, &acknowledgedBy, &acknowledgedAt,
 		&resolvedBy, &resolvedAt,
@@ -157,6 +158,9 @@ func (r *AlertRepository) Create(
 	if a.WindowEnd.Before(a.WindowStart) {
 		return repository.Alert{}, repository.ErrInvalidArgument
 	}
+	if a.WindowSeconds <= 0 {
+		return repository.Alert{}, repository.ErrInvalidArgument
+	}
 	if a.ID == uuid.Nil {
 		a.ID = uuid.New()
 	}
@@ -169,22 +173,22 @@ func (r *AlertRepository) Create(
 INSERT INTO alerts
     (id, tenant_id, kind, severity, dimension,
      observed_value, baseline_mean, baseline_stddev, z_score,
-     window_start, window_end,
+     window_start, window_end, window_seconds,
      summary, evidence, state,
      suppressed_by, acknowledged_by, acknowledged_at,
      resolved_by, resolved_at)
 VALUES
     ($1::uuid, $2::uuid, $3, $4, $5,
      $6, $7, $8, $9,
-     $10, $11,
-     $12, $13::jsonb, $14,
-     $15, $16, $17,
-     $18, $19)
+     $10, $11, $12,
+     $13, $14::jsonb, $15,
+     $16, $17, $18,
+     $19, $20)
 RETURNING ` + alertSelectColumns
 		row := tx.QueryRow(ctx, q,
 			a.ID, tenantID, a.Kind, string(a.Severity), a.Dimension,
 			a.ObservedValue, a.BaselineMean, a.BaselineStdDev, a.ZScore,
-			a.WindowStart.UTC(), a.WindowEnd.UTC(),
+			a.WindowStart.UTC(), a.WindowEnd.UTC(), a.WindowSeconds,
 			a.Summary, a.Evidence, string(a.State),
 			optionalUUID(a.SuppressedBy), optionalUUID(a.AcknowledgedBy), optionalTime(a.AcknowledgedAt),
 			optionalUUID(a.ResolvedBy), optionalTime(a.ResolvedAt),
@@ -805,16 +809,18 @@ func (r *AlertFeedbackRepository) Delete(
 }
 
 // ListByDimension returns every feedback row for alerts in the
-// supplied dimension, ordered by created_at DESC. The
-// `since` cut-off lets the tuning loop bound its lookback.
-// A zero `since` is treated as "no lower bound" — the query
-// returns every feedback row for the dimension regardless of
-// age. This matches the memory implementation's semantics; see
+// supplied (dimension, windowSeconds) tuple, ordered by
+// created_at DESC. The `since` cut-off lets the tuning loop
+// bound its lookback. A zero `since` is treated as "no lower
+// bound"; a `windowSeconds <= 0` is treated as "no window
+// filter" (see interface doc + PR #40 round-9 ANALYSIS_0002).
+// This matches the memory implementation's semantics — see
 // PR #40 round-8 ANALYSIS_0005 for the consistency note.
 func (r *AlertFeedbackRepository) ListByDimension(
 	ctx context.Context,
 	tenantID uuid.UUID,
 	dimension string,
+	windowSeconds int,
 	since time.Time,
 ) ([]repository.AlertFeedback, error) {
 	if tenantID == uuid.Nil || dimension == "" {
@@ -822,32 +828,30 @@ func (r *AlertFeedbackRepository) ListByDimension(
 	}
 	var out []repository.AlertFeedback
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		// Split the query path so a zero `since` does not emit
-		// a redundant `created_at >= '0001-01-01'` predicate
-		// (which is technically harmless but trips up query
-		// planners and obscures the operator-facing intent).
-		var (
-			rows pgx.Rows
-			qerr error
-		)
-		if since.IsZero() {
-			const q = `
-SELECT ` + feedbackJoinSelectColumns + `
-FROM alert_feedback f
-JOIN alerts a ON a.id = f.alert_id
-WHERE a.dimension = $1
-ORDER BY f.created_at DESC, f.id DESC`
-			rows, qerr = tx.Query(ctx, q, dimension)
-		} else {
-			const q = `
-SELECT ` + feedbackJoinSelectColumns + `
-FROM alert_feedback f
-JOIN alerts a ON a.id = f.alert_id
-WHERE a.dimension = $1
-  AND f.created_at >= $2::timestamptz
-ORDER BY f.created_at DESC, f.id DESC`
-			rows, qerr = tx.Query(ctx, q, dimension, since.UTC())
+		// Compose the WHERE clause + arg list dynamically so a
+		// zero `since` does not emit a redundant
+		// `created_at >= '0001-01-01'` predicate (technically
+		// harmless but trips up query planners + obscures
+		// operator-facing intent), and a `windowSeconds <= 0`
+		// omits the window filter entirely so a dimension-wide
+		// operator query still works.
+		where := []string{"a.dimension = $1"}
+		args := []any{dimension}
+		if windowSeconds > 0 {
+			args = append(args, windowSeconds)
+			where = append(where, fmt.Sprintf("a.window_seconds = $%d", len(args)))
 		}
+		if !since.IsZero() {
+			args = append(args, since.UTC())
+			where = append(where, fmt.Sprintf("f.created_at >= $%d::timestamptz", len(args)))
+		}
+		q := `
+SELECT ` + feedbackJoinSelectColumns + `
+FROM alert_feedback f
+JOIN alerts a ON a.id = f.alert_id
+WHERE ` + strings.Join(where, " AND ") + `
+ORDER BY f.created_at DESC, f.id DESC`
+		rows, qerr := tx.Query(ctx, q, args...)
 		if qerr != nil {
 			return fmt.Errorf("list alert_feedback by dimension: %w", qerr)
 		}

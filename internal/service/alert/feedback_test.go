@@ -28,9 +28,25 @@ func seedBaselineAndAlerts(
 	fbDecisions []repository.AlertFeedbackDecision,
 ) {
 	t.Helper()
+	seedBaselineAndAlertsAtWindow(t, s, tnt, dimension, 60, z, fbDecisions)
+}
+
+// seedBaselineAndAlertsAtWindow lets the cross-window isolation
+// test stamp feedback against an alternate windowSeconds bucket
+// (e.g. 3600) without disturbing the existing 60-second cases.
+func seedBaselineAndAlertsAtWindow(
+	t *testing.T,
+	s *memory.Store,
+	tnt uuid.UUID,
+	dimension string,
+	windowSeconds int,
+	z float64,
+	fbDecisions []repository.AlertFeedbackDecision,
+) {
+	t.Helper()
 	bRepo := memory.NewBaselineModelRepository(s)
 	if _, err := bRepo.Upsert(ctx(), tnt, repository.BaselineModel{
-		Dimension: dimension, WindowSeconds: 60,
+		Dimension: dimension, WindowSeconds: windowSeconds,
 		Alpha: 0.1, ZThreshold: z, Samples: 100, Mean: 10, M2: 9, EWMA: 10, EWMAVar: 1,
 	}); err != nil {
 		t.Fatalf("seed baseline: %v", err)
@@ -42,8 +58,11 @@ func seedBaselineAndAlerts(
 		a, err := aRepo.Create(ctx(), tnt, repository.Alert{
 			Kind: "baseline.zscore_exceeded", Severity: repository.AlertSeverityWarning,
 			Dimension: dimension, ObservedValue: 100, BaselineMean: 10, BaselineStdDev: 1,
-			ZScore: 5, WindowStart: now.Add(-time.Minute), WindowEnd: now,
-			Summary: "spike", Evidence: []byte(`{}`),
+			ZScore: 5,
+			WindowStart:   now.Add(-time.Duration(windowSeconds) * time.Second),
+			WindowEnd:     now,
+			WindowSeconds: windowSeconds,
+			Summary:       "spike", Evidence: []byte(`{}`),
 			State: repository.AlertStateOpen,
 		})
 		if err != nil {
@@ -205,6 +224,94 @@ func TestFeedback_TuneDimension_AlreadyAtCap(t *testing.T) {
 	}
 	if res.SkippedReason != "already at MaxZThreshold" {
 		t.Fatalf("SkippedReason = %q, want 'already at MaxZThreshold'", res.SkippedReason)
+	}
+}
+
+// TestFeedback_TuneDimension_IsolatesWindowSeconds pins the
+// fix for PR #40 round-9 ANALYSIS_0002: feedback rows attached to
+// alerts emitted against a different window_seconds bucket must
+// NOT bleed into the tuning decision for a (dimension,
+// window_seconds) tuple.
+//
+// Scenario: same dimension "d", two baselines (60s, 3600s).
+//   - 60s bucket: 5 false positives → noisy, would raise.
+//   - 3600s bucket: 5 true positives → clean, would lower.
+//
+// Pre-fix (window-agnostic aggregation) would see 5 FP + 5 TP
+// across both buckets → 50% FP rate → raise both thresholds.
+// Post-fix: the 60s tune raises (FP=1.0), the 3600s tune lowers
+// (FP=0.0), exactly as if they were independent dimensions.
+func TestFeedback_TuneDimension_IsolatesWindowSeconds(t *testing.T) {
+	s, tnt := seedTenant(t)
+	fb := alert.NewFeedback(
+		memory.NewAlertFeedbackRepository(s),
+		memory.NewAlertRepository(s),
+		memory.NewBaselineModelRepository(s),
+		alert.FeedbackTuningOptions{
+			MinSampleCount: 4,
+			RaiseStep:      0.5,
+			LowerStep:      0.25,
+			MaxZThreshold:  6.0,
+			MinZThreshold:  2.0,
+		},
+	)
+	fb.SetClock(func() time.Time { return time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC) })
+
+	// 60s window — 5 false positives → noisy.
+	seedBaselineAndAlertsAtWindow(t, s, tnt, "d", 60, 3.0, []repository.AlertFeedbackDecision{
+		repository.AlertFeedbackFalsePositive,
+		repository.AlertFeedbackFalsePositive,
+		repository.AlertFeedbackFalsePositive,
+		repository.AlertFeedbackFalsePositive,
+		repository.AlertFeedbackFalsePositive,
+	})
+	// 3600s window — 5 true positives → clean.
+	seedBaselineAndAlertsAtWindow(t, s, tnt, "d", 3600, 3.0, []repository.AlertFeedbackDecision{
+		repository.AlertFeedbackTruePositive,
+		repository.AlertFeedbackTruePositive,
+		repository.AlertFeedbackTruePositive,
+		repository.AlertFeedbackTruePositive,
+		repository.AlertFeedbackTruePositive,
+	})
+
+	res60, err := fb.TuneDimension(ctx(), tnt, "d", 60)
+	if err != nil {
+		t.Fatalf("tune 60s: %v", err)
+	}
+	if res60.Action != "raised" {
+		t.Fatalf("60s action = %s, want raised (saw FPR=%v Total=%d)",
+			res60.Action, res60.FalsePositiveR, res60.TotalFeedback)
+	}
+	if res60.NewZThreshold != 3.5 {
+		t.Fatalf("60s NewZThreshold = %v, want 3.5", res60.NewZThreshold)
+	}
+
+	res3600, err := fb.TuneDimension(ctx(), tnt, "d", 3600)
+	if err != nil {
+		t.Fatalf("tune 3600s: %v", err)
+	}
+	if res3600.Action != "lowered" {
+		t.Fatalf("3600s action = %s, want lowered (saw FPR=%v Total=%d)",
+			res3600.Action, res3600.FalsePositiveR, res3600.TotalFeedback)
+	}
+	if res3600.NewZThreshold != 2.75 {
+		t.Fatalf("3600s NewZThreshold = %v, want 2.75", res3600.NewZThreshold)
+	}
+
+	// Cross-check: each tune must see exactly its own bucket's
+	// feedback count and FP rate. Pre-fix this assertion would
+	// fail with the aggregated 50% rate on each side.
+	if res60.TotalFeedback != 5 {
+		t.Fatalf("60s TotalFeedback = %d, want 5", res60.TotalFeedback)
+	}
+	if res3600.TotalFeedback != 5 {
+		t.Fatalf("3600s TotalFeedback = %d, want 5", res3600.TotalFeedback)
+	}
+	if res60.FalsePositiveR != 1.0 {
+		t.Fatalf("60s FalsePositiveR = %v, want 1.0", res60.FalsePositiveR)
+	}
+	if res3600.FalsePositiveR != 0.0 {
+		t.Fatalf("3600s FalsePositiveR = %v, want 0.0", res3600.FalsePositiveR)
 	}
 }
 

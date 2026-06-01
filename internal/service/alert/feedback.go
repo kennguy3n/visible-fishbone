@@ -188,7 +188,12 @@ func (f *Feedback) TuneDimension(
 		return TuningResult{}, repository.ErrInvalidArgument
 	}
 	since := f.now().Add(-f.opts.LookbackWindow)
-	rows, err := f.feedback.ListByDimension(ctx, tenantID, dimension, since)
+	// Scope by windowSeconds so a noisy 60s window's FP rate
+	// does not silently push the 3600s window's threshold up
+	// (or vice versa) for the same dimension. The Alert struct
+	// carries window_seconds as a first-class field for exactly
+	// this filter — see PR #40 round-9 ANALYSIS_0002.
+	rows, err := f.feedback.ListByDimension(ctx, tenantID, dimension, windowSeconds, since)
 	if err != nil {
 		return TuningResult{}, fmt.Errorf("feedback list: %w", err)
 	}

@@ -46,6 +46,7 @@ func makeAlert(tenantID uuid.UUID) repository.Alert {
 		ZScore:         16,
 		WindowStart:    now.Add(-time.Minute),
 		WindowEnd:      now,
+		WindowSeconds:  60,
 		Summary:        "DNS NXDOMAIN spike",
 		Evidence:       []byte(`{"sample_count":1000}`),
 		State:          repository.AlertStateOpen,
@@ -353,7 +354,7 @@ func TestFeedback_ListByDimension_ScopedAndSince(t *testing.T) {
 	// Use a far-past since cutoff; the in-memory store uses a
 	// fixed test clock starting at 2025-01-01 which would
 	// otherwise be before time.Now() and filter every row.
-	out, err := fbRepo.ListByDimension(ctx(), tnt.ID, "auth.failures", time.Time{})
+	out, err := fbRepo.ListByDimension(ctx(), tnt.ID, "auth.failures", 0, time.Time{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

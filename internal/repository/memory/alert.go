@@ -87,6 +87,9 @@ func (r *AlertRepository) Create(ctx context.Context, tenantID uuid.UUID, a repo
 	if a.WindowEnd.Before(a.WindowStart) {
 		return repository.Alert{}, repository.ErrInvalidArgument
 	}
+	if a.WindowSeconds <= 0 {
+		return repository.Alert{}, repository.ErrInvalidArgument
+	}
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 	if a.ID == uuid.Nil {
@@ -524,14 +527,20 @@ func (r *AlertFeedbackRepository) Delete(
 }
 
 // ListByDimension returns every feedback row for alerts in the
-// supplied dimension, ordered by CreatedAt DESC. Implemented by
-// joining feedback rows to alerts on AlertID and filtering by
-// the alert's Dimension. Used by alert.Feedback.AggregateForTenant
-// to compute the per-dimension FP rate.
+// supplied (dimension, windowSeconds) tuple, ordered by
+// CreatedAt DESC. Implemented by joining feedback rows to alerts
+// on AlertID and filtering by the alert's Dimension + (when
+// windowSeconds > 0) WindowSeconds. Used by alert.Feedback.
+// TuneDimension to compute the per-(tenant, dimension, window)
+// FP rate.
+//
+// `windowSeconds <= 0` is the documented sentinel for "no window
+// filter" — see the interface doc.
 func (r *AlertFeedbackRepository) ListByDimension(
 	ctx context.Context,
 	tenantID uuid.UUID,
 	dimension string,
+	windowSeconds int,
 	since time.Time,
 ) ([]repository.AlertFeedback, error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
@@ -552,6 +561,9 @@ func (r *AlertFeedbackRepository) ListByDimension(
 		}
 		a, ok := r.s.alerts[f.AlertID]
 		if !ok || a.Dimension != dimension {
+			continue
+		}
+		if windowSeconds > 0 && a.WindowSeconds != windowSeconds {
 			continue
 		}
 		out = append(out, cloneFeedback(f))

@@ -78,6 +78,7 @@ func makeAlert(tnt uuid.UUID) repository.Alert {
 		ZScore:         45,
 		WindowStart:    now.Add(-time.Minute),
 		WindowEnd:      now,
+		WindowSeconds:  60,
 		Summary:        "spike",
 		Evidence:       []byte(`{}`),
 	}
