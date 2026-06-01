@@ -678,6 +678,17 @@ const feedbackSelectColumns = `
 id, tenant_id, alert_id, decision, COALESCE(notes, ''), created_by, created_at
 `
 
+// feedbackJoinSelectColumns is the `f.`-qualified variant of
+// feedbackSelectColumns used by ListByDimension. The JOIN against
+// `alerts` introduces ambiguous column references (`id`,
+// `tenant_id`, `created_at` exist on both tables) so the unqualified
+// SELECT list is rejected by postgres at runtime. The two constants
+// are kept in lockstep — see PR #40 round-9 BUG_0001 for the
+// regression that motivated the split.
+const feedbackJoinSelectColumns = `
+f.id, f.tenant_id, f.alert_id, f.decision, COALESCE(f.notes, ''), f.created_by, f.created_at
+`
+
 func scanFeedback(row pgx.Row) (repository.AlertFeedback, error) {
 	var (
 		f         repository.AlertFeedback
@@ -821,7 +832,7 @@ func (r *AlertFeedbackRepository) ListByDimension(
 		)
 		if since.IsZero() {
 			const q = `
-SELECT ` + feedbackSelectColumns + `
+SELECT ` + feedbackJoinSelectColumns + `
 FROM alert_feedback f
 JOIN alerts a ON a.id = f.alert_id
 WHERE a.dimension = $1
@@ -829,7 +840,7 @@ ORDER BY f.created_at DESC, f.id DESC`
 			rows, qerr = tx.Query(ctx, q, dimension)
 		} else {
 			const q = `
-SELECT ` + feedbackSelectColumns + `
+SELECT ` + feedbackJoinSelectColumns + `
 FROM alert_feedback f
 JOIN alerts a ON a.id = f.alert_id
 WHERE a.dimension = $1

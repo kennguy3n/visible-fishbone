@@ -31,6 +31,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -64,22 +65,31 @@ func (h *BaselineHandler) Register(mux *http.ServeMux) {
 // evolution. Welford state (Samples / Mean / M2 / EWMA /
 // EWMAVar) is exposed so the operator portal can render the
 // self-explaining alert context.
+//
+// Timestamps use time.Time so Go's RFC3339Nano default marshal
+// applies — same shape as alertResponse / suppressionResponse /
+// feedbackResponse so SDK consumers see one consistent
+// date-time encoding across the whole alert+baseline surface.
+// LastObservedAt / LastUpdatedAt are *time.Time so omitempty
+// suppresses the field on cold-start models that have never
+// folded an observation; time.Time itself is non-nil-able and
+// would marshal as "0001-01-01T00:00:00Z" through omitempty.
 type baselineResponse struct {
-	ID             uuid.UUID `json:"id"`
-	TenantID       uuid.UUID `json:"tenant_id"`
-	Dimension      string    `json:"dimension"`
-	WindowSeconds  int       `json:"window_seconds"`
-	Samples        int64     `json:"samples"`
-	Mean           float64   `json:"mean"`
-	StdDev         float64   `json:"stddev"`
-	EWMA           float64   `json:"ewma"`
-	EWMAStdDev     float64   `json:"ewma_stddev"`
-	Alpha          float64   `json:"alpha"`
-	ZThreshold     float64   `json:"z_threshold"`
-	LastObservedAt string    `json:"last_observed_at,omitempty"`
-	LastUpdatedAt  string    `json:"last_updated_at,omitempty"`
-	CreatedAt      string    `json:"created_at"`
-	Version        int64     `json:"version"`
+	ID             uuid.UUID  `json:"id"`
+	TenantID       uuid.UUID  `json:"tenant_id"`
+	Dimension      string     `json:"dimension"`
+	WindowSeconds  int        `json:"window_seconds"`
+	Samples        int64      `json:"samples"`
+	Mean           float64    `json:"mean"`
+	StdDev         float64    `json:"stddev"`
+	EWMA           float64    `json:"ewma"`
+	EWMAStdDev     float64    `json:"ewma_stddev"`
+	Alpha          float64    `json:"alpha"`
+	ZThreshold     float64    `json:"z_threshold"`
+	LastObservedAt *time.Time `json:"last_observed_at,omitempty"`
+	LastUpdatedAt  *time.Time `json:"last_updated_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	Version        int64      `json:"version"`
 }
 
 func toBaselineResponse(m repository.BaselineModel) baselineResponse {
@@ -95,14 +105,16 @@ func toBaselineResponse(m repository.BaselineModel) baselineResponse {
 		EWMAStdDev:    m.EWMAStdDev(),
 		Alpha:         m.Alpha,
 		ZThreshold:    m.ZThreshold,
-		CreatedAt:     m.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		CreatedAt:     m.CreatedAt,
 		Version:       m.Version,
 	}
 	if !m.LastObservedAt.IsZero() {
-		out.LastObservedAt = m.LastObservedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00")
+		t := m.LastObservedAt
+		out.LastObservedAt = &t
 	}
 	if !m.LastUpdatedAt.IsZero() {
-		out.LastUpdatedAt = m.LastUpdatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00")
+		t := m.LastUpdatedAt
+		out.LastUpdatedAt = &t
 	}
 	return out
 }

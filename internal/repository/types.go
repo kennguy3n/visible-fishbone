@@ -623,14 +623,22 @@ type PolicyRollout struct {
 // accumulate to make the estimate meaningful (default 30).
 //
 // (EWMA, EWMVar) is the exponentially-weighted pair. On a new
-// sample x with decay alpha:
+// sample x with decay alpha, against the PRE-update ewma:
 //
-//   delta  = x - ewma
-//   ewma  += alpha * delta
-//   ewma_var = (1 - alpha) * (ewma_var + alpha * delta * delta)
+//   delta    = x - ewma           // residual vs. previous EWMA
+//   ewma     = alpha*x + (1-alpha)*ewma
+//   ewma_var = alpha*delta*delta + (1-alpha)*ewma_var
 //
-// (Equivalent to West/Pelet's incremental EWVar formula.) The
-// EWMA captures recent shifts much faster than the Welford
+// This is the standard exponentially-smoothed squared residual
+// (the "RiskMetrics-style" EWVar) used by baseline.Engine.Fold.
+// It differs from West/Pelet's recursive variance estimator
+// `(1-alpha)*(ewma_var + alpha*delta^2)` by a scaling factor of
+// `(1-alpha)` on the squared-residual term — both are valid EW
+// variance estimators, and we ship the simpler form. Tuning of
+// ZThreshold should be done against the EWMA z-score this
+// formula produces, not against the West/Pelet variant.
+//
+// The EWMA captures recent shifts much faster than the Welford
 // estimator, which is important for catching sudden anomalies
 // (e.g. a malware outbreak generating a 5x spike in DNS
 // queries) that the long-run Welford mean would dilute.
