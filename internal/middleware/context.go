@@ -35,6 +35,7 @@ type contextKey string
 const (
 	keyRequestID   contextKey = "request_id"
 	keyTenantID    contextKey = "tenant_id"
+	keyMSPID       contextKey = "msp_id"
 	keyUserID      contextKey = "user_id"
 	keyAPIKeyID    contextKey = "api_key_id"
 	keyAuthSubject contextKey = "auth_subject"
@@ -151,6 +152,23 @@ func TenantIDFromContext(ctx context.Context) uuid.UUID {
 	return v
 }
 
+// MSPIDFromContext returns the resolved MSP UUID for the request,
+// or uuid.Nil if no MSP scope was bound (e.g. tenant-only paths).
+// Populated by RequireMSP (and indirectly by RequireMSPScope) after
+// it has authorized the caller against the path's msp_id.
+func MSPIDFromContext(ctx context.Context) uuid.UUID {
+	v, _ := ctx.Value(keyMSPID).(uuid.UUID)
+	return v
+}
+
+// WithMSPID returns a derived context carrying the given MSP UUID.
+// Exported for service-layer tests that need to simulate an
+// MSP-scoped caller without spinning up the full middleware stack;
+// production code goes through RequireMSP / RequireMSPScope.
+func WithMSPID(ctx context.Context, id uuid.UUID) context.Context {
+	return withMSPID(ctx, id)
+}
+
 // UserIDFromContext returns the authenticated user UUID, or uuid.Nil
 // if no user was bound (e.g. API-key auth, public endpoints).
 func UserIDFromContext(ctx context.Context) uuid.UUID {
@@ -183,6 +201,11 @@ func withTenantID(ctx context.Context, id uuid.UUID) context.Context {
 	return context.WithValue(ctx, keyTenantID, id)
 }
 
+// withMSPID stamps the MSP UUID onto the context.
+func withMSPID(ctx context.Context, id uuid.UUID) context.Context {
+	return context.WithValue(ctx, keyMSPID, id)
+}
+
 // withUserID stamps the user UUID onto the context.
 func withUserID(ctx context.Context, id uuid.UUID) context.Context {
 	return context.WithValue(ctx, keyUserID, id)
@@ -203,6 +226,15 @@ func withAPIKeyID(ctx context.Context, id string) context.Context {
 // through this helper.
 func ContextWithAPIKeyID(ctx context.Context, id string) context.Context {
 	return withAPIKeyID(ctx, id)
+}
+
+// WithUserIDForTest stamps the user UUID onto the context for
+// tests that need to simulate an authenticated user without
+// spinning up the full Auth middleware. Production code goes
+// through the Auth middleware (which calls the unexported
+// withUserID after a real JWT Verify), not through this helper.
+func WithUserIDForTest(ctx context.Context, id uuid.UUID) context.Context {
+	return withUserID(ctx, id)
 }
 
 // withAuthSubject stamps the auth subject (JWT sub or key name).
