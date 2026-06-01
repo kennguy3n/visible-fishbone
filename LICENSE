@@ -50,10 +50,9 @@ not owned by SN360, and are governed by their own respective licenses.
 A list of the material third-party open-source components used in
 connection with the Software, together with their respective licenses,
 will be maintained in the file `THIRD_PARTY_LICENSES.md` in the root
-of this repository once the first source crates land (see
-[`PROGRESS.md`](./PROGRESS.md) Phase 1). Nothing in this license is
-intended to, or does, alter, restrict, or supersede the terms of any
-third-party open-source license applicable to those components.
+of this repository. Nothing in this license is intended to, or does,
+alter, restrict, or supersede the terms of any third-party
+open-source license applicable to those components.
 
 4. No Warranty
 --------------

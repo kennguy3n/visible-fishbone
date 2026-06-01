@@ -1,9 +1,22 @@
 # ShieldNet Gateway — Architecture
 
 > Detailed system architecture for SNG. Companion to
-> [`PROPOSAL.md`](./PROPOSAL.md) (product / commercial / roadmap) and
-> [`PROGRESS.md`](./PROGRESS.md) (phase status). Modeled after
+> [`PROPOSAL.md`](./PROPOSAL.md) (product / commercial /
+> competitive context) and
+> [`docs/TRAFFIC_CLASSIFICATION.md`](./docs/TRAFFIC_CLASSIFICATION.md)
+> (the six-class steering framework). Modeled after
 > [`sn360-es/internal/docs/ARCHITECTURE.md`](https://github.com/kennguy3n/sn360-es/blob/main/internal/docs/ARCHITECTURE.md).
+>
+> This document covers the entire SNG product. Both planes live
+> in this monorepo: the Rust enforcement plane (`sng-edge`,
+> `sng-agent`, and the twelve library crates under `crates/`)
+> and the Go control plane (`cmd/sng-control`, `cmd/sng-migrate`,
+> packages under `internal/`, schema in `migrations/`, REST
+> surface in `api/openapi.yaml`). The broader SN360 multi-product
+> security-event platform — shared correlation, IOC distribution,
+> SBOM inventory, MSP portal across all SN360 products — lives
+> in [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform);
+> §9 describes the cross-product integration points.
 
 ---
 
@@ -201,8 +214,9 @@ resolver). Dual-bank image install allows safe rollback.
 
 - **nftables + conntrack** for the underlay; `sng-fw` programs
   rules from the compiled NGFW policy.
-- **VPP / DPDK fast path opt-in** later (Phase 5+) once measured
-  throughput demand justifies the operational cost.
+- **VPP / DPDK fast path** is an opt-in extension reserved for
+  the point where measured throughput demand justifies the
+  operational cost; the default path is nftables + conntrack.
 
 ### 4.2 NGFW Engine (`sng-fw`)
 
@@ -223,8 +237,9 @@ resolver). Dual-bank image install allows safe rollback.
 ### 4.4 Secure Web Gateway (`sng-swg`)
 
 - **Envoy** as the L7 proxy (forward proxy on HTTP / HTTPS).
-- URL categorization via a pluggable verdict provider (3rd-party
-  feed at launch; revisit build-vs-partner in Phase 5).
+- URL categorization via a pluggable verdict provider; the
+  default uses a 3rd-party feed, with a clean trait surface for
+  swapping in a first-party engine later.
 - Malware verdict API for downloaded files.
 - TLS interception with operator-controlled bypass lists for
   sensitive categories (healthcare, finance) — defaults match
@@ -243,9 +258,10 @@ the foundation for the cloud-only deployment mode's unit economics
 - **Per-class action**: direct egress / media-bypass /
   SWG-lite (URL-cat only, no TLS MITM) / full SWG+TLS+IPS / SD-WAN
   overlay / drop.
-- **App database** (`app_registry` + `app_registry_overrides`)
-  is the source of truth. Global catalog is curated by SNG; tenants
-  can promote/demote entries via per-tenant overrides (RLS-isolated).
+- **App database** (`app_registry` + `app_registry_overrides`,
+  control-plane tables) is the source of truth. Global catalog is
+  curated by SNG; tenants can promote/demote entries via per-
+  tenant overrides (RLS-isolated).
 - **Per-deployment-mode steering**: the same class compiles to
   different actions per bundle target. `edge` receives the full
   steering table; `cloud` only the classes that reach the cloud
@@ -257,8 +273,8 @@ the foundation for the cloud-only deployment mode's unit economics
   short-TTL overrides on the affected tenants. Global signals
   (threat feed, cert mismatch) fan out across every active tenant.
 - **Vendor sync** (`internal/service/appdb/sync.go`) periodically
-  pulls Microsoft 365 endpoints JSON, Google IP ranges JSON, AWS IP
-  ranges JSON, and any custom `{ domains, ip_ranges }` feed
+  pulls Microsoft 365 endpoints JSON, Google IP ranges JSON, AWS
+  IP ranges JSON, and any custom `{ domains, ip_ranges }` feed
   registered against an app's `metadata_url`.
 - **Byte determinism**: the compiled steering rule set is sorted
   in canonical order (domains, IPs, pins, app refs) so two
@@ -268,7 +284,8 @@ the foundation for the cloud-only deployment mode's unit economics
 - **Telemetry dimension**: every event envelope carries the
   `traffic_class` it was matched against; ClickHouse stores it as a
   `LowCardinality(String)` column so per-class cost attribution is
-  a single GROUP BY. See `internal/service/telemetry/clickhouse`.
+  a single GROUP BY. See `internal/service/telemetry/clickhouse`
+  for the writer.
 
 See `docs/TRAFFIC_CLASSIFICATION.md` for the full design.
 
@@ -472,7 +489,7 @@ Key properties:
 
 ### 7.4 Tenant Isolation
 
-Same posture as `sn360-security-platform`:
+Same posture as the rest of the SN360 family:
 
 - **Postgres**: Row-Level Security with a per-connection
   `tenant_id` GUC; every query is automatically scoped. No raw

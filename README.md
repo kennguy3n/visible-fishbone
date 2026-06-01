@@ -3,56 +3,71 @@
 [![License: Proprietary](https://img.shields.io/badge/License-Proprietary-lightgrey.svg)](./LICENSE)
 [![CI](https://github.com/kennguy3n/visible-fishbone/actions/workflows/ci.yml/badge.svg)](https://github.com/kennguy3n/visible-fishbone/actions/workflows/ci.yml)
 
-Software-first unified security gateway for SMEs. Part of the **SN360
-family** alongside [ShieldNet Access](https://github.com/kennguy3n/sn360-security-platform)
-and [ShieldNet Defense](https://github.com/kennguy3n/sn360-es).
-SNG delivers NGFW, IDS/IPS, SWG, DNS security, ZTNA, VPN replacement,
-SD-WAN, telemetry, and unified policy orchestration as a SaaS-managed,
-multi-tenant platform with edge enforcement — one console, one policy
-model, one lightweight endpoint client, one branch edge image, one
-telemetry fabric, and one support path.
+ShieldNet Gateway (SNG) is the network-layer product in the **SN360
+family**, alongside [ShieldNet Defense](https://github.com/kennguy3n/sn360-es)
+(email security) and [ShieldNet Access](https://github.com/kennguy3n/cautious-fishstick)
+(ZTNA + PAM). SNG delivers NGFW, IDS/IPS, SWG, DNS security, ZTNA,
+VPN replacement, SD-WAN, telemetry, and unified policy orchestration
+as a SaaS-managed, multi-tenant platform with edge enforcement —
+one console, one policy model, one lightweight endpoint client, one
+branch edge image, one telemetry fabric, one support path.
 
 Positioning: **"Fortinet economics + Zscaler simplicity + Palo
 Alto-grade management discipline."**
 
-This repository tracks the planning and reference architecture for the
-SNG product. The first deliverable is the documentation set below
-([`PROPOSAL.md`](./PROPOSAL.md), [`ARCHITECTURE.md`](./ARCHITECTURE.md),
-[`PROGRESS.md`](./PROGRESS.md)); source crates land in subsequent
-phases.
+This repository is the SNG monorepo: it contains both the Rust
+**enforcement plane** (`crates/sng-*` — the branch / site edge
+appliance binary `sng-edge`, the cross-platform endpoint client
+binary `sng-agent`, and the twelve library crates they compose)
+and the SNG-specific Go **control plane** (`cmd/sng-control`,
+`cmd/sng-migrate`, `internal/`, `migrations/`, `api/openapi.yaml`)
+that issues signed policy bundles, signed update manifests, and
+receives telemetry. The broader SN360 multi-product security-event
+platform (Wazuh-based correlation, IOC distribution, SBOM /
+inventory, MSP portal across all SN360 products) lives in
+[`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform);
+SNG integrates with it for cross-product features but does not
+depend on it for the gateway product itself.
 
 ## SN360 Family
 
-SNG is one of three products in the SN360 family. Each product owns a
-slice of the customer's security surface and shares the same tenant
-identity, policy graph, telemetry pipeline, and signing trust root.
-
 | Product | Repository | Scope |
 |---|---|---|
-| **ShieldNet Defense** | [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform) | Multi-tenant control plane: identity, RBAC, signed rule distribution (TRDS), IOC distribution (IOCFS), software-inventory (SIS), Wazuh-based correlation, compliance, alert forwarding | [`sn360-es`](https://github.com/kennguy3n/sn360-es) | Email security for GWS / O365: tiered ML phishing / BEC detection, banners, quarantine, post-delivery remediation, end-user education |
-| **ShieldNet Access** |  [`cautious-fishstick`] (https://github.com/kennguy3n/cautious-fishstick) | ZTNA with SaaS Adapters and PAM |
+| **ShieldNet Defense** | [`sn360-es`](https://github.com/kennguy3n/sn360-es) | Email security for GWS / O365: tiered ML phishing / BEC detection, banners, quarantine, post-delivery remediation, end-user education |
+| **ShieldNet Access** | [`cautious-fishstick`](https://github.com/kennguy3n/cautious-fishstick) | ZTNA with SaaS adapters and PAM |
 | **ShieldNet Gateway** | [`visible-fishbone`](https://github.com/kennguy3n/visible-fishbone) — this repo | Network security gateway: NGFW + IDS/IPS, SWG + DNS, ZTNA + VPN replacement, SD-WAN, edge VM appliance + lightweight endpoint client |
+| **SN360 Security Platform** | [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform) | Shared multi-product platform: identity, RBAC, signed rule distribution (TRDS), IOC distribution (IOCFS), software-inventory (SIS), Wazuh-based correlation, compliance, alert forwarding, MSP portal across every product above |
 
-## Core Capabilities
+## Capabilities
 
-SNG launches with a focused capability surface. Heavier data-protection
-and posture features ship in later phases (see [`PROGRESS.md`](./PROGRESS.md)).
+SNG ships in **three enforcement forms** that share a single control
+plane, policy model, and telemetry fabric.
 
-| Capability | Launch Status | Complexity |
+| Capability | Status | Where it runs |
 |---|---|---|
-| **NGFW + IDS/IPS** — L3-L7 policy, NAT, app awareness, TLS policy, Suricata inline | Phase 2 (Secure Edge MVP) | High |
-| **SWG + DNS Security** — Envoy-based proxy, URL categorization, malware verdict API, resolver-layer filtering, reputation | Phase 2 | Medium |
-| **ZTNA + VPN Replacement** — mTLS device identities, posture checks, app-level access, replaces legacy IPsec / SSL-VPN | Phase 2 | Medium |
-| **SD-WAN** — overlay tunnels, health probes, path scoring, app-aware steering, failover | Phase 2 | Medium-High |
-| **CASB (partial)** — SaaS discovery + top API connectors (no full inline-CASB) | Phase 4 (Data Protection Expansion) | Medium |
-| **DLP (partial)** — web + SaaS DLP, browser protections (no endpoint DLP at launch) | Phase 4 | Medium |
-| **XDR Integration** — signal export to SN360 Access + third-party SIEM / XDR / IAM / ticketing | Phase 3 (Unified Operations) | Low-Medium |
-| **Telemetry + Policy Orchestration** — single typed policy model, change simulation, NATS JetStream ingestion, ClickHouse hot analytics, S3 cold archive | Phase 1 (Foundation) and Phase 3 | High |
+| **NGFW + IDS/IPS** — L3-L7 policy, NAT, app awareness, TLS policy, Suricata inline | Implemented | Edge appliance (`sng-edge`) |
+| **SWG** — Envoy-based forward proxy with URL categorization + malware verdict API | Implemented | Edge appliance |
+| **DNS security** — reputation feed, category filter, sinkhole | Implemented | Edge appliance + endpoint |
+| **SD-WAN** — overlay tunnels, health probes, path scoring, app-aware steering | Implemented | Edge appliance |
+| **ZTNA** — mTLS device identities, posture binding, per-app access | Implemented | Edge appliance + endpoint client (`sng-agent`) |
+| **VPN replacement** — WireGuard-class tunnel, short-lived keys, no implicit "whole-network" access | Implemented | Endpoint client |
+| **Dual-bank self-update** — Ed25519-signed manifests, A/B install, rollback-safe health window | Implemented | Edge appliance + endpoint client |
+| **Local policy evaluator** — verified policy bundles, hot-swap, fail-closed | Implemented | Edge appliance + endpoint client |
+| **Telemetry collection** — metadata-first, redaction at source, at-least-once egress, dedup | Implemented | Edge appliance + endpoint client |
+| **Native protocol transport** — TLS 1.3 + MessagePack + HTTP/2, mTLS device identity | Implemented | All three enforcement forms |
+| **CASB discovery + SaaS connectors** | Planned | Control plane |
+| **DLP for web + SaaS** | Planned | Control plane + edge appliance |
+| **Hardware appliance SKUs (TPM-rooted)** | Planned | Branch edge |
+
+The SNG control plane in this repo (`cmd/sng-control`, `internal/`,
+`migrations/`, `api/openapi.yaml`) is the Go service that compiles
+the policy graph, signs bundles, accepts telemetry, and serves the
+REST API. Operator-facing concerns — admin UI, MSP portal,
+tenant + identity service, ClickHouse hot analytics, S3 cold
+archive, AI assistant — are shared across the SN360 family and
+live in [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform).
 
 ## Architecture Overview
-
-SNG ships in **three deployment forms** that share a single control
-plane, policy model, and telemetry fabric.
 
 ```
 +--------------------------------------------------------------+
@@ -87,8 +102,11 @@ plane, policy model, and telemetry fabric.
 +--------------------------------------------------------------+
 ```
 
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full mermaid diagrams,
-data flow, and per-component breakdown.
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full mermaid
+diagrams, data flow, and per-component breakdown, and
+[`docs/TRAFFIC_CLASSIFICATION.md`](./docs/TRAFFIC_CLASSIFICATION.md)
+for the six-class steering framework that drives the edge / cloud /
+endpoint enforcement-point decision.
 
 ## Technology Stack
 
@@ -98,44 +116,49 @@ performance-sensitive edge component.
 
 | Layer | Technology | Notes |
 |---|---|---|
-| Control plane services | **Go** | Matches `sn360-security-platform` (Gateway, TRDS, IOCFS, SIS) and the `sn360-es` single-binary control surface |
 | Edge enforcement (packet path, policy evaluator, local collectors, parsers) | **Rust** | Matches `sn360-agent-vm` and `sn360-agent-k8s` performance budgets |
 | Endpoint client (traffic steering, posture, ZTNA) | **Rust**, cross-platform | Mirrors the [`sn360-desktop-agent`](https://github.com/kennguy3n/sn360-desktop-agent) architecture (`sda-pal` → `sng-pal`) |
-| Admin UI | **TypeScript + React** | Matches the `sn360-security-platform` web admin |
-| Policy / metadata storage | **PostgreSQL** | Row-level security per tenant, same pattern as SN360 Access |
+| SNG control plane (`cmd/sng-control`, `internal/`, `api/`) | **Go** | In-repo; PostgreSQL-backed with `sng.tenant_id` GUC-driven row-level security (see [`docs/deploy.md`](./docs/deploy.md)) |
+| Admin UI / MSP portal / shared cross-product surfaces | **TypeScript + React** | In [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform) |
+| Policy / metadata storage | **PostgreSQL** | Row-level security per tenant; schema in `migrations/`, runbook in [`docs/deploy.md`](./docs/deploy.md) |
 | Hot analytics | **ClickHouse** | Normalized telemetry, 30-90 day retention |
 | Cold retention | **S3-compatible object storage** | Compressed event archive, 1+ year |
-| Eventing / pipeline | **NATS JetStream** | Same fabric as `sn360-es` and `sn360-security-platform` |
-| L7 proxying (SWG) | **Envoy** (or equivalent) | URL categorization + malware verdict API |
-| IDS/IPS | **Suricata** | Inline on edge VM; longer-term opt-in eBPF fast-path |
-| Container platform | Managed **Kubernetes** / **k3s** | Control plane in EKS / AKS / GKE; k3s for self-hosted reference deployments |
-| Infrastructure as code | **Terraform** | Tenant Terraform provider for MSP automation |
+| Eventing / pipeline | **NATS JetStream** | Same fabric as `sn360-es` and the SN360 platform repo |
+| L7 proxying (SWG) | **Envoy** | Forward proxy with ext-authz handoff to `sng-swg` |
+| IDS/IPS | **Suricata** | Inline on edge VM via `sng-ips`; longer-term opt-in eBPF fast-path |
+| Container platform | Managed **Kubernetes** / **k3s** | Control plane only |
+| Infrastructure as code | **Terraform** | Tenant Terraform provider in the SN360 platform repo |
 | Agent ↔ gateway wire | **TLS 1.3 + MessagePack + HTTP/2** | SN360 native protocol, same as SDA / VMA / SKA |
 | Artifact signing | **Ed25519** | Policy bundles, action jobs, edge images, endpoint installers |
 
-## Planned Workspace Layout
+## Workspace Layout
 
-Rust crates use the **`sng-`** prefix, following the family pattern
-(`sda-` desktop, `vma-` VM, `ska-` Kubernetes, `sng-` gateway). Layout
-mirrors the lib/bin split used by `sn360-agent-k8s` and
-`sn360-desktop-agent`.
+The workspace is two binaries plus twelve library crates. The Rust
+`sng-` prefix matches the family pattern (`sda-` desktop, `vma-`
+VM, `ska-` Kubernetes, `sng-` gateway). The lib / bin split mirrors
+[`sn360-agent-k8s`](https://github.com/kennguy3n/sn360-agent-k8s)
+and [`sn360-desktop-agent`](https://github.com/kennguy3n/sn360-desktop-agent).
 
 | Crate | Kind | Responsibility |
 |---|---|---|
-| `sng-agent` | bin | Endpoint client binary — traffic steering, posture, ZTNA, SWG steering, UX telemetry |
-| `sng-edge` | bin | Edge VM appliance binary — NGFW, IPS, DNS, SWG proxy, SD-WAN overlay |
-| `sng-core` | lib | Shared types, configuration model, lifecycle, error taxonomy |
-| `sng-pal` | lib | Platform Abstraction Layer for the endpoint client (Windows / macOS / Linux) |
-| `sng-policy-eval` | lib | Local policy evaluation engine (consumes compiled policy bundles) |
-| `sng-comms` | lib | SN360 native protocol client — TLS 1.3, MessagePack, HTTP/2, batching, replay-safe ack |
-| `sng-telemetry` | lib | Local telemetry collection, normalization, dedup, and metadata-first redaction |
-| `sng-swg` | lib | Secure Web Gateway proxy engine (Envoy integration + custom verdict hooks) |
-| `sng-dns` | lib | DNS security resolver and filter (reputation, category, sinkhole) |
-| `sng-ztna` | lib | Zero Trust Network Access — mTLS device identities, posture binding, app access |
-| `sng-sdwan` | lib | SD-WAN overlay tunnels, path scoring, health probes, app-aware steering |
-| `sng-ips` | lib | IDS/IPS integration (Suricata wrapper, rule sync, alert normalization) |
-| `sng-fw` | lib | Firewall — L3-L7 policy, NAT, app awareness, nftables / conntrack glue |
-| `sng-updater` | lib | Self-update with signed manifests (Ed25519), dual-bank image install, rollback |
+| [`sng-edge`](./crates/sng-edge) | bin | Edge VM appliance binary — composes every enforcement library behind `sng-core::supervisor::Supervisor` |
+| [`sng-agent`](./crates/sng-agent) | bin | Endpoint client binary — strict subset of edge subsystems (comms, policy_eval, telemetry, ztna, pal_capture / pal_posture / pal_tunnel) |
+| [`sng-core`](./crates/sng-core) | lib | Shared types, identifier newtypes, MessagePack envelope, signed-bundle verification, error taxonomy, lifecycle / supervisor traits |
+| [`sng-pal`](./crates/sng-pal) | lib | Platform Abstraction Layer for the endpoint client (Windows / macOS / Linux) — traffic capture, posture, tunnel, secure key store |
+| [`sng-policy-eval`](./crates/sng-policy-eval) | lib | Local policy evaluation engine — verified bundles, hot-swap, sub-microsecond per-flow verdict |
+| [`sng-comms`](./crates/sng-comms) | lib | SN360 native protocol client — TLS 1.3, MessagePack, HTTP/2, batching, replay-safe ack, bounded spool |
+| [`sng-telemetry`](./crates/sng-telemetry) | lib | Local telemetry collection, normalization, dedup, metadata-first redaction, egress |
+| [`sng-swg`](./crates/sng-swg) | lib | Envoy ext-authz handler — URL categorization, malware verdict, per-tenant rate-limit, bypass list |
+| [`sng-dns`](./crates/sng-dns) | lib | DNS security resolver and filter (reputation, category, sinkhole) |
+| [`sng-ztna`](./crates/sng-ztna) | lib | Zero Trust Network Access — mTLS device identities, posture binding, app access broker |
+| [`sng-sdwan`](./crates/sng-sdwan) | lib | SD-WAN overlay tunnels, path scoring, health probes, app-aware steering |
+| [`sng-ips`](./crates/sng-ips) | lib | Suricata wrapper — rule sync, alert normalization, supervisor + signal lifecycle |
+| [`sng-fw`](./crates/sng-fw) | lib | Firewall — L3-L7 policy, NAT, app awareness, deterministic nftables rule set |
+| [`sng-updater`](./crates/sng-updater) | lib | Self-update with signed manifests (Ed25519), dual-bank image install, rollback |
+
+Every crate is `#![forbid(unsafe_code)]` at the workspace level
+(per-OS PAL modules lift the ban locally with a documented
+rationale) and goes through the workspace-pedantic clippy profile.
 
 ## Endpoint Client Platforms
 
@@ -152,12 +175,46 @@ capture, posture, and tunnel primitives.
 | `aarch64-apple-darwin` | Apple Silicon macOS |
 | `x86_64-pc-windows-msvc` | Windows 10/11 endpoints |
 
+## Roadmap
+
+The current code in this repo covers the edge appliance and
+endpoint client surfaces. The remaining capability roadmap lives
+across the SN360 family:
+
+- **Hardware appliance SKUs.** Small / medium / large branch
+  profiles on vetted OEM platforms; same `sng-edge` image as the
+  VM, with the TPM as the root of device identity and the same
+  dual-bank install path.
+- **Data protection expansion.** CASB discovery + top SaaS API
+  connectors (M365, Google Workspace, Slack, Salesforce); DLP for
+  web + SaaS with MIP label awareness on Microsoft tenants; pre-
+  baked policy templates per industry.
+- **Advanced automation.** Guided remediation playbooks for the
+  most common incident classes; AI-proposed policy-tightening
+  deltas that compile through the deterministic verifier before
+  they can be applied; AI-proposed connectivity / policy / posture
+  fixes that always require operator (or pre-approved playbook)
+  execution.
+- **Unified operations layer.** Change-simulation replays of recent
+  telemetry against proposed policy changes before enforcement;
+  baseline alerts on statistical (z-score / EWMA) signals with
+  bounded ML as a second pass; AI-assisted incident summaries
+  grounded in evidence; bidirectional case sync with Jira /
+  ServiceNow / Zendesk / Freshdesk; Terraform provider for tenant
+  config-as-code.
+
+Operator-driven roadmap items should be filed as a GitHub issue
+labelled `roadmap`. Include the use case, the workaround you are
+using today, and any constraints (network architecture, hypervisor /
+cloud, identity provider, MSP context).
+
 ## Related Repositories
 
 | Repo | Purpose |
 |---|---|
-| [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform) | ShieldNet Access — multi-tenant control plane, identity, policy distribution, correlation, compliance |
+| [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform) | SN360 shared multi-product platform — identity, policy distribution, correlation, compliance, MSP portal |
 | [`sn360-es`](https://github.com/kennguy3n/sn360-es) | ShieldNet Defense — email security for GWS / O365 |
+| [`cautious-fishstick`](https://github.com/kennguy3n/cautious-fishstick) | ShieldNet Access — ZTNA + PAM |
 | [`sn360-desktop-agent`](https://github.com/kennguy3n/sn360-desktop-agent) | SN360 endpoint agent (Windows / macOS / Linux) |
 | [`sn360-agent-vm`](https://github.com/kennguy3n/sn360-agent-vm) | SN360 server / VM agent |
 | [`sn360-agent-k8s`](https://github.com/kennguy3n/sn360-agent-k8s) | SN360 Kubernetes agent |
@@ -167,10 +224,12 @@ capture, posture, and tunnel primitives.
 
 | Document | Purpose |
 |---|---|
-| [`PROPOSAL.md`](./PROPOSAL.md) | Product design proposal — competitive baseline, SME constraints, capability scope, reference architecture, AI / data / security model, commercial model, phased roadmap, risk register |
+| [`PROPOSAL.md`](./PROPOSAL.md) | Product design proposal — competitive baseline, SME constraints, capability scope, reference architecture, AI / data / security model, commercial model, risk register |
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | System architecture — topology diagrams, control plane services, edge VM internals, endpoint client internals, telemetry pipeline, data tiering, security model, SN360 integration points, wire protocol |
-| [`PROGRESS.md`](./PROGRESS.md) | Phased delivery roadmap — status per phase (Foundation, Secure Edge MVP, Unified Operations, Data Protection Expansion, Advanced Automation, Hardware Packaging), exit criteria, changelog |
-| [`docs/deploy.md`](./docs/deploy.md) | Control-plane deployment runbook — PostgreSQL role hierarchy, RLS GUC contract, migration runner privileges, rollout and rollback, health checks, backup considerations, connection-pool configuration |
+| [`docs/TRAFFIC_CLASSIFICATION.md`](./docs/TRAFFIC_CLASSIFICATION.md) | Traffic classification and steering framework — six traffic classes, per-deployment-mode steering tables, app registry overrides, byte-deterministic bundle layout |
+| [`docs/deploy.md`](./docs/deploy.md) | Control-plane deployment runbook — PostgreSQL role hierarchy, RLS GUC contract, migration runner privileges, policy signing-key modes, API-key cap |
+| [`SECURITY.md`](./SECURITY.md) | Security policy — supported versions, reporting process, response SLAs, scope, crypto / signing posture |
+| Per-crate `README.md` | Each library / binary crate carries its own README under [`crates/`](./crates) covering module surface, wire-format compatibility, and local verification commands |
 
 ## License
 

@@ -14,7 +14,7 @@ enforcement caller → Flow → Verdict                    ↓
 ```
 
 The top-level entry point is [`PolicyEngine`](src/engine.rs). Build it
-from a verified bundle body, then call [`PolicyEngine::evaluate`] per
+from a verified bundle body, then call `PolicyEngine::evaluate` per
 flow.
 
 ## Wire format
@@ -37,15 +37,15 @@ on the Go control plane:
 
 ## Architecture
 
-* **Hot-swap** — bundle rotation goes through [`arc_swap::ArcSwap`].
-  The hot path ([`PolicyEngine::evaluate`]) clones a cheap `Arc` and
+* **Hot-swap** — bundle rotation goes through `arc_swap::ArcSwap`.
+  The hot path (`PolicyEngine::evaluate`) clones a cheap `Arc` and
   does zero locking; rotation is atomic against concurrent readers
   and concurrent writers.
 * **Replay protection** — by default, a bundle whose `graph_version`
   is strictly less than the currently-loaded version is rejected
-  ([`PolicyEvalError::Stale`]). Pass `force = true` on the swap path
+  (`PolicyEvalError::Stale`). Pass `force = true` on the swap path
   for explicit operator rollback.
-* **Target binding** — the engine is bound to a [`BundleTarget`] at
+* **Target binding** — the engine is bound to a `BundleTarget` at
   construction; misrouted bundles fail with `TargetMismatch`.
 * **Fail-closed** — unknown subject refs, unrecognised matcher kinds,
   and missing principals all skip the rule. The bundle's

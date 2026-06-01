@@ -103,8 +103,10 @@ is either redesigned or deferred.
 ## 4. Product Scope and Positioning
 
 SNG's capability matrix at launch and through the phased roadmap.
-"Launch" means Phase 2 (Secure Edge MVP); later capabilities ship in
-Phase 4+ (see [`PROGRESS.md`](./PROGRESS.md)).
+The enforcement-plane stack landed first (Foundation + Secure Edge
+MVP); the unified-operations, data-protection, automation, and
+hardware-packaging phases below are forward-looking. See §10 for
+the roadmap shape.
 
 | Capability | Scope at Launch | Design Choice | Cost / Op Tradeoff | Recommended Stack | Complexity |
 |---|---|---|---|---|---|
@@ -121,8 +123,8 @@ Phase 4+ (see [`PROGRESS.md`](./PROGRESS.md)).
 Out of scope at launch (called out explicitly so we do not drift):
 
 - Inline-CASB.
-- Endpoint DLP (defer to SDA integration in Phase 4+).
-- Hardware appliance SKUs (Phase 6+, only if economics demand).
+- Endpoint DLP (defer to SDA integration; see §10 phase 4 row).
+- Hardware appliance SKUs (see §10 phase 6 row, only if economics demand).
 - Vendor-built threat-research lab.
 - Customer-hosted control plane (managed SaaS only).
 
@@ -472,7 +474,7 @@ default for `cloud_only` and `home_office` site templates).
 | **MSP misfit** | MSPs find the console worse than what they have today | MSP-first design partner cohort from Phase 3; hierarchical RBAC + bulk ops + Terraform on day one; per-MSP branding |
 | **Migration friction** | Customers refuse to switch off incumbent NGFW / VPN | Coexistence mode from Phase 2 — slice-by-slice cutover (DNS first, then SWG, then ZTNA, then NGFW), never forklift |
 | **Control-plane blast radius** | A bad release in shared control plane impacts all tenants | Blue-green control plane, canary release cohorts, per-tenant feature flags, dedicated-cell upsell for customers who require it |
-| **App-database maintenance drag** — domains, IP ranges, and cert pins for trusted apps drift over time | Stale catalog mis-routes flows: false-positive demotions when a domain's IPs change, missed bypass opportunities for newly-published vendor endpoints | Vendor-published endpoint sync (Microsoft 365 / Google / AWS feeds) covers the high-volume sources automatically (`internal/service/appdb/sync.go`); demotion engine self-corrects on cert / IP-range mismatch; per-tenant overrides let operators absorb the long tail without waiting on SNG to update the global catalog |
+| **App-database maintenance drag** — domains, IP ranges, and cert pins for trusted apps drift over time | Stale catalog mis-routes flows: false-positive demotions when a domain's IPs change, missed bypass opportunities for newly-published vendor endpoints | Vendor-published endpoint sync (Microsoft 365 / Google / AWS feeds) covers the high-volume sources automatically (`internal/service/appdb/sync.go` in this repo); demotion engine self-corrects on cert / IP-range mismatch; per-tenant overrides let operators absorb the long tail without waiting on SNG to update the global catalog |
 
 ---
 

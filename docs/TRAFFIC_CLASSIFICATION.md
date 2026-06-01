@@ -99,8 +99,7 @@ classification can never be silently promoted to trusted.
 
 Demotion is the runtime response to evidence that a previously
 trusted classification is currently unsafe. The demotion engine
-(see `internal/service/appdb/demotion.go`) listens on four
-signals:
+(`internal/service/appdb/demotion.go`) listens on four signals:
 
 | Trigger | Demotion Scope | TTL |
 |---|---|---|
@@ -168,7 +167,7 @@ global registry wins, otherwise fall back to `inspect_full`.
 The schema is defined in `migrations/008_app_registry.up.sql`;
 RLS is enabled on `app_registry_overrides` following the same
 `sng.tenant_id` GUC pattern as every other tenant-scoped table
-(see `docs/deploy.md` for the RLS contract). The
+on the control plane (see [`docs/deploy.md`](./deploy.md)). The
 `app_registry` table is intentionally **global** (no RLS) — it
 is the same curated dataset for every tenant.
 
@@ -201,11 +200,12 @@ can investigate.
 
 ## 9. Integration with the Policy Compiler
 
-During bundle compilation (`internal/service/policy/service.go`
-`Compile`), the policy compiler calls
+During bundle compilation on the control plane
+(`internal/service/policy/service.go::Compile`), the policy
+compiler calls
 `appdb.Service.CompileSteeringRules(tenantID, targetType)` and
 embeds the resulting `SteeringRuleSet` into the bundle envelope
-under the new `steering` section. Each enforcement target sees
+under the `steering` section. Each enforcement target sees
 the steering rules relevant to *its* enforcement domain:
 
 - `edge` and `cloud` bundles receive the full SWG bypass list +
@@ -242,10 +242,10 @@ Operators see, per tenant:
 - Cert-pin / IP-range mismatch counts (candidates for
   investigation).
 
-This visibility feeds the AI policy-tightening suggestions in
-Phase 5: *"App Foo accounts for 15% of your `inspect_full`
-traffic and has been clean for 90 days; promote to
-`trusted_direct`?"*
+This visibility feeds the AI policy-tightening suggestions on
+the control plane: *"App Foo accounts for 15% of your
+`inspect_full` traffic and has been clean for 90 days; promote
+to `trusted_direct`?"*
 
 ## 11. Failure Modes
 
