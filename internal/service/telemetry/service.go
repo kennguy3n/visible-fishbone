@@ -216,9 +216,75 @@ type Service struct {
 	dedup   *dedupRing
 	metrics Metrics
 
+	// limiter enforces per-tenant ingestion rate budgets. nil
+	// means "no limiter" — every event is dispatched as fast as
+	// the writers can absorb it. Set via WithPerTenantLimiter.
+	// When configured, dispatch will Nak (with a short backoff)
+	// any envelope whose tenant has exhausted its budget for
+	// the configured wait window, letting JetStream retry the
+	// delivery once the bucket has refilled.
+	limiter *PerTenantLimiter
+
+	// limiterWaitBudget caps the per-message wait spent inside
+	// the limiter before falling through to Nak. Zero → use
+	// DefaultTenantWaitBudget. A very small wait budget biases
+	// the consumer toward shedding (back-pressuring producers
+	// via Nak/redelivery) rather than holding messages
+	// in-flight, which is the right trade-off when JetStream
+	// MaxAckPending is the controlling resource.
+	limiterWaitBudget time.Duration
+
+	// nakBackoff is the redelivery delay used when the limiter
+	// rejects an envelope. Zero → use DefaultNakBackoff. The
+	// value is intentionally larger than typical JetStream
+	// AckWait so the redelivery does not collide with the next
+	// fetch cycle.
+	nakBackoff time.Duration
+
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
+}
+
+// WithPerTenantLimiter wires a PerTenantLimiter onto the
+// service. Once set, dispatch consults the limiter before
+// invoking hot/cold writers and Nak's the message with a short
+// backoff when the tenant has exhausted its budget. Pass nil to
+// remove the limiter (e.g. for tests). Returns the receiver for
+// fluent wiring.
+//
+// Wiring rationale: the limiter is intentionally optional and
+// additive so the existing wire-up paths (cmd/sng-control,
+// tests that pre-date the limiter) keep working without change
+// — the only behavioural effect of NOT wiring a limiter is that
+// individual tenants are free to swamp the writers, which is
+// the prior (current) behaviour. Wire a limiter in production
+// to bound per-tenant ingestion.
+func (s *Service) WithPerTenantLimiter(limiter *PerTenantLimiter) *Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.limiter = limiter
+	return s
+}
+
+// WithLimiterWaitBudget overrides the per-message limiter wait
+// budget. Useful in tests where the default DefaultTenantWaitBudget
+// is too long for the test wall-clock. Zero restores the
+// default.
+func (s *Service) WithLimiterWaitBudget(d time.Duration) *Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.limiterWaitBudget = d
+	return s
+}
+
+// WithNakBackoff overrides the Nak redelivery delay used when
+// the limiter rejects an envelope. Zero restores the default.
+func (s *Service) WithNakBackoff(d time.Duration) *Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nakBackoff = d
+	return s
 }
 
 // WithDLQ wires an explicit DLQ publisher onto the service. Once
@@ -397,6 +463,49 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 	s.metrics.Decoded.Add(1)
+
+	// Per-tenant rate-limit gate. Sits between decode and the
+	// dedup check so a swamped tenant cannot push past their
+	// budget by retrying — JetStream redelivers the message,
+	// the limiter rejects it again until the bucket refills.
+	// A nil limiter is a no-op (existing behaviour preserved).
+	if s.limiter != nil {
+		wait := s.limiterWaitBudget
+		if wait <= 0 {
+			wait = DefaultTenantWaitBudget
+		}
+		if err := s.limiter.WaitWithBudget(ctx, env.TenantID, wait); err != nil {
+			if errors.Is(err, ErrTenantBlocked) {
+				// Backpressure: bounce the message back to
+				// JetStream with a delay so the bucket
+				// has a chance to refill before the next
+				// delivery. NB: a tenant that stays over
+				// budget will eventually run through the
+				// consumer's MaxDeliver budget and the
+				// hot-write-exhausted DLQ path will take
+				// over — the rate limiter is shedding,
+				// not silent dropping.
+				delay := s.nakBackoff
+				if delay <= 0 {
+					delay = DefaultNakBackoff
+				}
+				_ = msg.NakWithDelay(delay)
+				s.metrics.Nacked.Add(1)
+				s.logger.Debug("telemetry: tenant rate limit",
+					slog.String("tenant_id", env.TenantID.String()),
+					slog.String("event_id", env.EventID.String()))
+				return
+			}
+			// A non-ErrTenantBlocked failure (context cancel
+			// during shutdown is the canonical case) is also
+			// handled as a Nak so the message survives. The
+			// delivery count + MaxDeliver budget keeps an
+			// infinite-loop pathology bounded.
+			_ = msg.NakWithDelay(s.nakBackoff)
+			s.metrics.Nacked.Add(1)
+			return
+		}
+	}
 
 	// Read-only dedup check: only suppress redelivery if we have
 	// previously processed this EventID through to a successful

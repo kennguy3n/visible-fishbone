@@ -762,3 +762,120 @@ func TestService_HotWriteExhaustionRoutedToDLQ(t *testing.T) {
 		t.Errorf("expected HotWriteFails >= 5 (full retry budget), got %d", m.HotWriteFails)
 	}
 }
+
+func TestService_PerTenantLimiter_NaksWhenBudgetExhausted(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	// Build a per-tenant limiter that allows exactly two events
+	// (the burst) and then no refill within the test window —
+	// every subsequent envelope must be Nak'd by the limiter
+	// gate.
+	resolver := telemetry.StaticLimitResolver{Limit: telemetry.TenantLimit{Rate: 0.001, Burst: 2}}
+	limiter := telemetry.NewPerTenantLimiter(resolver)
+
+	svc, err := telemetry.New(js, cfg, telemetry.Config{Durable: "tlm-ratelimit"}, hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	// Very short wait budget + short Nak backoff so the test
+	// finishes in single-digit seconds. The production defaults
+	// are tuned for production load, not test wall-clock.
+	svc.
+		WithPerTenantLimiter(limiter).
+		WithLimiterWaitBudget(5 * time.Millisecond).
+		WithNakBackoff(200 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	tenant := uuid.New()
+	const total = 6
+	for i := 0; i < total; i++ {
+		env := schema.Envelope{
+			SchemaVersion: schema.SchemaVersion, EventID: uuid.New(),
+			TenantID: tenant, DeviceID: uuid.New(),
+			Timestamp:  time.Now().UTC(),
+			EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
+			Payload:    newPayload(t),
+		}
+		if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
+			t.Fatalf("publish[%d]: %v", i, err)
+		}
+	}
+	// Wait long enough for the consumer to process the burst
+	// AND for the limiter to Nak the remainder a few times.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		m := svc.MetricsSnapshot()
+		if len(hot.Snapshot()) >= 2 && m.Nacked >= uint64(total-2) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	if err := svc.Stop(stopCtx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	hits := len(hot.Snapshot())
+	if hits < 2 {
+		t.Errorf("hot writer hits = %d, want >= 2 (burst budget)", hits)
+	}
+	m := svc.MetricsSnapshot()
+	if m.Nacked < uint64(total-2) {
+		t.Errorf("Nacked = %d, want >= %d (limiter-rejected envelopes)", m.Nacked, total-2)
+	}
+}
+
+func TestService_PerTenantLimiter_NilLimiterIsNoOp(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	svc, err := telemetry.New(js, cfg, telemetry.Config{Durable: "tlm-nilrl"}, hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	// Set limiter to nil explicitly — must be a no-op.
+	svc.WithPerTenantLimiter(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	tenant := uuid.New()
+	for i := 0; i < 4; i++ {
+		env := schema.Envelope{
+			SchemaVersion: schema.SchemaVersion, EventID: uuid.New(),
+			TenantID: tenant, DeviceID: uuid.New(),
+			Timestamp:  time.Now().UTC(),
+			EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
+			Payload:    newPayload(t),
+		}
+		if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(hot.Snapshot()) >= 4 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	_ = svc.Stop(stopCtx)
+	if hits := len(hot.Snapshot()); hits != 4 {
+		t.Errorf("nil limiter: hot writer hits = %d, want 4 (no shedding)", hits)
+	}
+}
