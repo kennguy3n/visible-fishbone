@@ -685,3 +685,62 @@ type AlertFeedbackRepository interface {
 		since time.Time,
 	) ([]AlertFeedback, error)
 }
+
+// --- Integration connectors -----------------------------------------------
+
+// IntegrationConnectorRepository owns integration_connectors.
+// Tenant-scoped reads/writes flow through `sng.tenant_id` (RLS);
+// the dispatcher's ListActive matches the same indexes as
+// WebhookEndpointRepository.ListActive — the access pattern is
+// "every active connector for a tenant".
+type IntegrationConnectorRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, c IntegrationConnector) (IntegrationConnector, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (IntegrationConnector, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[IntegrationConnector], error)
+	Update(ctx context.Context, tenantID uuid.UUID, c IntegrationConnector) (IntegrationConnector, error)
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+	// SetStatus is a narrow lifecycle transition: enable / disable
+	// without rewriting Config / Secret. Update() with the same
+	// fields would also work but the dedicated path avoids the
+	// "did the operator accidentally clear the secret" footgun.
+	SetStatus(ctx context.Context, tenantID, id uuid.UUID, status IntegrationConnectorStatus) (IntegrationConnector, error)
+	// RecordTestResult updates LastTestResult / LastTestAt /
+	// LastTestError after a TestConnector probe. The Service is
+	// responsible for the probe itself; the repo just persists
+	// the outcome so the operator portal can show it.
+	RecordTestResult(ctx context.Context, tenantID, id uuid.UUID, result IntegrationTestResult, at time.Time, lastErr string) (IntegrationConnector, error)
+	// ListActive returns every active connector for the tenant
+	// that subscribes to at least one of the given event types
+	// (or whose EventTypes slice is empty — subscribe-to-all).
+	// Used by the dispatcher to fan out events.
+	ListActive(ctx context.Context, tenantID uuid.UUID, eventTypes []string) ([]IntegrationConnector, error)
+}
+
+// IntegrationDeliveryRepository owns integration_deliveries. Same
+// invariants as WebhookDeliveryRepository: ListPending atomically
+// claims a batch and transitions rows to 'processing' inside the
+// claim statement, so concurrent workers cannot double-deliver.
+type IntegrationDeliveryRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, d IntegrationDelivery) (IntegrationDelivery, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (IntegrationDelivery, error)
+	List(ctx context.Context, tenantID uuid.UUID, connectorID *uuid.UUID, page Page) (PageResult[IntegrationDelivery], error)
+	// UpdateStatus transitions the delivery to a new status with
+	// attempt metadata. externalRef, when non-empty, is persisted
+	// as the row's ExternalReference (Jira issue key /
+	// ServiceNow sys_id); pass "" to leave the existing value
+	// untouched.
+	UpdateStatus(
+		ctx context.Context,
+		tenantID, id uuid.UUID,
+		status IntegrationDeliveryStatus,
+		attempt int,
+		lastErr string,
+		responseStatus int,
+		nextRetry time.Time,
+		externalRef string,
+	) error
+	// ListPending atomically claims a batch of due-for-retry
+	// deliveries. processingTimeout governs the stuck-row recovery
+	// window; pass 0 to never re-claim.
+	ListPending(ctx context.Context, limit int, processingTimeout time.Duration) ([]IntegrationDelivery, error)
+}

@@ -854,3 +854,162 @@ type AlertFeedback struct {
 	CreatedBy *uuid.UUID
 	CreatedAt time.Time
 }
+
+// --- Integration connectors ----------------------------------------------
+
+// IntegrationConnectorType enumerates the connector kinds supported
+// by internal/service/integration. The Service uses this discriminator
+// to route Validate/Test/Deliver calls to the right plugin in the
+// connector registry; the database CHECK constraint pins the same
+// set so a row with an unknown type cannot land in the table.
+type IntegrationConnectorType string
+
+const (
+	// IntegrationConnectorSyslog forwards events as RFC 5424
+	// syslog messages over TLS (RFC 5425) or plain TCP / UDP
+	// where the operator explicitly opts out of TLS.
+	IntegrationConnectorSyslog IntegrationConnectorType = "syslog"
+	// IntegrationConnectorSIEMWebhook posts JSON-encoded events
+	// to SIEM / XDR HTTP endpoints (Splunk HEC, Elastic, Sentinel,
+	// generic webhook). Distinct from the tenant webhook service
+	// — that one is operator-owned receivers; this one is a
+	// purpose-built SIEM/XDR payload shape with HMAC + per-vendor
+	// envelope normalisation.
+	IntegrationConnectorSIEMWebhook IntegrationConnectorType = "siem_webhook"
+	// IntegrationConnectorJira opens / updates Jira issues via the
+	// Atlassian Cloud REST API (token + email auth in v1, OAuth 2.0
+	// device flow planned). Bidirectional sync is best-effort: the
+	// edge of trust is the cloud-issue ID embedded in the SNG
+	// alert payload, returned by the connector on first Deliver.
+	IntegrationConnectorJira IntegrationConnectorType = "jira"
+	// IntegrationConnectorServiceNow opens / updates ServiceNow
+	// incidents via the Table API (basic auth in v1, OAuth 2.0
+	// client-credentials planned).
+	IntegrationConnectorServiceNow IntegrationConnectorType = "servicenow"
+)
+
+// IsValid reports whether the connector type is one the registry
+// knows how to dispatch. Returns false for the zero value.
+func (t IntegrationConnectorType) IsValid() bool {
+	switch t {
+	case IntegrationConnectorSyslog,
+		IntegrationConnectorSIEMWebhook,
+		IntegrationConnectorJira,
+		IntegrationConnectorServiceNow:
+		return true
+	}
+	return false
+}
+
+// IntegrationConnectorStatus enumerates connector lifecycle states.
+// Matches the CHECK constraint on integration_connectors.status.
+type IntegrationConnectorStatus string
+
+const (
+	IntegrationConnectorStatusActive   IntegrationConnectorStatus = "active"
+	IntegrationConnectorStatusDisabled IntegrationConnectorStatus = "disabled"
+)
+
+// IntegrationTestResult enumerates the outcome of the most recent
+// Test() probe. NEVER means TestConnector has not been called since
+// the row was created — operators are expected to test before
+// enabling, but nothing in the data model forces that order.
+type IntegrationTestResult string
+
+const (
+	IntegrationTestResultNever   IntegrationTestResult = "never"
+	IntegrationTestResultSuccess IntegrationTestResult = "success"
+	IntegrationTestResultFailure IntegrationTestResult = "failure"
+)
+
+// IntegrationConnector is one configured outbound destination for a
+// tenant. The Config / Secret split mirrors the webhook endpoint
+// shape: Config is operator-readable on List/Get; Secret is opaque
+// and returned only as a presence flag on read (never the value).
+//
+// Secret encryption-at-rest is delegated to disk encryption / TDE
+// in the same way as WebhookEndpoint.SigningSecret — the migration
+// header comment calls this out. Per-row envelope encryption is a
+// known follow-up for the FedRAMP-track deployment.
+type IntegrationConnector struct {
+	ID       uuid.UUID
+	TenantID uuid.UUID
+	// Type is the connector plugin to dispatch to. See
+	// IntegrationConnectorType.
+	Type IntegrationConnectorType
+	// Name is the operator-visible label (uniqueness scope is
+	// (tenant, name) — enforced by the migration's UNIQUE index).
+	Name string
+	// Description is free-form operator notes. Optional.
+	Description string
+	// EventTypes is the inclusion filter: only events whose type
+	// is in this slice fan out to this connector. Empty means
+	// every event matches — the dispatcher treats nil and []string
+	// identically (subscribe-to-all). Concrete event types are
+	// owned by the producing services (alert.*, telemetry.* …).
+	EventTypes []string
+	// Config is the connector-type-specific configuration JSON.
+	// The connector plugin owns the schema; the Service just
+	// shuttles bytes. See internal/service/integration/{type}.go
+	// Config struct for the per-connector contract.
+	Config json.RawMessage
+	// Secret is the connector-type-specific secret JSON. Same
+	// shape contract as Config but never returned to clients.
+	Secret json.RawMessage
+	// Status governs whether the dispatcher fans out to this row
+	// at all. Disabled rows are inert and Test()-only.
+	Status IntegrationConnectorStatus
+	// LastTestResult tracks the outcome of the last TestConnector
+	// probe.
+	LastTestResult IntegrationTestResult
+	// LastTestAt is when the last probe ran. Nil when LastTestResult
+	// is NEVER.
+	LastTestAt *time.Time
+	// LastTestError is the human-readable error from the last
+	// failed probe. Cleared on success. Empty when LastTestResult
+	// is NEVER or SUCCESS.
+	LastTestError string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// IntegrationDeliveryStatus enumerates the delivery worker's state
+// transitions for a single connector dispatch attempt. Identical
+// shape to WebhookDeliveryStatus so operators using both pipes
+// recognise the lifecycle.
+type IntegrationDeliveryStatus string
+
+const (
+	IntegrationDeliveryStatusPending IntegrationDeliveryStatus = "pending"
+	// IntegrationDeliveryStatusProcessing is the exclusive-ownership
+	// state a delivery transitions into when a worker claims it.
+	IntegrationDeliveryStatusProcessing IntegrationDeliveryStatus = "processing"
+	IntegrationDeliveryStatusDelivered  IntegrationDeliveryStatus = "delivered"
+	IntegrationDeliveryStatusFailed     IntegrationDeliveryStatus = "failed"
+	IntegrationDeliveryStatusExhausted  IntegrationDeliveryStatus = "exhausted"
+)
+
+// IntegrationDelivery is one fan-out row produced by the dispatcher
+// for a single connector. The Service.Enqueue path produces a row
+// per matching connector; the DeliveryWorker (subsequent PR) walks
+// IntegrationDeliveryRepository.ListPending to retry due rows.
+type IntegrationDelivery struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	ConnectorID    uuid.UUID
+	EventType      string
+	Payload        json.RawMessage
+	Status         IntegrationDeliveryStatus
+	Attempts       int
+	LastAttemptAt  *time.Time
+	LastError      string
+	NextRetryAt    time.Time
+	ResponseStatus int
+	// ExternalReference is the connector-issued identifier (Jira
+	// issue key, ServiceNow sys_id, syslog has none). Populated by
+	// the worker on first successful Deliver, then immutable —
+	// follow-up Deliver()s for the same alert.* event update the
+	// remote object referenced here.
+	ExternalReference string
+	CreatedAt         time.Time
+}

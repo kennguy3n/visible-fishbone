@@ -56,6 +56,13 @@ type Store struct {
 	webhookEndpoints  map[uuid.UUID]repository.WebhookEndpoint
 	webhookDeliveries map[uuid.UUID]repository.WebhookDelivery
 
+	// Integration connector tables — see migration 014. The shape
+	// mirrors webhook_{endpoints,deliveries} deliberately; the
+	// dispatcher's ListPending / atomic-claim semantics are the
+	// same modulo the connector_id foreign key.
+	integrationConnectors map[uuid.UUID]repository.IntegrationConnector
+	integrationDeliveries map[uuid.UUID]repository.IntegrationDelivery
+
 	// App registry tables — see internal/repository/app_registry.go
 	// and migrations/008_app_registry.up.sql. `appRegistry` is the
 	// global curated catalog (not tenant-scoped); `appOverrides`
@@ -103,6 +110,8 @@ func NewStore() *Store {
 		tenantAPIKeys:     map[uuid.UUID]repository.TenantAPIKey{},
 		webhookEndpoints:  map[uuid.UUID]repository.WebhookEndpoint{},
 		webhookDeliveries: map[uuid.UUID]repository.WebhookDelivery{},
+		integrationConnectors: map[uuid.UUID]repository.IntegrationConnector{},
+		integrationDeliveries: map[uuid.UUID]repository.IntegrationDelivery{},
 		appRegistry:       map[uuid.UUID]repository.AppRegistry{},
 		appOverrides:      map[uuid.UUID]repository.AppRegistryOverride{},
 		roles:             map[uuid.UUID]repository.Role{},
