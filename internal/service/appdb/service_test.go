@@ -318,6 +318,9 @@ func (f fakeTenantRepo) TransitionStatus(context.Context, uuid.UUID, repository.
 	return repository.Tenant{}, nil
 }
 func (f fakeTenantRepo) Delete(context.Context, uuid.UUID) error { return nil }
+func (f fakeTenantRepo) SetMSPOwner(context.Context, uuid.UUID, *uuid.UUID) (repository.Tenant, error) {
+	return repository.Tenant{}, nil
+}
 func (f fakeTenantRepo) List(context.Context, repository.Page) (repository.PageResult[repository.Tenant], error) {
 	return repository.PageResult[repository.Tenant]{
 		Items: []repository.Tenant{{ID: f.tn, Status: repository.TenantStatusActive}},

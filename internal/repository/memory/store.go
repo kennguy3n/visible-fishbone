@@ -63,6 +63,14 @@ type Store struct {
 	integrationConnectors map[uuid.UUID]repository.IntegrationConnector
 	integrationDeliveries map[uuid.UUID]repository.IntegrationDelivery
 
+	// MSP hierarchy tables — see migration 015. `msps` is the
+	// top-level catalog (NOT tenant-scoped, mirrors `tenants`).
+	// `mspTenants` is the many-to-many MSP <-> tenant binding;
+	// the key is the composite (msp_id, tenant_id) matching the
+	// Postgres PRIMARY KEY.
+	msps       map[uuid.UUID]repository.MSP
+	mspTenants map[mspTenantKey]repository.MSPTenantBinding
+
 	// App registry tables — see internal/repository/app_registry.go
 	// and migrations/008_app_registry.up.sql. `appRegistry` is the
 	// global curated catalog (not tenant-scoped); `appOverrides`
@@ -90,6 +98,13 @@ type userRoleKey struct {
 	ScopeID uuid.UUID
 }
 
+// mspTenantKey is the composite key for msp_tenants. Matches the
+// Postgres PRIMARY KEY (msp_id, tenant_id).
+type mspTenantKey struct {
+	MSPID    uuid.UUID
+	TenantID uuid.UUID
+}
+
 // NewStore constructs an empty Store backed by `time.Now().UTC()`.
 func NewStore() *Store {
 	return &Store{
@@ -112,6 +127,8 @@ func NewStore() *Store {
 		webhookDeliveries:     map[uuid.UUID]repository.WebhookDelivery{},
 		integrationConnectors: map[uuid.UUID]repository.IntegrationConnector{},
 		integrationDeliveries: map[uuid.UUID]repository.IntegrationDelivery{},
+		msps:                  map[uuid.UUID]repository.MSP{},
+		mspTenants:            map[mspTenantKey]repository.MSPTenantBinding{},
 		appRegistry:           map[uuid.UUID]repository.AppRegistry{},
 		appOverrides:          map[uuid.UUID]repository.AppRegistryOverride{},
 		roles:                 map[uuid.UUID]repository.Role{},
