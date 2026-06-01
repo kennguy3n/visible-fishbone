@@ -230,7 +230,7 @@ async fn policy_pull_200_then_304() {
     let claims = PolicyBundleClaims {
         schema_version: 1,
         target: BundleTarget::Edge,
-        graph_id: PolicyGraphId::new_v4(),
+        graph_id: PolicyGraphId::new_v4().into_uuid().to_string(),
         graph_version: 10,
         compiler: "integration-test".into(),
         default_action: "deny".into(),

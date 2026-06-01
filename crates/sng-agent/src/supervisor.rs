@@ -49,7 +49,10 @@ use crate::subsystems::{
 };
 use sng_comms::PolicyTrustStore;
 use sng_core::envelope::Platform;
-use sng_core::{BundleTarget, Supervisor, SupervisorBuilder, SupervisorReport, SupervisorRunError};
+use sng_core::{
+    BundleTarget, ShutdownSignal, Supervisor, SupervisorBuilder, SupervisorReport,
+    SupervisorRunError,
+};
 use sng_pal::posture::{PostureCollector, UnknownPostureCollector};
 use sng_pal::traffic::{InMemoryCapture, TrafficCapture};
 use sng_pal::tunnel::{InMemoryTunnelProvider, TunnelConfig, TunnelProvider};
@@ -218,12 +221,27 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
         Arc::clone(comms.client()),
     )?);
 
+    // Create the supervisor builder up front so we can pull
+    // a `ShutdownSignal` clone for non-subsystem helper tasks
+    // (the telemetry pipeline-handle bridge below) BEFORE
+    // the supervisor itself is built. The bridge owns a
+    // `PipelineHandle` clone and would otherwise have no way
+    // to observe drain; it would pin the pipeline's
+    // producer-side mpsc sender for the entire process
+    // lifetime and deadlock the telemetry subsystem's drain.
+    // The builder lazily creates the trigger/signal pair in
+    // its `Default` impl so this is always safe.
+    let mut builder = SupervisorBuilder::default()
+        .with_health_interval(cfg.supervisor.health_interval)
+        .with_health_probe_budget(cfg.supervisor.health_probe_budget);
+    let shutdown_signal_for_bridges = builder.shutdown_signal();
+
     // 4. ZTNA. The agent config's `max_inflight` maps onto
     //    ZtnaServiceConfig's `max_sessions` — both name the
     //    producer-enforced ceiling on concurrent ZTNA
     //    evaluations the brain has advertised it can
     //    handle.
-    let telemetry_tx = pipeline_handle_to_telemetry_sender(&telemetry);
+    let telemetry_tx = pipeline_handle_to_telemetry_sender(&telemetry, shutdown_signal_for_bridges);
     let ztna_cfg = ZtnaServiceConfig {
         max_sessions: cfg.ztna.max_inflight,
     };
@@ -289,13 +307,10 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
         desired_tunnels_rx,
     ));
 
-    // Assemble the supervisor. Boot order matters: telemetry
-    // + comms first so producer subsystems have a live
-    // channel + bundle source by the time they spawn, then
-    // everything else.
-    let mut builder = SupervisorBuilder::default()
-        .with_health_interval(cfg.supervisor.health_interval)
-        .with_health_probe_budget(cfg.supervisor.health_probe_budget);
+    // Register subsystems onto the builder we created above.
+    // Boot order matters: telemetry + comms first so producer
+    // subsystems have a live channel + bundle source by the
+    // time they spawn, then everything else.
     builder = builder.with_subsystem(Arc::clone(&telemetry));
     builder = builder.with_subsystem(Arc::clone(&comms));
     builder = builder.with_subsystem(Arc::clone(&policy_eval));
@@ -341,8 +356,53 @@ pub async fn run_agent(cli: Cli, cfg: AgentConfig) -> Result<SupervisorReport, A
         tunnel_backend = ?cli.effective_tunnel_backend(),
         "sng-agent composed; entering supervisor run loop"
     );
-    let report = built.supervisor.run().await?;
-    Ok(report)
+    // Move `supervisor` out and drop every other subsystem
+    // Arc field BEFORE the supervisor takes over. Each
+    // subsystem stores its own producer-side channel halves
+    // (e.g. `TelemetrySubsystem.handle: PipelineHandle`
+    // wraps an mpsc::Sender) and any extra `Arc<...Subsystem>`
+    // reference outside the supervisor would keep those
+    // channel ends alive across drain — the telemetry
+    // pipeline can only exit when ALL producer-channel
+    // senders are dropped.
+    //
+    // CRITICAL: we must NOT use `let BuiltAgent { supervisor,
+    // .. } = built;` here. The `..` ignore-pattern does not
+    // drop the unbound fields at the destructure site; they
+    // are kept alive as anonymous bindings for the duration
+    // of the enclosing scope. Because `supervisor.run().await`
+    // is also in that scope, every other subsystem Arc would
+    // remain alive across the entire run loop — the telemetry
+    // pipeline's producer-channel sender count would never
+    // hit zero and the supervisor would deadlock on drain.
+    //
+    // The fully-named destructure plus explicit `drop` of
+    // each field forces every subsystem Arc clone owned by
+    // `BuiltAgent` to be released right here, before the
+    // supervisor takes over, leaving the supervisor as the
+    // sole subsystem-Arc holder (which it then releases
+    // during `run()` per the comment in
+    // `sng_core::Supervisor::run`).
+    let BuiltAgent {
+        supervisor,
+        telemetry,
+        comms,
+        policy_eval,
+        ztna,
+        pal_capture,
+        pal_posture,
+        pal_tunnel,
+        desired_tunnels_tx,
+    } = built;
+    drop(telemetry);
+    drop(comms);
+    drop(policy_eval);
+    drop(ztna);
+    drop(pal_capture);
+    drop(pal_posture);
+    drop(pal_tunnel);
+    drop(desired_tunnels_tx);
+    supervisor.run().await.map_err(AgentBuildError::from)
 }
 
 /// Resolve the per-selector PAL backend choice and validate
@@ -404,26 +464,61 @@ fn host_platform() -> Platform {
 /// still go through the canonical pipeline.
 fn pipeline_handle_to_telemetry_sender(
     telemetry: &Arc<TelemetrySubsystem>,
+    shutdown: ShutdownSignal,
 ) -> mpsc::Sender<TelemetryEvent> {
     let (tx, mut rx) = mpsc::channel::<TelemetryEvent>(1024);
     let handle = telemetry.pipeline_handle();
     tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            // Submit through the canonical PipelineHandle.
-            // We use the non-blocking `try_submit` form so
-            // a saturated pipeline never wedges a producer
-            // subsystem; the dropped event is logged at
-            // debug-level and is accounted for in the
-            // pipeline's own stats counters when the
-            // channel is closed.
-            if let Err(err) = handle.try_submit(event) {
-                tracing::debug!(
-                    target: "sng_agent::telemetry_bridge",
-                    "pipeline submit rejected event: {err:?}"
-                );
+        loop {
+            tokio::select! {
+                // Race shutdown so the bridge releases its
+                // owned `PipelineHandle` (which wraps the
+                // pipeline's producer-side `mpsc::Sender`)
+                // when the supervisor begins drain. Without
+                // this, the bridge keeps one strong sender
+                // reference alive for the entire process
+                // lifetime, the pipeline's `recv()` never
+                // observes channel closure, the telemetry
+                // subsystem's `start()` spawn task never
+                // joins, and the supervisor drain deadlocks
+                // \u2014 a real production-shutdown bug.
+                () = shutdown.wait() => {
+                    break;
+                }
+                ev = rx.recv() => {
+                    match ev {
+                        Some(event) => {
+                            // Submit through the canonical
+                            // PipelineHandle. We use the
+                            // non-blocking `try_submit` form
+                            // so a saturated pipeline never
+                            // wedges a producer subsystem;
+                            // the dropped event is logged at
+                            // debug-level and accounted for
+                            // in the pipeline's own stats
+                            // counters when the channel is
+                            // closed.
+                            if let Err(err) = handle.try_submit(event) {
+                                tracing::debug!(
+                                    target: "sng_agent::telemetry_bridge",
+                                    "pipeline submit rejected event: {err:?}"
+                                );
+                            }
+                        }
+                        None => {
+                            // Every producer dropped its
+                            // sender clone \u2014 we're done.
+                            break;
+                        }
+                    }
+                }
             }
         }
-        // Producer side dropped: nothing more to forward.
+        // Explicit drop so the `PipelineHandle` (and the
+        // inner mpsc sender it owns) is released exactly when
+        // the loop exits, regardless of which branch broke
+        // us out.
+        drop(handle);
     });
     tx
 }

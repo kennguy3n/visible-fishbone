@@ -240,6 +240,14 @@ impl Subsystem for TelemetrySubsystem {
             // clone so the pipeline sees its producer count
             // hit zero and exits cleanly.
             shutdown.wait().await;
+            // Drop the producer-side handle clone the moment
+            // shutdown fires. The pipeline's `run` loop exits
+            // when its receiver observes channel closure, which
+            // only happens once every producer-side
+            // `PipelineHandle` clone (including this one) is
+            // dropped. Holding `handle_clone` across the
+            // join-await below would keep the channel open and
+            // deadlock the drain.
             drop(handle_clone);
 
             // Drain both sub-tasks. We tolerate a join error

@@ -214,6 +214,16 @@ impl CommsSubsystem {
     pub fn client(&self) -> &Arc<ControlPlaneClient> {
         &self.client
     }
+
+    /// The underlying [`PolicyPuller`]. Exposes the trust
+    /// store so the orchestrator (or test rig) can seed
+    /// trusted signing keys before the first pull and rotate
+    /// keys at runtime without going through a config reload
+    /// + supervisor restart.
+    #[must_use]
+    pub fn puller(&self) -> &Arc<PolicyPuller> {
+        &self.puller
+    }
 }
 
 #[async_trait]

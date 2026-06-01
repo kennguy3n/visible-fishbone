@@ -341,6 +341,18 @@ impl PolicyPuller {
         self.cached.read().clone()
     }
 
+    /// Borrow the underlying trust store. Useful at runtime for
+    /// key rotation (operator-provided new key, then revoke an
+    /// old key) and at boot for seeding the initial trusted
+    /// signer set before the first pull. The store mutators
+    /// (`insert_key` / `remove_key`) are themselves atomic
+    /// against concurrent pulls — see
+    /// [`PolicyTrustStore::insert_key`] for the rcu contract.
+    #[must_use]
+    pub fn trust_store(&self) -> &Arc<PolicyTrustStore> {
+        &self.trust_store
+    }
+
     /// Override the path used for the next pull. Useful for
     /// pinning a specific bundle revision from operator tooling.
     /// Most callers should set this once at construction.
@@ -626,7 +638,7 @@ mod tests {
         PolicyBundleClaims {
             schema_version: 1,
             target,
-            graph_id: PolicyGraphId::new_v4(),
+            graph_id: PolicyGraphId::new_v4().into_uuid().to_string(),
             graph_version,
             compiler: "test".into(),
             default_action: "deny".into(),

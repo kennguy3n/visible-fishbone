@@ -56,6 +56,17 @@ tempfile = { workspace = true }
 rand = { workspace = true }
 uuid = { workspace = true }
 rcgen = { workspace = true }
+# In-process control-plane harness for `tests/agent_e2e.rs`.
+# `bytes`/`http`/`h2`/`tokio-rustls` reproduce the same TLS+h2
+# server shape that `sng-comms/tests/integration.rs` uses, so
+# the supervisor talks to a real rustls + h2 endpoint instead
+# of a mocked transport. `rmp-serde` is the wire codec for
+# policy bundle claims and telemetry envelopes.
+bytes = { workspace = true }
+http = { workspace = true }
+h2 = { workspace = true }
+tokio-rustls = { workspace = true }
+rmp-serde = { workspace = true }
 
 [lints]
 workspace = true
