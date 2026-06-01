@@ -1,0 +1,471 @@
+package policy
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
+)
+
+// canaryFixture wires a minimal policy.Service + memory rollout
+// repo + CanaryService, returning the seeded tenant ID and graph
+// so each test can branch into its own scenario without
+// duplicating the boring setup.
+type canaryFixture struct {
+	tenantID  uuid.UUID
+	graph     repository.PolicyGraph
+	policy    *Service
+	canary    *CanaryService
+	rollouts  repository.PolicyRolloutRepository
+	policyR   repository.PolicyRepository
+}
+
+func newCanaryFixture(t *testing.T) *canaryFixture {
+	t.Helper()
+	store := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(store)
+	tnt, err := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "t", Slug: "t",
+		Status: repository.TenantStatusActive,
+		Tier:   repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	policyRepo := memory.NewPolicyRepository(store)
+	keyRepo := memory.NewPolicySigningKeyRepository(store)
+	auditRepo := memory.NewAuditLogRepository(store)
+	keys := NewKeyService(keyRepo, auditRepo)
+	svc := New(policyRepo, auditRepo, keys)
+
+	raw, _ := json.Marshal(map[string]any{
+		"default_action": "deny",
+		"rules": []map[string]any{
+			{"id": "ngfw-1", "domain": "ngfw", "verb": "deny"},
+		},
+	})
+	graph, err := svc.PutGraph(context.Background(), tnt.ID, nil, raw)
+	if err != nil {
+		t.Fatalf("put graph: %v", err)
+	}
+
+	rollouts := memory.NewPolicyRolloutRepository(store)
+	canary, err := NewCanaryService(svc, rollouts)
+	if err != nil {
+		t.Fatalf("new canary: %v", err)
+	}
+	return &canaryFixture{
+		tenantID: tnt.ID,
+		graph:    graph,
+		policy:   svc,
+		canary:   canary,
+		rollouts: rollouts,
+		policyR:  policyRepo,
+	}
+}
+
+func TestCanary_StartDryRun_PersistsAndCompiles(t *testing.T) {
+	t.Parallel()
+	f := newCanaryFixture(t)
+
+	rollout, dr, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{
+		Proposed: f.graph,
+		Notes:    "first rollout",
+	})
+	if err != nil {
+		t.Fatalf("start dry run: %v", err)
+	}
+	if rollout.Stage != repository.PolicyRolloutStageDryRun {
+		t.Fatalf("stage = %s, want dry_run", rollout.Stage)
+	}
+	if rollout.CanaryPercent != 0 {
+		t.Fatalf("canary_percent = %d, want 0", rollout.CanaryPercent)
+	}
+	if rollout.GraphID != f.graph.ID {
+		t.Fatalf("graph_id mismatch")
+	}
+	if dr.SimulationID == uuid.Nil {
+		t.Fatalf("dry-run simulation id missing")
+	}
+	if dr.Subject == "" || len(dr.Bundles) == 0 {
+		t.Fatalf("dry-run result not populated: subj=%q bundles=%d", dr.Subject, len(dr.Bundles))
+	}
+}
+
+func TestCanary_StartDryRun_RejectsActiveRollout(t *testing.T) {
+	t.Parallel()
+	f := newCanaryFixture(t)
+
+	if _, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph}); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	_, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph})
+	if !errors.Is(err, ErrCanaryRolloutActive) {
+		t.Fatalf("second start err = %v, want ErrCanaryRolloutActive", err)
+	}
+}
+
+func TestCanary_StartDryRun_AllowsAfterRollback(t *testing.T) {
+	t.Parallel()
+	f := newCanaryFixture(t)
+
+	first, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph})
+	if err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	if _, err := f.canary.Rollback(context.Background(), f.tenantID, first.ID, nil, "abort"); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if _, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph}); err != nil {
+		t.Fatalf("second start after rollback: %v", err)
+	}
+}
+
+func TestCanary_Advance_StateMachine(t *testing.T) {
+	t.Parallel()
+	f := newCanaryFixture(t)
+
+	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// dry_run -> canary requires non-zero percent
+	if _, err := f.canary.Advance(context.Background(), f.tenantID, rollout.ID, AdvanceInput{
+		NextStage: repository.PolicyRolloutStageCanary,
+	}); !errors.Is(err, ErrCanaryPercent) {
+		t.Fatalf("zero-percent canary: err = %v, want ErrCanaryPercent", err)
+	}
+
+	r2, err := f.canary.Advance(context.Background(), f.tenantID, rollout.ID, AdvanceInput{
+		NextStage:     repository.PolicyRolloutStageCanary,
+		CanaryPercent: 25,
+		Notes:         "promoting to 25%",
+	})
+	if err != nil {
+		t.Fatalf("dry_run -> canary: %v", err)
+	}
+	if r2.Stage != repository.PolicyRolloutStageCanary || r2.CanaryPercent != 25 {
+		t.Fatalf("stage/percent wrong: %s/%d", r2.Stage, r2.CanaryPercent)
+	}
+
+	r3, err := f.canary.Advance(context.Background(), f.tenantID, rollout.ID, AdvanceInput{
+		NextStage: repository.PolicyRolloutStageFull,
+	})
+	if err != nil {
+		t.Fatalf("canary -> full: %v", err)
+	}
+	if r3.Stage != repository.PolicyRolloutStageFull {
+		t.Fatalf("full stage wrong: %s", r3.Stage)
+	}
+
+	r4, err := f.canary.Advance(context.Background(), f.tenantID, rollout.ID, AdvanceInput{
+		NextStage: repository.PolicyRolloutStageCompleted,
+	})
+	if err != nil {
+		t.Fatalf("full -> completed: %v", err)
+	}
+	if r4.Stage != repository.PolicyRolloutStageCompleted {
+		t.Fatalf("completed stage wrong: %s", r4.Stage)
+	}
+
+	// Terminal: further Advance is rejected.
+	if _, err := f.canary.Advance(context.Background(), f.tenantID, rollout.ID, AdvanceInput{
+		NextStage: repository.PolicyRolloutStageRolledBack,
+	}); err == nil {
+		t.Fatalf("expected reject for completed -> rolled_back")
+	}
+}
+
+func TestCanary_Advance_IllegalTransitions(t *testing.T) {
+	t.Parallel()
+	f := newCanaryFixture(t)
+	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// dry_run -> completed (must go through full first).
+	if _, err := f.canary.Advance(context.Background(), f.tenantID, rollout.ID, AdvanceInput{
+		NextStage: repository.PolicyRolloutStageCompleted,
+	}); err == nil {
+		t.Fatalf("expected reject for dry_run -> completed")
+	}
+}
+
+func TestCanary_GetActive_ReturnsNonTerminalOnly(t *testing.T) {
+	t.Parallel()
+	f := newCanaryFixture(t)
+
+	r1, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	got, err := f.canary.GetActive(context.Background(), f.tenantID)
+	if err != nil {
+		t.Fatalf("get active: %v", err)
+	}
+	if got.ID != r1.ID {
+		t.Fatalf("get active id = %s, want %s", got.ID, r1.ID)
+	}
+	if _, err := f.canary.Rollback(context.Background(), f.tenantID, r1.ID, nil, "abort"); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if _, err := f.canary.GetActive(context.Background(), f.tenantID); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("after rollback err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestIsCanaryDevice_Deterministic(t *testing.T) {
+	t.Parallel()
+	rolloutID := uuid.New()
+	deviceID := uuid.New()
+	a := IsCanaryDevice(rolloutID, deviceID, 50)
+	b := IsCanaryDevice(rolloutID, deviceID, 50)
+	if a != b {
+		t.Fatalf("non-deterministic: %v vs %v", a, b)
+	}
+}
+
+func TestIsCanaryDevice_BoundaryPercents(t *testing.T) {
+	t.Parallel()
+	rolloutID := uuid.New()
+	for i := 0; i < 100; i++ {
+		deviceID := uuid.New()
+		if IsCanaryDevice(rolloutID, deviceID, 0) {
+			t.Fatalf("percent 0 should never select")
+		}
+		if !IsCanaryDevice(rolloutID, deviceID, 100) {
+			t.Fatalf("percent 100 should always select")
+		}
+		// Out-of-range values clamp.
+		if IsCanaryDevice(rolloutID, deviceID, -10) {
+			t.Fatalf("negative percent should clamp to 0")
+		}
+		if !IsCanaryDevice(rolloutID, deviceID, 250) {
+			t.Fatalf("percent > 100 should clamp to 100")
+		}
+	}
+}
+
+func TestIsCanaryDevice_ApproximatesTargetRate(t *testing.T) {
+	t.Parallel()
+	// With a uniform hash, the fraction of devices selected
+	// should approach canary_percent / 100 for large N.
+	rolloutID := uuid.New()
+	const (
+		N      = 5000
+		target = 30
+		slack  = 5 // ±5 percentage points
+	)
+	in := 0
+	for i := 0; i < N; i++ {
+		if IsCanaryDevice(rolloutID, uuid.New(), target) {
+			in++
+		}
+	}
+	actual := in * 100 / N
+	if actual < target-slack || actual > target+slack {
+		t.Fatalf("selection rate %d%% outside %d±%d%%", actual, target, slack)
+	}
+}
+
+func TestIsCanaryDevice_RolloutSaltsAreIndependent(t *testing.T) {
+	t.Parallel()
+	// Two distinct rollouts at the same percent should NOT pick
+	// the identical cohort — they're salted by rollout_id.
+	const N = 1000
+	deviceIDs := make([]uuid.UUID, N)
+	for i := range deviceIDs {
+		deviceIDs[i] = uuid.New()
+	}
+	rollA, rollB := uuid.New(), uuid.New()
+	overlap := 0
+	for _, d := range deviceIDs {
+		if IsCanaryDevice(rollA, d, 50) && IsCanaryDevice(rollB, d, 50) {
+			overlap++
+		}
+	}
+	// Independent samples at 50% each should overlap ~25% of
+	// the time. Wide slack so the test isn't flaky.
+	if overlap < N/5 || overlap > N*2/5 {
+		t.Fatalf("overlap %d devices outside 20-40%% of %d (rollouts not independent?)", overlap, N)
+	}
+}
+
+func TestCanary_Advance_NotFound(t *testing.T) {
+	t.Parallel()
+	f := newCanaryFixture(t)
+	_, err := f.canary.Advance(context.Background(), f.tenantID, uuid.New(), AdvanceInput{
+		NextStage: repository.PolicyRolloutStageFull,
+	})
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCanary_StartDryRun_RequiresInputs(t *testing.T) {
+	t.Parallel()
+	f := newCanaryFixture(t)
+	if _, _, err := f.canary.StartDryRun(context.Background(), uuid.Nil, StartDryRunInput{Proposed: f.graph}); err == nil {
+		t.Fatalf("zero tenant_id should fail")
+	}
+	if _, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{}); err == nil {
+		t.Fatalf("missing proposed graph should fail")
+	}
+}
+
+func TestNewCanaryService_RejectsNilDeps(t *testing.T) {
+	t.Parallel()
+	if _, err := NewCanaryService(nil, nil); err == nil {
+		t.Fatalf("expected error for nil deps")
+	}
+	store := memory.NewStore()
+	rollouts := memory.NewPolicyRolloutRepository(store)
+	if _, err := NewCanaryService(nil, rollouts); err == nil {
+		t.Fatalf("expected error for nil policy svc")
+	}
+	policyRepo := memory.NewPolicyRepository(store)
+	keyRepo := memory.NewPolicySigningKeyRepository(store)
+	auditRepo := memory.NewAuditLogRepository(store)
+	keys := NewKeyService(keyRepo, auditRepo)
+	svc := New(policyRepo, auditRepo, keys)
+	if _, err := NewCanaryService(svc, nil); err == nil {
+		t.Fatalf("expected error for nil rollouts repo")
+	}
+}
+
+func TestCanary_DeterministicTimestamps_ViaStoreClock(t *testing.T) {
+	t.Parallel()
+	// CreatedAt / UpdatedAt are stamped by the repository (not
+	// the service), so the test pins the store clock. The
+	// service-level WithCanaryClock pins the audit-log clock and
+	// any internal time math the service layer adds in future.
+	fixed := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	store := memory.NewStore()
+	store.SetClock(func() time.Time { return fixed })
+	tenantRepo := memory.NewTenantRepository(store)
+	tnt, err := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "t", Slug: "t",
+		Status: repository.TenantStatusActive,
+		Tier:   repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	policyRepo := memory.NewPolicyRepository(store)
+	keyRepo := memory.NewPolicySigningKeyRepository(store)
+	auditRepo := memory.NewAuditLogRepository(store)
+	keys := NewKeyService(keyRepo, auditRepo)
+	svc := New(policyRepo, auditRepo, keys)
+	raw, _ := json.Marshal(map[string]any{"default_action": "deny"})
+	graph, err := svc.PutGraph(context.Background(), tnt.ID, nil, raw)
+	if err != nil {
+		t.Fatalf("put graph: %v", err)
+	}
+	rollouts := memory.NewPolicyRolloutRepository(store)
+	canary, err := NewCanaryService(svc, rollouts, WithCanaryClock(func() time.Time { return fixed }))
+	if err != nil {
+		t.Fatalf("new canary: %v", err)
+	}
+	got, _, err := canary.StartDryRun(context.Background(), tnt.ID, StartDryRunInput{Proposed: graph})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if !got.CreatedAt.Equal(fixed) {
+		t.Fatalf("created_at = %v, want %v", got.CreatedAt, fixed)
+	}
+}
+
+// TestCanary_Advance_PromotesDraftOnFirstEnforcingStage checks
+// the draft -> live transition: the proposed graph starts out
+// as a draft (so /policy/compile keeps serving the previously
+// live graph during dry-run), and only flips to live on the
+// dry_run -> canary transition.
+func TestCanary_Advance_PromotesDraftOnFirstEnforcingStage(t *testing.T) {
+	t.Parallel()
+	f := newCanaryFixture(t)
+	// Persist a fresh proposed graph as a draft. Reuse the
+	// service so audit + draft semantics match the production
+	// handler path.
+	rawProp, _ := json.Marshal(map[string]any{
+		"default_action": "allow",
+		"rules": []map[string]any{
+			{"id": "ngfw-allow", "domain": "ngfw", "verb": "allow"},
+		},
+	})
+	draft, err := f.policy.PutDraftGraph(context.Background(), f.tenantID, nil, rawProp)
+	if err != nil {
+		t.Fatalf("put draft: %v", err)
+	}
+	if !draft.IsDraft {
+		t.Fatalf("draft.IsDraft = false, want true")
+	}
+
+	// Pre-start: live current is the seeded f.graph.
+	if cur, _ := f.policyR.GetCurrentGraph(context.Background(), f.tenantID); cur.ID != f.graph.ID {
+		t.Fatalf("pre-start current = %s, want %s", cur.ID, f.graph.ID)
+	}
+
+	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenantID,
+		StartDryRunInput{Proposed: draft, PreviousGraphID: f.graph.ID})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// During dry-run, live MUST stay the previous graph.
+	if cur, _ := f.policyR.GetCurrentGraph(context.Background(), f.tenantID); cur.ID != f.graph.ID {
+		t.Fatalf("during dry-run current = %s, want previous %s", cur.ID, f.graph.ID)
+	}
+
+	// dry_run -> canary @ 50% triggers promotion.
+	if _, err := f.canary.Advance(context.Background(), f.tenantID, rollout.ID, AdvanceInput{
+		NextStage: repository.PolicyRolloutStageCanary, CanaryPercent: 50,
+	}); err != nil {
+		t.Fatalf("advance to canary: %v", err)
+	}
+	cur, err := f.policyR.GetCurrentGraph(context.Background(), f.tenantID)
+	if err != nil {
+		t.Fatalf("post-advance current: %v", err)
+	}
+	if cur.ID != draft.ID {
+		t.Fatalf("post-advance current = %s, want promoted draft %s", cur.ID, draft.ID)
+	}
+}
+
+// TestCanary_Rollback_LeavesDraftUnpromoted verifies the
+// rollback path does NOT flip is_draft. The draft row stays
+// queryable for audit but does not affect the live policy.
+func TestCanary_Rollback_LeavesDraftUnpromoted(t *testing.T) {
+	t.Parallel()
+	f := newCanaryFixture(t)
+	rawProp, _ := json.Marshal(map[string]any{"default_action": "allow"})
+	draft, err := f.policy.PutDraftGraph(context.Background(), f.tenantID, nil, rawProp)
+	if err != nil {
+		t.Fatalf("put draft: %v", err)
+	}
+	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenantID,
+		StartDryRunInput{Proposed: draft, PreviousGraphID: f.graph.ID})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if _, err := f.canary.Rollback(context.Background(), f.tenantID, rollout.ID, nil, "abort"); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	got, err := f.policyR.GetGraph(context.Background(), f.tenantID, draft.ID)
+	if err != nil {
+		t.Fatalf("get draft after rollback: %v", err)
+	}
+	if !got.IsDraft {
+		t.Fatalf("draft promoted by rollback — want IsDraft=true")
+	}
+	// And the live current is still the previous graph.
+	cur, _ := f.policyR.GetCurrentGraph(context.Background(), f.tenantID)
+	if cur.ID != f.graph.ID {
+		t.Fatalf("post-rollback current = %s, want previous %s", cur.ID, f.graph.ID)
+	}
+}

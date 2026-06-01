@@ -314,6 +314,18 @@ type TenantAPIKeyRepository interface {
 type PolicyRepository interface {
 	CreateGraph(ctx context.Context, tenantID uuid.UUID, g PolicyGraph) (PolicyGraph, error)
 	GetCurrentGraph(ctx context.Context, tenantID uuid.UUID) (PolicyGraph, error)
+	// GetGraph returns a graph by ID regardless of its
+	// is_draft state. Used by the rollout machinery to fetch
+	// the proposed graph after it has been persisted as a
+	// draft (where GetCurrentGraph would skip it).
+	GetGraph(ctx context.Context, tenantID, id uuid.UUID) (PolicyGraph, error)
+	// PromoteGraph flips is_draft = false on a graph the
+	// rollout state machine is promoting from draft to live.
+	// Returns the post-promotion row. Idempotent — calling on
+	// an already-live graph is a no-op (returns the row
+	// unchanged). Returns ErrNotFound when no such graph
+	// exists for the tenant.
+	PromoteGraph(ctx context.Context, tenantID, id uuid.UUID) (PolicyGraph, error)
 	ListGraphVersions(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[PolicyGraph], error)
 	CreateBundle(ctx context.Context, tenantID uuid.UUID, b PolicyBundle) (PolicyBundle, error)
 	GetBundle(ctx context.Context, tenantID, id uuid.UUID) (PolicyBundle, error)
@@ -383,4 +395,61 @@ type PolicySigningKeyRepository interface {
 	// will fail with a clear error in the meantime, which is the
 	// intended behaviour for a compromised-key incident.
 	Revoke(ctx context.Context, tenantID uuid.UUID, keyID string, at time.Time) (PolicySigningKey, error)
+}
+
+// --- Policy rollouts ------------------------------------------------------
+
+// PolicyRolloutRepository owns the policy_rollouts table — the
+// progressive-deployment state machine for proposed policy graphs
+// (dry-run -> canary -> full -> completed | rolled_back).
+//
+// The "current active rollout" for a tenant is the most recently
+// created rollout whose Stage is NOT terminal. The schema does NOT
+// enforce a partial-unique-active constraint because operators
+// occasionally need to layer a hotfix rollout on top of an
+// in-flight canary; the service layer (internal/service/policy)
+// is responsible for the activity-overlap policy decisions.
+type PolicyRolloutRepository interface {
+	// Create inserts a new rollout. The caller pre-populates
+	// ID (or leaves zero — driver assigns), TenantID, GraphID,
+	// PreviousGraphID, Stage (always DryRun on first insert),
+	// CanaryPercent (zero unless Stage == Canary), SimulationID,
+	// CreatedBy, Notes. CreatedAt / UpdatedAt are stamped by the
+	// driver. Returns ErrInvalidArgument when TenantID or
+	// GraphID is zero, or when Stage is terminal at creation.
+	Create(ctx context.Context, tenantID uuid.UUID, r PolicyRollout) (PolicyRollout, error)
+
+	// Get returns one rollout by ID. The TenantID predicate is
+	// applied so a request from one tenant cannot read another
+	// tenant's rollouts (mirrors the RLS guard).
+	Get(ctx context.Context, tenantID, id uuid.UUID) (PolicyRollout, error)
+
+	// GetActive returns the most recent NON-terminal rollout
+	// for the tenant. Used by the agent-pull endpoints to
+	// resolve "what stage is this tenant in" without a list
+	// scan. Returns ErrNotFound when no active rollout exists.
+	GetActive(ctx context.Context, tenantID uuid.UUID) (PolicyRollout, error)
+
+	// List enumerates rollouts in created-at descending order.
+	// Used by the operator-facing list endpoint; bounded by
+	// Page.Limit.
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[PolicyRollout], error)
+
+	// UpdateStage transitions a rollout to a new stage. The
+	// driver enforces the monotone-forward invariant
+	// (DryRun -> Canary -> Full -> Completed and any
+	// non-terminal -> RolledBack); illegal transitions return
+	// ErrInvalidArgument. CanaryPercent is updated atomically
+	// alongside the stage when supplied; pass -1 to leave the
+	// existing value untouched. Notes is appended (newline
+	// delimiter) to preserve the per-transition audit trail.
+	UpdateStage(
+		ctx context.Context,
+		tenantID, id uuid.UUID,
+		next PolicyRolloutStage,
+		canaryPercent int,
+		notes string,
+		updatedBy *uuid.UUID,
+		at time.Time,
+	) (PolicyRollout, error)
 }

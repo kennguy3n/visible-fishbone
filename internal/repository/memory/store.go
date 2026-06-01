@@ -47,6 +47,7 @@ type Store struct {
 	policyGraphs      map[uuid.UUID]repository.PolicyGraph
 	policyBundles     map[uuid.UUID]repository.PolicyBundle
 	policySigningKeys map[uuid.UUID]repository.PolicySigningKey
+	policyRollouts    map[uuid.UUID]repository.PolicyRollout
 	tenantAPIKeys     map[uuid.UUID]repository.TenantAPIKey
 	webhookEndpoints  map[uuid.UUID]repository.WebhookEndpoint
 	webhookDeliveries map[uuid.UUID]repository.WebhookDelivery
@@ -90,6 +91,7 @@ func NewStore() *Store {
 		policyGraphs:      map[uuid.UUID]repository.PolicyGraph{},
 		policyBundles:     map[uuid.UUID]repository.PolicyBundle{},
 		policySigningKeys: map[uuid.UUID]repository.PolicySigningKey{},
+		policyRollouts:    map[uuid.UUID]repository.PolicyRollout{},
 		tenantAPIKeys:     map[uuid.UUID]repository.TenantAPIKey{},
 		webhookEndpoints:  map[uuid.UUID]repository.WebhookEndpoint{},
 		webhookDeliveries: map[uuid.UUID]repository.WebhookDelivery{},

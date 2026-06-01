@@ -130,7 +130,7 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, appRegHandler, appSyncer, err := buildRouter(&cfg, logger, pool, health, telReplay)
+	router, webhookWorker, appRegHandler, appSyncer, policySimHandler, err := buildRouter(&cfg, logger, pool, health, telReplay)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -176,6 +176,29 @@ func run() error {
 		// handler.TelemetryClassQuerier contract directly — no
 		// adapter shim required.
 		appRegHandler.SetStats(chWriter)
+
+		// Wire the policy simulator now that the ClickHouse hot
+		// tier is alive. Reader.NewReader on Writer shares the
+		// connection, so we don't open a second pool just for
+		// reads — and the simulator's lifecycle is bound to the
+		// telemetry stack's, which is exactly what we want
+		// (operator-driven simulation requires recent telemetry).
+		if policySimHandler != nil {
+			chReader, rErr := chWriter.NewReader()
+			if rErr != nil {
+				logger.Warn("policy.simulator: clickhouse reader unavailable; /simulations endpoint returns 503",
+					slog.String("error", rErr.Error()))
+			} else {
+				sim, sErr := policy.NewSimulator(chReader, policy.GraphEvaluatorFactory{}, policy.WithSimulatorLogger(logger))
+				if sErr != nil {
+					logger.Warn("policy.simulator: construction failed; /simulations endpoint returns 503",
+						slog.String("error", sErr.Error()))
+				} else {
+					policySimHandler.SetSimulator(sim)
+					logger.Info("policy.simulator: wired to clickhouse hot tier")
+				}
+			}
+		}
 	}
 	// Wrap startTelemetry's shutdown in a sync.Once so the bounded
 	// explicit call (with shutdownCtx) wins and the safety-net
@@ -251,7 +274,7 @@ func buildRouter(
 	pool *pgxpool.Pool,
 	health *handler.Health,
 	replay *telreplay.Worker,
-) (http.Handler, *webhook.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, error) {
+) (http.Handler, *webhook.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, error) {
 	store := postgres.NewStore(pool)
 
 	tenantRepo := store.NewTenantRepository()
@@ -262,6 +285,7 @@ func buildRouter(
 	auditRepo := store.NewAuditLogRepository()
 	policyRepo := store.NewPolicyRepository()
 	policyKeyRepo := store.NewPolicySigningKeyRepository()
+	policyRolloutRepo := store.NewPolicyRolloutRepository()
 	webhookEndpointRepo := store.NewWebhookEndpointRepository()
 	webhookDeliveryRepo := store.NewWebhookDeliveryRepository()
 	apiKeyRepo := store.NewTenantAPIKeyRepository()
@@ -297,11 +321,11 @@ func buildRouter(
 	// the same in all cases.
 	keyOpts := []policy.KeyOption{}
 	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
 	} else if len(master) > 0 {
 		w, err := policy.NewAESGCMWrapper(master)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
 		}
 		keyOpts = append(keyOpts, policy.WithKeyWrapper(w))
 		logger.Info("policy: AES-256-GCM at-rest wrap enabled for signing seeds")
@@ -312,7 +336,7 @@ func buildRouter(
 	if cfg.Policy.SigningKeyPath != "" {
 		ks, err := policy.LoadKeySignerFromFile(cfg.Policy.SigningKeyPath)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
 		}
 		policySigner = ks
 		fileSigner = ks
@@ -372,22 +396,37 @@ func buildRouter(
 		logger,
 	)
 
+	// PolicySimulationHandler is constructed only when both
+	// the rollout repo and a CanaryService can be built. The
+	// Simulator itself is wired without a TelemetrySource for
+	// now (deployments without a ClickHouse hot tier can still
+	// drive rollouts manually) — operator-triggered simulation
+	// returns 503 until ClickHouse is wired via a future
+	// startup pass. The rollout / dry-run / advance paths
+	// don't depend on the simulator and remain fully
+	// functional.
+	canarySvc, _ := policy.NewCanaryService(policySvc, policyRolloutRepo,
+		policy.WithCanaryLogger(logger))
+	policySimHandler := handler.NewPolicySimulationHandler(
+		policySvc, canarySvc, nil, policyRepo)
+
 	router := handler.NewRouter(handler.RouterDeps{
-		Config:       cfg,
-		Logger:       logger,
-		Tenants:      handler.NewTenantHandler(tenantSvc),
-		Sites:        handler.NewSiteHandler(siteSvc),
-		Devices:      handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL),
-		RBAC:         handler.NewRBACHandler(rbacSvc),
-		Policy:       handler.NewPolicyHandler(policySvc, policyKeySvc, policyHandlerOpts...),
-		Audit:        handler.NewAuditHandler(auditSvc),
-		Webhooks:     handler.NewWebhookHandler(webhookSvc),
-		APIKeys:      handler.NewAPIKeyHandler(apiKeySvc),
-		Telemetry:    handler.NewTelemetryHandler(replay),
-		AppRegistry:  appRegHandler,
-		APIKeyLookup: apiKeySvc,
-		Health:       health,
-		OpenAPISpec:  handler.NewOpenAPIHandler(),
+		Config:           cfg,
+		Logger:           logger,
+		Tenants:          handler.NewTenantHandler(tenantSvc),
+		Sites:            handler.NewSiteHandler(siteSvc),
+		Devices:          handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL),
+		RBAC:             handler.NewRBACHandler(rbacSvc),
+		Policy:           handler.NewPolicyHandler(policySvc, policyKeySvc, policyHandlerOpts...),
+		PolicySimulation: policySimHandler,
+		Audit:            handler.NewAuditHandler(auditSvc),
+		Webhooks:         handler.NewWebhookHandler(webhookSvc),
+		APIKeys:          handler.NewAPIKeyHandler(apiKeySvc),
+		Telemetry:        handler.NewTelemetryHandler(replay),
+		AppRegistry:      appRegHandler,
+		APIKeyLookup:     apiKeySvc,
+		Health:           health,
+		OpenAPISpec:      handler.NewOpenAPIHandler(),
 	})
 	// Return the AppRegistry handler so the caller can attach the
 	// telemetry stats querier post-construction — the ClickHouse
@@ -401,7 +440,7 @@ func buildRouter(
 	// admin `POST /admin/app-registry/sync` endpoint is the only
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
-	return router, webhookWorker, appRegHandler, appSyncer, nil
+	return router, webhookWorker, appRegHandler, appSyncer, policySimHandler, nil
 }
 
 // loadPolicyKeyWrapMaster resolves the AES-GCM master key from

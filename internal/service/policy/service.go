@@ -185,6 +185,37 @@ func (s *Service) GetCurrentGraph(ctx context.Context, tenantID uuid.UUID) (repo
 // `json.Unmarshal` behaviour) so callers can extend the document
 // with PR8+ metadata without touching the validator.
 func (s *Service) PutGraph(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, raw json.RawMessage) (repository.PolicyGraph, error) {
+	return s.putGraph(ctx, tenantID, actorID, raw, false)
+}
+
+// PutDraftGraph persists a candidate graph as a draft —
+// reachable via GetGraph but skipped by GetCurrentGraph. The
+// rollout machinery stages a proposed graph through this path
+// so the live policy stays stable until the rollout state
+// machine explicitly promotes the draft to live (via
+// PromoteGraph).
+func (s *Service) PutDraftGraph(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, raw json.RawMessage) (repository.PolicyGraph, error) {
+	return s.putGraph(ctx, tenantID, actorID, raw, true)
+}
+
+// PromoteGraph flips is_draft=false on a graph and appends an
+// audit entry. Idempotent — promoting a live graph is a no-op.
+func (s *Service) PromoteGraph(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, id uuid.UUID) (repository.PolicyGraph, error) {
+	promoted, err := s.repo.PromoteGraph(ctx, tenantID, id)
+	if err != nil {
+		return repository.PolicyGraph{}, err
+	}
+	if s.audit != nil {
+		_, _ = s.audit.Append(ctx, tenantID, repository.AuditEntry{
+			TenantID: tenantID, ActorID: actorID,
+			Action: "policy.graph_promoted", ResourceType: "policy_graph",
+			ResourceID: &promoted.ID,
+		})
+	}
+	return promoted, nil
+}
+
+func (s *Service) putGraph(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, raw json.RawMessage, draft bool) (repository.PolicyGraph, error) {
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
 	}
@@ -195,16 +226,21 @@ func (s *Service) PutGraph(ctx context.Context, tenantID uuid.UUID, actorID *uui
 		return repository.PolicyGraph{}, err
 	}
 	g := repository.PolicyGraph{
-		Graph: raw,
+		Graph:   raw,
+		IsDraft: draft,
 	}
 	saved, err := s.repo.CreateGraph(ctx, tenantID, g)
 	if err != nil {
 		return repository.PolicyGraph{}, err
 	}
 	if s.audit != nil {
+		action := "policy.graph_updated"
+		if draft {
+			action = "policy.graph_drafted"
+		}
 		_, _ = s.audit.Append(ctx, tenantID, repository.AuditEntry{
 			TenantID: tenantID, ActorID: actorID,
-			Action: "policy.graph_updated", ResourceType: "policy_graph",
+			Action: action, ResourceType: "policy_graph",
 			ResourceID: &saved.ID,
 		})
 	}
