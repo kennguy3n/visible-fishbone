@@ -469,12 +469,31 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 	// budget by retrying — JetStream redelivers the message,
 	// the limiter rejects it again until the bucket refills.
 	// A nil limiter is a no-op (existing behaviour preserved).
-	if s.limiter != nil {
-		wait := s.limiterWaitBudget
+	//
+	// Snapshot the mutex-guarded fields (limiter,
+	// limiterWaitBudget, nakBackoff) under s.mu before
+	// consulting them — every setter that touches them
+	// (WithPerTenantLimiter, WithLimiterWaitBudget,
+	// WithNakBackoff) takes s.mu, so reading them lock-free
+	// here would race with a concurrent reconfiguration
+	// (and `go test -race` would flag it). The lock-and-copy
+	// matches the s.dlq pattern already in use by
+	// routeBadPayloadToDLQ / routeHotWriteFailureToDLQ —
+	// pointer + word + Duration copy with no I/O, so the
+	// critical section is microscopic. See PR #38 Devin
+	// Review round-4 BUG_0001.
+	s.mu.Lock()
+	limiter := s.limiter
+	limiterWaitBudget := s.limiterWaitBudget
+	nakBackoff := s.nakBackoff
+	s.mu.Unlock()
+
+	if limiter != nil {
+		wait := limiterWaitBudget
 		if wait <= 0 {
 			wait = DefaultTenantWaitBudget
 		}
-		if err := s.limiter.WaitWithBudget(ctx, env.TenantID, wait); err != nil {
+		if err := limiter.WaitWithBudget(ctx, env.TenantID, wait); err != nil {
 			if errors.Is(err, ErrTenantBlocked) {
 				// Backpressure: bounce the message back to
 				// JetStream with a delay so the bucket
@@ -485,7 +504,7 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 				// hot-write-exhausted DLQ path will take
 				// over — the rate limiter is shedding,
 				// not silent dropping.
-				delay := s.nakBackoff
+				delay := nakBackoff
 				if delay <= 0 {
 					delay = DefaultNakBackoff
 				}
@@ -506,7 +525,7 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 			// left nakBackoff at zero doesn't trigger
 			// immediate redelivery (which would defeat the
 			// MaxDeliver budget on shutdown-cancel storms).
-			delay := s.nakBackoff
+			delay := nakBackoff
 			if delay <= 0 {
 				delay = DefaultNakBackoff
 			}
