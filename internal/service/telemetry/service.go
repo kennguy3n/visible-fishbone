@@ -494,35 +494,33 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 			wait = DefaultTenantWaitBudget
 		}
 		if err := limiter.WaitWithBudget(ctx, env.TenantID, wait); err != nil {
-			if errors.Is(err, ErrTenantBlocked) {
-				// Backpressure: bounce the message back to
-				// JetStream with a delay so the bucket
-				// has a chance to refill before the next
-				// delivery. NB: a tenant that stays over
-				// budget will eventually run through the
-				// consumer's MaxDeliver budget and the
-				// hot-write-exhausted DLQ path will take
-				// over — the rate limiter is shedding,
-				// not silent dropping.
-				delay := nakBackoff
-				if delay <= 0 {
-					delay = DefaultNakBackoff
+			// Both ErrTenantBlocked and non-Blocked (typically
+			// ctx.Err() during shutdown) branches share the
+			// same shape: Nak with the configured backoff so
+			// the bucket can refill / the consumer can come
+			// back. BUT: JetStream silently drops a message
+			// once NumDelivered exceeds MaxDeliver, so when
+			// the message has reached the end of its retry
+			// budget the limiter rejection becomes a silent
+			// drop unless we route it to the DLQ first. This
+			// is the same defence-in-depth as the hot-write
+			// path below (service.go:570-583). The DLQ
+			// metadata carries a distinct cause flavour
+			// ("rate-limit exhausted") so operators can
+			// tell on triage whether the tenant needs a
+			// budget bump or the writer needs a fix.
+			if s.deliveryExhausted(msg) {
+				s.routeRateLimitExhaustionToDLQ(msg, err)
+				if termErr := msg.Term(); termErr != nil {
+					s.logger.Warn("telemetry: term after rate-limit exhaustion failed",
+						slog.Any("error", termErr),
+						slog.String("event_id", env.EventID.String()))
 				}
-				_ = msg.NakWithDelay(delay)
 				s.metrics.Nacked.Add(1)
-				s.logger.Debug("telemetry: tenant rate limit",
-					slog.String("tenant_id", env.TenantID.String()),
-					slog.String("event_id", env.EventID.String()))
 				return
 			}
-			// A non-ErrTenantBlocked failure (context cancel
-			// during shutdown is the canonical case) is also
-			// handled as a Nak so the message survives. The
-			// delivery count + MaxDeliver budget keeps an
-			// infinite-loop pathology bounded. Default the
-			// backoff identically to the ErrTenantBlocked
-			// branch above so a misconfigured Service that
-			// left nakBackoff at zero doesn't trigger
+			// Default the backoff so a misconfigured Service
+			// that left nakBackoff at zero doesn't trigger
 			// immediate redelivery (which would defeat the
 			// MaxDeliver budget on shutdown-cancel storms).
 			delay := nakBackoff
@@ -531,6 +529,11 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 			}
 			_ = msg.NakWithDelay(delay)
 			s.metrics.Nacked.Add(1)
+			if errors.Is(err, ErrTenantBlocked) {
+				s.logger.Debug("telemetry: tenant rate limit",
+					slog.String("tenant_id", env.TenantID.String()),
+					slog.String("event_id", env.EventID.String()))
+			}
 			return
 		}
 	}
@@ -668,6 +671,54 @@ func (s *Service) routeHotWriteFailureToDLQ(msg jetstream.Msg, cause error) {
 	s.logger.Info("telemetry: hot-write exhausted, routed to DLQ",
 		slog.String("subject", msg.Subject()),
 		slog.Any("hot_write_error", cause),
+		slog.Uint64("num_delivered", delivery))
+}
+
+// routeRateLimitExhaustionToDLQ publishes a message whose per-tenant
+// rate-limit budget has been exhausted across the consumer's
+// MaxDeliver attempts. Mirrors routeHotWriteFailureToDLQ in shape
+// but carries a distinct log surface + cause prefix so DLQ
+// dashboards can split "tenant needs a budget bump" from "writer
+// is down" without dumping the raw cause string. Best-effort: a
+// DLQ publish failure is logged + counted but does NOT block the
+// Term() that follows.
+//
+// publishCtx derives from context.Background() for the same reason
+// as the hot-write path — a graceful-shutdown that lands mid-
+// dispatch shouldn't expire the 2s DLQ budget and force a Term()
+// with no forensic copy.
+func (s *Service) routeRateLimitExhaustionToDLQ(msg jetstream.Msg, cause error) {
+	s.mu.Lock()
+	dlq := s.dlq
+	s.mu.Unlock()
+	if dlq == nil {
+		s.logger.Warn("telemetry: rate-limit exhausted, no DLQ publisher wired (message dropped)",
+			slog.String("subject", msg.Subject()),
+			slog.Any("rate_limit_error", cause),
+			slog.Int("payload_bytes", len(msg.Data())))
+		return
+	}
+	headers := flattenMsgHeaders(msg)
+	publishCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	delivery := uint64(0)
+	if md, mdErr := msg.Metadata(); mdErr == nil && md != nil {
+		delivery = md.NumDelivered
+	}
+	// Wrap so the DLQ entry's cause string is self-describing.
+	wrapped := fmt.Errorf("rate-limit exhausted: %w", cause)
+	if err := dlq.PublishToDLQ(publishCtx, msg.Subject(), msg.Data(), headers, delivery, wrapped); err != nil {
+		s.metrics.DLQPublishFail.Add(1)
+		s.logger.Warn("telemetry: rate-limit DLQ publish failed (message will be dropped)",
+			slog.Any("dlq_error", err),
+			slog.Any("rate_limit_error", cause),
+			slog.String("subject", msg.Subject()))
+		return
+	}
+	s.metrics.DLQPublished.Add(1)
+	s.logger.Info("telemetry: rate-limit exhausted, routed to DLQ",
+		slog.String("subject", msg.Subject()),
+		slog.Any("rate_limit_error", cause),
 		slog.Uint64("num_delivered", delivery))
 }
 
