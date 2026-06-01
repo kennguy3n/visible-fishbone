@@ -192,7 +192,7 @@ func TestSimulationHandler_AdvanceRollout_StateMachine(t *testing.T) {
 	f := newSimHandlerFixture(t)
 	// seed a rollout via the service directly to skip handler boilerplate.
 	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenant.ID, policy.StartDryRunInput{
-		Proposed: f.graph,
+		ProposedGraph: f.graph.Graph,
 	})
 	if err != nil {
 		t.Fatalf("seed rollout: %v", err)
@@ -219,7 +219,7 @@ func TestSimulationHandler_AdvanceRollout_StateMachine(t *testing.T) {
 	// but verify the dedicated guard via a fresh rollout).
 	freshFixture := newSimHandlerFixture(t)
 	freshRollout, _, _ := freshFixture.canary.StartDryRun(context.Background(), freshFixture.tenant.ID, policy.StartDryRunInput{
-		Proposed: freshFixture.graph,
+		ProposedGraph: freshFixture.graph.Graph,
 	})
 	req = makeRequest(t, http.MethodPost,
 		"/api/v1/tenants/"+freshFixture.tenant.ID.String()+"/policy/rollouts/"+freshRollout.ID.String()+"/advance",
@@ -237,7 +237,7 @@ func TestSimulationHandler_RollbackRollout_TerminatesRollout(t *testing.T) {
 	t.Parallel()
 	f := newSimHandlerFixture(t)
 	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenant.ID, policy.StartDryRunInput{
-		Proposed: f.graph,
+		ProposedGraph: f.graph.Graph,
 	})
 	if err != nil {
 		t.Fatalf("seed: %v", err)
@@ -267,7 +267,7 @@ func TestSimulationHandler_ListRollouts_PaginatesAndSerialises(t *testing.T) {
 	// descending order.
 	for i := 0; i < 3; i++ {
 		rl, _, err := f.canary.StartDryRun(context.Background(), f.tenant.ID, policy.StartDryRunInput{
-			Proposed: f.graph,
+			ProposedGraph: f.graph.Graph,
 		})
 		if err != nil {
 			t.Fatalf("seed %d: %v", i, err)

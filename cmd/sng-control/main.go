@@ -405,8 +405,20 @@ func buildRouter(
 	// startup pass. The rollout / dry-run / advance paths
 	// don't depend on the simulator and remain fully
 	// functional.
-	canarySvc, _ := policy.NewCanaryService(policySvc, policyRolloutRepo,
+	// NewCanaryService currently only fails when either of its
+	// required deps is nil — which would be a programmer error
+	// at startup, not a runtime condition. Surface it as a
+	// fatal log so we never silently start a control plane with
+	// a missing rollout state machine (per PR #39 Devin Review
+	// ANALYSIS_0002): a future option (e.g. a clock injection
+	// guard, or a CanaryConfig validator) could introduce real
+	// failures, and silently dropping that error would leave
+	// the simulation handler wired to a nil service.
+	canarySvc, err := policy.NewCanaryService(policySvc, policyRolloutRepo,
 		policy.WithCanaryLogger(logger))
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
+	}
 	policySimHandler := handler.NewPolicySimulationHandler(
 		policySvc, canarySvc, nil, policyRepo)
 

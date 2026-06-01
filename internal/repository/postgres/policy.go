@@ -16,7 +16,7 @@ import (
 type PolicyRepository struct{ s *Store }
 
 const policyGraphSelectColumns = `
-	id, tenant_id, version, graph, compiled_at, COALESCE(compiler_version, ''), created_at
+	id, tenant_id, version, graph, compiled_at, COALESCE(compiler_version, ''), created_at, is_draft
 `
 
 func scanPolicyGraph(row pgx.Row) (repository.PolicyGraph, error) {
@@ -25,7 +25,17 @@ func scanPolicyGraph(row pgx.Row) (repository.PolicyGraph, error) {
 		compiledAt deletedAtScan
 		graphBuf   []byte
 	)
-	if err := row.Scan(&g.ID, &g.TenantID, &g.Version, &graphBuf, &compiledAt, &g.CompilerVersion, &g.CreatedAt); err != nil {
+	// is_draft is NOT NULL BOOLEAN DEFAULT false (migration
+	// 011); scan directly into the bool. Without this, every
+	// PolicyGraph returned from postgres would have IsDraft=false
+	// regardless of the on-disk value, silently masking drafts
+	// from GetGraph / PromoteGraph callers — see PR #39
+	// Devin Review BUG_0001.
+	if err := row.Scan(
+		&g.ID, &g.TenantID, &g.Version,
+		&graphBuf, &compiledAt, &g.CompilerVersion, &g.CreatedAt,
+		&g.IsDraft,
+	); err != nil {
 		return repository.PolicyGraph{}, err
 	}
 	g.Graph = json.RawMessage(graphBuf)

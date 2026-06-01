@@ -47,6 +47,7 @@ package policy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -126,8 +127,14 @@ func NewCanaryService(p *Service, rollouts repository.PolicyRolloutRepository, o
 
 // StartDryRunInput parameterises a call to StartDryRun.
 type StartDryRunInput struct {
-	// Proposed is the candidate graph operators want to evaluate.
-	Proposed repository.PolicyGraph
+	// ProposedGraph is the candidate graph JSON the operator
+	// wants to evaluate. StartDryRun owns the persistence of
+	// this payload as a *draft* (is_draft=true) so the
+	// active-rollout pre-check runs BEFORE any DB row is
+	// written: this prevents accumulating orphaned draft
+	// graphs whenever an operator retries past a 409 conflict
+	// (see PR #39 Devin Review ANALYSIS_0004).
+	ProposedGraph json.RawMessage
 
 	// PreviousGraphID is the graph the proposal is intended to
 	// replace. Optional; zero if the tenant has no current
@@ -157,7 +164,9 @@ type StartDryRunInput struct {
 // ErrCanaryRolloutActive. The caller can resolve by either
 // promoting or rolling back the existing rollout first; this
 // guard prevents two overlapping rollouts from confusing the
-// operator-facing UI.
+// operator-facing UI. The active-rollout check fires BEFORE
+// the draft graph is persisted so a 409 retry doesn't leak
+// orphaned draft rows into policy_graphs.
 func (s *CanaryService) StartDryRun(
 	ctx context.Context,
 	tenantID uuid.UUID,
@@ -166,19 +175,42 @@ func (s *CanaryService) StartDryRun(
 	if tenantID == uuid.Nil {
 		return repository.PolicyRollout{}, DryRunResult{}, errors.New("policy: tenant id required")
 	}
-	if in.Proposed.ID == uuid.Nil || len(in.Proposed.Graph) == 0 {
+	if len(in.ProposedGraph) == 0 {
 		return repository.PolicyRollout{}, DryRunResult{}, errors.New("policy: proposed graph required")
 	}
 
+	// Fail fast on already-active rollout BEFORE persisting
+	// any candidate state. If we persisted the draft first
+	// and then hit this branch, every retry would leak an
+	// orphaned draft row (invisible to GetCurrentGraph but
+	// still incrementing the version counter).
 	if _, err := s.rollouts.GetActive(ctx, tenantID); err == nil {
 		return repository.PolicyRollout{}, DryRunResult{}, ErrCanaryRolloutActive
 	} else if !errors.Is(err, repository.ErrNotFound) {
 		return repository.PolicyRollout{}, DryRunResult{}, fmt.Errorf("policy: check active rollout: %w", err)
 	}
 
+	// Persist the proposed graph as a draft so the rollout
+	// row can FK to it. PutDraftGraph allocates a fresh ID,
+	// the next sequential version, and sets is_draft=true
+	// so GetCurrentGraph (and therefore /policy/compile)
+	// keeps returning the previously-live graph until the
+	// rollout state machine promotes the draft.
+	proposed, err := s.policy.PutDraftGraph(ctx, tenantID, in.ActorID, in.ProposedGraph)
+	if err != nil {
+		return repository.PolicyRollout{}, DryRunResult{}, fmt.Errorf("policy: persist draft graph: %w", err)
+	}
+
 	// Compile the shadow bundle BEFORE persisting the rollout so
 	// a compile failure does not leak a half-baked rollout row.
-	dryRun, err := s.policy.CompileDryRun(ctx, tenantID, in.Proposed, DryRunOptions{
+	// (A draft graph may have already landed at this point; that
+	// is acceptable — the graph is invisible to GetCurrentGraph
+	// and the next StartDryRun on the same operator-supplied
+	// payload will simply mint a new draft. The only state we
+	// must avoid leaking is the rollout row itself, because the
+	// "one active rollout per tenant" invariant gates further
+	// progress on it.)
+	dryRun, err := s.policy.CompileDryRun(ctx, tenantID, proposed, DryRunOptions{
 		SimulationID: in.SimulationID,
 	})
 	if err != nil {
@@ -189,7 +221,7 @@ func (s *CanaryService) StartDryRun(
 	rollout := repository.PolicyRollout{
 		ID:              uuid.New(),
 		TenantID:        tenantID,
-		GraphID:         in.Proposed.ID,
+		GraphID:         proposed.ID,
 		PreviousGraphID: in.PreviousGraphID,
 		Stage:           repository.PolicyRolloutStageDryRun,
 		CanaryPercent:   0,
@@ -207,7 +239,7 @@ func (s *CanaryService) StartDryRun(
 	s.logger.Info("policy.canary: dry-run started",
 		slog.String("tenant_id", tenantID.String()),
 		slog.String("rollout_id", saved.ID.String()),
-		slog.String("graph_id", in.Proposed.ID.String()),
+		slog.String("graph_id", proposed.ID.String()),
 		slog.String("simulation_id", dryRun.SimulationID.String()),
 		slog.String("subject", dryRun.Subject),
 	)
@@ -261,39 +293,51 @@ func (s *CanaryService) Advance(
 	}
 
 	// Look up the rollout BEFORE mutating state so we know
-	// which graph to promote on a draft -> live transition,
-	// and so we can validate that the requested transition is
-	// legal at this point in the lifecycle (UpdateStage is the
-	// authoritative validator; this fetch is just for the
-	// promotion side-effect below).
+	// which graph to promote on a draft -> live transition.
+	// UpdateStage is still the authoritative validator for
+	// the transition itself; this fetch only feeds the
+	// promotion gate below.
 	current, err := s.rollouts.Get(ctx, tenantID, rolloutID)
 	if err != nil {
 		return repository.PolicyRollout{}, err
 	}
 
-	// Promotion side-effect: the proposed graph was stored as
-	// a draft by StartDryRun so that /policy/compile would
-	// keep serving the previously-live bundle during dry-run.
-	// On the first transition that lets real fleet traffic
-	// reach the new policy — dry_run -> canary (any percent),
-	// dry_run -> full, or canary -> full — we flip is_draft
-	// back to false so any future /policy/compile (or the
-	// implicit compile that happens at canary stage) picks up
-	// the new graph as "current". Subsequent transitions
-	// (canary -> full, full -> completed) are no-ops on the
-	// graph table because PromoteGraph is idempotent.
+	// Decide whether the candidate (draft) graph should flip
+	// to live as part of this stage advance. The proposed
+	// graph was stored as is_draft=true by StartDryRun so
+	// /policy/compile keeps serving the previously-live
+	// bundle during dry-run. On the first transition that
+	// lets real fleet traffic reach the new policy —
+	// dry_run -> canary (any percent) or dry_run -> full —
+	// is_draft must flip to false so any subsequent
+	// /policy/compile picks the new graph up as "current".
+	//
+	// We deliberately fold the promotion into UpdateStage
+	// rather than calling s.policy.PromoteGraph separately:
+	// two repository calls would leave a failure window in
+	// which the rollout state + graph live-state can
+	// disagree (see PR #39 Devin Review ANALYSIS_0001).
+	// The postgres impl runs the rollout UPDATE and the
+	// graph UPDATE in the same withTenant transaction; the
+	// memory impl holds s.mu across both writes for the
+	// equivalent atomicity guarantee.
+	//
+	// Subsequent transitions (canary -> full, full ->
+	// completed, * -> rolled_back) do not pass a promote
+	// id: by that point the graph is already live (or, for
+	// rollback, it must intentionally stay a draft so audit
+	// history is preserved without polluting GetCurrentGraph).
+	var promoteID *uuid.UUID
 	if shouldPromote(current.Stage, in.NextStage) {
-		if _, err := s.policy.PromoteGraph(
-			ctx, tenantID, in.ActorID, current.GraphID,
-		); err != nil {
-			return repository.PolicyRollout{}, fmt.Errorf("policy: promote graph: %w", err)
-		}
+		gid := current.GraphID
+		promoteID = &gid
 	}
 
 	now := s.nowFunc().UTC()
 	updated, err := s.rollouts.UpdateStage(
 		ctx, tenantID, rolloutID,
 		in.NextStage, in.CanaryPercent, in.Notes, in.ActorID, now,
+		promoteID,
 	)
 	if err != nil {
 		return repository.PolicyRollout{}, err
@@ -303,27 +347,31 @@ func (s *CanaryService) Advance(
 		slog.String("rollout_id", rolloutID.String()),
 		slog.String("stage", string(updated.Stage)),
 		slog.Int("canary_percent", updated.CanaryPercent),
+		slog.Bool("promoted", promoteID != nil),
 	)
 	return updated, nil
 }
 
 // shouldPromote returns true when the transition from prev to
 // next is the boundary at which the proposed (draft) graph
-// becomes the live policy. Today that is any transition out of
-// dry_run into a stage that actually enforces (canary or full),
-// or canary -> full. Rollback / completed never trigger a
-// promotion — rollback leaves the draft as-is (so it remains
-// queryable for audit but does not become current), and
-// "completed" is the terminal stage that follows a canary in
-// which the graph was already promoted.
+// becomes the live policy. Today that means dry_run -> canary
+// (at any percentage) or dry_run -> full: those are the only
+// stages where agents start fetching bundles compiled off the
+// candidate graph, so is_draft must flip exactly then.
+//
+// Later transitions (canary -> full, full -> completed) do NOT
+// re-promote: by the time the rollout reaches canary the graph
+// is already is_draft=false, and the subsequent advance is just
+// a state-machine move on the rollout row. Rolling back to
+// rolled_back also returns false: rollback intentionally leaves
+// the draft as a draft so audit queries can still locate the
+// candidate graph without it pre-empting GetCurrentGraph.
 func shouldPromote(prev, next repository.PolicyRolloutStage) bool {
-	switch prev {
-	case repository.PolicyRolloutStageDryRun:
-		return next == repository.PolicyRolloutStageCanary ||
-			next == repository.PolicyRolloutStageFull
-	default:
+	if prev != repository.PolicyRolloutStageDryRun {
 		return false
 	}
+	return next == repository.PolicyRolloutStageCanary ||
+		next == repository.PolicyRolloutStageFull
 }
 
 // Rollback is the dedicated escape hatch from any non-terminal

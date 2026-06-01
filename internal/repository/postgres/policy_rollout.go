@@ -227,6 +227,7 @@ func (r *PolicyRolloutRepository) UpdateStage(
 	notes string,
 	updatedBy *uuid.UUID,
 	at time.Time,
+	promoteGraphID *uuid.UUID,
 ) (repository.PolicyRollout, error) {
 	if next == "" {
 		return repository.PolicyRollout{}, repository.ErrInvalidArgument
@@ -276,6 +277,27 @@ RETURNING `+policyRolloutSelectColumns,
 				return repository.ErrInvalidArgument
 			}
 			return fmt.Errorf("update rollout stage: %w", err)
+		}
+		// Promotion side-effect, inside the same tx so the
+		// stage advance and the graph going-live commit
+		// atomically. The CanaryService passes the rollout's
+		// graph_id here when the transition is the boundary
+		// at which the candidate becomes the live policy
+		// (dry_run -> canary / dry_run -> full). The UPDATE
+		// is intentionally idempotent (no-op if is_draft is
+		// already false), matching PromoteGraph's contract,
+		// so re-running this transaction on retry stays
+		// safe. We don't ErrNotFound here: the rollout's FK
+		// to policy_graphs already guarantees the row exists.
+		if promoteGraphID != nil {
+			if _, err := tx.Exec(ctx, `
+				UPDATE policy_graphs
+				SET is_draft = false
+				WHERE id = $1::uuid
+				  AND tenant_id = $2::uuid
+			`, *promoteGraphID, tenantID); err != nil {
+				return fmt.Errorf("promote draft graph: %w", err)
+			}
 		}
 		out = scanned
 		return nil

@@ -443,6 +443,14 @@ type PolicyRolloutRepository interface {
 	// alongside the stage when supplied; pass -1 to leave the
 	// existing value untouched. Notes is appended (newline
 	// delimiter) to preserve the per-transition audit trail.
+	//
+	// promoteGraphID, when non-nil, flips is_draft = false on
+	// that graph row inside the SAME transaction as the stage
+	// update. This is the only safe way to fold draft promotion
+	// into a stage advance: doing it as a separate repository
+	// call leaves a failure window in which the rollout state
+	// and the graph "live" state can disagree (see PR #39
+	// Devin Review ANALYSIS_0001). Pass nil to skip promotion.
 	UpdateStage(
 		ctx context.Context,
 		tenantID, id uuid.UUID,
@@ -451,5 +459,6 @@ type PolicyRolloutRepository interface {
 		notes string,
 		updatedBy *uuid.UUID,
 		at time.Time,
+		promoteGraphID *uuid.UUID,
 	) (PolicyRollout, error)
 }

@@ -51,6 +51,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -61,10 +62,19 @@ import (
 
 // PolicySimulationHandler exposes the simulator + rollout API
 // surface. Construct via NewPolicySimulationHandler.
+//
+// sim is an atomic pointer so SetSimulator can be called from
+// outside the HTTP server goroutine without a data race against
+// in-flight /simulations requests. The startup path in
+// cmd/sng-control already orders SetSimulator before the
+// listener accept loop, but storing the pointer atomically
+// makes the safety explicit and makes a future hot-reload of
+// the ClickHouse reader trivially correct (see PR #39
+// Devin Review ANALYSIS_0005).
 type PolicySimulationHandler struct {
 	policy  *policy.Service
 	canary  *policy.CanaryService
-	sim     *policy.Simulator
+	sim     atomic.Pointer[policy.Simulator]
 	policyR repository.PolicyRepository
 }
 
@@ -76,12 +86,15 @@ func NewPolicySimulationHandler(
 	sim *policy.Simulator,
 	policyR repository.PolicyRepository,
 ) *PolicySimulationHandler {
-	return &PolicySimulationHandler{
+	h := &PolicySimulationHandler{
 		policy:  p,
 		canary:  canary,
-		sim:     sim,
 		policyR: policyR,
 	}
+	if sim != nil {
+		h.sim.Store(sim)
+	}
+	return h
 }
 
 // SetSimulator wires the simulator after construction. The
@@ -94,7 +107,7 @@ func (h *PolicySimulationHandler) SetSimulator(s *policy.Simulator) {
 	if h == nil || s == nil {
 		return
 	}
-	h.sim = s
+	h.sim.Store(s)
 }
 
 // Register wires every endpoint onto mux.
@@ -185,7 +198,8 @@ func toSimulationResponse(r policy.ImpactReport) simulationResponse {
 }
 
 func (h *PolicySimulationHandler) simulate(w http.ResponseWriter, r *http.Request) {
-	if h.sim == nil || h.policyR == nil {
+	sim := h.sim.Load()
+	if sim == nil || h.policyR == nil {
 		WriteError(w, http.StatusServiceUnavailable, "unavailable", "policy simulator not configured on this deployment")
 		return
 	}
@@ -236,7 +250,7 @@ func (h *PolicySimulationHandler) simulate(w http.ResponseWriter, r *http.Reques
 		Graph:   req.Proposed,
 	}
 
-	report, err := h.sim.Simulate(r.Context(), tenantID, prev, proposed, since, until, policy.SimulationOptions{
+	report, err := sim.Simulate(r.Context(), tenantID, prev, proposed, since, until, policy.SimulationOptions{
 		MaxEvents: req.MaxEvents,
 	})
 	if err != nil {
@@ -347,27 +361,17 @@ func (h *PolicySimulationHandler) startRollout(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Persist the proposed graph as a *draft* so the rollout
-	// can FK to it. PutDraftGraph allocates an ID and the next
-	// sequential version but sets is_draft=true; this keeps
-	// GetCurrentGraph (and therefore /policy/compile) returning
-	// the previously-live graph until the rollout state machine
-	// explicitly promotes the draft. Without the draft flag, a
-	// concurrent /policy/compile call during dry-run would
-	// regenerate the live bundle off the candidate graph and
-	// defeat the whole point of the rollout.
-	proposed, err := h.policy.PutDraftGraph(r.Context(), tenantID, actorFromCtx(r), req.Proposed)
-	if err != nil {
-		WriteRepositoryError(w, err)
-		return
-	}
-
+	// StartDryRun owns the draft-graph persistence: it runs
+	// the "one active rollout per tenant" pre-check BEFORE
+	// writing anything, so a 409 conflict response no longer
+	// leaks an orphaned draft row into policy_graphs (see
+	// PR #39 Devin Review ANALYSIS_0004).
 	var simID uuid.UUID
 	if req.SimulationID != nil {
 		simID = *req.SimulationID
 	}
 	rollout, dryRun, err := h.canary.StartDryRun(r.Context(), tenantID, policy.StartDryRunInput{
-		Proposed:        proposed,
+		ProposedGraph:   req.Proposed,
 		PreviousGraphID: previousGraphID,
 		SimulationID:    simID,
 		ActorID:         actorFromCtx(r),

@@ -75,8 +75,8 @@ func TestCanary_StartDryRun_PersistsAndCompiles(t *testing.T) {
 	f := newCanaryFixture(t)
 
 	rollout, dr, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{
-		Proposed: f.graph,
-		Notes:    "first rollout",
+		ProposedGraph: f.graph.Graph,
+		Notes:         "first rollout",
 	})
 	if err != nil {
 		t.Fatalf("start dry run: %v", err)
@@ -87,8 +87,18 @@ func TestCanary_StartDryRun_PersistsAndCompiles(t *testing.T) {
 	if rollout.CanaryPercent != 0 {
 		t.Fatalf("canary_percent = %d, want 0", rollout.CanaryPercent)
 	}
-	if rollout.GraphID != f.graph.ID {
-		t.Fatalf("graph_id mismatch")
+	// StartDryRun now owns draft persistence, so rollout.GraphID
+	// points at a freshly minted draft row — not f.graph (the
+	// previously-live seed).
+	if rollout.GraphID == uuid.Nil || rollout.GraphID == f.graph.ID {
+		t.Fatalf("graph_id = %s, want a freshly minted draft id", rollout.GraphID)
+	}
+	persisted, err := f.policyR.GetGraph(context.Background(), f.tenantID, rollout.GraphID)
+	if err != nil {
+		t.Fatalf("get auto-minted draft: %v", err)
+	}
+	if !persisted.IsDraft {
+		t.Fatalf("auto-minted graph.IsDraft = false, want true")
 	}
 	if dr.SimulationID == uuid.Nil {
 		t.Fatalf("dry-run simulation id missing")
@@ -102,10 +112,10 @@ func TestCanary_StartDryRun_RejectsActiveRollout(t *testing.T) {
 	t.Parallel()
 	f := newCanaryFixture(t)
 
-	if _, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph}); err != nil {
+	if _, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{ProposedGraph: f.graph.Graph}); err != nil {
 		t.Fatalf("first start: %v", err)
 	}
-	_, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph})
+	_, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{ProposedGraph: f.graph.Graph})
 	if !errors.Is(err, ErrCanaryRolloutActive) {
 		t.Fatalf("second start err = %v, want ErrCanaryRolloutActive", err)
 	}
@@ -115,14 +125,14 @@ func TestCanary_StartDryRun_AllowsAfterRollback(t *testing.T) {
 	t.Parallel()
 	f := newCanaryFixture(t)
 
-	first, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph})
+	first, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{ProposedGraph: f.graph.Graph})
 	if err != nil {
 		t.Fatalf("first start: %v", err)
 	}
 	if _, err := f.canary.Rollback(context.Background(), f.tenantID, first.ID, nil, "abort"); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
-	if _, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph}); err != nil {
+	if _, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{ProposedGraph: f.graph.Graph}); err != nil {
 		t.Fatalf("second start after rollback: %v", err)
 	}
 }
@@ -131,7 +141,7 @@ func TestCanary_Advance_StateMachine(t *testing.T) {
 	t.Parallel()
 	f := newCanaryFixture(t)
 
-	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph})
+	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{ProposedGraph: f.graph.Graph})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -186,7 +196,7 @@ func TestCanary_Advance_StateMachine(t *testing.T) {
 func TestCanary_Advance_IllegalTransitions(t *testing.T) {
 	t.Parallel()
 	f := newCanaryFixture(t)
-	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph})
+	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{ProposedGraph: f.graph.Graph})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -202,7 +212,7 @@ func TestCanary_GetActive_ReturnsNonTerminalOnly(t *testing.T) {
 	t.Parallel()
 	f := newCanaryFixture(t)
 
-	r1, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{Proposed: f.graph})
+	r1, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{ProposedGraph: f.graph.Graph})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -312,7 +322,7 @@ func TestCanary_Advance_NotFound(t *testing.T) {
 func TestCanary_StartDryRun_RequiresInputs(t *testing.T) {
 	t.Parallel()
 	f := newCanaryFixture(t)
-	if _, _, err := f.canary.StartDryRun(context.Background(), uuid.Nil, StartDryRunInput{Proposed: f.graph}); err == nil {
+	if _, _, err := f.canary.StartDryRun(context.Background(), uuid.Nil, StartDryRunInput{ProposedGraph: f.graph.Graph}); err == nil {
 		t.Fatalf("zero tenant_id should fail")
 	}
 	if _, _, err := f.canary.StartDryRun(context.Background(), f.tenantID, StartDryRunInput{}); err == nil {
@@ -373,7 +383,7 @@ func TestCanary_DeterministicTimestamps_ViaStoreClock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new canary: %v", err)
 	}
-	got, _, err := canary.StartDryRun(context.Background(), tnt.ID, StartDryRunInput{Proposed: graph})
+	got, _, err := canary.StartDryRun(context.Background(), tnt.ID, StartDryRunInput{ProposedGraph: graph.Graph})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -390,22 +400,16 @@ func TestCanary_DeterministicTimestamps_ViaStoreClock(t *testing.T) {
 func TestCanary_Advance_PromotesDraftOnFirstEnforcingStage(t *testing.T) {
 	t.Parallel()
 	f := newCanaryFixture(t)
-	// Persist a fresh proposed graph as a draft. Reuse the
-	// service so audit + draft semantics match the production
-	// handler path.
+	// Hand StartDryRun the raw proposed graph JSON. StartDryRun
+	// owns the draft persistence (see ANALYSIS_0004 fix), so
+	// the rollout.GraphID returned below points at the auto-
+	// minted draft row we then expect Advance to promote.
 	rawProp, _ := json.Marshal(map[string]any{
 		"default_action": "allow",
 		"rules": []map[string]any{
 			{"id": "ngfw-allow", "domain": "ngfw", "verb": "allow"},
 		},
 	})
-	draft, err := f.policy.PutDraftGraph(context.Background(), f.tenantID, nil, rawProp)
-	if err != nil {
-		t.Fatalf("put draft: %v", err)
-	}
-	if !draft.IsDraft {
-		t.Fatalf("draft.IsDraft = false, want true")
-	}
 
 	// Pre-start: live current is the seeded f.graph.
 	if cur, _ := f.policyR.GetCurrentGraph(context.Background(), f.tenantID); cur.ID != f.graph.ID {
@@ -413,10 +417,21 @@ func TestCanary_Advance_PromotesDraftOnFirstEnforcingStage(t *testing.T) {
 	}
 
 	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenantID,
-		StartDryRunInput{Proposed: draft, PreviousGraphID: f.graph.ID})
+		StartDryRunInput{ProposedGraph: rawProp, PreviousGraphID: f.graph.ID})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	draftID := rollout.GraphID
+
+	// The auto-minted draft must actually be persisted as a draft.
+	draft, err := f.policyR.GetGraph(context.Background(), f.tenantID, draftID)
+	if err != nil {
+		t.Fatalf("get auto-minted draft: %v", err)
+	}
+	if !draft.IsDraft {
+		t.Fatalf("draft.IsDraft = false, want true")
+	}
+
 	// During dry-run, live MUST stay the previous graph.
 	if cur, _ := f.policyR.GetCurrentGraph(context.Background(), f.tenantID); cur.ID != f.graph.ID {
 		t.Fatalf("during dry-run current = %s, want previous %s", cur.ID, f.graph.ID)
@@ -432,8 +447,8 @@ func TestCanary_Advance_PromotesDraftOnFirstEnforcingStage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post-advance current: %v", err)
 	}
-	if cur.ID != draft.ID {
-		t.Fatalf("post-advance current = %s, want promoted draft %s", cur.ID, draft.ID)
+	if cur.ID != draftID {
+		t.Fatalf("post-advance current = %s, want promoted draft %s", cur.ID, draftID)
 	}
 }
 
@@ -444,19 +459,16 @@ func TestCanary_Rollback_LeavesDraftUnpromoted(t *testing.T) {
 	t.Parallel()
 	f := newCanaryFixture(t)
 	rawProp, _ := json.Marshal(map[string]any{"default_action": "allow"})
-	draft, err := f.policy.PutDraftGraph(context.Background(), f.tenantID, nil, rawProp)
-	if err != nil {
-		t.Fatalf("put draft: %v", err)
-	}
 	rollout, _, err := f.canary.StartDryRun(context.Background(), f.tenantID,
-		StartDryRunInput{Proposed: draft, PreviousGraphID: f.graph.ID})
+		StartDryRunInput{ProposedGraph: rawProp, PreviousGraphID: f.graph.ID})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	draftID := rollout.GraphID
 	if _, err := f.canary.Rollback(context.Background(), f.tenantID, rollout.ID, nil, "abort"); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
-	got, err := f.policyR.GetGraph(context.Background(), f.tenantID, draft.ID)
+	got, err := f.policyR.GetGraph(context.Background(), f.tenantID, draftID)
 	if err != nil {
 		t.Fatalf("get draft after rollback: %v", err)
 	}
