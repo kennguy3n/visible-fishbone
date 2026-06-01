@@ -1607,19 +1607,36 @@ components:
         error: { type: string }
     BaselineModel:
       type: object
-      required: [tenant_id, dimension, window_seconds, mean, variance, ewma, z_threshold, samples, updated_at]
+      required:
+        - id
+        - tenant_id
+        - dimension
+        - window_seconds
+        - samples
+        - mean
+        - stddev
+        - ewma
+        - ewma_stddev
+        - alpha
+        - z_threshold
+        - created_at
+        - version
       properties:
+        id: { type: string, format: uuid }
         tenant_id: { type: string, format: uuid }
         dimension: { type: string }
         window_seconds: { type: integer, format: int64 }
-        mean: { type: number, format: double }
-        variance: { type: number, format: double }
-        ewma: { type: number, format: double }
-        ewma_variance: { type: number, format: double }
-        z_threshold: { type: number, format: double }
         samples: { type: integer, format: int64 }
+        mean: { type: number, format: double }
+        stddev: { type: number, format: double }
+        ewma: { type: number, format: double }
+        ewma_stddev: { type: number, format: double }
+        alpha: { type: number, format: double }
+        z_threshold: { type: number, format: double }
         last_observed_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
+        last_updated_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        version: { type: integer, format: int64 }
     Alert:
       type: object
       required:

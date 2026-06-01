@@ -796,6 +796,10 @@ func (r *AlertFeedbackRepository) Delete(
 // ListByDimension returns every feedback row for alerts in the
 // supplied dimension, ordered by created_at DESC. The
 // `since` cut-off lets the tuning loop bound its lookback.
+// A zero `since` is treated as "no lower bound" — the query
+// returns every feedback row for the dimension regardless of
+// age. This matches the memory implementation's semantics; see
+// PR #40 round-8 ANALYSIS_0005 for the consistency note.
 func (r *AlertFeedbackRepository) ListByDimension(
 	ctx context.Context,
 	tenantID uuid.UUID,
@@ -807,14 +811,32 @@ func (r *AlertFeedbackRepository) ListByDimension(
 	}
 	var out []repository.AlertFeedback
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		const q = `
+		// Split the query path so a zero `since` does not emit
+		// a redundant `created_at >= '0001-01-01'` predicate
+		// (which is technically harmless but trips up query
+		// planners and obscures the operator-facing intent).
+		var (
+			rows pgx.Rows
+			qerr error
+		)
+		if since.IsZero() {
+			const q = `
+SELECT ` + feedbackSelectColumns + `
+FROM alert_feedback f
+JOIN alerts a ON a.id = f.alert_id
+WHERE a.dimension = $1
+ORDER BY f.created_at DESC, f.id DESC`
+			rows, qerr = tx.Query(ctx, q, dimension)
+		} else {
+			const q = `
 SELECT ` + feedbackSelectColumns + `
 FROM alert_feedback f
 JOIN alerts a ON a.id = f.alert_id
 WHERE a.dimension = $1
   AND f.created_at >= $2::timestamptz
 ORDER BY f.created_at DESC, f.id DESC`
-		rows, qerr := tx.Query(ctx, q, dimension, since.UTC())
+			rows, qerr = tx.Query(ctx, q, dimension, since.UTC())
+		}
 		if qerr != nil {
 			return fmt.Errorf("list alert_feedback by dimension: %w", qerr)
 		}

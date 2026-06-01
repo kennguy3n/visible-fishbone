@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
@@ -60,6 +61,13 @@ type Router struct {
 
 	cacheMu sync.RWMutex
 	cache   map[uuid.UUID]suppressionCacheEntry
+
+	// fillGroup coalesces concurrent suppression-cache misses
+	// for the same tenant into one ListActive call. Without
+	// this an alert storm against a tenant whose cache entry
+	// just expired sees N goroutines all issue the same
+	// repository query. See PR #40 round-8 ANALYSIS_0001.
+	fillGroup singleflight.Group
 }
 
 type suppressionCacheEntry struct {
@@ -197,6 +205,17 @@ func (r *Router) Emit(
 // is excruciating to track down. The cost is one allocation
 // per Emit; the suppression list is typically a handful of
 // rules per tenant, so the bytes are trivial.
+//
+// Concurrency: when the cache is fresh, the RLock fast path
+// serves the slice without touching the repository. On miss,
+// singleflight.Group keyed by tenantID coalesces concurrent
+// misses for the same tenant into one ListActive call — the
+// first caller does the work; the rest of the herd block on
+// the same shared future and receive the same slice. This
+// guarantees the worst-case repo load per tenant is 1 + the
+// cache-refresh cadence (one query per suppressionCacheTTL),
+// independent of the alert arrival rate. Different tenants
+// proceed concurrently. See PR #40 round-8 ANALYSIS_0001.
 func (r *Router) activeSuppressions(
 	ctx context.Context,
 	tenantID uuid.UUID,
@@ -209,18 +228,39 @@ func (r *Router) activeSuppressions(
 		return out, nil
 	}
 	r.cacheMu.RUnlock()
-	fresh, err := r.suppressions.ListActive(ctx, tenantID, now)
+	// Coalesce the fill: the herd waits on one shared future.
+	// Key on the tenant UUID — different tenants don't contend.
+	res, err, _ := r.fillGroup.Do(tenantID.String(), func() (any, error) {
+		// Re-check the cache under singleflight: a caller that
+		// arrived just before our slot inside Do() could have
+		// already filled the entry. This avoids a second
+		// ListActive when the previous Do() owner finished
+		// between our cacheMu.RUnlock above and our entry to
+		// the singleflight slot.
+		r.cacheMu.RLock()
+		if entry, ok := r.cache[tenantID]; ok && entry.expires.After(r.now()) {
+			rules := entry.rules
+			r.cacheMu.RUnlock()
+			return rules, nil
+		}
+		r.cacheMu.RUnlock()
+		fresh, lerr := r.suppressions.ListActive(ctx, tenantID, now)
+		if lerr != nil {
+			return nil, lerr
+		}
+		r.cacheMu.Lock()
+		r.cache[tenantID] = suppressionCacheEntry{
+			rules:   fresh,
+			expires: now.Add(suppressionCacheTTL),
+		}
+		r.cacheMu.Unlock()
+		return fresh, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	// Cache the canonical slice; hand out a copy.
-	r.cacheMu.Lock()
-	r.cache[tenantID] = suppressionCacheEntry{
-		rules:   fresh,
-		expires: now.Add(suppressionCacheTTL),
-	}
-	r.cacheMu.Unlock()
-	return slices.Clone(fresh), nil
+	rules, _ := res.([]repository.AlertSuppression)
+	return slices.Clone(rules), nil
 }
 
 // InvalidateSuppressionCache drops the cached suppression rules

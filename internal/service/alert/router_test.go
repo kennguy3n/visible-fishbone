@@ -315,6 +315,83 @@ func TestRouter_ListAndGet(t *testing.T) {
 	}
 }
 
+// countingSuppressions wraps a repository.AlertSuppressionRepository
+// and exposes a ListActive counter so tests can assert how many
+// times the suppression cache fell through to the repository.
+type countingSuppressions struct {
+	repository.AlertSuppressionRepository
+	mu              sync.Mutex
+	listActiveCalls int
+	gate            chan struct{} // optional: blocks ListActive until released
+}
+
+func (c *countingSuppressions) ListActive(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	at time.Time,
+) ([]repository.AlertSuppression, error) {
+	c.mu.Lock()
+	c.listActiveCalls++
+	g := c.gate
+	c.mu.Unlock()
+	if g != nil {
+		<-g
+	}
+	return c.AlertSuppressionRepository.ListActive(ctx, tenantID, at)
+}
+
+// TestRouter_SuppressionCache_CoalescesConcurrentMisses pins
+// the PR #40 round-8 ANALYSIS_0001 fix: a thundering herd of
+// concurrent Emits for the same tenant whose suppression cache
+// is cold must collapse into exactly one ListActive call via
+// the per-tenant singleflight group.
+func TestRouter_SuppressionCache_CoalescesConcurrentMisses(t *testing.T) {
+	s, tnt := seedTenant(t)
+	suppr := &countingSuppressions{
+		AlertSuppressionRepository: memory.NewAlertSuppressionRepository(s),
+		gate:                       make(chan struct{}),
+	}
+	r := alert.NewRouter(
+		memory.NewAlertRepository(s),
+		suppr,
+		nil,
+		alert.Options{},
+	)
+
+	const n = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := r.Emit(ctx(), tnt, makeAlert(tnt))
+			errs <- err
+		}()
+	}
+	// Give all goroutines a beat to land inside the singleflight
+	// before we release the gate. 50ms is plenty on any
+	// reasonable scheduler; if the test machine is so loaded
+	// that 16 goroutines can't spawn in 50ms, the singleflight
+	// path will still coalesce them — just may collect fewer.
+	// We assert the count is >= the herd size below.
+	time.Sleep(50 * time.Millisecond)
+	close(suppr.gate)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("emit failed: %v", err)
+		}
+	}
+	suppr.mu.Lock()
+	calls := suppr.listActiveCalls
+	suppr.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("ListActive call count = %d, want 1 (singleflight coalescing)", calls)
+	}
+}
+
 func TestRouter_RejectsNilTenant(t *testing.T) {
 	s, _ := seedTenant(t)
 	r := alert.NewRouter(
