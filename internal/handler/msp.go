@@ -253,19 +253,42 @@ func (h *MSPHandler) requirePlatformPermission(w http.ResponseWriter, r *http.Re
 }
 
 // validMSPStatus filters request-supplied status strings against
-// the repository's enum. Empty is accepted (defaults to active
-// per the memory + postgres Create paths). Anything else must
-// match one of the three lifecycle values; otherwise the handler
-// returns 400 instead of letting an arbitrary string flow through
-// to the repo (memory: written verbatim; postgres: would be
-// caught by the CHECK constraint as a generic 23514, but only at
-// write time and only on postgres backends).
+// the repository's enum on PATCH / setStatus paths, where any of
+// the three lifecycle values is acceptable (empty accepted on
+// PATCH to mean "no change"; setStatus additionally rejects
+// empty before calling this helper because the body's required:
+// true contract demands a value).
+//
+// `deleted` is acceptable here because UpdateStatus(deleted) and
+// Delete() both maintain the (status='deleted' ⇔ deleted_at!=NULL)
+// invariant. See validMSPCreateStatus for the create-time guard
+// that rejects `deleted` since Create has no soft-delete
+// bookkeeping.
 func validMSPStatus(s string) bool {
 	switch repository.MSPStatus(s) {
 	case "",
 		repository.MSPStatusActive,
 		repository.MSPStatusSuspended,
 		repository.MSPStatusDeleted:
+		return true
+	}
+	return false
+}
+
+// validMSPCreateStatus is the stricter create-time variant. A
+// POST with status=deleted would land an inconsistent row
+// (status='deleted' but deleted_at IS NULL) that is invisible to
+// status-aware queries yet blocks slug reuse via the partial
+// unique index, producing an unreachable lifecycle state. The
+// only legal path into deleted is the UpdateStatus + Delete
+// soft-delete machinery, which always stamps deleted_at NOW().
+// On create we only accept empty (→ defaults to active in the
+// repo), active, or suspended.
+func validMSPCreateStatus(s string) bool {
+	switch repository.MSPStatus(s) {
+	case "",
+		repository.MSPStatusActive,
+		repository.MSPStatusSuspended:
 		return true
 	}
 	return false
@@ -290,14 +313,24 @@ func (h *MSPHandler) list(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
-	items := make([]MSPResponse, 0, len(res.Items))
-	for _, m := range res.Items {
-		items = append(items, toMSPResponse(m))
+	// Typed envelope with `omitempty` on next_cursor so the field
+	// is OMITTED (rather than emitted as `""`) on the last page.
+	// The map[string]any pattern used earlier serialised `"":` for
+	// terminal pages, which is technically distinct from the
+	// OpenAPI `nullable: true` declaration and can trip
+	// spec-strict SDK validators that distinguish between absent,
+	// null, and empty-string. Matches the alert/baseline handlers.
+	out := struct {
+		Items      []MSPResponse `json:"items"`
+		NextCursor string        `json:"next_cursor,omitempty"`
+	}{
+		Items:      make([]MSPResponse, 0, len(res.Items)),
+		NextCursor: res.NextCursor,
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"items":       items,
-		"next_cursor": res.NextCursor,
-	})
+	for _, m := range res.Items {
+		out.Items = append(out.Items, toMSPResponse(m))
+	}
+	WriteJSON(w, http.StatusOK, out)
 }
 
 func (h *MSPHandler) create(w http.ResponseWriter, r *http.Request) {
@@ -320,16 +353,21 @@ func (h *MSPHandler) create(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_param", "slug is required")
 		return
 	}
-	// Status, when supplied, must match the repository enum. The
-	// memory repo writes the verbatim string (no CHECK
-	// constraint), so without this guard a client could POST
-	// `"status": "corrupt-state"` and have it persist. Postgres
-	// would reject via CHECK at write time but only when the
-	// postgres backend is wired; we want consistent boundary
-	// validation across both backends.
-	if !validMSPStatus(req.Status) {
+	// Status, when supplied, must match the create-time subset of
+	// the repository enum. The memory repo writes the verbatim
+	// string (no CHECK constraint), so without this guard a
+	// client could POST `"status": "corrupt-state"` and have it
+	// persist. Postgres would reject via CHECK at write time but
+	// only when the postgres backend is wired; we want consistent
+	// boundary validation across both backends. `deleted` is
+	// additionally rejected because Create has no soft-delete
+	// bookkeeping (would store status='deleted' with deleted_at
+	// IS NULL — an unreachable lifecycle state); use
+	// `DELETE /api/v1/msps/{msp_id}` or `PUT .../status` to
+	// transition an existing MSP into the deleted state.
+	if !validMSPCreateStatus(req.Status) {
 		WriteError(w, http.StatusBadRequest, "invalid_param",
-			"status must be one of active, suspended, deleted (or omitted to default to active)")
+			"status on create must be one of active, suspended (or omitted to default to active); use DELETE or PUT .../status to delete")
 		return
 	}
 	m := repository.MSP{
@@ -444,14 +482,18 @@ func (h *MSPHandler) listTenants(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
-	items := make([]MSPTenantBindingResponse, 0, len(res.Items))
-	for _, b := range res.Items {
-		items = append(items, toBindingResponse(b))
+	// Typed envelope; see list() above for the rationale.
+	out := struct {
+		Items      []MSPTenantBindingResponse `json:"items"`
+		NextCursor string                     `json:"next_cursor,omitempty"`
+	}{
+		Items:      make([]MSPTenantBindingResponse, 0, len(res.Items)),
+		NextCursor: res.NextCursor,
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"items":       items,
-		"next_cursor": res.NextCursor,
-	})
+	for _, b := range res.Items {
+		out.Items = append(out.Items, toBindingResponse(b))
+	}
+	WriteJSON(w, http.StatusOK, out)
 }
 
 // AssignTenantRequest is the optional body for POST
@@ -504,6 +546,17 @@ func (h *MSPHandler) assignTenant(w http.ResponseWriter, r *http.Request) {
 		if req.Relationship != "" {
 			rel = repository.MSPRelationship(req.Relationship)
 		}
+	}
+	// Validate the enum at the handler boundary. The repository
+	// rejects unknown relationships with ErrInvalidArgument, but
+	// that surfaces as the generic `invalid_argument` body with
+	// no field-level guidance. Producing a precise 400 here
+	// matches the validMSPStatus + slug pattern earlier in this
+	// file and gives clients an actionable error message.
+	if !rel.IsValid() {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			"relationship must be one of owner, co_manager (or omitted to default to owner)")
+		return
 	}
 	binding, err := h.msps.AssignTenant(r.Context(), mspID, tenantID, rel, actorFromCtx(r))
 	if err != nil {

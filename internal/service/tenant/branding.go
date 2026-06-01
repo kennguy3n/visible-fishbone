@@ -5,11 +5,50 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
+
+// DefaultBrandingCacheTTL is the time-to-live for cached resolved
+// branding entries when a non-zero TTL is supplied to the
+// constructor. Branding mutations (SetTenantBranding,
+// ClearTenantBranding) invalidate the affected tenant's entry
+// immediately, so the TTL only bounds staleness from out-of-band
+// writes (e.g. an MSP rebrand via UpdateMSP).
+const DefaultBrandingCacheTTL = 30 * time.Second
+
+// DefaultBrandingCacheMaxEntries caps the cache to prevent memory
+// growth on long-running deployments. When exceeded, the oldest
+// entry by insertion time is evicted. 1024 covers the largest
+// single-process tenant cardinality we currently support while
+// keeping the cache footprint well under 1 MiB.
+const DefaultBrandingCacheMaxEntries = 1024
+
+// BrandingCacheOptions tunes the in-process cache that
+// BrandingResolver maintains in front of the tenant + msp
+// repositories. The zero value disables caching (every Resolve
+// hits both repos). See NewBrandingResolverWithCache for the
+// caching constructor; NewBrandingResolver remains uncached for
+// callers that prefer to defer to an external cache layer.
+type BrandingCacheOptions struct {
+	// TTL bounds staleness for entries that have not been
+	// invalidated by a local SetTenantBranding /
+	// ClearTenantBranding call. Zero disables caching entirely.
+	TTL time.Duration
+	// MaxEntries is the cache cap; zero defaults to
+	// DefaultBrandingCacheMaxEntries.
+	MaxEntries int
+}
+
+type brandingCacheEntry struct {
+	resolved repository.MSPBranding
+	insertAt time.Time
+	expireAt time.Time
+}
 
 // DefaultBranding is the platform-wide branding fallback. Returned
 // fields are intentionally generic — operators are expected to
@@ -28,17 +67,156 @@ var DefaultBranding = repository.MSPBranding{
 // a tenant that only sets PrimaryColor inherits LogoURL etc from
 // the MSP layer.
 //
-// The resolver does NOT cache. Each Resolve call hits the tenant
-// + msp repositories. Callers serving high-traffic UI surfaces
-// should cache the resolved branding for the request lifetime.
+// The resolver MAY cache resolved branding in-process when
+// constructed via NewBrandingResolverWithCache; the bare
+// NewBrandingResolver path stays uncached and hits the tenant +
+// msp repositories on every Resolve. SetTenantBranding /
+// ClearTenantBranding always invalidate the affected tenant's
+// cache entry on success, so a local write is immediately
+// visible. MSP-level rebrands (UpdateMSP) become visible within
+// the configured TTL.
 type BrandingResolver struct {
 	tenants repository.TenantRepository
 	msps    repository.MSPRepository
+
+	// Cache fields. cacheTTL == 0 means caching is disabled
+	// (cacheEntries is also nil) and the fast-path checks below
+	// short-circuit immediately. When caching is enabled, all
+	// reads + writes go through cacheMu — a RWMutex because
+	// Resolve traffic vastly outnumbers Set/Clear traffic on
+	// production portals.
+	cacheMu       sync.RWMutex
+	cacheTTL      time.Duration
+	cacheMax      int
+	cacheEntries  map[uuid.UUID]brandingCacheEntry
+	// now is injected for tests; production code uses time.Now.
+	now func() time.Time
 }
 
-// NewBrandingResolver returns a ready-to-use resolver.
+// NewBrandingResolver returns an uncached resolver. Every Resolve
+// call hits the tenant + msp repositories. Use this when the
+// caller owns its own caching layer or when the lookup volume is
+// low enough that a per-process cache is not warranted.
 func NewBrandingResolver(tenants repository.TenantRepository, msps repository.MSPRepository) *BrandingResolver {
-	return &BrandingResolver{tenants: tenants, msps: msps}
+	return &BrandingResolver{tenants: tenants, msps: msps, now: time.Now}
+}
+
+// NewBrandingResolverWithCache wires a TTL+capped in-process
+// cache in front of the resolver. Pass a zero-value
+// BrandingCacheOptions to fall back to the defaults
+// (DefaultBrandingCacheTTL, DefaultBrandingCacheMaxEntries). A
+// TTL of <0 disables caching (equivalent to NewBrandingResolver).
+//
+// The cache invalidation contract:
+//   - SetTenantBranding / ClearTenantBranding evict the affected
+//     tenant entry synchronously on success.
+//   - Invalidate(tenantID) / InvalidateAll() are public for
+//     callers performing out-of-band writes (e.g. an MSP rebrand
+//     via UpdateMSP would call InvalidateAll because the cache
+//     keys on tenantID, not mspID).
+//   - Entries past TTL are lazily expired on the next Resolve
+//     hitting that key; there is no background sweeper.
+func NewBrandingResolverWithCache(tenants repository.TenantRepository, msps repository.MSPRepository, opts BrandingCacheOptions) *BrandingResolver {
+	if opts.TTL < 0 {
+		return NewBrandingResolver(tenants, msps)
+	}
+	ttl := opts.TTL
+	if ttl == 0 {
+		ttl = DefaultBrandingCacheTTL
+	}
+	max := opts.MaxEntries
+	if max <= 0 {
+		max = DefaultBrandingCacheMaxEntries
+	}
+	return &BrandingResolver{
+		tenants:      tenants,
+		msps:         msps,
+		cacheTTL:     ttl,
+		cacheMax:     max,
+		cacheEntries: make(map[uuid.UUID]brandingCacheEntry, max),
+		now:          time.Now,
+	}
+}
+
+// Invalidate evicts a single tenant's cache entry. Safe to call
+// on an uncached resolver (no-op).
+func (r *BrandingResolver) Invalidate(tenantID uuid.UUID) {
+	if r.cacheEntries == nil {
+		return
+	}
+	r.cacheMu.Lock()
+	delete(r.cacheEntries, tenantID)
+	r.cacheMu.Unlock()
+}
+
+// InvalidateAll clears every cached entry. Use after a write that
+// could affect many tenants (e.g. updating an MSP's branding
+// defaults — the cache keys on tenantID and cannot be
+// selectively flushed without an msp_id → tenants index that the
+// resolver does not maintain).
+func (r *BrandingResolver) InvalidateAll() {
+	if r.cacheEntries == nil {
+		return
+	}
+	r.cacheMu.Lock()
+	for k := range r.cacheEntries {
+		delete(r.cacheEntries, k)
+	}
+	r.cacheMu.Unlock()
+}
+
+// cacheLookup returns (resolved, true) on hit, zero+false on
+// miss or stale entry. Holds cacheMu.RLock for the duration.
+func (r *BrandingResolver) cacheLookup(tenantID uuid.UUID) (repository.MSPBranding, bool) {
+	if r.cacheEntries == nil {
+		return repository.MSPBranding{}, false
+	}
+	r.cacheMu.RLock()
+	defer r.cacheMu.RUnlock()
+	e, ok := r.cacheEntries[tenantID]
+	if !ok {
+		return repository.MSPBranding{}, false
+	}
+	if r.now().After(e.expireAt) {
+		// Stale — return miss; the caller will recompute and
+		// overwrite the entry. We do not delete here because
+		// the read lock cannot upgrade; the next cacheStore
+		// will replace the entry in place.
+		return repository.MSPBranding{}, false
+	}
+	return e.resolved, true
+}
+
+// cacheStore writes a resolved entry. Evicts the oldest insertion
+// when the cap is exceeded; this is O(n) over the map but the
+// cap is small (1024 by default) and writes are rare relative to
+// reads, so the simpler bookkeeping wins over a doubly-linked
+// LRU. Holds cacheMu.Lock for the duration.
+func (r *BrandingResolver) cacheStore(tenantID uuid.UUID, b repository.MSPBranding) {
+	if r.cacheEntries == nil {
+		return
+	}
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	now := r.now()
+	if _, present := r.cacheEntries[tenantID]; !present && len(r.cacheEntries) >= r.cacheMax {
+		var (
+			oldestID uuid.UUID
+			oldestAt time.Time
+		)
+		for k, v := range r.cacheEntries {
+			if oldestAt.IsZero() || v.insertAt.Before(oldestAt) {
+				oldestID = k
+				oldestAt = v.insertAt
+			}
+		}
+		delete(r.cacheEntries, oldestID)
+	}
+	r.cacheEntries[tenantID] = brandingCacheEntry{
+		resolved: b,
+		insertAt: now,
+		expireAt: now.Add(r.cacheTTL),
+	}
 }
 
 // tenantBrandingSettings is the shape of the optional
@@ -61,15 +239,33 @@ type tenantBrandingSettings struct {
 //  3. DefaultBranding (platform fallback)
 //
 // Returns ErrNotFound if the tenant does not exist.
+//
+// When caching is enabled (see NewBrandingResolverWithCache),
+// Resolve short-circuits to the cached entry on hit. The cache
+// keys on tenantID, so a stale MSP-level rebrand surfaces within
+// cacheTTL. On miss the result is computed via ResolveForTenant
+// and stored back into the cache. ResolveForTenant itself is
+// uncached because its caller already has the tenant row in
+// hand — the savings would be the tenant Get only, while the
+// callers that hit ResolveForTenant (setBranding RMW path) are
+// not the hot read path the cache is sized for.
 func (r *BrandingResolver) Resolve(ctx context.Context, tenantID uuid.UUID) (repository.MSPBranding, error) {
 	if tenantID == uuid.Nil {
 		return repository.MSPBranding{}, fmt.Errorf("branding resolve: %w", repository.ErrInvalidArgument)
+	}
+	if cached, ok := r.cacheLookup(tenantID); ok {
+		return cached, nil
 	}
 	tn, err := r.tenants.Get(ctx, tenantID)
 	if err != nil {
 		return repository.MSPBranding{}, fmt.Errorf("branding resolve: get tenant: %w", err)
 	}
-	return r.ResolveForTenant(ctx, tn)
+	resolved, err := r.ResolveForTenant(ctx, tn)
+	if err != nil {
+		return repository.MSPBranding{}, err
+	}
+	r.cacheStore(tenantID, resolved)
+	return resolved, nil
 }
 
 // ResolveForTenant computes the effective branding starting from
@@ -212,6 +408,12 @@ func (r *BrandingResolver) SetTenantBranding(
 	if err != nil {
 		return repository.Tenant{}, fmt.Errorf("set tenant branding: update tenant: %w", err)
 	}
+	// Synchronous invalidation — a follow-up Resolve(tenantID)
+	// after a successful SetTenantBranding MUST observe the new
+	// override. Doing this after the Update succeeds (rather than
+	// before) means a failed write does not leave an empty cache
+	// behind that would force a needless recompute.
+	r.Invalidate(tenantID)
 	return updated, nil
 }
 
@@ -249,5 +451,7 @@ func (r *BrandingResolver) ClearTenantBranding(ctx context.Context, tenantID uui
 	if err != nil {
 		return repository.Tenant{}, fmt.Errorf("clear tenant branding: update tenant: %w", err)
 	}
+	// Synchronous invalidation — see SetTenantBranding above.
+	r.Invalidate(tenantID)
 	return updated, nil
 }

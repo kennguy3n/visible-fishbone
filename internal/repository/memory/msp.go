@@ -14,21 +14,23 @@ import (
 // MSP is a top-level entity, NOT tenant-scoped, so the same
 // "clone-on-read, mutate under store.mu" pattern applies.
 //
-// The denormalised tenants.msp_id column is maintained via the
-// adjacent TenantRepository.SetMSPOwner so that AssignTenant /
-// UnassignTenant remain the single sources of truth for the
-// MSP-owner pointer. We hold s.mu across both writes so a crash
-// mid-flow cannot leave them inconsistent.
+// The denormalised tenants.msp_id column is maintained by
+// touching r.s.tenants directly under r.s.mu inside the
+// AssignTenant / UnassignTenant flows; we do NOT need a separate
+// TenantRepository handle because the in-memory store is the
+// single source of truth and both repos share `s.mu`. Holding
+// s.mu across the msp_tenants insert + tenants.msp_id update is
+// what gives us atomicity (crash mid-flow cannot leave the two
+// storage sites inconsistent).
 type MSPRepository struct {
-	s       *Store
-	tenants *TenantRepository
+	s *Store
 }
 
-// NewMSPRepository binds a Store + the adjacent TenantRepository
-// (used for the denormalised tenants.msp_id update during
-// AssignTenant / UnassignTenant).
+// NewMSPRepository binds a Store. The denormalised tenants.msp_id
+// pointer is maintained under r.s.mu directly; see AssignTenant /
+// UnassignTenant for the atomicity story.
 func NewMSPRepository(s *Store) *MSPRepository {
-	return &MSPRepository{s: s, tenants: NewTenantRepository(s)}
+	return &MSPRepository{s: s}
 }
 
 var _ repository.MSPRepository = (*MSPRepository)(nil)

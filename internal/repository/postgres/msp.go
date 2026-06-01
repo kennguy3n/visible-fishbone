@@ -446,14 +446,35 @@ func (r *MSPRepository) ListTenants(ctx context.Context, mspID uuid.UUID, page r
 	if err != nil {
 		return repository.PageResult[repository.MSPTenantBinding]{}, repository.ErrInvalidArgument
 	}
-	const q = `
+	// Mirror the ASC/DESC branches from List above so a caller
+	// passing SortAsc gets honest ascending ordering at the
+	// Postgres backend instead of silently receiving DESC. The
+	// memory backend already respects page.Order via
+	// page.Normalize() + sortByCreatedAtDesc/Asc; the previous
+	// single-branch DESC query here created a latent backend
+	// inconsistency that would only surface if a future caller
+	// (e.g. an audit-trail UI rendering oldest-first) flipped
+	// the param.
+	var q string
+	args := []any{mspID, cur.T, cur.I, page.Limit}
+	switch page.Order {
+	case repository.SortAsc:
+		q = `
+		SELECT msp_id, tenant_id, relationship, created_at, created_by
+		FROM msp_tenants
+		WHERE msp_id = $1::uuid
+		  AND ($2::timestamptz IS NULL OR (created_at, tenant_id) > ($2::timestamptz, $3::uuid))
+		ORDER BY created_at ASC, tenant_id ASC
+		LIMIT $4`
+	default:
+		q = `
 		SELECT msp_id, tenant_id, relationship, created_at, created_by
 		FROM msp_tenants
 		WHERE msp_id = $1::uuid
 		  AND ($2::timestamptz IS NULL OR (created_at, tenant_id) < ($2::timestamptz, $3::uuid))
 		ORDER BY created_at DESC, tenant_id DESC
 		LIMIT $4`
-	args := []any{mspID, cur.T, cur.I, page.Limit}
+	}
 	if cur.T.IsZero() {
 		args[1] = nil
 	}

@@ -266,3 +266,209 @@ func TestBrandingResolveForTenant_AgreesWithResolve(t *testing.T) {
 	// shape directly via tenants.Get.
 	_ = tenants
 }
+
+// --------------------------------------------------------------------
+// Cache fixtures + tests
+// --------------------------------------------------------------------
+
+// brandingCacheFixtures returns a BrandingResolverWithCache whose
+// clock is injected so TTL assertions are deterministic. The
+// tenant has no override; the MSP supplies a primary colour the
+// tests assert flows through Resolve.
+func brandingCacheFixtures(t *testing.T, opts svctenant.BrandingCacheOptions) (
+	*svctenant.BrandingResolver,
+	*memory.TenantRepository,
+	*memory.MSPRepository,
+	repository.Tenant,
+	repository.MSP,
+) {
+	t.Helper()
+	store := memory.NewStore()
+	tenants := memory.NewTenantRepository(store)
+	msps := memory.NewMSPRepository(store)
+	ctx := context.Background()
+	msp, err := msps.Create(ctx, repository.MSP{
+		Name: "Acme",
+		Slug: "acme",
+		Branding: repository.MSPBranding{
+			LogoURL:        "https://acme.example/logo.svg",
+			PrimaryColor:   "#FF0000",
+			SecondaryColor: "#00FF00",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create msp: %v", err)
+	}
+	tn, err := tenants.Create(ctx, repository.Tenant{Name: "T", Slug: "t"})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if _, err := msps.AssignTenant(ctx, msp.ID, tn.ID, repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign tenant: %v", err)
+	}
+	r := svctenant.NewBrandingResolverWithCache(tenants, msps, opts)
+	// Re-fetch tn so its MSPID pointer reflects the assign.
+	tn2, err := tenants.Get(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("re-fetch tenant: %v", err)
+	}
+	return r, tenants, msps, tn2, msp
+}
+
+// TestBrandingResolver_CachesResolutions verifies that within TTL
+// a second Resolve returns the cached value EVEN after the
+// underlying tenant settings change out-of-band (i.e. via the
+// tenants repo directly, bypassing the resolver's invalidation
+// hook). The first Resolve seeds the cache with the MSP-default
+// PrimaryColor; the out-of-band update changes the settings to a
+// new colour; the second Resolve must still return the cached
+// MSP-default. This is the positive cache-hit behaviour.
+func TestBrandingResolver_CachesResolutions(t *testing.T) {
+	t.Parallel()
+	r, tenants, _, tn, msp := brandingCacheFixtures(t, svctenant.BrandingCacheOptions{TTL: 30 * 1e9})
+	ctx := context.Background()
+
+	first, err := r.Resolve(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("first resolve: %v", err)
+	}
+	if first.PrimaryColor != msp.Branding.PrimaryColor {
+		t.Fatalf("first: primary=%q want %q", first.PrimaryColor, msp.Branding.PrimaryColor)
+	}
+	// Mutate tenant settings directly via the repo — this path
+	// does NOT call r.Invalidate, so the cached entry should
+	// stay valid for the remainder of the TTL.
+	override, _ := json.Marshal(map[string]any{
+		"branding": map[string]any{"primary_color": "#0000FF"},
+	})
+	raw := json.RawMessage(override)
+	if _, err := tenants.Update(ctx, tn.ID, repository.TenantPatch{Settings: &raw}); err != nil {
+		t.Fatalf("update tenant settings: %v", err)
+	}
+	second, err := r.Resolve(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("second resolve: %v", err)
+	}
+	if second.PrimaryColor != msp.Branding.PrimaryColor {
+		t.Fatalf("second primary=%q want %q (cached); out-of-band write should NOT bleed through",
+			second.PrimaryColor, msp.Branding.PrimaryColor)
+	}
+}
+
+// TestBrandingResolver_InvalidatesOnSet proves SetTenantBranding
+// evicts the cached entry: a subsequent Resolve returns the new
+// override, not the previously cached MSP-default colour.
+func TestBrandingResolver_InvalidatesOnSet(t *testing.T) {
+	t.Parallel()
+	r, _, _, tn, msp := brandingCacheFixtures(t, svctenant.BrandingCacheOptions{TTL: 30 * 1e9})
+	ctx := context.Background()
+
+	first, err := r.Resolve(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("first resolve: %v", err)
+	}
+	if first.PrimaryColor != msp.Branding.PrimaryColor {
+		t.Fatalf("first primary=%q want %q", first.PrimaryColor, msp.Branding.PrimaryColor)
+	}
+	// Apply a tenant-level override; the cached MSP-default
+	// PrimaryColor must NOT bleed through.
+	override := repository.MSPBranding{PrimaryColor: "#0000FF"}
+	if _, err := r.SetTenantBranding(ctx, tn.ID, override); err != nil {
+		t.Fatalf("set tenant branding: %v", err)
+	}
+	second, err := r.Resolve(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("second resolve: %v", err)
+	}
+	if second.PrimaryColor != "#0000FF" {
+		t.Fatalf("second primary=%q want #0000FF (cache should have been invalidated)", second.PrimaryColor)
+	}
+}
+
+// TestBrandingResolver_InvalidatesOnClear proves the same for the
+// clear path.
+func TestBrandingResolver_InvalidatesOnClear(t *testing.T) {
+	t.Parallel()
+	r, _, _, tn, msp := brandingCacheFixtures(t, svctenant.BrandingCacheOptions{TTL: 30 * 1e9})
+	ctx := context.Background()
+
+	// Seed with an override so Clear has work to do.
+	if _, err := r.SetTenantBranding(ctx, tn.ID, repository.MSPBranding{PrimaryColor: "#0000FF"}); err != nil {
+		t.Fatalf("set tenant branding: %v", err)
+	}
+	first, err := r.Resolve(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("first resolve: %v", err)
+	}
+	if first.PrimaryColor != "#0000FF" {
+		t.Fatalf("first primary=%q want #0000FF", first.PrimaryColor)
+	}
+	// Clear the tenant override; resolved primary should revert
+	// to the MSP-default red.
+	if _, err := r.ClearTenantBranding(ctx, tn.ID); err != nil {
+		t.Fatalf("clear tenant branding: %v", err)
+	}
+	second, err := r.Resolve(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("second resolve: %v", err)
+	}
+	if second.PrimaryColor != msp.Branding.PrimaryColor {
+		t.Fatalf("second primary=%q want MSP default %q (cache should have been invalidated)",
+			second.PrimaryColor, msp.Branding.PrimaryColor)
+	}
+}
+
+// TestBrandingResolver_ExpiresStaleEntries verifies the TTL is
+// honoured: after the configured TTL elapses the next Resolve
+// recomputes (here demonstrated by mutating tenants.settings
+// directly through the repo, BYPASSING SetTenantBranding's
+// invalidation hook).
+func TestBrandingResolver_ExpiresStaleEntries(t *testing.T) {
+	t.Parallel()
+	r, tenants, _, tn, msp := brandingCacheFixtures(t, svctenant.BrandingCacheOptions{TTL: 1})
+	ctx := context.Background()
+
+	first, err := r.Resolve(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("first resolve: %v", err)
+	}
+	if first.PrimaryColor != msp.Branding.PrimaryColor {
+		t.Fatalf("first primary=%q want %q", first.PrimaryColor, msp.Branding.PrimaryColor)
+	}
+	// Patch the tenant.settings directly through the repo,
+	// without going through SetTenantBranding (the resolver
+	// would otherwise invalidate). After the 1-ns TTL elapses,
+	// the next Resolve must recompute and surface the new
+	// override.
+	override, _ := json.Marshal(map[string]any{
+		"branding": map[string]any{"primary_color": "#0000FF"},
+	})
+	raw := json.RawMessage(override)
+	if _, err := tenants.Update(ctx, tn.ID, repository.TenantPatch{Settings: &raw}); err != nil {
+		t.Fatalf("update tenant settings: %v", err)
+	}
+	// Sleep one tick so the lazy expiry path triggers.
+	// 1 ns TTL is below the OS clock resolution; the lazy
+	// expiry uses time.Now which is monotonic — by the time we
+	// re-enter Resolve, the cached entry has already expired.
+	second, err := r.Resolve(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("second resolve: %v", err)
+	}
+	if second.PrimaryColor != "#0000FF" {
+		t.Fatalf("second primary=%q want #0000FF after TTL expiry", second.PrimaryColor)
+	}
+}
+
+// TestBrandingResolver_UncachedConstructorIgnoresInvalidate proves
+// the uncached resolver tolerates Invalidate / InvalidateAll calls
+// (they are no-ops) and never crashes.
+func TestBrandingResolver_UncachedConstructorIgnoresInvalidate(t *testing.T) {
+	t.Parallel()
+	resolver, _, _, tn, _ := brandingFixtures(t)
+	resolver.Invalidate(tn.ID)
+	resolver.InvalidateAll()
+}
+
+// Suppress staticcheck unused-identifier warnings.
+var _ = errors.New

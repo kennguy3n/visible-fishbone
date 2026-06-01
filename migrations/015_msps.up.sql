@@ -46,7 +46,13 @@
 CREATE TABLE IF NOT EXISTS msps (
     id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name        TEXT NOT NULL,
-    slug        TEXT NOT NULL UNIQUE,
+    -- Slug uniqueness is enforced by a partial unique index (see
+    -- msps_slug_uniq_idx below) instead of an inline UNIQUE
+    -- constraint, so soft-deleted MSPs do not block slug reuse.
+    -- This matches the memory backend's "uniqueness ignores
+    -- deleted_at IS NOT NULL" check and the analogous
+    -- tenants(msp_id) partial unique index further down.
+    slug        TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'active'
                 CHECK (status IN ('active', 'suspended', 'deleted')),
     branding    JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -55,6 +61,9 @@ CREATE TABLE IF NOT EXISTS msps (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at  TIMESTAMPTZ
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS msps_slug_uniq_idx
+    ON msps (slug) WHERE deleted_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS msps_status_idx
     ON msps (status) WHERE deleted_at IS NULL;
