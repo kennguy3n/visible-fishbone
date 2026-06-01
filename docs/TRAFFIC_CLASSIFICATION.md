@@ -99,7 +99,9 @@ classification can never be silently promoted to trusted.
 
 Demotion is the runtime response to evidence that a previously
 trusted classification is currently unsafe. The demotion engine
-(see `internal/service/appdb/demotion.go`) listens on four
+(in the control-plane repo
+[`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform),
+under `internal/service/appdb/demotion.go`) listens on four
 signals:
 
 | Trigger | Demotion Scope | TTL |
@@ -165,19 +167,20 @@ The classification database has two layers:
 Tenant resolution is left-fold: tenant override wins, otherwise
 global registry wins, otherwise fall back to `inspect_full`.
 
-The schema is defined in `migrations/008_app_registry.up.sql`;
-RLS is enabled on `app_registry_overrides` following the same
-`sng.tenant_id` GUC pattern as every other tenant-scoped table
-(see `docs/deploy.md` for the RLS contract). The
-`app_registry` table is intentionally **global** (no RLS) — it
-is the same curated dataset for every tenant.
+The schema is defined in `migrations/008_app_registry.up.sql`
+in the sibling [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform)
+repo; RLS is enabled on `app_registry_overrides` following the
+same `sng.tenant_id` GUC pattern as every other tenant-scoped
+table on that control plane. The `app_registry` table is
+intentionally **global** (no RLS) — it is the same curated
+dataset for every tenant.
 
 ## 8. Vendor Endpoint Sync
 
 Apps with a `metadata_url` (Microsoft publishes M365 endpoint
 ranges, Google publishes Workspace SPF + IP lists, etc.) are
-auto-refreshed by a periodic sync job
-(`internal/service/appdb/sync.go`). The job:
+auto-refreshed by a periodic sync job in the control-plane
+repo (`internal/service/appdb/sync.go`). The job:
 
 1. Fetches the vendor URL on a 24h cadence.
 2. Diffs the new endpoint set against the stored one.
@@ -201,11 +204,12 @@ can investigate.
 
 ## 9. Integration with the Policy Compiler
 
-During bundle compilation (`internal/service/policy/service.go`
-`Compile`), the policy compiler calls
+During bundle compilation on the control plane
+(`internal/service/policy/service.go::Compile` in the
+`sn360-security-platform` repo), the policy compiler calls
 `appdb.Service.CompileSteeringRules(tenantID, targetType)` and
 embeds the resulting `SteeringRuleSet` into the bundle envelope
-under the new `steering` section. Each enforcement target sees
+under the `steering` section. Each enforcement target sees
 the steering rules relevant to *its* enforcement domain:
 
 - `edge` and `cloud` bundles receive the full SWG bypass list +
@@ -242,10 +246,10 @@ Operators see, per tenant:
 - Cert-pin / IP-range mismatch counts (candidates for
   investigation).
 
-This visibility feeds the AI policy-tightening suggestions in
-Phase 5: *"App Foo accounts for 15% of your `inspect_full`
-traffic and has been clean for 90 days; promote to
-`trusted_direct`?"*
+This visibility feeds the AI policy-tightening suggestions on
+the control plane: *"App Foo accounts for 15% of your
+`inspect_full` traffic and has been clean for 90 days; promote
+to `trusted_direct`?"*
 
 ## 11. Failure Modes
 

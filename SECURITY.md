@@ -9,21 +9,29 @@ We accept and triage vulnerability reports against the current
 release branch (the most recent tagged release on `main`). Older
 preview tags and unreleased pre-`v0.x` commits are not supported.
 
-The product surface that this policy covers includes:
+The product surface this policy covers, for code that lives in
+*this* repository:
 
-- The Go control plane (`cmd/sng-control`, `cmd/sng-migrate`, every
-  package under `internal/`).
 - The Rust workspace under `crates/`, including the edge VM image
-  (`sng-edge`), the endpoint client (`sng-agent`), and every
-  shared crate (`sng-core`, `sng-pal`, `sng-comms`,
-  `sng-policy-eval`, `sng-telemetry`, `sng-fw`, `sng-ips`,
-  `sng-dns`, `sng-swg`, `sng-ztna`, `sng-sdwan`, `sng-updater`).
-- The REST API surface described by `api/openapi.yaml`.
+  binary (`sng-edge`), the endpoint client binary (`sng-agent`),
+  and every shared library crate (`sng-core`, `sng-pal`,
+  `sng-comms`, `sng-policy-eval`, `sng-telemetry`, `sng-fw`,
+  `sng-ips`, `sng-dns`, `sng-swg`, `sng-ztna`, `sng-sdwan`,
+  `sng-updater`).
 - The wire protocol described in
-  [`ARCHITECTURE.md`](./ARCHITECTURE.md) §7 (the SN360 native
+  [`ARCHITECTURE.md`](./ARCHITECTURE.md) §10 (the SN360 native
   protocol over TLS 1.3, HTTP/2, and MessagePack).
 - The signed policy bundle / signed update manifest format
   (Ed25519 over a canonical MessagePack payload).
+
+The SN360 SaaS control plane (admin UI, MSP portal, tenant +
+identity service, policy graph compiler, telemetry pipeline,
+REST API + integration gateway) lives in the sibling
+[`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform)
+repo and is covered by that repo's `SECURITY.md`. Reports that
+straddle both surfaces — e.g. a wire-protocol issue that affects
+both the gateway client and the control-plane endpoint — should
+be sent to the address below; we will route internally.
 
 ## Reporting a vulnerability
 
@@ -38,9 +46,8 @@ if the issue involves credentials, exploit code, or PII.
 A useful report includes:
 
 - A short description of the vulnerability and its impact.
-- The affected SNG component (`sng-control`, `sng-edge`,
-  `sng-agent`, or a named crate) and the version
-  (`sng-control --version`, `sng-edge --version`,
+- The affected SNG component (`sng-edge`, `sng-agent`, or a
+  named library crate) and the version (`sng-edge --version`,
   `sng-agent --version`, or the git SHA you built from).
 - The deployment shape: SaaS control plane vs. self-hosted, edge
   VM hypervisor (VMware / KVM / Hyper-V / cloud), endpoint OS
@@ -71,11 +78,9 @@ The following are not vulnerabilities for the purposes of this
 policy:
 
 - Operator misconfiguration that disables a security feature (for
-  example running `sng-edge` with `dns.filter_chain: []`,
-  disabling TLS inspection for every flow, or running the
-  control plane with `PG_APP_ROLE=` so Postgres row-level
-  security is bypassed). The defaults documented in
-  [`docs/deploy.md`](./docs/deploy.md) are the supported
+  example running `sng-edge` with `dns.filter_chain: []` or
+  disabling TLS inspection for every flow). The defaults shipped
+  in each binary's reference config are the supported
   configuration.
 - Theoretical issues that require an already-compromised
   control-plane database, an already-compromised edge VM, or
@@ -93,8 +98,7 @@ policy:
 ## Crypto and signing posture
 
 A short summary of the cryptographic invariants the product
-relies on lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md) §8 and
-[`docs/deploy.md`](./docs/deploy.md):
+relies on lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md) §8:
 
 - TLS 1.3 only (via `rustls`) on the SN360 native protocol
   between every edge / endpoint and the control plane.
@@ -110,8 +114,8 @@ relies on lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md) §8 and
   refuses a swap if the new bank fails its health check inside
   the rollback window.
 - Postgres row-level security (RLS) is the **only** tenant
-  isolation boundary; the control plane refuses to start in
-  production with `PG_APP_ROLE=` empty (see `internal/config`).
+  isolation boundary on the control plane side; see the
+  control-plane repo for the role / GUC contract.
 - All telemetry is metadata-first; payloads are dropped at the
   edge unless the tenant's policy bundle opts in for that flow
   class.

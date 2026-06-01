@@ -1,15 +1,40 @@
 [workspace]
-# Phase 2 introduces the two foundation crates: `sng-core` (shared
-# types, lifecycle, error taxonomy, traffic class, policy bundle
-# verification) and `sng-pal` (cross-platform OS hooks). Subsequent
-# phases add `sng-comms`, `sng-policy-eval`, `sng-telemetry`,
-# `sng-dns`, `sng-fw`, `sng-ips`, `sng-swg`, `sng-ztna`,
-# `sng-sdwan`, `sng-updater`, and finally the two binary crates
-# (`sng-edge`, `sng-agent`). The list grows additively rather than
-# being placeholder-filled now, because every member listed here
-# must compile cleanly on every CI run — adding empty stubs would
-# defeat the cargo-deny + clippy gates this workspace exists to
-# enforce.
+# The SNG enforcement plane: twelve library crates plus two binary
+# crates (`sng-edge`, `sng-agent`).
+#
+#   sng-core           shared types, lifecycle / supervisor, error
+#                      taxonomy, MessagePack envelope, signed-bundle
+#                      verification
+#   sng-pal            Platform Abstraction Layer for the endpoint
+#                      client (Windows / macOS / Linux)
+#   sng-comms          SN360 native protocol client (TLS 1.3 + h2 +
+#                      MessagePack, batching, spool, replay-safe ack)
+#   sng-policy-eval    local policy evaluator over verified bundles
+#                      (hot-swap, sub-microsecond per-flow verdict)
+#   sng-telemetry      five-stage local pipeline (collect / dedup /
+#                      redact / enrich / egress)
+#   sng-dns            recursive-resolver wrapper + reputation /
+#                      category / sinkhole filter chain
+#   sng-fw             firewall engine — L3-L7 policy, NAT, app
+#                      awareness, deterministic nftables rule set
+#   sng-ips            Suricata wrapper — rule sync, alert
+#                      normalisation, supervisor + signal lifecycle
+#   sng-swg            Envoy ext-authz handler — URL categorisation,
+#                      malware verdict, rate-limit, bypass list
+#   sng-ztna           Zero-Trust Network Access broker — mTLS device
+#                      identity, posture binding, per-app access
+#   sng-sdwan          SD-WAN steering brain — path catalog, probes,
+#                      score, sticky-pin
+#   sng-updater        self-update engine — signed manifests, dual-
+#                      bank install, rollback-safe health window
+#   sng-edge           edge VM appliance binary (composes every
+#                      library above behind the supervisor)
+#   sng-agent          endpoint client binary (subset: comms,
+#                      policy_eval, telemetry, ztna, pal_*)
+#
+# Every member listed here must compile cleanly on every CI run —
+# adding empty placeholders defeats the cargo-deny + clippy gates
+# this workspace exists to enforce.
 members = [
     "crates/sng-core",
     "crates/sng-pal",
