@@ -12,7 +12,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -784,5 +786,44 @@ func TestPolicy_GetPublicKey_FileBackedSigner_UnknownKidFallsThrough(t *testing.
 		nil, tid, "", otherKid)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("unknown-kid fallthrough: expected 404, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPolicyGraphResponse_IsDraftFieldExposed pins the round-2
+// ANALYSIS_0006 contract that the wire shape carries the
+// is_draft flag from the repository. Without this, operators
+// cannot distinguish "this is the live policy" from "this is a
+// pending draft attached to a rollout" without shelling into
+// Postgres — which was the open-issue concern raised in round 2
+// of the PR #39 Devin Review.
+func TestPolicyGraphResponse_IsDraftFieldExposed(t *testing.T) {
+	t.Parallel()
+	draft := repository.PolicyGraph{
+		ID: uuid.New(), TenantID: uuid.New(), Version: 7,
+		Graph:     []byte(`{"default_action":"deny"}`),
+		IsDraft:   true,
+		CreatedAt: time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+	live := draft
+	live.ID = uuid.New()
+	live.IsDraft = false
+
+	gotDraft := toPolicyGraphResponse(draft)
+	if !gotDraft.IsDraft {
+		t.Fatalf("draft graph response IsDraft = false, want true")
+	}
+	gotLive := toPolicyGraphResponse(live)
+	if gotLive.IsDraft {
+		t.Fatalf("live graph response IsDraft = true, want false")
+	}
+	// And the JSON projection actually serializes the key
+	// (not just a Go field) — that's the operator-facing
+	// contract.
+	enc, err := json.Marshal(gotDraft)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(enc), `"is_draft":true`) {
+		t.Fatalf("wire JSON missing is_draft=true; got=%s", string(enc))
 	}
 }

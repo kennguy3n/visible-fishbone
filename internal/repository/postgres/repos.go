@@ -38,6 +38,11 @@ func (s *Store) NewPolicySigningKeyRepository() *PolicySigningKeyRepository {
 	return &PolicySigningKeyRepository{s: s}
 }
 
+// NewPolicyRolloutRepository binds the Store to repository.PolicyRolloutRepository.
+func (s *Store) NewPolicyRolloutRepository() *PolicyRolloutRepository {
+	return &PolicyRolloutRepository{s: s}
+}
+
 // NewTenantAPIKeyRepository binds the Store to repository.TenantAPIKeyRepository.
 func (s *Store) NewTenantAPIKeyRepository() *TenantAPIKeyRepository {
 	return &TenantAPIKeyRepository{s: s}
@@ -76,6 +81,7 @@ var (
 	_ repository.AuditLogRepository            = (*AuditLogRepository)(nil)
 	_ repository.PolicyRepository              = (*PolicyRepository)(nil)
 	_ repository.PolicySigningKeyRepository    = (*PolicySigningKeyRepository)(nil)
+	_ repository.PolicyRolloutRepository       = (*PolicyRolloutRepository)(nil)
 	_ repository.TenantAPIKeyRepository        = (*TenantAPIKeyRepository)(nil)
 	_ repository.WebhookEndpointRepository     = (*WebhookEndpointRepository)(nil)
 	_ repository.WebhookDeliveryRepository     = (*WebhookDeliveryRepository)(nil)

@@ -68,7 +68,11 @@ func (r *PolicyRepository) GetCurrentGraph(ctx context.Context, tenantID uuid.UU
 	var best repository.PolicyGraph
 	found := false
 	for _, g := range r.s.policyGraphs {
-		if g.TenantID != tenantID {
+		if g.TenantID != tenantID || g.IsDraft {
+			// Drafts are persisted-but-unpromoted candidates
+			// (see migration 011); GetCurrentGraph must skip
+			// them so the live policy stays stable while a
+			// rollout is in flight.
 			continue
 		}
 		if !found || g.Version > best.Version {
@@ -81,6 +85,42 @@ func (r *PolicyRepository) GetCurrentGraph(ctx context.Context, tenantID uuid.UU
 	}
 	out := best
 	out.Graph = cloneJSON(best.Graph)
+	return out, nil
+}
+
+// GetGraph returns a single graph by ID regardless of draft
+// state. Used by the rollout machinery to fetch the proposed
+// graph after it has been stored as a draft.
+func (r *PolicyRepository) GetGraph(ctx context.Context, tenantID, id uuid.UUID) (repository.PolicyGraph, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.PolicyGraph{}, err
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	g, ok := r.s.policyGraphs[id]
+	if !ok || g.TenantID != tenantID {
+		return repository.PolicyGraph{}, repository.ErrNotFound
+	}
+	out := g
+	out.Graph = cloneJSON(g.Graph)
+	return out, nil
+}
+
+// PromoteGraph flips IsDraft = false. Idempotent.
+func (r *PolicyRepository) PromoteGraph(ctx context.Context, tenantID, id uuid.UUID) (repository.PolicyGraph, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.PolicyGraph{}, err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	g, ok := r.s.policyGraphs[id]
+	if !ok || g.TenantID != tenantID {
+		return repository.PolicyGraph{}, repository.ErrNotFound
+	}
+	g.IsDraft = false
+	r.s.policyGraphs[id] = g
+	out := g
+	out.Graph = cloneJSON(g.Graph)
 	return out, nil
 }
 
