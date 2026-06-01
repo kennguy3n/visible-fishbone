@@ -25,6 +25,8 @@ type RouterDeps struct {
 	APIKeys          *APIKeyHandler
 	Telemetry        *TelemetryHandler
 	AppRegistry      *AppRegistryHandler
+	Baseline         *BaselineHandler
+	Alert            *AlertHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
 	RateLimiter      *middleware.RateLimiter
@@ -84,6 +86,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.AppRegistry != nil {
 		deps.AppRegistry.Register(apiMux)
+	}
+	if deps.Baseline != nil {
+		deps.Baseline.Register(apiMux)
+	}
+	if deps.Alert != nil {
+		deps.Alert.Register(apiMux)
 	}
 
 	apiChain := middleware.Chain(

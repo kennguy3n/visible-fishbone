@@ -68,6 +68,24 @@ func (s *Store) NewAppRegistryOverrideRepository() *AppRegistryOverrideRepositor
 	return &AppRegistryOverrideRepository{s: s}
 }
 
+// NewBaselineModelRepository binds the Store to repository.BaselineModelRepository.
+func (s *Store) NewBaselineModelRepository() *BaselineModelRepository {
+	return &BaselineModelRepository{s: s}
+}
+
+// NewAlertRepository binds the Store to repository.AlertRepository.
+func (s *Store) NewAlertRepository() *AlertRepository { return &AlertRepository{s: s} }
+
+// NewAlertSuppressionRepository binds the Store to repository.AlertSuppressionRepository.
+func (s *Store) NewAlertSuppressionRepository() *AlertSuppressionRepository {
+	return &AlertSuppressionRepository{s: s}
+}
+
+// NewAlertFeedbackRepository binds the Store to repository.AlertFeedbackRepository.
+func (s *Store) NewAlertFeedbackRepository() *AlertFeedbackRepository {
+	return &AlertFeedbackRepository{s: s}
+}
+
 // Compile-time interface compliance asserts. Keeping these in this
 // file means a single grep tells us "did the postgres package
 // implement every interface?" without scanning eight files.
@@ -87,4 +105,8 @@ var (
 	_ repository.WebhookDeliveryRepository     = (*WebhookDeliveryRepository)(nil)
 	_ repository.AppRegistryRepository         = (*AppRegistryRepository)(nil)
 	_ repository.AppRegistryOverrideRepository = (*AppRegistryOverrideRepository)(nil)
+	_ repository.BaselineModelRepository       = (*BaselineModelRepository)(nil)
+	_ repository.AlertRepository               = (*AlertRepository)(nil)
+	_ repository.AlertSuppressionRepository    = (*AlertSuppressionRepository)(nil)
+	_ repository.AlertFeedbackRepository       = (*AlertFeedbackRepository)(nil)
 )

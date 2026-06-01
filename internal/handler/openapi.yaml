@@ -811,6 +811,374 @@ paths:
                     items: { $ref: "#/components/schemas/SyncResult" }
         "503":
           description: vendor sync not configured
+  /tenants/{tenant_id}/baselines:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+    get:
+      tags: [baseline]
+      operationId: listBaselineModels
+      summary: List baseline statistical models for the tenant
+      description: |
+        Returns one row per (dimension, window) currently
+        modelled. Each row carries Welford + EWMA state plus
+        the configured z-score threshold used by the anomaly
+        detector.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: page of baseline models
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/BaselineModel" }
+                  next_cursor: { type: string }
+  /tenants/{tenant_id}/baselines/{dimension}/{window_seconds}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - name: dimension
+        in: path
+        required: true
+        schema: { type: string }
+      - name: window_seconds
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    get:
+      tags: [baseline]
+      operationId: getBaselineModel
+      summary: Fetch a single baseline model
+      responses:
+        "200":
+          description: baseline model
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BaselineModel" }
+        "404":
+          description: model not found
+  /tenants/{tenant_id}/baselines/{dimension}/{window_seconds}/threshold:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - name: dimension
+        in: path
+        required: true
+        schema: { type: string }
+      - name: window_seconds
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    put:
+      tags: [baseline]
+      operationId: updateBaselineThreshold
+      summary: Override the z-score threshold for this baseline
+      description: |
+        Threshold updates take effect on the next anomaly
+        evaluation; the in-flight observation pipeline is not
+        interrupted. The Feedback service may later re-tune
+        this value from operator feedback.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [z_threshold]
+              properties:
+                z_threshold:
+                  type: number
+                  format: double
+                  # OpenAPI 3.1.0 / JSON Schema 2020-12:
+                  # exclusiveMinimum is the value above which
+                  # the field is accepted. The handler in
+                  # internal/handler/baseline.go rejects
+                  # z_threshold <= 0 with HTTP 400, so the
+                  # spec must encode strict-positivity, not
+                  # just non-negativity (a `minimum: 0` would
+                  # advertise zero as legal and contradict the
+                  # implementation).
+                  exclusiveMinimum: 0
+      responses:
+        "200":
+          description: updated model
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BaselineModel" }
+        "404":
+          description: model not found
+  /tenants/{tenant_id}/alerts:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+    get:
+      tags: [alert]
+      operationId: listAlerts
+      summary: List alerts for the tenant
+      parameters:
+        - name: state
+          in: query
+          description: Filter by alert state (repeatable).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string, enum: [open, acknowledged, resolved, suppressed] }
+        - name: kind
+          in: query
+          description: Filter by alert kind (repeatable).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: dimension
+          in: query
+          description: Filter by baseline dimension (repeatable).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: page of alerts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Alert" }
+                  next_cursor: { type: string }
+  /tenants/{tenant_id}/alerts/{alert_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - name: alert_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [alert]
+      operationId: getAlert
+      summary: Fetch a single alert
+      responses:
+        "200":
+          description: alert
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alert" }
+        "404":
+          description: alert not found
+  /tenants/{tenant_id}/alerts/{alert_id}/acknowledge:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - name: alert_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [alert]
+      operationId: acknowledgeAlert
+      summary: Move an alert to the acknowledged state
+      description: |
+        The actor (acknowledged_by) is derived server-side from
+        the authenticated principal (JWT `sub` claim or API-key
+        owner). No request body is accepted — a client cannot
+        override the actor in the audit trail.
+      responses:
+        "200":
+          description: updated alert
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alert" }
+        "404":
+          description: alert not found
+        "409":
+          description: alert is in a terminal state and cannot be acknowledged
+  /tenants/{tenant_id}/alerts/{alert_id}/resolve:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - name: alert_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [alert]
+      operationId: resolveAlert
+      summary: Move an alert to the resolved state
+      description: |
+        The actor (resolved_by) is derived server-side from
+        the authenticated principal (JWT `sub` claim or
+        API-key owner). No request body is accepted — a
+        client cannot override the actor in the audit trail.
+      responses:
+        "200":
+          description: updated alert
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alert" }
+        "404":
+          description: alert not found
+        "409":
+          description: alert is in a terminal state and cannot be resolved
+  /tenants/{tenant_id}/alert-suppressions:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+    get:
+      tags: [alert]
+      operationId: listAlertSuppressions
+      summary: List active suppression rules for the tenant
+      responses:
+        "200":
+          description: page of suppression rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AlertSuppression" }
+                  next_cursor: { type: string }
+    post:
+      tags: [alert]
+      operationId: createAlertSuppression
+      summary: Add a (Kind, Dimension) suppression rule
+      description: |
+        Creates a suppression rule that auto-routes matching future
+        alerts into the terminal AlertStateSuppressed state at emit
+        time. At least one of `kind` or `dimension` must be provided
+        (the rule is the conjunction of the supplied matchers); both
+        may be set for a tighter match. `reason` is required so the
+        audit surface always carries a human-readable explanation
+        for why a class of alerts is being filtered.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                kind:
+                  type: string
+                  description: "Alert kind to suppress, e.g. baseline_zscore_anomaly. Either `kind` or `dimension` must be set."
+                dimension:
+                  type: string
+                  description: "Baseline dimension to suppress (e.g. flow_bytes_inbound). Either `kind` or `dimension` must be set."
+                reason: { type: string, description: "Operator-visible audit note documenting why this rule exists." }
+                expires_at:
+                  type: string
+                  format: date-time
+                  description: "Optional auto-expiry; the rule stops applying once expires_at has passed (the row remains for audit)."
+      responses:
+        "201":
+          description: rule created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertSuppression" }
+        "400":
+          description: "neither kind nor dimension provided, or reason missing"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /tenants/{tenant_id}/alert-suppressions/{rule_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - name: rule_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [alert]
+      operationId: getAlertSuppression
+      summary: Fetch a single suppression rule
+      responses:
+        "200":
+          description: rule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertSuppression" }
+        "404":
+          description: rule not found
+    delete:
+      tags: [alert]
+      operationId: deleteAlertSuppression
+      summary: Delete a suppression rule
+      responses:
+        "204":
+          description: rule deleted
+        "404":
+          description: rule not found
+  /tenants/{tenant_id}/alerts/{alert_id}/feedback:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - name: alert_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [alert]
+      operationId: getAlertFeedback
+      summary: Fetch operator feedback recorded for this alert
+      responses:
+        "200":
+          description: feedback row
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertFeedback" }
+        "404":
+          description: no feedback recorded
+    post:
+      tags: [alert]
+      operationId: submitAlertFeedback
+      summary: Record operator feedback (true / false positive / noise)
+      description: |
+        Feedback is the input to the Feedback service's tuning
+        loop. Submitting feedback may indirectly raise or lower
+        the underlying baseline's z-score threshold the next
+        time `Run` runs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [true_positive, false_positive, noise]
+                notes: { type: string, description: "Free-form operator note explaining the decision." }
+      responses:
+        "201":
+          description: feedback recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertFeedback" }
+    delete:
+      tags: [alert]
+      operationId: deleteAlertFeedback
+      summary: Remove operator feedback for this alert
+      responses:
+        "204":
+          description: feedback deleted
+        "404":
+          description: no feedback recorded
 components:
   securitySchemes:
     BearerJWT:
@@ -1258,3 +1626,119 @@ components:
         ip_ranges_after: { type: integer }
         updated: { type: boolean }
         error: { type: string }
+    BaselineModel:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - dimension
+        - window_seconds
+        - samples
+        - mean
+        - stddev
+        - ewma
+        - ewma_stddev
+        - alpha
+        - z_threshold
+        - created_at
+        - version
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        dimension: { type: string }
+        window_seconds: { type: integer, format: int64 }
+        samples: { type: integer, format: int64 }
+        mean: { type: number, format: double }
+        stddev: { type: number, format: double }
+        ewma: { type: number, format: double }
+        ewma_stddev: { type: number, format: double }
+        alpha: { type: number, format: double }
+        z_threshold: { type: number, format: double }
+        last_observed_at: { type: string, format: date-time }
+        last_updated_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        version: { type: integer, format: int64 }
+    Alert:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - kind
+        - severity
+        - dimension
+        - observed_value
+        - baseline_mean
+        - baseline_stddev
+        - z_score
+        - window_start
+        - window_end
+        - window_seconds
+        - summary
+        - state
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        kind: { type: string, description: "Detector kind, e.g. baseline_zscore_anomaly." }
+        severity: { type: string, enum: [info, warning, critical] }
+        dimension: { type: string, description: "Baseline dimension the alert was generated against." }
+        observed_value: { type: number, format: double, description: "Observation that tripped the detector." }
+        baseline_mean: { type: number, format: double }
+        baseline_stddev: { type: number, format: double }
+        z_score:
+          description: max(|z_welford|, |z_ewma|) — the deviation score that tripped the detector
+          type: number
+          format: double
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        window_seconds:
+          type: integer
+          minimum: 1
+          description: "Baseline window size (in seconds) the alert was generated against. Identifies which (dimension, window_seconds) baseline bucket emitted this alert — the same dimension can have multiple buckets (e.g. 60 vs 3600)."
+        summary: { type: string, description: "Human-readable rationale string the detector emitted with the alert." }
+        evidence:
+          description: "Detector-supplied JSON payload (statistical context, thresholds, etc.)."
+          type: object
+          additionalProperties: true
+        state: { type: string, enum: [open, acknowledged, resolved, suppressed] }
+        suppressed_by: { type: string, format: uuid, description: "Suppression rule ID that auto-routed this alert to the suppressed state, if any." }
+        acknowledged_by: { type: string, format: uuid }
+        acknowledged_at: { type: string, format: date-time }
+        resolved_by: { type: string, format: uuid }
+        resolved_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AlertSuppression:
+      type: object
+      required: [id, tenant_id, reason, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        kind:
+          type: string
+          description: "Alert kind matched by this rule. Either kind or dimension (or both) is set; nil means match any kind within the supplied dimension."
+        dimension:
+          type: string
+          description: "Baseline dimension matched by this rule. Either kind or dimension (or both) is set; nil means match any dimension within the supplied kind."
+        reason: { type: string }
+        created_by:
+          type: string
+          format: uuid
+          description: "Operator who created the rule. Derived from the JWT sub / API-key owner server-side."
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    AlertFeedback:
+      type: object
+      required: [id, alert_id, tenant_id, decision, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        alert_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        decision: { type: string, enum: [true_positive, false_positive, noise] }
+        notes: { type: string }
+        created_by:
+          type: string
+          format: uuid
+          description: "Operator who recorded the feedback. Derived from the JWT sub / API-key owner server-side — clients must not set this."
+        created_at: { type: string, format: date-time }

@@ -32,6 +32,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
+	"github.com/kennguy3n/visible-fishbone/internal/service/alert"
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
@@ -130,7 +131,7 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, appRegHandler, appSyncer, policySimHandler, err := buildRouter(&cfg, logger, pool, health, telReplay)
+	router, webhookWorker, appRegHandler, appSyncer, policySimHandler, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -274,6 +275,7 @@ func buildRouter(
 	pool *pgxpool.Pool,
 	health *handler.Health,
 	replay *telreplay.Worker,
+	telPub *sngnats.Publisher,
 ) (http.Handler, *webhook.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, error) {
 	store := postgres.NewStore(pool)
 
@@ -291,6 +293,10 @@ func buildRouter(
 	apiKeyRepo := store.NewTenantAPIKeyRepository()
 	appRepo := store.NewAppRegistryRepository()
 	appOverrideRepo := store.NewAppRegistryOverrideRepository()
+	baselineRepo := store.NewBaselineModelRepository()
+	alertRepo := store.NewAlertRepository()
+	alertSuppressionRepo := store.NewAlertSuppressionRepository()
+	alertFeedbackRepo := store.NewAlertFeedbackRepository()
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -422,6 +428,35 @@ func buildRouter(
 	policySimHandler := handler.NewPolicySimulationHandler(
 		policySvc, canarySvc, nil, policyRepo, logger)
 
+	// Baseline + alert services (Phase 3 Block 3, Tasks 11-15).
+	// The Router takes a Publisher for NATS lifecycle events on
+	// `sng.<tenant>.alerts.*`; we adapt sngnats.Publisher's 4-arg
+	// signature to the 3-arg slice the Router needs. Passing nil
+	// is safe (Router checks for nil pub on every publish); in
+	// practice the publisher is always wired here so the operator
+	// portal can subscribe to fresh alerts in realtime.
+	alertRouter := alert.NewRouter(
+		alertRepo, alertSuppressionRepo,
+		natsAlertAdapter{p: telPub},
+		alert.Options{Logger: logger},
+	)
+	alertFeedback := alert.NewFeedback(
+		alertFeedbackRepo, alertRepo, baselineRepo,
+		alert.FeedbackTuningOptions{},
+	)
+	// Scope the tuning loop's logger so operators can filter
+	// `component=alert-feedback` to triage missing threshold
+	// adjustments without scrolling through every router log.
+	alertFeedback.SetLogger(logger.With(slog.String("component", "alert-feedback")))
+	// NOTE: baseline.NewService(baselineRepo) is intentionally
+	// NOT constructed here. The Service / Detector pair is
+	// wired by the telemetry consumer (future block) once the
+	// dispatch path is ready to feed Observations in; until
+	// then, alert.Feedback / alert.Router operate on the
+	// baseline repo directly for threshold tuning and
+	// suppression matching, which does not require the
+	// score-then-fold service surface.
+
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:           cfg,
 		Logger:           logger,
@@ -436,6 +471,8 @@ func buildRouter(
 		APIKeys:          handler.NewAPIKeyHandler(apiKeySvc),
 		Telemetry:        handler.NewTelemetryHandler(replay),
 		AppRegistry:      appRegHandler,
+		Baseline:         handler.NewBaselineHandler(baselineRepo, logger),
+		Alert:            handler.NewAlertHandler(alertRouter, alertFeedback, logger),
 		APIKeyLookup:     apiKeySvc,
 		Health:           health,
 		OpenAPISpec:      handler.NewOpenAPIHandler(),
@@ -978,4 +1015,22 @@ func trailingSpaces(s string) string {
 		}
 	}
 	return s
+}
+
+// natsAlertAdapter adapts sngnats.Publisher (Publish takes 4
+// args including PublishOptions) to the alert.Router.Publisher
+// interface (Publish takes 3 args). The Router treats alert
+// publishing as best-effort fire-and-forget — a transient NATS
+// hiccup must not roll back the persistent alert row — so we
+// use the publisher's default retry/timeout from cfg.NATS
+// (PublishOptions{} = zero-value = use cfg defaults).
+type natsAlertAdapter struct {
+	p *sngnats.Publisher
+}
+
+func (a natsAlertAdapter) Publish(ctx context.Context, subject string, data []byte) error {
+	if a.p == nil {
+		return nil
+	}
+	return a.p.Publish(ctx, subject, data, sngnats.PublishOptions{})
 }
