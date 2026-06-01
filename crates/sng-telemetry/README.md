@@ -8,17 +8,17 @@ endpoint client. Implements the five-stage pipeline described in
 collect → dedup → redact → enrich → egress (sng-comms)
 ```
 
-1. **Collect** — typed [`TelemetryEvent`]s arrive from every
+1. **Collect** — typed `TelemetryEvent`s arrive from every
    subsystem (DNS filter, firewall, IPS, SWG, ZTNA, SD-WAN,
    updater, agent lifecycle). Subsystems implement
-   [`EventSource`] or push directly into a [`PipelineHandle`].
-2. **Dedup** — a rolling window ([`Dedup`]) drops fingerprint-
+   `EventSource` or push directly into a `PipelineHandle`.
+2. **Dedup** — a rolling window (`Dedup`) drops fingerprint-
    equal events observed within the configured TTL. The
    fingerprint is computed over producer-relevant fields only
    (byte counters and other observation-dependent fields are
    excluded) so a retry path emitting the same flow twice
    collapses to one record.
-3. **Redact** — metadata-first ([`RedactionPolicy`]): payload
+3. **Redact** — metadata-first (`RedactionPolicy`): payload
    only when the tenant policy explicitly opts in for that flow
    class. Redaction happens at source.
 4. **Enrich** — site / tenant / time / identity context applied
@@ -28,24 +28,24 @@ collect → dedup → redact → enrich → egress (sng-comms)
    bounded-spool + batched native-protocol upload to the
    control plane.
 
-A short [`PcapRing`] gives operators bounded forensic re-hydration
+A short `PcapRing` gives operators bounded forensic re-hydration
 on demand. The ring is local-only — bytes never leave the edge /
 endpoint unless the operator explicitly pulls a slice.
 
 ## Module layout
 
-* [`source`] — `EventSource` trait, `ChannelSource` impl,
+* `source` — `EventSource` trait, `ChannelSource` impl,
   `TelemetryEvent` shape.
-* [`dedup`] — rolling-window deduplicator and `Fingerprint`
+* `dedup` — rolling-window deduplicator and `Fingerprint`
   hasher.
-* [`redaction`] — `RedactionPolicy` per-flow-class opt-in
+* `redaction` — `RedactionPolicy` per-flow-class opt-in
   matrix.
-* [`enrichment`] — site / tenant / time / identity binder.
-* [`pcap`] — `PcapRing`, `PcapRingConfig`, `PcapStats`.
-* [`pipeline`] — `Pipeline` / `PipelineHandle` /
+* `enrichment` — site / tenant / time / identity binder.
+* `pcap` — `PcapRing`, `PcapRingConfig`, `PcapStats`.
+* `pipeline` — `Pipeline` / `PipelineHandle` /
   `PipelineStats` — the supervisor surface the edge / agent
   drive from their subsystem composition.
-* [`error`] — `TelemetryError` mapped to
+* `error` — `TelemetryError` mapped to
   `sng_core::error::ErrorCode`.
 
 ## Shutdown contract

@@ -17,43 +17,43 @@ ext-authz uses at runtime.
 
 ## Module layout
 
-* [`bypass`] — operator + industry-default SNI bypass list with
+* `bypass` — operator + industry-default SNI bypass list with
   longest-suffix-first match semantics. Re-uses
   `sng_fw::sni_suffix_match` so the SWG and the firewall agree on
   which TLS handshakes are exempt from inspection.
-* [`categorizer`] — async `UrlCategorizer` trait and the in-tree
+* `categorizer` — async `UrlCategorizer` trait and the in-tree
   `LocalCategoryDb` impl that backs a signed category bundle.
-* [`malware`] — async `MalwareVerdictProvider` trait with the
+* `malware` — async `MalwareVerdictProvider` trait with the
   in-tree `StaticMalwareList` impl plus a TTL cache so the
   forward proxy can short-circuit repeat lookups.
-* [`rate_limit`] — token-bucket per `(tenant_id, principal_id)`
+* `rate_limit` — token-bucket per `(tenant_id, principal_id)`
   with a `Clock` trait so the tests drive refill deterministically
   via `TestClock`.
-* [`verdict`] — pure verdict state machine producing
+* `verdict` — pure verdict state machine producing
   `Action::{Allow, Bypass, Deny, RateLimit}`. The decision logic
   is testable without any HTTP layer.
-* [`auth`] — HTTP ext-authz handler: JSON envelope decode, verdict
+* `auth` — HTTP ext-authz handler: JSON envelope decode, verdict
   dispatch, response render, telemetry emit. Envoy POSTs each
   candidate request to `/ext_authz`; the handler computes the
   verdict and replies with a JSON body Envoy maps onto allow / deny
   / 429.
-* [`config`] — deterministic Envoy YAML renderer with SHA-256
+* `config` — deterministic Envoy YAML renderer with SHA-256
   digest dedup. Mirrors `sng_fw::compile::render_script` (the
   nftables renderer): hand-rendered text, byte-identical output
   for byte-identical input, no third-party parser in the path.
-* [`process`] — `EnvoyProcess` trait + `ShellEnvoy` and
+* `process` — `EnvoyProcess` trait + `ShellEnvoy` and
   `MockEnvoyProcess` impls. Production shells out to `envoy
   --config-path …` for spawn / validate and to `/bin/kill -<sig>`
   for signal delivery (matches `sng_ips::process::ShellSuricata`).
-* [`health`] — health state machine (`Healthy` / `Degraded` /
+* `health` — health state machine (`Healthy` / `Degraded` /
   `Failed` / `Unknown`) and operator-chosen `FailMode` (open /
   closed) governing what happens to traffic when the SWG is down.
-* [`manager`] — supervisor that wires all of the above together:
+* `manager` — supervisor that wires all of the above together:
   `install(config)` validates + writes + reloads or starts;
   `probe(admin_reachable)` runs one health tick; the manager
   keeps the digest of the last installed config so a re-install
   with the same bytes is a no-op.
-* [`telemetry`] — `TelemetryEmitter` trait + the `sng-telemetry`
+* `telemetry` — `TelemetryEmitter` trait + the `sng-telemetry`
   bridge. Maps SWG-specific `Action` values onto the shared
   `Verdict` envelope and carries per-decision context
   (rate-limit metadata, bypass reason, category) without folding
@@ -116,7 +116,7 @@ authorisation decision plus the matching deny / 429 response:
 is populated only when the categoriser produced a value (any
 action).
 
-Both shapes are exercised by [`auth::tests`] round-trip tests so a
+Both shapes are exercised by `auth::tests` round-trip tests so a
 silent rename to either is caught at build time.
 
 ## Local verification

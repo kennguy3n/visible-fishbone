@@ -19,10 +19,10 @@ harness:
 ## Library / binary split
 
 Like `sng-edge`, the crate exposes a `lib` target alongside the
-`bin`. The library half publishes [`run_agent`] (full supervisor
-lifecycle on a loaded config) and [`build_agent`] (subsystem
+`bin`. The library half publishes `run_agent` (full supervisor
+lifecycle on a loaded config) and `build_agent` (subsystem
 composition only). The binary half (`src/main.rs`) is a thin
-wrapper around [`run_from_args`].
+wrapper around `run_from_args`.
 
 The in-tree integration tests (`tests/agent_e2e.rs`,
 `tests/agent_supervisor.rs`) drive the supervisor stack

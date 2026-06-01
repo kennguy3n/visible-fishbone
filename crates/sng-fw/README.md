@@ -17,24 +17,24 @@ test assertions check the wire-format the kernel sees.
 
 ## Module layout
 
-* [`rule`] — `FirewallRule`, `RuleAction`, `RuleMatch`,
+* `rule` — `FirewallRule`, `RuleAction`, `RuleMatch`,
   `Protocol`, the closed set of L3 / L4 predicates.
-* [`zone`] — `Zone`, `ZonePolicy`, `ZoneTable`, default-deny
+* `zone` — `Zone`, `ZonePolicy`, `ZoneTable`, default-deny
   inter-zone segmentation.
-* [`nat`] — SNAT / DNAT / masquerade rule generation.
-* [`conntrack`] — `ConntrackState` state machine for stateful
+* `nat` — SNAT / DNAT / masquerade rule generation.
+* `conntrack` — `ConntrackState` state machine for stateful
   filtering (`NEW` / `ESTABLISHED` / `RELATED` / `INVALID`).
-* [`l7`] — protocol signature identification, TLS SNI extraction,
+* `l7` — protocol signature identification, TLS SNI extraction,
   HTTP host / URI matching, `AppId` to `TrafficClass` mapping.
-* [`tls_policy`] — decrypt vs. bypass decision engine, industry
+* `tls_policy` — decrypt vs. bypass decision engine, industry
   default "do not decrypt" list, operator-controlled bypass
   categories.
-* [`compile`] — turns the NGFW rule slice of a `LoadedBundle`
+* `compile` — turns the NGFW rule slice of a `LoadedBundle`
   into a `CompiledRuleSet` (rule set + zone table + NAT table)
   plus a deterministic nftables script.
-* [`nftables`] — `NftablesBackend` trait + `ShellNftables`
+* `nftables` — `NftablesBackend` trait + `ShellNftables`
   (production `nft -f` shell-out) + `MockNftables` (tests).
-* [`engine`] — top-level `FirewallEngine` that owns the compiled
+* `engine` — top-level `FirewallEngine` that owns the compiled
   rule set, hot-swaps it atomically on bundle rotation, and
   exposes the per-flow evaluation surface the data path queries.
 

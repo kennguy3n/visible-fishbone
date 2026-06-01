@@ -32,39 +32,39 @@ orchestrates the verified hand-off between those layers.
 
 ## Module layout
 
-* [`manifest`] — typed manifest model + Ed25519 signature
-  verification via [`sng_core::policy::PolicyVerifier`]-style
+* `manifest` — typed manifest model + Ed25519 signature
+  verification via `sng_core::policy::PolicyVerifier`-style
   trust store.
-* [`source`] — `ManifestSource` trait + `StaticManifestSource`
+* `source` — `ManifestSource` trait + `StaticManifestSource`
   test impl (production source is a `sng-comms` pull).
-* [`download`] — streaming [`ImageDownloader`] with
-  on-the-fly SHA-256 hashing ([`StreamingHasher`]) so a
+* `download` — streaming `ImageDownloader` with
+  on-the-fly SHA-256 hashing (`StreamingHasher`) so a
   truncated or tampered transfer is rejected before the bank
   finalises.
-* [`bank`] — `BankWriter` trait with a documented
+* `bank` — `BankWriter` trait with a documented
   **idempotency contract** on `mark_committed` / `set_active`
   (the post-commit retry loop in the manager depends on it).
   Ships with `InMemoryBankWriter` for tests; the on-disk
   production impl ships separately.
-* [`bootloader`] — `Bootloader` trait + `InMemoryBootloader`
+* `bootloader` — `Bootloader` trait + `InMemoryBootloader`
   for tests; production impl bridges to the host bootloader
   (GRUB / U-Boot / EFI).
-* [`healthcheck`] — `HealthCheck` trait, `HealthReport`,
+* `healthcheck` — `HealthCheck` trait, `HealthReport`,
   `StaticHealthCheck` for tests. The manager spins one of
   these inside the rollback window after each commit.
-* [`policy`] — operator-controlled `UpdaterPolicy`
+* `policy` — operator-controlled `UpdaterPolicy`
   (manifest-size cap, health-window cadence, channel pin) with
   hot-swap via `UpdaterPolicyHolder`.
-* [`verifier`] — Ed25519 signature verification primitives,
+* `verifier` — Ed25519 signature verification primitives,
   exported so external callers can re-verify a manifest out of
   band.
-* [`state`] — explicit [`UpdateState`] state machine the
+* `state` — explicit `UpdateState` state machine the
   service walks, rejecting illegal transitions.
-* [`service`] — `UpdaterService` orchestrator with the
+* `service` — `UpdaterService` orchestrator with the
   install / rollback brain. Exposes `clear_layout_divergence`
   so an operator can re-arm the engine after manual metadata
   reconciliation.
-* [`stats`] — counter surface matching the same per-counter
+* `stats` — counter surface matching the same per-counter
   contract used elsewhere in the workspace.
 
 ## Failure-mode discipline

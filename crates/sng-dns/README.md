@@ -12,21 +12,21 @@ run without network and without an external resolver binary.
 
 ## Module layout
 
-* [`qtype`] — typed DNS query type + RCODE enums.
-* [`wire`] — RFC 1035 wire-format encoder / decoder.
-* [`error`] — [`DnsError`] mapped to
-  [`sng_core::error::ErrorCode`].
-* [`query`] — agent-facing [`DnsQuery`] / [`DnsResponse`] types
+* `qtype` — typed DNS query type + RCODE enums.
+* `wire` — RFC 1035 wire-format encoder / decoder.
+* `error` — `DnsError` mapped to
+  `sng_core::error::ErrorCode`.
+* `query` — agent-facing `DnsQuery` / `DnsResponse` types
   plus `canonicalize_name` / `domain_suffix_match` helpers.
-* [`filter`] — [`Filter`] trait + hot-swappable
-  [`FilterChain`] with `combine_verdicts` semantics.
-* [`reputation`] — exact-match reputation feed → `NXDOMAIN`.
-* [`category`] — per-tenant per-category Allow / Log / Block.
-* [`sinkhole`] — suffix-match list → synthetic A / AAAA.
-* [`resolver`] — async [`Resolver`] trait, [`UdpResolver`]
-  production impl, and [`StaticResolver`] for tests.
-* [`service`] — end-to-end [`DnsService`] orchestrator that
-  emits [`HandledQuery`] events into the `sng-telemetry`
+* `filter` — `Filter` trait + hot-swappable
+  `FilterChain` with `combine_verdicts` semantics.
+* `reputation` — exact-match reputation feed → `NXDOMAIN`.
+* `category` — per-tenant per-category Allow / Log / Block.
+* `sinkhole` — suffix-match list → synthetic A / AAAA.
+* `resolver` — async `Resolver` trait, `UdpResolver`
+  production impl, and `StaticResolver` for tests.
+* `service` — end-to-end `DnsService` orchestrator that
+  emits `HandledQuery` events into the `sng-telemetry`
   pipeline.
 
 ## Hot-swap

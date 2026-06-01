@@ -9,30 +9,30 @@ may reach a specific application**.
 
 ## Module layout
 
-* [`app`] — `App`, `AppCatalogProvider` trait, and the
+* `app` — `App`, `AppCatalogProvider` trait, and the
   `StaticAppCatalog` test impl. What apps does this tenant
   publish? What URL / host patterns identify them? What
   minimum posture do they require? What groups are entitled?
-* [`identity`] — `UserIdentity` and the `IdentityProvider`
+* `identity` — `UserIdentity` and the `IdentityProvider`
   trait. Given a verified user id (`sub` from the IdP or the
   SPIFFE ID from the mTLS chain), what groups does the user
   belong to and is MFA still fresh?
-* [`device`] — `DeviceTrustProvider` trait. Given a device id
+* `device` — `DeviceTrustProvider` trait. Given a device id
   (the certificate fingerprint that passed mTLS), is the
   device enrolled, what is its live posture snapshot, when was
   it last attested?
-* [`policy`] — `ZtnaPolicy` and the rule shapes that join the
+* `policy` — `ZtnaPolicy` and the rule shapes that join the
   three providers above into an access decision.
-* [`request`] — `AccessRequest` envelope.
-* [`error`] — `ZtnaError` mapped to
+* `request` — `AccessRequest` envelope.
+* `error` — `ZtnaError` mapped to
   `sng_core::error::ErrorCode`.
-* [`service`] — `ZtnaService::evaluate` is the brain's entry
+* `service` — `ZtnaService::evaluate` is the brain's entry
   point. The path is: resolve app → resolve device trust +
   posture → resolve identity + group memberships → evaluate
   policy → return `AccessDecision` (`Allow`, `Deny`,
   `DenyPosture`, `DenyMfaStale`, …) with a structured
   reason for the audit log.
-* [`stats`] — counter surface; relaxed-ordering snapshot per
+* `stats` — counter surface; relaxed-ordering snapshot per
   the same per-counter contract as `sng-sdwan` and `sng-swg`.
 
 ## Telemetry

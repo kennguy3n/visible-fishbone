@@ -123,8 +123,8 @@ the roadmap shape.
 Out of scope at launch (called out explicitly so we do not drift):
 
 - Inline-CASB.
-- Endpoint DLP (defer to SDA integration in Phase 4+).
-- Hardware appliance SKUs (Phase 6+, only if economics demand).
+- Endpoint DLP (defer to SDA integration; see §10 phase 4 row).
+- Hardware appliance SKUs (see §10 phase 6 row, only if economics demand).
 - Vendor-built threat-research lab.
 - Customer-hosted control plane (managed SaaS only).
 

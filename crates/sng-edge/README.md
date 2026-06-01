@@ -22,10 +22,10 @@ harness:
 ## Library / binary split
 
 The crate exposes a `lib` target alongside the `bin`. The library
-half publishes [`run_edge`] (full supervisor lifecycle on a
-loaded config) and [`build_edge`] (subsystem composition only).
+half publishes `run_edge` (full supervisor lifecycle on a
+loaded config) and `build_edge` (subsystem composition only).
 The binary half (`src/main.rs`) is a thin wrapper around
-[`run_from_args`].
+`run_from_args`.
 
 This split exists so the in-tree integration tests
 (`tests/edge_e2e.rs`, `tests/edge_supervisor.rs`) can drive the
