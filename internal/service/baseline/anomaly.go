@@ -1,0 +1,218 @@
+// Package baseline — anomaly.go implements the
+// AnomalyDetector. It sits BETWEEN the baseline service and the
+// alert.Router: an Observation arrives, the Detector loads the
+// current Baseline, scores the Observation against it, and
+// emits an alert if the score crosses the model's threshold AND
+// the estimator has seen enough warmup samples.
+//
+// The Observation is folded into the Baseline AFTER scoring so
+// the alert reflects "how surprising was this observation given
+// what we have learned SO FAR" — folding first would dilute
+// the deviation by the new sample's own contribution to the
+// mean, masking obvious spikes.
+package baseline
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
+)
+
+// AlertEmitter is the slice of the alert.Router API the
+// Detector uses. Defining the interface here lets tests stub
+// the Router without dragging in NATS / the alert package.
+type AlertEmitter interface {
+	// Emit persists the alert and routes it. Returns the
+	// persisted Alert (with assigned ID / CreatedAt) or
+	// ErrConflict / ErrInvalidArgument from the repository.
+	Emit(ctx context.Context, tenantID uuid.UUID, a repository.Alert) (repository.Alert, error)
+}
+
+// DetectorOptions configures the Detector's emit-gating
+// thresholds. Zero values fall back to the package defaults.
+type DetectorOptions struct {
+	// MinWarmupSamples is the minimum sample count required
+	// before the Detector will emit alerts on a dimension.
+	// Below this the estimator is too unstable. Defaults to
+	// the package's MinWarmupSamples constant.
+	MinWarmupSamples int64
+	// WarningZScore is the threshold above which an alert is
+	// emitted with severity=warning when the model's
+	// ZThreshold doesn't override it. The Detector emits
+	// max(model.ZThreshold, WarningZScore) at warning, and
+	// 1.5x that value at critical.
+	WarningZScore float64
+}
+
+func (o DetectorOptions) fillDefaults() DetectorOptions {
+	if o.MinWarmupSamples <= 0 {
+		o.MinWarmupSamples = MinWarmupSamples
+	}
+	if o.WarningZScore <= 0 {
+		o.WarningZScore = DefaultZThreshold
+	}
+	return o
+}
+
+// Detector wires the baseline.Service to an AlertEmitter and
+// applies the deviation-score policy. One Detector per process;
+// per-(tenant, dim) tuning lives on the Baseline itself.
+type Detector struct {
+	svc  *Service
+	emit AlertEmitter
+	opts DetectorOptions
+	now  func() time.Time
+}
+
+// NewDetector constructs a Detector. emit may be nil — the
+// Detector will skip emission in that case (useful for tests
+// that only want to exercise the scoring path). now defaults to
+// time.Now.UTC if nil.
+func NewDetector(svc *Service, emit AlertEmitter, opts DetectorOptions) *Detector {
+	return &Detector{
+		svc:  svc,
+		emit: emit,
+		opts: opts.fillDefaults(),
+		now:  func() time.Time { return time.Now().UTC() },
+	}
+}
+
+// SetClock overrides the wall-clock source. Used by tests to
+// pin CreatedAt / WindowStart on emitted alerts.
+func (d *Detector) SetClock(fn func() time.Time) {
+	if fn != nil {
+		d.now = fn
+	}
+}
+
+// ObserveAndScore is the main entry point. It performs the
+// score-then-fold sequence:
+//
+//  1. Load the current Baseline.
+//  2. Score the observation against the loaded Baseline.
+//  3. Fold the observation into the Baseline and persist.
+//  4. If max(|zW|, |zE|) >= max(model.ZThreshold, WarningZScore)
+//     AND samples >= MinWarmupSamples, emit an alert.
+//
+// Returns (foldedBaseline, alert?, error). alert is non-nil
+// only when an alert was emitted; err is non-nil only when
+// either the baseline persist OR the alert emit failed (i.e.
+// "we did not score" vs "we scored but couldn't persist").
+//
+// Cold-start (no row exists) inserts a fresh Baseline; no alert
+// is emitted on the first observation regardless of score
+// because the estimator has nothing to compare against.
+func (d *Detector) ObserveAndScore(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	dimension string,
+	windowSeconds int,
+	obs Observation,
+	kind string,
+) (repository.BaselineModel, *repository.Alert, error) {
+	if tenantID == uuid.Nil || dimension == "" || windowSeconds <= 0 {
+		return repository.BaselineModel{}, nil, repository.ErrInvalidArgument
+	}
+	if kind == "" {
+		kind = "baseline.zscore_exceeded"
+	}
+	// 1. Load (or materialise cold-start) the current Baseline.
+	cur, err := d.svc.repo.GetForDimension(ctx, tenantID, dimension, windowSeconds)
+	if errors.Is(err, repository.ErrNotFound) {
+		cur = repository.BaselineModel{
+			TenantID:      tenantID,
+			Dimension:     dimension,
+			WindowSeconds: windowSeconds,
+			Alpha:         DefaultAlpha,
+			ZThreshold:    DefaultZThreshold,
+		}
+	} else if err != nil {
+		return repository.BaselineModel{}, nil, fmt.Errorf("anomaly load baseline: %w", err)
+	}
+
+	// 2. Score the observation against the PRE-update state.
+	zW, zE := d.svc.engine.Score(cur, obs)
+	maxZ := MaxAbsZ(zW, zE)
+
+	// 3. Fold into the Baseline + persist.
+	folded := d.svc.engine.Fold(cur, obs)
+	saved, err := d.svc.repo.Upsert(ctx, tenantID, folded)
+	if err != nil {
+		return repository.BaselineModel{}, nil, fmt.Errorf("anomaly upsert baseline: %w", err)
+	}
+
+	// 4. Emit gate. Warmup AND score-above-threshold both required.
+	threshold := cur.ZThreshold
+	if d.opts.WarningZScore > threshold {
+		threshold = d.opts.WarningZScore
+	}
+	if cur.Samples < d.opts.MinWarmupSamples || maxZ < threshold {
+		return saved, nil, nil
+	}
+	if d.emit == nil {
+		// Useful for tests that only want to exercise the
+		// scoring path without an emit stub.
+		return saved, nil, nil
+	}
+
+	severity := repository.AlertSeverityWarning
+	// 1.5x threshold escalates to critical — a 4.5σ event
+	// on the default 3.0σ threshold is single-tenant
+	// outage territory.
+	if maxZ >= threshold*1.5 {
+		severity = repository.AlertSeverityCritical
+	}
+
+	now := d.now()
+	evidence, _ := json.Marshal(map[string]any{
+		"z_welford":          zW,
+		"z_ewma":             zE,
+		"max_abs_z":          maxZ,
+		"alpha":              cur.Alpha,
+		"window_seconds":     windowSeconds,
+		"baseline_samples":   cur.Samples,
+		"baseline_ewma":      cur.EWMA,
+		"baseline_ewma_var":  cur.EWMAVar,
+		"observed_value":     obs.Value,
+		"threshold_z":        threshold,
+		"min_warmup_samples": d.opts.MinWarmupSamples,
+	})
+
+	summary := fmt.Sprintf(
+		"%s on %s: observed=%.3f mean=%.3f stddev=%.3f z=%.2fσ (warning ≥ %.2fσ)",
+		kind, dimension, obs.Value, cur.Mean, cur.StdDev(), maxZ, threshold,
+	)
+
+	stddev := cur.StdDev()
+	if stddev == 0 || math.IsNaN(stddev) {
+		stddev = cur.EWMAStdDev()
+	}
+
+	a := repository.Alert{
+		TenantID:       tenantID,
+		Kind:           kind,
+		Severity:       severity,
+		Dimension:      dimension,
+		ObservedValue:  obs.Value,
+		BaselineMean:   cur.Mean,
+		BaselineStdDev: stddev,
+		ZScore:         maxZ,
+		WindowStart:    now.Add(-time.Duration(windowSeconds) * time.Second),
+		WindowEnd:      now,
+		Summary:        summary,
+		Evidence:       evidence,
+		State:          repository.AlertStateOpen,
+	}
+	emitted, err := d.emit.Emit(ctx, tenantID, a)
+	if err != nil {
+		return saved, nil, fmt.Errorf("anomaly emit: %w", err)
+	}
+	return saved, &emitted, nil
+}

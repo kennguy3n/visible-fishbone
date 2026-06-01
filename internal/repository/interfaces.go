@@ -476,3 +476,193 @@ type PolicyRolloutRepository interface {
 		demoteGraphID *uuid.UUID,
 	) (PolicyRollout, error)
 }
+
+// -----------------------------------------------------------------------
+// Baseline + alert repositories (Phase 3 Block 3, Tasks 11-15).
+// -----------------------------------------------------------------------
+
+// BaselineModelRepository owns the baseline_models table.
+//
+// The hot path is the read-modify-write Observe loop in
+// baseline.Engine: a goroutine pulls a window of observations
+// from ClickHouse, loads the current BaselineModel for
+// (tenant, dimension, window_seconds), folds the new sample
+// into the Welford + EWMA state, and writes back. Concurrent
+// observers (different windows, different dimensions) update
+// disjoint rows and never collide; concurrent observers of the
+// SAME (tenant, dim, window) tuple race, and the optimistic
+// lock on Version is the mechanism that surfaces the conflict
+// so the service layer can retry instead of silently losing
+// one of the writes.
+type BaselineModelRepository interface {
+	// GetForDimension returns the model for the supplied (tenant,
+	// dimension, windowSeconds). Returns ErrNotFound when no
+	// such row exists — the caller's contract is to fall back to
+	// a cold-start BaselineModel (all-zero Welford/EWMA, default
+	// Alpha + ZThreshold).
+	GetForDimension(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		dimension string,
+		windowSeconds int,
+	) (BaselineModel, error)
+
+	// Upsert inserts the model if no row exists for the
+	// (tenant, dim, window) tuple, otherwise UPDATEs the
+	// existing row. The driver MUST enforce optimistic
+	// concurrency via Version: if the supplied m.Version does
+	// not match the persisted value (UPDATE path only — INSERT
+	// stamps Version=1 regardless), the driver returns
+	// ErrConflict and the caller retries the load+fold+write
+	// cycle. The driver stamps Version = m.Version + 1 on
+	// successful update.
+	Upsert(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		m BaselineModel,
+	) (BaselineModel, error)
+
+	// List enumerates models for a tenant, ordered by
+	// LastUpdatedAt DESC. Used by the operator-facing
+	// /baselines endpoint and the alert.Feedback tuning loop
+	// when it needs to enumerate every (dimension) the tenant
+	// has a model for.
+	List(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		page Page,
+	) (PageResult[BaselineModel], error)
+
+	// UpdateThreshold updates the ZThreshold on a model
+	// in-place without touching the Welford / EWMA state.
+	// Used by the alert.Feedback tuning loop and the
+	// operator-facing threshold override endpoint.
+	// Returns ErrNotFound when no model exists for the tuple.
+	UpdateThreshold(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		dimension string,
+		windowSeconds int,
+		zThreshold float64,
+	) (BaselineModel, error)
+}
+
+// AlertListFilter narrows AlertRepository.List to specific
+// states / kinds / dimensions. Zero-value fields are wildcards.
+type AlertListFilter struct {
+	// States narrows to alerts in one of the supplied states.
+	// Empty = any state.
+	States []AlertState
+	// Kinds narrows to alerts whose kind matches one of the
+	// supplied strings (exact match). Empty = any kind.
+	Kinds []string
+	// Dimensions narrows to alerts whose dimension matches one
+	// of the supplied strings (exact match). Empty = any
+	// dimension.
+	Dimensions []string
+}
+
+// AlertRepository owns the alerts table.
+type AlertRepository interface {
+	// Create persists a freshly-emitted alert. The caller
+	// supplies a fully-populated Alert struct (statistical
+	// context already snapshot-copied off the baseline).
+	// CreatedAt / UpdatedAt are stamped by the driver.
+	Create(ctx context.Context, tenantID uuid.UUID, a Alert) (Alert, error)
+
+	// Get returns one alert by ID, scoped to tenant.
+	Get(ctx context.Context, tenantID, id uuid.UUID) (Alert, error)
+
+	// List enumerates alerts in created-at DESC order. The
+	// filter narrows by state / kind / dimension; the page
+	// bounds the page size.
+	List(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		filter AlertListFilter,
+		page Page,
+	) (PageResult[Alert], error)
+
+	// Acknowledge transitions an alert from Open to
+	// Acknowledged. Idempotent: re-acknowledging an already-
+	// acknowledged alert is a no-op (returns the unchanged
+	// row). Returns ErrInvalidArgument when the alert is in
+	// a terminal state.
+	Acknowledge(
+		ctx context.Context,
+		tenantID, id uuid.UUID,
+		by *uuid.UUID,
+		at time.Time,
+	) (Alert, error)
+
+	// Resolve transitions an alert from Open or Acknowledged
+	// to Resolved. Returns ErrInvalidArgument when the alert
+	// is in a terminal state.
+	Resolve(
+		ctx context.Context,
+		tenantID, id uuid.UUID,
+		by *uuid.UUID,
+		at time.Time,
+	) (Alert, error)
+}
+
+// AlertSuppressionRepository owns the alert_suppressions table.
+type AlertSuppressionRepository interface {
+	// Create persists a new suppression rule. Returns
+	// ErrInvalidArgument when neither Kind nor Dimension is
+	// set (matches the DB-level
+	// alert_suppressions_scope_nonempty constraint).
+	Create(ctx context.Context, tenantID uuid.UUID, s AlertSuppression) (AlertSuppression, error)
+
+	// Get returns one suppression by ID, scoped to tenant.
+	Get(ctx context.Context, tenantID, id uuid.UUID) (AlertSuppression, error)
+
+	// List enumerates suppressions in created-at DESC order.
+	List(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		page Page,
+	) (PageResult[AlertSuppression], error)
+
+	// ListActive returns every CURRENTLY-active suppression for
+	// a tenant (ExpiresAt == nil OR ExpiresAt > now). Used by
+	// alert.Router.Emit on every emit; the in-memory cache
+	// inside the router invalidates after a short TTL.
+	ListActive(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		now time.Time,
+	) ([]AlertSuppression, error)
+
+	// Delete removes a suppression rule.
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+}
+
+// AlertFeedbackRepository owns the alert_feedback table.
+type AlertFeedbackRepository interface {
+	// Create persists feedback on an alert. Returns
+	// ErrConflict when feedback already exists for the alert
+	// (the UNIQUE constraint on alert_id).
+	Create(ctx context.Context, tenantID uuid.UUID, f AlertFeedback) (AlertFeedback, error)
+
+	// GetForAlert returns the feedback for one alert. Returns
+	// ErrNotFound when no feedback exists for the alert.
+	GetForAlert(ctx context.Context, tenantID, alertID uuid.UUID) (AlertFeedback, error)
+
+	// Delete removes the feedback for an alert. Used so the
+	// operator can revise their judgement via DELETE +
+	// re-Create rather than silently overwriting history.
+	Delete(ctx context.Context, tenantID, alertID uuid.UUID) error
+
+	// ListByDimension returns every feedback row for alerts in
+	// the supplied dimension, ordered by created_at DESC. Used
+	// by alert.Feedback.AggregateForTenant to compute the per-
+	// dimension false-positive rate that drives threshold
+	// tuning.
+	ListByDimension(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		dimension string,
+		since time.Time,
+	) ([]AlertFeedback, error)
+}

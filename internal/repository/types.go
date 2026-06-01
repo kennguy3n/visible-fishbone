@@ -15,6 +15,7 @@ package repository
 
 import (
 	"encoding/json"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -599,4 +600,243 @@ type PolicyRollout struct {
 	// auth-svc"). Bounded to 1024 chars at the handler layer;
 	// the column itself is unconstrained TEXT.
 	Notes string
+}
+
+// -----------------------------------------------------------------------
+// Baseline + alert types (Phase 3 Block 3, Tasks 11-15).
+// -----------------------------------------------------------------------
+
+// BaselineModel is one row in the baseline_models table. Tracks
+// the running mean + variance (Welford) and EWMA estimators for
+// a single (tenant, dimension, window_seconds) metric.
+//
+// The Welford pair (Mean, M2) is the numerically-stable online
+// estimator from Knuth/Welford: given a new sample x, update
+//
+//   samples++  delta = x - mean
+//   mean += delta / samples
+//   m2   += delta * (x - mean)
+//
+// Sample variance is then m2 / max(samples - 1, 1); standard
+// deviation is sqrt(variance). Samples < 2 means cold start —
+// the anomaly detector skips scoring until enough samples
+// accumulate to make the estimate meaningful (default 30).
+//
+// (EWMA, EWMVar) is the exponentially-weighted pair. On a new
+// sample x with decay alpha:
+//
+//   delta  = x - ewma
+//   ewma  += alpha * delta
+//   ewma_var = (1 - alpha) * (ewma_var + alpha * delta * delta)
+//
+// (Equivalent to West/Pelet's incremental EWVar formula.) The
+// EWMA captures recent shifts much faster than the Welford
+// estimator, which is important for catching sudden anomalies
+// (e.g. a malware outbreak generating a 5x spike in DNS
+// queries) that the long-run Welford mean would dilute.
+//
+// ZThreshold is the per-(tenant, dimension) alert threshold in
+// units of standard deviation; the anomaly detector emits an
+// alert when max(|z_welford|, |z_ewma|) >= ZThreshold. Default
+// 3.0 captures the ~0.27% tail of a Gaussian, which empirically
+// is the right knee for "novel enough to wake an operator".
+//
+// Version is an optimistic-lock counter incremented on every
+// successful Update. The service layer uses it to detect lost
+// updates when a fan-out goroutine observes two batches into the
+// same model concurrently — see baseline.Engine.Observe.
+type BaselineModel struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	Dimension      string
+	WindowSeconds  int
+	Samples        int64
+	Mean           float64
+	M2             float64
+	EWMA           float64
+	EWMAVar        float64
+	Alpha          float64
+	ZThreshold     float64
+	LastObservedAt time.Time
+	LastUpdatedAt  time.Time
+	CreatedAt      time.Time
+	Version        int64
+}
+
+// StdDev returns the sample standard deviation of the Welford
+// estimator. Returns 0 when samples < 2 (cold start, undefined).
+func (b BaselineModel) StdDev() float64 {
+	if b.Samples < 2 {
+		return 0
+	}
+	v := b.M2 / float64(b.Samples-1)
+	if v <= 0 {
+		return 0
+	}
+	return math.Sqrt(v)
+}
+
+// EWMAStdDev returns the EW standard deviation. Like StdDev, the
+// estimator is only meaningful after a warm-up window — callers
+// should gate scoring on Samples >= a minimum-warmup threshold
+// (the anomaly detector uses 30 by default).
+func (b BaselineModel) EWMAStdDev() float64 {
+	if b.Samples < 2 {
+		return 0
+	}
+	if b.EWMAVar <= 0 {
+		return 0
+	}
+	return math.Sqrt(b.EWMAVar)
+}
+
+// -----------------------------------------------------------------------
+// Alert types
+// -----------------------------------------------------------------------
+
+// AlertSeverity enumerates the three-bucket severity scale.
+// Matches the alerts.severity CHECK constraint.
+type AlertSeverity string
+
+const (
+	AlertSeverityInfo     AlertSeverity = "info"
+	AlertSeverityWarning  AlertSeverity = "warning"
+	AlertSeverityCritical AlertSeverity = "critical"
+)
+
+// IsValid reports whether s is a known severity.
+func (s AlertSeverity) IsValid() bool {
+	switch s {
+	case AlertSeverityInfo, AlertSeverityWarning, AlertSeverityCritical:
+		return true
+	}
+	return false
+}
+
+// AlertState enumerates the alert lifecycle states. Matches the
+// alerts.state CHECK constraint.
+type AlertState string
+
+const (
+	AlertStateOpen         AlertState = "open"
+	AlertStateAcknowledged AlertState = "acknowledged"
+	AlertStateResolved     AlertState = "resolved"
+	AlertStateSuppressed   AlertState = "suppressed"
+)
+
+// IsValid reports whether s is a known state.
+func (s AlertState) IsValid() bool {
+	switch s {
+	case AlertStateOpen, AlertStateAcknowledged,
+		AlertStateResolved, AlertStateSuppressed:
+		return true
+	}
+	return false
+}
+
+// IsTerminal reports whether the state admits no further
+// transitions. Resolved and Suppressed are terminal; Open and
+// Acknowledged are not.
+func (s AlertState) IsTerminal() bool {
+	return s == AlertStateResolved || s == AlertStateSuppressed
+}
+
+// Alert is one row in the alerts table. Created at emit time by
+// alert.Router; the statistical context (Mean/StdDev/ZScore) is
+// snapshot-copied at creation so the alert remains self-
+// explaining even after the underlying baseline drifts.
+type Alert struct {
+	ID              uuid.UUID
+	TenantID        uuid.UUID
+	Kind            string
+	Severity        AlertSeverity
+	Dimension       string
+	ObservedValue   float64
+	BaselineMean    float64
+	BaselineStdDev  float64
+	ZScore          float64
+	WindowStart     time.Time
+	WindowEnd       time.Time
+	Summary         string
+	Evidence        []byte // JSON; never persist non-JSON bytes here
+	State           AlertState
+	SuppressedBy    *uuid.UUID
+	AcknowledgedBy  *uuid.UUID
+	AcknowledgedAt  *time.Time
+	ResolvedBy      *uuid.UUID
+	ResolvedAt      *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+// AlertSuppression is one row in the alert_suppressions table.
+// The (Kind, Dimension) pair are matchers: a nil pointer means
+// "match any". The CHECK constraint requires at least one to be
+// non-nil so a suppression rule always has a discriminating
+// scope.
+type AlertSuppression struct {
+	ID        uuid.UUID
+	TenantID  uuid.UUID
+	Kind      *string
+	Dimension *string
+	Reason    string
+	CreatedBy *uuid.UUID
+	CreatedAt time.Time
+	ExpiresAt *time.Time
+}
+
+// IsActive reports whether the suppression is currently in
+// effect at the supplied wall-clock time. A nil ExpiresAt means
+// the suppression never expires.
+func (s AlertSuppression) IsActive(now time.Time) bool {
+	if s.ExpiresAt == nil {
+		return true
+	}
+	return now.Before(*s.ExpiresAt)
+}
+
+// Matches reports whether a suppression rule covers an alert
+// with the supplied (kind, dimension). A nil matcher field on
+// the rule is a wildcard.
+func (s AlertSuppression) Matches(kind, dimension string) bool {
+	if s.Kind != nil && *s.Kind != kind {
+		return false
+	}
+	if s.Dimension != nil && *s.Dimension != dimension {
+		return false
+	}
+	return true
+}
+
+// AlertFeedbackDecision enumerates the operator-visible feedback
+// labels. Matches the alert_feedback.decision CHECK constraint.
+type AlertFeedbackDecision string
+
+const (
+	AlertFeedbackTruePositive  AlertFeedbackDecision = "true_positive"
+	AlertFeedbackFalsePositive AlertFeedbackDecision = "false_positive"
+	AlertFeedbackNoise         AlertFeedbackDecision = "noise"
+)
+
+// IsValid reports whether d is a known feedback decision.
+func (d AlertFeedbackDecision) IsValid() bool {
+	switch d {
+	case AlertFeedbackTruePositive, AlertFeedbackFalsePositive, AlertFeedbackNoise:
+		return true
+	}
+	return false
+}
+
+// AlertFeedback is one row in the alert_feedback table. The
+// UNIQUE constraint on alert_id enforces one feedback per alert
+// — the API DELETEs and re-INSERTs rather than overwrites so
+// the audit trail captures the revision.
+type AlertFeedback struct {
+	ID        uuid.UUID
+	TenantID  uuid.UUID
+	AlertID   uuid.UUID
+	Decision  AlertFeedbackDecision
+	Notes     string
+	CreatedBy *uuid.UUID
+	CreatedAt time.Time
 }
