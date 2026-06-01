@@ -50,8 +50,9 @@ func (f *fakeTenantLookup) callCount() int {
 }
 
 type fakeSiteLookup struct {
-	mu   sync.Mutex
-	rows map[siteCacheKey]repository.Site
+	mu    sync.Mutex
+	rows  map[siteCacheKey]repository.Site
+	calls int
 }
 
 func newFakeSiteLookup() *fakeSiteLookup {
@@ -61,6 +62,7 @@ func newFakeSiteLookup() *fakeSiteLookup {
 func (f *fakeSiteLookup) Get(_ context.Context, tenantID, id uuid.UUID) (repository.Site, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
 	s, ok := f.rows[siteCacheKey{tenant: tenantID, site: id}]
 	if !ok {
 		return repository.Site{}, repository.ErrNotFound
@@ -68,10 +70,17 @@ func (f *fakeSiteLookup) Get(_ context.Context, tenantID, id uuid.UUID) (reposit
 	return s, nil
 }
 
+func (f *fakeSiteLookup) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
 type fakeDeviceLookup struct {
 	mu      sync.Mutex
 	rows    map[deviceCacheKey]repository.Device
 	failNxt error
+	calls   int
 }
 
 func newFakeDeviceLookup() *fakeDeviceLookup {
@@ -81,6 +90,7 @@ func newFakeDeviceLookup() *fakeDeviceLookup {
 func (f *fakeDeviceLookup) Get(_ context.Context, tenantID, id uuid.UUID) (repository.Device, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
 	if f.failNxt != nil {
 		err := f.failNxt
 		f.failNxt = nil
@@ -91,6 +101,12 @@ func (f *fakeDeviceLookup) Get(_ context.Context, tenantID, id uuid.UUID) (repos
 		return repository.Device{}, repository.ErrNotFound
 	}
 	return d, nil
+}
+
+func (f *fakeDeviceLookup) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 // --- helpers ------------------------------------------------------------
@@ -391,5 +407,132 @@ func TestNormalize_RejectsInvalidEnvelope(t *testing.T) {
 	_, err := n.Normalize(context.Background(), env)
 	if err == nil {
 		t.Fatalf("expected error on invalid envelope")
+	}
+}
+
+// TestNormalize_NegativeTenantCache asserts that a flood of
+// envelopes for an unknown tenant only hits the tenant lookup
+// once within the NegativeCacheTTL window. Prior to PR #38
+// round-7 ANALYSIS_0004, every envelope re-issued the repo
+// call.
+func TestNormalize_NegativeTenantCache(t *testing.T) {
+	t.Parallel()
+	unknownTenant := uuid.New()
+	deviceID := uuid.New()
+	tenants := newFakeTenantLookup()
+	sites := newFakeSiteLookup()
+	devices := newFakeDeviceLookup()
+	n, err := NewNormalizer(tenants, sites, devices, NormalizerConfig{
+		CacheTTL:         time.Second,
+		CacheCapacity:    8,
+		NegativeCacheTTL: time.Second,
+		NowFunc:          time.Now,
+	})
+	if err != nil {
+		t.Fatalf("NewNormalizer: %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		_, err := n.Normalize(context.Background(), envelopeFor(t, unknownTenant, deviceID))
+		if !errors.Is(err, ErrTenantUnknown) {
+			t.Fatalf("envelope %d: want ErrTenantUnknown, got %v", i, err)
+		}
+	}
+	if got := tenants.callCount(); got != 1 {
+		t.Fatalf("negative cache leaked: want 1 tenant lookup, got %d", got)
+	}
+}
+
+// TestNormalize_NegativeDeviceCache mirrors the tenant variant
+// for an unknown device under a known-good tenant. The negative
+// cache must absorb the device lookups; the tenant lookup is
+// satisfied from the positive cache after the first hit.
+func TestNormalize_NegativeDeviceCache(t *testing.T) {
+	t.Parallel()
+	tenantID := uuid.New()
+	unknownDevice := uuid.New()
+	tenants := newFakeTenantLookup()
+	tenants.rows[tenantID] = repository.Tenant{ID: tenantID, Status: repository.TenantStatusActive, Name: "T"}
+	sites := newFakeSiteLookup()
+	devices := newFakeDeviceLookup()
+	n, err := NewNormalizer(tenants, sites, devices, NormalizerConfig{
+		CacheTTL:         time.Second,
+		CacheCapacity:    8,
+		NegativeCacheTTL: time.Second,
+		NowFunc:          time.Now,
+	})
+	if err != nil {
+		t.Fatalf("NewNormalizer: %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		_, err := n.Normalize(context.Background(), envelopeFor(t, tenantID, unknownDevice))
+		if !errors.Is(err, ErrDeviceUnknown) {
+			t.Fatalf("envelope %d: want ErrDeviceUnknown, got %v", i, err)
+		}
+	}
+	if got := devices.callCount(); got != 1 {
+		t.Fatalf("negative cache leaked: want 1 device lookup, got %d", got)
+	}
+}
+
+// TestNormalize_NegativeCacheDisabled confirms callers can pin
+// the legacy behaviour (every miss touches the repo) by passing
+// NegativeCacheTTL < 0.
+func TestNormalize_NegativeCacheDisabled(t *testing.T) {
+	t.Parallel()
+	unknownTenant := uuid.New()
+	deviceID := uuid.New()
+	tenants := newFakeTenantLookup()
+	n, err := NewNormalizer(tenants, newFakeSiteLookup(), newFakeDeviceLookup(), NormalizerConfig{
+		CacheTTL:         time.Second,
+		CacheCapacity:    8,
+		NegativeCacheTTL: -1, // disabled
+		NowFunc:          time.Now,
+	})
+	if err != nil {
+		t.Fatalf("NewNormalizer: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		_, _ = n.Normalize(context.Background(), envelopeFor(t, unknownTenant, deviceID))
+	}
+	if got := tenants.callCount(); got != 5 {
+		t.Fatalf("disabled negative cache: want 5 tenant lookups, got %d", got)
+	}
+}
+
+// TestNormalize_InvalidateClearsNegativeCache pins the
+// "freshly-created tenant accepted within seconds" semantics:
+// after a negative cache hit, calling Invalidate must clear the
+// memo so a subsequent Normalize for the same tenant re-issues
+// the lookup and sees the new row.
+func TestNormalize_InvalidateClearsNegativeCache(t *testing.T) {
+	t.Parallel()
+	tenantID := uuid.New()
+	deviceID := uuid.New()
+	tenants := newFakeTenantLookup()
+	devices := newFakeDeviceLookup()
+	devices.rows[deviceCacheKey{tenantID, deviceID}] = repository.Device{ID: deviceID, TenantID: tenantID, Name: "d"}
+	n, err := NewNormalizer(tenants, newFakeSiteLookup(), devices, NormalizerConfig{
+		CacheTTL:         time.Second,
+		CacheCapacity:    8,
+		NegativeCacheTTL: time.Minute, // long enough to outlive the test
+		NowFunc:          time.Now,
+	})
+	if err != nil {
+		t.Fatalf("NewNormalizer: %v", err)
+	}
+	// First call: tenant absent → ErrTenantUnknown + negative
+	// cache entry written.
+	if _, err := n.Normalize(context.Background(), envelopeFor(t, tenantID, deviceID)); !errors.Is(err, ErrTenantUnknown) {
+		t.Fatalf("pre-create: want ErrTenantUnknown, got %v", err)
+	}
+	// Operator creates the tenant and invalidates the memo.
+	tenants.rows[tenantID] = repository.Tenant{ID: tenantID, Status: repository.TenantStatusActive, Name: "T"}
+	n.Invalidate(tenantID, uuid.Nil, uuid.Nil)
+	// Second call: tenant present → success.
+	if _, err := n.Normalize(context.Background(), envelopeFor(t, tenantID, deviceID)); err != nil {
+		t.Fatalf("post-invalidate: want success, got %v", err)
+	}
+	if got := tenants.callCount(); got != 2 {
+		t.Fatalf("want 2 tenant lookups (one miss, one hit), got %d", got)
 	}
 }

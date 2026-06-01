@@ -62,6 +62,28 @@ const DefaultCacheTTL = 30 * time.Second
 // repositories are the source of truth on cache miss.
 const DefaultCacheCapacity = 16_384
 
+// DefaultNegativeCacheTTL is the dwell time of an entry written
+// to the cache after the underlying lookup returned
+// repository.ErrNotFound. Bounds the repo load under a flood of
+// envelopes from an unknown tenant or device (e.g. a rogue
+// agent with a valid mTLS cert but no enrolment row, or a
+// replay of envelopes for a deleted tenant). 5s is short
+// enough that a freshly-created tenant / device sees its
+// envelopes accepted within one TTL window, but long enough
+// that the repo is not hammered N times per second per rogue
+// envelope. See PR #38 round-7 ANALYSIS_0004.
+const DefaultNegativeCacheTTL = 5 * time.Second
+
+// DefaultNegativeCacheCapacity bounds the size of each
+// per-dimension negative cache. Sized one order of magnitude
+// below the positive cache because the legitimate working set
+// dominates and we don't want a flood of rogue envelopes (each
+// targeting a distinct unknown UUID) to evict positive entries.
+// Even if the negative cache thrashes, the worst outcome is one
+// uncached miss per rogue envelope on the rotated-out entry —
+// which is exactly the no-negative-cache fallback behaviour.
+const DefaultNegativeCacheCapacity = 1_024
+
 // Sentinel errors returned by Normalize.
 var (
 	// ErrUnsupportedSchema is returned when the envelope's
@@ -166,6 +188,17 @@ type Normalizer struct {
 	siteCache   *normCache[siteCacheKey, repository.Site]
 	deviceCache *normCache[deviceCacheKey, repository.Device]
 
+	// negativeTenantCache / negativeSiteCache / negativeDeviceCache
+	// memoize repository.ErrNotFound responses with a much
+	// shorter TTL than the positive caches. The value half is
+	// struct{} — we only need to know "this key was missing
+	// recently", the dwell time is what bounds repo load. nil
+	// when negative caching is disabled via
+	// NegativeCacheTTL < 0. See PR #38 round-7 ANALYSIS_0004.
+	negativeTenantCache *normCache[uuid.UUID, struct{}]
+	negativeSiteCache   *normCache[siteCacheKey, struct{}]
+	negativeDeviceCache *normCache[deviceCacheKey, struct{}]
+
 	nowFunc func() time.Time
 }
 
@@ -185,6 +218,13 @@ type NormalizerConfig struct {
 	// CacheCapacity bounds the size of each per-dimension cache.
 	// Defaults to DefaultCacheCapacity when zero.
 	CacheCapacity int
+	// NegativeCacheTTL bounds the staleness of cached
+	// "tenant / site / device not found" sentinels. Pinned much
+	// shorter than CacheTTL so a freshly-created tenant / device
+	// is accepted within seconds of provisioning. Defaults to
+	// DefaultNegativeCacheTTL when zero; pass a negative value
+	// to disable negative caching entirely.
+	NegativeCacheTTL time.Duration
 	// NowFunc returns the current time. Injected so tests can
 	// pin the clock; production passes time.Now.
 	NowFunc func() time.Time
@@ -216,7 +256,7 @@ func NewNormalizer(
 	if cfg.NowFunc == nil {
 		cfg.NowFunc = time.Now
 	}
-	return &Normalizer{
+	n := &Normalizer{
 		tenantLookup: tenantLookup,
 		siteLookup:   siteLookup,
 		deviceLookup: deviceLookup,
@@ -224,7 +264,20 @@ func NewNormalizer(
 		siteCache:    newNormCache[siteCacheKey, repository.Site](cfg.CacheCapacity, cfg.CacheTTL, cfg.NowFunc),
 		deviceCache:  newNormCache[deviceCacheKey, repository.Device](cfg.CacheCapacity, cfg.CacheTTL, cfg.NowFunc),
 		nowFunc:      cfg.NowFunc,
-	}, nil
+	}
+	// Negative caching is opt-out: callers can pass a negative
+	// NegativeCacheTTL to disable it entirely (used by tests
+	// that want to assert raw repository call counts without
+	// the dampening from the short-TTL ErrNotFound memo).
+	if cfg.NegativeCacheTTL == 0 {
+		cfg.NegativeCacheTTL = DefaultNegativeCacheTTL
+	}
+	if cfg.NegativeCacheTTL > 0 {
+		n.negativeTenantCache = newNormCache[uuid.UUID, struct{}](DefaultNegativeCacheCapacity, cfg.NegativeCacheTTL, cfg.NowFunc)
+		n.negativeSiteCache = newNormCache[siteCacheKey, struct{}](DefaultNegativeCacheCapacity, cfg.NegativeCacheTTL, cfg.NowFunc)
+		n.negativeDeviceCache = newNormCache[deviceCacheKey, struct{}](DefaultNegativeCacheCapacity, cfg.NegativeCacheTTL, cfg.NowFunc)
+	}
+	return n, nil
 }
 
 // Normalize validates and enriches a single envelope.
@@ -303,15 +356,33 @@ func (n *Normalizer) Normalize(ctx context.Context, env schema.Envelope) (Normal
 // Invalidate drops any cached entry for the given tenant /
 // site / device. The site / device invalidation requires the
 // tenant ID; pass uuid.Nil for the ID you do not want to touch.
+//
+// Both the positive and the negative caches are invalidated:
+// a fresh ErrNotFound memo from a probe just before the
+// tenant / site / device row was created would otherwise
+// continue to reject envelopes for up to NegativeCacheTTL.
+// Operator-initiated provisioning paths should call Invalidate
+// immediately after the row is committed.
 func (n *Normalizer) Invalidate(tenantID, siteID, deviceID uuid.UUID) {
 	if tenantID != uuid.Nil {
 		n.tenantCache.Invalidate(tenantID)
+		if n.negativeTenantCache != nil {
+			n.negativeTenantCache.Invalidate(tenantID)
+		}
 	}
 	if tenantID != uuid.Nil && siteID != uuid.Nil {
-		n.siteCache.Invalidate(siteCacheKey{tenant: tenantID, site: siteID})
+		key := siteCacheKey{tenant: tenantID, site: siteID}
+		n.siteCache.Invalidate(key)
+		if n.negativeSiteCache != nil {
+			n.negativeSiteCache.Invalidate(key)
+		}
 	}
 	if tenantID != uuid.Nil && deviceID != uuid.Nil {
-		n.deviceCache.Invalidate(deviceCacheKey{tenant: tenantID, device: deviceID})
+		key := deviceCacheKey{tenant: tenantID, device: deviceID}
+		n.deviceCache.Invalidate(key)
+		if n.negativeDeviceCache != nil {
+			n.negativeDeviceCache.Invalidate(key)
+		}
 	}
 }
 
@@ -319,8 +390,16 @@ func (n *Normalizer) lookupTenant(ctx context.Context, id uuid.UUID) (repository
 	if t, ok := n.tenantCache.Get(id); ok {
 		return t, nil
 	}
+	if n.negativeTenantCache != nil {
+		if _, ok := n.negativeTenantCache.Get(id); ok {
+			return repository.Tenant{}, repository.ErrNotFound
+		}
+	}
 	t, err := n.tenantLookup.Get(ctx, id)
 	if err != nil {
+		if n.negativeTenantCache != nil && errors.Is(err, repository.ErrNotFound) {
+			n.negativeTenantCache.Put(id, struct{}{})
+		}
 		return repository.Tenant{}, err
 	}
 	n.tenantCache.Put(id, t)
@@ -332,8 +411,16 @@ func (n *Normalizer) lookupSite(ctx context.Context, tenantID, id uuid.UUID) (re
 	if s, ok := n.siteCache.Get(key); ok {
 		return s, nil
 	}
+	if n.negativeSiteCache != nil {
+		if _, ok := n.negativeSiteCache.Get(key); ok {
+			return repository.Site{}, repository.ErrNotFound
+		}
+	}
 	s, err := n.siteLookup.Get(ctx, tenantID, id)
 	if err != nil {
+		if n.negativeSiteCache != nil && errors.Is(err, repository.ErrNotFound) {
+			n.negativeSiteCache.Put(key, struct{}{})
+		}
 		return repository.Site{}, err
 	}
 	n.siteCache.Put(key, s)
@@ -345,8 +432,16 @@ func (n *Normalizer) lookupDevice(ctx context.Context, tenantID, id uuid.UUID) (
 	if d, ok := n.deviceCache.Get(key); ok {
 		return d, nil
 	}
+	if n.negativeDeviceCache != nil {
+		if _, ok := n.negativeDeviceCache.Get(key); ok {
+			return repository.Device{}, repository.ErrNotFound
+		}
+	}
 	d, err := n.deviceLookup.Get(ctx, tenantID, id)
 	if err != nil {
+		if n.negativeDeviceCache != nil && errors.Is(err, repository.ErrNotFound) {
+			n.negativeDeviceCache.Put(key, struct{}{})
+		}
 		return repository.Device{}, err
 	}
 	n.deviceCache.Put(key, d)
