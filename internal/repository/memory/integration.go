@@ -243,9 +243,10 @@ func (r *IntegrationConnectorRepository) RecordTestResult(
 	}
 	t := at
 	existing.LastTestAt = &t
-	if result == repository.IntegrationTestResultSuccess {
+	switch result {
+	case repository.IntegrationTestResultSuccess:
 		existing.LastTestError = ""
-	} else if result == repository.IntegrationTestResultFailure {
+	case repository.IntegrationTestResultFailure:
 		existing.LastTestError = lastErr
 	}
 	existing.UpdatedAt = r.s.clock()

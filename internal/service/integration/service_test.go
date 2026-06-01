@@ -125,12 +125,12 @@ func TestService_CreateConnector_RejectsUnknownKind(t *testing.T) {
 func TestService_CreateConnector_RejectsInvalidArgs(t *testing.T) {
 	svc, _, _, tn, actor := newSvc(t)
 	cases := map[string]func(in *integration.CreateConnectorInput){
-		"empty name":    func(in *integration.CreateConnectorInput) { in.Name = "" },
-		"empty config":  func(in *integration.CreateConnectorInput) { in.Config = nil },
-		"bad config":    func(in *integration.CreateConnectorInput) { in.Config = json.RawMessage(`{not-json`) },
-		"bad secret":    func(in *integration.CreateConnectorInput) { in.Secret = json.RawMessage(`{still-bad`) },
-		"invalid kind":  func(in *integration.CreateConnectorInput) { in.Type = "bogus" },
-		"empty events":  func(in *integration.CreateConnectorInput) { in.EventTypes = []string{"   "} },
+		"empty name":   func(in *integration.CreateConnectorInput) { in.Name = "" },
+		"empty config": func(in *integration.CreateConnectorInput) { in.Config = nil },
+		"bad config":   func(in *integration.CreateConnectorInput) { in.Config = json.RawMessage(`{not-json`) },
+		"bad secret":   func(in *integration.CreateConnectorInput) { in.Secret = json.RawMessage(`{still-bad`) },
+		"invalid kind": func(in *integration.CreateConnectorInput) { in.Type = "bogus" },
+		"empty events": func(in *integration.CreateConnectorInput) { in.EventTypes = []string{"   "} },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -170,6 +170,47 @@ func TestService_UpdateConnector_PartialFields(t *testing.T) {
 	}
 	if string(updated.Config) != string(created.Config) {
 		t.Fatalf("config mutated unexpectedly")
+	}
+}
+
+// TestService_UpdateConnector_ClearEventTypes pins the PATCH
+// `event_types: []` semantics: passing a non-nil empty slice
+// clears the filter so the connector subscribes to every event.
+// Previously normaliseEvents collapsed nil and []string{} to
+// (nil, nil), which the repo Update treated as "no change",
+// silently dropping the operator's clear intent.
+func TestService_UpdateConnector_ClearEventTypes(t *testing.T) {
+	svc, _, _, tn, actor := newSvc(t)
+	in := goodCreateInput()
+	in.EventTypes = []string{"alert.created", "alert.resolved"}
+	created, err := svc.CreateConnector(context.Background(), tn, in, &actor)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if len(created.EventTypes) != 2 {
+		t.Fatalf("seed: created.EventTypes = %v, want 2 entries", created.EventTypes)
+	}
+	// PATCH with explicit empty slice -> should clear.
+	updated, err := svc.UpdateConnector(context.Background(), tn, created.ID,
+		integration.UpdateConnectorInput{EventTypes: []string{}}, &actor)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if len(updated.EventTypes) != 0 {
+		t.Fatalf("updated.EventTypes = %v, want empty (subscribe-to-all)", updated.EventTypes)
+	}
+	// PATCH with nil EventTypes (omitted on the wire) -> no
+	// change: refetched row should still report empty.
+	updated2, err := svc.UpdateConnector(context.Background(), tn, created.ID,
+		integration.UpdateConnectorInput{Name: "renamed"}, &actor)
+	if err != nil {
+		t.Fatalf("update2: %v", err)
+	}
+	if len(updated2.EventTypes) != 0 {
+		t.Fatalf("updated2.EventTypes = %v, want still empty", updated2.EventTypes)
+	}
+	if updated2.Name != "renamed" {
+		t.Fatalf("updated2.Name = %s", updated2.Name)
 	}
 }
 

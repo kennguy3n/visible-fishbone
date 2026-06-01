@@ -3,7 +3,7 @@
 // ServiceNow) that consume the same alert.* + telemetry.* events
 // the webhook subscription system fans out to URL endpoints.
 //
-// Architectural contract
+// # Architectural contract
 //
 // The service is intentionally shaped to mirror
 // internal/service/webhook so the operator mental model is

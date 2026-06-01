@@ -168,11 +168,21 @@ func (svc *Service) UpdateConnector(
 		existing.Description = v
 	}
 	if in.EventTypes != nil {
-		events, err := normaliseEvents(in.EventTypes)
-		if err != nil {
-			return repository.IntegrationConnector{}, err
+		// nil and []string{} carry different semantics on PATCH:
+		// nil  = client omitted the field => no change.
+		// []   = client explicitly cleared it => subscribe to all.
+		// normaliseEvents collapses both to nil, so we shortcut
+		// the empty case to write an explicit []string{} that the
+		// repo Update will not COALESCE-away.
+		if len(in.EventTypes) == 0 {
+			existing.EventTypes = []string{}
+		} else {
+			events, err := normaliseEvents(in.EventTypes)
+			if err != nil {
+				return repository.IntegrationConnector{}, err
+			}
+			existing.EventTypes = events
 		}
-		existing.EventTypes = events
 	}
 	if len(in.Config) > 0 {
 		if !json.Valid(in.Config) {
@@ -211,12 +221,15 @@ func (svc *Service) ListConnectors(
 	return svc.connectors.List(ctx, tenantID, page)
 }
 
-// DeleteConnector removes a connector. Pending deliveries for
-// the connector are NOT cascaded — they will fail their next
-// dispatch attempt when the worker tries to resolve the parent
-// row and either be marked failed (transient resolve error) or
-// exhausted (4xx-class resolve error) based on the repo's Get
-// semantics. The audit row is written regardless.
+// DeleteConnector removes a connector. The postgres migration
+// declares integration_deliveries.connector_id with ON DELETE
+// CASCADE (migrations/014_integrations.up.sql:64) and the
+// memory repo mirrors that cascade explicitly (see
+// internal/repository/memory/integration.go:184-187), so every
+// pending and historical delivery row for this connector is
+// removed atomically with the parent. The audit row is written
+// regardless so the operator-visible delete event is preserved
+// even though the delivery history disappears.
 func (svc *Service) DeleteConnector(
 	ctx context.Context,
 	tenantID, id uuid.UUID,
@@ -427,8 +440,11 @@ func (svc *Service) validateCreate(in CreateConnectorInput) error {
 
 // normaliseEvents trims, lowercases, dedupes, and sorts so the
 // persisted ordering is stable and ListActive's IN-clause is
-// deterministic. nil and []string{} are treated identically —
-// "subscribe to all" — by both the Service and the repository.
+// deterministic. It treats len(events)==0 as "subscribe to all"
+// and returns (nil, nil). On CREATE the caller passes the input
+// through unconditionally; on UPDATE the caller must distinguish
+// nil (no change) from []string{} (subscribe to all) BEFORE
+// calling this helper, since both collapse to nil here.
 func normaliseEvents(events []string) ([]string, error) {
 	if len(events) == 0 {
 		return nil, nil

@@ -1707,8 +1707,11 @@ components:
       enum: [active, disabled]
     IntegrationConnectorTestResult:
       type: string
-      enum: ["", success, failure]
-      description: empty when no probe has ever run
+      enum: [never, success, failure]
+      description: |
+        - never: no test probe has ever been invoked for this connector
+        - success: most recent probe succeeded
+        - failure: most recent probe failed (see last_test_error)
     IntegrationConnectorCreateRequest:
       type: object
       required: [type, name]
@@ -1720,9 +1723,11 @@ components:
           type: array
           description: |
             Event types this connector subscribes to. An empty
-            array means "match every event"; omit the field on
-            POST to default to no events (connector is wired but
-            silent until events are added).
+            array (or omitting the field entirely) means "match
+            every event" — `nil` and `[]` are treated identically
+            on CREATE. To restrict the connector to a subset,
+            supply the explicit list (e.g. `["alert.created",
+            "alert.acknowledged"]`).
           items: { type: string }
         config:
           description: |
@@ -1803,15 +1808,16 @@ components:
         updated_at: { type: string, format: date-time }
     IntegrationDeliveryStatus:
       type: string
-      enum: [pending, in_flight, success, failed, dead_letter]
+      enum: [pending, processing, delivered, failed, exhausted]
       description: |
         - pending: queued, no attempt yet (or backed off after
           transient failure)
-        - in_flight: claimed by a worker via SKIP LOCKED
-        - success: terminal — the connector accepted the payload
-        - failed: terminal — exhausted retries
-        - dead_letter: terminal — operator-visible failure that
-          needs manual triage
+        - processing: claimed by a worker via SKIP LOCKED
+        - delivered: terminal — the connector accepted the payload
+        - failed: a single attempt failed; will retry if attempts
+          < max_attempts, else transitions to exhausted
+        - exhausted: terminal — exhausted retries, operator-visible
+          failure that needs manual triage
     IntegrationDelivery:
       type: object
       required:

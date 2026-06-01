@@ -483,10 +483,10 @@ func buildRouter(
 	integrationHTTP := &http.Client{Timeout: 15 * time.Second}
 	integrationUA := cfg.AppName + "/sng-control"
 	integrationRegistry := integration.Registry{
-		repository.IntegrationConnectorSyslog:       connectors.NewSyslog(nil, 5*time.Second, hostnameForSyslog()),
-		repository.IntegrationConnectorSIEMWebhook:  connectors.NewSIEM(integrationHTTP, integrationUA),
-		repository.IntegrationConnectorJira:         connectors.NewJira(integrationHTTP, integrationUA),
-		repository.IntegrationConnectorServiceNow:   connectors.NewServiceNow(integrationHTTP, integrationUA),
+		repository.IntegrationConnectorSyslog:      connectors.NewSyslog(nil, 5*time.Second, hostnameForSyslog()),
+		repository.IntegrationConnectorSIEMWebhook: connectors.NewSIEM(integrationHTTP, integrationUA),
+		repository.IntegrationConnectorJira:        connectors.NewJira(integrationHTTP, integrationUA),
+		repository.IntegrationConnectorServiceNow:  connectors.NewServiceNow(integrationHTTP, integrationUA),
 	}
 	integrationSvc := integration.New(
 		integrationConnectorRepo, integrationDeliveryRepo, auditRepo,

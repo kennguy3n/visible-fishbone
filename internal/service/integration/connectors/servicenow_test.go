@@ -179,9 +179,9 @@ func TestServiceNow_Parse_RejectsInvalidConfig(t *testing.T) {
 	cases := map[string]struct {
 		cfg, sec string
 	}{
-		"empty":         {`{}`, `{"username":"u","password":"p"}`},
-		"bad scheme":    {`{"instance_url":"ftp://x"}`, `{"username":"u","password":"p"}`},
-		"missing auth":  {`{"instance_url":"https://x"}`, `{}`},
+		"empty":        {`{}`, `{"username":"u","password":"p"}`},
+		"bad scheme":   {`{"instance_url":"ftp://x"}`, `{"username":"u","password":"p"}`},
+		"missing auth": {`{"instance_url":"https://x"}`, `{}`},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

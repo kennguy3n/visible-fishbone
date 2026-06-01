@@ -17,20 +17,20 @@ import (
 // recordingConn captures Write payloads in memory so the syslog
 // frame can be asserted against the RFC 5424 grammar.
 type recordingConn struct {
-	mu        sync.Mutex
-	written   []byte
-	scheme    string
-	closeErr  error
-	writeErr  error
+	mu       sync.Mutex
+	written  []byte
+	scheme   string
+	closeErr error
+	writeErr error
 }
 
-func (c *recordingConn) Read(p []byte) (int, error)         { return 0, net.ErrClosed }
-func (c *recordingConn) LocalAddr() net.Addr                { return &net.IPAddr{} }
-func (c *recordingConn) RemoteAddr() net.Addr               { return &net.IPAddr{} }
-func (c *recordingConn) SetDeadline(time.Time) error        { return nil }
-func (c *recordingConn) SetReadDeadline(time.Time) error    { return nil }
-func (c *recordingConn) SetWriteDeadline(time.Time) error   { return nil }
-func (c *recordingConn) Close() error                        { return c.closeErr }
+func (c *recordingConn) Read(p []byte) (int, error)       { return 0, net.ErrClosed }
+func (c *recordingConn) LocalAddr() net.Addr              { return &net.IPAddr{} }
+func (c *recordingConn) RemoteAddr() net.Addr             { return &net.IPAddr{} }
+func (c *recordingConn) SetDeadline(time.Time) error      { return nil }
+func (c *recordingConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *recordingConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *recordingConn) Close() error                     { return c.closeErr }
 func (c *recordingConn) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -191,11 +191,11 @@ func TestSyslog_Test_DialsAndCloses(t *testing.T) {
 func TestSyslog_Parse_RejectsInvalidConfig(t *testing.T) {
 	s := NewSyslog(func(context.Context, string, string, *tls.Config) (net.Conn, error) { return nil, nil }, time.Second, "h")
 	cases := map[string]string{
-		"empty":          `{}`,
-		"bad scheme":     `{"endpoint":"ftp://siem:514"}`,
-		"missing host":   `{"endpoint":"tcp://"}`,
-		"facility hi":    `{"endpoint":"tcp://h:1","facility":25}`,
-		"facility neg":   `{"endpoint":"tcp://h:1","facility":-1}`,
+		"empty":        `{}`,
+		"bad scheme":   `{"endpoint":"ftp://siem:514"}`,
+		"missing host": `{"endpoint":"tcp://"}`,
+		"facility hi":  `{"endpoint":"tcp://h:1","facility":25}`,
+		"facility neg": `{"endpoint":"tcp://h:1","facility":-1}`,
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -233,7 +233,7 @@ func TestSyslog_SeverityMapping(t *testing.T) {
 		"critical": 2, "high": 3, "error": 3,
 		"warning": 4, "warn": 4, "medium": 4,
 		"info": 5, "notice": 5, "low": 5,
-		"debug": 7, "":       6, "weird": 6,
+		"debug": 7, "": 6, "weird": 6,
 	}
 	for in, want := range tests {
 		if got := mapSeverity(in); got != want {

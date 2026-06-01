@@ -25,9 +25,9 @@ import (
 // is the upstream label used to pick the envelope shape:
 //
 //   - "splunk_hec":   Splunk HTTP Event Collector schema
-//                     ({"event": <payload>, "sourcetype": …}).
+//     ({"event": <payload>, "sourcetype": …}).
 //   - "elastic":      Elastic _bulk-compatible ECS envelope
-//                     wrapping the payload under "event.original".
+//     wrapping the payload under "event.original".
 //   - "":             generic — payload posted as-is.
 //
 // Source labels the originating system in the envelope (defaults
@@ -35,14 +35,14 @@ import (
 // HMAC headers the upstream verifies; defaults match the webhook
 // service so SIEM operators can reuse their verification logic.
 type SIEMConfig struct {
-	Endpoint         string            `json:"endpoint"`
-	Vendor           string            `json:"vendor,omitempty"`
-	Source           string            `json:"source,omitempty"`
-	SignatureHeader  string            `json:"signature_header,omitempty"`
-	TimestampHeader  string            `json:"timestamp_header,omitempty"`
-	Headers          map[string]string `json:"headers,omitempty"`
-	InsecureSkipTLS  bool              `json:"insecure_skip_tls,omitempty"`
-	IndexOrSourcetype string           `json:"index_or_sourcetype,omitempty"`
+	Endpoint          string            `json:"endpoint"`
+	Vendor            string            `json:"vendor,omitempty"`
+	Source            string            `json:"source,omitempty"`
+	SignatureHeader   string            `json:"signature_header,omitempty"`
+	TimestampHeader   string            `json:"timestamp_header,omitempty"`
+	Headers           map[string]string `json:"headers,omitempty"`
+	InsecureSkipTLS   bool              `json:"insecure_skip_tls,omitempty"`
+	IndexOrSourcetype string            `json:"index_or_sourcetype,omitempty"`
 }
 
 // SIEMSecret carries the HMAC signing key and any bearer/api-key
@@ -132,12 +132,12 @@ func (s *SIEM) Send(ctx context.Context, sn integration.Sendable) (integration.S
 }
 
 type parsedSIEMConfig struct {
-	endpoint         string
-	vendor           string
-	source           string
-	sigHeader        string
-	tsHeader         string
-	headers          map[string]string
+	endpoint          string
+	vendor            string
+	source            string
+	sigHeader         string
+	tsHeader          string
+	headers           map[string]string
 	indexOrSourcetype string
 }
 

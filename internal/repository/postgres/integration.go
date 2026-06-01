@@ -32,16 +32,16 @@ const integrationConnectorSelectColumns = `
 
 func scanIntegrationConnector(row pgx.Row) (repository.IntegrationConnector, error) {
 	var (
-		c             repository.IntegrationConnector
-		typ           string
-		status        string
-		lastTestRes   string
-		lastTestAt    *time.Time
-		lastTestErr   string
-		descNullable  string
-		eventTypes    []string
-		configBytes   []byte
-		secretBytes   []byte
+		c            repository.IntegrationConnector
+		typ          string
+		status       string
+		lastTestRes  string
+		lastTestAt   *time.Time
+		lastTestErr  string
+		descNullable string
+		eventTypes   []string
+		configBytes  []byte
+		secretBytes  []byte
 	)
 	if err := row.Scan(
 		&c.ID, &c.TenantID, &typ, &c.Name, &descNullable, &eventTypes,

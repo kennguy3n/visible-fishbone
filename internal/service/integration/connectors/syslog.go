@@ -28,9 +28,9 @@ import (
 // numeric syslog facility (0..23). The dispatcher maps the alert
 // severity onto the RFC 5424 severity field (0..7) per alertSeverity.
 type SyslogConfig struct {
-	Endpoint    string `json:"endpoint"`
-	AppName     string `json:"app_name,omitempty"`
-	Facility    int    `json:"facility,omitempty"`
+	Endpoint     string `json:"endpoint"`
+	AppName      string `json:"app_name,omitempty"`
+	Facility     int    `json:"facility,omitempty"`
 	StructuredID string `json:"structured_id,omitempty"`
 	// InsecureSkipVerify only applies when Endpoint scheme is tls://.
 	// Operator-facing kill-switch for self-signed lab destinations;
@@ -53,8 +53,8 @@ type SyslogDialer func(ctx context.Context, scheme, host string, tlsCfg *tls.Con
 
 // Syslog is the kind=syslog plugin.
 type Syslog struct {
-	dialer  SyslogDialer
-	timeout time.Duration
+	dialer   SyslogDialer
+	timeout  time.Duration
 	hostname string
 }
 

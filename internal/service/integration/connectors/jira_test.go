@@ -166,10 +166,10 @@ func TestJira_Parse_RejectsInvalidConfig(t *testing.T) {
 	cases := map[string]struct {
 		cfg, sec string
 	}{
-		"missing base":       {`{}`, `{"bearer_token":"t"}`},
-		"bad base":           {`{"base_url":"ftp://x","project_key":"P"}`, `{"bearer_token":"t"}`},
-		"missing project":    {`{"base_url":"https://x"}`, `{"bearer_token":"t"}`},
-		"no auth":            {`{"base_url":"https://x","project_key":"P"}`, `{}`},
+		"missing base":    {`{}`, `{"bearer_token":"t"}`},
+		"bad base":        {`{"base_url":"ftp://x","project_key":"P"}`, `{"bearer_token":"t"}`},
+		"missing project": {`{"base_url":"https://x"}`, `{"bearer_token":"t"}`},
+		"no auth":         {`{"base_url":"https://x","project_key":"P"}`, `{}`},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

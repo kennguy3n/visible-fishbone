@@ -25,7 +25,6 @@ package handler
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"time"
 
@@ -105,12 +104,16 @@ type IntegrationConnectorResponse struct {
 
 func toIntegrationConnectorResponse(c repository.IntegrationConnector) IntegrationConnectorResponse {
 	resp := IntegrationConnectorResponse{
-		ID:             c.ID.String(),
-		TenantID:       c.TenantID.String(),
-		Type:           string(c.Type),
-		Name:           c.Name,
-		Description:    c.Description,
-		EventTypes:     append([]string(nil), c.EventTypes...),
+		ID:          c.ID.String(),
+		TenantID:    c.TenantID.String(),
+		Type:        string(c.Type),
+		Name:        c.Name,
+		Description: c.Description,
+		// Force a non-nil slice so the JSON wire-form is always
+		// `[]` for a connector with no event filter — EventTypes
+		// is `required` in the OpenAPI schema and a JSON `null`
+		// would violate the contract for spec-compliant clients.
+		EventTypes:     append(make([]string, 0, len(c.EventTypes)), c.EventTypes...),
 		SecretSet:      len(c.Secret) > 0,
 		Status:         string(c.Status),
 		LastTestResult: string(c.LastTestResult),
@@ -441,8 +444,3 @@ func (h *IntegrationHandler) getDelivery(w http.ResponseWriter, r *http.Request)
 	}
 	WriteJSON(w, http.StatusOK, toIntegrationDeliveryResponse(d))
 }
-
-// errIs reports whether err matches the given target. Re-exported
-// here so the handler tests can verify the test-failure path
-// without pulling in errors.Is from every caller.
-func errIs(err, target error) bool { return errors.Is(err, target) }

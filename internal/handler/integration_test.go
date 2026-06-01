@@ -365,3 +365,40 @@ func TestIntegrationHandler_SetStatusValidatesEnum(t *testing.T) {
 			rec.Code, rec.Body.String())
 	}
 }
+
+// TestIntegrationHandler_EventTypesAlwaysArray pins the wire-form
+// invariant that a connector with no event filter (EventTypes
+// nil or []string{}) serializes `event_types` as a JSON `[]`
+// rather than `null`. `event_types` is declared `required` in
+// the OpenAPI schema, so a JSON `null` would violate the
+// contract for spec-compliant clients.
+func TestIntegrationHandler_EventTypesAlwaysArray(t *testing.T) {
+	t.Parallel()
+	router, _, _, tenantID, _, token := newIntegrationTestRouter(
+		t, repository.IntegrationConnectorSIEMWebhook, nil)
+	path := "/api/v1/tenants/" + tenantID.String() + "/integrations"
+
+	// Create without specifying event_types: backend stores nil.
+	rec := doJSON(t, router, http.MethodPost, path, token, map[string]any{
+		"type":   "siem_webhook",
+		"name":   "soc",
+		"config": map[string]string{"url": "https://example.com/siem"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	// Inspect the raw JSON for the `event_types` field — `[]` not
+	// `null`. Deserializing into a typed struct would coerce
+	// both shapes to a nil/empty slice and miss the difference.
+	var asMap map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &asMap); err != nil {
+		t.Fatalf("decode create as map: %v", err)
+	}
+	raw, ok := asMap["event_types"]
+	if !ok {
+		t.Fatalf("response missing event_types: %s", rec.Body.String())
+	}
+	if string(raw) != "[]" {
+		t.Fatalf("event_types = %s, want []", string(raw))
+	}
+}
