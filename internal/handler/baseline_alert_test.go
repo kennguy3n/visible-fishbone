@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -224,6 +225,44 @@ func TestAlertHandler_LifecycleAndSuppression(t *testing.T) {
 		token, nil)
 	if ds.Code != http.StatusNoContent {
 		t.Fatalf("delete suppression expected 204, got %d: %s", ds.Code, ds.Body.String())
+	}
+}
+
+// TestAlertHandler_TerminalStateConflict pins the 409 message
+// shape for state-machine conflicts so the API error text stays
+// stable for clients. The previous WriteRepositoryError fall-
+// through emitted 'uniqueness constraint violated' which made
+// it impossible to tell a duplicate-row 409 apart from an
+// already-resolved-alert 409 client-side. The state machine
+// also makes resolve idempotent (resolve -> resolve returns
+// 200), so the conflict surface is exercised via
+// acknowledge-after-resolve which is forbidden because
+// resolved is terminal.
+func TestAlertHandler_TerminalStateConflict(t *testing.T) {
+	t.Parallel()
+	router, store, tenantID, token := newBaselineAlertTestRouter(t)
+	a := seedAlert(t, store, tenantID)
+
+	res := doJSON(t, router, http.MethodPost,
+		"/api/v1/tenants/"+tenantID.String()+"/alerts/"+a.ID.String()+"/resolve",
+		token, nil)
+	if res.Code != http.StatusOK {
+		t.Fatalf("first resolve expected 200, got %d: %s", res.Code, res.Body.String())
+	}
+
+	// Acknowledging an already-resolved alert: terminal -> non
+	// terminal forbidden, returns ErrConflict.
+	ack := doJSON(t, router, http.MethodPost,
+		"/api/v1/tenants/"+tenantID.String()+"/alerts/"+a.ID.String()+"/acknowledge",
+		token, nil)
+	if ack.Code != http.StatusConflict {
+		t.Fatalf("ack on resolved expected 409, got %d: %s", ack.Code, ack.Body.String())
+	}
+	if !strings.Contains(ack.Body.String(), "terminal state") {
+		t.Errorf("ack 409 body should mention terminal state, got: %s", ack.Body.String())
+	}
+	if strings.Contains(ack.Body.String(), "uniqueness constraint") {
+		t.Errorf("409 body should not mention uniqueness constraint for state conflicts: %s", ack.Body.String())
 	}
 }
 

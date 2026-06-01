@@ -201,7 +201,7 @@ func (h *AlertHandler) acknowledge(w http.ResponseWriter, r *http.Request) {
 	}
 	a, err := h.router.Acknowledge(r.Context(), tenantID, id, actorFromCtx(r))
 	if err != nil {
-		WriteRepositoryError(w, err)
+		writeAlertStateError(w, err, "acknowledge")
 		return
 	}
 	WriteJSON(w, http.StatusOK, toAlertResponse(a))
@@ -218,10 +218,28 @@ func (h *AlertHandler) resolve(w http.ResponseWriter, r *http.Request) {
 	}
 	a, err := h.router.Resolve(r.Context(), tenantID, id, actorFromCtx(r))
 	if err != nil {
-		WriteRepositoryError(w, err)
+		writeAlertStateError(w, err, "resolve")
 		return
 	}
 	WriteJSON(w, http.StatusOK, toAlertResponse(a))
+}
+
+// writeAlertStateError specialises ErrConflict for the alert
+// state-machine transitions (acknowledge / resolve) so the
+// 409 message says 'alert is in a terminal state and cannot
+// be <op>' rather than the generic 'uniqueness constraint
+// violated' string WriteRepositoryError emits for every
+// ErrConflict. The status (409) is identical — only the
+// human-readable reason string changes. Every other sentinel
+// falls through to WriteRepositoryError so the existing
+// not-found / forbidden / invalid-arg shape is preserved.
+func writeAlertStateError(w http.ResponseWriter, err error, op string) {
+	if errors.Is(err, repository.ErrConflict) {
+		WriteError(w, http.StatusConflict, "conflict",
+			"alert is in a terminal state and cannot be "+op+"d")
+		return
+	}
+	WriteRepositoryError(w, err)
 }
 
 // --- suppressions -------------------------------------------------------
