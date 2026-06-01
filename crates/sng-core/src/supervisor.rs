@@ -587,7 +587,7 @@ impl Supervisor {
         // selects on the shutdown signal so it exits cleanly
         // when drain begins.
         let health_signal = signal.clone();
-        let health_task = tokio::spawn(async move {
+        let mut health_task = tokio::spawn(async move {
             health_aggregator_loop(health_entries, health_interval, health_signal).await;
         });
 
@@ -610,11 +610,36 @@ impl Supervisor {
         // task it can actually exit (its run loop no longer
         // has any extra subsystem-Arc references holding its
         // channels open). If the aggregator wedges, we cap
-        // the wait at the default drain budget and continue —
-        // the per-subsystem drain still runs; a wedged
-        // aggregator just becomes a logged warning.
-        if let Err(e) = timeout(DEFAULT_DRAIN_BUDGET, health_task).await {
-            warn!(error = %e, "health aggregator did not exit within drain budget");
+        // the wait at the default drain budget, then ABORT
+        // the spawn task and join the abort \u2014 a tokio
+        // `JoinHandle` does NOT cancel its task on drop, so
+        // letting the timeout future drop the handle would
+        // leave the aggregator task running with its
+        // `Arc<dyn HealthCheck>` clones still pinning the
+        // subsystem state we're trying to release. Aborting
+        // and re-joining guarantees those Arcs are dropped
+        // before per-subsystem drain begins, which is the
+        // whole point of draining the aggregator first.
+        match timeout(DEFAULT_DRAIN_BUDGET, &mut health_task).await {
+            Ok(_) => {}
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "health aggregator did not exit within drain budget; aborting"
+                );
+                health_task.abort();
+                // Await the aborted task. `abort()` cancels
+                // on the next await point; the JoinHandle
+                // resolves with `Err(JoinError { is_cancelled
+                // = true })`. The await is guaranteed bounded
+                // because there is no async work left for the
+                // task to do once cancelled. Once this future
+                // resolves the spawn task is dropped, which
+                // drops its captured `health_entries` vec, which
+                // drops every `Arc<dyn HealthCheck>` clone the
+                // aggregator was holding.
+                let _ = health_task.await;
+            }
         }
 
         // Drain every subsystem IN PARALLEL with its own

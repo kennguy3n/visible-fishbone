@@ -387,27 +387,40 @@ pub async fn run_agent(cli: Cli, cfg: AgentConfig) -> Result<SupervisorReport, A
     // (e.g. `TelemetrySubsystem.handle: PipelineHandle`
     // wraps an mpsc::Sender) and any extra `Arc<...Subsystem>`
     // reference outside the supervisor would keep those
-    // channel ends alive across drain — the telemetry
+    // channel ends alive across drain \u2014 the telemetry
     // pipeline can only exit when ALL producer-channel
     // senders are dropped.
     //
-    // CRITICAL: we must NOT use `let BuiltAgent { supervisor,
-    // .. } = built;` here. The `..` ignore-pattern does not
-    // drop the unbound fields at the destructure site; they
-    // are kept alive as anonymous bindings for the duration
-    // of the enclosing scope. Because `supervisor.run().await`
-    // is also in that scope, every other subsystem Arc would
-    // remain alive across the entire run loop — the telemetry
-    // pipeline's producer-channel sender count would never
-    // hit zero and the supervisor would deadlock on drain.
-    //
+    // Rust would already drop the unbound fields at the
+    // destructure site if we wrote `let BuiltAgent {
+    // supervisor, .. } = built;` (a `..` ignore-pattern
+    // moves the unmentioned fields out of the value and
+    // drops them immediately, since they have no binding).
     // The fully-named destructure plus explicit `drop` of
-    // each field forces every subsystem Arc clone owned by
-    // `BuiltAgent` to be released right here, before the
-    // supervisor takes over, leaving the supervisor as the
-    // sole subsystem-Arc holder (which it then releases
-    // during `run()` per the comment in
-    // `sng_core::Supervisor::run`).
+    // each field is therefore equivalent in observable
+    // behaviour for the current code, but is preferred here
+    // for two reasons:
+    //
+    //   1. It documents the deadlock-avoidance intent
+    //      explicitly on every field, so a future maintainer
+    //      reading this function understands that each Arc
+    //      must be released before `supervisor.run()` and
+    //      cannot accidentally introduce a long-lived clone
+    //      (e.g. by adding `let t = telemetry.clone();`
+    //      between the destructure and the run call) without
+    //      first deleting the matching `drop(...)` line.
+    //   2. If `BuiltAgent` ever grows a new field, the
+    //      compiler will fail the destructure rather than
+    //      silently extending the deadlock-risky surface
+    //      through `..`. With `..` the field would be silently
+    //      dropped, which still happens to be the right
+    //      behaviour today, but bypasses the chance for the
+    //      author of the new field to think about whether the
+    //      release ordering matters for their addition.
+    //
+    // The supervisor then releases its own internal Arc
+    // references during `run()` per the comment in
+    // `sng_core::Supervisor::run`.
     let BuiltAgent {
         supervisor,
         telemetry,
@@ -526,6 +539,21 @@ fn pipeline_handle_to_telemetry_sender(
     tokio::spawn(async move {
         loop {
             tokio::select! {
+                // `biased;` so shutdown is polled FIRST on
+                // every loop iteration. The default fair
+                // polling could let a steady stream of
+                // `rx.recv()`-readies starve the shutdown
+                // branch for an arbitrary number of select
+                // cycles \u2014 the buffer-drain step below
+                // makes that semantically harmless (no event
+                // is lost) but it would still delay the
+                // supervisor's observable transition into the
+                // drain phase. Biased polling guarantees that
+                // once `shutdown` fires the very next
+                // iteration breaks out of the loop into the
+                // drain step deterministically, regardless of
+                // how many events are queued ahead of us.
+                biased;
                 // Race shutdown so the bridge releases its
                 // owned `PipelineHandle` (which wraps the
                 // pipeline's producer-side `mpsc::Sender`)
