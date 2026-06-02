@@ -60,6 +60,7 @@ func (p *Provider) DetectDrift(ctx context.Context, tenantID uuid.UUID, declared
 	report := DriftReport{
 		TenantID:   tenantID,
 		DetectedAt: time.Now().UTC(),
+		Entries:    []DriftEntry{},
 	}
 
 	// Compare sites.
