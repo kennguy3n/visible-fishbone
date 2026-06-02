@@ -93,6 +93,10 @@ func (r *KBEntryRepository) List(
 	page repository.Page,
 ) (repository.PageResult[repository.KBEntry], error) {
 	page = page.Normalize()
+	cur, err := decodeCursor(page.After)
+	if err != nil {
+		return repository.PageResult[repository.KBEntry]{}, repository.ErrInvalidArgument
+	}
 	var items []repository.KBEntry
 	run := func(tx pgx.Tx) error {
 		query := `SELECT id, tenant_id, category, title, content, tags, created_at, updated_at
@@ -104,8 +108,7 @@ func (r *KBEntryRepository) List(
 			query += fmt.Sprintf(" AND category = $%d", n)
 			args = append(args, *category)
 		}
-		cur, err := decodeCursor(page.After)
-		if err == nil && !cur.T.IsZero() {
+		if !cur.T.IsZero() {
 			if page.Order == repository.SortAsc {
 				n++
 				query += fmt.Sprintf(" AND (created_at, id) > ($%d", n)
@@ -148,7 +151,6 @@ func (r *KBEntryRepository) List(
 		}
 		return rows.Err()
 	}
-	var err error
 	if tenantID != nil {
 		err = r.s.withTenantRO(ctx, tenantID.String(), run)
 	} else {
@@ -400,15 +402,18 @@ func (r *TroubleshootSessionRepository) List(
 	page repository.Page,
 ) (repository.PageResult[repository.TroubleshootSession], error) {
 	page = page.Normalize()
+	cur, err := decodeCursor(page.After)
+	if err != nil {
+		return repository.PageResult[repository.TroubleshootSession]{}, repository.ErrInvalidArgument
+	}
 	var items []repository.TroubleshootSession
-	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+	err = r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		query := `SELECT id, tenant_id, operator_id, issue, status, messages, diagnostic_results, created_at, updated_at
 			FROM troubleshoot_sessions WHERE 1=1`
 		args := []any{}
 		n := 0
 
-		cur, err := decodeCursor(page.After)
-		if err == nil && !cur.T.IsZero() {
+		if !cur.T.IsZero() {
 			if page.Order == repository.SortAsc {
 				n++
 				query += fmt.Sprintf(" AND (created_at, id) > ($%d", n)
