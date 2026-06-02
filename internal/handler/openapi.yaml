@@ -2369,6 +2369,132 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
 
+  # --- Operational Health ---------------------------------------------------
+
+  /tenants/{tenant_id}/ops/health:
+    get:
+      operationId: getOpsHealthLatest
+      summary: Get latest operational health snapshot
+      tags: [ops-health]
+      parameters:
+        - { name: tenant_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Latest snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OpsHealthSnapshot" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: recordOpsHealth
+      summary: Record an operational health snapshot
+      tags: [ops-health]
+      parameters:
+        - { name: tenant_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OpsHealthRecordRequest" }
+      responses:
+        "201":
+          description: Snapshot created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OpsHealthSnapshot" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ops/health/history:
+    get:
+      operationId: getOpsHealthHistory
+      summary: Get historical health snapshots
+      tags: [ops-health]
+      parameters:
+        - { name: tenant_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: days, in: query, schema: { type: integer, enum: [7, 30], default: 7 } }
+      responses:
+        "200":
+          description: List of snapshots
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OpsHealthHistoryResponse" }
+
+  # --- Bulk Device Operations ------------------------------------------------
+
+  /tenants/{tenant_id}/devices/bulk/enroll:
+    post:
+      operationId: bulkEnrollDevices
+      summary: Generate bulk enrollment tokens
+      tags: [bulk-device]
+      parameters:
+        - { name: tenant_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkEnrollRequest" }
+      responses:
+        "201":
+          description: Tokens generated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkEnrollResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/devices/bulk/revoke:
+    post:
+      operationId: bulkRevokeDevices
+      summary: Bulk revoke device enrollments
+      tags: [bulk-device]
+      parameters:
+        - { name: tenant_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkRevokeRequest" }
+      responses:
+        "200":
+          description: Revocation result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkResult" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/devices/import:
+    post:
+      operationId: importDevicesCSV
+      summary: Import devices from CSV
+      tags: [bulk-device]
+      parameters:
+        - { name: tenant_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CSVImportResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/devices/export:
+    get:
+      operationId: exportDevicesCSV
+      summary: Export device inventory as CSV
+      tags: [bulk-device]
+      parameters:
+        - { name: tenant_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: CSV file
+          content:
+            text/csv:
+              schema: { type: string, format: binary }
+
 components:
   securitySchemes:
     BearerJWT:
@@ -3517,3 +3643,86 @@ components:
         confidence: { type: number, format: double }
         ai_generated: { type: boolean }
         model_id: { type: string }
+
+    # --- Operational Health Schemas -------------------------------------------
+
+    OpsHealthSnapshot:
+      type: object
+      required: [id, tenant_id, health_score, component_scores, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        health_score: { type: integer, minimum: 0, maximum: 100 }
+        component_scores: { type: object }
+        created_at: { type: string, format: date-time }
+
+    OpsHealthRecordRequest:
+      type: object
+      required: [health_score, component_scores]
+      properties:
+        health_score: { type: integer, minimum: 0, maximum: 100 }
+        component_scores: { type: object }
+
+    OpsHealthHistoryResponse:
+      type: object
+      required: [snapshots]
+      properties:
+        snapshots:
+          type: array
+          items: { $ref: "#/components/schemas/OpsHealthSnapshot" }
+
+    # --- Bulk Device Schemas --------------------------------------------------
+
+    BulkEnrollRequest:
+      type: object
+      required: [count]
+      properties:
+        count: { type: integer, minimum: 1, maximum: 1000 }
+        ttl: { type: string, description: "Go duration string, e.g. 24h" }
+
+    BulkEnrollResponse:
+      type: object
+      properties:
+        result: { $ref: "#/components/schemas/BulkResult" }
+        tokens:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              expires_at: { type: string, format: date-time }
+
+    BulkRevokeRequest:
+      type: object
+      required: [device_ids]
+      properties:
+        device_ids:
+          type: array
+          items: { type: string, format: uuid }
+
+    BulkResult:
+      type: object
+      properties:
+        total: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        errors:
+          type: array
+          items: { type: string }
+
+    CSVImportResponse:
+      type: object
+      properties:
+        imported: { type: integer }
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/DeviceCSVRow" }
+
+    DeviceCSVRow:
+      type: object
+      properties:
+        device_id: { type: string }
+        name: { type: string }
+        platform: { type: string }
+        status: { type: string }
+        created_at: { type: string }

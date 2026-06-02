@@ -105,6 +105,10 @@ type Store struct {
 	roles     map[uuid.UUID]repository.Role
 	userRoles map[userRoleKey]repository.UserRole
 
+	// Operational health tables — see migrations 030, 031.
+	policyReviewSchedules map[uuid.UUID]repository.PolicyReviewSchedule
+	opsHealthSnapshots    map[uuid.UUID]repository.OpsHealthSnapshot
+
 	// clock is injected for deterministic tests. Defaults to
 	// time.Now.UTC.
 	clock func() time.Time
@@ -164,6 +168,8 @@ func NewStore() *Store {
 		dlpMatches:            map[uuid.UUID]repository.DLPMatch{},
 		roles:                 map[uuid.UUID]repository.Role{},
 		userRoles:             map[userRoleKey]repository.UserRole{},
+		policyReviewSchedules: map[uuid.UUID]repository.PolicyReviewSchedule{},
+		opsHealthSnapshots:    map[uuid.UUID]repository.OpsHealthSnapshot{},
 		clock:                 func() time.Time { return time.Now().UTC() },
 	}
 }

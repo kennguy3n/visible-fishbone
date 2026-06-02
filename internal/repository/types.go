@@ -1482,3 +1482,25 @@ type DeviceCertificate struct {
 	ExpiresAt time.Time
 	RevokedAt *time.Time
 }
+
+// --- Operational Health ---------------------------------------------------
+
+// PolicyReviewSchedule represents a row in the policy_review_schedules table.
+type PolicyReviewSchedule struct {
+	ID                 uuid.UUID
+	TenantID           uuid.UUID
+	PolicyID           uuid.UUID
+	LastReviewedAt     *time.Time
+	NextReviewAt       *time.Time
+	ReviewIntervalDays int
+	CreatedAt          time.Time
+}
+
+// OpsHealthSnapshot represents a row in the ops_health_snapshots table.
+type OpsHealthSnapshot struct {
+	ID              uuid.UUID
+	TenantID        uuid.UUID
+	HealthScore     int
+	ComponentScores json.RawMessage
+	CreatedAt       time.Time
+}

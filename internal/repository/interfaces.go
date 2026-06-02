@@ -997,3 +997,20 @@ type DeviceEnrollmentRepository interface {
 	// a device by stamping revoked_at.
 	RevokeAllCertificates(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, at time.Time) error
 }
+
+// --- Operational Health ---------------------------------------------------
+
+// PolicyReviewScheduleRepository owns the policy_review_schedules table.
+type PolicyReviewScheduleRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, s PolicyReviewSchedule) (PolicyReviewSchedule, error)
+	Get(ctx context.Context, tenantID, policyID uuid.UUID) (PolicyReviewSchedule, error)
+	ListDue(ctx context.Context, before time.Time, limit int) ([]PolicyReviewSchedule, error)
+	UpdateLastReviewed(ctx context.Context, tenantID, policyID uuid.UUID, at time.Time) error
+}
+
+// OpsHealthSnapshotRepository owns the ops_health_snapshots table.
+type OpsHealthSnapshotRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, s OpsHealthSnapshot) (OpsHealthSnapshot, error)
+	GetLatest(ctx context.Context, tenantID uuid.UUID) (OpsHealthSnapshot, error)
+	ListHistory(ctx context.Context, tenantID uuid.UUID, since time.Time) ([]OpsHealthSnapshot, error)
+}
