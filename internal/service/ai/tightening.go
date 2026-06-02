@@ -109,8 +109,16 @@ func (s *TighteningService) Analyze(ctx context.Context, input AnalyzeInput) (Ti
 	if _, exists := s.lastReports[input.TenantID]; !exists {
 		if len(s.reportOrder) >= maxCachedReports {
 			oldest := s.reportOrder[0]
-			s.reportOrder = s.reportOrder[1:]
 			delete(s.lastReports, oldest)
+			// Shift the remaining IDs down in place rather than
+			// resliding with [1:]. Reslicing would advance the slice
+			// header past the head element on every eviction, so the
+			// backing array (and the evicted UUID it still references)
+			// could only be reclaimed when append happened to
+			// reallocate. Compacting in place keeps a single stable
+			// backing array bounded by maxCachedReports.
+			copy(s.reportOrder, s.reportOrder[1:])
+			s.reportOrder = s.reportOrder[:len(s.reportOrder)-1]
 		}
 		s.reportOrder = append(s.reportOrder, input.TenantID)
 	}
