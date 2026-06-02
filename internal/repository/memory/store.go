@@ -72,7 +72,7 @@ type Store struct {
 	msps       map[uuid.UUID]repository.MSP
 	mspTenants map[mspTenantKey]repository.MSPTenantBinding
 
-	// CASB tables — see migration 018.
+	// CASB tables — see migration 016.
 	casbConnectors     map[uuid.UUID]repository.CASBConnector
 	casbDiscoveredApps map[uuid.UUID]repository.CASBDiscoveredApp
 	casbPostureChecks  map[uuid.UUID]repository.CASBPostureCheck

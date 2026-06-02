@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -71,7 +72,7 @@ func (g *Google) Test(ctx context.Context, config json.RawMessage, secret []byte
 	}
 	endpoint := fmt.Sprintf(
 		g.baseURL+"/admin/directory/v1/users?customer=%s&maxResults=1",
-		customerID)
+		url.QueryEscape(customerID))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
@@ -105,7 +106,7 @@ func (g *Google) ListUsers(ctx context.Context, config json.RawMessage, secret [
 	}
 	endpoint := fmt.Sprintf(
 		g.baseURL+"/admin/directory/v1/users?customer=%s&maxResults=500",
-		customerID)
+		url.QueryEscape(customerID))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
