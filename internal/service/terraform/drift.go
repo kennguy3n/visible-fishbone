@@ -123,9 +123,10 @@ func diffResources(resourceType string, declared, actual map[string]string) []Dr
 }
 
 // marshalCanonical serializes v into a canonical JSON string for
-// comparison. json.RawMessage fields (e.g. Config, HandlingRules)
-// are normalized via json.Compact so semantically equivalent JSON
-// with different whitespace/key-ordering produces identical output.
+// comparison. A marshal→unmarshal→marshal round-trip normalizes
+// json.RawMessage fields (e.g. Config, HandlingRules) into sorted
+// map keys and consistent whitespace so semantically equivalent
+// JSON produces identical output.
 func marshalCanonical(v any) string {
 	b, _ := json.Marshal(v)
 	// Round-trip through interface{} to normalize json.RawMessage

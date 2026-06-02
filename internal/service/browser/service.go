@@ -92,6 +92,9 @@ func (s *Service) UpdatePolicy(
 	actorID *uuid.UUID,
 	patch repository.BrowserPolicyPatch,
 ) (repository.BrowserPolicy, error) {
+	if patch.Name != nil && *patch.Name == "" {
+		return repository.BrowserPolicy{}, fmt.Errorf("name must not be empty: %w", repository.ErrInvalidArgument)
+	}
 	if patch.Action != nil && !patch.Action.IsValid() {
 		return repository.BrowserPolicy{}, fmt.Errorf("invalid action %q: %w", *patch.Action, repository.ErrInvalidArgument)
 	}

@@ -128,6 +128,25 @@ func TestUpdatePolicy(t *testing.T) {
 	}
 }
 
+func TestUpdatePolicy_EmptyName(t *testing.T) {
+	t.Parallel()
+	svc, tid := newTestService(t)
+	ctx := context.Background()
+
+	p, _ := svc.CreatePolicy(ctx, tid, nil, repository.BrowserPolicy{
+		Name: "orig", Action: repository.BrowserPolicyActionBlock,
+		Scope: repository.BrowserPolicyScopeUser, Enabled: true,
+	})
+
+	empty := ""
+	_, err := svc.UpdatePolicy(ctx, tid, p.ID, nil, repository.BrowserPolicyPatch{
+		Name: &empty,
+	})
+	if err == nil {
+		t.Fatal("expected error when patching name to empty string")
+	}
+}
+
 func TestDeletePolicy(t *testing.T) {
 	t.Parallel()
 	svc, tid := newTestService(t)
