@@ -159,17 +159,16 @@ func (r *MIPReader) readFromHeaders(content []byte) ([]MIPLabel, error) {
 	lines := strings.Split(string(content), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "X-MS-InformationProtection-Label:") ||
-			strings.HasPrefix(line, "x-ms-informationprotection-label:") {
+		if line == "" {
+			break // RFC 5322 header/body boundary
+		}
+		if strings.HasPrefix(strings.ToLower(line), "x-ms-informationprotection-label:") {
 			val := strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
 			labels = append(labels, MIPLabel{
 				LabelID:     val,
 				Sensitivity: val,
 				Enabled:     true,
 			})
-		}
-		if line == "" && len(labels) > 0 {
-			break
 		}
 	}
 	return labels, nil

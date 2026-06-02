@@ -75,6 +75,34 @@ func TestMIPReader_OOXML(t *testing.T) {
 	}
 }
 
+func TestMIPReader_BodyNotScanned(t *testing.T) {
+	r := NewMIPReader()
+	// MIP header only in body after the blank-line separator — must not match.
+	content := []byte("From: alice@corp.com\r\nSubject: Hello\r\n\r\nX-MS-InformationProtection-Label: fake-label")
+	labels, err := r.ReadMIPLabels(content, "message/rfc822")
+	if err != nil {
+		t.Fatalf("ReadMIPLabels: %v", err)
+	}
+	if len(labels) != 0 {
+		t.Fatalf("expected 0 labels from body, got %d", len(labels))
+	}
+}
+
+func TestMIPReader_CaseInsensitiveHeader(t *testing.T) {
+	r := NewMIPReader()
+	content := []byte("From: alice@corp.com\r\nX-Ms-Informationprotection-Label: mixed-case-guid\r\n\r\nBody.")
+	labels, err := r.ReadMIPLabels(content, "message/rfc822")
+	if err != nil {
+		t.Fatalf("ReadMIPLabels: %v", err)
+	}
+	if len(labels) != 1 {
+		t.Fatalf("expected 1 label, got %d", len(labels))
+	}
+	if labels[0].LabelID != "mixed-case-guid" {
+		t.Errorf("unexpected label ID: %q", labels[0].LabelID)
+	}
+}
+
 func TestMIPReader_InvalidZip(t *testing.T) {
 	r := NewMIPReader()
 	_, err := r.ReadMIPLabels([]byte("not a zip"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")

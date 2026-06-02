@@ -351,9 +351,13 @@ func (h *DLPHandler) classify(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
+	policyIDs := result.PolicyIDs
+	if policyIDs == nil {
+		policyIDs = []uuid.UUID{}
+	}
 	WriteJSON(w, http.StatusOK, dlpClassifyResponse{
 		Matches:    toDLPMatches(result.Matches),
-		PolicyIDs:  result.PolicyIDs,
+		PolicyIDs:  policyIDs,
 		Action:     string(result.Action),
 		Confidence: result.Confidence,
 	})

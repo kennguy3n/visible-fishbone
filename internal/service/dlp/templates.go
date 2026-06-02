@@ -78,7 +78,10 @@ var builtinTemplates = []PolicyTemplate{
 // ListTemplates returns the catalog of pre-baked DLP policy templates.
 func (s *Service) ListTemplates() []PolicyTemplate {
 	out := make([]PolicyTemplate, len(builtinTemplates))
-	copy(out, builtinTemplates)
+	for i, t := range builtinTemplates {
+		t.Rules = append([]repository.DLPRule(nil), t.Rules...)
+		out[i] = t
+	}
 	return out
 }
 

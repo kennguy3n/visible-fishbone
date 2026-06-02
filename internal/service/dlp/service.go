@@ -2,7 +2,9 @@ package dlp
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -63,6 +65,24 @@ func (s *Service) Classify(ctx context.Context, tenantID uuid.UUID, input Classi
 	if len(result.Matches) > 0 {
 		result.Confidence = avgConfidence(result.Matches)
 	}
+
+	// Persist audit trail for each matched policy.
+	for _, pid := range result.PolicyIDs {
+		details, _ := json.Marshal(map[string]any{
+			"source":     input.Metadata.Filename,
+			"action":     result.Action,
+			"confidence": result.Confidence,
+		})
+		if _, err := s.matches.Create(ctx, tenantID, repository.DLPMatch{
+			PolicyID:  pid,
+			Source:    input.Metadata.Source,
+			MatchedAt: time.Now(),
+			Details:   details,
+		}); err != nil {
+			s.logger.WarnContext(ctx, "dlp: failed to record audit match", "policy_id", pid, "err", err)
+		}
+	}
+
 	return result, nil
 }
 
