@@ -143,6 +143,104 @@ func (r certRevokeFailRepo) RevokeAllCertificates(_ context.Context, _ uuid.UUID
 	return r.err
 }
 
+// pgLikeEnrollRepo mimics the Postgres enrollment store's guarded
+// transition (`UPDATE ... WHERE status != 'revoked'` returns
+// ErrNotFound for an already-revoked enrollment), plus a toggleable
+// certificate-revocation failure, so we can exercise BulkRevoke's
+// retry/heal path that the in-memory store cannot reproduce.
+type pgLikeEnrollRepo struct {
+	repository.DeviceEnrollmentRepository
+	exists    map[uuid.UUID]bool
+	revoked   map[uuid.UUID]bool
+	certFail  bool
+	certCalls map[uuid.UUID]int
+}
+
+func (r *pgLikeEnrollRepo) UpdateEnrollmentStatus(_ context.Context, _ uuid.UUID, did uuid.UUID, status repository.EnrollmentStatus) error {
+	if !r.exists[did] {
+		return repository.ErrNotFound
+	}
+	if status == repository.EnrollmentStatusRevoked && r.revoked[did] {
+		return repository.ErrNotFound // guarded transition: no row matches
+	}
+	if status == repository.EnrollmentStatusRevoked {
+		r.revoked[did] = true
+	}
+	return nil
+}
+
+func (r *pgLikeEnrollRepo) GetEnrollmentAnyStatus(_ context.Context, tid uuid.UUID, did uuid.UUID) (repository.DeviceEnrollment, error) {
+	if !r.exists[did] {
+		return repository.DeviceEnrollment{}, repository.ErrNotFound
+	}
+	st := repository.EnrollmentStatusActive
+	if r.revoked[did] {
+		st = repository.EnrollmentStatusRevoked
+	}
+	return repository.DeviceEnrollment{DeviceID: did, TenantID: tid, Status: st}, nil
+}
+
+func (r *pgLikeEnrollRepo) RevokeAllCertificates(_ context.Context, _ uuid.UUID, did uuid.UUID, _ time.Time) error {
+	r.certCalls[did]++
+	if r.certFail {
+		return errors.New("ca unreachable")
+	}
+	return nil
+}
+
+func TestBulkDevice_Revoke_RetryHealsHalfRevoked(t *testing.T) {
+	store := memory.NewStore()
+	tenantID := uuid.New()
+	ctx := context.Background()
+	if _, err := memory.NewTenantRepository(store).Create(ctx, repository.Tenant{
+		ID: tenantID, Name: "heal", Slug: "heal",
+	}); err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	did := uuid.New()
+	enrolls := &pgLikeEnrollRepo{
+		exists:    map[uuid.UUID]bool{did: true},
+		revoked:   map[uuid.UUID]bool{},
+		certFail:  true,
+		certCalls: map[uuid.UUID]int{},
+	}
+	svc := identity.NewBulkDeviceService(
+		memory.NewDeviceRepository(store),
+		memory.NewClaimTokenRepository(store),
+		enrolls, memory.NewAuditLogRepository(store), nil)
+
+	// First attempt: enrollment flips to revoked but cert revocation
+	// fails, leaving the device half-revoked and reported as Failed.
+	r1, err := svc.BulkRevoke(ctx, tenantID, []uuid.UUID{did})
+	if err != nil {
+		t.Fatalf("bulk revoke (1): %v", err)
+	}
+	if r1.Succeeded != 0 || r1.Failed != 1 {
+		t.Fatalf("attempt 1: succeeded=%d failed=%d, want 0/1", r1.Succeeded, r1.Failed)
+	}
+	if !enrolls.revoked[did] {
+		t.Fatal("attempt 1: enrollment should be revoked")
+	}
+	if enrolls.certCalls[did] != 1 {
+		t.Fatalf("attempt 1: cert revoke calls=%d, want 1", enrolls.certCalls[did])
+	}
+
+	// CA recovers. A retry must heal the half-revoked device by
+	// re-running certificate revocation even though the guarded
+	// enrollment update now reports ErrNotFound (already revoked).
+	enrolls.certFail = false
+	r2, err := svc.BulkRevoke(ctx, tenantID, []uuid.UUID{did})
+	if err != nil {
+		t.Fatalf("bulk revoke (2): %v", err)
+	}
+	if r2.Succeeded != 1 || r2.Failed != 0 {
+		t.Errorf("attempt 2: succeeded=%d failed=%d, want 1/0 (retry should heal)", r2.Succeeded, r2.Failed)
+	}
+	if enrolls.certCalls[did] != 2 {
+		t.Errorf("attempt 2: cert revoke calls=%d, want 2 (must be retried)", enrolls.certCalls[did])
+	}
+}
+
 func TestBulkDevice_Revoke_CertFailureCountsAsFailed(t *testing.T) {
 	store := memory.NewStore()
 	tenantID := uuid.New()

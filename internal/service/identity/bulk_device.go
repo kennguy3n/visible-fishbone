@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -195,22 +196,43 @@ func (s *BulkDeviceService) BulkRevoke(
 	result := BulkResult{Total: len(deviceIDs)}
 	now := s.nowFunc()
 	for _, did := range deviceIDs {
-		if err := s.enrolls.UpdateEnrollmentStatus(ctx, tenantID, did, repository.EnrollmentStatusRevoked); err != nil {
-			result.Failed++
-			result.Errors = append(result.Errors, fmt.Sprintf("device %s: %v", did, err))
-			continue
+		err := s.enrolls.UpdateEnrollmentStatus(ctx, tenantID, did, repository.EnrollmentStatusRevoked)
+		transitioned := err == nil
+		if err != nil {
+			// Stores that guard the transition (Postgres uses
+			// `status != 'revoked'`) report an already-revoked
+			// enrollment as ErrNotFound. That device may be stuck
+			// half-revoked from an earlier attempt where the
+			// enrollment flipped but certificate revocation failed, so
+			// treat the already-revoked case as a heal path and fall
+			// through to (re-)revoke its certificates below. Only a
+			// genuinely missing enrollment counts as a failure.
+			if !errors.Is(err, repository.ErrNotFound) {
+				result.Failed++
+				result.Errors = append(result.Errors, fmt.Sprintf("device %s: %v", did, err))
+				continue
+			}
+			existing, getErr := s.enrolls.GetEnrollmentAnyStatus(ctx, tenantID, did)
+			if getErr != nil || existing.Status != repository.EnrollmentStatusRevoked {
+				result.Failed++
+				result.Errors = append(result.Errors, fmt.Sprintf("device %s: %v", did, err))
+				continue
+			}
 		}
-		// The enrollment status — the primary access gate — is now
-		// revoked, so record it on the audit trail regardless of the
-		// certificate outcome below.
-		deviceID := did
-		s.appendAudit(ctx, tenantID, "device.enrollment.revoked", "device_enrollment", &deviceID)
+		// Record the audit entry only on a genuine state change so
+		// retries that merely heal certificates don't emit duplicate
+		// "revoked" events.
+		if transitioned {
+			deviceID := did
+			s.appendAudit(ctx, tenantID, "device.enrollment.revoked", "device_enrollment", &deviceID)
+		}
 		if err := s.enrolls.RevokeAllCertificates(ctx, tenantID, did, now); err != nil {
 			// Fail closed: a device whose certificates are still valid
 			// is not fully revoked, so surface it as a failure instead
 			// of a silent success — otherwise a caller treating
-			// Failed == 0 as "fully revoked" would miss it. Revocation
-			// is idempotent, so the caller can safely retry.
+			// Failed == 0 as "fully revoked" would miss it. The
+			// already-revoked heal path above keeps this retryable: a
+			// subsequent BulkRevoke re-attempts certificate revocation.
 			s.logger.Warn("bulk revoke: certificate revocation failed",
 				"device_id", did, "tenant_id", tenantID, "error", err)
 			result.Failed++
