@@ -139,6 +139,16 @@ func (s *Store) NewPlaybookApprovalRepository() *PlaybookApprovalRepository {
 	return &PlaybookApprovalRepository{s: s}
 }
 
+// NewPolicyReviewScheduleRepository binds the Store to repository.PolicyReviewScheduleRepository.
+func (s *Store) NewPolicyReviewScheduleRepository() *PolicyReviewScheduleRepository {
+	return &PolicyReviewScheduleRepository{s: s}
+}
+
+// NewOpsHealthSnapshotRepository binds the Store to repository.OpsHealthSnapshotRepository.
+func (s *Store) NewOpsHealthSnapshotRepository() *OpsHealthSnapshotRepository {
+	return &OpsHealthSnapshotRepository{s: s}
+}
+
 // Compile-time interface compliance asserts. Keeping these in this
 // file means a single grep tells us "did the postgres package
 // implement every interface?" without scanning eight files.
@@ -173,4 +183,6 @@ var (
 	_ repository.PlaybookRepository             = (*PlaybookRepository)(nil)
 	_ repository.PlaybookExecutionRepository    = (*PlaybookExecutionRepository)(nil)
 	_ repository.PlaybookApprovalRepository     = (*PlaybookApprovalRepository)(nil)
+	_ repository.PolicyReviewScheduleRepository = (*PolicyReviewScheduleRepository)(nil)
+	_ repository.OpsHealthSnapshotRepository    = (*OpsHealthSnapshotRepository)(nil)
 )

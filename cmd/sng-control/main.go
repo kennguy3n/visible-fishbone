@@ -334,6 +334,7 @@ func buildRouter(
 	casbConnectorRepo := store.NewCASBConnectorRepository()
 	casbAppRepo := store.NewCASBDiscoveredAppRepository()
 	casbPostureRepo := store.NewCASBPostureCheckRepository()
+	opsHealthRepo := store.NewOpsHealthSnapshotRepository()
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -573,6 +574,13 @@ func buildRouter(
 
 	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, logger)
 
+	// --- Operational automation wiring (Session 5) --------------------
+	// Bulk device operations reuse the existing device / claim-token /
+	// enrollment repositories; ops-health is backed by its own snapshot
+	// repository. Wiring here makes the /ops/health and /devices/bulk
+	// + /devices/import|export routes actually serve in production.
+	bulkDeviceSvc := identity.NewBulkDeviceService(deviceRepo, claimRepo, enrollmentRepo, auditRepo, logger)
+
 	// --- Compliance + Playbook wiring (Session 1, Tasks 47, 49-54) ----
 	// Compliance reporting renders per-tenant framework scores and
 	// evidence packs from enforced-policy state. The playbook engine
@@ -623,6 +631,8 @@ func buildRouter(
 		APIKeyLookup:     apiKeySvc,
 		Health:           health,
 		OpenAPISpec:      handler.NewOpenAPIHandler(),
+		OpsHealth:        handler.NewOpsHealthHandler(opsHealthRepo, logger),
+		BulkDevice:       handler.NewBulkDeviceHandler(bulkDeviceSvc, deviceRepo, logger),
 	})
 	// Return the AppRegistry handler so the caller can attach the
 	// telemetry stats querier post-construction — the ClickHouse

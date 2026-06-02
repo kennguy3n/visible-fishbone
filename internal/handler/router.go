@@ -41,6 +41,8 @@ type RouterDeps struct {
 	APIKeyLookup     middleware.APIKeyLookup
 	RateLimiter      *middleware.RateLimiter
 	Health           *Health
+	OpsHealth        *OpsHealthHandler
+	BulkDevice       *BulkDeviceHandler
 }
 
 // NewRouter composes the full API mux + middleware chain.
@@ -135,6 +137,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.Playbook != nil {
 		deps.Playbook.Register(apiMux)
+	}
+	if deps.OpsHealth != nil {
+		deps.OpsHealth.Register(apiMux)
+	}
+	if deps.BulkDevice != nil {
+		deps.BulkDevice.Register(apiMux)
 	}
 
 	apiChain := middleware.Chain(
