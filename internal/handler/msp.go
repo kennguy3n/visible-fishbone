@@ -532,6 +532,58 @@ func (h *MSPHandler) setStatus(w http.ResponseWriter, r *http.Request) {
 			"status must be one of active, suspended, deleted")
 		return
 	}
+	// Transitioning to `deleted` must follow the same cascade-aware
+	// path as `DELETE /api/v1/msps/{msp_id}`: the repository's
+	// UpdateStatus method only stamps the MSP row + deleted_at, but
+	// Delete additionally removes msp_tenants rows and clears the
+	// denormalised tenants.msp_id pointer (memory:
+	// internal/repository/memory/msp.go:211-247; postgres mirrors).
+	// Routing both endpoints through the same code path on the
+	// deleted-transition closes the cascade gap caught by round-10
+	// of Devin Review:
+	//
+	//   * orphaned msp_tenants rows would otherwise survive across the
+	//     soft-delete, blocking re-binding and producing zombie rows;
+	//   * tenants.msp_id would keep pointing at the soft-deleted MSP,
+	//     so branding resolution would continue surfacing the deleted
+	//     MSP's LogoURL/colors/CustomDomain until an out-of-band
+	//     bind/unbind cycle reset the denormalised pointer.
+	//
+	// We use Delete() instead of teaching UpdateStatus to cascade in
+	// both repository backends because (a) Delete already has the
+	// canonical cascade implementation and the lifecycle invariant is
+	// enforced in exactly one place, (b) UpdateStatus's contract
+	// stays simple (active <-> suspended transitions only need to
+	// touch the MSP row), and (c) doubling the cascade logic across
+	// two repository methods is exactly the kind of
+	// invariant-violation surface that the round-6 + round-8 reviews
+	// were exercised against. After Delete we re-Get the row to honour
+	// the OpenAPI contract that `POST .../status` returns 200 + the
+	// MSP body (the DELETE endpoint returns 204 No Content, which
+	// would be a wire-incompatible change here). Get() does NOT filter
+	// soft-deleted rows, so the response shows status="deleted" with
+	// deleted_at stamped — exactly what the client requested. We
+	// invalidate the branding cache for the same reason the delete
+	// handler does: every tenant previously bound to this MSP now
+	// resolves through platform defaults, so any cached entry keyed on
+	// tenantID would otherwise keep serving the just-deleted MSP's
+	// branding until TTL.
+	if repository.MSPStatus(req.Status) == repository.MSPStatusDeleted {
+		if err := h.msps.Delete(r.Context(), id); err != nil {
+			WriteRepositoryError(w, err)
+			return
+		}
+		if h.branding != nil {
+			h.branding.InvalidateAll()
+		}
+		deleted, err := h.msps.Get(r.Context(), id)
+		if err != nil {
+			WriteRepositoryError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, toMSPResponse(deleted))
+		return
+	}
 	updated, err := h.msps.UpdateStatus(r.Context(), id, repository.MSPStatus(req.Status))
 	if err != nil {
 		WriteRepositoryError(w, err)
@@ -760,8 +812,13 @@ type BulkSiteRequest struct {
 //     without having to read the config first. The OpenAPI spec
 //     documents this fallback explicitly so SDK clients are not
 //     surprised by the silent default substitution.
-//   - negative values are rejected at the OpenAPI layer
-//     (`minimum: 0`); the handler does NOT need to re-check.
+//   - negative values are rejected at the handler boundary below
+//     (round-10 of Devin Review caught the original "OpenAPI gates
+//     it" claim was false — no server-side OpenAPI validation
+//     middleware is wired into the stack, so the spec is purely
+//     documentation. A client posting `{"ttl_seconds": -60}` would
+//     have flowed through as a negative time.Duration and produced
+//     tokens with ExpiresAt in the past — silently unredeemable).
 type BulkClaimTokensRequest struct {
 	Count      int `json:"count"`
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
@@ -878,6 +935,21 @@ func (h *MSPHandler) bulkGenerateClaimTokens(w http.ResponseWriter, r *http.Requ
 	}
 	var req BulkClaimTokensRequest
 	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	// Negative TTLSeconds would compute ExpiresAt in the past and
+	// produce silently-unredeemable tokens — the response would still
+	// report success with token strings the client can never redeem.
+	// The OpenAPI spec declares `minimum: 0` but the server has no
+	// spec-validation middleware wired, so we re-check here at the
+	// handler boundary. Round-10 of Devin Review caught the original
+	// doc-comment's false "OpenAPI gates it" claim. We accept 0
+	// because the identity service interprets ttl=0 as "use the
+	// configured DefaultTokenTTL" — the intentional fallback path
+	// documented on BulkClaimTokensRequest.
+	if req.TTLSeconds < 0 {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			"ttl_seconds must be >= 0")
 		return
 	}
 	// req.TTLSeconds == 0 (omitted or explicit) flows through as

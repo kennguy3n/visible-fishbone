@@ -1719,3 +1719,258 @@ func TestMSPHandler_PatchOmittedFieldsAreNoOp(t *testing.T) {
 			after.Name, after.Slug)
 	}
 }
+
+// TestMSPHandler_SetStatusDeleted_CascadesBindings pins the
+// round-10 fix: POST /api/v1/msps/{msp_id}/status with
+// status="deleted" must perform the same cascade as DELETE
+// /api/v1/msps/{msp_id}. Specifically it must:
+//
+//  1. Remove every msp_tenants row that pointed at this MSP.
+//  2. Clear the denormalised tenants.msp_id pointer on every
+//     tenant that pointed at this MSP.
+//  3. Stamp the MSP row's status=deleted + deleted_at.
+//
+// Before the fix the handler routed through UpdateStatus, which
+// only did step 3 — leaving orphaned join rows AND stale
+// tenants.msp_id pointers at the just-deleted MSP. That breaks
+// re-binding (the join row blocks new owner assignments) and
+// silently keeps branding resolution pointing at the deleted
+// MSP's logo/colors until an out-of-band bind/unbind cycle
+// resets the denormalised pointer.
+//
+// The fix routes status="deleted" through Delete(), which
+// already cascades correctly in both backends. The lifecycle
+// contract (status='deleted' ⇔ deleted_at!=NULL) is preserved.
+func TestMSPHandler_SetStatusDeleted_CascadesBindings(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+
+	m, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-status-del"})
+	if err != nil {
+		t.Fatalf("seed msp: %v", err)
+	}
+	mID := m.ID
+	tn1, err := tenants.Create(ctx, repository.Tenant{
+		Name: "T1", Slug: "t1-status-del", MSPID: &mID,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant1: %v", err)
+	}
+	tn2, err := tenants.Create(ctx, repository.Tenant{
+		Name: "T2", Slug: "t2-status-del", MSPID: &mID,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant2: %v", err)
+	}
+	if _, err := msps.AssignTenant(ctx, m.ID, tn1.ID,
+		repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign tn1: %v", err)
+	}
+	if _, err := msps.AssignTenant(ctx, m.ID, tn2.ID,
+		repository.MSPRelationshipCoManager, nil); err != nil {
+		t.Fatalf("assign tn2: %v", err)
+	}
+
+	// Sanity: bindings exist before the cascade.
+	pre, err := msps.ListTenants(ctx, m.ID, repository.Page{})
+	if err != nil {
+		t.Fatalf("pre listTenants: %v", err)
+	}
+	if len(pre.Items) != 2 {
+		t.Fatalf("pre cascade bindings = %d, want 2", len(pre.Items))
+	}
+
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/status",
+		handler.MSPStatusRequest{Status: "deleted"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setStatus=deleted: code=%d body=%s, want 200",
+			rec.Code, rec.Body.String())
+	}
+	// Response body should reflect the deleted lifecycle state.
+	var body handler.MSPResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Status != string(repository.MSPStatusDeleted) {
+		t.Fatalf("response status = %q, want deleted", body.Status)
+	}
+
+	// (1) msp_tenants rows for this MSP must be gone.
+	post, err := msps.ListTenants(ctx, m.ID, repository.Page{})
+	if err != nil {
+		t.Fatalf("post listTenants: %v", err)
+	}
+	if len(post.Items) != 0 {
+		t.Fatalf("post cascade bindings = %d, want 0 — "+
+			"setStatus=deleted must cascade msp_tenants rows",
+			len(post.Items))
+	}
+
+	// (2) tenants.msp_id must be cleared on every tenant that
+	// pointed at this MSP.
+	for _, id := range []uuid.UUID{tn1.ID, tn2.ID} {
+		got, err := tenants.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("get tenant %s: %v", id, err)
+		}
+		if got.MSPID != nil {
+			t.Fatalf("tenant %s msp_id = %v, want nil — "+
+				"setStatus=deleted must clear denormalised pointer",
+				id, *got.MSPID)
+		}
+	}
+
+	// (3) lifecycle invariant: status=deleted ⇔ deleted_at!=NULL.
+	after, err := msps.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get msp after delete: %v", err)
+	}
+	if after.Status != repository.MSPStatusDeleted {
+		t.Fatalf("post-delete status = %q, want deleted", after.Status)
+	}
+	if after.DeletedAt == nil {
+		t.Fatalf("post-delete deleted_at = nil, want stamped — "+
+			"lifecycle invariant violated for msp %s", m.ID)
+	}
+}
+
+// TestMSPHandler_SetStatusDeleted_InvalidatesBrandingCache pins
+// the second half of the round-10 fix: setStatus=deleted must
+// flush the branding cache, otherwise tenants previously bound
+// to the now-deleted MSP would keep resolving against the
+// deleted MSP's cached branding until the TTL expires (multi-
+// minute window in production).
+//
+// We use the cached BrandingResolver wiring with TTL=1h so the
+// test deterministically fails if InvalidateAll is missing.
+func TestMSPHandler_SetStatusDeleted_InvalidatesBrandingCache(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _ := setupMSPHandlerWithCachedBranding(t)
+	ctx := context.Background()
+
+	m, err := msps.Create(ctx, repository.MSP{
+		Name:     "Acme",
+		Slug:     "acme-setstatus-del-cache",
+		Branding: repository.MSPBranding{LogoURL: "v1"},
+	})
+	if err != nil {
+		t.Fatalf("seed msp: %v", err)
+	}
+	mID := m.ID
+	tn, err := tenants.Create(ctx, repository.Tenant{
+		Name: "T", Slug: "t-setstatus-del-cache", MSPID: &mID,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+
+	// Prime the cache: resolution returns the MSP's "v1" logo.
+	rec := doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prime resolve status = %d", rec.Code)
+	}
+	var primed handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&primed)
+	if primed.LogoURL != "v1" {
+		t.Fatalf("primed logo = %q, want v1", primed.LogoURL)
+	}
+
+	// Trip the deleted transition via the status endpoint.
+	rec = doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/status",
+		handler.MSPStatusRequest{Status: "deleted"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setStatus=deleted: code=%d body=%s",
+			rec.Code, rec.Body.String())
+	}
+
+	// After the cascade, tenant's msp_id is cleared so the
+	// resolver should fall through to platform defaults — the
+	// cache must NOT continue serving the stale "v1".
+	rec = doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post-delete resolve status = %d", rec.Code)
+	}
+	var after handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&after)
+	if after.LogoURL == "v1" {
+		t.Fatalf("setStatus=deleted did not invalidate cache: "+
+			"logo still = %q, want empty/default", after.LogoURL)
+	}
+}
+
+// TestMSPHandler_BulkClaimTokens_RejectsNegativeTTL pins the
+// round-10 fix on bulk claim-token issuance: a client posting
+// `{"count": 1, "ttl_seconds": -60}` must get a 400, not a 202
+// with silently-unredeemable tokens (ExpiresAt in the past).
+//
+// Before the fix the handler relied on the OpenAPI `minimum: 0`
+// constraint to gate the value, but no spec-validation
+// middleware is wired into the stack — the spec is purely
+// documentation. The negative duration would have flowed through
+// to the identity service's token issuer producing past-expiry
+// tokens that the response would still report as successful.
+//
+// The fix re-validates at the handler boundary. ttl=0 is still
+// accepted because the identity service interprets it as "use
+// the configured DefaultTokenTTL" — the documented fallback path.
+func TestMSPHandler_BulkClaimTokens_RejectsNegativeTTL(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	tenants := memory.NewTenantRepository(store)
+	ctx := context.Background()
+	m, _ := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-negttl"})
+	tn, _ := tenants.Create(ctx, repository.Tenant{Name: "t1", Slug: "t1-negttl"})
+	if _, err := msps.AssignTenant(ctx, m.ID, tn.ID,
+		repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	bulkSvc := svctenant.NewBulkService(
+		msps,
+		stubBulkAuthz{tenants: []uuid.UUID{tn.ID}},
+		nil, nil,
+		&fakeTokenIssuer{},
+		nil,
+		svctenant.BulkOptions{},
+	)
+	h := handler.NewMSPHandler(repoMSPService{repo: msps}, bulkSvc, nil, allowAllAuthz{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/bulk/claim-tokens",
+		handler.BulkClaimTokensRequest{Count: 1, TTLSeconds: -60})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400 — "+
+			"negative ttl_seconds must be rejected at the handler boundary",
+			rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "invalid_param" {
+		t.Fatalf("error.code = %q, want invalid_param", body.Error.Code)
+	}
+
+	// ttl=0 must still be accepted — that's the documented
+	// "use DefaultTokenTTL" fallback path.
+	rec = doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/bulk/claim-tokens",
+		handler.BulkClaimTokensRequest{Count: 1, TTLSeconds: 0})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("ttl=0 status = %d body=%s, want 202 — "+
+			"the zero fallback is documented and intentional",
+			rec.Code, rec.Body.String())
+	}
+}
