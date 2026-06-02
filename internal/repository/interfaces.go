@@ -865,3 +865,28 @@ type MSPRepository interface {
 	// tenant (an inverse lookup — "who manages this tenant?").
 	ListBindings(ctx context.Context, tenantID uuid.UUID) ([]MSPTenantBinding, error)
 }
+
+// --- Browser Policy (Phase 4, Task 43) ---------------------------------
+
+// BrowserPolicyRepository owns the browser_policies table.
+type BrowserPolicyRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, p BrowserPolicy) (BrowserPolicy, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (BrowserPolicy, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[BrowserPolicy], error)
+	Update(ctx context.Context, tenantID, id uuid.UUID, patch BrowserPolicyPatch) (BrowserPolicy, error)
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+}
+
+// --- Data Classification (Phase 4, Task 46) ----------------------------
+
+// DataClassificationRepository owns the data_classifications table.
+type DataClassificationRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, dc DataClassification) (DataClassification, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (DataClassification, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[DataClassification], error)
+	Update(ctx context.Context, tenantID, id uuid.UUID, patch DataClassificationPatch) (DataClassification, error)
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+	// GetByLevel returns the classification entry for the given level
+	// within a tenant. Returns ErrNotFound when no entry matches.
+	GetByLevel(ctx context.Context, tenantID uuid.UUID, level ClassificationLevel) (DataClassification, error)
+}

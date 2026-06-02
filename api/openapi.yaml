@@ -1761,6 +1761,140 @@ paths:
         "204": { description: cleared }
         "404": { $ref: "#/components/responses/Error" }
 
+  # ── Browser Protection (Phase 4, Task 43) ──────────────────────
+  /tenants/{tenant_id}/browser-policies:
+    post:
+      tags: [browser]
+      summary: Create a browser protection policy
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BrowserPolicyCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BrowserPolicy" }
+        "400": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [browser]
+      summary: List browser protection policies
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/BrowserPolicy" }
+                  next_cursor: { type: string }
+
+  /tenants/{tenant_id}/browser-policies/{id}:
+    get:
+      tags: [browser]
+      summary: Get a browser protection policy
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/ResourceID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BrowserPolicy" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [browser]
+      summary: Update a browser protection policy
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/ResourceID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BrowserPolicyUpdate" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BrowserPolicy" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [browser]
+      summary: Delete a browser protection policy
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/ResourceID"
+      responses:
+        "204": { description: deleted }
+        "404": { $ref: "#/components/responses/Error" }
+
+  # ── Config Export/Import (Phase 4, Tasks 47-48) ────────────────
+  /tenants/{tenant_id}/config/export:
+    get:
+      tags: [terraform]
+      summary: Export full tenant configuration
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExportedConfig" }
+
+  /tenants/{tenant_id}/config/import:
+    post:
+      tags: [terraform]
+      summary: Idempotent import of tenant configuration
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExportedConfig" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+
+  /tenants/{tenant_id}/config/drift:
+    post:
+      tags: [terraform]
+      summary: Detect drift between declared config and actual state
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExportedConfig" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DriftReport" }
+
 components:
   securitySchemes:
     BearerJWT:
@@ -2646,3 +2780,78 @@ components:
           format: uuid
           description: "Operator who recorded the feedback. Derived from the JWT sub / API-key owner server-side — clients must not set this."
         created_at: { type: string, format: date-time }
+
+    # ── Browser Protection (Phase 4, Task 43) ──────────────────────
+    BrowserRule:
+      type: object
+      required: [type, action]
+      properties:
+        type: { type: string, enum: [download, upload, clipboard, print, screenshot, url_category] }
+        condition: { type: string }
+        action: { type: string, enum: [block, allow, warn, log] }
+    BrowserPolicy:
+      type: object
+      required: [id, tenant_id, name, rules, action, scope, enabled, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        rules:
+          type: array
+          items: { $ref: "#/components/schemas/BrowserRule" }
+        action: { type: string, enum: [block, allow, warn, log] }
+        scope: { type: string, enum: [user, group, site] }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    BrowserPolicyCreate:
+      type: object
+      required: [name, action, scope]
+      properties:
+        name: { type: string }
+        rules:
+          type: array
+          items: { $ref: "#/components/schemas/BrowserRule" }
+        action: { type: string, enum: [block, allow, warn, log] }
+        scope: { type: string, enum: [user, group, site] }
+        enabled: { type: boolean, default: true }
+    BrowserPolicyUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        rules:
+          type: array
+          items: { $ref: "#/components/schemas/BrowserRule" }
+        action: { type: string, enum: [block, allow, warn, log] }
+        scope: { type: string, enum: [user, group, site] }
+        enabled: { type: boolean }
+
+    # ── Config Export/Import (Phase 4, Tasks 47-48) ────────────────
+    ExportedConfig:
+      type: object
+      required: [version, tenant_id]
+      properties:
+        version: { type: integer }
+        exported_at: { type: string, format: date-time }
+        tenant_id: { type: string, format: uuid }
+        policies: { type: array, items: { type: object } }
+        sites: { type: array, items: { type: object } }
+        browser_policies: { type: array, items: { type: object } }
+        data_classifications: { type: array, items: { type: object } }
+        integrations: { type: array, items: { type: object } }
+    DriftReport:
+      type: object
+      required: [tenant_id, detected_at, entries, has_drift]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        detected_at: { type: string, format: date-time }
+        entries:
+          type: array
+          items:
+            type: object
+            properties:
+              resource_type: { type: string }
+              resource_name: { type: string }
+              drift_type: { type: string, enum: [added, modified, removed] }
+              details: { type: string }
+        has_drift: { type: boolean }
