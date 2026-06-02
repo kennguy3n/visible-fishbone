@@ -11,21 +11,6 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
-// HealthComponentScore captures a single component's health rating.
-type HealthComponentScore struct {
-	Name   string  `json:"name"`
-	Score  float64 `json:"score"`
-	Status string  `json:"status"`
-}
-
-// OpsHealthResponse is the API response for operational health.
-type OpsHealthResponse struct {
-	TenantID    uuid.UUID              `json:"tenant_id"`
-	HealthScore int                    `json:"health_score"`
-	Components  []HealthComponentScore `json:"components"`
-	ComputedAt  time.Time              `json:"computed_at"`
-}
-
 // OpsHealthHistoryResponse wraps a list of historical snapshots.
 type OpsHealthHistoryResponse struct {
 	Snapshots []OpsHealthSnapshotDTO `json:"snapshots"`

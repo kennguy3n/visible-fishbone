@@ -124,12 +124,22 @@ func (h *BulkDeviceHandler) exportCSV(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	page, err := h.devices.List(r.Context(), tenantID, repository.DeviceListFilter{}, repository.Page{Limit: identity.MaxBulkDevices})
-	if err != nil {
-		WriteRepositoryError(w, err)
-		return
+	var all []repository.Device
+	after := ""
+	for {
+		pg := repository.Page{Limit: repository.MaxPageLimit, After: after}
+		result, err := h.devices.List(r.Context(), tenantID, repository.DeviceListFilter{}, pg)
+		if err != nil {
+			WriteRepositoryError(w, err)
+			return
+		}
+		all = append(all, result.Items...)
+		if result.NextCursor == "" || len(all) >= identity.MaxBulkDevices {
+			break
+		}
+		after = result.NextCursor
 	}
-	data, err := h.svc.ExportCSV(r.Context(), tenantID, page.Items)
+	data, err := h.svc.ExportCSV(r.Context(), tenantID, all)
 	if err != nil {
 		WriteError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
