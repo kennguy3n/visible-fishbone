@@ -153,6 +153,9 @@ func indexSites(sites []ExportedSite) map[string]string {
 func indexBrowserPolicies(policies []ExportedBrowserPolicy) map[string]string {
 	m := make(map[string]string, len(policies))
 	for _, p := range policies {
+		if p.Rules == nil {
+			p.Rules = []repository.BrowserRule{}
+		}
 		m[p.Name] = marshalCanonical(p)
 	}
 	return m
@@ -169,6 +172,9 @@ func indexDataClassifications(dcs []ExportedDataClassification) map[string]strin
 func indexIntegrations(ics []ExportedIntegration) map[string]string {
 	m := make(map[string]string, len(ics))
 	for _, ic := range ics {
+		if ic.EventTypes == nil {
+			ic.EventTypes = []string{}
+		}
 		m[ic.Name] = marshalCanonical(ic)
 	}
 	return m
