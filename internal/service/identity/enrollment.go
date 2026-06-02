@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -25,6 +27,7 @@ const DefaultCertTTL = 24 * time.Hour
 // flow described in PROPOSAL.md §7 and ARCHITECTURE.md §3.4.
 type EnrollmentService struct {
 	enrollments repository.DeviceEnrollmentRepository
+	tokens      repository.ClaimTokenRepository
 	audit       repository.AuditLogRepository
 	nowFunc     func() time.Time
 	certTTL     time.Duration
@@ -33,10 +36,12 @@ type EnrollmentService struct {
 // NewEnrollmentService returns a ready-to-use enrollment service.
 func NewEnrollmentService(
 	enrollments repository.DeviceEnrollmentRepository,
+	tokens repository.ClaimTokenRepository,
 	audit repository.AuditLogRepository,
 ) *EnrollmentService {
 	return &EnrollmentService{
 		enrollments: enrollments,
+		tokens:      tokens,
 		audit:       audit,
 		nowFunc:     func() time.Time { return time.Now().UTC() },
 		certTTL:     DefaultCertTTL,
@@ -56,6 +61,7 @@ func (s *EnrollmentService) RedeemClaimToken(
 	ctx context.Context,
 	tenantID uuid.UUID,
 	deviceID uuid.UUID,
+	plaintextToken string,
 	publicKey []byte,
 ) (EnrollmentResult, error) {
 	if len(publicKey) != ed25519.PublicKeySize {
@@ -63,6 +69,16 @@ func (s *EnrollmentService) RedeemClaimToken(
 	}
 
 	now := s.nowFunc()
+
+	// Validate and atomically consume the claim token.
+	raw, err := base64.RawURLEncoding.DecodeString(plaintextToken)
+	if err != nil {
+		return EnrollmentResult{}, fmt.Errorf("invalid claim token encoding: %w", repository.ErrInvalidArgument)
+	}
+	hash := sha256.Sum256(raw)
+	if _, err := s.tokens.Redeem(ctx, tenantID, hash[:], now); err != nil {
+		return EnrollmentResult{}, fmt.Errorf("claim token validation failed: %w", err)
+	}
 	enrollment := repository.DeviceEnrollment{
 		DeviceID:   deviceID,
 		TenantID:   tenantID,

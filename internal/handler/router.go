@@ -56,6 +56,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.OpenAPISpec != nil {
 		deps.OpenAPISpec.Register(publicMux)
 	}
+	if deps.Devices != nil {
+		deps.Devices.RegisterPublic(publicMux)
+	}
 
 	apiMux := http.NewServeMux()
 	if deps.Tenants != nil {
@@ -120,6 +123,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	root.Handle("/readyz", publicMux)
 	root.Handle("/api/v1/docs", publicMux)
 	root.Handle("/api/v1/openapi.yaml", publicMux)
+	root.Handle("/api/v1/enroll", publicMux)
 	root.Handle("/api/v1/", authedAPI)
 	root.Handle("/scim/", authedAPI)
 

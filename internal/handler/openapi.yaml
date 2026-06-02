@@ -2042,7 +2042,7 @@ paths:
               schema: { $ref: "#/components/schemas/EnrollDeviceResponse" }
         "400": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
-  /tenants/{tenant_id}/devices/{device_id}/refresh-cert:
+  /tenants/{tenant_id}/devices/{id}/refresh-cert:
     post:
       tags: [enrollment]
       operationId: refreshDeviceCert
@@ -2052,7 +2052,7 @@ paths:
           in: path
           required: true
           schema: { type: string, format: uuid }
-        - name: device_id
+        - name: id
           in: path
           required: true
           schema: { type: string, format: uuid }
@@ -2064,7 +2064,7 @@ paths:
               schema: { $ref: "#/components/schemas/RefreshCertResponse" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
-  /tenants/{tenant_id}/devices/{device_id}/revoke:
+  /tenants/{tenant_id}/devices/{id}/revoke:
     post:
       tags: [enrollment]
       operationId: revokeDevice
@@ -2074,14 +2074,14 @@ paths:
           in: path
           required: true
           schema: { type: string, format: uuid }
-        - name: device_id
+        - name: id
           in: path
           required: true
           schema: { type: string, format: uuid }
       responses:
         "204": { description: Revoked }
         "404": { $ref: "#/components/responses/Error" }
-  /tenants/{tenant_id}/devices/{device_id}/status:
+  /tenants/{tenant_id}/devices/{id}/status:
     get:
       tags: [enrollment]
       operationId: getDeviceEnrollmentStatus
@@ -2091,7 +2091,7 @@ paths:
           in: path
           required: true
           schema: { type: string, format: uuid }
-        - name: device_id
+        - name: id
           in: path
           required: true
           schema: { type: string, format: uuid }

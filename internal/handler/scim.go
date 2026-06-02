@@ -2,12 +2,14 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/middleware"
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 )
 
@@ -364,7 +366,18 @@ func writeSCIMError(w http.ResponseWriter, status int, detail string) {
 }
 
 func writeSCIMRepoError(w http.ResponseWriter, err error) {
-	WriteRepositoryError(w, err)
+	switch {
+	case errors.Is(err, repository.ErrNotFound):
+		writeSCIMError(w, http.StatusNotFound, "resource not found")
+	case errors.Is(err, repository.ErrConflict):
+		writeSCIMError(w, http.StatusConflict, "uniqueness constraint violated")
+	case errors.Is(err, repository.ErrForbidden):
+		writeSCIMError(w, http.StatusForbidden, "operation not permitted")
+	case errors.Is(err, repository.ErrInvalidArgument):
+		writeSCIMError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeSCIMError(w, http.StatusInternalServerError, "internal server error")
+	}
 }
 
 func decodeSCIM(w http.ResponseWriter, r *http.Request, dst any) bool {

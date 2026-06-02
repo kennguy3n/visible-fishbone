@@ -53,10 +53,15 @@ func (h *DeviceHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/devices/{id}", h.get)
 
 	// Enrollment endpoints (Task 30).
-	mux.HandleFunc("POST /api/v1/enroll", h.enrollDevice)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/devices/{id}/refresh-cert", h.refreshCert)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/devices/{id}/revoke", h.revokeDevice)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/devices/{id}/status", h.enrollmentStatus)
+}
+
+// RegisterPublic attaches unauthenticated enrollment routes.
+// POST /api/v1/enroll does not require auth — the claim token is the credential.
+func (h *DeviceHandler) RegisterPublic(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/v1/enroll", h.enrollDevice)
 }
 
 // ClaimTokenCreateRequest is the JSON body for POST /claim-tokens.
@@ -317,11 +322,7 @@ func (h *DeviceHandler) enrollDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate the claim token via the existing identity service. The
-	// enrollment service then binds the public key and issues a cert.
-	// For the MVP, the claim token is validated by the identity service's
-	// existing RedeemClaimToken. Here we just create the enrollment.
-	result, err := h.enrollment.RedeemClaimToken(r.Context(), tenantID, deviceID, pubKeyBytes)
+	result, err := h.enrollment.RedeemClaimToken(r.Context(), tenantID, deviceID, req.ClaimToken, pubKeyBytes)
 	if err != nil {
 		WriteRepositoryError(w, err)
 		return
@@ -434,12 +435,15 @@ func decodePublicKey(s string) ([]byte, error) {
 	if len(s) == 0 {
 		return nil, errors.New("empty public key")
 	}
-	b, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		b, err = base64.RawStdEncoding.DecodeString(s)
-		if err != nil {
-			return nil, errors.New("not valid base64")
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	} {
+		if b, err := enc.DecodeString(s); err == nil {
+			return b, nil
 		}
 	}
-	return b, nil
+	return nil, errors.New("not valid base64")
 }

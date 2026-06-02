@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -13,7 +16,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 )
 
-func newEnrollmentService(t *testing.T) (*EnrollmentService, uuid.UUID) {
+func newEnrollmentService(t *testing.T) (*EnrollmentService, uuid.UUID, repository.ClaimTokenRepository) {
 	t.Helper()
 	s := memory.NewStore()
 	tn, err := memory.NewTenantRepository(s).Create(context.Background(), repository.Tenant{
@@ -22,11 +25,33 @@ func newEnrollmentService(t *testing.T) (*EnrollmentService, uuid.UUID) {
 	if err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
+	tokens := memory.NewClaimTokenRepository(s)
 	svc := NewEnrollmentService(
 		memory.NewDeviceEnrollmentRepository(s),
+		tokens,
 		memory.NewAuditLogRepository(s),
 	)
-	return svc, tn.ID
+	return svc, tn.ID, tokens
+}
+
+func seedClaimToken(t *testing.T, tokens repository.ClaimTokenRepository, tenantID uuid.UUID) string {
+	t.Helper()
+	plainBytes := make([]byte, 32)
+	if _, err := rand.Read(plainBytes); err != nil {
+		t.Fatalf("generate claim token bytes: %v", err)
+	}
+	plaintext := base64.RawURLEncoding.EncodeToString(plainBytes)
+	hash := sha256.Sum256(plainBytes)
+	_, err := tokens.Create(context.Background(), tenantID, repository.ClaimToken{
+		ID:        uuid.New(),
+		TenantID:  tenantID,
+		TokenHash: hash[:],
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("seed claim token: %v", err)
+	}
+	return plaintext
 }
 
 func generateEd25519PublicKey(t *testing.T) []byte {
@@ -40,11 +65,12 @@ func generateEd25519PublicKey(t *testing.T) []byte {
 
 func TestRedeemClaimToken(t *testing.T) {
 	t.Parallel()
-	svc, tid := newEnrollmentService(t)
+	svc, tid, tokens := newEnrollmentService(t)
 	deviceID := uuid.New()
 	pubKey := generateEd25519PublicKey(t)
+	token := seedClaimToken(t, tokens, tid)
 
-	result, err := svc.RedeemClaimToken(context.Background(), tid, deviceID, pubKey)
+	result, err := svc.RedeemClaimToken(context.Background(), tid, deviceID, token, pubKey)
 	if err != nil {
 		t.Fatalf("RedeemClaimToken: %v", err)
 	}
@@ -64,8 +90,9 @@ func TestRedeemClaimToken(t *testing.T) {
 
 func TestRedeemClaimTokenInvalidKeySize(t *testing.T) {
 	t.Parallel()
-	svc, tid := newEnrollmentService(t)
-	_, err := svc.RedeemClaimToken(context.Background(), tid, uuid.New(), []byte("too-short"))
+	svc, tid, tokens := newEnrollmentService(t)
+	token := seedClaimToken(t, tokens, tid)
+	_, err := svc.RedeemClaimToken(context.Background(), tid, uuid.New(), token, []byte("too-short"))
 	if err == nil {
 		t.Fatal("expected error for invalid key size")
 	}
@@ -76,15 +103,17 @@ func TestRedeemClaimTokenInvalidKeySize(t *testing.T) {
 
 func TestRedeemClaimTokenDuplicate(t *testing.T) {
 	t.Parallel()
-	svc, tid := newEnrollmentService(t)
+	svc, tid, tokens := newEnrollmentService(t)
 	deviceID := uuid.New()
 	pubKey := generateEd25519PublicKey(t)
+	token1 := seedClaimToken(t, tokens, tid)
 
-	_, err := svc.RedeemClaimToken(context.Background(), tid, deviceID, pubKey)
+	_, err := svc.RedeemClaimToken(context.Background(), tid, deviceID, token1, pubKey)
 	if err != nil {
 		t.Fatalf("first RedeemClaimToken: %v", err)
 	}
-	_, err = svc.RedeemClaimToken(context.Background(), tid, deviceID, pubKey)
+	token2 := seedClaimToken(t, tokens, tid)
+	_, err = svc.RedeemClaimToken(context.Background(), tid, deviceID, token2, pubKey)
 	if !errors.Is(err, repository.ErrConflict) {
 		t.Errorf("expected ErrConflict for duplicate enrollment, got %v", err)
 	}
@@ -92,11 +121,12 @@ func TestRedeemClaimTokenDuplicate(t *testing.T) {
 
 func TestRefreshCertificate(t *testing.T) {
 	t.Parallel()
-	svc, tid := newEnrollmentService(t)
+	svc, tid, tokens := newEnrollmentService(t)
 	deviceID := uuid.New()
 	pubKey := generateEd25519PublicKey(t)
+	token := seedClaimToken(t, tokens, tid)
 
-	_, err := svc.RedeemClaimToken(context.Background(), tid, deviceID, pubKey)
+	_, err := svc.RedeemClaimToken(context.Background(), tid, deviceID, token, pubKey)
 	if err != nil {
 		t.Fatalf("RedeemClaimToken: %v", err)
 	}
@@ -121,11 +151,12 @@ func TestRefreshCertificate(t *testing.T) {
 
 func TestRevokeDevice(t *testing.T) {
 	t.Parallel()
-	svc, tid := newEnrollmentService(t)
+	svc, tid, tokens := newEnrollmentService(t)
 	deviceID := uuid.New()
 	pubKey := generateEd25519PublicKey(t)
+	token := seedClaimToken(t, tokens, tid)
 
-	_, err := svc.RedeemClaimToken(context.Background(), tid, deviceID, pubKey)
+	_, err := svc.RedeemClaimToken(context.Background(), tid, deviceID, token, pubKey)
 	if err != nil {
 		t.Fatalf("RedeemClaimToken: %v", err)
 	}
@@ -143,11 +174,12 @@ func TestRevokeDevice(t *testing.T) {
 
 func TestGetEnrollmentStatus(t *testing.T) {
 	t.Parallel()
-	svc, tid := newEnrollmentService(t)
+	svc, tid, tokens := newEnrollmentService(t)
 	deviceID := uuid.New()
 	pubKey := generateEd25519PublicKey(t)
+	token := seedClaimToken(t, tokens, tid)
 
-	_, err := svc.RedeemClaimToken(context.Background(), tid, deviceID, pubKey)
+	_, err := svc.RedeemClaimToken(context.Background(), tid, deviceID, token, pubKey)
 	if err != nil {
 		t.Fatalf("RedeemClaimToken: %v", err)
 	}
@@ -166,12 +198,13 @@ func TestGetEnrollmentStatus(t *testing.T) {
 
 func TestDeviceLifecycleStateMachine(t *testing.T) {
 	t.Parallel()
-	svc, tid := newEnrollmentService(t)
+	svc, tid, tokens := newEnrollmentService(t)
 	deviceID := uuid.New()
 	pubKey := generateEd25519PublicKey(t)
+	token := seedClaimToken(t, tokens, tid)
 
 	// Step 1: Enroll → enrolled.
-	_, err := svc.RedeemClaimToken(context.Background(), tid, deviceID, pubKey)
+	_, err := svc.RedeemClaimToken(context.Background(), tid, deviceID, token, pubKey)
 	if err != nil {
 		t.Fatalf("RedeemClaimToken: %v", err)
 	}
