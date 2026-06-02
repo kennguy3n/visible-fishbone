@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -196,8 +197,41 @@ func (s *BulkDeviceService) ExportCSV(
 	return buf.Bytes(), w.Error()
 }
 
-// ImportCSV parses a CSV of device rows.
-func (s *BulkDeviceService) ImportCSV(r io.Reader) ([]DeviceCSVRow, error) {
+// ImportCSV parses a CSV of device inventory rows and persists each
+// as a device for the tenant. It is the symmetric counterpart to
+// ExportCSV: every successfully parsed row results in a created
+// device. Per-row failures (malformed platform, repository errors)
+// are isolated and reported in the returned BulkResult so a single
+// bad row does not abort the whole import.
+func (s *BulkDeviceService) ImportCSV(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	r io.Reader,
+) (BulkResult, error) {
+	rows, err := parseDeviceCSV(r)
+	if err != nil {
+		return BulkResult{}, err
+	}
+	result := BulkResult{Total: len(rows)}
+	for i, row := range rows {
+		dev, derr := deviceFromCSVRow(row)
+		if derr != nil {
+			result.Failed++
+			result.Errors = append(result.Errors, fmt.Sprintf("row %d: %v", i+1, derr))
+			continue
+		}
+		if _, cerr := s.devices.Create(ctx, tenantID, dev); cerr != nil {
+			result.Failed++
+			result.Errors = append(result.Errors, fmt.Sprintf("row %d: %v", i+1, cerr))
+			continue
+		}
+		result.Succeeded++
+	}
+	return result, nil
+}
+
+// parseDeviceCSV reads device rows from CSV, skipping the header.
+func parseDeviceCSV(r io.Reader) ([]DeviceCSVRow, error) {
 	reader := csv.NewReader(r)
 	records, err := reader.ReadAll()
 	if err != nil {
@@ -224,4 +258,55 @@ func (s *BulkDeviceService) ImportCSV(r io.Reader) ([]DeviceCSVRow, error) {
 		return nil, fmt.Errorf("CSV exceeds max %d rows: %w", MaxBulkDevices, repository.ErrInvalidArgument)
 	}
 	return rows, nil
+}
+
+// deviceFromCSVRow builds a Device from one inventory row. The
+// device_id column is honoured only when it is a valid UUID;
+// foreign identifiers from other systems are dropped so the
+// repository assigns a fresh primary key. Platform is required and
+// validated; status defaults to pending when omitted.
+func deviceFromCSVRow(row DeviceCSVRow) (repository.Device, error) {
+	platform := repository.DevicePlatform(strings.ToLower(strings.TrimSpace(row.Platform)))
+	if !isKnownPlatform(platform) {
+		return repository.Device{}, fmt.Errorf("invalid platform %q: %w", row.Platform, repository.ErrInvalidArgument)
+	}
+	dev := repository.Device{
+		Name:     strings.TrimSpace(row.Name),
+		Platform: platform,
+	}
+	if id, perr := uuid.Parse(strings.TrimSpace(row.DeviceID)); perr == nil {
+		dev.ID = id
+	}
+	if st := repository.DeviceStatus(strings.ToLower(strings.TrimSpace(row.Status))); st != "" {
+		if !isKnownStatus(st) {
+			return repository.Device{}, fmt.Errorf("invalid status %q: %w", row.Status, repository.ErrInvalidArgument)
+		}
+		dev.Status = st
+	}
+	return dev, nil
+}
+
+func isKnownPlatform(p repository.DevicePlatform) bool {
+	switch p {
+	case repository.DevicePlatformWindows,
+		repository.DevicePlatformMacOS,
+		repository.DevicePlatformLinux,
+		repository.DevicePlatformIOS,
+		repository.DevicePlatformAndroid:
+		return true
+	default:
+		return false
+	}
+}
+
+func isKnownStatus(s repository.DeviceStatus) bool {
+	switch s {
+	case repository.DeviceStatusPending,
+		repository.DeviceStatusActive,
+		repository.DeviceStatusSuspended,
+		repository.DeviceStatusDeleted:
+		return true
+	default:
+		return false
+	}
 }

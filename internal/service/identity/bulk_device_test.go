@@ -149,31 +149,66 @@ func TestBulkDevice_ExportCSV(t *testing.T) {
 }
 
 func TestBulkDevice_ImportCSV(t *testing.T) {
-	svc, _, _ := setupBulkTest(t)
+	svc, store, tenantID := setupBulkTest(t)
+	ctx := context.Background()
 
 	csv := "device_id,name,platform,status,created_at\n" +
 		"abc-123,dev1,linux,active,2025-01-01T00:00:00Z\n" +
 		"def-456,dev2,windows,active,2025-01-02T00:00:00Z\n"
 
-	rows, err := svc.ImportCSV(strings.NewReader(csv))
+	result, err := svc.ImportCSV(ctx, tenantID, strings.NewReader(csv))
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	if len(rows) != 2 {
-		t.Errorf("rows = %d, want 2", len(rows))
+	if result.Total != 2 || result.Succeeded != 2 || result.Failed != 0 {
+		t.Errorf("result = %+v, want total=2 succeeded=2 failed=0", result)
 	}
-	if rows[0].Name != "dev1" {
-		t.Errorf("name = %q, want dev1", rows[0].Name)
+	// Rows must be persisted as devices for the tenant.
+	page, err := memory.NewDeviceRepository(store).List(
+		ctx, tenantID, repository.DeviceListFilter{}, repository.Page{Limit: 50})
+	if err != nil {
+		t.Fatalf("list devices: %v", err)
+	}
+	if len(page.Items) != 2 {
+		t.Errorf("persisted devices = %d, want 2", len(page.Items))
+	}
+}
+
+func TestBulkDevice_ImportCSV_InvalidPlatformIsolated(t *testing.T) {
+	svc, store, tenantID := setupBulkTest(t)
+	ctx := context.Background()
+
+	csv := "device_id,name,platform,status,created_at\n" +
+		"abc-123,dev1,linux,active,2025-01-01T00:00:00Z\n" +
+		"def-456,dev2,plan9,active,2025-01-02T00:00:00Z\n"
+
+	result, err := svc.ImportCSV(ctx, tenantID, strings.NewReader(csv))
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Succeeded != 1 || result.Failed != 1 {
+		t.Errorf("result = %+v, want succeeded=1 failed=1", result)
+	}
+	if len(result.Errors) != 1 {
+		t.Errorf("errors = %v, want 1 entry", result.Errors)
+	}
+	page, err := memory.NewDeviceRepository(store).List(
+		ctx, tenantID, repository.DeviceListFilter{}, repository.Page{Limit: 50})
+	if err != nil {
+		t.Fatalf("list devices: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Errorf("persisted devices = %d, want 1 (bad row isolated)", len(page.Items))
 	}
 }
 
 func TestBulkDevice_ImportCSV_Empty(t *testing.T) {
-	svc, _, _ := setupBulkTest(t)
-	rows, err := svc.ImportCSV(strings.NewReader("header\n"))
+	svc, _, tenantID := setupBulkTest(t)
+	result, err := svc.ImportCSV(context.Background(), tenantID, strings.NewReader("header\n"))
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	if len(rows) != 0 {
-		t.Errorf("rows = %d, want 0", len(rows))
+	if result.Total != 0 || result.Succeeded != 0 {
+		t.Errorf("result = %+v, want empty", result)
 	}
 }

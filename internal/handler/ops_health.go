@@ -118,7 +118,7 @@ func (h *OpsHealthHandler) record(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_argument", "health_score must be 0-100")
 		return
 	}
-	if len(req.ComponentScores) == 0 {
+	if len(req.ComponentScores) == 0 || isJSONNullPayload(req.ComponentScores) {
 		WriteError(w, http.StatusBadRequest, "invalid_argument", "component_scores is required")
 		return
 	}

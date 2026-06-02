@@ -2478,7 +2478,7 @@ paths:
           description: Import result
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/CSVImportResponse" }
+              schema: { $ref: "#/components/schemas/BulkResult" }
         "400": { $ref: "#/components/responses/Error" }
 
   /tenants/{tenant_id}/devices/export:
@@ -3710,20 +3710,3 @@ components:
         errors:
           type: array
           items: { type: string }
-
-    CSVImportResponse:
-      type: object
-      properties:
-        imported: { type: integer }
-        rows:
-          type: array
-          items: { $ref: "#/components/schemas/DeviceCSVRow" }
-
-    DeviceCSVRow:
-      type: object
-      properties:
-        device_id: { type: string }
-        name: { type: string }
-        platform: { type: string }
-        status: { type: string }
-        created_at: { type: string }

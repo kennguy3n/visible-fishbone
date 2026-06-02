@@ -113,10 +113,12 @@ func TestBulkDevice_Revoke(t *testing.T) {
 
 func TestBulkDevice_ImportCSV(t *testing.T) {
 	t.Parallel()
-	h, _, tenantID := newBulkDeviceTestSetup(t)
+	h, store, tenantID := newBulkDeviceTestSetup(t)
 	tid := tenantID.String()
 
-	csv := "device_id,name,platform,status,created_at\nabc,dev1,linux,active,2025-01-01T00:00:00Z\n"
+	csv := "device_id,name,platform,status,created_at\n" +
+		"abc,dev1,linux,active,2025-01-01T00:00:00Z\n" +
+		"def,dev2,windows,pending,2025-01-02T00:00:00Z\n"
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/tenants/"+tid+"/devices/import",
 		strings.NewReader(csv))
@@ -125,6 +127,56 @@ func TestBulkDevice_ImportCSV(t *testing.T) {
 	h.importCSV(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var result identity.BulkResult
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if result.Total != 2 || result.Succeeded != 2 || result.Failed != 0 {
+		t.Errorf("result = %+v, want total=2 succeeded=2 failed=0", result)
+	}
+	// Imported rows must actually be persisted as devices.
+	page, err := memory.NewDeviceRepository(store).List(
+		context.Background(), tenantID, repository.DeviceListFilter{}, repository.Page{Limit: 50})
+	if err != nil {
+		t.Fatalf("list devices: %v", err)
+	}
+	if len(page.Items) != 2 {
+		t.Errorf("persisted devices = %d, want 2", len(page.Items))
+	}
+}
+
+func TestBulkDevice_ImportCSV_InvalidPlatformIsolated(t *testing.T) {
+	t.Parallel()
+	h, store, tenantID := newBulkDeviceTestSetup(t)
+	tid := tenantID.String()
+
+	csv := "device_id,name,platform,status,created_at\n" +
+		"abc,dev1,linux,active,2025-01-01T00:00:00Z\n" +
+		"def,dev2,plan9,active,2025-01-02T00:00:00Z\n"
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tid+"/devices/import",
+		strings.NewReader(csv))
+	req.SetPathValue("tenant_id", tid)
+	rec := httptest.NewRecorder()
+	h.importCSV(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var result identity.BulkResult
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if result.Succeeded != 1 || result.Failed != 1 {
+		t.Errorf("result = %+v, want succeeded=1 failed=1", result)
+	}
+	page, err := memory.NewDeviceRepository(store).List(
+		context.Background(), tenantID, repository.DeviceListFilter{}, repository.Page{Limit: 50})
+	if err != nil {
+		t.Fatalf("list devices: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Errorf("persisted devices = %d, want 1 (bad row isolated)", len(page.Items))
 	}
 }
 

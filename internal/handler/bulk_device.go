@@ -105,19 +105,17 @@ func (h *BulkDeviceHandler) bulkRevoke(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *BulkDeviceHandler) importCSV(w http.ResponseWriter, r *http.Request) {
-	if _, ok := PathUUID(w, r, "tenant_id"); !ok {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // 10 MB
-	rows, err := h.svc.ImportCSV(r.Body)
+	result, err := h.svc.ImportCSV(r.Context(), tenantID, r.Body)
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_body", err.Error())
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"imported": len(rows),
-		"rows":     rows,
-	})
+	WriteJSON(w, http.StatusOK, result)
 }
 
 func (h *BulkDeviceHandler) exportCSV(w http.ResponseWriter, r *http.Request) {

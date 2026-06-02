@@ -132,6 +132,29 @@ func TestOpsHealth_InvalidScore(t *testing.T) {
 	}
 }
 
+func TestOpsHealth_NullComponentScoresRejected(t *testing.T) {
+	t.Parallel()
+	h, tenantID := newOpsHealthTestSetup(t)
+	tid := tenantID.String()
+
+	// A literal JSON `null` has len 4, so it must be rejected by the
+	// explicit null check rather than slipping past len()==0.
+	body, _ := json.Marshal(OpsHealthRecordRequest{
+		HealthScore:     50,
+		ComponentScores: json.RawMessage(`null`),
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tid+"/ops/health",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tid)
+	rec := httptest.NewRecorder()
+	h.record(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for null component_scores; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestOpsHealth_GetLatest_NoData(t *testing.T) {
 	t.Parallel()
 	h, tenantID := newOpsHealthTestSetup(t)
