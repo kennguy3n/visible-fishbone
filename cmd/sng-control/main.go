@@ -35,6 +35,7 @@ import (
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
+	aisvc "github.com/kennguy3n/visible-fishbone/internal/service/ai"
 	"github.com/kennguy3n/visible-fishbone/internal/service/alert"
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
@@ -554,6 +555,7 @@ func buildRouter(
 		Alert:            handler.NewAlertHandler(alertRouter, alertFeedback, logger),
 		Integrations:     handler.NewIntegrationHandler(integrationSvc),
 		MSP:              handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
+		AI:               buildAIHandler(cfg, policySvc, logger),
 		APIKeyLookup:     apiKeySvc,
 		Health:           health,
 		OpenAPISpec:      handler.NewOpenAPIHandler(),
@@ -571,6 +573,37 @@ func buildRouter(
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
 	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, nil
+}
+
+// buildAIHandler constructs the AI handler with an optional LLM
+// provider. When AI_LLM_ENDPOINT is not set, the service runs in
+// template-only mode and suggest-policy / troubleshoot return 503.
+func buildAIHandler(cfg *config.Config, policySvc *policy.Service, logger *slog.Logger) *handler.AIHandler {
+	var llm aisvc.LLMProvider
+	if cfg.AI.Endpoint != "" {
+		llm = &aisvc.HTTPProvider{
+			Endpoint: cfg.AI.Endpoint,
+			APIKey:   cfg.AI.APIKey,
+			Model:    cfg.AI.Model,
+			Timeout:  cfg.AI.Timeout,
+		}
+		logger.Info("ai: LLM provider configured",
+			slog.String("endpoint", cfg.AI.Endpoint),
+			slog.String("model", cfg.AI.Model))
+	} else {
+		logger.Info("ai: no LLM endpoint configured; template-only mode")
+	}
+
+	var verifier *aisvc.Verifier
+	if policySvc != nil {
+		verifier = aisvc.NewVerifier(policySvc)
+	}
+
+	// Summarizer requires a ClickHouse evidence reader. For now,
+	// we construct without one (nil) — it will be wired later when
+	// ClickHouse is available, similar to the policy simulator.
+	svc := aisvc.New(llm, verifier, nil, aisvc.WithLogger(logger))
+	return handler.NewAIHandler(svc, logger)
 }
 
 // loadPolicyKeyWrapMaster resolves the AES-GCM master key from
