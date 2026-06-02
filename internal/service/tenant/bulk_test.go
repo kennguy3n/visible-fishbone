@@ -598,3 +598,113 @@ func (p *blockingApplier) PutGraph(ctx context.Context, tid uuid.UUID, _ *uuid.U
 	<-ctx.Done()
 	return repository.PolicyGraph{}, ctx.Err()
 }
+
+// ctxAwareTokens simulates an issuer that PERSISTS the token in
+// its DB before observing ctx cancellation. This is the failure
+// mode the round-25 ANALYSIS_0002 fix targets: under
+// errgroup.WithContext, one goroutine's failure cancels the
+// derived ctx, and sibling goroutines whose tokens already landed
+// server-side then see ctx.Canceled before they could write to
+// their slot in the result array — losing a persisted-but-
+// unreported token. With the round-25 fix (plain errgroup.Group),
+// siblings see the parent ctx, never cancelled by sibling
+// failures, and every persisted token reaches the response slice.
+type ctxAwareTokens struct {
+	mu           sync.Mutex
+	failOnCall   map[uuid.UUID]int // tenantID -> 1-based call index that fails
+	persisted    map[uuid.UUID]int // tenantID -> server-side token count
+	calls        map[uuid.UUID]int // tenantID -> total call count
+	persistDelay time.Duration
+}
+
+func (s *ctxAwareTokens) GenerateClaimToken(ctx context.Context, tid uuid.UUID, _ time.Duration, _ *uuid.UUID) (svctenant.ClaimTokenResult, error) {
+	s.mu.Lock()
+	s.calls[tid]++
+	callIdx := s.calls[tid]
+	s.mu.Unlock()
+	if want, ok := s.failOnCall[tid]; ok && want == callIdx {
+		return svctenant.ClaimTokenResult{}, errors.New("forced fail")
+	}
+	// Simulate DB persistence happening BEFORE the ctx
+	// observation. After this point the token is on disk and
+	// the operator has lost the plaintext if we abort.
+	s.mu.Lock()
+	s.persisted[tid]++
+	pt := uuid.NewString()
+	s.mu.Unlock()
+	if s.persistDelay > 0 {
+		time.Sleep(s.persistDelay)
+	}
+	// Now check whether ctx was cancelled out from under us by
+	// a sibling failure. Pre-fix (errgroup.WithContext shape),
+	// this returns ctx.Err() — the slot is never populated and
+	// the persisted token leaks. Post-fix (plain Group sharing
+	// parent ctx), this only returns non-nil if the CALLER's
+	// parent context was cancelled — sibling failures do not
+	// cascade here.
+	if err := ctx.Err(); err != nil {
+		return svctenant.ClaimTokenResult{}, err
+	}
+	return svctenant.ClaimTokenResult{Plaintext: pt, ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+// TestBulkGenerateClaimTokens_SiblingFailureDoesNotLosePersistedTokens
+// pins round-25 of Devin Review on PR #42 (ANALYSIS_0002). With
+// count=4, the first call fails immediately while three siblings
+// are mid-persistence. Under the pre-fix errgroup.WithContext
+// shape, the derived ctx was cancelled by the first failure and
+// the three siblings — having already persisted server-side —
+// would return ctx.Canceled before writing their plaintext slot.
+// The operator lost three plaintexts that the API contract
+// promised they would never need to recover via admin tooling.
+//
+// Post-fix invariant: every persisted token reaches the response
+// outcome (ClaimTokens slice on the Failures entry, since the
+// tenant overall failed). Concretely:
+//
+//	persisted == 3  &&  len(outcome.ClaimTokens) == 3
+//
+// If a future refactor reintroduces errgroup.WithContext-shaped
+// cancellation here, persisted will be 3 but len(ClaimTokens) will
+// be 0 — the test fails loudly with that exact accounting message.
+func TestBulkGenerateClaimTokens_SiblingFailureDoesNotLosePersistedTokens(t *testing.T) {
+	t.Parallel()
+	tn := uuid.New()
+	tokens := &ctxAwareTokens{
+		failOnCall:   map[uuid.UUID]int{tn: 1},
+		persisted:    map[uuid.UUID]int{},
+		calls:        map[uuid.UUID]int{},
+		persistDelay: 75 * time.Millisecond,
+	}
+	svc := svctenant.NewBulkService(nil, stubAuthz{tenants: []uuid.UUID{tn}}, nil, nil, tokens, nil, svctenant.BulkOptions{})
+	res, err := svc.BulkGenerateClaimTokens(context.Background(), uuid.New(), uuid.New(), nil, 4, time.Hour)
+	if err != nil {
+		t.Fatalf("gen: %v", err)
+	}
+	// One tenant, one forced failure → tenant lands in Failures.
+	if len(res.Failures) != 1 || len(res.Successes) != 0 {
+		t.Fatalf("expected 1 failure / 0 success, got %d/%d", len(res.Successes), len(res.Failures))
+	}
+	tokens.mu.Lock()
+	persisted := tokens.persisted[tn]
+	tokens.mu.Unlock()
+	// 3 of the 4 calls persisted server-side (the 1 forced-fail
+	// returned without persisting).
+	if persisted != 3 {
+		t.Fatalf("test fixture: expected 3 server-side persisted tokens, got %d", persisted)
+	}
+	// The round-25 invariant: every persisted token must appear
+	// in the outcome's ClaimTokens slice. Pre-fix would yield 0
+	// here (sibling ctx cancelled before slot population).
+	got := len(res.Failures[0].ClaimTokens)
+	if got != persisted {
+		t.Fatalf("round-25 regression: %d tokens persisted server-side but only %d returned to caller; sibling ctx-cancellation lost plaintexts", persisted, got)
+	}
+	// Sanity: every returned plaintext must be non-empty (no
+	// empty slot leaked through).
+	for i, pt := range res.Failures[0].ClaimTokens {
+		if pt == "" {
+			t.Fatalf("plaintext slot %d is empty in returned ClaimTokens — slot-population regression", i)
+		}
+	}
+}

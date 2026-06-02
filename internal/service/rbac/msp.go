@@ -212,7 +212,44 @@ func (svc *Service) ListAuthorizedTenants(
 	if err != nil {
 		return nil, fmt.Errorf("list authorized tenants: %w", err)
 	}
-	// Pull every binding for the MSP. ListTenants returns paginated
+	// Decide broad authority and (for the non-broad case) the
+	// authorized tenant-grant set BEFORE pulling any binding
+	// pages. Round-25 of Devin Review on PR #42 (ANALYSIS_0003)
+	// flagged the previous shape: we eagerly accumulated every
+	// msp_tenants binding (up to ~1M via the page cap) into a
+	// flat slice and only decided authorization at the end. For
+	// non-broad operators with a small tenant-grant set on a
+	// large MSP that allocated O(total bindings) instead of
+	// O(authorized), and for the no-authority-at-all case it
+	// scanned every page just to return nil. The new shape:
+	//
+	//  1. If the user holds broad authority (platform-scope or
+	//     msp-scope matching mspID with `permission`), every
+	//     binding is authorized — we still page through them
+	//     all because the contract returns the full set, but
+	//     skip the per-row hash lookup.
+	//  2. If not broad, we precompute the authorized tenant
+	//     set from the resolved tenant-scope grants. If that
+	//     set is empty, the answer is unambiguously empty and
+	//     we short-circuit without fetching a single page.
+	//  3. Otherwise we filter each page inline against the set
+	//     and only retain matches, bounding the in-memory
+	//     `bound` slice to authorized tenants regardless of
+	//     MSP size.
+	broad := hasBroadAuthorityIn(resolvedGrants, mspID, permission)
+	var tenantGrantSet map[uuid.UUID]struct{}
+	if !broad {
+		tenantGrantSet = authorizedTenantSet(resolvedGrants, permission)
+		if len(tenantGrantSet) == 0 {
+			// No broad authority AND no tenant-scope grants —
+			// the answer is empty without consulting the
+			// MSP binding table at all. Saves up to ~5000
+			// ListTenants round-trips on a pathologically
+			// large MSP.
+			return nil, nil
+		}
+	}
+	// Pull bindings for the MSP. ListTenants returns paginated
 	// rows; for the platform's expected MSP sizes (<10k tenants)
 	// the loop terminates in 10 iterations, but we cap at
 	// ListAuthorizedTenantsMaxPages as a defensive guard against
@@ -234,15 +271,16 @@ func (svc *Service) ListAuthorizedTenants(
 			return nil, fmt.Errorf("list authorized tenants: msp binding: %w", err)
 		}
 		for _, b := range page.Items {
-			bound = append(bound, b.TenantID)
+			if broad {
+				bound = append(bound, b.TenantID)
+				continue
+			}
+			if _, ok := tenantGrantSet[b.TenantID]; ok {
+				bound = append(bound, b.TenantID)
+			}
 		}
 		if page.NextCursor == "" {
-			// Decide the broad authorization (platform or msp scope)
-			// using the pre-resolved grants.
-			if hasBroadAuthorityIn(resolvedGrants, mspID, permission) {
-				return bound, nil
-			}
-			return restrictToTenantGrantsIn(resolvedGrants, permission, bound), nil
+			return bound, nil
 		}
 		cursor = page.NextCursor
 	}
@@ -316,11 +354,16 @@ func hasBroadAuthorityIn(grants []resolvedGrant, mspID uuid.UUID, permission str
 	return false
 }
 
-// restrictToTenantGrantsIn is the pure-function form of
-// restrictToTenantGrants. Returns the subset of `bound` tenants that
-// the user holds a tenant-scoped grant for, gated by the named
-// permission. Round-23 of Devin Review on PR #42 (ANALYSIS_0005).
-func restrictToTenantGrantsIn(grants []resolvedGrant, permission string, bound []uuid.UUID) []uuid.UUID {
+// authorizedTenantSet returns the set of tenant IDs the user holds
+// a tenant-scoped grant for, gated by the named permission. The
+// returned map is suitable for O(1) lookup while streaming MSP
+// bindings through ListAuthorizedTenants. Round-25 of Devin Review
+// on PR #42 (ANALYSIS_0003) hoisted this computation out of the
+// post-loop restrictToTenantGrantsIn so we can decide broad
+// authority + the authorized set BEFORE fetching binding pages,
+// short-circuit when both are empty, and stream-filter pages when
+// the set is small but the MSP is large.
+func authorizedTenantSet(grants []resolvedGrant, permission string) map[uuid.UUID]struct{} {
 	tenantGrants := make(map[uuid.UUID]struct{}, len(grants))
 	for _, rg := range grants {
 		if rg.role.Scope != repository.RoleScopeTenant {
@@ -336,6 +379,19 @@ func restrictToTenantGrantsIn(grants []resolvedGrant, permission string, bound [
 			tenantGrants[*rg.role.TenantID] = struct{}{}
 		}
 	}
+	return tenantGrants
+}
+
+// restrictToTenantGrantsIn is the pure-function form of
+// restrictToTenantGrants. Returns the subset of `bound` tenants that
+// the user holds a tenant-scoped grant for, gated by the named
+// permission. Retained for any caller that still post-filters a
+// fully accumulated slice; ListAuthorizedTenants now stream-filters
+// inside the page loop instead. Round-23 of Devin Review on PR #42
+// (ANALYSIS_0005); the inner set computation is shared with
+// authorizedTenantSet from round-25.
+func restrictToTenantGrantsIn(grants []resolvedGrant, permission string, bound []uuid.UUID) []uuid.UUID {
+	tenantGrants := authorizedTenantSet(grants, permission)
 	out := make([]uuid.UUID, 0, len(bound))
 	for _, tid := range bound {
 		if _, ok := tenantGrants[tid]; ok {

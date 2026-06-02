@@ -802,3 +802,139 @@ func TestListAuthorizedTenants_ResolvesUserRolesOnce(t *testing.T) {
 		})
 	}
 }
+
+// callCountingMSPRepo wraps an MSPRepository and counts ListTenants
+// invocations. Used by TestListAuthorizedTenants_NoAuthorityShortCircuits
+// to pin the round-25 ANALYSIS_0003 fix that decides broad authority +
+// the authorized tenant-grant set BEFORE consulting the binding table
+// — when both are empty, ListTenants must be called zero times.
+type callCountingMSPRepo struct {
+	repository.MSPRepository
+	listTenantsCalls int
+}
+
+func (c *callCountingMSPRepo) ListTenants(
+	ctx context.Context, mspID uuid.UUID, page repository.Page,
+) (repository.PageResult[repository.MSPTenantBinding], error) {
+	c.listTenantsCalls++
+	return c.MSPRepository.ListTenants(ctx, mspID, page)
+}
+
+// TestListAuthorizedTenants_NoAuthorityShortCircuitsBindingFetch pins
+// round-25 of Devin Review on PR #42 (ANALYSIS_0003). The previous
+// shape fetched ALL msp_tenants bindings (up to ~1M via the page cap)
+// even when the user had zero grants for the named permission —
+// O(MSP size) DB work to return an empty slice. The new shape decides
+// broad authority + the authorized tenant-grant set from the resolved
+// (grant, role) tuples BEFORE the page loop; when both are empty, it
+// short-circuits without touching ListTenants at all.
+//
+// We seed a non-trivial MSP (>1 page of bindings) and a user with NO
+// role grants of any kind, then assert:
+//
+//  1. ListAuthorizedTenants returns nil, nil.
+//  2. ListTenants was invoked exactly zero times.
+//
+// Invariant 2 is the key regression gate — if a future refactor
+// reintroduces the eager-fetch shape, this test catches it
+// immediately (no need to time the call or watch DB load).
+func TestListAuthorizedTenants_NoAuthorityShortCircuitsBindingFetch(t *testing.T) {
+	t.Parallel()
+	svc, store, mspRepo, _, userID, mspID := mspRBACFixtures(t)
+	tenantRepo := memory.NewTenantRepository(store)
+	ctx := context.Background()
+
+	// Seed enough tenants to span multiple pages so the test
+	// would visibly fail with O(MSP size) round-trips if the
+	// short-circuit regressed.
+	total := repository.MaxPageLimit + 5
+	for i := 0; i < total; i++ {
+		tn, err := tenantRepo.Create(ctx, repository.Tenant{
+			Name: fmt.Sprintf("t-%d", i),
+			Slug: fmt.Sprintf("r25-sc-%03d", i),
+		})
+		if err != nil {
+			t.Fatalf("seed tenant %d: %v", i, err)
+		}
+		if _, err := mspRepo.AssignTenant(ctx, mspID, tn.ID, repository.MSPRelationshipCoManager, nil); err != nil {
+			t.Fatalf("assign tenant %d: %v", i, err)
+		}
+	}
+
+	counting := &callCountingMSPRepo{MSPRepository: mspRepo}
+	got, err := svc.ListAuthorizedTenants(ctx, userID, mspID, rbac.PermTenantsRead, counting)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("user has no grants — expected empty result, got %d tenants", len(got))
+	}
+	if counting.listTenantsCalls != 0 {
+		t.Fatalf("regression: ListTenants invoked %d times for a user with no authority; round-25 short-circuit broken (expected 0)", counting.listTenantsCalls)
+	}
+}
+
+// TestListAuthorizedTenants_NonBroadStreamFiltersBindings pins the
+// round-25 ANALYSIS_0003 stream-filter behaviour for the non-broad
+// case. A user with a tenant-scope grant for exactly ONE tenant
+// inside an MSP that spans multiple pages of bindings must:
+//
+//  1. Receive that single tenant back (and no others).
+//  2. Hit the pagination loop the same number of times as the
+//     broad case (the inner-loop filter is what changed, not the
+//     outer page cadence).
+func TestListAuthorizedTenants_NonBroadStreamFiltersBindings(t *testing.T) {
+	t.Parallel()
+	svc, store, mspRepo, roleRepo, userID, mspID := mspRBACFixtures(t)
+	tenantRepo := memory.NewTenantRepository(store)
+	ctx := context.Background()
+
+	// Seed >1 page so we exercise the cursor loop, not the single-page
+	// happy path.
+	total := repository.MaxPageLimit + 25
+	var targetTenant uuid.UUID
+	for i := 0; i < total; i++ {
+		tn, err := tenantRepo.Create(ctx, repository.Tenant{
+			Name: fmt.Sprintf("t-%d", i),
+			Slug: fmt.Sprintf("r25-sf-%03d", i),
+		})
+		if err != nil {
+			t.Fatalf("seed tenant %d: %v", i, err)
+		}
+		if _, err := mspRepo.AssignTenant(ctx, mspID, tn.ID, repository.MSPRelationshipCoManager, nil); err != nil {
+			t.Fatalf("assign tenant %d: %v", i, err)
+		}
+		// Pick a tenant in the SECOND page so the stream-filter
+		// must outlast the first page boundary.
+		if i == repository.MaxPageLimit+3 {
+			targetTenant = tn.ID
+		}
+	}
+	if targetTenant == uuid.Nil {
+		t.Fatalf("test bug: target tenant not selected")
+	}
+
+	role := mustSeedRole(t, roleRepo, repository.Role{
+		Name:        "tenant_scoped_reader",
+		Scope:       repository.RoleScopeTenant,
+		TenantID:    &targetTenant,
+		Permissions: []string{rbac.PermTenantsRead},
+	})
+	scope := targetTenant
+	if err := roleRepo.AssignRole(ctx, repository.UserRole{
+		UserID: userID, RoleID: role.ID, ScopeID: &scope,
+	}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+
+	got, err := svc.ListAuthorizedTenants(ctx, userID, mspID, rbac.PermTenantsRead, mspRepo)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 authorized tenant (round-25 stream-filter), got %d", len(got))
+	}
+	if got[0] != targetTenant {
+		t.Fatalf("expected the tenant-scope-granted tenant, got %s want %s", got[0], targetTenant)
+	}
+}

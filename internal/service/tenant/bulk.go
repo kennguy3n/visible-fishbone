@@ -285,17 +285,35 @@ func (svc *BulkService) BulkGenerateClaimTokens(
 		// down by the inner cap, while the outer fanOut limit
 		// still bounds the total goroutine count to
 		// (outer × inner). Each goroutine writes into its own
-		// `plaintexts[i]` slot so there's no shared mutation;
-		// errgroup.WithContext cancels the inner ctx on first
-		// error, but the success/failure outcome is decided by
-		// scanning the slot population after Wait — this is
-		// equivalent to the previous "first failure wins"
-		// semantic but reports a partial-success count that
-		// reflects all in-flight successes that completed
-		// (not just those issued before the failure index).
+		// `plaintexts[i]` slot so there's no shared mutation.
+		//
+		// Round-25 of Devin Review on PR #42 (ANALYSIS_0002)
+		// flagged a subtle correctness issue with the previous
+		// `errgroup.WithContext` shape: when goroutine A's
+		// GenerateClaimToken failed, the derived ctx was
+		// cancelled, and goroutine B (whose token may have
+		// already been persisted server-side) could have its
+		// next pool operation aborted with `context.Canceled`
+		// before the function returned — so the plaintext was
+		// never written to the slot and the operator lost a
+		// persisted-but-unreported token. The token is
+		// recoverable via the identity service's admin path,
+		// but the API contract claimed "plaintexts are NEVER
+		// persisted elsewhere" so this was a real leak.
+		//
+		// The fix: plain `errgroup.Group` (no derived ctx).
+		// A failing call no longer cancels siblings; every
+		// goroutine sees the parent ctx directly. Wall-clock
+		// cost in the failure path increases marginally (we
+		// wait for the remaining count-1 calls to complete
+		// instead of short-circuiting), but token issuance is
+		// rare, count is small, and the correctness gain
+		// dominates. SetLimit still bounds the in-flight
+		// goroutines so a high count doesn't fan out beyond
+		// perTenantTokenConcurrency.
 		const perTenantTokenConcurrency = 8
 		plaintexts := make([]string, count)
-		ig, igctx := errgroup.WithContext(ctx)
+		var ig errgroup.Group
 		limit := perTenantTokenConcurrency
 		if limit > count {
 			limit = count
@@ -304,7 +322,7 @@ func (svc *BulkService) BulkGenerateClaimTokens(
 		for i := 0; i < count; i++ {
 			i := i
 			ig.Go(func() error {
-				r, err := svc.tokens.GenerateClaimToken(igctx, tid, ttl, actorID)
+				r, err := svc.tokens.GenerateClaimToken(ctx, tid, ttl, actorID)
 				if err != nil {
 					return err
 				}
