@@ -350,6 +350,21 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 						return SCIMGroup{}, fmt.Errorf("assign member %s: %w", m.Value, err)
 					}
 				}
+			} else if strings.EqualFold(op.Path, "displayname") {
+				// RFC 7644 §3.5.2.1: add on single-valued = set value.
+				if val, ok := op.Value.(string); ok && val != "" {
+					r, err = s.roles.Update(ctx, groupID, val, r.ExternalID)
+					if err != nil {
+						return SCIMGroup{}, err
+					}
+				}
+			} else if strings.EqualFold(op.Path, "externalid") {
+				if val, ok := op.Value.(string); ok {
+					r, err = s.roles.Update(ctx, groupID, r.Name, val)
+					if err != nil {
+						return SCIMGroup{}, err
+					}
+				}
 			}
 		case "remove":
 			if strings.EqualFold(op.Path, "members") {
@@ -492,9 +507,23 @@ func roleToSCIMGroup(r repository.Role) SCIMGroup {
 }
 
 // applyUserReplace applies a "replace" (or "add") patch operation to
-// a repository User.
+// a repository User. Supports path-less operations (Azure AD pattern)
+// where op.Value is a map of attribute-value pairs.
 func applyUserReplace(u *repository.User, op SCIMPatchOp) {
 	path := strings.ToLower(op.Path)
+
+	// Path-less patch: Azure AD sends {"op":"replace","value":{"active":false}}
+	if path == "" {
+		m, ok := op.Value.(map[string]any)
+		if !ok {
+			return
+		}
+		for k, v := range m {
+			applyUserReplace(u, SCIMPatchOp{Op: op.Op, Path: k, Value: v})
+		}
+		return
+	}
+
 	val, _ := op.Value.(string)
 	switch path {
 	case "username":
