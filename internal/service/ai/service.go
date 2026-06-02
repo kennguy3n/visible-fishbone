@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -104,7 +105,7 @@ func (s *Service) SuggestPolicy(ctx context.Context, tenantID uuid.UUID, actorID
 	}
 
 	suggestion := PolicySuggestion{
-		Graph:       []byte(resp.Text),
+		Graph:       []byte(extractJSON(resp.Text)),
 		Rationale:   "AI-generated policy suggestion based on: " + truncate(prompt, 200),
 		Confidence:  0.5,
 		AIGenerated: true,
@@ -158,6 +159,25 @@ func (s *Service) Troubleshoot(ctx context.Context, tenantID uuid.UUID, query st
 		AIGenerated:    true,
 		ModelID:        resp.ModelID,
 	}, nil
+}
+
+// extractJSON strips markdown code fences and leading/trailing
+// whitespace from an LLM response, returning only the JSON body.
+// LLMs routinely wrap JSON in ```json ... ``` blocks despite
+// prompts asking for raw JSON.
+func extractJSON(s string) string {
+	s = strings.TrimSpace(s)
+	// Strip ```json ... ``` or ``` ... ``` fences.
+	if strings.HasPrefix(s, "```") {
+		if idx := strings.Index(s[3:], "\n"); idx >= 0 {
+			s = s[3+idx+1:]
+		}
+		if idx := strings.LastIndex(s, "```"); idx >= 0 {
+			s = s[:idx]
+		}
+		s = strings.TrimSpace(s)
+	}
+	return s
 }
 
 func buildPolicySuggestionPrompt(userPrompt string) string {

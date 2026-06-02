@@ -1788,6 +1788,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AISummary" }
         "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
 
   /tenants/{tenant_id}/ai/suggest-policy:
@@ -1814,6 +1816,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AIVerifiedSuggestion" }
         "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
 
   /tenants/{tenant_id}/ai/troubleshoot:
@@ -1839,6 +1843,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AITroubleshootResult" }
         "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
 
 components:

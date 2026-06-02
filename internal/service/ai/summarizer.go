@@ -49,7 +49,9 @@ func WithMaxLatency(d time.Duration) SummarizerOption {
 }
 
 // NewSummarizer constructs a Summarizer. llm may be nil
-// (template-only mode). evidence must not be nil.
+// (template-only mode). evidence may be nil — Generate will
+// produce a template summary with empty evidence data until a
+// real EvidenceReader is wired.
 func NewSummarizer(llm LLMProvider, evidence EvidenceReader, opts ...SummarizerOption) *Summarizer {
 	s := &Summarizer{
 		llm:        llm,
@@ -73,13 +75,13 @@ func NewSummarizer(llm LLMProvider, evidence EvidenceReader, opts ...SummarizerO
 func (s *Summarizer) Generate(ctx context.Context, tenantID uuid.UUID, tr TimeRange) (Summary, error) {
 	start := time.Now()
 
-	if s.evidence == nil {
-		return Summary{}, fmt.Errorf("ai/summarizer: no evidence reader configured")
-	}
-
-	data, err := s.evidence.QueryEvidence(ctx, tenantID, tr)
-	if err != nil {
-		return Summary{}, fmt.Errorf("ai/summarizer: query evidence: %w", err)
+	var data TemplateData
+	if s.evidence != nil {
+		var err error
+		data, err = s.evidence.QueryEvidence(ctx, tenantID, tr)
+		if err != nil {
+			return Summary{}, fmt.Errorf("ai/summarizer: query evidence: %w", err)
+		}
 	}
 
 	data.TenantID = tenantID.String()
