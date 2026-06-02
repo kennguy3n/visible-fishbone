@@ -85,10 +85,10 @@ type BrandingResolver struct {
 	// reads + writes go through cacheMu — a RWMutex because
 	// Resolve traffic vastly outnumbers Set/Clear traffic on
 	// production portals.
-	cacheMu       sync.RWMutex
-	cacheTTL      time.Duration
-	cacheMax      int
-	cacheEntries  map[uuid.UUID]brandingCacheEntry
+	cacheMu      sync.RWMutex
+	cacheTTL     time.Duration
+	cacheMax     int
+	cacheEntries map[uuid.UUID]brandingCacheEntry
 	// now is injected for tests; production code uses time.Now.
 	now func() time.Time
 }
