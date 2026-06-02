@@ -82,14 +82,14 @@ func (m *SchedulerMetrics) Snapshot() SchedulerMetrics {
 // tenants. It uses rate limiting to avoid thundering herd and
 // supports leader election via NATS KV for single-writer semantics.
 type Scheduler struct {
-	config   SchedulerConfig
-	tenants  TenantLister
-	optIn    TenantOptInChecker
-	runner   AnalysisRunner
-	logger   *slog.Logger
-	metrics  SchedulerMetrics
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	config  SchedulerConfig
+	tenants TenantLister
+	optIn   TenantOptInChecker
+	runner  AnalysisRunner
+	logger  *slog.Logger
+	metrics SchedulerMetrics
+	stopCh  chan struct{}
+	doneCh  chan struct{}
 }
 
 // NewScheduler constructs a Scheduler.

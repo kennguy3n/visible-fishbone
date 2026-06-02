@@ -35,6 +35,9 @@ type AnalyzeInput struct {
 
 // Analyze runs a full tightening analysis and returns a report.
 func (s *TighteningService) Analyze(ctx context.Context, input AnalyzeInput) (TighteningReport, error) {
+	if err := ctx.Err(); err != nil {
+		return TighteningReport{}, err
+	}
 	if input.WindowDays <= 0 {
 		input.WindowDays = 30
 	}

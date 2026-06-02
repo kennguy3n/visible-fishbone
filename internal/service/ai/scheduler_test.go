@@ -27,9 +27,9 @@ func (s *stubOptInChecker) IsOptedIn(_ context.Context, id uuid.UUID) bool {
 }
 
 type stubAnalysisRunner struct {
-	runCount     atomic.Int64
-	suggestions  int
-	err          error
+	runCount    atomic.Int64
+	suggestions int
+	err         error
 }
 
 func (s *stubAnalysisRunner) RunAnalysis(_ context.Context, _ uuid.UUID) (int, error) {

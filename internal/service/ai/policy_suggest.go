@@ -16,10 +16,10 @@ import (
 // typed policy change suggestions. Every suggestion MUST compile
 // through the deterministic policy compiler before being queued.
 type PolicySuggestService struct {
-	llm        LLMProvider
-	verifier   *Verifier
-	repo       repository.AISuggestionRepository
-	logger     *slog.Logger
+	llm      LLMProvider
+	verifier *Verifier
+	repo     repository.AISuggestionRepository
+	logger   *slog.Logger
 }
 
 // NewPolicySuggestService constructs a PolicySuggestService.
@@ -106,12 +106,12 @@ func (s *PolicySuggestService) AnalyzeAndSuggest(
 		suggestions[i].Status = SuggestionStatusPending
 
 		repoSuggestion := repository.AISuggestion{
-			ID:       suggestions[i].ID,
-			TenantID: tenantID,
-			RuleID:   suggestions[i].RuleID,
-			Category: string(suggestions[i].Category),
+			ID:         suggestions[i].ID,
+			TenantID:   tenantID,
+			RuleID:     suggestions[i].RuleID,
+			Category:   string(suggestions[i].Category),
 			Confidence: suggestions[i].Confidence,
-			Status:   repository.AISuggestionStatusPending,
+			Status:     repository.AISuggestionStatusPending,
 		}
 		suggJSON, _ := json.Marshal(suggestions[i])
 		repoSuggestion.SuggestionJSON = suggJSON
@@ -291,8 +291,8 @@ func riskFromConfidence(confidence float64) RiskLevel {
 
 func isBroadRule(ruleRaw json.RawMessage) bool {
 	var rule struct {
-		Subjects []json.RawMessage `json:"subjects"`
-		SubjectRefs []string `json:"subject_refs"`
+		Subjects    []json.RawMessage `json:"subjects"`
+		SubjectRefs []string          `json:"subject_refs"`
 	}
 	if err := json.Unmarshal(ruleRaw, &rule); err != nil {
 		return false

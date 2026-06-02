@@ -13,10 +13,10 @@ import (
 type SuggestionCategory string
 
 const (
-	SuggestionCategoryUnused          SuggestionCategory = "unused"
-	SuggestionCategoryShadowed        SuggestionCategory = "shadowed"
+	SuggestionCategoryUnused           SuggestionCategory = "unused"
+	SuggestionCategoryShadowed         SuggestionCategory = "shadowed"
 	SuggestionCategoryOverlyPermissive SuggestionCategory = "overly_permissive"
-	SuggestionCategoryDenyLog         SuggestionCategory = "deny_log"
+	SuggestionCategoryDenyLog          SuggestionCategory = "deny_log"
 )
 
 // SuggestionStatus tracks a suggestion through the review workflow.

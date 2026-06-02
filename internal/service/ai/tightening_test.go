@@ -84,7 +84,7 @@ func TestTighteningService_OverlyPermissiveRules(t *testing.T) {
 		Rules: []json.RawMessage{
 			json.RawMessage(`{"id":"r-permissive","verb":"allow","domain":"swg"}`),
 		},
-		HitCounts: map[string]int64{"r-permissive": 200},
+		HitCounts:  map[string]int64{"r-permissive": 200},
 		WindowDays: 30,
 	})
 	if err != nil {
