@@ -1,9 +1,12 @@
 package rbac_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -936,5 +939,124 @@ func TestListAuthorizedTenants_NonBroadStreamFiltersBindings(t *testing.T) {
 	}
 	if got[0] != targetTenant {
 		t.Fatalf("expected the tenant-scope-granted tenant, got %s want %s", got[0], targetTenant)
+	}
+}
+
+// infinitePagesMSPRepo returns the SAME (mspID, tenantID) binding
+// on every page and never sets NextCursor="", so
+// ListAuthorizedTenants is forced to iterate ListAuthorizedTenantsMaxPages
+// before bailing with ErrTooManyMSPBindings. The fake cursor advances
+// across calls so the inner Page.After value differs each iteration
+// (matching the postgres backend's cursor contract — a never-equal
+// cursor still indicates "more pages"). Used by
+// TestListAuthorizedTenants_WarnLogAt80Percent to verify the
+// round-28 ANALYSIS_0004 warn-log at the 80% threshold.
+type infinitePagesMSPRepo struct {
+	repository.MSPRepository
+	binding repository.MSPTenantBinding
+	calls   int
+}
+
+func (r *infinitePagesMSPRepo) ListTenants(
+	ctx context.Context, mspID uuid.UUID, page repository.Page,
+) (repository.PageResult[repository.MSPTenantBinding], error) {
+	r.calls++
+	return repository.PageResult[repository.MSPTenantBinding]{
+		Items:      []repository.MSPTenantBinding{r.binding},
+		NextCursor: fmt.Sprintf("cursor-%d", r.calls),
+	}, nil
+}
+
+// TestListAuthorizedTenants_WarnLogAt80Percent pins round-28 of
+// Devin Review on PR #42 (ANALYSIS_0004). The 5000-page cap on
+// ListAuthorizedTenants previously produced a sudden ErrTooManyMSPBindings
+// 500 with no advance warning. The fix emits a warn-level slog
+// entry once at the 80% threshold so operators have a buffer
+// between "this MSP is getting large" and the eventual hard fail.
+//
+// Test strategy: a stub MSPRepository returns an infinite stream
+// of pages with a single binding and a never-empty cursor. The
+// service must (a) emit exactly one warn log at the 80% threshold
+// page, (b) NOT spam the log on every subsequent page, and (c)
+// eventually return ErrTooManyMSPBindings when the hard cap is
+// hit. We capture slog output via a captureHandler and assert the
+// message + structured fields.
+func TestListAuthorizedTenants_WarnLogAt80Percent(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	store := memory.NewStore()
+	roleRepo := memory.NewRoleRepository(store)
+	tenantRepo := memory.NewTenantRepository(store)
+	userRepo := memory.NewUserRepository(store)
+	svc := rbac.New(roleRepo, memory.NewAuditLogRepository(store), logger)
+	ctx := context.Background()
+
+	tn, err := tenantRepo.Create(ctx, repository.Tenant{Name: "T", Slug: "warn-t"})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	user, err := userRepo.Create(ctx, tn.ID, repository.User{Email: "u@example.com"})
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	mspID := uuid.New()
+
+	// Grant broad MSP-scope authority so the loop accumulates every
+	// binding (we want the page count to advance unimpeded; with
+	// no broad authority the empty tenant-grant set short-circuits
+	// before ListTenants is even called).
+	role := mustSeedRole(t, roleRepo, repository.Role{
+		Name:        "msp_bulk_writer_warn",
+		Scope:       repository.RoleScopeMSP,
+		Permissions: []string{rbac.PermTenantsRead},
+	})
+	scope := mspID
+	if err := roleRepo.AssignRole(ctx, repository.UserRole{
+		UserID: user.ID, RoleID: role.ID, ScopeID: &scope,
+	}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+
+	stub := &infinitePagesMSPRepo{
+		binding: repository.MSPTenantBinding{
+			MSPID:        mspID,
+			TenantID:     tn.ID,
+			Relationship: repository.MSPRelationshipCoManager,
+		},
+	}
+
+	// The stub never sets NextCursor="" so the loop exhausts the
+	// hard cap and returns ErrTooManyMSPBindings.
+	_, err = svc.ListAuthorizedTenants(ctx, user.ID, mspID, rbac.PermTenantsRead, stub)
+	if !errors.Is(err, rbac.ErrTooManyMSPBindings) {
+		t.Fatalf("expected ErrTooManyMSPBindings, got %v", err)
+	}
+	if stub.calls != rbac.ListAuthorizedTenantsMaxPages {
+		t.Fatalf("expected %d ListTenants calls (hard cap), got %d",
+			rbac.ListAuthorizedTenantsMaxPages, stub.calls)
+	}
+
+	// Exactly ONE warn log emitted — not one per page over the
+	// threshold. The handler writes "msp binding pagination
+	// approaching cap" as the message.
+	output := buf.String()
+	count := strings.Count(output, "msp binding pagination approaching cap")
+	if count != 1 {
+		t.Fatalf("expected exactly 1 warn log at threshold, got %d (output: %s)", count, output)
+	}
+	// Structured fields must include the trigger page count
+	// (warn_threshold = 4000 at the default 5000 cap) and the
+	// hard cap so operators have actionable context.
+	wantFields := []string{
+		fmt.Sprintf("pages_fetched=%d", rbac.ListAuthorizedTenantsWarnPagesThreshold),
+		fmt.Sprintf("warn_threshold=%d", rbac.ListAuthorizedTenantsWarnPagesThreshold),
+		fmt.Sprintf("hard_cap=%d", rbac.ListAuthorizedTenantsMaxPages),
+		fmt.Sprintf("msp_id=%s", mspID),
+		"permission=" + rbac.PermTenantsRead,
+	}
+	for _, f := range wantFields {
+		if !strings.Contains(output, f) {
+			t.Fatalf("expected structured field %q in warn log, output=%s", f, output)
+		}
 	}
 }

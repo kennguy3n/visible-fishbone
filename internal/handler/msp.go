@@ -1130,7 +1130,7 @@ const MaxBulkClaimTokenCount = 1000
 // resource-exhaustion bound. A value of 0 stays valid — the
 // identity service interprets ttl=0 as "use the configured
 // DefaultTokenTTL" per BulkClaimTokensRequest's doc-comment.
-const MaxClaimTokenTTLSeconds = 365 * 24 * 60 * 60
+const MaxClaimTokenTTLSeconds int64 = 365 * 24 * 60 * 60
 
 // BulkClaimTokensRequest carries the count + TTL.
 //
@@ -1153,8 +1153,23 @@ const MaxClaimTokenTTLSeconds = 365 * 24 * 60 * 60
 //     have flowed through as a negative time.Duration and produced
 //     tokens with ExpiresAt in the past — silently unredeemable).
 type BulkClaimTokensRequest struct {
-	Count      int `json:"count"`
-	TTLSeconds int `json:"ttl_seconds,omitempty"`
+	Count int `json:"count"`
+	// TTLSeconds is int64 (not int) so the maximum value the JSON
+	// decoder will accept is platform-independent. The Go `int`
+	// type is 32-bit on 32-bit platforms (max ~2.1B) and 64-bit
+	// on 64-bit platforms (max ~9.22e18), which would otherwise
+	// make the *maximum decodable* TTLSeconds vary by
+	// architecture even though the `MaxClaimTokenTTLSeconds`
+	// upper-bound check is the same on both. Pinning to int64
+	// keeps the contract explicit: any value the JSON decoder
+	// accepts is checked against the same cap regardless of where
+	// the server runs. Round-28 of Devin Review on PR #42
+	// (ANALYSIS_0003) flagged the prior `int` typing for this
+	// portability hazard; the server today only ships on 64-bit
+	// (so the practical wire behaviour does not change), but the
+	// type is now honest about the bound being on the value, not
+	// the platform.
+	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
 }
 
 // BulkOutcomeResponse is the per-tenant JSON projection of a

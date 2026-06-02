@@ -3346,7 +3346,7 @@ func TestMSPHandler_BulkClaimTokens_RejectsAboveMaxTTL(t *testing.T) {
 
 	cases := []struct {
 		name string
-		ttl  int
+		ttl  int64
 	}{
 		{"just over the cap", handler.MaxClaimTokenTTLSeconds + 1},
 		{"overflow territory", 1 << 40},

@@ -244,3 +244,39 @@ func TestTenantResponse_ExposesMSPID(t *testing.T) {
 			patchedResp.MSPID, msp.ID.String())
 	}
 }
+
+// TestTenantList_OmitsNextCursorOnTerminalPage pins round-28 of
+// Devin Review on PR #42 (ANALYSIS_0005). The pre-existing tenant
+// list handler used `map[string]any{"next_cursor": res.NextCursor}`
+// which always emitted `"next_cursor": ""` on the last page. The
+// typed-envelope fix uses `json:"next_cursor,omitempty"` so the
+// field is OMITTED on the terminal page (matching MSP/alert/
+// baseline/integration handlers). Wire-format-true regression:
+// we decode the body into map[string]any so the absence of the
+// KEY is detectable, not just the struct field being zero.
+func TestTenantList_OmitsNextCursorOnTerminalPage(t *testing.T) {
+	t.Parallel()
+	h, _ := newTestTenantHandler(t, "us-east-1")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants", nil)
+	rec := httptest.NewRecorder()
+	h.list(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, rec.Body.String())
+	}
+
+	if _, has := raw["items"]; !has {
+		t.Fatalf("items key missing from response; body=%s", rec.Body.String())
+	}
+	if v, has := raw["next_cursor"]; has {
+		t.Fatalf("next_cursor KEY must be absent on terminal page "+
+			"(omitempty on typed envelope, round-28 ANALYSIS_0005); got %v in body=%s",
+			v, rec.Body.String())
+	}
+}

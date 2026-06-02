@@ -528,7 +528,25 @@ func (r *MSPRepository) Delete(ctx context.Context, id uuid.UUID) error {
 		if _, err := tx.Exec(ctx, `DELETE FROM msp_tenants WHERE msp_id = $1::uuid`, id); err != nil {
 			return fmt.Errorf("cascade msp_tenants: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE tenants SET msp_id = NULL WHERE msp_id = $1::uuid`, id); err != nil {
+		// Explicit `updated_at = NOW()` on the tenants cascade.
+		// Round-28 of Devin Review on PR #42 (ANALYSIS_0001)
+		// flagged a pattern divergence within this file: both
+		// AssignTenant (line ~709) and UnassignTenant (lines
+		// ~726, ~760) write `updated_at = NOW()` explicitly when
+		// they mutate the tenants.msp_id pointer, while this
+		// Delete cascade relied on the `sng_set_updated_at`
+		// BEFORE UPDATE trigger to fill it in. The memory backend
+		// (internal/repository/memory/msp.go) ALSO sets
+		// `t.UpdatedAt = r.s.clock()` explicitly on its Delete
+		// cascade, so the trigger-dependent shape here was the
+		// outlier across both backends + both binding-mutation
+		// neighbours. Setting it explicitly here closes the
+		// pattern gap, removes the silent dependency on a
+		// schema-side trigger we don't own at this layer, and
+		// keeps the audit story consistent: every write that
+		// mutates `tenants.msp_id` also stamps `updated_at`
+		// from the same statement.
+		if _, err := tx.Exec(ctx, `UPDATE tenants SET msp_id = NULL, updated_at = NOW() WHERE msp_id = $1::uuid`, id); err != nil {
 			return fmt.Errorf("cascade tenants.msp_id: %w", err)
 		}
 		return nil

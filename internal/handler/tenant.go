@@ -129,14 +129,28 @@ func (h *TenantHandler) list(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
-	items := make([]TenantResponse, 0, len(res.Items))
-	for _, t := range res.Items {
-		items = append(items, toTenantResponse(t))
+	// Typed envelope with `omitempty` on next_cursor so the field
+	// is OMITTED (rather than emitted as `""`) on the last page.
+	// The previous map[string]any pattern serialised
+	// `"next_cursor": ""` on terminal pages, which is technically
+	// distinct from the OpenAPI `nullable: true` declaration and
+	// can trip spec-strict SDK validators that distinguish between
+	// absent, null, and empty-string. Matches the MSP / alert /
+	// baseline / integration handlers — round-28 of Devin Review
+	// on PR #42 (ANALYSIS_0005) flagged this as the last
+	// list-handler still using the map envelope after the round-7
+	// migration on the other surfaces.
+	out := struct {
+		Items      []TenantResponse `json:"items"`
+		NextCursor string           `json:"next_cursor,omitempty"`
+	}{
+		Items:      make([]TenantResponse, 0, len(res.Items)),
+		NextCursor: res.NextCursor,
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"items":       items,
-		"next_cursor": res.NextCursor,
-	})
+	for _, t := range res.Items {
+		out.Items = append(out.Items, toTenantResponse(t))
+	}
+	WriteJSON(w, http.StatusOK, out)
 }
 
 func (h *TenantHandler) get(w http.ResponseWriter, r *http.Request) {

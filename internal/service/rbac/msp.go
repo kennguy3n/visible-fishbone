@@ -4,11 +4,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
+
+// ListAuthorizedTenantsWarnPagesThreshold is the page count at which
+// ListAuthorizedTenants emits a warn-level log so operators have
+// advance notice that an MSP is approaching ListAuthorizedTenantsMaxPages
+// (and therefore the ErrTooManyMSPBindings 500 cliff). Set at 80% of
+// the cap as a routine "approaching capacity" trigger — the
+// documented platform target is <10k tenants per MSP, so any MSP that
+// trips this is well outside the modelled envelope and operator
+// action (sharding the MSP, archiving stale tenants, or raising the
+// cap with monitoring data behind it) should already be underway.
+//
+// We log exactly once per ListAuthorizedTenants call, not once per
+// page over the threshold — a single warning is sufficient to capture
+// "this MSP is large" without spamming the journal on every paged
+// request. Round-28 of Devin Review on PR #42 (ANALYSIS_0004)
+// suggested 80% as the warn threshold to give operators a buffer
+// between the warning and the eventual 500.
+const ListAuthorizedTenantsWarnPagesThreshold = ListAuthorizedTenantsMaxPages * 4 / 5
 
 // AuthorizeMSP reports whether the user holds a role granting
 // `permission` on the given MSP.
@@ -257,6 +276,7 @@ func (svc *Service) ListAuthorizedTenants(
 	// cursor predicate that never advances).
 	var bound []uuid.UUID
 	var cursor string
+	warned := false
 	for i := 0; i < ListAuthorizedTenantsMaxPages; i++ {
 		// Limit is repository.MaxPageLimit so the "rows per
 		// page" actually matches the backend behaviour rather
@@ -278,6 +298,27 @@ func (svc *Service) ListAuthorizedTenants(
 			if _, ok := tenantGrantSet[b.TenantID]; ok {
 				bound = append(bound, b.TenantID)
 			}
+		}
+		// Emit a warn log once when we cross the 80% threshold,
+		// so operators see "this MSP is large" before the
+		// pagination hits ErrTooManyMSPBindings and the request
+		// 500s with no advance signal. Round-28 of Devin Review
+		// on PR #42 (ANALYSIS_0004). Logged at warn (not info)
+		// because reaching this point on an MSP indicates a
+		// growth pattern well outside the documented <10k-tenant
+		// envelope; once-per-call (not once-per-page) so we
+		// don't spam the journal on each step of the loop.
+		if !warned && i+1 >= ListAuthorizedTenantsWarnPagesThreshold && svc.logger != nil {
+			svc.logger.WarnContext(ctx,
+				"rbac: msp binding pagination approaching cap",
+				slog.String("msp_id", mspID.String()),
+				slog.String("user_id", userID.String()),
+				slog.String("permission", permission),
+				slog.Int("pages_fetched", i+1),
+				slog.Int("warn_threshold", ListAuthorizedTenantsWarnPagesThreshold),
+				slog.Int("hard_cap", ListAuthorizedTenantsMaxPages),
+			)
+			warned = true
 		}
 		if page.NextCursor == "" {
 			return bound, nil
