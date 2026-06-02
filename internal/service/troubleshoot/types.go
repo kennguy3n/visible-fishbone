@@ -52,8 +52,8 @@ type DiagnosticResult struct {
 type SessionStatus string
 
 const (
-	SessionActive   SessionStatus = "active"
-	SessionResolved SessionStatus = "resolved"
+	SessionActive    SessionStatus = "active"
+	SessionResolved  SessionStatus = "resolved"
 	SessionEscalated SessionStatus = "escalated"
 )
 

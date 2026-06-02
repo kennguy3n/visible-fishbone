@@ -58,15 +58,15 @@ type startSessionRequest struct {
 }
 
 type sessionResponse struct {
-	ID                uuid.UUID                       `json:"id"`
-	TenantID          uuid.UUID                       `json:"tenant_id"`
-	OperatorID        uuid.UUID                       `json:"operator_id"`
-	Issue             string                          `json:"issue"`
-	Status            string                          `json:"status"`
-	Messages          []sessionMessageResponse        `json:"messages"`
-	DiagnosticResults []diagnosticResultResponse      `json:"diagnostic_results"`
-	CreatedAt         string                          `json:"created_at"`
-	UpdatedAt         string                          `json:"updated_at"`
+	ID                uuid.UUID                  `json:"id"`
+	TenantID          uuid.UUID                  `json:"tenant_id"`
+	OperatorID        uuid.UUID                  `json:"operator_id"`
+	Issue             string                     `json:"issue"`
+	Status            string                     `json:"status"`
+	Messages          []sessionMessageResponse   `json:"messages"`
+	DiagnosticResults []diagnosticResultResponse `json:"diagnostic_results"`
+	CreatedAt         string                     `json:"created_at"`
+	UpdatedAt         string                     `json:"updated_at"`
 }
 
 type sessionMessageResponse struct {

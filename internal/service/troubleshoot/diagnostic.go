@@ -68,4 +68,3 @@ func toServiceResult(r checks.DiagnosticResult) DiagnosticResult {
 		ExecutedAt: r.ExecutedAt,
 	}
 }
-

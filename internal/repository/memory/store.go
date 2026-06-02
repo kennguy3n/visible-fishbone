@@ -104,8 +104,8 @@ type Store struct {
 	aiSuggestions map[uuid.UUID]repository.AISuggestion
 
 	// Troubleshooting tables — see migrations 022-023.
-	kbEntries             map[uuid.UUID]repository.KBEntry
-	troubleshootSessions  map[uuid.UUID]repository.TroubleshootSession
+	kbEntries            map[uuid.UUID]repository.KBEntry
+	troubleshootSessions map[uuid.UUID]repository.TroubleshootSession
 
 	// Role / user_role tables. Roles are NOT tenant-scoped on
 	// their own (system roles have TenantID nil).

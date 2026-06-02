@@ -14,8 +14,8 @@ import (
 // PerformanceCheck checks telemetry pipeline lag by comparing
 // expected vs actual event flow from device heartbeats.
 type PerformanceCheck struct {
-	devices        repository.DeviceRepository
-	lagThreshold   time.Duration
+	devices      repository.DeviceRepository
+	lagThreshold time.Duration
 }
 
 // NewPerformanceCheck creates a performance diagnostic check.
@@ -57,9 +57,9 @@ func (c *PerformanceCheck) Run(ctx context.Context, tenantID uuid.UUID) Diagnost
 	}
 
 	details, _ := json.Marshal(map[string]any{
-		"total_devices":  total,
+		"total_devices":   total,
 		"lagging_devices": lagging,
-		"lag_threshold":  c.lagThreshold.String(),
+		"lag_threshold":   c.lagThreshold.String(),
 	})
 	result.Details = details
 
