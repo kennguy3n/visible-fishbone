@@ -1,4 +1,4 @@
--- Migration 022: Knowledge base entries for the troubleshooting assistant.
+-- Migration 032: Knowledge base entries for the troubleshooting assistant.
 -- Supports global (tenant_id IS NULL) and per-tenant custom entries.
 
 CREATE TABLE kb_entries (
