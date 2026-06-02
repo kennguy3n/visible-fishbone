@@ -322,3 +322,31 @@ func TestSIEM_Send_InsecureSkipTLSAppliedToTransport(t *testing.T) {
 		t.Fatalf("default flow should hit shared stub once, got %d", len(shared.requests))
 	}
 }
+
+// TestSIEM_Send_InsecureSkipTLS_ReusesCachedClient pins the
+// round-5 fix on PR #41 (PR D): when `insecure_skip_tls=true`
+// the SIEM connector must NOT allocate a fresh http.Client +
+// http.Transport on every Send (idle connections lingered until
+// Go's default IdleConnTimeout=90s and accumulated under a
+// high-throughput alert fan-out). The cache is keyed on the
+// connector instance via `sync.Once`, so back-to-back Sends
+// should observe an identical `s.insecureClient` pointer.
+//
+// The test exercises the cache via `insecureDoer()` directly
+// because `Send` always returns a transport error against the
+// invalid endpoint and the cache assignment happens BEFORE the
+// dial, so we still pin the invariant without needing a live
+// server.
+func TestSIEM_Send_InsecureSkipTLS_ReusesCachedClient(t *testing.T) {
+	s := NewSIEM(&stubHTTP{}, "ua")
+	first := s.insecureDoer()
+	if first == nil {
+		t.Fatalf("insecureDoer() returned nil")
+	}
+	for i := 0; i < 32; i++ {
+		got := s.insecureDoer()
+		if got != first {
+			t.Fatalf("insecureDoer() call %d returned a different client (cache not honoured)", i)
+		}
+	}
+}

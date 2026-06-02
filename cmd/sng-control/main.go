@@ -491,9 +491,28 @@ func buildRouter(
 	integrationSvc := integration.New(
 		integrationConnectorRepo, integrationDeliveryRepo, auditRepo,
 		integrationRegistry, logger)
+	// Translate the operator-facing cfg.Integration knobs into
+	// the worker's internal WorkerConfig. Round-4 of Devin Review
+	// on PR #41 (PR D) flagged that the previous wiring passed an
+	// empty `integration.WorkerConfig{}`, which silently fell
+	// back to the hard-coded defaults in
+	// internal/service/integration/worker.go:46-65 — operators
+	// who exported `INTEGRATION_WORKER_*` env vars would see them
+	// validated at boot but never reach the live worker. Threads
+	// the values through so the contract is honoured (mirrors the
+	// webhook worker wiring above).
 	integrationWorker := integration.NewDeliveryWorker(
 		integrationConnectorRepo, integrationDeliveryRepo,
-		integrationRegistry, integration.WorkerConfig{}, logger)
+		integrationRegistry,
+		integration.WorkerConfig{
+			BatchSize:         cfg.Integration.BatchSize,
+			PollInterval:      cfg.Integration.PollInterval,
+			MaxAttempts:       cfg.Integration.MaxAttempts,
+			BackoffBase:       cfg.Integration.BackoffBase,
+			BackoffMax:        cfg.Integration.BackoffMax,
+			ProcessingTimeout: cfg.Integration.ProcessingTimeout,
+		},
+		logger)
 
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:           cfg,

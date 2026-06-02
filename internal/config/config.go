@@ -73,6 +73,7 @@ type Config struct {
 	RateLimit          RateLimit
 	CORS               CORS
 	Webhook            Webhook
+	Integration        Integration
 	Auth               Auth
 	Policy             Policy
 	Telemetry          Telemetry
@@ -427,6 +428,49 @@ type Webhook struct {
 	SignatureHeader string
 }
 
+// Integration carries the operator-facing knobs for the
+// integration delivery worker. Round-4 of Devin Review on PR #41
+// (PR D) flagged that the worker was constructed with
+// `integration.WorkerConfig{}` at cmd/sng-control/main.go:496 —
+// the same `WorkerConfig{}` anti-pattern that the webhook worker
+// originally shipped with. The previous wiring meant every field
+// silently fell back to the hard-coded defaults in
+// internal/service/integration/worker.go:46-65 (BatchSize=32,
+// PollInterval=1s, MaxAttempts=8, BackoffBase=30s, BackoffMax=1h,
+// ProcessingTimeout=5m) — operators exporting their tuning knobs
+// would see the validator accept them at boot but the values
+// would never reach the live worker. This struct mirrors the
+// Webhook layout so the two delivery workers are uniformly
+// tunable.
+type Integration struct {
+	// MaxAttempts is the TOTAL number of delivery attempts (first
+	// try + retries) before a delivery is marked exhausted.
+	// Default 8. Operators wanting a single attempt with no
+	// retries set this to 1.
+	MaxAttempts int
+	// BackoffBase is the base factor for exponential backoff:
+	// `next_retry = now + BackoffBase * 2^(attempt-1)`, capped at
+	// `BackoffMax`. Default 30s.
+	BackoffBase time.Duration
+	// BackoffMax is the per-attempt backoff ceiling. Default 1h.
+	BackoffMax time.Duration
+	// ProcessingTimeout is the stuck-row recovery window. A
+	// worker that crashes mid-delivery leaves its claimed rows
+	// in `status='processing'`; the next ListPending re-claims
+	// them once their last_attempt_at is older than
+	// `now - ProcessingTimeout`. Choose to be safely longer than
+	// the worst-case in-flight delivery so a true crash is
+	// reclaimed but a slow upstream is not double-dispatched.
+	// Default 5m.
+	ProcessingTimeout time.Duration
+	// BatchSize caps the number of pending deliveries the worker
+	// fetches per scheduling tick. Default 32.
+	BatchSize int
+	// PollInterval is the wait between scans of the pending
+	// queue when the previous tick produced no work. Default 1s.
+	PollInterval time.Duration
+}
+
 // Auth carries authentication configuration for the operator-facing
 // API.
 type Auth struct {
@@ -727,6 +771,15 @@ func Load() (Config, error) {
 		{"RATE_LIMIT_BURST", 60, &cfg.RateLimit.Burst},
 		{"WEBHOOK_MAX_ATTEMPTS", 6, &cfg.Webhook.MaxAttempts},
 		{"WEBHOOK_BATCH_SIZE", 32, &cfg.Webhook.BatchSize},
+		// Round-4 of Devin Review on PR #41 (PR D): wire the
+		// integration delivery worker's tuning knobs through the
+		// strict int parser so a typo (e.g.
+		// `INTEGRATION_WORKER_BATCH_SIZE="32a"`) fails boot
+		// loudly instead of silently reverting to the hard-coded
+		// default. Defaults match
+		// internal/service/integration/worker.go:46-65.
+		{"INTEGRATION_WORKER_MAX_ATTEMPTS", 8, &cfg.Integration.MaxAttempts},
+		{"INTEGRATION_WORKER_BATCH_SIZE", 32, &cfg.Integration.BatchSize},
 		// Kept in sync with apikey.DefaultMaxActiveKeys; literal
 		// here so the config package doesn't take a dependency on
 		// internal/service/apikey.
@@ -758,6 +811,11 @@ func Load() (Config, error) {
 		{"WEBHOOK_DELIVERY_TIMEOUT", 10 * time.Second, &cfg.Webhook.DeliveryTimeout},
 		{"WEBHOOK_POLL_INTERVAL", time.Second, &cfg.Webhook.PollInterval},
 		{"WEBHOOK_PROCESSING_TIMEOUT", 5 * time.Minute, &cfg.Webhook.ProcessingTimeout},
+		// Integration delivery worker duration knobs.
+		{"INTEGRATION_WORKER_BACKOFF_BASE", 30 * time.Second, &cfg.Integration.BackoffBase},
+		{"INTEGRATION_WORKER_BACKOFF_MAX", time.Hour, &cfg.Integration.BackoffMax},
+		{"INTEGRATION_WORKER_POLL_INTERVAL", time.Second, &cfg.Integration.PollInterval},
+		{"INTEGRATION_WORKER_PROCESSING_TIMEOUT", 5 * time.Minute, &cfg.Integration.ProcessingTimeout},
 		{"AUTH_ACCESS_TOKEN_TTL", time.Hour, &cfg.Auth.AccessTokenTTL},
 		{"AUTH_CLAIM_TOKEN_TTL", 24 * time.Hour, &cfg.Auth.ClaimTokenTTL},
 		{"CLICKHOUSE_FLUSH_INTERVAL", 2 * time.Second, &cfg.TelemetryAnalytics.ClickHouseFlushInterval},
@@ -1030,6 +1088,28 @@ func (c Config) validate() error {
 	// reclaimed under any race.
 	if c.Webhook.ProcessingTimeout <= c.Webhook.DeliveryTimeout {
 		return fmt.Errorf("WEBHOOK_PROCESSING_TIMEOUT (%s) must be > WEBHOOK_DELIVERY_TIMEOUT (%s) to prevent stuck-row reaper from racing in-flight deliveries", c.Webhook.ProcessingTimeout, c.Webhook.DeliveryTimeout)
+	}
+	// Integration delivery worker — same invariants as the
+	// webhook worker. Reject 0 explicitly so the strict parser's
+	// 0s acceptance cannot let an operator's misconfigured value
+	// fall through to the worker's hard-coded default.
+	if c.Integration.MaxAttempts < 1 {
+		return fmt.Errorf("INTEGRATION_WORKER_MAX_ATTEMPTS must be >= 1 (set to 1 for a single attempt with no retries), got %d", c.Integration.MaxAttempts)
+	}
+	if c.Integration.BackoffBase <= 0 {
+		return fmt.Errorf("INTEGRATION_WORKER_BACKOFF_BASE must be > 0, got %s", c.Integration.BackoffBase)
+	}
+	if c.Integration.BackoffMax < c.Integration.BackoffBase {
+		return fmt.Errorf("INTEGRATION_WORKER_BACKOFF_MAX (%s) must be >= INTEGRATION_WORKER_BACKOFF_BASE (%s)", c.Integration.BackoffMax, c.Integration.BackoffBase)
+	}
+	if c.Integration.BatchSize <= 0 {
+		return fmt.Errorf("INTEGRATION_WORKER_BATCH_SIZE must be > 0, got %d", c.Integration.BatchSize)
+	}
+	if c.Integration.PollInterval <= 0 {
+		return fmt.Errorf("INTEGRATION_WORKER_POLL_INTERVAL must be > 0, got %s", c.Integration.PollInterval)
+	}
+	if c.Integration.ProcessingTimeout <= 0 {
+		return fmt.Errorf("INTEGRATION_WORKER_PROCESSING_TIMEOUT must be > 0, got %s", c.Integration.ProcessingTimeout)
 	}
 	// AUTH_ACCESS_TOKEN_TTL <= 0 makes every issued token already
 	// expired, which would silently lock every operator out of the
