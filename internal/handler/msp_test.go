@@ -74,9 +74,6 @@ func (s repoMSPService) List(ctx context.Context, p repository.Page) (repository
 func (s repoMSPService) Update(ctx context.Context, id uuid.UUID, patch repository.MSPPatch) (repository.MSP, error) {
 	return s.repo.Update(ctx, id, patch)
 }
-func (s repoMSPService) UpdateStatus(ctx context.Context, id uuid.UUID, st repository.MSPStatus) (repository.MSP, error) {
-	return s.repo.UpdateStatus(ctx, id, st)
-}
 func (s repoMSPService) TransitionStatus(ctx context.Context, id uuid.UUID, to repository.MSPStatus) (repository.MSP, error) {
 	return s.repo.TransitionStatus(ctx, id, to)
 }
@@ -2816,4 +2813,103 @@ type spuriousForbiddenMSPSvc struct {
 
 func (s *spuriousForbiddenMSPSvc) Delete(ctx context.Context, id uuid.UUID) error {
 	return repository.ErrForbidden
+}
+
+// TestMSPHandler_CreateInvalidStatus_ErrorMentionsPOST pins the
+// round-16 BUG_0001 fix: the create-handler error message used to
+// reference `PUT .../status` for the deleted-on-create case, but
+// the status endpoint is registered as `POST` (see Register() at
+// the top of internal/handler/msp.go). A client following the
+// stale message would hit a 405 from the router instead of the
+// expected lifecycle transition. This test asserts the corrected
+// guidance.
+func TestMSPHandler_CreateInvalidStatus_ErrorMentionsPOST(t *testing.T) {
+	t.Parallel()
+	mux, _, _, _, _ := setupMSPHandler(t, false)
+	rec := doMSPJSON(t, mux, http.MethodPost, "/api/v1/msps",
+		handler.MSPRequest{Name: "Acme", Slug: "acme-r16-bug",
+			Status: string(repository.MSPStatusDeleted)})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "invalid_param" {
+		t.Fatalf("error.code = %q, want invalid_param", body.Error.Code)
+	}
+	if !strings.Contains(body.Error.Message, "POST .../status") {
+		t.Fatalf("error.message = %q, want a message mentioning the actual "+
+			"POST .../status endpoint (round-16 BUG_0001 caught a stale "+
+			"`PUT .../status` reference)", body.Error.Message)
+	}
+	if strings.Contains(body.Error.Message, "PUT") {
+		t.Fatalf("error.message = %q, must NOT mention PUT — status endpoint "+
+			"is POST", body.Error.Message)
+	}
+}
+
+// TestMSPHandler_BulkProvisionSites_RejectsInvalidTemplate pins the
+// round-16 ANALYSIS_0007 fix: bogus values for the `template` field
+// on BulkSiteRequest must surface a specific `invalid_param` 400
+// from the handler, not the generic `unknown template ...:
+// invalid_argument` from the site service. The handler-boundary
+// guard mirrors the pattern already established for status, slug,
+// and relationship — same uniform error surface across the bulk
+// endpoints.
+func TestMSPHandler_BulkProvisionSites_RejectsInvalidTemplate(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	tenants := memory.NewTenantRepository(store)
+	ctx := context.Background()
+	m, _ := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-r16-tpl"})
+	tn, _ := tenants.Create(ctx, repository.Tenant{Name: "t1", Slug: "t1-r16-tpl"})
+	if _, err := msps.AssignTenant(ctx, m.ID, tn.ID,
+		repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	bulkSvc := svctenant.NewBulkService(
+		msps,
+		stubBulkAuthz{tenants: []uuid.UUID{tn.ID}},
+		nil, nil,
+		&fakeTokenIssuer{},
+		nil,
+		svctenant.BulkOptions{},
+	)
+	h := handler.NewMSPHandler(repoMSPService{repo: msps}, bulkSvc, nil, allowAllAuthz{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/bulk/sites",
+		handler.BulkSiteRequest{Name: "Site A", Template: "totally-bogus"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bogus template: status = %d body=%s, want 400 "+
+			"(round-16 ANALYSIS_0007 \u2014 handler must surface invalid_param, "+
+			"not let the generic site-service invalid_argument bubble up)",
+			rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "invalid_param" {
+		t.Fatalf("error.code = %q, want invalid_param", body.Error.Code)
+	}
+	if !strings.Contains(body.Error.Message, "template") {
+		t.Fatalf("error.message = %q, want a message mentioning 'template'",
+			body.Error.Message)
+	}
 }

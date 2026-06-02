@@ -51,7 +51,6 @@ type MSPService interface {
 	Get(ctx context.Context, id uuid.UUID) (repository.MSP, error)
 	List(ctx context.Context, page repository.Page) (repository.PageResult[repository.MSP], error)
 	Update(ctx context.Context, id uuid.UUID, patch repository.MSPPatch) (repository.MSP, error)
-	UpdateStatus(ctx context.Context, id uuid.UUID, status repository.MSPStatus) (repository.MSP, error)
 	// TransitionStatus is the race-free building block for the
 	// active <-> suspended transitions on POST .../status. The
 	// repository's atomic SQL precondition (`WHERE status <>
@@ -59,6 +58,20 @@ type MSPService interface {
 	// Get-then-UpdateStatus pair (round-13 of Devin Review on
 	// PR #42 — BUG_0001). The handler must NOT call this for
 	// `to=deleted`; that transition is owned by Delete().
+	//
+	// Note: the older `UpdateStatus(ctx, id, status)` method
+	// remains on the underlying `repository.MSPRepository` (other
+	// service-layer callers may need it), but it is intentionally
+	// NOT exposed on this handler-narrow interface. Round-16 of
+	// Devin Review on PR #42 (ANALYSIS_0002) caught the dead-code
+	// surface and the lifecycle-invariant risk: UpdateStatus
+	// writes the status column unconditionally (no resurrection
+	// guard, no `deleted_at` bookkeeping for a deleted-transition
+	// path), so a future handler refactor that reached for it
+	// would silently bypass the round-12/13 invariants. The
+	// canonical paths are TransitionStatus (active <-> suspended)
+	// and Delete (the cascading soft-delete) — and the handler
+	// interface should expose exactly those.
 	TransitionStatus(ctx context.Context, id uuid.UUID, to repository.MSPStatus) (repository.MSP, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	AssignTenant(ctx context.Context, mspID, tenantID uuid.UUID, relationship repository.MSPRelationship, actor *uuid.UUID) (repository.MSPTenantBinding, error)
@@ -316,6 +329,27 @@ func validMSPCreateStatus(s string) bool {
 	return false
 }
 
+// validSiteTemplate is the handler-boundary guard for the
+// `template` field on BulkSiteRequest. Round-16 of Devin Review on
+// PR #42 (ANALYSIS_0007) flagged that bogus values flowed through
+// to the site service where they produced a generic
+// `unknown template ...: invalid_argument` 400 — inconsistent
+// with status, slug, and relationship which all surface a specific
+// `invalid_param` message from this layer. Empty stays valid: the
+// site service defaults the empty case to `branch` at
+// `internal/service/site/service.go:86-88`.
+func validSiteTemplate(s string) bool {
+	switch repository.SiteTemplate(s) {
+	case "",
+		repository.SiteTemplateBranch,
+		repository.SiteTemplateHub,
+		repository.SiteTemplateCloudOnly,
+		repository.SiteTemplateHomeOffice:
+		return true
+	}
+	return false
+}
+
 func (h *MSPHandler) list(w http.ResponseWriter, r *http.Request) {
 	if !h.requirePlatformPermission(w, r, "msp.read") {
 		return
@@ -388,8 +422,15 @@ func (h *MSPHandler) create(w http.ResponseWriter, r *http.Request) {
 	// `DELETE /api/v1/msps/{msp_id}` or `PUT .../status` to
 	// transition an existing MSP into the deleted state.
 	if !validMSPCreateStatus(req.Status) {
+		// Round-16 of Devin Review on PR #42 (BUG_0001) caught the
+		// previous `PUT .../status` reference — the status endpoint
+		// is registered as `POST /api/v1/msps/{msp_id}/status` (see
+		// the Register() body above). A client following the stale
+		// message would issue a PUT and get a 405 from the router
+		// instead of the expected lifecycle transition. Match the
+		// PATCH handler's wording downstream.
 		WriteError(w, http.StatusBadRequest, "invalid_param",
-			"status on create must be one of active, suspended (or omitted to default to active); use DELETE or PUT .../status to delete")
+			"status on create must be one of active, suspended (or omitted to default to active); use DELETE or POST .../status to delete")
 		return
 	}
 	m := repository.MSP{
@@ -1085,6 +1126,24 @@ func (h *MSPHandler) bulkProvisionSites(w http.ResponseWriter, r *http.Request) 
 	if req.Name == "" {
 		WriteError(w, http.StatusBadRequest, "invalid_param",
 			"name is required")
+		return
+	}
+	// Validate `template` at the handler boundary so a bogus value
+	// produces a specific `invalid_param` 400 instead of the generic
+	// `invalid_argument` that bubbles up from the site service.
+	// Round-16 of Devin Review on PR #42 (ANALYSIS_0007) flagged the
+	// inconsistency: status / slug / relationship are all validated
+	// at this layer, but template flowed through to
+	// `internal/service/site/service.go:89-90` where the generic
+	// `unknown template ...: invalid_argument` was wrapped into a 400
+	// without the actionable param name. Empty stays valid (the site
+	// service defaults it to `branch` at
+	// `internal/service/site/service.go:86-88`); the four enum values
+	// match `repository.SiteTemplate*` constants and the OpenAPI
+	// declaration on `BulkSiteRequest`.
+	if !validSiteTemplate(req.Template) {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			"template must be one of branch, hub, cloud_only, home_office (or omitted to default to branch)")
 		return
 	}
 	site := repository.Site{
