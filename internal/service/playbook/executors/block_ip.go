@@ -10,9 +10,9 @@ import (
 
 // BlockIPConfig is the configuration for an IP block step.
 type BlockIPConfig struct {
-	IPAddress  string `json:"ip_address"`
-	Duration   string `json:"duration"`
-	Reason     string `json:"reason"`
+	IPAddress string `json:"ip_address"`
+	Duration  string `json:"duration"`
+	Reason    string `json:"reason"`
 }
 
 // BlockIPExecutor inserts a temporary IP block via NATS.

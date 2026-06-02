@@ -109,10 +109,10 @@ type Store struct {
 	complianceReports map[uuid.UUID]repository.ComplianceReport
 
 	// Playbook tables — see migrations 023-025.
-	playbooks            map[uuid.UUID]repository.Playbook
-	playbookExecutions   map[uuid.UUID]repository.PlaybookExecution
-	playbookStepResults  map[uuid.UUID]repository.StepResult
-	playbookApprovals    map[uuid.UUID]repository.PlaybookApproval
+	playbooks           map[uuid.UUID]repository.Playbook
+	playbookExecutions  map[uuid.UUID]repository.PlaybookExecution
+	playbookStepResults map[uuid.UUID]repository.StepResult
+	playbookApprovals   map[uuid.UUID]repository.PlaybookApproval
 
 	// clock is injected for deterministic tests. Defaults to
 	// time.Now.UTC.

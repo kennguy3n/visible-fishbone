@@ -177,7 +177,7 @@ func (sf *Salesforce) ListActivity(ctx context.Context, config json.RawMessage, 
 			ID:        r.ID,
 			Actor:     r.CreatedBy.Name,
 			Action:    r.Action,
-			Details: r.Display,
+			Details:   r.Display,
 			Timestamp: ts,
 		})
 	}

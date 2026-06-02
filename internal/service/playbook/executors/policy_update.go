@@ -10,10 +10,10 @@ import (
 
 // PolicyUpdateConfig is the configuration for a scoped policy change.
 type PolicyUpdateConfig struct {
-	PolicyID  uuid.UUID `json:"policy_id"`
-	Action    string    `json:"action"`
-	Scope     string    `json:"scope"`
-	Reason    string    `json:"reason"`
+	PolicyID uuid.UUID `json:"policy_id"`
+	Action   string    `json:"action"`
+	Scope    string    `json:"scope"`
+	Reason   string    `json:"reason"`
 }
 
 // PolicyUpdateExecutor applies a scoped policy change.

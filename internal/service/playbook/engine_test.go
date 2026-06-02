@@ -15,13 +15,19 @@ import (
 
 type mockPublisher struct {
 	mu   sync.Mutex
-	msgs []struct{ Subject string; Data []byte }
+	msgs []struct {
+		Subject string
+		Data    []byte
+	}
 }
 
 func (m *mockPublisher) Publish(_ context.Context, subject string, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.msgs = append(m.msgs, struct{ Subject string; Data []byte }{subject, data})
+	m.msgs = append(m.msgs, struct {
+		Subject string
+		Data    []byte
+	}{subject, data})
 	return nil
 }
 

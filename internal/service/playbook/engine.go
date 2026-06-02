@@ -36,8 +36,8 @@ type Engine struct {
 	executors     ExecutorRegistry
 	logger        *slog.Logger
 
-	mu       sync.Mutex
-	running  map[string]bool // key: tenantID+playbookID
+	mu      sync.Mutex
+	running map[string]bool // key: tenantID+playbookID
 }
 
 // NewEngine constructs a playbook engine.
