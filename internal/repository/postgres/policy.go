@@ -16,7 +16,7 @@ import (
 type PolicyRepository struct{ s *Store }
 
 const policyGraphSelectColumns = `
-	id, tenant_id, version, graph, compiled_at, COALESCE(compiler_version, ''), created_at
+	id, tenant_id, version, graph, compiled_at, COALESCE(compiler_version, ''), created_at, is_draft
 `
 
 func scanPolicyGraph(row pgx.Row) (repository.PolicyGraph, error) {
@@ -25,7 +25,17 @@ func scanPolicyGraph(row pgx.Row) (repository.PolicyGraph, error) {
 		compiledAt deletedAtScan
 		graphBuf   []byte
 	)
-	if err := row.Scan(&g.ID, &g.TenantID, &g.Version, &graphBuf, &compiledAt, &g.CompilerVersion, &g.CreatedAt); err != nil {
+	// is_draft is NOT NULL BOOLEAN DEFAULT false (migration
+	// 011); scan directly into the bool. Without this, every
+	// PolicyGraph returned from postgres would have IsDraft=false
+	// regardless of the on-disk value, silently masking drafts
+	// from GetGraph / PromoteGraph callers — see PR #39
+	// Devin Review BUG_0001.
+	if err := row.Scan(
+		&g.ID, &g.TenantID, &g.Version,
+		&graphBuf, &compiledAt, &g.CompilerVersion, &g.CreatedAt,
+		&g.IsDraft,
+	); err != nil {
 		return repository.PolicyGraph{}, err
 	}
 	g.Graph = json.RawMessage(graphBuf)
@@ -105,10 +115,10 @@ func (r *PolicyRepository) CreateGraph(ctx context.Context, tenantID uuid.UUID, 
 			compilerVersion = g.CompilerVersion
 		}
 		row := tx.QueryRow(ctx, `
-			INSERT INTO policy_graphs (id, tenant_id, version, graph, compiled_at, compiler_version)
-			VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5, $6)
+			INSERT INTO policy_graphs (id, tenant_id, version, graph, compiled_at, compiler_version, is_draft)
+			VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5, $6, $7)
 			RETURNING `+policyGraphSelectColumns,
-			g.ID, tenantID, version, []byte(g.Graph), compiledAt, compilerVersion,
+			g.ID, tenantID, version, []byte(g.Graph), compiledAt, compilerVersion, g.IsDraft,
 		)
 		var err error
 		out, err = scanPolicyGraph(row)
@@ -129,12 +139,24 @@ func (r *PolicyRepository) CreateGraph(ctx context.Context, tenantID uuid.UUID, 
 func (r *PolicyRepository) GetCurrentGraph(ctx context.Context, tenantID uuid.UUID) (repository.PolicyGraph, error) {
 	var out repository.PolicyGraph
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		// Defence-in-depth: predicate on tenant_id explicitly in
+		// addition to the RLS policy. RLS via withTenantRO is the
+		// primary tenant boundary, but a misconfigured connection
+		// (superuser, RLS-bypass role, GUC unset) would silently
+		// return another tenant's graph. The explicit predicate
+		// makes the boundary independent of RLS enforcement state
+		// — the query is correct even if RLS is off. The planner
+		// uses the existing `(tenant_id, is_draft, version DESC)`
+		// composite index either way, so there is no performance
+		// cost to adding the predicate.
 		row := tx.QueryRow(ctx, `
 			SELECT `+policyGraphSelectColumns+`
 			FROM policy_graphs
+			WHERE tenant_id = $1
+			  AND is_draft = false
 			ORDER BY version DESC
 			LIMIT 1
-		`)
+		`, tenantID)
 		var err error
 		out, err = scanPolicyGraph(row)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -142,6 +164,60 @@ func (r *PolicyRepository) GetCurrentGraph(ctx context.Context, tenantID uuid.UU
 		}
 		if err != nil {
 			return fmt.Errorf("select current graph: %w", err)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// GetGraph returns a single graph by ID regardless of its
+// is_draft state. Used by the rollout machinery to fetch a
+// proposed-but-not-yet-promoted graph (which GetCurrentGraph
+// would skip).
+func (r *PolicyRepository) GetGraph(ctx context.Context, tenantID, id uuid.UUID) (repository.PolicyGraph, error) {
+	var out repository.PolicyGraph
+	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		row := tx.QueryRow(ctx, `
+			SELECT `+policyGraphSelectColumns+`
+			FROM policy_graphs
+			WHERE id = $1::uuid
+		`, id)
+		var err error
+		out, err = scanPolicyGraph(row)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return repository.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("get policy graph: %w", err)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// PromoteGraph flips is_draft = false on a graph. Idempotent —
+// promoting an already-live graph is a no-op (returns the row
+// unchanged). The rollout controller calls this at the
+// dry_run -> canary transition to flip the candidate graph
+// into the live set so subsequent GetCurrentGraph reads see
+// the new policy.
+func (r *PolicyRepository) PromoteGraph(ctx context.Context, tenantID, id uuid.UUID) (repository.PolicyGraph, error) {
+	var out repository.PolicyGraph
+	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		row := tx.QueryRow(ctx, `
+			UPDATE policy_graphs
+			SET is_draft = false
+			WHERE id = $1::uuid
+			RETURNING `+policyGraphSelectColumns,
+			id,
+		)
+		var err error
+		out, err = scanPolicyGraph(row)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return repository.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("promote policy graph: %w", err)
 		}
 		return nil
 	})

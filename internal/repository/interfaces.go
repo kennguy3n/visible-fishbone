@@ -314,6 +314,18 @@ type TenantAPIKeyRepository interface {
 type PolicyRepository interface {
 	CreateGraph(ctx context.Context, tenantID uuid.UUID, g PolicyGraph) (PolicyGraph, error)
 	GetCurrentGraph(ctx context.Context, tenantID uuid.UUID) (PolicyGraph, error)
+	// GetGraph returns a graph by ID regardless of its
+	// is_draft state. Used by the rollout machinery to fetch
+	// the proposed graph after it has been persisted as a
+	// draft (where GetCurrentGraph would skip it).
+	GetGraph(ctx context.Context, tenantID, id uuid.UUID) (PolicyGraph, error)
+	// PromoteGraph flips is_draft = false on a graph the
+	// rollout state machine is promoting from draft to live.
+	// Returns the post-promotion row. Idempotent — calling on
+	// an already-live graph is a no-op (returns the row
+	// unchanged). Returns ErrNotFound when no such graph
+	// exists for the tenant.
+	PromoteGraph(ctx context.Context, tenantID, id uuid.UUID) (PolicyGraph, error)
 	ListGraphVersions(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[PolicyGraph], error)
 	CreateBundle(ctx context.Context, tenantID uuid.UUID, b PolicyBundle) (PolicyBundle, error)
 	GetBundle(ctx context.Context, tenantID, id uuid.UUID) (PolicyBundle, error)
@@ -383,4 +395,352 @@ type PolicySigningKeyRepository interface {
 	// will fail with a clear error in the meantime, which is the
 	// intended behaviour for a compromised-key incident.
 	Revoke(ctx context.Context, tenantID uuid.UUID, keyID string, at time.Time) (PolicySigningKey, error)
+}
+
+// --- Policy rollouts ------------------------------------------------------
+
+// PolicyRolloutRepository owns the policy_rollouts table — the
+// progressive-deployment state machine for proposed policy graphs
+// (dry-run -> canary -> full -> completed | rolled_back).
+//
+// The "current active rollout" for a tenant is the most recently
+// created rollout whose Stage is NOT terminal. The schema does NOT
+// enforce a partial-unique-active constraint because operators
+// occasionally need to layer a hotfix rollout on top of an
+// in-flight canary; the service layer (internal/service/policy)
+// is responsible for the activity-overlap policy decisions.
+type PolicyRolloutRepository interface {
+	// Create inserts a new rollout. The caller pre-populates
+	// ID (or leaves zero — driver assigns), TenantID, GraphID,
+	// PreviousGraphID, Stage (always DryRun on first insert),
+	// CanaryPercent (zero unless Stage == Canary), SimulationID,
+	// CreatedBy, Notes. CreatedAt / UpdatedAt are stamped by the
+	// driver. Returns ErrInvalidArgument when TenantID or
+	// GraphID is zero, or when Stage is terminal at creation.
+	Create(ctx context.Context, tenantID uuid.UUID, r PolicyRollout) (PolicyRollout, error)
+
+	// Get returns one rollout by ID. The TenantID predicate is
+	// applied so a request from one tenant cannot read another
+	// tenant's rollouts (mirrors the RLS guard).
+	Get(ctx context.Context, tenantID, id uuid.UUID) (PolicyRollout, error)
+
+	// GetActive returns the most recent NON-terminal rollout
+	// for the tenant. Used by the agent-pull endpoints to
+	// resolve "what stage is this tenant in" without a list
+	// scan. Returns ErrNotFound when no active rollout exists.
+	GetActive(ctx context.Context, tenantID uuid.UUID) (PolicyRollout, error)
+
+	// List enumerates rollouts in created-at descending order.
+	// Used by the operator-facing list endpoint; bounded by
+	// Page.Limit.
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[PolicyRollout], error)
+
+	// UpdateStage transitions a rollout to a new stage. The
+	// driver enforces the monotone-forward invariant
+	// (DryRun -> Canary -> Full -> Completed and any
+	// non-terminal -> RolledBack); illegal transitions return
+	// ErrInvalidArgument. CanaryPercent is updated atomically
+	// alongside the stage when supplied; pass -1 to leave the
+	// existing value untouched. Notes is appended (newline
+	// delimiter) to preserve the per-transition audit trail.
+	//
+	// promoteGraphID, when non-nil, flips is_draft = false on
+	// that graph row inside the SAME transaction as the stage
+	// update. This is the only safe way to fold draft promotion
+	// into a stage advance: doing it as a separate repository
+	// call leaves a failure window in which the rollout state
+	// and the graph "live" state can disagree (see PR #39
+	// Devin Review ANALYSIS_0001). Pass nil to skip promotion.
+	//
+	// demoteGraphID, when non-nil, flips is_draft = true on
+	// that graph row inside the SAME transaction as the stage
+	// update. The CanaryService passes this when a rollout is
+	// rolled back FROM canary or full: the proposed graph was
+	// promoted to live on the dry_run -> canary | full edge,
+	// and must be demoted back to draft on rollback so
+	// GetCurrentGraph (which filters is_draft = false) once
+	// again returns the previous live graph instead of the
+	// just-rolled-back proposal (see PR #39 Devin Review
+	// BUG_0001 round 3). promoteGraphID and demoteGraphID
+	// are mutually exclusive — passing both returns
+	// ErrInvalidArgument.
+	UpdateStage(
+		ctx context.Context,
+		tenantID, id uuid.UUID,
+		next PolicyRolloutStage,
+		canaryPercent int,
+		notes string,
+		updatedBy *uuid.UUID,
+		at time.Time,
+		promoteGraphID *uuid.UUID,
+		demoteGraphID *uuid.UUID,
+	) (PolicyRollout, error)
+}
+
+// -----------------------------------------------------------------------
+// Baseline + alert repositories (Phase 3 Block 3, Tasks 11-15).
+// -----------------------------------------------------------------------
+
+// BaselineModelRepository owns the baseline_models table.
+//
+// The hot path is the read-modify-write Observe loop in
+// baseline.Engine: a goroutine pulls a window of observations
+// from ClickHouse, loads the current BaselineModel for
+// (tenant, dimension, window_seconds), folds the new sample
+// into the Welford + EWMA state, and writes back. Concurrent
+// observers (different windows, different dimensions) update
+// disjoint rows and never collide; concurrent observers of the
+// SAME (tenant, dim, window) tuple race, and the optimistic
+// lock on Version is the mechanism that surfaces the conflict
+// so the service layer can retry instead of silently losing
+// one of the writes.
+type BaselineModelRepository interface {
+	// GetForDimension returns the model for the supplied (tenant,
+	// dimension, windowSeconds). Returns ErrNotFound when no
+	// such row exists — the caller's contract is to fall back to
+	// a cold-start BaselineModel (all-zero Welford/EWMA, default
+	// Alpha + ZThreshold).
+	GetForDimension(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		dimension string,
+		windowSeconds int,
+	) (BaselineModel, error)
+
+	// Upsert inserts the model if no row exists for the
+	// (tenant, dim, window) tuple, otherwise UPDATEs the
+	// existing row. The driver MUST enforce optimistic
+	// concurrency via Version: if the supplied m.Version does
+	// not match the persisted value (UPDATE path only — INSERT
+	// stamps Version=1 regardless), the driver returns
+	// ErrConflict and the caller retries the load+fold+write
+	// cycle. The driver stamps Version = m.Version + 1 on
+	// successful update.
+	Upsert(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		m BaselineModel,
+	) (BaselineModel, error)
+
+	// List enumerates models for a tenant, ordered by
+	// LastUpdatedAt DESC. Used by the operator-facing
+	// /baselines endpoint and the alert.Feedback tuning loop
+	// when it needs to enumerate every (dimension) the tenant
+	// has a model for.
+	List(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		page Page,
+	) (PageResult[BaselineModel], error)
+
+	// UpdateThreshold updates the ZThreshold on a model
+	// in-place without touching the Welford / EWMA state.
+	// Used by the alert.Feedback tuning loop and the
+	// operator-facing threshold override endpoint.
+	// Returns ErrNotFound when no model exists for the tuple.
+	UpdateThreshold(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		dimension string,
+		windowSeconds int,
+		zThreshold float64,
+	) (BaselineModel, error)
+}
+
+// AlertListFilter narrows AlertRepository.List to specific
+// states / kinds / dimensions. Zero-value fields are wildcards.
+type AlertListFilter struct {
+	// States narrows to alerts in one of the supplied states.
+	// Empty = any state.
+	States []AlertState
+	// Kinds narrows to alerts whose kind matches one of the
+	// supplied strings (exact match). Empty = any kind.
+	Kinds []string
+	// Dimensions narrows to alerts whose dimension matches one
+	// of the supplied strings (exact match). Empty = any
+	// dimension.
+	Dimensions []string
+}
+
+// AlertRepository owns the alerts table.
+type AlertRepository interface {
+	// Create persists a freshly-emitted alert. The caller
+	// supplies a fully-populated Alert struct (statistical
+	// context already snapshot-copied off the baseline).
+	// CreatedAt / UpdatedAt are stamped by the driver.
+	Create(ctx context.Context, tenantID uuid.UUID, a Alert) (Alert, error)
+
+	// Get returns one alert by ID, scoped to tenant.
+	Get(ctx context.Context, tenantID, id uuid.UUID) (Alert, error)
+
+	// List enumerates alerts in created-at DESC order. The
+	// filter narrows by state / kind / dimension; the page
+	// bounds the page size.
+	List(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		filter AlertListFilter,
+		page Page,
+	) (PageResult[Alert], error)
+
+	// Acknowledge transitions an alert from Open to
+	// Acknowledged. Idempotent: re-acknowledging an already-
+	// acknowledged alert is a no-op (returns the unchanged
+	// row). Returns ErrConflict when the alert is in a
+	// terminal state (Resolved / Suppressed) — the handler's
+	// writeAlertStateError helper maps that to a 409 with a
+	// 'terminal state' message rather than the generic
+	// 'uniqueness constraint' fall-through. See PR #40
+	// round-7 ANALYSIS_0003.
+	Acknowledge(
+		ctx context.Context,
+		tenantID, id uuid.UUID,
+		by *uuid.UUID,
+		at time.Time,
+	) (Alert, error)
+
+	// Resolve transitions an alert from Open or Acknowledged
+	// to Resolved. Returns ErrConflict when the alert is
+	// already in a different terminal state (Suppressed);
+	// re-resolving an already-Resolved alert is idempotent
+	// and returns the unchanged row.
+	Resolve(
+		ctx context.Context,
+		tenantID, id uuid.UUID,
+		by *uuid.UUID,
+		at time.Time,
+	) (Alert, error)
+}
+
+// AlertSuppressionRepository owns the alert_suppressions table.
+type AlertSuppressionRepository interface {
+	// Create persists a new suppression rule. Returns
+	// ErrInvalidArgument when neither Kind nor Dimension is
+	// set (matches the DB-level
+	// alert_suppressions_scope_nonempty constraint).
+	Create(ctx context.Context, tenantID uuid.UUID, s AlertSuppression) (AlertSuppression, error)
+
+	// Get returns one suppression by ID, scoped to tenant.
+	Get(ctx context.Context, tenantID, id uuid.UUID) (AlertSuppression, error)
+
+	// List enumerates suppressions in created-at DESC order.
+	List(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		page Page,
+	) (PageResult[AlertSuppression], error)
+
+	// ListActive returns every CURRENTLY-active suppression for
+	// a tenant (ExpiresAt == nil OR ExpiresAt > now). Used by
+	// alert.Router.Emit on every emit; the in-memory cache
+	// inside the router invalidates after a short TTL.
+	ListActive(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		now time.Time,
+	) ([]AlertSuppression, error)
+
+	// Delete removes a suppression rule.
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+}
+
+// AlertFeedbackRepository owns the alert_feedback table.
+type AlertFeedbackRepository interface {
+	// Create persists feedback on an alert. Returns
+	// ErrConflict when feedback already exists for the alert
+	// (the UNIQUE constraint on alert_id).
+	Create(ctx context.Context, tenantID uuid.UUID, f AlertFeedback) (AlertFeedback, error)
+
+	// GetForAlert returns the feedback for one alert. Returns
+	// ErrNotFound when no feedback exists for the alert.
+	GetForAlert(ctx context.Context, tenantID, alertID uuid.UUID) (AlertFeedback, error)
+
+	// Delete removes the feedback for an alert. Used so the
+	// operator can revise their judgement via DELETE +
+	// re-Create rather than silently overwriting history.
+	Delete(ctx context.Context, tenantID, alertID uuid.UUID) error
+
+	// ListByDimension returns every feedback row for alerts in
+	// the supplied (dimension, windowSeconds) tuple, ordered by
+	// created_at DESC. Used by alert.Feedback.TuneDimension to
+	// compute the per-(tenant, dimension, window) FP rate that
+	// drives threshold tuning.
+	//
+	// `windowSeconds <= 0` is a sentinel meaning "do not filter
+	// on window_seconds" — the query returns every feedback row
+	// for the dimension regardless of which window the underlying
+	// alert was emitted against. The tuning loop never passes
+	// this sentinel (it always knows the specific window); it
+	// exists for operator-facing tooling that wants a
+	// dimension-wide view across all windows. See PR #40 round-9
+	// ANALYSIS_0002 for why the tuning loop MUST scope by
+	// windowSeconds — aggregating a noisy 60s window's FP rate
+	// into a clean 3600s window's threshold would silently push
+	// the wrong threshold up.
+	ListByDimension(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		dimension string,
+		windowSeconds int,
+		since time.Time,
+	) ([]AlertFeedback, error)
+}
+
+// --- Integration connectors -----------------------------------------------
+
+// IntegrationConnectorRepository owns integration_connectors.
+// Tenant-scoped reads/writes flow through `sng.tenant_id` (RLS);
+// the dispatcher's ListActive matches the same indexes as
+// WebhookEndpointRepository.ListActive — the access pattern is
+// "every active connector for a tenant".
+type IntegrationConnectorRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, c IntegrationConnector) (IntegrationConnector, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (IntegrationConnector, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[IntegrationConnector], error)
+	Update(ctx context.Context, tenantID uuid.UUID, c IntegrationConnector) (IntegrationConnector, error)
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+	// SetStatus is a narrow lifecycle transition: enable / disable
+	// without rewriting Config / Secret. Update() with the same
+	// fields would also work but the dedicated path avoids the
+	// "did the operator accidentally clear the secret" footgun.
+	SetStatus(ctx context.Context, tenantID, id uuid.UUID, status IntegrationConnectorStatus) (IntegrationConnector, error)
+	// RecordTestResult updates LastTestResult / LastTestAt /
+	// LastTestError after a TestConnector probe. The Service is
+	// responsible for the probe itself; the repo just persists
+	// the outcome so the operator portal can show it.
+	RecordTestResult(ctx context.Context, tenantID, id uuid.UUID, result IntegrationTestResult, at time.Time, lastErr string) (IntegrationConnector, error)
+	// ListActive returns every active connector for the tenant
+	// that subscribes to at least one of the given event types
+	// (or whose EventTypes slice is empty — subscribe-to-all).
+	// Used by the dispatcher to fan out events.
+	ListActive(ctx context.Context, tenantID uuid.UUID, eventTypes []string) ([]IntegrationConnector, error)
+}
+
+// IntegrationDeliveryRepository owns integration_deliveries. Same
+// invariants as WebhookDeliveryRepository: ListPending atomically
+// claims a batch and transitions rows to 'processing' inside the
+// claim statement, so concurrent workers cannot double-deliver.
+type IntegrationDeliveryRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, d IntegrationDelivery) (IntegrationDelivery, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (IntegrationDelivery, error)
+	List(ctx context.Context, tenantID uuid.UUID, connectorID *uuid.UUID, page Page) (PageResult[IntegrationDelivery], error)
+	// UpdateStatus transitions the delivery to a new status with
+	// attempt metadata. externalRef, when non-empty, is persisted
+	// as the row's ExternalReference (Jira issue key /
+	// ServiceNow sys_id); pass "" to leave the existing value
+	// untouched.
+	UpdateStatus(
+		ctx context.Context,
+		tenantID, id uuid.UUID,
+		status IntegrationDeliveryStatus,
+		attempt int,
+		lastErr string,
+		responseStatus int,
+		nextRetry time.Time,
+		externalRef string,
+	) error
+	// ListPending atomically claims a batch of due-for-retry
+	// deliveries. processingTimeout governs the stuck-row recovery
+	// window; pass 0 to never re-claim.
+	ListPending(ctx context.Context, limit int, processingTimeout time.Duration) ([]IntegrationDelivery, error)
 }

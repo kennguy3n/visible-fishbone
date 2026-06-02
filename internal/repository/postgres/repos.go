@@ -38,6 +38,11 @@ func (s *Store) NewPolicySigningKeyRepository() *PolicySigningKeyRepository {
 	return &PolicySigningKeyRepository{s: s}
 }
 
+// NewPolicyRolloutRepository binds the Store to repository.PolicyRolloutRepository.
+func (s *Store) NewPolicyRolloutRepository() *PolicyRolloutRepository {
+	return &PolicyRolloutRepository{s: s}
+}
+
 // NewTenantAPIKeyRepository binds the Store to repository.TenantAPIKeyRepository.
 func (s *Store) NewTenantAPIKeyRepository() *TenantAPIKeyRepository {
 	return &TenantAPIKeyRepository{s: s}
@@ -63,22 +68,57 @@ func (s *Store) NewAppRegistryOverrideRepository() *AppRegistryOverrideRepositor
 	return &AppRegistryOverrideRepository{s: s}
 }
 
+// NewBaselineModelRepository binds the Store to repository.BaselineModelRepository.
+func (s *Store) NewBaselineModelRepository() *BaselineModelRepository {
+	return &BaselineModelRepository{s: s}
+}
+
+// NewAlertRepository binds the Store to repository.AlertRepository.
+func (s *Store) NewAlertRepository() *AlertRepository { return &AlertRepository{s: s} }
+
+// NewAlertSuppressionRepository binds the Store to repository.AlertSuppressionRepository.
+func (s *Store) NewAlertSuppressionRepository() *AlertSuppressionRepository {
+	return &AlertSuppressionRepository{s: s}
+}
+
+// NewAlertFeedbackRepository binds the Store to repository.AlertFeedbackRepository.
+func (s *Store) NewAlertFeedbackRepository() *AlertFeedbackRepository {
+	return &AlertFeedbackRepository{s: s}
+}
+
+// NewIntegrationConnectorRepository binds the Store to repository.IntegrationConnectorRepository.
+func (s *Store) NewIntegrationConnectorRepository() *IntegrationConnectorRepository {
+	return &IntegrationConnectorRepository{s: s}
+}
+
+// NewIntegrationDeliveryRepository binds the Store to repository.IntegrationDeliveryRepository.
+func (s *Store) NewIntegrationDeliveryRepository() *IntegrationDeliveryRepository {
+	return &IntegrationDeliveryRepository{s: s}
+}
+
 // Compile-time interface compliance asserts. Keeping these in this
 // file means a single grep tells us "did the postgres package
 // implement every interface?" without scanning eight files.
 var (
-	_ repository.TenantRepository              = (*TenantRepository)(nil)
-	_ repository.SiteRepository                = (*SiteRepository)(nil)
-	_ repository.UserRepository                = (*UserRepository)(nil)
-	_ repository.DeviceRepository              = (*DeviceRepository)(nil)
-	_ repository.RoleRepository                = (*RoleRepository)(nil)
-	_ repository.ClaimTokenRepository          = (*ClaimTokenRepository)(nil)
-	_ repository.AuditLogRepository            = (*AuditLogRepository)(nil)
-	_ repository.PolicyRepository              = (*PolicyRepository)(nil)
-	_ repository.PolicySigningKeyRepository    = (*PolicySigningKeyRepository)(nil)
-	_ repository.TenantAPIKeyRepository        = (*TenantAPIKeyRepository)(nil)
-	_ repository.WebhookEndpointRepository     = (*WebhookEndpointRepository)(nil)
-	_ repository.WebhookDeliveryRepository     = (*WebhookDeliveryRepository)(nil)
-	_ repository.AppRegistryRepository         = (*AppRegistryRepository)(nil)
-	_ repository.AppRegistryOverrideRepository = (*AppRegistryOverrideRepository)(nil)
+	_ repository.TenantRepository               = (*TenantRepository)(nil)
+	_ repository.SiteRepository                 = (*SiteRepository)(nil)
+	_ repository.UserRepository                 = (*UserRepository)(nil)
+	_ repository.DeviceRepository               = (*DeviceRepository)(nil)
+	_ repository.RoleRepository                 = (*RoleRepository)(nil)
+	_ repository.ClaimTokenRepository           = (*ClaimTokenRepository)(nil)
+	_ repository.AuditLogRepository             = (*AuditLogRepository)(nil)
+	_ repository.PolicyRepository               = (*PolicyRepository)(nil)
+	_ repository.PolicySigningKeyRepository     = (*PolicySigningKeyRepository)(nil)
+	_ repository.PolicyRolloutRepository        = (*PolicyRolloutRepository)(nil)
+	_ repository.TenantAPIKeyRepository         = (*TenantAPIKeyRepository)(nil)
+	_ repository.WebhookEndpointRepository      = (*WebhookEndpointRepository)(nil)
+	_ repository.WebhookDeliveryRepository      = (*WebhookDeliveryRepository)(nil)
+	_ repository.AppRegistryRepository          = (*AppRegistryRepository)(nil)
+	_ repository.AppRegistryOverrideRepository  = (*AppRegistryOverrideRepository)(nil)
+	_ repository.BaselineModelRepository        = (*BaselineModelRepository)(nil)
+	_ repository.AlertRepository                = (*AlertRepository)(nil)
+	_ repository.AlertSuppressionRepository     = (*AlertSuppressionRepository)(nil)
+	_ repository.AlertFeedbackRepository        = (*AlertFeedbackRepository)(nil)
+	_ repository.IntegrationConnectorRepository = (*IntegrationConnectorRepository)(nil)
+	_ repository.IntegrationDeliveryRepository  = (*IntegrationDeliveryRepository)(nil)
 )

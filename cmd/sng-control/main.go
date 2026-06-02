@@ -31,11 +31,15 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
+	"github.com/kennguy3n/visible-fishbone/internal/service/alert"
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
+	"github.com/kennguy3n/visible-fishbone/internal/service/integration"
+	"github.com/kennguy3n/visible-fishbone/internal/service/integration/connectors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
 	"github.com/kennguy3n/visible-fishbone/internal/service/site"
@@ -130,7 +134,7 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, appRegHandler, appSyncer, err := buildRouter(&cfg, logger, pool, health, telReplay)
+	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -140,6 +144,13 @@ func run() error {
 	// immediately on boot. Stopped during shutdown below.
 	if err := webhookWorker.Start(rootCtx); err != nil {
 		return fmt.Errorf("start webhook worker: %w", err)
+	}
+	// Same boot ordering as the webhook worker — pending
+	// IntegrationDelivery rows queued by a previous process
+	// resume dispatch before the HTTP server starts accepting
+	// new traffic.
+	if err := integrationWorker.Start(rootCtx); err != nil {
+		return fmt.Errorf("start integration worker: %w", err)
 	}
 
 	// Launch the periodic app-registry sync loop. The Syncer pulls
@@ -176,6 +187,29 @@ func run() error {
 		// handler.TelemetryClassQuerier contract directly — no
 		// adapter shim required.
 		appRegHandler.SetStats(chWriter)
+
+		// Wire the policy simulator now that the ClickHouse hot
+		// tier is alive. Reader.NewReader on Writer shares the
+		// connection, so we don't open a second pool just for
+		// reads — and the simulator's lifecycle is bound to the
+		// telemetry stack's, which is exactly what we want
+		// (operator-driven simulation requires recent telemetry).
+		if policySimHandler != nil {
+			chReader, rErr := chWriter.NewReader()
+			if rErr != nil {
+				logger.Warn("policy.simulator: clickhouse reader unavailable; /simulations endpoint returns 503",
+					slog.String("error", rErr.Error()))
+			} else {
+				sim, sErr := policy.NewSimulator(chReader, policy.GraphEvaluatorFactory{}, policy.WithSimulatorLogger(logger))
+				if sErr != nil {
+					logger.Warn("policy.simulator: construction failed; /simulations endpoint returns 503",
+						slog.String("error", sErr.Error()))
+				} else {
+					policySimHandler.SetSimulator(sim)
+					logger.Info("policy.simulator: wired to clickhouse hot tier")
+				}
+			}
+		}
 	}
 	// Wrap startTelemetry's shutdown in a sync.Once so the bounded
 	// explicit call (with shutdownCtx) wins and the safety-net
@@ -227,6 +261,9 @@ func run() error {
 	if err := webhookWorker.Stop(shutdownCtx); err != nil {
 		logger.Warn("sng-control: webhook worker shutdown error", slog.Any("error", err))
 	}
+	if err := integrationWorker.Stop(shutdownCtx); err != nil {
+		logger.Warn("sng-control: integration worker shutdown error", slog.Any("error", err))
+	}
 
 	if err := telShutdown(shutdownCtx); err != nil {
 		logger.Warn("sng-control: telemetry shutdown error", slog.Any("error", err))
@@ -251,7 +288,8 @@ func buildRouter(
 	pool *pgxpool.Pool,
 	health *handler.Health,
 	replay *telreplay.Worker,
-) (http.Handler, *webhook.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, error) {
+	telPub *sngnats.Publisher,
+) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, error) {
 	store := postgres.NewStore(pool)
 
 	tenantRepo := store.NewTenantRepository()
@@ -262,11 +300,18 @@ func buildRouter(
 	auditRepo := store.NewAuditLogRepository()
 	policyRepo := store.NewPolicyRepository()
 	policyKeyRepo := store.NewPolicySigningKeyRepository()
+	policyRolloutRepo := store.NewPolicyRolloutRepository()
 	webhookEndpointRepo := store.NewWebhookEndpointRepository()
 	webhookDeliveryRepo := store.NewWebhookDeliveryRepository()
 	apiKeyRepo := store.NewTenantAPIKeyRepository()
 	appRepo := store.NewAppRegistryRepository()
 	appOverrideRepo := store.NewAppRegistryOverrideRepository()
+	baselineRepo := store.NewBaselineModelRepository()
+	alertRepo := store.NewAlertRepository()
+	alertSuppressionRepo := store.NewAlertSuppressionRepository()
+	alertFeedbackRepo := store.NewAlertFeedbackRepository()
+	integrationConnectorRepo := store.NewIntegrationConnectorRepository()
+	integrationDeliveryRepo := store.NewIntegrationDeliveryRepository()
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -297,11 +342,11 @@ func buildRouter(
 	// the same in all cases.
 	keyOpts := []policy.KeyOption{}
 	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
 	} else if len(master) > 0 {
 		w, err := policy.NewAESGCMWrapper(master)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
 		}
 		keyOpts = append(keyOpts, policy.WithKeyWrapper(w))
 		logger.Info("policy: AES-256-GCM at-rest wrap enabled for signing seeds")
@@ -312,7 +357,7 @@ func buildRouter(
 	if cfg.Policy.SigningKeyPath != "" {
 		ks, err := policy.LoadKeySignerFromFile(cfg.Policy.SigningKeyPath)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
 		}
 		policySigner = ks
 		fileSigner = ks
@@ -372,22 +417,123 @@ func buildRouter(
 		logger,
 	)
 
+	// PolicySimulationHandler is constructed only when both
+	// the rollout repo and a CanaryService can be built. The
+	// Simulator itself is wired without a TelemetrySource for
+	// now (deployments without a ClickHouse hot tier can still
+	// drive rollouts manually) — operator-triggered simulation
+	// returns 503 until ClickHouse is wired via a future
+	// startup pass. The rollout / dry-run / advance paths
+	// don't depend on the simulator and remain fully
+	// functional.
+	// NewCanaryService currently only fails when either of its
+	// required deps is nil — which would be a programmer error
+	// at startup, not a runtime condition. Surface it as a
+	// fatal log so we never silently start a control plane with
+	// a missing rollout state machine (per PR #39 Devin Review
+	// ANALYSIS_0002): a future option (e.g. a clock injection
+	// guard, or a CanaryConfig validator) could introduce real
+	// failures, and silently dropping that error would leave
+	// the simulation handler wired to a nil service.
+	canarySvc, err := policy.NewCanaryService(policySvc, policyRolloutRepo,
+		policy.WithCanaryLogger(logger))
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
+	}
+	policySimHandler := handler.NewPolicySimulationHandler(
+		policySvc, canarySvc, nil, policyRepo, logger)
+
+	// Baseline + alert services (Phase 3 Block 3, Tasks 11-15).
+	// The Router takes a Publisher for NATS lifecycle events on
+	// `sng.<tenant>.alerts.*`; we adapt sngnats.Publisher's 4-arg
+	// signature to the 3-arg slice the Router needs. Passing nil
+	// is safe (Router checks for nil pub on every publish); in
+	// practice the publisher is always wired here so the operator
+	// portal can subscribe to fresh alerts in realtime.
+	alertRouter := alert.NewRouter(
+		alertRepo, alertSuppressionRepo,
+		natsAlertAdapter{p: telPub},
+		alert.Options{Logger: logger},
+	)
+	alertFeedback := alert.NewFeedback(
+		alertFeedbackRepo, alertRepo, baselineRepo,
+		alert.FeedbackTuningOptions{},
+	)
+	// Scope the tuning loop's logger so operators can filter
+	// `component=alert-feedback` to triage missing threshold
+	// adjustments without scrolling through every router log.
+	alertFeedback.SetLogger(logger.With(slog.String("component", "alert-feedback")))
+	// NOTE: baseline.NewService(baselineRepo) is intentionally
+	// NOT constructed here. The Service / Detector pair is
+	// wired by the telemetry consumer (future block) once the
+	// dispatch path is ready to feed Observations in; until
+	// then, alert.Feedback / alert.Router operate on the
+	// baseline repo directly for threshold tuning and
+	// suppression matching, which does not require the
+	// score-then-fold service surface.
+
+	// Integration service + worker (Phase 3 Block 4, Task 21).
+	// Registry maps every IntegrationConnectorType to its plugin.
+	// We construct each connector with a shared http.Client so
+	// the deployment's outbound HTTPS budget is uniform across
+	// SIEM / Jira / ServiceNow. Syslog is wired with nil dialer
+	// so the connector falls back to net.Dial / tls.Dial as
+	// appropriate per connector.Scheme. The worker is started
+	// alongside the webhook worker (see Start/Stop sites below).
+	integrationHTTP := &http.Client{Timeout: 15 * time.Second}
+	integrationUA := cfg.AppName + "/sng-control"
+	integrationRegistry := integration.Registry{
+		repository.IntegrationConnectorSyslog:      connectors.NewSyslog(nil, 5*time.Second, hostnameForSyslog()),
+		repository.IntegrationConnectorSIEMWebhook: connectors.NewSIEM(integrationHTTP, integrationUA),
+		repository.IntegrationConnectorJira:        connectors.NewJira(integrationHTTP, integrationUA),
+		repository.IntegrationConnectorServiceNow:  connectors.NewServiceNow(integrationHTTP, integrationUA),
+	}
+	integrationSvc := integration.New(
+		integrationConnectorRepo, integrationDeliveryRepo, auditRepo,
+		integrationRegistry, logger)
+	// Translate the operator-facing cfg.Integration knobs into
+	// the worker's internal WorkerConfig. Round-4 of Devin Review
+	// on PR #41 (PR D) flagged that the previous wiring passed an
+	// empty `integration.WorkerConfig{}`, which silently fell
+	// back to the hard-coded defaults in
+	// internal/service/integration/worker.go:46-65 — operators
+	// who exported `INTEGRATION_WORKER_*` env vars would see them
+	// validated at boot but never reach the live worker. Threads
+	// the values through so the contract is honoured (mirrors the
+	// webhook worker wiring above).
+	integrationWorker := integration.NewDeliveryWorker(
+		integrationConnectorRepo, integrationDeliveryRepo,
+		integrationRegistry,
+		integration.WorkerConfig{
+			BatchSize:         cfg.Integration.BatchSize,
+			PollInterval:      cfg.Integration.PollInterval,
+			MaxAttempts:       cfg.Integration.MaxAttempts,
+			BackoffBase:       cfg.Integration.BackoffBase,
+			BackoffMax:        cfg.Integration.BackoffMax,
+			ProcessingTimeout: cfg.Integration.ProcessingTimeout,
+		},
+		logger)
+
 	router := handler.NewRouter(handler.RouterDeps{
-		Config:       cfg,
-		Logger:       logger,
-		Tenants:      handler.NewTenantHandler(tenantSvc),
-		Sites:        handler.NewSiteHandler(siteSvc),
-		Devices:      handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL),
-		RBAC:         handler.NewRBACHandler(rbacSvc),
-		Policy:       handler.NewPolicyHandler(policySvc, policyKeySvc, policyHandlerOpts...),
-		Audit:        handler.NewAuditHandler(auditSvc),
-		Webhooks:     handler.NewWebhookHandler(webhookSvc),
-		APIKeys:      handler.NewAPIKeyHandler(apiKeySvc),
-		Telemetry:    handler.NewTelemetryHandler(replay),
-		AppRegistry:  appRegHandler,
-		APIKeyLookup: apiKeySvc,
-		Health:       health,
-		OpenAPISpec:  handler.NewOpenAPIHandler(),
+		Config:           cfg,
+		Logger:           logger,
+		Tenants:          handler.NewTenantHandler(tenantSvc),
+		Sites:            handler.NewSiteHandler(siteSvc),
+		Devices:          handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL),
+		RBAC:             handler.NewRBACHandler(rbacSvc),
+		Policy:           handler.NewPolicyHandler(policySvc, policyKeySvc, policyHandlerOpts...),
+		PolicySimulation: policySimHandler,
+		Audit:            handler.NewAuditHandler(auditSvc),
+		Webhooks:         handler.NewWebhookHandler(webhookSvc),
+		APIKeys:          handler.NewAPIKeyHandler(apiKeySvc),
+		Telemetry:        handler.NewTelemetryHandler(replay),
+		AppRegistry:      appRegHandler,
+		Baseline:         handler.NewBaselineHandler(baselineRepo, logger),
+		Alert:            handler.NewAlertHandler(alertRouter, alertFeedback, logger),
+		Integrations:     handler.NewIntegrationHandler(integrationSvc),
+		APIKeyLookup:     apiKeySvc,
+		Health:           health,
+		OpenAPISpec:      handler.NewOpenAPIHandler(),
 	})
 	// Return the AppRegistry handler so the caller can attach the
 	// telemetry stats querier post-construction — the ClickHouse
@@ -401,7 +547,7 @@ func buildRouter(
 	// admin `POST /admin/app-registry/sync` endpoint is the only
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
-	return router, webhookWorker, appRegHandler, appSyncer, nil
+	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, nil
 }
 
 // loadPolicyKeyWrapMaster resolves the AES-GCM master key from
@@ -927,4 +1073,35 @@ func trailingSpaces(s string) string {
 		}
 	}
 	return s
+}
+
+// natsAlertAdapter adapts sngnats.Publisher (Publish takes 4
+// args including PublishOptions) to the alert.Router.Publisher
+// interface (Publish takes 3 args). The Router treats alert
+// publishing as best-effort fire-and-forget — a transient NATS
+// hiccup must not roll back the persistent alert row — so we
+// use the publisher's default retry/timeout from cfg.NATS
+// (PublishOptions{} = zero-value = use cfg defaults).
+type natsAlertAdapter struct {
+	p *sngnats.Publisher
+}
+
+func (a natsAlertAdapter) Publish(ctx context.Context, subject string, data []byte) error {
+	if a.p == nil {
+		return nil
+	}
+	return a.p.Publish(ctx, subject, data, sngnats.PublishOptions{})
+}
+
+// hostnameForSyslog returns the local hostname used as the
+// HOSTNAME field in RFC 5424 syslog frames. Falls back to
+// "sng-control" so a hostname-lookup failure does not crash the
+// connector; operators see the literal "sng-control" in their
+// SIEM and can correlate against the Kubernetes pod metadata.
+func hostnameForSyslog() string {
+	h, err := os.Hostname()
+	if err != nil || h == "" {
+		return "sng-control"
+	}
+	return h
 }

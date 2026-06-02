@@ -12,22 +12,26 @@ import (
 // router. Each handler is injected separately so callers can swap
 // real implementations for in-memory ones in tests.
 type RouterDeps struct {
-	Config       *config.Config
-	Logger       *slog.Logger
-	Tenants      *TenantHandler
-	Sites        *SiteHandler
-	Devices      *DeviceHandler
-	RBAC         *RBACHandler
-	Policy       *PolicyHandler
-	Audit        *AuditHandler
-	Webhooks     *WebhookHandler
-	APIKeys      *APIKeyHandler
-	Telemetry    *TelemetryHandler
-	AppRegistry  *AppRegistryHandler
-	OpenAPISpec  *OpenAPIHandler
-	APIKeyLookup middleware.APIKeyLookup
-	RateLimiter  *middleware.RateLimiter
-	Health       *Health
+	Config           *config.Config
+	Logger           *slog.Logger
+	Tenants          *TenantHandler
+	Sites            *SiteHandler
+	Devices          *DeviceHandler
+	RBAC             *RBACHandler
+	Policy           *PolicyHandler
+	PolicySimulation *PolicySimulationHandler
+	Audit            *AuditHandler
+	Webhooks         *WebhookHandler
+	APIKeys          *APIKeyHandler
+	Telemetry        *TelemetryHandler
+	AppRegistry      *AppRegistryHandler
+	Baseline         *BaselineHandler
+	Alert            *AlertHandler
+	Integrations     *IntegrationHandler
+	OpenAPISpec      *OpenAPIHandler
+	APIKeyLookup     middleware.APIKeyLookup
+	RateLimiter      *middleware.RateLimiter
+	Health           *Health
 }
 
 // NewRouter composes the full API mux + middleware chain.
@@ -66,6 +70,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.Policy != nil {
 		deps.Policy.Register(apiMux)
 	}
+	if deps.PolicySimulation != nil {
+		deps.PolicySimulation.Register(apiMux)
+	}
 	if deps.Audit != nil {
 		deps.Audit.Register(apiMux)
 	}
@@ -80,6 +87,15 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.AppRegistry != nil {
 		deps.AppRegistry.Register(apiMux)
+	}
+	if deps.Baseline != nil {
+		deps.Baseline.Register(apiMux)
+	}
+	if deps.Alert != nil {
+		deps.Alert.Register(apiMux)
+	}
+	if deps.Integrations != nil {
+		deps.Integrations.Register(apiMux)
 	}
 
 	apiChain := middleware.Chain(

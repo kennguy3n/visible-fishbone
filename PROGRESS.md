@@ -275,26 +275,26 @@ down; MSP onboarding is repeatable.
 
 ### Block 4 — Integration service
 
-- [ ] **Task 16.** Integration service scaffold —
+- [x] **Task 16.** Integration service scaffold —
       `internal/service/integration/service.go`: manage external
       connectors (SIEM, ticketing, IAM, RMM / PSA) using the
       same service pattern as tenant / policy / webhook
-- [ ] **Task 17.** Syslog export —
+- [x] **Task 17.** Syslog export —
       `internal/service/integration/syslog.go`: RFC 5424 / 5425
       with TLS, per-tenant destinations, subscribe to telemetry
       NATS subjects, retry with backoff
-- [ ] **Task 18.** SIEM / XDR webhook export —
+- [x] **Task 18.** SIEM / XDR webhook export —
       `internal/service/integration/siem_export.go`: outbound
       delivery to Splunk HEC / Elastic / Sentinel via HMAC-signed
       webhooks, retry / backoff, per-tenant destination config
-- [ ] **Task 19.** Ticketing integration — Jira —
+- [x] **Task 19.** Ticketing integration — Jira —
       `internal/service/integration/ticketing/jira.go`:
       bidirectional ticket sync, OAuth 2.0, create incidents
       from SNG alerts, sync status back
-- [ ] **Task 20.** Ticketing integration — ServiceNow —
+- [x] **Task 20.** Ticketing integration — ServiceNow —
       `internal/service/integration/ticketing/servicenow.go`:
       same pattern, REST + OAuth, bidirectional case status sync
-- [ ] **Task 21.** Integration handler + API —
+- [x] **Task 21.** Integration handler + API —
       `internal/handler/integration.go` + OpenAPI: REST CRUD
       endpoints for connectors, test connectivity, list
       available integrations, view sync status

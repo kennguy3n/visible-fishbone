@@ -1,0 +1,312 @@
+package memory
+
+import (
+	"context"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
+)
+
+// PolicyRolloutRepository is the memory-backed implementation of
+// repository.PolicyRolloutRepository. It mirrors the
+// monotone-forward state-machine invariant the Postgres driver
+// enforces with a CHECK on UpdateStage transitions; rejections
+// surface as ErrInvalidArgument so service-layer callers can
+// branch on the same sentinel both backends emit.
+type PolicyRolloutRepository struct{ s *Store }
+
+// NewPolicyRolloutRepository wires a fresh repo over the shared
+// Store.
+func NewPolicyRolloutRepository(s *Store) *PolicyRolloutRepository {
+	return &PolicyRolloutRepository{s: s}
+}
+
+var _ repository.PolicyRolloutRepository = (*PolicyRolloutRepository)(nil)
+
+// cloneRollout returns a deep copy of the rollout — slice / pointer
+// fields are independent of the stored row so callers can mutate
+// the returned value without racing the store. Matches the pattern
+// used in policy.go / policy_signing_key.go.
+func cloneRollout(in repository.PolicyRollout) repository.PolicyRollout {
+	out := in
+	if in.CreatedBy != nil {
+		u := *in.CreatedBy
+		out.CreatedBy = &u
+	}
+	return out
+}
+
+// Create inserts a new rollout. The caller may leave ID zero (the
+// repo assigns one); a non-zero ID collides only if a row with
+// that ID already exists (ErrConflict). Stage is forced to DryRun
+// at creation — the state machine starts at DryRun and may only
+// advance from there.
+func (r *PolicyRolloutRepository) Create(ctx context.Context, tenantID uuid.UUID, rl repository.PolicyRollout) (repository.PolicyRollout, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.PolicyRollout{}, err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if tenantID == uuid.Nil || rl.GraphID == uuid.Nil {
+		return repository.PolicyRollout{}, repository.ErrInvalidArgument
+	}
+	if _, ok := r.s.tenants[tenantID]; !ok {
+		return repository.PolicyRollout{}, repository.ErrNotFound
+	}
+	if g, ok := r.s.policyGraphs[rl.GraphID]; !ok || g.TenantID != tenantID {
+		return repository.PolicyRollout{}, repository.ErrNotFound
+	}
+	// PreviousGraphID is optional (uuid.Nil means "no prior
+	// graph"); when set, it must reference the same tenant.
+	if rl.PreviousGraphID != uuid.Nil {
+		if g, ok := r.s.policyGraphs[rl.PreviousGraphID]; !ok || g.TenantID != tenantID {
+			return repository.PolicyRollout{}, repository.ErrNotFound
+		}
+	}
+	if rl.Stage.IsTerminal() {
+		return repository.PolicyRollout{}, repository.ErrInvalidArgument
+	}
+	if rl.Stage == "" {
+		rl.Stage = repository.PolicyRolloutStageDryRun
+	}
+	if rl.Stage == repository.PolicyRolloutStageCanary {
+		if rl.CanaryPercent < 0 || rl.CanaryPercent > 100 {
+			return repository.PolicyRollout{}, repository.ErrInvalidArgument
+		}
+	} else {
+		rl.CanaryPercent = 0
+	}
+	if rl.ID == uuid.Nil {
+		rl.ID = uuid.New()
+	} else if _, dup := r.s.policyRollouts[rl.ID]; dup {
+		return repository.PolicyRollout{}, repository.ErrConflict
+	}
+	rl.TenantID = tenantID
+	now := r.s.clock()
+	rl.CreatedAt = now
+	rl.UpdatedAt = now
+	stored := cloneRollout(rl)
+	r.s.policyRollouts[stored.ID] = stored
+	return cloneRollout(stored), nil
+}
+
+// Get returns the rollout by ID, filtering on tenant scope.
+func (r *PolicyRolloutRepository) Get(ctx context.Context, tenantID, id uuid.UUID) (repository.PolicyRollout, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.PolicyRollout{}, err
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	rl, ok := r.s.policyRollouts[id]
+	if !ok || rl.TenantID != tenantID {
+		return repository.PolicyRollout{}, repository.ErrNotFound
+	}
+	return cloneRollout(rl), nil
+}
+
+// GetActive returns the most recently created NON-terminal
+// rollout for the tenant. Ties on CreatedAt are broken by ID to
+// keep the result deterministic across runs.
+func (r *PolicyRolloutRepository) GetActive(ctx context.Context, tenantID uuid.UUID) (repository.PolicyRollout, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.PolicyRollout{}, err
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	var best repository.PolicyRollout
+	found := false
+	for _, rl := range r.s.policyRollouts {
+		if rl.TenantID != tenantID || rl.Stage.IsTerminal() {
+			continue
+		}
+		if !found ||
+			rl.CreatedAt.After(best.CreatedAt) ||
+			(rl.CreatedAt.Equal(best.CreatedAt) && rolloutIDLess(best.ID, rl.ID)) {
+			best = rl
+			found = true
+		}
+	}
+	if !found {
+		return repository.PolicyRollout{}, repository.ErrNotFound
+	}
+	return cloneRollout(best), nil
+}
+
+// List returns rollouts in created-at descending order.
+func (r *PolicyRolloutRepository) List(ctx context.Context, tenantID uuid.UUID, page repository.Page) (repository.PageResult[repository.PolicyRollout], error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.PageResult[repository.PolicyRollout]{}, err
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	all := make([]repository.PolicyRollout, 0, len(r.s.policyRollouts))
+	for _, rl := range r.s.policyRollouts {
+		if rl.TenantID != tenantID {
+			continue
+		}
+		all = append(all, cloneRollout(rl))
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if !all[i].CreatedAt.Equal(all[j].CreatedAt) {
+			return all[i].CreatedAt.After(all[j].CreatedAt)
+		}
+		return rolloutIDLess(all[j].ID, all[i].ID) // descending by ID
+	})
+	return paginate(all, page, func(rl repository.PolicyRollout) cursor {
+		return cursor{CreatedAt: rl.CreatedAt, ID: rl.ID}
+	}), nil
+}
+
+// UpdateStage transitions the rollout to a new stage, enforcing
+// the monotone-forward invariant. Returns the updated row.
+func (r *PolicyRolloutRepository) UpdateStage(
+	ctx context.Context,
+	tenantID, id uuid.UUID,
+	next repository.PolicyRolloutStage,
+	canaryPercent int,
+	notes string,
+	updatedBy *uuid.UUID,
+	at time.Time,
+	promoteGraphID *uuid.UUID,
+	demoteGraphID *uuid.UUID,
+) (repository.PolicyRollout, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.PolicyRollout{}, err
+	}
+	// Promote + demote in one call would be self-contradictory;
+	// reject early so the postgres and memory impls agree.
+	if promoteGraphID != nil && demoteGraphID != nil {
+		return repository.PolicyRollout{}, repository.ErrInvalidArgument
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	rl, ok := r.s.policyRollouts[id]
+	if !ok || rl.TenantID != tenantID {
+		return repository.PolicyRollout{}, repository.ErrNotFound
+	}
+	if !validRolloutTransition(rl.Stage, next) {
+		return repository.PolicyRollout{}, repository.ErrInvalidArgument
+	}
+	if next == repository.PolicyRolloutStageCanary {
+		if canaryPercent < 0 || canaryPercent > 100 {
+			return repository.PolicyRollout{}, repository.ErrInvalidArgument
+		}
+		rl.CanaryPercent = canaryPercent
+	}
+	// Leaving canary stage — CanaryPercent is no longer
+	// meaningful, but the row deliberately retains the
+	// historical value so the audit trail records "we ran at
+	// N%". No mutation here; the existing column stays.
+	// If the caller requested a draft -> live promotion OR
+	// the live -> draft demotion, validate the target graph
+	// exists for this tenant BEFORE mutating any rollout
+	// state — the memory impl has no transactions, so failing
+	// here is the only way to keep the rollout and the graph
+	// from disagreeing. In the postgres impl this is enforced
+	// by the FK + the tenant RLS GUC inside the surrounding
+	// withTenant tx.
+	if promoteGraphID != nil {
+		g, gok := r.s.policyGraphs[*promoteGraphID]
+		if !gok || g.TenantID != tenantID {
+			return repository.PolicyRollout{}, repository.ErrNotFound
+		}
+	}
+	if demoteGraphID != nil {
+		g, gok := r.s.policyGraphs[*demoteGraphID]
+		if !gok || g.TenantID != tenantID {
+			return repository.PolicyRollout{}, repository.ErrNotFound
+		}
+	}
+	rl.Stage = next
+	rl.UpdatedAt = at.UTC()
+	if updatedBy != nil {
+		// CreatedBy stays put (immutable provenance); the
+		// updater is folded into Notes so we don't add a
+		// second column for it in the memory impl.
+		_ = updatedBy
+	}
+	if notes != "" {
+		if rl.Notes == "" {
+			rl.Notes = notes
+		} else {
+			rl.Notes = strings.Join([]string{rl.Notes, notes}, "\n")
+		}
+	}
+	r.s.policyRollouts[id] = rl
+	// Promotion / demotion side-effect, flipped on the target
+	// graph. Both are idempotent (no-op if the column already
+	// holds the target value). The postgres impl does the
+	// equivalent UPDATE inside the same withTenant tx so the
+	// stage advance + draft flip commit atomically; here we
+	// hold s.mu across both writes which is the memory-
+	// equivalent guarantee.
+	if promoteGraphID != nil {
+		g := r.s.policyGraphs[*promoteGraphID]
+		g.IsDraft = false
+		r.s.policyGraphs[*promoteGraphID] = g
+	}
+	if demoteGraphID != nil {
+		g := r.s.policyGraphs[*demoteGraphID]
+		g.IsDraft = true
+		r.s.policyGraphs[*demoteGraphID] = g
+	}
+	return cloneRollout(rl), nil
+}
+
+// validRolloutTransition encodes the monotone-forward state
+// machine matching the Postgres trigger
+// policy_rollouts_check_transition (migration 010,
+// trg_policy_rollouts_check_transition):
+//
+//   - Same-stage updates are always allowed. This is how the
+//     service layer patches notes / canary_percent / promoteGraphID
+//     without advancing the stage (e.g. bumping canary 1% -> 5%).
+//   - Terminal stages (Completed, RolledBack) reject every other
+//     destination — even RolledBack — because re-rolling-back a
+//     completed rollout would corrupt the audit trail.
+//   - Any non-terminal stage may transition to RolledBack (the
+//     one-way emergency exit).
+//   - DryRun -> Canary | Full, Canary -> Full, Full -> Completed
+//     are the only forward edges.
+//
+// The memory backend MUST mirror the Postgres trigger exactly so
+// callers can rely on identical behaviour regardless of which
+// repository is wired underneath. Prior to this fix the memory
+// impl returned ErrInvalidArgument on same-stage updates, causing
+// any in-place patch to pass against Postgres and fail against
+// memory.
+func validRolloutTransition(from, to repository.PolicyRolloutStage) bool {
+	if from == to {
+		return true
+	}
+	if from.IsTerminal() {
+		return false
+	}
+	if to == repository.PolicyRolloutStageRolledBack {
+		return true
+	}
+	switch from {
+	case repository.PolicyRolloutStageDryRun:
+		return to == repository.PolicyRolloutStageCanary || to == repository.PolicyRolloutStageFull
+	case repository.PolicyRolloutStageCanary:
+		return to == repository.PolicyRolloutStageFull
+	case repository.PolicyRolloutStageFull:
+		return to == repository.PolicyRolloutStageCompleted
+	}
+	return false
+}
+
+// rolloutIDLess compares two UUIDs byte-wise — used as a
+// deterministic tiebreaker when CreatedAt collides.
+func rolloutIDLess(a, b uuid.UUID) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
+}
