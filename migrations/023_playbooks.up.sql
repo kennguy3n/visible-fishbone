@@ -22,5 +22,6 @@ CREATE INDEX idx_playbooks_tenant ON playbooks(tenant_id);
 CREATE INDEX idx_playbooks_tenant_enabled ON playbooks(tenant_id, enabled);
 
 ALTER TABLE playbooks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE playbooks FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON playbooks
-    USING (tenant_id = current_setting('sng.tenant_id')::uuid);
+    USING (tenant_id = NULLIF(current_setting('sng.tenant_id', true), '')::uuid);

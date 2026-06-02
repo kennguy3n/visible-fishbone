@@ -131,8 +131,8 @@ func (r *PlaybookRepository) List(ctx context.Context, tenantID uuid.UUID, page 
 func (r *PlaybookRepository) Update(ctx context.Context, tenantID, id uuid.UUID, patch repository.PlaybookPatch) (repository.Playbook, error) {
 	var out repository.Playbook
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		// fetch current
-		q := `SELECT ` + playbookCols + ` FROM playbooks WHERE id = $1`
+		// fetch current with row lock to prevent lost updates
+		q := `SELECT ` + playbookCols + ` FROM playbooks WHERE id = $1 FOR UPDATE`
 		p, err := scanPlaybook(tx.QueryRow(ctx, q, id))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return repository.ErrNotFound

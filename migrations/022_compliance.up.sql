@@ -20,5 +20,6 @@ CREATE INDEX idx_compliance_reports_tenant ON compliance_reports(tenant_id);
 CREATE INDEX idx_compliance_reports_tenant_framework ON compliance_reports(tenant_id, framework);
 
 ALTER TABLE compliance_reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE compliance_reports FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON compliance_reports
-    USING (tenant_id = current_setting('sng.tenant_id')::uuid);
+    USING (tenant_id = NULLIF(current_setting('sng.tenant_id', true), '')::uuid);

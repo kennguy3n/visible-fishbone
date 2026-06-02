@@ -19,8 +19,9 @@ CREATE INDEX idx_playbook_executions_tenant ON playbook_executions(tenant_id);
 CREATE INDEX idx_playbook_executions_playbook ON playbook_executions(tenant_id, playbook_id);
 
 ALTER TABLE playbook_executions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE playbook_executions FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON playbook_executions
-    USING (tenant_id = current_setting('sng.tenant_id')::uuid);
+    USING (tenant_id = NULLIF(current_setting('sng.tenant_id', true), '')::uuid);
 
 CREATE TABLE IF NOT EXISTS playbook_step_results (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -40,5 +41,6 @@ CREATE TABLE IF NOT EXISTS playbook_step_results (
 CREATE INDEX idx_step_results_execution ON playbook_step_results(execution_id);
 
 ALTER TABLE playbook_step_results ENABLE ROW LEVEL SECURITY;
+ALTER TABLE playbook_step_results FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON playbook_step_results
-    USING (tenant_id = current_setting('sng.tenant_id')::uuid);
+    USING (tenant_id = NULLIF(current_setting('sng.tenant_id', true), '')::uuid);
