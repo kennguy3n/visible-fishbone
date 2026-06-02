@@ -55,6 +55,20 @@ func (r *DeviceEnrollmentRepository) GetEnrollment(ctx context.Context, tenantID
 	defer r.s.mu.RUnlock()
 	key := deviceEnrollmentKey{DeviceID: deviceID, TenantID: tenantID}
 	e, ok := r.s.deviceEnrollments[key]
+	if !ok || e.Status == repository.EnrollmentStatusRevoked {
+		return repository.DeviceEnrollment{}, repository.ErrNotFound
+	}
+	return e, nil
+}
+
+func (r *DeviceEnrollmentRepository) GetEnrollmentAnyStatus(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID) (repository.DeviceEnrollment, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.DeviceEnrollment{}, err
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	key := deviceEnrollmentKey{DeviceID: deviceID, TenantID: tenantID}
+	e, ok := r.s.deviceEnrollments[key]
 	if !ok {
 		return repository.DeviceEnrollment{}, repository.ErrNotFound
 	}

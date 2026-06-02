@@ -92,6 +92,42 @@ func (r *DeviceEnrollmentRepository) GetEnrollment(ctx context.Context, tenantID
 	return out, err
 }
 
+func (r *DeviceEnrollmentRepository) GetEnrollmentAnyStatus(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID) (repository.DeviceEnrollment, error) {
+	var out repository.DeviceEnrollment
+	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		const q = `
+			SELECT device_id, tenant_id, public_key, status, enrolled_at,
+			       last_cert_issued_at, revoked_at
+			FROM device_enrollments
+			WHERE device_id = $1::uuid
+			LIMIT 1`
+		row := tx.QueryRow(ctx, q, deviceID)
+		var enrolled deletedAtScan
+		var lastCert deletedAtScan
+		var revoked deletedAtScan
+		if err := row.Scan(
+			&out.DeviceID, &out.TenantID, &out.PublicKey, &out.Status,
+			&enrolled, &lastCert, &revoked,
+		); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return repository.ErrNotFound
+			}
+			return fmt.Errorf("select device_enrollment: %w", err)
+		}
+		out.EnrolledAt = enrolled.Time
+		if lastCert.Valid {
+			t := lastCert.Time
+			out.LastCertIssuedAt = &t
+		}
+		if revoked.Valid {
+			t := revoked.Time
+			out.RevokedAt = &t
+		}
+		return nil
+	})
+	return out, err
+}
+
 func (r *DeviceEnrollmentRepository) UpdateEnrollmentStatus(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, status repository.EnrollmentStatus) error {
 	return r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		var q string

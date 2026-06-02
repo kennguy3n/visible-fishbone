@@ -910,8 +910,14 @@ type DeviceEnrollmentRepository interface {
 	// exists for the (tenant_id, device_id) pair.
 	CreateEnrollment(ctx context.Context, tenantID uuid.UUID, e DeviceEnrollment) (DeviceEnrollment, error)
 	// GetEnrollment returns the active/enrolled enrollment for a
-	// device. Returns ErrNotFound if no enrollment exists.
+	// device. Returns ErrNotFound if no enrollment exists or if the
+	// enrollment is revoked.
 	GetEnrollment(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID) (DeviceEnrollment, error)
+	// GetEnrollmentAnyStatus returns the enrollment for a device
+	// regardless of lifecycle status (including revoked). Use this
+	// for status queries; use GetEnrollment for operations that
+	// should only target non-revoked enrollments.
+	GetEnrollmentAnyStatus(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID) (DeviceEnrollment, error)
 	// UpdateEnrollmentStatus transitions the enrollment to a new
 	// lifecycle state.
 	UpdateEnrollmentStatus(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, status EnrollmentStatus) error

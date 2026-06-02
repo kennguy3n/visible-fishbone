@@ -148,13 +148,14 @@ func (s *EnrollmentService) RevokeDevice(
 	return nil
 }
 
-// GetEnrollmentStatus returns the current enrollment status for a device.
+// GetEnrollmentStatus returns the current enrollment status for a device,
+// including revoked enrollments.
 func (s *EnrollmentService) GetEnrollmentStatus(
 	ctx context.Context,
 	tenantID uuid.UUID,
 	deviceID uuid.UUID,
 ) (repository.DeviceEnrollment, error) {
-	return s.enrollments.GetEnrollment(ctx, tenantID, deviceID)
+	return s.enrollments.GetEnrollmentAnyStatus(ctx, tenantID, deviceID)
 }
 
 // issueCertificate generates a short-lived self-signed mTLS

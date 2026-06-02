@@ -227,11 +227,11 @@ func TestDeviceLifecycleStateMachine(t *testing.T) {
 	if err := svc.RevokeDevice(context.Background(), tid, deviceID); err != nil {
 		t.Fatalf("RevokeDevice: %v", err)
 	}
-	// Revoked device lookup may fail depending on impl — check either
-	// status=revoked or ErrNotFound (memory returns not_found since
-	// GetEnrollment skips revoked by convention).
 	e, err = svc.GetEnrollmentStatus(context.Background(), tid, deviceID)
-	if err == nil && e.Status != repository.EnrollmentStatusRevoked {
+	if err != nil {
+		t.Fatalf("step 3: GetEnrollmentStatus after revoke: %v", err)
+	}
+	if e.Status != repository.EnrollmentStatusRevoked {
 		t.Errorf("step 3: status = %s, want revoked", e.Status)
 	}
 }
