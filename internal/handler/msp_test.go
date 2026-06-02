@@ -2169,3 +2169,223 @@ func TestMSPHandler_BulkPermissionConstants_AreUsedByRouter(t *testing.T) {
 		}
 	}
 }
+
+// TestMSPHandler_SetStatus_RejectsResurrection pins the round-12
+// BUG_0001 fix: `POST /api/v1/msps/{id}/status` with
+// `{"status":"active"}` (or "suspended") on a soft-deleted MSP
+// must return 403 Forbidden, not silently resurrect the row.
+//
+// The lifecycle invariant is `(status='deleted' ⇔ deleted_at != NULL)`.
+// Both repository backends' UpdateStatus methods write the status
+// column unconditionally and never CLEAR deleted_at on the reverse
+// arm (memory: internal/repository/memory/msp.go:194; postgres:
+// internal/repository/postgres/msp.go:275-280 — the SQL CASE only
+// stamps deleted_at on `$2 = 'deleted'`). Without the handler guard
+// a resurrected MSP would have `status='active' && deleted_at != NULL`,
+// the partial unique slug index `WHERE deleted_at IS NULL` would
+// still treat it as soft-deleted, every status-aware list query and
+// the branding cache would behave inconsistently, and the original
+// Delete's tenant-cascade (msp_tenants rows removed,
+// tenants.msp_id cleared) is irreversible — the resurrected MSP is
+// orphaned with no bindings even though it appears active.
+//
+// `deleted` is the terminal state of the MSP lifecycle.
+func TestMSPHandler_SetStatus_RejectsResurrection(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+
+	// Seed: create an MSP and soft-delete it via the canonical
+	// Delete path so the cascade fires (msp_tenants, tenants.msp_id).
+	m, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-rez-guard"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := msps.Delete(ctx, m.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	deleted, err := msps.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get deleted: %v", err)
+	}
+	if deleted.Status != repository.MSPStatusDeleted {
+		t.Fatalf("after delete, status = %q, want %q",
+			deleted.Status, repository.MSPStatusDeleted)
+	}
+	if deleted.DeletedAt == nil {
+		t.Fatalf("after delete, DeletedAt = nil, want non-nil " +
+			"(lifecycle invariant: status='deleted' ⇔ deleted_at != NULL)")
+	}
+
+	// Attempt resurrection to `active` — must be rejected with 403.
+	for _, target := range []repository.MSPStatus{
+		repository.MSPStatusActive,
+		repository.MSPStatusSuspended,
+	} {
+		rec := doMSPJSON(t, mux, http.MethodPost,
+			"/api/v1/msps/"+m.ID.String()+"/status",
+			handler.MSPStatusRequest{Status: string(target)})
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("resurrection to %q: status = %d body=%s, want 403 — "+
+				"deleted is a terminal lifecycle state",
+				target, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body.Error.Code != "forbidden" {
+			t.Fatalf("error.code = %q, want forbidden", body.Error.Code)
+		}
+		if !strings.Contains(body.Error.Message, "deleted") {
+			t.Fatalf("error.message = %q, want a message mentioning 'deleted'",
+				body.Error.Message)
+		}
+	}
+
+	// Verify the MSP is still deleted, not resurrected — the
+	// lifecycle invariant must hold across the rejected attempts.
+	stillDeleted, err := msps.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get after resurrection attempt: %v", err)
+	}
+	if stillDeleted.Status != repository.MSPStatusDeleted {
+		t.Fatalf("after rejected resurrection, status = %q, want %q",
+			stillDeleted.Status, repository.MSPStatusDeleted)
+	}
+	if stillDeleted.DeletedAt == nil {
+		t.Fatalf("after rejected resurrection, DeletedAt = nil, " +
+			"want non-nil (lifecycle invariant violated)")
+	}
+
+	// Sanity: re-posting `deleted` is still idempotent per round-11,
+	// so the guard didn't regress that path.
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/status",
+		handler.MSPStatusRequest{Status: string(repository.MSPStatusDeleted)})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-post deleted: status = %d body=%s, want 200 "+
+			"(idempotent — round-11)",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestMSPHandler_BulkApplyPolicy_RejectsEmptyTemplate pins the
+// round-12 ANALYSIS fix: handler-boundary validation. A client
+// posting `{}` or `{"template":null}` must get a 400
+// invalid_param at the handler boundary with a specific message,
+// not the generic `invalid_argument` the bulk service wraps
+// around an empty templateGraph. Mirrors the count/ttl guards on
+// bulk/claim-tokens — input validation consolidated at one layer.
+func TestMSPHandler_BulkApplyPolicy_RejectsEmptyTemplate(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	tenants := memory.NewTenantRepository(store)
+	ctx := context.Background()
+	m, _ := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-empty-tmpl"})
+	tn, _ := tenants.Create(ctx, repository.Tenant{Name: "t1", Slug: "t1-empty-tmpl"})
+	if _, err := msps.AssignTenant(ctx, m.ID, tn.ID,
+		repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	bulkSvc := svctenant.NewBulkService(
+		msps,
+		stubBulkAuthz{tenants: []uuid.UUID{tn.ID}},
+		nil, nil,
+		&fakeTokenIssuer{},
+		nil,
+		svctenant.BulkOptions{},
+	)
+	h := handler.NewMSPHandler(repoMSPService{repo: msps}, bulkSvc, nil, allowAllAuthz{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	// template omitted entirely.
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/bulk/policy-templates",
+		handler.BulkPolicyTemplateRequest{})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty template: status = %d body=%s, want 400",
+			rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "invalid_param" {
+		t.Fatalf("error.code = %q, want invalid_param — handler boundary error",
+			body.Error.Code)
+	}
+	if !strings.Contains(body.Error.Message, "template") {
+		t.Fatalf("error.message = %q, want a message mentioning 'template'",
+			body.Error.Message)
+	}
+}
+
+// TestMSPHandler_BulkProvisionSites_RejectsEmptyName pins the
+// round-12 ANALYSIS fix: handler-boundary validation for the
+// site name. The bulk service already returns ErrInvalidArgument
+// for an empty Site.Name (internal/service/tenant/bulk.go:222),
+// but the handler now performs the same check up front so the
+// error surface is uniform with the bulk/policy template-body
+// guard and the bulk/claim-tokens count + ttl guards.
+func TestMSPHandler_BulkProvisionSites_RejectsEmptyName(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	tenants := memory.NewTenantRepository(store)
+	ctx := context.Background()
+	m, _ := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-empty-name"})
+	tn, _ := tenants.Create(ctx, repository.Tenant{Name: "t1", Slug: "t1-empty-name"})
+	if _, err := msps.AssignTenant(ctx, m.ID, tn.ID,
+		repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	bulkSvc := svctenant.NewBulkService(
+		msps,
+		stubBulkAuthz{tenants: []uuid.UUID{tn.ID}},
+		nil, nil,
+		&fakeTokenIssuer{},
+		nil,
+		svctenant.BulkOptions{},
+	)
+	h := handler.NewMSPHandler(repoMSPService{repo: msps}, bulkSvc, nil, allowAllAuthz{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/bulk/sites",
+		handler.BulkSiteRequest{Name: ""})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty name: status = %d body=%s, want 400",
+			rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "invalid_param" {
+		t.Fatalf("error.code = %q, want invalid_param",
+			body.Error.Code)
+	}
+	if !strings.Contains(body.Error.Message, "name") {
+		t.Fatalf("error.message = %q, want a message mentioning 'name'",
+			body.Error.Message)
+	}
+}

@@ -622,6 +622,47 @@ func (h *MSPHandler) setStatus(w http.ResponseWriter, r *http.Request) {
 		WriteJSON(w, http.StatusOK, toMSPResponse(deleted))
 		return
 	}
+	// Resurrection guard: refuse to transition a soft-deleted MSP
+	// back to active/suspended. Both repository backends'
+	// UpdateStatus methods write the status column unconditionally
+	// (memory: internal/repository/memory/msp.go:194; postgres:
+	// internal/repository/postgres/msp.go:275-280 — the SQL CASE
+	// only stamps deleted_at on `$2 = 'deleted'` and never CLEARS
+	// it on the reverse arm), so without this guard a client could
+	// POST `{"status":"active"}` to a soft-deleted MSP and produce
+	// a corrupt row:
+	//
+	//   * status='active' but deleted_at != NULL — violates the
+	//     `(status='deleted' ⇔ deleted_at != NULL)` lifecycle
+	//     invariant the rest of the system relies on (the partial
+	//     unique slug index `WHERE deleted_at IS NULL` would still
+	//     see the row as soft-deleted; the resolver, status-aware
+	//     list queries, and branding cache all behave inconsistently);
+	//   * the cascade fired by the original `Delete()` —
+	//     removing every `msp_tenants` row and clearing
+	//     `tenants.msp_id` on each previously-owned tenant — is
+	//     irreversible, leaving the resurrected MSP orphaned with
+	//     no tenant bindings even though it appears active to
+	//     status-only consumers.
+	//
+	// `deleted` is the terminal state of the MSP lifecycle. Round-12
+	// of Devin Review on PR #42 caught the missing guard as
+	// BUG_0001. To create a new MSP after a deletion, callers must
+	// `POST /api/v1/msps` with a new slug — the partial unique
+	// index intentionally allows slug reuse only when the prior row
+	// is soft-deleted, but the resurrection path was never the
+	// intended way to recycle an identifier.
+	existing, err := h.msps.Get(r.Context(), id)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	if existing.Status == repository.MSPStatusDeleted {
+		WriteError(w, http.StatusForbidden, "forbidden",
+			"cannot transition a deleted MSP back to active or suspended; "+
+				"deleted is a terminal lifecycle state — create a new MSP with the desired slug instead")
+		return
+	}
 	updated, err := h.msps.UpdateStatus(r.Context(), id, repository.MSPStatus(req.Status))
 	if err != nil {
 		WriteRepositoryError(w, err)
@@ -926,6 +967,30 @@ func (h *MSPHandler) bulkApplyPolicyTemplate(w http.ResponseWriter, r *http.Requ
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
+	// Template body must be present. The bulk service does enforce
+	// this and returns ErrInvalidArgument-wrapped 400 via
+	// writeBulkError, but the long-term contract puts input
+	// validation at the handler boundary so the error surface is
+	// uniform with the bulk/sites name guard, the bulk/claim-tokens
+	// count + ttl guards, and the status/slug/rel checks the
+	// earlier rounds consolidated here. Round-12 of Devin Review on
+	// PR #42 flagged this asymmetric validation: handler-side
+	// checks elsewhere produce specific `invalid_param` messages,
+	// while a missing template body returned a generic
+	// `invalid_argument`. The check uses `len()` against the raw
+	// json.RawMessage rather than parsing — an empty body, `null`,
+	// or just whitespace would all be rejected here, matching the
+	// service-layer `len(templateGraph) == 0` predicate. The
+	// `string(req.Template) == "null"` arm handles the explicit
+	// JSON null case: `{"template": null}` unmarshals into a
+	// non-nil 4-byte `RawMessage("null")`, but the policy
+	// service would still reject it after fan-out cost — better
+	// to fail fast at the boundary.
+	if len(req.Template) == 0 || string(req.Template) == "null" {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			"template is required")
+		return
+	}
 	res, err := h.bulk.ApplyPolicyTemplateToTenants(r.Context(), mspID, userID, actorFromCtx(r), req.Template)
 	if err != nil {
 		writeBulkError(w, err)
@@ -946,6 +1011,22 @@ func (h *MSPHandler) bulkProvisionSites(w http.ResponseWriter, r *http.Request) 
 	}
 	var req BulkSiteRequest
 	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	// Site name must be non-empty. Round-12 of Devin Review on
+	// PR #42 caught the asymmetric validation: the bulk service
+	// rejects an empty name at internal/service/tenant/bulk.go:222
+	// with ErrInvalidArgument, but the handler did not surface a
+	// specific message. Moving the check to the handler boundary
+	// matches the pattern already established for the
+	// bulk/claim-tokens count + ttl guards, the bulk/policy
+	// template-body guard above, and the status/slug/rel checks on
+	// the CRUD endpoints — uniform error surface, specific
+	// `invalid_param` message, validation consolidated at one
+	// layer.
+	if req.Name == "" {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			"name is required")
 		return
 	}
 	site := repository.Site{
