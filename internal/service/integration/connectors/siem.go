@@ -290,8 +290,26 @@ func (s *SIEM) post(
 	if sec.HMACKey != "" {
 		ts := strconv.FormatInt(now.UTC().Unix(), 10)
 		mac := hmac.New(sha256.New, []byte(sec.HMACKey))
-		signed := append([]byte(ts+"."), body...)
-		mac.Write(signed)
+		// Feed the HMAC in two writes (ts+"." then body) rather
+		// than allocating a combined slice. Round-8 of Devin
+		// Review on PR #41 (ANALYSIS_0001) flagged that the
+		// previous `append([]byte(ts+"."), body...)` relied on
+		// Go's append-capacity semantics to guarantee that body
+		// (which is also handed to bytes.NewReader on line 269
+		// as the HTTP request body) was not aliased into the
+		// HMAC input. That guarantee is correct today but
+		// silently breaks under a refactor that pre-allocates
+		// the temp slice with excess capacity (e.g. `buf :=
+		// make([]byte, 0, 1024); buf = append(buf, ts+".");
+		// signed := append(buf, body...)`) — at which point the
+		// HMAC input and the HTTP body could diverge. hash.Hash
+		// is io.Writer-shaped and explicitly equivalent to a
+		// single concatenated Write per the stdlib contract
+		// (`sha256` doc: "It never returns an error"), so
+		// splitting the writes eliminates the temp buffer and
+		// the aliasing concern in one stroke.
+		mac.Write([]byte(ts + "."))
+		mac.Write(body)
 		req.Header.Set(cfg.tsHeader, ts)
 		req.Header.Set(cfg.sigHeader, "v1="+hex.EncodeToString(mac.Sum(nil)))
 	}
