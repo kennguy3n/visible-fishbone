@@ -866,6 +866,32 @@ type MSPRepository interface {
 	ListBindings(ctx context.Context, tenantID uuid.UUID) ([]MSPTenantBinding, error)
 }
 
+// --- CASB ------------------------------------------------------------------
+
+// CASBConnectorRepository owns the casb_connectors table.
+// Tenant-scoped reads/writes flow through `sng.tenant_id` (RLS).
+type CASBConnectorRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, c CASBConnector) (CASBConnector, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (CASBConnector, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[CASBConnector], error)
+	Update(ctx context.Context, tenantID uuid.UUID, c CASBConnector) (CASBConnector, error)
+	UpdateSyncStatus(ctx context.Context, tenantID, id uuid.UUID, status CASBConnectorStatus, lastSyncAt time.Time) error
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+}
+
+// CASBDiscoveredAppRepository owns the casb_discovered_apps table.
+type CASBDiscoveredAppRepository interface {
+	Upsert(ctx context.Context, tenantID uuid.UUID, app CASBDiscoveredApp) (CASBDiscoveredApp, error)
+	List(ctx context.Context, tenantID uuid.UUID) ([]CASBDiscoveredApp, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (CASBDiscoveredApp, error)
+}
+
+// CASBPostureCheckRepository owns the casb_posture_checks table.
+type CASBPostureCheckRepository interface {
+	Save(ctx context.Context, tenantID uuid.UUID, appID uuid.UUID, checks []CASBPostureCheck) error
+	GetLatest(ctx context.Context, tenantID uuid.UUID, appID uuid.UUID) ([]CASBPostureCheck, error)
+}
+
 // --- DLP ------------------------------------------------------------------
 
 // DLPPolicyRepository owns the dlp_policies table. Tenant-scoped
