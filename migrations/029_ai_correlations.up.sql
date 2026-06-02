@@ -1,4 +1,4 @@
--- Migration 026: AI alert correlations table.
+-- Migration 029: AI alert correlations table.
 -- Stores incident clusters produced by the AI correlation engine.
 
 CREATE TABLE ai_alert_correlations (

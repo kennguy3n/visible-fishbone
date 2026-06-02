@@ -1047,3 +1047,28 @@ type PlaybookApprovalRepository interface {
 	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string, approverID *uuid.UUID) error
 	ExpireOld(ctx context.Context, before time.Time) (int, error)
 }
+
+// --- Operational Health ---------------------------------------------------
+
+// PolicyReviewScheduleRepository owns the policy_review_schedules table.
+type PolicyReviewScheduleRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, s PolicyReviewSchedule) (PolicyReviewSchedule, error)
+	Get(ctx context.Context, tenantID, policyID uuid.UUID) (PolicyReviewSchedule, error)
+	ListDue(ctx context.Context, before time.Time, limit int) ([]PolicyReviewSchedule, error)
+	UpdateLastReviewed(ctx context.Context, tenantID, policyID uuid.UUID, at time.Time) error
+}
+
+// MaxOpsHealthHistory caps how many snapshots ListHistory returns. The
+// time window already bounds the result, but a tenant recording at high
+// frequency could otherwise return tens of thousands of rows in a single
+// unpaginated response; implementations keep the most recent rows.
+const MaxOpsHealthHistory = 2000
+
+// OpsHealthSnapshotRepository owns the ops_health_snapshots table.
+type OpsHealthSnapshotRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, s OpsHealthSnapshot) (OpsHealthSnapshot, error)
+	GetLatest(ctx context.Context, tenantID uuid.UUID) (OpsHealthSnapshot, error)
+	// ListHistory returns snapshots created at or after since, newest
+	// first, capped at MaxOpsHealthHistory rows.
+	ListHistory(ctx context.Context, tenantID uuid.UUID, since time.Time) ([]OpsHealthSnapshot, error)
+}

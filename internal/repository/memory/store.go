@@ -117,6 +117,10 @@ type Store struct {
 	playbookStepResults map[uuid.UUID]repository.StepResult
 	playbookApprovals   map[uuid.UUID]repository.PlaybookApproval
 
+	// Operational health tables — see migrations 030, 031.
+	policyReviewSchedules map[uuid.UUID]repository.PolicyReviewSchedule
+	opsHealthSnapshots    map[uuid.UUID]repository.OpsHealthSnapshot
+
 	// clock is injected for deterministic tests. Defaults to
 	// time.Now.UTC.
 	clock func() time.Time
@@ -182,6 +186,8 @@ func NewStore() *Store {
 		playbookExecutions:    map[uuid.UUID]repository.PlaybookExecution{},
 		playbookStepResults:   map[uuid.UUID]repository.StepResult{},
 		playbookApprovals:     map[uuid.UUID]repository.PlaybookApproval{},
+		policyReviewSchedules: map[uuid.UUID]repository.PolicyReviewSchedule{},
+		opsHealthSnapshots:    map[uuid.UUID]repository.OpsHealthSnapshot{},
 		clock:                 func() time.Time { return time.Now().UTC() },
 	}
 }
