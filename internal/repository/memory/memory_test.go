@@ -758,3 +758,55 @@ func TestTenantRepository_Create_ReturnsClonedSettingsNotSharedBackingArray(t *t
 			stillSame.Settings, original)
 	}
 }
+
+// TestTenantRepository_UpdateSettingsKey_RejectsSoftDeletedTenant
+// pins the round-21 fix for ANALYSIS_0002: the interface doc on
+// repository.TenantRepository.UpdateSettingsKey promises "Returns
+// ErrNotFound if the row does not exist or has been soft-deleted",
+// but neither backend enforced it before round-21. A caller that
+// knew a now-tombstoned tenant's UUID could otherwise mutate its
+// JSONB settings document, contradicting both the interface
+// contract and the lifecycle invariant. Both backends now add a
+// `deleted_at IS NULL` filter (postgres) / equivalent in-memory
+// check (this backend) so the documented behaviour is observable.
+func TestTenantRepository_UpdateSettingsKey_RejectsSoftDeletedTenant(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	tn, err := repo.Create(ctx(), repository.Tenant{Name: "Acme", Slug: "acme-r21-update-sk", Tier: repository.TenantTierStarter})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := repo.Delete(ctx(), tn.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	_, err = repo.UpdateSettingsKey(ctx(), tn.ID, "theme", json.RawMessage(`"dark"`))
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("UpdateSettingsKey on soft-deleted tenant: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestTenantRepository_DeleteSettingsKey_RejectsSoftDeletedTenant
+// is the delete-side twin of the UpdateSettingsKey test above.
+// Same rationale: the interface contract says ErrNotFound for
+// missing-or-soft-deleted, and the round-21 fix makes the contract
+// observable on both backends.
+func TestTenantRepository_DeleteSettingsKey_RejectsSoftDeletedTenant(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	tn, err := repo.Create(ctx(), repository.Tenant{
+		Name:     "Acme",
+		Slug:     "acme-r21-delete-sk",
+		Tier:     repository.TenantTierStarter,
+		Settings: json.RawMessage(`{"theme":"dark"}`),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := repo.Delete(ctx(), tn.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	_, err = repo.DeleteSettingsKey(ctx(), tn.ID, "theme")
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("DeleteSettingsKey on soft-deleted tenant: want ErrNotFound, got %v", err)
+	}
+}

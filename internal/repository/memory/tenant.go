@@ -204,6 +204,24 @@ func (r *TenantRepository) UpdateSettingsKey(ctx context.Context, id uuid.UUID, 
 	if !ok {
 		return repository.Tenant{}, repository.ErrNotFound
 	}
+	// Soft-delete filter (round-21 of Devin Review on PR #42 —
+	// ANALYSIS_0002). The interface doc on
+	// repository.TenantRepository.UpdateSettingsKey promises
+	// "Returns ErrNotFound if the row does not exist or has been
+	// soft-deleted." Both halves were missing from the prior
+	// implementation — a plain map lookup returned the tombstoned
+	// row and the merge would then write fresh keys into a
+	// soft-deleted tenant's JSONB document, leaking past the
+	// lifecycle invariant `(Status==Deleted ⇔ DeletedAt != nil)`.
+	// Callers today go through MountTenantScoped middleware which
+	// gates access, but the interface contract is broader than
+	// that path and any new internal caller (worker, migration,
+	// admin tool) must observe the documented behaviour. We check
+	// both predicates for defence-in-depth against any hypothetical
+	// corrupt row that violates the invariant.
+	if existing.DeletedAt != nil || existing.Status == repository.TenantStatusDeleted {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
 	settings := map[string]json.RawMessage{}
 	if len(existing.Settings) > 0 && string(existing.Settings) != "null" {
 		if err := json.Unmarshal(existing.Settings, &settings); err != nil {
@@ -235,6 +253,16 @@ func (r *TenantRepository) DeleteSettingsKey(ctx context.Context, id uuid.UUID, 
 	defer r.s.mu.Unlock()
 	existing, ok := r.s.tenants[id]
 	if !ok {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	// Soft-delete filter (round-21 of Devin Review on PR #42 —
+	// ANALYSIS_0002). Mirrors the matching guard on
+	// UpdateSettingsKey: the interface contract is "ErrNotFound if
+	// the row does not exist or has been soft-deleted", so a
+	// tombstoned tenant's JSONB document is now unreachable via
+	// this primitive. See the matching guard upstream for the full
+	// rationale.
+	if existing.DeletedAt != nil || existing.Status == repository.TenantStatusDeleted {
 		return repository.Tenant{}, repository.ErrNotFound
 	}
 	if len(existing.Settings) == 0 || string(existing.Settings) == "null" {

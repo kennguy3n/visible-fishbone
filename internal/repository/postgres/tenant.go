@@ -290,10 +290,29 @@ func (r *TenantRepository) UpdateSettingsKey(ctx context.Context, id uuid.UUID, 
 	// true) inserts the key when the path does not exist; the
 	// COALESCE(settings, '{}'::jsonb) ensures we treat SQL NULL
 	// as an empty document rather than returning NULL.
+	//
+	// Soft-delete filter (round-21 of Devin Review on PR #42 —
+	// ANALYSIS_0002). The interface doc promises "Returns
+	// ErrNotFound if the row does not exist or has been
+	// soft-deleted." The prior WHERE clause was `WHERE id =
+	// $1::uuid` with no `deleted_at IS NULL` predicate, so a
+	// tombstoned tenant's JSONB document could be mutated by any
+	// caller that knew the (still-valid) UUID — and the
+	// silent-success response would convince the caller the write
+	// had landed on a live row. Add the predicate so the
+	// pgx.ErrNoRows path covers BOTH "no such id" and "id refers
+	// to a soft-deleted row", which the existing error mapping
+	// already collapses into ErrNotFound — matching the interface
+	// contract exactly. The check is against `deleted_at` (rather
+	// than `status`) because `deleted_at` is the canonical signal
+	// across the tenant lifecycle: TransitionStatus / Delete both
+	// stamp it, and the partial unique index
+	// `tenants_slug_uniq_idx WHERE deleted_at IS NULL` already
+	// keys off it.
 	const q = `
 		UPDATE tenants
 		SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), ARRAY[$2::text], $3::jsonb, true)
-		WHERE id = $1::uuid
+		WHERE id = $1::uuid AND deleted_at IS NULL
 		RETURNING ` + tenantSelectColumns
 	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, key, []byte(value)))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -315,10 +334,17 @@ func (r *TenantRepository) DeleteSettingsKey(ctx context.Context, id uuid.UUID, 
 	if key == "" {
 		return repository.Tenant{}, repository.ErrInvalidArgument
 	}
+	// Soft-delete filter (round-21 of Devin Review on PR #42 —
+	// ANALYSIS_0002). Mirrors the matching guard on
+	// UpdateSettingsKey above: the interface contract is
+	// "ErrNotFound if the row does not exist or has been
+	// soft-deleted", so the WHERE clause filters tombstones via
+	// `deleted_at IS NULL`. See the upstream comment for the full
+	// rationale.
 	const q = `
 		UPDATE tenants
 		SET settings = COALESCE(settings, '{}'::jsonb) - $2::text
-		WHERE id = $1::uuid
+		WHERE id = $1::uuid AND deleted_at IS NULL
 		RETURNING ` + tenantSelectColumns
 	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, key))
 	if errors.Is(err, pgx.ErrNoRows) {
