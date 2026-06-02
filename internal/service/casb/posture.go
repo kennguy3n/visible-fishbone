@@ -108,16 +108,21 @@ func (a *PostureAssessor) Assess(ctx context.Context, tenantID uuid.UUID, snap S
 	if score >= a.threshold && a.alertEmitter != nil {
 		evidence, _ := json.Marshal(report)
 		now := time.Now().UTC()
+		const windowSec = 86400 // 24-hour assessment window
 		if _, err := a.alertEmitter.Emit(ctx, tenantID, repository.Alert{
-			TenantID:  tenantID,
-			Kind:      "posture_degradation",
-			Severity:  repository.AlertSeverity(severityForScore(score)),
-			Dimension: "casb.posture." + snap.AppID,
-			Summary:   fmt.Sprintf("SaaS posture degradation: %s scored %d/100", snap.AppName, score),
-			Evidence:  evidence,
-			State:     repository.AlertStateOpen,
-			CreatedAt: now,
-			UpdatedAt: now,
+			TenantID:      tenantID,
+			Kind:          "posture_degradation",
+			Severity:      repository.AlertSeverity(severityForScore(score)),
+			Dimension:     "casb.posture." + snap.AppID,
+			Summary:       fmt.Sprintf("SaaS posture degradation: %s scored %d/100", snap.AppName, score),
+			Evidence:      evidence,
+			State:         repository.AlertStateOpen,
+			ObservedValue: float64(score),
+			WindowStart:   now.Add(-windowSec * time.Second),
+			WindowEnd:     now,
+			WindowSeconds: windowSec,
+			CreatedAt:     now,
+			UpdatedAt:     now,
 		}); err != nil {
 			a.logger.Error("posture alert failed", "app", snap.AppName, "err", err)
 		}

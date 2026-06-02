@@ -78,6 +78,16 @@ func TestPostureAssessor_AllFail(t *testing.T) {
 	if len(emitter.emitted) != 1 {
 		t.Fatalf("expected 1 alert, got %d", len(emitter.emitted))
 	}
+	alert := emitter.emitted[0]
+	if alert.WindowSeconds <= 0 {
+		t.Fatalf("alert WindowSeconds = %d, want > 0", alert.WindowSeconds)
+	}
+	if alert.WindowEnd.Before(alert.WindowStart) {
+		t.Fatal("alert WindowEnd before WindowStart")
+	}
+	if alert.ObservedValue != 100 {
+		t.Fatalf("alert ObservedValue = %f, want 100", alert.ObservedValue)
+	}
 }
 
 func TestPostureAssessor_PartialFail(t *testing.T) {
