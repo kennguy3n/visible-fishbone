@@ -177,7 +177,7 @@ func (s *Service) evaluatePolicy(ctx context.Context, tenantID uuid.UUID, p repo
 				continue
 			}
 			for _, l := range labels {
-				if l.LabelID == rule.Pattern || l.Sensitivity == rule.SensitivityLevel {
+				if l.LabelID == rule.Pattern || (rule.SensitivityLevel != "" && l.Sensitivity == rule.SensitivityLevel) {
 					hits = append(hits, Match{
 						RuleType:   repository.DLPRuleTypeMIPLabel,
 						Pattern:    rule.Pattern,
