@@ -175,6 +175,10 @@ func indexIntegrations(ics []ExportedIntegration) map[string]string {
 		if ic.EventTypes == nil {
 			ic.EventTypes = []string{}
 		}
+		// Status is runtime state (e.g. "active"/"disabled"), not
+		// declared configuration. Zero it so drift detection only
+		// compares config-level fields.
+		ic.Status = ""
 		m[ic.Name] = marshalCanonical(ic)
 	}
 	return m

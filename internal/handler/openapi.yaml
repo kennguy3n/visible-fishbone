@@ -1766,6 +1766,7 @@ paths:
   /tenants/{tenant_id}/browser-policies:
     post:
       tags: [browser]
+      operationId: createBrowserPolicy
       summary: Create a browser protection policy
       parameters:
         - $ref: "#/components/parameters/TenantPathID"
@@ -1783,6 +1784,7 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
     get:
       tags: [browser]
+      operationId: listBrowserPolicies
       summary: List browser protection policies
       parameters:
         - $ref: "#/components/parameters/TenantPathID"
@@ -1804,6 +1806,7 @@ paths:
   /tenants/{tenant_id}/browser-policies/{id}:
     get:
       tags: [browser]
+      operationId: getBrowserPolicy
       summary: Get a browser protection policy
       parameters:
         - $ref: "#/components/parameters/TenantPathID"
@@ -1817,6 +1820,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
     patch:
       tags: [browser]
+      operationId: updateBrowserPolicy
       summary: Update a browser protection policy
       parameters:
         - $ref: "#/components/parameters/TenantPathID"
@@ -1835,6 +1839,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
     delete:
       tags: [browser]
+      operationId: deleteBrowserPolicy
       summary: Delete a browser protection policy
       parameters:
         - $ref: "#/components/parameters/TenantPathID"
@@ -1847,6 +1852,7 @@ paths:
   /tenants/{tenant_id}/config/export:
     get:
       tags: [terraform]
+      operationId: exportTenantConfig
       summary: Export full tenant configuration
       parameters:
         - $ref: "#/components/parameters/TenantPathID"
@@ -1860,6 +1866,7 @@ paths:
   /tenants/{tenant_id}/config/import:
     post:
       tags: [terraform]
+      operationId: importTenantConfig
       summary: Idempotent import of tenant configuration
       parameters:
         - $ref: "#/components/parameters/TenantPathID"
@@ -1881,6 +1888,7 @@ paths:
   /tenants/{tenant_id}/config/drift:
     post:
       tags: [terraform]
+      operationId: detectConfigDrift
       summary: Detect drift between declared config and actual state
       parameters:
         - $ref: "#/components/parameters/TenantPathID"
