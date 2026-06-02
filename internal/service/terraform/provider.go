@@ -216,12 +216,17 @@ func (p *Provider) ExportTenantConfig(ctx context.Context, tenantID uuid.UUID) (
 }
 
 // ImportTenantConfig idempotently imports a tenant configuration.
-// Existing resources with matching names are updated; new ones are
-// created.
+// Existing resources with matching identity keys are updated; new
+// ones are created.
+//
+// Policy graphs and integration connectors are intentionally NOT
+// imported: policy graphs require versioning/simulation/signing that
+// a bulk import cannot replicate, and integration connectors depend
+// on Secret values which are excluded from export for security.
 func (p *Provider) ImportTenantConfig(ctx context.Context, tenantID uuid.UUID, config json.RawMessage) error {
 	var cfg ExportedConfig
 	if err := json.Unmarshal(config, &cfg); err != nil {
-		return fmt.Errorf("unmarshal config: %w", err)
+		return fmt.Errorf("unmarshal config: %w: %w", repository.ErrInvalidArgument, err)
 	}
 	if cfg.Version != ConfigVersion {
 		return fmt.Errorf("unsupported config version %d (expected %d): %w",

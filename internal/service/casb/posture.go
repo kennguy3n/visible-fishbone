@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
 // CheckStatus is the outcome of a single posture check.
@@ -65,7 +67,7 @@ type SaaSSnapshot struct {
 // AlertEmitter is the interface the assessor uses to route posture
 // degradation alerts. Satisfied by alert.Router.Emit.
 type AlertEmitter interface {
-	Emit(ctx context.Context, tenantID uuid.UUID, kind, severity, dimension, summary string, evidence json.RawMessage) error
+	Emit(ctx context.Context, tenantID uuid.UUID, a repository.Alert) (repository.Alert, error)
 }
 
 // PostureAssessor scores SaaS application posture.
@@ -105,12 +107,18 @@ func (a *PostureAssessor) Assess(ctx context.Context, tenantID uuid.UUID, snap S
 
 	if score >= a.threshold && a.alertEmitter != nil {
 		evidence, _ := json.Marshal(report)
-		if err := a.alertEmitter.Emit(ctx, tenantID,
-			"posture_degradation", severityForScore(score),
-			"casb.posture."+snap.AppID,
-			fmt.Sprintf("SaaS posture degradation: %s scored %d/100", snap.AppName, score),
-			evidence,
-		); err != nil {
+		now := time.Now().UTC()
+		if _, err := a.alertEmitter.Emit(ctx, tenantID, repository.Alert{
+			TenantID:  tenantID,
+			Kind:      "posture_degradation",
+			Severity:  repository.AlertSeverity(severityForScore(score)),
+			Dimension: "casb.posture." + snap.AppID,
+			Summary:   fmt.Sprintf("SaaS posture degradation: %s scored %d/100", snap.AppName, score),
+			Evidence:  evidence,
+			State:     repository.AlertStateOpen,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}); err != nil {
 			a.logger.Error("posture alert failed", "app", snap.AppName, "err", err)
 		}
 	}

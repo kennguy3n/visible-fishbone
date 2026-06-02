@@ -2,21 +2,22 @@ package casb_test
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/casb"
 )
 
 type stubAlertEmitter struct {
-	emitted []string
+	emitted []repository.Alert
 }
 
-func (s *stubAlertEmitter) Emit(_ context.Context, _ uuid.UUID, kind, severity, dimension, summary string, _ json.RawMessage) error {
-	s.emitted = append(s.emitted, kind+":"+severity+":"+summary)
-	return nil
+func (s *stubAlertEmitter) Emit(_ context.Context, _ uuid.UUID, a repository.Alert) (repository.Alert, error) {
+	s.emitted = append(s.emitted, a)
+	a.ID = uuid.New()
+	return a, nil
 }
 
 func boolPtr(b bool) *bool    { return &b }

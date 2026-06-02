@@ -25,6 +25,7 @@ tags:
   - name: policy
   - name: audit
   - name: webhooks
+  - name: ai
 paths:
   /tenants:
     post:
@@ -1895,6 +1896,91 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DriftReport" }
 
+  /tenants/{tenant_id}/ai/summarize:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [ai]
+      operationId: aiSummarize
+      summary: Trigger AI-assisted incident summarization
+      description: |
+        Queries ClickHouse for recent alerts, baselines, and policy
+        verdicts in the requested time range, then produces a
+        structured summary. When an LLM is configured, the
+        deterministic template output is polished; on any LLM
+        failure the template output is returned verbatim. The
+        `ai_generated` flag indicates which mode produced the
+        response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AISummarizeRequest" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AISummary" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/suggest-policy:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [ai]
+      operationId: aiSuggestPolicy
+      summary: AI-proposed policy changes
+      description: |
+        Asks the LLM to propose a policy graph delta, then compiles
+        the suggestion through the deterministic policy compiler.
+        Returns a verified, ready-to-queue change with dry-run
+        metadata. Requires an LLM endpoint; returns 503 when AI is
+        not configured.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AISuggestPolicyRequest" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AIVerifiedSuggestion" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/troubleshoot:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [ai]
+      operationId: aiTroubleshoot
+      summary: RAG-based troubleshooting assistant
+      description: |
+        Returns suggestions (never actions) for operator
+        troubleshooting queries. Grounded in collected evidence;
+        refuses to assert facts outside that evidence. Requires
+        an LLM endpoint; returns 503 when AI is not configured.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AITroubleshootRequest" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AITroubleshootResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     BearerJWT:
@@ -2855,3 +2941,58 @@ components:
               drift_type: { type: string, enum: [added, modified, removed] }
               details: { type: string }
         has_drift: { type: boolean }
+    AISummarizeRequest:
+      type: object
+      properties:
+        start: { type: string, format: date-time, description: "Start of the time range (RFC 3339). Defaults to 24h before end." }
+        end: { type: string, format: date-time, description: "End of the time range (RFC 3339). Defaults to now." }
+    AISummary:
+      type: object
+      required: [text, key_findings, recommended_actions, evidence_refs, ai_generated, latency_ms]
+      properties:
+        text: { type: string }
+        key_findings: { type: array, items: { type: string } }
+        recommended_actions: { type: array, items: { type: string } }
+        evidence_refs: { type: array, items: { type: string } }
+        ai_generated: { type: boolean, description: "true when an LLM polished the output; false for template-only." }
+        model_id: { type: string }
+        latency_ms: { type: integer, format: int64 }
+    AISuggestPolicyRequest:
+      type: object
+      required: [prompt]
+      properties:
+        prompt: { type: string, description: "Natural-language description of the desired policy change." }
+    AIVerifiedSuggestion:
+      type: object
+      required: [suggestion, verify]
+      properties:
+        suggestion:
+          type: object
+          required: [graph, rationale, confidence, ai_generated]
+          properties:
+            graph: { type: object, additionalProperties: true }
+            rationale: { type: string }
+            confidence: { type: number, format: double }
+            ai_generated: { type: boolean }
+            model_id: { type: string }
+        verify:
+          type: object
+          required: [compiled, compile_ms]
+          properties:
+            compiled: { type: boolean }
+            graph_id: { type: string, format: uuid }
+            compile_ms: { type: integer, format: int64 }
+    AITroubleshootRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string, description: "Natural-language troubleshooting query." }
+    AITroubleshootResult:
+      type: object
+      required: [suggestions, referenced_docs, confidence, ai_generated]
+      properties:
+        suggestions: { type: array, items: { type: string } }
+        referenced_docs: { type: array, items: { type: string } }
+        confidence: { type: number, format: double }
+        ai_generated: { type: boolean }
+        model_id: { type: string }

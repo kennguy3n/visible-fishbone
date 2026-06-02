@@ -45,9 +45,10 @@ func (h *TerraformHandler) importConfig(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "failed to read body")
+		WriteError(w, http.StatusRequestEntityTooLarge, "body_too_large", "request body exceeds 10 MB limit")
 		return
 	}
 	if !json.Valid(body) {
@@ -66,9 +67,10 @@ func (h *TerraformHandler) drift(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "failed to read body")
+		WriteError(w, http.StatusRequestEntityTooLarge, "body_too_large", "request body exceeds 10 MB limit")
 		return
 	}
 	if !json.Valid(body) {
