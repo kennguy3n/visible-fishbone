@@ -231,11 +231,11 @@ func (r *CASBDiscoveredAppRepository) Upsert(
 		return tx.QueryRow(ctx, `
 			INSERT INTO casb_discovered_apps
 			    (id, tenant_id, name, vendor, category, risk_score, users_count, first_seen, last_seen)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			VALUES ($1, $2, $3, $4, $5, COALESCE($6, 0), $7, $8, $9)
 			ON CONFLICT (tenant_id, name) DO UPDATE SET
 			    vendor = EXCLUDED.vendor,
 			    category = EXCLUDED.category,
-			    risk_score = CASE WHEN EXCLUDED.risk_score > 0 THEN EXCLUDED.risk_score ELSE casb_discovered_apps.risk_score END,
+			    risk_score = CASE WHEN $6 IS NOT NULL THEN $6 ELSE casb_discovered_apps.risk_score END,
 			    users_count = EXCLUDED.users_count,
 			    last_seen = EXCLUDED.last_seen
 			RETURNING id, tenant_id, name, vendor, category, risk_score,

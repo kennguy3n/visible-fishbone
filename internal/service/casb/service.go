@@ -234,7 +234,8 @@ func (svc *Service) SyncConnector(
 			slog.String("connector_id", connectorID.String()),
 			slog.Any("error", err))
 	} else {
-		app.RiskScore = report.Score
+		score := report.Score
+		app.RiskScore = &score
 	}
 
 	savedApp, err := svc.apps.Upsert(ctx, tenantID, app)
@@ -306,7 +307,7 @@ func (svc *Service) GetSaaSPosture(
 			Status:    string(c.Status),
 			Details:   c.Details,
 		})
-		if !c.AssessedAt.IsZero() {
+		if !c.AssessedAt.IsZero() && report.AssessedAt.Before(c.AssessedAt) {
 			report.AssessedAt = c.AssessedAt
 		}
 	}

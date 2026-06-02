@@ -95,13 +95,17 @@ type casbAppResponse struct {
 }
 
 func toCASBAppResponse(a repository.CASBDiscoveredApp) casbAppResponse {
+	riskScore := 0
+	if a.RiskScore != nil {
+		riskScore = *a.RiskScore
+	}
 	return casbAppResponse{
 		ID:         a.ID.String(),
 		TenantID:   a.TenantID.String(),
 		Name:       a.Name,
 		Vendor:     a.Vendor,
 		Category:   a.Category,
-		RiskScore:  a.RiskScore,
+		RiskScore:  riskScore,
 		UsersCount: a.UsersCount,
 		FirstSeen:  a.FirstSeen.Format("2006-01-02T15:04:05Z"),
 		LastSeen:   a.LastSeen.Format("2006-01-02T15:04:05Z"),
@@ -245,7 +249,7 @@ func (h *CASBHandler) testConnector(w http.ResponseWriter, r *http.Request) {
 			WriteRepositoryError(w, err)
 			return
 		}
-		WriteError(w, http.StatusBadGateway, "connector_test_failed", err.Error())
+		WriteError(w, http.StatusBadGateway, "connector_test_failed", "external service unavailable")
 		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -265,7 +269,7 @@ func (h *CASBHandler) syncConnector(w http.ResponseWriter, r *http.Request) {
 			WriteRepositoryError(w, err)
 			return
 		}
-		WriteError(w, http.StatusBadGateway, "sync_failed", err.Error())
+		WriteError(w, http.StatusBadGateway, "sync_failed", "external service unavailable")
 		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]string{"status": "synced"})

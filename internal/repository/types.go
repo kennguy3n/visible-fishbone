@@ -1178,7 +1178,7 @@ type CASBDiscoveredApp struct {
 	Name       string
 	Vendor     string
 	Category   string
-	RiskScore  int
+	RiskScore  *int
 	UsersCount int
 	FirstSeen  time.Time
 	LastSeen   time.Time
