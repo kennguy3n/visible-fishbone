@@ -163,12 +163,20 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 	var totalSuggestions int
 	var firstErr error
 
+loop:
 	for _, tid := range tenantIDs {
 		if !s.optIn.IsOptedIn(ctx, tid) {
 			continue
 		}
 
-		sem <- struct{}{}
+		// Acquire a concurrency slot, but abandon the sweep promptly
+		// if the context is cancelled while all slots are busy rather
+		// than blocking on the send until one frees up.
+		select {
+		case <-ctx.Done():
+			break loop
+		case sem <- struct{}{}:
+		}
 		wg.Add(1)
 		go func(tenantID uuid.UUID) {
 			defer wg.Done()

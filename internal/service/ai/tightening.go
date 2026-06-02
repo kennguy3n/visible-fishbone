@@ -11,6 +11,13 @@ import (
 	"github.com/google/uuid"
 )
 
+// maxCachedReports bounds the per-tenant report cache so it cannot
+// grow without limit in a long-running multi-tenant process. When the
+// cap is reached the oldest cached tenant is evicted (FIFO); an
+// evicted tenant simply re-runs analysis (the GET endpoint returns
+// 404 until it does), so eviction is never a correctness problem.
+const maxCachedReports = 1024
+
 // TighteningService identifies rules that can be tightened:
 // unused rules, shadowed rules, and overly-permissive rules.
 type TighteningService struct {
@@ -19,9 +26,14 @@ type TighteningService struct {
 
 	// lastReports caches the most recent analysis report per tenant
 	// so the GET report endpoint can return the result of the most
-	// recent POST analyze run instead of an empty placeholder.
+	// recent POST analyze run instead of an empty placeholder. It is
+	// bounded by maxCachedReports with FIFO eviction tracked by
+	// reportOrder. This is a best-effort, single-instance cache: in a
+	// horizontally-scaled deployment a GET may land on an instance
+	// that did not run the analysis and will 404, prompting a re-run.
 	mu          sync.RWMutex
 	lastReports map[uuid.UUID]TighteningReport
+	reportOrder []uuid.UUID
 }
 
 // NewTighteningService constructs a TighteningService.
@@ -94,6 +106,14 @@ func (s *TighteningService) Analyze(ctx context.Context, input AnalyzeInput) (Ti
 	}
 
 	s.mu.Lock()
+	if _, exists := s.lastReports[input.TenantID]; !exists {
+		if len(s.reportOrder) >= maxCachedReports {
+			oldest := s.reportOrder[0]
+			s.reportOrder = s.reportOrder[1:]
+			delete(s.lastReports, oldest)
+		}
+		s.reportOrder = append(s.reportOrder, input.TenantID)
+	}
 	s.lastReports[input.TenantID] = report
 	s.mu.Unlock()
 

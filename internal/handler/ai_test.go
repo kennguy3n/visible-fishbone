@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -396,6 +397,60 @@ func TestAIHandler_ListSuggestions_400OnInvalidStatus(t *testing.T) {
 	h.listSuggestions(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_SuggestionResponses_SnakeCase(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	repo := memory.NewAISuggestionRepository(store)
+	tenantID := uuid.New()
+	created, err := repo.Create(context.Background(), tenantID, repository.AISuggestion{
+		RuleID:         "r1",
+		Category:       "unused",
+		SuggestionJSON: json.RawMessage(`{"action":"remove_rule"}`),
+		Confidence:     0.9,
+	})
+	if err != nil {
+		t.Fatalf("seed create: %v", err)
+	}
+
+	h := NewAIHandler(nil, nil)
+	h.SetReviewService(ai.NewReviewService(repo, nil))
+
+	// list
+	lreq := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID.String()+"/ai/suggestions", nil)
+	lreq.SetPathValue("tenant_id", tenantID.String())
+	lrec := httptest.NewRecorder()
+	h.listSuggestions(lrec, lreq)
+	if lrec.Code != http.StatusOK {
+		t.Fatalf("list status = %d; body=%s", lrec.Code, lrec.Body.String())
+	}
+	body := lrec.Body.String()
+	for _, want := range []string{`"items":[`, `"next_cursor"`, `"id":`, `"tenant_id":`, `"rule_id":`, `"suggestion_json":`, `"created_at":`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("list body missing %s: %s", want, body)
+		}
+	}
+	for _, bad := range []string{`"ID"`, `"TenantID"`, `"RuleID"`, `"SuggestionJSON"`, `"NextCursor"`, `"Items"`} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("list body has PascalCase %s: %s", bad, body)
+		}
+	}
+
+	// get
+	greq := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID.String()+"/ai/suggestions/"+created.ID.String(), nil)
+	greq.SetPathValue("tenant_id", tenantID.String())
+	greq.SetPathValue("id", created.ID.String())
+	grec := httptest.NewRecorder()
+	h.getSuggestion(grec, greq)
+	if grec.Code != http.StatusOK {
+		t.Fatalf("get status = %d; body=%s", grec.Code, grec.Body.String())
+	}
+	if !strings.Contains(grec.Body.String(), `"tenant_id":`) || strings.Contains(grec.Body.String(), `"TenantID"`) {
+		t.Fatalf("get body not snake_case: %s", grec.Body.String())
 	}
 }
 

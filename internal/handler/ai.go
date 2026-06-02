@@ -158,6 +158,42 @@ func (h *AIHandler) troubleshoot(w http.ResponseWriter, r *http.Request) {
 
 // --- AI suggestion review handlers ----------------------------------------
 
+// aiSuggestionResponse is the wire representation of an AI policy
+// suggestion. The repository struct repository.AISuggestion has no
+// JSON tags, so serialising it directly would emit PascalCase field
+// names; this type pins the snake_case contract declared by the
+// AISuggestion OpenAPI schema. Optional fields use pointers with
+// omitempty so they are absent (not null/empty) when unset.
+type aiSuggestionResponse struct {
+	ID             uuid.UUID       `json:"id"`
+	TenantID       uuid.UUID       `json:"tenant_id"`
+	RuleID         string          `json:"rule_id"`
+	Category       string          `json:"category"`
+	SuggestionJSON json.RawMessage `json:"suggestion_json"`
+	Confidence     float64         `json:"confidence"`
+	Status         string          `json:"status"`
+	CreatedAt      time.Time       `json:"created_at"`
+	ReviewedAt     *time.Time      `json:"reviewed_at,omitempty"`
+	ReviewerID     *uuid.UUID      `json:"reviewer_id,omitempty"`
+	Feedback       *string         `json:"feedback,omitempty"`
+}
+
+func toAISuggestionResponse(s repository.AISuggestion) aiSuggestionResponse {
+	return aiSuggestionResponse{
+		ID:             s.ID,
+		TenantID:       s.TenantID,
+		RuleID:         s.RuleID,
+		Category:       s.Category,
+		SuggestionJSON: s.SuggestionJSON,
+		Confidence:     s.Confidence,
+		Status:         string(s.Status),
+		CreatedAt:      s.CreatedAt,
+		ReviewedAt:     s.ReviewedAt,
+		ReviewerID:     s.ReviewerID,
+		Feedback:       s.Feedback,
+	}
+}
+
 func (h *AIHandler) listSuggestions(w http.ResponseWriter, r *http.Request) {
 	if h.reviewSvc == nil {
 		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
@@ -189,7 +225,16 @@ func (h *AIHandler) listSuggestions(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusInternalServerError, "ai_error", "failed to list suggestions")
 		return
 	}
-	WriteJSON(w, http.StatusOK, result)
+	items := make([]aiSuggestionResponse, 0, len(result.Items))
+	for _, s := range result.Items {
+		items = append(items, toAISuggestionResponse(s))
+	}
+	// next_cursor is a required field in the AISuggestionPage schema,
+	// so it is always emitted (no omitempty) even when empty.
+	WriteJSON(w, http.StatusOK, struct {
+		Items      []aiSuggestionResponse `json:"items"`
+		NextCursor string                 `json:"next_cursor"`
+	}{Items: items, NextCursor: result.NextCursor})
 }
 
 func (h *AIHandler) getSuggestion(w http.ResponseWriter, r *http.Request) {
@@ -211,7 +256,7 @@ func (h *AIHandler) getSuggestion(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, suggestion)
+	WriteJSON(w, http.StatusOK, toAISuggestionResponse(suggestion))
 }
 
 // decodeOptionalReviewBody decodes an optional JSON request body into
@@ -267,7 +312,7 @@ func (h *AIHandler) approveSuggestion(w http.ResponseWriter, r *http.Request) {
 		writeReviewError(w, h.logger, "approve", err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, updated)
+	WriteJSON(w, http.StatusOK, toAISuggestionResponse(updated))
 }
 
 func (h *AIHandler) rejectSuggestion(w http.ResponseWriter, r *http.Request) {
@@ -301,7 +346,7 @@ func (h *AIHandler) rejectSuggestion(w http.ResponseWriter, r *http.Request) {
 		writeReviewError(w, h.logger, "reject", err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, updated)
+	WriteJSON(w, http.StatusOK, toAISuggestionResponse(updated))
 }
 
 func (h *AIHandler) analyzeTightening(w http.ResponseWriter, r *http.Request) {
