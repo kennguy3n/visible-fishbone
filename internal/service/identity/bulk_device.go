@@ -200,13 +200,25 @@ func (s *BulkDeviceService) BulkRevoke(
 			result.Errors = append(result.Errors, fmt.Sprintf("device %s: %v", did, err))
 			continue
 		}
-		if err := s.enrolls.RevokeAllCertificates(ctx, tenantID, did, now); err != nil {
-			s.logger.Warn("bulk revoke: certificate revocation failed",
-				"device_id", did, "tenant_id", tenantID, "error", err)
-		}
-		result.Succeeded++
+		// The enrollment status — the primary access gate — is now
+		// revoked, so record it on the audit trail regardless of the
+		// certificate outcome below.
 		deviceID := did
 		s.appendAudit(ctx, tenantID, "device.enrollment.revoked", "device_enrollment", &deviceID)
+		if err := s.enrolls.RevokeAllCertificates(ctx, tenantID, did, now); err != nil {
+			// Fail closed: a device whose certificates are still valid
+			// is not fully revoked, so surface it as a failure instead
+			// of a silent success — otherwise a caller treating
+			// Failed == 0 as "fully revoked" would miss it. Revocation
+			// is idempotent, so the caller can safely retry.
+			s.logger.Warn("bulk revoke: certificate revocation failed",
+				"device_id", did, "tenant_id", tenantID, "error", err)
+			result.Failed++
+			result.Errors = append(result.Errors,
+				fmt.Sprintf("device %s: enrollment revoked but certificate revocation failed: %v", did, err))
+			continue
+		}
+		result.Succeeded++
 	}
 	return result, nil
 }

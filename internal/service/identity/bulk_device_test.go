@@ -2,6 +2,7 @@ package identity_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +128,74 @@ func TestBulkDevice_Revoke_PartialFailure(t *testing.T) {
 	}
 	if result.Failed != 1 {
 		t.Errorf("failed = %d, want 1", result.Failed)
+	}
+}
+
+// certRevokeFailRepo wraps a real enrollment repository but forces
+// RevokeAllCertificates to fail, so we can assert BulkRevoke's
+// fail-closed handling of a partially-revoked device.
+type certRevokeFailRepo struct {
+	repository.DeviceEnrollmentRepository
+	err error
+}
+
+func (r certRevokeFailRepo) RevokeAllCertificates(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ time.Time) error {
+	return r.err
+}
+
+func TestBulkDevice_Revoke_CertFailureCountsAsFailed(t *testing.T) {
+	store := memory.NewStore()
+	tenantID := uuid.New()
+	if _, err := memory.NewTenantRepository(store).Create(context.Background(), repository.Tenant{
+		ID: tenantID, Name: "cert-fail", Slug: "cert-fail",
+	}); err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	ctx := context.Background()
+
+	realEnroll := memory.NewDeviceEnrollmentRepository(store)
+	deviceID := uuid.New()
+	if _, err := realEnroll.CreateEnrollment(ctx, tenantID, repository.DeviceEnrollment{
+		DeviceID: deviceID,
+		Status:   repository.EnrollmentStatusActive,
+	}); err != nil {
+		t.Fatalf("create enrollment: %v", err)
+	}
+
+	enrolls := certRevokeFailRepo{
+		DeviceEnrollmentRepository: realEnroll,
+		err:                        errors.New("ca unreachable"),
+	}
+	audit := memory.NewAuditLogRepository(store)
+	svc := identity.NewBulkDeviceService(
+		memory.NewDeviceRepository(store),
+		memory.NewClaimTokenRepository(store),
+		enrolls, audit, nil)
+
+	result, err := svc.BulkRevoke(ctx, tenantID, []uuid.UUID{deviceID})
+	if err != nil {
+		t.Fatalf("bulk revoke: %v", err)
+	}
+	// Fail closed: the enrollment was revoked but its certificates were
+	// not, so the device must NOT count as a clean success.
+	if result.Succeeded != 0 {
+		t.Errorf("succeeded = %d, want 0 when cert revocation fails", result.Succeeded)
+	}
+	if result.Failed != 1 {
+		t.Errorf("failed = %d, want 1 when cert revocation fails", result.Failed)
+	}
+	if len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "certificate revocation failed") {
+		t.Errorf("errors = %v, want one mentioning certificate revocation", result.Errors)
+	}
+	// The enrollment transition that did occur must still be audited.
+	entries, err := audit.List(ctx, tenantID,
+		repository.AuditFilter{Action: "device.enrollment.revoked"},
+		repository.Page{Limit: 10})
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	if len(entries.Items) != 1 {
+		t.Errorf("audit entries = %d, want 1 (enrollment revocation is still recorded)", len(entries.Items))
 	}
 }
 
