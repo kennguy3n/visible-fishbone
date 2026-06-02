@@ -188,30 +188,30 @@ func (s *Slack) AssessPosture(_ context.Context, _ json.RawMessage, _ []byte) (c
 	var checks []casb.PostureCheck
 
 	checks = append(checks, casb.PostureCheck{
-		CheckName: "sso_enforcement",
-		Status:    "warn",
-		Details:   "SSO enforcement status requires Slack admin settings inspection",
+		Name:     "sso_enforcement",
+		Status:   casb.CheckStatusWarn,
+		Evidence: "SSO enforcement status requires Slack admin settings inspection",
 	})
 	checks = append(checks, casb.PostureCheck{
-		CheckName: "two_factor_auth",
-		Status:    "warn",
-		Details:   "2FA enforcement status requires workspace settings inspection",
+		Name:     "two_factor_auth",
+		Status:   casb.CheckStatusWarn,
+		Evidence: "2FA enforcement status requires workspace settings inspection",
 	})
 	checks = append(checks, casb.PostureCheck{
-		CheckName: "external_sharing",
-		Status:    "warn",
-		Details:   "external sharing policy requires workspace settings inspection",
+		Name:     "external_sharing",
+		Status:   casb.CheckStatusWarn,
+		Evidence: "external sharing policy requires workspace settings inspection",
 	})
 	checks = append(checks, casb.PostureCheck{
-		CheckName: "app_install_permissions",
-		Status:    "warn",
-		Details:   "app installation permissions require workspace admin settings inspection",
+		Name:     "app_install_permissions",
+		Status:   casb.CheckStatusWarn,
+		Evidence: "app installation permissions require workspace admin settings inspection",
 	})
 
 	score := computePostureScore(checks)
 	return casb.PostureReport{
 		Checks:     checks,
-		Score:      score,
+		RiskScore:  score,
 		AssessedAt: now,
 	}, nil
 }

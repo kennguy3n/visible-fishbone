@@ -35,8 +35,8 @@ func (s *stubCASBPlugin) ListActivity(_ context.Context, _ json.RawMessage, _ []
 }
 func (s *stubCASBPlugin) AssessPosture(_ context.Context, _ json.RawMessage, _ []byte) (casb.PostureReport, error) {
 	return casb.PostureReport{
-		Checks: []casb.PostureCheck{{CheckName: "mfa", Status: "pass", Details: "ok"}},
-		Score:  80,
+		Checks: []casb.PostureCheck{{Name: "mfa", Status: casb.CheckStatusPass, Evidence: "ok"}},
+		RiskScore: 80,
 	}, nil
 }
 func (s *stubCASBPlugin) Test(_ context.Context, _ json.RawMessage, _ []byte) error {

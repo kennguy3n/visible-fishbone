@@ -30,6 +30,8 @@ type RouterDeps struct {
 	Integrations     *IntegrationHandler
 	CASB             *CASBHandler
 	MSP              *MSPHandler
+	Browser          *BrowserHandler
+	Terraform        *TerraformHandler
 	AI               *AIHandler
 	DLP              *DLPHandler
 	OpenAPISpec      *OpenAPIHandler
@@ -106,6 +108,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.MSP != nil {
 		deps.MSP.Register(apiMux)
+	}
+	if deps.Browser != nil {
+		deps.Browser.Register(apiMux)
+	}
+	if deps.Terraform != nil {
+		deps.Terraform.Register(apiMux)
 	}
 	if deps.AI != nil {
 		deps.AI.Register(apiMux)

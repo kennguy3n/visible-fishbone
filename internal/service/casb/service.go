@@ -234,7 +234,7 @@ func (svc *Service) SyncConnector(
 			slog.String("connector_id", connectorID.String()),
 			slog.Any("error", err))
 	} else {
-		score := report.Score
+		score := report.RiskScore
 		app.RiskScore = &score
 	}
 
@@ -244,15 +244,15 @@ func (svc *Service) SyncConnector(
 	}
 
 	if report.Checks != nil {
-		report.AppID = savedApp.ID
+		report.AppID = savedApp.ID.String()
 		checks := make([]repository.CASBPostureCheck, 0, len(report.Checks))
 		for _, pc := range report.Checks {
 			checks = append(checks, repository.CASBPostureCheck{
 				TenantID:   tenantID,
 				AppID:      savedApp.ID,
-				CheckName:  pc.CheckName,
+				CheckName:  pc.Name,
 				Status:     repository.CASBPostureCheckStatus(pc.Status),
-				Details:    pc.Details,
+				Details:    pc.Evidence,
 				AssessedAt: report.AssessedAt,
 			})
 		}
@@ -296,15 +296,16 @@ func (svc *Service) GetSaaSPosture(
 		return PostureReport{}, err
 	}
 	report := PostureReport{
-		AppID:  appID,
-		Score:  computeScore(checks),
-		Checks: make([]PostureCheck, 0, len(checks)),
+		AppID:     appID.String(),
+		TenantID:  tenantID,
+		RiskScore: computeScore(checks),
+		Checks:    make([]PostureCheck, 0, len(checks)),
 	}
 	for _, c := range checks {
 		report.Checks = append(report.Checks, PostureCheck{
-			CheckName: c.CheckName,
-			Status:    string(c.Status),
-			Details:   c.Details,
+			Name:     c.CheckName,
+			Status:   CheckStatus(c.Status),
+			Evidence: c.Details,
 		})
 		if !c.AssessedAt.IsZero() && report.AssessedAt.Before(c.AssessedAt) {
 			report.AssessedAt = c.AssessedAt
@@ -320,16 +321,16 @@ func computeScore(checks []repository.CASBPostureCheck) int {
 	if len(checks) == 0 {
 		return 0
 	}
-	total := 0
+	healthTotal := 0
 	for _, c := range checks {
 		switch c.Status {
 		case repository.CASBPosturePass:
-			total += 100
+			healthTotal += 100
 		case repository.CASBPostureWarn:
-			total += 50
+			healthTotal += 50
 		}
 	}
-	return total / len(checks)
+	return 100 - healthTotal/len(checks)
 }
 
 func (svc *Service) logAudit(

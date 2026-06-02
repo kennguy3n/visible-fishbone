@@ -177,7 +177,7 @@ func (sf *Salesforce) ListActivity(ctx context.Context, config json.RawMessage, 
 			ID:        r.ID,
 			Actor:     r.CreatedBy.Name,
 			Action:    r.Action,
-			Details:   r.Display,
+			Details: r.Display,
 			Timestamp: ts,
 		})
 	}
@@ -189,30 +189,30 @@ func (sf *Salesforce) AssessPosture(_ context.Context, _ json.RawMessage, _ []by
 	var checks []casb.PostureCheck
 
 	checks = append(checks, casb.PostureCheck{
-		CheckName: "mfa_enforcement",
-		Status:    "warn",
-		Details:   "MFA enforcement requires Salesforce org settings inspection",
+		Name:     "mfa_enforcement",
+		Status:   casb.CheckStatusWarn,
+		Evidence: "MFA enforcement requires Salesforce org settings inspection",
 	})
 	checks = append(checks, casb.PostureCheck{
-		CheckName: "session_settings",
-		Status:    "warn",
-		Details:   "session timeout and IP restrictions require org settings inspection",
+		Name:     "session_settings",
+		Status:   casb.CheckStatusWarn,
+		Evidence: "session timeout and IP restrictions require org settings inspection",
 	})
 	checks = append(checks, casb.PostureCheck{
-		CheckName: "password_policy",
-		Status:    "warn",
-		Details:   "password complexity policy requires org settings inspection",
+		Name:     "password_policy",
+		Status:   casb.CheckStatusWarn,
+		Evidence: "password complexity policy requires org settings inspection",
 	})
 	checks = append(checks, casb.PostureCheck{
-		CheckName: "api_access_control",
-		Status:    "warn",
-		Details:   "API access control requires connected app and profile inspection",
+		Name:     "api_access_control",
+		Status:   casb.CheckStatusWarn,
+		Evidence: "API access control requires connected app and profile inspection",
 	})
 
 	score := computePostureScore(checks)
 	return casb.PostureReport{
 		Checks:     checks,
-		Score:      score,
+		RiskScore:  score,
 		AssessedAt: now,
 	}, nil
 }

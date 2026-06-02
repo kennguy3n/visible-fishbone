@@ -1112,6 +1112,172 @@ type MSPTenantBinding struct {
 	CreatedBy    *uuid.UUID
 }
 
+// ---------------------------------------------------------------------
+// Browser Protection (Phase 4, Task 43)
+// ---------------------------------------------------------------------
+
+// BrowserRuleType enumerates the kinds of browser-level enforcement
+// a BrowserRule can apply. Mirrors the CHECK constraint on
+// browser_rules.type.
+type BrowserRuleType string
+
+const (
+	BrowserRuleTypeDownload    BrowserRuleType = "download"
+	BrowserRuleTypeUpload      BrowserRuleType = "upload"
+	BrowserRuleTypeClipboard   BrowserRuleType = "clipboard"
+	BrowserRuleTypePrint       BrowserRuleType = "print"
+	BrowserRuleTypeScreenshot  BrowserRuleType = "screenshot"
+	BrowserRuleTypeURLCategory BrowserRuleType = "url_category"
+)
+
+// IsValid reports whether t is a recognised BrowserRuleType.
+func (t BrowserRuleType) IsValid() bool {
+	switch t {
+	case BrowserRuleTypeDownload, BrowserRuleTypeUpload,
+		BrowserRuleTypeClipboard, BrowserRuleTypePrint,
+		BrowserRuleTypeScreenshot, BrowserRuleTypeURLCategory:
+		return true
+	}
+	return false
+}
+
+// BrowserPolicyAction enumerates the policy-level action applied
+// when a rule matches.
+type BrowserPolicyAction string
+
+const (
+	BrowserPolicyActionBlock BrowserPolicyAction = "block"
+	BrowserPolicyActionAllow BrowserPolicyAction = "allow"
+	BrowserPolicyActionWarn  BrowserPolicyAction = "warn"
+	BrowserPolicyActionLog   BrowserPolicyAction = "log"
+)
+
+// IsValid reports whether a is a recognised BrowserPolicyAction.
+func (a BrowserPolicyAction) IsValid() bool {
+	switch a {
+	case BrowserPolicyActionBlock, BrowserPolicyActionAllow,
+		BrowserPolicyActionWarn, BrowserPolicyActionLog:
+		return true
+	}
+	return false
+}
+
+// BrowserPolicyScope enumerates the targeting scope of a browser
+// protection policy.
+type BrowserPolicyScope string
+
+const (
+	BrowserPolicyScopeUser  BrowserPolicyScope = "user"
+	BrowserPolicyScopeGroup BrowserPolicyScope = "group"
+	BrowserPolicyScopeSite  BrowserPolicyScope = "site"
+)
+
+// IsValid reports whether s is a recognised BrowserPolicyScope.
+func (s BrowserPolicyScope) IsValid() bool {
+	switch s {
+	case BrowserPolicyScopeUser, BrowserPolicyScopeGroup,
+		BrowserPolicyScopeSite:
+		return true
+	}
+	return false
+}
+
+// BrowserRule is a single enforcement rule inside a BrowserPolicy.
+type BrowserRule struct {
+	Type      BrowserRuleType     `json:"type"`
+	Condition string              `json:"condition,omitempty"`
+	Action    BrowserPolicyAction `json:"action"`
+}
+
+// BrowserPolicy is one row in the browser_policies table.
+type BrowserPolicy struct {
+	ID        uuid.UUID
+	TenantID  uuid.UUID
+	Name      string
+	Rules     []BrowserRule
+	Action    BrowserPolicyAction
+	Scope     BrowserPolicyScope
+	Enabled   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// BrowserPolicyPatch is the sparse-PATCH input for updates.
+type BrowserPolicyPatch struct {
+	Name    *string
+	Rules   []BrowserRule
+	Action  *BrowserPolicyAction
+	Scope   *BrowserPolicyScope
+	Enabled *bool
+}
+
+// ---------------------------------------------------------------------
+// Data Classification Taxonomy (Phase 4, Task 46)
+// ---------------------------------------------------------------------
+
+// ClassificationLevel enumerates the hierarchical data classification
+// labels. Ordered from least to most sensitive.
+type ClassificationLevel string
+
+const (
+	ClassificationLevelPublic       ClassificationLevel = "public"
+	ClassificationLevelInternal     ClassificationLevel = "internal"
+	ClassificationLevelConfidential ClassificationLevel = "confidential"
+	ClassificationLevelRestricted   ClassificationLevel = "restricted"
+	ClassificationLevelTopSecret    ClassificationLevel = "top_secret"
+)
+
+// IsValid reports whether l is a recognised ClassificationLevel.
+func (l ClassificationLevel) IsValid() bool {
+	switch l {
+	case ClassificationLevelPublic, ClassificationLevelInternal,
+		ClassificationLevelConfidential, ClassificationLevelRestricted,
+		ClassificationLevelTopSecret:
+		return true
+	}
+	return false
+}
+
+// ClassificationLevelRank returns a numeric rank (0-4) for sorting/
+// comparison. Higher rank means more sensitive.
+func (l ClassificationLevel) Rank() int {
+	switch l {
+	case ClassificationLevelPublic:
+		return 0
+	case ClassificationLevelInternal:
+		return 1
+	case ClassificationLevelConfidential:
+		return 2
+	case ClassificationLevelRestricted:
+		return 3
+	case ClassificationLevelTopSecret:
+		return 4
+	default:
+		return -1
+	}
+}
+
+// DataClassification is one row in the data_classifications table.
+type DataClassification struct {
+	ID            uuid.UUID
+	TenantID      uuid.UUID
+	Label         string
+	Level         ClassificationLevel
+	Description   string
+	HandlingRules json.RawMessage
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// DataClassificationPatch is the sparse-PATCH input for updates.
+type DataClassificationPatch struct {
+	Label         *string
+	Level         *ClassificationLevel
+	Description   *string
+	HandlingRules *json.RawMessage
+}
+
+
 // --- CASB types -----------------------------------------------------------
 
 // CASBConnectorType enumerates the CASB connector kinds.
@@ -1279,3 +1445,4 @@ type DLPMatch struct {
 	MatchedAt time.Time
 	Details   json.RawMessage
 }
+

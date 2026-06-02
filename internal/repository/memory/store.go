@@ -85,6 +85,12 @@ type Store struct {
 	appRegistry  map[uuid.UUID]repository.AppRegistry
 	appOverrides map[uuid.UUID]repository.AppRegistryOverride
 
+	// Browser protection policies — Phase 4, Task 43.
+	browserPolicies map[uuid.UUID]repository.BrowserPolicy
+
+	// Data classification taxonomy — Phase 4, Task 46.
+	dataClassifications map[uuid.UUID]repository.DataClassification
+
 	// DLP tables — see migration 019. All tenant-scoped.
 	dlpPolicies     map[uuid.UUID]repository.DLPPolicy
 	dlpFingerprints map[uuid.UUID]repository.DLPFingerprint
@@ -145,6 +151,8 @@ func NewStore() *Store {
 		mspTenants:            map[mspTenantKey]repository.MSPTenantBinding{},
 		appRegistry:           map[uuid.UUID]repository.AppRegistry{},
 		appOverrides:          map[uuid.UUID]repository.AppRegistryOverride{},
+		browserPolicies:       map[uuid.UUID]repository.BrowserPolicy{},
+		dataClassifications:   map[uuid.UUID]repository.DataClassification{},
 		dlpPolicies:           map[uuid.UUID]repository.DLPPolicy{},
 		dlpFingerprints:       map[uuid.UUID]repository.DLPFingerprint{},
 		dlpMatches:            map[uuid.UUID]repository.DLPMatch{},
