@@ -64,7 +64,7 @@ type tenantUsage struct {
 
 // GuardrailedProvider wraps an LLMProvider with guardrails:
 // rate limiting, content filtering, output validation, and audit
-// logging.
+// logging. The audit log is capped at maxAuditLogSize entries (ring buffer).
 type GuardrailedProvider struct {
 	inner   LLMProvider
 	config  GuardrailConfig
@@ -75,6 +75,8 @@ type GuardrailedProvider struct {
 	usage    map[uuid.UUID]*tenantUsage
 	auditLog []AuditRecord
 }
+
+const maxAuditLogSize = 10000
 
 // NewGuardrailedProvider constructs a guardrailed LLM wrapper.
 // inner must not be nil.
@@ -229,6 +231,9 @@ func (g *GuardrailedProvider) recordAudit(tenantID uuid.UUID, model, action stri
 		Error:      errMsg,
 	}
 	g.mu.Lock()
+	if len(g.auditLog) >= maxAuditLogSize {
+		g.auditLog = g.auditLog[1:]
+	}
 	g.auditLog = append(g.auditLog, record)
 	g.mu.Unlock()
 
@@ -246,16 +251,19 @@ func (g *GuardrailedProvider) Status(tenantID uuid.UUID) GuardrailStatus {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	u := g.getOrCreateUsage(tenantID)
+	u, ok := g.usage[tenantID]
 	now := time.Now()
 
-	reqThisMin := u.requestsThisMinute
-	if now.Sub(u.minuteStart) > time.Minute {
-		reqThisMin = 0
-	}
-	tokensToday := u.tokensToday
-	if now.Sub(u.dayStart) > 24*time.Hour {
-		tokensToday = 0
+	var reqThisMin, tokensToday int
+	if ok {
+		reqThisMin = u.requestsThisMinute
+		if now.Sub(u.minuteStart) > time.Minute {
+			reqThisMin = 0
+		}
+		tokensToday = u.tokensToday
+		if now.Sub(u.dayStart) > 24*time.Hour {
+			tokensToday = 0
+		}
 	}
 
 	return GuardrailStatus{

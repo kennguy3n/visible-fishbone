@@ -1,11 +1,11 @@
--- Migration 029: AI alert correlations table.
+-- Migration 022: AI alert correlations table.
 -- Stores incident clusters produced by the AI correlation engine.
 
 CREATE TABLE ai_alert_correlations (
     id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id  UUID        NOT NULL REFERENCES tenants(id),
     alert_ids  UUID[]      NOT NULL,
-    summary    TEXT,
+    summary    TEXT        NOT NULL DEFAULT '',
     severity   TEXT        NOT NULL,
     status     TEXT        NOT NULL DEFAULT 'open',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

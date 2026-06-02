@@ -184,7 +184,7 @@ func (h *AIHandler) listCorrelations(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	page := repository.Page{Limit: QueryLimit(r), After: r.URL.Query().Get("cursor")}
+	page := repository.Page{Limit: QueryLimit(r), After: r.URL.Query().Get("after")}
 	result, err := h.correlationRepo.List(r.Context(), tenantID, page)
 	if err != nil {
 		WriteRepositoryError(w, err)

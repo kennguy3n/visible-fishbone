@@ -181,7 +181,7 @@ func (e *CorrelationEngine) llmSummarize(ctx context.Context, cluster Correlatio
 // (multiple distinct alert kinds).
 func escalateSeverity(group []AlertInput) string {
 	kinds := map[string]bool{}
-	maxSev := "info"
+	maxSev := "low"
 	for _, a := range group {
 		kinds[a.Kind] = true
 		if severityRank(a.Severity) > severityRank(maxSev) {
