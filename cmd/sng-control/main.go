@@ -220,7 +220,7 @@ func run() error {
 	// tier is built, pass it instead of nil to enable
 	// evidence-grounded summaries.
 	if aiSvc != nil {
-		aiSvc.SetSummarizer(aisvc.NewSummarizer(nil, nil))
+		aiSvc.SetSummarizer(aisvc.NewSummarizer(aiSvc.LLM(), nil))
 		logger.Info("ai.summarizer: wired (template-mode; evidence reader pending)")
 	}
 	// Wrap startTelemetry's shutdown in a sync.Once so the bounded

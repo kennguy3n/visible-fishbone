@@ -83,6 +83,14 @@ func (s *Service) SummarizerConfigured() bool {
 	return s != nil && s.summarizer.Load() != nil
 }
 
+// LLM returns the configured LLM provider (may be nil).
+func (s *Service) LLM() LLMProvider {
+	if s == nil {
+		return nil
+	}
+	return s.llm
+}
+
 // SuggestPolicy asks the LLM to propose policy changes, then
 // verifies the result through the deterministic compiler. Returns
 // a VerifiedSuggestion on success or an error if the LLM is not
