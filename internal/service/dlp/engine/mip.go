@@ -5,8 +5,13 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"strings"
 )
+
+// maxDecompressSize caps the bytes read from a single ZIP entry
+// to guard against zip-bomb attacks (10 MB).
+const maxDecompressSize = 10 << 20
 
 // MIPLabel represents a Microsoft Information Protection label
 // extracted from document metadata or email headers.
@@ -90,11 +95,14 @@ func (r *MIPReader) readFromOOXML(content []byte) ([]MIPLabel, error) {
 				return nil, fmt.Errorf("mip: open custom.xml: %w", err)
 			}
 			buf := new(bytes.Buffer)
-			if _, err := buf.ReadFrom(rc); err != nil {
+			if _, err := buf.ReadFrom(io.LimitReader(rc, maxDecompressSize+1)); err != nil {
 				_ = rc.Close()
 				return nil, fmt.Errorf("mip: read custom.xml: %w", err)
 			}
 			_ = rc.Close()
+			if int64(buf.Len()) > maxDecompressSize {
+				return nil, fmt.Errorf("mip: custom.xml exceeds %d byte size limit", maxDecompressSize)
+			}
 			customXML = buf.Bytes()
 			break
 		}

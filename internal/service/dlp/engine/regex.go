@@ -3,13 +3,21 @@
 package engine
 
 import (
+	"container/list"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
+
+// maxCustomCacheSize is the upper bound on cached custom regex
+// patterns. When the limit is reached the least-recently-used
+// entry is evicted.
+const maxCustomCacheSize = 1024
 
 // builtinPatterns maps well-known PII pattern names to compiled
 // regular expressions. The keys are used as the Pattern field in
@@ -45,17 +53,26 @@ var builtinPatterns = map[string]*regexp.Regexp{
 
 // RegexEngine provides pre-compiled regex matching for PII patterns.
 // Tenant-defined custom patterns are compiled on first use and
-// cached per pattern string.
+// cached in a bounded LRU cache. Concurrent compilations of the
+// same pattern are coalesced via singleflight.
 type RegexEngine struct {
-	mu    sync.RWMutex
-	cache map[string]*regexp.Regexp
+	mu    sync.Mutex
+	cache map[string]*list.Element
+	order *list.List
+	sfg   singleflight.Group
+}
+
+type cacheEntry struct {
+	pattern string
+	re      *regexp.Regexp
 }
 
 // NewRegexEngine constructs a regex engine with an empty custom
 // pattern cache.
 func NewRegexEngine() *RegexEngine {
 	return &RegexEngine{
-		cache: map[string]*regexp.Regexp{},
+		cache: make(map[string]*list.Element, maxCustomCacheSize),
+		order: list.New(),
 	}
 }
 
@@ -111,20 +128,35 @@ func (e *RegexEngine) resolve(r repository.DLPRule) *regexp.Regexp {
 }
 
 func (e *RegexEngine) compileCustom(pattern string) *regexp.Regexp {
-	e.mu.RLock()
-	if cached, ok := e.cache[pattern]; ok {
-		e.mu.RUnlock()
-		return cached
+	e.mu.Lock()
+	if elem, ok := e.cache[pattern]; ok {
+		e.order.MoveToFront(elem)
+		e.mu.Unlock()
+		return elem.Value.(*cacheEntry).re
 	}
-	e.mu.RUnlock()
+	e.mu.Unlock()
 
-	re, err := regexp.Compile(pattern)
-	if err != nil {
+	v, _, _ := e.sfg.Do(pattern, func() (any, error) {
+		return regexp.Compile(pattern)
+	})
+	re, _ := v.(*regexp.Regexp)
+	if re == nil {
 		return nil
 	}
+
 	e.mu.Lock()
-	e.cache[pattern] = re
-	e.mu.Unlock()
+	defer e.mu.Unlock()
+	if elem, ok := e.cache[pattern]; ok {
+		e.order.MoveToFront(elem)
+		return elem.Value.(*cacheEntry).re
+	}
+	if e.order.Len() >= maxCustomCacheSize {
+		oldest := e.order.Back()
+		delete(e.cache, oldest.Value.(*cacheEntry).pattern)
+		e.order.Remove(oldest)
+	}
+	elem := e.order.PushFront(&cacheEntry{pattern: pattern, re: re})
+	e.cache[pattern] = elem
 	return re
 }
 

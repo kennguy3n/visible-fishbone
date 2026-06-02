@@ -40,6 +40,8 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
+	"github.com/kennguy3n/visible-fishbone/internal/service/casb"
+	casbconnectors "github.com/kennguy3n/visible-fishbone/internal/service/casb/connectors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration/connectors"
@@ -325,6 +327,9 @@ func buildRouter(
 	integrationConnectorRepo := store.NewIntegrationConnectorRepository()
 	integrationDeliveryRepo := store.NewIntegrationDeliveryRepository()
 	mspRepo := store.NewMSPRepository()
+	casbConnectorRepo := store.NewCASBConnectorRepository()
+	casbAppRepo := store.NewCASBDiscoveredAppRepository()
+	casbPostureRepo := store.NewCASBPostureCheckRepository()
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -527,6 +532,19 @@ func buildRouter(
 		},
 		logger)
 
+	// --- CASB wiring (Phase 4) ----------------------------------------
+	casbHTTP := &http.Client{Timeout: 30 * time.Second}
+	casbUA := cfg.AppName + "/sng-control"
+	casbPlugins := casb.PluginRegistry{
+		repository.CASBConnectorM365:       casbconnectors.NewM365(casbHTTP, casbUA),
+		repository.CASBConnectorGoogle:     casbconnectors.NewGoogle(casbHTTP, casbUA),
+		repository.CASBConnectorSlack:      casbconnectors.NewSlack(casbHTTP, casbUA),
+		repository.CASBConnectorSalesforce: casbconnectors.NewSalesforce(casbHTTP, casbUA),
+	}
+	casbSvc := casb.New(
+		casbConnectorRepo, casbAppRepo, casbPostureRepo, auditRepo,
+		casbPlugins, logger)
+
 	// --- MSP hierarchy wiring (Phase 3 Block 5) -----------------------
 	// The MSP service is just the repository — there is no
 	// business logic beyond what the repo already enforces.
@@ -565,6 +583,7 @@ func buildRouter(
 		Baseline:         handler.NewBaselineHandler(baselineRepo, logger),
 		Alert:            handler.NewAlertHandler(alertRouter, alertFeedback, logger),
 		Integrations:     handler.NewIntegrationHandler(integrationSvc),
+		CASB:             handler.NewCASBHandler(casbSvc),
 		MSP:              handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
 		AI:               aiHandler,
 		APIKeyLookup:     apiKeySvc,
