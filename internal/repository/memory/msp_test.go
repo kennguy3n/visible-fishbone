@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -691,5 +692,128 @@ func TestMSPRepository_AssignTenant_RepeatedCoManagerDoesNotClearOtherOwner(t *t
 	}
 	if got.MSPID == nil || *got.MSPID != owner.ID {
 		t.Fatalf("owner pointer mutated by repeated co_manager: got %v want %s", got.MSPID, owner.ID)
+	}
+}
+
+// TestMSPRepository_Create_DefaultsNilSettingsToEmptyObject pins
+// round-20 of Devin Review on PR #42 (ANALYSIS_0001). The postgres
+// backend defaults nil/empty Settings to `{}` so the JSON response
+// surface always carries a non-null object; previously the memory
+// backend left Settings nil, which `omitempty` then dropped from
+// the response entirely. That cross-backend divergence trips SDK
+// code-gen and confuses clients that expect Settings to always be
+// a JSON object regardless of which backend handled the request.
+//
+// The fix mirrors the postgres default in
+// internal/repository/memory/msp.go Create. This test pins the
+// behaviour both for the immediate Create return value AND for a
+// subsequent Get, since the latter exercises the stored-then-cloned
+// path (catching a regression where the default is applied to the
+// return value but not the underlying store).
+func TestMSPRepository_Create_DefaultsNilSettingsToEmptyObject(t *testing.T) {
+	_, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+
+	// nil Settings on Create
+	m, err := mspRepo.Create(ctx, repository.MSP{
+		Name:     "Acme",
+		Slug:     "acme-settings-default",
+		Settings: nil,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if string(m.Settings) != `{}` {
+		t.Fatalf("Create return: expected Settings='{}' default, got %q", string(m.Settings))
+	}
+
+	// Get must return the SAME defaulted Settings value.
+	got, err := mspRepo.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if string(got.Settings) != `{}` {
+		t.Fatalf("Get: expected stored Settings='{}', got %q", string(got.Settings))
+	}
+
+	// Explicit zero-length RawMessage (e.g. {}-stripped or
+	// truncated upstream) MUST also default — len(nil)==0 and
+	// len([]byte{})==0 both hit the guard.
+	m2, err := mspRepo.Create(ctx, repository.MSP{
+		Name:     "Acme2",
+		Slug:     "acme-settings-empty",
+		Settings: json.RawMessage{},
+	})
+	if err != nil {
+		t.Fatalf("create empty: %v", err)
+	}
+	if string(m2.Settings) != `{}` {
+		t.Fatalf("Create empty: expected Settings='{}' default, got %q", string(m2.Settings))
+	}
+
+	// Caller-supplied non-empty Settings MUST round-trip
+	// untouched (the default applies only on len==0).
+	m3, err := mspRepo.Create(ctx, repository.MSP{
+		Name:     "Acme3",
+		Slug:     "acme-settings-custom",
+		Settings: json.RawMessage(`{"k":"v"}`),
+	})
+	if err != nil {
+		t.Fatalf("create custom: %v", err)
+	}
+	if string(m3.Settings) != `{"k":"v"}` {
+		t.Fatalf("Create custom: expected Settings to round-trip, got %q", string(m3.Settings))
+	}
+}
+
+// TestMSPRepository_AssignTenant_RejectsSoftDeletedMSP pins
+// round-20 of Devin Review on PR #42 (ANALYSIS_0002). Previously
+// the AssignTenant existence check was a plain map lookup, which
+// surfaces tombstoned rows as live. Update() and TransitionStatus()
+// already filtered Status==Deleted / DeletedAt!=nil — AssignTenant
+// was the only writer in the MSP surface that didn't, leaving a
+// gap where a stale role grant + race between Delete and
+// AssignTenant could create a binding on a row that is already
+// invariant-broken.
+//
+// The fix adds an explicit DeletedAt/Status guard returning
+// ErrForbidden so callers can distinguish "msp never existed"
+// (ErrNotFound) from "msp tombstoned" (ErrForbidden). Postgres
+// gets the matching guard via a `SELECT id, status, deleted_at
+// ... ` query.
+func TestMSPRepository_AssignTenant_RejectsSoftDeletedMSP(t *testing.T) {
+	_, mspRepo, tenantRepo := mspFixtures(t)
+	ctx := context.Background()
+
+	msp := mustCreateMSP(t, mspRepo, "softdel-msp")
+	tn := mustCreateTenant(t, tenantRepo, "softdel-tn")
+
+	// Soft-delete the MSP. Memory Delete cascades msp_tenants +
+	// tenants.msp_id and stamps both Status='deleted' and
+	// DeletedAt — matches the invariant the new guard checks.
+	if err := mspRepo.Delete(ctx, msp.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	// Attempt to bind a tenant to the tombstoned MSP. Must reject
+	// with ErrForbidden — NOT ErrNotFound (the row exists) and
+	// NOT a successful binding (would re-create the invariant
+	// violation Delete just resolved).
+	_, err := mspRepo.AssignTenant(ctx, msp.ID, tn.ID, repository.MSPRelationshipCoManager, nil)
+	if !errors.Is(err, repository.ErrForbidden) {
+		t.Fatalf("expected ErrForbidden for soft-deleted MSP, got %v", err)
+	}
+
+	// Owner relationship: same guard, same error.
+	_, err = mspRepo.AssignTenant(ctx, msp.ID, tn.ID, repository.MSPRelationshipOwner, nil)
+	if !errors.Is(err, repository.ErrForbidden) {
+		t.Fatalf("expected ErrForbidden for owner-binding on soft-deleted MSP, got %v", err)
+	}
+
+	// Genuinely missing MSP still returns ErrNotFound — the new
+	// guard must not collapse the two cases.
+	_, err = mspRepo.AssignTenant(ctx, uuid.New(), tn.ID, repository.MSPRelationshipCoManager, nil)
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing MSP, got %v", err)
 	}
 }

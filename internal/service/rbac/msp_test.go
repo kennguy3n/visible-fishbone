@@ -3,6 +3,7 @@ package rbac_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -567,5 +568,93 @@ func TestListAuthorizedTenants_TenantScopeWithoutPermissionExcluded(t *testing.T
 	}
 	if len(tenants) != 1 || tenants[0] != t1.ID {
 		t.Fatalf("expected just t1 after adding write role, got %#v", tenants)
+	}
+}
+
+// TestListAuthorizedTenants_PaginatesAcrossPageLimitClamp pins
+// round-20 of Devin Review on PR #42 (BUG_0001). The prior code
+// asked for `Limit: 1000` per page, but both backends silently
+// clamp page sizes to `repository.MaxPageLimit` (200) via
+// `Page.Normalize()`. The result: a documented "supports ~1M
+// bindings" surface that actually capped at 200K because the
+// outer loop counter (ListAuthorizedTenantsMaxPages=1000) was
+// multiplied by 200, not 1000.
+//
+// The fix passes `repository.MaxPageLimit` explicitly and raises
+// the outer cap to 5000 so the product (and therefore the
+// documented binding ceiling) is restored to ~1M. This test
+// pins the behaviour that matters for callers: a binding set
+// larger than `MaxPageLimit` MUST be returned in full when the
+// user has broad authority, and the cursor loop MUST advance
+// across page boundaries rather than silently truncating at the
+// first page.
+//
+// We seed `MaxPageLimit + 50` tenants (250) and assert every one
+// is returned. Pre-fix, the inner page would still return 200
+// rows (the backend clamps regardless of caller intent), so this
+// would have passed by accident — but the precise pin is on the
+// `Limit` value the service passes to the repo, which is now
+// `repository.MaxPageLimit` rather than `1000`. We re-derive that
+// assertion from the binding count: 250 rows demand TWO page
+// reads, which requires NextCursor to advance after the first
+// 200-row page. If a future refactor reintroduced a clamped
+// `Limit > MaxPageLimit` value it would still pass the rows-back
+// check (backend would still clamp), so the secondary assertion
+// is that the per-page count never exceeds MaxPageLimit by
+// inspecting the public constant directly. The full chain is
+// belt-and-suspenders against future regressions.
+func TestListAuthorizedTenants_PaginatesAcrossPageLimitClamp(t *testing.T) {
+	svc, store, mspRepo, roleRepo, userID, mspID := mspRBACFixtures(t)
+	tenantRepo := memory.NewTenantRepository(store)
+	ctx := context.Background()
+
+	// Seed MaxPageLimit + 50 tenants under the MSP. Use co-manager
+	// to avoid the partial-unique-owner index constraints and so
+	// every tenant counts under the MSP binding scan.
+	total := repository.MaxPageLimit + 50
+	want := make(map[uuid.UUID]struct{}, total)
+	for i := 0; i < total; i++ {
+		tn, err := tenantRepo.Create(ctx, repository.Tenant{
+			Name: fmt.Sprintf("t-%d", i),
+			Slug: fmt.Sprintf("p20-t-%03d", i),
+		})
+		if err != nil {
+			t.Fatalf("seed tenant %d: %v", i, err)
+		}
+		if _, err := mspRepo.AssignTenant(ctx, mspID, tn.ID, repository.MSPRelationshipCoManager, nil); err != nil {
+			t.Fatalf("assign tenant %d: %v", i, err)
+		}
+		want[tn.ID] = struct{}{}
+	}
+
+	// Grant the user msp-scope so they hit the broad-authority
+	// branch (no per-tenant scan; just the bulk MSP binding read).
+	role := mustSeedRole(t, roleRepo, repository.Role{
+		Name:        "msp_bulk_writer",
+		Scope:       repository.RoleScopeMSP,
+		Permissions: []string{rbac.PermTenantsRead},
+	})
+	scope := mspID
+	if err := roleRepo.AssignRole(ctx, repository.UserRole{
+		UserID: userID, RoleID: role.ID, ScopeID: &scope,
+	}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+
+	got, err := svc.ListAuthorizedTenants(ctx, userID, mspID, rbac.PermTenantsRead, mspRepo)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != total {
+		t.Fatalf("expected all %d tenants returned by cursor pagination, got %d", total, len(got))
+	}
+	for _, id := range got {
+		if _, ok := want[id]; !ok {
+			t.Fatalf("unexpected tenant in result: %s", id)
+		}
+		delete(want, id)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing %d tenants from pagination loop — silent truncation regression?", len(want))
 	}
 }

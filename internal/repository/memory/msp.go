@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -59,6 +60,20 @@ func (r *MSPRepository) Create(ctx context.Context, m repository.MSP) (repositor
 	m.UpdatedAt = now
 	if m.Status == "" {
 		m.Status = repository.MSPStatusActive
+	}
+	// Default nil/empty Settings to "{}" so memory and postgres
+	// both return a non-null JSON object on Get/Create
+	// responses. Without this, a caller that omits Settings on
+	// Create receives `null` from the memory backend but `{}` from
+	// postgres (which has the same default at
+	// internal/repository/postgres/msp.go:68-70). That cross-backend
+	// divergence trips SDK code-gen and unmarshalling for clients
+	// that expect Settings to always be a JSON object. Round-20 of
+	// Devin Review on PR #42 (ANALYSIS_0001) flagged this; the fix
+	// is to mirror the postgres default here so the response shape
+	// is identical regardless of which backend handled the request.
+	if len(m.Settings) == 0 {
+		m.Settings = json.RawMessage(`{}`)
 	}
 	m.Settings = cloneJSON(m.Settings)
 	r.s.msps[m.ID] = m
@@ -369,8 +384,24 @@ func (r *MSPRepository) AssignTenant(
 	}
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
-	if _, ok := r.s.msps[mspID]; !ok {
+	existing, ok := r.s.msps[mspID]
+	if !ok {
 		return repository.MSPTenantBinding{}, repository.ErrNotFound
+	}
+	// Reject binding creation against a soft-deleted MSP. Without
+	// this guard the map lookup above surfaces tombstoned rows
+	// (Status='deleted' with DeletedAt!=nil) as live, letting an
+	// operator with a stale role grant race a concurrent Delete and
+	// land a fresh binding on a row that is already invariant-broken
+	// (`Delete` cascades msp_tenants and clears tenants.msp_id, but
+	// can't rewind a write that hasn't happened yet). Update() and
+	// TransitionStatus() both filter soft-deletes — AssignTenant was
+	// the only writer in the MSP surface that didn't. Round-20 of
+	// Devin Review on PR #42 (ANALYSIS_0002) flagged this; the
+	// postgres mirror adds the same `AND deleted_at IS NULL`
+	// predicate to its pre-flight check.
+	if existing.DeletedAt != nil || existing.Status == repository.MSPStatusDeleted {
+		return repository.MSPTenantBinding{}, repository.ErrForbidden
 	}
 	if _, ok := r.s.tenants[tenantID]; !ok {
 		return repository.MSPTenantBinding{}, repository.ErrNotFound

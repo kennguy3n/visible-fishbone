@@ -124,17 +124,32 @@ func (svc *Service) AuthorizePlatform(
 }
 
 // ListAuthorizedTenantsMaxPages caps the pagination loop in
-// ListAuthorizedTenants as a safety net. At Limit=1000 per page
-// this allows up to ~1,000,000 tenant bindings per MSP — well
-// above the documented platform target (<10k tenants per MSP)
-// and large enough to avoid spurious failures on legitimate
-// growth, while still guaranteeing the call cannot spin
-// indefinitely if the repository ever returns a non-empty cursor
-// that never advances (e.g. a misconfigured cursor-comparison
-// predicate). When the cap is reached we return an explicit
-// error rather than silently truncating the authorized set,
-// because under-authorization is a security-sensitive bug.
-const ListAuthorizedTenantsMaxPages = 1000
+// ListAuthorizedTenants as a safety net. At repository.MaxPageLimit
+// (200) per page this allows up to ~1,000,000 tenant bindings per
+// MSP — well above the documented platform target (<10k tenants per
+// MSP) and large enough to avoid spurious failures on legitimate
+// growth, while still guaranteeing the call cannot spin indefinitely
+// if the repository ever returns a non-empty cursor that never
+// advances (e.g. a misconfigured cursor-comparison predicate). When
+// the cap is reached we return an explicit error rather than
+// silently truncating the authorized set, because under-authorization
+// is a security-sensitive bug.
+//
+// Round-20 of Devin Review on PR #42 (BUG_0001) caught that the
+// prior `Limit: 1000` paired with a 1000-page cap claimed to
+// support ~1M bindings — but both the memory and postgres backends
+// silently clamp Limit via `Page.Normalize()` to
+// repository.MaxPageLimit (200), so the real ceiling was only
+// 200K. Worse, the same call did 5× the round-trips it claimed
+// because each effective page returned 200 rows, not 1000. The
+// fix here is two-fold: (1) the inner ListTenants call now passes
+// repository.MaxPageLimit explicitly so the "rows per page"
+// number is honest, and (2) this cap is raised to 5000 to keep
+// the documented ~1M ceiling. The product of the two constants
+// remains the supported binding count; making the per-page
+// number match the backend clamp eliminates the silent half of
+// the bug.
+const ListAuthorizedTenantsMaxPages = 5000
 
 // ErrTooManyMSPBindings is returned by ListAuthorizedTenants when
 // the binding pagination loop exceeds ListAuthorizedTenantsMaxPages.
@@ -191,8 +206,13 @@ func (svc *Service) ListAuthorizedTenants(
 	var bound []uuid.UUID
 	var cursor string
 	for i := 0; i < ListAuthorizedTenantsMaxPages; i++ {
+		// Limit is repository.MaxPageLimit so the "rows per
+		// page" actually matches the backend behaviour rather
+		// than being silently clamped by Page.Normalize(). See
+		// the round-20 BUG_0001 note on
+		// ListAuthorizedTenantsMaxPages above for the full story.
 		page, err := msps.ListTenants(ctx, mspID, repository.Page{
-			Limit: 1000,
+			Limit: repository.MaxPageLimit,
 			After: cursor,
 		})
 		if err != nil {

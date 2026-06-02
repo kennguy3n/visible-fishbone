@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -492,12 +493,34 @@ func (r *MSPRepository) AssignTenant(
 	// distinguishes "msp missing" from "tenant missing" via a
 	// clean ErrNotFound rather than a Postgres FK violation
 	// error code surfaced upstream.
-	var dummy uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT id FROM msps WHERE id = $1::uuid`, mspID).Scan(&dummy); err != nil {
+	//
+	// The MSP lookup additionally filters soft-deletes so a
+	// tombstoned row (`status='deleted'` AND `deleted_at IS NOT
+	// NULL`) doesn't accept new bindings. Update() and
+	// TransitionStatus() both guard against deleted rows already —
+	// AssignTenant was the only writer in the MSP surface that
+	// didn't. Round-20 of Devin Review on PR #42 (ANALYSIS_0002)
+	// flagged this; the memory backend has the matching guard at
+	// internal/repository/memory/msp.go (just before this comment's
+	// mirrored note). We return `ErrForbidden` when the row exists
+	// but is soft-deleted so callers can distinguish "msp never
+	// existed" (ErrNotFound) from "msp tombstoned" (ErrForbidden)
+	// — the latter is recoverable via Restore, the former is not.
+	var (
+		dummy      uuid.UUID
+		mspStatus  string
+		mspDeleted *time.Time
+	)
+	if err := tx.QueryRow(ctx,
+		`SELECT id, status, deleted_at FROM msps WHERE id = $1::uuid`, mspID,
+	).Scan(&dummy, &mspStatus, &mspDeleted); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return repository.MSPTenantBinding{}, repository.ErrNotFound
 		}
 		return repository.MSPTenantBinding{}, fmt.Errorf("lookup msp: %w", err)
+	}
+	if mspDeleted != nil || mspStatus == string(repository.MSPStatusDeleted) {
+		return repository.MSPTenantBinding{}, repository.ErrForbidden
 	}
 	if err := tx.QueryRow(ctx, `SELECT id FROM tenants WHERE id = $1::uuid`, tenantID).Scan(&dummy); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
