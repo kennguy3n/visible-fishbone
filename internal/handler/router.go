@@ -35,6 +35,8 @@ type RouterDeps struct {
 	AI               *AIHandler
 	DLP              *DLPHandler
 	SCIM             *SCIMHandler
+	Compliance       *ComplianceHandler
+	Playbook         *PlaybookHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
 	RateLimiter      *middleware.RateLimiter
@@ -129,6 +131,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.SCIM != nil {
 		deps.SCIM.Register(apiMux)
+	}
+	if deps.Compliance != nil {
+		deps.Compliance.Register(apiMux)
+	}
+	if deps.Playbook != nil {
+		deps.Playbook.Register(apiMux)
 	}
 	if deps.OpsHealth != nil {
 		deps.OpsHealth.Register(apiMux)

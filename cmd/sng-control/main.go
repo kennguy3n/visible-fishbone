@@ -42,9 +42,12 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
 	"github.com/kennguy3n/visible-fishbone/internal/service/casb"
 	casbconnectors "github.com/kennguy3n/visible-fishbone/internal/service/casb/connectors"
+	"github.com/kennguy3n/visible-fishbone/internal/service/compliance"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration/connectors"
+	"github.com/kennguy3n/visible-fishbone/internal/service/playbook"
+	"github.com/kennguy3n/visible-fishbone/internal/service/playbook/executors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
 	"github.com/kennguy3n/visible-fishbone/internal/service/site"
@@ -578,6 +581,26 @@ func buildRouter(
 	// + /devices/import|export routes actually serve in production.
 	bulkDeviceSvc := identity.NewBulkDeviceService(deviceRepo, claimRepo, enrollmentRepo, auditRepo, logger)
 
+	// --- Compliance + Playbook wiring (Session 1, Tasks 47, 49-54) ----
+	// Compliance reporting renders per-tenant framework scores and
+	// evidence packs from enforced-policy state. The playbook engine
+	// runs remediation steps through the executor registry; both the
+	// engine and its executors publish NATS commands via the same
+	// adapter the alert router uses for `sng.<tenant>.alerts.*`.
+	playbookPub := natsAlertAdapter{p: telPub}
+	complianceHandler := handler.NewComplianceHandler(
+		compliance.NewReportService(store.NewComplianceReportRepository(), logger))
+	playbookEngine := playbook.NewEngine(
+		store.NewPlaybookRepository(),
+		store.NewPlaybookExecutionRepository(),
+		playbookPub, logger)
+	playbookEngine.SetExecutors(executors.NewRegistry(playbookPub))
+	playbookApprovalSvc := playbook.NewApprovalService(
+		store.NewPlaybookApprovalRepository(),
+		store.NewPlaybookExecutionRepository(),
+		logger)
+	playbookHandler := handler.NewPlaybookHandler(playbookEngine, playbookApprovalSvc)
+
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:  cfg,
 		Logger:  logger,
@@ -603,6 +626,8 @@ func buildRouter(
 		MSP:              handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
 		AI:               aiHandler,
 		SCIM:             handler.NewSCIMHandler(scimSvc),
+		Compliance:       complianceHandler,
+		Playbook:         playbookHandler,
 		APIKeyLookup:     apiKeySvc,
 		Health:           health,
 		OpenAPISpec:      handler.NewOpenAPIHandler(),

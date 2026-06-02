@@ -105,6 +105,15 @@ type Store struct {
 	roles     map[uuid.UUID]repository.Role
 	userRoles map[userRoleKey]repository.UserRole
 
+	// Compliance reports — see migration 022.
+	complianceReports map[uuid.UUID]repository.ComplianceReport
+
+	// Playbook tables — see migrations 023-025.
+	playbooks           map[uuid.UUID]repository.Playbook
+	playbookExecutions  map[uuid.UUID]repository.PlaybookExecution
+	playbookStepResults map[uuid.UUID]repository.StepResult
+	playbookApprovals   map[uuid.UUID]repository.PlaybookApproval
+
 	// Operational health tables — see migrations 030, 031.
 	policyReviewSchedules map[uuid.UUID]repository.PolicyReviewSchedule
 	opsHealthSnapshots    map[uuid.UUID]repository.OpsHealthSnapshot
@@ -168,6 +177,11 @@ func NewStore() *Store {
 		dlpMatches:            map[uuid.UUID]repository.DLPMatch{},
 		roles:                 map[uuid.UUID]repository.Role{},
 		userRoles:             map[userRoleKey]repository.UserRole{},
+		complianceReports:     map[uuid.UUID]repository.ComplianceReport{},
+		playbooks:             map[uuid.UUID]repository.Playbook{},
+		playbookExecutions:    map[uuid.UUID]repository.PlaybookExecution{},
+		playbookStepResults:   map[uuid.UUID]repository.StepResult{},
+		playbookApprovals:     map[uuid.UUID]repository.PlaybookApproval{},
 		policyReviewSchedules: map[uuid.UUID]repository.PolicyReviewSchedule{},
 		opsHealthSnapshots:    map[uuid.UUID]repository.OpsHealthSnapshot{},
 		clock:                 func() time.Time { return time.Now().UTC() },

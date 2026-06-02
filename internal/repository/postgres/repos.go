@@ -119,6 +119,26 @@ func (s *Store) NewCASBPostureCheckRepository() *CASBPostureCheckRepository {
 	return &CASBPostureCheckRepository{s: s}
 }
 
+// NewComplianceReportRepository binds the Store to repository.ComplianceReportRepository.
+func (s *Store) NewComplianceReportRepository() *ComplianceReportRepository {
+	return &ComplianceReportRepository{s: s}
+}
+
+// NewPlaybookRepository binds the Store to repository.PlaybookRepository.
+func (s *Store) NewPlaybookRepository() *PlaybookRepository {
+	return &PlaybookRepository{s: s}
+}
+
+// NewPlaybookExecutionRepository binds the Store to repository.PlaybookExecutionRepository.
+func (s *Store) NewPlaybookExecutionRepository() *PlaybookExecutionRepository {
+	return &PlaybookExecutionRepository{s: s}
+}
+
+// NewPlaybookApprovalRepository binds the Store to repository.PlaybookApprovalRepository.
+func (s *Store) NewPlaybookApprovalRepository() *PlaybookApprovalRepository {
+	return &PlaybookApprovalRepository{s: s}
+}
+
 // NewPolicyReviewScheduleRepository binds the Store to repository.PolicyReviewScheduleRepository.
 func (s *Store) NewPolicyReviewScheduleRepository() *PolicyReviewScheduleRepository {
 	return &PolicyReviewScheduleRepository{s: s}
@@ -159,6 +179,10 @@ var (
 	_ repository.CASBConnectorRepository        = (*CASBConnectorRepository)(nil)
 	_ repository.CASBDiscoveredAppRepository    = (*CASBDiscoveredAppRepository)(nil)
 	_ repository.CASBPostureCheckRepository     = (*CASBPostureCheckRepository)(nil)
+	_ repository.ComplianceReportRepository     = (*ComplianceReportRepository)(nil)
+	_ repository.PlaybookRepository             = (*PlaybookRepository)(nil)
+	_ repository.PlaybookExecutionRepository    = (*PlaybookExecutionRepository)(nil)
+	_ repository.PlaybookApprovalRepository     = (*PlaybookApprovalRepository)(nil)
 	_ repository.PolicyReviewScheduleRepository = (*PolicyReviewScheduleRepository)(nil)
 	_ repository.OpsHealthSnapshotRepository    = (*OpsHealthSnapshotRepository)(nil)
 )
