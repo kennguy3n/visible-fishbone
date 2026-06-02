@@ -1112,6 +1112,26 @@ type BulkSiteRequest struct {
 // already present at the handler boundary below.
 const MaxBulkClaimTokenCount = 1000
 
+// MaxClaimTokenTTLSeconds caps `ttl_seconds` on the same endpoint.
+// Round-26 of Devin Review on PR #42 (ANALYSIS_0001) flagged
+// that the existing `ttl_seconds >= 0` guard left an int64
+// overflow window: `time.Duration(req.TTLSeconds) * time.Second`
+// multiplies by 1e9 (nanoseconds per second), so any
+// `TTLSeconds > math.MaxInt64 / 1e9` (~9.22 billion seconds, or
+// ~292 years) wraps to a NEGATIVE duration. The bulk service
+// stamps ExpiresAt = now + ttl, so the wrapped duration produces
+// tokens whose ExpiresAt sits in the past — silently
+// unredeemable, exactly the class of bug the lower-bound guard
+// was added to prevent. The cap below (1 year) is multiple
+// orders of magnitude below the overflow threshold, well above
+// any plausible operator workflow (the longest legitimate
+// claim-token lifetime today is a 30-day onboarding window),
+// and symmetric with MaxBulkClaimTokenCount as a
+// resource-exhaustion bound. A value of 0 stays valid — the
+// identity service interprets ttl=0 as "use the configured
+// DefaultTokenTTL" per BulkClaimTokensRequest's doc-comment.
+const MaxClaimTokenTTLSeconds = 365 * 24 * 60 * 60
+
 // BulkClaimTokensRequest carries the count + TTL.
 //
 // TTLSeconds semantics:
@@ -1353,6 +1373,20 @@ func (h *MSPHandler) bulkGenerateClaimTokens(w http.ResponseWriter, r *http.Requ
 	if req.TTLSeconds < 0 {
 		WriteError(w, http.StatusBadRequest, "invalid_param",
 			"ttl_seconds must be >= 0")
+		return
+	}
+	// Upper bound (round-26 of Devin Review on PR #42 —
+	// ANALYSIS_0001). `time.Duration(req.TTLSeconds) *
+	// time.Second` overflows int64 for TTLSeconds above ~9.2
+	// billion (~292 years) and wraps to a negative duration,
+	// silently producing tokens with ExpiresAt in the past. The
+	// MaxClaimTokenTTLSeconds cap (1 year) is orders of magnitude
+	// below the overflow threshold and well above any plausible
+	// operator workflow. See the constant's doc-comment for the
+	// detailed rationale.
+	if req.TTLSeconds > MaxClaimTokenTTLSeconds {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			fmt.Sprintf("ttl_seconds must be <= %d (per-token upper bound; %d seconds is ~1 year)", MaxClaimTokenTTLSeconds, MaxClaimTokenTTLSeconds))
 		return
 	}
 	// req.TTLSeconds == 0 (omitted or explicit) flows through as

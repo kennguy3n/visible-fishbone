@@ -3311,6 +3311,83 @@ func TestMSPHandler_BulkClaimTokens_RejectsAboveMaxCount(t *testing.T) {
 	}
 }
 
+// TestMSPHandler_BulkClaimTokens_RejectsAboveMaxTTL pins round-26
+// ANALYSIS_0001: POST .../bulk/claim-tokens with
+// ttl_seconds > MaxClaimTokenTTLSeconds (1 year) must be rejected
+// at the handler boundary with 400 invalid_param. Without this
+// cap, TTLSeconds above ~9.2 billion wraps `time.Duration` (int64
+// nanoseconds) to a negative duration, producing tokens with
+// ExpiresAt in the past — silently unredeemable. The lower-bound
+// guard (ttl_seconds >= 0) alone doesn't prevent this; the
+// upper-bound closes the overflow path.
+func TestMSPHandler_BulkClaimTokens_RejectsAboveMaxTTL(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	tenants := memory.NewTenantRepository(store)
+	ctx := context.Background()
+	m, _ := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-r26-maxttl"})
+	tn, _ := tenants.Create(ctx, repository.Tenant{Name: "t1", Slug: "t1-r26-maxttl"})
+	if _, err := msps.AssignTenant(ctx, m.ID, tn.ID,
+		repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	bulkSvc := svctenant.NewBulkService(
+		msps,
+		stubBulkAuthz{tenants: []uuid.UUID{tn.ID}},
+		nil, nil,
+		&fakeTokenIssuer{},
+		nil,
+		svctenant.BulkOptions{},
+	)
+	h := handler.NewMSPHandler(repoMSPService{repo: msps}, bulkSvc, nil, allowAllAuthz{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	cases := []struct {
+		name string
+		ttl  int
+	}{
+		{"just over the cap", handler.MaxClaimTokenTTLSeconds + 1},
+		{"overflow territory", 1 << 40},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := doMSPJSON(t, mux, http.MethodPost,
+				"/api/v1/msps/"+m.ID.String()+"/bulk/claim-tokens",
+				handler.BulkClaimTokensRequest{Count: 1, TTLSeconds: tc.ttl})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("ttl=%d status = %d body=%s, want 400 — "+
+					"ttl above MaxClaimTokenTTLSeconds must be rejected (round-26 ANALYSIS_0001)",
+					tc.ttl, rec.Code, rec.Body.String())
+			}
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.Error.Code != "invalid_param" {
+				t.Fatalf("error.code = %q, want invalid_param", body.Error.Code)
+			}
+		})
+	}
+
+	// Sanity: ttl == MaxClaimTokenTTLSeconds is accepted.
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/bulk/claim-tokens",
+		handler.BulkClaimTokensRequest{Count: 1, TTLSeconds: handler.MaxClaimTokenTTLSeconds})
+	if rec.Code == http.StatusBadRequest {
+		t.Fatalf("ttl == MaxClaimTokenTTLSeconds status = 400 body=%s — "+
+			"the cap is inclusive; ttl == 1yr must be allowed",
+			rec.Body.String())
+	}
+}
+
 // TestMSPHandler_CreateRejectsJSONNullSettings pins the round-22 fix
 // for ANALYSIS_0005: a client sending `{"name":"x","slug":"y",
 // "settings": null}` would previously be accepted by the handler,

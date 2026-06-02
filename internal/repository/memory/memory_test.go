@@ -147,17 +147,44 @@ func TestTenantRepository_WritePathsReturnFreshPointers(t *testing.T) {
 		t.Errorf("caller mutation of UpdateStatus result.Settings leaked into store: %s", got.Settings)
 	}
 
-	// Update path: mutating Settings on the returned struct must
-	// not affect the stored row.
+	// Update path on the soft-deleted row: must return
+	// ErrForbidden since round-26 added the soft-delete guard.
 	name := "Renamed"
-	updated, err := repo.Update(ctx(), t1.ID, repository.TenantPatch{Name: &name})
+	_, err = repo.Update(ctx(), t1.ID, repository.TenantPatch{Name: &name})
+	if !errors.Is(err, repository.ErrForbidden) {
+		t.Fatalf("update on soft-deleted tenant: want ErrForbidden, got %v", err)
+	}
+}
+
+// TestTenantRepository_Update_ReturnsClonedSettings pins the
+// cloneTenant invariant on the Update write path. The returned
+// struct must own fresh-allocated Settings backing memory so the
+// caller can mutate the result without corrupting in-store state.
+// Separated from WritePathsReturnFreshPointers because that test
+// soft-deletes the tenant (which now blocks Update via the
+// round-26 immutability guard).
+func TestTenantRepository_Update_ReturnsClonedSettings(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	settings := json.RawMessage(`{"k":"v"}`)
+	t1, err := repo.Create(ctx(), repository.Tenant{
+		Name:     "B",
+		Slug:     "upclone",
+		Tier:     repository.TenantTierStarter,
+		Settings: settings,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rename := "Renamed"
+	updated, err := repo.Update(ctx(), t1.ID, repository.TenantPatch{Name: &rename})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if len(updated.Settings) > 0 {
 		updated.Settings[0] = 'Y'
 	}
-	got, err = repo.Get(ctx(), t1.ID)
+	got, err := repo.Get(ctx(), t1.ID)
 	if err != nil {
 		t.Fatalf("get after update: %v", err)
 	}
@@ -808,5 +835,71 @@ func TestTenantRepository_DeleteSettingsKey_RejectsSoftDeletedTenant(t *testing.
 	_, err = repo.DeleteSettingsKey(ctx(), tn.ID, "theme")
 	if !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("DeleteSettingsKey on soft-deleted tenant: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestTenantRepository_Update_RejectsSoftDeletedTenant pins the
+// round-26 ANALYSIS_0006 fix: tenant Update must reject a PATCH
+// on a soft-deleted row with ErrForbidden (parity with MSP Update).
+func TestTenantRepository_Update_RejectsSoftDeletedTenant(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	tn, err := repo.Create(ctx(), repository.Tenant{
+		Name: "SoftDeletePatch",
+		Slug: "soft-del-patch",
+		Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := repo.Delete(ctx(), tn.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	name := "Patched"
+	_, err = repo.Update(ctx(), tn.ID, repository.TenantPatch{Name: &name})
+	if !errors.Is(err, repository.ErrForbidden) {
+		t.Fatalf("Update on soft-deleted tenant: want ErrForbidden, got %v", err)
+	}
+	// Verify the stored row was NOT mutated by the rejected PATCH.
+	got, err := repo.Get(ctx(), tn.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Name != "SoftDeletePatch" {
+		t.Errorf("name changed despite rejected patch: got %q", got.Name)
+	}
+}
+
+// TestTenantRepository_DeleteSettingsKey_NormalisesNilSettingsToEmptyObject
+// pins the round-26 ANALYSIS_0002 fix: DeleteSettingsKey on a
+// tenant with nil/empty Settings must normalise the returned
+// Settings to the empty JSON object `{}` (matching the postgres
+// COALESCE behaviour) instead of leaving it nil/empty.
+func TestTenantRepository_DeleteSettingsKey_NormalisesNilSettingsToEmptyObject(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	tn, err := repo.Create(ctx(), repository.Tenant{
+		Name: "NilSettings",
+		Slug: "nil-settings",
+		Tier: repository.TenantTierStarter,
+		// No Settings → stored as nil.
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	updated, err := repo.DeleteSettingsKey(ctx(), tn.ID, "nonexistent")
+	if err != nil {
+		t.Fatalf("DeleteSettingsKey: %v", err)
+	}
+	if string(updated.Settings) != "{}" {
+		t.Fatalf("Settings after DeleteSettingsKey on nil: want %q, got %q", "{}", string(updated.Settings))
+	}
+	// Verify stored row also sees the normalised value.
+	got, err := repo.Get(ctx(), tn.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if string(got.Settings) != "{}" {
+		t.Errorf("stored Settings: want %q, got %q", "{}", string(got.Settings))
 	}
 }

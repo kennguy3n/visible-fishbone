@@ -201,6 +201,23 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 	// `''` wire value and made it impossible to PATCH the
 	// optional Region column back to empty once it had been
 	// set — exactly the bug the round-4 review flagged.
+	// Soft-delete immutability guard. Round-26 of Devin Review on
+	// PR #42 (ANALYSIS_0006) flagged that this WHERE clause lacked
+	// the `status <> 'deleted' AND deleted_at IS NULL` predicate
+	// that MSPRepository.Update enforces at internal/repository/
+	// postgres/msp.go:294 — a PATCH on a soft-deleted tenant
+	// silently rewrote the tombstoned row's name/slug/region/tier/
+	// status/settings, bypassing the lifecycle invariant
+	// `(status='deleted' ⇔ deleted_at != NULL)`. The matching
+	// memory backend now rejects soft-deleted Updates with
+	// ErrForbidden (see internal/repository/memory/tenant.go:147).
+	// As with msp.go, the dual `status <> 'deleted' AND
+	// deleted_at IS NULL` predicate is defence-in-depth against a
+	// hypothetical corrupt row violating the invariant — under the
+	// invariant both halves are equivalent, but a corrupt row with
+	// only one half set would otherwise slip past exactly one of
+	// the backends. Returns ErrForbidden via the disambiguation
+	// query below when the row exists but is soft-deleted.
 	const q = `
 		UPDATE tenants
 		SET name     = CASE WHEN $2::text IS NULL THEN name     ELSE $2::text END,
@@ -209,7 +226,7 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 		    region   = CASE WHEN $5::text IS NULL THEN region   ELSE $5::text END,
 		    tier     = CASE WHEN $6::text IS NULL THEN tier     ELSE $6::text END,
 		    settings = CASE WHEN $7::jsonb IS NULL THEN settings ELSE $7::jsonb END
-		WHERE id = $1::uuid
+		WHERE id = $1::uuid AND status <> 'deleted' AND deleted_at IS NULL
 		RETURNING ` + tenantSelectColumns
 	var (
 		nameArg   any
@@ -251,7 +268,21 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 		id, nameArg, slugArg, statusArg, regionArg, tierArg, settings,
 	))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return repository.Tenant{}, repository.ErrNotFound
+		// Either the row doesn't exist (NotFound) or the row
+		// exists but is soft-deleted (Forbidden, per the
+		// round-26 ANALYSIS_0006 guard above). Mirrors the
+		// disambiguation MSPRepository.Update uses at
+		// internal/repository/postgres/msp.go:345-357 — one
+		// extra round-trip on the rare zero-rows-affected path
+		// to give callers the precise error.
+		var dummy uuid.UUID
+		if scanErr := r.s.pool.QueryRow(ctx, `SELECT id FROM tenants WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				return repository.Tenant{}, repository.ErrNotFound
+			}
+			return repository.Tenant{}, fmt.Errorf("update tenant lookup: %w", scanErr)
+		}
+		return repository.Tenant{}, repository.ErrForbidden
 	}
 	if isUniqueViolation(err) {
 		return repository.Tenant{}, repository.ErrConflict

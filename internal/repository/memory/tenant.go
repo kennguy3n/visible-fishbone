@@ -144,6 +144,23 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 	if !ok {
 		return repository.Tenant{}, repository.ErrNotFound
 	}
+	// Soft-delete immutability guard. Round-26 of Devin Review on
+	// PR #42 (ANALYSIS_0006) flagged the asymmetry with
+	// MSPRepository.Update — the MSP postgres + memory backends
+	// both reject a PATCH on a soft-deleted row with ErrForbidden
+	// (`status <> 'deleted' AND deleted_at IS NULL` on postgres,
+	// the matching predicate on memory). The tenant Update path
+	// did not — a tombstoned tenant's name/slug/region/tier/status/
+	// settings could be silently rewritten via PATCH even though
+	// the row was supposed to be terminal. UpdateSettingsKey /
+	// DeleteSettingsKey already guard against this (round-21
+	// ANALYSIS_0002); Update is the last remaining writer that
+	// bypassed the lifecycle invariant. Distinguishing ErrForbidden
+	// (row exists but is deleted) from ErrNotFound (row absent)
+	// mirrors the MSPRepository.Update contract.
+	if existing.DeletedAt != nil || existing.Status == repository.TenantStatusDeleted {
+		return repository.Tenant{}, repository.ErrForbidden
+	}
 	if patch.Slug != nil && *patch.Slug != "" && *patch.Slug != existing.Slug {
 		for otherID, other := range r.s.tenants {
 			if otherID == id {
@@ -266,8 +283,20 @@ func (r *TenantRepository) DeleteSettingsKey(ctx context.Context, id uuid.UUID, 
 		return repository.Tenant{}, repository.ErrNotFound
 	}
 	if len(existing.Settings) == 0 || string(existing.Settings) == "null" {
-		// No settings document → no-op, but still bump UpdatedAt
-		// so callers see a stable returned row.
+		// No settings document → key is unconditionally absent.
+		// Normalise the returned Settings to the empty-object
+		// literal `{}` so this backend matches the postgres
+		// behaviour, which `COALESCE(settings, '{}'::jsonb) -
+		// $2::text` resolves to `'{}'` at
+		// internal/repository/postgres/tenant.go:345-349.
+		// Round-26 of Devin Review on PR #42 (ANALYSIS_0002)
+		// flagged the cross-backend divergence: postgres
+		// surfaced `{}` while memory left the column nil/empty.
+		// Test suites and SDK clients that assert on the
+		// returned Settings shape would observe different
+		// values across backends; both mean "no settings" but
+		// the wire payload differed.
+		existing.Settings = json.RawMessage("{}")
 		existing.UpdatedAt = r.s.clock()
 		r.s.tenants[existing.ID] = existing
 		return cloneTenant(existing), nil
