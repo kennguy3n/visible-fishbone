@@ -1473,9 +1473,26 @@ paths:
       summary: Update MSP (sparse PATCH)
       description: |
         Pointer-shaped patch semantics: omitting a field leaves
-        the corresponding column untouched. Supplying a field as
-        its zero value (e.g. `slug: ""`, `branding: {}`) clears
-        it. Same convention as `PATCH /tenants/{tenant_id}`.
+        the corresponding column untouched. Supplying an optional
+        field as its zero value (e.g. `branding: {}`) clears it.
+
+        Required fields (`name`, `slug`) cannot be cleared via
+        PATCH. Posting `{"name": ""}` or `{"slug": ""}` returns
+        400 `invalid_param` — omit the field to leave it unchanged.
+        Round-11 of Devin Review on PR #42 caught the previous
+        contract drift where this description told clients zero
+        values would clear those fields, but the handler at
+        `internal/handler/msp.go:436-444` rejects them to prevent
+        row corruption (postgres would bind an empty string into
+        the NOT NULL column; memory would silently no-op).
+
+        `status` follows the same rule on PATCH — supplying `""`
+        is treated as "no change" (the only legal transitions to
+        `deleted` go through `DELETE /api/v1/msps/{msp_id}` or
+        `POST /api/v1/msps/{msp_id}/status`, both of which stamp
+        `deleted_at` alongside the status column).
+
+        Same convention as `PATCH /tenants/{tenant_id}`.
       requestBody:
         required: true
         content:

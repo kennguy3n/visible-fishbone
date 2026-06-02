@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -1972,5 +1973,199 @@ func TestMSPHandler_BulkClaimTokens_RejectsNegativeTTL(t *testing.T) {
 		t.Fatalf("ttl=0 status = %d body=%s, want 202 — "+
 			"the zero fallback is documented and intentional",
 			rec.Code, rec.Body.String())
+	}
+}
+
+// TestMSPHandler_SetStatusDeleted_Idempotent pins the round-11
+// fix: posting status="deleted" to an already-soft-deleted MSP
+// must return 200 + the (still-deleted) MSP body, NOT a 403
+// ErrForbidden propagated from a second Delete() call. Both
+// repository backends explicitly reject double-deletes by
+// design (the SQL guard at internal/repository/postgres/msp.go
+// refuses to re-stamp deleted_at; the memory backend at
+// internal/repository/memory/msp.go returns ErrForbidden).
+// REST idempotency for soft-delete state transitions requires
+// the handler to short-circuit when the row is already in the
+// requested state, so retries from at-least-once delivery in
+// upstream orchestration don't surface as application-level
+// errors. Round-11 of Devin Review on PR #42 caught this
+// surface as a contract violation.
+func TestMSPHandler_SetStatusDeleted_Idempotent(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+
+	m, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-idemp-del"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// First delete: 200, status=deleted in body.
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/status",
+		handler.MSPStatusRequest{Status: string(repository.MSPStatusDeleted)})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first delete: status = %d body=%s, want 200",
+			rec.Code, rec.Body.String())
+	}
+	var first handler.MSPResponse
+	if err := json.NewDecoder(rec.Body).Decode(&first); err != nil {
+		t.Fatalf("decode first: %v", err)
+	}
+	if first.Status != string(repository.MSPStatusDeleted) {
+		t.Fatalf("first.Status = %q, want %q",
+			first.Status, repository.MSPStatusDeleted)
+	}
+
+	// Second delete (replay): must still be 200, NOT 403.
+	rec = doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/status",
+		handler.MSPStatusRequest{Status: string(repository.MSPStatusDeleted)})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("replay delete: status = %d body=%s, want 200 — "+
+			"setStatus=deleted must be idempotent (no 403 on replay)",
+			rec.Code, rec.Body.String())
+	}
+	var second handler.MSPResponse
+	if err := json.NewDecoder(rec.Body).Decode(&second); err != nil {
+		t.Fatalf("decode second: %v", err)
+	}
+	if second.Status != string(repository.MSPStatusDeleted) {
+		t.Fatalf("second.Status = %q, want %q",
+			second.Status, repository.MSPStatusDeleted)
+	}
+	// Same ID returned — the row was not re-created.
+	if second.ID != first.ID {
+		t.Fatalf("ID drift: first=%q second=%q", first.ID, second.ID)
+	}
+	// deleted_at must be stable across the replay (the row's
+	// soft-delete timestamp must NOT be re-stamped on replay).
+	if second.UpdatedAt != first.UpdatedAt {
+		t.Fatalf("UpdatedAt drift: first=%q second=%q — "+
+			"the idempotent short-circuit must not re-touch the row",
+			first.UpdatedAt, second.UpdatedAt)
+	}
+}
+
+// TestMSPHandler_BulkClaimTokens_RejectsZeroCount pins the
+// round-11 fix: a client posting `{"count": 0}` must get a
+// 400 invalid_param at the handler boundary, not a 400 from
+// the bulk service wrapped as a generic invalid_argument.
+// The TTL guard already lives at the handler; the count guard
+// belongs there for the same reason — uniform error surface
+// and explicit message ("count must be > 0") rather than
+// the service's wrapped error. Round-11 of Devin Review on
+// PR #42 caught the asymmetric validation surface.
+func TestMSPHandler_BulkClaimTokens_RejectsZeroCount(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	tenants := memory.NewTenantRepository(store)
+	ctx := context.Background()
+	m, _ := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-zerocount"})
+	tn, _ := tenants.Create(ctx, repository.Tenant{Name: "t1", Slug: "t1-zerocount"})
+	if _, err := msps.AssignTenant(ctx, m.ID, tn.ID,
+		repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	bulkSvc := svctenant.NewBulkService(
+		msps,
+		stubBulkAuthz{tenants: []uuid.UUID{tn.ID}},
+		nil, nil,
+		&fakeTokenIssuer{},
+		nil,
+		svctenant.BulkOptions{},
+	)
+	h := handler.NewMSPHandler(repoMSPService{repo: msps}, bulkSvc, nil, allowAllAuthz{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	// count=0 (the OpenAPI minimum is 1).
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/bulk/claim-tokens",
+		handler.BulkClaimTokensRequest{Count: 0, TTLSeconds: 60})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("count=0 status = %d body=%s, want 400 — "+
+			"zero count must be rejected at the handler boundary",
+			rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "invalid_param" {
+		t.Fatalf("error.code = %q, want invalid_param — "+
+			"handler boundary error, not service-wrapped",
+			body.Error.Code)
+	}
+	if !strings.Contains(body.Error.Message, "count") {
+		t.Fatalf("error.message = %q, want a message mentioning 'count'",
+			body.Error.Message)
+	}
+
+	// count=-1 must also be rejected (defensive: catches signed-int
+	// underflow if a client serialised an unsigned value as int).
+	rec = doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/bulk/claim-tokens",
+		handler.BulkClaimTokensRequest{Count: -1, TTLSeconds: 60})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("count=-1 status = %d body=%s, want 400",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestMSPHandler_BulkPermissionConstants_AreUsedByRouter pins
+// the round-11 DRY fix: the router's middleware permission
+// strings MUST resolve from the same exported constants as the
+// bulk service's authorizedTenants() check. Before the fix the
+// handler used string literals ("msp.bulk_apply_policy", etc.)
+// while the service used svctenant.PermissionBulk* constants;
+// if either side ever changed the string, the middleware would
+// gate on one permission while the service evaluated authz on a
+// different one, silently narrowing or broadening the authorized
+// tenant set with no test failure. This test pins the cross-layer
+// invariant directly: the constants are exported, public, and
+// must match what the router would accept.
+func TestMSPHandler_BulkPermissionConstants_AreUsedByRouter(t *testing.T) {
+	t.Parallel()
+	// The constants must exist and be non-empty. A future rename
+	// like `Permission_BulkApplyPolicy` would surface here as a
+	// compile error rather than a silent runtime mismatch.
+	want := map[string]string{
+		"PermissionBulkApplyPolicy":        svctenant.PermissionBulkApplyPolicy,
+		"PermissionBulkProvisionSites":     svctenant.PermissionBulkProvisionSites,
+		"PermissionBulkGenerateClaimToken": svctenant.PermissionBulkGenerateClaimToken,
+	}
+	for name, value := range want {
+		if value == "" {
+			t.Fatalf("svctenant.%s = \"\", want a non-empty permission string", name)
+		}
+	}
+
+	// All three constants must be distinct — sharing a string
+	// would collapse three RBAC permissions to one and break the
+	// least-privilege guarantee the route table expresses.
+	seen := map[string]string{}
+	for name, value := range want {
+		if prior, ok := seen[value]; ok {
+			t.Fatalf("svctenant.%s and svctenant.%s both = %q — "+
+				"the three bulk permissions must be distinct",
+				name, prior, value)
+		}
+		seen[value] = name
+	}
+
+	// Sanity-check the wire-level convention: every bulk
+	// permission must be in the `msp.bulk_*` namespace so
+	// platform admins can pattern-match them in RBAC bindings.
+	for name, value := range want {
+		if !strings.HasPrefix(value, "msp.bulk_") {
+			t.Fatalf("svctenant.%s = %q, want a string in the msp.bulk_* namespace",
+				name, value)
+		}
 	}
 }

@@ -115,13 +115,23 @@ func (h *MSPHandler) Register(mux *http.ServeMux) {
 		middleware.RequireMSPScope(h.authz, "msp.bind_tenants", "msp_id")(http.HandlerFunc(h.unassignTenant)))
 
 	// Bulk operations (only registered when bulk service wired).
+	// Permission strings are sourced from the bulk service's exported
+	// constants so the middleware gate and the service's
+	// authorizedTenants() check resolve the same string. Round-11 of
+	// Devin Review on PR #42 caught the previous DRY drift where the
+	// handler had string literals ("msp.bulk_apply_policy") and the
+	// bulk service had constants (svctenant.PermissionBulkApplyPolicy);
+	// if either side ever changed, the middleware would gate on one
+	// permission while the service evaluated authorization with a
+	// different one, silently narrowing or broadening the authorized
+	// tenant set with no test failure.
 	if h.bulk != nil {
 		mux.Handle("POST /api/v1/msps/{msp_id}/bulk/policy-templates",
-			middleware.RequireMSPScope(h.authz, "msp.bulk_apply_policy", "msp_id")(http.HandlerFunc(h.bulkApplyPolicyTemplate)))
+			middleware.RequireMSPScope(h.authz, svctenant.PermissionBulkApplyPolicy, "msp_id")(http.HandlerFunc(h.bulkApplyPolicyTemplate)))
 		mux.Handle("POST /api/v1/msps/{msp_id}/bulk/sites",
-			middleware.RequireMSPScope(h.authz, "msp.bulk_provision_sites", "msp_id")(http.HandlerFunc(h.bulkProvisionSites)))
+			middleware.RequireMSPScope(h.authz, svctenant.PermissionBulkProvisionSites, "msp_id")(http.HandlerFunc(h.bulkProvisionSites)))
 		mux.Handle("POST /api/v1/msps/{msp_id}/bulk/claim-tokens",
-			middleware.RequireMSPScope(h.authz, "msp.bulk_generate_claim_tokens", "msp_id")(http.HandlerFunc(h.bulkGenerateClaimTokens)))
+			middleware.RequireMSPScope(h.authz, svctenant.PermissionBulkGenerateClaimToken, "msp_id")(http.HandlerFunc(h.bulkGenerateClaimTokens)))
 	}
 
 	// Branding (only registered when resolver wired). Branding
@@ -569,6 +579,34 @@ func (h *MSPHandler) setStatus(w http.ResponseWriter, r *http.Request) {
 	// tenantID would otherwise keep serving the just-deleted MSP's
 	// branding until TTL.
 	if repository.MSPStatus(req.Status) == repository.MSPStatusDeleted {
+		// Idempotency contract: a `POST .../status` with
+		// status="deleted" against an already-soft-deleted MSP must
+		// return 200 + the (still-deleted) MSP body, NOT 403
+		// ErrForbidden from a second Delete call. Both repository
+		// backends explicitly reject double-deletes (memory:
+		// internal/repository/memory/msp.go:221-222; postgres:
+		// internal/repository/postgres/msp.go:317-325 — the SQL
+		// guard refuses to re-stamp deleted_at). Without this short
+		// circuit, replaying the same status request — a common
+		// pattern with at-least-once delivery from upstream
+		// orchestration — would surface a confusing 403 to clients
+		// who already observed the deletion succeed once.
+		//
+		// Note: Get() does NOT filter soft-deleted rows (round-10
+		// established this for the post-Delete read below), so the
+		// pre-check sees the deleted row exactly the same way the
+		// post-Delete path does. Round-11 of Devin Review on PR #42
+		// flagged the previous 403-on-replay surface as a REST
+		// idempotency violation for soft-delete semantics.
+		existing, err := h.msps.Get(r.Context(), id)
+		if err != nil {
+			WriteRepositoryError(w, err)
+			return
+		}
+		if existing.Status == repository.MSPStatusDeleted {
+			WriteJSON(w, http.StatusOK, toMSPResponse(existing))
+			return
+		}
 		if err := h.msps.Delete(r.Context(), id); err != nil {
 			WriteRepositoryError(w, err)
 			return
@@ -935,6 +973,22 @@ func (h *MSPHandler) bulkGenerateClaimTokens(w http.ResponseWriter, r *http.Requ
 	}
 	var req BulkClaimTokensRequest
 	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	// Count must be > 0. The bulk service does enforce this and
+	// returns ErrInvalidArgument-wrapped 400 via writeBulkError, but
+	// the long-term contract puts boundary validation at the handler
+	// so the error path is uniform with the negative-TTL guard below
+	// and the client sees a specific message rather than the generic
+	// "invalid_argument" the service wraps around it. Round-11 of
+	// Devin Review on PR #42 caught the asymmetric validation surface:
+	// the TTL guard lives at the handler, the count guard only at the
+	// service — splitting input validation across two layers is the
+	// same maintainability hazard the earlier rounds flagged on the
+	// status enum, slug, and rel checks.
+	if req.Count <= 0 {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			"count must be > 0")
 		return
 	}
 	// Negative TTLSeconds would compute ExpiresAt in the past and
