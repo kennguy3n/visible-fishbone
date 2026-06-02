@@ -279,7 +279,7 @@ func (h *SCIMHandler) deleteGroup(w http.ResponseWriter, r *http.Request) {
 
 func (h *SCIMHandler) serviceProviderConfig(w http.ResponseWriter, _ *http.Request) {
 	config := map[string]any{
-		"schemas": []string{"urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"},
+		"schemas":          []string{"urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"},
 		"documentationUri": "https://docs.shieldnet.io/scim",
 		"patch":            map[string]any{"supported": true},
 		"bulk":             map[string]any{"supported": false, "maxOperations": 0, "maxPayloadSize": 0},
@@ -328,18 +328,18 @@ func (h *SCIMHandler) resourceTypes(w http.ResponseWriter, _ *http.Request) {
 		ItemsPerPage: 2,
 		Resources: []any{
 			map[string]any{
-				"schemas":     []string{"urn:ietf:params:scim:schemas:core:2.0:ResourceType"},
-				"id":          "User",
-				"name":        "User",
-				"endpoint":    "/scim/v2/Users",
-				"schema":      identity.SCIMSchemaUser,
+				"schemas":  []string{"urn:ietf:params:scim:schemas:core:2.0:ResourceType"},
+				"id":       "User",
+				"name":     "User",
+				"endpoint": "/scim/v2/Users",
+				"schema":   identity.SCIMSchemaUser,
 			},
 			map[string]any{
-				"schemas":     []string{"urn:ietf:params:scim:schemas:core:2.0:ResourceType"},
-				"id":          "Group",
-				"name":        "Group",
-				"endpoint":    "/scim/v2/Groups",
-				"schema":      identity.SCIMSchemaGroup,
+				"schemas":  []string{"urn:ietf:params:scim:schemas:core:2.0:ResourceType"},
+				"id":       "Group",
+				"name":     "Group",
+				"endpoint": "/scim/v2/Groups",
+				"schema":   identity.SCIMSchemaGroup,
 			},
 		},
 	}

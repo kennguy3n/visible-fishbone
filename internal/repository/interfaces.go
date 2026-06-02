@@ -997,3 +997,43 @@ type DeviceEnrollmentRepository interface {
 	// a device by stamping revoked_at.
 	RevokeAllCertificates(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, at time.Time) error
 }
+
+// --- Compliance -----------------------------------------------------------
+
+// ComplianceReportRepository owns the compliance_reports table.
+type ComplianceReportRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, r ComplianceReport) (ComplianceReport, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (ComplianceReport, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[ComplianceReport], error)
+}
+
+// --- Playbooks ------------------------------------------------------------
+
+// PlaybookRepository owns the playbooks table.
+type PlaybookRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, p Playbook) (Playbook, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (Playbook, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[Playbook], error)
+	Update(ctx context.Context, tenantID, id uuid.UUID, patch PlaybookPatch) (Playbook, error)
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+	ListByTrigger(ctx context.Context, tenantID uuid.UUID, triggerType string) ([]Playbook, error)
+}
+
+// PlaybookExecutionRepository owns the playbook_executions and
+// playbook_step_results tables.
+type PlaybookExecutionRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, e PlaybookExecution) (PlaybookExecution, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (PlaybookExecution, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[PlaybookExecution], error)
+	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string) error
+	AddStepResult(ctx context.Context, tenantID, executionID uuid.UUID, r StepResult) error
+}
+
+// PlaybookApprovalRepository owns the playbook_approvals table.
+type PlaybookApprovalRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, a PlaybookApproval) (PlaybookApproval, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (PlaybookApproval, error)
+	ListPending(ctx context.Context, tenantID uuid.UUID) ([]PlaybookApproval, error)
+	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string, approverID *uuid.UUID) error
+	ExpireOld(ctx context.Context, before time.Time) (int, error)
+}

@@ -1278,7 +1278,6 @@ type DataClassificationPatch struct {
 	HandlingRules *json.RawMessage
 }
 
-
 // --- CASB types -----------------------------------------------------------
 
 // CASBConnectorType enumerates the CASB connector kinds.
@@ -1462,8 +1461,8 @@ const (
 
 // DeviceEnrollment represents a row in the device_enrollments table.
 type DeviceEnrollment struct {
-	DeviceID        uuid.UUID
-	TenantID        uuid.UUID
+	DeviceID         uuid.UUID
+	TenantID         uuid.UUID
 	PublicKey        []byte // Ed25519 32-byte public key
 	Status           EnrollmentStatus
 	EnrolledAt       time.Time
@@ -1481,4 +1480,80 @@ type DeviceCertificate struct {
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 	RevokedAt *time.Time
+}
+
+// --- Compliance -----------------------------------------------------------
+
+// ComplianceReport represents a row in the compliance_reports table.
+type ComplianceReport struct {
+	ID           uuid.UUID
+	TenantID     uuid.UUID
+	Framework    string
+	Score        float64
+	MaxScore     float64
+	Controls     json.RawMessage
+	EvidencePack json.RawMessage
+	GeneratedAt  time.Time
+	CreatedAt    time.Time
+}
+
+// --- Playbooks ------------------------------------------------------------
+
+// Playbook represents a row in the playbooks table.
+type Playbook struct {
+	ID               uuid.UUID
+	TenantID         uuid.UUID
+	Name             string
+	Description      string
+	TriggerCondition string
+	Steps            json.RawMessage
+	Enabled          bool
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+// PlaybookPatch is the sparse-update input for PlaybookRepository.Update.
+type PlaybookPatch struct {
+	Name             *string
+	Description      *string
+	TriggerCondition *string
+	Steps            *json.RawMessage
+	Enabled          *bool
+}
+
+// PlaybookExecution represents a row in the playbook_executions table.
+type PlaybookExecution struct {
+	ID           uuid.UUID
+	TenantID     uuid.UUID
+	PlaybookID   uuid.UUID
+	Status       string
+	TriggerEvent json.RawMessage
+	StartedAt    time.Time
+	CompletedAt  *time.Time
+	CreatedAt    time.Time
+}
+
+// StepResult represents a row in the playbook_step_results table.
+type StepResult struct {
+	ID          uuid.UUID
+	ExecutionID uuid.UUID
+	TenantID    uuid.UUID
+	StepOrder   int
+	Status      string
+	Output      json.RawMessage
+	Error       string
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+}
+
+// PlaybookApproval represents a row in the playbook_approvals table.
+type PlaybookApproval struct {
+	ID          uuid.UUID
+	TenantID    uuid.UUID
+	ExecutionID uuid.UUID
+	ApproverID  *uuid.UUID
+	Status      string
+	ExpiresAt   time.Time
+	DecidedAt   *time.Time
+	CreatedAt   time.Time
 }
