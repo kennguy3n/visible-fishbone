@@ -83,6 +83,9 @@ func TestReportEngine_Generate_WithLLM(t *testing.T) {
 	if !report.AIGenerated {
 		t.Fatal("expected ai_generated=true with LLM")
 	}
+	if report.Summary != "Executive summary from AI." {
+		t.Fatalf("expected LLM summary, got %q", report.Summary)
+	}
 	if report.ModelID != "gpt-4" {
 		t.Fatalf("expected model_id gpt-4, got %q", report.ModelID)
 	}

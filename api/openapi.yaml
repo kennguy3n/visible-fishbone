@@ -3786,6 +3786,7 @@ components:
         recommendations:
           type: array
           items: { type: string }
+        summary: { type: string, description: "LLM-polished executive summary (empty in template-only mode)." }
 
     AIPostureGenerateRequest:
       type: object

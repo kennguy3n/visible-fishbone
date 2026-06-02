@@ -39,14 +39,14 @@ func (c CorrelationConfig) normalize() CorrelationConfig {
 // correlation engine. Callers map their domain-specific alert types
 // into this shape.
 type AlertInput struct {
-	ID        uuid.UUID
-	TenantID  uuid.UUID
-	Kind      string
-	Severity  string
-	DeviceID  string
-	UserID    string
-	IPAddress string
-	CreatedAt time.Time
+	ID        uuid.UUID `json:"id"`
+	TenantID  uuid.UUID `json:"tenant_id"`
+	Kind      string    `json:"kind"`
+	Severity  string    `json:"severity"`
+	DeviceID  string    `json:"device_id"`
+	UserID    string    `json:"user_id"`
+	IPAddress string    `json:"source_ip"`
+	CreatedAt time.Time `json:"timestamp"`
 }
 
 // CorrelationCluster is the output of the correlation engine: a

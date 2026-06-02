@@ -17,6 +17,7 @@ type PostureReport struct {
 	Threats         PostureThreatSection  `json:"threats"`
 	PolicyHealth    PosturePolicyHealth   `json:"policy_health"`
 	Recommendations []string             `json:"recommendations"`
+	Summary         string                `json:"summary,omitempty"`
 	GeneratedAt     time.Time             `json:"generated_at"`
 	AIGenerated     bool                  `json:"ai_generated"`
 	ModelID         string                `json:"model_id,omitempty"`
@@ -131,8 +132,9 @@ func (e *ReportEngine) Generate(ctx context.Context, input PostureInput) (Postur
 	}
 
 	if e.llm != nil {
-		_, modelID, err := e.polishWithLLM(ctx, report)
+		text, modelID, err := e.polishWithLLM(ctx, report)
 		if err == nil {
+			report.Summary = text
 			report.AIGenerated = true
 			report.ModelID = modelID
 		}

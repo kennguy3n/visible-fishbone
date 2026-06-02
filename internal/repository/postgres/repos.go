@@ -119,6 +119,11 @@ func (s *Store) NewCASBPostureCheckRepository() *CASBPostureCheckRepository {
 	return &CASBPostureCheckRepository{s: s}
 }
 
+// NewAICorrelationRepository binds the Store to repository.AICorrelationRepository.
+func (s *Store) NewAICorrelationRepository() *AICorrelationRepository {
+	return &AICorrelationRepository{s: s}
+}
+
 // Compile-time interface compliance asserts. Keeping these in this
 // file means a single grep tells us "did the postgres package
 // implement every interface?" without scanning eight files.
@@ -149,4 +154,5 @@ var (
 	_ repository.CASBConnectorRepository        = (*CASBConnectorRepository)(nil)
 	_ repository.CASBDiscoveredAppRepository    = (*CASBDiscoveredAppRepository)(nil)
 	_ repository.CASBPostureCheckRepository     = (*CASBPostureCheckRepository)(nil)
+	_ repository.AICorrelationRepository        = (*AICorrelationRepository)(nil)
 )
