@@ -219,7 +219,9 @@ func (r *CASBDiscoveredAppRepository) Upsert(
 		if existing.TenantID == tenantID && existing.Name == app.Name {
 			existing.Vendor = app.Vendor
 			existing.Category = app.Category
-			existing.RiskScore = app.RiskScore
+			if app.RiskScore > 0 {
+				existing.RiskScore = app.RiskScore
+			}
 			existing.UsersCount = app.UsersCount
 			existing.LastSeen = app.LastSeen
 			r.s.casbDiscoveredApps[id] = existing

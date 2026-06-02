@@ -235,7 +235,7 @@ func (r *CASBDiscoveredAppRepository) Upsert(
 			ON CONFLICT (tenant_id, name) DO UPDATE SET
 			    vendor = EXCLUDED.vendor,
 			    category = EXCLUDED.category,
-			    risk_score = EXCLUDED.risk_score,
+			    risk_score = CASE WHEN EXCLUDED.risk_score > 0 THEN EXCLUDED.risk_score ELSE casb_discovered_apps.risk_score END,
 			    users_count = EXCLUDED.users_count,
 			    last_seen = EXCLUDED.last_seen
 			RETURNING id, tenant_id, name, vendor, category, risk_score,
