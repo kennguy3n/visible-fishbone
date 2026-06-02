@@ -84,6 +84,11 @@ func (r *PlaybookRepository) List(ctx context.Context, tenantID uuid.UUID, page 
 			return repository.ErrInvalidArgument
 		}
 
+		cmp, dir := "<", "DESC"
+		if page.Order == repository.SortAsc {
+			cmp, dir = ">", "ASC"
+		}
+
 		q := `SELECT ` + playbookCols + ` FROM playbooks`
 		args := []any{}
 		argN := 0
@@ -93,11 +98,11 @@ func (r *PlaybookRepository) List(ctx context.Context, tenantID uuid.UUID, page 
 			tArg := argN
 			argN++
 			iArg := argN
-			q += fmt.Sprintf(` WHERE (created_at, id) < ($%d, $%d)`, tArg, iArg)
+			q += fmt.Sprintf(` WHERE (created_at, id) %s ($%d, $%d)`, cmp, tArg, iArg)
 			args = append(args, cur.T, cur.I)
 		}
 		argN++
-		q += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, argN)
+		q += fmt.Sprintf(` ORDER BY created_at %s, id %s LIMIT $%d`, dir, dir, argN)
 		args = append(args, page.Limit)
 
 		rows, err := tx.Query(ctx, q, args...)
@@ -282,6 +287,11 @@ func (r *PlaybookExecutionRepository) List(ctx context.Context, tenantID uuid.UU
 			return repository.ErrInvalidArgument
 		}
 
+		cmp, dir := "<", "DESC"
+		if page.Order == repository.SortAsc {
+			cmp, dir = ">", "ASC"
+		}
+
 		q := `SELECT ` + execCols + ` FROM playbook_executions`
 		args := []any{}
 		argN := 0
@@ -291,11 +301,11 @@ func (r *PlaybookExecutionRepository) List(ctx context.Context, tenantID uuid.UU
 			tArg := argN
 			argN++
 			iArg := argN
-			q += fmt.Sprintf(` WHERE (created_at, id) < ($%d, $%d)`, tArg, iArg)
+			q += fmt.Sprintf(` WHERE (created_at, id) %s ($%d, $%d)`, cmp, tArg, iArg)
 			args = append(args, cur.T, cur.I)
 		}
 		argN++
-		q += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, argN)
+		q += fmt.Sprintf(` ORDER BY created_at %s, id %s LIMIT $%d`, dir, dir, argN)
 		args = append(args, page.Limit)
 
 		rows, err := tx.Query(ctx, q, args...)

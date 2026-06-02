@@ -130,7 +130,8 @@ func (s *ReportService) Generate(
 
 	score := s.computeScore(framework, policies)
 
-	evidencePack := s.buildEvidencePack(tenantID, framework, score, policies)
+	now := time.Now().UTC()
+	evidencePack := s.buildEvidencePack(tenantID, framework, score, policies, now)
 	evidenceBytes, err := json.Marshal(evidencePack)
 	if err != nil {
 		return ComplianceReport{}, err
@@ -141,7 +142,6 @@ func (s *ReportService) Generate(
 		return ComplianceReport{}, err
 	}
 
-	now := time.Now().UTC()
 	repoReport := repository.ComplianceReport{
 		TenantID:     tenantID,
 		Framework:    string(framework),
@@ -214,6 +214,7 @@ func (s *ReportService) buildEvidencePack(
 	framework ComplianceFramework,
 	score ComplianceScore,
 	policies EnforcedPolicies,
+	generatedAt time.Time,
 ) EvidencePack {
 	policyEvidence := []PolicyEvidence{
 		{Type: "dlp", Name: "Data Loss Prevention", Enforced: policies.DLP},
@@ -226,7 +227,7 @@ func (s *ReportService) buildEvidencePack(
 	return EvidencePack{
 		Framework:   framework,
 		TenantID:    tenantID,
-		GeneratedAt: time.Now().UTC(),
+		GeneratedAt: generatedAt,
 		Controls:    score.Controls,
 		Policies:    policyEvidence,
 	}

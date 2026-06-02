@@ -60,7 +60,9 @@ func (s *ApprovalService) RequestApproval(
 		return repository.PlaybookApproval{}, err
 	}
 
-	_ = s.executionRepo.UpdateStatus(ctx, tenantID, executionID, string(StatusAwaitingApproval))
+	if err := s.executionRepo.UpdateStatus(ctx, tenantID, executionID, string(StatusAwaitingApproval)); err != nil {
+		s.logger.Warn("failed to mark execution awaiting approval", "execution_id", executionID, "tenant_id", tenantID, "error", err)
+	}
 
 	return created, nil
 }
@@ -82,7 +84,9 @@ func (s *ApprovalService) Approve(
 	}
 
 	if time.Now().UTC().After(approval.ExpiresAt) {
-		_ = s.approvalRepo.UpdateStatus(ctx, tenantID, approvalID, string(ApprovalExpired), nil)
+		if err := s.approvalRepo.UpdateStatus(ctx, tenantID, approvalID, string(ApprovalExpired), nil); err != nil {
+			s.logger.Warn("failed to mark approval expired", "approval_id", approvalID, "tenant_id", tenantID, "error", err)
+		}
 		return repository.PlaybookApproval{}, fmt.Errorf("approval has expired: %w", repository.ErrInvalidArgument)
 	}
 
@@ -90,7 +94,9 @@ func (s *ApprovalService) Approve(
 		return repository.PlaybookApproval{}, err
 	}
 
-	_ = s.executionRepo.UpdateStatus(ctx, tenantID, approval.ExecutionID, string(StatusRunning))
+	if err := s.executionRepo.UpdateStatus(ctx, tenantID, approval.ExecutionID, string(StatusRunning)); err != nil {
+		s.logger.Warn("failed to mark execution running", "execution_id", approval.ExecutionID, "tenant_id", tenantID, "error", err)
+	}
 
 	s.logger.Info("playbook execution approved",
 		"approval_id", approvalID,
@@ -121,7 +127,9 @@ func (s *ApprovalService) Reject(
 		return repository.PlaybookApproval{}, err
 	}
 
-	_ = s.executionRepo.UpdateStatus(ctx, tenantID, approval.ExecutionID, string(StatusFailed))
+	if err := s.executionRepo.UpdateStatus(ctx, tenantID, approval.ExecutionID, string(StatusFailed)); err != nil {
+		s.logger.Warn("failed to mark execution failed", "execution_id", approval.ExecutionID, "tenant_id", tenantID, "error", err)
+	}
 
 	s.logger.Info("playbook execution rejected",
 		"approval_id", approvalID,

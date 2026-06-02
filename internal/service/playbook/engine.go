@@ -113,14 +113,18 @@ func (e *Engine) Execute(
 
 	var steps []PlaybookStep
 	if err := json.Unmarshal(pb.Steps, &steps); err != nil {
-		_ = e.executionRepo.UpdateStatus(ctx, tenantID, exec.ID, string(StatusFailed))
+		if uerr := e.executionRepo.UpdateStatus(ctx, tenantID, exec.ID, string(StatusFailed)); uerr != nil {
+			e.logger.Warn("failed to mark execution failed", "execution_id", exec.ID, "tenant_id", tenantID, "error", uerr)
+		}
 		return exec, fmt.Errorf("invalid playbook steps: %w", err)
 	}
 
 	finalStatus := string(StatusCompleted)
 	for _, step := range steps {
-		stepResult := e.executeStep(ctx, tenantID, exec.ID, step)
-		_ = e.executionRepo.AddStepResult(ctx, tenantID, exec.ID, stepResult)
+		stepResult := e.executeStep(ctx, tenantID, exec.ID, step, triggerEvent)
+		if err := e.executionRepo.AddStepResult(ctx, tenantID, exec.ID, stepResult); err != nil {
+			e.logger.Warn("failed to persist step result", "execution_id", exec.ID, "tenant_id", tenantID, "step_order", step.Order, "error", err)
+		}
 
 		if stepResult.Status == "failed" {
 			finalStatus = string(StatusFailed)
@@ -133,7 +137,9 @@ func (e *Engine) Execute(
 		}
 	}
 
-	_ = e.executionRepo.UpdateStatus(ctx, tenantID, exec.ID, finalStatus)
+	if err := e.executionRepo.UpdateStatus(ctx, tenantID, exec.ID, finalStatus); err != nil {
+		e.logger.Warn("failed to update execution status", "execution_id", exec.ID, "tenant_id", tenantID, "status", finalStatus, "error", err)
+	}
 	exec.Status = finalStatus
 	now := time.Now().UTC()
 	exec.CompletedAt = &now
@@ -146,6 +152,7 @@ func (e *Engine) executeStep(
 	tenantID uuid.UUID,
 	executionID uuid.UUID,
 	step PlaybookStep,
+	triggerEvent json.RawMessage,
 ) repository.StepResult {
 	now := time.Now().UTC()
 	result := repository.StepResult{
@@ -181,7 +188,7 @@ func (e *Engine) executeStep(
 	stepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	output, err := executor.Execute(stepCtx, tenantID, step.Config)
+	output, err := executor.Execute(stepCtx, tenantID, mergeTriggerContext(triggerEvent, step.Config))
 	end := time.Now().UTC()
 	result.CompletedAt = &end
 
@@ -194,6 +201,36 @@ func (e *Engine) executeStep(
 	result.Status = "completed"
 	result.Output = output
 	return result
+}
+
+// mergeTriggerContext overlays runtime trigger-event fields onto a step's
+// static config. Explicit config keys take precedence; fields the step omits
+// (e.g. device_id, ip_address, file_id) are filled from the alert that
+// triggered the playbook, so cloned templates run against live data.
+func mergeTriggerContext(trigger, config json.RawMessage) json.RawMessage {
+	var triggerMap map[string]json.RawMessage
+	if err := json.Unmarshal(trigger, &triggerMap); err != nil || len(triggerMap) == 0 {
+		return config
+	}
+	var configMap map[string]json.RawMessage
+	if len(config) > 0 {
+		if err := json.Unmarshal(config, &configMap); err != nil {
+			return config
+		}
+	}
+	if configMap == nil {
+		configMap = make(map[string]json.RawMessage, len(triggerMap))
+	}
+	for k, v := range triggerMap {
+		if _, ok := configMap[k]; !ok {
+			configMap[k] = v
+		}
+	}
+	merged, err := json.Marshal(configMap)
+	if err != nil {
+		return config
+	}
+	return merged
 }
 
 // DryRun simulates a playbook execution without persisting results.

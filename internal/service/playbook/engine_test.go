@@ -89,6 +89,68 @@ func TestEngine_Execute(t *testing.T) {
 	}
 }
 
+type capturingExecutor struct {
+	lastConfig json.RawMessage
+}
+
+func (c *capturingExecutor) Execute(_ context.Context, _ uuid.UUID, config json.RawMessage) (json.RawMessage, error) {
+	c.lastConfig = config
+	return json.Marshal(map[string]string{"status": "ok"})
+}
+
+type capturingRegistry struct{ exec *capturingExecutor }
+
+func (r *capturingRegistry) Get(_ playbook.StepType) (playbook.StepExecutor, error) {
+	return r.exec, nil
+}
+
+func TestEngine_Execute_MergesTriggerContext(t *testing.T) {
+	store := memory.NewStore()
+	engine := playbook.NewEngine(
+		memory.NewPlaybookRepository(store),
+		memory.NewPlaybookExecutionRepository(store),
+		&mockPublisher{}, nil,
+	)
+	capExec := &capturingExecutor{}
+	engine.SetExecutors(&capturingRegistry{exec: capExec})
+
+	tenantID := uuid.New()
+	steps, _ := json.Marshal([]playbook.PlaybookStep{
+		// no device_id in config; it must be filled from the trigger event,
+		// while the explicit reason must win over the trigger's reason.
+		{Order: 1, Type: playbook.StepIsolate, Config: json.RawMessage(`{"reason":"explicit"}`)},
+	})
+	pb, err := engine.CreatePlaybook(context.Background(), tenantID, repository.Playbook{
+		Name:             "Isolate",
+		TriggerCondition: "device.compromised",
+		Steps:            steps,
+		Enabled:          true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deviceID := uuid.New()
+	trigger := json.RawMessage(`{"device_id":"` + deviceID.String() + `","reason":"from-trigger","severity":"critical"}`)
+	if _, err := engine.Execute(context.Background(), tenantID, pb.ID, trigger); err != nil {
+		t.Fatal(err)
+	}
+
+	var merged map[string]any
+	if err := json.Unmarshal(capExec.lastConfig, &merged); err != nil {
+		t.Fatalf("merged config not valid JSON: %v", err)
+	}
+	if merged["device_id"] != deviceID.String() {
+		t.Errorf("expected device_id injected from trigger, got %v", merged["device_id"])
+	}
+	if merged["reason"] != "explicit" {
+		t.Errorf("explicit config should win over trigger, got %v", merged["reason"])
+	}
+	if merged["severity"] != "critical" {
+		t.Errorf("expected severity carried from trigger, got %v", merged["severity"])
+	}
+}
+
 func TestEngine_Concurrency(t *testing.T) {
 	engine, _ := newTestEngine()
 	tenantID := uuid.New()

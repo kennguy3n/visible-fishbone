@@ -85,6 +85,11 @@ func (r *ComplianceReportRepository) List(ctx context.Context, tenantID uuid.UUI
 			return repository.ErrInvalidArgument
 		}
 
+		cmp, dir := "<", "DESC"
+		if page.Order == repository.SortAsc {
+			cmp, dir = ">", "ASC"
+		}
+
 		q := `SELECT id, tenant_id, framework, score, max_score, controls, evidence_pack, generated_at, created_at
 FROM compliance_reports`
 		args := []any{}
@@ -95,12 +100,12 @@ FROM compliance_reports`
 			tArg := argN
 			argN++
 			iArg := argN
-			q += fmt.Sprintf(` WHERE (created_at, id) < ($%d, $%d)`, tArg, iArg)
+			q += fmt.Sprintf(` WHERE (created_at, id) %s ($%d, $%d)`, cmp, tArg, iArg)
 			args = append(args, cur.T, cur.I)
 		}
 
 		argN++
-		q += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, argN)
+		q += fmt.Sprintf(` ORDER BY created_at %s, id %s LIMIT $%d`, dir, dir, argN)
 		args = append(args, page.Limit)
 
 		rows, err := tx.Query(ctx, q, args...)
