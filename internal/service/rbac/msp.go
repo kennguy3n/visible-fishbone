@@ -210,7 +210,7 @@ func (svc *Service) ListAuthorizedTenants(
 			if broad {
 				return bound, nil
 			}
-			return svc.restrictToTenantGrants(ctx, userID, bound)
+			return svc.restrictToTenantGrants(ctx, userID, permission, bound)
 		}
 		cursor = page.NextCursor
 	}
@@ -222,9 +222,28 @@ func (svc *Service) ListAuthorizedTenants(
 // ListAuthorizedTenants to keep the pagination loop
 // readable now that the cap-bound for-loop forces early return on
 // the final page.
+//
+// `permission` is the bulk-op permission the caller is asking
+// for. We filter tenant-scoped roles to those that ACTUALLY grant
+// that permission (literal or wildcard). Without this gate, a user
+// with a tenant-scope `viewer` role (read-only) would be
+// authorized to participate in a bulk write (e.g.
+// `msp.bulk_apply_policy`) on that tenant — because the previous
+// implementation only checked role.Scope==tenant + scope_id match,
+// not the role's permission set. The handler path is currently
+// protected by `RequireMSPScope` middleware which gates the same
+// permission, so this was unreachable end-to-end via the HTTP
+// surface. But `BulkService` is a public Go API: an internal
+// caller (e.g. a future event-driven bulk pipeline) could invoke
+// it directly, bypassing the middleware. Round-7 of Devin Review
+// flagged this as a latent privilege-confusion surface; the fix
+// closes it as defense-in-depth so the tenant-grant subset is
+// always correctly gated regardless of how the bulk service is
+// reached.
 func (svc *Service) restrictToTenantGrants(
 	ctx context.Context,
 	userID uuid.UUID,
+	permission string,
 	bound []uuid.UUID,
 ) ([]uuid.UUID, error) {
 	// Fall back to per-tenant authorization. Read every grant once
@@ -243,6 +262,13 @@ func (svc *Service) restrictToTenantGrants(
 			return nil, fmt.Errorf("list authorized tenants: get role: %w", err)
 		}
 		if role.Scope != repository.RoleScopeTenant {
+			continue
+		}
+		// Permission gate: the tenant-scope role must actually grant
+		// the requested permission (literal or wildcard). A viewer
+		// role with only `tenants.read` must not satisfy a bulk-write
+		// authorization for that tenant.
+		if !rolePermits(role, permission) {
 			continue
 		}
 		// Tenant-scoped roles encode the tenant via Role.TenantID

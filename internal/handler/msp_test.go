@@ -1168,6 +1168,88 @@ func TestMSPHandler_UpdateMSP_InvalidatesBrandingCache(t *testing.T) {
 	}
 }
 
+// TestMSPHandler_UpdateMSP_NonBrandingPatchDoesNotInvalidate pins
+// the round-7 cache-efficiency fix: a PATCH that touches only
+// non-branding fields (Name/Slug/Status/Settings) must NOT flush
+// the per-tenant branding cache, because none of those fields
+// feed into the resolved MSPBranding record. Previously the
+// handler called branding.InvalidateAll() unconditionally on every
+// UpdateMSP, causing a thundering-herd of branding re-resolutions
+// against the tenant + msp repos after any unrelated MSP metadata
+// change (e.g. renaming an MSP or rotating its status).
+//
+// We assert by mutating the underlying MSP's branding row directly
+// (bypassing the handler so InvalidateAll is not called even by
+// the patch path), priming the cache, then patching ONLY the Name
+// via the handler. The cached value must remain visible — if the
+// handler had invalidated, the next Resolve would re-fetch the
+// (mutated) branding and the assertion fails.
+func TestMSPHandler_UpdateMSP_NonBrandingPatchDoesNotInvalidate(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _ := setupMSPHandlerWithCachedBranding(t)
+	ctx := context.Background()
+
+	m, err := msps.Create(ctx, repository.MSP{
+		Name:     "Acme",
+		Slug:     "acme-nonbrand",
+		Branding: repository.MSPBranding{LogoURL: "v1"},
+	})
+	if err != nil {
+		t.Fatalf("seed msp: %v", err)
+	}
+	mID := m.ID
+	tn, err := tenants.Create(ctx, repository.Tenant{
+		Name: "T", Slug: "t-nonbrand", MSPID: &mID,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+
+	// Prime the cache by resolving once.
+	rec := doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prime resolve status = %d", rec.Code)
+	}
+	var primed handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&primed)
+	if primed.LogoURL != "v1" {
+		t.Fatalf("primed logo = %q, want v1", primed.LogoURL)
+	}
+
+	// Mutate the underlying MSP's branding directly via the repo.
+	// This does NOT invalidate the cache (only the handler PATCH
+	// path with patch.Branding != nil does that). The resolver's
+	// cached entry should still serve "v1" if and only if the
+	// handler does not invalidate on non-branding patches.
+	newBrand := repository.MSPBranding{LogoURL: "v2"}
+	if _, err := msps.Update(ctx, m.ID, repository.MSPPatch{Branding: &newBrand}); err != nil {
+		t.Fatalf("repo brand mutate: %v", err)
+	}
+
+	// PATCH the MSP via the handler, touching ONLY Name (no
+	// Branding field). With the fix, this must NOT invalidate the
+	// cache, so the next Resolve still serves the cached "v1".
+	newName := "Acme Renamed"
+	rec = doMSPJSON(t, mux, http.MethodPatch, "/api/v1/msps/"+m.ID.String(),
+		handler.MSPPatchRequest{Name: &newName})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post-patch resolve status = %d", rec.Code)
+	}
+	var afterPatch handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&afterPatch)
+	if afterPatch.LogoURL != "v1" {
+		t.Fatalf("non-branding patch wrongly invalidated cache: logo = %q, want v1 (cached)",
+			afterPatch.LogoURL)
+	}
+}
+
 // setupMSPHandlerWithCachedBranding wires the handler with a
 // cached BrandingResolver so tests can exercise the
 // MSP-rebrand-invalidates-cache path. The cache TTL is set high

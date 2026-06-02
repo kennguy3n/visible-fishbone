@@ -498,3 +498,74 @@ func TestListAuthorizedTenants_RejectsEmptyPermission(t *testing.T) {
 		t.Fatalf("expected ErrInvalidArgument for empty permission, got %v", err)
 	}
 }
+
+// TestListAuthorizedTenants_TenantScopeWithoutPermissionExcluded pins
+// the round-7 defense-in-depth fix: a tenant-scoped role that does
+// NOT grant the requested permission must NOT contribute that tenant
+// to the authorized set, even when the user has no broad authority.
+//
+// Scenario:
+//   - User has tenant-scope role on t1 with ONLY `tenants.read`
+//   - Caller asks for `msp.bulk_apply_policy` authorization
+//   - Previous behaviour: t1 would be included in the authorized set
+//     because the function only checked scope+scope_id match, not
+//     the permission set. A latent privilege-confusion if any
+//     internal caller invoked BulkService bypassing the
+//     RequireMSPScope middleware.
+//   - Fixed behaviour: t1 is excluded — tenant-scope roles must
+//     actually grant the requested permission to satisfy the
+//     authorization.
+func TestListAuthorizedTenants_TenantScopeWithoutPermissionExcluded(t *testing.T) {
+	svc, store, mspRepo, roleRepo, userID, mspID := mspRBACFixtures(t)
+	tenantRepo := memory.NewTenantRepository(store)
+	ctx := context.Background()
+
+	t1, _ := tenantRepo.Create(ctx, repository.Tenant{Name: "t1", Slug: "t1"})
+	if _, err := mspRepo.AssignTenant(ctx, mspID, t1.ID, repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign t1: %v", err)
+	}
+	// Tenant-scoped role that grants ONLY tenants.read (not the
+	// bulk_apply_policy permission the caller is asking for).
+	role := mustSeedRole(t, roleRepo, repository.Role{
+		Name:        "tenant_viewer",
+		Scope:       repository.RoleScopeTenant,
+		Permissions: []string{rbac.PermTenantsRead},
+		TenantID:    &t1.ID,
+	})
+	if err := roleRepo.AssignRole(ctx, repository.UserRole{
+		UserID: userID, RoleID: role.ID,
+	}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	// Ask for the bulk_apply_policy permission: tenant-viewer must
+	// not be sufficient.
+	tenants, err := svc.ListAuthorizedTenants(ctx, userID, mspID, "msp.bulk_apply_policy", mspRepo)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tenants) != 0 {
+		t.Fatalf("expected empty (tenant viewer must not satisfy bulk-write), got %d tenants %#v",
+			len(tenants), tenants)
+	}
+
+	// Sanity check the positive path: a tenant-scoped role granting
+	// the bulk_apply_policy permission DOES restrict-to that tenant.
+	roleWrite := mustSeedRole(t, roleRepo, repository.Role{
+		Name:        "tenant_bulk_writer",
+		Scope:       repository.RoleScopeTenant,
+		Permissions: []string{"msp.bulk_apply_policy"},
+		TenantID:    &t1.ID,
+	})
+	if err := roleRepo.AssignRole(ctx, repository.UserRole{
+		UserID: userID, RoleID: roleWrite.ID,
+	}); err != nil {
+		t.Fatalf("assign write: %v", err)
+	}
+	tenants, err = svc.ListAuthorizedTenants(ctx, userID, mspID, "msp.bulk_apply_policy", mspRepo)
+	if err != nil {
+		t.Fatalf("list (with write role): %v", err)
+	}
+	if len(tenants) != 1 || tenants[0] != t1.ID {
+		t.Fatalf("expected just t1 after adding write role, got %#v", tenants)
+	}
+}
