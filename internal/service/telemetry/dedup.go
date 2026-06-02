@@ -96,7 +96,7 @@ type DedupKey struct {
 type LRUDedup struct {
 	mu       sync.RWMutex
 	capacity int
-	order    *list.List               // back = least-recent
+	order    *list.List // back = least-recent
 	deviceMu map[deviceSeqKey]*list.Element
 	eventMu  map[uuid.UUID]*list.Element
 

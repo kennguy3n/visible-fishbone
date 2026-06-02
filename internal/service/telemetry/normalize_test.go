@@ -16,10 +16,10 @@ import (
 // --- test doubles -------------------------------------------------------
 
 type fakeTenantLookup struct {
-	mu      sync.Mutex
-	rows    map[uuid.UUID]repository.Tenant
+	mu       sync.Mutex
+	rows     map[uuid.UUID]repository.Tenant
 	notFound map[uuid.UUID]bool
-	calls   int
+	calls    int
 }
 
 func newFakeTenantLookup() *fakeTenantLookup {
@@ -70,7 +70,7 @@ func (f *fakeSiteLookup) Get(_ context.Context, tenantID, id uuid.UUID) (reposit
 	return s, nil
 }
 
-func (f *fakeSiteLookup) callCount() int {
+func (f *fakeSiteLookup) callCount() int { //nolint:unused // parity with other fakes; will be used in site-enrichment assertions
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls

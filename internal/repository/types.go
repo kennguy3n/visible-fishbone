@@ -619,9 +619,9 @@ type PolicyRollout struct {
 // The Welford pair (Mean, M2) is the numerically-stable online
 // estimator from Knuth/Welford: given a new sample x, update
 //
-//   samples++  delta = x - mean
-//   mean += delta / samples
-//   m2   += delta * (x - mean)
+//	samples++  delta = x - mean
+//	mean += delta / samples
+//	m2   += delta * (x - mean)
 //
 // Sample variance is then m2 / max(samples - 1, 1); standard
 // deviation is sqrt(variance). Samples < 2 means cold start —
@@ -631,9 +631,9 @@ type PolicyRollout struct {
 // (EWMA, EWMVar) is the exponentially-weighted pair. On a new
 // sample x with decay alpha, against the PRE-update ewma:
 //
-//   delta    = x - ewma           // residual vs. previous EWMA
-//   ewma     = alpha*x + (1-alpha)*ewma
-//   ewma_var = alpha*delta*delta + (1-alpha)*ewma_var
+//	delta    = x - ewma           // residual vs. previous EWMA
+//	ewma     = alpha*x + (1-alpha)*ewma
+//	ewma_var = alpha*delta*delta + (1-alpha)*ewma_var
 //
 // This is the standard exponentially-smoothed squared residual
 // (the "RiskMetrics-style" EWVar) used by baseline.Engine.Fold.
@@ -760,33 +760,33 @@ func (s AlertState) IsTerminal() bool {
 // snapshot-copied at creation so the alert remains self-
 // explaining even after the underlying baseline drifts.
 type Alert struct {
-	ID              uuid.UUID
-	TenantID        uuid.UUID
-	Kind            string
-	Severity        AlertSeverity
-	Dimension       string
-	ObservedValue   float64
-	BaselineMean    float64
-	BaselineStdDev  float64
-	ZScore          float64
-	WindowStart     time.Time
-	WindowEnd       time.Time
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	Kind           string
+	Severity       AlertSeverity
+	Dimension      string
+	ObservedValue  float64
+	BaselineMean   float64
+	BaselineStdDev float64
+	ZScore         float64
+	WindowStart    time.Time
+	WindowEnd      time.Time
 	// WindowSeconds is the bucket size of the underlying baseline
 	// model. Snapshot-copied at emit time so the alert.Feedback
 	// tuning loop can scope its FP-rate aggregation to the
 	// matching (dimension, window_seconds) tuple. See PR #40
 	// round-9 ANALYSIS_0002.
-	WindowSeconds   int
-	Summary         string
-	Evidence        []byte // JSON; never persist non-JSON bytes here
-	State           AlertState
-	SuppressedBy    *uuid.UUID
-	AcknowledgedBy  *uuid.UUID
-	AcknowledgedAt  *time.Time
-	ResolvedBy      *uuid.UUID
-	ResolvedAt      *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	WindowSeconds  int
+	Summary        string
+	Evidence       []byte // JSON; never persist non-JSON bytes here
+	State          AlertState
+	SuppressedBy   *uuid.UUID
+	AcknowledgedBy *uuid.UUID
+	AcknowledgedAt *time.Time
+	ResolvedBy     *uuid.UUID
+	ResolvedAt     *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // AlertSuppression is one row in the alert_suppressions table.
