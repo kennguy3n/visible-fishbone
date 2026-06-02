@@ -54,6 +54,9 @@ func clearAll(t *testing.T) {
 		"WEBHOOK_MAX_ATTEMPTS", "WEBHOOK_MAX_RETRIES", "WEBHOOK_INITIAL_DELAY", "WEBHOOK_MAX_DELAY",
 		"WEBHOOK_DELIVERY_TIMEOUT", "WEBHOOK_SIGNATURE_HEADER",
 		"WEBHOOK_BATCH_SIZE", "WEBHOOK_POLL_INTERVAL", "WEBHOOK_PROCESSING_TIMEOUT",
+		"INTEGRATION_WORKER_MAX_ATTEMPTS", "INTEGRATION_WORKER_BATCH_SIZE",
+		"INTEGRATION_WORKER_BACKOFF_BASE", "INTEGRATION_WORKER_BACKOFF_MAX",
+		"INTEGRATION_WORKER_POLL_INTERVAL", "INTEGRATION_WORKER_PROCESSING_TIMEOUT",
 		"AUTH_JWT_SECRET", "AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "AUTH_ACCESS_TOKEN_TTL", "AUTH_CLAIM_TOKEN_TTL", "AUTH_API_KEY_HEADER",
 		"OTEL_EXPORTER_OTLP_ENDPOINT", "SERVICE_VERSION",
 	}
@@ -146,6 +149,125 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Webhook.ProcessingTimeout != 5*time.Minute {
 		t.Errorf("Webhook.ProcessingTimeout = %s, want 5m", cfg.Webhook.ProcessingTimeout)
+	}
+	// Integration delivery worker — defaults must match the
+	// hard-coded values in internal/service/integration/worker.go
+	// so an operator who exports no INTEGRATION_WORKER_* env vars
+	// sees the same behaviour the worker would on a
+	// `WorkerConfig{}`. Round-4 of Devin Review on PR #41 (PR D)
+	// flagged the previous wiring where the strict-table parsed
+	// values silently bypassed the worker; this pins that the
+	// table + the worker defaults stay in sync.
+	if cfg.Integration.MaxAttempts != 8 {
+		t.Errorf("Integration.MaxAttempts = %d, want 8", cfg.Integration.MaxAttempts)
+	}
+	if cfg.Integration.BatchSize != 32 {
+		t.Errorf("Integration.BatchSize = %d, want 32", cfg.Integration.BatchSize)
+	}
+	if cfg.Integration.PollInterval != time.Second {
+		t.Errorf("Integration.PollInterval = %s, want 1s", cfg.Integration.PollInterval)
+	}
+	if cfg.Integration.BackoffBase != 30*time.Second {
+		t.Errorf("Integration.BackoffBase = %s, want 30s", cfg.Integration.BackoffBase)
+	}
+	if cfg.Integration.BackoffMax != time.Hour {
+		t.Errorf("Integration.BackoffMax = %s, want 1h", cfg.Integration.BackoffMax)
+	}
+	if cfg.Integration.ProcessingTimeout != 5*time.Minute {
+		t.Errorf("Integration.ProcessingTimeout = %s, want 5m", cfg.Integration.ProcessingTimeout)
+	}
+}
+
+// TestIntegrationWorkerEnvOverridesReachConfig verifies the
+// round-4 fix on PR #41 (PR D): `INTEGRATION_WORKER_*` env vars
+// flow through `Load` to the `cfg.Integration.*` fields that
+// `cmd/sng-control/main.go` threads into the live worker. The
+// previous wiring used `integration.WorkerConfig{}`, so the
+// strict parser would accept these env vars at boot but the
+// worker never saw them.
+func TestIntegrationWorkerEnvOverridesReachConfig(t *testing.T) {
+	clearAll(t)
+	tmp := t.TempDir()
+	wd, _ := os.Getwd()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	t.Setenv("INTEGRATION_WORKER_MAX_ATTEMPTS", "11")
+	t.Setenv("INTEGRATION_WORKER_BATCH_SIZE", "7")
+	t.Setenv("INTEGRATION_WORKER_BACKOFF_BASE", "15s")
+	t.Setenv("INTEGRATION_WORKER_BACKOFF_MAX", "30m")
+	t.Setenv("INTEGRATION_WORKER_POLL_INTERVAL", "250ms")
+	t.Setenv("INTEGRATION_WORKER_PROCESSING_TIMEOUT", "2m")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Integration.MaxAttempts != 11 {
+		t.Errorf("Integration.MaxAttempts = %d, want 11", cfg.Integration.MaxAttempts)
+	}
+	if cfg.Integration.BatchSize != 7 {
+		t.Errorf("Integration.BatchSize = %d, want 7", cfg.Integration.BatchSize)
+	}
+	if cfg.Integration.BackoffBase != 15*time.Second {
+		t.Errorf("Integration.BackoffBase = %s, want 15s", cfg.Integration.BackoffBase)
+	}
+	if cfg.Integration.BackoffMax != 30*time.Minute {
+		t.Errorf("Integration.BackoffMax = %s, want 30m", cfg.Integration.BackoffMax)
+	}
+	if cfg.Integration.PollInterval != 250*time.Millisecond {
+		t.Errorf("Integration.PollInterval = %s, want 250ms", cfg.Integration.PollInterval)
+	}
+	if cfg.Integration.ProcessingTimeout != 2*time.Minute {
+		t.Errorf("Integration.ProcessingTimeout = %s, want 2m", cfg.Integration.ProcessingTimeout)
+	}
+}
+
+// TestIntegrationWorkerValidationRejectsBadValues confirms each
+// guard added in `validate()` for the integration worker rejects
+// the bad value with an actionable error message naming the env
+// var.
+func TestIntegrationWorkerValidationRejectsBadValues(t *testing.T) {
+	cases := []struct {
+		name   string
+		env    string
+		value  string
+		expect string
+	}{
+		{"MaxAttempts<1", "INTEGRATION_WORKER_MAX_ATTEMPTS", "0", "INTEGRATION_WORKER_MAX_ATTEMPTS"},
+		{"BackoffBase<=0", "INTEGRATION_WORKER_BACKOFF_BASE", "0s", "INTEGRATION_WORKER_BACKOFF_BASE"},
+		{"BackoffMax<Base", "INTEGRATION_WORKER_BACKOFF_MAX", "5s", "INTEGRATION_WORKER_BACKOFF_MAX"},
+		{"BatchSize<=0", "INTEGRATION_WORKER_BATCH_SIZE", "0", "INTEGRATION_WORKER_BATCH_SIZE"},
+		{"PollInterval<=0", "INTEGRATION_WORKER_POLL_INTERVAL", "0s", "INTEGRATION_WORKER_POLL_INTERVAL"},
+		{"ProcessingTimeout<=0", "INTEGRATION_WORKER_PROCESSING_TIMEOUT", "0s", "INTEGRATION_WORKER_PROCESSING_TIMEOUT"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearAll(t)
+			tmp := t.TempDir()
+			wd, _ := os.Getwd()
+			if err := os.Chdir(tmp); err != nil {
+				t.Fatalf("chdir: %v", err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(wd) })
+
+			// BackoffMax<Base test needs Base set; supply the
+			// default 30s explicitly so the case is unambiguous.
+			if tc.env == "INTEGRATION_WORKER_BACKOFF_MAX" {
+				t.Setenv("INTEGRATION_WORKER_BACKOFF_BASE", "30s")
+			}
+			t.Setenv(tc.env, tc.value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load: want error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.expect) {
+				t.Errorf("err = %q, want substring %q", err.Error(), tc.expect)
+			}
+		})
 	}
 }
 

@@ -467,14 +467,24 @@ func (h *PolicySimulationHandler) listRollouts(w http.ResponseWriter, r *http.Re
 		WriteRepositoryError(w, err)
 		return
 	}
-	items := make([]rolloutResponse, 0, len(res.Items))
-	for _, item := range res.Items {
-		items = append(items, toRolloutResponse(item, ""))
+	// Typed envelope with `omitempty` on next_cursor so the
+	// field is OMITTED (rather than emitted as `""`) on the last
+	// page. Matches alert/baseline/integration handlers; the
+	// previous map[string]any pattern emitted `"next_cursor": ""`
+	// for terminal pages, which is technically distinct from the
+	// OpenAPI `nullable: true` contract and trips spec-strict
+	// SDK validators that differentiate absent vs null vs empty.
+	out := struct {
+		Items      []rolloutResponse `json:"items"`
+		NextCursor string            `json:"next_cursor,omitempty"`
+	}{
+		Items:      make([]rolloutResponse, 0, len(res.Items)),
+		NextCursor: res.NextCursor,
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"items":       items,
-		"next_cursor": res.NextCursor,
-	})
+	for _, item := range res.Items {
+		out.Items = append(out.Items, toRolloutResponse(item, ""))
+	}
+	WriteJSON(w, http.StatusOK, out)
 }
 
 func (h *PolicySimulationHandler) getRollout(w http.ResponseWriter, r *http.Request) {

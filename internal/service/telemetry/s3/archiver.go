@@ -72,7 +72,19 @@ const DefaultArchiverFlushInterval = 60 * time.Second
 // DefaultArchiverMaxBytesPerObject is the size threshold that
 // triggers an upload for a single partition before the interval
 // fires.
-const DefaultArchiverMaxBytesPerObject = 8 * 1024 * 1024 // 8 MiB compressed
+//
+// Compared against the partition's accumulated **raw msgpack
+// payload bytes** (the sum of envelope.Payload lengths) — NOT
+// the sealed/compressed object size. The sealed object is
+// significantly smaller because of zstd compression; on the
+// SNG envelope mix (100-300B payloads) the compressed object
+// lands at ~25-40% of the raw threshold, so an 8 MiB raw
+// budget yields ~2-3 MiB on the wire. The threshold is in raw
+// bytes so the in-memory buffer is bounded by a value the
+// operator can directly reason about; if it were compressed
+// bytes the buffer footprint would depend on the compressibility
+// of the workload, which is harder to capacity-plan against.
+const DefaultArchiverMaxBytesPerObject = 8 * 1024 * 1024 // 8 MiB raw payload
 
 // DefaultArchiverMaxEventsPerObject is the per-partition row count
 // that triggers an upload before the interval fires.

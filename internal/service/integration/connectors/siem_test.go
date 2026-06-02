@@ -130,6 +130,80 @@ func TestSIEM_Send_HMACSignaturePresent(t *testing.T) {
 	}
 }
 
+// TestSIEM_Send_HMACInputIsNotAliasedWithBody pins the
+// invariant the round-8 ANALYSIS_0001 review finding flagged:
+// the HMAC input MUST be byte-identical to what the HTTP body
+// reader produces, regardless of whether the caller-supplied
+// `body` slice has excess backing-array capacity.
+//
+// The historical implementation built the HMAC input via
+// `append([]byte(ts+"."), body...)`. That works today because
+// `[]byte(ts+".")` is freshly allocated with len==cap, so the
+// append never aliases into `body`. But under a refactor that
+// pre-allocates the prefix with excess capacity, the append
+// would write the body bytes INTO the same backing array as
+// `body` (or vice-versa depending on layout) — leading to a
+// scenario where mutating `body` (post-Send, pre-network-flush
+// in some hypothetical streaming refactor) silently desyncs the
+// HMAC input from the actual HTTP body, breaking signature
+// verification at the SIEM receiver.
+//
+// The fix splits the HMAC into two `mac.Write` calls (ts+"."
+// then body), so there is no temporary buffer to alias.
+//
+// This test pins that with a body slice of len(7), cap(1024),
+// the HMAC is computed off exactly the 7 prefix bytes and not
+// any garbage in the trailing 1017 bytes of the backing array.
+func TestSIEM_Send_HMACInputIsNotAliasedWithBody(t *testing.T) {
+	srv := &stubHTTP{}
+	s := NewSIEM(srv, "ua")
+	cfg, _ := json.Marshal(SIEMConfig{Endpoint: "https://siem/"})
+	sec, _ := json.Marshal(SIEMSecret{HMACKey: "topsecret"})
+	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	// Build a body slice with excess capacity, so any future
+	// `append(prefix, body...)` refactor could potentially write
+	// into the trailing region. Fill the trailing region with
+	// non-zero garbage so an aliasing bug would surface as a
+	// non-matching HMAC.
+	backing := make([]byte, 1024)
+	for i := range backing {
+		backing[i] = 0xAA
+	}
+	payload := []byte(`{"x":1}`)
+	copy(backing, payload)
+	body := json.RawMessage(backing[:len(payload):cap(backing)])
+	_, err := s.Send(context.Background(), integration.Sendable{
+		EventType: "alert.created",
+		Payload:   body,
+		Config:    cfg,
+		Secret:    sec,
+		Now:       now,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	req := srv.requests[0]
+	ts := req.Header.Get("X-Sng-Timestamp")
+	sig := req.Header.Get("X-Sng-Signature")
+	// Recompute the HMAC off the exact bytes the receiver
+	// would see on the wire — NOT off `backing`. If aliasing
+	// were happening, srv.bodies[0] would also contain the
+	// 0xAA garbage, and the cross-check below against a
+	// from-scratch HMAC over `payload` would fail.
+	if !bytes.Equal(srv.bodies[0], payload) {
+		t.Fatalf("HTTP body must be exactly %q (no aliasing), got %q",
+			payload, srv.bodies[0])
+	}
+	mac := hmac.New(sha256.New, []byte("topsecret"))
+	mac.Write([]byte(ts + "."))
+	mac.Write(payload)
+	want := "v1=" + hex.EncodeToString(mac.Sum(nil))
+	if sig != want {
+		t.Fatalf("HMAC must be over the 7-byte payload only (no aliasing into the 0xAA trailing region): got %q want %q",
+			sig, want)
+	}
+}
+
 func TestSIEM_Send_5xxIsTransient(t *testing.T) {
 	srv := &stubHTTP{respond: func(req *http.Request, body []byte) (*http.Response, error) {
 		return &http.Response{StatusCode: 503, Body: io.NopCloser(strings.NewReader("busy"))}, nil
@@ -320,5 +394,33 @@ func TestSIEM_Send_InsecureSkipTLSAppliedToTransport(t *testing.T) {
 	}
 	if len(shared.requests) != 1 {
 		t.Fatalf("default flow should hit shared stub once, got %d", len(shared.requests))
+	}
+}
+
+// TestSIEM_Send_InsecureSkipTLS_ReusesCachedClient pins the
+// round-5 fix on PR #41 (PR D): when `insecure_skip_tls=true`
+// the SIEM connector must NOT allocate a fresh http.Client +
+// http.Transport on every Send (idle connections lingered until
+// Go's default IdleConnTimeout=90s and accumulated under a
+// high-throughput alert fan-out). The cache is keyed on the
+// connector instance via `sync.Once`, so back-to-back Sends
+// should observe an identical `s.insecureClient` pointer.
+//
+// The test exercises the cache via `insecureDoer()` directly
+// because `Send` always returns a transport error against the
+// invalid endpoint and the cache assignment happens BEFORE the
+// dial, so we still pin the invariant without needing a live
+// server.
+func TestSIEM_Send_InsecureSkipTLS_ReusesCachedClient(t *testing.T) {
+	s := NewSIEM(&stubHTTP{}, "ua")
+	first := s.insecureDoer()
+	if first == nil {
+		t.Fatalf("insecureDoer() returned nil")
+	}
+	for i := 0; i < 32; i++ {
+		got := s.insecureDoer()
+		if got != first {
+			t.Fatalf("insecureDoer() call %d returned a different client (cache not honoured)", i)
+		}
 	}
 }

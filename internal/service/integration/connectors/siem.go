@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -64,6 +65,22 @@ type SIEMHTTPDoer interface {
 type SIEM struct {
 	client    SIEMHTTPDoer
 	userAgent string
+	// insecureClientOnce and insecureClient lazily construct a
+	// single http.Client with InsecureSkipVerify=true for the
+	// `insecure_skip_tls` config path. Round-5 of Devin Review on
+	// PR #41 (PR D) flagged that the previous wiring allocated a
+	// fresh http.Client + http.Transport on every Send call —
+	// the Transport's idle connections were never closed and
+	// lingered until Go's default IdleConnTimeout (90s),
+	// accumulating hundreds of short-lived idle conns under a
+	// high-throughput alert fan-out when the flag is enabled.
+	// The flag is rare and per-config, but it is identical
+	// across every caller that flips it, so a single cached
+	// client is safe (no per-tenant TLS material to mix). Built
+	// via sync.Once so connectors that never see the flag pay
+	// nothing.
+	insecureClientOnce sync.Once
+	insecureClient     SIEMHTTPDoer
 }
 
 // NewSIEM constructs a SIEM connector. client may be nil
@@ -76,6 +93,21 @@ func NewSIEM(client SIEMHTTPDoer, userAgent string) *SIEM {
 		userAgent = "sng-control/0.1 (+integration/siem)"
 	}
 	return &SIEM{client: client, userAgent: userAgent}
+}
+
+// insecureDoer returns the lazily-built shared insecure client
+// for the `insecure_skip_tls` path. See the doc on
+// `SIEM.insecureClient` for why a single cached client is safe.
+func (s *SIEM) insecureDoer() SIEMHTTPDoer {
+	s.insecureClientOnce.Do(func() {
+		s.insecureClient = &http.Client{
+			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			},
+		}
+	})
+	return s.insecureClient
 }
 
 // Kind reports IntegrationConnectorSIEMWebhook.
@@ -258,8 +290,26 @@ func (s *SIEM) post(
 	if sec.HMACKey != "" {
 		ts := strconv.FormatInt(now.UTC().Unix(), 10)
 		mac := hmac.New(sha256.New, []byte(sec.HMACKey))
-		signed := append([]byte(ts+"."), body...)
-		mac.Write(signed)
+		// Feed the HMAC in two writes (ts+"." then body) rather
+		// than allocating a combined slice. Round-8 of Devin
+		// Review on PR #41 (ANALYSIS_0001) flagged that the
+		// previous `append([]byte(ts+"."), body...)` relied on
+		// Go's append-capacity semantics to guarantee that body
+		// (which is also handed to bytes.NewReader on line 269
+		// as the HTTP request body) was not aliased into the
+		// HMAC input. That guarantee is correct today but
+		// silently breaks under a refactor that pre-allocates
+		// the temp slice with excess capacity (e.g. `buf :=
+		// make([]byte, 0, 1024); buf = append(buf, ts+".");
+		// signed := append(buf, body...)`) — at which point the
+		// HMAC input and the HTTP body could diverge. hash.Hash
+		// is io.Writer-shaped and explicitly equivalent to a
+		// single concatenated Write per the stdlib contract
+		// (`sha256` doc: "It never returns an error"), so
+		// splitting the writes eliminates the temp buffer and
+		// the aliasing concern in one stroke.
+		mac.Write([]byte(ts + "."))
+		mac.Write(body)
 		req.Header.Set(cfg.tsHeader, ts)
 		req.Header.Set(cfg.sigHeader, "v1="+hex.EncodeToString(mac.Sum(nil)))
 	}
@@ -267,19 +317,21 @@ func (s *SIEM) post(
 	if cfg.insecureSkipTLS {
 		// Per-connector InsecureSkipVerify cannot be applied to
 		// the shared http.Client (it is shared across tenants and
-		// connectors), so we build a one-shot client with a
-		// custom Transport for this call. Used for self-signed
-		// lab destinations only — production deployments should
-		// leave insecure_skip_tls=false and trust the system CA
-		// store. The allocation cost is negligible because the
-		// flag is rare and SIEM Send latency is dominated by the
-		// network round-trip.
-		doer = &http.Client{
-			Timeout: 10 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-			},
-		}
+		// connectors), so we route through a lazily-constructed,
+		// connection-pooled insecure client cached on the SIEM
+		// connector. The previous implementation allocated a
+		// fresh http.Transport per Send call — its idle
+		// connections lingered until Go's default IdleConnTimeout
+		// (90s), accumulating under a high-throughput alert
+		// fan-out. Round-5 of Devin Review on PR #41 (PR D)
+		// flagged that resource-management gap; the cached
+		// transport reuses idle conns the same way the default
+		// `s.client` does and pays the construction cost exactly
+		// once via `insecureDoer`'s sync.Once. Production
+		// deployments should still leave insecure_skip_tls=false
+		// and trust the system CA store; this path remains a
+		// self-signed-lab escape hatch.
+		doer = s.insecureDoer()
 	}
 	resp, err := doer.Do(req)
 	if err != nil {

@@ -260,13 +260,26 @@ type retentionCacheEntry struct {
 // cancellation would risk wedging unrelated tenants. A future
 // resolver that needs cancellation should plumb its own
 // deadline internally.
+//
+// Two distinct clocks are sampled to keep the cache TTL honest:
+// `cacheReadAt` for the cache-hit comparison (so a stale entry
+// from before the call site is correctly invalidated) and
+// `cacheWriteAt` taken *after* the resolver returns so the
+// `expiresAt` window measures TTL from the moment the value
+// became authoritative, not from the moment we entered the
+// function. Pre-round-7 both timestamps were the same `now`
+// captured at entry, which silently shortened the effective
+// TTL by the resolver call duration — fine for the default
+// in-process resolver but measurable when a future resolver is
+// backed by a multi-second remote service. See PR #38 round-7
+// ANALYSIS_0002.
 func (w *Writer) resolveRetention(tenantID uuid.UUID) int {
-	now := time.Now()
+	cacheReadAt := time.Now()
 	w.mu.Lock()
 	if w.retentionCache == nil {
 		w.retentionCache = make(map[uuid.UUID]retentionCacheEntry)
 	}
-	if entry, ok := w.retentionCache[tenantID]; ok && now.Before(entry.expiresAt) {
+	if entry, ok := w.retentionCache[tenantID]; ok && cacheReadAt.Before(entry.expiresAt) {
 		w.mu.Unlock()
 		return entry.days
 	}
@@ -284,10 +297,11 @@ func (w *Writer) resolveRetention(tenantID uuid.UUID) int {
 	if days > MaxRetentionDays {
 		days = MaxRetentionDays
 	}
+	cacheWriteAt := time.Now()
 	w.mu.Lock()
 	w.retentionCache[tenantID] = retentionCacheEntry{
 		days:      days,
-		expiresAt: now.Add(retentionCacheTTL),
+		expiresAt: cacheWriteAt.Add(retentionCacheTTL),
 	}
 	w.mu.Unlock()
 	return days

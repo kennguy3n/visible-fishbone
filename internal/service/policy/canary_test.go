@@ -579,3 +579,23 @@ func TestCanary_RollbackFromFull_DemotesGraph(t *testing.T) {
 		t.Fatalf("post-rollback current = %s, want previous %s", cur.ID, f.graph.ID)
 	}
 }
+
+// TestErrCanaryPercent_MessageMatchesValidator pins the round-4
+// Devin Review fix: the error message previously announced the
+// valid range as [0, 100] but the validator rejected 0, so a
+// client passing canary_percent=0 was told 0 was valid (per the
+// message) and retried with the same value, getting stuck. The
+// long-term fix changes the message to match what the validator
+// actually accepts: [1, 100].
+//
+// Pinning the literal message keeps the contract honest — future
+// edits to the validator must edit the message in lockstep.
+func TestErrCanaryPercent_MessageMatchesValidator(t *testing.T) {
+	t.Parallel()
+	want := "policy: canary percent must be in [1, 100]"
+	if got := ErrCanaryPercent.Error(); got != want {
+		t.Fatalf("ErrCanaryPercent.Error() = %q, want %q\n"+
+			"keep the message in lockstep with the (0, 100] validator at canary.go:290",
+			got, want)
+	}
+}
