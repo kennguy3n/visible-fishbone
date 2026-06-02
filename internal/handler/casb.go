@@ -71,7 +71,7 @@ func toCASBConnectorResponse(c repository.CASBConnector) casbConnectorResponse {
 		Name:      c.Name,
 		Status:    string(c.Status),
 		Config:    c.Config,
-		SecretSet: len(c.Secret) > 0,
+		SecretSet: isSecretSet(c.Secret),
 		CreatedAt: c.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt: c.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}

@@ -258,9 +258,8 @@ func (svc *Service) SyncConnector(
 	}
 
 	syncAt := svc.nowFunc()
-	c.LastSyncAt = &syncAt
-	c.Status = repository.CASBConnectorStatusActive
-	if _, err := svc.connectors.Update(ctx, tenantID, c); err != nil {
+	if err := svc.connectors.UpdateSyncStatus(ctx, tenantID, connectorID,
+		repository.CASBConnectorStatusActive, syncAt); err != nil {
 		svc.logger.Warn("casb: update connector sync timestamp failed",
 			slog.String("connector_id", connectorID.String()),
 			slog.Any("error", err))

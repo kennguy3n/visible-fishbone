@@ -149,6 +149,28 @@ func (r *CASBConnectorRepository) Update(
 	return cloneCASBConnector(existing), nil
 }
 
+func (r *CASBConnectorRepository) UpdateSyncStatus(
+	ctx context.Context,
+	tenantID, id uuid.UUID,
+	status repository.CASBConnectorStatus,
+	lastSyncAt time.Time,
+) error {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.casbConnectors[id]
+	if !ok || existing.TenantID != tenantID {
+		return repository.ErrNotFound
+	}
+	existing.Status = status
+	existing.LastSyncAt = &lastSyncAt
+	existing.UpdatedAt = r.s.clock()
+	r.s.casbConnectors[id] = existing
+	return nil
+}
+
 func (r *CASBConnectorRepository) Delete(
 	ctx context.Context,
 	tenantID, id uuid.UUID,

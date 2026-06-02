@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -26,6 +28,12 @@ func (r *CASBConnectorRepository) Create(
 ) (repository.CASBConnector, error) {
 	if c.ID == uuid.Nil {
 		c.ID = uuid.New()
+	}
+	if len(c.Config) == 0 {
+		c.Config = json.RawMessage(`{}`)
+	}
+	if c.Secret == nil {
+		c.Secret = []byte{}
 	}
 	var out repository.CASBConnector
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
@@ -127,22 +135,35 @@ func (r *CASBConnectorRepository) Update(
 	tenantID uuid.UUID,
 	c repository.CASBConnector,
 ) (repository.CASBConnector, error) {
+	var (
+		config any
+		secret any
+	)
+	if len(c.Config) > 0 {
+		config = []byte(c.Config)
+	}
+	if len(c.Secret) > 0 {
+		secret = []byte(c.Secret)
+	}
 	var out repository.CASBConnector
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
 			UPDATE casb_connectors
-			SET name = $2, status = $3, config = $4, secret = $5, last_sync_at = $6
+			SET name       = COALESCE(NULLIF($2, ''), name),
+			    status     = COALESCE(NULLIF($3, ''), status),
+			    config     = COALESCE($4::jsonb, config),
+			    secret     = COALESCE($5::bytea, secret),
+			    last_sync_at = COALESCE($6, last_sync_at)
 			WHERE id = $1
-			RETURNING id, tenant_id, type, name, status, config, secret,
-			          last_sync_at, created_at, updated_at`,
-			c.ID, c.Name, c.Status, c.Config, c.Secret, c.LastSyncAt,
+			RETURNING `+casbConnectorSelectColumns,
+			c.ID, c.Name, string(c.Status), config, secret, c.LastSyncAt,
 		).Scan(
 			&out.ID, &out.TenantID, &out.Type, &out.Name, &out.Status,
 			&out.Config, &out.Secret, &out.LastSyncAt, &out.CreatedAt, &out.UpdatedAt,
 		)
 	})
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return repository.CASBConnector{}, repository.ErrNotFound
 		}
 		if isUniqueViolation(err) {
@@ -151,6 +172,28 @@ func (r *CASBConnectorRepository) Update(
 		return repository.CASBConnector{}, err
 	}
 	return out, nil
+}
+
+func (r *CASBConnectorRepository) UpdateSyncStatus(
+	ctx context.Context,
+	tenantID, id uuid.UUID,
+	status repository.CASBConnectorStatus,
+	lastSyncAt time.Time,
+) error {
+	return r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE casb_connectors
+			SET status = $2, last_sync_at = $3
+			WHERE id = $1`,
+			id, status, lastSyncAt)
+		if err != nil {
+			return fmt.Errorf("update casb_connector sync status: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return repository.ErrNotFound
+		}
+		return nil
+	})
 }
 
 func (r *CASBConnectorRepository) Delete(

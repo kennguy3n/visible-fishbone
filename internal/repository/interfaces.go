@@ -875,6 +875,7 @@ type CASBConnectorRepository interface {
 	Get(ctx context.Context, tenantID, id uuid.UUID) (CASBConnector, error)
 	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[CASBConnector], error)
 	Update(ctx context.Context, tenantID uuid.UUID, c CASBConnector) (CASBConnector, error)
+	UpdateSyncStatus(ctx context.Context, tenantID, id uuid.UUID, status CASBConnectorStatus, lastSyncAt time.Time) error
 	Delete(ctx context.Context, tenantID, id uuid.UUID) error
 }
 
