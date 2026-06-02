@@ -200,6 +200,108 @@ S3 (telemetry).
   Freshdesk), IAM (Okta, Entra, Google Workspace), and RMM / PSA
   (ConnectWise, Datto, Kaseya, NinjaOne).
 - Bidirectional where it makes sense (e.g. ticket sync, case status).
+- Implementation:
+  - `internal/service/integration/service.go` — connector lifecycle,
+    tenant-scoped CRUD, sync worker orchestration.
+  - `internal/service/integration/connectors/syslog.go` — RFC 5424 /
+    5425 with TLS, per-tenant destinations, retry with backoff.
+  - `internal/service/integration/connectors/siem.go` — outbound
+    delivery to Splunk HEC / Elastic / Sentinel via HMAC-signed
+    webhooks.
+  - `internal/service/integration/connectors/jira.go` — bidirectional
+    ticket sync, OAuth 2.0, create incidents from SNG alerts.
+  - `internal/service/integration/connectors/servicenow.go` — REST +
+    OAuth, bidirectional case status sync.
+  - `internal/handler/integration.go` — REST CRUD endpoints, test
+    connectivity, list available integrations, view sync status.
+  - `migrations/014_integrations.*` — schema for connector configs
+    and sync state.
+
+### 3.8 Baseline + Alert Service
+
+Statistical behaviour modelling and alert generation for per-tenant
+anomaly detection.
+
+- **Baseline engine** (`internal/service/baseline/engine.go`):
+  maintains Welford running mean + M2 and EWMA + EWMVAR estimators
+  per (tenant, dimension, window). Dimensions include bytes per app
+  class, DNS query volume, failed auth attempts, and policy deny
+  rate.
+- **Anomaly detector** (`internal/service/baseline/anomaly.go`):
+  evaluates `max(|z_welford|, |z_ewma|)` as a deviation score.
+  Configurable z-score thresholds per-tenant per-dimension (default
+  3.0). Emits typed alerts for both "sudden spike" and "slow drift"
+  regimes.
+- **Model persistence** (`internal/repository/{memory,postgres}/
+  baseline.go`, `migrations/012_baseline_models.*`): online
+  estimators are persisted per-tenant, per-dimension with rolling
+  updates. No raw sample storage — only the running statistics.
+- **Alert router** (`internal/service/alert/router.go`,
+  `migrations/013_alerts.*`): dispatches alerts to the operator
+  portal, NATS subjects, and external integrations. Per-tenant
+  suppression rules with audit trail.
+- **Feedback loop** (`internal/service/alert/feedback.go`): operator
+  feedback on dismissed / false-positive alerts feeds back into the
+  z-threshold tuning for the originating (tenant, dimension) pair.
+
+### 3.9 Policy Change Simulation
+
+Deterministic simulation of proposed policy changes before they
+affect any live traffic.
+
+- **Simulator** (`internal/service/policy/simulator.go`): replays
+  Tier-2 (ClickHouse) telemetry against old + new compiled bundles.
+  Produces an impact report: flow-count deltas, per-verdict
+  transition matrix, affected devices/users.
+- **Dry-run mode** (`internal/service/policy/dryrun.go`): shadow
+  bundles distributed to edges / endpoints that log verdicts without
+  enforcing. NATS subject routing isolates dry-run telemetry from
+  production.
+- **Canary rollout** (`internal/service/policy/canary.go`): staged
+  progression — dry-run shadow → canary cohort (configurable %) →
+  full fleet. One-click rollback at any stage. PostgreSQL-tracked
+  state (`migrations/010_policy_rollouts.*`,
+  `migrations/011_policy_graphs_is_draft.*`).
+- **Simulation API** (`internal/handler/policy_simulation.go`):
+  REST endpoints for triggering simulations, retrieving impact
+  reports, approving / rejecting proposed changes.
+
+### 3.10 MSP Hierarchy + Co-management
+
+Multi-tier partner hierarchy for Managed Service Providers.
+
+- **Data model** (`migrations/015_msps.*`,
+  `internal/repository/types.go`): MSP entity, MSP→tenant
+  relationship, MSP-scoped roles, per-MSP branding config,
+  MSP-level RLS extension.
+- **MSP RBAC** (`internal/service/rbac/msp.go`): extends the
+  hierarchical RBAC model with MSP → tenant → site → role
+  composition. MSP operators can manage their tenant cohort
+  without system-level privileges.
+- **Bulk operations** (`internal/service/tenant/bulk.go`): apply
+  policy templates across tenant cohorts, bulk site provisioning,
+  bulk device enrollment-token generation.
+- **Branding** (`internal/service/tenant/branding.go`): logo,
+  colour scheme, custom domain per MSP, inherited by tenants
+  unless overridden.
+- **MSP API** (`internal/handler/msp.go`): lifecycle, MSP↔tenant
+  assignments, bulk operations, branding config, MSP-role
+  authorization middleware.
+
+### 3.11 Planned Phase 4 Additions (Data Protection)
+
+The following capabilities are planned for the control plane in
+Phase 4 and are not yet implemented:
+
+- **CASB** — passive SaaS discovery from SWG flow logs + active
+  SaaS API connectors (M365, Google Workspace, Slack, Salesforce)
+  for audit-log ingestion and file-level visibility.
+- **DLP** — content inspection engine with regex + keyword
+  detectors, inline (SWG ext-authz) and out-of-band (CASB API)
+  enforcement, per-industry policy templates (PCI-DSS, HIPAA,
+  GDPR).
+- **Browser protection** — isolation proxy for high-risk URLs,
+  extension policy enforcement, credential phishing detection.
 
 ---
 

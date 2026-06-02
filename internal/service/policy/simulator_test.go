@@ -32,9 +32,9 @@ func (s *stubSource) ListFlowEvents(
 	ctx context.Context,
 	tid uuid.UUID,
 	since, until time.Time,
-	max int,
+	limit int,
 ) ([]schema.Envelope, error) {
-	return s.ListEvents(ctx, tid, []schema.EventClass{schema.EventClassFlow}, since, until, max)
+	return s.ListEvents(ctx, tid, []schema.EventClass{schema.EventClassFlow}, since, until, limit)
 }
 
 func (s *stubSource) ListEvents(

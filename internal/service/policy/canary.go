@@ -278,10 +278,10 @@ type AdvanceInput struct {
 
 // Advance moves the rollout to the next stage. Legal targets:
 //
-//   dry_run -> canary (with CanaryPercent in (0, 100))
-//   dry_run -> full
-//   canary  -> full
-//   full    -> completed
+//	dry_run -> canary (with CanaryPercent in (0, 100))
+//	dry_run -> full
+//	canary  -> full
+//	full    -> completed
 //
 // Any other transition fails with ErrInvalidArgument from the
 // repository (validRolloutTransition; mirrored in the DB
@@ -488,5 +488,3 @@ func IsCanaryDevice(rolloutID, deviceID uuid.UUID, canaryPercent int) bool {
 	bucket := h.Sum64() % 100
 	return bucket < uint64(canaryPercent)
 }
-
-

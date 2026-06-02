@@ -277,10 +277,10 @@ func (h *PolicySimulationHandler) simulate(w http.ResponseWriter, r *http.Reques
 	// runs against the operator-supplied bytes without touching
 	// the canonical graph state.
 	proposed := repository.PolicyGraph{
-		ID:      uuid.New(),
+		ID:       uuid.New(),
 		TenantID: tenantID,
-		Version: prev.Version + 1,
-		Graph:   req.Proposed,
+		Version:  prev.Version + 1,
+		Graph:    req.Proposed,
 	}
 
 	report, err := sim.Simulate(r.Context(), tenantID, prev, proposed, since, until, policy.SimulationOptions{
@@ -325,7 +325,7 @@ func (h *PolicySimulationHandler) simulate(w http.ResponseWriter, r *http.Reques
 // simulator transiently (no persistence) so by-ID retrieval is
 // not yet possible — return 404 with a stable code so clients
 // written against this path today still parse the response.
-func (h *PolicySimulationHandler) getSimulation(w http.ResponseWriter, r *http.Request) {
+func (h *PolicySimulationHandler) getSimulation(w http.ResponseWriter, _ *http.Request) {
 	WriteError(w, http.StatusNotFound, "not_found",
 		"simulation runs are not persisted in this build; re-run the simulation to inspect the report")
 }

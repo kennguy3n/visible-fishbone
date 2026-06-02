@@ -180,11 +180,11 @@ type ArchiverAPI interface {
 
 // Archiver is the cold-tier sealed-archive writer.
 type Archiver struct {
-	api      ArchiverAPI
-	cfg      ArchiverConfig
-	budgets  BudgetResolver
-	logger   *slog.Logger
-	nowFunc  func() time.Time
+	api     ArchiverAPI
+	cfg     ArchiverConfig
+	budgets BudgetResolver
+	logger  *slog.Logger
+	nowFunc func() time.Time
 
 	mu         sync.Mutex
 	partitions map[archiverPartitionKey]*archiverPartition
@@ -269,10 +269,10 @@ type archiverPartitionKey struct {
 // archiverPartition holds the in-memory accumulator for one
 // tenant/day partition before its zstd seal + upload.
 type archiverPartition struct {
-	mu             sync.Mutex
-	events         []sealedEvent
-	rawBytes       int
-	openedAt       time.Time
+	mu       sync.Mutex
+	events   []sealedEvent
+	rawBytes int
+	openedAt time.Time
 }
 
 // sealedEvent is the per-event row in a sealed object. The raw
@@ -290,8 +290,8 @@ type budgetKey struct {
 }
 
 type tenantDayUsage struct {
-	mu      sync.Mutex
-	bytes   int64
+	mu    sync.Mutex
+	bytes int64
 }
 
 // Archive buffers the envelope + raw bytes for cold-tier sealing.

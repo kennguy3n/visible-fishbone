@@ -58,7 +58,7 @@ func seedBaselineAndAlertsAtWindow(
 		a, err := aRepo.Create(ctx(), tnt, repository.Alert{
 			Kind: "baseline.zscore_exceeded", Severity: repository.AlertSeverityWarning,
 			Dimension: dimension, ObservedValue: 100, BaselineMean: 10, BaselineStdDev: 1,
-			ZScore: 5,
+			ZScore:        5,
 			WindowStart:   now.Add(-time.Duration(windowSeconds) * time.Second),
 			WindowEnd:     now,
 			WindowSeconds: windowSeconds,
