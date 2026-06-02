@@ -16,7 +16,7 @@ import (
 // the concrete policy type (prevents import cycles) and the
 // verifier can be unit-tested with a minimal fake.
 type PolicyCompiler interface {
-	PutGraph(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, raw json.RawMessage) (repository.PolicyGraph, error)
+	PutDraftGraph(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, raw json.RawMessage) (repository.PolicyGraph, error)
 }
 
 // Verifier takes an AI-proposed PolicySuggestion, compiles it
@@ -33,7 +33,7 @@ func NewVerifier(compiler PolicyCompiler) *Verifier {
 }
 
 // Verify compiles the AI-proposed suggestion through
-// policy.Service.PutGraph (as a draft). On success, returns a
+// policy.Service.PutDraftGraph. On success, returns a
 // VerifiedSuggestion with dry-run metadata. On compile failure,
 // returns the compiler error so the caller can surface it to the
 // operator.
@@ -46,7 +46,7 @@ func (v *Verifier) Verify(ctx context.Context, tenantID uuid.UUID, suggestion Po
 	}
 
 	start := time.Now()
-	graph, err := v.compiler.PutGraph(ctx, tenantID, nil, suggestion.Graph)
+	graph, err := v.compiler.PutDraftGraph(ctx, tenantID, nil, suggestion.Graph)
 	elapsed := time.Since(start)
 
 	if err != nil {

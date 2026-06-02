@@ -34,7 +34,7 @@ func (h *AIHandler) Register(mux *http.ServeMux) {
 }
 
 func (h *AIHandler) summarize(w http.ResponseWriter, r *http.Request) {
-	if h.svc == nil {
+	if h.svc == nil || !h.svc.SummarizerConfigured() {
 		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
 			"AI service is not configured")
 		return
@@ -148,6 +148,9 @@ func parseTimeRange(start, end string) (ai.TimeRange, error) {
 	}
 	if tr.Start.IsZero() {
 		tr.Start = tr.End.Add(-24 * time.Hour)
+	}
+	if !tr.Start.Before(tr.End) {
+		return tr, fmt.Errorf("start must be before end")
 	}
 	return tr, nil
 }

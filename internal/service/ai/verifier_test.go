@@ -16,7 +16,7 @@ type fakeCompiler struct {
 	err error
 }
 
-func (f *fakeCompiler) PutGraph(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ json.RawMessage) (repository.PolicyGraph, error) {
+func (f *fakeCompiler) PutDraftGraph(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ json.RawMessage) (repository.PolicyGraph, error) {
 	if f.err != nil {
 		return repository.PolicyGraph{}, f.err
 	}

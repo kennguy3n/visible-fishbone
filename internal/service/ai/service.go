@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,10 +21,13 @@ import (
 // Summarizer for incident/telemetry summaries, to the Verifier for
 // policy suggestions, and to the LLMProvider for raw completions.
 // When LLM is nil, only template-mode summaries are available.
+// The summarizer is stored behind an atomic.Pointer so it can be
+// wired post-construction when ClickHouse becomes available
+// (matching the PolicySimulationHandler.SetSimulator pattern).
 type Service struct {
 	llm        LLMProvider
 	verifier   *Verifier
-	summarizer *Summarizer
+	summarizer atomic.Pointer[Summarizer]
 	logger     *slog.Logger
 }
 
@@ -45,10 +49,12 @@ func WithLogger(l *slog.Logger) Option {
 // configured.
 func New(llm LLMProvider, verifier *Verifier, summarizer *Summarizer, opts ...Option) *Service {
 	s := &Service{
-		llm:        llm,
-		verifier:   verifier,
-		summarizer: summarizer,
-		logger:     slog.Default(),
+		llm:      llm,
+		verifier: verifier,
+		logger:   slog.Default(),
+	}
+	if summarizer != nil {
+		s.summarizer.Store(summarizer)
 	}
 	for _, o := range opts {
 		o(s)
@@ -56,11 +62,24 @@ func New(llm LLMProvider, verifier *Verifier, summarizer *Summarizer, opts ...Op
 	return s
 }
 
+// SetSummarizer wires a Summarizer post-construction. This
+// supports the late-binding pattern where ClickHouse is not
+// available at Service construction time but becomes ready
+// later during startup (mirrors PolicySimulationHandler.SetSimulator).
+func (s *Service) SetSummarizer(sum *Summarizer) {
+	s.summarizer.Store(sum)
+}
+
 // Configured reports whether the AI service has an LLM provider
 // wired. When false, only template-mode summaries are available
 // and SuggestPolicy / Troubleshoot return errors.
 func (s *Service) Configured() bool {
 	return s != nil && s.llm != nil
+}
+
+// SummarizerConfigured reports whether the summarizer is wired.
+func (s *Service) SummarizerConfigured() bool {
+	return s != nil && s.summarizer.Load() != nil
 }
 
 // SuggestPolicy asks the LLM to propose policy changes, then
@@ -102,10 +121,11 @@ func (s *Service) SuggestPolicy(ctx context.Context, tenantID uuid.UUID, prompt 
 // Summarize produces a summary for the given tenant and time
 // range. If the Summarizer is not configured, returns an error.
 func (s *Service) Summarize(ctx context.Context, tenantID uuid.UUID, tr TimeRange) (Summary, error) {
-	if s.summarizer == nil {
+	sum := s.summarizer.Load()
+	if sum == nil {
 		return Summary{}, errors.New("ai: summarizer not configured")
 	}
-	summary, err := s.summarizer.Generate(ctx, tenantID, tr)
+	summary, err := sum.Generate(ctx, tenantID, tr)
 	if err != nil {
 		return Summary{}, fmt.Errorf("ai: summarize: %w", err)
 	}

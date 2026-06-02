@@ -758,7 +758,6 @@ func Load() (Config, error) {
 			Endpoint: getStr("AI_LLM_ENDPOINT", ""),
 			APIKey:   getStr("AI_LLM_API_KEY", ""),
 			Model:    getStr("AI_LLM_MODEL", ""),
-			Timeout:  getDuration("AI_LLM_TIMEOUT", 10*time.Second),
 		},
 	}
 
@@ -839,6 +838,7 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_FLUSH_INTERVAL", 2 * time.Second, &cfg.TelemetryAnalytics.ClickHouseFlushInterval},
 		{"S3_TELEMETRY_FLUSH_INTERVAL", 30 * time.Second, &cfg.TelemetryAnalytics.S3FlushInterval},
 		{"APP_REGISTRY_SYNC_INTERVAL", 24 * time.Hour, &cfg.AppRegistry.SyncInterval},
+		{"AI_LLM_TIMEOUT", 10 * time.Second, &cfg.AI.Timeout},
 	}
 	strictFloats := []struct {
 		key string
