@@ -214,10 +214,8 @@ func severityForScore(score int) string {
 	case score >= 80:
 		return "critical"
 	case score >= 60:
-		return "high"
-	case score >= 40:
-		return "medium"
+		return "warning"
 	default:
-		return "low"
+		return "info"
 	}
 }

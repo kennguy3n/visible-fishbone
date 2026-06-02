@@ -125,6 +125,42 @@ func TestDetectDrift_MultipleResourceTypes(t *testing.T) {
 	}
 }
 
+func TestDetectDrift_ModifiedResource(t *testing.T) {
+	t.Parallel()
+	provider, store, tenantID := newTestProvider(t)
+	ctx := context.Background()
+
+	siteRepo := memory.NewSiteRepository(store)
+	_, _ = siteRepo.Create(ctx, tenantID, repository.Site{
+		Name: "HQ", Slug: "hq", Template: repository.SiteTemplateBranch,
+	})
+
+	// Declared has same name but different template.
+	declared := terraform.ExportedConfig{
+		Version:  terraform.ConfigVersion,
+		TenantID: tenantID.String(),
+		Sites:    []terraform.ExportedSite{{Name: "HQ", Slug: "hq", Template: "hub"}},
+	}
+	declaredJSON, _ := json.Marshal(declared)
+
+	report, err := provider.DetectDrift(ctx, tenantID, declaredJSON)
+	if err != nil {
+		t.Fatalf("drift: %v", err)
+	}
+	if !report.HasDrift {
+		t.Fatal("expected drift for modified resource")
+	}
+	found := false
+	for _, e := range report.Entries {
+		if e.ResourceType == "site" && e.DriftType == terraform.DriftTypeModified {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected modified site drift entry, got %+v", report.Entries)
+	}
+}
+
 func TestDetectDrift_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	provider, _, tenantID := newTestProvider(t)

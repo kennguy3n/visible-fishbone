@@ -1767,7 +1767,7 @@ paths:
       tags: [browser]
       summary: Create a browser protection policy
       parameters:
-        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/TenantPathID"
       requestBody:
         required: true
         content:
@@ -1784,7 +1784,7 @@ paths:
       tags: [browser]
       summary: List browser protection policies
       parameters:
-        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/TenantPathID"
         - $ref: "#/components/parameters/After"
         - $ref: "#/components/parameters/Limit"
       responses:
@@ -1805,7 +1805,7 @@ paths:
       tags: [browser]
       summary: Get a browser protection policy
       parameters:
-        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/TenantPathID"
         - $ref: "#/components/parameters/ResourceID"
       responses:
         "200":
@@ -1818,7 +1818,7 @@ paths:
       tags: [browser]
       summary: Update a browser protection policy
       parameters:
-        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/TenantPathID"
         - $ref: "#/components/parameters/ResourceID"
       requestBody:
         required: true
@@ -1836,7 +1836,7 @@ paths:
       tags: [browser]
       summary: Delete a browser protection policy
       parameters:
-        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/TenantPathID"
         - $ref: "#/components/parameters/ResourceID"
       responses:
         "204": { description: deleted }
@@ -1848,7 +1848,7 @@ paths:
       tags: [terraform]
       summary: Export full tenant configuration
       parameters:
-        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/TenantPathID"
       responses:
         "200":
           description: OK
@@ -1861,7 +1861,7 @@ paths:
       tags: [terraform]
       summary: Idempotent import of tenant configuration
       parameters:
-        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/TenantPathID"
       requestBody:
         required: true
         content:
@@ -1882,7 +1882,7 @@ paths:
       tags: [terraform]
       summary: Detect drift between declared config and actual state
       parameters:
-        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/TenantPathID"
       requestBody:
         required: true
         content:

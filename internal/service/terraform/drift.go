@@ -63,48 +63,48 @@ func (p *Provider) DetectDrift(ctx context.Context, tenantID uuid.UUID, declared
 	}
 
 	// Compare sites.
-	report.Entries = append(report.Entries, diffNamedResources("site",
-		exportedSiteNames(declared.Sites),
-		exportedSiteNames(actual.Sites),
-	)...)
+	report.Entries = append(report.Entries, diffResources("site",
+		indexSites(declared.Sites), indexSites(actual.Sites))...)
 
 	// Compare browser policies.
-	report.Entries = append(report.Entries, diffNamedResources("browser_policy",
-		exportedBrowserPolicyNames(declared.BrowserPolicies),
-		exportedBrowserPolicyNames(actual.BrowserPolicies),
-	)...)
+	report.Entries = append(report.Entries, diffResources("browser_policy",
+		indexBrowserPolicies(declared.BrowserPolicies), indexBrowserPolicies(actual.BrowserPolicies))...)
 
 	// Compare data classifications.
-	report.Entries = append(report.Entries, diffNamedResources("data_classification",
-		exportedDataClassificationLabels(declared.DataClassifications),
-		exportedDataClassificationLabels(actual.DataClassifications),
-	)...)
+	report.Entries = append(report.Entries, diffResources("data_classification",
+		indexDataClassifications(declared.DataClassifications), indexDataClassifications(actual.DataClassifications))...)
 
 	// Compare integrations.
-	report.Entries = append(report.Entries, diffNamedResources("integration",
-		exportedIntegrationNames(declared.Integrations),
-		exportedIntegrationNames(actual.Integrations),
-	)...)
+	report.Entries = append(report.Entries, diffResources("integration",
+		indexIntegrations(declared.Integrations), indexIntegrations(actual.Integrations))...)
 
 	report.HasDrift = len(report.Entries) > 0
 	return report, nil
 }
 
-func diffNamedResources(resourceType string, declared, actual map[string]bool) []DriftEntry {
+func diffResources(resourceType string, declared, actual map[string]string) []DriftEntry {
 	var entries []DriftEntry
 
-	for name := range declared {
-		if !actual[name] {
+	for name, declHash := range declared {
+		actHash, exists := actual[name]
+		if !exists {
 			entries = append(entries, DriftEntry{
 				ResourceType: resourceType,
 				ResourceName: name,
 				DriftType:    DriftTypeRemoved,
 				Details:      "declared but not present in actual state",
 			})
+		} else if declHash != actHash {
+			entries = append(entries, DriftEntry{
+				ResourceType: resourceType,
+				ResourceName: name,
+				DriftType:    DriftTypeModified,
+				Details:      "configuration differs between declared and actual state",
+			})
 		}
 	}
 	for name := range actual {
-		if !declared[name] {
+		if _, exists := declared[name]; !exists {
 			entries = append(entries, DriftEntry{
 				ResourceType: resourceType,
 				ResourceName: name,
@@ -116,34 +116,39 @@ func diffNamedResources(resourceType string, declared, actual map[string]bool) [
 	return entries
 }
 
-func exportedSiteNames(sites []ExportedSite) map[string]bool {
-	m := make(map[string]bool, len(sites))
+func marshalCanonical(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+func indexSites(sites []ExportedSite) map[string]string {
+	m := make(map[string]string, len(sites))
 	for _, s := range sites {
-		m[s.Name] = true
+		m[s.Name] = marshalCanonical(s)
 	}
 	return m
 }
 
-func exportedBrowserPolicyNames(policies []ExportedBrowserPolicy) map[string]bool {
-	m := make(map[string]bool, len(policies))
+func indexBrowserPolicies(policies []ExportedBrowserPolicy) map[string]string {
+	m := make(map[string]string, len(policies))
 	for _, p := range policies {
-		m[p.Name] = true
+		m[p.Name] = marshalCanonical(p)
 	}
 	return m
 }
 
-func exportedDataClassificationLabels(dcs []ExportedDataClassification) map[string]bool {
-	m := make(map[string]bool, len(dcs))
+func indexDataClassifications(dcs []ExportedDataClassification) map[string]string {
+	m := make(map[string]string, len(dcs))
 	for _, dc := range dcs {
-		m[dc.Label] = true
+		m[dc.Label] = marshalCanonical(dc)
 	}
 	return m
 }
 
-func exportedIntegrationNames(ics []ExportedIntegration) map[string]bool {
-	m := make(map[string]bool, len(ics))
+func indexIntegrations(ics []ExportedIntegration) map[string]string {
+	m := make(map[string]string, len(ics))
 	for _, ic := range ics {
-		m[ic.Name] = true
+		m[ic.Name] = marshalCanonical(ic)
 	}
 	return m
 }

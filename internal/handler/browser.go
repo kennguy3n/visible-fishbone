@@ -32,7 +32,7 @@ type BrowserPolicyCreateRequest struct {
 	Rules   []repository.BrowserRule `json:"rules"`
 	Action  string                   `json:"action"`
 	Scope   string                   `json:"scope"`
-	Enabled bool                     `json:"enabled"`
+	Enabled *bool                    `json:"enabled,omitempty"`
 }
 
 // BrowserPolicyUpdateRequest is the JSON body for PATCH.
@@ -85,12 +85,16 @@ func (h *BrowserHandler) create(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "missing_name", "name is required")
 		return
 	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
 	created, err := h.svc.CreatePolicy(r.Context(), tenantID, repository.BrowserPolicy{
 		Name:    req.Name,
 		Rules:   req.Rules,
 		Action:  repository.BrowserPolicyAction(req.Action),
 		Scope:   repository.BrowserPolicyScope(req.Scope),
-		Enabled: req.Enabled,
+		Enabled: enabled,
 	})
 	if err != nil {
 		WriteRepositoryError(w, err)
