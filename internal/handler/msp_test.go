@@ -1250,6 +1250,78 @@ func TestMSPHandler_UpdateMSP_NonBrandingPatchDoesNotInvalidate(t *testing.T) {
 	}
 }
 
+// TestMSPHandler_DeleteMSP_InvalidatesBrandingCache pins the
+// round-8 fix: when an MSP is soft-deleted, the handler must
+// invalidate the branding cache. Soft-deletion cascades by
+// clearing tenants.msp_id for every owned tenant — without the
+// invalidation, the cache continues to serve the now-deleted
+// MSP's branding fields to those tenants until the TTL expires
+// (a multi-minute window in production once caching is enabled).
+//
+// We prime the cache via a Resolve, mutate the MSP's branding row
+// directly via the repo (so no handler-side invalidation can fire),
+// then DELETE the MSP via the handler. After delete the cache must
+// no longer be serving the cached "v1" — the resolver must fall
+// through to platform defaults because the MSP is gone and the
+// tenant's msp_id has been cleared.
+func TestMSPHandler_DeleteMSP_InvalidatesBrandingCache(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _ := setupMSPHandlerWithCachedBranding(t)
+	ctx := context.Background()
+
+	m, err := msps.Create(ctx, repository.MSP{
+		Name:     "Acme",
+		Slug:     "acme-del-cache",
+		Branding: repository.MSPBranding{LogoURL: "v1"},
+	})
+	if err != nil {
+		t.Fatalf("seed msp: %v", err)
+	}
+	mID := m.ID
+	tn, err := tenants.Create(ctx, repository.Tenant{
+		Name: "T", Slug: "t-del-cache", MSPID: &mID,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+
+	// Prime the cache.
+	rec := doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prime resolve status = %d", rec.Code)
+	}
+	var primed handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&primed)
+	if primed.LogoURL != "v1" {
+		t.Fatalf("primed logo = %q, want v1", primed.LogoURL)
+	}
+
+	// DELETE the MSP via the handler. This must invalidate the
+	// cache so the next Resolve does not return stale "v1".
+	rec = doMSPJSON(t, mux, http.MethodDelete,
+		"/api/v1/msps/"+m.ID.String(), nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// After delete, the cache must NOT serve the cached v1. The
+	// tenant's msp_id has been cleared by the cascade so the
+	// resolver should now fall through to platform defaults; the
+	// LogoURL therefore must NOT equal the cached "v1".
+	rec = doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post-delete resolve status = %d", rec.Code)
+	}
+	var after handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&after)
+	if after.LogoURL == "v1" {
+		t.Fatalf("delete did not invalidate cache: logo still = %q, want empty/default",
+			after.LogoURL)
+	}
+}
+
 // setupMSPHandlerWithCachedBranding wires the handler with a
 // cached BrandingResolver so tests can exercise the
 // MSP-rebrand-invalidates-cache path. The cache TTL is set high

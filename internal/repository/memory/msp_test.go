@@ -399,3 +399,55 @@ func TestMSPRepository_GetBySlug_ReturnsErrNotFoundForOnlySoftDeleted(t *testing
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
+
+// TestMSPRepository_Update_RejectsEmptyName pins the round-8
+// defense-in-depth guard at the repo boundary: even if an
+// internal caller bypasses the HTTP handler (which already 400s
+// on `{"name": ""}`), the memory repo must reject *patch.Name=""
+// with ErrInvalidArgument so the two backends stay consistent.
+// The previous behaviour silently dropped the empty value, while
+// postgres would have written it into the NOT NULL column.
+func TestMSPRepository_Update_RejectsEmptyName(t *testing.T) {
+	_, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+	m, err := mspRepo.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-empty-name"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	empty := ""
+	_, err = mspRepo.Update(ctx, m.ID, repository.MSPPatch{Name: &empty})
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument for empty Name, got %v", err)
+	}
+	// And the row must NOT have been mutated.
+	after, err := mspRepo.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if after.Name != "Acme" {
+		t.Fatalf("row mutated despite rejected update: name = %q, want Acme", after.Name)
+	}
+}
+
+// TestMSPRepository_Update_RejectsEmptySlug is the slug-side
+// twin of the empty-Name test above.
+func TestMSPRepository_Update_RejectsEmptySlug(t *testing.T) {
+	_, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+	m, err := mspRepo.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-empty-slug"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	empty := ""
+	_, err = mspRepo.Update(ctx, m.ID, repository.MSPPatch{Slug: &empty})
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument for empty Slug, got %v", err)
+	}
+	after, err := mspRepo.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if after.Slug != "acme-empty-slug" {
+		t.Fatalf("row mutated despite rejected update: slug = %q, want acme-empty-slug", after.Slug)
+	}
+}

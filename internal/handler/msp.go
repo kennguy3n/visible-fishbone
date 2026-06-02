@@ -549,6 +549,27 @@ func (h *MSPHandler) delete(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
+	// Soft-deleting an MSP cascades by clearing tenants.msp_id for
+	// every tenant the MSP owned (memory backend:
+	// internal/repository/memory/msp.go:210-221; postgres backend:
+	// internal/repository/postgres/msp.go:304-308). The resolver keys
+	// the branding cache on tenantID, so any tenant that was bound to
+	// this MSP would otherwise keep serving the now-deleted MSP's
+	// branding fields until the cache TTL expired. We can't selectively
+	// flush (the cache is keyed on tenantID and we don't enumerate the
+	// owned tenant set here on purpose — that's the repo's concern), so
+	// we invalidate the whole cache. InvalidateAll is a documented
+	// no-op on uncached resolvers (internal/service/tenant/branding.go
+	// :180-188), so this is free on the current production wiring (which
+	// constructs the uncached variant via NewBrandingResolver) and only
+	// pays a cost the moment caching is turned on. Round-8 of Devin
+	// Review caught this gap. Symmetric with the Update path's
+	// conditional flush — the Update path uses patch.Branding != nil as
+	// a precise predicate; Delete cannot be that selective because it
+	// has no per-field signal, so we always invalidate.
+	if h.branding != nil {
+		h.branding.InvalidateAll()
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

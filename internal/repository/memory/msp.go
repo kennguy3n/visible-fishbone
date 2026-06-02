@@ -126,13 +126,29 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.MSP{}, err
 	}
+	// Defense-in-depth: reject empty Name / Slug here even though the
+	// HTTP handler already 400s on `{"name": ""}` / `{"slug": ""}`.
+	// Round-8 of Devin Review caught that the previous behaviour
+	// (silently dropping the empty value via `if *patch.X != ""`)
+	// diverged from the postgres backend (which would bind the empty
+	// string into the NOT NULL column). Both behaviours are wrong for
+	// an internal caller bypassing the handler. Failing fast with
+	// ErrInvalidArgument is now consistent across backends; see the
+	// matching guard in internal/repository/postgres/msp.go:182-208 for
+	// the rationale.
+	if patch.Name != nil && *patch.Name == "" {
+		return repository.MSP{}, repository.ErrInvalidArgument
+	}
+	if patch.Slug != nil && *patch.Slug == "" {
+		return repository.MSP{}, repository.ErrInvalidArgument
+	}
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 	existing, ok := r.s.msps[id]
 	if !ok {
 		return repository.MSP{}, repository.ErrNotFound
 	}
-	if patch.Slug != nil && *patch.Slug != "" && *patch.Slug != existing.Slug {
+	if patch.Slug != nil && *patch.Slug != existing.Slug {
 		for otherID, other := range r.s.msps {
 			if otherID == id {
 				continue
@@ -143,7 +159,7 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 		}
 		existing.Slug = *patch.Slug
 	}
-	if patch.Name != nil && *patch.Name != "" {
+	if patch.Name != nil {
 		existing.Name = *patch.Name
 	}
 	if patch.Status != nil && *patch.Status != "" {

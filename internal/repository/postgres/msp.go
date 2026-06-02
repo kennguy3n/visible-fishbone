@@ -183,6 +183,29 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 	if id == uuid.Nil {
 		return repository.MSP{}, repository.ErrInvalidArgument
 	}
+	// Defense-in-depth: reject empty Name / Slug here even though the
+	// HTTP handler already 400s on `{"name": ""}` and `{"slug": ""}`.
+	// Round-8 of Devin Review caught the cross-backend divergence:
+	// the previous postgres `CASE WHEN $X::text IS NULL THEN col ELSE
+	// $X::text END` arm bound an empty string into NOT NULL columns,
+	// while the memory backend silently dropped the empty value with
+	// `if *patch.Name != ""`. Both behaviours are wrong for an
+	// internal caller that bypasses the handler:
+	//   - postgres: corrupts the row (empty NOT NULL string, both
+	//     required-on-create fields nulled out),
+	//   - memory: silently no-ops with no diagnostic.
+	// Failing fast with ErrInvalidArgument keeps the two backends
+	// observably identical and makes any future internal caller see
+	// the bug at the repo boundary instead of producing a corrupted
+	// row or a silent drop. The handler keeps producing the friendlier
+	// 400 copy ("cannot be cleared via PATCH; omit the field to leave
+	// unchanged") for HTTP callers.
+	if patch.Name != nil && *patch.Name == "" {
+		return repository.MSP{}, repository.ErrInvalidArgument
+	}
+	if patch.Slug != nil && *patch.Slug == "" {
+		return repository.MSP{}, repository.ErrInvalidArgument
+	}
 	// Same sparse explicit-clear PATCH shape as
 	// TenantRepository.Update: nil arg → keep, non-nil arg → set
 	// to value (including zero).
