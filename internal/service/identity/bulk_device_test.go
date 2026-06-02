@@ -202,6 +202,39 @@ func TestBulkDevice_ImportCSV_InvalidPlatformIsolated(t *testing.T) {
 	}
 }
 
+func TestBulkDevice_ImportCSV_MalformedRowReported(t *testing.T) {
+	svc, store, tenantID := setupBulkTest(t)
+	ctx := context.Background()
+
+	// Second data row has only 3 columns and cannot be parsed.
+	csv := "device_id,name,platform,status,created_at\n" +
+		"abc-123,dev1,linux,active,2025-01-01T00:00:00Z\n" +
+		"def-456,dev2,windows\n"
+
+	result, err := svc.ImportCSV(ctx, tenantID, strings.NewReader(csv))
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	// The malformed row must be counted, not silently dropped.
+	if result.Total != 2 || result.Succeeded != 1 || result.Failed != 1 {
+		t.Errorf("result = %+v, want total=2 succeeded=1 failed=1", result)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("errors = %v, want 1 entry", result.Errors)
+	}
+	if !strings.Contains(result.Errors[0], "row 2") {
+		t.Errorf("error %q should reference the malformed row 2", result.Errors[0])
+	}
+	page, err := memory.NewDeviceRepository(store).List(
+		ctx, tenantID, repository.DeviceListFilter{}, repository.Page{Limit: 50})
+	if err != nil {
+		t.Fatalf("list devices: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Errorf("persisted devices = %d, want 1 (malformed row not persisted)", len(page.Items))
+	}
+}
+
 func TestBulkDevice_ImportCSV_Empty(t *testing.T) {
 	svc, _, tenantID := setupBulkTest(t)
 	result, err := svc.ImportCSV(context.Background(), tenantID, strings.NewReader("header\n"))

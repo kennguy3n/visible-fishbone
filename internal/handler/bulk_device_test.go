@@ -83,6 +83,24 @@ func TestBulkDevice_Enroll_InvalidCount(t *testing.T) {
 	}
 }
 
+func TestBulkDevice_Enroll_NegativeTTL(t *testing.T) {
+	t.Parallel()
+	h, _, tenantID := newBulkDeviceTestSetup(t)
+	tid := tenantID.String()
+
+	body, _ := json.Marshal(BulkEnrollHTTPRequest{Count: 1, TTL: "-24h"})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tid+"/devices/bulk/enroll",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tid)
+	rec := httptest.NewRecorder()
+	h.bulkEnroll(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for negative ttl", rec.Code)
+	}
+}
+
 func TestBulkDevice_Revoke(t *testing.T) {
 	t.Parallel()
 	h, store, tenantID := newBulkDeviceTestSetup(t)

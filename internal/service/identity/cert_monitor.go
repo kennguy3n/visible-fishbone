@@ -135,7 +135,9 @@ func (s *CertMonitorService) FindExpiring(
 		if c.TenantID != tenantID || c.RevokedAt != nil {
 			continue
 		}
-		if now.After(c.ExpiresAt) || threshold.After(c.ExpiresAt) {
+		// threshold = now + window, so threshold.After(ExpiresAt) already
+		// covers both already-expired and expiring-soon certificates.
+		if threshold.After(c.ExpiresAt) {
 			daysLeft := int(c.ExpiresAt.Sub(now).Hours() / 24)
 			if daysLeft < 0 {
 				daysLeft = 0
@@ -189,7 +191,12 @@ func (s *CertMonitorService) CheckRenewalStatus(
 				continue
 			}
 			if c.IssuedAt.After(*enrollment.LastCertIssuedAt) || c.IssuedAt.Equal(*enrollment.LastCertIssuedAt) {
-				if now.Before(c.ExpiresAt) {
+				// A genuine renewal cert must itself be healthy: its expiry
+				// is beyond the threshold window. This excludes the cert that
+				// triggered the concern (whose expiry is within the window),
+				// which would otherwise self-satisfy the check when its
+				// IssuedAt equals LastCertIssuedAt (the single-cert case).
+				if now.Add(s.threshold).Before(c.ExpiresAt) {
 					status.RenewedAfter = true
 					break
 				}

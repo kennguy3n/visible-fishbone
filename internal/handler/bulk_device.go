@@ -65,6 +65,10 @@ func (h *BulkDeviceHandler) bulkEnroll(w http.ResponseWriter, r *http.Request) {
 			WriteError(w, http.StatusBadRequest, "invalid_argument", "invalid ttl duration")
 			return
 		}
+		if parsed <= 0 {
+			WriteError(w, http.StatusBadRequest, "invalid_argument", "ttl must be positive")
+			return
+		}
 		ttl = parsed
 	}
 	result, tokens, err := h.svc.BulkGenerateTokens(r.Context(), tenantID, req.Count, ttl)

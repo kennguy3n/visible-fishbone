@@ -109,6 +109,39 @@ func TestCertMonitor_CheckRenewalStatus(t *testing.T) {
 	}
 }
 
+func TestCertMonitor_CheckRenewalStatus_SingleCertNoRenewal(t *testing.T) {
+	svc := identity.NewCertMonitorService(nil, nil, nil)
+	now := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	svc.SetNowFunc(func() time.Time { return now })
+
+	tenantID := uuid.New()
+	deviceID := uuid.New()
+	// The device has exactly one cert (the one about to expire), and
+	// LastCertIssuedAt was set when that same cert was issued.
+	lastIssued := now.Add(-340 * 24 * time.Hour)
+
+	enrollment := repository.DeviceEnrollment{
+		DeviceID:         deviceID,
+		TenantID:         tenantID,
+		Status:           repository.EnrollmentStatusActive,
+		LastCertIssuedAt: &lastIssued,
+	}
+
+	// Single cert expiring in 25 days (within 30-day threshold), issued at
+	// the same instant recorded in LastCertIssuedAt. No renewal has happened.
+	certs := []repository.DeviceCertificate{
+		{ID: uuid.New(), DeviceID: deviceID, TenantID: tenantID, ExpiresAt: now.Add(25 * 24 * time.Hour), IssuedAt: lastIssued},
+	}
+
+	status := svc.CheckRenewalStatus(enrollment, certs)
+	if !status.Triggered {
+		t.Error("expected triggered (cert within threshold)")
+	}
+	if status.RenewedAfter {
+		t.Error("expected RenewedAfter=false: the expiring cert must not self-satisfy the renewal check")
+	}
+}
+
 func TestCertMonitor_CustomThreshold(t *testing.T) {
 	svc := identity.NewCertMonitorService(nil, nil, nil)
 	now := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)

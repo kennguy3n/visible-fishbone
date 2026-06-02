@@ -208,21 +208,27 @@ func (s *BulkDeviceService) ImportCSV(
 	tenantID uuid.UUID,
 	r io.Reader,
 ) (BulkResult, error) {
-	rows, err := parseDeviceCSV(r)
+	rows, malformed, err := parseDeviceCSV(r)
 	if err != nil {
 		return BulkResult{}, err
 	}
-	result := BulkResult{Total: len(rows)}
-	for i, row := range rows {
-		dev, derr := deviceFromCSVRow(row)
+	// Total counts every data row in the CSV (header excluded),
+	// including rows that could not be parsed at all. Malformed rows
+	// (wrong column count) are reported as failures so the caller is
+	// never silently shorted records.
+	result := BulkResult{Total: len(rows) + len(malformed)}
+	result.Failed += len(malformed)
+	result.Errors = append(result.Errors, malformed...)
+	for _, dr := range rows {
+		dev, derr := deviceFromCSVRow(dr.row)
 		if derr != nil {
 			result.Failed++
-			result.Errors = append(result.Errors, fmt.Sprintf("row %d: %v", i+1, derr))
+			result.Errors = append(result.Errors, fmt.Sprintf("row %d: %v", dr.line, derr))
 			continue
 		}
 		if _, cerr := s.devices.Create(ctx, tenantID, dev); cerr != nil {
 			result.Failed++
-			result.Errors = append(result.Errors, fmt.Sprintf("row %d: %v", i+1, cerr))
+			result.Errors = append(result.Errors, fmt.Sprintf("row %d: %v", dr.line, cerr))
 			continue
 		}
 		result.Succeeded++
@@ -230,34 +236,53 @@ func (s *BulkDeviceService) ImportCSV(
 	return result, nil
 }
 
-// parseDeviceCSV reads device rows from CSV, skipping the header.
-func parseDeviceCSV(r io.Reader) ([]DeviceCSVRow, error) {
+// csvDataRow pairs a parsed CSV row with its 1-based data-row number
+// (header excluded) so per-row errors reference the original line.
+type csvDataRow struct {
+	line int
+	row  DeviceCSVRow
+}
+
+// parseDeviceCSV reads device rows from CSV, skipping the header. It
+// returns the well-formed rows alongside per-row error messages for
+// rows that have too few columns to parse, so callers can surface
+// them instead of dropping them silently.
+func parseDeviceCSV(r io.Reader) ([]csvDataRow, []string, error) {
 	reader := csv.NewReader(r)
+	// Allow a variable column count so a single short/long row is
+	// reported per-row instead of aborting the entire import.
+	reader.FieldsPerRecord = -1
 	records, err := reader.ReadAll()
 	if err != nil {
-		return nil, fmt.Errorf("parse CSV: %w", err)
+		return nil, nil, fmt.Errorf("parse CSV: %w", err)
 	}
 	if len(records) < 2 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	// Skip header row.
-	var rows []DeviceCSVRow
-	for _, rec := range records[1:] {
+	// Skip header row; number remaining rows from 1.
+	var rows []csvDataRow
+	var malformed []string
+	for i, rec := range records[1:] {
+		line := i + 1
 		if len(rec) < 5 {
+			malformed = append(malformed, fmt.Sprintf("row %d: expected 5 columns, got %d", line, len(rec)))
 			continue
 		}
-		rows = append(rows, DeviceCSVRow{
-			DeviceID:  rec[0],
-			Name:      rec[1],
-			Platform:  rec[2],
-			Status:    rec[3],
-			CreatedAt: rec[4],
+		rows = append(rows, csvDataRow{
+			line: line,
+			row: DeviceCSVRow{
+				DeviceID:  rec[0],
+				Name:      rec[1],
+				Platform:  rec[2],
+				Status:    rec[3],
+				CreatedAt: rec[4],
+			},
 		})
 	}
-	if len(rows) > MaxBulkDevices {
-		return nil, fmt.Errorf("CSV exceeds max %d rows: %w", MaxBulkDevices, repository.ErrInvalidArgument)
+	if len(rows)+len(malformed) > MaxBulkDevices {
+		return nil, nil, fmt.Errorf("CSV exceeds max %d rows: %w", MaxBulkDevices, repository.ErrInvalidArgument)
 	}
-	return rows, nil
+	return rows, malformed, nil
 }
 
 // deviceFromCSVRow builds a Device from one inventory row. The
