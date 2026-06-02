@@ -2989,3 +2989,233 @@ func TestMSPHandler_BulkProvisionSites_RejectsInvalidTemplate(t *testing.T) {
 			body.Error.Message)
 	}
 }
+
+// permissionAuthz is a fine-grained MSPAuthorizer that returns
+// true only for the permissions in `allow`. Used to pin the
+// round-18 BUG_0001 fix on setStatus=deleted: holding msp.write
+// (which the route's middleware enforces) is NOT sufficient — the
+// handler must additionally check msp.delete before running the
+// cascade-aware Delete() path, because the cascade is identical
+// to the dedicated DELETE /api/v1/msps/{msp_id} endpoint which
+// requires msp.delete.
+type permissionAuthz struct {
+	allow map[string]bool
+}
+
+func (p permissionAuthz) AuthorizeMSP(_ context.Context, _, _ uuid.UUID, permission string) (bool, error) {
+	return p.allow[permission], nil
+}
+func (p permissionAuthz) AuthorizePlatform(_ context.Context, _ uuid.UUID, permission string) (bool, error) {
+	return p.allow[permission], nil
+}
+
+// TestMSPHandler_SetStatusDeleted_RequiresMSPDeletePermission
+// pins round-18 BUG_0001: POST /api/v1/msps/{msp_id}/status with
+// status="deleted" must require msp.delete (not just msp.write).
+// The cascade behaviour is identical to DELETE
+// /api/v1/msps/{msp_id} — it removes every msp_tenants row and
+// clears the denormalised tenants.msp_id pointer on every owned
+// tenant — so without this gate, any operator holding msp.write
+// could bypass the intended permission boundary by POSTing to the
+// status endpoint instead of calling DELETE.
+//
+// We exercise three scenarios:
+//
+//  1. Holder of {msp.write} only → 403 forbidden
+//  2. Holder of {msp.write, msp.delete} → 200 with cascading
+//     soft-delete
+//  3. active <-> suspended transition path (status="suspended")
+//     must NOT escalate: msp.write alone is sufficient (the
+//     extra gate fires only on the deleted branch).
+func TestMSPHandler_SetStatusDeleted_RequiresMSPDeletePermission(t *testing.T) {
+	t.Parallel()
+
+	// (1) msp.write but NOT msp.delete → 403.
+	t.Run("write only is rejected", func(t *testing.T) {
+		t.Parallel()
+		store := memory.NewStore()
+		msps := memory.NewMSPRepository(store)
+		h := handler.NewMSPHandler(repoMSPService{repo: msps}, nil, nil,
+			permissionAuthz{allow: map[string]bool{"msp.write": true}})
+		mux := http.NewServeMux()
+		h.Register(mux)
+		m, err := msps.Create(context.Background(), repository.MSP{
+			Name: "Acme", Slug: "acme-r18-writeonly",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		rec := doMSPJSON(t, mux, http.MethodPost,
+			"/api/v1/msps/"+m.ID.String()+"/status",
+			handler.MSPStatusRequest{Status: string(repository.MSPStatusDeleted)})
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d body=%s, want 403 — "+
+				"setStatus=deleted with msp.write only must be rejected "+
+				"(round-18 BUG_0001: cascade requires msp.delete)",
+				rec.Code, rec.Body.String())
+		}
+		// Confirm the row was NOT touched.
+		got, err := msps.Get(context.Background(), m.ID)
+		if err != nil {
+			t.Fatalf("post-403 Get: %v", err)
+		}
+		if got.Status == repository.MSPStatusDeleted {
+			t.Fatalf("got.Status = deleted after 403 — " +
+				"the cascade must not run when msp.delete is denied",
+			)
+		}
+		if got.DeletedAt != nil {
+			t.Fatalf("got.DeletedAt = %v, want nil — "+
+				"the cascade must not stamp deleted_at when 403",
+				got.DeletedAt)
+		}
+	})
+
+	// (2) {msp.write, msp.delete} → 200 + cascading soft-delete.
+	t.Run("write and delete succeeds", func(t *testing.T) {
+		t.Parallel()
+		store := memory.NewStore()
+		msps := memory.NewMSPRepository(store)
+		h := handler.NewMSPHandler(repoMSPService{repo: msps}, nil, nil,
+			permissionAuthz{allow: map[string]bool{
+				"msp.write":  true,
+				"msp.delete": true,
+			}})
+		mux := http.NewServeMux()
+		h.Register(mux)
+		m, err := msps.Create(context.Background(), repository.MSP{
+			Name: "Acme", Slug: "acme-r18-bothperms",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		rec := doMSPJSON(t, mux, http.MethodPost,
+			"/api/v1/msps/"+m.ID.String()+"/status",
+			handler.MSPStatusRequest{Status: string(repository.MSPStatusDeleted)})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s, want 200 — "+
+				"setStatus=deleted with msp.write+msp.delete must succeed",
+				rec.Code, rec.Body.String())
+		}
+		var body handler.MSPResponse
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body.Status != string(repository.MSPStatusDeleted) {
+			t.Fatalf("body.Status = %q, want %q",
+				body.Status, repository.MSPStatusDeleted)
+		}
+	})
+
+	// (3) active <-> suspended path must NOT escalate.
+	t.Run("suspended path does not require msp.delete", func(t *testing.T) {
+		t.Parallel()
+		store := memory.NewStore()
+		msps := memory.NewMSPRepository(store)
+		h := handler.NewMSPHandler(repoMSPService{repo: msps}, nil, nil,
+			permissionAuthz{allow: map[string]bool{"msp.write": true}})
+		mux := http.NewServeMux()
+		h.Register(mux)
+		m, err := msps.Create(context.Background(), repository.MSP{
+			Name: "Acme", Slug: "acme-r18-suspend",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		rec := doMSPJSON(t, mux, http.MethodPost,
+			"/api/v1/msps/"+m.ID.String()+"/status",
+			handler.MSPStatusRequest{Status: string(repository.MSPStatusSuspended)})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s, want 200 — "+
+				"setStatus=suspended must succeed with msp.write only "+
+				"(the round-18 gate fires only on the deleted branch)",
+				rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// TestMSPHandler_BulkClaimTokens_RejectsAboveMaxCount pins
+// round-18 ANALYSIS_0004: POST .../bulk/claim-tokens with
+// count > MaxBulkClaimTokenCount (1000) must be rejected at the
+// handler boundary with 400 invalid_param. Without this cap a
+// client could request millions of tokens in a single call,
+// exhausting the identity-store inserts. The existing
+// `count > 0` guard alone does not address this — the
+// upper-bound check is what bounds worst-case work per request
+// to a fixed, predictable amount that operators can reason
+// about. Mirrors the lower-bound `count <= 0` guard (already
+// pinned by TestMSPHandler_BulkClaimTokens_RejectsZeroCount).
+func TestMSPHandler_BulkClaimTokens_RejectsAboveMaxCount(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	tenants := memory.NewTenantRepository(store)
+	ctx := context.Background()
+	m, _ := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-r18-maxcount"})
+	tn, _ := tenants.Create(ctx, repository.Tenant{Name: "t1", Slug: "t1-r18-maxcount"})
+	if _, err := msps.AssignTenant(ctx, m.ID, tn.ID,
+		repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	bulkSvc := svctenant.NewBulkService(
+		msps,
+		stubBulkAuthz{tenants: []uuid.UUID{tn.ID}},
+		nil, nil,
+		&fakeTokenIssuer{},
+		nil,
+		svctenant.BulkOptions{},
+	)
+	h := handler.NewMSPHandler(repoMSPService{repo: msps}, bulkSvc, nil, allowAllAuthz{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	cases := []struct {
+		name  string
+		count int
+	}{
+		{"just over the cap", handler.MaxBulkClaimTokenCount + 1},
+		{"large multiple of the cap", handler.MaxBulkClaimTokenCount * 1000},
+		{"max int32", 1 << 30},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := doMSPJSON(t, mux, http.MethodPost,
+				"/api/v1/msps/"+m.ID.String()+"/bulk/claim-tokens",
+				handler.BulkClaimTokensRequest{Count: tc.count, TTLSeconds: 60})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("count=%d status = %d body=%s, want 400 — "+
+					"count above MaxBulkClaimTokenCount must be rejected at the handler boundary (round-18 ANALYSIS_0004)",
+					tc.count, rec.Code, rec.Body.String())
+			}
+			var body struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.Error.Code != "invalid_param" {
+				t.Fatalf("error.code = %q, want invalid_param", body.Error.Code)
+			}
+			if !strings.Contains(body.Error.Message, "1000") {
+				t.Fatalf("error.message = %q, want a message mentioning the cap (1000)",
+					body.Error.Message)
+			}
+		})
+	}
+
+	// Sanity check: count == MaxBulkClaimTokenCount is allowed
+	// (the cap is inclusive on the lower bound — `count <= cap`).
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/bulk/claim-tokens",
+		handler.BulkClaimTokensRequest{Count: handler.MaxBulkClaimTokenCount, TTLSeconds: 60})
+	if rec.Code == http.StatusBadRequest {
+		t.Fatalf("count == MaxBulkClaimTokenCount status = 400 body=%s — "+
+			"the cap is inclusive; count == 1000 must be allowed",
+			rec.Body.String())
+	}
+}

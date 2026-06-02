@@ -30,6 +30,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -641,6 +642,45 @@ func (h *MSPHandler) setStatus(w http.ResponseWriter, r *http.Request) {
 	// tenantID would otherwise keep serving the just-deleted MSP's
 	// branding until TTL.
 	if repository.MSPStatus(req.Status) == repository.MSPStatusDeleted {
+		// Privilege gate (round-18 of Devin Review on PR #42 —
+		// BUG_0001). The route's middleware wrapper has already
+		// established the caller holds `msp.write` against this MSP
+		// (see Register() at line 125-126). That is sufficient for
+		// active <-> suspended transitions, but transitioning into
+		// `deleted` runs the same cascade as the dedicated `DELETE
+		// /api/v1/msps/{msp_id}` endpoint — removing every
+		// msp_tenants row and clearing the denormalised
+		// tenants.msp_id pointer on every owned tenant. The DELETE
+		// endpoint requires the stricter `msp.delete` permission
+		// (line 127-128). Without this extra gate, any operator
+		// holding `msp.write` but NOT `msp.delete` could bypass
+		// the intended permission boundary by POSTing
+		// `{"status": "deleted"}` to the status endpoint instead
+		// of calling DELETE. Surface a 403 here so the two paths
+		// observe the same authorisation contract regardless of
+		// which verb the caller used. Tested by
+		// TestMSPHandler_SetStatusDeleted_RequiresMSPDeletePermission.
+		userID := middleware.UserIDFromContext(r.Context())
+		if userID == uuid.Nil {
+			// The route's middleware already enforced authentication,
+			// so a missing user ID here is a programmer error (the
+			// middleware chain was wired incorrectly). Fail closed
+			// rather than fall through to the cascade.
+			WriteError(w, http.StatusUnauthorized, "unauthenticated",
+				"setStatus=deleted requires an authenticated user identity")
+			return
+		}
+		allowed, err := h.authz.AuthorizeMSP(r.Context(), userID, id, "msp.delete")
+		if err != nil {
+			WriteError(w, http.StatusInternalServerError, "authorization_failed",
+				"failed to evaluate msp.delete authorization for setStatus=deleted")
+			return
+		}
+		if !allowed {
+			WriteError(w, http.StatusForbidden, "msp_forbidden",
+				"setStatus=deleted requires the msp.delete permission (the cascade is identical to DELETE /api/v1/msps/{msp_id}); current grant only includes msp.write")
+			return
+		}
 		// Idempotency contract: a `POST .../status` with
 		// status="deleted" against an already-soft-deleted MSP must
 		// return 200 + the (still-deleted) MSP body, NOT 403
@@ -990,6 +1030,23 @@ type BulkSiteRequest struct {
 	Config   json.RawMessage `json:"config,omitempty"`
 }
 
+// MaxBulkClaimTokenCount caps the per-request token count on
+// POST /api/v1/msps/{msp_id}/bulk/claim-tokens. Without an upper
+// bound a client could request millions of tokens in a single
+// call and exhaust the identity-store inserts (the postgres path
+// issues one row per token under withTenant, and the memory path
+// allocates a slice of length=count up front). Round-18 of Devin
+// Review on PR #42 (ANALYSIS_0004) flagged this as a
+// resource-exhaustion vector that the existing `count > 0` guard
+// alone does not address. 1000 is intentionally generous compared
+// to the paginated-list ceiling (repository.MaxPageLimit = 200)
+// because token-issuance is a one-shot operator workflow rather
+// than a routine listing, but still bounds the worst-case work
+// per request to a fixed, predictable upper-bound that operators
+// can reason about. Mirrored by ttl_seconds bounds checking
+// already present at the handler boundary below.
+const MaxBulkClaimTokenCount = 1000
+
 // BulkClaimTokensRequest carries the count + TTL.
 //
 // TTLSeconds semantics:
@@ -1200,6 +1257,22 @@ func (h *MSPHandler) bulkGenerateClaimTokens(w http.ResponseWriter, r *http.Requ
 	if req.Count <= 0 {
 		WriteError(w, http.StatusBadRequest, "invalid_param",
 			"count must be > 0")
+		return
+	}
+	// Upper-bound guard (round-18 of Devin Review on PR #42 —
+	// ANALYSIS_0004). Without this cap a client could request
+	// count=1_000_000 and force the bulk service to allocate the
+	// matching-length slice + issue one DB row per token,
+	// exhausting connection-pool capacity and inflating the
+	// identity-store schema. The cap is set to
+	// MaxBulkClaimTokenCount (1000) — well above any plausible
+	// human-operator workflow but bounded enough to keep
+	// worst-case work per request predictable. Surface the same
+	// invalid_param shape as the lower bound so SDK clients can
+	// handle both with a single error branch.
+	if req.Count > MaxBulkClaimTokenCount {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			fmt.Sprintf("count must be <= %d (per-request upper bound — split very large issuance into multiple calls)", MaxBulkClaimTokenCount))
 		return
 	}
 	// Negative TTLSeconds would compute ExpiresAt in the past and

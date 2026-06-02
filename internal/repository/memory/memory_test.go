@@ -687,3 +687,74 @@ func TestTenantRepository_GetDeepCopiesPointerFields(t *testing.T) {
 			again.DeletedAt, mutatedTs)
 	}
 }
+
+// TestTenantRepository_Create_ReturnsClonedSettingsNotSharedBackingArray
+// pins round-18 ANALYSIS_0003: memory.TenantRepository.Create must
+// clone its return value so a caller mutating the returned
+// Tenant.Settings cannot corrupt the stored row's backing array.
+// Every other write path on this repo (Get, GetBySlug, List,
+// Update, UpdateStatus, TransitionStatus, Delete,
+// UpdateSettingsKey, DeleteSettingsKey) clones via cloneTenant;
+// Create was asymmetric pre-round-18 and only cloned via cloneJSON
+// (which copies into the stored row but then returns the SAME
+// slice header — so caller and store shared the backing array).
+//
+// The behaviour we pin: mutating returned.Settings[i] must NOT
+// affect a subsequent Get of the same row.
+func TestTenantRepository_Create_ReturnsClonedSettingsNotSharedBackingArray(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	tenants := memory.NewTenantRepository(store)
+
+	settings := json.RawMessage(`{"theme":"dark","timezone":"UTC"}`)
+	created, err := tenants.Create(context.Background(), repository.Tenant{
+		Name:     "Acme",
+		Slug:     "acme-r18-clone",
+		Settings: settings,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if len(created.Settings) == 0 {
+		t.Fatalf("created.Settings is empty: %q", created.Settings)
+	}
+
+	// Mutate the returned slice. If Create returned a slice
+	// sharing a backing array with the stored row, this would
+	// corrupt the persisted Settings JSON.
+	original := append(json.RawMessage(nil), created.Settings...)
+	for i := range created.Settings {
+		created.Settings[i] = 'X'
+	}
+
+	got, err := tenants.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	// Stored row must still parse as the original JSON. We compare
+	// against `original` (captured before the mutation) rather
+	// than `settings` because cloneJSON normalises trailing-bytes.
+	if string(got.Settings) != string(original) {
+		t.Fatalf("got.Settings = %q, want %q — "+
+			"mutating Create's returned Settings corrupted the "+
+			"stored row's backing array (round-18 ANALYSIS_0003)",
+			got.Settings, original)
+	}
+	// Also exercise the input-side defence: mutating the caller's
+	// original settings argument after Create returns must NOT
+	// corrupt the stored row either. This pins the existing
+	// `t.Settings = cloneJSON(t.Settings)` pre-store guard.
+	for i := range settings {
+		settings[i] = 'Y'
+	}
+	stillSame, err := tenants.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("re-get-after-input-mutation: %v", err)
+	}
+	if string(stillSame.Settings) != string(original) {
+		t.Fatalf("stillSame.Settings = %q, want %q — "+
+			"mutating the caller's input Settings corrupted the "+
+			"stored row (the pre-store cloneJSON guard regressed)",
+			stillSame.Settings, original)
+	}
+}

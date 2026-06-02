@@ -47,9 +47,24 @@ func (r *TenantRepository) Create(ctx context.Context, t repository.Tenant) (rep
 	if t.Status == "" {
 		t.Status = repository.TenantStatusActive
 	}
+	// Defensive clone before storing so a caller mutating their
+	// own t.Settings slice after Create returns cannot corrupt the
+	// row we just persisted (the cloneJSON here owns the backing
+	// array on the stored row).
 	t.Settings = cloneJSON(t.Settings)
 	r.s.tenants[t.ID] = t
-	return t, nil
+	// Defensive clone on the way out so the returned value has
+	// independent backing arrays for Settings + freshly-allocated
+	// MSPID / DeletedAt pointers — matching the cloneTenant pattern
+	// applied to Get / GetBySlug / List / Update / UpdateStatus /
+	// TransitionStatus / Delete / UpdateSettingsKey /
+	// DeleteSettingsKey. Without this clone, a caller mutating the
+	// returned Tenant.Settings (e.g. `created.Settings[0]^=0xff`)
+	// would corrupt the in-memory store because both sides shared
+	// the post-cloneJSON backing array. Round-18 of Devin Review on
+	// PR #42 (ANALYSIS_0003) flagged the asymmetry vs every other
+	// write path on this repo.
+	return cloneTenant(t), nil
 }
 
 // cloneTenant returns a deep copy of the given tenant. All
