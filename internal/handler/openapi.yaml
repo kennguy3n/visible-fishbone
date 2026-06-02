@@ -2060,7 +2060,7 @@ paths:
   /enroll:
     post:
       tags: [enrollment]
-      operationId: enrollDevice
+      operationId: redeemEnrollmentToken
       summary: Redeem a claim token and enroll a device
       description: |
         No auth required — the claim token is the auth. Binds the
