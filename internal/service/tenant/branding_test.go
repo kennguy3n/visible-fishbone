@@ -695,3 +695,86 @@ func TestTenantRepository_UpdateStatus_ResurrectionRejected(t *testing.T) {
 		t.Errorf("deleted_at: got nil, want set")
 	}
 }
+
+// TestBrandingResolver_InvalidateAllRaceFree pins round-24 of
+// Devin Review on PR #42 (BUG_0001): InvalidateAll previously
+// replaced r.cacheEntries with a fresh map (`r.cacheEntries =
+// make(...)`) under cacheMu.Lock(), but the fast-path nil-check on
+// Invalidate / InvalidateAll / cacheLookup / cacheStore reads
+// r.cacheEntries WITHOUT a lock. That violates the Go memory
+// model: a concurrent Resolve()→cacheLookup() reading the pointer
+// races the locked pointer write in InvalidateAll, regardless of
+// the eventual map contents.
+//
+// The fix is to never reassign the pointer post-construction —
+// InvalidateAll now clears the map in place via `clear()`. This
+// test pins the contract by racing 8 invalidators against 8
+// concurrent Resolve callers + 8 Set callers under -race. If any
+// future refactor reintroduces a pointer write, `go test -race`
+// will trip on the unsynchronized read in the nil-check fast-path.
+//
+// We exercise both the cached path AND the post-InvalidateAll
+// recovery path (the resolver must keep working — the map is
+// merely emptied, not destroyed).
+func TestBrandingResolver_InvalidateAllRaceFree(t *testing.T) {
+	t.Parallel()
+	r, _, _, tn, _ := brandingCacheFixtures(t, svctenant.BrandingCacheOptions{
+		TTL:        30 * 1e9, // 30s — entries don't expire mid-test
+		MaxEntries: 64,
+	})
+	ctx := context.Background()
+
+	const goroutines = 8
+	const iters = 64
+
+	var wg sync.WaitGroup
+	wg.Add(3 * goroutines)
+
+	// 1) Resolve callers exercise the cache fast-path AND fill it.
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iters; j++ {
+				if _, err := r.Resolve(ctx, tn.ID); err != nil {
+					t.Errorf("Resolve: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	// 2) Set callers exercise the synchronous Invalidate(tenantID)
+	//    path which also reads r.cacheEntries through the same
+	//    fast-path nil check.
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iters; j++ {
+				if _, err := r.SetTenantBranding(ctx, tn.ID, repository.MSPBranding{
+					PrimaryColor: "#" + uuid.New().String()[:6],
+				}); err != nil {
+					t.Errorf("SetTenantBranding: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	// 3) InvalidateAll racers — the writer path that previously
+	//    replaced the map pointer.
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iters; j++ {
+				r.InvalidateAll()
+			}
+		}()
+	}
+	wg.Wait()
+
+	// After the storm, the resolver must still produce a valid
+	// resolution. This proves InvalidateAll left the cache in a
+	// usable (empty-but-allocated) state rather than nilling out
+	// the map.
+	if _, err := r.Resolve(ctx, tn.ID); err != nil {
+		t.Fatalf("Resolve after race: %v", err)
+	}
+}

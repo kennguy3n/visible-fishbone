@@ -559,12 +559,47 @@ func (r *MSPRepository) AssignTenant(
 	if !relationship.IsValid() {
 		return repository.MSPTenantBinding{}, repository.ErrInvalidArgument
 	}
-	tx, err := r.s.pool.BeginTx(ctx, pgx.TxOptions{})
+	// Run inside withSystem so the cross-tenant cascade
+	// `UPDATE tenants SET msp_id = ...` is forward-proof against
+	// any future migration adding `FORCE ROW LEVEL SECURITY` to the
+	// tenants table. Today tenants has no RLS, so this is a no-op
+	// in observable behaviour; the value is purely future-proofing
+	// parity with Delete (which already runs under withSystem for
+	// the same cascade — see internal/repository/postgres/msp.go
+	// Delete and the round-21 ANALYSIS_0005 note). Round-24 of
+	// Devin Review on PR #42 (ANALYSIS_0001) flagged the asymmetry
+	// where AssignTenant + UnassignTenant + Delete all touch the
+	// denormalised tenants.msp_id pointer but only Delete had the
+	// system context: under future RLS on tenants the Assign /
+	// Unassign cascades would silently match zero rows, leaving
+	// the join table and the pointer drifted.
+	var binding repository.MSPTenantBinding
+	err := r.s.withSystem(ctx, func(tx pgx.Tx) error {
+		b, err := r.assignTenantTx(ctx, tx, mspID, tenantID, relationship, actor)
+		if err != nil {
+			return err
+		}
+		binding = b
+		return nil
+	})
 	if err != nil {
-		return repository.MSPTenantBinding{}, fmt.Errorf("begin tx: %w", err)
+		return repository.MSPTenantBinding{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	return binding, nil
+}
 
+// assignTenantTx implements AssignTenant inside a single
+// transaction. Split out so the outer wrapper can run it under
+// withSystem (forward-proof RLS) without bloating that public
+// method. All ErrNotFound / ErrForbidden / ErrInvalidArgument
+// sentinels propagate through unchanged.
+func (r *MSPRepository) assignTenantTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	mspID, tenantID uuid.UUID,
+	relationship repository.MSPRelationship,
+	actor *uuid.UUID,
+) (repository.MSPTenantBinding, error) {
 	// Pre-flight existence checks so the FK violation
 	// distinguishes "msp missing" from "tenant missing" via a
 	// clean ErrNotFound rather than a Postgres FK violation
@@ -695,45 +730,41 @@ func (r *MSPRepository) AssignTenant(
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return repository.MSPTenantBinding{}, fmt.Errorf("commit: %w", err)
-	}
 	return binding, nil
 }
 
 // UnassignTenant removes the (msp, tenant) binding. If the binding
 // was an owner, the denormalised tenants.msp_id is cleared in the
 // same transaction.
+//
+// Runs inside withSystem for the same forward-proofing argument as
+// AssignTenant + Delete: the `UPDATE tenants SET msp_id = NULL`
+// cascade must continue to work under any future migration that
+// adds RLS to the tenants table. Round-24 of Devin Review on
+// PR #42 (ANALYSIS_0001).
 func (r *MSPRepository) UnassignTenant(ctx context.Context, mspID, tenantID uuid.UUID) error {
-	tx, err := r.s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	var relationship string
-	const delQ = `
-		DELETE FROM msp_tenants
-		WHERE msp_id = $1::uuid AND tenant_id = $2::uuid
-		RETURNING relationship`
-	if err := tx.QueryRow(ctx, delQ, mspID, tenantID).Scan(&relationship); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return repository.ErrNotFound
+	return r.s.withSystem(ctx, func(tx pgx.Tx) error {
+		var relationship string
+		const delQ = `
+			DELETE FROM msp_tenants
+			WHERE msp_id = $1::uuid AND tenant_id = $2::uuid
+			RETURNING relationship`
+		if err := tx.QueryRow(ctx, delQ, mspID, tenantID).Scan(&relationship); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return repository.ErrNotFound
+			}
+			return fmt.Errorf("delete binding: %w", err)
 		}
-		return fmt.Errorf("delete binding: %w", err)
-	}
-	if repository.MSPRelationship(relationship) == repository.MSPRelationshipOwner {
-		if _, err := tx.Exec(ctx,
-			`UPDATE tenants SET msp_id = NULL, updated_at = NOW() WHERE id = $1::uuid AND msp_id = $2::uuid`,
-			tenantID, mspID,
-		); err != nil {
-			return fmt.Errorf("clear tenant owner: %w", err)
+		if repository.MSPRelationship(relationship) == repository.MSPRelationshipOwner {
+			if _, err := tx.Exec(ctx,
+				`UPDATE tenants SET msp_id = NULL, updated_at = NOW() WHERE id = $1::uuid AND msp_id = $2::uuid`,
+				tenantID, mspID,
+			); err != nil {
+				return fmt.Errorf("clear tenant owner: %w", err)
+			}
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
 
 func (r *MSPRepository) ListTenants(ctx context.Context, mspID uuid.UUID, page repository.Page) (repository.PageResult[repository.MSPTenantBinding], error) {

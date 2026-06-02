@@ -187,12 +187,27 @@ func (r *BrandingResolver) Invalidate(tenantID uuid.UUID) {
 // defaults — the cache keys on tenantID and cannot be
 // selectively flushed without an msp_id → tenants index that the
 // resolver does not maintain).
+//
+// Implementation note: the cacheEntries field and the cacheLRU
+// pointer are set ONCE at construction (NewBrandingResolver leaves
+// them nil; NewBrandingResolverWithCache allocates both) and never
+// reassigned thereafter. This is what makes the unsynchronized
+// nil-check fast-path on cacheLookup / cacheStore / Invalidate /
+// InvalidateAll race-free: the only reader of the pointer field
+// runs concurrently with mutations of the map *contents* (under
+// cacheMu) but never with a write to the pointer itself. Round-24
+// of Devin Review on PR #42 (BUG_0001) flagged a previous version
+// that replaced cacheEntries with a fresh map here; that variant
+// raced the fast-path read against the locked pointer write.
+// `clear(r.cacheEntries)` keeps the same map header alive and
+// drops every key under the lock — equivalent semantics, no
+// pointer mutation.
 func (r *BrandingResolver) InvalidateAll() {
 	if r.cacheEntries == nil {
 		return
 	}
 	r.cacheMu.Lock()
-	r.cacheEntries = make(map[uuid.UUID]*list.Element, r.cacheMax)
+	clear(r.cacheEntries)
 	r.cacheLRU.Init()
 	r.cacheMu.Unlock()
 }
