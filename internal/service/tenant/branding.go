@@ -124,16 +124,16 @@ func NewBrandingResolverWithCache(tenants repository.TenantRepository, msps repo
 	if ttl == 0 {
 		ttl = DefaultBrandingCacheTTL
 	}
-	max := opts.MaxEntries
-	if max <= 0 {
-		max = DefaultBrandingCacheMaxEntries
+	maxEntries := opts.MaxEntries
+	if maxEntries <= 0 {
+		maxEntries = DefaultBrandingCacheMaxEntries
 	}
 	return &BrandingResolver{
 		tenants:      tenants,
 		msps:         msps,
 		cacheTTL:     ttl,
-		cacheMax:     max,
-		cacheEntries: make(map[uuid.UUID]brandingCacheEntry, max),
+		cacheMax:     maxEntries,
+		cacheEntries: make(map[uuid.UUID]brandingCacheEntry, maxEntries),
 		now:          time.Now,
 	}
 }
