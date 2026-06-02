@@ -123,8 +123,8 @@ func TestGoogle_AssessPosture(t *testing.T) {
 	if len(report.Checks) == 0 {
 		t.Fatal("expected posture checks")
 	}
-	if report.Score < 0 || report.Score > 100 {
-		t.Errorf("score out of range: %d", report.Score)
+	if report.RiskScore < 0 || report.RiskScore > 100 {
+		t.Errorf("score out of range: %d", report.RiskScore)
 	}
 }
 

@@ -1,25 +1,6 @@
 package casb
 
-import (
-	"time"
-
-	"github.com/google/uuid"
-)
-
-// PostureCheck is a single configuration assessment result.
-type PostureCheck struct {
-	CheckName string `json:"check_name"`
-	Status    string `json:"status"`
-	Details   string `json:"details"`
-}
-
-// PostureReport aggregates posture checks for a SaaS app.
-type PostureReport struct {
-	AppID      uuid.UUID      `json:"app_id"`
-	Checks     []PostureCheck `json:"checks"`
-	Score      int            `json:"score"`
-	AssessedAt time.Time      `json:"assessed_at"`
-}
+import "time"
 
 // SaaSUser represents a user discovered within a SaaS connector.
 type SaaSUser struct {

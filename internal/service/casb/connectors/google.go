@@ -214,30 +214,30 @@ func (g *Google) AssessPosture(_ context.Context, _ json.RawMessage, _ []byte) (
 	var checks []casb.PostureCheck
 
 	checks = append(checks, casb.PostureCheck{
-		CheckName: "2sv_enforcement",
-		Status:    "warn",
-		Details:   "2-Step Verification enforcement requires Admin SDK org unit settings inspection",
+		Name:     "2sv_enforcement",
+		Status:   casb.CheckStatusWarn,
+		Evidence: "2-Step Verification enforcement requires Admin SDK org unit settings inspection",
 	})
 	checks = append(checks, casb.PostureCheck{
-		CheckName: "recovery_options",
-		Status:    "warn",
-		Details:   "recovery phone/email settings require per-user inspection",
+		Name:     "recovery_options",
+		Status:   casb.CheckStatusWarn,
+		Evidence: "recovery phone/email settings require per-user inspection",
 	})
 	checks = append(checks, casb.PostureCheck{
-		CheckName: "oauth_app_access",
-		Status:    "warn",
-		Details:   "OAuth app access control requires domain settings inspection",
+		Name:     "oauth_app_access",
+		Status:   casb.CheckStatusWarn,
+		Evidence: "OAuth app access control requires domain settings inspection",
 	})
 	checks = append(checks, casb.PostureCheck{
-		CheckName: "external_sharing",
-		Status:    "warn",
-		Details:   "Drive external sharing policy requires Drive SDK settings inspection",
+		Name:     "external_sharing",
+		Status:   casb.CheckStatusWarn,
+		Evidence: "Drive external sharing policy requires Drive SDK settings inspection",
 	})
 
 	score := computePostureScore(checks)
 	return casb.PostureReport{
 		Checks:     checks,
-		Score:      score,
+		RiskScore:  score,
 		AssessedAt: now,
 	}, nil
 }
