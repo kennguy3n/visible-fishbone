@@ -576,7 +576,7 @@ func buildRouter(
 	// enrollment repositories; ops-health is backed by its own snapshot
 	// repository. Wiring here makes the /ops/health and /devices/bulk
 	// + /devices/import|export routes actually serve in production.
-	bulkDeviceSvc := identity.NewBulkDeviceService(deviceRepo, claimRepo, enrollmentRepo, logger)
+	bulkDeviceSvc := identity.NewBulkDeviceService(deviceRepo, claimRepo, enrollmentRepo, auditRepo, logger)
 
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:  cfg,

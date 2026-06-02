@@ -33,6 +33,7 @@ func newBulkDeviceTestSetup(t *testing.T) (*BulkDeviceHandler, *memory.Store, uu
 		memory.NewClaimTokenRepository(store),
 		memory.NewDeviceEnrollmentRepository(store),
 		nil,
+		nil,
 	)
 	devRepo := memory.NewDeviceRepository(store)
 	h := NewBulkDeviceHandler(svc, devRepo, nil)

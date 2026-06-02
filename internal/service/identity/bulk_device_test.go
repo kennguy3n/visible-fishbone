@@ -28,7 +28,8 @@ func setupBulkTest(t *testing.T) (*identity.BulkDeviceService, *memory.Store, uu
 	devices := memory.NewDeviceRepository(store)
 	tokens := memory.NewClaimTokenRepository(store)
 	enrolls := memory.NewDeviceEnrollmentRepository(store)
-	svc := identity.NewBulkDeviceService(devices, tokens, enrolls, nil)
+	audit := memory.NewAuditLogRepository(store)
+	svc := identity.NewBulkDeviceService(devices, tokens, enrolls, audit, nil)
 	return svc, store, tenantID
 }
 
@@ -125,6 +126,48 @@ func TestBulkDevice_Revoke_PartialFailure(t *testing.T) {
 	}
 	if result.Failed != 1 {
 		t.Errorf("failed = %d, want 1", result.Failed)
+	}
+}
+
+func TestBulkDevice_Revoke_EmitsAuditTrail(t *testing.T) {
+	svc, store, tenantID := setupBulkTest(t)
+	ctx := context.Background()
+
+	enrollRepo := memory.NewDeviceEnrollmentRepository(store)
+	ids := make([]uuid.UUID, 2)
+	for i := range ids {
+		ids[i] = uuid.New()
+		if _, err := enrollRepo.CreateEnrollment(ctx, tenantID, repository.DeviceEnrollment{
+			DeviceID: ids[i],
+			Status:   repository.EnrollmentStatusActive,
+		}); err != nil {
+			t.Fatalf("create enrollment %d: %v", i, err)
+		}
+	}
+
+	if _, err := svc.BulkRevoke(ctx, tenantID, ids); err != nil {
+		t.Fatalf("bulk revoke: %v", err)
+	}
+
+	// Each successful revocation must leave an audit entry, matching the
+	// single-device RevokeDevice path so compliance reporting is complete.
+	auditRepo := memory.NewAuditLogRepository(store)
+	entries, err := auditRepo.List(ctx, tenantID,
+		repository.AuditFilter{Action: "device.enrollment.revoked"},
+		repository.Page{Limit: 100})
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	if len(entries.Items) != len(ids) {
+		t.Fatalf("audit entries = %d, want %d", len(entries.Items), len(ids))
+	}
+	for _, e := range entries.Items {
+		if e.ResourceType != "device_enrollment" {
+			t.Errorf("resource type = %q, want device_enrollment", e.ResourceType)
+		}
+		if e.ResourceID == nil {
+			t.Error("audit entry missing resource id")
+		}
 	}
 }
 

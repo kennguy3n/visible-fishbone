@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
@@ -69,15 +70,19 @@ type BulkDeviceService struct {
 	devices repository.DeviceRepository
 	tokens  repository.ClaimTokenRepository
 	enrolls repository.DeviceEnrollmentRepository
+	audit   repository.AuditLogRepository
 	logger  *slog.Logger
 	nowFunc func() time.Time
 }
 
-// NewBulkDeviceService returns a ready-to-use bulk device service.
+// NewBulkDeviceService returns a ready-to-use bulk device service. The
+// audit repository is optional; when nil, bulk operations still run
+// but emit no audit entries (used by unit tests).
 func NewBulkDeviceService(
 	devices repository.DeviceRepository,
 	tokens repository.ClaimTokenRepository,
 	enrolls repository.DeviceEnrollmentRepository,
+	audit repository.AuditLogRepository,
 	logger *slog.Logger,
 ) *BulkDeviceService {
 	if logger == nil {
@@ -87,8 +92,33 @@ func NewBulkDeviceService(
 		devices: devices,
 		tokens:  tokens,
 		enrolls: enrolls,
+		audit:   audit,
 		logger:  logger,
 		nowFunc: func() time.Time { return time.Now().UTC() },
+	}
+}
+
+// appendAudit records a state-changing bulk operation. It is a no-op
+// when no audit repository is configured so the service degrades
+// gracefully. Failures are logged but never abort the bulk op.
+func (s *BulkDeviceService) appendAudit(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	action, resourceType string,
+	resourceID *uuid.UUID,
+) {
+	if s.audit == nil {
+		return
+	}
+	details := middleware.EnrichAuditDetails(ctx, json.RawMessage(`{}`))
+	if _, err := s.audit.Append(ctx, tenantID, repository.AuditEntry{
+		Action:       action,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		Details:      details,
+	}); err != nil {
+		s.logger.Warn("bulk device: audit append failed",
+			"action", action, "tenant_id", tenantID, "error", err)
 	}
 }
 
@@ -138,6 +168,8 @@ func (s *BulkDeviceService) BulkGenerateTokens(
 		}
 		result.Succeeded++
 		tokens = append(tokens, BulkTokenResult{Token: created, Plaintext: plaintext})
+		tokenID := created.ID
+		s.appendAudit(ctx, tenantID, "claim_token.created", "claim_token", &tokenID)
 	}
 	return result, tokens, nil
 }
@@ -164,6 +196,8 @@ func (s *BulkDeviceService) BulkRevoke(
 				"device_id", did, "tenant_id", tenantID, "error", err)
 		}
 		result.Succeeded++
+		deviceID := did
+		s.appendAudit(ctx, tenantID, "device.enrollment.revoked", "device_enrollment", &deviceID)
 	}
 	return result, nil
 }
@@ -226,12 +260,15 @@ func (s *BulkDeviceService) ImportCSV(
 			result.Errors = append(result.Errors, fmt.Sprintf("row %d: %v", dr.line, derr))
 			continue
 		}
-		if _, cerr := s.devices.Create(ctx, tenantID, dev); cerr != nil {
+		created, cerr := s.devices.Create(ctx, tenantID, dev)
+		if cerr != nil {
 			result.Failed++
 			result.Errors = append(result.Errors, fmt.Sprintf("row %d: %v", dr.line, cerr))
 			continue
 		}
 		result.Succeeded++
+		deviceID := created.ID
+		s.appendAudit(ctx, tenantID, "device.imported", "device", &deviceID)
 	}
 	return result, nil
 }
