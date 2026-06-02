@@ -339,6 +339,10 @@ func deviceFromCSVRow(row DeviceCSVRow) (repository.Device, error) {
 	if id, perr := uuid.Parse(strings.TrimSpace(row.DeviceID)); perr == nil {
 		dev.ID = id
 	}
+	// Default an omitted status to pending at the import boundary so a
+	// device is never persisted with an empty, non-enum status. A
+	// present value is validated against the known set.
+	dev.Status = repository.DeviceStatusPending
 	if st := repository.DeviceStatus(strings.ToLower(strings.TrimSpace(row.Status))); st != "" {
 		if !isKnownStatus(st) {
 			return repository.Device{}, fmt.Errorf("invalid status %q: %w", row.Status, repository.ErrInvalidArgument)

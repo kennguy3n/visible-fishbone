@@ -217,6 +217,34 @@ func TestBulkDevice_ImportCSV(t *testing.T) {
 	}
 }
 
+func TestBulkDevice_ImportCSV_EmptyStatusDefaultsToPending(t *testing.T) {
+	svc, store, tenantID := setupBulkTest(t)
+	ctx := context.Background()
+
+	// status column left blank must not persist an empty, non-enum status.
+	csv := "device_id,name,platform,status,created_at\n" +
+		"abc-123,dev1,linux,,2025-01-01T00:00:00Z\n"
+
+	result, err := svc.ImportCSV(ctx, tenantID, strings.NewReader(csv))
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Succeeded != 1 || result.Failed != 0 {
+		t.Fatalf("result = %+v, want succeeded=1 failed=0", result)
+	}
+	page, err := memory.NewDeviceRepository(store).List(
+		ctx, tenantID, repository.DeviceListFilter{}, repository.Page{Limit: 50})
+	if err != nil {
+		t.Fatalf("list devices: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("persisted devices = %d, want 1", len(page.Items))
+	}
+	if got := page.Items[0].Status; got != repository.DeviceStatusPending {
+		t.Errorf("status = %q, want %q", got, repository.DeviceStatusPending)
+	}
+}
+
 func TestBulkDevice_ImportCSV_InvalidPlatformIsolated(t *testing.T) {
 	svc, store, tenantID := setupBulkTest(t)
 	ctx := context.Background()
