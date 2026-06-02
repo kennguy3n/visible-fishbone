@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -82,15 +83,17 @@ func (m *SchedulerMetrics) Snapshot() SchedulerMetrics {
 // tenants. It uses rate limiting to avoid thundering herd and
 // supports leader election via NATS KV for single-writer semantics.
 type Scheduler struct {
-	config   SchedulerConfig
-	tenants  TenantLister
-	optIn    TenantOptInChecker
-	runner   AnalysisRunner
-	logger   *slog.Logger
-	metrics  SchedulerMetrics
-	stopCh   chan struct{}
-	doneCh   chan struct{}
-	stopOnce sync.Once
+	config    SchedulerConfig
+	tenants   TenantLister
+	optIn     TenantOptInChecker
+	runner    AnalysisRunner
+	logger    *slog.Logger
+	metrics   SchedulerMetrics
+	stopCh    chan struct{}
+	doneCh    chan struct{}
+	stopOnce  sync.Once
+	startOnce sync.Once
+	started   atomic.Bool
 }
 
 // NewScheduler constructs a Scheduler.
@@ -118,17 +121,25 @@ func NewScheduler(
 	}
 }
 
-// Start begins the periodic scheduling loop. Non-blocking.
+// Start begins the periodic scheduling loop. Non-blocking. Safe to
+// call multiple times; only the first call launches the loop.
 func (s *Scheduler) Start(ctx context.Context) {
-	go s.run(ctx)
+	s.startOnce.Do(func() {
+		s.started.Store(true)
+		go s.run(ctx)
+	})
 }
 
 // Stop signals the scheduler to stop and waits for it to finish.
 // Safe to call multiple times: the stop channel is closed at most
-// once so concurrent or repeated Stop calls do not panic.
+// once so concurrent or repeated Stop calls do not panic. If Start
+// was never called there is no run loop to wait on, so Stop returns
+// without blocking on doneCh (which would otherwise deadlock).
 func (s *Scheduler) Stop() {
 	s.stopOnce.Do(func() { close(s.stopCh) })
-	<-s.doneCh
+	if s.started.Load() {
+		<-s.doneCh
+	}
 }
 
 // Metrics returns the current scheduler metrics.
@@ -190,9 +201,14 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 			}
 
 			if s.config.TenantCooldown > 0 {
+				// Use an explicit timer so it can be stopped when the
+				// context is cancelled; time.After would leak the timer
+				// until it fires (up to TenantCooldown) on shutdown.
+				timer := time.NewTimer(s.config.TenantCooldown)
 				select {
 				case <-ctx.Done():
-				case <-time.After(s.config.TenantCooldown):
+					timer.Stop()
+				case <-timer.C:
 				}
 			}
 		}(tid)

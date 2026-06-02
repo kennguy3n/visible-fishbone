@@ -334,6 +334,71 @@ func TestAIHandler_GetTighteningReport_503WhenNotConfigured(t *testing.T) {
 	}
 }
 
+func TestAIHandler_GetTighteningReport_404WhenNoRun(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetTighteningService(ai.NewTighteningService(nil, nil))
+
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/tightening/report", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.getTighteningReport(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_GetTighteningReport_200AfterAnalyze(t *testing.T) {
+	t.Parallel()
+	tighteningSvc := ai.NewTighteningService(nil, nil)
+	h := NewAIHandler(nil, nil)
+	h.SetTighteningService(tighteningSvc)
+
+	tenantID := uuid.New().String()
+	body, _ := json.Marshal(map[string]any{
+		"rules":       []json.RawMessage{json.RawMessage(`{"id":"r1","verb":"allow","domain":"ngfw"}`)},
+		"hit_counts":  map[string]int64{"r1": 0},
+		"window_days": 30,
+	})
+	areq := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID+"/ai/tightening/analyze",
+		bytes.NewReader(body))
+	areq.Header.Set("Content-Type", "application/json")
+	areq.SetPathValue("tenant_id", tenantID)
+	h.analyzeTightening(httptest.NewRecorder(), areq)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/tightening/report", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.getTighteningReport(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// Recommendations must serialise as a JSON array, never null.
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"recommendations":[`)) {
+		t.Fatalf("expected recommendations array in body, got %s", rec.Body.String())
+	}
+}
+
+func TestAIHandler_ListSuggestions_400OnInvalidStatus(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetReviewService(ai.NewReviewService(memory.NewAISuggestionRepository(memory.NewStore()), nil))
+
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/suggestions?status=bogus", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.listSuggestions(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // --- test stubs ---
 
 type stubHandlerLLM struct{}

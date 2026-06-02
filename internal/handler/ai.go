@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -213,6 +214,28 @@ func (h *AIHandler) getSuggestion(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, suggestion)
 }
 
+// decodeOptionalReviewBody decodes an optional JSON request body into
+// dst. A missing body is allowed: a zero Content-Length or an empty
+// chunked body (Content-Length == -1, decoder returns io.EOF) is
+// treated as "no body" rather than a 400, mirroring the pattern used
+// by device.go and msp.go. Any other decode error writes a 400 and
+// returns false.
+func decodeOptionalReviewBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if r.ContentLength == 0 {
+		return true
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			return true
+		}
+		WriteError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return false
+	}
+	return true
+}
+
 func (h *AIHandler) approveSuggestion(w http.ResponseWriter, r *http.Request) {
 	if h.reviewSvc == nil {
 		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
@@ -230,10 +253,8 @@ func (h *AIHandler) approveSuggestion(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Feedback string `json:"feedback"`
 	}
-	if r.ContentLength != 0 {
-		if !DecodeJSON(w, r, &req) {
-			return
-		}
+	if !decodeOptionalReviewBody(w, r, &req) {
+		return
 	}
 	reviewerID := actorFromCtx(r)
 	if reviewerID == nil {
@@ -266,10 +287,8 @@ func (h *AIHandler) rejectSuggestion(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Feedback string `json:"feedback"`
 	}
-	if r.ContentLength != 0 {
-		if !DecodeJSON(w, r, &req) {
-			return
-		}
+	if !decodeOptionalReviewBody(w, r, &req) {
+		return
 	}
 	reviewerID := actorFromCtx(r)
 	if reviewerID == nil {
@@ -329,10 +348,11 @@ func (h *AIHandler) getTighteningReport(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	// Return an empty report; a full implementation would cache
-	// the last analysis run per tenant.
-	report := ai.TighteningReport{
-		TenantID: tenantID,
+	report, ok := h.tighteningSvc.LastReport(tenantID)
+	if !ok {
+		WriteError(w, http.StatusNotFound, "not_found",
+			"no tightening report available; run an analysis first")
+		return
 	}
 	WriteJSON(w, http.StatusOK, report)
 }

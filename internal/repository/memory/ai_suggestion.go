@@ -79,6 +79,7 @@ func (r *AISuggestionRepository) List(ctx context.Context, tenantID uuid.UUID, s
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.PageResult[repository.AISuggestion]{}, err
 	}
+	page = page.Normalize()
 	r.s.mu.RLock()
 	defer r.s.mu.RUnlock()
 

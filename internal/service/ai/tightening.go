@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +16,12 @@ import (
 type TighteningService struct {
 	llm    LLMProvider
 	logger *slog.Logger
+
+	// lastReports caches the most recent analysis report per tenant
+	// so the GET report endpoint can return the result of the most
+	// recent POST analyze run instead of an empty placeholder.
+	mu          sync.RWMutex
+	lastReports map[uuid.UUID]TighteningReport
 }
 
 // NewTighteningService constructs a TighteningService.
@@ -22,7 +29,11 @@ func NewTighteningService(llm LLMProvider, logger *slog.Logger) *TighteningServi
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &TighteningService{llm: llm, logger: logger}
+	return &TighteningService{
+		llm:         llm,
+		logger:      logger,
+		lastReports: make(map[uuid.UUID]TighteningReport),
+	}
 }
 
 // AnalyzeInput parameterises a tightening analysis run.
@@ -42,7 +53,7 @@ func (s *TighteningService) Analyze(ctx context.Context, input AnalyzeInput) (Ti
 		input.WindowDays = 30
 	}
 
-	var recs []TighteningRecommendation
+	recs := []TighteningRecommendation{}
 
 	for _, ruleRaw := range input.Rules {
 		var rule struct {
@@ -74,13 +85,29 @@ func (s *TighteningService) Analyze(ctx context.Context, input AnalyzeInput) (Ti
 	shadowedRecs := s.detectShadowedRules(input.Rules)
 	recs = append(recs, shadowedRecs...)
 
-	return TighteningReport{
+	report := TighteningReport{
 		TenantID:        input.TenantID,
 		Recommendations: recs,
 		AnalysisWindow:  input.WindowDays,
 		RulesAnalyzed:   len(input.Rules),
 		GeneratedAt:     time.Now().UTC(),
-	}, nil
+	}
+
+	s.mu.Lock()
+	s.lastReports[input.TenantID] = report
+	s.mu.Unlock()
+
+	return report, nil
+}
+
+// LastReport returns the most recent analysis report for a tenant
+// and whether one exists. It lets the GET report endpoint serve the
+// result of the last Analyze run.
+func (s *TighteningService) LastReport(tenantID uuid.UUID) (TighteningReport, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	report, ok := s.lastReports[tenantID]
+	return report, ok
 }
 
 func (s *TighteningService) detectShadowedRules(rules []json.RawMessage) []TighteningRecommendation {
