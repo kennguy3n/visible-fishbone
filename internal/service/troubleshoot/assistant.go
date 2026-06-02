@@ -111,9 +111,10 @@ func buildPrompt(issue, message string, kbEntries []KBEntry, diagnostics []Diagn
 	return b.String()
 }
 
-func buildTemplateResponse(issue, message string, kbEntries []KBEntry, diagnostics []DiagnosticResult) string {
+func buildTemplateResponse(issue, _ string, kbEntries []KBEntry, diagnostics []DiagnosticResult) string {
 	var b strings.Builder
 	b.WriteString("## Troubleshooting Summary\n\n")
+	b.WriteString(fmt.Sprintf("**Issue:** %s\n\n", issue))
 
 	if len(diagnostics) > 0 {
 		b.WriteString("### Diagnostic Results\n\n")

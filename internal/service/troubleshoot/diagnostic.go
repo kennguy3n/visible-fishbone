@@ -3,7 +3,6 @@ package troubleshoot
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -64,5 +63,3 @@ func toServiceResult(r checks.DiagnosticResult) DiagnosticResult {
 	}
 }
 
-// nowUTC returns the current UTC time. Used as a seam for testing.
-var nowUTC = func() time.Time { return time.Now().UTC() }
