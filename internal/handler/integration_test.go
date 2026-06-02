@@ -432,3 +432,93 @@ func TestIntegrationHandler_ListConnectors_OmitsEmptyNextCursor(t *testing.T) {
 	}
 }
 
+// TestIntegrationHandler_PatchRejectsTypeField pins round-7 of
+// Devin Review on PR #41: the PATCH handler previously shared its
+// request struct with the POST handler, so a loose client sending
+// `{"type": "jira"}` on PATCH would silently decode without error
+// (the Go struct had a Type field even though the OpenAPI
+// IntegrationConnectorUpdateRequest schema doesn't), and the
+// server would ignore the field and respond 200 OK as if the
+// "update" had succeeded. That is misleading for clients who
+// expect either a schema-strict 400 or actual mutation.
+//
+// The fix splits IntegrationConnectorRequest into separate
+// IntegrationConnectorCreateRequest (has Type) and
+// IntegrationConnectorUpdateRequest (no Type). With
+// DisallowUnknownFields on the decoder, `{"type": ...}` on PATCH
+// now returns a clean 400 invalid_body — matching the OpenAPI
+// surface contract.
+//
+// We also pin the positive path: a PATCH with no `type` field
+// still succeeds, and the connector kind remains immutable
+// regardless of what the client sent.
+func TestIntegrationHandler_PatchRejectsTypeField(t *testing.T) {
+	t.Parallel()
+	router, _, _, tenantID, _, token := newIntegrationTestRouter(
+		t, repository.IntegrationConnectorSIEMWebhook, nil)
+	path := "/api/v1/tenants/" + tenantID.String() + "/integrations"
+
+	// Seed a connector to PATCH against.
+	rec := doJSON(t, router, http.MethodPost, path, token, map[string]any{
+		"type":   "siem_webhook",
+		"name":   "soc-source",
+		"config": map[string]any{"endpoint": "https://example.com"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST seed status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var created handler.IntegrationConnectorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+
+	// PATCH with `type` field MUST be rejected — connector kind
+	// is immutable post-create, and silent-swallow would mislead
+	// callers into thinking they had retyped the connector.
+	rec = doJSON(t, router, http.MethodPatch, path+"/"+created.ID, token, map[string]any{
+		"type": "jira",
+		"name": "soc-source-retyped",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PATCH with type field: status = %d, want 400; body = %s",
+			rec.Code, rec.Body.String())
+	}
+
+	// Sanity-check: the connector kind was NOT mutated by the
+	// rejected request. (If the decoder ever silently swallowed
+	// the field again, the rest of the request body could still
+	// land partial mutations — this guards against half-applied
+	// updates regressing.)
+	rec = doJSON(t, router, http.MethodGet, path+"/"+created.ID, token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET after rejected PATCH: status = %d", rec.Code)
+	}
+	var after handler.IntegrationConnectorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &after); err != nil {
+		t.Fatalf("decode get: %v", err)
+	}
+	if after.Type != "siem_webhook" {
+		t.Errorf("Type mutated by rejected PATCH: got %q want siem_webhook", after.Type)
+	}
+	if after.Name != "soc-source" {
+		t.Errorf("Name mutated by rejected PATCH: got %q want soc-source", after.Name)
+	}
+
+	// Positive path: PATCH WITHOUT `type` still succeeds.
+	rec = doJSON(t, router, http.MethodPatch, path+"/"+created.ID, token, map[string]any{
+		"name": "soc-source-renamed",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clean PATCH status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var updated handler.IntegrationConnectorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode update: %v", err)
+	}
+	if updated.Name != "soc-source-renamed" {
+		t.Errorf("Name not updated by clean PATCH: got %q", updated.Name)
+	}
+	if updated.Type != "siem_webhook" {
+		t.Errorf("Type changed after clean PATCH: got %q want siem_webhook", updated.Type)
+	}
+}

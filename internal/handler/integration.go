@@ -60,20 +60,42 @@ func (h *IntegrationHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/integration-deliveries/{id}", h.getDelivery)
 }
 
-// IntegrationConnectorRequest is the JSON body for POST/PATCH.
+// IntegrationConnectorCreateRequest is the JSON body for POST.
+// Type + Name are required, Config defaults to `{}` if omitted
+// (the plugin's Validate() is what enforces a real shape).
 //
-// POST: Type + Name are required, Config defaults to `{}` if
-// omitted (the plugin's Validate() is what enforces a real
-// shape).
+// This shape is intentionally separate from
+// IntegrationConnectorUpdateRequest so the PATCH decoder can
+// reject an inbound `type` field cleanly via
+// DisallowUnknownFields — Type is immutable post-create, and a
+// silent-swallow on PATCH would mislead loose clients into
+// thinking they had retyped a connector when the service had
+// ignored the field. Round-7 of Devin Review on PR #41 flagged
+// the prior shared-struct behaviour as a silent-no-op trap.
+type IntegrationConnectorCreateRequest struct {
+	Type        string          `json:"type,omitempty"`
+	Name        string          `json:"name,omitempty"`
+	Description string          `json:"description,omitempty"`
+	EventTypes  []string        `json:"event_types,omitempty"`
+	Config      json.RawMessage `json:"config,omitempty"`
+	Secret      json.RawMessage `json:"secret,omitempty"`
+}
+
+// IntegrationConnectorUpdateRequest is the JSON body for PATCH.
+// Type is intentionally absent: connector kind is immutable
+// post-create, so a client attempting `{"type": "jira"}` on
+// PATCH receives a clean 400 from DisallowUnknownFields rather
+// than a silent no-op. Mirrors the OpenAPI
+// IntegrationConnectorUpdateRequest schema, which also omits
+// `type`.
 //
-// PATCH: every field is optional; omitting EventTypes leaves the
+// Every other field is optional; omitting EventTypes leaves the
 // existing slice untouched (mirrors the Service contract — a nil
 // slice means "no change", an empty `[]` means "match
 // everything"). Description follows the same rule as the Service
 // layer: blank means no change, so clearing requires admin path
 // (delete+recreate) for now — by design.
-type IntegrationConnectorRequest struct {
-	Type        string          `json:"type,omitempty"`
+type IntegrationConnectorUpdateRequest struct {
 	Name        string          `json:"name,omitempty"`
 	Description string          `json:"description,omitempty"`
 	EventTypes  []string        `json:"event_types,omitempty"`
@@ -225,7 +247,7 @@ func (h *IntegrationHandler) create(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req IntegrationConnectorRequest
+	var req IntegrationConnectorCreateRequest
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
@@ -311,7 +333,7 @@ func (h *IntegrationHandler) update(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req IntegrationConnectorRequest
+	var req IntegrationConnectorUpdateRequest
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
@@ -346,7 +368,7 @@ func (h *IntegrationHandler) delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // integrationStatusRequest is the body for POST /integrations/{id}/status —
-// keep separate from IntegrationConnectorRequest so the
+// keep separate from the create/update request types so the
 // payload contract for "set status" is small and obvious.
 type integrationStatusRequest struct {
 	Status string `json:"status"`
