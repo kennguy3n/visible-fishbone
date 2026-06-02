@@ -227,10 +227,6 @@ func (svc *Service) SyncConnector(
 		FirstSeen:  now,
 		LastSeen:   now,
 	}
-	savedApp, err := svc.apps.Upsert(ctx, tenantID, app)
-	if err != nil {
-		return fmt.Errorf("upsert discovered app: %w", err)
-	}
 
 	report, err := plugin.AssessPosture(ctx, c.Config, c.Secret)
 	if err != nil {
@@ -238,6 +234,15 @@ func (svc *Service) SyncConnector(
 			slog.String("connector_id", connectorID.String()),
 			slog.Any("error", err))
 	} else {
+		app.RiskScore = report.Score
+	}
+
+	savedApp, err := svc.apps.Upsert(ctx, tenantID, app)
+	if err != nil {
+		return fmt.Errorf("upsert discovered app: %w", err)
+	}
+
+	if report.Checks != nil {
 		report.AppID = savedApp.ID
 		checks := make([]repository.CASBPostureCheck, 0, len(report.Checks))
 		for _, pc := range report.Checks {
@@ -289,6 +294,7 @@ func (svc *Service) GetSaaSPosture(
 		AppID:      appID,
 		AssessedAt: svc.nowFunc(),
 		Score:      computeScore(checks),
+		Checks:     make([]PostureCheck, 0, len(checks)),
 	}
 	for _, c := range checks {
 		report.Checks = append(report.Checks, PostureCheck{

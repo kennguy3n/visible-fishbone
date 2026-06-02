@@ -80,7 +80,7 @@ func (r *CASBConnectorRepository) Get(
 		)
 	})
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return repository.CASBConnector{}, repository.ErrNotFound
 		}
 		return repository.CASBConnector{}, err
@@ -303,7 +303,7 @@ func (r *CASBDiscoveredAppRepository) Get(
 		)
 	})
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return repository.CASBDiscoveredApp{}, repository.ErrNotFound
 		}
 		return repository.CASBDiscoveredApp{}, err

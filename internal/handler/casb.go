@@ -200,6 +200,11 @@ func (h *CASBHandler) updateConnector(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Status != "" {
 		s := repository.CASBConnectorStatus(req.Status)
+		if !s.IsValid() {
+			WriteError(w, http.StatusBadRequest, "invalid_param",
+				"status must be one of: active, disabled, error, configuring")
+			return
+		}
 		input.Status = &s
 	}
 	updated, err := h.svc.UpdateConnector(r.Context(), tenantID, id, input, actorFromCtx(r))
