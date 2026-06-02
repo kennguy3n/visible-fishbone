@@ -371,6 +371,15 @@ func (svc *BulkService) authorizedTenants(ctx context.Context, mspID, userID uui
 // never aborts on a single tenant's failure (errgroup is only used
 // for its SetLimit semaphore, never to propagate errors — work
 // always returns nil).
+//
+// Implementation note: a plain errgroup.Group is used here rather
+// than errgroup.WithContext because work always returns nil, so
+// the WithContext cancellation channel would be unreachable from
+// inside this scope. Parent-context cancellation still propagates
+// — `ctx` is the parent context passed through unchanged, and the
+// per-tenant work closure observes it directly. Round-23 of Devin
+// Review on PR #42 (ANALYSIS_0001) flagged the unused cancellation
+// channel as a clarity nit.
 func (svc *BulkService) fanOut(
 	ctx context.Context,
 	tenants []uuid.UUID,
@@ -378,12 +387,12 @@ func (svc *BulkService) fanOut(
 ) BulkResult {
 	startedAt := time.Now().UTC()
 	results := make([]BulkTenantOutcome, len(tenants))
-	g, gctx := errgroup.WithContext(ctx)
+	var g errgroup.Group
 	g.SetLimit(svc.options.concurrency())
 	for i, tid := range tenants {
 		i, tid := i, tid
 		g.Go(func() error {
-			results[i] = work(gctx, tid)
+			results[i] = work(ctx, tid)
 			return nil
 		})
 	}

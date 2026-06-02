@@ -197,6 +197,21 @@ func (svc *Service) ListAuthorizedTenants(
 	if userID == uuid.Nil || mspID == uuid.Nil || permission == "" {
 		return nil, fmt.Errorf("list authorized tenants: %w", repository.ErrInvalidArgument)
 	}
+	// Fetch the user's grants and resolve every unique role ONCE
+	// up front, then pass the resolved (grant, role) tuples to both
+	// the broad-authority short-circuit and the tenant-restriction
+	// path. The previous shape called GetUserRoles twice (once
+	// inside userHasBroadAuthority, once inside
+	// restrictToTenantGrants) and re-resolved each grant's role
+	// independently on each call — N+1 across both the duplicate
+	// GetUserRoles AND the per-call Role Get loop. Round-23 of
+	// Devin Review on PR #42 (ANALYSIS_0005) flagged the duplicate
+	// GetUserRoles; resolving roles once also closes the N+1 the
+	// reviewer noted would compound with it.
+	resolvedGrants, err := svc.resolveUserGrantsWithRoles(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list authorized tenants: %w", err)
+	}
 	// Pull every binding for the MSP. ListTenants returns paginated
 	// rows; for the platform's expected MSP sizes (<10k tenants)
 	// the loop terminates in 10 iterations, but we cap at
@@ -222,83 +237,103 @@ func (svc *Service) ListAuthorizedTenants(
 			bound = append(bound, b.TenantID)
 		}
 		if page.NextCursor == "" {
-			// Decide the broad authorization (platform or msp scope).
-			broad, err := svc.userHasBroadAuthority(ctx, userID, mspID, permission)
-			if err != nil {
-				return nil, err
-			}
-			if broad {
+			// Decide the broad authorization (platform or msp scope)
+			// using the pre-resolved grants.
+			if hasBroadAuthorityIn(resolvedGrants, mspID, permission) {
 				return bound, nil
 			}
-			return svc.restrictToTenantGrants(ctx, userID, permission, bound)
+			return restrictToTenantGrantsIn(resolvedGrants, permission, bound), nil
 		}
 		cursor = page.NextCursor
 	}
 	return nil, fmt.Errorf("list authorized tenants: %w", ErrTooManyMSPBindings)
 }
 
-// restrictToTenantGrants resolves the per-tenant grant subset for
-// a user without broad authority. Split out from
-// ListAuthorizedTenants to keep the pagination loop
-// readable now that the cap-bound for-loop forces early return on
-// the final page.
-//
-// `permission` is the bulk-op permission the caller is asking
-// for. We filter tenant-scoped roles to those that ACTUALLY grant
-// that permission (literal or wildcard). Without this gate, a user
-// with a tenant-scope `viewer` role (read-only) would be
-// authorized to participate in a bulk write (e.g.
-// `msp.bulk_apply_policy`) on that tenant — because the previous
-// implementation only checked role.Scope==tenant + scope_id match,
-// not the role's permission set. The handler path is currently
-// protected by `RequireMSPScope` middleware which gates the same
-// permission, so this was unreachable end-to-end via the HTTP
-// surface. But `BulkService` is a public Go API: an internal
-// caller (e.g. a future event-driven bulk pipeline) could invoke
-// it directly, bypassing the middleware. Round-7 of Devin Review
-// flagged this as a latent privilege-confusion surface; the fix
-// closes it as defense-in-depth so the tenant-grant subset is
-// always correctly gated regardless of how the bulk service is
-// reached.
-func (svc *Service) restrictToTenantGrants(
+// resolvedGrant pairs a UserRole assignment with the Role it
+// resolves to. resolveUserGrantsWithRoles fetches user grants and
+// every unique role exactly once so the downstream composition
+// decisions iterate without further storage round-trips.
+type resolvedGrant struct {
+	grant repository.UserRole
+	role  repository.Role
+}
+
+// resolveUserGrantsWithRoles loads every grant for `userID` plus the
+// distinct Role rows those grants reference, returning the joined
+// tuples. Stale grants (role row was deleted out from under the
+// assignment) are silently dropped — they cannot grant anything.
+// Round-23 of Devin Review on PR #42 (ANALYSIS_0005).
+func (svc *Service) resolveUserGrantsWithRoles(
 	ctx context.Context,
 	userID uuid.UUID,
-	permission string,
-	bound []uuid.UUID,
-) ([]uuid.UUID, error) {
-	// Fall back to per-tenant authorization. Read every grant once
-	// and look up scope_ids matching bound tenants.
+) ([]resolvedGrant, error) {
 	grants, err := svc.roles.GetUserRoles(ctx, userID)
 	if err != nil {
-		return nil, fmt.Errorf("list authorized tenants: get user roles: %w", err)
+		return nil, fmt.Errorf("get user roles: %w", err)
 	}
-	tenantGrants := make(map[uuid.UUID]struct{}, len(grants))
+	roleCache := make(map[uuid.UUID]repository.Role, len(grants))
+	out := make([]resolvedGrant, 0, len(grants))
 	for _, g := range grants {
-		role, err := svc.roles.Get(ctx, g.RoleID)
-		if err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				continue
+		role, ok := roleCache[g.RoleID]
+		if !ok {
+			fetched, err := svc.roles.Get(ctx, g.RoleID)
+			if err != nil {
+				if errors.Is(err, repository.ErrNotFound) {
+					// Stale grant — skip, matches the previous
+					// per-helper continue-on-NotFound behaviour.
+					continue
+				}
+				return nil, fmt.Errorf("get role %s: %w", g.RoleID, err)
 			}
-			return nil, fmt.Errorf("list authorized tenants: get role: %w", err)
+			role = fetched
+			roleCache[g.RoleID] = role
 		}
-		if role.Scope != repository.RoleScopeTenant {
+		out = append(out, resolvedGrant{grant: g, role: role})
+	}
+	return out, nil
+}
+
+// hasBroadAuthorityIn is the pure-function form of
+// userHasBroadAuthority that operates on pre-resolved (grant, role)
+// tuples. Returns true when ANY grant satisfies the broad-authority
+// gate (platform-scope wildcard/named perm, or msp-scope grant
+// matching mspID with the named perm). Round-23 of Devin Review on
+// PR #42 (ANALYSIS_0005).
+func hasBroadAuthorityIn(grants []resolvedGrant, mspID uuid.UUID, permission string) bool {
+	for _, rg := range grants {
+		if !rolePermits(rg.role, permission) {
 			continue
 		}
-		// Permission gate: the tenant-scope role must actually grant
-		// the requested permission (literal or wildcard). A viewer
-		// role with only `tenants.read` must not satisfy a bulk-write
-		// authorization for that tenant.
-		if !rolePermits(role, permission) {
+		switch rg.role.Scope {
+		case repository.RoleScopePlatform:
+			return true
+		case repository.RoleScopeMSP:
+			if rg.grant.ScopeID != nil && *rg.grant.ScopeID == mspID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// restrictToTenantGrantsIn is the pure-function form of
+// restrictToTenantGrants. Returns the subset of `bound` tenants that
+// the user holds a tenant-scoped grant for, gated by the named
+// permission. Round-23 of Devin Review on PR #42 (ANALYSIS_0005).
+func restrictToTenantGrantsIn(grants []resolvedGrant, permission string, bound []uuid.UUID) []uuid.UUID {
+	tenantGrants := make(map[uuid.UUID]struct{}, len(grants))
+	for _, rg := range grants {
+		if rg.role.Scope != repository.RoleScopeTenant {
 			continue
 		}
-		// Tenant-scoped roles encode the tenant via Role.TenantID
-		// (system roles seeded per-tenant) or via UserRole.ScopeID
-		// (custom roles with a tenant scope). We accept either.
+		if !rolePermits(rg.role, permission) {
+			continue
+		}
 		switch {
-		case g.ScopeID != nil:
-			tenantGrants[*g.ScopeID] = struct{}{}
-		case role.TenantID != nil:
-			tenantGrants[*role.TenantID] = struct{}{}
+		case rg.grant.ScopeID != nil:
+			tenantGrants[*rg.grant.ScopeID] = struct{}{}
+		case rg.role.TenantID != nil:
+			tenantGrants[*rg.role.TenantID] = struct{}{}
 		}
 	}
 	out := make([]uuid.UUID, 0, len(bound))
@@ -307,67 +342,36 @@ func (svc *Service) restrictToTenantGrants(
 			out = append(out, tid)
 		}
 	}
-	return out, nil
+	return out
 }
 
-// userHasBroadAuthority reports whether the user holds a
-// platform-scoped or msp-scoped grant that BOTH (a) matches the
-// scope target and (b) grants `permission` (literal or wildcard).
-// When true, ListAuthorizedTenants short-circuits the per-tenant
-// grant scan and returns every bound tenant.
+// Composition rules for the tenant-scope subset and the
+// broad-authority short-circuit are implemented as pure functions
+// (restrictToTenantGrantsIn, hasBroadAuthorityIn) operating on the
+// pre-resolved (grant, role) tuples returned by
+// resolveUserGrantsWithRoles. Splitting along that boundary keeps
+// each composition rule a one-pass scan and avoids the duplicate
+// GetUserRoles/Role-Get pattern flagged by round-23 ANALYSIS_0005.
 //
-// Round-6 of Devin Review: the previous implementation accepted
-// any platform-scoped role iff it carried the wildcard
-// permission, and accepted any msp-scoped role for the matching
-// mspID regardless of permission. Both cases were inconsistent:
+// Round-6 of Devin Review motivated the original split into
+// userHasBroadAuthority / restrictToTenantGrants: a platform role
+// with a specific permission (e.g. `msp.bulk_apply_policy` but no
+// `*`) used to silently produce an empty authorized set rather
+// than broadening, and an msp-scoped role with a specific
+// permission like `tenants.read` would broaden bulk-op
+// authorization to all tenants under the MSP without actually
+// granting the bulk-op permission. Both branches now gate on
+// rolePermits(role, permission) — see hasBroadAuthorityIn.
 //
-//   - A platform role with a specific permission (e.g.
-//     `msp.bulk_apply_policy` but no `*`) silently produced an
-//     empty authorized set rather than broadening — the
-//     opposite of the operator's expectation.
-//   - An msp-scoped role with a specific permission (e.g.
-//     `tenants.read` only) broadened bulk-op authorization to
-//     all tenants under the MSP without actually granting the
-//     bulk-op permission, which the caller already required at
-//     the middleware boundary.
-//
-// The fix is to gate BOTH branches on rolePermits(role,
-// permission); the middleware contract (the caller has the
-// bulk-op permission at MSP scope) plus this composition rule
-// produces the consistent answer: every grant that names the
-// bulk-op permission at platform or MSP scope broadens, every
-// other grant restricts to tenant-scope subsets.
-func (svc *Service) userHasBroadAuthority(
-	ctx context.Context,
-	userID, mspID uuid.UUID,
-	permission string,
-) (bool, error) {
-	grants, err := svc.roles.GetUserRoles(ctx, userID)
-	if err != nil {
-		return false, fmt.Errorf("broad authority: get user roles: %w", err)
-	}
-	for _, g := range grants {
-		role, err := svc.roles.Get(ctx, g.RoleID)
-		if err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				continue
-			}
-			return false, fmt.Errorf("broad authority: get role: %w", err)
-		}
-		if !rolePermits(role, permission) {
-			continue
-		}
-		switch role.Scope {
-		case repository.RoleScopePlatform:
-			return true, nil
-		case repository.RoleScopeMSP:
-			if g.ScopeID != nil && *g.ScopeID == mspID {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
-}
+// Round-7 of Devin Review motivated the permission gate on the
+// tenant-restriction path: a tenant-scope `viewer` role
+// (read-only) would otherwise satisfy a bulk-write authorization
+// for that tenant via Scope==tenant + scope_id match alone. The
+// handler path is gated by `RequireMSPScope` middleware, so the
+// HTTP surface was safe, but `BulkService` is a public Go API:
+// internal callers (e.g. a future event-driven bulk pipeline)
+// could invoke it directly. The permission gate in
+// restrictToTenantGrantsIn closes this as defence-in-depth.
 
 // GrantMSPRole assigns `roleID` to `userID` scoped to `mspID`.
 // The role must have scope=msp; otherwise ErrInvalidArgument.

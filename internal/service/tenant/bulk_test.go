@@ -474,3 +474,127 @@ func TestApplyPolicyTemplate_TemplateGraphIsDeepCopiedPerTenant(t *testing.T) {
 		seen[p] = struct{}{}
 	}
 }
+
+// TestApplyPolicyTemplate_PerTenantWorkSeesParentContext pins the
+// round-23 ANALYSIS_0001 fix on PR #42. The previous shape built
+// the per-tenant work context via `errgroup.WithContext(ctx)`, but
+// every work closure always returned nil, so the WithContext
+// cancellation channel was unreachable from inside the fan-out
+// scope. The fix replaced the WithContext-derived ctx with a
+// plain `errgroup.Group` and threads the parent ctx through
+// directly. This test verifies the resulting invariants:
+//
+//  1. A successful tenant's work closure does NOT cause subsequent
+//     tenants' work closures to receive a cancelled context. (This
+//     was already true under the old shape — work always returned
+//     nil — but the test pins it so any future regression that
+//     reintroduces WithContext + an `if err != nil { return err }`
+//     style cancellation is caught.)
+//
+//  2. Parent-context cancellation DOES propagate to in-flight
+//     per-tenant work. This is the contract that justifies threading
+//     `ctx` directly to work rather than synthesising a fresh one.
+func TestApplyPolicyTemplate_PerTenantWorkSeesParentContext(t *testing.T) {
+	t.Parallel()
+
+	// Scenario 1: successful tenant does NOT cancel siblings.
+	t.Run("SuccessfulTenantDoesNotCancelSiblings", func(t *testing.T) {
+		t.Parallel()
+		tenants := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+		ctxStillLive := atomic.Int64{}
+		policy := newStubPolicy()
+		// Patch the stub by wrapping it in an inline implementation that
+		// records whether each tenant's ctx was cancelled at the moment
+		// it was invoked. We use a per-test wrapper instead of mutating
+		// stubPolicy so other tests aren't affected.
+		wrap := contextProbingApplier{
+			inner:       policy,
+			liveCounter: &ctxStillLive,
+		}
+		svc := svctenant.NewBulkService(nil, stubAuthz{tenants: tenants}, &wrap, nil, nil, nil, svctenant.BulkOptions{Concurrency: 4})
+		res, err := svc.ApplyPolicyTemplateToTenants(context.Background(), uuid.New(), uuid.New(), nil, json.RawMessage(`{"v":1}`))
+		if err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+		if res.Total() != 3 || len(res.Failures) != 0 {
+			t.Fatalf("expected all 3 to succeed: total=%d failures=%d", res.Total(), len(res.Failures))
+		}
+		if got := ctxStillLive.Load(); got != 3 {
+			t.Fatalf("expected ctx live count = 3 (no cancellation from sibling success), got %d", got)
+		}
+	})
+
+	// Scenario 2: parent ctx cancellation reaches in-flight work.
+	t.Run("ParentCancellationPropagatesToWork", func(t *testing.T) {
+		t.Parallel()
+		tenants := []uuid.UUID{uuid.New(), uuid.New(), uuid.New(), uuid.New()}
+		blockedSaw := make(chan struct{}, len(tenants))
+		probe := blockingApplier{blockedSaw: blockedSaw}
+		svc := svctenant.NewBulkService(nil, stubAuthz{tenants: tenants}, &probe, nil, nil, nil, svctenant.BulkOptions{Concurrency: 4})
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan svctenant.BulkResult, 1)
+		go func() {
+			res, _ := svc.ApplyPolicyTemplateToTenants(ctx, uuid.New(), uuid.New(), nil, json.RawMessage(`{}`))
+			done <- res
+		}()
+		// Wait for all 4 tenants to be in-flight (each closure blocks
+		// on the probe's ctx.Done()). Bounded wait so a stuck test
+		// fails loudly.
+		deadline := time.After(2 * time.Second)
+		for i := 0; i < len(tenants); i++ {
+			select {
+			case <-blockedSaw:
+			case <-deadline:
+				t.Fatalf("only %d of %d tenants reached the blocking probe", i, len(tenants))
+			}
+		}
+		cancel()
+		select {
+		case res := <-done:
+			// Every tenant should have surfaced context.Canceled as its
+			// per-tenant error.
+			if len(res.Failures) != len(tenants) {
+				t.Fatalf("parent cancel: want %d failures, got %d (successes=%d)",
+					len(tenants), len(res.Failures), len(res.Successes))
+			}
+			for _, f := range res.Failures {
+				if !errors.Is(f.Error, context.Canceled) {
+					t.Errorf("tenant %v: want context.Canceled, got %v", f.TenantID, f.Error)
+				}
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("ApplyPolicyTemplateToTenants did not return after parent ctx cancel")
+		}
+	})
+}
+
+// contextProbingApplier wraps a PolicyTemplateApplier and increments
+// liveCounter if the ctx passed to PutGraph is still live (i.e.
+// `ctx.Err() == nil`) at the moment the call is observed. Used by
+// the round-23 ANALYSIS_0001 regression test to verify that a
+// successful sibling tenant does not cancel the per-tenant work ctx.
+type contextProbingApplier struct {
+	inner       svctenant.PolicyTemplateApplier
+	liveCounter *atomic.Int64
+}
+
+func (p *contextProbingApplier) PutGraph(ctx context.Context, tid uuid.UUID, actor *uuid.UUID, raw json.RawMessage) (repository.PolicyGraph, error) {
+	if ctx.Err() == nil {
+		p.liveCounter.Add(1)
+	}
+	return p.inner.PutGraph(ctx, tid, actor, raw)
+}
+
+// blockingApplier blocks PutGraph on ctx.Done() so callers can
+// hold every tenant's work in-flight while the parent ctx is
+// cancelled externally. Used by the parent-cancellation arm of
+// TestApplyPolicyTemplate_PerTenantWorkSeesParentContext.
+type blockingApplier struct {
+	blockedSaw chan<- struct{}
+}
+
+func (p *blockingApplier) PutGraph(ctx context.Context, tid uuid.UUID, _ *uuid.UUID, _ json.RawMessage) (repository.PolicyGraph, error) {
+	p.blockedSaw <- struct{}{}
+	<-ctx.Done()
+	return repository.PolicyGraph{}, ctx.Err()
+}

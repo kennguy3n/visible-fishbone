@@ -658,3 +658,147 @@ func TestListAuthorizedTenants_PaginatesAcrossPageLimitClamp(t *testing.T) {
 		t.Fatalf("missing %d tenants from pagination loop — silent truncation regression?", len(want))
 	}
 }
+
+// callCountingRoleRepo wraps a RoleRepository and counts
+// GetUserRoles + Get(role) invocations. Used by
+// TestListAuthorizedTenants_ResolvesUserRolesOnce to pin the
+// round-23 ANALYSIS_0005 fix that consolidated the two duplicated
+// GetUserRoles call sites (one in userHasBroadAuthority, one in
+// restrictToTenantGrants) into a single up-front fetch in
+// ListAuthorizedTenants.
+type callCountingRoleRepo struct {
+	repository.RoleRepository
+	getUserRolesCalls int
+	getRoleCalls      int
+}
+
+func (c *callCountingRoleRepo) GetUserRoles(ctx context.Context, userID uuid.UUID) ([]repository.UserRole, error) {
+	c.getUserRolesCalls++
+	return c.RoleRepository.GetUserRoles(ctx, userID)
+}
+
+func (c *callCountingRoleRepo) Get(ctx context.Context, id uuid.UUID) (repository.Role, error) {
+	c.getRoleCalls++
+	return c.RoleRepository.Get(ctx, id)
+}
+
+// TestListAuthorizedTenants_ResolvesUserRolesOnce pins the round-23
+// ANALYSIS_0005 fix on PR #42. The old implementation called
+// GetUserRoles twice for a non-broad-authority operator — once in
+// userHasBroadAuthority, once in restrictToTenantGrants — and
+// re-resolved every grant's role independently in each helper. The
+// new shape fetches grants once and resolves the distinct role
+// rows once before deciding broad vs tenant-restricted
+// authorization.
+//
+// We verify two invariants:
+//
+//  1. GetUserRoles is invoked exactly ONCE per ListAuthorizedTenants
+//     call. Both the broad-authority path (early return) and the
+//     tenant-restriction path (no broad authority) must share the
+//     single fetch.
+//  2. Get(roleID) is invoked at most ONCE per distinct role ID
+//     across the whole call. If a user has N grants pointing at the
+//     same role, the repository should be hit once, not N times.
+//
+// Run in two scenarios so both code paths are exercised:
+//
+//   - Tenant-restriction path (no platform/msp broad grant).
+//   - Broad-authority path (msp-scope grant matching mspID).
+func TestListAuthorizedTenants_ResolvesUserRolesOnce(t *testing.T) {
+	cases := []struct {
+		name      string
+		broad     bool
+		roleScope repository.RoleScope
+	}{
+		{name: "TenantRestrictionPath", broad: false, roleScope: repository.RoleScopeTenant},
+		{name: "BroadAuthorityPath", broad: true, roleScope: repository.RoleScopeMSP},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := memory.NewStore()
+			tenantRepo := memory.NewTenantRepository(store)
+			userRepo := memory.NewUserRepository(store)
+			roleRepo := memory.NewRoleRepository(store)
+			mspRepo := memory.NewMSPRepository(store)
+			counting := &callCountingRoleRepo{RoleRepository: roleRepo}
+			svc := rbac.New(counting, memory.NewAuditLogRepository(store), nil)
+
+			ctx := context.Background()
+			tn, err := tenantRepo.Create(ctx, repository.Tenant{Name: "T", Slug: "t-r23"})
+			if err != nil {
+				t.Fatalf("seed tenant: %v", err)
+			}
+			user, err := userRepo.Create(ctx, tn.ID, repository.User{
+				Email: "u@example.com", Status: repository.UserStatusActive,
+			})
+			if err != nil {
+				t.Fatalf("seed user: %v", err)
+			}
+			msp, err := mspRepo.Create(ctx, repository.MSP{Name: "A", Slug: "a-r23"})
+			if err != nil {
+				t.Fatalf("seed msp: %v", err)
+			}
+			if _, err := mspRepo.AssignTenant(ctx, msp.ID, tn.ID, repository.MSPRelationshipOwner, nil); err != nil {
+				t.Fatalf("assign tenant: %v", err)
+			}
+
+			// Seed ONE role and assign it to the user TWICE on
+			// different scope_ids. This exercises the "distinct
+			// role lookup is cached" invariant: with two grants
+			// pointing at the same role, the repository should
+			// see exactly one Get(role) call.
+			role := mustSeedRole(t, roleRepo, repository.Role{
+				Name:        "r23_role",
+				Scope:       tc.roleScope,
+				TenantID:    nil,
+				Permissions: []string{rbac.PermTenantsRead},
+			})
+			scopeTenant := tn.ID
+			scopeMSP := msp.ID
+			grants := []repository.UserRole{
+				{UserID: user.ID, RoleID: role.ID, ScopeID: &scopeTenant},
+				{UserID: user.ID, RoleID: role.ID, ScopeID: &scopeMSP},
+			}
+			for _, g := range grants {
+				if err := roleRepo.AssignRole(ctx, g); err != nil {
+					t.Fatalf("assign: %v", err)
+				}
+			}
+
+			// Reset counts after seeding so we measure only the
+			// ListAuthorizedTenants call itself.
+			counting.getUserRolesCalls = 0
+			counting.getRoleCalls = 0
+
+			out, err := svc.ListAuthorizedTenants(ctx, user.ID, msp.ID, rbac.PermTenantsRead, mspRepo)
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+
+			if counting.getUserRolesCalls != 1 {
+				t.Fatalf("GetUserRoles called %d times, want exactly 1 (round-23 ANALYSIS_0005 regression)",
+					counting.getUserRolesCalls)
+			}
+			// Two grants both reference the same role row; the
+			// resolver must dedupe the lookup. Permits 1; the old
+			// shape would do 4 (2 grants × 2 helpers).
+			if counting.getRoleCalls > 1 {
+				t.Fatalf("Get(role) called %d times for a single distinct role; want <= 1 (round-23 ANALYSIS_0005 role-cache regression)",
+					counting.getRoleCalls)
+			}
+
+			// Final shape: the broad path returns every bound
+			// tenant, the tenant-restriction path returns only
+			// tenants the user has tenant-scope grants on.
+			switch {
+			case tc.broad && len(out) != 1:
+				t.Fatalf("broad-authority path: want 1 tenant, got %d", len(out))
+			case !tc.broad && len(out) != 1:
+				t.Fatalf("tenant-restriction path: want 1 tenant (user has tenant-scope grant on the bound tenant), got %d", len(out))
+			}
+		})
+	}
+}
