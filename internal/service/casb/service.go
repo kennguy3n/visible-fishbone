@@ -308,13 +308,16 @@ func computeScore(checks []repository.CASBPostureCheck) int {
 	if len(checks) == 0 {
 		return 0
 	}
-	passed := 0
+	total := 0
 	for _, c := range checks {
-		if c.Status == repository.CASBPosturePass {
-			passed++
+		switch c.Status {
+		case repository.CASBPosturePass:
+			total += 100
+		case repository.CASBPostureWarn:
+			total += 50
 		}
 	}
-	return (passed * 100) / len(checks)
+	return total / len(checks)
 }
 
 func (svc *Service) logAudit(

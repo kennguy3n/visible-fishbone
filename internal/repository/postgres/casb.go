@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
+
+const casbConnectorSelectColumns = `id, tenant_id, type, name, status, config, secret, last_sync_at, created_at, updated_at`
 
 // --- CASBConnectorRepository ---
 
@@ -83,43 +86,40 @@ func (r *CASBConnectorRepository) List(
 	page repository.Page,
 ) (repository.PageResult[repository.CASBConnector], error) {
 	page = page.Normalize()
-	var items []repository.CASBConnector
-	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `
-			SELECT id, tenant_id, type, name, status, config, secret,
-			       last_sync_at, created_at, updated_at
-			FROM casb_connectors
-			ORDER BY created_at DESC, id DESC
-			LIMIT $1`, page.Limit+1)
-		if err != nil {
-			return err
+	cur, err := decodeCursor(page.After)
+	if err != nil {
+		return repository.PageResult[repository.CASBConnector]{}, repository.ErrInvalidArgument
+	}
+	res := repository.PageResult[repository.CASBConnector]{}
+	err = r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		q, args := buildListQuery("casb_connectors", casbConnectorSelectColumns, cur, page.Order, page.Limit)
+		rows, qerr := tx.Query(ctx, q, args...)
+		if qerr != nil {
+			return fmt.Errorf("list casb_connectors: %w", qerr)
 		}
 		defer rows.Close()
+		items := make([]repository.CASBConnector, 0, page.Limit)
 		for rows.Next() {
 			var c repository.CASBConnector
 			if err := rows.Scan(
 				&c.ID, &c.TenantID, &c.Type, &c.Name, &c.Status,
 				&c.Config, &c.Secret, &c.LastSyncAt, &c.CreatedAt, &c.UpdatedAt,
 			); err != nil {
-				return err
+				return fmt.Errorf("scan casb_connector: %w", err)
 			}
 			items = append(items, c)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate casb_connectors: %w", err)
+		}
+		res.Items = items
+		if len(items) == page.Limit && len(items) > 0 {
+			last := items[len(items)-1]
+			res.NextCursor = encodeCursor(pageCursor{T: last.CreatedAt, I: last.ID})
+		}
+		return nil
 	})
-	if err != nil {
-		return repository.PageResult[repository.CASBConnector]{}, err
-	}
-	var res repository.PageResult[repository.CASBConnector]
-	if len(items) > page.Limit {
-		items = items[:page.Limit]
-	}
-	res.Items = items
-	if len(items) == page.Limit && len(items) > 0 {
-		last := items[len(items)-1]
-		res.NextCursor = encodeCursor(pageCursor{T: last.CreatedAt, I: last.ID})
-	}
-	return res, nil
+	return res, err
 }
 
 func (r *CASBConnectorRepository) Update(

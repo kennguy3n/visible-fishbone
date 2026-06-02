@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -235,6 +236,10 @@ func (h *CASBHandler) testConnector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.TestConnector(r.Context(), tenantID, id); err != nil {
+		if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
+			WriteRepositoryError(w, err)
+			return
+		}
 		WriteError(w, http.StatusBadGateway, "connector_test_failed", err.Error())
 		return
 	}
@@ -251,6 +256,10 @@ func (h *CASBHandler) syncConnector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.SyncConnector(r.Context(), tenantID, id); err != nil {
+		if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
+			WriteRepositoryError(w, err)
+			return
+		}
 		WriteError(w, http.StatusBadGateway, "sync_failed", err.Error())
 		return
 	}
