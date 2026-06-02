@@ -37,7 +37,7 @@ func NewVerifier(compiler PolicyCompiler) *Verifier {
 // VerifiedSuggestion with dry-run metadata. On compile failure,
 // returns the compiler error so the caller can surface it to the
 // operator.
-func (v *Verifier) Verify(ctx context.Context, tenantID uuid.UUID, suggestion PolicySuggestion) (VerifiedSuggestion, error) {
+func (v *Verifier) Verify(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, suggestion PolicySuggestion) (VerifiedSuggestion, error) {
 	if v.compiler == nil {
 		return VerifiedSuggestion{}, fmt.Errorf("ai/verifier: no policy compiler configured")
 	}
@@ -46,7 +46,7 @@ func (v *Verifier) Verify(ctx context.Context, tenantID uuid.UUID, suggestion Po
 	}
 
 	start := time.Now()
-	graph, err := v.compiler.PutDraftGraph(ctx, tenantID, nil, suggestion.Graph)
+	graph, err := v.compiler.PutDraftGraph(ctx, tenantID, actorID, suggestion.Graph)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -54,7 +54,7 @@ func (v *Verifier) Verify(ctx context.Context, tenantID uuid.UUID, suggestion Po
 	}
 	return VerifiedSuggestion{
 		Suggestion: suggestion,
-		DryRun: DryRunMeta{
+		Verify: VerifyMeta{
 			Compiled:  true,
 			GraphID:   graph.ID.String(),
 			CompileMS: elapsed.Milliseconds(),

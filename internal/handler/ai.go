@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/service/ai"
 )
 
@@ -86,7 +89,11 @@ func (h *AIHandler) suggestPolicy(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "prompt is required")
 		return
 	}
-	verified, err := h.svc.SuggestPolicy(r.Context(), tenantID, req.Prompt)
+	var actorID *uuid.UUID
+	if uid := middleware.UserIDFromContext(r.Context()); uid != uuid.Nil {
+		actorID = &uid
+	}
+	verified, err := h.svc.SuggestPolicy(r.Context(), tenantID, actorID, req.Prompt)
 	if err != nil {
 		h.logger.Error("ai: suggest-policy failed",
 			slog.String("tenant_id", tenantID.String()),

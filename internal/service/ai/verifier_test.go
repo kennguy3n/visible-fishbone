@@ -32,14 +32,14 @@ func TestVerifier_AcceptValidGraph(t *testing.T) {
 		Confidence:  0.8,
 		AIGenerated: true,
 	}
-	result, err := v.Verify(context.Background(), uuid.New(), suggestion)
+	result, err := v.Verify(context.Background(), uuid.New(), nil, suggestion)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if !result.DryRun.Compiled {
+	if !result.Verify.Compiled {
 		t.Fatal("expected compiled=true")
 	}
-	if result.DryRun.GraphID == "" {
+	if result.Verify.GraphID == "" {
 		t.Fatal("expected non-empty graph_id")
 	}
 	if !result.Suggestion.AIGenerated {
@@ -56,7 +56,7 @@ func TestVerifier_RejectInvalidGraph(t *testing.T) {
 		Rationale:   "test",
 		AIGenerated: true,
 	}
-	_, err := v.Verify(context.Background(), uuid.New(), suggestion)
+	_, err := v.Verify(context.Background(), uuid.New(), nil, suggestion)
 	if err == nil {
 		t.Fatal("expected error for invalid graph")
 	}
@@ -68,7 +68,7 @@ func TestVerifier_RejectInvalidGraph(t *testing.T) {
 func TestVerifier_EmptyGraph(t *testing.T) {
 	t.Parallel()
 	v := NewVerifier(&fakeCompiler{})
-	_, err := v.Verify(context.Background(), uuid.New(), PolicySuggestion{})
+	_, err := v.Verify(context.Background(), uuid.New(), nil, PolicySuggestion{})
 	if err == nil {
 		t.Fatal("expected error for empty graph")
 	}
@@ -77,7 +77,7 @@ func TestVerifier_EmptyGraph(t *testing.T) {
 func TestVerifier_NilCompiler(t *testing.T) {
 	t.Parallel()
 	v := NewVerifier(nil)
-	_, err := v.Verify(context.Background(), uuid.New(), PolicySuggestion{
+	_, err := v.Verify(context.Background(), uuid.New(), nil, PolicySuggestion{
 		Graph: json.RawMessage(`{}`),
 	})
 	if err == nil {

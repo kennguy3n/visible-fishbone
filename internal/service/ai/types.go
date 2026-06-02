@@ -53,12 +53,14 @@ type TimeRange struct {
 // draft graph change.
 type VerifiedSuggestion struct {
 	Suggestion PolicySuggestion `json:"suggestion"`
-	DryRun     DryRunMeta       `json:"dry_run"`
+	Verify     VerifyMeta       `json:"verify"`
 }
 
-// DryRunMeta records the result of the deterministic compile
-// pass that verified the suggestion.
-type DryRunMeta struct {
+// VerifyMeta records the result of the deterministic compile
+// pass that verified the suggestion. The suggestion is persisted
+// as a draft graph (not live) — operators must explicitly promote
+// it before it takes effect.
+type VerifyMeta struct {
 	Compiled  bool   `json:"compiled"`
 	GraphID   string `json:"graph_id,omitempty"`
 	CompileMS int64  `json:"compile_ms"`

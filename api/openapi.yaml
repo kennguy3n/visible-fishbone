@@ -2749,7 +2749,7 @@ components:
         prompt: { type: string, description: "Natural-language description of the desired policy change." }
     AIVerifiedSuggestion:
       type: object
-      required: [suggestion, dry_run]
+      required: [suggestion, verify]
       properties:
         suggestion:
           type: object
@@ -2760,7 +2760,7 @@ components:
             confidence: { type: number, format: double }
             ai_generated: { type: boolean }
             model_id: { type: string }
-        dry_run:
+        verify:
           type: object
           required: [compiled, compile_ms]
           properties:

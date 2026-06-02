@@ -86,7 +86,7 @@ func (s *Service) SummarizerConfigured() bool {
 // verifies the result through the deterministic compiler. Returns
 // a VerifiedSuggestion on success or an error if the LLM is not
 // configured, the suggestion is invalid, or compile fails.
-func (s *Service) SuggestPolicy(ctx context.Context, tenantID uuid.UUID, prompt string) (VerifiedSuggestion, error) {
+func (s *Service) SuggestPolicy(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, prompt string) (VerifiedSuggestion, error) {
 	if s.llm == nil {
 		return VerifiedSuggestion{}, errors.New("ai: LLM not configured")
 	}
@@ -111,7 +111,7 @@ func (s *Service) SuggestPolicy(ctx context.Context, tenantID uuid.UUID, prompt 
 		ModelID:     resp.ModelID,
 	}
 
-	verified, err := s.verifier.Verify(ctx, tenantID, suggestion)
+	verified, err := s.verifier.Verify(ctx, tenantID, actorID, suggestion)
 	if err != nil {
 		return VerifiedSuggestion{}, fmt.Errorf("ai: verification failed: %w", err)
 	}
