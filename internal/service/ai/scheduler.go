@@ -180,14 +180,17 @@ loop:
 		wg.Add(1)
 		go func(tenantID uuid.UUID) {
 			defer wg.Done()
+			// Hold the concurrency slot through both the analysis and
+			// the per-tenant cooldown, releasing it only when the
+			// worker fully finishes. This is what makes TenantCooldown
+			// actually pace the rate of new analysis starts: with
+			// MaxConcurrent slots, a new tenant cannot begin until a
+			// prior worker's analysis AND its cooldown have elapsed,
+			// throttling load on shared resources (e.g. the database)
+			// rather than merely delaying goroutine exit.
+			defer func() { <-sem }()
 
 			suggestions, runErr := s.runner.RunAnalysis(ctx, tenantID)
-
-			// Release the concurrency slot as soon as the analysis
-			// (the expensive work) completes. The per-tenant cooldown
-			// below is a pacing delay and must not hold a slot that
-			// another tenant's analysis could otherwise use.
-			<-sem
 
 			mu.Lock()
 			totalSuggestions += suggestions
