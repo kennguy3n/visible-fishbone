@@ -10,6 +10,7 @@ package terraform
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -109,82 +110,113 @@ func (p *Provider) ExportTenantConfig(ctx context.Context, tenantID uuid.UUID) (
 		TenantID:   tenantID.String(),
 	}
 
-	allPages := repository.Page{Limit: repository.MaxPageLimit}
-
 	// Sites.
 	if p.deps.Sites != nil {
-		sites, err := p.deps.Sites.List(ctx, tenantID, allPages)
-		if err != nil {
-			return nil, fmt.Errorf("export sites: %w", err)
-		}
-		for _, s := range sites.Items {
-			cfg.Sites = append(cfg.Sites, ExportedSite{
-				Name: s.Name, Slug: s.Slug,
-				Template: string(s.Template), Config: s.Config,
-			})
+		page := repository.Page{Limit: repository.MaxPageLimit}
+		for {
+			sites, err := p.deps.Sites.List(ctx, tenantID, page)
+			if err != nil {
+				return nil, fmt.Errorf("export sites: %w", err)
+			}
+			for _, s := range sites.Items {
+				cfg.Sites = append(cfg.Sites, ExportedSite{
+					Name: s.Name, Slug: s.Slug,
+					Template: string(s.Template), Config: s.Config,
+				})
+			}
+			if sites.NextCursor == "" {
+				break
+			}
+			page.After = sites.NextCursor
 		}
 	}
 
 	// Policy graphs.
 	if p.deps.Policies != nil {
 		pg, err := p.deps.Policies.GetCurrentGraph(ctx, tenantID)
-		if err == nil {
+		switch {
+		case err == nil:
 			cfg.Policies = append(cfg.Policies, ExportedPolicy{
 				Version: pg.Version, Graph: pg.Graph,
 			})
+		case errors.Is(err, repository.ErrNotFound):
+			// No current graph yet — skip.
+		default:
+			return nil, fmt.Errorf("export policies: %w", err)
 		}
 	}
 
 	// Browser policies.
 	if p.deps.BrowserPolicies != nil {
-		bps, err := p.deps.BrowserPolicies.List(ctx, tenantID, allPages)
-		if err != nil {
-			return nil, fmt.Errorf("export browser policies: %w", err)
-		}
-		for _, bp := range bps.Items {
-			cfg.BrowserPolicies = append(cfg.BrowserPolicies, ExportedBrowserPolicy{
-				Name: bp.Name, Rules: bp.Rules,
-				Action: string(bp.Action), Scope: string(bp.Scope),
-				Enabled: bp.Enabled,
-			})
+		page := repository.Page{Limit: repository.MaxPageLimit}
+		for {
+			bps, err := p.deps.BrowserPolicies.List(ctx, tenantID, page)
+			if err != nil {
+				return nil, fmt.Errorf("export browser policies: %w", err)
+			}
+			for _, bp := range bps.Items {
+				cfg.BrowserPolicies = append(cfg.BrowserPolicies, ExportedBrowserPolicy{
+					Name: bp.Name, Rules: bp.Rules,
+					Action: string(bp.Action), Scope: string(bp.Scope),
+					Enabled: bp.Enabled,
+				})
+			}
+			if bps.NextCursor == "" {
+				break
+			}
+			page.After = bps.NextCursor
 		}
 	}
 
 	// Data classifications.
 	if p.deps.DataClassifications != nil {
-		dcs, err := p.deps.DataClassifications.List(ctx, tenantID, allPages)
-		if err != nil {
-			return nil, fmt.Errorf("export data classifications: %w", err)
-		}
-		for _, dc := range dcs.Items {
-			cfg.DataClassifications = append(cfg.DataClassifications, ExportedDataClassification{
-				Label: dc.Label, Level: string(dc.Level),
-				Description: dc.Description, HandlingRules: dc.HandlingRules,
-			})
+		page := repository.Page{Limit: repository.MaxPageLimit}
+		for {
+			dcs, err := p.deps.DataClassifications.List(ctx, tenantID, page)
+			if err != nil {
+				return nil, fmt.Errorf("export data classifications: %w", err)
+			}
+			for _, dc := range dcs.Items {
+				cfg.DataClassifications = append(cfg.DataClassifications, ExportedDataClassification{
+					Label: dc.Label, Level: string(dc.Level),
+					Description: dc.Description, HandlingRules: dc.HandlingRules,
+				})
+			}
+			if dcs.NextCursor == "" {
+				break
+			}
+			page.After = dcs.NextCursor
 		}
 	}
 
 	// Integrations.
 	if p.deps.Integrations != nil {
-		ics, err := p.deps.Integrations.List(ctx, tenantID, allPages)
-		if err != nil {
-			return nil, fmt.Errorf("export integrations: %w", err)
-		}
-		for _, ic := range ics.Items {
-			cfg.Integrations = append(cfg.Integrations, ExportedIntegration{
-				Type: string(ic.Type), Name: ic.Name,
-				Description: ic.Description, EventTypes: ic.EventTypes,
-				Config: ic.Config, Status: string(ic.Status),
-			})
+		page := repository.Page{Limit: repository.MaxPageLimit}
+		for {
+			ics, err := p.deps.Integrations.List(ctx, tenantID, page)
+			if err != nil {
+				return nil, fmt.Errorf("export integrations: %w", err)
+			}
+			for _, ic := range ics.Items {
+				cfg.Integrations = append(cfg.Integrations, ExportedIntegration{
+					Type: string(ic.Type), Name: ic.Name,
+					Description: ic.Description, EventTypes: ic.EventTypes,
+					Config: ic.Config, Status: string(ic.Status),
+				})
+			}
+			if ics.NextCursor == "" {
+				break
+			}
+			page.After = ics.NextCursor
 		}
 	}
 
 	return json.Marshal(cfg)
 }
 
-// ImportTenantConfig idempotently imports a tenant configuration.
-// Existing resources with matching names are updated; new ones are
-// created.
+// ImportTenantConfig imports a tenant configuration. Resources are
+// created by name; existing resources with conflicting names are
+// skipped and logged at Warn level.
 func (p *Provider) ImportTenantConfig(ctx context.Context, tenantID uuid.UUID, config json.RawMessage) error {
 	var cfg ExportedConfig
 	if err := json.Unmarshal(config, &cfg); err != nil {
