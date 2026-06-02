@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
@@ -168,6 +169,43 @@ func TestBulkDevice_Revoke_EmitsAuditTrail(t *testing.T) {
 		if e.ResourceID == nil {
 			t.Error("audit entry missing resource id")
 		}
+	}
+}
+
+func TestBulkDevice_Revoke_AuditCarriesActorID(t *testing.T) {
+	svc, store, tenantID := setupBulkTest(t)
+	actor := uuid.New()
+	ctx := middleware.WithUserIDForTest(context.Background(), actor)
+
+	enrollRepo := memory.NewDeviceEnrollmentRepository(store)
+	deviceID := uuid.New()
+	if _, err := enrollRepo.CreateEnrollment(ctx, tenantID, repository.DeviceEnrollment{
+		DeviceID: deviceID,
+		Status:   repository.EnrollmentStatusActive,
+	}); err != nil {
+		t.Fatalf("create enrollment: %v", err)
+	}
+
+	if _, err := svc.BulkRevoke(ctx, tenantID, []uuid.UUID{deviceID}); err != nil {
+		t.Fatalf("bulk revoke: %v", err)
+	}
+
+	// The human initiator must be attributed on the audit entry's
+	// ActorID column, not just buried in details, so compliance
+	// queries can trace who triggered the bulk operation.
+	auditRepo := memory.NewAuditLogRepository(store)
+	entries, err := auditRepo.List(ctx, tenantID,
+		repository.AuditFilter{Action: "device.enrollment.revoked"},
+		repository.Page{Limit: 10})
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	if len(entries.Items) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(entries.Items))
+	}
+	got := entries.Items[0]
+	if got.ActorID == nil || *got.ActorID != actor {
+		t.Errorf("ActorID = %v, want %v", got.ActorID, actor)
 	}
 }
 

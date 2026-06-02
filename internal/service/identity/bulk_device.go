@@ -110,8 +110,17 @@ func (s *BulkDeviceService) appendAudit(
 	if s.audit == nil {
 		return
 	}
+	// Attribute the human initiator on the audit entry, mirroring the
+	// single-operation identity.Service.appendAudit. ActorID is the
+	// user UUID and stays nil on API-key paths, where
+	// EnrichAuditDetails records the machine actor in details instead.
+	var actorID *uuid.UUID
+	if uid := middleware.UserIDFromContext(ctx); uid != uuid.Nil {
+		actorID = &uid
+	}
 	details := middleware.EnrichAuditDetails(ctx, json.RawMessage(`{}`))
 	if _, err := s.audit.Append(ctx, tenantID, repository.AuditEntry{
+		ActorID:      actorID,
 		Action:       action,
 		ResourceType: resourceType,
 		ResourceID:   resourceID,
