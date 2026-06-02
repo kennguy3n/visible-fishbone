@@ -142,7 +142,10 @@ func (h *BulkDeviceHandler) exportCSV(w http.ResponseWriter, r *http.Request) {
 		if len(all) >= identity.MaxBulkDevices {
 			// More devices may exist beyond the cap; signal a partial
 			// export to the client rather than dropping rows silently.
-			truncated = result.NextCursor != ""
+			// Overshoot within this page (when the page size does not
+			// divide the cap evenly) also drops rows, so flag it even
+			// when the cursor is exhausted.
+			truncated = result.NextCursor != "" || len(all) > identity.MaxBulkDevices
 			if len(all) > identity.MaxBulkDevices {
 				all = all[:identity.MaxBulkDevices]
 			}

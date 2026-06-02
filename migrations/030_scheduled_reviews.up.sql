@@ -4,7 +4,7 @@
 CREATE TABLE policy_review_schedules (
     id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id           UUID        NOT NULL REFERENCES tenants(id),
-    policy_id           UUID        NOT NULL,
+    policy_id           UUID        NOT NULL REFERENCES policy_graphs(id) ON DELETE CASCADE,
     last_reviewed_at    TIMESTAMPTZ,
     next_review_at      TIMESTAMPTZ,
     review_interval_days INT        NOT NULL DEFAULT 90,
