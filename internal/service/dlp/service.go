@@ -154,13 +154,11 @@ func (s *Service) TestPolicy(ctx context.Context, tenantID, policyID uuid.UUID, 
 }
 
 // evaluatePolicy runs a single policy's rules against content.
-// Fingerprint matches are loaded at most once per call to avoid
-// redundant full-table scans when multiple fingerprint rules exist.
+// Fingerprint matching is hoisted: if any rule has type fingerprint
+// a single query loads all matches and appends them once.
 func (s *Service) evaluatePolicy(ctx context.Context, tenantID uuid.UUID, p repository.DLPPolicy, input ClassificationInput) []Match {
 	var hits []Match
-
-	var fpLoaded bool
-	var fpMatches []engine.FingerprintMatch
+	var hasFingerprint bool
 
 	for _, rule := range p.Rules {
 		switch rule.Type {
@@ -193,23 +191,24 @@ func (s *Service) evaluatePolicy(ctx context.Context, tenantID uuid.UUID, p repo
 				}
 			}
 		case repository.DLPRuleTypeFingerprint:
-			if !fpLoaded {
-				var err error
-				fpMatches, err = s.fp.MatchFingerprints(ctx, tenantID, input.Content)
-				if err != nil {
-					s.logger.WarnContext(ctx, "fingerprint match failed", "err", err)
-				}
-				fpLoaded = true
-			}
-			for _, fm := range fpMatches {
-				hits = append(hits, Match{
-					RuleType:   repository.DLPRuleTypeFingerprint,
-					Pattern:    fm.Name,
-					Confidence: fm.Similarity,
-				})
-			}
+			hasFingerprint = true
 		}
 	}
+
+	if hasFingerprint {
+		fpMatches, err := s.fp.MatchFingerprints(ctx, tenantID, input.Content)
+		if err != nil {
+			s.logger.WarnContext(ctx, "fingerprint match failed", "err", err)
+		}
+		for _, fm := range fpMatches {
+			hits = append(hits, Match{
+				RuleType:   repository.DLPRuleTypeFingerprint,
+				Pattern:    fm.Name,
+				Confidence: fm.Similarity,
+			})
+		}
+	}
+
 	return hits
 }
 

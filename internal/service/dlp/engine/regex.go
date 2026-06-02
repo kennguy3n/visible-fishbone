@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
@@ -51,11 +53,13 @@ var builtinPatterns = map[string]*regexp.Regexp{
 
 // RegexEngine provides pre-compiled regex matching for PII patterns.
 // Tenant-defined custom patterns are compiled on first use and
-// cached in a bounded LRU cache.
+// cached in a bounded LRU cache. Concurrent compilations of the
+// same pattern are coalesced via singleflight.
 type RegexEngine struct {
 	mu    sync.Mutex
 	cache map[string]*list.Element
 	order *list.List
+	sfg   singleflight.Group
 }
 
 type cacheEntry struct {
@@ -125,18 +129,27 @@ func (e *RegexEngine) resolve(r repository.DLPRule) *regexp.Regexp {
 
 func (e *RegexEngine) compileCustom(pattern string) *regexp.Regexp {
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	if elem, ok := e.cache[pattern]; ok {
+		e.order.MoveToFront(elem)
+		e.mu.Unlock()
+		return elem.Value.(*cacheEntry).re
+	}
+	e.mu.Unlock()
 
+	v, _, _ := e.sfg.Do(pattern, func() (any, error) {
+		return regexp.Compile(pattern)
+	})
+	re, _ := v.(*regexp.Regexp)
+	if re == nil {
+		return nil
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if elem, ok := e.cache[pattern]; ok {
 		e.order.MoveToFront(elem)
 		return elem.Value.(*cacheEntry).re
 	}
-
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil
-	}
-
 	if e.order.Len() >= maxCustomCacheSize {
 		oldest := e.order.Back()
 		delete(e.cache, oldest.Value.(*cacheEntry).pattern)
