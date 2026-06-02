@@ -169,6 +169,11 @@ func (h *AIHandler) listSuggestions(w http.ResponseWriter, r *http.Request) {
 	}
 	var statusFilter *string
 	if s := r.URL.Query().Get("status"); s != "" {
+		if !ai.SuggestionStatus(s).Valid() {
+			WriteError(w, http.StatusBadRequest, "invalid_status",
+				"status must be one of: pending, approved, rejected, applied, rolled_back")
+			return
+		}
 		statusFilter = &s
 	}
 	page := repository.Page{

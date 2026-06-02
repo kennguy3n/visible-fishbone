@@ -180,6 +180,20 @@ func (r *AISuggestionRepository) UpdateStatus(ctx context.Context, tenantID, id 
 			return fmt.Errorf("update status: %w", err)
 		}
 		if tag.RowsAffected() == 0 {
+			// Zero rows can mean either the row does not exist (or is
+			// hidden by RLS) or it exists but its status no longer
+			// matches expectedStatus. Disambiguate so callers get the
+			// right HTTP status (404 vs 409), matching the convention
+			// used by the other postgres repositories.
+			var exists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM ai_policy_suggestions WHERE id = $1)`, id,
+			).Scan(&exists); err != nil {
+				return fmt.Errorf("update status existence check: %w", err)
+			}
+			if !exists {
+				return repository.ErrNotFound
+			}
 			return repository.ErrConflict
 		}
 		return nil

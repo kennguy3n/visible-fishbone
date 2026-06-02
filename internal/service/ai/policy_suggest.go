@@ -219,13 +219,23 @@ func (s *PolicySuggestService) generateLLMSuggestions(
 
 	var suggestions []PolicyChangeSuggestion
 	for _, p := range parsed {
+		category := SuggestionCategory(p.Category)
+		if !category.Valid() {
+			// The LLM occasionally invents categories. Skip them
+			// rather than persisting an unrecognised value that
+			// downstream UI / risk logic cannot interpret.
+			s.logger.Warn("ai: skipping suggestion with unknown category",
+				slog.String("category", p.Category),
+				slog.String("rule_id", p.RuleID))
+			continue
+		}
 		if p.Confidence < 0 || p.Confidence > 1 {
 			p.Confidence = 0.5
 		}
 		suggestions = append(suggestions, PolicyChangeSuggestion{
 			TenantID:    tenantID,
 			RuleID:      p.RuleID,
-			Category:    SuggestionCategory(p.Category),
+			Category:    category,
 			Title:       p.Title,
 			Description: p.Reasoning,
 			Reasoning:   p.Reasoning,

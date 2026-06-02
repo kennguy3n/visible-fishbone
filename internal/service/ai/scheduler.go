@@ -82,14 +82,15 @@ func (m *SchedulerMetrics) Snapshot() SchedulerMetrics {
 // tenants. It uses rate limiting to avoid thundering herd and
 // supports leader election via NATS KV for single-writer semantics.
 type Scheduler struct {
-	config  SchedulerConfig
-	tenants TenantLister
-	optIn   TenantOptInChecker
-	runner  AnalysisRunner
-	logger  *slog.Logger
-	metrics SchedulerMetrics
-	stopCh  chan struct{}
-	doneCh  chan struct{}
+	config   SchedulerConfig
+	tenants  TenantLister
+	optIn    TenantOptInChecker
+	runner   AnalysisRunner
+	logger   *slog.Logger
+	metrics  SchedulerMetrics
+	stopCh   chan struct{}
+	doneCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // NewScheduler constructs a Scheduler.
@@ -123,8 +124,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 }
 
 // Stop signals the scheduler to stop and waits for it to finish.
+// Safe to call multiple times: the stop channel is closed at most
+// once so concurrent or repeated Stop calls do not panic.
 func (s *Scheduler) Stop() {
-	close(s.stopCh)
+	s.stopOnce.Do(func() { close(s.stopCh) })
 	<-s.doneCh
 }
 
@@ -158,17 +161,15 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 		wg.Add(1)
 		go func(tenantID uuid.UUID) {
 			defer wg.Done()
-			defer func() { <-sem }()
-
-			if s.config.TenantCooldown > 0 {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(s.config.TenantCooldown):
-				}
-			}
 
 			suggestions, runErr := s.runner.RunAnalysis(ctx, tenantID)
+
+			// Release the concurrency slot as soon as the analysis
+			// (the expensive work) completes. The per-tenant cooldown
+			// below is a pacing delay and must not hold a slot that
+			// another tenant's analysis could otherwise use.
+			<-sem
+
 			mu.Lock()
 			totalSuggestions += suggestions
 			if runErr != nil && firstErr == nil {
@@ -186,6 +187,13 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 				s.logger.Info("tenant analysis completed",
 					slog.String("tenant_id", tenantID.String()),
 					slog.Int("suggestions", suggestions))
+			}
+
+			if s.config.TenantCooldown > 0 {
+				select {
+				case <-ctx.Done():
+				case <-time.After(s.config.TenantCooldown):
+				}
 			}
 		}(tid)
 	}

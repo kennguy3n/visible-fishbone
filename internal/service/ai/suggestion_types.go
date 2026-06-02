@@ -19,6 +19,21 @@ const (
 	SuggestionCategoryDenyLog          SuggestionCategory = "deny_log"
 )
 
+// Valid reports whether c is one of the recognised suggestion
+// categories. Used to reject free-form categories returned by the
+// LLM before they are persisted.
+func (c SuggestionCategory) Valid() bool {
+	switch c {
+	case SuggestionCategoryUnused,
+		SuggestionCategoryShadowed,
+		SuggestionCategoryOverlyPermissive,
+		SuggestionCategoryDenyLog:
+		return true
+	default:
+		return false
+	}
+}
+
 // SuggestionStatus tracks a suggestion through the review workflow.
 type SuggestionStatus string
 
@@ -29,6 +44,21 @@ const (
 	SuggestionStatusApplied    SuggestionStatus = "applied"
 	SuggestionStatusRolledBack SuggestionStatus = "rolled_back"
 )
+
+// Valid reports whether s is one of the recognised suggestion
+// statuses. Used to reject unknown status filters from API callers.
+func (s SuggestionStatus) Valid() bool {
+	switch s {
+	case SuggestionStatusPending,
+		SuggestionStatusApproved,
+		SuggestionStatusRejected,
+		SuggestionStatusApplied,
+		SuggestionStatusRolledBack:
+		return true
+	default:
+		return false
+	}
+}
 
 // RiskLevel categorises the risk of applying a suggestion.
 type RiskLevel string
