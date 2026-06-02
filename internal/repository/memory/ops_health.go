@@ -179,5 +179,8 @@ func (r *OpsHealthSnapshotRepository) ListHistory(ctx context.Context, tenantID 
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].CreatedAt.After(result[j].CreatedAt)
 	})
+	if len(result) > repository.MaxOpsHealthHistory {
+		result = result[:repository.MaxOpsHealthHistory]
+	}
 	return result, nil
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -108,6 +109,37 @@ func TestOpsHealth_History(t *testing.T) {
 	}
 	if len(resp.Snapshots) != 2 {
 		t.Errorf("snapshots = %d, want 2", len(resp.Snapshots))
+	}
+}
+
+func TestOpsHealth_History_CappedAtMax(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	tenantID := uuid.New()
+	if _, err := memory.NewTenantRepository(store).Create(context.Background(), repository.Tenant{
+		ID: tenantID, Name: "cap", Slug: "cap",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repo := memory.NewOpsHealthSnapshotRepository(store)
+	ctx := context.Background()
+	// Record more snapshots than the cap; ListHistory must return at
+	// most MaxOpsHealthHistory rows so a high-frequency tenant cannot
+	// blow up an unpaginated response.
+	for i := 0; i < repository.MaxOpsHealthHistory+5; i++ {
+		if _, err := repo.Create(ctx, tenantID, repository.OpsHealthSnapshot{
+			HealthScore:     50,
+			ComponentScores: json.RawMessage(`{}`),
+		}); err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+	}
+	snaps, err := repo.ListHistory(ctx, tenantID, time.Now().UTC().AddDate(0, 0, -30))
+	if err != nil {
+		t.Fatalf("list history: %v", err)
+	}
+	if len(snaps) != repository.MaxOpsHealthHistory {
+		t.Errorf("snapshots = %d, want %d (capped)", len(snaps), repository.MaxOpsHealthHistory)
 	}
 }
 

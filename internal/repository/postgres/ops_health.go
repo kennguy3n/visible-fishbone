@@ -204,8 +204,9 @@ func (r *OpsHealthSnapshotRepository) ListHistory(ctx context.Context, tenantID 
 			SELECT id, tenant_id, health_score, component_scores, created_at
 			FROM ops_health_snapshots
 			WHERE created_at >= $1
-			ORDER BY created_at DESC`
-		rows, err := tx.Query(ctx, q, since)
+			ORDER BY created_at DESC
+			LIMIT $2`
+		rows, err := tx.Query(ctx, q, since, repository.MaxOpsHealthHistory)
 		if err != nil {
 			return fmt.Errorf("list ops_health_snapshot history: %w", err)
 		}
