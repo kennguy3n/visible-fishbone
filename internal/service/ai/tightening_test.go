@@ -43,6 +43,35 @@ func TestTighteningService_UnusedRules(t *testing.T) {
 	}
 }
 
+// When the caller supplies no hit data (nil HitCounts), unused-rule
+// detection must be skipped rather than flagging every allow rule as
+// unused — absent hit data is "unknown", not "zero hits".
+func TestTighteningService_NilHitCounts_SkipsUnusedDetection(t *testing.T) {
+	t.Parallel()
+	svc := NewTighteningService(nil, nil)
+
+	report, err := svc.Analyze(context.Background(), AnalyzeInput{
+		TenantID: uuid.New(),
+		Rules: []json.RawMessage{
+			json.RawMessage(`{"id":"r1","verb":"allow","domain":"ngfw","subject_refs":["admin"]}`),
+			json.RawMessage(`{"id":"r2","verb":"allow","domain":"swg","subject_refs":["ops"]}`),
+		},
+		// HitCounts intentionally omitted (nil).
+		WindowDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, rec := range report.Recommendations {
+		if rec.Category == SuggestionCategoryUnused {
+			t.Fatalf("did not expect unused recommendation when hit data is absent, got one for %s", rec.RuleID)
+		}
+	}
+	if report.RulesAnalyzed != 2 {
+		t.Fatalf("expected 2 rules analyzed, got %d", report.RulesAnalyzed)
+	}
+}
+
 func TestTighteningService_ShadowedRules(t *testing.T) {
 	t.Parallel()
 	svc := NewTighteningService(nil, nil)

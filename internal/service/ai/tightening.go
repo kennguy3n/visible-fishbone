@@ -67,6 +67,14 @@ func (s *TighteningService) Analyze(ctx context.Context, input AnalyzeInput) (Ti
 
 	recs := []TighteningRecommendation{}
 
+	// A nil HitCounts map means the caller supplied no hit data at all.
+	// Without it we cannot conclude a rule is unused, so unused-rule
+	// detection is skipped — otherwise every allow rule would be flagged
+	// as unused and recommended for removal. An explicitly-provided
+	// (non-nil) map, even if empty, is authoritative: a rule absent from
+	// it genuinely had zero hits in the window.
+	haveHitData := input.HitCounts != nil
+
 	for _, ruleRaw := range input.Rules {
 		var rule struct {
 			ID          string          `json:"id"`
@@ -84,7 +92,7 @@ func (s *TighteningService) Analyze(ctx context.Context, input AnalyzeInput) (Ti
 
 		hits := input.HitCounts[rule.ID]
 
-		if hits == 0 && rule.Verb == "allow" {
+		if haveHitData && hits == 0 && rule.Verb == "allow" {
 			recs = append(recs, buildUnusedRecommendation(rule.ID, input.WindowDays, ruleRaw))
 			continue
 		}
