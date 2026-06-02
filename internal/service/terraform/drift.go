@@ -124,7 +124,7 @@ func marshalCanonical(v any) string {
 func indexSites(sites []ExportedSite) map[string]string {
 	m := make(map[string]string, len(sites))
 	for _, s := range sites {
-		m[s.Name] = marshalCanonical(s)
+		m[s.Slug] = marshalCanonical(s)
 	}
 	return m
 }
@@ -140,7 +140,7 @@ func indexBrowserPolicies(policies []ExportedBrowserPolicy) map[string]string {
 func indexDataClassifications(dcs []ExportedDataClassification) map[string]string {
 	m := make(map[string]string, len(dcs))
 	for _, dc := range dcs {
-		m[dc.Label] = marshalCanonical(dc)
+		m[dc.Level] = marshalCanonical(dc)
 	}
 	return m
 }
