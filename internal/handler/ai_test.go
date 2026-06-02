@@ -400,6 +400,35 @@ func TestAIHandler_ListSuggestions_400OnInvalidStatus(t *testing.T) {
 	}
 }
 
+// invalidArgListRepo is an AISuggestionRepository whose List always
+// returns repository.ErrInvalidArgument, mimicking the postgres backend's
+// behaviour for a malformed/tampered pagination cursor. The memory
+// backend deliberately treats bad cursors as "start over", so a stub is
+// needed to exercise the handler's 400 mapping.
+type invalidArgListRepo struct {
+	repository.AISuggestionRepository
+}
+
+func (invalidArgListRepo) List(context.Context, uuid.UUID, *string, repository.Page) (repository.PageResult[repository.AISuggestion], error) {
+	return repository.PageResult[repository.AISuggestion]{}, repository.ErrInvalidArgument
+}
+
+func TestAIHandler_ListSuggestions_400OnInvalidCursor(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetReviewService(ai.NewReviewService(invalidArgListRepo{}, nil))
+
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/suggestions?after=not-a-valid-cursor", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.listSuggestions(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAIHandler_SuggestionResponses_SnakeCase(t *testing.T) {
 	t.Parallel()
 	store := memory.NewStore()

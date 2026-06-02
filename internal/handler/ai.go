@@ -219,6 +219,14 @@ func (h *AIHandler) listSuggestions(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.reviewSvc.ListSuggestions(r.Context(), tenantID, statusFilter, page)
 	if err != nil {
+		// A malformed/tampered cursor surfaces as ErrInvalidArgument
+		// from the repository; that is a client error (400), not a
+		// server fault, matching how getSuggestion maps repository
+		// errors via WriteRepositoryError.
+		if errors.Is(err, repository.ErrInvalidArgument) {
+			WriteError(w, http.StatusBadRequest, "invalid_argument", "invalid cursor")
+			return
+		}
 		h.logger.Error("ai: list suggestions failed",
 			slog.String("tenant_id", tenantID.String()),
 			slog.String("error", err.Error()))
