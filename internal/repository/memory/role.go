@@ -100,7 +100,7 @@ func (r *RoleRepository) List(ctx context.Context, tenantID *uuid.UUID) ([]repos
 	return out, nil
 }
 
-func (r *RoleRepository) Update(ctx context.Context, id uuid.UUID, name string) (repository.Role, error) {
+func (r *RoleRepository) Update(ctx context.Context, id uuid.UUID, name string, externalID string) (repository.Role, error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.Role{}, err
 	}
@@ -125,6 +125,7 @@ func (r *RoleRepository) Update(ctx context.Context, id uuid.UUID, name string) 
 		}
 	}
 	role.Name = name
+	role.ExternalID = externalID
 	r.s.roles[id] = role
 	cp := role
 	cp.Permissions = append([]string(nil), role.Permissions...)

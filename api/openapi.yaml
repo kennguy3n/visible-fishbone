@@ -1767,7 +1767,14 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
 
   # --- SCIM 2.0 endpoints ---------------------------------------------------
+  # SCIM routes are served at the root (not under /api/v1/) per RFC 7644.
+  # Path-level servers override ensures SDK generators construct correct URLs.
   /scim/v2/Users:
+    servers:
+      - url: https://control.shieldnet.example
+        description: Production
+      - url: http://localhost:8080
+        description: Development
     post:
       tags: [scim]
       operationId: scimCreateUser
@@ -1807,6 +1814,11 @@ paths:
             application/scim+json:
               schema: { $ref: "#/components/schemas/SCIMListResponse" }
   /scim/v2/Users/{id}:
+    servers:
+      - url: https://control.shieldnet.example
+        description: Production
+      - url: http://localhost:8080
+        description: Development
     get:
       tags: [scim]
       operationId: scimGetUser
@@ -1878,6 +1890,11 @@ paths:
         "204": { description: Deactivated }
         "404": { $ref: "#/components/responses/Error" }
   /scim/v2/Groups:
+    servers:
+      - url: https://control.shieldnet.example
+        description: Production
+      - url: http://localhost:8080
+        description: Development
     post:
       tags: [scim]
       operationId: scimCreateGroup
@@ -1915,6 +1932,11 @@ paths:
             application/scim+json:
               schema: { $ref: "#/components/schemas/SCIMListResponse" }
   /scim/v2/Groups/{id}:
+    servers:
+      - url: https://control.shieldnet.example
+        description: Production
+      - url: http://localhost:8080
+        description: Development
     get:
       tags: [scim]
       operationId: scimGetGroup
@@ -1986,6 +2008,11 @@ paths:
         "204": { description: Deleted }
         "404": { $ref: "#/components/responses/Error" }
   /scim/v2/ServiceProviderConfig:
+    servers:
+      - url: https://control.shieldnet.example
+        description: Production
+      - url: http://localhost:8080
+        description: Development
     get:
       tags: [scim]
       operationId: scimServiceProviderConfig
@@ -1997,6 +2024,11 @@ paths:
             application/scim+json:
               schema: { type: object }
   /scim/v2/Schemas:
+    servers:
+      - url: https://control.shieldnet.example
+        description: Production
+      - url: http://localhost:8080
+        description: Development
     get:
       tags: [scim]
       operationId: scimSchemas
@@ -2008,6 +2040,11 @@ paths:
             application/scim+json:
               schema: { $ref: "#/components/schemas/SCIMListResponse" }
   /scim/v2/ResourceTypes:
+    servers:
+      - url: https://control.shieldnet.example
+        description: Production
+      - url: http://localhost:8080
+        description: Development
     get:
       tags: [scim]
       operationId: scimResourceTypes

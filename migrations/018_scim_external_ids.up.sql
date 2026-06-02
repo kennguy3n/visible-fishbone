@@ -1,10 +1,6 @@
--- Migration 016: SCIM external IDs
--- Adds external_id and scim_active columns to users table for SCIM
--- provisioning; adds external_id to roles table for SCIM group mapping.
-
--- Users: SCIM external ID + active flag.
-ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS scim_active BOOLEAN NOT NULL DEFAULT TRUE;
+-- Migration 018: SCIM external IDs
+-- Adds index on users.external_id for SCIM filter fast path;
+-- adds external_id to roles table for SCIM group mapping.
 
 -- Index for SCIM filter queries: lookup by (tenant_id, external_id).
 -- external_id already exists on users (see types.go); add an index

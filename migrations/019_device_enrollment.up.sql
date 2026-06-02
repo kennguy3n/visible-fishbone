@@ -1,4 +1,4 @@
--- Migration 017: Device enrollment tables.
+-- Migration 019: Device enrollment tables.
 -- Adds device_enrollments and device_certificates tables for the
 -- claim-token enrollment flow (PROPOSAL.md §7, ARCHITECTURE.md §3.4).
 

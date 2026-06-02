@@ -240,21 +240,33 @@ func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter 
 		after = res.NextCursor
 	}
 
-	resources := make([]any, 0, len(allUsers))
+	allMatching := make([]any, 0, len(allUsers))
 	for _, u := range allUsers {
 		su := userToSCIM(u)
 		if parsed != nil && !parsed.MatchUser(su) {
 			continue
 		}
-		resources = append(resources, su)
+		allMatching = append(allMatching, su)
 	}
+
+	// Apply RFC 7644 §3.4.2 pagination window.
+	totalResults := len(allMatching)
+	start := startIndex - 1 // SCIM startIndex is 1-based
+	if start > totalResults {
+		start = totalResults
+	}
+	end := start + count
+	if end > totalResults {
+		end = totalResults
+	}
+	page := allMatching[start:end]
 
 	return SCIMListResponse{
 		Schemas:      []string{SCIMSchemaList},
-		TotalResults: len(resources),
+		TotalResults: totalResults,
 		StartIndex:   startIndex,
-		ItemsPerPage: len(resources),
-		Resources:    resources,
+		ItemsPerPage: len(page),
+		Resources:    page,
 	}, nil
 }
 
@@ -268,6 +280,7 @@ func (s *SCIMService) CreateGroup(ctx context.Context, tenantID uuid.UUID, sg SC
 	r, err := s.roles.Create(ctx, repository.Role{
 		TenantID:    &tenantID,
 		Name:        sg.DisplayName,
+		ExternalID:  sg.ExternalID,
 		Permissions: []string{},
 		Scope:       repository.RoleScopeTenant,
 	})
@@ -298,8 +311,12 @@ func (s *SCIMService) UpdateGroup(ctx context.Context, tenantID uuid.UUID, group
 	if r.TenantID == nil || *r.TenantID != tenantID {
 		return SCIMGroup{}, repository.ErrNotFound
 	}
-	if sg.DisplayName != "" && sg.DisplayName != r.Name {
-		r, err = s.roles.Update(ctx, groupID, sg.DisplayName)
+	name := sg.DisplayName
+	if name == "" {
+		name = r.Name
+	}
+	if name != r.Name || sg.ExternalID != r.ExternalID {
+		r, err = s.roles.Update(ctx, groupID, name, sg.ExternalID)
 		if err != nil {
 			return SCIMGroup{}, err
 		}
@@ -350,7 +367,14 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 		case "replace":
 			if strings.EqualFold(op.Path, "displayname") {
 				if val, ok := op.Value.(string); ok && val != "" {
-					r, err = s.roles.Update(ctx, groupID, val)
+					r, err = s.roles.Update(ctx, groupID, val, r.ExternalID)
+					if err != nil {
+						return SCIMGroup{}, err
+					}
+				}
+			} else if strings.EqualFold(op.Path, "externalid") {
+				if val, ok := op.Value.(string); ok {
+					r, err = s.roles.Update(ctx, groupID, r.Name, val)
 					if err != nil {
 						return SCIMGroup{}, err
 					}
@@ -389,7 +413,14 @@ func (s *SCIMService) ListGroups(ctx context.Context, tenantID uuid.UUID, filter
 		parsed = &f
 	}
 
-	resources := make([]any, 0, len(roles))
+	if startIndex < 1 {
+		startIndex = 1
+	}
+	if count <= 0 {
+		count = repository.DefaultPageLimit
+	}
+
+	allMatching := make([]any, 0, len(roles))
 	for _, r := range roles {
 		if r.TenantID == nil {
 			continue
@@ -398,21 +429,27 @@ func (s *SCIMService) ListGroups(ctx context.Context, tenantID uuid.UUID, filter
 		if parsed != nil && !parsed.MatchGroup(sg) {
 			continue
 		}
-		resources = append(resources, sg)
+		allMatching = append(allMatching, sg)
 	}
 
-	if startIndex < 1 {
-		startIndex = 1
+	// Apply RFC 7644 §3.4.2 pagination window.
+	totalResults := len(allMatching)
+	start := startIndex - 1
+	if start > totalResults {
+		start = totalResults
 	}
-	if count <= 0 {
-		count = repository.DefaultPageLimit
+	end := start + count
+	if end > totalResults {
+		end = totalResults
 	}
+	page := allMatching[start:end]
+
 	return SCIMListResponse{
 		Schemas:      []string{SCIMSchemaList},
-		TotalResults: len(resources),
+		TotalResults: totalResults,
 		StartIndex:   startIndex,
-		ItemsPerPage: len(resources),
-		Resources:    resources,
+		ItemsPerPage: len(page),
+		Resources:    page,
 	}, nil
 }
 
@@ -445,6 +482,7 @@ func roleToSCIMGroup(r repository.Role) SCIMGroup {
 	return SCIMGroup{
 		Schemas:     []string{SCIMSchemaGroup},
 		ID:          r.ID.String(),
+		ExternalID:  r.ExternalID,
 		DisplayName: r.Name,
 		Meta: &SCIMMeta{
 			ResourceType: "Group",

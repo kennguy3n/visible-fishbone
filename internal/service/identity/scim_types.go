@@ -122,10 +122,26 @@ type SCIMFilter struct {
 // `attribute op "value"`. Only single-clause filters with eq, co, sw
 // are supported — this covers the IdP provisioning patterns (Okta,
 // Azure AD, OneLogin all use `userName eq "x"` for dedup lookups).
+// Compound filters (using `and`/`or`) are rejected with a clear error.
 func ParseSCIMFilter(raw string) (SCIMFilter, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return SCIMFilter{}, fmt.Errorf("empty filter")
+	}
+
+	// Reject compound filters — we only support single-clause.
+	lower := strings.ToLower(raw)
+	for _, keyword := range []string{" and ", " or "} {
+		// Only check outside of quoted values by looking for the
+		// keyword after the closing quote of the first clause.
+		idx := strings.Index(lower, keyword)
+		if idx < 0 {
+			continue
+		}
+		// Count quotes before the keyword — if even, it's outside a value.
+		if strings.Count(raw[:idx], "\"")%2 == 0 {
+			return SCIMFilter{}, fmt.Errorf("compound filters are not supported; only single-clause filters (eq, co, sw) are accepted")
+		}
 	}
 
 	// Split into exactly 3 tokens: attr op "value"

@@ -155,6 +155,7 @@ type Role struct {
 	ID          uuid.UUID
 	TenantID    *uuid.UUID // nil for system roles
 	Name        string
+	ExternalID  string // SCIM externalId for IdP reconciliation
 	Permissions []string
 	Scope       RoleScope
 	CreatedAt   time.Time

@@ -204,10 +204,10 @@ type RoleRepository interface {
 	Create(ctx context.Context, r Role) (Role, error)
 	Get(ctx context.Context, id uuid.UUID) (Role, error)
 	List(ctx context.Context, tenantID *uuid.UUID) ([]Role, error)
-	// Update renames a role. Returns ErrNotFound if the role does
-	// not exist, ErrConflict if the new name collides with another
-	// role in the same tenant.
-	Update(ctx context.Context, id uuid.UUID, name string) (Role, error)
+	// Update updates a role's name and external ID. Returns
+	// ErrNotFound if the role does not exist, ErrConflict if the
+	// new name collides with another role in the same tenant.
+	Update(ctx context.Context, id uuid.UUID, name string, externalID string) (Role, error)
 	// Delete removes a role and its user_role assignments.
 	// Returns ErrNotFound if the role does not exist.
 	Delete(ctx context.Context, id uuid.UUID) error
