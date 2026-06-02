@@ -2626,3 +2626,194 @@ func TestMSPHandler_Patch_RejectsSoftDeleted(t *testing.T) {
 		t.Fatalf("name = %q, want unchanged 'Acme'", final.Name)
 	}
 }
+
+// raceMSPSvc wraps an MSPService and simulates the round-15
+// BUG_0001 TOCTOU race by performing a "concurrent" Delete via
+// the same backing repo just before delegating the handler's
+// Delete call. After the first underlying Delete commits, the
+// second one (the handler's actual call) naturally returns
+// ErrForbidden because the soft-delete-immutability guard
+// refuses to re-stamp deleted_at on an already-deleted row
+// (memory: internal/repository/memory/msp.go:276; postgres:
+// internal/repository/postgres/msp.go:384). This is exactly the
+// production race surface: the handler's pre-Get sees the row
+// as active, the handler's Delete fires AFTER a concurrent
+// caller's Delete commits, so the handler observes ErrForbidden.
+// Without the round-15 fix, this surfaces a confusing 403 to a
+// client whose request semantically succeeded; with the fix,
+// the handler re-Gets, sees the now-deleted state, and returns
+// 200+body per the idempotency contract.
+type raceMSPSvc struct {
+	repoMSPService
+	once sync.Once
+}
+
+func (r *raceMSPSvc) Delete(ctx context.Context, id uuid.UUID) error {
+	// On the first Delete call: simulate the "concurrent" caller
+	// winning the race. We delete through the same backing repo
+	// directly, then delegate the handler's actual Delete call
+	// below — which now sees an already-deleted row and returns
+	// ErrForbidden. This is the deterministic equivalent of two
+	// real callers both calling setStatus(deleted) at the same
+	// time on an active MSP: one commits, the other observes the
+	// post-commit guard. Subsequent calls (none expected on this
+	// path because the handler's pre-Get short-circuits the
+	// second request) just see ErrForbidden naturally.
+	r.once.Do(func() {
+		_ = r.repoMSPService.Delete(ctx, id)
+	})
+	return r.repoMSPService.Delete(ctx, id)
+}
+
+// TestMSPHandler_SetStatusDeleted_TOCTOURecoversToIdempotent pins
+// the round-15 🟡 BUG_0001 fix: the setStatus handler's deleted
+// path had a TOCTOU window between the pre-Get (line 609) and
+// the Delete call (line 618). When a concurrent caller's
+// Delete landed in that window, the handler's Delete would
+// return ErrForbidden (the repository backends refuse to
+// re-stamp deleted_at), which mapped to HTTP 403 — violating
+// the idempotency contract this endpoint documents (a POST
+// .../status with status=deleted on an already-deleted MSP
+// must return 200+body, not 403).
+//
+// The fix catches the ErrForbidden post-Delete and re-Gets the
+// MSP. If the row is now in the deleted state, the handler
+// returns 200+body (idempotent recovery). Only if the row is
+// somehow still NOT deleted does the 403 surface — that case
+// represents a genuinely unexpected state and the
+// resurrection-guard branch a few lines below would catch any
+// follow-up attempt anyway.
+//
+// This test uses a raceMSPSvc wrapper to deterministically
+// inject the race window: on the handler's Delete call, the
+// wrapper first commits an underlying Delete (simulating the
+// concurrent winner), then delegates — producing the exact
+// ErrForbidden surface the production race would.
+func TestMSPHandler_SetStatusDeleted_TOCTOURecoversToIdempotent(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	svc := &raceMSPSvc{repoMSPService: repoMSPService{repo: msps}}
+	h := handler.NewMSPHandler(svc, nil, nil, allowAllAuthz{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+	ctx := context.Background()
+
+	m, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-toctou-del"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// First call: the wrapper injects the race during Delete, so
+	// the handler observes ErrForbidden and must recover via
+	// re-Get → 200+body.
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/status",
+		handler.MSPStatusRequest{Status: string(repository.MSPStatusDeleted)})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setStatus(deleted) under TOCTOU race: status = %d body=%s, "+
+			"want 200 — handler must recover from concurrent-Delete "+
+			"ErrForbidden by re-Getting and honouring idempotency",
+			rec.Code, rec.Body.String())
+	}
+	var resp handler.MSPResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != string(repository.MSPStatusDeleted) {
+		t.Fatalf("resp.Status = %q, want %q — re-Get path must surface the "+
+			"post-concurrent-Delete deleted state",
+			resp.Status, repository.MSPStatusDeleted)
+	}
+	if resp.ID != m.ID.String() {
+		t.Fatalf("resp.ID = %q, want %q — recovery must return the same row, not create a new one",
+			resp.ID, m.ID)
+	}
+
+	// Repository invariant: the row must be soft-deleted exactly
+	// once with deleted_at stamped — the wrapper's Do-once
+	// arrangement plus the second-Delete-returns-ErrForbidden
+	// natural behaviour means deleted_at was only set by the
+	// concurrent (raced) call, not by the handler.
+	final, err := msps.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get after recovery: %v", err)
+	}
+	if final.Status != repository.MSPStatusDeleted {
+		t.Fatalf("final.Status = %q, want deleted — invariant violated",
+			final.Status)
+	}
+	if final.DeletedAt == nil {
+		t.Fatalf("final.DeletedAt = nil, want stamped — " +
+			"(status='deleted' ⇔ deleted_at != NULL) invariant violated")
+	}
+}
+
+// TestMSPHandler_SetStatusDeleted_TOCTOUPropagatesGenuine403 pins
+// the *negative* side of the round-15 fix: if the post-Delete
+// re-Get returns a row that is NOT in the deleted state (a
+// truly unexpected condition; under normal lifecycle the only
+// way Delete returns ErrForbidden is when the row was just
+// deleted by a concurrent caller), the handler must still
+// surface the 403. We exercise this by wrapping the service so
+// Delete returns ErrForbidden without actually mutating the row
+// — i.e., a spurious / corrupt ErrForbidden. The handler's
+// re-Get then sees the row still active, and the original
+// ErrForbidden falls through to a 403 response.
+//
+// This pins the contract: the round-15 recovery path narrows to
+// the legitimate concurrent-delete race; it must NOT silently
+// swallow ErrForbidden when the lifecycle invariant is not
+// actually satisfied.
+func TestMSPHandler_SetStatusDeleted_TOCTOUPropagatesGenuine403(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	svc := &spuriousForbiddenMSPSvc{repoMSPService: repoMSPService{repo: msps}}
+	h := handler.NewMSPHandler(svc, nil, nil, allowAllAuthz{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+	ctx := context.Background()
+
+	m, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-toctou-genuine"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/status",
+		handler.MSPStatusRequest{Status: string(repository.MSPStatusDeleted)})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("setStatus(deleted) with spurious ErrForbidden: status = %d body=%s, "+
+			"want 403 — re-Get sees row still active, so the original "+
+			"ErrForbidden must surface (no silent swallow)",
+			rec.Code, rec.Body.String())
+	}
+
+	// The row must NOT have been mutated by the failed call.
+	final, err := msps.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if final.Status != repository.MSPStatusActive {
+		t.Fatalf("final.Status = %q, want active — no mutation must have occurred",
+			final.Status)
+	}
+	if final.DeletedAt != nil {
+		t.Fatalf("final.DeletedAt = %v, want nil — invariant violated",
+			final.DeletedAt)
+	}
+}
+
+// spuriousForbiddenMSPSvc returns ErrForbidden from Delete WITHOUT
+// actually mutating the underlying row. Used to verify the
+// round-15 fix narrows its recovery to legitimate concurrent
+// deletes — the re-Get path must see status != deleted and
+// surface the 403 rather than silently swallow it.
+type spuriousForbiddenMSPSvc struct {
+	repoMSPService
+}
+
+func (s *spuriousForbiddenMSPSvc) Delete(ctx context.Context, id uuid.UUID) error {
+	return repository.ErrForbidden
+}

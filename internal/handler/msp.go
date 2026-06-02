@@ -616,6 +616,50 @@ func (h *MSPHandler) setStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := h.msps.Delete(r.Context(), id); err != nil {
+			// TOCTOU window between the pre-Get above and this
+			// Delete call: if a concurrent `DELETE /api/v1/msps/{id}`
+			// or another `POST .../status` with status=deleted lands
+			// in between, our pre-Get saw status=active so the
+			// idempotency short-circuit didn't fire, then our Delete
+			// returns ErrForbidden because the repository backends
+			// refuse to re-stamp deleted_at on an already-deleted
+			// row (memory: internal/repository/memory/msp.go:276;
+			// postgres: internal/repository/postgres/msp.go:384).
+			// Without this guard, the concurrent caller observes
+			// 200+body (the winner) but THIS caller observes a 403
+			// "operation not permitted" — even though the MSP is
+			// now in exactly the state they requested, breaking
+			// the idempotency contract this endpoint documents.
+			//
+			// Round-15 of Devin Review on PR #42 (BUG_0001) flagged
+			// this race. Recovery: re-Get to confirm the row is now
+			// soft-deleted (we expect the concurrent caller's
+			// Delete to have committed); if so, return 200+body
+			// just like the pre-check path would have. Only surface
+			// the 403 if the row is somehow still NOT deleted — a
+			// genuinely unexpected state (e.g. a parallel
+			// resurrection, which is itself rejected by the
+			// resurrection guard a few lines below). The branding
+			// cache is invalidated either way because *some* caller
+			// soft-deleted the MSP and any cached entry under this
+			// MSP's tenants is now stale.
+			if errors.Is(err, repository.ErrForbidden) {
+				recheck, rgErr := h.msps.Get(r.Context(), id)
+				if rgErr != nil {
+					WriteRepositoryError(w, rgErr)
+					return
+				}
+				if recheck.Status == repository.MSPStatusDeleted {
+					if h.branding != nil {
+						h.branding.InvalidateAll()
+					}
+					WriteJSON(w, http.StatusOK, toMSPResponse(recheck))
+					return
+				}
+				// Truly unexpected: Delete refused but the row is
+				// not in the deleted state. Fall through to surface
+				// the original ErrForbidden as a 403.
+			}
 			WriteRepositoryError(w, err)
 			return
 		}
