@@ -79,7 +79,7 @@ func (h *TerraformHandler) drift(w http.ResponseWriter, r *http.Request) {
 	}
 	report, err := h.provider.DetectDrift(r.Context(), tenantID, body)
 	if err != nil {
-		WriteError(w, http.StatusInternalServerError, "drift_failed", "internal server error")
+		WriteRepositoryError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, report)
