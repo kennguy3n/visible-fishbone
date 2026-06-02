@@ -328,12 +328,12 @@ down; MSP onboarding is repeatable.
 
 ### Block 6 — AI assistant foundation + identity
 
-- [ ] **Task 27.** AI service interface —
+- [x] **Task 27.** AI service interface —
       `internal/service/ai/service.go`: methods for
       policy-auto-suggest, incident summarisation,
       troubleshooting assistance; the
       "AI proposes, deterministic systems enforce" invariant
-- [ ] **Task 28.** Incident summarisation —
+- [x] **Task 28.** Incident summarisation —
       `internal/service/ai/summarizer.go`: LLM-backed summaries
       grounded in ClickHouse evidence; refuses to assert facts
       outside collected evidence; flags output as AI-generated;

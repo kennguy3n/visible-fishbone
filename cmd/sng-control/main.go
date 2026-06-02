@@ -35,6 +35,7 @@ import (
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
+	aisvc "github.com/kennguy3n/visible-fishbone/internal/service/ai"
 	"github.com/kennguy3n/visible-fishbone/internal/service/alert"
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
@@ -136,7 +137,7 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher)
+	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -212,6 +213,15 @@ func run() error {
 				}
 			}
 		}
+	}
+
+	// Wire the AI summarizer. Template mode works without
+	// ClickHouse; when an EvidenceReader adapter for the CH hot
+	// tier is built, pass it instead of nil to enable
+	// evidence-grounded summaries.
+	if aiSvc != nil {
+		aiSvc.SetSummarizer(aisvc.NewSummarizer(aiSvc.LLM(), nil))
+		logger.Info("ai.summarizer: wired (template-mode; evidence reader pending)")
 	}
 	// Wrap startTelemetry's shutdown in a sync.Once so the bounded
 	// explicit call (with shutdownCtx) wins and the safety-net
@@ -291,7 +301,7 @@ func buildRouter(
 	health *handler.Health,
 	replay *telreplay.Worker,
 	telPub *sngnats.Publisher,
-) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, error) {
+) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, *aisvc.Service, error) {
 	store := postgres.NewStore(pool)
 
 	tenantRepo := store.NewTenantRepository()
@@ -345,11 +355,11 @@ func buildRouter(
 	// the same in all cases.
 	keyOpts := []policy.KeyOption{}
 	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
 	} else if len(master) > 0 {
 		w, err := policy.NewAESGCMWrapper(master)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
+			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
 		}
 		keyOpts = append(keyOpts, policy.WithKeyWrapper(w))
 		logger.Info("policy: AES-256-GCM at-rest wrap enabled for signing seeds")
@@ -360,7 +370,7 @@ func buildRouter(
 	if cfg.Policy.SigningKeyPath != "" {
 		ks, err := policy.LoadKeySignerFromFile(cfg.Policy.SigningKeyPath)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
+			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
 		}
 		policySigner = ks
 		fileSigner = ks
@@ -441,7 +451,7 @@ func buildRouter(
 	canarySvc, err := policy.NewCanaryService(policySvc, policyRolloutRepo,
 		policy.WithCanaryLogger(logger))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
 	}
 	policySimHandler := handler.NewPolicySimulationHandler(
 		policySvc, canarySvc, nil, policyRepo, logger)
@@ -536,6 +546,8 @@ func buildRouter(
 		logger, tenant.BulkOptions{})
 	brandingResolver := tenant.NewBrandingResolver(tenantRepo, mspRepo)
 
+	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, logger)
+
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:           cfg,
 		Logger:           logger,
@@ -554,6 +566,7 @@ func buildRouter(
 		Alert:            handler.NewAlertHandler(alertRouter, alertFeedback, logger),
 		Integrations:     handler.NewIntegrationHandler(integrationSvc),
 		MSP:              handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
+		AI:               aiHandler,
 		APIKeyLookup:     apiKeySvc,
 		Health:           health,
 		OpenAPISpec:      handler.NewOpenAPIHandler(),
@@ -570,7 +583,39 @@ func buildRouter(
 	// admin `POST /admin/app-registry/sync` endpoint is the only
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
-	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, nil
+	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, nil
+}
+
+// buildAIHandler constructs the AI handler with an optional LLM
+// provider. When AI_LLM_ENDPOINT is not set, the service runs in
+// template-only mode and suggest-policy / troubleshoot return 503.
+func buildAIHandler(cfg *config.Config, policySvc *policy.Service, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
+	var llm aisvc.LLMProvider
+	if cfg.AI.Endpoint != "" {
+		llm = &aisvc.HTTPProvider{
+			Endpoint: cfg.AI.Endpoint,
+			APIKey:   cfg.AI.APIKey,
+			Model:    cfg.AI.Model,
+			Timeout:  cfg.AI.Timeout,
+		}
+		logger.Info("ai: LLM provider configured",
+			slog.String("endpoint", cfg.AI.Endpoint),
+			slog.String("model", cfg.AI.Model))
+	} else {
+		logger.Info("ai: no LLM endpoint configured; template-only mode")
+	}
+
+	var verifier *aisvc.Verifier
+	if policySvc != nil {
+		verifier = aisvc.NewVerifier(policySvc)
+	}
+
+	// Summarizer requires a ClickHouse evidence reader. For now,
+	// we construct without one (nil) — it will be wired later via
+	// svc.SetSummarizer when ClickHouse becomes available
+	// (mirrors the policySimHandler.SetSimulator pattern).
+	svc := aisvc.New(llm, verifier, nil, aisvc.WithLogger(logger))
+	return handler.NewAIHandler(svc, logger), svc
 }
 
 // loadPolicyKeyWrapMaster resolves the AES-GCM master key from

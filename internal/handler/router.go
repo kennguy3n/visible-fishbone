@@ -29,6 +29,7 @@ type RouterDeps struct {
 	Alert            *AlertHandler
 	Integrations     *IntegrationHandler
 	MSP              *MSPHandler
+	AI               *AIHandler
 	DLP              *DLPHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
@@ -101,6 +102,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.MSP != nil {
 		deps.MSP.Register(apiMux)
+	}
+	if deps.AI != nil {
+		deps.AI.Register(apiMux)
 	}
 	if deps.DLP != nil {
 		deps.DLP.Register(apiMux)
