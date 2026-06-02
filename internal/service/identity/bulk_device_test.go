@@ -54,6 +54,45 @@ func TestBulkDevice_GenerateTokens(t *testing.T) {
 	}
 }
 
+func TestBulkDevice_GenerateTokens_AttributesCreatedBy(t *testing.T) {
+	svc, _, tenantID := setupBulkTest(t)
+	actor := uuid.New()
+	ctx := middleware.WithUserIDForTest(context.Background(), actor)
+
+	// Bulk-issued tokens must stamp CreatedBy with the initiating
+	// user, matching the single-token GenerateClaimToken path so
+	// downstream joins on created_by find them regardless of path.
+	_, tokens, err := svc.BulkGenerateTokens(ctx, tenantID, 3, time.Hour)
+	if err != nil {
+		t.Fatalf("generate tokens: %v", err)
+	}
+	if len(tokens) != 3 {
+		t.Fatalf("tokens = %d, want 3", len(tokens))
+	}
+	for i, tk := range tokens {
+		if tk.Token.CreatedBy == nil || *tk.Token.CreatedBy != actor {
+			t.Errorf("token %d CreatedBy = %v, want %v", i, tk.Token.CreatedBy, actor)
+		}
+	}
+}
+
+func TestBulkDevice_GenerateTokens_NoActorLeavesCreatedByNil(t *testing.T) {
+	svc, _, tenantID := setupBulkTest(t)
+	ctx := context.Background()
+
+	// Without an authenticated user in context (e.g. API-key path),
+	// CreatedBy stays nil; the actor is recorded in audit details.
+	_, tokens, err := svc.BulkGenerateTokens(ctx, tenantID, 2, time.Hour)
+	if err != nil {
+		t.Fatalf("generate tokens: %v", err)
+	}
+	for i, tk := range tokens {
+		if tk.Token.CreatedBy != nil {
+			t.Errorf("token %d CreatedBy = %v, want nil", i, *tk.Token.CreatedBy)
+		}
+	}
+}
+
 func TestBulkDevice_GenerateTokens_ExceedsLimit(t *testing.T) {
 	svc, _, tenantID := setupBulkTest(t)
 	ctx := context.Background()

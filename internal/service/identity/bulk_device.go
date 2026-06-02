@@ -154,6 +154,14 @@ func (s *BulkDeviceService) BulkGenerateTokens(
 		ttl = 24 * time.Hour
 	}
 	now := s.nowFunc()
+	// Attribute the human initiator on each token, mirroring the
+	// single-token GenerateClaimToken path so downstream joins on
+	// created_by behave identically regardless of issue path. Stays
+	// nil on API-key paths, where the audit details record the actor.
+	var createdBy *uuid.UUID
+	if uid := middleware.UserIDFromContext(ctx); uid != uuid.Nil {
+		createdBy = &uid
+	}
 	result := BulkResult{Total: count}
 	var tokens []BulkTokenResult
 	for i := 0; i < count; i++ {
@@ -169,6 +177,7 @@ func (s *BulkDeviceService) BulkGenerateTokens(
 			TenantID:  tenantID,
 			TokenHash: hash[:],
 			ExpiresAt: now.Add(ttl),
+			CreatedBy: createdBy,
 		}
 		created, err := s.tokens.Create(ctx, tenantID, token)
 		if err != nil {
