@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
@@ -116,6 +118,8 @@ func (s *EnrollmentService) RedeemClaimToken(
 		return EnrollmentResult{}, fmt.Errorf("issue certificate: %w", err)
 	}
 
+	s.logAuditErr(s.appendAudit(ctx, tenantID, "device.enrollment.created", "device_enrollment", &deviceID, nil))
+
 	return EnrollmentResult{
 		Enrollment:  saved,
 		Certificate: cert,
@@ -148,6 +152,8 @@ func (s *EnrollmentService) RefreshCertificate(
 		_ = s.enrollments.UpdateEnrollmentStatus(ctx, tenantID, deviceID, repository.EnrollmentStatusActive)
 	}
 
+	s.logAuditErr(s.appendAudit(ctx, tenantID, "device.certificate.refreshed", "device_enrollment", &deviceID, nil))
+
 	return cert, nil
 }
 
@@ -164,6 +170,9 @@ func (s *EnrollmentService) RevokeDevice(
 	if err := s.enrollments.RevokeAllCertificates(ctx, tenantID, deviceID, s.nowFunc()); err != nil {
 		return fmt.Errorf("revoke certificates: %w", err)
 	}
+
+	s.logAuditErr(s.appendAudit(ctx, tenantID, "device.enrollment.revoked", "device_enrollment", &deviceID, nil))
+
 	return nil
 }
 
@@ -280,4 +289,30 @@ func (s *EnrollmentService) issueCertificate(
 	_ = s.enrollments.UpdateLastCertIssuedAt(ctx, tenantID, deviceID, now)
 
 	return saved, nil
+}
+
+func (s *EnrollmentService) appendAudit(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	action, resourceType string,
+	resourceID *uuid.UUID,
+	details json.RawMessage,
+) error {
+	if details == nil {
+		details = json.RawMessage(`{}`)
+	}
+	details = middleware.EnrichAuditDetails(ctx, details)
+	_, err := s.audit.Append(ctx, tenantID, repository.AuditEntry{
+		Action:       action,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		Details:      details,
+	})
+	return err
+}
+
+func (s *EnrollmentService) logAuditErr(err error) {
+	if err != nil {
+		s.logger.Warn("enrollment: audit append failed", slog.Any("error", err))
+	}
 }
