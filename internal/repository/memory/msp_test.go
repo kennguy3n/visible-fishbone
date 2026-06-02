@@ -338,6 +338,47 @@ func TestMSPRepository_UpdateStatus_TransitionsLifecycle(t *testing.T) {
 	}
 }
 
+// TestMSPRepository_UpdateStatus_ResurrectionRejected pins
+// round-17 of Devin Review on PR #42 (ANALYSIS_0005). Before the
+// guard, an UpdateStatus(deleted_row, 'active') call would
+// silently flip the row's status while leaving deleted_at
+// stamped, breaking the lifecycle invariant
+// `(status='deleted' ⇔ deleted_at != NULL)` and producing a
+// corrupt row that the partial unique slug index could not
+// reconcile. The guard rejects every UpdateStatus call on a
+// soft-deleted row with ErrForbidden — including idempotent
+// `deleted → deleted` — because the legal cascading-delete path
+// is Delete() (which clears msp_tenants + tenants.msp_id) and
+// the legal transition out of deleted does not exist (deleted
+// is terminal by design for MSPs).
+func TestMSPRepository_UpdateStatus_ResurrectionRejected(t *testing.T) {
+	_, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+	msp := mustCreateMSP(t, mspRepo, "msp")
+	if err := mspRepo.Delete(ctx, msp.ID); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	for _, to := range []repository.MSPStatus{
+		repository.MSPStatusActive,
+		repository.MSPStatusSuspended,
+		repository.MSPStatusDeleted,
+	} {
+		if _, err := mspRepo.UpdateStatus(ctx, msp.ID, to); !errors.Is(err, repository.ErrForbidden) {
+			t.Fatalf("UpdateStatus(deleted -> %s): want ErrForbidden, got %v", to, err)
+		}
+	}
+	// The row must remain in its tombstoned state — Status=deleted,
+	// DeletedAt != nil — regardless of the rejected attempts.
+	got, err := mspRepo.Get(ctx, msp.ID)
+	if err != nil {
+		t.Fatalf("Get post-resurrection-attempt: %v", err)
+	}
+	if got.Status != repository.MSPStatusDeleted || got.DeletedAt == nil {
+		t.Fatalf("row mutated by rejected UpdateStatus calls: status=%q deleted_at=%v",
+			got.Status, got.DeletedAt)
+	}
+}
+
 // TestMSPRepository_GetBySlug_FiltersSoftDeleted pins the
 // soft-delete filter on GetBySlug. After a soft-delete + slug
 // reuse cycle, two rows can share the same slug (Create only
