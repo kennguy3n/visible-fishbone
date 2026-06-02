@@ -440,6 +440,18 @@ func (h *MSPHandler) update(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
+	// Branding may have changed. Tenants under this MSP inherit
+	// per-field overrides, so a Branding mutation here invalidates
+	// every cached entry — the cache keys on tenantID, not mspID,
+	// so we cannot selectively flush. Settings/Name/Slug/Status
+	// changes also affect the resolved record (CustomDomain etc.
+	// flow through), so we invalidate unconditionally for any
+	// successful UpdateMSP. InvalidateAll is a no-op on the
+	// uncached resolver so this is safe regardless of construction
+	// path. See BrandingResolver doc-comment for the rationale.
+	if h.branding != nil {
+		h.branding.InvalidateAll()
+	}
 	WriteJSON(w, http.StatusOK, toMSPResponse(updated))
 }
 

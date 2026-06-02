@@ -287,34 +287,6 @@ func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, statu
 	return out, nil
 }
 
-// SetMSPOwner is the storage primitive for the denormalised
-// tenants.msp_id column. The MSP service's AssignTenant /
-// UnassignTenant paths call this alongside the msp_tenants join
-// row update so the denormalised column and the join stay in
-// lockstep. Passing a nil mspID clears the column.
-func (r *TenantRepository) SetMSPOwner(ctx context.Context, tenantID uuid.UUID, mspID *uuid.UUID) (repository.Tenant, error) {
-	if tenantID == uuid.Nil {
-		return repository.Tenant{}, repository.ErrInvalidArgument
-	}
-	const q = `
-		UPDATE tenants
-		SET msp_id = $2::uuid
-		WHERE id = $1::uuid
-		RETURNING ` + tenantSelectColumns
-	var arg any
-	if mspID != nil {
-		arg = *mspID
-	}
-	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, tenantID, arg))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return repository.Tenant{}, repository.ErrNotFound
-	}
-	if err != nil {
-		return repository.Tenant{}, fmt.Errorf("set msp owner: %w", err)
-	}
-	return out, nil
-}
-
 func (r *TenantRepository) TransitionStatus(ctx context.Context, id uuid.UUID, from, to repository.TenantStatus) (repository.Tenant, error) {
 	switch to {
 	case repository.TenantStatusActive, repository.TenantStatusSuspended, repository.TenantStatusDeleted:

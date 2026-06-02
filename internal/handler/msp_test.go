@@ -1098,3 +1098,95 @@ func TestMSPHandler_PatchStatusExplicitInvalidIs400(t *testing.T) {
 		t.Fatalf("error.code = %q, want invalid_param", errBody.Error.Code)
 	}
 }
+
+// TestMSPHandler_UpdateMSP_InvalidatesBrandingCache pins the
+// round-5 cache invalidation contract: after a successful
+// UpdateMSP the handler must call branding.InvalidateAll() so
+// per-tenant cached entries that derived per-field defaults from
+// this MSP's record are forced to re-resolve on the next Resolve
+// call. Without this, a rebrand (logo, colour) is invisible to
+// subscribed tenants until the cache TTL elapses (default 30s) —
+// a soft bug that would surface as "we updated the logo but the
+// portal still shows the old one for ~30s after deploy".
+func TestMSPHandler_UpdateMSP_InvalidatesBrandingCache(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _ := setupMSPHandlerWithCachedBranding(t)
+	ctx := context.Background()
+
+	m, err := msps.Create(ctx, repository.MSP{
+		Name:     "Acme",
+		Slug:     "acme-rebrand",
+		Branding: repository.MSPBranding{PrimaryColor: "#abc", LogoURL: "old"},
+	})
+	if err != nil {
+		t.Fatalf("seed msp: %v", err)
+	}
+	mID := m.ID
+	tn, err := tenants.Create(ctx, repository.Tenant{
+		Name: "T", Slug: "t-rebrand", MSPID: &mID,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+
+	// Prime the cache by resolving once.
+	rec := doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prime resolve status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var primed handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&primed)
+	if primed.LogoURL != "old" {
+		t.Fatalf("primed logo = %q, want old", primed.LogoURL)
+	}
+
+	// Rebrand at the MSP level. The handler must invalidate the
+	// per-tenant cache; otherwise the next Resolve below would
+	// still see "old".
+	rec = doMSPJSON(t, mux, http.MethodPatch, "/api/v1/msps/"+m.ID.String(),
+		handler.MSPPatchRequest{
+			Branding: &repository.MSPBranding{PrimaryColor: "#abc", LogoURL: "new"},
+		})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post-patch resolve status = %d body=%s",
+			rec.Code, rec.Body.String())
+	}
+	var afterPatch handler.BrandingResponse
+	if err := json.NewDecoder(rec.Body).Decode(&afterPatch); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if afterPatch.LogoURL != "new" {
+		t.Fatalf("post-rebrand logo = %q, want new (cache should have been invalidated)",
+			afterPatch.LogoURL)
+	}
+}
+
+// setupMSPHandlerWithCachedBranding wires the handler with a
+// cached BrandingResolver so tests can exercise the
+// MSP-rebrand-invalidates-cache path. The cache TTL is set high
+// enough that without explicit InvalidateAll the test would see
+// the stale value.
+func setupMSPHandlerWithCachedBranding(t *testing.T) (
+	*http.ServeMux,
+	*memory.MSPRepository,
+	*memory.TenantRepository,
+	*svctenant.BulkService,
+) {
+	t.Helper()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	tenants := memory.NewTenantRepository(store)
+	branding := svctenant.NewBrandingResolverWithCache(tenants, msps,
+		svctenant.BrandingCacheOptions{TTL: time.Hour, MaxEntries: 64})
+	h := handler.NewMSPHandler(repoMSPService{repo: msps}, nil, branding, allowAllAuthz{})
+	mux := http.NewServeMux()
+	h.Register(mux)
+	return mux, msps, tenants, nil
+}

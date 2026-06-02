@@ -32,13 +32,18 @@ type stubPolicy struct {
 	inflight atomic.Int64
 	maxLive  atomic.Int64
 
-	mu   sync.Mutex
-	fail map[uuid.UUID]error
-	got  map[uuid.UUID]json.RawMessage
+	mu      sync.Mutex
+	fail    map[uuid.UUID]error
+	got     map[uuid.UUID]json.RawMessage
+	rawPtrs map[uuid.UUID]uintptr // backing-array address of the `raw` arg seen by PutGraph
 }
 
 func newStubPolicy() *stubPolicy {
-	return &stubPolicy{fail: map[uuid.UUID]error{}, got: map[uuid.UUID]json.RawMessage{}}
+	return &stubPolicy{
+		fail:    map[uuid.UUID]error{},
+		got:     map[uuid.UUID]json.RawMessage{},
+		rawPtrs: map[uuid.UUID]uintptr{},
+	}
 }
 
 func (s *stubPolicy) PutGraph(_ context.Context, tid uuid.UUID, _ *uuid.UUID, raw json.RawMessage) (repository.PolicyGraph, error) {
@@ -50,6 +55,13 @@ func (s *stubPolicy) PutGraph(_ context.Context, tid uuid.UUID, _ *uuid.UUID, ra
 		}
 	}
 	defer s.inflight.Add(-1)
+	// Snapshot the backing-array address BEFORE any internal copy
+	// so the deep-copy invariant can be asserted by callers without
+	// the stub itself accidentally hiding aliasing.
+	var rawPtr uintptr
+	if len(raw) > 0 {
+		rawPtr = uintptr(unsafe.Pointer(&raw[0]))
+	}
 	time.Sleep(2 * time.Millisecond)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -57,6 +69,7 @@ func (s *stubPolicy) PutGraph(_ context.Context, tid uuid.UUID, _ *uuid.UUID, ra
 		return repository.PolicyGraph{}, err
 	}
 	s.got[tid] = append(json.RawMessage{}, raw...)
+	s.rawPtrs[tid] = rawPtr
 	return repository.PolicyGraph{TenantID: tid, Version: 7}, nil
 }
 
@@ -351,6 +364,48 @@ func TestBulkProvisionSites_ConfigBytesAreDeepCopied(t *testing.T) {
 		}
 		if _, dup := seen[p]; dup {
 			t.Errorf("tenant %v: Config backing array aliases another tenant's (round-4 deep-copy regression)", tid)
+		}
+		seen[p] = struct{}{}
+	}
+}
+
+// TestApplyPolicyTemplate_TemplateGraphIsDeepCopiedPerTenant mirrors
+// the round-4 BulkProvisionSites deep-copy invariant for the
+// policy fan-out path: ApplyPolicyTemplateToTenants must allocate
+// a fresh json.RawMessage backing array per tenant goroutine
+// before invoking PutGraph. Without the copy, every per-tenant
+// goroutine receives a slice header pointing at the same
+// underlying byte array, which would race the instant a future
+// PolicyTemplateApplier canonicalised, signed, or annotated the
+// payload in place. We assert (a) every captured raw pointer is
+// distinct from the input pointer, and (b) no two tenants share a
+// raw pointer.
+func TestApplyPolicyTemplate_TemplateGraphIsDeepCopiedPerTenant(t *testing.T) {
+	t.Parallel()
+	tenants := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	policy := newStubPolicy()
+	tmpl := json.RawMessage(`{"version":1,"rules":[]}`)
+	svc := svctenant.NewBulkService(nil, stubAuthz{tenants: tenants}, policy, nil, nil, nil, svctenant.BulkOptions{})
+	if _, err := svc.ApplyPolicyTemplateToTenants(context.Background(), uuid.New(), uuid.New(), nil, tmpl); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	policy.mu.Lock()
+	defer policy.mu.Unlock()
+	if len(policy.rawPtrs) != len(tenants) {
+		t.Fatalf("got = %d invocations, want %d", len(policy.rawPtrs), len(tenants))
+	}
+	tmplPtr := uintptr(unsafe.Pointer(&tmpl[0]))
+	seen := map[uintptr]struct{}{}
+	for tid, p := range policy.rawPtrs {
+		if p == 0 {
+			t.Errorf("tenant %v: zero rawPtr (template was empty?)", tid)
+			continue
+		}
+		if p == tmplPtr {
+			t.Errorf("tenant %v: PutGraph received the caller's templateGraph backing array (deep-copy missing)", tid)
+		}
+		if _, dup := seen[p]; dup {
+			t.Errorf("tenant %v: PutGraph received a backing array already passed to another tenant (deep-copy missing)", tid)
 		}
 		seen[p] = struct{}{}
 	}

@@ -337,3 +337,65 @@ func TestMSPRepository_UpdateStatus_TransitionsLifecycle(t *testing.T) {
 		t.Fatalf("bogus status: %v", err)
 	}
 }
+
+// TestMSPRepository_GetBySlug_FiltersSoftDeleted pins the
+// soft-delete filter on GetBySlug. After a soft-delete + slug
+// reuse cycle, two rows can share the same slug (Create only
+// enforces uniqueness among non-deleted rows, mirroring the
+// postgres partial unique index `WHERE deleted_at IS NULL`).
+// Without the filter, Go map iteration order is undefined and
+// GetBySlug could return either the tombstone or the live row.
+func TestMSPRepository_GetBySlug_FiltersSoftDeleted(t *testing.T) {
+	_, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+
+	original, err := mspRepo.Create(ctx, repository.MSP{
+		Name: "Original Acme",
+		Slug: "acme",
+	})
+	if err != nil {
+		t.Fatalf("create original: %v", err)
+	}
+	if err := mspRepo.Delete(ctx, original.ID); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	revived, err := mspRepo.Create(ctx, repository.MSP{
+		Name: "Revived Acme",
+		Slug: "acme",
+	})
+	if err != nil {
+		t.Fatalf("create revived (slug reuse should be allowed post-soft-delete): %v", err)
+	}
+	got, err := mspRepo.GetBySlug(ctx, "acme")
+	if err != nil {
+		t.Fatalf("get by slug: %v", err)
+	}
+	if got.ID != revived.ID {
+		t.Fatalf("GetBySlug returned wrong row: got %s want %s (tombstone leaked)", got.ID, revived.ID)
+	}
+	if got.DeletedAt != nil {
+		t.Fatalf("GetBySlug returned soft-deleted row: deleted_at=%v", got.DeletedAt)
+	}
+}
+
+// TestMSPRepository_GetBySlug_ReturnsErrNotFoundForOnlySoftDeleted
+// confirms that when no active row exists for the slug, GetBySlug
+// reports ErrNotFound rather than the tombstoned row.
+func TestMSPRepository_GetBySlug_ReturnsErrNotFoundForOnlySoftDeleted(t *testing.T) {
+	_, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+
+	m, err := mspRepo.Create(ctx, repository.MSP{
+		Name: "Gone",
+		Slug: "gone",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := mspRepo.Delete(ctx, m.ID); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	if _, err := mspRepo.GetBySlug(ctx, "gone"); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}

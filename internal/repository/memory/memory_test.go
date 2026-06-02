@@ -102,6 +102,70 @@ func TestTenantRepository_UpdateStatusAndDelete(t *testing.T) {
 	}
 }
 
+// TestTenantRepository_WritePathsReturnFreshPointers pins the
+// cloneTenant invariant on all write paths (Update, UpdateStatus,
+// TransitionStatus). The returned struct must own fresh-allocated
+// DeletedAt and Settings backing memory so the caller can mutate
+// the result without corrupting in-store state. Prior to round-5
+// only the read paths cloned defensively; the write paths returned
+// the struct directly with the in-store pointers, which meant a
+// caller that wrote through `result.DeletedAt = nil` would silently
+// resurrect a tombstone.
+func TestTenantRepository_WritePathsReturnFreshPointers(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	settings := json.RawMessage(`{"k":"v"}`)
+	t1, err := repo.Create(ctx(), repository.Tenant{
+		Name:     "A",
+		Slug:     "wp",
+		Tier:     repository.TenantTierStarter,
+		Settings: settings,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// UpdateStatus(Deleted) populates DeletedAt; mutating the
+	// returned pointer must not be visible to a subsequent Get.
+	deleted, err := repo.UpdateStatus(ctx(), t1.ID, repository.TenantStatusDeleted)
+	if err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+	if deleted.DeletedAt == nil {
+		t.Fatalf("UpdateStatus(Deleted) did not set DeletedAt")
+	}
+	*deleted.DeletedAt = time.Time{}
+	deleted.Settings[0] = 'X'
+	got, err := repo.Get(ctx(), t1.ID)
+	if err != nil {
+		t.Fatalf("get after update status: %v", err)
+	}
+	if got.DeletedAt == nil || got.DeletedAt.IsZero() {
+		t.Errorf("caller mutation of UpdateStatus result leaked into store: %v", got.DeletedAt)
+	}
+	if string(got.Settings) != `{"k":"v"}` {
+		t.Errorf("caller mutation of UpdateStatus result.Settings leaked into store: %s", got.Settings)
+	}
+
+	// Update path: mutating Settings on the returned struct must
+	// not affect the stored row.
+	name := "Renamed"
+	updated, err := repo.Update(ctx(), t1.ID, repository.TenantPatch{Name: &name})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if len(updated.Settings) > 0 {
+		updated.Settings[0] = 'Y'
+	}
+	got, err = repo.Get(ctx(), t1.ID)
+	if err != nil {
+		t.Fatalf("get after update: %v", err)
+	}
+	if string(got.Settings) != `{"k":"v"}` {
+		t.Errorf("caller mutation of Update result.Settings leaked into store: %s", got.Settings)
+	}
+}
+
 func TestTenantRepository_List_CursorPagination(t *testing.T) {
 	s := newStore(t)
 	repo := memory.NewTenantRepository(s)

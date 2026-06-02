@@ -169,7 +169,15 @@ func (svc *BulkService) ApplyPolicyTemplateToTenants(
 		return BulkResult{}, err
 	}
 	return svc.fanOut(ctx, tenants, func(ctx context.Context, tid uuid.UUID) BulkTenantOutcome {
-		graph, err := svc.policy.PutGraph(ctx, tid, actorID, templateGraph)
+		// Deep-copy templateGraph per fan-out call so each goroutine
+		// owns its own json.RawMessage backing array. Without this the
+		// same slice header is handed to N concurrent PutGraph calls;
+		// any future in-place rewrite (e.g. canonicalisation, embedded
+		// signing fields, audit annotation) would race across
+		// goroutines on the shared underlying byte array. Mirrors the
+		// per-tenant config clone in BulkProvisionSites below.
+		graphCopy := append(json.RawMessage(nil), templateGraph...)
+		graph, err := svc.policy.PutGraph(ctx, tid, actorID, graphCopy)
 		if err != nil {
 			return BulkTenantOutcome{TenantID: tid, Error: err}
 		}

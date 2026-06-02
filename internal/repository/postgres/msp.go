@@ -103,8 +103,16 @@ func (r *MSPRepository) Get(ctx context.Context, id uuid.UUID) (repository.MSP, 
 	return out, nil
 }
 
+// GetBySlug looks up the active (non-soft-deleted) MSP by slug. The
+// migration enforces uniqueness only among non-deleted rows via
+// `msps_slug_uniq_idx WHERE deleted_at IS NULL`, so after a
+// soft-delete + slug reuse cycle two rows can share the same slug.
+// Without the explicit filter QueryRow's result is whichever row
+// the planner happens to return first (no ORDER BY) — typically the
+// older tombstone. Filtering on `deleted_at IS NULL` keeps the
+// lookup deterministic and aligned with the memory backend.
 func (r *MSPRepository) GetBySlug(ctx context.Context, slug string) (repository.MSP, error) {
-	const q = `SELECT ` + mspSelectColumns + ` FROM msps WHERE slug = $1`
+	const q = `SELECT ` + mspSelectColumns + ` FROM msps WHERE slug = $1 AND deleted_at IS NULL`
 	out, err := scanMSP(r.s.pool.QueryRow(ctx, q, slug))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.MSP{}, repository.ErrNotFound

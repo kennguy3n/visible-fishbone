@@ -78,6 +78,16 @@ func (r *MSPRepository) Get(ctx context.Context, id uuid.UUID) (repository.MSP, 
 	return cloneMSP(m), nil
 }
 
+// GetBySlug returns the active (non-soft-deleted) MSP carrying the
+// given slug. After a soft-delete + slug-reuse cycle the underlying
+// map can hold two rows with the same slug — the tombstone (with
+// DeletedAt != nil) and the new active row — because Create only
+// enforces uniqueness among non-deleted rows (mirroring the postgres
+// partial unique index `WHERE deleted_at IS NULL`). Go map iteration
+// order is undefined, so a naive scan would non-deterministically
+// return either the live or the tombstoned row. Filtering on
+// DeletedAt == nil keeps the lookup deterministic and aligned with
+// the postgres backend.
 func (r *MSPRepository) GetBySlug(ctx context.Context, slug string) (repository.MSP, error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.MSP{}, err
@@ -85,7 +95,7 @@ func (r *MSPRepository) GetBySlug(ctx context.Context, slug string) (repository.
 	r.s.mu.RLock()
 	defer r.s.mu.RUnlock()
 	for _, m := range r.s.msps {
-		if m.Slug == slug {
+		if m.Slug == slug && m.DeletedAt == nil {
 			return cloneMSP(m), nil
 		}
 	}

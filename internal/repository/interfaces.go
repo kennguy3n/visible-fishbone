@@ -113,13 +113,15 @@ type TenantRepository interface {
 	// transitions like active->suspended or active->deleted; prefer
 	// it over a Get+UpdateStatus pair.
 	TransitionStatus(ctx context.Context, id uuid.UUID, from, to TenantStatus) (Tenant, error)
-	// SetMSPOwner atomically points the denormalised
-	// `tenants.msp_id` at the given MSP (or clears it when mspID
-	// is nil). Used by MSPRepository.AssignTenant /
-	// UnassignTenant to keep the join row and the denormalised
-	// column in lockstep without a second round trip. Returns
-	// ErrNotFound if the tenant does not exist.
-	SetMSPOwner(ctx context.Context, tenantID uuid.UUID, mspID *uuid.UUID) (Tenant, error)
+	// Note: the denormalised `tenants.msp_id` column is maintained
+	// inline by MSPRepository.AssignTenant / UnassignTenant — the
+	// postgres path inside a single tx, the memory path under the
+	// shared store lock. A separate SetMSPOwner primitive was
+	// considered but rejected because (a) postgres SetMSPOwner
+	// would use the pool and commit out-of-band from the binding
+	// tx, breaking atomicity, and (b) memory SetMSPOwner would
+	// re-enter r.s.mu and deadlock. Keep this comment as the
+	// canonical reason future contributors should not add one.
 	Delete(ctx context.Context, id uuid.UUID) error
 }
 
