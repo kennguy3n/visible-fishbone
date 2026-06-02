@@ -122,6 +122,13 @@ func (h *OpsHealthHandler) record(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_argument", "component_scores is required")
 		return
 	}
+	// The OpenAPI contract declares component_scores as an object;
+	// reject arrays/scalars so a JSONB array can never be persisted.
+	var componentObj map[string]json.RawMessage
+	if err := json.Unmarshal(req.ComponentScores, &componentObj); err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_argument", "component_scores must be a JSON object")
+		return
+	}
 	snap, err := h.snapshots.Create(r.Context(), tenantID, repository.OpsHealthSnapshot{
 		HealthScore:     req.HealthScore,
 		ComponentScores: req.ComponentScores,

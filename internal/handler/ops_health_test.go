@@ -187,6 +187,29 @@ func TestOpsHealth_NullComponentScoresRejected(t *testing.T) {
 	}
 }
 
+func TestOpsHealth_NonObjectComponentScoresRejected(t *testing.T) {
+	t.Parallel()
+	h, tenantID := newOpsHealthTestSetup(t)
+	tid := tenantID.String()
+
+	// A JSON array is valid JSON but violates the object contract for
+	// component_scores and must be rejected rather than stored.
+	body, _ := json.Marshal(OpsHealthRecordRequest{
+		HealthScore:     50,
+		ComponentScores: json.RawMessage(`[1,2,3]`),
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tid+"/ops/health",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tid)
+	rec := httptest.NewRecorder()
+	h.record(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for non-object component_scores; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestOpsHealth_GetLatest_NoData(t *testing.T) {
 	t.Parallel()
 	h, tenantID := newOpsHealthTestSetup(t)
