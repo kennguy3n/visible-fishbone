@@ -179,6 +179,8 @@ func extractJSON(s string) string {
 	if strings.HasPrefix(s, "```") {
 		if idx := strings.Index(s[3:], "\n"); idx >= 0 {
 			s = s[3+idx+1:]
+		} else {
+			s = s[3:]
 		}
 		if idx := strings.LastIndex(s, "```"); idx >= 0 {
 			s = s[:idx]
