@@ -5,8 +5,9 @@
 > [`ARCHITECTURE.md`](./ARCHITECTURE.md) for component identity.
 > Updated as PRs land on `main`.
 
-**Overall status:** Phase 1 complete, Phase 2 essentially
-complete (one optional follow-up open), Phase 3 in progress.
+**Overall status:** Phase 1 complete (~100%), Phase 2 complete
+(~100% — all gaps resolved in Phase 3 Block 1), Phase 3 in
+progress (~87%, 26 of 30 tasks complete).
 
 ---
 
@@ -94,7 +95,7 @@ phase depends on. All Phase 1 surfaces are on `main`.
 
 ---
 
-## Phase 2 — Secure Edge MVP (~95%)
+## Phase 2 — Secure Edge MVP (~100%)
 
 Lands the core "gateway" product surface — branch / site edge
 appliance binary, endpoint-client binary, and the twelve library
@@ -167,26 +168,24 @@ crates they compose.
       (`docs/TRAFFIC_CLASSIFICATION.md`,
       `feat(appdb,policy,site,telemetry)`)
 
-### Known Phase 2 gaps (rolled into Phase 3)
+### Known Phase 2 gaps (resolved in Phase 3 Block 1)
 
-- [ ] **NATS JetStream consumer worker** factored into its own
+- [x] **NATS JetStream consumer worker** factored into its own
       file with explicit per-tenant rate-limiting and backpressure
-      knobs — currently lives inline in the telemetry service
-      (Phase 3, Block 1, Task 1)
-- [ ] **Telemetry deduplication** factored into a standalone
-      service with sequence-number + device-ID keys — currently
-      a unit-internal ring keyed by `EventID` (Phase 3, Block 1,
-      Task 4)
-- [ ] **Telemetry normalization** factored into its own pass
+      knobs (`internal/service/telemetry/consumer.go` — Task 1)
+- [x] **Telemetry deduplication** factored into a standalone
+      service with sequence-number + device-ID keys
+      (`internal/service/telemetry/dedup.go` — Task 4)
+- [x] **Telemetry normalization** factored into its own pass
       with schema-version validation and tenant + site + identity
-      enrichment from the tenant service (Phase 3, Block 1,
+      enrichment (`internal/service/telemetry/normalize.go` —
       Task 5)
-- [ ] **S3 cold archiver** — content-addressed SHA-256 seal,
-      zstd compression option, per-tenant budget guardrails
-      (Phase 3, Block 1, Task 3)
-- [ ] **Replay service** — re-hydrate cold-tier events from S3
-      (today's `worker.go` only re-publishes from DLQ) and feed
-      them into the simulator (Phase 3, Block 1, Task 6)
+- [x] **S3 cold archiver** — content-addressed SHA-256 seal,
+      zstd compression, per-tenant budget guardrails
+      (`internal/service/telemetry/s3/archiver.go` — Task 3)
+- [x] **Replay service** — re-hydrate cold-tier events from S3
+      and feed them into the policy change simulator
+      (`internal/service/telemetry/replay/service.go` — Task 6)
 
 ---
 
@@ -202,73 +201,78 @@ down; MSP onboarding is repeatable.
 
 ### Block 1 — Telemetry pipeline completion
 
-- [ ] **Task 1.** NATS JetStream consumer worker —
+- [x] **Task 1.** NATS JetStream consumer worker —
       `internal/service/telemetry/consumer.go`: durable consumer
       on `sng.<tenant>.telemetry.*`, MessagePack envelope
       decoding, hot + cold routing, graceful shutdown,
       backpressure, per-tenant rate limiting
-- [ ] **Task 2.** ClickHouse writer completion —
+- [x] **Task 2.** ClickHouse writer completion —
       `internal/service/telemetry/clickhouse/writer.go`: tenant
       isolation contract, `traffic_class` `LowCardinality`,
       retry/backoff, per-tenant retention 30-90 days, new
       migration for the table DDL
-- [ ] **Task 3.** S3 cold archiver —
+      (`migrations/clickhouse/001_sng_telemetry.up.sql`)
+- [x] **Task 3.** S3 cold archiver —
       `internal/service/telemetry/s3/archiver.go`: partition by
       `tenant_id/yyyy=/mm=/dd=`, zstd compression, SHA-256 seal
       for tamper detection, per-tenant budget guardrails
-- [ ] **Task 4.** Telemetry deduplication service —
+- [x] **Task 4.** Telemetry deduplication service —
       `internal/service/telemetry/dedup.go`: rolling-window
       dedup keyed by sequence number + device ID, bounded
       memory with LRU eviction
-- [ ] **Task 5.** Telemetry normalization —
+- [x] **Task 5.** Telemetry normalization —
       `internal/service/telemetry/normalize.go`: schema-version
       validation, tenant + site + identity enrichment, typed
       output structs ready for ClickHouse insertion
-- [ ] **Task 6.** Telemetry replay service completion —
+- [x] **Task 6.** Telemetry replay service completion —
       `internal/service/telemetry/replay/service.go`: re-hydrate
       cold-tier events from S3, replay against proposed bundles,
       estimate user impact
 
 ### Block 2 — Policy change simulation
 
-- [ ] **Task 7.** Policy change simulator —
+- [x] **Task 7.** Policy change simulator —
       `internal/service/policy/simulator.go`: deterministic
       simulator that replays Tier-2 telemetry against old + new
       compiled bundles and produces an impact report
-- [ ] **Task 8.** Policy dry-run mode —
+- [x] **Task 8.** Policy dry-run mode —
       `internal/service/policy/dryrun.go`: shadow bundles
       distributed to edges / endpoints that log verdicts without
       enforcing; NATS subject routing for dry-run telemetry
-- [ ] **Task 9.** Policy canary rollout —
+- [x] **Task 9.** Policy canary rollout —
       `internal/service/policy/canary.go`: dry-run shadow →
       canary cohort (configurable %) → full fleet; one-click
       rollback at any stage; PostgreSQL-tracked state
-- [ ] **Task 10.** Policy diff + impact-report API —
+      (`migrations/010_policy_rollouts.*`,
+      `migrations/011_policy_graphs_is_draft.*`)
+- [x] **Task 10.** Policy diff + impact-report API —
       `internal/handler/policy_simulation.go` + OpenAPI: REST
       endpoints for triggering simulations, retrieving impact
       reports, approving / rejecting proposed changes
 
 ### Block 3 — Baseline alerts + behaviour models
 
-- [ ] **Task 11.** Statistical baseline engine —
+- [x] **Task 11.** Statistical baseline engine —
       `internal/service/baseline/engine.go`: z-score + EWMA over
       per-tenant dimensions (bytes per app class, DNS query
       volume, failed auth attempts, policy deny rate);
       self-explaining alerts
-- [ ] **Task 12.** Anomaly detector —
+- [x] **Task 12.** Anomaly detector —
       `internal/service/baseline/anomaly.go`: configurable
       thresholds, alert generation, feed-back into the telemetry
       pipeline and operator portal, per-tenant sensitivity
       tuning
-- [ ] **Task 13.** Baseline model persistence —
-      `internal/service/baseline/store.go` + migration: store
-      computed baselines per-tenant, per-dimension, with rolling
-      updates
-- [ ] **Task 14.** Alert routing + suppression —
-      `internal/service/alert/router.go`: dispatch to operator
-      portal, NATS subjects, external integrations; typed
-      per-tenant suppression rules with audit trail
-- [ ] **Task 15.** Feedback loop for false-positive reduction —
+- [x] **Task 13.** Baseline model persistence —
+      `internal/repository/{memory,postgres}/baseline.go` +
+      `migrations/012_baseline_models.*`: store computed baselines
+      per-tenant, per-dimension, with rolling updates (Welford +
+      EWMA estimators)
+- [x] **Task 14.** Alert routing + suppression —
+      `internal/service/alert/router.go` +
+      `migrations/013_alerts.*`: dispatch to operator portal,
+      NATS subjects, external integrations; typed per-tenant
+      suppression rules with audit trail
+- [x] **Task 15.** Feedback loop for false-positive reduction —
       `internal/service/alert/feedback.go`: operator feedback on
       dismissed / false-positive alerts feeds back into per-tenant
       baseline tuning
@@ -301,22 +305,23 @@ down; MSP onboarding is repeatable.
 
 ### Block 5 — MSP hierarchy + co-management
 
-- [ ] **Task 22.** MSP hierarchy data model — new migration +
+- [x] **Task 22.** MSP hierarchy data model —
+      `migrations/015_msps.*` +
       `internal/repository/types.go` extension: MSP entity,
       MSP→tenant relationship, MSP-scoped roles, per-MSP
       branding config, MSP-level RLS extension
-- [ ] **Task 23.** MSP RBAC extension —
+- [x] **Task 23.** MSP RBAC extension —
       `internal/service/rbac/msp.go`: MSP → tenant → site → role
       composition, bulk operations across tenant cohorts
-- [ ] **Task 24.** MSP bulk operations —
+- [x] **Task 24.** MSP bulk operations —
       `internal/service/tenant/bulk.go`: apply policy templates
       across tenant cohorts, bulk site provisioning, bulk device
       enrollment-token generation
-- [ ] **Task 25.** MSP branding —
-      `internal/service/tenant/branding.go` + migration: logo,
-      colour scheme, custom domain per MSP, inherited by tenants
-      unless overridden
-- [ ] **Task 26.** MSP handler + API —
+- [x] **Task 25.** MSP branding —
+      `internal/service/tenant/branding.go` +
+      `migrations/015_msps.*`: logo, colour scheme, custom domain
+      per MSP, inherited by tenants unless overridden
+- [x] **Task 26.** MSP handler + API —
       `internal/handler/msp.go` + OpenAPI: lifecycle, MSP↔tenant
       assignments, bulk operations, branding config, MSP-role
       authorization middleware
@@ -355,6 +360,86 @@ protections, pre-baked policy templates per industry. Exit
 criterion: controlled false-positive rate, usable policy
 templates published.
 
+### Block 1 — CASB discovery + SaaS connectors
+
+- [ ] **Task 31.** CASB discovery engine —
+      `internal/service/casb/discovery.go`: passive traffic
+      inspection on SWG flow logs to identify shadow-IT SaaS
+      usage per tenant; app fingerprinting against the app
+      registry
+- [ ] **Task 32.** SaaS API connector framework —
+      `internal/service/casb/connector.go`: OAuth 2.0 credential
+      lifecycle, pagination helpers, rate-limit backoff, tenant-
+      isolated token storage
+- [ ] **Task 33.** M365 connector —
+      `internal/service/casb/connectors/m365.go`: Graph API
+      audit-log ingestion, user activity, sharing events,
+      sensitivity-label read
+- [ ] **Task 34.** Google Workspace connector —
+      `internal/service/casb/connectors/google.go`: Admin SDK
+      audit-log, Drive sharing events, OAuth token grants
+- [ ] **Task 35.** Slack connector —
+      `internal/service/casb/connectors/slack.go`: Enterprise
+      Grid audit API, file sharing, external channel detection
+- [ ] **Task 36.** Salesforce connector —
+      `internal/service/casb/connectors/salesforce.go`: Event
+      Monitoring, login events, report export detection
+
+### Block 2 — Web + SaaS DLP
+
+- [ ] **Task 37.** DLP engine scaffold —
+      `internal/service/dlp/engine.go`: content inspection
+      pipeline; regex + keyword detectors, configurable per-
+      tenant policies, verdict (allow / redact / block)
+- [ ] **Task 38.** DLP detectors — PII / PCI / PHI —
+      `internal/service/dlp/detectors/`: credit-card (Luhn),
+      SSN, passport, health-record patterns; per-region variants
+- [ ] **Task 39.** DLP for SWG inline —
+      `internal/service/dlp/inline.go`: hook into sng-swg
+      ext-authz path for upload / paste interception on HTTP
+      body inspection
+- [ ] **Task 40.** DLP for SaaS API (CASB out-of-band) —
+      `internal/service/dlp/oob.go`: scan CASB-discovered files
+      and messages via connector APIs; remediation actions
+      (quarantine / notify / revoke share)
+- [ ] **Task 41.** DLP policy templates —
+      `internal/service/dlp/templates/`: PCI-DSS, HIPAA, GDPR
+      starter templates; per-industry pre-baked rules
+- [ ] **Task 42.** DLP handler + API —
+      `internal/handler/dlp.go` + OpenAPI: policy CRUD,
+      incident list, false-positive feedback, per-tenant
+      dashboard metrics
+
+### Block 3 — Browser protection
+
+- [ ] **Task 43.** Browser isolation proxy —
+      `internal/service/browser/isolation.go`: pixel-push or
+      DOM-rewrite isolation for high-risk URLs identified by
+      SWG categorization
+- [ ] **Task 44.** Browser extension policy —
+      `internal/service/browser/extension_policy.go`: allow /
+      block / audit extension installs; per-tenant allow-list,
+      risk scoring from Chrome Web Store metadata
+- [ ] **Task 45.** Credential phishing protection —
+      `internal/service/browser/phishing.go`: detect corporate
+      credential entry on non-corporate domains; real-time
+      block + alert generation
+
+### Block 4 — Policy templates + reporting
+
+- [ ] **Task 46.** Industry policy template library —
+      `internal/service/policy/templates/`: healthcare, finance,
+      education, retail starter bundles; operators clone +
+      customize
+- [ ] **Task 47.** Compliance posture report —
+      `internal/service/compliance/report.go`: map enforced
+      policies to regulatory frameworks (PCI-DSS, HIPAA, SOC2,
+      ISO 27001); exportable PDF / JSON evidence packs
+- [ ] **Task 48.** Data protection dashboard API —
+      `internal/handler/data_protection.go` + OpenAPI: DLP
+      incident trends, CASB shadow-IT summary, compliance
+      posture score, per-tenant drill-down
+
 ## Phase 5 — Advanced automation (planned)
 
 Guided remediation playbooks, policy-tightening suggestions
@@ -375,6 +460,11 @@ demonstrate stronger margin than hardware revenue alone.
 
 ## Changelog (most recent first)
 
+- `2026-06-02` — Tasks 1-15, 22-26 checked off (code was merged
+  via PRs #38, #40, #41, #42 but PROGRESS.md not updated).
+  Phase 2 known gaps all resolved. Phase 3 Block 6 (Tasks 27-30)
+  remains in progress. Phase 4 Blocks 1-4 (Tasks 31-48) task list
+  added. Overall status updated to Phase 3 ~87% (26/30).
 - `2026-06-01` — PROGRESS.md recovery: re-derive phase tracker
   from `PROPOSAL.md` §10 and the actual `main` checkpoint;
   Phase 1 marked complete, Phase 2 marked ~95% complete, Phase 3

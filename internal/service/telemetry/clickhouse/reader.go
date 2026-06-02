@@ -91,7 +91,7 @@ func (w *Writer) NewReader() (*Reader, error) {
 // closing the Writer doesn't tear the Reader down — the two
 // have independent lifecycles per the package header. Callers
 // must Close the Reader when done; nothing else does.
-func NewReaderFromConfig(ctx context.Context, cfg Config) (*Reader, *clickhouseHandle, error) {
+func NewReaderFromConfig(ctx context.Context, cfg Config) (*Reader, *ClickhouseHandle, error) {
 	cfg.fillDefaults()
 	if err := cfg.validate(); err != nil {
 		return nil, nil, err
@@ -124,17 +124,17 @@ func NewReaderFromConfig(ctx context.Context, cfg Config) (*Reader, *clickhouseH
 		_ = conn.Close()
 		return nil, nil, rErr
 	}
-	return r, &clickhouseHandle{conn: conn}, nil
+	return r, &ClickhouseHandle{conn: conn}, nil
 }
 
-// clickhouseHandle is a tiny owner-of-the-connection wrapper so
+// ClickhouseHandle is a tiny owner-of-the-connection wrapper so
 // the caller can Close() the Reader's underlying connection
 // without the Reader itself having to know about lifetime
 // semantics for the injected-Querier case.
-type clickhouseHandle struct{ conn driver.Conn }
+type ClickhouseHandle struct{ conn driver.Conn }
 
 // Close shuts down the underlying connection.
-func (h *clickhouseHandle) Close() error {
+func (h *ClickhouseHandle) Close() error {
 	if h == nil || h.conn == nil {
 		return nil
 	}
@@ -246,18 +246,18 @@ LIMIT ?`, quoteIdentifier(r.table), string(placeholders))
 	out := make([]schema.Envelope, 0, maxEvents)
 	for rows.Next() {
 		var (
-			envelopeID  uuid.UUID
-			tid         uuid.UUID
-			deviceID    uuid.UUID
-			siteRaw     *uuid.UUID
-			ts          time.Time
-			eventClass  string
-			platform    string
-			schemaVer   uint8
-			trafficCls  string
-			bytesIn     uint64
-			bytesOut    uint64
-			payload     string
+			envelopeID uuid.UUID
+			tid        uuid.UUID
+			deviceID   uuid.UUID
+			siteRaw    *uuid.UUID
+			ts         time.Time
+			eventClass string
+			platform   string
+			schemaVer  uint8
+			trafficCls string
+			bytesIn    uint64
+			bytesOut   uint64
+			payload    string
 		)
 		if err := rows.Scan(
 			&envelopeID, &tid, &deviceID, &siteRaw,

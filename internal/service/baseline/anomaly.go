@@ -160,11 +160,11 @@ func (d *Detector) ObserveAndScore(
 	// across the loop so the alert emit at the bottom uses the
 	// values that match the successfully-persisted baseline.
 	var (
-		cur    repository.BaselineModel
-		saved  repository.BaselineModel
-		zW     float64
-		zE     float64
-		maxZ   float64
+		cur     repository.BaselineModel
+		saved   repository.BaselineModel
+		zW      float64
+		zE      float64
+		maxZ    float64
 		lastErr error
 	)
 	loaded := false
