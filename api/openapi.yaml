@@ -3690,6 +3690,7 @@ components:
             type: object
             properties:
               id: { type: string, format: uuid }
+              token: { type: string, description: "One-time plaintext token (base64url)" }
               expires_at: { type: string, format: date-time }
 
     BulkRevokeRequest:

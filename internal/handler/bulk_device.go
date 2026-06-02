@@ -24,19 +24,21 @@ type BulkRevokeHTTPRequest struct {
 
 // BulkDeviceHandler exposes REST endpoints for bulk device operations.
 type BulkDeviceHandler struct {
-	svc    *identity.BulkDeviceService
-	logger *slog.Logger
+	svc     *identity.BulkDeviceService
+	devices repository.DeviceRepository
+	logger  *slog.Logger
 }
 
 // NewBulkDeviceHandler returns a ready-to-use handler.
 func NewBulkDeviceHandler(
 	svc *identity.BulkDeviceService,
+	devices repository.DeviceRepository,
 	logger *slog.Logger,
 ) *BulkDeviceHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &BulkDeviceHandler{svc: svc, logger: logger}
+	return &BulkDeviceHandler{svc: svc, devices: devices, logger: logger}
 }
 
 // Register wires the handler routes onto the mux.
@@ -72,11 +74,12 @@ func (h *BulkDeviceHandler) bulkEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	type tokenDTO struct {
 		ID        uuid.UUID `json:"id"`
+		Token     string    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
 	dtos := make([]tokenDTO, 0, len(tokens))
 	for _, t := range tokens {
-		dtos = append(dtos, tokenDTO{ID: t.ID, ExpiresAt: t.ExpiresAt})
+		dtos = append(dtos, tokenDTO{ID: t.Token.ID, Token: t.Plaintext, ExpiresAt: t.Token.ExpiresAt})
 	}
 	WriteJSON(w, http.StatusCreated, map[string]any{
 		"result": result,
@@ -121,9 +124,12 @@ func (h *BulkDeviceHandler) exportCSV(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// For now export an empty device list — the handler layer validates
-	// the route wiring. Production callers pass fetched devices.
-	data, err := h.svc.ExportCSV(r.Context(), tenantID, []repository.Device{})
+	page, err := h.devices.List(r.Context(), tenantID, repository.DeviceListFilter{}, repository.Page{Limit: identity.MaxBulkDevices})
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	data, err := h.svc.ExportCSV(r.Context(), tenantID, page.Items)
 	if err != nil {
 		WriteError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -45,6 +46,12 @@ type BulkResult struct {
 	Succeeded int      `json:"succeeded"`
 	Failed    int      `json:"failed"`
 	Errors    []string `json:"errors,omitempty"`
+}
+
+// BulkTokenResult pairs a persisted token with its one-time plaintext.
+type BulkTokenResult struct {
+	Token     repository.ClaimToken `json:"token"`
+	Plaintext string                `json:"plaintext"`
 }
 
 // DeviceCSVRow represents one device in CSV import/export format.
@@ -92,12 +99,13 @@ func (s *BulkDeviceService) SetNowFunc(fn func() time.Time) {
 }
 
 // BulkGenerateTokens creates N claim tokens for a tenant.
+// Each returned BulkTokenResult includes the plaintext (shown once).
 func (s *BulkDeviceService) BulkGenerateTokens(
 	ctx context.Context,
 	tenantID uuid.UUID,
 	count int,
 	ttl time.Duration,
-) (BulkResult, []repository.ClaimToken, error) {
+) (BulkResult, []BulkTokenResult, error) {
 	if count <= 0 || count > MaxBulkDevices {
 		return BulkResult{}, nil, fmt.Errorf("count must be 1-%d: %w", MaxBulkDevices, repository.ErrInvalidArgument)
 	}
@@ -106,7 +114,7 @@ func (s *BulkDeviceService) BulkGenerateTokens(
 	}
 	now := s.nowFunc()
 	result := BulkResult{Total: count}
-	var tokens []repository.ClaimToken
+	var tokens []BulkTokenResult
 	for i := 0; i < count; i++ {
 		raw := make([]byte, 32)
 		if _, err := rand.Read(raw); err != nil {
@@ -114,6 +122,7 @@ func (s *BulkDeviceService) BulkGenerateTokens(
 			result.Errors = append(result.Errors, fmt.Sprintf("token %d: rng: %v", i, err))
 			continue
 		}
+		plaintext := base64.RawURLEncoding.EncodeToString(raw)
 		hash := sha256.Sum256(raw)
 		token := repository.ClaimToken{
 			TenantID:  tenantID,
@@ -127,7 +136,7 @@ func (s *BulkDeviceService) BulkGenerateTokens(
 			continue
 		}
 		result.Succeeded++
-		tokens = append(tokens, created)
+		tokens = append(tokens, BulkTokenResult{Token: created, Plaintext: plaintext})
 	}
 	return result, tokens, nil
 }
