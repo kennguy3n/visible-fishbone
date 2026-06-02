@@ -817,3 +817,86 @@ func TestMSPRepository_AssignTenant_RejectsSoftDeletedMSP(t *testing.T) {
 		t.Fatalf("expected ErrNotFound for missing MSP, got %v", err)
 	}
 }
+
+// TestMSPRepository_Update_RejectsPatchStatusDeleted pins the
+// round-21 fix for ANALYSIS_0001: an internal caller that
+// constructs `MSPPatch{Status: &MSPStatusDeleted}` must be
+// rejected at the repo boundary with ErrInvalidArgument, NOT
+// silently allowed through the SET clause where it would write
+// `status='deleted'` without the `deleted_at` stamping that
+// Delete() performs as part of the cascade. The handler already
+// 400s on this via validMSPCreateStatus, but the repo layer is
+// the right place to enforce the invariant for non-HTTP callers
+// (admin tools, migration scripts, future RPC). The legal
+// transition into `deleted` is Delete(); transitions to active /
+// suspended go through TransitionStatus.
+func TestMSPRepository_Update_RejectsPatchStatusDeleted(t *testing.T) {
+	_, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+	m, err := mspRepo.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-patch-deleted"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	deleted := repository.MSPStatusDeleted
+	_, err = mspRepo.Update(ctx, m.ID, repository.MSPPatch{Status: &deleted})
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("Update with patch.Status=deleted must ErrInvalidArgument, got %v", err)
+	}
+	// The row must NOT have been mutated — neither status nor
+	// deleted_at should have moved, the lifecycle invariant
+	// must remain intact.
+	after, err := mspRepo.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if after.Status != repository.MSPStatusActive {
+		t.Fatalf("row mutated despite rejected patch.Status=deleted: status = %q, want active", after.Status)
+	}
+	if after.DeletedAt != nil {
+		t.Fatalf("row mutated despite rejected patch.Status=deleted: DeletedAt = %v, want nil", after.DeletedAt)
+	}
+}
+
+// TestMSPRepository_Delete_CascadeClearsTenantPointer_R21 pins
+// the round-21 fix for ANALYSIS_0005: MSPRepository.Delete must
+// cascade the `tenants.msp_id` clear regardless of any future RLS
+// policy on the tenants table. The memory backend has no RLS so
+// the behaviour is unchanged; the matching postgres backend now
+// runs the whole tx under `withSystem` so the GUC bypass is in
+// place if/when RLS is added to tenants. This test re-pins the
+// cross-backend contract by exercising the cascade end-to-end via
+// the memory backend.
+func TestMSPRepository_Delete_CascadeClearsTenantPointer_R21(t *testing.T) {
+	_, mspRepo, tenantRepo := mspFixtures(t)
+	ctx := context.Background()
+	m, err := mspRepo.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-r21-cascade"})
+	if err != nil {
+		t.Fatalf("create msp: %v", err)
+	}
+	tn, err := tenantRepo.Create(ctx, repository.Tenant{Name: "T1", Slug: "t1-r21-cascade"})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if _, err := mspRepo.AssignTenant(ctx, m.ID, tn.ID, repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign owner: %v", err)
+	}
+	// Pre-condition: pointer is set.
+	got, err := tenantRepo.Get(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("pre-cascade get: %v", err)
+	}
+	if got.MSPID == nil || *got.MSPID != m.ID {
+		t.Fatalf("precondition: tenants.msp_id = %v, want %v", got.MSPID, m.ID)
+	}
+	// Delete the MSP — cascade must clear the pointer.
+	if err := mspRepo.Delete(ctx, m.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	got, err = tenantRepo.Get(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("post-cascade get: %v", err)
+	}
+	if got.MSPID != nil {
+		t.Fatalf("cascade did not clear tenants.msp_id: still pointing at %v", *got.MSPID)
+	}
+}

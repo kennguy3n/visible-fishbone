@@ -166,6 +166,25 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 	if patch.Slug != nil && *patch.Slug == "" {
 		return repository.MSP{}, repository.ErrInvalidArgument
 	}
+	// Reject `patch.Status = MSPStatusDeleted` at the repo boundary.
+	// The handler already 400s on this via validMSPCreateStatus, but
+	// an internal caller (admin tool, migration script, future RPC)
+	// that constructs `MSPPatch{Status: &MSPStatusDeleted}` would
+	// otherwise reach the SET clause below, write `status='deleted'`
+	// onto the row, and skip the `deleted_at` stamping that Delete()
+	// performs as part of the cascade. That produces the corrupt
+	// `(status='deleted', deleted_at IS NULL)` state the lifecycle
+	// invariant is designed to prevent, AND leaves msp_tenants /
+	// tenants.msp_id pointing at the now-deleted MSP (Delete() is the
+	// only path that cascades). Round-21 of Devin Review on PR #42
+	// (ANALYSIS_0001) flagged this. The legal transition into
+	// `deleted` is Delete(); the legal transitions to active /
+	// suspended go through TransitionStatus. Both backends now refuse
+	// `patch.Status='deleted'` with ErrInvalidArgument so the gap
+	// closes regardless of which backend a caller hits.
+	if patch.Status != nil && *patch.Status == repository.MSPStatusDeleted {
+		return repository.MSP{}, repository.ErrInvalidArgument
+	}
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 	existing, ok := r.s.msps[id]

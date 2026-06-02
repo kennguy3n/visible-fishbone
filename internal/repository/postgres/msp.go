@@ -220,6 +220,25 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 	if patch.Slug != nil && *patch.Slug == "" {
 		return repository.MSP{}, repository.ErrInvalidArgument
 	}
+	// Reject `patch.Status = MSPStatusDeleted` at the repo boundary.
+	// The handler already 400s on this via validMSPCreateStatus, but
+	// an internal caller (admin tool, migration script, future RPC)
+	// that constructs `MSPPatch{Status: &MSPStatusDeleted}` would
+	// otherwise let the UPDATE below write `status='deleted'` onto
+	// the row without the `deleted_at` stamping that Delete()
+	// performs as part of the cascade. That produces the corrupt
+	// `(status='deleted', deleted_at IS NULL)` state the lifecycle
+	// invariant is designed to prevent, AND leaves msp_tenants /
+	// tenants.msp_id pointing at the now-deleted MSP (Delete() is
+	// the only path that cascades). Round-21 of Devin Review on
+	// PR #42 (ANALYSIS_0001) flagged this. The legal transition
+	// into `deleted` is Delete(); the legal transitions to active
+	// / suspended go through TransitionStatus. Mirrors the matching
+	// guard in internal/repository/memory/msp.go so cross-backend
+	// parity is enforced for every internal caller.
+	if patch.Status != nil && *patch.Status == repository.MSPStatusDeleted {
+		return repository.MSP{}, repository.ErrInvalidArgument
+	}
 	// Same sparse explicit-clear PATCH shape as
 	// TenantRepository.Update: nil arg → keep, non-nil arg → set
 	// to value (including zero).
@@ -422,41 +441,54 @@ func (r *MSPRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status r
 // the implementation explicitly drops the join rows and clears the
 // pointers inside a single tx alongside the status update.
 func (r *MSPRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	tx, err := r.s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	const updateQ = `
-		UPDATE msps
-		SET status     = 'deleted',
-		    deleted_at = COALESCE(deleted_at, NOW())
-		WHERE id = $1::uuid AND status <> 'deleted'`
-	tag, err := tx.Exec(ctx, updateQ, id)
-	if err != nil {
-		return fmt.Errorf("delete msp: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		var status string
-		if scanErr := tx.QueryRow(ctx, `SELECT status FROM msps WHERE id = $1::uuid`, id).Scan(&status); scanErr != nil {
-			if errors.Is(scanErr, pgx.ErrNoRows) {
-				return repository.ErrNotFound
-			}
-			return fmt.Errorf("delete msp lookup: %w", scanErr)
+	// withSystem sets `sng.system_role='true'` on the transaction
+	// so any RLS policy keyed off that GUC will permit the
+	// cross-tenant cascade. Today the tenants table has no RLS
+	// (migrations/015_msps.up.sql:125-129 — "enforced at the
+	// application layer"), and msp_tenants is a top-level join
+	// table with no per-tenant policy, so the cascade works
+	// regardless. But round-21 of Devin Review on PR #42
+	// (ANALYSIS_0005) correctly flagged that the cascade is brittle
+	// against a future change that adds `FORCE ROW LEVEL SECURITY`
+	// to either table: without a system context, the cascade
+	// UPDATE/DELETE would silently match zero rows, the soft-delete
+	// status flip would still land, and the denormalised
+	// tenants.msp_id pointer would be left dangling at a
+	// tombstoned MSP. Running inside withSystem future-proofs the
+	// cascade against any such RLS migration without changing the
+	// observable behaviour today, and matches the pattern used by
+	// other cross-tenant background paths in this package (the
+	// integration delivery worker's ListPending, the app_registry
+	// CRUD, the apikey CRUD, and the webhook delivery worker all
+	// run under withSystem for the same reason).
+	return r.s.withSystem(ctx, func(tx pgx.Tx) error {
+		const updateQ = `
+			UPDATE msps
+			SET status     = 'deleted',
+			    deleted_at = COALESCE(deleted_at, NOW())
+			WHERE id = $1::uuid AND status <> 'deleted'`
+		tag, err := tx.Exec(ctx, updateQ, id)
+		if err != nil {
+			return fmt.Errorf("delete msp: %w", err)
 		}
-		return repository.ErrForbidden
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM msp_tenants WHERE msp_id = $1::uuid`, id); err != nil {
-		return fmt.Errorf("cascade msp_tenants: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE tenants SET msp_id = NULL WHERE msp_id = $1::uuid`, id); err != nil {
-		return fmt.Errorf("cascade tenants.msp_id: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-	return nil
+		if tag.RowsAffected() == 0 {
+			var status string
+			if scanErr := tx.QueryRow(ctx, `SELECT status FROM msps WHERE id = $1::uuid`, id).Scan(&status); scanErr != nil {
+				if errors.Is(scanErr, pgx.ErrNoRows) {
+					return repository.ErrNotFound
+				}
+				return fmt.Errorf("delete msp lookup: %w", scanErr)
+			}
+			return repository.ErrForbidden
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM msp_tenants WHERE msp_id = $1::uuid`, id); err != nil {
+			return fmt.Errorf("cascade msp_tenants: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE tenants SET msp_id = NULL WHERE msp_id = $1::uuid`, id); err != nil {
+			return fmt.Errorf("cascade tenants.msp_id: %w", err)
+		}
+		return nil
+	})
 }
 
 // --- Binding ops --------------------------------------------------
