@@ -167,20 +167,20 @@ func (r *AISuggestionRepository) List(ctx context.Context, tenantID uuid.UUID, s
 	return result, nil
 }
 
-func (r *AISuggestionRepository) UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string, reviewerID *uuid.UUID, feedback *string) error {
+func (r *AISuggestionRepository) UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, expectedStatus, newStatus string, reviewerID *uuid.UUID, feedback *string) error {
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		now := time.Now().UTC()
 		tag, err := tx.Exec(ctx, `
 			UPDATE ai_policy_suggestions
 			   SET status = $1, reviewed_at = $2, reviewer_id = $3, feedback = $4
-			 WHERE id = $5`,
-			status, now, reviewerID, feedback, id,
+			 WHERE id = $5 AND status = $6`,
+			newStatus, now, reviewerID, feedback, id, expectedStatus,
 		)
 		if err != nil {
 			return fmt.Errorf("update status: %w", err)
 		}
 		if tag.RowsAffected() == 0 {
-			return repository.ErrNotFound
+			return repository.ErrConflict
 		}
 		return nil
 	})

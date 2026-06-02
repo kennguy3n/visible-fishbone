@@ -2503,7 +2503,7 @@ paths:
       summary: List AI policy suggestions for a tenant
       operationId: listAISuggestions
       parameters:
-        - $ref: "#/components/parameters/tenant_id"
+        - $ref: "#/components/parameters/TenantPathID"
         - name: status
           in: query
           required: false
@@ -2531,7 +2531,7 @@ paths:
       summary: Get a single AI policy suggestion
       operationId: getAISuggestion
       parameters:
-        - $ref: "#/components/parameters/tenant_id"
+        - $ref: "#/components/parameters/TenantPathID"
         - name: id
           in: path
           required: true
@@ -2552,7 +2552,7 @@ paths:
       summary: Approve an AI policy suggestion
       operationId: approveAISuggestion
       parameters:
-        - $ref: "#/components/parameters/tenant_id"
+        - $ref: "#/components/parameters/TenantPathID"
         - name: id
           in: path
           required: true
@@ -2581,7 +2581,7 @@ paths:
       summary: Reject an AI policy suggestion
       operationId: rejectAISuggestion
       parameters:
-        - $ref: "#/components/parameters/tenant_id"
+        - $ref: "#/components/parameters/TenantPathID"
         - name: id
           in: path
           required: true
@@ -2610,7 +2610,7 @@ paths:
       summary: Trigger a policy tightening analysis
       operationId: analyzeTightening
       parameters:
-        - $ref: "#/components/parameters/tenant_id"
+        - $ref: "#/components/parameters/TenantPathID"
       requestBody:
         required: true
         content:
@@ -2633,7 +2633,7 @@ paths:
       summary: Get latest tightening report
       operationId: getTighteningReport
       parameters:
-        - $ref: "#/components/parameters/tenant_id"
+        - $ref: "#/components/parameters/TenantPathID"
       responses:
         "200":
           description: ok

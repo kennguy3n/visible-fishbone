@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/ai"
@@ -229,6 +230,7 @@ func TestAIHandler_ApproveSuggestion(t *testing.T) {
 		Confidence:     0.9,
 	})
 
+	userID := uuid.New()
 	body, _ := json.Marshal(map[string]string{"feedback": "lgtm"})
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/tenants/"+tenantID.String()+"/ai/suggestions/"+s.ID.String()+"/approve",
@@ -236,6 +238,7 @@ func TestAIHandler_ApproveSuggestion(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.SetPathValue("tenant_id", tenantID.String())
 	req.SetPathValue("id", s.ID.String())
+	req = req.WithContext(middleware.WithUserIDForTest(req.Context(), userID))
 	rec := httptest.NewRecorder()
 	h.approveSuggestion(rec, req)
 	if rec.Code != http.StatusOK {
@@ -260,6 +263,7 @@ func TestAIHandler_RejectSuggestion(t *testing.T) {
 		Confidence:     0.9,
 	})
 
+	userID := uuid.New()
 	body, _ := json.Marshal(map[string]string{"feedback": "nope"})
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/tenants/"+tenantID.String()+"/ai/suggestions/"+s.ID.String()+"/reject",
@@ -267,6 +271,7 @@ func TestAIHandler_RejectSuggestion(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.SetPathValue("tenant_id", tenantID.String())
 	req.SetPathValue("id", s.ID.String())
+	req = req.WithContext(middleware.WithUserIDForTest(req.Context(), userID))
 	rec := httptest.NewRecorder()
 	h.rejectSuggestion(rec, req)
 	if rec.Code != http.StatusOK {

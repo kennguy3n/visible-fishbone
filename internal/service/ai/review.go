@@ -133,7 +133,7 @@ func (s *ReviewService) transition(
 	if feedback != "" {
 		fbPtr = &feedback
 	}
-	if err := s.repo.UpdateStatus(ctx, tenantID, id, string(newStatus), reviewerID, fbPtr); err != nil {
+	if err := s.repo.UpdateStatus(ctx, tenantID, id, string(currentStatus), string(newStatus), reviewerID, fbPtr); err != nil {
 		return repository.AISuggestion{}, fmt.Errorf("update status: %w", err)
 	}
 

@@ -230,13 +230,12 @@ func (h *AIHandler) approveSuggestion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	reviewerID := actorFromCtx(r)
-	var reviewer uuid.UUID
-	if reviewerID != nil {
-		reviewer = *reviewerID
-	} else {
-		reviewer = uuid.New()
+	if reviewerID == nil {
+		WriteError(w, http.StatusUnauthorized, "unauthorized",
+			"authenticated user required for approval")
+		return
 	}
-	updated, err := h.reviewSvc.ApproveSuggestion(r.Context(), tenantID, id, reviewer, req.Feedback)
+	updated, err := h.reviewSvc.ApproveSuggestion(r.Context(), tenantID, id, *reviewerID, req.Feedback)
 	if err != nil {
 		h.logger.Error("ai: approve suggestion failed",
 			slog.String("error", err.Error()))
@@ -269,13 +268,12 @@ func (h *AIHandler) rejectSuggestion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	reviewerID := actorFromCtx(r)
-	var reviewer uuid.UUID
-	if reviewerID != nil {
-		reviewer = *reviewerID
-	} else {
-		reviewer = uuid.New()
+	if reviewerID == nil {
+		WriteError(w, http.StatusUnauthorized, "unauthorized",
+			"authenticated user required for rejection")
+		return
 	}
-	updated, err := h.reviewSvc.RejectSuggestion(r.Context(), tenantID, id, reviewer, req.Feedback)
+	updated, err := h.reviewSvc.RejectSuggestion(r.Context(), tenantID, id, *reviewerID, req.Feedback)
 	if err != nil {
 		h.logger.Error("ai: reject suggestion failed",
 			slog.String("error", err.Error()))

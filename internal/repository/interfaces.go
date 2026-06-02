@@ -1071,5 +1071,5 @@ type AISuggestionRepository interface {
 	Create(ctx context.Context, tenantID uuid.UUID, s AISuggestion) (AISuggestion, error)
 	Get(ctx context.Context, tenantID, id uuid.UUID) (AISuggestion, error)
 	List(ctx context.Context, tenantID uuid.UUID, status *string, page Page) (PageResult[AISuggestion], error)
-	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string, reviewerID *uuid.UUID, feedback *string) error
+	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, expectedStatus, newStatus string, reviewerID *uuid.UUID, feedback *string) error
 }

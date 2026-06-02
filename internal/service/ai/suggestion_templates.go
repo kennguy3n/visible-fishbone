@@ -52,7 +52,7 @@ func narrowSourceScopeTemplate() SuggestionTemplate {
 		Name:          "narrow_source_scope",
 		Category:      SuggestionCategoryOverlyPermissive,
 		TitleTemplate: "Narrow source scope of rule %s",
-		DescTemplate: "Rule %s allows traffic from all sources. " +
+		DescTemplate: "Rule %s allows traffic from all sources (analyzed over %d days). " +
 			"Restricting the source CIDR or identity to observed patterns reduces exposure.",
 		DefaultRisk:       RiskLevelMedium,
 		RiskJustification: "Narrowing scope may inadvertently block legitimate traffic from unobserved sources. Requires validation against recent traffic logs.",
@@ -70,7 +70,7 @@ func addTimeRestrictionTemplate() SuggestionTemplate {
 		Name:          "add_time_restriction",
 		Category:      SuggestionCategoryOverlyPermissive,
 		TitleTemplate: "Add time-based restriction to rule %s",
-		DescTemplate: "Rule %s allows traffic at all hours. " +
+		DescTemplate: "Rule %s allows traffic at all hours (analyzed over %d days). " +
 			"Adding business-hours-only restriction reduces the attack window.",
 		DefaultRisk:       RiskLevelMedium,
 		RiskJustification: "Time restrictions may block legitimate after-hours operations (maintenance, deployments, on-call). Requires verification of operational patterns.",
@@ -88,7 +88,7 @@ func enableLoggingTemplate() SuggestionTemplate {
 		Name:          "enable_logging",
 		Category:      SuggestionCategoryDenyLog,
 		TitleTemplate: "Enable logging on allow rule %s",
-		DescTemplate: "Rule %s allows traffic without logging. " +
+		DescTemplate: "Rule %s allows traffic without logging (analyzed over %d days). " +
 			"Adding log action provides visibility without changing the verdict.",
 		DefaultRisk:       RiskLevelLow,
 		RiskJustification: "Enabling logging on an allow rule does not change the traffic verdict and poses minimal risk. The only concern is additional log volume.",

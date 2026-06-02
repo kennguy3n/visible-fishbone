@@ -108,7 +108,7 @@ func (r *AISuggestionRepository) List(ctx context.Context, tenantID uuid.UUID, s
 	}), nil
 }
 
-func (r *AISuggestionRepository) UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string, reviewerID *uuid.UUID, feedback *string) error {
+func (r *AISuggestionRepository) UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, expectedStatus, newStatus string, reviewerID *uuid.UUID, feedback *string) error {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return err
 	}
@@ -119,7 +119,10 @@ func (r *AISuggestionRepository) UpdateStatus(ctx context.Context, tenantID, id 
 	if !ok || s.TenantID != tenantID {
 		return repository.ErrNotFound
 	}
-	s.Status = repository.AISuggestionStatus(status)
+	if string(s.Status) != expectedStatus {
+		return repository.ErrConflict
+	}
+	s.Status = repository.AISuggestionStatus(newStatus)
 	now := r.s.clock()
 	s.ReviewedAt = &now
 	if reviewerID != nil {
