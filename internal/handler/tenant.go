@@ -41,6 +41,16 @@ type TenantCreateRequest struct {
 }
 
 // TenantResponse is the JSON projection of repository.Tenant.
+//
+// `msp_id` reflects the denormalised `tenants.msp_id` column kept
+// in sync with the `msp_tenants` join row whose relationship is
+// `owner`. It is the answer to "which MSP owns this tenant?" and
+// can be observed alongside the rest of the tenant's identity
+// without a separate `/msps/{msp_id}/tenants` round-trip. Omitted
+// from the JSON payload when nil (unmanaged tenant — direct
+// platform customer with no MSP owner). Round-27 of Devin Review
+// on PR #42 (ANALYSIS_0007) flagged that the field was readable
+// on the repository.Tenant struct but invisible to HTTP clients.
 type TenantResponse struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
@@ -49,6 +59,7 @@ type TenantResponse struct {
 	Region    string          `json:"region,omitempty"`
 	Tier      string          `json:"tier"`
 	Settings  json.RawMessage `json:"settings"`
+	MSPID     *string         `json:"msp_id,omitempty"`
 	CreatedAt string          `json:"created_at"`
 	UpdatedAt string          `json:"updated_at"`
 }
@@ -58,10 +69,22 @@ func toTenantResponse(t repository.Tenant) TenantResponse {
 	if len(settings) == 0 {
 		settings = json.RawMessage(`{}`)
 	}
+	var mspID *string
+	if t.MSPID != nil {
+		// Stringify into a pointer so omitempty drops the field
+		// for unmanaged tenants. We don't emit `null` because the
+		// OpenAPI schema marks `msp_id` as an optional uuid; a
+		// `null` value would be valid JSON but the SDK code-gen
+		// would surface it as a populated optional, which is the
+		// opposite of "no MSP".
+		s := t.MSPID.String()
+		mspID = &s
+	}
 	return TenantResponse{
 		ID: t.ID.String(), Name: t.Name, Slug: t.Slug,
 		Status: string(t.Status), Region: t.Region, Tier: string(t.Tier),
 		Settings:  settings,
+		MSPID:     mspID,
 		CreatedAt: t.CreatedAt.Format("2006-01-02T15:04:05.000000000Z07:00"),
 		UpdatedAt: t.UpdatedAt.Format("2006-01-02T15:04:05.000000000Z07:00"),
 	}

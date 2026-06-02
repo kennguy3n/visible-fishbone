@@ -1872,6 +1872,17 @@ components:
         region: { type: string }
         tier: { type: string, enum: [starter, professional, enterprise] }
         settings: { type: object }
+        msp_id:
+          type: string
+          format: uuid
+          description: |
+            The owning MSP, if any. Mirrors the denormalised
+            `tenants.msp_id` column kept in sync with the
+            `msp_tenants` row whose `relationship='owner'`. Omitted
+            when the tenant is unmanaged (direct platform customer
+            with no MSP owner). See migration 015 for the storage
+            rationale and `/msps/{msp_id}/tenants` for the
+            authoritative listing surface.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     SiteCreateRequest:

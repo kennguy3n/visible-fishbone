@@ -382,28 +382,9 @@ func authorizedTenantSet(grants []resolvedGrant, permission string) map[uuid.UUI
 	return tenantGrants
 }
 
-// restrictToTenantGrantsIn is the pure-function form of
-// restrictToTenantGrants. Returns the subset of `bound` tenants that
-// the user holds a tenant-scoped grant for, gated by the named
-// permission. Retained for any caller that still post-filters a
-// fully accumulated slice; ListAuthorizedTenants now stream-filters
-// inside the page loop instead. Round-23 of Devin Review on PR #42
-// (ANALYSIS_0005); the inner set computation is shared with
-// authorizedTenantSet from round-25.
-func restrictToTenantGrantsIn(grants []resolvedGrant, permission string, bound []uuid.UUID) []uuid.UUID {
-	tenantGrants := authorizedTenantSet(grants, permission)
-	out := make([]uuid.UUID, 0, len(bound))
-	for _, tid := range bound {
-		if _, ok := tenantGrants[tid]; ok {
-			out = append(out, tid)
-		}
-	}
-	return out
-}
-
 // Composition rules for the tenant-scope subset and the
 // broad-authority short-circuit are implemented as pure functions
-// (restrictToTenantGrantsIn, hasBroadAuthorityIn) operating on the
+// (authorizedTenantSet, hasBroadAuthorityIn) operating on the
 // pre-resolved (grant, role) tuples returned by
 // resolveUserGrantsWithRoles. Splitting along that boundary keeps
 // each composition rule a one-pass scan and avoids the duplicate
@@ -427,7 +408,14 @@ func restrictToTenantGrantsIn(grants []resolvedGrant, permission string, bound [
 // HTTP surface was safe, but `BulkService` is a public Go API:
 // internal callers (e.g. a future event-driven bulk pipeline)
 // could invoke it directly. The permission gate in
-// restrictToTenantGrantsIn closes this as defence-in-depth.
+// authorizedTenantSet closes this as defence-in-depth.
+//
+// Round-27 of Devin Review on PR #42 (ANALYSIS_0003) flagged that
+// the original `restrictToTenantGrantsIn` helper retained from
+// round-23 had become dead code after round-25 inlined the
+// stream-filter into ListAuthorizedTenants' page loop. The helper
+// has been removed; the inner set computation is preserved in
+// authorizedTenantSet, which is the sole call site now.
 
 // GrantMSPRole assigns `roleID` to `userID` scoped to `mspID`.
 // The role must have scope=msp; otherwise ErrInvalidArgument.
