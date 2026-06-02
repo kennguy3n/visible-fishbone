@@ -336,7 +336,8 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 	for _, op := range ops {
 		switch strings.ToLower(op.Op) {
 		case "add":
-			if strings.EqualFold(op.Path, "members") {
+			switch strings.ToLower(op.Path) {
+			case "members":
 				members := extractMembers(op.Value)
 				for _, m := range members {
 					uid := uuidFromString(m.Value)
@@ -350,7 +351,7 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 						return SCIMGroup{}, fmt.Errorf("assign member %s: %w", m.Value, err)
 					}
 				}
-			} else if strings.EqualFold(op.Path, "displayname") {
+			case "displayname":
 				// RFC 7644 §3.5.2.1: add on single-valued = set value.
 				if val, ok := op.Value.(string); ok && val != "" {
 					r, err = s.roles.Update(ctx, groupID, val, r.ExternalID)
@@ -358,7 +359,7 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 						return SCIMGroup{}, err
 					}
 				}
-			} else if strings.EqualFold(op.Path, "externalid") {
+			case "externalid":
 				if val, ok := op.Value.(string); ok {
 					r, err = s.roles.Update(ctx, groupID, r.Name, val)
 					if err != nil {
@@ -380,14 +381,15 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 				}
 			}
 		case "replace":
-			if strings.EqualFold(op.Path, "displayname") {
+			switch strings.ToLower(op.Path) {
+			case "displayname":
 				if val, ok := op.Value.(string); ok && val != "" {
 					r, err = s.roles.Update(ctx, groupID, val, r.ExternalID)
 					if err != nil {
 						return SCIMGroup{}, err
 					}
 				}
-			} else if strings.EqualFold(op.Path, "externalid") {
+			case "externalid":
 				if val, ok := op.Value.(string); ok {
 					r, err = s.roles.Update(ctx, groupID, r.Name, val)
 					if err != nil {
@@ -564,54 +566,52 @@ func applyUserReplace(u *repository.User, op SCIMPatchOp) {
 }
 
 func applyUserRemove(u *repository.User, op SCIMPatchOp) {
-	path := strings.ToLower(op.Path)
-	switch path {
-	case "externalid":
+	if strings.ToLower(op.Path) == "externalid" {
 		u.ExternalID = ""
 	}
 }
 
 func extractMembers(val any) []SCIMGroupMember {
-	switch v := val.(type) {
-	case []any:
-		out := make([]SCIMGroupMember, 0, len(v))
-		for _, item := range v {
-			if m, ok := item.(map[string]any); ok {
-				member := SCIMGroupMember{}
-				if s, ok := m["value"].(string); ok {
-					member.Value = s
-				}
-				if s, ok := m["display"].(string); ok {
-					member.Display = s
-				}
-				out = append(out, member)
-			}
-		}
-		return out
+	v, ok := val.([]any)
+	if !ok {
+		return nil
 	}
-	return nil
+	out := make([]SCIMGroupMember, 0, len(v))
+	for _, item := range v {
+		if m, ok := item.(map[string]any); ok {
+			member := SCIMGroupMember{}
+			if s, ok := m["value"].(string); ok {
+				member.Value = s
+			}
+			if s, ok := m["display"].(string); ok {
+				member.Display = s
+			}
+			out = append(out, member)
+		}
+	}
+	return out
 }
 
 func extractEmails(val any) []SCIMEmail {
-	switch v := val.(type) {
-	case []any:
-		out := make([]SCIMEmail, 0, len(v))
-		for _, item := range v {
-			if m, ok := item.(map[string]any); ok {
-				e := SCIMEmail{}
-				if s, ok := m["value"].(string); ok {
-					e.Value = s
-				}
-				if s, ok := m["type"].(string); ok {
-					e.Type = s
-				}
-				if b, ok := m["primary"].(bool); ok {
-					e.Primary = b
-				}
-				out = append(out, e)
-			}
-		}
-		return out
+	v, ok := val.([]any)
+	if !ok {
+		return nil
 	}
-	return nil
+	out := make([]SCIMEmail, 0, len(v))
+	for _, item := range v {
+		if m, ok := item.(map[string]any); ok {
+			e := SCIMEmail{}
+			if s, ok := m["value"].(string); ok {
+				e.Value = s
+			}
+			if s, ok := m["type"].(string); ok {
+				e.Type = s
+			}
+			if b, ok := m["primary"].(bool); ok {
+				e.Primary = b
+			}
+			out = append(out, e)
+		}
+	}
+	return out
 }

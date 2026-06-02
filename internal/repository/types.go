@@ -1278,7 +1278,6 @@ type DataClassificationPatch struct {
 	HandlingRules *json.RawMessage
 }
 
-
 // --- CASB types -----------------------------------------------------------
 
 // CASBConnectorType enumerates the CASB connector kinds.
@@ -1462,8 +1461,8 @@ const (
 
 // DeviceEnrollment represents a row in the device_enrollments table.
 type DeviceEnrollment struct {
-	DeviceID        uuid.UUID
-	TenantID        uuid.UUID
+	DeviceID         uuid.UUID
+	TenantID         uuid.UUID
 	PublicKey        []byte // Ed25519 32-byte public key
 	Status           EnrollmentStatus
 	EnrolledAt       time.Time
