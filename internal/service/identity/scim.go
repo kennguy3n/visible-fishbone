@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -132,6 +133,7 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 	if err != nil {
 		return SCIMUser{}, err
 	}
+	clearExternalID := false
 	for _, op := range ops {
 		switch strings.ToLower(op.Op) {
 		case "replace":
@@ -139,7 +141,11 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 		case "add":
 			applyUserReplace(&u, op) // add semantics = replace for single-valued
 		case "remove":
-			applyUserRemove(&u, op)
+			if strings.EqualFold(op.Path, "externalid") {
+				clearExternalID = true
+			} else {
+				applyUserRemove(&u, op)
+			}
 		default:
 			return SCIMUser{}, fmt.Errorf("unsupported SCIM PatchOp: %s: %w", op.Op, repository.ErrInvalidArgument)
 		}
@@ -147,6 +153,12 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 	updated, err := s.users.Update(ctx, tenantID, u)
 	if err != nil {
 		return SCIMUser{}, err
+	}
+	if clearExternalID {
+		updated, err = s.users.ClearExternalID(ctx, tenantID, userID)
+		if err != nil {
+			return SCIMUser{}, err
+		}
 	}
 	return userToSCIM(updated), nil
 }
@@ -241,10 +253,12 @@ func (s *SCIMService) UpdateGroup(ctx context.Context, tenantID uuid.UUID, group
 	if r.TenantID == nil || *r.TenantID != tenantID {
 		return SCIMGroup{}, repository.ErrNotFound
 	}
-	// Groups map to roles; update the role name.
-	// The role repository doesn't have a dedicated Update method,
-	// so we delete and recreate. For simplicity we just return the
-	// existing role with updated display name.
+	if sg.DisplayName != "" && sg.DisplayName != r.Name {
+		r, err = s.roles.Update(ctx, groupID, sg.DisplayName)
+		if err != nil {
+			return SCIMGroup{}, err
+		}
+	}
 	return roleToSCIMGroup(r), nil
 }
 
@@ -257,7 +271,6 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 	if r.TenantID == nil || *r.TenantID != tenantID {
 		return SCIMGroup{}, repository.ErrNotFound
 	}
-	// Process member add/remove operations.
 	for _, op := range ops {
 		switch strings.ToLower(op.Op) {
 		case "add":
@@ -268,10 +281,12 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 					if uid == uuid.Nil {
 						continue
 					}
-					_ = s.roles.AssignRole(ctx, repository.UserRole{
+					if err := s.roles.AssignRole(ctx, repository.UserRole{
 						UserID: uid,
 						RoleID: groupID,
-					})
+					}); err != nil && !errors.Is(err, repository.ErrConflict) {
+						return SCIMGroup{}, fmt.Errorf("assign member %s: %w", m.Value, err)
+					}
 				}
 			}
 		case "remove":
@@ -282,22 +297,35 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 					if uid == uuid.Nil {
 						continue
 					}
-					_ = s.roles.RevokeRole(ctx, uid, groupID, nil)
+					if err := s.roles.RevokeRole(ctx, uid, groupID, nil); err != nil && !errors.Is(err, repository.ErrNotFound) {
+						return SCIMGroup{}, fmt.Errorf("remove member %s: %w", m.Value, err)
+					}
 				}
 			}
 		case "replace":
-			// replace on displayName — no-op for now since roles
-			// don't have an Update method.
+			if strings.EqualFold(op.Path, "displayname") {
+				if val, ok := op.Value.(string); ok && val != "" {
+					r, err = s.roles.Update(ctx, groupID, val)
+					if err != nil {
+						return SCIMGroup{}, err
+					}
+				}
+			}
 		}
 	}
 	return roleToSCIMGroup(r), nil
 }
 
-// DeleteGroup removes a SCIM group. Since roles don't have a Delete
-// method, this is a no-op that returns nil — the group remains but
-// is no longer managed by SCIM.
-func (s *SCIMService) DeleteGroup(_ context.Context, _ uuid.UUID, _ uuid.UUID) error {
-	return nil
+// DeleteGroup removes a SCIM group and all its role assignments.
+func (s *SCIMService) DeleteGroup(ctx context.Context, tenantID uuid.UUID, groupID uuid.UUID) error {
+	r, err := s.roles.Get(ctx, groupID)
+	if err != nil {
+		return err
+	}
+	if r.TenantID == nil || *r.TenantID != tenantID {
+		return repository.ErrNotFound
+	}
+	return s.roles.Delete(ctx, groupID)
 }
 
 // ListGroups returns a SCIM list response for groups matching the filter.

@@ -100,6 +100,55 @@ func (r *RoleRepository) List(ctx context.Context, tenantID *uuid.UUID) ([]repos
 	return out, nil
 }
 
+func (r *RoleRepository) Update(ctx context.Context, id uuid.UUID, name string) (repository.Role, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.Role{}, err
+	}
+	if name == "" {
+		return repository.Role{}, repository.ErrInvalidArgument
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	role, ok := r.s.roles[id]
+	if !ok {
+		return repository.Role{}, repository.ErrNotFound
+	}
+	for rid, existing := range r.s.roles {
+		if rid == id || existing.Name != name {
+			continue
+		}
+		switch {
+		case existing.TenantID == nil && role.TenantID == nil:
+			return repository.Role{}, repository.ErrConflict
+		case existing.TenantID != nil && role.TenantID != nil && *existing.TenantID == *role.TenantID:
+			return repository.Role{}, repository.ErrConflict
+		}
+	}
+	role.Name = name
+	r.s.roles[id] = role
+	cp := role
+	cp.Permissions = append([]string(nil), role.Permissions...)
+	return cp, nil
+}
+
+func (r *RoleRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if _, ok := r.s.roles[id]; !ok {
+		return repository.ErrNotFound
+	}
+	delete(r.s.roles, id)
+	for key := range r.s.userRoles {
+		if key.RoleID == id {
+			delete(r.s.userRoles, key)
+		}
+	}
+	return nil
+}
+
 func (r *RoleRepository) AssignRole(ctx context.Context, ur repository.UserRole) error {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return err

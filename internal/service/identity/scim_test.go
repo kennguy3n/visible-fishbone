@@ -303,6 +303,96 @@ func TestSCIMFilterMatchUser(t *testing.T) {
 	}
 }
 
+func TestSCIMUpdateGroup(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	created, err := svc.CreateGroup(context.Background(), tid, SCIMGroup{
+		DisplayName: "Engineers",
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	gid := uuidFromString(created.ID)
+	updated, err := svc.UpdateGroup(context.Background(), tid, gid, SCIMGroup{
+		DisplayName: "Platform Engineers",
+	})
+	if err != nil {
+		t.Fatalf("UpdateGroup: %v", err)
+	}
+	if updated.DisplayName != "Platform Engineers" {
+		t.Errorf("displayName = %q, want Platform Engineers", updated.DisplayName)
+	}
+	got, err := svc.GetGroup(context.Background(), tid, gid)
+	if err != nil {
+		t.Fatalf("GetGroup after update: %v", err)
+	}
+	if got.DisplayName != "Platform Engineers" {
+		t.Errorf("persisted displayName = %q, want Platform Engineers", got.DisplayName)
+	}
+}
+
+func TestSCIMDeleteGroup(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	created, err := svc.CreateGroup(context.Background(), tid, SCIMGroup{
+		DisplayName: "ToDelete",
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	gid := uuidFromString(created.ID)
+	if err := svc.DeleteGroup(context.Background(), tid, gid); err != nil {
+		t.Fatalf("DeleteGroup: %v", err)
+	}
+	_, err = svc.GetGroup(context.Background(), tid, gid)
+	if err == nil {
+		t.Error("expected error after DeleteGroup, got nil")
+	}
+}
+
+func TestSCIMPatchGroupReplaceDisplayName(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	created, err := svc.CreateGroup(context.Background(), tid, SCIMGroup{
+		DisplayName: "OldName",
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	gid := uuidFromString(created.ID)
+	patched, err := svc.PatchGroup(context.Background(), tid, gid, []SCIMPatchOp{
+		{Op: "replace", Path: "displayName", Value: "NewName"},
+	})
+	if err != nil {
+		t.Fatalf("PatchGroup: %v", err)
+	}
+	if patched.DisplayName != "NewName" {
+		t.Errorf("displayName = %q, want NewName", patched.DisplayName)
+	}
+}
+
+func TestSCIMPatchRemoveExternalID(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	created, err := svc.CreateUser(context.Background(), tid, SCIMUser{
+		UserName:   "clear-ext@example.com",
+		ExternalID: "ext-to-clear",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	uid := uuidFromString(created.ID)
+	patched, err := svc.PatchUser(context.Background(), tid, uid, []SCIMPatchOp{
+		{Op: "remove", Path: "externalId"},
+	})
+	if err != nil {
+		t.Fatalf("PatchUser remove externalId: %v", err)
+	}
+	if patched.ExternalID != "" {
+		t.Errorf("externalId = %q, want empty after remove", patched.ExternalID)
+	}
+}
+
 func TestSCIMServiceProviderConfig(t *testing.T) {
 	t.Parallel()
 	// Just test it doesn't panic — handler test is more comprehensive.

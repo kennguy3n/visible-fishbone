@@ -139,3 +139,19 @@ func (r *UserRepository) Update(ctx context.Context, tenantID uuid.UUID, u repos
 	r.s.users[existing.ID] = existing
 	return existing, nil
 }
+
+func (r *UserRepository) ClearExternalID(ctx context.Context, tenantID, userID uuid.UUID) (repository.User, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.User{}, err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.users[userID]
+	if !ok || existing.TenantID != tenantID {
+		return repository.User{}, repository.ErrNotFound
+	}
+	existing.ExternalID = ""
+	existing.UpdatedAt = r.s.clock()
+	r.s.users[existing.ID] = existing
+	return existing, nil
+}

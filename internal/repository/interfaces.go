@@ -166,6 +166,10 @@ type UserRepository interface {
 	GetByEmail(ctx context.Context, tenantID uuid.UUID, email string) (User, error)
 	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[User], error)
 	Update(ctx context.Context, tenantID uuid.UUID, u User) (User, error)
+	// ClearExternalID sets the external_id column to NULL/empty.
+	// This is separate from Update because the sparse-update
+	// convention treats empty string as "no change".
+	ClearExternalID(ctx context.Context, tenantID, userID uuid.UUID) (User, error)
 }
 
 // --- Device ---------------------------------------------------------------
@@ -195,6 +199,13 @@ type RoleRepository interface {
 	Create(ctx context.Context, r Role) (Role, error)
 	Get(ctx context.Context, id uuid.UUID) (Role, error)
 	List(ctx context.Context, tenantID *uuid.UUID) ([]Role, error)
+	// Update renames a role. Returns ErrNotFound if the role does
+	// not exist, ErrConflict if the new name collides with another
+	// role in the same tenant.
+	Update(ctx context.Context, id uuid.UUID, name string) (Role, error)
+	// Delete removes a role and its user_role assignments.
+	// Returns ErrNotFound if the role does not exist.
+	Delete(ctx context.Context, id uuid.UUID) error
 	AssignRole(ctx context.Context, ur UserRole) error
 	RevokeRole(ctx context.Context, userID, roleID uuid.UUID, scopeID *uuid.UUID) error
 	GetUserRoles(ctx context.Context, userID uuid.UUID) ([]UserRole, error)

@@ -98,6 +98,40 @@ func (r *RoleRepository) Get(ctx context.Context, id uuid.UUID) (repository.Role
 	return out, nil
 }
 
+func (r *RoleRepository) Update(ctx context.Context, id uuid.UUID, name string) (repository.Role, error) {
+	if name == "" {
+		return repository.Role{}, repository.ErrInvalidArgument
+	}
+	row := r.s.pool.QueryRow(ctx, `
+		UPDATE roles SET name = $2
+		WHERE id = $1::uuid
+		RETURNING `+roleSelectColumns,
+		id, name,
+	)
+	out, err := scanRole(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.Role{}, repository.ErrNotFound
+	}
+	if isUniqueViolation(err) {
+		return repository.Role{}, repository.ErrConflict
+	}
+	if err != nil {
+		return repository.Role{}, fmt.Errorf("update role: %w", err)
+	}
+	return out, nil
+}
+
+func (r *RoleRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	ct, err := r.s.pool.Exec(ctx, `DELETE FROM roles WHERE id = $1::uuid`, id)
+	if err != nil {
+		return fmt.Errorf("delete role: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return repository.ErrNotFound
+	}
+	return nil
+}
+
 func (r *RoleRepository) List(ctx context.Context, tenantID *uuid.UUID) ([]repository.Role, error) {
 	// Visible roles = system roles (tenant_id IS NULL) + the
 	// tenant's own roles. With tenantID nil, return everything
