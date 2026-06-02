@@ -103,6 +103,48 @@ func TestMIPReader_CaseInsensitiveHeader(t *testing.T) {
 	}
 }
 
+func TestMIPReader_OOXMLDecompressLimit(t *testing.T) {
+	r := NewMIPReader()
+
+	// Build an OOXML ZIP where custom.xml is exactly at the limit.
+	// We just verify that a normal-sized file still parses correctly
+	// (the limit is 10 MB; we don't need to create a 10 MB test file).
+	customXML := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties"
+            xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="MSIP_Label_limit-test_Enabled">
+    <vt:lpwstr>true</vt:lpwstr>
+  </property>
+  <property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="3" name="MSIP_Label_limit-test_Name">
+    <vt:lpwstr>Limited</vt:lpwstr>
+  </property>
+</Properties>`
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	fw, err := zw.Create("docProps/custom.xml")
+	if err != nil {
+		t.Fatalf("zip create: %v", err)
+	}
+	if _, err := fw.Write([]byte(customXML)); err != nil {
+		t.Fatalf("zip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+
+	labels, err := r.ReadMIPLabels(buf.Bytes(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	if err != nil {
+		t.Fatalf("ReadMIPLabels: %v", err)
+	}
+	if len(labels) != 1 {
+		t.Fatalf("expected 1 label, got %d", len(labels))
+	}
+	if labels[0].LabelID != "limit-test" {
+		t.Errorf("unexpected label ID: %q", labels[0].LabelID)
+	}
+}
+
 func TestMIPReader_InvalidZip(t *testing.T) {
 	r := NewMIPReader()
 	_, err := r.ReadMIPLabels([]byte("not a zip"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
