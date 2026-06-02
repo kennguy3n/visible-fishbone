@@ -157,7 +157,7 @@ func (s *ReportService) Generate(
 		return ComplianceReport{}, err
 	}
 
-	return fromRepoReport(saved), nil
+	return s.fromRepoReport(saved), nil
 }
 
 // computeScore evaluates controls based on enforced policies.
@@ -238,7 +238,7 @@ func (s *ReportService) Get(ctx context.Context, tenantID, id uuid.UUID) (Compli
 	if err != nil {
 		return ComplianceReport{}, err
 	}
-	return fromRepoReport(r), nil
+	return s.fromRepoReport(r), nil
 }
 
 // List returns paginated compliance reports for a tenant.
@@ -249,7 +249,7 @@ func (s *ReportService) List(ctx context.Context, tenantID uuid.UUID, page repos
 	}
 	items := make([]ComplianceReport, len(result.Items))
 	for i, r := range result.Items {
-		items[i] = fromRepoReport(r)
+		items[i] = s.fromRepoReport(r)
 	}
 	return repository.PageResult[ComplianceReport]{Items: items, NextCursor: result.NextCursor}, nil
 }
@@ -263,10 +263,12 @@ func (s *ReportService) GetEvidence(ctx context.Context, tenantID, id uuid.UUID)
 	return r.EvidencePack, nil
 }
 
-func fromRepoReport(r repository.ComplianceReport) ComplianceReport {
+func (s *ReportService) fromRepoReport(r repository.ComplianceReport) ComplianceReport {
 	var controls []ControlStatus
 	if len(r.Controls) > 0 {
-		_ = json.Unmarshal(r.Controls, &controls)
+		if err := json.Unmarshal(r.Controls, &controls); err != nil {
+			s.logger.Warn("failed to unmarshal compliance controls", "report_id", r.ID, "error", err)
+		}
 	}
 	return ComplianceReport{
 		ID:           r.ID,

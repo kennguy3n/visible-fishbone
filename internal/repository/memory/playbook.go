@@ -290,7 +290,8 @@ func (r *PlaybookExecutionRepository) AddStepResult(ctx context.Context, tenantI
 	}
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
-	if _, ok := r.s.playbookExecutions[executionID]; !ok {
+	e, ok := r.s.playbookExecutions[executionID]
+	if !ok || e.TenantID != tenantID {
 		return repository.ErrNotFound
 	}
 	if sr.ID == uuid.Nil {

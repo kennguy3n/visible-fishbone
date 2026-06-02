@@ -99,8 +99,7 @@ func (h *ComplianceHandler) generateReport(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req generateReportRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "invalid request body")
+	if !DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.Framework == "" {

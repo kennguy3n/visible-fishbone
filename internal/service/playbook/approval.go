@@ -78,12 +78,12 @@ func (s *ApprovalService) Approve(
 	}
 
 	if approval.Status != string(ApprovalPending) {
-		return repository.PlaybookApproval{}, fmt.Errorf("approval is not pending (current: %s)", approval.Status)
+		return repository.PlaybookApproval{}, fmt.Errorf("approval is not pending (current: %s): %w", approval.Status, repository.ErrInvalidArgument)
 	}
 
 	if time.Now().UTC().After(approval.ExpiresAt) {
 		_ = s.approvalRepo.UpdateStatus(ctx, tenantID, approvalID, string(ApprovalExpired), nil)
-		return repository.PlaybookApproval{}, fmt.Errorf("approval has expired")
+		return repository.PlaybookApproval{}, fmt.Errorf("approval has expired: %w", repository.ErrInvalidArgument)
 	}
 
 	if err := s.approvalRepo.UpdateStatus(ctx, tenantID, approvalID, string(ApprovalApproved), approverID); err != nil {
@@ -114,7 +114,7 @@ func (s *ApprovalService) Reject(
 	}
 
 	if approval.Status != string(ApprovalPending) {
-		return repository.PlaybookApproval{}, fmt.Errorf("approval is not pending (current: %s)", approval.Status)
+		return repository.PlaybookApproval{}, fmt.Errorf("approval is not pending (current: %s): %w", approval.Status, repository.ErrInvalidArgument)
 	}
 
 	if err := s.approvalRepo.UpdateStatus(ctx, tenantID, approvalID, string(ApprovalRejected), approverID); err != nil {

@@ -162,8 +162,7 @@ func (h *PlaybookHandler) createPlaybook(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req createPlaybookRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "invalid request body")
+	if !DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -215,8 +214,7 @@ func (h *PlaybookHandler) updatePlaybook(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req updatePlaybookRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "invalid request body")
+	if !DecodeJSON(w, r, &req) {
 		return
 	}
 
