@@ -31,22 +31,22 @@ func (c *IntegrationHealthCheck) Run(ctx context.Context, tenantID uuid.UUID) Di
 		ExecutedAt: now,
 	}
 
-	connectors, err := c.connectors.List(ctx, tenantID, repository.Page{Limit: 200})
+	connectors, err := listAllConnectors(ctx, c.connectors, tenantID)
 	if err != nil {
 		result.Status = DiagnosticFail
 		result.Message = "Failed to retrieve integration connectors: " + err.Error()
 		return result
 	}
 
-	if len(connectors.Items) == 0 {
+	if len(connectors) == 0 {
 		result.Status = DiagnosticPass
 		result.Message = "No integration connectors configured"
 		return result
 	}
 
 	unhealthy := 0
-	total := len(connectors.Items)
-	for _, conn := range connectors.Items {
+	total := len(connectors)
+	for _, conn := range connectors {
 		if conn.Status == repository.IntegrationConnectorStatusDisabled {
 			unhealthy++
 		}

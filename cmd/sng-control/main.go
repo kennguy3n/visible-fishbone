@@ -56,6 +56,8 @@ import (
 	telreplay "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/replay"
 	s3writer "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/s3"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenant"
+	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot"
+	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot/checks"
 	"github.com/kennguy3n/visible-fishbone/internal/service/webhook"
 )
 
@@ -602,6 +604,26 @@ func buildRouter(
 		logger)
 	playbookHandler := handler.NewPlaybookHandler(playbookEngine, playbookApprovalSvc)
 
+	// --- Troubleshoot wiring (Session 3, Tasks 61-66) ----------------
+	// The autonomous troubleshooting assistant runs diagnostic checks
+	// against tenant state, serves a global + per-tenant knowledge
+	// base, and drives RAG-based suggest-only sessions over the same
+	// LLM provider the AI handler uses (nil => deterministic templates
+	// when no AI endpoint is configured).
+	troubleshootChecks := []checks.DiagnosticCheck{
+		checks.NewConnectivityCheck(deviceRepo, 0),
+		checks.NewPolicyConsistencyCheck(policyRepo),
+		checks.NewCertHealthCheck(deviceRepo, enrollmentRepo, 0),
+		checks.NewIntegrationHealthCheck(integrationConnectorRepo),
+		checks.NewPerformanceCheck(deviceRepo, 0),
+	}
+	troubleshootEngine := troubleshoot.NewDiagnosticEngine(troubleshootChecks)
+	troubleshootKB := troubleshoot.NewKBService(store.NewKBEntryRepository())
+	troubleshootAssistant := troubleshoot.NewAssistant(aiSvc.LLM(), troubleshootKB, troubleshootEngine)
+	troubleshootSessions := troubleshoot.NewSessionService(
+		store.NewTroubleshootSessionRepository(), troubleshootAssistant, nil)
+	troubleshootHandler := handler.NewTroubleshootHandler(troubleshootSessions, troubleshootKB, troubleshootEngine)
+
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:  cfg,
 		Logger:  logger,
@@ -629,6 +651,7 @@ func buildRouter(
 		SCIM:             handler.NewSCIMHandler(scimSvc),
 		Compliance:       complianceHandler,
 		Playbook:         playbookHandler,
+		Troubleshoot:     troubleshootHandler,
 		APIKeyLookup:     apiKeySvc,
 		Health:           health,
 		OpenAPISpec:      handler.NewOpenAPIHandler(),

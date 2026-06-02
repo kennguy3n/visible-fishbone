@@ -37,14 +37,14 @@ func (c *CertHealthCheck) Run(ctx context.Context, tenantID uuid.UUID) Diagnosti
 	}
 
 	// List devices for the tenant, then check each one's enrollment.
-	devices, err := c.devices.List(ctx, tenantID, repository.DeviceListFilter{}, repository.Page{Limit: 200})
+	devices, err := listAllDevices(ctx, c.devices, tenantID, repository.DeviceListFilter{})
 	if err != nil {
 		result.Status = DiagnosticFail
 		result.Message = "Failed to retrieve device list: " + err.Error()
 		return result
 	}
 
-	if len(devices.Items) == 0 {
+	if len(devices) == 0 {
 		result.Status = DiagnosticPass
 		result.Message = "No devices to check"
 		details, _ := json.Marshal(map[string]any{
@@ -58,7 +58,7 @@ func (c *CertHealthCheck) Run(ctx context.Context, tenantID uuid.UUID) Diagnosti
 	expired := 0
 	checked := 0
 
-	for _, d := range devices.Items {
+	for _, d := range devices {
 		enrollment, err := c.enrollments.GetEnrollmentAnyStatus(ctx, tenantID, d.ID)
 		if err != nil {
 			continue

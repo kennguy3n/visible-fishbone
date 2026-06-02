@@ -36,22 +36,22 @@ func (c *ConnectivityCheck) Run(ctx context.Context, tenantID uuid.UUID) Diagnos
 		ExecutedAt: now,
 	}
 
-	devices, err := c.devices.List(ctx, tenantID, repository.DeviceListFilter{}, repository.Page{Limit: 200})
+	devices, err := listAllDevices(ctx, c.devices, tenantID, repository.DeviceListFilter{})
 	if err != nil {
 		result.Status = DiagnosticFail
 		result.Message = "Failed to retrieve device list: " + err.Error()
 		return result
 	}
 
-	if len(devices.Items) == 0 {
+	if len(devices) == 0 {
 		result.Status = DiagnosticPass
 		result.Message = "No devices registered"
 		return result
 	}
 
 	stale := 0
-	total := len(devices.Items)
-	for _, d := range devices.Items {
+	total := len(devices)
+	for _, d := range devices {
 		if d.LastSeenAt != nil && now.Sub(*d.LastSeenAt) > c.threshold {
 			stale++
 		} else if d.LastSeenAt == nil {
