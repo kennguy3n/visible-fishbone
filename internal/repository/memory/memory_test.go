@@ -560,3 +560,66 @@ func TestStore_ContextCancellation(t *testing.T) {
 		t.Errorf("cancelled context: want context.* error, got %v", err)
 	}
 }
+
+// TestTenantRepository_GetDeepCopiesPointerFields pins the round-4
+// fix on tenant.go: Get must allocate fresh *uuid.UUID (MSPID) and
+// *time.Time (DeletedAt) so a caller mutating either through the
+// returned struct cannot corrupt the stored row. The previous
+// implementation cloned Settings (the JSONB blob) but left both
+// pointer fields aliasing the in-memory store.
+func TestTenantRepository_GetDeepCopiesPointerFields(t *testing.T) {
+	s := newStore(t)
+	tenants := memory.NewTenantRepository(s)
+	msps := memory.NewMSPRepository(s)
+
+	tn, err := tenants.Create(ctx(), repository.Tenant{Name: "Acme", Slug: "acme-clone", Tier: repository.TenantTierStarter})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	m, err := msps.Create(ctx(), repository.MSP{Name: "Aperture", Slug: "aperture-clone"})
+	if err != nil {
+		t.Fatalf("create msp: %v", err)
+	}
+	if _, err := msps.AssignTenant(ctx(), m.ID, tn.ID, repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign tenant: %v", err)
+	}
+
+	// Drive the tenant into a soft-deleted state so DeletedAt is
+	// non-nil and we exercise that pointer too. UpdateStatus
+	// sets DeletedAt via the in-place store; the subsequent Get
+	// must hand back a fresh pointer.
+	if _, err := tenants.UpdateStatus(ctx(), tn.ID, repository.TenantStatusDeleted); err != nil {
+		t.Fatalf("soft-delete: %v", err)
+	}
+
+	got, err := tenants.Get(ctx(), tn.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.MSPID == nil {
+		t.Fatal("post-condition: MSPID nil; expected the bound MSP id")
+	}
+	if got.DeletedAt == nil {
+		t.Fatal("post-condition: DeletedAt nil; expected non-nil after soft-delete")
+	}
+
+	// Mutate the returned pointers' targets. If Get returned
+	// aliased pointers (the pre-fix behaviour), a subsequent
+	// Get would observe the mutation.
+	*got.MSPID = uuid.Nil
+	mutatedTs := got.DeletedAt.Add(24 * 365 * 100 * time.Hour) // +100y
+	*got.DeletedAt = mutatedTs
+
+	again, err := tenants.Get(ctx(), tn.ID)
+	if err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	if again.MSPID == nil || *again.MSPID != m.ID {
+		t.Fatalf("MSPID alias leaked: again.MSPID = %v, want %v (round-4 deep-copy fix)",
+			again.MSPID, m.ID)
+	}
+	if again.DeletedAt == nil || again.DeletedAt.Equal(mutatedTs) {
+		t.Fatalf("DeletedAt alias leaked: again.DeletedAt = %v, mutated copy = %v (round-4 deep-copy fix)",
+			again.DeletedAt, mutatedTs)
+	}
+}

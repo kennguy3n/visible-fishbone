@@ -973,8 +973,8 @@ func TestMSPHandler_ListTenants_RespectsAscOrder(t *testing.T) {
 	// clock in the memory repo guarantees distinct CreatedAt
 	// values per assign so ordering is deterministic.
 	var (
-		first  repository.Tenant
-		last   repository.Tenant
+		first repository.Tenant
+		last  repository.Tenant
 	)
 	for i, n := range []string{"t1", "t2", "t3"} {
 		tn, err := tenants.Create(ctx, repository.Tenant{Name: n, Slug: n + "-order"})
@@ -1011,4 +1011,90 @@ func TestMSPHandler_ListTenants_RespectsAscOrder(t *testing.T) {
 	// so this test pins the default DESC behaviour; the asc
 	// branch in the postgres repo is exercised by the repository
 	// unit tests.)
+}
+
+// === round-4 fixes ========================================================
+
+// TestMSPHandler_PatchStatusEmptyStringIsNoChange pins the round-4
+// BUG fix: a PATCH body of {"status": ""} is treated as "no
+// change" rather than reaching the repository with patch.Status =
+// &"". The latter would (silently) be skipped by the memory backend
+// (its in-place guard at internal/repository/memory/msp.go does
+// `if *patch.Status != ""`) but would propagate to the postgres
+// backend, where the SQL `CASE WHEN $4::text IS NULL THEN status
+// ELSE $4::text END` binds "" not NULL and violates the
+// `CHECK (status IN ('active', 'suspended', 'deleted'))` CHECK
+// constraint, producing a 400 response that surprises the caller.
+// The handler now skips status entirely when the supplied value is
+// empty, restoring a single behaviour across backends.
+func TestMSPHandler_PatchStatusEmptyStringIsNoChange(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+	m, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-empty-status"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Hand-rolled body so we can emit a literal `""` for status
+	// (a struct with Status *string would happily marshal `"":`
+	// but the round-trip through json.Decoder would then give
+	// the handler a non-nil pointer to the empty string — which
+	// is exactly the case we're regressing against).
+	body := bytes.NewBufferString(`{"name":"Acme Renamed","status":""}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/msps/"+m.ID.String(), body)
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithUserIDForTest(req.Context(), uuid.New()))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 (empty status must be treated as no-change, not propagate as &\"\")",
+			rec.Code, rec.Body.String())
+	}
+	// And confirm the rename landed (proving status="" did not
+	// short-circuit the rest of the patch).
+	got, err := msps.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("post-patch get: %v", err)
+	}
+	if got.Name != "Acme Renamed" {
+		t.Fatalf("name = %q, want Acme Renamed", got.Name)
+	}
+	if got.Status != repository.MSPStatusActive {
+		t.Fatalf("status = %q, want %q (must be unchanged from create default)",
+			got.Status, repository.MSPStatusActive)
+	}
+}
+
+// TestMSPHandler_PatchStatusExplicitInvalidIs400 pins the
+// companion invariant: a NON-empty but invalid status string still
+// 400s with the same error code as before the round-4 fix —
+// `validMSPStatus` is reached when `*req.Status != ""`.
+func TestMSPHandler_PatchStatusExplicitInvalidIs400(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+	m, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-bad-status"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	body := bytes.NewBufferString(`{"status":"corrupt-state"}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/msps/"+m.ID.String(), body)
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithUserIDForTest(req.Context(), uuid.New()))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	var errBody struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&errBody); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if errBody.Error.Code != "invalid_param" {
+		t.Fatalf("error.code = %q, want invalid_param", errBody.Error.Code)
+	}
 }

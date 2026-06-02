@@ -415,7 +415,18 @@ func (h *MSPHandler) update(w http.ResponseWriter, r *http.Request) {
 		Branding: req.Branding,
 		Settings: req.Settings,
 	}
-	if req.Status != nil {
+	// Skip patch.Status entirely when the client supplied an
+	// empty string. The MSPPatchRequest pointer type already
+	// differentiates "absent" (nil) from "supplied" (non-nil),
+	// but a client posting `{"status": ""}` would otherwise reach
+	// the repo with patch.Status = &""; the postgres backend
+	// would then violate `CHECK (status IN ('active', 'suspended',
+	// 'deleted'))` (the SQL CASE arm binds "" not NULL) while the
+	// memory backend silently skips. Treating "" as "no change"
+	// (matching the doc-comment on MSPPatchRequest's pointer
+	// semantics) eliminates the cross-backend divergence and the
+	// hidden 400 path.
+	if req.Status != nil && *req.Status != "" {
 		if !validMSPStatus(*req.Status) {
 			WriteError(w, http.StatusBadRequest, "invalid_param",
 				"status must be one of active, suspended, deleted")

@@ -199,12 +199,22 @@ func (svc *BulkService) BulkProvisionSites(
 		return BulkResult{}, err
 	}
 	return svc.fanOut(ctx, tenants, func(ctx context.Context, tid uuid.UUID) BulkTenantOutcome {
-		// Defensive copy so per-tenant mutations (e.g. the site
-		// repo stamping the tenant ID) cannot leak across
-		// goroutines.
+		// Deep defensive copy so per-tenant mutations (e.g. the
+		// site repo stamping the tenant ID, or any future
+		// SiteProvisioner that canonicalises Config in-place)
+		// cannot race across goroutines. The struct copy alone
+		// is shallow — the json.RawMessage backing array
+		// (Site.Config) would otherwise be shared and a
+		// concurrent in-place write would produce a data race
+		// invisible to `go vet`. Site.Template is a string-typed
+		// alias (SiteTemplate), so the value-copy from `s :=
+		// siteTemplate` is already safe for it.
 		s := siteTemplate
 		s.ID = uuid.Nil
 		s.TenantID = uuid.Nil
+		if len(siteTemplate.Config) > 0 {
+			s.Config = append(json.RawMessage(nil), siteTemplate.Config...)
+		}
 		created, err := svc.sites.Create(ctx, tid, actorID, s)
 		if err != nil {
 			return BulkTenantOutcome{TenantID: tid, Error: err}

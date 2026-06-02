@@ -50,6 +50,26 @@ func (r *TenantRepository) Create(ctx context.Context, t repository.Tenant) (rep
 	return t, nil
 }
 
+// cloneTenant returns a deep copy of the given tenant. All
+// pointer-typed fields (MSPID, DeletedAt) and the JSONB Settings
+// blob are allocated fresh so a caller mutating any field of the
+// returned value cannot corrupt the stored row. Centralising the
+// clone avoids the latent defensiveness gaps Devin Review flagged
+// where Get cloned Settings but left *uuid.UUID / *time.Time
+// pointers shared with the in-memory store.
+func cloneTenant(t repository.Tenant) repository.Tenant {
+	t.Settings = cloneJSON(t.Settings)
+	if t.MSPID != nil {
+		mspID := *t.MSPID
+		t.MSPID = &mspID
+	}
+	if t.DeletedAt != nil {
+		ts := *t.DeletedAt
+		t.DeletedAt = &ts
+	}
+	return t
+}
+
 func (r *TenantRepository) Get(ctx context.Context, id uuid.UUID) (repository.Tenant, error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.Tenant{}, err
@@ -60,8 +80,7 @@ func (r *TenantRepository) Get(ctx context.Context, id uuid.UUID) (repository.Te
 	if !ok {
 		return repository.Tenant{}, repository.ErrNotFound
 	}
-	t.Settings = cloneJSON(t.Settings)
-	return t, nil
+	return cloneTenant(t), nil
 }
 
 func (r *TenantRepository) GetBySlug(ctx context.Context, slug string) (repository.Tenant, error) {
@@ -72,8 +91,7 @@ func (r *TenantRepository) GetBySlug(ctx context.Context, slug string) (reposito
 	defer r.s.mu.RUnlock()
 	for _, t := range r.s.tenants {
 		if t.Slug == slug {
-			t.Settings = cloneJSON(t.Settings)
-			return t, nil
+			return cloneTenant(t), nil
 		}
 	}
 	return repository.Tenant{}, repository.ErrNotFound
@@ -87,8 +105,7 @@ func (r *TenantRepository) List(ctx context.Context, page repository.Page) (repo
 	defer r.s.mu.RUnlock()
 	all := make([]repository.Tenant, 0, len(r.s.tenants))
 	for _, t := range r.s.tenants {
-		t.Settings = cloneJSON(t.Settings)
-		all = append(all, t)
+		all = append(all, cloneTenant(t))
 	}
 	sorted := sortByCreatedAtDesc(all,
 		func(t repository.Tenant) time.Time { return t.CreatedAt },

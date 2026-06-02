@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/google/uuid"
 
@@ -296,5 +297,61 @@ func TestBulkService_IntegratesWithRealMSPRepo(t *testing.T) {
 	}
 	if len(res.Successes) != 1 || res.Successes[0].TenantID != t1.ID {
 		t.Fatalf("unexpected outcome: %#v", res)
+	}
+}
+
+// TestBulkProvisionSites_ConfigBytesAreDeepCopied pins the round-4
+// defensiveness fix: BulkProvisionSites must allocate a fresh
+// json.RawMessage backing array for each per-tenant defensive copy.
+// The previous shallow `s := siteTemplate` only copied the slice
+// header; all per-tenant goroutines saw the same underlying byte
+// array, which would race the instant a future SiteProvisioner
+// canonicalised Config in-place. We assert the per-tenant Config
+// slices have distinct backing-array addresses to pin the
+// deep-copy invariant.
+func TestBulkProvisionSites_ConfigBytesAreDeepCopied(t *testing.T) {
+	t.Parallel()
+	tenants := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	sites := newStubSites()
+	tmpl := repository.Site{
+		Name:     "HQ",
+		Template: repository.SiteTemplateBranch,
+		Config:   json.RawMessage(`{"posture":"strict"}`),
+	}
+	svc := svctenant.NewBulkService(nil, stubAuthz{tenants: tenants}, nil, sites, nil, nil, svctenant.BulkOptions{})
+	if _, err := svc.BulkProvisionSites(context.Background(), uuid.New(), uuid.New(), nil, tmpl); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	sites.mu.Lock()
+	defer sites.mu.Unlock()
+	if len(sites.got) != len(tenants) {
+		t.Fatalf("got = %d sites, want %d", len(sites.got), len(tenants))
+	}
+
+	// Each captured Config byte slice must:
+	//   (a) carry the same VALUE as the template (deep copy
+	//       preserves contents); and
+	//   (b) NOT alias the template's backing array (deep copy
+	//       allocates fresh memory).
+	tmplPtr := uintptr(0)
+	if len(tmpl.Config) > 0 {
+		tmplPtr = uintptr(unsafe.Pointer(&tmpl.Config[0]))
+	}
+	seen := map[uintptr]struct{}{}
+	for tid, got := range sites.got {
+		if string(got.Config) != string(tmpl.Config) {
+			t.Errorf("tenant %v: Config = %q, want %q", tid, got.Config, tmpl.Config)
+		}
+		if len(got.Config) == 0 {
+			continue
+		}
+		p := uintptr(unsafe.Pointer(&got.Config[0]))
+		if p == tmplPtr {
+			t.Errorf("tenant %v: Config backing array aliases the template's (round-4 deep-copy regression)", tid)
+		}
+		if _, dup := seen[p]; dup {
+			t.Errorf("tenant %v: Config backing array aliases another tenant's (round-4 deep-copy regression)", tid)
+		}
+		seen[p] = struct{}{}
 	}
 }
