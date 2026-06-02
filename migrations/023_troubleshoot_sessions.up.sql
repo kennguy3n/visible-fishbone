@@ -1,4 +1,4 @@
--- Migration 028: Troubleshoot sessions for the autonomous troubleshooting assistant.
+-- Migration 023: Troubleshoot sessions for the autonomous troubleshooting assistant.
 
 CREATE TABLE troubleshoot_sessions (
     id                 UUID        PRIMARY KEY DEFAULT gen_random_uuid(),

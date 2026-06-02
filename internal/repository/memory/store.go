@@ -103,7 +103,7 @@ type Store struct {
 	// AI suggestion tables — see migration 026.
 	aiSuggestions map[uuid.UUID]repository.AISuggestion
 
-	// Troubleshooting tables — see migrations 027-028.
+	// Troubleshooting tables — see migrations 022-023.
 	kbEntries             map[uuid.UUID]repository.KBEntry
 	troubleshootSessions  map[uuid.UUID]repository.TroubleshootSession
 
