@@ -46,6 +46,33 @@ func TestPolicySuggestService_UnusedRule(t *testing.T) {
 	}
 }
 
+// When the caller supplies no hit data (nil hitCounts), unused-rule
+// detection must be skipped rather than flagging every allow rule for
+// removal — absent hit data is "unknown", not "zero hits".
+func TestPolicySuggestService_NilHitCounts_SkipsUnusedSuggestion(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	repo := memory.NewAISuggestionRepository(store)
+	svc := NewPolicySuggestService(nil, nil, repo, nil)
+
+	tenantID := uuid.New()
+	rules := []json.RawMessage{
+		json.RawMessage(`{"id":"rule-1","verb":"allow","domain":"ngfw","subject_refs":["admin"]}`),
+		json.RawMessage(`{"id":"rule-2","verb":"allow","domain":"swg","subject_refs":["ops"]}`),
+	}
+
+	// hitCounts intentionally nil.
+	suggestions, err := svc.AnalyzeAndSuggest(context.Background(), tenantID, rules, nil, 30)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, s := range suggestions {
+		if s.Category == SuggestionCategoryUnused {
+			t.Fatalf("did not expect an unused suggestion when hit data is absent, got one for %s", s.RuleID)
+		}
+	}
+}
+
 func TestPolicySuggestService_OverlyPermissiveRule(t *testing.T) {
 	t.Parallel()
 	store := memory.NewStore()

@@ -57,6 +57,13 @@ func (s *PolicySuggestService) AnalyzeAndSuggest(
 
 	var suggestions []PolicyChangeSuggestion
 
+	// A nil hitCounts map means the caller supplied no hit data; without it
+	// a rule cannot be judged unused, so unused-rule detection is skipped
+	// (otherwise every allow rule would be flagged for removal). A non-nil
+	// map, even if empty, is authoritative: a rule absent from it genuinely
+	// had zero hits. Mirrors TighteningService.Analyze.
+	haveHitData := hitCounts != nil
+
 	for i, ruleRaw := range rules {
 		var rule struct {
 			ID   string `json:"id"`
@@ -74,7 +81,7 @@ func (s *PolicySuggestService) AnalyzeAndSuggest(
 
 		hits := hitCounts[rule.ID]
 
-		if hits == 0 && rule.Verb == "allow" {
+		if haveHitData && hits == 0 && rule.Verb == "allow" {
 			suggestion := s.buildUnusedRuleSuggestion(tenantID, rule.ID, windowDays, ruleRaw)
 			suggestions = append(suggestions, suggestion)
 			continue
