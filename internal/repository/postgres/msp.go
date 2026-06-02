@@ -210,15 +210,19 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 	// TenantRepository.Update: nil arg → keep, non-nil arg → set
 	// to value (including zero).
 	//
-	// Soft-delete immutability: the `AND deleted_at IS NULL` guard
-	// refuses any PATCH against a soft-deleted row. Round-13 of
-	// Devin Review on PR #42 flagged the previous behaviour
-	// (silently mutating a soft-deleted MSP) as 🚩 inconsistent
-	// with the resurrection guard the handler already enforces on
-	// status transitions — both code paths now treat 'deleted' as
-	// the terminal lifecycle state. Distinguishing ErrForbidden
-	// (row exists but is deleted) from ErrNotFound (row absent)
-	// requires the secondary lookup below on zero rows affected.
+	// Soft-delete immutability (defense-in-depth, round-14 of Devin
+	// Review on PR #42 — ANALYSIS_0002): the guard rejects a PATCH
+	// if EITHER `status = 'deleted'` OR `deleted_at IS NOT NULL`.
+	// Under the lifecycle invariant `(status='deleted' ⇔ deleted_at
+	// != NULL)` the two predicates are logically equivalent, but a
+	// hypothetical corrupt row (e.g. status='deleted' with deleted_at
+	// IS NULL, or vice versa) would otherwise bypass exactly one of
+	// the backends. Round-13 introduced the `deleted_at IS NULL` half
+	// of this guard; round-14 mirrors the additional `status <>
+	// 'deleted'` check so postgres and memory enforce parity against
+	// the same failure modes. Distinguishing ErrForbidden (row exists
+	// but is deleted) from ErrNotFound (row absent) requires the
+	// secondary lookup below on zero rows affected.
 	const q = `
 		UPDATE msps
 		SET name     = CASE WHEN $2::text IS NULL THEN name     ELSE $2::text END,
@@ -226,7 +230,7 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 		    status   = CASE WHEN $4::text IS NULL THEN status   ELSE $4::text END,
 		    branding = CASE WHEN $5::jsonb IS NULL THEN branding ELSE $5::jsonb END,
 		    settings = CASE WHEN $6::jsonb IS NULL THEN settings ELSE $6::jsonb END
-		WHERE id = $1::uuid AND deleted_at IS NULL
+		WHERE id = $1::uuid AND status <> 'deleted' AND deleted_at IS NULL
 		RETURNING ` + mspSelectColumns
 	var (
 		nameArg     any
@@ -459,6 +463,32 @@ func (r *MSPRepository) AssignTenant(
 		}
 	}
 
+	// Capture the previous relationship (if any) before the upsert so
+	// we can correctly cascade a downgrade away from `owner` to the
+	// denormalised `tenants.msp_id` pointer below. Round-14 of Devin
+	// Review on PR #42 (ANALYSIS_0003) flagged that without this
+	// lookup an `AssignTenant(mspID, tenantID, co_manager)` after a
+	// prior `owner` binding for the same pair would leave the join
+	// table reading `co_manager` while the denormalised column still
+	// pointed at this MSP — a cross-storage-site drift. The query
+	// runs in the same transaction as the upsert + UPDATE, so the
+	// (read prev, upsert, conditionally clear) sequence commits
+	// atomically.
+	var (
+		prevRel string
+		hadPrev bool
+	)
+	if err := tx.QueryRow(ctx,
+		`SELECT relationship FROM msp_tenants WHERE msp_id = $1::uuid AND tenant_id = $2::uuid`,
+		mspID, tenantID,
+	).Scan(&prevRel); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return repository.MSPTenantBinding{}, fmt.Errorf("lookup prior binding: %w", err)
+		}
+	} else {
+		hadPrev = true
+	}
+
 	const upsertQ = `
 		INSERT INTO msp_tenants (msp_id, tenant_id, relationship, created_by)
 		VALUES ($1::uuid, $2::uuid, $3, $4::uuid)
@@ -484,12 +514,30 @@ func (r *MSPRepository) AssignTenant(
 		binding.CreatedBy = &v
 	}
 
-	if relationship == repository.MSPRelationshipOwner {
+	switch {
+	case relationship == repository.MSPRelationshipOwner:
 		if _, err := tx.Exec(ctx,
 			`UPDATE tenants SET msp_id = $2::uuid, updated_at = NOW() WHERE id = $1::uuid`,
 			tenantID, mspID,
 		); err != nil {
 			return repository.MSPTenantBinding{}, fmt.Errorf("set tenant owner: %w", err)
+		}
+	case hadPrev && prevRel == string(repository.MSPRelationshipOwner):
+		// Downgrade: the same (msp, tenant) binding flipped from
+		// owner to a non-owner relationship. Clear the
+		// denormalised pointer if it still references this MSP so
+		// the join table and `tenants.msp_id` stay consistent.
+		// The `msp_id = $2::uuid` predicate scopes the clear to
+		// rows still owned by this MSP — if some other MSP
+		// owner-bound this tenant in between (unlikely under
+		// normal flows; the partial UNIQUE index would block it
+		// for owner relationships) we must not stomp their
+		// pointer.
+		if _, err := tx.Exec(ctx,
+			`UPDATE tenants SET msp_id = NULL, updated_at = NOW() WHERE id = $1::uuid AND msp_id = $2::uuid`,
+			tenantID, mspID,
+		); err != nil {
+			return repository.MSPTenantBinding{}, fmt.Errorf("clear stale owner pointer: %w", err)
 		}
 	}
 

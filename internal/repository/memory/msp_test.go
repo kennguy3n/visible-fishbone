@@ -451,3 +451,150 @@ func TestMSPRepository_Update_RejectsEmptySlug(t *testing.T) {
 		t.Fatalf("row mutated despite rejected update: slug = %q, want acme-empty-slug", after.Slug)
 	}
 }
+
+// TestMSPRepository_Update_RejectsSoftDeletedRowOnStatusGuard pins
+// the round-14 defense-in-depth fix for ANALYSIS_0002: under the
+// lifecycle invariant `(status='deleted' ⇔ deleted_at != NULL)`
+// the two halves of the guard are equivalent, but the memory
+// backend must still reject a PATCH against a row whose Status is
+// already 'deleted'. This is the original round-13 half of the
+// guard.
+func TestMSPRepository_Update_RejectsSoftDeletedRowOnStatusGuard(t *testing.T) {
+	_, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+	m, err := mspRepo.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-soft-status"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := mspRepo.Delete(ctx, m.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	newName := "Renamed"
+	_, err = mspRepo.Update(ctx, m.ID, repository.MSPPatch{Name: &newName})
+	if !errors.Is(err, repository.ErrForbidden) {
+		t.Fatalf("Update on soft-deleted MSP should ErrForbidden, got %v", err)
+	}
+}
+
+// TestMSPRepository_Update_RejectsCorruptDeletedAtOnlyRow pins the
+// round-14 ANALYSIS_0002 defense-in-depth: a corrupt row with
+// `deleted_at != nil` but `Status != deleted` (lifecycle invariant
+// violation, e.g. partial write) must still be rejected. Prior to
+// round-14 the memory backend only checked `Status == deleted` so
+// such a row would have been mutated; the postgres backend would
+// have rejected it via the `deleted_at IS NULL` predicate. The
+// fix mirrors postgres's predicate into memory so both backends
+// fail the same way on corrupt data.
+func TestMSPRepository_Update_RejectsCorruptDeletedAtOnlyRow(t *testing.T) {
+	store, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+	m, err := mspRepo.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-corrupt-da"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Simulate corrupt data: deleted_at stamped but Status NOT
+	// transitioned to 'deleted'. This violates the lifecycle
+	// invariant the system is designed to maintain, but we
+	// defend against it anyway.
+	store.mu.Lock()
+	row := store.msps[m.ID]
+	ts := row.CreatedAt
+	row.DeletedAt = &ts
+	// row.Status remains MSPStatusActive
+	store.msps[m.ID] = row
+	store.mu.Unlock()
+
+	newName := "Renamed"
+	_, err = mspRepo.Update(ctx, m.ID, repository.MSPPatch{Name: &newName})
+	if !errors.Is(err, repository.ErrForbidden) {
+		t.Fatalf("Update on corrupt-deleted_at row should ErrForbidden, got %v", err)
+	}
+}
+
+// TestMSPRepository_AssignTenant_DowngradeClearsMSPID pins the
+// round-14 fix for ANALYSIS_0003: when AssignTenant is called for
+// the same (msp, tenant) pair with relationship=co_manager after
+// a prior relationship=owner assignment, the binding is upserted
+// (memory direct write, postgres ON CONFLICT DO UPDATE) but the
+// denormalised `tenants.msp_id` pointer must be cleared so the
+// join table and the denormalised column stay consistent. Prior
+// to round-14 the downgrade left the pointer stale, creating a
+// cross-storage-site drift.
+func TestMSPRepository_AssignTenant_DowngradeClearsMSPID(t *testing.T) {
+	_, mspRepo, tenantRepo := mspFixtures(t)
+	ctx := context.Background()
+
+	msp := mustCreateMSP(t, mspRepo, "downgrade-msp")
+	tenant := mustCreateTenant(t, tenantRepo, "downgrade-tenant")
+
+	// First make it an owner — pointer should be set.
+	if _, err := mspRepo.AssignTenant(ctx, msp.ID, tenant.ID, repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign owner: %v", err)
+	}
+	got, err := tenantRepo.Get(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("get tenant after owner: %v", err)
+	}
+	if got.MSPID == nil || *got.MSPID != msp.ID {
+		t.Fatalf("after owner-assign expected pointer to %s, got %v", msp.ID, got.MSPID)
+	}
+
+	// Now downgrade to co_manager — pointer must be cleared.
+	if _, err := mspRepo.AssignTenant(ctx, msp.ID, tenant.ID, repository.MSPRelationshipCoManager, nil); err != nil {
+		t.Fatalf("assign co_manager: %v", err)
+	}
+	got, err = tenantRepo.Get(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("get tenant after downgrade: %v", err)
+	}
+	if got.MSPID != nil {
+		t.Fatalf("after downgrade expected pointer cleared, got %v", got.MSPID)
+	}
+	// But the binding itself must still exist and now be co_manager.
+	bindings, err := mspRepo.ListBindings(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding after downgrade, got %d", len(bindings))
+	}
+	if bindings[0].Relationship != repository.MSPRelationshipCoManager {
+		t.Fatalf("expected co_manager binding, got %s", bindings[0].Relationship)
+	}
+	if bindings[0].MSPID != msp.ID {
+		t.Fatalf("binding MSP ID mismatch: got %s want %s", bindings[0].MSPID, msp.ID)
+	}
+}
+
+// TestMSPRepository_AssignTenant_RepeatedCoManagerDoesNotClearOtherOwner
+// pins that the round-14 downgrade fix does NOT stomp a pointer set
+// by some other MSP: if MSP-A owns the tenant and MSP-B is bound as
+// co_manager (no prior owner relationship on B), a repeat
+// co_manager assign on B must not touch tenants.msp_id (still
+// points at A).
+func TestMSPRepository_AssignTenant_RepeatedCoManagerDoesNotClearOtherOwner(t *testing.T) {
+	_, mspRepo, tenantRepo := mspFixtures(t)
+	ctx := context.Background()
+
+	owner := mustCreateMSP(t, mspRepo, "owner-msp")
+	co := mustCreateMSP(t, mspRepo, "co-msp")
+	tenant := mustCreateTenant(t, tenantRepo, "shared-tenant")
+
+	if _, err := mspRepo.AssignTenant(ctx, owner.ID, tenant.ID, repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign owner: %v", err)
+	}
+	if _, err := mspRepo.AssignTenant(ctx, co.ID, tenant.ID, repository.MSPRelationshipCoManager, nil); err != nil {
+		t.Fatalf("first co_manager assign: %v", err)
+	}
+	// Repeat — idempotent upsert; must NOT clear owner's pointer.
+	if _, err := mspRepo.AssignTenant(ctx, co.ID, tenant.ID, repository.MSPRelationshipCoManager, nil); err != nil {
+		t.Fatalf("repeated co_manager assign: %v", err)
+	}
+	got, err := tenantRepo.Get(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("get tenant: %v", err)
+	}
+	if got.MSPID == nil || *got.MSPID != owner.ID {
+		t.Fatalf("owner pointer mutated by repeated co_manager: got %v want %s", got.MSPID, owner.ID)
+	}
+}

@@ -148,16 +148,20 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 	if !ok {
 		return repository.MSP{}, repository.ErrNotFound
 	}
-	// Soft-delete immutability: refuse to PATCH a row whose
-	// status has been moved to the terminal 'deleted' state.
-	// Round-13 of Devin Review on PR #42 flagged the previous
-	// behaviour (mutating fields on a soft-deleted MSP) as 🚩
-	// inconsistent with the resurrection guard enforced by the
-	// handler on status transitions — both code paths now treat
-	// 'deleted' as terminal. The postgres backend enforces the
-	// same invariant via the `AND deleted_at IS NULL` WHERE
-	// clause on the UPDATE statement.
-	if existing.Status == repository.MSPStatusDeleted {
+	// Soft-delete immutability (defense-in-depth, round-14 of Devin
+	// Review on PR #42 — ANALYSIS_0002): refuse to PATCH a row whose
+	// status is 'deleted' OR whose deleted_at is set. Under the
+	// lifecycle invariant `(status='deleted' ⇔ deleted_at != NULL)`
+	// these two predicates are logically equivalent, but a hypothetical
+	// corrupt row (e.g. status='deleted' with deleted_at IS NULL, or
+	// vice versa) would otherwise bypass exactly one of the backends.
+	// Round-13 introduced the `status == deleted` half of this guard;
+	// round-14 mirrors the additional `deleted_at != nil` check so
+	// postgres and memory enforce parity against the same failure
+	// modes. The postgres backend has the matching `WHERE status <>
+	// 'deleted' AND deleted_at IS NULL` clause on its UPDATE
+	// statement.
+	if existing.Status == repository.MSPStatusDeleted || existing.DeletedAt != nil {
 		return repository.MSP{}, repository.ErrForbidden
 	}
 	if patch.Slug != nil && *patch.Slug != existing.Slug {
@@ -327,6 +331,16 @@ func (r *MSPRepository) AssignTenant(
 	if _, ok := r.s.tenants[tenantID]; !ok {
 		return repository.MSPTenantBinding{}, repository.ErrNotFound
 	}
+	bindingKey := mspTenantKey{MSPID: mspID, TenantID: tenantID}
+	// Capture the previous relationship (if any) before the upsert so
+	// we can correctly cascade a downgrade away from `owner` to the
+	// denormalised `tenants.msp_id` pointer below. Round-14 of Devin
+	// Review on PR #42 (ANALYSIS_0003) flagged that without this
+	// lookup an `AssignTenant(mspID, tenantID, co_manager)` after a
+	// prior `owner` binding for the same pair would leave the join
+	// table reading `co_manager` while the denormalised column still
+	// pointed at this MSP — a cross-storage-site drift.
+	prev, hadPrev := r.s.mspTenants[bindingKey]
 	if relationship == repository.MSPRelationshipOwner {
 		// Remove any existing owner binding for this tenant; the
 		// partial UNIQUE index in migration 015 enforces at most
@@ -348,13 +362,30 @@ func (r *MSPRepository) AssignTenant(
 		v := *actor
 		binding.CreatedBy = &v
 	}
-	r.s.mspTenants[mspTenantKey{MSPID: mspID, TenantID: tenantID}] = binding
-	if relationship == repository.MSPRelationshipOwner {
+	r.s.mspTenants[bindingKey] = binding
+	switch {
+	case relationship == repository.MSPRelationshipOwner:
 		t := r.s.tenants[tenantID]
 		id := mspID
 		t.MSPID = &id
 		t.UpdatedAt = now
 		r.s.tenants[tenantID] = t
+	case hadPrev && prev.Relationship == repository.MSPRelationshipOwner:
+		// Downgrade: the same (msp, tenant) binding flipped from
+		// owner to a non-owner relationship. Clear the
+		// denormalised pointer if it still references this MSP so
+		// the join table and `tenants.msp_id` stay consistent.
+		// The pointer is only cleared when it still names this
+		// MSP — if some other MSP owner-bound this tenant in
+		// between (unlikely under normal flows; the partial
+		// UNIQUE index would block it for owner relationships)
+		// we must not stomp their pointer.
+		t := r.s.tenants[tenantID]
+		if t.MSPID != nil && *t.MSPID == mspID {
+			t.MSPID = nil
+			t.UpdatedAt = now
+			r.s.tenants[tenantID] = t
+		}
 	}
 	out := binding
 	if binding.CreatedBy != nil {
