@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -121,6 +122,48 @@ func TestRegexEngine_UKNI(t *testing.T) {
 	matches := e.Match(content, rules)
 	if len(matches) == 0 {
 		t.Fatal("expected at least one UK NI match")
+	}
+}
+
+func TestRegexEngine_CacheEviction(t *testing.T) {
+	e := NewRegexEngine()
+	content := []byte("MATCH-000")
+
+	// Fill the cache beyond maxCustomCacheSize.
+	for i := 0; i <= maxCustomCacheSize; i++ {
+		pat := fmt.Sprintf(`MATCH-%03d`, i)
+		rules := []repository.DLPRule{
+			{Type: repository.DLPRuleTypeRegex, Pattern: pat},
+		}
+		e.Match([]byte(pat), rules)
+	}
+
+	// Cache size must not exceed the limit.
+	e.mu.Lock()
+	size := len(e.cache)
+	e.mu.Unlock()
+	if size > maxCustomCacheSize {
+		t.Fatalf("cache size %d exceeds max %d", size, maxCustomCacheSize)
+	}
+
+	// The most recently used pattern should still be cached and match.
+	latest := fmt.Sprintf(`MATCH-%03d`, maxCustomCacheSize)
+	rules := []repository.DLPRule{
+		{Type: repository.DLPRuleTypeRegex, Pattern: latest},
+	}
+	matches := e.Match([]byte(latest), rules)
+	if len(matches) == 0 {
+		t.Fatal("expected match for most recently cached pattern")
+	}
+
+	// Earliest pattern (index 0) should have been evicted but still
+	// compiles on demand (just not in cache before this call).
+	rules0 := []repository.DLPRule{
+		{Type: repository.DLPRuleTypeRegex, Pattern: `MATCH-000`},
+	}
+	matches0 := e.Match(content, rules0)
+	if len(matches0) == 0 {
+		t.Fatal("expected match after re-compile of evicted pattern")
 	}
 }
 
