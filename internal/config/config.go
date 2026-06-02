@@ -79,6 +79,7 @@ type Config struct {
 	Telemetry          Telemetry
 	TelemetryAnalytics TelemetryAnalytics
 	AppRegistry        AppRegistry
+	AI                 AI
 }
 
 // AppRegistry carries the runtime knobs for the curated
@@ -103,6 +104,17 @@ type AppRegistry struct {
 	// the Syncer; the strict parser still rejects un-parseable
 	// values so an operator typo doesn't silently revert.
 	SyncInterval time.Duration
+}
+
+// AI carries runtime knobs for the AI assistant service
+// (Phase 3 Block 6). When Endpoint is empty the service runs in
+// template-only mode — all summaries are deterministic and the
+// suggest-policy / troubleshoot endpoints return 503.
+type AI struct {
+	Endpoint string
+	APIKey   string
+	Model    string
+	Timeout  time.Duration
 }
 
 // Log carries structured-logging configuration.
@@ -742,6 +754,11 @@ func Load() (Config, error) {
 			S3StorageClass:      getStr("S3_TELEMETRY_STORAGE_CLASS", ""),
 			ReplayDurable:       getStr("TELEMETRY_REPLAY_DURABLE", ""),
 		},
+		AI: AI{
+			Endpoint: getStr("AI_LLM_ENDPOINT", ""),
+			APIKey:   getStr("AI_LLM_API_KEY", ""),
+			Model:    getStr("AI_LLM_MODEL", ""),
+		},
 	}
 
 	// Critical numeric settings: re-parse with the strict helpers
@@ -821,6 +838,7 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_FLUSH_INTERVAL", 2 * time.Second, &cfg.TelemetryAnalytics.ClickHouseFlushInterval},
 		{"S3_TELEMETRY_FLUSH_INTERVAL", 30 * time.Second, &cfg.TelemetryAnalytics.S3FlushInterval},
 		{"APP_REGISTRY_SYNC_INTERVAL", 24 * time.Hour, &cfg.AppRegistry.SyncInterval},
+		{"AI_LLM_TIMEOUT", 10 * time.Second, &cfg.AI.Timeout},
 	}
 	strictFloats := []struct {
 		key string

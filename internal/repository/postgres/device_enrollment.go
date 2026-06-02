@@ -25,6 +25,13 @@ func (r *DeviceEnrollmentRepository) CreateEnrollment(ctx context.Context, tenan
 		const q = `
 			INSERT INTO device_enrollments (device_id, tenant_id, public_key, status, enrolled_at)
 			VALUES ($1::uuid, $2::uuid, $3, $4, $5)
+			ON CONFLICT (device_id, tenant_id)
+			DO UPDATE SET public_key   = EXCLUDED.public_key,
+			              status       = EXCLUDED.status,
+			              enrolled_at  = EXCLUDED.enrolled_at,
+			              revoked_at   = NULL,
+			              last_cert_issued_at = NULL
+			WHERE device_enrollments.status = 'revoked'
 			RETURNING device_id, tenant_id, public_key, status, enrolled_at,
 			          last_cert_issued_at, revoked_at`
 		row := tx.QueryRow(ctx, q,
@@ -153,8 +160,14 @@ func (r *DeviceEnrollmentRepository) UpdateLastCertIssuedAt(ctx context.Context,
 	return r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		const q = `UPDATE device_enrollments SET last_cert_issued_at = $2
 		           WHERE device_id = $1::uuid AND status != 'revoked'`
-		_, err := tx.Exec(ctx, q, deviceID, at)
-		return err
+		tag, err := tx.Exec(ctx, q, deviceID, at)
+		if err != nil {
+			return fmt.Errorf("update last_cert_issued_at: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return repository.ErrNotFound
+		}
+		return nil
 	})
 }
 

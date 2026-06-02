@@ -114,17 +114,24 @@ func (s *SCIMService) UpdateUser(ctx context.Context, tenantID uuid.UUID, userID
 			displayName = strings.TrimSpace(su.Name.GivenName + " " + su.Name.FamilyName)
 		}
 	}
-	u, err := s.users.Update(ctx, tenantID, repository.User{
+	u := repository.User{
 		ID:         userID,
 		Email:      email,
 		Name:       displayName,
 		ExternalID: su.ExternalID,
 		Status:     status,
-	})
+	}
+	var updated repository.User
+	var err error
+	if su.ExternalID == "" {
+		updated, err = s.users.UpdateAndClearExternalID(ctx, tenantID, u)
+	} else {
+		updated, err = s.users.Update(ctx, tenantID, u)
+	}
 	if err != nil {
 		return SCIMUser{}, err
 	}
-	return userToSCIM(u), nil
+	return userToSCIM(updated), nil
 }
 
 // PatchUser applies a SCIM PATCH operation (RFC 7644 §3.5.2).
