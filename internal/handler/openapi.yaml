@@ -3871,12 +3871,16 @@ components:
       type: object
       required: [verdict, explanation, ai_generated]
       properties:
-        verdict: { type: string, enum: [allow, deny, unknown] }
+        verdict: { type: string, enum: [allow, deny, inspect, log, alert, unknown] }
         matched_rules: { type: array, items: { type: string } }
         explanation: { type: string }
         confidence: { type: number, format: double }
         ai_generated: { type: boolean }
         model_id: { type: string }
+        evaluation_mode:
+          type: string
+          enum: [compiled-bundle, no-policy, default-heuristic]
+          description: "How the verdict was produced: compiled-bundle (tenant's live policy graph evaluated), no-policy (no live graph, heuristic default), or default-heuristic (no policy source/evaluation error)."
 
     AIPostureReport:
       type: object

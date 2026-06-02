@@ -2,9 +2,12 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
 func TestNLQueryEngine_EmptyQuestion(t *testing.T) {
@@ -122,7 +125,109 @@ func TestNLQueryEngine_LLMFallback(t *testing.T) {
 	}
 }
 
+func TestNLQueryEngine_DefaultHeuristicModeWhenNoSource(t *testing.T) {
+	t.Parallel()
+	engine := NewNLQueryEngine(nil)
+	resp, err := engine.Query(context.Background(), NLQueryRequest{
+		Question: "Can user alice access app salesforce.com from device laptop1?",
+		TenantID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.EvaluationMode != evalModeDefaultHeuristic {
+		t.Fatalf("expected mode %q, got %q", evalModeDefaultHeuristic, resp.EvaluationMode)
+	}
+	if resp.MatchedRules[0] != "default-policy" {
+		t.Fatalf("expected default-policy matched rule, got %v", resp.MatchedRules)
+	}
+}
+
+func TestNLQueryEngine_CompiledBundleAllow(t *testing.T) {
+	t.Parallel()
+	// SWG rule that allows the salesforce.com host; default deny.
+	graph := `{"default_action":"deny","rules":[{"id":"allow-sf","domain":"swg","verb":"allow","predicates":[{"name":"h","match":{"host":"salesforce.com"}}]}]}`
+	src := &fakeGraphSource{graph: repository.PolicyGraph{ID: uuid.New(), Version: 3, Graph: json.RawMessage(graph)}}
+	engine := NewNLQueryEngine(nil, WithPolicyGraphSource(src))
+
+	resp, err := engine.Query(context.Background(), NLQueryRequest{
+		Question: "Can user alice access app salesforce.com from device laptop1?",
+		TenantID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Verdict != "allow" {
+		t.Fatalf("expected allow from compiled bundle, got %q", resp.Verdict)
+	}
+	if resp.EvaluationMode != evalModeCompiledBundle {
+		t.Fatalf("expected mode %q, got %q", evalModeCompiledBundle, resp.EvaluationMode)
+	}
+	if len(resp.MatchedRules) == 0 || resp.MatchedRules[0] == "default-policy" {
+		t.Fatalf("expected a policy-graph matched rule reference, got %v", resp.MatchedRules)
+	}
+	if resp.Confidence < 0.9 {
+		t.Fatalf("expected high confidence for authoritative verdict, got %f", resp.Confidence)
+	}
+}
+
+func TestNLQueryEngine_CompiledBundleDefaultDeny(t *testing.T) {
+	t.Parallel()
+	// Same graph, but the queried app doesn't match the allow rule,
+	// so the graph's default action (deny) governs.
+	graph := `{"default_action":"deny","rules":[{"id":"allow-sf","domain":"swg","verb":"allow","predicates":[{"name":"h","match":{"host":"salesforce.com"}}]}]}`
+	src := &fakeGraphSource{graph: repository.PolicyGraph{ID: uuid.New(), Version: 1, Graph: json.RawMessage(graph)}}
+	engine := NewNLQueryEngine(nil, WithPolicyGraphSource(src))
+
+	resp, err := engine.Query(context.Background(), NLQueryRequest{
+		Question: "Can user bob access app evil.com from device laptop2?",
+		TenantID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Verdict != "deny" {
+		t.Fatalf("expected deny from default action, got %q", resp.Verdict)
+	}
+	if resp.EvaluationMode != evalModeCompiledBundle {
+		t.Fatalf("expected mode %q, got %q", evalModeCompiledBundle, resp.EvaluationMode)
+	}
+}
+
+func TestNLQueryEngine_NoLivePolicyFallsBack(t *testing.T) {
+	t.Parallel()
+	src := &fakeGraphSource{err: repository.ErrNotFound}
+	engine := NewNLQueryEngine(nil, WithPolicyGraphSource(src))
+
+	resp, err := engine.Query(context.Background(), NLQueryRequest{
+		Question: "Can user alice access app salesforce.com from device laptop1?",
+		TenantID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.EvaluationMode != evalModeNoPolicy {
+		t.Fatalf("expected mode %q, got %q", evalModeNoPolicy, resp.EvaluationMode)
+	}
+	// Heuristic default applies (allow unless explicit block).
+	if resp.Verdict != "allow" {
+		t.Fatalf("expected heuristic allow, got %q", resp.Verdict)
+	}
+}
+
 // --- test stubs ---
+
+type fakeGraphSource struct {
+	graph repository.PolicyGraph
+	err   error
+}
+
+func (f *fakeGraphSource) GetCurrentGraph(_ context.Context, _ uuid.UUID) (repository.PolicyGraph, error) {
+	if f.err != nil {
+		return repository.PolicyGraph{}, f.err
+	}
+	return f.graph, nil
+}
 
 type nlQueryStubLLM struct {
 	text    string

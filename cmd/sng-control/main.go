@@ -709,7 +709,15 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	h := handler.NewAIHandler(svc, logger)
 
 	correlation := aisvc.NewCorrelationEngine(effectiveLLM, aisvc.CorrelationConfig{})
-	nlQuery := aisvc.NewNLQueryEngine(effectiveLLM)
+	// Wire the NL-query engine to the tenant's live compiled policy
+	// graph so verdicts come from the real policy evaluator (the LLM
+	// only ever parses intent, never produces the verdict). Falls
+	// back to the heuristic default when policySvc is nil.
+	var nlOpts []aisvc.NLQueryOption
+	if policySvc != nil {
+		nlOpts = append(nlOpts, aisvc.WithPolicyGraphSource(policySvc))
+	}
+	nlQuery := aisvc.NewNLQueryEngine(effectiveLLM, nlOpts...)
 	reports := aisvc.NewReportEngine(effectiveLLM)
 	// No external threat feed is configured by default; enrichment
 	// returns an empty (non-escalated) context until one is wired.
