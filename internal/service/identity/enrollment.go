@@ -106,11 +106,13 @@ func (s *EnrollmentService) RedeemClaimToken(
 
 	cert, err := s.issueCertificate(ctx, tenantID, deviceID, publicKey, now)
 	if err != nil {
-		if unErr := s.tokens.UnredeemByHash(ctx, tenantID, hash[:]); unErr != nil {
-			s.logger.Error("enrollment: failed to un-redeem token after certificate issuance failure",
-				slog.Any("unredeemError", unErr),
-				slog.Any("certError", err))
-		}
+		// Enrollment succeeded so the token stays consumed — the
+		// device can recover via RefreshCertificate. Un-redeeming
+		// here would leave an orphaned enrollment that blocks
+		// retries with ErrConflict.
+		s.logger.Error("enrollment: certificate issuance failed after enrollment created; device should use RefreshCertificate",
+			slog.Any("error", err),
+			slog.String("deviceID", deviceID.String()))
 		return EnrollmentResult{}, fmt.Errorf("issue certificate: %w", err)
 	}
 

@@ -44,7 +44,7 @@ func (r *DeviceEnrollmentRepository) CreateEnrollment(ctx context.Context, tenan
 			&out.DeviceID, &out.TenantID, &out.PublicKey, &out.Status,
 			&enrolled, &lastCert, &revoked,
 		); err != nil {
-			if isUniqueViolation(err) {
+			if isUniqueViolation(err) || errors.Is(err, pgx.ErrNoRows) {
 				return repository.ErrConflict
 			}
 			return fmt.Errorf("insert device_enrollment: %w", err)
