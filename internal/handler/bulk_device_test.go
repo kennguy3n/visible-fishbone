@@ -214,4 +214,45 @@ func TestBulkDevice_ExportCSV(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "text/csv" {
 		t.Errorf("content-type = %q, want text/csv", ct)
 	}
+	// A small inventory must not be flagged as truncated.
+	if v := rec.Header().Get("X-Truncated"); v != "" {
+		t.Errorf("X-Truncated = %q, want empty for a complete export", v)
+	}
+}
+
+func TestBulkDevice_ExportCSV_TruncationSignaled(t *testing.T) {
+	t.Parallel()
+	h, store, tenantID := newBulkDeviceTestSetup(t)
+	tid := tenantID.String()
+
+	// Seed more devices than the export cap so the loop stops early and
+	// must advertise the partial result instead of dropping rows silently.
+	devRepo := memory.NewDeviceRepository(store)
+	for i := 0; i < identity.MaxBulkDevices+1; i++ {
+		if _, err := devRepo.Create(context.Background(), tenantID, repository.Device{
+			Name:     "dev",
+			Platform: repository.DevicePlatformLinux,
+			Status:   repository.DeviceStatusActive,
+		}); err != nil {
+			t.Fatalf("seed device %d: %v", i, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tid+"/devices/export", nil)
+	req.SetPathValue("tenant_id", tid)
+	rec := httptest.NewRecorder()
+	h.exportCSV(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if v := rec.Header().Get("X-Truncated"); v != "true" {
+		t.Errorf("X-Truncated = %q, want \"true\" when inventory exceeds the export cap", v)
+	}
+	// Body must contain exactly the cap plus the header row.
+	lines := strings.Count(strings.TrimRight(rec.Body.String(), "\n"), "\n") + 1
+	if lines != identity.MaxBulkDevices+1 {
+		t.Errorf("exported lines = %d, want %d (header + %d rows)",
+			lines, identity.MaxBulkDevices+1, identity.MaxBulkDevices)
+	}
 }

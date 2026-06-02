@@ -3,6 +3,7 @@ package handler
 import (
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -129,6 +130,7 @@ func (h *BulkDeviceHandler) exportCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	var all []repository.Device
 	after := ""
+	truncated := false
 	for {
 		pg := repository.Page{Limit: repository.MaxPageLimit, After: after}
 		result, err := h.devices.List(r.Context(), tenantID, repository.DeviceListFilter{}, pg)
@@ -137,7 +139,16 @@ func (h *BulkDeviceHandler) exportCSV(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		all = append(all, result.Items...)
-		if result.NextCursor == "" || len(all) >= identity.MaxBulkDevices {
+		if len(all) >= identity.MaxBulkDevices {
+			// More devices may exist beyond the cap; signal a partial
+			// export to the client rather than dropping rows silently.
+			truncated = result.NextCursor != ""
+			if len(all) > identity.MaxBulkDevices {
+				all = all[:identity.MaxBulkDevices]
+			}
+			break
+		}
+		if result.NextCursor == "" {
 			break
 		}
 		after = result.NextCursor
@@ -149,6 +160,12 @@ func (h *BulkDeviceHandler) exportCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", "attachment; filename=devices.csv")
+	// When the inventory exceeds the export cap, advertise the partial
+	// result so consumers can paginate or request a fuller export.
+	if truncated {
+		w.Header().Set("X-Truncated", "true")
+		w.Header().Set("X-Export-Limit", strconv.Itoa(identity.MaxBulkDevices))
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
