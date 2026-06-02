@@ -1250,6 +1250,226 @@ func TestMSPHandler_UpdateMSP_NonBrandingPatchDoesNotInvalidate(t *testing.T) {
 	}
 }
 
+// TestMSPHandler_AssignTenant_OwnerInvalidatesBrandingCache pins
+// the round-9 fix: when the handler assigns an OWNER binding the
+// repo cascades by setting tenants.msp_id to the new MSP, which
+// changes the branding resolution chain for that tenant. The
+// handler must invalidate the cached branding entry so the next
+// Resolve falls through to the (newly bound) MSP's branding.
+//
+// We seed an unbound tenant + an MSP with LogoURL="v1", prime
+// the cache for the tenant (serves platform defaults), then
+// POST .../tenants/{tid} with relationship=owner. After the
+// assign, the resolver must serve the new MSP's "v1" rather than
+// the cached platform-default.
+func TestMSPHandler_AssignTenant_OwnerInvalidatesBrandingCache(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _ := setupMSPHandlerWithCachedBranding(t)
+	ctx := context.Background()
+
+	m, err := msps.Create(ctx, repository.MSP{
+		Name:     "Acme",
+		Slug:     "acme-assign-cache",
+		Branding: repository.MSPBranding{LogoURL: "v1"},
+	})
+	if err != nil {
+		t.Fatalf("seed msp: %v", err)
+	}
+	tn, err := tenants.Create(ctx, repository.Tenant{
+		Name: "T", Slug: "t-assign-cache",
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+
+	// Prime the cache. The tenant has no msp_id yet so the
+	// resolver returns platform defaults (LogoURL = "").
+	rec := doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prime resolve status = %d", rec.Code)
+	}
+	var primed handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&primed)
+	if primed.LogoURL == "v1" {
+		t.Fatalf("primed logo = %q, expected empty/default before owner-assign",
+			primed.LogoURL)
+	}
+
+	// Assign owner via the handler. The cascade sets
+	// tenants.msp_id = m.ID; the cache must be invalidated so
+	// the next Resolve picks up the new MSP's branding.
+	rec = doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/tenants/"+tn.ID.String(),
+		handler.AssignTenantRequest{Relationship: string(repository.MSPRelationshipOwner)})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("assign status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post-assign resolve status = %d", rec.Code)
+	}
+	var after handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&after)
+	if after.LogoURL != "v1" {
+		t.Fatalf("owner assign did not invalidate cache: logo = %q, want v1 (from new MSP)",
+			after.LogoURL)
+	}
+}
+
+// TestMSPHandler_AssignTenant_CoManagerDoesNotInvalidate pins the
+// round-9 efficiency contract: a co-manager binding does NOT
+// change tenants.msp_id, so it must not flush the per-tenant
+// cache. We seed a tenant already bound to one MSP, prime the
+// cache against that MSP's branding, then assign co-manager from
+// a different MSP. The cached value must remain visible after the
+// co-manager assign — confirming the invalidation is gated on
+// `rel == owner` rather than firing unconditionally.
+func TestMSPHandler_AssignTenant_CoManagerDoesNotInvalidate(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _ := setupMSPHandlerWithCachedBranding(t)
+	ctx := context.Background()
+
+	ownerMSP, err := msps.Create(ctx, repository.MSP{
+		Name:     "Owner",
+		Slug:     "owner-comgr-cache",
+		Branding: repository.MSPBranding{LogoURL: "owner-v1"},
+	})
+	if err != nil {
+		t.Fatalf("seed owner msp: %v", err)
+	}
+	coMSP, err := msps.Create(ctx, repository.MSP{
+		Name:     "CoMgr",
+		Slug:     "co-comgr-cache",
+		Branding: repository.MSPBranding{LogoURL: "co-v1"},
+	})
+	if err != nil {
+		t.Fatalf("seed co msp: %v", err)
+	}
+	ownerID := ownerMSP.ID
+	tn, err := tenants.Create(ctx, repository.Tenant{
+		Name: "T", Slug: "t-comgr-cache", MSPID: &ownerID,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+
+	// Prime the cache. Tenant resolves through ownerMSP → "owner-v1".
+	rec := doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prime resolve status = %d", rec.Code)
+	}
+	var primed handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&primed)
+	if primed.LogoURL != "owner-v1" {
+		t.Fatalf("primed logo = %q, want owner-v1", primed.LogoURL)
+	}
+
+	// Mutate the owner MSP's branding directly via the repo to
+	// "owner-v2". The cache still serves "owner-v1" until
+	// invalidated. The co-manager assign below MUST NOT flush
+	// the cache, so the next Resolve must still return "owner-v1".
+	newBrand := repository.MSPBranding{LogoURL: "owner-v2"}
+	if _, err := msps.Update(ctx, ownerMSP.ID,
+		repository.MSPPatch{Branding: &newBrand}); err != nil {
+		t.Fatalf("repo brand mutate: %v", err)
+	}
+
+	// Assign co_manager via the second MSP. This must not change
+	// tenants.msp_id and must not flush the cache.
+	rec = doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+coMSP.ID.String()+"/tenants/"+tn.ID.String(),
+		handler.AssignTenantRequest{Relationship: string(repository.MSPRelationshipCoManager)})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("co_manager assign status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post-assign resolve status = %d", rec.Code)
+	}
+	var after handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&after)
+	if after.LogoURL != "owner-v1" {
+		t.Fatalf("co_manager assign wrongly invalidated cache: logo = %q, want owner-v1 (cached)",
+			after.LogoURL)
+	}
+}
+
+// TestMSPHandler_UnassignTenant_InvalidatesBrandingCache pins the
+// round-9 fix: when the handler unassigns an OWNER binding the
+// repo cascades by clearing tenants.msp_id back to NULL, which
+// resets the branding chain to platform defaults. The handler
+// must invalidate the cached entry so a stale Resolve does not
+// keep serving the just-detached MSP's branding.
+//
+// We seed a tenant bound to an MSP, prime the cache, then DELETE
+// the binding via the handler. After the unassign the resolver
+// must NOT return the cached MSP's LogoURL.
+func TestMSPHandler_UnassignTenant_InvalidatesBrandingCache(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _ := setupMSPHandlerWithCachedBranding(t)
+	ctx := context.Background()
+
+	m, err := msps.Create(ctx, repository.MSP{
+		Name:     "Acme",
+		Slug:     "acme-unassign-cache",
+		Branding: repository.MSPBranding{LogoURL: "v1"},
+	})
+	if err != nil {
+		t.Fatalf("seed msp: %v", err)
+	}
+	mID := m.ID
+	tn, err := tenants.Create(ctx, repository.Tenant{
+		Name: "T", Slug: "t-unassign-cache", MSPID: &mID,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	// Seed the join row so UnassignTenant has something to delete.
+	if _, err := msps.AssignTenant(ctx, m.ID, tn.ID,
+		repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+
+	// Prime the cache: tenant resolves through MSP → "v1".
+	rec := doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prime resolve status = %d", rec.Code)
+	}
+	var primed handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&primed)
+	if primed.LogoURL != "v1" {
+		t.Fatalf("primed logo = %q, want v1", primed.LogoURL)
+	}
+
+	// Unassign via the handler. The cascade clears
+	// tenants.msp_id, so the cache must be invalidated so the
+	// next Resolve falls through to platform defaults.
+	rec = doMSPJSON(t, mux, http.MethodDelete,
+		"/api/v1/msps/"+m.ID.String()+"/tenants/"+tn.ID.String(), nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("unassign status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post-unassign resolve status = %d", rec.Code)
+	}
+	var after handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&after)
+	if after.LogoURL == "v1" {
+		t.Fatalf("unassign did not invalidate cache: logo still = %q, want empty/default",
+			after.LogoURL)
+	}
+}
+
 // TestMSPHandler_DeleteMSP_InvalidatesBrandingCache pins the
 // round-8 fix: when an MSP is soft-deleted, the handler must
 // invalidate the branding cache. Soft-deletion cascades by

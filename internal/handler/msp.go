@@ -668,6 +668,27 @@ func (h *MSPHandler) assignTenant(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
+	// Owner-relationship assignments cascade by setting
+	// tenants.msp_id to the new MSP (memory backend:
+	// internal/repository/memory/msp.go:301-307; postgres backend
+	// mirrors this via the AssignTenant SQL). That changes the
+	// branding resolution chain for this tenant: a cached branding
+	// entry resolved before the binding would have used the old
+	// msp_id (or platform defaults if previously unbound) and would
+	// keep serving stale fields until TTL. Co-manager bindings do
+	// NOT touch tenants.msp_id (only the join row is inserted), so
+	// branding resolution is unaffected and we skip the invalidation
+	// for those — keeps the cache hit-rate high for the common case
+	// of attaching audit/read-only relationships. Round-9 of Devin
+	// Review caught this gap. We use Invalidate(tenantID) instead
+	// of InvalidateAll because we have the precise tenantID here
+	// (unlike the delete path which cascades across the unknown
+	// owned-tenant set); per-tenant flush is O(1) and minimises
+	// blast radius. InvalidateAll/Invalidate are both no-ops on
+	// the uncached production resolver.
+	if h.branding != nil && rel == repository.MSPRelationshipOwner {
+		h.branding.Invalidate(tenantID)
+	}
 	WriteJSON(w, http.StatusCreated, toBindingResponse(binding))
 }
 
@@ -683,6 +704,30 @@ func (h *MSPHandler) unassignTenant(w http.ResponseWriter, r *http.Request) {
 	if err := h.msps.UnassignTenant(r.Context(), mspID, tenantID); err != nil {
 		WriteRepositoryError(w, err)
 		return
+	}
+	// Unassigning an owner binding cascades by clearing
+	// tenants.msp_id back to NULL (memory backend:
+	// internal/repository/memory/msp.go:330-337; postgres mirrors).
+	// That changes the branding resolution chain: cached entries
+	// keyed on tenantID would otherwise keep serving the
+	// just-detached MSP's branding fields until TTL.
+	//
+	// The handler cannot tell whether the removed binding was owner
+	// or co-manager without a pre-lookup (AssignTenant has `rel` in
+	// scope; UnassignTenant identifies the binding by composite key
+	// only). Pre-fetching the binding first would add a roundtrip
+	// solely to gate a per-tenant invalidation that is itself O(1)
+	// on the cache and a no-op on the production uncached resolver.
+	// Use the always-invalidate strategy here — the cost is bounded
+	// to one cache eviction per call, and the correctness is
+	// strictly tighter than the pre-fetch alternative (the
+	// pre-fetched binding could race with a concurrent assign).
+	// Round-9 of Devin Review caught this gap. Symmetric with the
+	// delete handler's full flush, but narrower: we know exactly
+	// which tenant is affected here, so we use Invalidate(tenantID)
+	// rather than InvalidateAll.
+	if h.branding != nil {
+		h.branding.Invalidate(tenantID)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
