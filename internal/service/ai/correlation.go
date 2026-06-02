@@ -67,32 +67,42 @@ func (e *CorrelationEngine) Analyze(ctx context.Context, alerts []AlertInput) (C
 				continue
 			}
 
-			matched := false
-
-			// Temporal dimension.
-			if candidate.CreatedAt.Sub(anchor.CreatedAt) <= e.config.TimeWindow {
-				dims[CorrelationDimensionTemporal] = true
-				matched = true
+			// Temporal proximity is a necessary precondition, not a
+			// sufficient one. The slice is sorted ascending by
+			// CreatedAt, so once a candidate falls outside the anchor's
+			// window every later candidate does too and we can stop.
+			// Crucially, closeness in time alone must NOT correlate two
+			// otherwise-unrelated alerts: a real correlation also
+			// requires a shared entity (device/user/IP) or a shared
+			// pattern (same kind). Without this, any pair of alerts
+			// within TimeWindow would be clustered, producing very
+			// broad, low-signal incidents.
+			if candidate.CreatedAt.Sub(anchor.CreatedAt) > e.config.TimeWindow {
+				break
 			}
 
 			// Entity dimension: shared device, user, or IP.
-			if (anchor.DeviceID != "" && anchor.DeviceID == candidate.DeviceID) ||
+			sharedEntity := (anchor.DeviceID != "" && anchor.DeviceID == candidate.DeviceID) ||
 				(anchor.UserID != "" && anchor.UserID == candidate.UserID) ||
-				(anchor.IPAddress != "" && anchor.IPAddress == candidate.IPAddress) {
-				dims[CorrelationDimensionEntity] = true
-				matched = true
-			}
+				(anchor.IPAddress != "" && anchor.IPAddress == candidate.IPAddress)
 
 			// Pattern dimension: same alert kind suggests attack chain.
-			if anchor.Kind == candidate.Kind && anchor.Kind != "" {
-				dims[CorrelationDimensionPattern] = true
-				matched = true
+			samePattern := anchor.Kind != "" && anchor.Kind == candidate.Kind
+
+			if !sharedEntity && !samePattern {
+				continue
 			}
 
-			if matched {
-				group = append(group, candidate)
-				assigned[j] = true
+			// Record only the dimensions that actually contributed.
+			dims[CorrelationDimensionTemporal] = true
+			if sharedEntity {
+				dims[CorrelationDimensionEntity] = true
 			}
+			if samePattern {
+				dims[CorrelationDimensionPattern] = true
+			}
+			group = append(group, candidate)
+			assigned[j] = true
 		}
 
 		if len(group) < e.config.MinClusterSize {

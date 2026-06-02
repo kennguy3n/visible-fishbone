@@ -62,19 +62,46 @@ type tenantUsage struct {
 	dayStart           time.Time
 }
 
+// AuditSink is a narrow, optional durable sink for guardrail audit
+// records. The in-memory ring buffer (exposed via Status/AuditLog) is
+// always maintained for the live status endpoint and tests; when a
+// sink is configured, every AI interaction is ALSO persisted durably
+// (e.g. to the append-only audit-log service) so records survive
+// process restarts and are queryable for compliance.
+//
+// The interface is declared here, rather than importing the audit
+// service, so the ai package takes no dependency on it (avoiding an
+// import cycle) and tests can stub it. A thin adapter in
+// cmd/sng-control maps AuditRecord onto the audit service's Append.
+type AuditSink interface {
+	RecordAIAudit(ctx context.Context, rec AuditRecord) error
+}
+
 // GuardrailedProvider wraps an LLMProvider with guardrails:
 // rate limiting, content filtering, output validation, and audit
 // logging. The audit log is capped at maxAuditLogSize entries (ring buffer).
 type GuardrailedProvider struct {
-	inner   LLMProvider
-	config  GuardrailConfig
-	logger  *slog.Logger
-	filters []*regexp.Regexp
+	inner     LLMProvider
+	config    GuardrailConfig
+	logger    *slog.Logger
+	filters   []*regexp.Regexp
+	auditSink AuditSink
 
 	mu        sync.Mutex
 	usage     map[uuid.UUID]*tenantUsage
 	auditLog  []AuditRecord
 	lastSweep time.Time
+}
+
+// GuardrailOption customizes a GuardrailedProvider.
+type GuardrailOption func(*GuardrailedProvider)
+
+// WithAuditSink configures a durable sink that receives a copy of
+// every guardrail audit record in addition to the in-memory ring
+// buffer. When nil (the default) audit records are kept in memory
+// only.
+func WithAuditSink(sink AuditSink) GuardrailOption {
+	return func(g *GuardrailedProvider) { g.auditSink = sink }
 }
 
 const maxAuditLogSize = 10000
@@ -89,8 +116,9 @@ const (
 )
 
 // NewGuardrailedProvider constructs a guardrailed LLM wrapper.
-// inner must not be nil.
-func NewGuardrailedProvider(inner LLMProvider, cfg GuardrailConfig, logger *slog.Logger) *GuardrailedProvider {
+// inner must not be nil. Optional behaviour (e.g. a durable audit
+// sink) is supplied via GuardrailOption.
+func NewGuardrailedProvider(inner LLMProvider, cfg GuardrailConfig, logger *slog.Logger, opts ...GuardrailOption) *GuardrailedProvider {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -123,13 +151,17 @@ func NewGuardrailedProvider(inner LLMProvider, cfg GuardrailConfig, logger *slog
 		filters = append(filters, re)
 	}
 
-	return &GuardrailedProvider{
+	g := &GuardrailedProvider{
 		inner:   inner,
 		config:  cfg,
 		logger:  logger,
 		filters: filters,
 		usage:   make(map[uuid.UUID]*tenantUsage),
 	}
+	for _, opt := range opts {
+		opt(g)
+	}
+	return g
 }
 
 // Complete implements LLMProvider with guardrails applied.
@@ -139,7 +171,7 @@ func (g *GuardrailedProvider) Complete(ctx context.Context, req LLMRequest) (LLM
 
 	// Rate limiting.
 	if err := g.checkRateLimit(tenantID); err != nil {
-		g.recordAudit(tenantID, "", "complete", 0, time.Since(start), false, err.Error())
+		g.recordAudit(ctx, tenantID, "", "complete", 0, time.Since(start), false, err.Error())
 		return LLMResponse{}, err
 	}
 
@@ -156,14 +188,14 @@ func (g *GuardrailedProvider) Complete(ctx context.Context, req LLMRequest) (LLM
 	elapsed := time.Since(start)
 
 	if err != nil {
-		g.recordAudit(tenantID, "", "complete", 0, elapsed, redacted, err.Error())
+		g.recordAudit(ctx, tenantID, "", "complete", 0, elapsed, redacted, err.Error())
 		return LLMResponse{}, err
 	}
 
 	// Track token usage.
 	g.trackTokens(tenantID, resp.TokenCount)
 
-	g.recordAudit(tenantID, resp.ModelID, "complete", resp.TokenCount, elapsed, redacted, "")
+	g.recordAudit(ctx, tenantID, resp.ModelID, "complete", resp.TokenCount, elapsed, redacted, "")
 
 	return resp, nil
 }
@@ -246,7 +278,7 @@ func (g *GuardrailedProvider) filterContent(text string) (string, bool) {
 	return text, redacted
 }
 
-func (g *GuardrailedProvider) recordAudit(tenantID uuid.UUID, model, action string, tokens int, latency time.Duration, redacted bool, errMsg string) {
+func (g *GuardrailedProvider) recordAudit(ctx context.Context, tenantID uuid.UUID, model, action string, tokens int, latency time.Duration, redacted bool, errMsg string) {
 	record := AuditRecord{
 		Timestamp:  time.Now().UTC(),
 		TenantID:   tenantID,
@@ -258,10 +290,17 @@ func (g *GuardrailedProvider) recordAudit(tenantID uuid.UUID, model, action stri
 		Error:      errMsg,
 	}
 	g.mu.Lock()
+	// Bounded ring buffer. Once at capacity, drop the oldest record by
+	// shifting in place (copy) and reusing the same backing array,
+	// rather than re-slicing with g.auditLog[1:] which would advance
+	// the slice header off the front of the array and leak the head
+	// region until the next append-driven reallocation.
 	if len(g.auditLog) >= maxAuditLogSize {
-		g.auditLog = g.auditLog[1:]
+		copy(g.auditLog, g.auditLog[1:])
+		g.auditLog[len(g.auditLog)-1] = record
+	} else {
+		g.auditLog = append(g.auditLog, record)
 	}
-	g.auditLog = append(g.auditLog, record)
 	g.mu.Unlock()
 
 	g.logger.Info("ai/guardrails: audit",
@@ -271,6 +310,19 @@ func (g *GuardrailedProvider) recordAudit(tenantID uuid.UUID, model, action stri
 		slog.Int("tokens", tokens),
 		slog.Int64("latency_ms", latency.Milliseconds()),
 		slog.Bool("redacted", redacted))
+
+	// Durably persist the record when a sink is configured so AI
+	// interactions survive restarts and are queryable for compliance.
+	// Persistence failures must not break the live LLM path: the call
+	// already succeeded (or failed) on its own merits, so we log and
+	// continue rather than surfacing the sink error to the caller.
+	if g.auditSink != nil {
+		if err := g.auditSink.RecordAIAudit(ctx, record); err != nil {
+			g.logger.Warn("ai/guardrails: durable audit sink failed",
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("error", err.Error()))
+		}
+	}
 }
 
 // Status returns the current guardrail status for a tenant.

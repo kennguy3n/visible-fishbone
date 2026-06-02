@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -287,10 +289,29 @@ func TestAIHandler_PostureReport_503WhenNotConfigured(t *testing.T) {
 	}
 }
 
+func TestAIHandler_PostureReport_503WhenNoDataSource(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	// Reports engine configured, but no posture data source: GET must
+	// not fabricate an empty (misleadingly healthy) report.
+	h.SetEnhancedAI(nil, nil, ai.NewReportEngine(nil), nil, nil, nil)
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/reports/posture", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.getPostureReport(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAIHandler_PostureReport_200(t *testing.T) {
 	t.Parallel()
 	h := NewAIHandler(nil, nil)
 	h.SetEnhancedAI(nil, nil, ai.NewReportEngine(nil), nil, nil, nil)
+	// Wire a real-data source so GET reflects actual alert counts.
+	h.SetPostureDataSource(stubPostureData{counts: map[string]int{"critical": 2, "warning": 1}})
 	tenantID := uuid.New().String()
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/v1/tenants/"+tenantID+"/ai/reports/posture", nil)
@@ -299,6 +320,34 @@ func TestAIHandler_PostureReport_200(t *testing.T) {
 	h.getPostureReport(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var report ai.PostureReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	// The report must reflect the real counts from the data source,
+	// not an empty baseline.
+	if report.Overview.TotalAlerts != 3 {
+		t.Fatalf("total_alerts = %d, want 3; body=%s", report.Overview.TotalAlerts, rec.Body.String())
+	}
+	if report.Overview.AlertsBySeverity["critical"] != 2 {
+		t.Fatalf("critical = %d, want 2", report.Overview.AlertsBySeverity["critical"])
+	}
+}
+
+func TestAIHandler_PostureReport_DataSourceError500(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, nil, ai.NewReportEngine(nil), nil, nil, nil)
+	h.SetPostureDataSource(stubPostureData{err: errStubPostureData})
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/reports/posture", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.getPostureReport(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -435,4 +484,19 @@ type stubHandlerEvidence struct {
 
 func (s *stubHandlerEvidence) QueryEvidence(_ context.Context, _ uuid.UUID, _ ai.TimeRange) (ai.TemplateData, error) {
 	return s.data, nil
+}
+
+var errStubPostureData = errors.New("stub posture data failure")
+
+// stubPostureData is a test double for the PostureDataSource.
+type stubPostureData struct {
+	counts map[string]int
+	err    error
+}
+
+func (s stubPostureData) AlertCountsBySeverity(_ context.Context, _ uuid.UUID, _, _ time.Time) (map[string]int, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.counts, nil
 }

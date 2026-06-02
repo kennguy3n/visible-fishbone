@@ -2,6 +2,8 @@ package ai
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,6 +112,59 @@ func TestGuardrailedProvider_AuditLogging(t *testing.T) {
 	}
 	if log[0].Action != "complete" {
 		t.Fatalf("expected action 'complete', got %q", log[0].Action)
+	}
+}
+
+func TestGuardrailedProvider_DurableAuditSink(t *testing.T) {
+	t.Parallel()
+	inner := &guardrailStubLLM{text: "ok", modelID: "test"}
+	sink := &stubAuditSink{}
+	gp := NewGuardrailedProvider(inner, GuardrailConfig{
+		MaxRequestsPerMinute: 100,
+		MaxTokensPerDay:      100000,
+	}, nil, WithAuditSink(sink))
+
+	tenantID := uuid.New()
+	ctx := ContextWithTenantID(context.Background(), tenantID)
+	if _, err := gp.Complete(ctx, LLMRequest{Prompt: "hello"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The durable sink must receive the same record that lands in the
+	// in-memory ring buffer.
+	got := sink.records()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 durable audit record, got %d", len(got))
+	}
+	if got[0].TenantID != tenantID {
+		t.Fatalf("durable sink tenant_id mismatch: got %s want %s", got[0].TenantID, tenantID)
+	}
+	if got[0].Action != "complete" {
+		t.Fatalf("expected durable action 'complete', got %q", got[0].Action)
+	}
+	if got[0].Model != "test" {
+		t.Fatalf("expected durable model 'test', got %q", got[0].Model)
+	}
+}
+
+func TestGuardrailedProvider_DurableAuditSinkFailureDoesNotBreakCall(t *testing.T) {
+	t.Parallel()
+	inner := &guardrailStubLLM{text: "ok", modelID: "test"}
+	sink := &stubAuditSink{err: errStubSink}
+	gp := NewGuardrailedProvider(inner, GuardrailConfig{
+		MaxRequestsPerMinute: 100,
+		MaxTokensPerDay:      100000,
+	}, nil, WithAuditSink(sink))
+
+	ctx := ContextWithTenantID(context.Background(), uuid.New())
+	// A failing durable sink must not surface as an error on the LLM
+	// path: the completion itself succeeded.
+	resp, err := gp.Complete(ctx, LLMRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatalf("sink failure must not break Complete: %v", err)
+	}
+	if resp.Text != "ok" {
+		t.Fatalf("expected passthrough response, got %q", resp.Text)
 	}
 }
 
@@ -253,4 +308,32 @@ func (c *capturingLLM) Complete(_ context.Context, req LLMRequest) (LLMResponse,
 		c.capture(req)
 	}
 	return c.resp, nil
+}
+
+var errStubSink = errors.New("stub sink failure")
+
+// stubAuditSink is a test double for the durable AuditSink.
+type stubAuditSink struct {
+	err error
+
+	mu   sync.Mutex
+	recs []AuditRecord
+}
+
+func (s *stubAuditSink) RecordAIAudit(_ context.Context, rec AuditRecord) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.mu.Lock()
+	s.recs = append(s.recs, rec)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *stubAuditSink) records() []AuditRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]AuditRecord, len(s.recs))
+	copy(out, s.recs)
+	return out
 }

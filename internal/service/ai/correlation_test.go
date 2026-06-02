@@ -56,6 +56,36 @@ func TestCorrelationEngine_TemporalCluster(t *testing.T) {
 	}
 }
 
+func TestCorrelationEngine_TemporalProximityAloneDoesNotCluster(t *testing.T) {
+	t.Parallel()
+	engine := NewCorrelationEngine(nil, CorrelationConfig{
+		TimeWindow:     time.Hour,
+		MinClusterSize: 2,
+	})
+
+	tenantID := uuid.New()
+	now := time.Now()
+	// Two alerts close in time but with no shared entity (different
+	// device/user/IP) and different kinds. Temporal proximity alone
+	// must NOT correlate them, otherwise unrelated alerts that merely
+	// occur near each other would form spurious, low-signal incidents.
+	alerts := []AlertInput{
+		{ID: uuid.New(), TenantID: tenantID, Kind: "anomaly", Severity: "low", DeviceID: "d1", UserID: "u1", IPAddress: "10.0.0.1", CreatedAt: now},
+		{ID: uuid.New(), TenantID: tenantID, Kind: "policy_violation", Severity: "low", DeviceID: "d2", UserID: "u2", IPAddress: "10.0.0.2", CreatedAt: now.Add(2 * time.Minute)},
+	}
+
+	result, err := engine.Analyze(context.Background(), alerts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Clusters) != 0 {
+		t.Fatalf("expected 0 clusters (temporal-only must not correlate), got %d", len(result.Clusters))
+	}
+	if result.CorrelatedAlerts != 0 {
+		t.Fatalf("expected 0 correlated alerts, got %d", result.CorrelatedAlerts)
+	}
+}
+
 func TestCorrelationEngine_EntityCluster(t *testing.T) {
 	t.Parallel()
 	engine := NewCorrelationEngine(nil, CorrelationConfig{

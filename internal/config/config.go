@@ -115,6 +115,12 @@ type AI struct {
 	APIKey   string
 	Model    string
 	Timeout  time.Duration
+	// GuardrailMaxRequestsPerMinute is the per-tenant request rate
+	// limit applied to every LLM-backed AI call. Defaults to 60.
+	GuardrailMaxRequestsPerMinute int
+	// GuardrailMaxTokensPerDay is the per-tenant daily token budget
+	// for LLM-backed AI calls (cost control). Defaults to 100000.
+	GuardrailMaxTokensPerDay int
 }
 
 // Log carries structured-logging configuration.
@@ -801,6 +807,14 @@ func Load() (Config, error) {
 		// here so the config package doesn't take a dependency on
 		// internal/service/apikey.
 		{"AUTH_API_KEY_MAX_ACTIVE_PER_TENANT", 64, &cfg.Auth.APIKeyMaxActivePerTenant},
+		// AI guardrail tuning knobs. Defaults match
+		// internal/service/ai.GuardrailConfig.normalize() (60 rpm,
+		// 100000 tokens/day) so operators can tune per-tenant cost
+		// controls without recompiling. Parsed strictly because a
+		// typo silently reverting to the default would weaken a rate
+		// limit / cost control.
+		{"AI_GUARDRAIL_MAX_REQUESTS_PER_MINUTE", 60, &cfg.AI.GuardrailMaxRequestsPerMinute},
+		{"AI_GUARDRAIL_MAX_TOKENS_PER_DAY", 100000, &cfg.AI.GuardrailMaxTokensPerDay},
 		{"CLICKHOUSE_BATCH_SIZE", 1024, &cfg.TelemetryAnalytics.ClickHouseBatchSize},
 		{"CLICKHOUSE_MAX_BACKLOG_MULTIPLIER", 4, &cfg.TelemetryAnalytics.ClickHouseMaxBacklogMultiplier},
 		{"S3_TELEMETRY_MAX_BYTES_PER_OBJECT", 16 * 1024 * 1024, &cfg.TelemetryAnalytics.S3MaxBytesPerObject},

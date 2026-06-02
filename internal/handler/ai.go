@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -27,6 +28,17 @@ type AIHandler struct {
 	threatIntel     *ai.ThreatIntelEngine
 	guardrails      *ai.GuardrailedProvider
 	correlationRepo repository.AICorrelationRepository
+	postureData     PostureDataSource
+}
+
+// PostureDataSource supplies real per-tenant alert counts for a
+// reporting period. It backs the read-only GET posture report so the
+// response reflects actual alert volume rather than an empty (and
+// therefore misleadingly "healthy") baseline. The POST .../generate
+// endpoint continues to accept caller-supplied data and does not
+// depend on this source.
+type PostureDataSource interface {
+	AlertCountsBySeverity(ctx context.Context, tenantID uuid.UUID, start, end time.Time) (map[string]int, error)
 }
 
 // NewAIHandler constructs an AIHandler. svc may be nil (endpoints
@@ -54,6 +66,15 @@ func (h *AIHandler) SetEnhancedAI(
 	h.threatIntel = threatIntel
 	h.guardrails = guardrails
 	h.correlationRepo = correlationRepo
+}
+
+// SetPostureDataSource wires the optional real-alert data source used
+// by the read-only GET posture report. When unset, GET returns 503
+// (callers can still POST .../generate with explicit data). Kept as a
+// separate setter so the source can be wired independently of the
+// other enhanced-AI dependencies.
+func (h *AIHandler) SetPostureDataSource(src PostureDataSource) {
+	h.postureData = src
 }
 
 // Register wires AI endpoints onto mux.
@@ -311,21 +332,38 @@ func (h *AIHandler) getPostureReport(w http.ResponseWriter, r *http.Request) {
 			"AI reports service is not configured")
 		return
 	}
+	// The read-only GET reflects real, current posture. Without a
+	// data source we must not fabricate an empty (and misleadingly
+	// "healthy") report — return 503 and steer callers to the POST
+	// .../generate endpoint, which accepts explicit alert data.
+	if h.postureData == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"posture report data source is not configured; POST .../reports/posture/generate with explicit data")
+		return
+	}
 	tenantID, ok := PathUUID(w, r, "tenant_id")
 	if !ok {
 		return
 	}
-	// Generate on-demand with defaults.
 	ctx := ai.ContextWithTenantID(r.Context(), tenantID)
 	now := time.Now().UTC()
+	start := now.Add(-7 * 24 * time.Hour)
+	counts, err := h.postureData.AlertCountsBySeverity(ctx, tenantID, start, now)
+	if err != nil {
+		h.logger.Error("ai: posture report alert counts failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("error", err.Error()))
+		WriteError(w, http.StatusInternalServerError, "ai_error", "report generation failed")
+		return
+	}
 	report, err := h.reports.Generate(ctx, ai.PostureInput{
 		TenantID: tenantID,
 		Period: ai.ReportPeriod{
-			Start: now.Add(-7 * 24 * time.Hour),
+			Start: start,
 			End:   now,
 			Label: "weekly",
 		},
-		AlertsBySeverity: map[string]int{},
+		AlertsBySeverity: counts,
 	})
 	if err != nil {
 		h.logger.Error("ai: posture report failed",
