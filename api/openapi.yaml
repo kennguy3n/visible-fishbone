@@ -2495,6 +2495,155 @@ paths:
             text/csv:
               schema: { type: string, format: binary }
 
+  # --- AI Suggestion Review Endpoints ---
+
+  /tenants/{tenant_id}/ai/suggestions:
+    get:
+      tags: [ai]
+      summary: List AI policy suggestions for a tenant
+      operationId: listAISuggestions
+      parameters:
+        - $ref: "#/components/parameters/tenant_id"
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [pending, approved, rejected, applied, rolled_back] }
+        - name: after
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AISuggestionPage" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/suggestions/{id}:
+    get:
+      tags: [ai]
+      summary: Get a single AI policy suggestion
+      operationId: getAISuggestion
+      parameters:
+        - $ref: "#/components/parameters/tenant_id"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AISuggestion" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/suggestions/{id}/approve:
+    post:
+      tags: [ai]
+      summary: Approve an AI policy suggestion
+      operationId: approveAISuggestion
+      parameters:
+        - $ref: "#/components/parameters/tenant_id"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                feedback: { type: string }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AISuggestion" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/suggestions/{id}/reject:
+    post:
+      tags: [ai]
+      summary: Reject an AI policy suggestion
+      operationId: rejectAISuggestion
+      parameters:
+        - $ref: "#/components/parameters/tenant_id"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                feedback: { type: string }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AISuggestion" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/tightening/analyze:
+    post:
+      tags: [ai]
+      summary: Trigger a policy tightening analysis
+      operationId: analyzeTightening
+      parameters:
+        - $ref: "#/components/parameters/tenant_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TighteningAnalyzeRequest" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TighteningReport" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/tightening/report:
+    get:
+      tags: [ai]
+      summary: Get latest tightening report
+      operationId: getTighteningReport
+      parameters:
+        - $ref: "#/components/parameters/tenant_id"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TighteningReport" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     BearerJWT:
@@ -3710,3 +3859,64 @@ components:
         errors:
           type: array
           items: { type: string }
+
+    # --- AI Suggestion Schemas ---
+
+    AISuggestion:
+      type: object
+      required: [id, tenant_id, rule_id, category, suggestion_json, confidence, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        rule_id: { type: string }
+        category: { type: string, enum: [unused, shadowed, overly_permissive, deny_log] }
+        suggestion_json: { type: object, additionalProperties: true }
+        confidence: { type: number, format: double, minimum: 0, maximum: 1 }
+        status: { type: string, enum: [pending, approved, rejected, applied, rolled_back] }
+        created_at: { type: string, format: date-time }
+        reviewed_at: { type: string, format: date-time }
+        reviewer_id: { type: string, format: uuid }
+        feedback: { type: string }
+
+    AISuggestionPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AISuggestion" } }
+        next_cursor: { type: string }
+
+    TighteningAnalyzeRequest:
+      type: object
+      required: [rules]
+      properties:
+        rules: { type: array, items: { type: object, additionalProperties: true } }
+        hit_counts: { type: object, additionalProperties: { type: integer, format: int64 } }
+        window_days: { type: integer, minimum: 1 }
+
+    TighteningReport:
+      type: object
+      required: [tenant_id, recommendations, analysis_window_days, rules_analyzed, generated_at]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        recommendations:
+          type: array
+          items: { $ref: "#/components/schemas/TighteningRecommendation" }
+        analysis_window_days: { type: integer }
+        rules_analyzed: { type: integer }
+        generated_at: { type: string, format: date-time }
+
+    TighteningRecommendation:
+      type: object
+      required: [rule_id, category, suggested_change, confidence, reasoning]
+      properties:
+        rule_id: { type: string }
+        category: { type: string, enum: [unused, shadowed, overly_permissive, deny_log] }
+        suggested_change:
+          type: object
+          properties:
+            action: { type: string }
+            before_rule: { type: object, additionalProperties: true }
+            after_rule: { type: object, additionalProperties: true }
+            justification: { type: string }
+        confidence: { type: number, format: double, minimum: 0, maximum: 1 }
+        reasoning: { type: string }

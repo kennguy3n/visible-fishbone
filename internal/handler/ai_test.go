@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/ai"
 )
 
@@ -142,6 +144,188 @@ func TestAIHandler_Troubleshoot_400MissingQuery(t *testing.T) {
 	h.troubleshoot(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- AI suggestion handler tests ---
+
+func TestAIHandler_ListSuggestions_503WhenNotConfigured(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/suggestions", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.listSuggestions(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestAIHandler_ListSuggestions_200(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	repo := memory.NewAISuggestionRepository(store)
+	reviewSvc := ai.NewReviewService(repo, nil)
+
+	h := NewAIHandler(nil, nil)
+	h.SetReviewService(reviewSvc)
+
+	tenantID := uuid.New()
+	repo.Create(context.Background(), tenantID, repository.AISuggestion{
+		RuleID:         "r1",
+		Category:       "unused",
+		SuggestionJSON: json.RawMessage(`{}`),
+		Confidence:     0.9,
+	})
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID.String()+"/ai/suggestions", nil)
+	req.SetPathValue("tenant_id", tenantID.String())
+	rec := httptest.NewRecorder()
+	h.listSuggestions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_GetSuggestion_404(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	repo := memory.NewAISuggestionRepository(store)
+	reviewSvc := ai.NewReviewService(repo, nil)
+
+	h := NewAIHandler(nil, nil)
+	h.SetReviewService(reviewSvc)
+
+	tenantID := uuid.New().String()
+	fakeID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/suggestions/"+fakeID, nil)
+	req.SetPathValue("tenant_id", tenantID)
+	req.SetPathValue("id", fakeID)
+	rec := httptest.NewRecorder()
+	h.getSuggestion(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_ApproveSuggestion(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	repo := memory.NewAISuggestionRepository(store)
+	reviewSvc := ai.NewReviewService(repo, nil)
+
+	h := NewAIHandler(nil, nil)
+	h.SetReviewService(reviewSvc)
+
+	tenantID := uuid.New()
+	s, _ := repo.Create(context.Background(), tenantID, repository.AISuggestion{
+		RuleID:         "r1",
+		Category:       "unused",
+		SuggestionJSON: json.RawMessage(`{}`),
+		Confidence:     0.9,
+	})
+
+	body, _ := json.Marshal(map[string]string{"feedback": "lgtm"})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID.String()+"/ai/suggestions/"+s.ID.String()+"/approve",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID.String())
+	req.SetPathValue("id", s.ID.String())
+	rec := httptest.NewRecorder()
+	h.approveSuggestion(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_RejectSuggestion(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	repo := memory.NewAISuggestionRepository(store)
+	reviewSvc := ai.NewReviewService(repo, nil)
+
+	h := NewAIHandler(nil, nil)
+	h.SetReviewService(reviewSvc)
+
+	tenantID := uuid.New()
+	s, _ := repo.Create(context.Background(), tenantID, repository.AISuggestion{
+		RuleID:         "r1",
+		Category:       "unused",
+		SuggestionJSON: json.RawMessage(`{}`),
+		Confidence:     0.9,
+	})
+
+	body, _ := json.Marshal(map[string]string{"feedback": "nope"})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID.String()+"/ai/suggestions/"+s.ID.String()+"/reject",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID.String())
+	req.SetPathValue("id", s.ID.String())
+	rec := httptest.NewRecorder()
+	h.rejectSuggestion(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_AnalyzeTightening_503WhenNotConfigured(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	tenantID := uuid.New().String()
+	body, _ := json.Marshal(map[string]any{"rules": []any{}})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID+"/ai/tightening/analyze",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.analyzeTightening(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestAIHandler_AnalyzeTightening_200(t *testing.T) {
+	t.Parallel()
+	tighteningSvc := ai.NewTighteningService(nil, nil)
+	h := NewAIHandler(nil, nil)
+	h.SetTighteningService(tighteningSvc)
+
+	tenantID := uuid.New().String()
+	body, _ := json.Marshal(map[string]any{
+		"rules":       []json.RawMessage{json.RawMessage(`{"id":"r1","verb":"allow","domain":"ngfw"}`)},
+		"hit_counts":  map[string]int64{"r1": 0},
+		"window_days": 30,
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID+"/ai/tightening/analyze",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.analyzeTightening(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_GetTighteningReport_503WhenNotConfigured(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/tightening/report", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.getTighteningReport(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
 	}
 }
 
