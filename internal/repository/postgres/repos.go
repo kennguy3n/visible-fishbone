@@ -99,6 +99,11 @@ func (s *Store) NewIntegrationDeliveryRepository() *IntegrationDeliveryRepositor
 // NewMSPRepository binds the Store to repository.MSPRepository.
 func (s *Store) NewMSPRepository() *MSPRepository { return &MSPRepository{s: s} }
 
+// NewDeviceEnrollmentRepository binds the Store to repository.DeviceEnrollmentRepository.
+func (s *Store) NewDeviceEnrollmentRepository() *DeviceEnrollmentRepository {
+	return &DeviceEnrollmentRepository{s: s}
+}
+
 // NewCASBConnectorRepository binds the Store to repository.CASBConnectorRepository.
 func (s *Store) NewCASBConnectorRepository() *CASBConnectorRepository {
 	return &CASBConnectorRepository{s: s}
@@ -140,6 +145,7 @@ var (
 	_ repository.IntegrationConnectorRepository = (*IntegrationConnectorRepository)(nil)
 	_ repository.IntegrationDeliveryRepository  = (*IntegrationDeliveryRepository)(nil)
 	_ repository.MSPRepository                  = (*MSPRepository)(nil)
+	_ repository.DeviceEnrollmentRepository     = (*DeviceEnrollmentRepository)(nil)
 	_ repository.CASBConnectorRepository        = (*CASBConnectorRepository)(nil)
 	_ repository.CASBDiscoveredAppRepository    = (*CASBDiscoveredAppRepository)(nil)
 	_ repository.CASBPostureCheckRepository     = (*CASBPostureCheckRepository)(nil)

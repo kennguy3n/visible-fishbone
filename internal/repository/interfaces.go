@@ -166,6 +166,15 @@ type UserRepository interface {
 	GetByEmail(ctx context.Context, tenantID uuid.UUID, email string) (User, error)
 	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[User], error)
 	Update(ctx context.Context, tenantID uuid.UUID, u User) (User, error)
+	// ClearExternalID sets the external_id column to NULL/empty.
+	// This is separate from Update because the sparse-update
+	// convention treats empty string as "no change".
+	ClearExternalID(ctx context.Context, tenantID, userID uuid.UUID) (User, error)
+	// UpdateAndClearExternalID applies a sparse update to the user
+	// AND atomically clears the external_id in a single transaction.
+	// Use this when a SCIM PATCH includes both field updates and a
+	// "remove externalId" operation.
+	UpdateAndClearExternalID(ctx context.Context, tenantID uuid.UUID, u User) (User, error)
 }
 
 // --- Device ---------------------------------------------------------------
@@ -195,6 +204,13 @@ type RoleRepository interface {
 	Create(ctx context.Context, r Role) (Role, error)
 	Get(ctx context.Context, id uuid.UUID) (Role, error)
 	List(ctx context.Context, tenantID *uuid.UUID) ([]Role, error)
+	// Update updates a role's name and external ID. Returns
+	// ErrNotFound if the role does not exist, ErrConflict if the
+	// new name collides with another role in the same tenant.
+	Update(ctx context.Context, id uuid.UUID, name string, externalID string) (Role, error)
+	// Delete removes a role and its user_role assignments.
+	// Returns ErrNotFound if the role does not exist.
+	Delete(ctx context.Context, id uuid.UUID) error
 	AssignRole(ctx context.Context, ur UserRole) error
 	RevokeRole(ctx context.Context, userID, roleID uuid.UUID, scopeID *uuid.UUID) error
 	GetUserRoles(ctx context.Context, userID uuid.UUID) ([]UserRole, error)
@@ -949,4 +965,35 @@ type DLPFingerprintRepository interface {
 type DLPMatchRepository interface {
 	Create(ctx context.Context, tenantID uuid.UUID, m DLPMatch) (DLPMatch, error)
 	List(ctx context.Context, tenantID uuid.UUID, policyID *uuid.UUID, page Page) (PageResult[DLPMatch], error)
+}
+
+// --- Device enrollment ----------------------------------------------------
+
+// DeviceEnrollmentRepository owns the device_enrollments and
+// device_certificates tables. All operations are tenant-isolated.
+type DeviceEnrollmentRepository interface {
+	// CreateEnrollment inserts a new device enrollment record.
+	// Returns ErrConflict if an active/enrolled enrollment already
+	// exists for the (tenant_id, device_id) pair.
+	CreateEnrollment(ctx context.Context, tenantID uuid.UUID, e DeviceEnrollment) (DeviceEnrollment, error)
+	// GetEnrollment returns the active/enrolled enrollment for a
+	// device. Returns ErrNotFound if no enrollment exists or if the
+	// enrollment is revoked.
+	GetEnrollment(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID) (DeviceEnrollment, error)
+	// GetEnrollmentAnyStatus returns the enrollment for a device
+	// regardless of lifecycle status (including revoked). Use this
+	// for status queries; use GetEnrollment for operations that
+	// should only target non-revoked enrollments.
+	GetEnrollmentAnyStatus(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID) (DeviceEnrollment, error)
+	// UpdateEnrollmentStatus transitions the enrollment to a new
+	// lifecycle state.
+	UpdateEnrollmentStatus(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, status EnrollmentStatus) error
+	// UpdateLastCertIssuedAt stamps the last-cert-issued timestamp.
+	UpdateLastCertIssuedAt(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, at time.Time) error
+
+	// CreateCertificate inserts a new device certificate record.
+	CreateCertificate(ctx context.Context, tenantID uuid.UUID, c DeviceCertificate) (DeviceCertificate, error)
+	// RevokeAllCertificates revokes all un-revoked certificates for
+	// a device by stamping revoked_at.
+	RevokeAllCertificates(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, at time.Time) error
 }

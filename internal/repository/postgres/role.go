@@ -16,7 +16,7 @@ import (
 type RoleRepository struct{ s *Store }
 
 const roleSelectColumns = `
-	id, tenant_id, name, permissions, scope, created_at
+	id, tenant_id, name, external_id, permissions, scope, created_at
 `
 
 func scanRole(row pgx.Row) (repository.Role, error) {
@@ -25,7 +25,7 @@ func scanRole(row pgx.Row) (repository.Role, error) {
 		tenantID nullableUUID
 		perms    []byte
 	)
-	if err := row.Scan(&role.ID, &tenantID, &role.Name, &perms, &role.Scope, &role.CreatedAt); err != nil {
+	if err := row.Scan(&role.ID, &tenantID, &role.Name, &role.ExternalID, &perms, &role.Scope, &role.CreatedAt); err != nil {
 		return repository.Role{}, err
 	}
 	if tenantID.Valid {
@@ -65,10 +65,10 @@ func (r *RoleRepository) Create(ctx context.Context, role repository.Role) (repo
 	// withTenant wrap.
 	var out repository.Role
 	row := r.s.pool.QueryRow(ctx, `
-		INSERT INTO roles (id, tenant_id, name, permissions, scope)
-		VALUES ($1::uuid, $2, $3, $4::jsonb, $5)
+		INSERT INTO roles (id, tenant_id, name, external_id, permissions, scope)
+		VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6)
 		RETURNING `+roleSelectColumns,
-		role.ID, role.TenantID, role.Name, perms, role.Scope,
+		role.ID, role.TenantID, role.Name, role.ExternalID, perms, role.Scope,
 	)
 	out, err = scanRole(row)
 	if err != nil {
@@ -96,6 +96,40 @@ func (r *RoleRepository) Get(ctx context.Context, id uuid.UUID) (repository.Role
 		return repository.Role{}, fmt.Errorf("select role: %w", err)
 	}
 	return out, nil
+}
+
+func (r *RoleRepository) Update(ctx context.Context, id uuid.UUID, name string, externalID string) (repository.Role, error) {
+	if name == "" {
+		return repository.Role{}, repository.ErrInvalidArgument
+	}
+	row := r.s.pool.QueryRow(ctx, `
+		UPDATE roles SET name = $2, external_id = $3
+		WHERE id = $1::uuid
+		RETURNING `+roleSelectColumns,
+		id, name, externalID,
+	)
+	out, err := scanRole(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.Role{}, repository.ErrNotFound
+	}
+	if isUniqueViolation(err) {
+		return repository.Role{}, repository.ErrConflict
+	}
+	if err != nil {
+		return repository.Role{}, fmt.Errorf("update role: %w", err)
+	}
+	return out, nil
+}
+
+func (r *RoleRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	ct, err := r.s.pool.Exec(ctx, `DELETE FROM roles WHERE id = $1::uuid`, id)
+	if err != nil {
+		return fmt.Errorf("delete role: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return repository.ErrNotFound
+	}
+	return nil
 }
 
 func (r *RoleRepository) List(ctx context.Context, tenantID *uuid.UUID) ([]repository.Role, error) {

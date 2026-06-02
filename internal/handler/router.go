@@ -34,6 +34,7 @@ type RouterDeps struct {
 	Terraform        *TerraformHandler
 	AI               *AIHandler
 	DLP              *DLPHandler
+	SCIM             *SCIMHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
 	RateLimiter      *middleware.RateLimiter
@@ -58,6 +59,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.OpenAPISpec != nil {
 		deps.OpenAPISpec.Register(publicMux)
+	}
+	if deps.Devices != nil {
+		deps.Devices.RegisterPublic(publicMux)
 	}
 
 	apiMux := http.NewServeMux()
@@ -121,6 +125,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.DLP != nil {
 		deps.DLP.Register(apiMux)
 	}
+	if deps.SCIM != nil {
+		deps.SCIM.Register(apiMux)
+	}
 
 	apiChain := middleware.Chain(
 		middleware.Auth(&deps.Config.Auth, deps.APIKeyLookup),
@@ -132,7 +139,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	root.Handle("/readyz", publicMux)
 	root.Handle("/api/v1/docs", publicMux)
 	root.Handle("/api/v1/openapi.yaml", publicMux)
+	root.Handle("/api/v1/enroll", publicMux)
 	root.Handle("/api/v1/", authedAPI)
+	root.Handle("/scim/", authedAPI)
 
 	// Top-level middleware applied to every request.
 	var rlmw func(http.Handler) http.Handler

@@ -139,3 +139,52 @@ func (r *UserRepository) Update(ctx context.Context, tenantID uuid.UUID, u repos
 	r.s.users[existing.ID] = existing
 	return existing, nil
 }
+
+func (r *UserRepository) ClearExternalID(ctx context.Context, tenantID, userID uuid.UUID) (repository.User, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.User{}, err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.users[userID]
+	if !ok || existing.TenantID != tenantID {
+		return repository.User{}, repository.ErrNotFound
+	}
+	existing.ExternalID = ""
+	existing.UpdatedAt = r.s.clock()
+	r.s.users[existing.ID] = existing
+	return existing, nil
+}
+
+func (r *UserRepository) UpdateAndClearExternalID(ctx context.Context, tenantID uuid.UUID, u repository.User) (repository.User, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.User{}, err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.users[u.ID]
+	if !ok || existing.TenantID != tenantID {
+		return repository.User{}, repository.ErrNotFound
+	}
+	if u.Email != "" {
+		for uid, other := range r.s.users {
+			if uid != u.ID && other.TenantID == tenantID && strings.EqualFold(other.Email, u.Email) {
+				return repository.User{}, repository.ErrConflict
+			}
+		}
+		existing.Email = u.Email
+	}
+	if u.Name != "" {
+		existing.Name = u.Name
+	}
+	existing.ExternalID = ""
+	if u.IDPSubject != "" {
+		existing.IDPSubject = u.IDPSubject
+	}
+	if u.Status != "" {
+		existing.Status = u.Status
+	}
+	existing.UpdatedAt = r.s.clock()
+	r.s.users[existing.ID] = existing
+	return existing, nil
+}

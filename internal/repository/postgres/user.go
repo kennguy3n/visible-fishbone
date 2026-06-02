@@ -171,3 +171,61 @@ func (r *UserRepository) Update(ctx context.Context, tenantID uuid.UUID, u repos
 	})
 	return out, err
 }
+
+func (r *UserRepository) ClearExternalID(ctx context.Context, tenantID, userID uuid.UUID) (repository.User, error) {
+	if tenantID == uuid.Nil || userID == uuid.Nil {
+		return repository.User{}, repository.ErrInvalidArgument
+	}
+	var out repository.User
+	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		row := tx.QueryRow(ctx, `
+			UPDATE users SET external_id = NULL
+			WHERE id = $1::uuid
+			RETURNING `+userSelectColumns, userID)
+		var err error
+		out, err = scanUser(row)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return repository.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("clear external_id: %w", err)
+		}
+		return nil
+	})
+	return out, err
+}
+
+func (r *UserRepository) UpdateAndClearExternalID(ctx context.Context, tenantID uuid.UUID, u repository.User) (repository.User, error) {
+	if tenantID == uuid.Nil || u.ID == uuid.Nil {
+		return repository.User{}, repository.ErrInvalidArgument
+	}
+	var out repository.User
+	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		const q = `
+			UPDATE users
+			SET email       = COALESCE(NULLIF($2, ''), email),
+			    name        = COALESCE(NULLIF($3, ''), name),
+			    external_id = NULL,
+			    idp_subject = COALESCE(NULLIF($4, ''), idp_subject),
+			    status      = COALESCE(NULLIF($5, ''), status)
+			WHERE id = $1::uuid
+			RETURNING ` + userSelectColumns
+		row := tx.QueryRow(ctx, q, u.ID, u.Email, u.Name, u.IDPSubject, string(u.Status))
+		var err error
+		out, err = scanUser(row)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return repository.ErrNotFound
+		}
+		if isUniqueViolation(err) {
+			return repository.ErrConflict
+		}
+		if isCheckViolation(err) {
+			return repository.ErrInvalidArgument
+		}
+		if err != nil {
+			return fmt.Errorf("update user and clear external_id: %w", err)
+		}
+		return nil
+	})
+	return out, err
+}

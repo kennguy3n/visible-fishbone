@@ -327,6 +327,7 @@ func buildRouter(
 	integrationConnectorRepo := store.NewIntegrationConnectorRepository()
 	integrationDeliveryRepo := store.NewIntegrationDeliveryRepository()
 	mspRepo := store.NewMSPRepository()
+	enrollmentRepo := store.NewDeviceEnrollmentRepository()
 	casbConnectorRepo := store.NewCASBConnectorRepository()
 	casbAppRepo := store.NewCASBDiscoveredAppRepository()
 	casbPostureRepo := store.NewCASBPostureCheckRepository()
@@ -334,6 +335,9 @@ func buildRouter(
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
 	identitySvc := identity.New(deviceRepo, claimRepo, auditRepo, logger)
+	enrollmentSvc := identity.NewEnrollmentService(enrollmentRepo, claimRepo, auditRepo, logger)
+	userRepo := store.NewUserRepository()
+	scimSvc := identity.NewSCIMService(userRepo, roleRepo, auditRepo)
 	rbacSvc := rbac.New(roleRepo, auditRepo, logger)
 	auditSvc := audit.New(auditRepo)
 	apiKeySvc := apikey.New(apiKeyRepo, auditRepo,
@@ -571,7 +575,11 @@ func buildRouter(
 		Logger:           logger,
 		Tenants:          handler.NewTenantHandler(tenantSvc),
 		Sites:            handler.NewSiteHandler(siteSvc),
-		Devices:          handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL),
+		Devices: func() *handler.DeviceHandler {
+			h := handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL)
+			h.SetEnrollmentService(enrollmentSvc)
+			return h
+		}(),
 		RBAC:             handler.NewRBACHandler(rbacSvc),
 		Policy:           handler.NewPolicyHandler(policySvc, policyKeySvc, policyHandlerOpts...),
 		PolicySimulation: policySimHandler,
@@ -586,6 +594,7 @@ func buildRouter(
 		CASB:             handler.NewCASBHandler(casbSvc),
 		MSP:              handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
 		AI:               aiHandler,
+		SCIM:             handler.NewSCIMHandler(scimSvc),
 		APIKeyLookup:     apiKeySvc,
 		Health:           health,
 		OpenAPISpec:      handler.NewOpenAPIHandler(),
