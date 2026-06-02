@@ -105,6 +105,9 @@ type Store struct {
 	roles     map[uuid.UUID]repository.Role
 	userRoles map[userRoleKey]repository.UserRole
 
+	// AI correlation tables — see migration 029.
+	aiCorrelations map[uuid.UUID]repository.AICorrelation
+
 	// clock is injected for deterministic tests. Defaults to
 	// time.Now.UTC.
 	clock func() time.Time
@@ -164,6 +167,7 @@ func NewStore() *Store {
 		dlpMatches:            map[uuid.UUID]repository.DLPMatch{},
 		roles:                 map[uuid.UUID]repository.Role{},
 		userRoles:             map[userRoleKey]repository.UserRole{},
+		aiCorrelations:        map[uuid.UUID]repository.AICorrelation{},
 		clock:                 func() time.Time { return time.Now().UTC() },
 	}
 }

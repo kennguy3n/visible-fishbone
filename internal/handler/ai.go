@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/middleware"
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/ai"
 )
 
@@ -18,6 +19,14 @@ import (
 type AIHandler struct {
 	svc    *ai.Service
 	logger *slog.Logger
+
+	// Enhanced AI capabilities (Tasks 67-71).
+	correlation    *ai.CorrelationEngine
+	nlQuery        *ai.NLQueryEngine
+	reports        *ai.ReportEngine
+	threatIntel    *ai.ThreatIntelEngine
+	guardrails     *ai.GuardrailedProvider
+	correlationRepo repository.AICorrelationRepository
 }
 
 // NewAIHandler constructs an AIHandler. svc may be nil (endpoints
@@ -29,11 +38,39 @@ func NewAIHandler(svc *ai.Service, logger *slog.Logger) *AIHandler {
 	return &AIHandler{svc: svc, logger: logger}
 }
 
+// SetEnhancedAI wires up the enhanced AI capabilities (Tasks 67-71)
+// after construction. This pattern matches Service.SetSummarizer.
+func (h *AIHandler) SetEnhancedAI(
+	correlation *ai.CorrelationEngine,
+	nlQuery *ai.NLQueryEngine,
+	reports *ai.ReportEngine,
+	threatIntel *ai.ThreatIntelEngine,
+	guardrails *ai.GuardrailedProvider,
+	correlationRepo repository.AICorrelationRepository,
+) {
+	h.correlation = correlation
+	h.nlQuery = nlQuery
+	h.reports = reports
+	h.threatIntel = threatIntel
+	h.guardrails = guardrails
+	h.correlationRepo = correlationRepo
+}
+
 // Register wires AI endpoints onto mux.
 func (h *AIHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/summarize", h.summarize)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/suggest-policy", h.suggestPolicy)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/troubleshoot", h.troubleshoot)
+
+	// Enhanced AI endpoints (Tasks 67-71).
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/ai/correlations", h.listCorrelations)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/ai/correlations/{id}", h.getCorrelation)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/correlations/analyze", h.analyzeCorrelations)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/query", h.nlPolicyQuery)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/ai/reports/posture", h.getPostureReport)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/reports/posture/generate", h.generatePostureReport)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/enrich", h.enrichAlert)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/ai/guardrails/status", h.guardrailsStatus)
 }
 
 func (h *AIHandler) summarize(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +170,249 @@ func (h *AIHandler) troubleshoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	WriteJSON(w, http.StatusOK, result)
+}
+
+// --- Enhanced AI endpoints (Tasks 67-71) ---------------------------------
+
+func (h *AIHandler) listCorrelations(w http.ResponseWriter, r *http.Request) {
+	if h.correlationRepo == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI correlation service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	page := repository.Page{Limit: QueryLimit(r), After: r.URL.Query().Get("cursor")}
+	result, err := h.correlationRepo.List(r.Context(), tenantID, page)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, result)
+}
+
+func (h *AIHandler) getCorrelation(w http.ResponseWriter, r *http.Request) {
+	if h.correlationRepo == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI correlation service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	id, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	c, err := h.correlationRepo.Get(r.Context(), tenantID, id)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, c)
+}
+
+func (h *AIHandler) analyzeCorrelations(w http.ResponseWriter, r *http.Request) {
+	if h.correlation == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI correlation service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Alerts []ai.AlertInput `json:"alerts"`
+	}
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	// Enforce tenant scope on every alert.
+	for i := range req.Alerts {
+		req.Alerts[i].TenantID = tenantID
+	}
+	result, err := h.correlation.Analyze(r.Context(), req.Alerts)
+	if err != nil {
+		h.logger.Error("ai: correlate failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("error", err.Error()))
+		WriteError(w, http.StatusInternalServerError, "ai_error", "correlation analysis failed")
+		return
+	}
+	// Persist clusters.
+	if h.correlationRepo != nil {
+		for _, cluster := range result.Clusters {
+			_, _ = h.correlationRepo.Create(r.Context(), tenantID, repository.AICorrelation{
+				AlertIDs: cluster.AlertIDs,
+				Summary:  cluster.Summary,
+				Severity: cluster.Severity,
+				Status:   cluster.Status,
+			})
+		}
+	}
+	WriteJSON(w, http.StatusOK, result)
+}
+
+func (h *AIHandler) nlPolicyQuery(w http.ResponseWriter, r *http.Request) {
+	if h.nlQuery == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI query service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Question string `json:"question"`
+	}
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	if req.Question == "" {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "question is required")
+		return
+	}
+	resp, err := h.nlQuery.Query(r.Context(), ai.NLQueryRequest{
+		Question: req.Question,
+		TenantID: tenantID,
+	})
+	if err != nil {
+		h.logger.Error("ai: nl query failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("error", err.Error()))
+		WriteError(w, http.StatusInternalServerError, "ai_error", "query failed")
+		return
+	}
+	WriteJSON(w, http.StatusOK, resp)
+}
+
+func (h *AIHandler) getPostureReport(w http.ResponseWriter, r *http.Request) {
+	if h.reports == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI reports service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	// Generate on-demand with defaults.
+	now := time.Now().UTC()
+	report, err := h.reports.Generate(r.Context(), ai.PostureInput{
+		TenantID: tenantID,
+		Period: ai.ReportPeriod{
+			Start: now.Add(-7 * 24 * time.Hour),
+			End:   now,
+			Label: "weekly",
+		},
+		AlertsBySeverity: map[string]int{},
+	})
+	if err != nil {
+		h.logger.Error("ai: posture report failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("error", err.Error()))
+		WriteError(w, http.StatusInternalServerError, "ai_error", "report generation failed")
+		return
+	}
+	WriteJSON(w, http.StatusOK, report)
+}
+
+func (h *AIHandler) generatePostureReport(w http.ResponseWriter, r *http.Request) {
+	if h.reports == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI reports service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Period string         `json:"period"` // weekly, monthly
+		Alerts map[string]int `json:"alerts_by_severity"`
+	}
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	if req.Period == "" {
+		req.Period = "weekly"
+	}
+	if req.Alerts == nil {
+		req.Alerts = map[string]int{}
+	}
+	now := time.Now().UTC()
+	var start time.Time
+	if req.Period == "monthly" {
+		start = now.Add(-30 * 24 * time.Hour)
+	} else {
+		start = now.Add(-7 * 24 * time.Hour)
+	}
+	report, err := h.reports.Generate(r.Context(), ai.PostureInput{
+		TenantID:         tenantID,
+		Period:           ai.ReportPeriod{Start: start, End: now, Label: req.Period},
+		AlertsBySeverity: req.Alerts,
+	})
+	if err != nil {
+		h.logger.Error("ai: generate posture report failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("error", err.Error()))
+		WriteError(w, http.StatusInternalServerError, "ai_error", "report generation failed")
+		return
+	}
+	WriteJSON(w, http.StatusOK, report)
+}
+
+func (h *AIHandler) enrichAlert(w http.ResponseWriter, r *http.Request) {
+	if h.threatIntel == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI threat intelligence service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	var req struct {
+		AlertID    uuid.UUID `json:"alert_id"`
+		Indicators []string  `json:"indicators"`
+		Severity   string    `json:"severity"`
+	}
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	tc, err := h.threatIntel.Enrich(r.Context(), ai.EnrichRequest{
+		AlertID:    req.AlertID,
+		TenantID:   tenantID,
+		Indicators: req.Indicators,
+		Severity:   req.Severity,
+	})
+	if err != nil {
+		h.logger.Error("ai: enrich failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("error", err.Error()))
+		WriteError(w, http.StatusInternalServerError, "ai_error", "enrichment failed")
+		return
+	}
+	WriteJSON(w, http.StatusOK, tc)
+}
+
+func (h *AIHandler) guardrailsStatus(w http.ResponseWriter, r *http.Request) {
+	if h.guardrails == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI guardrails service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	status := h.guardrails.Status(tenantID)
+	WriteJSON(w, http.StatusOK, status)
 }
 
 func parseTimeRange(start, end string) (ai.TimeRange, error) {

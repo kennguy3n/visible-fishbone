@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/ai"
 )
 
@@ -142,6 +144,231 @@ func TestAIHandler_Troubleshoot_400MissingQuery(t *testing.T) {
 	h.troubleshoot(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- Enhanced AI endpoint tests (Tasks 67-71) ----
+
+func TestAIHandler_ListCorrelations_503WhenNotConfigured(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/correlations", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.listCorrelations(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_ListCorrelations_200(t *testing.T) {
+	t.Parallel()
+	store := newTestMemoryStore()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, nil, nil, nil, nil, store.aiCorrelationRepo)
+	tenantID := uuid.New()
+	// Seed one correlation.
+	store.aiCorrelationRepo.Create(context.Background(), tenantID, repository.AICorrelation{
+		AlertIDs: []uuid.UUID{uuid.New()},
+		Severity: "high",
+		Summary:  "test cluster",
+	})
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID.String()+"/ai/correlations", nil)
+	req.SetPathValue("tenant_id", tenantID.String())
+	rec := httptest.NewRecorder()
+	h.listCorrelations(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_GetCorrelation_404(t *testing.T) {
+	t.Parallel()
+	store := newTestMemoryStore()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, nil, nil, nil, nil, store.aiCorrelationRepo)
+	tenantID := uuid.New().String()
+	corrID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/correlations/"+corrID, nil)
+	req.SetPathValue("tenant_id", tenantID)
+	req.SetPathValue("id", corrID)
+	rec := httptest.NewRecorder()
+	h.getCorrelation(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_AnalyzeCorrelations_503WhenNotConfigured(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	tenantID := uuid.New().String()
+	body, _ := json.Marshal(map[string]any{"alerts": []any{}})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID+"/ai/correlations/analyze",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.analyzeCorrelations(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_NLPolicyQuery_503WhenNotConfigured(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	tenantID := uuid.New().String()
+	body, _ := json.Marshal(map[string]string{"question": "can user X access app Y?"})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID+"/ai/query",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.nlPolicyQuery(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_NLPolicyQuery_400MissingQuestion(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, ai.NewNLQueryEngine(nil), nil, nil, nil, nil)
+	tenantID := uuid.New().String()
+	body, _ := json.Marshal(map[string]string{})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID+"/ai/query",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.nlPolicyQuery(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_NLPolicyQuery_200(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, ai.NewNLQueryEngine(nil), nil, nil, nil, nil)
+	tenantID := uuid.New().String()
+	body, _ := json.Marshal(map[string]string{"question": "Can user alice access app salesforce?"})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID+"/ai/query",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.nlPolicyQuery(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_PostureReport_503WhenNotConfigured(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/reports/posture", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.getPostureReport(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_PostureReport_200(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, nil, ai.NewReportEngine(nil), nil, nil, nil)
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/reports/posture", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.getPostureReport(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_EnrichAlert_503WhenNotConfigured(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	tenantID := uuid.New().String()
+	body, _ := json.Marshal(map[string]any{
+		"alert_id":   uuid.New().String(),
+		"indicators": []string{"1.2.3.4"},
+		"severity":   "medium",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID+"/ai/enrich",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.enrichAlert(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_EnrichAlert_200(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, nil, nil, ai.NewThreatIntelEngine(nil), nil, nil)
+	tenantID := uuid.New().String()
+	body, _ := json.Marshal(map[string]any{
+		"alert_id":   uuid.New().String(),
+		"indicators": []string{"1.2.3.4"},
+		"severity":   "medium",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID+"/ai/enrich",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.enrichAlert(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAIHandler_GuardrailsStatus_503WhenNotConfigured(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/guardrails/status", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.guardrailsStatus(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- test helpers ---
+
+type testMemoryStore struct {
+	aiCorrelationRepo *memory.AICorrelationRepository
+}
+
+func newTestMemoryStore() testMemoryStore {
+	s := memory.NewStore()
+	return testMemoryStore{
+		aiCorrelationRepo: memory.NewAICorrelationRepository(s),
 	}
 }
 

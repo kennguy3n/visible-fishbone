@@ -1482,3 +1482,17 @@ type DeviceCertificate struct {
 	ExpiresAt time.Time
 	RevokedAt *time.Time
 }
+
+// --- AI Correlations ------------------------------------------------------
+
+// AICorrelation represents a row in the ai_alert_correlations table.
+type AICorrelation struct {
+	ID        uuid.UUID
+	TenantID  uuid.UUID
+	AlertIDs  []uuid.UUID
+	Summary   string
+	Severity  string
+	Status    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}

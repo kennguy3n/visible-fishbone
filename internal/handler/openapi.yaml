@@ -2369,6 +2369,163 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
 
+  /tenants/{tenant_id}/ai/correlations:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [ai]
+      operationId: aiListCorrelations
+      summary: List alert correlation clusters
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: page of correlation clusters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AICorrelation" }
+                  next_cursor: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/correlations/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [ai]
+      operationId: aiGetCorrelation
+      summary: Get a single correlation cluster
+      responses:
+        "200":
+          description: correlation cluster
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AICorrelation" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/correlations/analyze:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [ai]
+      operationId: aiAnalyzeCorrelations
+      summary: Trigger correlation analysis on a batch of alerts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AICorrelationAnalyzeRequest" }
+      responses:
+        "200":
+          description: correlation result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AICorrelationResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/query:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [ai]
+      operationId: aiNLPolicyQuery
+      summary: Natural language policy query
+      description: |
+        Parse a natural language question about access policy, resolve
+        entities, and return a deterministic verdict. The LLM parses
+        intent; the policy evaluator produces the answer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AINLQueryRequest" }
+      responses:
+        "200":
+          description: policy query result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AINLQueryResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/reports/posture:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [ai]
+      operationId: aiGetPostureReport
+      summary: Get latest security posture report
+      responses:
+        "200":
+          description: posture report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AIPostureReport" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/reports/posture/generate:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [ai]
+      operationId: aiGeneratePostureReport
+      summary: Generate a new security posture report
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AIPostureGenerateRequest" }
+      responses:
+        "200":
+          description: generated posture report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AIPostureReport" }
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/enrich:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [ai]
+      operationId: aiEnrichAlert
+      summary: Enrich alert with threat intelligence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AIEnrichRequest" }
+      responses:
+        "200":
+          description: threat context
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AIThreatContext" }
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/ai/guardrails/status:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [ai]
+      operationId: aiGuardrailsStatus
+      summary: Get AI guardrail status for tenant
+      responses:
+        "200":
+          description: guardrail usage and limits
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AIGuardrailStatus" }
+        "503": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     BearerJWT:
@@ -3517,3 +3674,158 @@ components:
         confidence: { type: number, format: double }
         ai_generated: { type: boolean }
         model_id: { type: string }
+
+    # --- Enhanced AI schemas (Tasks 67-71) ---
+
+    AICorrelation:
+      type: object
+      required: [id, tenant_id, alert_ids, severity, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        alert_ids:
+          type: array
+          items: { type: string, format: uuid }
+        summary: { type: string }
+        severity: { type: string, enum: [low, medium, high, critical] }
+        status: { type: string, enum: [open, acknowledged, resolved] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    AICorrelationAnalyzeRequest:
+      type: object
+      required: [alerts]
+      properties:
+        alerts:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              tenant_id: { type: string, format: uuid }
+              kind: { type: string }
+              severity: { type: string }
+              device_id: { type: string }
+              user_id: { type: string }
+              source_ip: { type: string }
+              timestamp: { type: string, format: date-time }
+
+    AICorrelationResult:
+      type: object
+      properties:
+        clusters:
+          type: array
+          items: { $ref: "#/components/schemas/AICorrelationCluster" }
+        total_alerts: { type: integer }
+        correlated_alerts: { type: integer }
+
+    AICorrelationCluster:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        alert_ids:
+          type: array
+          items: { type: string, format: uuid }
+        summary: { type: string }
+        severity: { type: string }
+        status: { type: string }
+        dimensions:
+          type: array
+          items: { type: string }
+        created_at: { type: string, format: date-time }
+
+    AINLQueryRequest:
+      type: object
+      required: [question]
+      properties:
+        question: { type: string, description: "Natural language policy question." }
+
+    AINLQueryResponse:
+      type: object
+      required: [verdict, explanation, ai_generated]
+      properties:
+        verdict: { type: string, enum: [allow, deny, unknown] }
+        matched_rules: { type: array, items: { type: string } }
+        explanation: { type: string }
+        confidence: { type: number, format: double }
+        ai_generated: { type: boolean }
+        model_id: { type: string }
+
+    AIPostureReport:
+      type: object
+      required: [tenant_id, period, generated_at]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        period:
+          type: object
+          properties:
+            start: { type: string, format: date-time }
+            end: { type: string, format: date-time }
+            label: { type: string }
+        generated_at: { type: string, format: date-time }
+        ai_generated: { type: boolean }
+        model_id: { type: string }
+        overview:
+          type: object
+          properties:
+            total_alerts: { type: integer }
+            alerts_by_severity: { type: object, additionalProperties: { type: integer } }
+            trend: { type: string, enum: [improving, degrading, stable] }
+        threats:
+          type: object
+          properties:
+            top_kinds: { type: array, items: { type: string } }
+            new_threat_types: { type: integer }
+        policy_health:
+          type: object
+          properties:
+            total_policies: { type: integer }
+            active_policies: { type: integer }
+            coverage_pct: { type: number, format: double }
+        recommendations:
+          type: array
+          items: { type: string }
+
+    AIPostureGenerateRequest:
+      type: object
+      properties:
+        period: { type: string, enum: [weekly, monthly], default: weekly }
+        alerts_by_severity: { type: object, additionalProperties: { type: integer } }
+
+    AIEnrichRequest:
+      type: object
+      required: [alert_id, indicators, severity]
+      properties:
+        alert_id: { type: string, format: uuid }
+        indicators:
+          type: array
+          items: { type: string }
+        severity: { type: string }
+
+    AIThreatContext:
+      type: object
+      properties:
+        alert_id: { type: string, format: uuid }
+        ioc_matches:
+          type: array
+          items:
+            type: object
+            properties:
+              indicator: { type: string }
+              feed_name: { type: string }
+              threat_type: { type: string }
+              confidence: { type: number, format: double }
+        threat_actors: { type: array, items: { type: string } }
+        campaigns: { type: array, items: { type: string } }
+        confidence: { type: number, format: double }
+        escalated_severity: { type: string }
+
+    AIGuardrailStatus:
+      type: object
+      properties:
+        tenant_id: { type: string, format: uuid }
+        requests_this_minute: { type: integer }
+        max_requests_per_minute: { type: integer }
+        tokens_today: { type: integer }
+        max_tokens_per_day: { type: integer }

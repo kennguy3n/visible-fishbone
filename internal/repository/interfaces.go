@@ -997,3 +997,13 @@ type DeviceEnrollmentRepository interface {
 	// a device by stamping revoked_at.
 	RevokeAllCertificates(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, at time.Time) error
 }
+
+// --- AI Correlations ------------------------------------------------------
+
+// AICorrelationRepository owns the ai_alert_correlations table.
+type AICorrelationRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, c AICorrelation) (AICorrelation, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (AICorrelation, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[AICorrelation], error)
+	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string) error
+}
