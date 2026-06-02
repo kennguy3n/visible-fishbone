@@ -159,7 +159,7 @@ rationale) and goes through the workspace-pedantic clippy profile.
 
 ### Prerequisites
 
-- **Go 1.22+** (the module declares `go 1.25`; 1.22+ will build)
+- **Go 1.25+** (the module declares `go 1.25.0`)
 - **Rust 1.85+** (workspace `rust-version = "1.85"`)
 - **Docker** (for testcontainers-based integration tests)
 - **NATS Server** (for JetStream telemetry pipeline tests)
