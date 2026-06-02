@@ -23,4 +23,11 @@ CREATE INDEX idx_playbook_approvals_execution ON playbook_approvals(execution_id
 ALTER TABLE playbook_approvals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE playbook_approvals FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON playbook_approvals
-    USING (tenant_id = NULLIF(current_setting('sng.tenant_id', true), '')::uuid);
+    USING (
+        tenant_id = NULLIF(current_setting('sng.tenant_id', true), '')::uuid
+        OR NULLIF(current_setting('sng.system_role', true), '') = 'true'
+    )
+    WITH CHECK (
+        tenant_id = NULLIF(current_setting('sng.tenant_id', true), '')::uuid
+        OR NULLIF(current_setting('sng.system_role', true), '') = 'true'
+    );
