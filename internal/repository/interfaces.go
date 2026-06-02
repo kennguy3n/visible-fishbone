@@ -899,3 +899,28 @@ type DLPMatchRepository interface {
 	Create(ctx context.Context, tenantID uuid.UUID, m DLPMatch) (DLPMatch, error)
 	List(ctx context.Context, tenantID uuid.UUID, policyID *uuid.UUID, page Page) (PageResult[DLPMatch], error)
 }
+
+// --- Device enrollment ----------------------------------------------------
+
+// DeviceEnrollmentRepository owns the device_enrollments and
+// device_certificates tables. All operations are tenant-isolated.
+type DeviceEnrollmentRepository interface {
+	// CreateEnrollment inserts a new device enrollment record.
+	// Returns ErrConflict if an active/enrolled enrollment already
+	// exists for the (tenant_id, device_id) pair.
+	CreateEnrollment(ctx context.Context, tenantID uuid.UUID, e DeviceEnrollment) (DeviceEnrollment, error)
+	// GetEnrollment returns the active/enrolled enrollment for a
+	// device. Returns ErrNotFound if no enrollment exists.
+	GetEnrollment(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID) (DeviceEnrollment, error)
+	// UpdateEnrollmentStatus transitions the enrollment to a new
+	// lifecycle state.
+	UpdateEnrollmentStatus(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, status EnrollmentStatus) error
+	// UpdateLastCertIssuedAt stamps the last-cert-issued timestamp.
+	UpdateLastCertIssuedAt(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, at time.Time) error
+
+	// CreateCertificate inserts a new device certificate record.
+	CreateCertificate(ctx context.Context, tenantID uuid.UUID, c DeviceCertificate) (DeviceCertificate, error)
+	// RevokeAllCertificates revokes all un-revoked certificates for
+	// a device by stamping revoked_at.
+	RevokeAllCertificates(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, at time.Time) error
+}

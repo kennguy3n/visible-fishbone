@@ -72,6 +72,10 @@ type Store struct {
 	msps       map[uuid.UUID]repository.MSP
 	mspTenants map[mspTenantKey]repository.MSPTenantBinding
 
+	// Device enrollment tables — see migration 017.
+	deviceEnrollments  map[deviceEnrollmentKey]repository.DeviceEnrollment
+	deviceCertificates map[uuid.UUID]repository.DeviceCertificate
+
 	// App registry tables — see internal/repository/app_registry.go
 	// and migrations/008_app_registry.up.sql. `appRegistry` is the
 	// global curated catalog (not tenant-scoped); `appOverrides`
@@ -135,6 +139,8 @@ func NewStore() *Store {
 		integrationDeliveries: map[uuid.UUID]repository.IntegrationDelivery{},
 		msps:                  map[uuid.UUID]repository.MSP{},
 		mspTenants:            map[mspTenantKey]repository.MSPTenantBinding{},
+		deviceEnrollments:     map[deviceEnrollmentKey]repository.DeviceEnrollment{},
+		deviceCertificates:    map[uuid.UUID]repository.DeviceCertificate{},
 		appRegistry:           map[uuid.UUID]repository.AppRegistry{},
 		appOverrides:          map[uuid.UUID]repository.AppRegistryOverride{},
 		dlpPolicies:           map[uuid.UUID]repository.DLPPolicy{},

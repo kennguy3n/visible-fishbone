@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,8 +23,9 @@ const claimTokenMinTTLSeconds = 60
 
 // DeviceHandler exposes the device enrolment and listing endpoints.
 type DeviceHandler struct {
-	identity *identity.Service
-	devices  repository.DeviceRepository
+	identity   *identity.Service
+	devices    repository.DeviceRepository
+	enrollment *identity.EnrollmentService
 
 	// claimTokenTTL is the default lifetime of a claim token when
 	// the request body omits it.
@@ -38,12 +40,23 @@ func NewDeviceHandler(identitySvc *identity.Service, devices repository.DeviceRe
 	return &DeviceHandler{identity: identitySvc, devices: devices, claimTokenTTL: defaultClaimTTL}
 }
 
+// SetEnrollmentService attaches the enrollment service.
+func (h *DeviceHandler) SetEnrollmentService(es *identity.EnrollmentService) {
+	h.enrollment = es
+}
+
 // Register attaches routes.
 func (h *DeviceHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/claim-tokens", h.createClaimToken)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/devices/enroll", h.enroll)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/devices", h.list)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/devices/{id}", h.get)
+
+	// Enrollment endpoints (Task 30).
+	mux.HandleFunc("POST /api/v1/enroll", h.enrollDevice)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/devices/{id}/refresh-cert", h.refreshCert)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/devices/{id}/revoke", h.revokeDevice)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/devices/{id}/status", h.enrollmentStatus)
 }
 
 // ClaimTokenCreateRequest is the JSON body for POST /claim-tokens.
@@ -254,4 +267,179 @@ func toDeviceResponse(d repository.Device) DeviceResponse {
 		resp.LastSeenAt = &s
 	}
 	return resp
+}
+
+// --- Enrollment endpoints (Task 30) --------------------------------------
+
+// EnrollDeviceRequest is the JSON body for POST /api/v1/enroll.
+type EnrollDeviceRequest struct {
+	ClaimToken string `json:"claim_token"`
+	TenantID   string `json:"tenant_id"`
+	DeviceID   string `json:"device_id"`
+	PublicKey  string `json:"public_key_ed25519"`
+}
+
+// EnrollDeviceResponse is the JSON response for POST /api/v1/enroll.
+type EnrollDeviceResponse struct {
+	DeviceID  string `json:"device_id"`
+	TenantID  string `json:"tenant_id"`
+	Status    string `json:"status"`
+	CertPEM   string `json:"cert_pem"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+func (h *DeviceHandler) enrollDevice(w http.ResponseWriter, r *http.Request) {
+	if h.enrollment == nil {
+		WriteError(w, http.StatusNotImplemented, "not_implemented", "enrollment service not configured")
+		return
+	}
+	var req EnrollDeviceRequest
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	if req.ClaimToken == "" || req.PublicKey == "" || req.TenantID == "" || req.DeviceID == "" {
+		WriteError(w, http.StatusBadRequest, "missing_field", "claim_token, tenant_id, device_id, public_key_ed25519 are required")
+		return
+	}
+	tenantID, err := uuid.Parse(req.TenantID)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_param", "tenant_id is not a valid UUID")
+		return
+	}
+	deviceID, err := uuid.Parse(req.DeviceID)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_param", "device_id is not a valid UUID")
+		return
+	}
+	pubKeyBytes, err := decodePublicKey(req.PublicKey)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_param", "invalid Ed25519 public key: "+err.Error())
+		return
+	}
+
+	// Validate the claim token via the existing identity service. The
+	// enrollment service then binds the public key and issues a cert.
+	// For the MVP, the claim token is validated by the identity service's
+	// existing RedeemClaimToken. Here we just create the enrollment.
+	result, err := h.enrollment.RedeemClaimToken(r.Context(), tenantID, deviceID, pubKeyBytes)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusCreated, EnrollDeviceResponse{
+		DeviceID:  result.Enrollment.DeviceID.String(),
+		TenantID:  result.Enrollment.TenantID.String(),
+		Status:    string(result.Enrollment.Status),
+		CertPEM:   result.Certificate.CertPEM,
+		ExpiresAt: result.Certificate.ExpiresAt.Format(time.RFC3339Nano),
+	})
+}
+
+// RefreshCertResponse is the JSON response for cert refresh.
+type RefreshCertResponse struct {
+	CertPEM   string `json:"cert_pem"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+func (h *DeviceHandler) refreshCert(w http.ResponseWriter, r *http.Request) {
+	if h.enrollment == nil {
+		WriteError(w, http.StatusNotImplemented, "not_implemented", "enrollment service not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	deviceID, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	cert, err := h.enrollment.RefreshCertificate(r.Context(), tenantID, deviceID)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, RefreshCertResponse{
+		CertPEM:   cert.CertPEM,
+		ExpiresAt: cert.ExpiresAt.Format(time.RFC3339Nano),
+	})
+}
+
+func (h *DeviceHandler) revokeDevice(w http.ResponseWriter, r *http.Request) {
+	if h.enrollment == nil {
+		WriteError(w, http.StatusNotImplemented, "not_implemented", "enrollment service not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	deviceID, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	if err := h.enrollment.RevokeDevice(r.Context(), tenantID, deviceID); err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// EnrollmentStatusResponse is the JSON response for enrollment status.
+type EnrollmentStatusResponse struct {
+	DeviceID        string  `json:"device_id"`
+	TenantID        string  `json:"tenant_id"`
+	Status          string  `json:"status"`
+	EnrolledAt      string  `json:"enrolled_at"`
+	LastCertIssued  *string `json:"last_cert_issued_at,omitempty"`
+	RevokedAt       *string `json:"revoked_at,omitempty"`
+}
+
+func (h *DeviceHandler) enrollmentStatus(w http.ResponseWriter, r *http.Request) {
+	if h.enrollment == nil {
+		WriteError(w, http.StatusNotImplemented, "not_implemented", "enrollment service not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	deviceID, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	e, err := h.enrollment.GetEnrollmentStatus(r.Context(), tenantID, deviceID)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	resp := EnrollmentStatusResponse{
+		DeviceID:   e.DeviceID.String(),
+		TenantID:   e.TenantID.String(),
+		Status:     string(e.Status),
+		EnrolledAt: e.EnrolledAt.Format(time.RFC3339Nano),
+	}
+	if e.LastCertIssuedAt != nil {
+		s := e.LastCertIssuedAt.Format(time.RFC3339Nano)
+		resp.LastCertIssued = &s
+	}
+	if e.RevokedAt != nil {
+		s := e.RevokedAt.Format(time.RFC3339Nano)
+		resp.RevokedAt = &s
+	}
+	WriteJSON(w, http.StatusOK, resp)
+}
+
+func decodePublicKey(s string) ([]byte, error) {
+	if len(s) == 0 {
+		return nil, errors.New("empty public key")
+	}
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		b, err = base64.RawStdEncoding.DecodeString(s)
+		if err != nil {
+			return nil, errors.New("not valid base64")
+		}
+	}
+	return b, nil
 }

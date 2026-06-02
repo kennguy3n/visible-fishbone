@@ -1187,3 +1187,39 @@ type DLPMatch struct {
 	MatchedAt time.Time
 	Details   json.RawMessage
 }
+
+// --- Device enrollment ----------------------------------------------------
+
+// EnrollmentStatus enumerates the lifecycle stages of a device
+// enrollment. Mirrors the CHECK constraint on
+// `device_enrollments.status`.
+type EnrollmentStatus string
+
+const (
+	EnrollmentStatusEnrolled EnrollmentStatus = "enrolled"
+	EnrollmentStatusActive   EnrollmentStatus = "active"
+	EnrollmentStatusRevoked  EnrollmentStatus = "revoked"
+)
+
+// DeviceEnrollment represents a row in the device_enrollments table.
+type DeviceEnrollment struct {
+	DeviceID        uuid.UUID
+	TenantID        uuid.UUID
+	PublicKey        []byte // Ed25519 32-byte public key
+	Status           EnrollmentStatus
+	EnrolledAt       time.Time
+	LastCertIssuedAt *time.Time
+	RevokedAt        *time.Time
+}
+
+// DeviceCertificate represents a row in the device_certificates table.
+type DeviceCertificate struct {
+	ID        uuid.UUID
+	DeviceID  uuid.UUID
+	TenantID  uuid.UUID
+	Serial    string
+	CertPEM   string
+	IssuedAt  time.Time
+	ExpiresAt time.Time
+	RevokedAt *time.Time
+}
