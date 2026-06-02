@@ -18,11 +18,11 @@ type OpsHealthHistoryResponse struct {
 
 // OpsHealthSnapshotDTO is the API representation of a snapshot.
 type OpsHealthSnapshotDTO struct {
-	ID              uuid.UUID              `json:"id"`
-	TenantID        uuid.UUID              `json:"tenant_id"`
-	HealthScore     int                    `json:"health_score"`
-	ComponentScores json.RawMessage        `json:"component_scores"`
-	CreatedAt       time.Time              `json:"created_at"`
+	ID              uuid.UUID       `json:"id"`
+	TenantID        uuid.UUID       `json:"tenant_id"`
+	HealthScore     int             `json:"health_score"`
+	ComponentScores json.RawMessage `json:"component_scores"`
+	CreatedAt       time.Time       `json:"created_at"`
 }
 
 // OpsHealthRecordRequest is the body for recording a health snapshot.

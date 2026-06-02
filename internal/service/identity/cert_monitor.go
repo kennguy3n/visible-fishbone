@@ -35,9 +35,9 @@ type ExpiringCert struct {
 
 // CertRenewalStatus tracks whether a device has renewed after trigger.
 type CertRenewalStatus struct {
-	DeviceID       uuid.UUID `json:"device_id"`
-	Triggered      bool      `json:"triggered"`
-	RenewedAfter   bool      `json:"renewed_after"`
+	DeviceID       uuid.UUID  `json:"device_id"`
+	Triggered      bool       `json:"triggered"`
+	RenewedAfter   bool       `json:"renewed_after"`
 	LastCertIssued *time.Time `json:"last_cert_issued,omitempty"`
 }
 
@@ -53,11 +53,11 @@ type EnrollmentProvider interface {
 
 // CertMonitorService monitors certificate health across devices.
 type CertMonitorService struct {
-	certs      CertificateProvider
-	enrolls    EnrollmentProvider
-	logger     *slog.Logger
-	nowFunc    func() time.Time
-	threshold  time.Duration
+	certs     CertificateProvider
+	enrolls   EnrollmentProvider
+	logger    *slog.Logger
+	nowFunc   func() time.Time
+	threshold time.Duration
 }
 
 // NewCertMonitorService returns a ready-to-use certificate monitor.
@@ -94,7 +94,7 @@ func (s *CertMonitorService) SetNowFunc(fn func() time.Time) {
 
 // HealthSummary computes aggregate certificate health for a tenant.
 func (s *CertMonitorService) HealthSummary(
-	ctx context.Context,
+	_ context.Context,
 	tenantID uuid.UUID,
 	certs []repository.DeviceCertificate,
 ) CertHealthSummary {
@@ -110,11 +110,12 @@ func (s *CertMonitorService) HealthSummary(
 			summary.Revoked++
 			continue
 		}
-		if now.After(c.ExpiresAt) {
+		switch {
+		case now.After(c.ExpiresAt):
 			summary.Expired++
-		} else if threshold.After(c.ExpiresAt) {
+		case threshold.After(c.ExpiresAt):
 			summary.ExpiringSoon++
-		} else {
+		default:
 			summary.Healthy++
 		}
 	}
@@ -123,7 +124,7 @@ func (s *CertMonitorService) HealthSummary(
 
 // FindExpiring returns certificates expiring within the threshold window.
 func (s *CertMonitorService) FindExpiring(
-	ctx context.Context,
+	_ context.Context,
 	tenantID uuid.UUID,
 	certs []repository.DeviceCertificate,
 ) []ExpiringCert {

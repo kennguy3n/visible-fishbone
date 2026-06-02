@@ -571,10 +571,10 @@ func buildRouter(
 	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, logger)
 
 	router := handler.NewRouter(handler.RouterDeps{
-		Config:           cfg,
-		Logger:           logger,
-		Tenants:          handler.NewTenantHandler(tenantSvc),
-		Sites:            handler.NewSiteHandler(siteSvc),
+		Config:  cfg,
+		Logger:  logger,
+		Tenants: handler.NewTenantHandler(tenantSvc),
+		Sites:   handler.NewSiteHandler(siteSvc),
 		Devices: func() *handler.DeviceHandler {
 			h := handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL)
 			h.SetEnrollmentService(enrollmentSvc)

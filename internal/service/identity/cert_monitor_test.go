@@ -19,11 +19,11 @@ func TestCertMonitor_HealthSummary(t *testing.T) {
 	tenantID := uuid.New()
 	revoked := now.Add(-time.Hour)
 	certs := []repository.DeviceCertificate{
-		{ID: uuid.New(), DeviceID: uuid.New(), TenantID: tenantID, ExpiresAt: now.AddDate(0, 6, 0)},   // healthy
-		{ID: uuid.New(), DeviceID: uuid.New(), TenantID: tenantID, ExpiresAt: now.Add(15 * 24 * time.Hour)}, // expiring soon (within 30d)
-		{ID: uuid.New(), DeviceID: uuid.New(), TenantID: tenantID, ExpiresAt: now.Add(-24 * time.Hour)},     // expired
+		{ID: uuid.New(), DeviceID: uuid.New(), TenantID: tenantID, ExpiresAt: now.AddDate(0, 6, 0)},                      // healthy
+		{ID: uuid.New(), DeviceID: uuid.New(), TenantID: tenantID, ExpiresAt: now.Add(15 * 24 * time.Hour)},              // expiring soon (within 30d)
+		{ID: uuid.New(), DeviceID: uuid.New(), TenantID: tenantID, ExpiresAt: now.Add(-24 * time.Hour)},                  // expired
 		{ID: uuid.New(), DeviceID: uuid.New(), TenantID: tenantID, ExpiresAt: now.AddDate(1, 0, 0), RevokedAt: &revoked}, // revoked
-		{ID: uuid.New(), DeviceID: uuid.New(), TenantID: uuid.New(), ExpiresAt: now.AddDate(0, 1, 0)}, // different tenant
+		{ID: uuid.New(), DeviceID: uuid.New(), TenantID: uuid.New(), ExpiresAt: now.AddDate(0, 1, 0)},                    // different tenant
 	}
 
 	summary := svc.HealthSummary(context.Background(), tenantID, certs)

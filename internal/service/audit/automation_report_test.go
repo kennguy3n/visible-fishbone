@@ -63,9 +63,9 @@ func TestAutomationReport_TimeFiltering(t *testing.T) {
 	to := time.Date(2025, 1, 20, 0, 0, 0, 0, time.UTC)
 
 	actions := []audit.AutomationAction{
-		{ID: uuid.New(), TenantID: tenantID, ActionType: "playbook_execution", Outcome: "success", Timestamp: time.Date(2025, 1, 5, 0, 0, 0, 0, time.UTC)},  // before
-		{ID: uuid.New(), TenantID: tenantID, ActionType: "cert_rotation", Outcome: "success", Timestamp: time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC)},       // in range
-		{ID: uuid.New(), TenantID: tenantID, ActionType: "ai_suggestion", Outcome: "success", Timestamp: time.Date(2025, 1, 25, 0, 0, 0, 0, time.UTC)},       // after
+		{ID: uuid.New(), TenantID: tenantID, ActionType: "playbook_execution", Outcome: "success", Timestamp: time.Date(2025, 1, 5, 0, 0, 0, 0, time.UTC)}, // before
+		{ID: uuid.New(), TenantID: tenantID, ActionType: "cert_rotation", Outcome: "success", Timestamp: time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC)},     // in range
+		{ID: uuid.New(), TenantID: tenantID, ActionType: "ai_suggestion", Outcome: "success", Timestamp: time.Date(2025, 1, 25, 0, 0, 0, 0, time.UTC)},     // after
 	}
 	svc.AddStaticActions(actions)
 

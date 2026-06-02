@@ -169,7 +169,7 @@ func (s *BulkDeviceService) BulkRevoke(
 
 // ExportCSV writes device inventory as CSV.
 func (s *BulkDeviceService) ExportCSV(
-	ctx context.Context,
+	_ context.Context,
 	tenantID uuid.UUID,
 	devices []repository.Device,
 ) ([]byte, error) {

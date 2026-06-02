@@ -22,14 +22,14 @@ type AutomationAction struct {
 
 // AutomationSummary aggregates automation activity for a period.
 type AutomationSummary struct {
-	TenantID            uuid.UUID `json:"tenant_id"`
-	Period              string    `json:"period"`
-	TotalActions        int       `json:"total_actions"`
-	PlaybookExecutions  int       `json:"playbook_executions"`
-	AISuggestions       int       `json:"ai_suggestions"`
-	CertRotations       int       `json:"cert_rotations"`
-	PolicyAutoReviews   int       `json:"policy_auto_reviews"`
-	SuccessRate         float64   `json:"success_rate"`
+	TenantID           uuid.UUID `json:"tenant_id"`
+	Period             string    `json:"period"`
+	TotalActions       int       `json:"total_actions"`
+	PlaybookExecutions int       `json:"playbook_executions"`
+	AISuggestions      int       `json:"ai_suggestions"`
+	CertRotations      int       `json:"cert_rotations"`
+	PolicyAutoReviews  int       `json:"policy_auto_reviews"`
+	SuccessRate        float64   `json:"success_rate"`
 }
 
 // AutomationReport is the full compliance-grade automation audit.

@@ -43,29 +43,29 @@ type GrowthForecast struct {
 
 // TierRecommendation suggests a tier upgrade based on trajectory.
 type TierRecommendation struct {
-	TenantID       uuid.UUID `json:"tenant_id"`
-	CurrentTier    string    `json:"current_tier"`
-	RecommendTier  string    `json:"recommend_tier"`
-	Reason         string    `json:"reason"`
-	UsagePercent   float64   `json:"usage_percent"`
+	TenantID      uuid.UUID `json:"tenant_id"`
+	CurrentTier   string    `json:"current_tier"`
+	RecommendTier string    `json:"recommend_tier"`
+	Reason        string    `json:"reason"`
+	UsagePercent  float64   `json:"usage_percent"`
 }
 
 // ThresholdAlert is raised when a tenant approaches its tier limit.
 type ThresholdAlert struct {
-	TenantID    uuid.UUID `json:"tenant_id"`
-	Threshold   float64   `json:"threshold"`
-	CurrentPct  float64   `json:"current_pct"`
-	EventsDay   float64   `json:"events_day"`
-	TierLimit   float64   `json:"tier_limit"`
+	TenantID   uuid.UUID `json:"tenant_id"`
+	Threshold  float64   `json:"threshold"`
+	CurrentPct float64   `json:"current_pct"`
+	EventsDay  float64   `json:"events_day"`
+	TierLimit  float64   `json:"tier_limit"`
 }
 
 // CapacityReport aggregates capacity analysis for a tenant.
 type CapacityReport struct {
-	TenantID        uuid.UUID           `json:"tenant_id"`
-	Usage           []TenantUsage       `json:"usage"`
-	Forecast        GrowthForecast      `json:"forecast"`
-	Alerts          []ThresholdAlert    `json:"alerts"`
-	Recommendation  *TierRecommendation `json:"recommendation,omitempty"`
+	TenantID       uuid.UUID           `json:"tenant_id"`
+	Usage          []TenantUsage       `json:"usage"`
+	Forecast       GrowthForecast      `json:"forecast"`
+	Alerts         []ThresholdAlert    `json:"alerts"`
+	Recommendation *TierRecommendation `json:"recommendation,omitempty"`
 }
 
 // CapacityService analyses telemetry volume trends and projects
