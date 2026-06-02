@@ -1399,15 +1399,25 @@ func TestMSPHandler_AssignTenant_OwnerInvalidatesBrandingCache(t *testing.T) {
 	}
 }
 
-// TestMSPHandler_AssignTenant_CoManagerDoesNotInvalidate pins the
-// round-9 efficiency contract: a co-manager binding does NOT
-// change tenants.msp_id, so it must not flush the per-tenant
-// cache. We seed a tenant already bound to one MSP, prime the
-// cache against that MSP's branding, then assign co-manager from
-// a different MSP. The cached value must remain visible after the
-// co-manager assign — confirming the invalidation is gated on
-// `rel == owner` rather than firing unconditionally.
-func TestMSPHandler_AssignTenant_CoManagerDoesNotInvalidate(t *testing.T) {
+// TestMSPHandler_AssignTenant_CoManagerInvalidatesBrandingCache
+// pins the round-19 BUG_0001 fix. Previously the handler gated
+// branding-cache invalidation on `rel == owner`, which left a
+// correctness gap for the owner→co_manager downgrade path (see
+// TestMSPHandler_AssignTenant_DowngradeOwnerToCoManagerInvalidatesCache
+// below). The fix is to invalidate unconditionally on every
+// assign — the cost is bounded to a single O(1) cache eviction
+// per call (no-op on the production uncached resolver) and the
+// correctness is strictly tighter than the relationship-gated
+// alternative.
+//
+// This test verifies the new contract: even a NEW co_manager
+// binding (which does NOT touch tenants.msp_id) STILL invalidates
+// the cache. We seed a tenant already bound as owner to one MSP,
+// prime the cache, mutate the owner's branding behind the cache,
+// then assign a SECOND MSP as co_manager. The next Resolve must
+// pick up the post-mutation branding, confirming the cache was
+// flushed by the co_manager assign.
+func TestMSPHandler_AssignTenant_CoManagerInvalidatesBrandingCache(t *testing.T) {
 	t.Parallel()
 	mux, msps, tenants, _ := setupMSPHandlerWithCachedBranding(t)
 	ctx := context.Background()
@@ -1449,17 +1459,18 @@ func TestMSPHandler_AssignTenant_CoManagerDoesNotInvalidate(t *testing.T) {
 	}
 
 	// Mutate the owner MSP's branding directly via the repo to
-	// "owner-v2". The cache still serves "owner-v1" until
-	// invalidated. The co-manager assign below MUST NOT flush
-	// the cache, so the next Resolve must still return "owner-v1".
+	// "owner-v2". Without invalidation the cache would keep
+	// serving "owner-v1"; with the round-19 fix the co_manager
+	// assign below must flush, so the next Resolve picks up v2.
 	newBrand := repository.MSPBranding{LogoURL: "owner-v2"}
 	if _, err := msps.Update(ctx, ownerMSP.ID,
 		repository.MSPPatch{Branding: &newBrand}); err != nil {
 		t.Fatalf("repo brand mutate: %v", err)
 	}
 
-	// Assign co_manager via the second MSP. This must not change
-	// tenants.msp_id and must not flush the cache.
+	// Assign co_manager via the second MSP. With the round-19
+	// fix this invalidates unconditionally — the next Resolve
+	// must observe the post-mutation branding.
 	rec = doMSPJSON(t, mux, http.MethodPost,
 		"/api/v1/msps/"+coMSP.ID.String()+"/tenants/"+tn.ID.String(),
 		handler.AssignTenantRequest{Relationship: string(repository.MSPRelationshipCoManager)})
@@ -1474,9 +1485,89 @@ func TestMSPHandler_AssignTenant_CoManagerDoesNotInvalidate(t *testing.T) {
 	}
 	var after handler.BrandingResponse
 	_ = json.NewDecoder(rec.Body).Decode(&after)
-	if after.LogoURL != "owner-v1" {
-		t.Fatalf("co_manager assign wrongly invalidated cache: logo = %q, want owner-v1 (cached)",
+	if after.LogoURL != "owner-v2" {
+		t.Fatalf("co_manager assign did not flush cache: logo = %q, want owner-v2 (post-mutation)",
 			after.LogoURL)
+	}
+}
+
+// TestMSPHandler_AssignTenant_DowngradeOwnerToCoManagerInvalidatesCache
+// pins the precise BUG_0001 fix from round-19. The repository's
+// AssignTenant correctly handles the owner→co_manager downgrade by
+// clearing tenants.msp_id (memory backend: msp.go:405-420; postgres
+// mirrors), but the handler's prior `rel == owner` gate skipped
+// invalidation for that path because the NEW relationship is
+// co_manager. Under that prior shape a cached branding entry
+// would keep serving the just-detached MSP's logo until TTL.
+//
+// Setup: tenant bound to MSP-A as owner. Prime cache → MSP-A's
+// branding. Then PATCH the same binding to co_manager (downgrade
+// on the same MSP). Repo clears tenants.msp_id back to NULL, so
+// branding resolves to platform defaults. The next Resolve must
+// observe platform branding, NOT the cached MSP-A branding.
+func TestMSPHandler_AssignTenant_DowngradeOwnerToCoManagerInvalidatesCache(t *testing.T) {
+	t.Parallel()
+	mux, msps, tenants, _ := setupMSPHandlerWithCachedBranding(t)
+	ctx := context.Background()
+
+	mspA, err := msps.Create(ctx, repository.MSP{
+		Name:     "A",
+		Slug:     "downgrade-a",
+		Branding: repository.MSPBranding{LogoURL: "a-logo"},
+	})
+	if err != nil {
+		t.Fatalf("seed msp a: %v", err)
+	}
+	tn, err := tenants.Create(ctx, repository.Tenant{
+		Name: "T", Slug: "t-downgrade-cache",
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+
+	// Establish the owner binding via the handler so all paths
+	// (including the post-assign invalidation) run as they would
+	// in production.
+	rec := doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+mspA.ID.String()+"/tenants/"+tn.ID.String(),
+		handler.AssignTenantRequest{Relationship: string(repository.MSPRelationshipOwner)})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("owner assign status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Prime the cache. Tenant resolves through mspA → "a-logo".
+	rec = doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prime resolve status = %d", rec.Code)
+	}
+	var primed handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&primed)
+	if primed.LogoURL != "a-logo" {
+		t.Fatalf("primed logo = %q, want a-logo", primed.LogoURL)
+	}
+
+	// Downgrade the SAME (msp,tenant) binding from owner to
+	// co_manager. The repo cascades by clearing tenants.msp_id.
+	// Without the round-19 fix the handler would skip invalidation
+	// here (rel == co_manager) and the cache would keep serving
+	// "a-logo" — that's the bug.
+	rec = doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+mspA.ID.String()+"/tenants/"+tn.ID.String(),
+		handler.AssignTenantRequest{Relationship: string(repository.MSPRelationshipCoManager)})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("downgrade assign status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doMSPJSON(t, mux, http.MethodGet,
+		"/api/v1/tenants/"+tn.ID.String()+"/branding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post-downgrade resolve status = %d", rec.Code)
+	}
+	var after handler.BrandingResponse
+	_ = json.NewDecoder(rec.Body).Decode(&after)
+	if after.LogoURL == "a-logo" {
+		t.Fatalf("downgrade owner→co_manager left stale cached logo (a-logo) — round-19 BUG_0001 regression")
 	}
 }
 

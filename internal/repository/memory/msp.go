@@ -279,7 +279,19 @@ func (r *MSPRepository) TransitionStatus(ctx context.Context, id uuid.UUID, to r
 	if !ok {
 		return repository.MSP{}, repository.ErrNotFound
 	}
-	if existing.Status == repository.MSPStatusDeleted {
+	// Defense-in-depth (round-19 of Devin Review on PR #42 —
+	// ANALYSIS_0002). Under the lifecycle invariant
+	// `(Status==Deleted ⇔ DeletedAt != nil)` the Status check is
+	// sufficient, but Update() checks BOTH predicates for parity
+	// against any hypothetical corrupt row (status='deleted'
+	// with deleted_at IS NULL, or vice versa — e.g. produced by
+	// a partial migration or a buggy admin tool). Mirror the
+	// belt-and-suspenders shape here so an internal caller using
+	// TransitionStatus observes the same refusal regardless of
+	// which side of the invariant the corruption manifests on.
+	// Matched by the postgres backend's `WHERE status <>
+	// 'deleted' AND deleted_at IS NULL` precondition.
+	if existing.Status == repository.MSPStatusDeleted || existing.DeletedAt != nil {
 		return repository.MSP{}, repository.ErrForbidden
 	}
 	existing.Status = to

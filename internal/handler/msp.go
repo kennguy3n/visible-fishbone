@@ -951,25 +951,42 @@ func (h *MSPHandler) assignTenant(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
-	// Owner-relationship assignments cascade by setting
-	// tenants.msp_id to the new MSP (memory backend:
-	// internal/repository/memory/msp.go:301-307; postgres backend
-	// mirrors this via the AssignTenant SQL). That changes the
-	// branding resolution chain for this tenant: a cached branding
-	// entry resolved before the binding would have used the old
-	// msp_id (or platform defaults if previously unbound) and would
-	// keep serving stale fields until TTL. Co-manager bindings do
-	// NOT touch tenants.msp_id (only the join row is inserted), so
-	// branding resolution is unaffected and we skip the invalidation
-	// for those — keeps the cache hit-rate high for the common case
-	// of attaching audit/read-only relationships. Round-9 of Devin
-	// Review caught this gap. We use Invalidate(tenantID) instead
-	// of InvalidateAll because we have the precise tenantID here
-	// (unlike the delete path which cascades across the unknown
-	// owned-tenant set); per-tenant flush is O(1) and minimises
-	// blast radius. InvalidateAll/Invalidate are both no-ops on
-	// the uncached production resolver.
-	if h.branding != nil && rel == repository.MSPRelationshipOwner {
+	// Branding cache invalidation. There are three relationship-
+	// transition shapes here that change the branding resolution
+	// chain for `tenantID`, and the handler does NOT have visibility
+	// into the prior binding's relationship without a pre-lookup
+	// (AssignTenant only returns the post-state binding):
+	//
+	//   1. NEW or REPLACE owner binding (no prior, or prior was owner
+	//      on a different MSP, or prior was co_manager on this MSP):
+	//      AssignTenant sets tenants.msp_id to mspID. → invalidate.
+	//   2. DOWNGRADE owner → co_manager (prior was owner on THIS
+	//      MSP; new relationship is co_manager): the repo correctly
+	//      clears tenants.msp_id (see
+	//      internal/repository/memory/msp.go:405-420 and postgres
+	//      mirror), so branding resolution changes from "this MSP's
+	//      branding" back to "platform defaults". → invalidate.
+	//      Round-19 of Devin Review on PR #42 (BUG_0001) caught
+	//      that the prior `rel == owner` gate missed this case.
+	//   3. NEW co_manager (no prior owner on THIS MSP): only the
+	//      join row is inserted, tenants.msp_id is unchanged, so
+	//      branding resolution is unaffected. → in theory we could
+	//      skip, but the handler has no way to distinguish (3) from
+	//      (2) without racing the pre-lookup against a concurrent
+	//      assign.
+	//
+	// We therefore invalidate unconditionally, mirroring the
+	// always-invalidate strategy used by UnassignTenant which has
+	// the same "can't tell prior relationship without a roundtrip"
+	// constraint. The cost is bounded — one O(1) cache eviction per
+	// call, no-op on the production uncached resolver. The
+	// correctness is strictly tighter than the relationship-gated
+	// alternative which had a documented gap (the downgrade path).
+	// We use Invalidate(tenantID) instead of InvalidateAll because
+	// the affected tenant is known precisely here; the delete path
+	// cascades across the unknown owned-tenant set and must use
+	// InvalidateAll.
+	if h.branding != nil {
 		h.branding.Invalidate(tenantID)
 	}
 	WriteJSON(w, http.StatusCreated, toBindingResponse(binding))

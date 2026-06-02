@@ -379,6 +379,60 @@ func TestMSPRepository_UpdateStatus_ResurrectionRejected(t *testing.T) {
 	}
 }
 
+// TestMSPRepository_TransitionStatus_RejectsCorruptDeletedAtRow
+// pins round-19 of Devin Review on PR #42 (ANALYSIS_0002). The
+// memory backend's TransitionStatus previously only checked
+// `existing.Status == MSPStatusDeleted` to refuse mutations on
+// a tombstoned row. Under the lifecycle invariant
+// `(Status==Deleted ⇔ DeletedAt != nil)` the Status check is
+// sufficient, but Update() defends against any hypothetical
+// corrupt row (status='deleted' with DeletedAt nil, OR
+// status='active' with DeletedAt stamped — produced e.g. by a
+// partial migration or a buggy admin tool that touched one
+// column without the other) by checking BOTH predicates.
+// TransitionStatus now mirrors that belt-and-suspenders shape
+// so it observes the same refusal regardless of which side of
+// the invariant the corruption manifests on. Postgres
+// TransitionStatus carries the matching SQL precondition `WHERE
+// status <> 'deleted' AND deleted_at IS NULL`.
+func TestMSPRepository_TransitionStatus_RejectsCorruptDeletedAtRow(t *testing.T) {
+	_, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+	msp := mustCreateMSP(t, mspRepo, "msp")
+
+	// Stamp DeletedAt while leaving Status='active' — a corrupt
+	// row violating the lifecycle invariant. There is no public
+	// API that can produce this; we surgically mutate the
+	// underlying store directly. This is the contract under
+	// test: TransitionStatus must refuse to mutate such a row.
+	mspRepo.s.mu.Lock()
+	row := mspRepo.s.msps[msp.ID]
+	stamped := mspRepo.s.clock()
+	row.DeletedAt = &stamped
+	mspRepo.s.msps[msp.ID] = row
+	mspRepo.s.mu.Unlock()
+
+	for _, to := range []repository.MSPStatus{
+		repository.MSPStatusActive,
+		repository.MSPStatusSuspended,
+	} {
+		if _, err := mspRepo.TransitionStatus(ctx, msp.ID, to); !errors.Is(err, repository.ErrForbidden) {
+			t.Fatalf("TransitionStatus(corrupt-deleted_at -> %s): want ErrForbidden, got %v", to, err)
+		}
+	}
+
+	// And the conventional path — Status=deleted with DeletedAt
+	// stamped, the legal tombstoned state — must also refuse.
+	mspRepo.s.mu.Lock()
+	row = mspRepo.s.msps[msp.ID]
+	row.Status = repository.MSPStatusDeleted
+	mspRepo.s.msps[msp.ID] = row
+	mspRepo.s.mu.Unlock()
+	if _, err := mspRepo.TransitionStatus(ctx, msp.ID, repository.MSPStatusActive); !errors.Is(err, repository.ErrForbidden) {
+		t.Fatalf("TransitionStatus(legal-deleted -> active): want ErrForbidden, got %v", err)
+	}
+}
+
 // TestMSPRepository_GetBySlug_FiltersSoftDeleted pins the
 // soft-delete filter on GetBySlug. After a soft-delete + slug
 // reuse cycle, two rows can share the same slug (Create only

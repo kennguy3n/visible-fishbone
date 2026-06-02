@@ -324,10 +324,24 @@ func (r *MSPRepository) TransitionStatus(ctx context.Context, id uuid.UUID, to r
 	default:
 		return repository.MSP{}, repository.ErrInvalidArgument
 	}
+	// Defense-in-depth (round-19 of Devin Review on PR #42 —
+	// ANALYSIS_0002). Under the lifecycle invariant `(status =
+	// 'deleted' ⇔ deleted_at IS NOT NULL)` the status check is
+	// sufficient, but Update()'s WHERE clause checks BOTH for
+	// parity against any hypothetical corrupt row (status =
+	// 'deleted' with deleted_at IS NULL, or vice versa — produced
+	// e.g. by a partial migration or a buggy admin tool that
+	// touched one column without the other). Mirror the
+	// belt-and-suspenders shape on TransitionStatus so callers
+	// observe the same refusal regardless of which side of the
+	// invariant the corruption manifests on. The matching memory
+	// backend at internal/repository/memory/msp.go now checks
+	// `existing.Status == Deleted || existing.DeletedAt != nil`
+	// for the same reason.
 	const q = `
 		UPDATE msps
 		SET status = $2
-		WHERE id = $1::uuid AND status <> 'deleted'
+		WHERE id = $1::uuid AND status <> 'deleted' AND deleted_at IS NULL
 		RETURNING ` + mspSelectColumns
 	out, err := scanMSP(r.s.pool.QueryRow(ctx, q, id, string(to)))
 	if err == nil {
