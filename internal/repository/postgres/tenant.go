@@ -16,23 +16,28 @@ import (
 type TenantRepository struct{ s *Store }
 
 const tenantSelectColumns = `
-	id, name, slug, status, COALESCE(region, ''), tier,
+	id, name, slug, msp_id, status, COALESCE(region, ''), tier,
 	settings, created_at, updated_at, deleted_at
 `
 
 func scanTenant(row pgx.Row) (repository.Tenant, error) {
 	var (
 		t       repository.Tenant
+		mspID   nullableUUID
 		region  string
 		setBuf  []byte
 		deleted *deletedAtScan
 	)
 	deleted = &deletedAtScan{}
 	if err := row.Scan(
-		&t.ID, &t.Name, &t.Slug, &t.Status, &region, &t.Tier,
+		&t.ID, &t.Name, &t.Slug, &mspID, &t.Status, &region, &t.Tier,
 		&setBuf, &t.CreatedAt, &t.UpdatedAt, deleted,
 	); err != nil {
 		return repository.Tenant{}, err
+	}
+	if mspID.Valid {
+		id := mspID.ID
+		t.MSPID = &id
 	}
 	t.Region = region
 	t.Settings = json.RawMessage(setBuf)
@@ -196,6 +201,23 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 	// `''` wire value and made it impossible to PATCH the
 	// optional Region column back to empty once it had been
 	// set — exactly the bug the round-4 review flagged.
+	// Soft-delete immutability guard. Round-26 of Devin Review on
+	// PR #42 (ANALYSIS_0006) flagged that this WHERE clause lacked
+	// the `status <> 'deleted' AND deleted_at IS NULL` predicate
+	// that MSPRepository.Update enforces at internal/repository/
+	// postgres/msp.go:294 — a PATCH on a soft-deleted tenant
+	// silently rewrote the tombstoned row's name/slug/region/tier/
+	// status/settings, bypassing the lifecycle invariant
+	// `(status='deleted' ⇔ deleted_at != NULL)`. The matching
+	// memory backend now rejects soft-deleted Updates with
+	// ErrForbidden (see internal/repository/memory/tenant.go:147).
+	// As with msp.go, the dual `status <> 'deleted' AND
+	// deleted_at IS NULL` predicate is defence-in-depth against a
+	// hypothetical corrupt row violating the invariant — under the
+	// invariant both halves are equivalent, but a corrupt row with
+	// only one half set would otherwise slip past exactly one of
+	// the backends. Returns ErrForbidden via the disambiguation
+	// query below when the row exists but is soft-deleted.
 	const q = `
 		UPDATE tenants
 		SET name     = CASE WHEN $2::text IS NULL THEN name     ELSE $2::text END,
@@ -204,7 +226,7 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 		    region   = CASE WHEN $5::text IS NULL THEN region   ELSE $5::text END,
 		    tier     = CASE WHEN $6::text IS NULL THEN tier     ELSE $6::text END,
 		    settings = CASE WHEN $7::jsonb IS NULL THEN settings ELSE $7::jsonb END
-		WHERE id = $1::uuid
+		WHERE id = $1::uuid AND status <> 'deleted' AND deleted_at IS NULL
 		RETURNING ` + tenantSelectColumns
 	var (
 		nameArg   any
@@ -246,7 +268,21 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 		id, nameArg, slugArg, statusArg, regionArg, tierArg, settings,
 	))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return repository.Tenant{}, repository.ErrNotFound
+		// Either the row doesn't exist (NotFound) or the row
+		// exists but is soft-deleted (Forbidden, per the
+		// round-26 ANALYSIS_0006 guard above). Mirrors the
+		// disambiguation MSPRepository.Update uses at
+		// internal/repository/postgres/msp.go:345-357 — one
+		// extra round-trip on the rare zero-rows-affected path
+		// to give callers the precise error.
+		var dummy uuid.UUID
+		if scanErr := r.s.pool.QueryRow(ctx, `SELECT id FROM tenants WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				return repository.Tenant{}, repository.ErrNotFound
+			}
+			return repository.Tenant{}, fmt.Errorf("update tenant lookup: %w", scanErr)
+		}
+		return repository.Tenant{}, repository.ErrForbidden
 	}
 	if isUniqueViolation(err) {
 		return repository.Tenant{}, repository.ErrConflict
@@ -260,26 +296,154 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 	return out, nil
 }
 
+// UpdateSettingsKey atomically merges `value` into the
+// tenants.settings JSONB document at top-level `key`. The
+// `jsonb_set` mutation is applied inside the same row UPDATE so
+// concurrent callers cannot lose updates the way a service-side
+// RMW (Get→unmarshal→merge→marshal→Update) could. Round-17 of
+// Devin Review on PR #42 (ANALYSIS_0003) flagged the lost-update
+// race that motivated this primitive. Returns ErrNotFound if the
+// row does not exist.
+func (r *TenantRepository) UpdateSettingsKey(ctx context.Context, id uuid.UUID, key string, value json.RawMessage) (repository.Tenant, error) {
+	if id == uuid.Nil {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	if key == "" {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	// Validate `value` is well-formed JSON before sending it to
+	// the database — a malformed payload would surface as a
+	// driver-level error and we want a clean ErrInvalidArgument.
+	if !json.Valid(value) {
+		return repository.Tenant{}, fmt.Errorf("update settings key %q: %w", key, repository.ErrInvalidArgument)
+	}
+	// jsonb_set with create_missing=true (the 4th arg, default
+	// true) inserts the key when the path does not exist; the
+	// COALESCE(settings, '{}'::jsonb) ensures we treat SQL NULL
+	// as an empty document rather than returning NULL.
+	//
+	// Soft-delete filter (round-21 of Devin Review on PR #42 —
+	// ANALYSIS_0002). The interface doc promises "Returns
+	// ErrNotFound if the row does not exist or has been
+	// soft-deleted." The prior WHERE clause was `WHERE id =
+	// $1::uuid` with no `deleted_at IS NULL` predicate, so a
+	// tombstoned tenant's JSONB document could be mutated by any
+	// caller that knew the (still-valid) UUID — and the
+	// silent-success response would convince the caller the write
+	// had landed on a live row. Add the predicate so the
+	// pgx.ErrNoRows path covers BOTH "no such id" and "id refers
+	// to a soft-deleted row", which the existing error mapping
+	// already collapses into ErrNotFound — matching the interface
+	// contract exactly. The check is against `deleted_at` (rather
+	// than `status`) because `deleted_at` is the canonical signal
+	// across the tenant lifecycle: TransitionStatus / Delete both
+	// stamp it, and the partial unique index
+	// `tenants_slug_uniq_idx WHERE deleted_at IS NULL` already
+	// keys off it.
+	const q = `
+		UPDATE tenants
+		SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), ARRAY[$2::text], $3::jsonb, true)
+		WHERE id = $1::uuid AND deleted_at IS NULL
+		RETURNING ` + tenantSelectColumns
+	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, key, []byte(value)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("update settings key %q: %w", key, err)
+	}
+	return out, nil
+}
+
+// DeleteSettingsKey atomically removes top-level `key` from
+// tenants.settings using the JSONB `-` operator. Same atomicity
+// guarantees as UpdateSettingsKey. A no-op for keys not present.
+func (r *TenantRepository) DeleteSettingsKey(ctx context.Context, id uuid.UUID, key string) (repository.Tenant, error) {
+	if id == uuid.Nil {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	if key == "" {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	// Soft-delete filter (round-21 of Devin Review on PR #42 —
+	// ANALYSIS_0002). Mirrors the matching guard on
+	// UpdateSettingsKey above: the interface contract is
+	// "ErrNotFound if the row does not exist or has been
+	// soft-deleted", so the WHERE clause filters tombstones via
+	// `deleted_at IS NULL`. See the upstream comment for the full
+	// rationale.
+	const q = `
+		UPDATE tenants
+		SET settings = COALESCE(settings, '{}'::jsonb) - $2::text
+		WHERE id = $1::uuid AND deleted_at IS NULL
+		RETURNING ` + tenantSelectColumns
+	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, key))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("delete settings key %q: %w", key, err)
+	}
+	return out, nil
+}
+
+// UpdateStatus mutates the tenant's status enum directly. Round-17
+// of Devin Review on PR #42 (ANALYSIS_0005) flagged that this
+// method could be used to resurrect a soft-deleted tenant
+// (`deleted` → `active`/`suspended`), which would break the
+// lifecycle invariant `(status='deleted' ⇔ deleted_at != NULL)`
+// because `deleted_at` would stay stamped on a now-active row and
+// the partial unique index `tenants_slug_uniq_idx WHERE deleted_at
+// IS NULL` would consider the resurrected row alongside any
+// post-deletion replacement, surfacing as a unique-constraint
+// violation on first write. The resurrection guard below rejects
+// any transition out of `deleted` with ErrForbidden; operators that
+// genuinely need to restore a tombstoned row must clear
+// `deleted_at` via a dedicated restore path (not yet exposed).
+// Idempotent self-transitions stay allowed (Delete→Delete) so
+// callers that already handle that case keep working.
+// TransitionStatus enforces the same invariant atomically for
+// callers that want to gate on a known prior status. The guard is
+// expressed as a WHERE predicate so the precondition and the
+// UPDATE land in the same SQL statement — a Get-then-Update pair
+// would have a TOCTOU window where a concurrent Delete could
+// tombstone the row between our checks.
 func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status repository.TenantStatus) (repository.Tenant, error) {
 	switch status {
 	case repository.TenantStatusActive, repository.TenantStatusSuspended, repository.TenantStatusDeleted:
 	default:
 		return repository.Tenant{}, repository.ErrInvalidArgument
 	}
+	// `status <> 'deleted' OR $2 = 'deleted'` is the resurrection
+	// guard: if the row is already deleted we only accept another
+	// transition to deleted (idempotent self-loop), and reject
+	// every other target with ErrForbidden via the follow-up
+	// lookup. See doc above for why this is wrong without the
+	// guard.
 	const q = `
 		UPDATE tenants
 		SET status     = $2,
 		    deleted_at = CASE WHEN $2 = 'deleted' THEN COALESCE(deleted_at, NOW()) ELSE deleted_at END
-		WHERE id = $1::uuid
+		WHERE id = $1::uuid AND (status <> 'deleted' OR $2 = 'deleted')
 		RETURNING ` + tenantSelectColumns
 	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, string(status)))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return repository.Tenant{}, repository.ErrNotFound
+	if err == nil {
+		return out, nil
 	}
-	if err != nil {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return repository.Tenant{}, fmt.Errorf("update status: %w", err)
 	}
-	return out, nil
+	// No row matched. Either the tenant does not exist (ErrNotFound)
+	// or it exists but is already deleted and the caller asked for
+	// a non-deleted target (ErrForbidden — resurrection rejected).
+	var dummy string
+	if scanErr := r.s.pool.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return repository.Tenant{}, repository.ErrNotFound
+		}
+		return repository.Tenant{}, fmt.Errorf("update status lookup: %w", scanErr)
+	}
+	return repository.Tenant{}, repository.ErrForbidden
 }
 
 func (r *TenantRepository) TransitionStatus(ctx context.Context, id uuid.UUID, from, to repository.TenantStatus) (repository.Tenant, error) {

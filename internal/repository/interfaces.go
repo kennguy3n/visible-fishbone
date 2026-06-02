@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -105,6 +106,24 @@ type TenantRepository interface {
 	// applies the value (including the zero value, which is how
 	// operators clear optional fields like Region).
 	Update(ctx context.Context, id uuid.UUID, patch TenantPatch) (Tenant, error)
+	// UpdateSettingsKey atomically merges a single top-level key
+	// into the tenants.settings JSONB document, preserving other
+	// keys verbatim. The caller passes the encoded value; the
+	// backend performs the merge inside the same row update so
+	// concurrent SetTenantBranding / ClearTenantBranding calls do
+	// not lose updates the way a Get→unmarshal→merge→marshal→Update
+	// pair could. The postgres backend uses `jsonb_set` on the row
+	// directly; the memory backend holds the store mutex across the
+	// RMW. Returns ErrNotFound if the row does not exist or has
+	// been soft-deleted. Round-17 of Devin Review on PR #42
+	// (ANALYSIS_0003) flagged the lost-update race on the previous
+	// service-side RMW.
+	UpdateSettingsKey(ctx context.Context, id uuid.UUID, key string, value json.RawMessage) (Tenant, error)
+	// DeleteSettingsKey atomically removes a single top-level key
+	// from the tenants.settings JSONB document, leaving other keys
+	// untouched. Same atomicity guarantees as UpdateSettingsKey. A
+	// no-op for keys that are not present.
+	DeleteSettingsKey(ctx context.Context, id uuid.UUID, key string) (Tenant, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status TenantStatus) (Tenant, error)
 	// TransitionStatus atomically changes the tenant status only if
 	// the current status matches `from`. Returns ErrForbidden if the
@@ -113,6 +132,15 @@ type TenantRepository interface {
 	// transitions like active->suspended or active->deleted; prefer
 	// it over a Get+UpdateStatus pair.
 	TransitionStatus(ctx context.Context, id uuid.UUID, from, to TenantStatus) (Tenant, error)
+	// Note: the denormalised `tenants.msp_id` column is maintained
+	// inline by MSPRepository.AssignTenant / UnassignTenant — the
+	// postgres path inside a single tx, the memory path under the
+	// shared store lock. A separate SetMSPOwner primitive was
+	// considered but rejected because (a) postgres SetMSPOwner
+	// would use the pool and commit out-of-band from the binding
+	// tx, breaking atomicity, and (b) memory SetMSPOwner would
+	// re-enter r.s.mu and deadlock. Keep this comment as the
+	// canonical reason future contributors should not add one.
 	Delete(ctx context.Context, id uuid.UUID) error
 }
 
@@ -743,4 +771,97 @@ type IntegrationDeliveryRepository interface {
 	// deliveries. processingTimeout governs the stuck-row recovery
 	// window; pass 0 to never re-claim.
 	ListPending(ctx context.Context, limit int, processingTimeout time.Duration) ([]IntegrationDelivery, error)
+}
+
+// --- MSP ------------------------------------------------------------------
+
+// MSPListFilter constrains the result set of MSPRepository.List
+// beyond what cursor pagination alone provides. The zero value is
+// the "operator default": soft-deleted rows are excluded so the
+// public list endpoint matches the lifecycle invariant exposed
+// elsewhere (deleted is terminal; deleted rows must not appear in
+// indexes or default UIs). Admin tools that need to inspect
+// tombstoned rows (e.g. for cleanup, audit, or restoration
+// tooling) opt in explicitly via IncludeDeleted=true. Round-17
+// of Devin Review on PR #42 flagged that the previous List
+// returned soft-deleted rows unconditionally.
+type MSPListFilter struct {
+	// IncludeDeleted controls whether rows whose status is
+	// 'deleted' (or whose deleted_at is non-NULL) are returned.
+	// Defaults to false. The two predicates are equivalent under
+	// the lifecycle invariant `(status='deleted' ⇔ deleted_at !=
+	// NULL)`; backends are free to use either or both.
+	IncludeDeleted bool
+}
+
+// MSPRepository owns the msps + msp_tenants tables. Like
+// TenantRepository, MSPRepository is platform-scoped — application
+// authorization (platform_admin sees all; msp_admin sees own row
+// only) decides who can call which methods. The repo just enforces
+// the storage invariants documented in migration 015.
+type MSPRepository interface {
+	Create(ctx context.Context, m MSP) (MSP, error)
+	Get(ctx context.Context, id uuid.UUID) (MSP, error)
+	GetBySlug(ctx context.Context, slug string) (MSP, error)
+	// List returns a cursor-paginated slice of MSPs matching the
+	// supplied filter. `filter.IncludeDeleted=false` excludes
+	// soft-deleted rows (the default and the operator-facing
+	// semantic); `true` returns all rows including tombstoned
+	// ones for admin / audit tools. Round-17 of Devin Review on
+	// PR #42 added the filter parameter — the previous signature
+	// `List(ctx, page)` always returned soft-deleted rows.
+	List(ctx context.Context, page Page, filter MSPListFilter) (PageResult[MSP], error)
+	// Update applies a sparse, explicit-clear PATCH (same
+	// semantics as TenantRepository.Update).
+	Update(ctx context.Context, id uuid.UUID, patch MSPPatch) (MSP, error)
+	UpdateStatus(ctx context.Context, id uuid.UUID, status MSPStatus) (MSP, error)
+	// TransitionStatus atomically updates the MSP status while
+	// refusing to mutate a soft-deleted row. The implementation
+	// performs the precondition check (current status != 'deleted')
+	// and the status write inside a single SQL statement (postgres)
+	// or under the shared store mutex (memory), eliminating the
+	// TOCTOU window present in a Get-then-UpdateStatus pair.
+	//
+	// `to` must be one of MSPStatusActive or MSPStatusSuspended;
+	// the terminal MSPStatusDeleted transition is owned by
+	// Delete() because it cascades the msp_tenants rows and
+	// tenants.msp_id pointer in the same transaction (see
+	// Delete docstring). Passing `to=MSPStatusDeleted` returns
+	// ErrInvalidArgument.
+	//
+	// Returns ErrForbidden if the row's current status is
+	// 'deleted' (lifecycle invariant: deleted is terminal),
+	// ErrNotFound if the MSP does not exist.
+	//
+	// This is the race-free building block introduced in round-13
+	// of Devin Review on PR #42 after a 🔴 BUG flagged that the
+	// handler's prior Get-check-UpdateStatus could be raced by a
+	// concurrent DELETE to produce a corrupt
+	// (status='active', deleted_at != NULL) row.
+	TransitionStatus(ctx context.Context, id uuid.UUID, to MSPStatus) (MSP, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+
+	// AssignTenant inserts (or updates) a msp_tenants row binding
+	// the tenant to this MSP with the given relationship. When
+	// relationship is Owner, also updates `tenants.msp_id` to
+	// point at this MSP and removes any previous owner binding
+	// (the partial UNIQUE index in migration 015 enforces at most
+	// one owner per tenant).
+	//
+	// Returns ErrNotFound if either the MSP or the tenant does
+	// not exist. The implementation runs the binding update and
+	// the tenants.msp_id update inside a single transaction so a
+	// crash mid-flow cannot leave the denormalised column out of
+	// sync with the join.
+	AssignTenant(ctx context.Context, mspID, tenantID uuid.UUID, relationship MSPRelationship, actor *uuid.UUID) (MSPTenantBinding, error)
+	// UnassignTenant removes the (msp, tenant) binding. If the
+	// binding was an Owner, also clears `tenants.msp_id`.
+	// Returns ErrNotFound if no binding exists.
+	UnassignTenant(ctx context.Context, mspID, tenantID uuid.UUID) error
+	// ListTenants returns every tenant binding for the MSP,
+	// ordered by binding creation time descending.
+	ListTenants(ctx context.Context, mspID uuid.UUID, page Page) (PageResult[MSPTenantBinding], error)
+	// ListBindings returns every msp_tenants row for a given
+	// tenant (an inverse lookup — "who manages this tenant?").
+	ListBindings(ctx context.Context, tenantID uuid.UUID) ([]MSPTenantBinding, error)
 }

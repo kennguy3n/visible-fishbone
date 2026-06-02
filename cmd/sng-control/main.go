@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
@@ -312,6 +314,7 @@ func buildRouter(
 	alertFeedbackRepo := store.NewAlertFeedbackRepository()
 	integrationConnectorRepo := store.NewIntegrationConnectorRepository()
 	integrationDeliveryRepo := store.NewIntegrationDeliveryRepository()
+	mspRepo := store.NewMSPRepository()
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -514,6 +517,25 @@ func buildRouter(
 		},
 		logger)
 
+	// --- MSP hierarchy wiring (Phase 3 Block 5) -----------------------
+	// The MSP service is just the repository — there is no
+	// business logic beyond what the repo already enforces.
+	// Bulk operations need narrow adapters around policy / site /
+	// identity services so the bulk package never imports their
+	// concrete types.
+	bulkPolicyApplier := policyTemplateApplierFunc(func(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, raw json.RawMessage) (repository.PolicyGraph, error) {
+		return policySvc.PutGraph(ctx, tenantID, actorID, raw)
+	})
+	bulkSiteProvisioner := siteProvisionerFunc(func(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, s repository.Site) (repository.Site, error) {
+		return siteSvc.Create(ctx, tenantID, actorID, s)
+	})
+	bulkTokenIssuer := claimTokenIssuerAdapter{identity: identitySvc}
+	bulkSvc := tenant.NewBulkService(
+		mspRepo, rbacSvc,
+		bulkPolicyApplier, bulkSiteProvisioner, bulkTokenIssuer,
+		logger, tenant.BulkOptions{})
+	brandingResolver := tenant.NewBrandingResolver(tenantRepo, mspRepo)
+
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:           cfg,
 		Logger:           logger,
@@ -531,6 +553,7 @@ func buildRouter(
 		Baseline:         handler.NewBaselineHandler(baselineRepo, logger),
 		Alert:            handler.NewAlertHandler(alertRouter, alertFeedback, logger),
 		Integrations:     handler.NewIntegrationHandler(integrationSvc),
+		MSP:              handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
 		APIKeyLookup:     apiKeySvc,
 		Health:           health,
 		OpenAPISpec:      handler.NewOpenAPIHandler(),
@@ -1104,4 +1127,42 @@ func hostnameForSyslog() string {
 		return "sng-control"
 	}
 	return h
+}
+
+// --- MSP bulk-operation adapters ------------------------------------
+//
+// The tenant.BulkService talks to small interfaces (PolicyTemplateApplier,
+// SiteProvisioner, ClaimTokenIssuer) so the bulk package never imports
+// the policy / site / identity packages directly. These adapters bridge
+// the concrete service methods to those interfaces.
+
+type policyTemplateApplierFunc func(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, raw json.RawMessage) (repository.PolicyGraph, error)
+
+func (f policyTemplateApplierFunc) PutGraph(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, raw json.RawMessage) (repository.PolicyGraph, error) {
+	return f(ctx, tenantID, actorID, raw)
+}
+
+type siteProvisionerFunc func(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, s repository.Site) (repository.Site, error)
+
+func (f siteProvisionerFunc) Create(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, s repository.Site) (repository.Site, error) {
+	return f(ctx, tenantID, actorID, s)
+}
+
+// claimTokenIssuerAdapter wraps *identity.Service so its
+// GenerateClaimToken (which returns identity.GenerateClaimTokenResult)
+// can satisfy tenant.ClaimTokenIssuer (which expects the slimmer
+// tenant.ClaimTokenResult).
+type claimTokenIssuerAdapter struct {
+	identity *identity.Service
+}
+
+func (a claimTokenIssuerAdapter) GenerateClaimToken(ctx context.Context, tenantID uuid.UUID, ttl time.Duration, createdBy *uuid.UUID) (tenant.ClaimTokenResult, error) {
+	res, err := a.identity.GenerateClaimToken(ctx, tenantID, ttl, createdBy)
+	if err != nil {
+		return tenant.ClaimTokenResult{}, err
+	}
+	return tenant.ClaimTokenResult{
+		Plaintext: res.Plaintext,
+		ExpiresAt: res.Token.ExpiresAt,
+	}, nil
 }

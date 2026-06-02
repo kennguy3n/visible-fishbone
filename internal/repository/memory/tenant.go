@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,9 +47,44 @@ func (r *TenantRepository) Create(ctx context.Context, t repository.Tenant) (rep
 	if t.Status == "" {
 		t.Status = repository.TenantStatusActive
 	}
+	// Defensive clone before storing so a caller mutating their
+	// own t.Settings slice after Create returns cannot corrupt the
+	// row we just persisted (the cloneJSON here owns the backing
+	// array on the stored row).
 	t.Settings = cloneJSON(t.Settings)
 	r.s.tenants[t.ID] = t
-	return t, nil
+	// Defensive clone on the way out so the returned value has
+	// independent backing arrays for Settings + freshly-allocated
+	// MSPID / DeletedAt pointers — matching the cloneTenant pattern
+	// applied to Get / GetBySlug / List / Update / UpdateStatus /
+	// TransitionStatus / Delete / UpdateSettingsKey /
+	// DeleteSettingsKey. Without this clone, a caller mutating the
+	// returned Tenant.Settings (e.g. `created.Settings[0]^=0xff`)
+	// would corrupt the in-memory store because both sides shared
+	// the post-cloneJSON backing array. Round-18 of Devin Review on
+	// PR #42 (ANALYSIS_0003) flagged the asymmetry vs every other
+	// write path on this repo.
+	return cloneTenant(t), nil
+}
+
+// cloneTenant returns a deep copy of the given tenant. All
+// pointer-typed fields (MSPID, DeletedAt) and the JSONB Settings
+// blob are allocated fresh so a caller mutating any field of the
+// returned value cannot corrupt the stored row. Centralising the
+// clone avoids the latent defensiveness gaps Devin Review flagged
+// where Get cloned Settings but left *uuid.UUID / *time.Time
+// pointers shared with the in-memory store.
+func cloneTenant(t repository.Tenant) repository.Tenant {
+	t.Settings = cloneJSON(t.Settings)
+	if t.MSPID != nil {
+		mspID := *t.MSPID
+		t.MSPID = &mspID
+	}
+	if t.DeletedAt != nil {
+		ts := *t.DeletedAt
+		t.DeletedAt = &ts
+	}
+	return t
 }
 
 func (r *TenantRepository) Get(ctx context.Context, id uuid.UUID) (repository.Tenant, error) {
@@ -60,8 +97,7 @@ func (r *TenantRepository) Get(ctx context.Context, id uuid.UUID) (repository.Te
 	if !ok {
 		return repository.Tenant{}, repository.ErrNotFound
 	}
-	t.Settings = cloneJSON(t.Settings)
-	return t, nil
+	return cloneTenant(t), nil
 }
 
 func (r *TenantRepository) GetBySlug(ctx context.Context, slug string) (repository.Tenant, error) {
@@ -72,8 +108,7 @@ func (r *TenantRepository) GetBySlug(ctx context.Context, slug string) (reposito
 	defer r.s.mu.RUnlock()
 	for _, t := range r.s.tenants {
 		if t.Slug == slug {
-			t.Settings = cloneJSON(t.Settings)
-			return t, nil
+			return cloneTenant(t), nil
 		}
 	}
 	return repository.Tenant{}, repository.ErrNotFound
@@ -87,8 +122,7 @@ func (r *TenantRepository) List(ctx context.Context, page repository.Page) (repo
 	defer r.s.mu.RUnlock()
 	all := make([]repository.Tenant, 0, len(r.s.tenants))
 	for _, t := range r.s.tenants {
-		t.Settings = cloneJSON(t.Settings)
-		all = append(all, t)
+		all = append(all, cloneTenant(t))
 	}
 	sorted := sortByCreatedAtDesc(all,
 		func(t repository.Tenant) time.Time { return t.CreatedAt },
@@ -109,6 +143,23 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 	existing, ok := r.s.tenants[id]
 	if !ok {
 		return repository.Tenant{}, repository.ErrNotFound
+	}
+	// Soft-delete immutability guard. Round-26 of Devin Review on
+	// PR #42 (ANALYSIS_0006) flagged the asymmetry with
+	// MSPRepository.Update — the MSP postgres + memory backends
+	// both reject a PATCH on a soft-deleted row with ErrForbidden
+	// (`status <> 'deleted' AND deleted_at IS NULL` on postgres,
+	// the matching predicate on memory). The tenant Update path
+	// did not — a tombstoned tenant's name/slug/region/tier/status/
+	// settings could be silently rewritten via PATCH even though
+	// the row was supposed to be terminal. UpdateSettingsKey /
+	// DeleteSettingsKey already guard against this (round-21
+	// ANALYSIS_0002); Update is the last remaining writer that
+	// bypassed the lifecycle invariant. Distinguishing ErrForbidden
+	// (row exists but is deleted) from ErrNotFound (row absent)
+	// mirrors the MSPRepository.Update contract.
+	if existing.DeletedAt != nil || existing.Status == repository.TenantStatusDeleted {
+		return repository.Tenant{}, repository.ErrForbidden
 	}
 	if patch.Slug != nil && *patch.Slug != "" && *patch.Slug != existing.Slug {
 		for otherID, other := range r.s.tenants {
@@ -141,11 +192,143 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 	}
 	existing.UpdatedAt = r.s.clock()
 	r.s.tenants[existing.ID] = existing
-	out := existing
-	out.Settings = cloneJSON(existing.Settings)
-	return out, nil
+	return cloneTenant(existing), nil
 }
 
+// UpdateSettingsKey atomically merges `value` into the tenants.settings
+// JSONB document at top-level `key`. The store mutex is held across
+// the unmarshal → mutate → marshal → write so concurrent callers
+// cannot lose updates the way a service-side RMW could. Round-17 of
+// Devin Review on PR #42 (ANALYSIS_0003) flagged the lost-update
+// race that motivated this primitive. Returns ErrNotFound if the
+// tenant row does not exist.
+func (r *TenantRepository) UpdateSettingsKey(ctx context.Context, id uuid.UUID, key string, value json.RawMessage) (repository.Tenant, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.Tenant{}, err
+	}
+	if key == "" {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	// Validate `value` is valid JSON before we hold the lock so a
+	// malformed payload from a buggy caller does not park inside
+	// the critical section.
+	if !json.Valid(value) {
+		return repository.Tenant{}, fmt.Errorf("update settings key %q: %w", key, repository.ErrInvalidArgument)
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.tenants[id]
+	if !ok {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	// Soft-delete filter (round-21 of Devin Review on PR #42 —
+	// ANALYSIS_0002). The interface doc on
+	// repository.TenantRepository.UpdateSettingsKey promises
+	// "Returns ErrNotFound if the row does not exist or has been
+	// soft-deleted." Both halves were missing from the prior
+	// implementation — a plain map lookup returned the tombstoned
+	// row and the merge would then write fresh keys into a
+	// soft-deleted tenant's JSONB document, leaking past the
+	// lifecycle invariant `(Status==Deleted ⇔ DeletedAt != nil)`.
+	// Callers today go through MountTenantScoped middleware which
+	// gates access, but the interface contract is broader than
+	// that path and any new internal caller (worker, migration,
+	// admin tool) must observe the documented behaviour. We check
+	// both predicates for defence-in-depth against any hypothetical
+	// corrupt row that violates the invariant.
+	if existing.DeletedAt != nil || existing.Status == repository.TenantStatusDeleted {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	settings := map[string]json.RawMessage{}
+	if len(existing.Settings) > 0 && string(existing.Settings) != "null" {
+		if err := json.Unmarshal(existing.Settings, &settings); err != nil {
+			return repository.Tenant{}, fmt.Errorf("update settings key %q: decode: %w", key, err)
+		}
+	}
+	settings[key] = append(json.RawMessage(nil), value...)
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("update settings key %q: encode: %w", key, err)
+	}
+	existing.Settings = encoded
+	existing.UpdatedAt = r.s.clock()
+	r.s.tenants[existing.ID] = existing
+	return cloneTenant(existing), nil
+}
+
+// DeleteSettingsKey atomically removes top-level `key` from
+// tenants.settings. Same atomicity guarantees as UpdateSettingsKey.
+// A no-op for keys not present.
+func (r *TenantRepository) DeleteSettingsKey(ctx context.Context, id uuid.UUID, key string) (repository.Tenant, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.Tenant{}, err
+	}
+	if key == "" {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.tenants[id]
+	if !ok {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	// Soft-delete filter (round-21 of Devin Review on PR #42 —
+	// ANALYSIS_0002). Mirrors the matching guard on
+	// UpdateSettingsKey: the interface contract is "ErrNotFound if
+	// the row does not exist or has been soft-deleted", so a
+	// tombstoned tenant's JSONB document is now unreachable via
+	// this primitive. See the matching guard upstream for the full
+	// rationale.
+	if existing.DeletedAt != nil || existing.Status == repository.TenantStatusDeleted {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if len(existing.Settings) == 0 || string(existing.Settings) == "null" {
+		// No settings document → key is unconditionally absent.
+		// Normalise the returned Settings to the empty-object
+		// literal `{}` so this backend matches the postgres
+		// behaviour, which `COALESCE(settings, '{}'::jsonb) -
+		// $2::text` resolves to `'{}'` at
+		// internal/repository/postgres/tenant.go:345-349.
+		// Round-26 of Devin Review on PR #42 (ANALYSIS_0002)
+		// flagged the cross-backend divergence: postgres
+		// surfaced `{}` while memory left the column nil/empty.
+		// Test suites and SDK clients that assert on the
+		// returned Settings shape would observe different
+		// values across backends; both mean "no settings" but
+		// the wire payload differed.
+		existing.Settings = json.RawMessage("{}")
+		existing.UpdatedAt = r.s.clock()
+		r.s.tenants[existing.ID] = existing
+		return cloneTenant(existing), nil
+	}
+	settings := map[string]json.RawMessage{}
+	if err := json.Unmarshal(existing.Settings, &settings); err != nil {
+		return repository.Tenant{}, fmt.Errorf("delete settings key %q: decode: %w", key, err)
+	}
+	delete(settings, key)
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("delete settings key %q: encode: %w", key, err)
+	}
+	existing.Settings = encoded
+	existing.UpdatedAt = r.s.clock()
+	r.s.tenants[existing.ID] = existing
+	return cloneTenant(existing), nil
+}
+
+// UpdateStatus mutates the tenant's status enum directly. Round-17
+// of Devin Review on PR #42 (ANALYSIS_0005) flagged that this
+// method could be used to resurrect a soft-deleted tenant
+// (`deleted` → `active`/`suspended`), which would break the
+// lifecycle invariant `(status='deleted' ⇔ deleted_at != NULL)`
+// because `deleted_at` would stay stamped on a now-active row. The
+// resurrection guard below rejects any transition out of `deleted`
+// with ErrForbidden; operators that genuinely need to restore a
+// tombstoned row must clear `deleted_at` via a dedicated restore
+// path (not yet exposed). Idempotent self-transitions stay allowed
+// (Delete→Delete) so callers that already handle that case keep
+// working. TransitionStatus enforces the same invariant atomically
+// for callers that want to gate on a known prior status.
 func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status repository.TenantStatus) (repository.Tenant, error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.Tenant{}, err
@@ -161,6 +344,10 @@ func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, statu
 	default:
 		return repository.Tenant{}, repository.ErrInvalidArgument
 	}
+	// Resurrection guard: deleted is terminal. See doc above.
+	if existing.Status == repository.TenantStatusDeleted && status != repository.TenantStatusDeleted {
+		return repository.Tenant{}, repository.ErrForbidden
+	}
 	existing.Status = status
 	existing.UpdatedAt = r.s.clock()
 	if status == repository.TenantStatusDeleted && existing.DeletedAt == nil {
@@ -168,9 +355,7 @@ func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, statu
 		existing.DeletedAt = &t
 	}
 	r.s.tenants[id] = existing
-	out := existing
-	out.Settings = cloneJSON(existing.Settings)
-	return out, nil
+	return cloneTenant(existing), nil
 }
 
 func (r *TenantRepository) TransitionStatus(ctx context.Context, id uuid.UUID, from, to repository.TenantStatus) (repository.Tenant, error) {
@@ -198,9 +383,7 @@ func (r *TenantRepository) TransitionStatus(ctx context.Context, id uuid.UUID, f
 		existing.DeletedAt = &t
 	}
 	r.s.tenants[id] = existing
-	out := existing
-	out.Settings = cloneJSON(existing.Settings)
-	return out, nil
+	return cloneTenant(existing), nil
 }
 
 // Delete soft-deletes a tenant atomically. Returns ErrForbidden if

@@ -102,6 +102,97 @@ func TestTenantRepository_UpdateStatusAndDelete(t *testing.T) {
 	}
 }
 
+// TestTenantRepository_WritePathsReturnFreshPointers pins the
+// cloneTenant invariant on all write paths (Update, UpdateStatus,
+// TransitionStatus). The returned struct must own fresh-allocated
+// DeletedAt and Settings backing memory so the caller can mutate
+// the result without corrupting in-store state. Prior to round-5
+// only the read paths cloned defensively; the write paths returned
+// the struct directly with the in-store pointers, which meant a
+// caller that wrote through `result.DeletedAt = nil` would silently
+// resurrect a tombstone.
+func TestTenantRepository_WritePathsReturnFreshPointers(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	settings := json.RawMessage(`{"k":"v"}`)
+	t1, err := repo.Create(ctx(), repository.Tenant{
+		Name:     "A",
+		Slug:     "wp",
+		Tier:     repository.TenantTierStarter,
+		Settings: settings,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// UpdateStatus(Deleted) populates DeletedAt; mutating the
+	// returned pointer must not be visible to a subsequent Get.
+	deleted, err := repo.UpdateStatus(ctx(), t1.ID, repository.TenantStatusDeleted)
+	if err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+	if deleted.DeletedAt == nil {
+		t.Fatalf("UpdateStatus(Deleted) did not set DeletedAt")
+	}
+	*deleted.DeletedAt = time.Time{}
+	deleted.Settings[0] = 'X'
+	got, err := repo.Get(ctx(), t1.ID)
+	if err != nil {
+		t.Fatalf("get after update status: %v", err)
+	}
+	if got.DeletedAt == nil || got.DeletedAt.IsZero() {
+		t.Errorf("caller mutation of UpdateStatus result leaked into store: %v", got.DeletedAt)
+	}
+	if string(got.Settings) != `{"k":"v"}` {
+		t.Errorf("caller mutation of UpdateStatus result.Settings leaked into store: %s", got.Settings)
+	}
+
+	// Update path on the soft-deleted row: must return
+	// ErrForbidden since round-26 added the soft-delete guard.
+	name := "Renamed"
+	_, err = repo.Update(ctx(), t1.ID, repository.TenantPatch{Name: &name})
+	if !errors.Is(err, repository.ErrForbidden) {
+		t.Fatalf("update on soft-deleted tenant: want ErrForbidden, got %v", err)
+	}
+}
+
+// TestTenantRepository_Update_ReturnsClonedSettings pins the
+// cloneTenant invariant on the Update write path. The returned
+// struct must own fresh-allocated Settings backing memory so the
+// caller can mutate the result without corrupting in-store state.
+// Separated from WritePathsReturnFreshPointers because that test
+// soft-deletes the tenant (which now blocks Update via the
+// round-26 immutability guard).
+func TestTenantRepository_Update_ReturnsClonedSettings(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	settings := json.RawMessage(`{"k":"v"}`)
+	t1, err := repo.Create(ctx(), repository.Tenant{
+		Name:     "B",
+		Slug:     "upclone",
+		Tier:     repository.TenantTierStarter,
+		Settings: settings,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rename := "Renamed"
+	updated, err := repo.Update(ctx(), t1.ID, repository.TenantPatch{Name: &rename})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if len(updated.Settings) > 0 {
+		updated.Settings[0] = 'Y'
+	}
+	got, err := repo.Get(ctx(), t1.ID)
+	if err != nil {
+		t.Fatalf("get after update: %v", err)
+	}
+	if string(got.Settings) != `{"k":"v"}` {
+		t.Errorf("caller mutation of Update result.Settings leaked into store: %s", got.Settings)
+	}
+}
+
 func TestTenantRepository_List_CursorPagination(t *testing.T) {
 	s := newStore(t)
 	repo := memory.NewTenantRepository(s)
@@ -558,5 +649,257 @@ func TestStore_ContextCancellation(t *testing.T) {
 	cancel()
 	if _, err := tr.Create(cctx, repository.Tenant{Name: "x", Slug: "x", Tier: repository.TenantTierStarter}); err == nil || !strings.Contains(err.Error(), "context") {
 		t.Errorf("cancelled context: want context.* error, got %v", err)
+	}
+}
+
+// TestTenantRepository_GetDeepCopiesPointerFields pins the round-4
+// fix on tenant.go: Get must allocate fresh *uuid.UUID (MSPID) and
+// *time.Time (DeletedAt) so a caller mutating either through the
+// returned struct cannot corrupt the stored row. The previous
+// implementation cloned Settings (the JSONB blob) but left both
+// pointer fields aliasing the in-memory store.
+func TestTenantRepository_GetDeepCopiesPointerFields(t *testing.T) {
+	s := newStore(t)
+	tenants := memory.NewTenantRepository(s)
+	msps := memory.NewMSPRepository(s)
+
+	tn, err := tenants.Create(ctx(), repository.Tenant{Name: "Acme", Slug: "acme-clone", Tier: repository.TenantTierStarter})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	m, err := msps.Create(ctx(), repository.MSP{Name: "Aperture", Slug: "aperture-clone"})
+	if err != nil {
+		t.Fatalf("create msp: %v", err)
+	}
+	if _, err := msps.AssignTenant(ctx(), m.ID, tn.ID, repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign tenant: %v", err)
+	}
+
+	// Drive the tenant into a soft-deleted state so DeletedAt is
+	// non-nil and we exercise that pointer too. UpdateStatus
+	// sets DeletedAt via the in-place store; the subsequent Get
+	// must hand back a fresh pointer.
+	if _, err := tenants.UpdateStatus(ctx(), tn.ID, repository.TenantStatusDeleted); err != nil {
+		t.Fatalf("soft-delete: %v", err)
+	}
+
+	got, err := tenants.Get(ctx(), tn.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.MSPID == nil {
+		t.Fatal("post-condition: MSPID nil; expected the bound MSP id")
+	}
+	if got.DeletedAt == nil {
+		t.Fatal("post-condition: DeletedAt nil; expected non-nil after soft-delete")
+	}
+
+	// Mutate the returned pointers' targets. If Get returned
+	// aliased pointers (the pre-fix behaviour), a subsequent
+	// Get would observe the mutation.
+	*got.MSPID = uuid.Nil
+	mutatedTs := got.DeletedAt.Add(24 * 365 * 100 * time.Hour) // +100y
+	*got.DeletedAt = mutatedTs
+
+	again, err := tenants.Get(ctx(), tn.ID)
+	if err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	if again.MSPID == nil || *again.MSPID != m.ID {
+		t.Fatalf("MSPID alias leaked: again.MSPID = %v, want %v (round-4 deep-copy fix)",
+			again.MSPID, m.ID)
+	}
+	if again.DeletedAt == nil || again.DeletedAt.Equal(mutatedTs) {
+		t.Fatalf("DeletedAt alias leaked: again.DeletedAt = %v, mutated copy = %v (round-4 deep-copy fix)",
+			again.DeletedAt, mutatedTs)
+	}
+}
+
+// TestTenantRepository_Create_ReturnsClonedSettingsNotSharedBackingArray
+// pins round-18 ANALYSIS_0003: memory.TenantRepository.Create must
+// clone its return value so a caller mutating the returned
+// Tenant.Settings cannot corrupt the stored row's backing array.
+// Every other write path on this repo (Get, GetBySlug, List,
+// Update, UpdateStatus, TransitionStatus, Delete,
+// UpdateSettingsKey, DeleteSettingsKey) clones via cloneTenant;
+// Create was asymmetric pre-round-18 and only cloned via cloneJSON
+// (which copies into the stored row but then returns the SAME
+// slice header — so caller and store shared the backing array).
+//
+// The behaviour we pin: mutating returned.Settings[i] must NOT
+// affect a subsequent Get of the same row.
+func TestTenantRepository_Create_ReturnsClonedSettingsNotSharedBackingArray(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	tenants := memory.NewTenantRepository(store)
+
+	settings := json.RawMessage(`{"theme":"dark","timezone":"UTC"}`)
+	created, err := tenants.Create(context.Background(), repository.Tenant{
+		Name:     "Acme",
+		Slug:     "acme-r18-clone",
+		Settings: settings,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if len(created.Settings) == 0 {
+		t.Fatalf("created.Settings is empty: %q", created.Settings)
+	}
+
+	// Mutate the returned slice. If Create returned a slice
+	// sharing a backing array with the stored row, this would
+	// corrupt the persisted Settings JSON.
+	original := append(json.RawMessage(nil), created.Settings...)
+	for i := range created.Settings {
+		created.Settings[i] = 'X'
+	}
+
+	got, err := tenants.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	// Stored row must still parse as the original JSON. We compare
+	// against `original` (captured before the mutation) rather
+	// than `settings` because cloneJSON normalises trailing-bytes.
+	if string(got.Settings) != string(original) {
+		t.Fatalf("got.Settings = %q, want %q — "+
+			"mutating Create's returned Settings corrupted the "+
+			"stored row's backing array (round-18 ANALYSIS_0003)",
+			got.Settings, original)
+	}
+	// Also exercise the input-side defence: mutating the caller's
+	// original settings argument after Create returns must NOT
+	// corrupt the stored row either. This pins the existing
+	// `t.Settings = cloneJSON(t.Settings)` pre-store guard.
+	for i := range settings {
+		settings[i] = 'Y'
+	}
+	stillSame, err := tenants.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("re-get-after-input-mutation: %v", err)
+	}
+	if string(stillSame.Settings) != string(original) {
+		t.Fatalf("stillSame.Settings = %q, want %q — "+
+			"mutating the caller's input Settings corrupted the "+
+			"stored row (the pre-store cloneJSON guard regressed)",
+			stillSame.Settings, original)
+	}
+}
+
+// TestTenantRepository_UpdateSettingsKey_RejectsSoftDeletedTenant
+// pins the round-21 fix for ANALYSIS_0002: the interface doc on
+// repository.TenantRepository.UpdateSettingsKey promises "Returns
+// ErrNotFound if the row does not exist or has been soft-deleted",
+// but neither backend enforced it before round-21. A caller that
+// knew a now-tombstoned tenant's UUID could otherwise mutate its
+// JSONB settings document, contradicting both the interface
+// contract and the lifecycle invariant. Both backends now add a
+// `deleted_at IS NULL` filter (postgres) / equivalent in-memory
+// check (this backend) so the documented behaviour is observable.
+func TestTenantRepository_UpdateSettingsKey_RejectsSoftDeletedTenant(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	tn, err := repo.Create(ctx(), repository.Tenant{Name: "Acme", Slug: "acme-r21-update-sk", Tier: repository.TenantTierStarter})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := repo.Delete(ctx(), tn.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	_, err = repo.UpdateSettingsKey(ctx(), tn.ID, "theme", json.RawMessage(`"dark"`))
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("UpdateSettingsKey on soft-deleted tenant: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestTenantRepository_DeleteSettingsKey_RejectsSoftDeletedTenant
+// is the delete-side twin of the UpdateSettingsKey test above.
+// Same rationale: the interface contract says ErrNotFound for
+// missing-or-soft-deleted, and the round-21 fix makes the contract
+// observable on both backends.
+func TestTenantRepository_DeleteSettingsKey_RejectsSoftDeletedTenant(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	tn, err := repo.Create(ctx(), repository.Tenant{
+		Name:     "Acme",
+		Slug:     "acme-r21-delete-sk",
+		Tier:     repository.TenantTierStarter,
+		Settings: json.RawMessage(`{"theme":"dark"}`),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := repo.Delete(ctx(), tn.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	_, err = repo.DeleteSettingsKey(ctx(), tn.ID, "theme")
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("DeleteSettingsKey on soft-deleted tenant: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestTenantRepository_Update_RejectsSoftDeletedTenant pins the
+// round-26 ANALYSIS_0006 fix: tenant Update must reject a PATCH
+// on a soft-deleted row with ErrForbidden (parity with MSP Update).
+func TestTenantRepository_Update_RejectsSoftDeletedTenant(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	tn, err := repo.Create(ctx(), repository.Tenant{
+		Name: "SoftDeletePatch",
+		Slug: "soft-del-patch",
+		Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := repo.Delete(ctx(), tn.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	name := "Patched"
+	_, err = repo.Update(ctx(), tn.ID, repository.TenantPatch{Name: &name})
+	if !errors.Is(err, repository.ErrForbidden) {
+		t.Fatalf("Update on soft-deleted tenant: want ErrForbidden, got %v", err)
+	}
+	// Verify the stored row was NOT mutated by the rejected PATCH.
+	got, err := repo.Get(ctx(), tn.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Name != "SoftDeletePatch" {
+		t.Errorf("name changed despite rejected patch: got %q", got.Name)
+	}
+}
+
+// TestTenantRepository_DeleteSettingsKey_NormalisesNilSettingsToEmptyObject
+// pins the round-26 ANALYSIS_0002 fix: DeleteSettingsKey on a
+// tenant with nil/empty Settings must normalise the returned
+// Settings to the empty JSON object `{}` (matching the postgres
+// COALESCE behaviour) instead of leaving it nil/empty.
+func TestTenantRepository_DeleteSettingsKey_NormalisesNilSettingsToEmptyObject(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	tn, err := repo.Create(ctx(), repository.Tenant{
+		Name: "NilSettings",
+		Slug: "nil-settings",
+		Tier: repository.TenantTierStarter,
+		// No Settings → stored as nil.
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	updated, err := repo.DeleteSettingsKey(ctx(), tn.ID, "nonexistent")
+	if err != nil {
+		t.Fatalf("DeleteSettingsKey: %v", err)
+	}
+	if string(updated.Settings) != "{}" {
+		t.Fatalf("Settings after DeleteSettingsKey on nil: want %q, got %q", "{}", string(updated.Settings))
+	}
+	// Verify stored row also sees the normalised value.
+	got, err := repo.Get(ctx(), tn.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if string(got.Settings) != "{}" {
+		t.Errorf("stored Settings: want %q, got %q", "{}", string(got.Settings))
 	}
 }

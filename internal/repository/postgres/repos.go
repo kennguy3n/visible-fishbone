@@ -96,6 +96,9 @@ func (s *Store) NewIntegrationDeliveryRepository() *IntegrationDeliveryRepositor
 	return &IntegrationDeliveryRepository{s: s}
 }
 
+// NewMSPRepository binds the Store to repository.MSPRepository.
+func (s *Store) NewMSPRepository() *MSPRepository { return &MSPRepository{s: s} }
+
 // Compile-time interface compliance asserts. Keeping these in this
 // file means a single grep tells us "did the postgres package
 // implement every interface?" without scanning eight files.
@@ -121,4 +124,5 @@ var (
 	_ repository.AlertFeedbackRepository        = (*AlertFeedbackRepository)(nil)
 	_ repository.IntegrationConnectorRepository = (*IntegrationConnectorRepository)(nil)
 	_ repository.IntegrationDeliveryRepository  = (*IntegrationDeliveryRepository)(nil)
+	_ repository.MSPRepository                  = (*MSPRepository)(nil)
 )
