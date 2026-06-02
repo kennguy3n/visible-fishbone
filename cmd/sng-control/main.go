@@ -568,13 +568,13 @@ func buildRouter(
 		logger, tenant.BulkOptions{})
 	brandingResolver := tenant.NewBrandingResolver(tenantRepo, mspRepo)
 
-	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, logger)
+	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), logger)
 
 	router := handler.NewRouter(handler.RouterDeps{
-		Config:           cfg,
-		Logger:           logger,
-		Tenants:          handler.NewTenantHandler(tenantSvc),
-		Sites:            handler.NewSiteHandler(siteSvc),
+		Config:  cfg,
+		Logger:  logger,
+		Tenants: handler.NewTenantHandler(tenantSvc),
+		Sites:   handler.NewSiteHandler(siteSvc),
 		Devices: func() *handler.DeviceHandler {
 			h := handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL)
 			h.SetEnrollmentService(enrollmentSvc)
@@ -617,7 +617,7 @@ func buildRouter(
 // buildAIHandler constructs the AI handler with an optional LLM
 // provider. When AI_LLM_ENDPOINT is not set, the service runs in
 // template-only mode and suggest-policy / troubleshoot return 503.
-func buildAIHandler(cfg *config.Config, policySvc *policy.Service, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
+func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
 	var llm aisvc.LLMProvider
 	if cfg.AI.Endpoint != "" {
 		llm = &aisvc.HTTPProvider{
@@ -643,7 +643,27 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, logger *slog.
 	// svc.SetSummarizer when ClickHouse becomes available
 	// (mirrors the policySimHandler.SetSimulator pattern).
 	svc := aisvc.New(llm, verifier, nil, aisvc.WithLogger(logger))
-	return handler.NewAIHandler(svc, logger), svc
+	h := handler.NewAIHandler(svc, logger)
+
+	// Enhanced AI capabilities (Tasks 67-71). The correlation, NL
+	// query, report, and threat-intel engines fall back to
+	// deterministic behaviour when no LLM is configured, so they are
+	// always wired. The guardrailed provider wraps a live LLM, so it
+	// is only wired when an endpoint is configured; its status
+	// endpoint returns 503 otherwise.
+	correlation := aisvc.NewCorrelationEngine(llm, aisvc.CorrelationConfig{})
+	nlQuery := aisvc.NewNLQueryEngine(llm)
+	reports := aisvc.NewReportEngine(llm)
+	// No external threat feed is configured by default; enrichment
+	// returns an empty (non-escalated) context until one is wired.
+	threatIntel := aisvc.NewThreatIntelEngine(nil)
+	var guardrails *aisvc.GuardrailedProvider
+	if llm != nil {
+		guardrails = aisvc.NewGuardrailedProvider(llm, aisvc.GuardrailConfig{}, logger)
+	}
+	h.SetEnhancedAI(correlation, nlQuery, reports, threatIntel, guardrails, correlationRepo)
+
+	return h, svc
 }
 
 // loadPolicyKeyWrapMaster resolves the AES-GCM master key from

@@ -111,5 +111,3 @@ func (r *AICorrelationRepository) UpdateStatus(ctx context.Context, tenantID, id
 	r.s.aiCorrelations[id] = c
 	return nil
 }
-
-

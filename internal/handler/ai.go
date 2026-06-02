@@ -21,11 +21,11 @@ type AIHandler struct {
 	logger *slog.Logger
 
 	// Enhanced AI capabilities (Tasks 67-71).
-	correlation    *ai.CorrelationEngine
-	nlQuery        *ai.NLQueryEngine
-	reports        *ai.ReportEngine
-	threatIntel    *ai.ThreatIntelEngine
-	guardrails     *ai.GuardrailedProvider
+	correlation     *ai.CorrelationEngine
+	nlQuery         *ai.NLQueryEngine
+	reports         *ai.ReportEngine
+	threatIntel     *ai.ThreatIntelEngine
+	guardrails      *ai.GuardrailedProvider
 	correlationRepo repository.AICorrelationRepository
 }
 

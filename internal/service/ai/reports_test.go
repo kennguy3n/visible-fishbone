@@ -94,10 +94,10 @@ func TestReportEngine_Generate_WithLLM(t *testing.T) {
 func TestReportEngine_TrendAnalysis(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name      string
-		current   int
-		previous  int
-		wantDir   string
+		name     string
+		current  int
+		previous int
+		wantDir  string
 	}{
 		{"stable-zero", 0, 0, "stable"},
 		{"degrading-from-zero", 10, 0, "degrading"},

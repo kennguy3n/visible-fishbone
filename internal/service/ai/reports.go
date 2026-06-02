@@ -11,16 +11,16 @@ import (
 // PostureReport is a security posture summary for a tenant over a
 // reporting period.
 type PostureReport struct {
-	TenantID        uuid.UUID             `json:"tenant_id"`
-	Period          ReportPeriod          `json:"period"`
-	Overview        PostureOverview       `json:"overview"`
-	Threats         PostureThreatSection  `json:"threats"`
-	PolicyHealth    PosturePolicyHealth   `json:"policy_health"`
+	TenantID        uuid.UUID            `json:"tenant_id"`
+	Period          ReportPeriod         `json:"period"`
+	Overview        PostureOverview      `json:"overview"`
+	Threats         PostureThreatSection `json:"threats"`
+	PolicyHealth    PosturePolicyHealth  `json:"policy_health"`
 	Recommendations []string             `json:"recommendations"`
-	Summary         string                `json:"summary,omitempty"`
-	GeneratedAt     time.Time             `json:"generated_at"`
-	AIGenerated     bool                  `json:"ai_generated"`
-	ModelID         string                `json:"model_id,omitempty"`
+	Summary         string               `json:"summary,omitempty"`
+	GeneratedAt     time.Time            `json:"generated_at"`
+	AIGenerated     bool                 `json:"ai_generated"`
+	ModelID         string               `json:"model_id,omitempty"`
 }
 
 // ReportPeriod defines the reporting window.
@@ -51,9 +51,9 @@ type ThreatEntry struct {
 
 // PosturePolicyHealth is the policy health section.
 type PosturePolicyHealth struct {
-	TotalPolicies   int     `json:"total_policies"`
-	ActivePolicies  int     `json:"active_policies"`
-	CoveragePct     float64 `json:"coverage_pct"`
+	TotalPolicies  int     `json:"total_policies"`
+	ActivePolicies int     `json:"active_policies"`
+	CoveragePct    float64 `json:"coverage_pct"`
 }
 
 // PostureInput is the structured data fed into the report engine.
@@ -62,14 +62,14 @@ type PostureInput struct {
 	TenantID uuid.UUID
 	Period   ReportPeriod
 
-	AlertsBySeverity  map[string]int
-	ResolvedAlerts    int
-	PrevPeriodAlerts  int
-	TopThreats        []ThreatEntry
-	TotalPolicies     int
-	ActivePolicies    int
-	TotalVerdicts     int
-	DenyVerdicts      int
+	AlertsBySeverity map[string]int
+	ResolvedAlerts   int
+	PrevPeriodAlerts int
+	TopThreats       []ThreatEntry
+	TotalPolicies    int
+	ActivePolicies   int
+	TotalVerdicts    int
+	DenyVerdicts     int
 }
 
 // ReportEngine generates security posture reports.

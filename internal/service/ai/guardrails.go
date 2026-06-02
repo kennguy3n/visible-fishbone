@@ -100,7 +100,7 @@ func NewGuardrailedProvider(inner LLMProvider, cfg GuardrailConfig, logger *slog
 
 	// Add default PII patterns.
 	defaultPatterns := []string{
-		`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b`,   // email
+		`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b`,      // email
 		`\b\d{3}-\d{2}-\d{4}\b`,                                      // SSN
 		`\b(?:\d{4}[- ]?){3}\d{4}\b`,                                 // credit card
 		`(?i)\b(?:api[_-]?key|secret|password|token)\s*[:=]\s*\S+\b`, // secrets

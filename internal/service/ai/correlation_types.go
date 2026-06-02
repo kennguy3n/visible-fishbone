@@ -52,14 +52,14 @@ type AlertInput struct {
 // CorrelationCluster is the output of the correlation engine: a
 // group of related alerts and a summary.
 type CorrelationCluster struct {
-	ID         uuid.UUID            `json:"id"`
-	TenantID   uuid.UUID            `json:"tenant_id"`
-	AlertIDs   []uuid.UUID          `json:"alert_ids"`
-	Summary    string               `json:"summary"`
-	Severity   string               `json:"severity"`
-	Status     string               `json:"status"`
+	ID         uuid.UUID              `json:"id"`
+	TenantID   uuid.UUID              `json:"tenant_id"`
+	AlertIDs   []uuid.UUID            `json:"alert_ids"`
+	Summary    string                 `json:"summary"`
+	Severity   string                 `json:"severity"`
+	Status     string                 `json:"status"`
 	Dimensions []CorrelationDimension `json:"dimensions"`
-	CreatedAt  time.Time            `json:"created_at"`
+	CreatedAt  time.Time              `json:"created_at"`
 }
 
 // CorrelationResult wraps the output of a full correlation run.

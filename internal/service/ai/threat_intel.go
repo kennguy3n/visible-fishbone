@@ -17,12 +17,12 @@ type ThreatFeedProvider interface {
 
 // IOCMatch represents a single IOC match from a threat feed.
 type IOCMatch struct {
-	Indicator   string  `json:"indicator"`
-	FeedName    string  `json:"feed_name,omitempty"`
-	ThreatType  string  `json:"threat_type"` // ip, domain, hash, url
-	ThreatActor string  `json:"threat_actor,omitempty"`
-	Campaign    string  `json:"campaign,omitempty"`
-	Confidence  float64 `json:"confidence"` // 0.0–1.0
+	Indicator   string    `json:"indicator"`
+	FeedName    string    `json:"feed_name,omitempty"`
+	ThreatType  string    `json:"threat_type"` // ip, domain, hash, url
+	ThreatActor string    `json:"threat_actor,omitempty"`
+	Campaign    string    `json:"campaign,omitempty"`
+	Confidence  float64   `json:"confidence"` // 0.0–1.0
 	LastSeen    time.Time `json:"last_seen,omitempty"`
 }
 
