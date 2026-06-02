@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -224,7 +225,7 @@ func (h *AIHandler) approveSuggestion(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Feedback string `json:"feedback"`
 	}
-	if r.ContentLength > 0 {
+	if r.ContentLength != 0 {
 		if !DecodeJSON(w, r, &req) {
 			return
 		}
@@ -237,9 +238,7 @@ func (h *AIHandler) approveSuggestion(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := h.reviewSvc.ApproveSuggestion(r.Context(), tenantID, id, *reviewerID, req.Feedback)
 	if err != nil {
-		h.logger.Error("ai: approve suggestion failed",
-			slog.String("error", err.Error()))
-		WriteError(w, http.StatusBadRequest, "invalid_transition", err.Error())
+		writeReviewError(w, h.logger, "approve", err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, updated)
@@ -262,7 +261,7 @@ func (h *AIHandler) rejectSuggestion(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Feedback string `json:"feedback"`
 	}
-	if r.ContentLength > 0 {
+	if r.ContentLength != 0 {
 		if !DecodeJSON(w, r, &req) {
 			return
 		}
@@ -275,9 +274,7 @@ func (h *AIHandler) rejectSuggestion(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := h.reviewSvc.RejectSuggestion(r.Context(), tenantID, id, *reviewerID, req.Feedback)
 	if err != nil {
-		h.logger.Error("ai: reject suggestion failed",
-			slog.String("error", err.Error()))
-		WriteError(w, http.StatusBadRequest, "invalid_transition", err.Error())
+		writeReviewError(w, h.logger, "reject", err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, updated)
@@ -333,6 +330,20 @@ func (h *AIHandler) getTighteningReport(w http.ResponseWriter, r *http.Request) 
 		TenantID: tenantID,
 	}
 	WriteJSON(w, http.StatusOK, report)
+}
+
+func writeReviewError(w http.ResponseWriter, logger *slog.Logger, action string, err error) {
+	switch {
+	case errors.Is(err, repository.ErrNotFound):
+		WriteError(w, http.StatusNotFound, "not_found", "suggestion not found")
+	case errors.Is(err, repository.ErrConflict):
+		WriteError(w, http.StatusConflict, "conflict", "concurrent status change")
+	case errors.Is(err, ai.ErrInvalidTransition):
+		WriteError(w, http.StatusBadRequest, "invalid_transition", err.Error())
+	default:
+		logger.Error("ai: "+action+" suggestion failed", slog.String("error", err.Error()))
+		WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+	}
 }
 
 func parseTimeRange(start, end string) (ai.TimeRange, error) {

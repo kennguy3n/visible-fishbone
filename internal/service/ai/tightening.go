@@ -60,6 +60,7 @@ func (s *TighteningService) Analyze(ctx context.Context, input AnalyzeInput) (Ti
 
 		if hits == 0 && rule.Verb == "allow" {
 			recs = append(recs, buildUnusedRecommendation(rule.ID, input.WindowDays, ruleRaw))
+			continue
 		}
 
 		if rule.Verb == "allow" && isBroadRule(ruleRaw) {
