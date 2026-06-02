@@ -321,16 +321,16 @@ func computeScore(checks []repository.CASBPostureCheck) int {
 	if len(checks) == 0 {
 		return 0
 	}
-	total := 0
+	healthTotal := 0
 	for _, c := range checks {
 		switch c.Status {
 		case repository.CASBPosturePass:
-			total += 100
+			healthTotal += 100
 		case repository.CASBPostureWarn:
-			total += 50
+			healthTotal += 50
 		}
 	}
-	return total / len(checks)
+	return 100 - healthTotal/len(checks)
 }
 
 func (svc *Service) logAudit(

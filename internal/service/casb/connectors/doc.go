@@ -18,20 +18,20 @@ type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// computePostureScore calculates a percentage-based score from
-// posture checks. pass=100%, warn=50%, fail=0%.
+// computePostureScore calculates a risk score from posture checks.
+// Higher values mean higher risk: fail=100, warn=50, pass=0.
 func computePostureScore(checks []casb.PostureCheck) int {
 	if len(checks) == 0 {
 		return 0
 	}
-	total := 0
+	healthTotal := 0
 	for _, c := range checks {
 		switch c.Status {
 		case casb.CheckStatusPass:
-			total += 100
+			healthTotal += 100
 		case casb.CheckStatusWarn:
-			total += 50
+			healthTotal += 50
 		}
 	}
-	return total / len(checks)
+	return 100 - healthTotal/len(checks)
 }
