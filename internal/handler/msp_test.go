@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,6 +76,9 @@ func (s repoMSPService) Update(ctx context.Context, id uuid.UUID, patch reposito
 }
 func (s repoMSPService) UpdateStatus(ctx context.Context, id uuid.UUID, st repository.MSPStatus) (repository.MSP, error) {
 	return s.repo.UpdateStatus(ctx, id, st)
+}
+func (s repoMSPService) TransitionStatus(ctx context.Context, id uuid.UUID, to repository.MSPStatus) (repository.MSP, error) {
+	return s.repo.TransitionStatus(ctx, id, to)
 }
 func (s repoMSPService) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repo.Delete(ctx, id)
@@ -2387,5 +2393,236 @@ func TestMSPHandler_BulkProvisionSites_RejectsEmptyName(t *testing.T) {
 	if !strings.Contains(body.Error.Message, "name") {
 		t.Fatalf("error.message = %q, want a message mentioning 'name'",
 			body.Error.Message)
+	}
+}
+
+// TestMSPHandler_SetStatus_ResurrectionGuard_NoTOCTOU pins the
+// round-13 🔴 BUG fix: the resurrection guard must be atomic with
+// the status write. The original Get-then-check-then-UpdateStatus
+// pattern (round-12) had a TOCTOU window — a concurrent
+// Delete landing between Get (seeing status='active') and
+// UpdateStatus (writing 'active' over a freshly stamped deleted_at)
+// would land a corrupt (status='active', deleted_at != NULL) row.
+// The fix pushes the precondition into the SQL: an atomic
+// `UPDATE msps SET status=$2 WHERE id=$1 AND status <> 'deleted'`
+// (TransitionStatus on the repository). When the precondition
+// fails, the handler must surface 403 Forbidden.
+//
+// This test pins the lifecycle invariant under contention: 16
+// concurrent goroutines, each racing a POST .../status=active
+// against the canonical Delete path. Either:
+//   - the Delete wins → POST .../status=active sees 'deleted' and
+//     returns 403 (no resurrection); OR
+//   - the POST wins on a not-yet-deleted row → returns 200 and
+//     Delete then sees 'active' and succeeds.
+//
+// What MUST NOT happen: status='active' && deleted_at != NULL.
+// The final invariant assertion validates this.
+func TestMSPHandler_SetStatus_ResurrectionGuard_NoTOCTOU(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+
+	const races = 32
+	for i := 0; i < races; i++ {
+		slug := fmt.Sprintf("acme-toctou-%d", i)
+		m, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: slug})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = doMSPJSON(t, mux, http.MethodPost,
+				"/api/v1/msps/"+m.ID.String()+"/status",
+				handler.MSPStatusRequest{Status: string(repository.MSPStatusActive)})
+		}()
+		go func() {
+			defer wg.Done()
+			_ = doMSPJSON(t, mux, http.MethodDelete,
+				"/api/v1/msps/"+m.ID.String(), nil)
+		}()
+		wg.Wait()
+
+		final, err := msps.Get(ctx, m.ID)
+		if err != nil {
+			t.Fatalf("get after race iter=%d: %v", i, err)
+		}
+		// Lifecycle invariant: (status='deleted' ⇔ deleted_at != NULL).
+		// The atomic TransitionStatus ensures this holds even under
+		// contention with Delete.
+		if final.Status == repository.MSPStatusDeleted && final.DeletedAt == nil {
+			t.Fatalf("iter=%d: status='deleted' but DeletedAt=nil — invariant violated", i)
+		}
+		if final.Status != repository.MSPStatusDeleted && final.DeletedAt != nil {
+			t.Fatalf("iter=%d: status=%q but DeletedAt=%v — CORRUPT (race produced resurrection)",
+				i, final.Status, final.DeletedAt)
+		}
+	}
+}
+
+// TestMSPRepository_TransitionStatus_AtomicReject pins the
+// repository-level atomic primitive. Calling TransitionStatus on a
+// soft-deleted MSP must return ErrForbidden without mutating the
+// row. The handler relies on this to surface the resurrection
+// guard correctly; this test pins the guarantee at the repo
+// boundary so a future internal caller bypassing the handler
+// still cannot resurrect via this method.
+func TestMSPRepository_TransitionStatus_AtomicReject(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	ctx := context.Background()
+	m, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-rep-transition"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := msps.Delete(ctx, m.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	// Soft-deleted row must reject every non-deleted target.
+	for _, target := range []repository.MSPStatus{
+		repository.MSPStatusActive,
+		repository.MSPStatusSuspended,
+	} {
+		_, err := msps.TransitionStatus(ctx, m.ID, target)
+		if !errors.Is(err, repository.ErrForbidden) {
+			t.Fatalf("TransitionStatus(%q) on deleted MSP = %v, want ErrForbidden",
+				target, err)
+		}
+	}
+
+	// `to=deleted` is rejected with ErrInvalidArgument — the
+	// terminal transition is owned by Delete().
+	_, err = msps.TransitionStatus(ctx, m.ID, repository.MSPStatusDeleted)
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("TransitionStatus(deleted) = %v, want ErrInvalidArgument", err)
+	}
+
+	// Missing MSP returns ErrNotFound (not ErrForbidden).
+	_, err = msps.TransitionStatus(ctx, uuid.New(), repository.MSPStatusActive)
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("TransitionStatus(missing) = %v, want ErrNotFound", err)
+	}
+
+	// Verify the deleted row is still deleted (no silent mutation).
+	final, err := msps.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if final.Status != repository.MSPStatusDeleted || final.DeletedAt == nil {
+		t.Fatalf("after rejected transition: status=%q, DeletedAt=%v — invariant violated",
+			final.Status, final.DeletedAt)
+	}
+}
+
+// TestMSPRepository_TransitionStatus_AtomicAccept pins the
+// non-terminal happy path. A non-deleted MSP must accept
+// active <-> suspended transitions.
+func TestMSPRepository_TransitionStatus_AtomicAccept(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	ctx := context.Background()
+	m, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-rep-accept"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	suspended, err := msps.TransitionStatus(ctx, m.ID, repository.MSPStatusSuspended)
+	if err != nil {
+		t.Fatalf("active -> suspended: %v", err)
+	}
+	if suspended.Status != repository.MSPStatusSuspended {
+		t.Fatalf("status = %q, want suspended", suspended.Status)
+	}
+	if suspended.DeletedAt != nil {
+		t.Fatalf("DeletedAt = %v, want nil (no terminal cascade)", suspended.DeletedAt)
+	}
+
+	active, err := msps.TransitionStatus(ctx, m.ID, repository.MSPStatusActive)
+	if err != nil {
+		t.Fatalf("suspended -> active: %v", err)
+	}
+	if active.Status != repository.MSPStatusActive {
+		t.Fatalf("status = %q, want active", active.Status)
+	}
+}
+
+// TestMSPRepository_Update_RejectsSoftDeleted pins the round-13 🚩
+// fix: PATCH on a soft-deleted MSP must return ErrForbidden, not
+// silently mutate the row. The handler resurrection guard
+// already protects status transitions; the Update method now
+// enforces the same lifecycle invariant for ANY column
+// (name/slug/branding/settings) via the
+// `WHERE deleted_at IS NULL` clause on postgres and the
+// `existing.Status == MSPStatusDeleted` guard on memory.
+func TestMSPRepository_Update_RejectsSoftDeleted(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	msps := memory.NewMSPRepository(store)
+	ctx := context.Background()
+	m, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-rep-immutable"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := msps.Delete(ctx, m.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	newName := "Renamed"
+	_, err = msps.Update(ctx, m.ID, repository.MSPPatch{Name: &newName})
+	if !errors.Is(err, repository.ErrForbidden) {
+		t.Fatalf("Update on deleted MSP = %v, want ErrForbidden", err)
+	}
+
+	// Sanity: the row was not mutated.
+	final, err := msps.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if final.Name != "Acme" {
+		t.Fatalf("name = %q, want %q (Update must be rejected, not silently applied)",
+			final.Name, "Acme")
+	}
+	if final.Status != repository.MSPStatusDeleted {
+		t.Fatalf("status = %q, want %q", final.Status, repository.MSPStatusDeleted)
+	}
+}
+
+// TestMSPHandler_Patch_RejectsSoftDeleted pins the round-13 🚩
+// fix at the handler boundary. PATCH on a soft-deleted MSP must
+// surface 403 Forbidden via WriteRepositoryError's mapping of
+// ErrForbidden.
+func TestMSPHandler_Patch_RejectsSoftDeleted(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+	m, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-handler-immutable"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := msps.Delete(ctx, m.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	newName := "Renamed"
+	rec := doMSPJSON(t, mux, http.MethodPatch,
+		"/api/v1/msps/"+m.ID.String(),
+		handler.MSPPatchRequest{Name: &newName})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("PATCH on deleted: status = %d body=%s, want 403 — "+
+			"soft-deleted MSPs are immutable",
+			rec.Code, rec.Body.String())
+	}
+
+	final, err := msps.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if final.Name != "Acme" {
+		t.Fatalf("name = %q, want unchanged 'Acme'", final.Name)
 	}
 }

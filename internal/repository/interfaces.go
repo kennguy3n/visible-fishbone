@@ -770,6 +770,30 @@ type MSPRepository interface {
 	// semantics as TenantRepository.Update).
 	Update(ctx context.Context, id uuid.UUID, patch MSPPatch) (MSP, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status MSPStatus) (MSP, error)
+	// TransitionStatus atomically updates the MSP status while
+	// refusing to mutate a soft-deleted row. The implementation
+	// performs the precondition check (current status != 'deleted')
+	// and the status write inside a single SQL statement (postgres)
+	// or under the shared store mutex (memory), eliminating the
+	// TOCTOU window present in a Get-then-UpdateStatus pair.
+	//
+	// `to` must be one of MSPStatusActive or MSPStatusSuspended;
+	// the terminal MSPStatusDeleted transition is owned by
+	// Delete() because it cascades the msp_tenants rows and
+	// tenants.msp_id pointer in the same transaction (see
+	// Delete docstring). Passing `to=MSPStatusDeleted` returns
+	// ErrInvalidArgument.
+	//
+	// Returns ErrForbidden if the row's current status is
+	// 'deleted' (lifecycle invariant: deleted is terminal),
+	// ErrNotFound if the MSP does not exist.
+	//
+	// This is the race-free building block introduced in round-13
+	// of Devin Review on PR #42 after a 🔴 BUG flagged that the
+	// handler's prior Get-check-UpdateStatus could be raced by a
+	// concurrent DELETE to produce a corrupt
+	// (status='active', deleted_at != NULL) row.
+	TransitionStatus(ctx context.Context, id uuid.UUID, to MSPStatus) (MSP, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 
 	// AssignTenant inserts (or updates) a msp_tenants row binding

@@ -209,6 +209,16 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 	// Same sparse explicit-clear PATCH shape as
 	// TenantRepository.Update: nil arg → keep, non-nil arg → set
 	// to value (including zero).
+	//
+	// Soft-delete immutability: the `AND deleted_at IS NULL` guard
+	// refuses any PATCH against a soft-deleted row. Round-13 of
+	// Devin Review on PR #42 flagged the previous behaviour
+	// (silently mutating a soft-deleted MSP) as 🚩 inconsistent
+	// with the resurrection guard the handler already enforces on
+	// status transitions — both code paths now treat 'deleted' as
+	// the terminal lifecycle state. Distinguishing ErrForbidden
+	// (row exists but is deleted) from ErrNotFound (row absent)
+	// requires the secondary lookup below on zero rows affected.
 	const q = `
 		UPDATE msps
 		SET name     = CASE WHEN $2::text IS NULL THEN name     ELSE $2::text END,
@@ -216,7 +226,7 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 		    status   = CASE WHEN $4::text IS NULL THEN status   ELSE $4::text END,
 		    branding = CASE WHEN $5::jsonb IS NULL THEN branding ELSE $5::jsonb END,
 		    settings = CASE WHEN $6::jsonb IS NULL THEN settings ELSE $6::jsonb END
-		WHERE id = $1::uuid
+		WHERE id = $1::uuid AND deleted_at IS NULL
 		RETURNING ` + mspSelectColumns
 	var (
 		nameArg     any
@@ -252,7 +262,18 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 		id, nameArg, slugArg, statusArg, brandingArg, settingsArg,
 	))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return repository.MSP{}, repository.ErrNotFound
+		// Either the row doesn't exist (NotFound) or the row exists
+		// but is soft-deleted (Forbidden — soft-delete immutability
+		// guard, round-13). One extra round-trip to disambiguate;
+		// rare path so cost is acceptable.
+		var dummy uuid.UUID
+		if scanErr := r.s.pool.QueryRow(ctx, `SELECT id FROM msps WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				return repository.MSP{}, repository.ErrNotFound
+			}
+			return repository.MSP{}, fmt.Errorf("update msp lookup: %w", scanErr)
+		}
+		return repository.MSP{}, repository.ErrForbidden
 	}
 	if isUniqueViolation(err) {
 		return repository.MSP{}, repository.ErrConflict
@@ -264,6 +285,48 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 		return repository.MSP{}, fmt.Errorf("update msp: %w", err)
 	}
 	return out, nil
+}
+
+// TransitionStatus atomically updates the MSP status while refusing
+// to mutate a soft-deleted row. The single UPDATE statement carries
+// the precondition (`status <> 'deleted'`) in its WHERE clause,
+// eliminating the TOCTOU window present in a Get-then-UpdateStatus
+// pair (round-13 of Devin Review on PR #42 — BUG_0001).
+//
+// `to` is restricted to MSPStatusActive or MSPStatusSuspended; the
+// terminal MSPStatusDeleted transition is owned by Delete() because
+// it cascades msp_tenants + tenants.msp_id in the same transaction.
+//
+// On zero rows affected we run a follow-up existence check to
+// distinguish ErrForbidden (row exists but is deleted) from
+// ErrNotFound (row absent). Rare path so the extra round-trip is
+// acceptable.
+func (r *MSPRepository) TransitionStatus(ctx context.Context, id uuid.UUID, to repository.MSPStatus) (repository.MSP, error) {
+	switch to {
+	case repository.MSPStatusActive, repository.MSPStatusSuspended:
+	default:
+		return repository.MSP{}, repository.ErrInvalidArgument
+	}
+	const q = `
+		UPDATE msps
+		SET status = $2
+		WHERE id = $1::uuid AND status <> 'deleted'
+		RETURNING ` + mspSelectColumns
+	out, err := scanMSP(r.s.pool.QueryRow(ctx, q, id, string(to)))
+	if err == nil {
+		return out, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return repository.MSP{}, fmt.Errorf("transition msp status: %w", err)
+	}
+	var dummy string
+	if scanErr := r.s.pool.QueryRow(ctx, `SELECT status FROM msps WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return repository.MSP{}, repository.ErrNotFound
+		}
+		return repository.MSP{}, fmt.Errorf("transition msp status lookup: %w", scanErr)
+	}
+	return repository.MSP{}, repository.ErrForbidden
 }
 
 func (r *MSPRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status repository.MSPStatus) (repository.MSP, error) {

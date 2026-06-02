@@ -31,14 +31,24 @@ const DefaultBrandingCacheMaxEntries = 1024
 
 // BrandingCacheOptions tunes the in-process cache that
 // BrandingResolver maintains in front of the tenant + msp
-// repositories. The zero value disables caching (every Resolve
-// hits both repos). See NewBrandingResolverWithCache for the
-// caching constructor; NewBrandingResolver remains uncached for
-// callers that prefer to defer to an external cache layer.
+// repositories. The zero value applies the package defaults
+// (DefaultBrandingCacheTTL + DefaultBrandingCacheMaxEntries) —
+// passing BrandingCacheOptions{} to NewBrandingResolverWithCache
+// yields a cached resolver with a 30s TTL. To bypass caching
+// entirely (e.g. when the caller owns its own cache layer), use
+// NewBrandingResolver, or pass a negative TTL to the cached
+// constructor. Round-13 of Devin Review on PR #42 flagged the
+// previous "zero disables caching" wording as a doc/code
+// mismatch: the constructor has always treated zero as
+// "use default" and only `<0` as "disable", matching Go's
+// usual zero-value-is-useful idiom.
 type BrandingCacheOptions struct {
 	// TTL bounds staleness for entries that have not been
 	// invalidated by a local SetTenantBranding /
-	// ClearTenantBranding call. Zero disables caching entirely.
+	// ClearTenantBranding call. Zero falls back to
+	// DefaultBrandingCacheTTL; a negative value disables
+	// caching entirely (NewBrandingResolverWithCache returns
+	// an uncached resolver equivalent to NewBrandingResolver).
 	TTL time.Duration
 	// MaxEntries is the cache cap; zero defaults to
 	// DefaultBrandingCacheMaxEntries.

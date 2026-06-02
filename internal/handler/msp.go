@@ -52,6 +52,14 @@ type MSPService interface {
 	List(ctx context.Context, page repository.Page) (repository.PageResult[repository.MSP], error)
 	Update(ctx context.Context, id uuid.UUID, patch repository.MSPPatch) (repository.MSP, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status repository.MSPStatus) (repository.MSP, error)
+	// TransitionStatus is the race-free building block for the
+	// active <-> suspended transitions on POST .../status. The
+	// repository's atomic SQL precondition (`WHERE status <>
+	// 'deleted'`) closes the TOCTOU window present in a
+	// Get-then-UpdateStatus pair (round-13 of Devin Review on
+	// PR #42 — BUG_0001). The handler must NOT call this for
+	// `to=deleted`; that transition is owned by Delete().
+	TransitionStatus(ctx context.Context, id uuid.UUID, to repository.MSPStatus) (repository.MSP, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	AssignTenant(ctx context.Context, mspID, tenantID uuid.UUID, relationship repository.MSPRelationship, actor *uuid.UUID) (repository.MSPTenantBinding, error)
 	UnassignTenant(ctx context.Context, mspID, tenantID uuid.UUID) error
@@ -625,12 +633,13 @@ func (h *MSPHandler) setStatus(w http.ResponseWriter, r *http.Request) {
 	// Resurrection guard: refuse to transition a soft-deleted MSP
 	// back to active/suspended. Both repository backends'
 	// UpdateStatus methods write the status column unconditionally
-	// (memory: internal/repository/memory/msp.go:194; postgres:
-	// internal/repository/postgres/msp.go:275-280 — the SQL CASE
-	// only stamps deleted_at on `$2 = 'deleted'` and never CLEARS
-	// it on the reverse arm), so without this guard a client could
-	// POST `{"status":"active"}` to a soft-deleted MSP and produce
-	// a corrupt row:
+	// (memory: internal/repository/memory/msp.go:206; postgres:
+	// internal/repository/postgres/msp.go SET status=$2,
+	// deleted_at=CASE WHEN ... — the SQL CASE only stamps
+	// deleted_at on `$2 = 'deleted'` and never CLEARS it on the
+	// reverse arm), so without this guard a client could POST
+	// `{"status":"active"}` to a soft-deleted MSP and produce a
+	// corrupt row:
 	//
 	//   * status='active' but deleted_at != NULL — violates the
 	//     `(status='deleted' ⇔ deleted_at != NULL)` lifecycle
@@ -647,24 +656,29 @@ func (h *MSPHandler) setStatus(w http.ResponseWriter, r *http.Request) {
 	//
 	// `deleted` is the terminal state of the MSP lifecycle. Round-12
 	// of Devin Review on PR #42 caught the missing guard as
-	// BUG_0001. To create a new MSP after a deletion, callers must
-	// `POST /api/v1/msps` with a new slug — the partial unique
-	// index intentionally allows slug reuse only when the prior row
-	// is soft-deleted, but the resurrection path was never the
-	// intended way to recycle an identifier.
-	existing, err := h.msps.Get(r.Context(), id)
+	// BUG_0001, and round-13 followed up with a 🔴 TOCTOU report
+	// on the original Get-then-check-then-UpdateStatus pattern: a
+	// concurrent DELETE could land between Get (seeing
+	// status='active') and UpdateStatus (writing 'active' over a
+	// stamped deleted_at), reintroducing the corrupt state the
+	// guard was meant to prevent. The fix is to push the
+	// precondition INTO the SQL statement — `WHERE status <>
+	// 'deleted'` on the UPDATE — so the check and the write are
+	// atomic. TransitionStatus exposes this atomic primitive and
+	// returns ErrForbidden if the row is already deleted at
+	// statement-evaluation time. To create a new MSP after a
+	// deletion, callers must `POST /api/v1/msps` with a new slug —
+	// the partial unique index intentionally allows slug reuse only
+	// when the prior row is soft-deleted, but the resurrection path
+	// was never the intended way to recycle an identifier.
+	updated, err := h.msps.TransitionStatus(r.Context(), id, repository.MSPStatus(req.Status))
 	if err != nil {
-		WriteRepositoryError(w, err)
-		return
-	}
-	if existing.Status == repository.MSPStatusDeleted {
-		WriteError(w, http.StatusForbidden, "forbidden",
-			"cannot transition a deleted MSP back to active or suspended; "+
-				"deleted is a terminal lifecycle state — create a new MSP with the desired slug instead")
-		return
-	}
-	updated, err := h.msps.UpdateStatus(r.Context(), id, repository.MSPStatus(req.Status))
-	if err != nil {
+		if errors.Is(err, repository.ErrForbidden) {
+			WriteError(w, http.StatusForbidden, "forbidden",
+				"cannot transition a deleted MSP back to active or suspended; "+
+					"deleted is a terminal lifecycle state — create a new MSP with the desired slug instead")
+			return
+		}
 		WriteRepositoryError(w, err)
 		return
 	}

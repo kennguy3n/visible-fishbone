@@ -148,6 +148,18 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 	if !ok {
 		return repository.MSP{}, repository.ErrNotFound
 	}
+	// Soft-delete immutability: refuse to PATCH a row whose
+	// status has been moved to the terminal 'deleted' state.
+	// Round-13 of Devin Review on PR #42 flagged the previous
+	// behaviour (mutating fields on a soft-deleted MSP) as 🚩
+	// inconsistent with the resurrection guard enforced by the
+	// handler on status transitions — both code paths now treat
+	// 'deleted' as terminal. The postgres backend enforces the
+	// same invariant via the `AND deleted_at IS NULL` WHERE
+	// clause on the UPDATE statement.
+	if existing.Status == repository.MSPStatusDeleted {
+		return repository.MSP{}, repository.ErrForbidden
+	}
 	if patch.Slug != nil && *patch.Slug != existing.Slug {
 		for otherID, other := range r.s.msps {
 			if otherID == id {
@@ -197,6 +209,45 @@ func (r *MSPRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status r
 		t := r.s.clock()
 		existing.DeletedAt = &t
 	}
+	r.s.msps[id] = existing
+	return cloneMSP(existing), nil
+}
+
+// TransitionStatus atomically updates the MSP status while refusing
+// to mutate a soft-deleted row. The store mutex serialises the
+// precondition check (`existing.Status != deleted`) with the
+// status write, eliminating the TOCTOU window present in a
+// Get-then-UpdateStatus pair (round-13 of Devin Review on PR #42
+// — BUG_0001).
+//
+// `to` is restricted to MSPStatusActive or MSPStatusSuspended; the
+// terminal MSPStatusDeleted transition is owned by Delete()
+// because it cascades msp_tenants + tenants.msp_id under the same
+// mutex.
+//
+// Returns ErrForbidden if the row's current status is 'deleted',
+// ErrNotFound if the MSP does not exist, ErrInvalidArgument on a
+// `to=deleted` call (use Delete() instead).
+func (r *MSPRepository) TransitionStatus(ctx context.Context, id uuid.UUID, to repository.MSPStatus) (repository.MSP, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.MSP{}, err
+	}
+	switch to {
+	case repository.MSPStatusActive, repository.MSPStatusSuspended:
+	default:
+		return repository.MSP{}, repository.ErrInvalidArgument
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.msps[id]
+	if !ok {
+		return repository.MSP{}, repository.ErrNotFound
+	}
+	if existing.Status == repository.MSPStatusDeleted {
+		return repository.MSP{}, repository.ErrForbidden
+	}
+	existing.Status = to
+	existing.UpdatedAt = r.s.clock()
 	r.s.msps[id] = existing
 	return cloneMSP(existing), nil
 }
