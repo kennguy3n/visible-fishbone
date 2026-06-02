@@ -345,6 +345,55 @@ func TestAIHandler_EnrichAlert_200(t *testing.T) {
 	}
 }
 
+func TestAIHandler_EnrichAlert_400MissingFields(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"missing alert_id", map[string]any{"indicators": []string{"1.2.3.4"}, "severity": "medium"}},
+		{"missing indicators", map[string]any{"alert_id": uuid.New().String(), "severity": "medium"}},
+		{"missing severity", map[string]any{"alert_id": uuid.New().String(), "indicators": []string{"1.2.3.4"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := NewAIHandler(nil, nil)
+			h.SetEnhancedAI(nil, nil, nil, ai.NewThreatIntelEngine(nil), nil, nil)
+			tenantID := uuid.New().String()
+			body, _ := json.Marshal(tc.body)
+			req := httptest.NewRequest(http.MethodPost,
+				"/api/v1/tenants/"+tenantID+"/ai/enrich",
+				bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.SetPathValue("tenant_id", tenantID)
+			rec := httptest.NewRecorder()
+			h.enrichAlert(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAIHandler_GeneratePostureReport_400InvalidPeriod(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, nil, ai.NewReportEngine(nil), nil, nil, nil)
+	tenantID := uuid.New().String()
+	body, _ := json.Marshal(map[string]any{"period": "daily"})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID+"/ai/reports/posture/generate",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.generatePostureReport(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAIHandler_GuardrailsStatus_503WhenNotConfigured(t *testing.T) {
 	t.Parallel()
 	h := NewAIHandler(nil, nil)

@@ -349,6 +349,11 @@ func (h *AIHandler) generatePostureReport(w http.ResponseWriter, r *http.Request
 	if req.Period == "" {
 		req.Period = "weekly"
 	}
+	if req.Period != "weekly" && req.Period != "monthly" {
+		WriteError(w, http.StatusBadRequest, "invalid_body",
+			"period must be one of: weekly, monthly")
+		return
+	}
 	if req.Alerts == nil {
 		req.Alerts = map[string]int{}
 	}
@@ -391,6 +396,18 @@ func (h *AIHandler) enrichAlert(w http.ResponseWriter, r *http.Request) {
 		Severity   string    `json:"severity"`
 	}
 	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	if req.AlertID == uuid.Nil {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "alert_id is required")
+		return
+	}
+	if len(req.Indicators) == 0 {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "indicators is required")
+		return
+	}
+	if req.Severity == "" {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "severity is required")
 		return
 	}
 	ctx := ai.ContextWithTenantID(r.Context(), tenantID)

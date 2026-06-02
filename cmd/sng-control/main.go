@@ -645,22 +645,27 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	svc := aisvc.New(llm, verifier, nil, aisvc.WithLogger(logger))
 	h := handler.NewAIHandler(svc, logger)
 
-	// Enhanced AI capabilities (Tasks 67-71). The correlation, NL
-	// query, report, and threat-intel engines fall back to
-	// deterministic behaviour when no LLM is configured, so they are
-	// always wired. The guardrailed provider wraps a live LLM, so it
-	// is only wired when an endpoint is configured; its status
-	// endpoint returns 503 otherwise.
-	correlation := aisvc.NewCorrelationEngine(llm, aisvc.CorrelationConfig{})
-	nlQuery := aisvc.NewNLQueryEngine(llm)
-	reports := aisvc.NewReportEngine(llm)
+	// Enhanced AI capabilities (Tasks 67-71). When a live LLM is
+	// configured we wrap it in the GuardrailedProvider so every
+	// engine call is rate-limited, PII/secret-filtered, and audited;
+	// the engines then run against that guardrailed provider rather
+	// than the raw LLM. When no endpoint is configured, effectiveLLM
+	// stays nil and the engines fall back to deterministic
+	// (template-only) behaviour. The guardrails handle is still
+	// passed to the handler so the status endpoint can report usage;
+	// it is nil (503) when no LLM is configured.
+	var guardrails *aisvc.GuardrailedProvider
+	var effectiveLLM aisvc.LLMProvider
+	if llm != nil {
+		guardrails = aisvc.NewGuardrailedProvider(llm, aisvc.GuardrailConfig{}, logger)
+		effectiveLLM = guardrails
+	}
+	correlation := aisvc.NewCorrelationEngine(effectiveLLM, aisvc.CorrelationConfig{})
+	nlQuery := aisvc.NewNLQueryEngine(effectiveLLM)
+	reports := aisvc.NewReportEngine(effectiveLLM)
 	// No external threat feed is configured by default; enrichment
 	// returns an empty (non-escalated) context until one is wired.
 	threatIntel := aisvc.NewThreatIntelEngine(nil)
-	var guardrails *aisvc.GuardrailedProvider
-	if llm != nil {
-		guardrails = aisvc.NewGuardrailedProvider(llm, aisvc.GuardrailConfig{}, logger)
-	}
 	h.SetEnhancedAI(correlation, nlQuery, reports, threatIntel, guardrails, correlationRepo)
 
 	return h, svc
