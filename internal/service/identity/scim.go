@@ -180,13 +180,11 @@ func (s *SCIMService) DeleteUser(ctx context.Context, tenantID uuid.UUID, userID
 
 // ListUsers returns a SCIM list response for users matching the filter.
 func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter string, startIndex, count int) (SCIMListResponse, error) {
-	page := repository.Page{Limit: count}
-	if page.Limit <= 0 {
-		page.Limit = repository.DefaultPageLimit
+	if startIndex < 1 {
+		startIndex = 1
 	}
-	res, err := s.users.List(ctx, tenantID, page)
-	if err != nil {
-		return SCIMListResponse{}, err
+	if count <= 0 {
+		count = repository.DefaultPageLimit
 	}
 
 	var parsed *SCIMFilter
@@ -198,8 +196,52 @@ func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter 
 		parsed = &f
 	}
 
-	resources := make([]any, 0, len(res.Items))
-	for _, u := range res.Items {
+	// Fast path: userName eq "x" — the standard IdP dedup lookup
+	// (Okta, Azure AD, OneLogin). Use GetByEmail for O(1) indexed
+	// lookup instead of paginating through all users.
+	if parsed != nil && parsed.Op == SCIMFilterEq &&
+		strings.EqualFold(parsed.Attribute, "username") {
+		u, err := s.users.GetByEmail(ctx, tenantID, parsed.Value)
+		if err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				return SCIMListResponse{
+					Schemas:      []string{SCIMSchemaList},
+					TotalResults: 0,
+					StartIndex:   startIndex,
+					ItemsPerPage: 0,
+					Resources:    []any{},
+				}, nil
+			}
+			return SCIMListResponse{}, err
+		}
+		return SCIMListResponse{
+			Schemas:      []string{SCIMSchemaList},
+			TotalResults: 1,
+			StartIndex:   startIndex,
+			ItemsPerPage: 1,
+			Resources:    []any{userToSCIM(u)},
+		}, nil
+	}
+
+	// General path: paginate through all users, applying filter
+	// in-memory. This handles co/sw filters and unfiltered lists.
+	var allUsers []repository.User
+	after := ""
+	for {
+		page := repository.Page{Limit: repository.MaxPageLimit, After: after}
+		res, err := s.users.List(ctx, tenantID, page)
+		if err != nil {
+			return SCIMListResponse{}, err
+		}
+		allUsers = append(allUsers, res.Items...)
+		if res.NextCursor == "" || len(res.Items) == 0 {
+			break
+		}
+		after = res.NextCursor
+	}
+
+	resources := make([]any, 0, len(allUsers))
+	for _, u := range allUsers {
 		su := userToSCIM(u)
 		if parsed != nil && !parsed.MatchUser(su) {
 			continue
@@ -207,9 +249,6 @@ func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter 
 		resources = append(resources, su)
 	}
 
-	if startIndex < 1 {
-		startIndex = 1
-	}
 	return SCIMListResponse{
 		Schemas:      []string{SCIMSchemaList},
 		TotalResults: len(resources),

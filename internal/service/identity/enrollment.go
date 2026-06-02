@@ -186,20 +186,51 @@ func (s *EnrollmentService) issueCertificate(
 	publicKey []byte,
 	now time.Time,
 ) (repository.DeviceCertificate, error) {
-	// Generate an ephemeral CA key for signing. In production this
-	// would be a persistent tenant CA; for the MVP we self-sign.
-	_, caPriv, err := ed25519.GenerateKey(rand.Reader)
+	// Generate an ephemeral CA key pair. In production this would be
+	// a persistent tenant CA; for the MVP we create a per-issuance CA
+	// so the resulting certificate chain is cryptographically valid.
+	caPub, caPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return repository.DeviceCertificate{}, fmt.Errorf("generate CA key: %w", err)
 	}
 
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	caSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		return repository.DeviceCertificate{}, fmt.Errorf("generate serial: %w", err)
+		return repository.DeviceCertificate{}, fmt.Errorf("generate CA serial: %w", err)
 	}
 
-	template := &x509.Certificate{
-		SerialNumber: serialNumber,
+	caTemplate := &x509.Certificate{
+		SerialNumber: caSerial,
+		Subject: pkix.Name{
+			CommonName:   "SNG Ephemeral CA - " + tenantID.String(),
+			Organization: []string{tenantID.String()},
+		},
+		NotBefore:             now,
+		NotAfter:              now.Add(s.certTTL),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLen:            0,
+		MaxPathLenZero:        true,
+	}
+
+	// Self-sign the CA certificate (caPub signs with caPriv).
+	caCertDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, caPub, caPriv)
+	if err != nil {
+		return repository.DeviceCertificate{}, fmt.Errorf("create CA certificate: %w", err)
+	}
+	caCert, err := x509.ParseCertificate(caCertDER)
+	if err != nil {
+		return repository.DeviceCertificate{}, fmt.Errorf("parse CA certificate: %w", err)
+	}
+
+	deviceSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return repository.DeviceCertificate{}, fmt.Errorf("generate device serial: %w", err)
+	}
+
+	deviceTemplate := &x509.Certificate{
+		SerialNumber: deviceSerial,
 		Subject: pkix.Name{
 			CommonName:   deviceID.String(),
 			Organization: []string{tenantID.String()},
@@ -212,23 +243,30 @@ func (s *EnrollmentService) issueCertificate(
 		},
 	}
 
+	// Sign the device cert with the CA (parent = caCert, signer = caPriv).
 	devicePubKey := ed25519.PublicKey(publicKey)
-	certDER, err := x509.CreateCertificate(rand.Reader, template, template, devicePubKey, caPriv)
+	deviceCertDER, err := x509.CreateCertificate(rand.Reader, deviceTemplate, caCert, devicePubKey, caPriv)
 	if err != nil {
-		return repository.DeviceCertificate{}, fmt.Errorf("create certificate: %w", err)
+		return repository.DeviceCertificate{}, fmt.Errorf("create device certificate: %w", err)
 	}
 
-	certPEM := pem.EncodeToMemory(&pem.Block{
+	// PEM chain: device cert followed by CA cert for verification.
+	var certChain []byte
+	certChain = append(certChain, pem.EncodeToMemory(&pem.Block{
 		Type:  "CERTIFICATE",
-		Bytes: certDER,
-	})
+		Bytes: deviceCertDER,
+	})...)
+	certChain = append(certChain, pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: caCertDER,
+	})...)
 
 	cert := repository.DeviceCertificate{
 		ID:        uuid.New(),
 		DeviceID:  deviceID,
 		TenantID:  tenantID,
-		Serial:    serialNumber.Text(16),
-		CertPEM:   string(certPEM),
+		Serial:    deviceSerial.Text(16),
+		CertPEM:   string(certChain),
 		IssuedAt:  now,
 		ExpiresAt: now.Add(s.certTTL),
 	}
