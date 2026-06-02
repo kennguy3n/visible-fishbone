@@ -257,3 +257,40 @@ func TestBulkDevice_ExportCSV_TruncationSignaled(t *testing.T) {
 			lines, identity.MaxBulkDevices+1, identity.MaxBulkDevices)
 	}
 }
+
+func TestBulkDevice_ExportCSV_ExactCapNotTruncated(t *testing.T) {
+	t.Parallel()
+	h, store, tenantID := newBulkDeviceTestSetup(t)
+	tid := tenantID.String()
+
+	// Seed exactly the export cap. The paginate helper emits a cursor
+	// for the full final page, but the export is complete, so the
+	// handler must NOT advertise a partial result.
+	devRepo := memory.NewDeviceRepository(store)
+	for i := 0; i < identity.MaxBulkDevices; i++ {
+		if _, err := devRepo.Create(context.Background(), tenantID, repository.Device{
+			Name:     "dev",
+			Platform: repository.DevicePlatformLinux,
+			Status:   repository.DeviceStatusActive,
+		}); err != nil {
+			t.Fatalf("seed device %d: %v", i, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tid+"/devices/export", nil)
+	req.SetPathValue("tenant_id", tid)
+	rec := httptest.NewRecorder()
+	h.exportCSV(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if v := rec.Header().Get("X-Truncated"); v != "" {
+		t.Errorf("X-Truncated = %q, want empty when inventory lands exactly on the cap", v)
+	}
+	lines := strings.Count(strings.TrimRight(rec.Body.String(), "\n"), "\n") + 1
+	if lines != identity.MaxBulkDevices+1 {
+		t.Errorf("exported lines = %d, want %d (header + %d rows)",
+			lines, identity.MaxBulkDevices+1, identity.MaxBulkDevices)
+	}
+}

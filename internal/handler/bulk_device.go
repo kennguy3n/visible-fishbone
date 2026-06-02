@@ -140,14 +140,28 @@ func (h *BulkDeviceHandler) exportCSV(w http.ResponseWriter, r *http.Request) {
 		}
 		all = append(all, result.Items...)
 		if len(all) >= identity.MaxBulkDevices {
-			// More devices may exist beyond the cap; signal a partial
-			// export to the client rather than dropping rows silently.
-			// Overshoot within this page (when the page size does not
-			// divide the cap evenly) also drops rows, so flag it even
-			// when the cursor is exhausted.
-			truncated = result.NextCursor != "" || len(all) > identity.MaxBulkDevices
-			if len(all) > identity.MaxBulkDevices {
+			overshoot := len(all) > identity.MaxBulkDevices
+			if overshoot {
 				all = all[:identity.MaxBulkDevices]
+			}
+			switch {
+			case overshoot:
+				// This page pushed us past the cap, so rows within it
+				// were dropped — the export is definitely partial.
+				truncated = true
+			case result.NextCursor != "":
+				// We landed exactly on the cap. A non-empty cursor only
+				// means the page was full (the paginate helper emits a
+				// cursor for every full page, including the last), so
+				// probe for one more row to distinguish a genuinely
+				// partial export from one that completes on the cap.
+				probe := repository.Page{Limit: 1, After: result.NextCursor}
+				extra, err := h.devices.List(r.Context(), tenantID, repository.DeviceListFilter{}, probe)
+				if err != nil {
+					WriteRepositoryError(w, err)
+					return
+				}
+				truncated = len(extra.Items) > 0
 			}
 			break
 		}
