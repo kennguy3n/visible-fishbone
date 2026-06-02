@@ -730,6 +730,13 @@ func TestPostgres_Integration(t *testing.T) {
 		tnt := mustTenant(t, store.NewTenantRepository())
 		repo := store.NewAISuggestionRepository()
 
+		// reviewer_id is a FK to users(id); create a real reviewer.
+		usr, err := store.NewUserRepository().Create(bgCtx(), tnt.ID,
+			repository.User{Email: "reviewer@example.com", Name: "Reviewer"})
+		if err != nil {
+			t.Fatalf("create user: %v", err)
+		}
+
 		created, err := repo.Create(bgCtx(), tnt.ID, repository.AISuggestion{
 			RuleID:         "rule-1",
 			Category:       "unused",
@@ -741,7 +748,7 @@ func TestPostgres_Integration(t *testing.T) {
 		}
 
 		// Approve records reviewer attribution and feedback.
-		reviewer := uuid.New()
+		reviewer := usr.ID
 		feedback := "looks good"
 		if err := repo.UpdateStatus(bgCtx(), tnt.ID, created.ID,
 			string(repository.AISuggestionStatusPending),

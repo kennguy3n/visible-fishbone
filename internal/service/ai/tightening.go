@@ -94,8 +94,20 @@ func (s *TighteningService) Analyze(ctx context.Context, input AnalyzeInput) (Ti
 		}
 	}
 
-	shadowedRecs := s.detectShadowedRules(input.Rules)
-	recs = append(recs, shadowedRecs...)
+	// A rule that has no traffic is already recommended for removal as
+	// "unused"; the stronger no-traffic signal supersedes a "shadowed"
+	// recommendation for the same rule, so suppress the duplicate to
+	// avoid presenting the operator two removal suggestions for one rule.
+	recommended := make(map[string]struct{}, len(recs))
+	for _, rec := range recs {
+		recommended[rec.RuleID] = struct{}{}
+	}
+	for _, rec := range s.detectShadowedRules(input.Rules) {
+		if _, dup := recommended[rec.RuleID]; dup {
+			continue
+		}
+		recs = append(recs, rec)
+	}
 
 	report := TighteningReport{
 		TenantID:        input.TenantID,
@@ -140,10 +152,11 @@ func (s *TighteningService) LastReport(tenantID uuid.UUID) (TighteningReport, bo
 
 func (s *TighteningService) detectShadowedRules(rules []json.RawMessage) []TighteningRecommendation {
 	type parsedRule struct {
-		ID          string   `json:"id"`
-		Verb        string   `json:"verb"`
-		Domain      string   `json:"domain"`
-		SubjectRefs []string `json:"subject_refs,omitempty"`
+		ID          string            `json:"id"`
+		Verb        string            `json:"verb"`
+		Domain      string            `json:"domain"`
+		SubjectRefs []string          `json:"subject_refs,omitempty"`
+		Subjects    []json.RawMessage `json:"subjects,omitempty"`
 	}
 
 	var parsed []parsedRule
@@ -161,10 +174,12 @@ func (s *TighteningService) detectShadowedRules(rules []json.RawMessage) []Tight
 		rule := parsed[i]
 		for j := 0; j < i; j++ {
 			higher := parsed[j]
+			higherIsCatchAll := len(higher.SubjectRefs) == 0 && len(higher.Subjects) == 0
+			ruleIsRestricted := len(rule.SubjectRefs) > 0 || len(rule.Subjects) > 0
 			if higher.Domain == rule.Domain &&
 				higher.Verb == rule.Verb &&
-				len(higher.SubjectRefs) == 0 &&
-				len(rule.SubjectRefs) > 0 {
+				higherIsCatchAll &&
+				ruleIsRestricted {
 				recs = append(recs, TighteningRecommendation{
 					RuleID:   rule.ID,
 					Category: SuggestionCategoryShadowed,

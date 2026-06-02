@@ -75,6 +75,61 @@ func TestTighteningService_ShadowedRules(t *testing.T) {
 	}
 }
 
+func hasShadowed(recs []TighteningRecommendation, ruleID string) bool {
+	for _, rec := range recs {
+		if rec.RuleID == ruleID && rec.Category == SuggestionCategoryShadowed {
+			return true
+		}
+	}
+	return false
+}
+
+// A higher-priority rule restricted via the structured "subjects" field is
+// NOT a catch-all, so lower-priority rules must not be flagged as shadowed.
+func TestTighteningService_ShadowedRules_SubjectsRestrictedHigherIsNotCatchAll(t *testing.T) {
+	t.Parallel()
+	svc := NewTighteningService(nil, nil)
+
+	report, err := svc.Analyze(context.Background(), AnalyzeInput{
+		TenantID: uuid.New(),
+		Rules: []json.RawMessage{
+			json.RawMessage(`{"id":"higher","verb":"allow","domain":"ngfw","subjects":[{"type":"group","id":"admin"}]}`),
+			json.RawMessage(`{"id":"lower","verb":"allow","domain":"ngfw","subject_refs":["ops"]}`),
+		},
+		HitCounts:  map[string]int64{"higher": 500, "lower": 10},
+		WindowDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hasShadowed(report.Recommendations, "lower") {
+		t.Fatal("higher rule restricted by subjects must not shadow lower rule")
+	}
+}
+
+// A lower-priority rule restricted only via "subjects" is still shadowed by a
+// genuine catch-all higher-priority rule.
+func TestTighteningService_ShadowedRules_SubjectsRestrictedLowerIsShadowed(t *testing.T) {
+	t.Parallel()
+	svc := NewTighteningService(nil, nil)
+
+	report, err := svc.Analyze(context.Background(), AnalyzeInput{
+		TenantID: uuid.New(),
+		Rules: []json.RawMessage{
+			json.RawMessage(`{"id":"broad","verb":"allow","domain":"ngfw"}`),
+			json.RawMessage(`{"id":"narrow","verb":"allow","domain":"ngfw","subjects":[{"type":"group","id":"admin"}]}`),
+		},
+		HitCounts:  map[string]int64{"broad": 500, "narrow": 10},
+		WindowDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hasShadowed(report.Recommendations, "narrow") {
+		t.Fatal("expected shadowed recommendation for subjects-restricted narrow rule")
+	}
+}
+
 func TestTighteningService_OverlyPermissiveRules(t *testing.T) {
 	t.Parallel()
 	svc := NewTighteningService(nil, nil)

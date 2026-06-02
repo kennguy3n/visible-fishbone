@@ -33,7 +33,6 @@ func NewReviewService(repo repository.AISuggestionRepository, logger *slog.Logge
 // Errors surfaced by the review workflow.
 var (
 	ErrInvalidTransition = errors.New("ai: invalid status transition")
-	ErrAlreadyReviewed   = errors.New("ai: suggestion already reviewed")
 )
 
 // validTransitions defines the allowed status transitions.
