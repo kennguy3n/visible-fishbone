@@ -422,36 +422,25 @@ func (r *BrandingResolver) SetTenantBranding(
 	if tenantID == uuid.Nil {
 		return repository.Tenant{}, fmt.Errorf("set tenant branding: %w", repository.ErrInvalidArgument)
 	}
-	tn, err := r.tenants.Get(ctx, tenantID)
-	if err != nil {
-		return repository.Tenant{}, fmt.Errorf("set tenant branding: get tenant: %w", err)
-	}
-	// RMW the settings JSON. Start from a generic map so unknown
-	// keys (other subsystems) are preserved verbatim across the
-	// update.
-	var settings map[string]json.RawMessage
-	if len(tn.Settings) > 0 && string(tn.Settings) != "null" {
-		if err := json.Unmarshal(tn.Settings, &settings); err != nil {
-			return repository.Tenant{}, fmt.Errorf("set tenant branding: decode existing settings: %w", err)
-		}
-	}
-	if settings == nil {
-		settings = map[string]json.RawMessage{}
-	}
+	// Encode the branding override into JSON and hand it to the
+	// repository's atomic settings merge primitive. Round-17 of
+	// Devin Review on PR #42 (ANALYSIS_0003) flagged that the
+	// previous implementation did
+	// Get→unmarshal→merge→marshal→Update entirely in the service
+	// layer — two concurrent SetTenantBranding calls (or one
+	// SetTenantBranding racing with ClearTenantBranding) could
+	// each read the same `tn.Settings` baseline and the second
+	// write would silently overwrite the first. Pushing the
+	// jsonb_set into the row UPDATE makes the merge atomic at
+	// the row level (postgres) / under the store mutex (memory),
+	// preserving any other settings keys verbatim.
 	encoded, err := json.Marshal(override)
 	if err != nil {
 		return repository.Tenant{}, fmt.Errorf("set tenant branding: encode override: %w", err)
 	}
-	settings["branding"] = encoded
-	newSettings, err := json.Marshal(settings)
+	updated, err := r.tenants.UpdateSettingsKey(ctx, tenantID, "branding", encoded)
 	if err != nil {
-		return repository.Tenant{}, fmt.Errorf("set tenant branding: encode settings: %w", err)
-	}
-	updated, err := r.tenants.Update(ctx, tenantID, repository.TenantPatch{
-		Settings: (*json.RawMessage)(&newSettings),
-	})
-	if err != nil {
-		return repository.Tenant{}, fmt.Errorf("set tenant branding: update tenant: %w", err)
+		return repository.Tenant{}, fmt.Errorf("set tenant branding: update settings: %w", err)
 	}
 	// Synchronous invalidation — a follow-up Resolve(tenantID)
 	// after a successful SetTenantBranding MUST observe the new
@@ -464,37 +453,18 @@ func (r *BrandingResolver) SetTenantBranding(
 
 // ClearTenantBranding removes the `branding` key from
 // tenants.settings, restoring full inheritance from the MSP
-// (or platform) default. Other settings keys are preserved.
+// (or platform) default. Other settings keys are preserved. The
+// removal is delegated to the repository's atomic
+// DeleteSettingsKey so a concurrent SetTenantBranding cannot lose
+// updates (see SetTenantBranding comment above and round-17 of
+// Devin Review on PR #42 — ANALYSIS_0003).
 func (r *BrandingResolver) ClearTenantBranding(ctx context.Context, tenantID uuid.UUID) (repository.Tenant, error) {
 	if tenantID == uuid.Nil {
 		return repository.Tenant{}, fmt.Errorf("clear tenant branding: %w", repository.ErrInvalidArgument)
 	}
-	tn, err := r.tenants.Get(ctx, tenantID)
+	updated, err := r.tenants.DeleteSettingsKey(ctx, tenantID, "branding")
 	if err != nil {
-		return repository.Tenant{}, fmt.Errorf("clear tenant branding: get tenant: %w", err)
-	}
-	if len(tn.Settings) == 0 || string(tn.Settings) == "null" {
-		// No settings → nothing to clear; return the tenant
-		// unchanged.
-		return tn, nil
-	}
-	var settings map[string]json.RawMessage
-	if err := json.Unmarshal(tn.Settings, &settings); err != nil {
-		return repository.Tenant{}, fmt.Errorf("clear tenant branding: decode settings: %w", err)
-	}
-	if _, ok := settings["branding"]; !ok {
-		return tn, nil
-	}
-	delete(settings, "branding")
-	newSettings, err := json.Marshal(settings)
-	if err != nil {
-		return repository.Tenant{}, fmt.Errorf("clear tenant branding: encode settings: %w", err)
-	}
-	updated, err := r.tenants.Update(ctx, tenantID, repository.TenantPatch{
-		Settings: (*json.RawMessage)(&newSettings),
-	})
-	if err != nil {
-		return repository.Tenant{}, fmt.Errorf("clear tenant branding: update tenant: %w", err)
+		return repository.Tenant{}, fmt.Errorf("clear tenant branding: update settings: %w", err)
 	}
 	// Synchronous invalidation — see SetTenantBranding above.
 	r.Invalidate(tenantID)

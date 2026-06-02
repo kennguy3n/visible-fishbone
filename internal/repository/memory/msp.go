@@ -102,7 +102,7 @@ func (r *MSPRepository) GetBySlug(ctx context.Context, slug string) (repository.
 	return repository.MSP{}, repository.ErrNotFound
 }
 
-func (r *MSPRepository) List(ctx context.Context, page repository.Page) (repository.PageResult[repository.MSP], error) {
+func (r *MSPRepository) List(ctx context.Context, page repository.Page, filter repository.MSPListFilter) (repository.PageResult[repository.MSP], error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.PageResult[repository.MSP]{}, err
 	}
@@ -110,6 +110,15 @@ func (r *MSPRepository) List(ctx context.Context, page repository.Page) (reposit
 	defer r.s.mu.RUnlock()
 	all := make([]repository.MSP, 0, len(r.s.msps))
 	for _, m := range r.s.msps {
+		// Round-17 of Devin Review on PR #42 — filter
+		// soft-deleted rows unless the admin caller opts in.
+		// The lifecycle invariant is `(Status==Deleted ⇔
+		// DeletedAt != nil)`, so either check is sufficient;
+		// we check both for defence-in-depth against any
+		// in-memory state that violates the invariant.
+		if !filter.IncludeDeleted && (m.Status == repository.MSPStatusDeleted || m.DeletedAt != nil) {
+			continue
+		}
 		all = append(all, cloneMSP(m))
 	}
 	sorted := sortByCreatedAtDesc(all,
@@ -206,6 +215,29 @@ func (r *MSPRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status r
 	existing, ok := r.s.msps[id]
 	if !ok {
 		return repository.MSP{}, repository.ErrNotFound
+	}
+	// Resurrection guard (round-17 of Devin Review on PR #42 —
+	// ANALYSIS_0005). The handler-narrow MSPService interface
+	// intentionally does not surface UpdateStatus, but the method
+	// remains on the public MSPRepository interface for use by
+	// admin tools / migrations. Without a guard here, an internal
+	// caller could resurrect a soft-deleted row by writing
+	// status='active' on top of `deleted_at != NULL`, producing
+	// the corrupt (status='active', deleted_at != NULL) state that
+	// breaks the lifecycle invariant `(status='deleted' ⇔
+	// deleted_at != NULL)` and consequently breaks the partial
+	// unique index on slug (postgres) / the slug uniqueness scan
+	// (memory). The legal transition into deleted runs through
+	// Delete() — which cascades msp_tenants + clears the
+	// denormalised tenants.msp_id pointer — and the legal
+	// transitions OUT of deleted... do not exist (deleted is
+	// terminal by design). Refuse any UpdateStatus call that
+	// targets a row whose Status or DeletedAt observe the deleted
+	// state. Matched by the postgres backend's `WHERE status <>
+	// 'deleted' AND deleted_at IS NULL` precondition on its UPDATE
+	// statement.
+	if existing.Status == repository.MSPStatusDeleted || existing.DeletedAt != nil {
+		return repository.MSP{}, repository.ErrForbidden
 	}
 	existing.Status = status
 	existing.UpdatedAt = r.s.clock()

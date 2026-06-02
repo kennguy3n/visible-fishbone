@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -161,6 +163,100 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 	return cloneTenant(existing), nil
 }
 
+// UpdateSettingsKey atomically merges `value` into the tenants.settings
+// JSONB document at top-level `key`. The store mutex is held across
+// the unmarshal → mutate → marshal → write so concurrent callers
+// cannot lose updates the way a service-side RMW could. Round-17 of
+// Devin Review on PR #42 (ANALYSIS_0003) flagged the lost-update
+// race that motivated this primitive. Returns ErrNotFound if the
+// tenant row does not exist.
+func (r *TenantRepository) UpdateSettingsKey(ctx context.Context, id uuid.UUID, key string, value json.RawMessage) (repository.Tenant, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.Tenant{}, err
+	}
+	if key == "" {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	// Validate `value` is valid JSON before we hold the lock so a
+	// malformed payload from a buggy caller does not park inside
+	// the critical section.
+	if !json.Valid(value) {
+		return repository.Tenant{}, fmt.Errorf("update settings key %q: %w", key, repository.ErrInvalidArgument)
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.tenants[id]
+	if !ok {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	settings := map[string]json.RawMessage{}
+	if len(existing.Settings) > 0 && string(existing.Settings) != "null" {
+		if err := json.Unmarshal(existing.Settings, &settings); err != nil {
+			return repository.Tenant{}, fmt.Errorf("update settings key %q: decode: %w", key, err)
+		}
+	}
+	settings[key] = append(json.RawMessage(nil), value...)
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("update settings key %q: encode: %w", key, err)
+	}
+	existing.Settings = encoded
+	existing.UpdatedAt = r.s.clock()
+	r.s.tenants[existing.ID] = existing
+	return cloneTenant(existing), nil
+}
+
+// DeleteSettingsKey atomically removes top-level `key` from
+// tenants.settings. Same atomicity guarantees as UpdateSettingsKey.
+// A no-op for keys not present.
+func (r *TenantRepository) DeleteSettingsKey(ctx context.Context, id uuid.UUID, key string) (repository.Tenant, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.Tenant{}, err
+	}
+	if key == "" {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.tenants[id]
+	if !ok {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if len(existing.Settings) == 0 || string(existing.Settings) == "null" {
+		// No settings document → no-op, but still bump UpdatedAt
+		// so callers see a stable returned row.
+		existing.UpdatedAt = r.s.clock()
+		r.s.tenants[existing.ID] = existing
+		return cloneTenant(existing), nil
+	}
+	settings := map[string]json.RawMessage{}
+	if err := json.Unmarshal(existing.Settings, &settings); err != nil {
+		return repository.Tenant{}, fmt.Errorf("delete settings key %q: decode: %w", key, err)
+	}
+	delete(settings, key)
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("delete settings key %q: encode: %w", key, err)
+	}
+	existing.Settings = encoded
+	existing.UpdatedAt = r.s.clock()
+	r.s.tenants[existing.ID] = existing
+	return cloneTenant(existing), nil
+}
+
+// UpdateStatus mutates the tenant's status enum directly. Round-17
+// of Devin Review on PR #42 (ANALYSIS_0005) flagged that this
+// method could be used to resurrect a soft-deleted tenant
+// (`deleted` → `active`/`suspended`), which would break the
+// lifecycle invariant `(status='deleted' ⇔ deleted_at != NULL)`
+// because `deleted_at` would stay stamped on a now-active row. The
+// resurrection guard below rejects any transition out of `deleted`
+// with ErrForbidden; operators that genuinely need to restore a
+// tombstoned row must clear `deleted_at` via a dedicated restore
+// path (not yet exposed). Idempotent self-transitions stay allowed
+// (Delete→Delete) so callers that already handle that case keep
+// working. TransitionStatus enforces the same invariant atomically
+// for callers that want to gate on a known prior status.
 func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status repository.TenantStatus) (repository.Tenant, error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.Tenant{}, err
@@ -175,6 +271,10 @@ func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, statu
 	case repository.TenantStatusActive, repository.TenantStatusSuspended, repository.TenantStatusDeleted:
 	default:
 		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	// Resurrection guard: deleted is terminal. See doc above.
+	if existing.Status == repository.TenantStatusDeleted && status != repository.TenantStatusDeleted {
+		return repository.Tenant{}, repository.ErrForbidden
 	}
 	existing.Status = status
 	existing.UpdatedAt = r.s.clock()

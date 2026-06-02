@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -476,12 +477,12 @@ var _ = errors.New
 // TestBrandingResolver_LRUEvictsLeastRecentlyUsed pins the round-6
 // O(1) LRU fix. With cacheMax=2:
 //
-//   1. Resolve(t1) → seeds t1 at MRU.
-//   2. Resolve(t2) → seeds t2 at MRU; t1 moves to LRU.
-//   3. Resolve(t1) → promotes t1 to MRU; t2 is now LRU.
-//   4. Resolve(t3) → evicts t2 (LRU), seeds t3 at MRU.
-//   5. Resolve(t1) → hits cache (still present).
-//   6. Resolve(t2) → MISS (evicted); recomputes.
+//  1. Resolve(t1) → seeds t1 at MRU.
+//  2. Resolve(t2) → seeds t2 at MRU; t1 moves to LRU.
+//  3. Resolve(t1) → promotes t1 to MRU; t2 is now LRU.
+//  4. Resolve(t3) → evicts t2 (LRU), seeds t3 at MRU.
+//  5. Resolve(t1) → hits cache (still present).
+//  6. Resolve(t2) → MISS (evicted); recomputes.
 //
 // The previous oldest-by-insertion-time scheme would have evicted
 // t1 (the oldest insertion) at step 4 even though step 3 made it
@@ -563,5 +564,134 @@ func TestBrandingResolver_LRUEvictsLeastRecentlyUsed(t *testing.T) {
 	if miss.PrimaryColor != "#ff0000" {
 		t.Fatalf("t2 PrimaryColor=%q, want #ff0000 (cache miss → recompute surfaces post-mutation override)",
 			miss.PrimaryColor)
+	}
+}
+
+// TestSetTenantBranding_ConcurrentSetsDoNotLoseUnrelatedSettings
+// pins round-17 of Devin Review on PR #42 (ANALYSIS_0003): the
+// previous SetTenantBranding did Get→unmarshal→merge→marshal→Update
+// entirely in the service layer, so two concurrent SetTenantBranding
+// calls (or one SetTenantBranding racing with a writer of an
+// orthogonal settings key) could each read the same `tn.Settings`
+// baseline and the second write would silently overwrite the first
+// orthogonal key. Pushing the merge into the repository's
+// UpdateSettingsKey (jsonb_set on postgres; mutex-held merge on
+// memory) makes it atomic. We exercise this by racing 16 concurrent
+// SetTenantBranding calls against 16 concurrent unrelated-settings
+// writes; afterwards both keys must be present on the row.
+func TestSetTenantBranding_ConcurrentSetsDoNotLoseUnrelatedSettings(t *testing.T) {
+	t.Parallel()
+	resolver, tenants, _, tn, _ := brandingFixtures(t)
+	ctx := context.Background()
+	// Seed an orthogonal `feature_flags` key first via the
+	// repository's atomic UpdateSettingsKey (mirrors what a
+	// future feature-flags service would do under the same
+	// round-17 contract).
+	ff := json.RawMessage(`{"x":true}`)
+	if _, err := tenants.UpdateSettingsKey(ctx, tn.ID, "feature_flags", ff); err != nil {
+		t.Fatalf("seed feature_flags: %v", err)
+	}
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	wg.Add(2 * goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			if _, err := resolver.SetTenantBranding(ctx, tn.ID, repository.MSPBranding{
+				PrimaryColor: "#112233",
+			}); err != nil {
+				t.Errorf("SetTenantBranding: %v", err)
+			}
+		}()
+		go func(i int) {
+			defer wg.Done()
+			// Write a per-iteration value to the orthogonal
+			// key; the last writer wins for the key itself,
+			// but the key MUST still exist after all SetTenantBranding
+			// races land.
+			raw := json.RawMessage(`{"writer":` + uuidLiteral(uuid.New()) + `}`)
+			if _, err := tenants.UpdateSettingsKey(ctx, tn.ID, "feature_flags", raw); err != nil {
+				t.Errorf("UpdateSettingsKey(feature_flags): %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// After the race, BOTH keys must be present. Pre-fix this
+	// would intermittently lose `feature_flags` because a
+	// SetTenantBranding goroutine that read its baseline BEFORE a
+	// feature_flags writer would, on its own Update, overwrite
+	// the feature_flags writer's commit with the stale baseline
+	// that omitted (or had an older value of) feature_flags.
+	updated, err := tenants.Get(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("get tenant: %v", err)
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(updated.Settings, &settings); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if _, ok := settings["branding"]; !ok {
+		t.Errorf("branding key lost after concurrent writes: %s", string(updated.Settings))
+	}
+	if _, ok := settings["feature_flags"]; !ok {
+		t.Errorf("feature_flags key lost (RMW race): %s", string(updated.Settings))
+	}
+}
+
+// uuidLiteral renders a uuid as a JSON string literal so we can
+// inline it into a json.RawMessage in the test above.
+func uuidLiteral(u uuid.UUID) string { return `"` + u.String() + `"` }
+
+// TestTenantRepository_UpdateStatus_ResurrectionRejected pins
+// round-17 of Devin Review on PR #42 (ANALYSIS_0005): UpdateStatus
+// must NOT be usable to transition a soft-deleted tenant back to
+// active/suspended. The lifecycle invariant
+// `(status='deleted' ⇔ deleted_at != NULL)` and the partial unique
+// index `tenants_slug_uniq_idx WHERE deleted_at IS NULL` both
+// assume `deleted` is terminal; a silent resurrection would leave
+// `deleted_at` stamped on a now-active row and surface as a unique
+// constraint violation on the first write that touches the slug.
+// Idempotent Delete→Delete must still succeed (callers that
+// already handle that case keep working).
+func TestTenantRepository_UpdateStatus_ResurrectionRejected(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	repo := memory.NewTenantRepository(store)
+	ctx := context.Background()
+	tn, err := repo.Create(ctx, repository.Tenant{Name: "T", Slug: "t1"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Soft-delete via UpdateStatus (the canonical path; also the
+	// path the guard most needs to defend against).
+	if _, err := repo.UpdateStatus(ctx, tn.ID, repository.TenantStatusDeleted); err != nil {
+		t.Fatalf("delete via UpdateStatus: %v", err)
+	}
+	// Resurrection attempts: each must surface ErrForbidden.
+	for _, status := range []repository.TenantStatus{
+		repository.TenantStatusActive,
+		repository.TenantStatusSuspended,
+	} {
+		if _, err := repo.UpdateStatus(ctx, tn.ID, status); !errors.Is(err, repository.ErrForbidden) {
+			t.Errorf("UpdateStatus(deleted→%s): want ErrForbidden, got %v", status, err)
+		}
+	}
+	// Idempotent self-loop must still succeed.
+	if _, err := repo.UpdateStatus(ctx, tn.ID, repository.TenantStatusDeleted); err != nil {
+		t.Errorf("idempotent UpdateStatus(deleted→deleted): got %v, want nil", err)
+	}
+	// The row must remain in deleted state and deleted_at must
+	// still be set.
+	got, err := repo.Get(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != repository.TenantStatusDeleted {
+		t.Errorf("status: got %q, want deleted", got.Status)
+	}
+	if got.DeletedAt == nil {
+		t.Errorf("deleted_at: got nil, want set")
 	}
 }

@@ -265,26 +265,128 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 	return out, nil
 }
 
+// UpdateSettingsKey atomically merges `value` into the
+// tenants.settings JSONB document at top-level `key`. The
+// `jsonb_set` mutation is applied inside the same row UPDATE so
+// concurrent callers cannot lose updates the way a service-side
+// RMW (Get→unmarshal→merge→marshal→Update) could. Round-17 of
+// Devin Review on PR #42 (ANALYSIS_0003) flagged the lost-update
+// race that motivated this primitive. Returns ErrNotFound if the
+// row does not exist.
+func (r *TenantRepository) UpdateSettingsKey(ctx context.Context, id uuid.UUID, key string, value json.RawMessage) (repository.Tenant, error) {
+	if id == uuid.Nil {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	if key == "" {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	// Validate `value` is well-formed JSON before sending it to
+	// the database — a malformed payload would surface as a
+	// driver-level error and we want a clean ErrInvalidArgument.
+	if !json.Valid(value) {
+		return repository.Tenant{}, fmt.Errorf("update settings key %q: %w", key, repository.ErrInvalidArgument)
+	}
+	// jsonb_set with create_missing=true (the 4th arg, default
+	// true) inserts the key when the path does not exist; the
+	// COALESCE(settings, '{}'::jsonb) ensures we treat SQL NULL
+	// as an empty document rather than returning NULL.
+	const q = `
+		UPDATE tenants
+		SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), ARRAY[$2::text], $3::jsonb, true)
+		WHERE id = $1::uuid
+		RETURNING ` + tenantSelectColumns
+	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, key, []byte(value)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("update settings key %q: %w", key, err)
+	}
+	return out, nil
+}
+
+// DeleteSettingsKey atomically removes top-level `key` from
+// tenants.settings using the JSONB `-` operator. Same atomicity
+// guarantees as UpdateSettingsKey. A no-op for keys not present.
+func (r *TenantRepository) DeleteSettingsKey(ctx context.Context, id uuid.UUID, key string) (repository.Tenant, error) {
+	if id == uuid.Nil {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	if key == "" {
+		return repository.Tenant{}, repository.ErrInvalidArgument
+	}
+	const q = `
+		UPDATE tenants
+		SET settings = COALESCE(settings, '{}'::jsonb) - $2::text
+		WHERE id = $1::uuid
+		RETURNING ` + tenantSelectColumns
+	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, key))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.Tenant{}, repository.ErrNotFound
+	}
+	if err != nil {
+		return repository.Tenant{}, fmt.Errorf("delete settings key %q: %w", key, err)
+	}
+	return out, nil
+}
+
+// UpdateStatus mutates the tenant's status enum directly. Round-17
+// of Devin Review on PR #42 (ANALYSIS_0005) flagged that this
+// method could be used to resurrect a soft-deleted tenant
+// (`deleted` → `active`/`suspended`), which would break the
+// lifecycle invariant `(status='deleted' ⇔ deleted_at != NULL)`
+// because `deleted_at` would stay stamped on a now-active row and
+// the partial unique index `tenants_slug_uniq_idx WHERE deleted_at
+// IS NULL` would consider the resurrected row alongside any
+// post-deletion replacement, surfacing as a unique-constraint
+// violation on first write. The resurrection guard below rejects
+// any transition out of `deleted` with ErrForbidden; operators that
+// genuinely need to restore a tombstoned row must clear
+// `deleted_at` via a dedicated restore path (not yet exposed).
+// Idempotent self-transitions stay allowed (Delete→Delete) so
+// callers that already handle that case keep working.
+// TransitionStatus enforces the same invariant atomically for
+// callers that want to gate on a known prior status. The guard is
+// expressed as a WHERE predicate so the precondition and the
+// UPDATE land in the same SQL statement — a Get-then-Update pair
+// would have a TOCTOU window where a concurrent Delete could
+// tombstone the row between our checks.
 func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status repository.TenantStatus) (repository.Tenant, error) {
 	switch status {
 	case repository.TenantStatusActive, repository.TenantStatusSuspended, repository.TenantStatusDeleted:
 	default:
 		return repository.Tenant{}, repository.ErrInvalidArgument
 	}
+	// `status <> 'deleted' OR $2 = 'deleted'` is the resurrection
+	// guard: if the row is already deleted we only accept another
+	// transition to deleted (idempotent self-loop), and reject
+	// every other target with ErrForbidden via the follow-up
+	// lookup. See doc above for why this is wrong without the
+	// guard.
 	const q = `
 		UPDATE tenants
 		SET status     = $2,
 		    deleted_at = CASE WHEN $2 = 'deleted' THEN COALESCE(deleted_at, NOW()) ELSE deleted_at END
-		WHERE id = $1::uuid
+		WHERE id = $1::uuid AND (status <> 'deleted' OR $2 = 'deleted')
 		RETURNING ` + tenantSelectColumns
 	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, string(status)))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return repository.Tenant{}, repository.ErrNotFound
+	if err == nil {
+		return out, nil
 	}
-	if err != nil {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return repository.Tenant{}, fmt.Errorf("update status: %w", err)
 	}
-	return out, nil
+	// No row matched. Either the tenant does not exist (ErrNotFound)
+	// or it exists but is already deleted and the caller asked for
+	// a non-deleted target (ErrForbidden — resurrection rejected).
+	var dummy string
+	if scanErr := r.s.pool.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return repository.Tenant{}, repository.ErrNotFound
+		}
+		return repository.Tenant{}, fmt.Errorf("update status lookup: %w", scanErr)
+	}
+	return repository.Tenant{}, repository.ErrForbidden
 }
 
 func (r *TenantRepository) TransitionStatus(ctx context.Context, id uuid.UUID, from, to repository.TenantStatus) (repository.Tenant, error) {

@@ -1421,9 +1421,24 @@ paths:
       tags: [msps]
       operationId: listMSPs
       summary: List MSPs
+      description: |
+        Returns active and suspended MSPs by default. Soft-deleted
+        rows (status='deleted', deleted_at != NULL) are excluded so
+        the operator-facing listing matches the lifecycle invariant
+        that `deleted` is terminal. Admin / audit callers wanting to
+        see tombstoned rows pass `?include_deleted=true`.
       parameters:
         - $ref: "#/components/parameters/After"
         - $ref: "#/components/parameters/Limit"
+        - name: include_deleted
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: |
+            When true, soft-deleted MSPs are included in the result
+            set. Defaults to false. Only the canonical lower-case
+            string "true" enables the flag; any other value
+            (including absent) is treated as false.
       responses:
         "200":
           description: page of MSPs

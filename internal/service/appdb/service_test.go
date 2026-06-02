@@ -311,6 +311,12 @@ func (f fakeTenantRepo) GetBySlug(context.Context, string) (repository.Tenant, e
 func (f fakeTenantRepo) Update(context.Context, uuid.UUID, repository.TenantPatch) (repository.Tenant, error) {
 	return repository.Tenant{}, nil
 }
+func (f fakeTenantRepo) UpdateSettingsKey(context.Context, uuid.UUID, string, json.RawMessage) (repository.Tenant, error) {
+	return repository.Tenant{}, nil
+}
+func (f fakeTenantRepo) DeleteSettingsKey(context.Context, uuid.UUID, string) (repository.Tenant, error) {
+	return repository.Tenant{}, nil
+}
 func (f fakeTenantRepo) UpdateStatus(context.Context, uuid.UUID, repository.TenantStatus) (repository.Tenant, error) {
 	return repository.Tenant{}, nil
 }

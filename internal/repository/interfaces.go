@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -105,6 +106,24 @@ type TenantRepository interface {
 	// applies the value (including the zero value, which is how
 	// operators clear optional fields like Region).
 	Update(ctx context.Context, id uuid.UUID, patch TenantPatch) (Tenant, error)
+	// UpdateSettingsKey atomically merges a single top-level key
+	// into the tenants.settings JSONB document, preserving other
+	// keys verbatim. The caller passes the encoded value; the
+	// backend performs the merge inside the same row update so
+	// concurrent SetTenantBranding / ClearTenantBranding calls do
+	// not lose updates the way a Get→unmarshal→merge→marshal→Update
+	// pair could. The postgres backend uses `jsonb_set` on the row
+	// directly; the memory backend holds the store mutex across the
+	// RMW. Returns ErrNotFound if the row does not exist or has
+	// been soft-deleted. Round-17 of Devin Review on PR #42
+	// (ANALYSIS_0003) flagged the lost-update race on the previous
+	// service-side RMW.
+	UpdateSettingsKey(ctx context.Context, id uuid.UUID, key string, value json.RawMessage) (Tenant, error)
+	// DeleteSettingsKey atomically removes a single top-level key
+	// from the tenants.settings JSONB document, leaving other keys
+	// untouched. Same atomicity guarantees as UpdateSettingsKey. A
+	// no-op for keys that are not present.
+	DeleteSettingsKey(ctx context.Context, id uuid.UUID, key string) (Tenant, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status TenantStatus) (Tenant, error)
 	// TransitionStatus atomically changes the tenant status only if
 	// the current status matches `from`. Returns ErrForbidden if the
@@ -756,6 +775,25 @@ type IntegrationDeliveryRepository interface {
 
 // --- MSP ------------------------------------------------------------------
 
+// MSPListFilter constrains the result set of MSPRepository.List
+// beyond what cursor pagination alone provides. The zero value is
+// the "operator default": soft-deleted rows are excluded so the
+// public list endpoint matches the lifecycle invariant exposed
+// elsewhere (deleted is terminal; deleted rows must not appear in
+// indexes or default UIs). Admin tools that need to inspect
+// tombstoned rows (e.g. for cleanup, audit, or restoration
+// tooling) opt in explicitly via IncludeDeleted=true. Round-17
+// of Devin Review on PR #42 flagged that the previous List
+// returned soft-deleted rows unconditionally.
+type MSPListFilter struct {
+	// IncludeDeleted controls whether rows whose status is
+	// 'deleted' (or whose deleted_at is non-NULL) are returned.
+	// Defaults to false. The two predicates are equivalent under
+	// the lifecycle invariant `(status='deleted' ⇔ deleted_at !=
+	// NULL)`; backends are free to use either or both.
+	IncludeDeleted bool
+}
+
 // MSPRepository owns the msps + msp_tenants tables. Like
 // TenantRepository, MSPRepository is platform-scoped — application
 // authorization (platform_admin sees all; msp_admin sees own row
@@ -765,7 +803,14 @@ type MSPRepository interface {
 	Create(ctx context.Context, m MSP) (MSP, error)
 	Get(ctx context.Context, id uuid.UUID) (MSP, error)
 	GetBySlug(ctx context.Context, slug string) (MSP, error)
-	List(ctx context.Context, page Page) (PageResult[MSP], error)
+	// List returns a cursor-paginated slice of MSPs matching the
+	// supplied filter. `filter.IncludeDeleted=false` excludes
+	// soft-deleted rows (the default and the operator-facing
+	// semantic); `true` returns all rows including tombstoned
+	// ones for admin / audit tools. Round-17 of Devin Review on
+	// PR #42 added the filter parameter — the previous signature
+	// `List(ctx, page)` always returned soft-deleted rows.
+	List(ctx context.Context, page Page, filter MSPListFilter) (PageResult[MSP], error)
 	// Update applies a sparse, explicit-clear PATCH (same
 	// semantics as TenantRepository.Update).
 	Update(ctx context.Context, id uuid.UUID, patch MSPPatch) (MSP, error)

@@ -275,23 +275,62 @@ func (svc *BulkService) BulkGenerateClaimTokens(
 		return BulkResult{}, err
 	}
 	return svc.fanOut(ctx, tenants, func(ctx context.Context, tid uuid.UUID) BulkTenantOutcome {
-		plaintexts := make([]string, 0, count)
-		for i := 0; i < count; i++ {
-			r, err := svc.tokens.GenerateClaimToken(ctx, tid, ttl, actorID)
-			if err != nil {
-				// Best-effort: surface the first failure with
-				// whatever tokens were generated so the caller
-				// can decide whether to deliver the partial
-				// batch or roll back externally.
-				return BulkTenantOutcome{
-					TenantID:    tid,
-					Error:       fmt.Errorf("issued %d of %d before failure: %w", i, count, err),
-					ClaimTokens: plaintexts,
-				}
-			}
-			plaintexts = append(plaintexts, r.Plaintext)
+		// Issue tokens concurrently within the tenant, bounded
+		// by perTenantTokenConcurrency. Round-17 of Devin
+		// Review on PR #42 (ANALYSIS_0002) flagged that the
+		// previous sequential loop made per-tenant wall-clock
+		// dominate at high counts (e.g. count=1000 × ~10ms per
+		// DB insert = ~10s per tenant). Pushing the parallelism
+		// into the inner loop scales the per-tenant latency
+		// down by the inner cap, while the outer fanOut limit
+		// still bounds the total goroutine count to
+		// (outer × inner). Each goroutine writes into its own
+		// `plaintexts[i]` slot so there's no shared mutation;
+		// errgroup.WithContext cancels the inner ctx on first
+		// error, but the success/failure outcome is decided by
+		// scanning the slot population after Wait — this is
+		// equivalent to the previous "first failure wins"
+		// semantic but reports a partial-success count that
+		// reflects all in-flight successes that completed
+		// (not just those issued before the failure index).
+		const perTenantTokenConcurrency = 8
+		plaintexts := make([]string, count)
+		ig, igctx := errgroup.WithContext(ctx)
+		limit := perTenantTokenConcurrency
+		if limit > count {
+			limit = count
 		}
-		return BulkTenantOutcome{TenantID: tid, ClaimTokens: plaintexts}
+		ig.SetLimit(limit)
+		for i := 0; i < count; i++ {
+			i := i
+			ig.Go(func() error {
+				r, err := svc.tokens.GenerateClaimToken(igctx, tid, ttl, actorID)
+				if err != nil {
+					return err
+				}
+				plaintexts[i] = r.Plaintext
+				return nil
+			})
+		}
+		firstErr := ig.Wait()
+		issued := make([]string, 0, count)
+		for _, p := range plaintexts {
+			if p != "" {
+				issued = append(issued, p)
+			}
+		}
+		if firstErr != nil {
+			// Best-effort: surface the first failure with
+			// whatever tokens were generated so the caller
+			// can decide whether to deliver the partial
+			// batch or roll back externally.
+			return BulkTenantOutcome{
+				TenantID:    tid,
+				Error:       fmt.Errorf("issued %d of %d before failure: %w", len(issued), count, firstErr),
+				ClaimTokens: issued,
+			}
+		}
+		return BulkTenantOutcome{TenantID: tid, ClaimTokens: issued}
 	}), nil
 }
 

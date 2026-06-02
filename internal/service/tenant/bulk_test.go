@@ -96,12 +96,18 @@ func (s *stubSites) Create(_ context.Context, tid uuid.UUID, _ *uuid.UUID, site 
 	return site, nil
 }
 
-// stubTokens implements ClaimTokenIssuer.
+// stubTokens implements ClaimTokenIssuer. `delay` simulates DB
+// latency so per-tenant parallelism is observable via the
+// `maxInFlight` and `inFlight` atomic counters used by
+// TestBulkGenerateClaimTokens_PerTenantInnerParallelism.
 type stubTokens struct {
-	mu         sync.Mutex
-	fail       map[uuid.UUID]int // tenantID -> fail-after-Nth call
-	calls      map[uuid.UUID]int
-	plaintexts map[uuid.UUID][]string
+	mu          sync.Mutex
+	fail        map[uuid.UUID]int // tenantID -> fail-after-Nth call
+	calls       map[uuid.UUID]int
+	plaintexts  map[uuid.UUID][]string
+	delay       time.Duration
+	inFlight    int64
+	maxInFlight int64
 }
 
 func newStubTokens() *stubTokens {
@@ -113,6 +119,20 @@ func newStubTokens() *stubTokens {
 }
 
 func (s *stubTokens) GenerateClaimToken(_ context.Context, tid uuid.UUID, _ time.Duration, _ *uuid.UUID) (svctenant.ClaimTokenResult, error) {
+	// In-flight tracking lives outside the mutex so concurrent
+	// callers actually overlap (otherwise the mutex would
+	// serialise everything and maxInFlight would never exceed 1).
+	in := atomic.AddInt64(&s.inFlight, 1)
+	for {
+		prev := atomic.LoadInt64(&s.maxInFlight)
+		if in <= prev || atomic.CompareAndSwapInt64(&s.maxInFlight, prev, in) {
+			break
+		}
+	}
+	defer atomic.AddInt64(&s.inFlight, -1)
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls[tid]++
@@ -281,6 +301,50 @@ func TestBulkGenerateClaimTokens_PartialFailureReturnsTokensIssuedSoFar(t *testi
 	}
 	if len(res.Failures[0].ClaimTokens) != 2 {
 		t.Fatalf("expected 2 issued-so-far tokens, got %d", len(res.Failures[0].ClaimTokens))
+	}
+}
+
+// TestBulkGenerateClaimTokens_PerTenantInnerParallelism pins
+// round-17 of Devin Review on PR #42 (ANALYSIS_0002): the
+// per-tenant token issuance must be parallelised so a single
+// large-count request (e.g. count=1000) does not dominate
+// per-tenant wall-clock under sequential issuance. The
+// implementation caps inner parallelism at 8 and we verify that
+// the in-flight concurrency observed by the stub crosses 1 (i.e.
+// at least two issuer goroutines were active simultaneously). We
+// also verify all 12 plaintexts are returned uniquely, ruling out
+// any race that collapses or duplicates the output slice. The 50ms
+// per-call delay makes the parallelism observable without
+// extending test runtime materially. Errgroup-launched goroutines
+// share `igctx`, so a context cancellation from a sibling tenant's
+// failure would cascade — out of scope for this test.
+func TestBulkGenerateClaimTokens_PerTenantInnerParallelism(t *testing.T) {
+	t.Parallel()
+	tenants := []uuid.UUID{uuid.New()}
+	tokens := newStubTokens()
+	tokens.delay = 50 * time.Millisecond
+	svc := svctenant.NewBulkService(nil, stubAuthz{tenants: tenants}, nil, nil, tokens, nil, svctenant.BulkOptions{})
+	res, err := svc.BulkGenerateClaimTokens(context.Background(), uuid.New(), uuid.New(), nil, 12, time.Hour)
+	if err != nil {
+		t.Fatalf("gen: %v", err)
+	}
+	if len(res.Successes) != 1 {
+		t.Fatalf("expected 1 success, got %d (failures=%d)", len(res.Successes), len(res.Failures))
+	}
+	if len(res.Successes[0].ClaimTokens) != 12 {
+		t.Fatalf("expected 12 tokens, got %d", len(res.Successes[0].ClaimTokens))
+	}
+	// All-unique check rules out any race that collapses output slots.
+	seen := map[string]bool{}
+	for _, pt := range res.Successes[0].ClaimTokens {
+		if seen[pt] {
+			t.Fatalf("duplicate token %q in output", pt)
+		}
+		seen[pt] = true
+	}
+	// Concurrency observed by the stub must have crossed 1.
+	if maxObs := atomic.LoadInt64(&tokens.maxInFlight); maxObs < 2 {
+		t.Fatalf("maxInFlight = %d; want >=2 (round-17 parallelism not active)", maxObs)
 	}
 }
 

@@ -49,7 +49,7 @@ import (
 type MSPService interface {
 	Create(ctx context.Context, m repository.MSP) (repository.MSP, error)
 	Get(ctx context.Context, id uuid.UUID) (repository.MSP, error)
-	List(ctx context.Context, page repository.Page) (repository.PageResult[repository.MSP], error)
+	List(ctx context.Context, page repository.Page, filter repository.MSPListFilter) (repository.PageResult[repository.MSP], error)
 	Update(ctx context.Context, id uuid.UUID, patch repository.MSPPatch) (repository.MSP, error)
 	// TransitionStatus is the race-free building block for the
 	// active <-> suspended transitions on POST .../status. The
@@ -364,7 +364,20 @@ func (h *MSPHandler) list(w http.ResponseWriter, r *http.Request) {
 		Limit: QueryLimit(r),
 		After: r.URL.Query().Get("after"),
 	}
-	res, err := h.msps.List(r.Context(), page)
+	// Default-exclude soft-deleted rows; admin tools opt in via
+	// `?include_deleted=true`. Round-17 of Devin Review on PR #42
+	// flagged that the previous handler returned all rows including
+	// tombstoned ones, contradicting the lifecycle invariant that
+	// `deleted` is terminal and should not appear in default
+	// listings. Any value other than the canonical "true" is
+	// treated as false (matches `strconv.ParseBool`'s strictness:
+	// `1`, `t`, `T`, `TRUE`, `true`, `True` all evaluate true; we
+	// only accept the lower-case "true" canonical form to keep
+	// the query-string grammar minimal and predictable).
+	filter := repository.MSPListFilter{
+		IncludeDeleted: r.URL.Query().Get("include_deleted") == "true",
+	}
+	res, err := h.msps.List(r.Context(), page, filter)
 	if err != nil {
 		WriteRepositoryError(w, err)
 		return

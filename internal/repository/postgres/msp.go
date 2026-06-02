@@ -123,11 +123,24 @@ func (r *MSPRepository) GetBySlug(ctx context.Context, slug string) (repository.
 	return out, nil
 }
 
-func (r *MSPRepository) List(ctx context.Context, page repository.Page) (repository.PageResult[repository.MSP], error) {
+func (r *MSPRepository) List(ctx context.Context, page repository.Page, filter repository.MSPListFilter) (repository.PageResult[repository.MSP], error) {
 	page = page.Normalize()
 	cur, err := decodeCursor(page.After)
 	if err != nil {
 		return repository.PageResult[repository.MSP]{}, repository.ErrInvalidArgument
+	}
+	// Round-17 of Devin Review on PR #42 — filter out
+	// soft-deleted rows unless an admin caller opts in.
+	// `deleted_at IS NULL` matches the partial unique index
+	// `msps_slug_uniq_idx WHERE deleted_at IS NULL` and the
+	// lifecycle invariant `(status='deleted' ⇔ deleted_at !=
+	// NULL)`. Composed via a SQL fragment so both ASC and DESC
+	// branches share it. Note: the cursor predicate uses an
+	// already-NULL probe on $1::timestamptz; appending the
+	// deleted_at filter via AND keeps that working.
+	deletedFilter := " AND deleted_at IS NULL"
+	if filter.IncludeDeleted {
+		deletedFilter = ""
 	}
 	var q string
 	args := []any{cur.T, cur.I, page.Limit}
@@ -136,7 +149,7 @@ func (r *MSPRepository) List(ctx context.Context, page repository.Page) (reposit
 		q = `
 			SELECT ` + mspSelectColumns + `
 			FROM msps
-			WHERE ($1::timestamptz IS NULL OR (created_at, id) > ($1::timestamptz, $2::uuid))
+			WHERE ($1::timestamptz IS NULL OR (created_at, id) > ($1::timestamptz, $2::uuid))` + deletedFilter + `
 			ORDER BY created_at ASC, id ASC
 			LIMIT $3
 		`
@@ -147,7 +160,7 @@ func (r *MSPRepository) List(ctx context.Context, page repository.Page) (reposit
 		q = `
 			SELECT ` + mspSelectColumns + `
 			FROM msps
-			WHERE ($1::timestamptz IS NULL OR (created_at, id) < ($1::timestamptz, $2::uuid))
+			WHERE ($1::timestamptz IS NULL OR (created_at, id) < ($1::timestamptz, $2::uuid))` + deletedFilter + `
 			ORDER BY created_at DESC, id DESC
 			LIMIT $3
 		`
@@ -339,15 +352,43 @@ func (r *MSPRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status r
 	default:
 		return repository.MSP{}, repository.ErrInvalidArgument
 	}
+	// Resurrection guard (round-17 of Devin Review on PR #42 —
+	// ANALYSIS_0005). UpdateStatus is no longer exposed on the
+	// handler-narrow MSPService interface, but the method remains
+	// on the public MSPRepository for admin tools / migrations.
+	// Without the `WHERE status <> 'deleted' AND deleted_at IS
+	// NULL` precondition below, a stray UpdateStatus(deleted_row,
+	// 'active') would resurrect a soft-deleted row and corrupt
+	// the lifecycle invariant `(status='deleted' ⇔ deleted_at
+	// != NULL)` — that in turn breaks the partial unique index
+	// `WHERE deleted_at IS NULL` on slug and produces the
+	// (status='active', deleted_at != NULL) state the lifecycle
+	// machinery elsewhere does not handle. ErrNoRows from the
+	// guarded UPDATE is disambiguated (NotFound vs Forbidden via
+	// a follow-up SELECT) so callers learn the precise reason
+	// — same pattern Delete() uses for its own precondition.
+	// Matched by the memory backend's
+	// (existing.Status==Deleted||existing.DeletedAt!=nil) check.
 	const q = `
 		UPDATE msps
 		SET status     = $2,
 		    deleted_at = CASE WHEN $2 = 'deleted' THEN COALESCE(deleted_at, NOW()) ELSE deleted_at END
-		WHERE id = $1::uuid
+		WHERE id = $1::uuid AND status <> 'deleted' AND deleted_at IS NULL
 		RETURNING ` + mspSelectColumns
 	out, err := scanMSP(r.s.pool.QueryRow(ctx, q, id, string(status)))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return repository.MSP{}, repository.ErrNotFound
+		// Either the row does not exist, or it's already deleted.
+		// Resolve via a separate SELECT so callers learn the precise
+		// reason.
+		var existing string
+		if scanErr := r.s.pool.QueryRow(ctx,
+			`SELECT status FROM msps WHERE id = $1::uuid`, id).Scan(&existing); scanErr != nil {
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				return repository.MSP{}, repository.ErrNotFound
+			}
+			return repository.MSP{}, fmt.Errorf("update msp status lookup: %w", scanErr)
+		}
+		return repository.MSP{}, repository.ErrForbidden
 	}
 	if err != nil {
 		return repository.MSP{}, fmt.Errorf("update msp status: %w", err)

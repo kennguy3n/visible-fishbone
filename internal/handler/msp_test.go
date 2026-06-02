@@ -68,8 +68,8 @@ func (s repoMSPService) Create(ctx context.Context, m repository.MSP) (repositor
 func (s repoMSPService) Get(ctx context.Context, id uuid.UUID) (repository.MSP, error) {
 	return s.repo.Get(ctx, id)
 }
-func (s repoMSPService) List(ctx context.Context, p repository.Page) (repository.PageResult[repository.MSP], error) {
-	return s.repo.List(ctx, p)
+func (s repoMSPService) List(ctx context.Context, p repository.Page, f repository.MSPListFilter) (repository.PageResult[repository.MSP], error) {
+	return s.repo.List(ctx, p, f)
 }
 func (s repoMSPService) Update(ctx context.Context, id uuid.UUID, patch repository.MSPPatch) (repository.MSP, error) {
 	return s.repo.Update(ctx, id, patch)
@@ -447,6 +447,82 @@ func TestMSPHandler_List_UsesAfterCursor(t *testing.T) {
 	if len(page2.Items) != 2 {
 		t.Fatalf("page2 returned %d items, want 2 (cursor was ignored — the round-1 bug)",
 			len(page2.Items))
+	}
+}
+
+// TestMSPHandler_List_DefaultExcludesSoftDeleted pins round-17 of
+// Devin Review on PR #42: GET /api/v1/msps without query string
+// MUST exclude soft-deleted rows, matching the lifecycle invariant
+// that `deleted` is terminal. `?include_deleted=true` opts in for
+// admin / audit tools. Any other value (empty, "false", "1",
+// "yes", "TRUE", or garbage) is treated as false — only the
+// canonical lower-case "true" enables the admin view. Tail-checks
+// that the typed envelope still respects the `omitempty`
+// `next_cursor` contract pinned by
+// TestMSPHandler_ListEmitsTypedEnvelopeWithoutCursor.
+func TestMSPHandler_List_DefaultExcludesSoftDeleted(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	ctx := context.Background()
+	live, err := msps.Create(ctx, repository.MSP{Name: "Live", Slug: "live"})
+	if err != nil {
+		t.Fatalf("seed live: %v", err)
+	}
+	dead, err := msps.Create(ctx, repository.MSP{Name: "Dead", Slug: "dead"})
+	if err != nil {
+		t.Fatalf("seed dead: %v", err)
+	}
+	if err := msps.Delete(ctx, dead.ID); err != nil {
+		t.Fatalf("soft-delete dead: %v", err)
+	}
+
+	// Default: no query string → dead must be excluded.
+	rec := doMSPJSON(t, mux, http.MethodGet, "/api/v1/msps?limit=100", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("default status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var page struct {
+		Items []handler.MSPResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&page); err != nil {
+		t.Fatalf("decode default: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ID != live.ID.String() {
+		t.Fatalf("default page = %+v; want only live=%s (dead must be excluded)", page, live.ID)
+	}
+
+	// Non-canonical truthy strings must NOT opt in (round-17
+	// chose the strict lower-case "true" form to keep the
+	// grammar minimal).
+	for _, q := range []string{"1", "TRUE", "True", "yes", "false", ""} {
+		rec := doMSPJSON(t, mux, http.MethodGet, "/api/v1/msps?limit=100&include_deleted="+q, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("q=%q status = %d body=%s", q, rec.Code, rec.Body.String())
+		}
+		var nonCanonical struct {
+			Items []handler.MSPResponse `json:"items"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&nonCanonical); err != nil {
+			t.Fatalf("decode q=%q: %v", q, err)
+		}
+		if len(nonCanonical.Items) != 1 || nonCanonical.Items[0].ID != live.ID.String() {
+			t.Fatalf("q=%q page = %+v; non-canonical truthy must NOT opt in", q, nonCanonical)
+		}
+	}
+
+	// Canonical opt-in: ?include_deleted=true must return both.
+	rec = doMSPJSON(t, mux, http.MethodGet, "/api/v1/msps?limit=100&include_deleted=true", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("opt-in status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var opted struct {
+		Items []handler.MSPResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&opted); err != nil {
+		t.Fatalf("decode opt-in: %v", err)
+	}
+	if len(opted.Items) != 2 {
+		t.Fatalf("opt-in page items = %d, want 2 (both live and dead): %+v", len(opted.Items), opted)
 	}
 }
 
