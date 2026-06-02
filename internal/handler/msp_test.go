@@ -3310,3 +3310,124 @@ func TestMSPHandler_BulkClaimTokens_RejectsAboveMaxCount(t *testing.T) {
 			rec.Body.String())
 	}
 }
+
+// TestMSPHandler_CreateRejectsJSONNullSettings pins the round-22 fix
+// for ANALYSIS_0005: a client sending `{"name":"x","slug":"y",
+// "settings": null}` would previously be accepted by the handler,
+// flow into the repo as `m.Settings = json.RawMessage("null")` (4
+// bytes, NOT zero), bypass the existing `len(m.Settings) == 0`
+// default, and persist the scalar `'null'::jsonb` in the postgres
+// column — a valid JSONB but in conflict with the OpenAPI
+// declaration `settings: type: object`. The handler boundary now
+// 400s the `null` literal so spec-strict clients see an explicit
+// `invalid_param` rather than a silent normalisation. The repo
+// boundary still normalises defensively for internal callers (see
+// internal/repository/memory/msp.go and the matching postgres
+// helper), which is exercised by the cross-backend tests.
+func TestMSPHandler_CreateRejectsJSONNullSettings(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+
+	rec := doMSPJSON(t, mux, http.MethodPost, "/api/v1/msps", handler.MSPRequest{
+		Name:     "Acme",
+		Slug:     "acme-null-create",
+		Settings: json.RawMessage(`null`),
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400 — Create must reject settings=null",
+			rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "invalid_param" {
+		t.Fatalf("error.code = %q, want invalid_param", body.Error.Code)
+	}
+	if !strings.Contains(body.Error.Message, "settings") {
+		t.Fatalf("error.message = %q, want mention of settings", body.Error.Message)
+	}
+
+	// No row should have been inserted — slug must still be free.
+	if _, err := msps.GetBySlug(context.Background(), "acme-null-create"); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("after rejected Create, GetBySlug = %v, want ErrNotFound (no row written)", err)
+	}
+
+	// Sanity-check: omitting the field works and yields a `{}` default.
+	rec = doMSPJSON(t, mux, http.MethodPost, "/api/v1/msps", handler.MSPRequest{
+		Name: "Acme2",
+		Slug: "acme-null-create-ok",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("control case Create without settings: code=%d body=%s, want 201",
+			rec.Code, rec.Body.String())
+	}
+	got, err := msps.GetBySlug(context.Background(), "acme-null-create-ok")
+	if err != nil {
+		t.Fatalf("get control msp: %v", err)
+	}
+	if string(got.Settings) != `{}` {
+		t.Fatalf("default settings = %s, want {}", string(got.Settings))
+	}
+}
+
+// TestMSPHandler_PatchSettingsNullIsNoOp pins the round-22 fix for
+// ANALYSIS_0005 on the PATCH path. The MSPPatchRequest declares
+// `Settings *json.RawMessage`, so encoding/json decodes `{"settings":
+// null}` into a NIL pointer (the std lib treats JSON `null` for a
+// pointer field as "set the pointer to nil"). Downstream the handler
+// builds `MSPPatch{Settings: nil}` which the repository treats as
+// "field omitted → keep existing". So `{"settings": null}` on PATCH
+// is observably a no-op — the row's existing settings survive
+// untouched and the response is 200 OK. This is the correct shape
+// for the HTTP surface: the CREATE handler 400s the `null` literal
+// (CREATE uses non-pointer `json.RawMessage` which decodes `null`
+// as the 4-byte `"null"`); the PATCH handler does NOT need a guard
+// because the decoder already eats `null` into nil. The repo-level
+// `null`-literal normalisation in postgres/msp.go and memory/msp.go
+// is the defence-in-depth for any internal caller that constructs
+// `MSPPatch{Settings: &json.RawMessage("null")}` directly (admin
+// tools, migration scripts, future RPC) — that path is exercised
+// by TestMSPRepository_Update_NormalisesJSONNullSettingsLiteral in
+// internal/repository/memory/msp_test.go.
+func TestMSPHandler_PatchSettingsNullIsNoOp(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	m, err := msps.Create(context.Background(), repository.MSP{
+		Name:     "Acme",
+		Slug:     "acme-null-patch",
+		Settings: json.RawMessage(`{"existing":"data"}`),
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Hand-craft the raw body — the typed MSPPatchRequest will
+	// not round-trip a `null` settings field via Marshal because
+	// `*json.RawMessage` set to `&json.RawMessage("null")` marshals
+	// as `"settings": null`. (We rely on that property here.)
+	rawBody := []byte(`{"settings": null}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/msps/"+m.ID.String(), bytes.NewReader(rawBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithUserIDForTest(req.Context(), uuid.New()))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 — PATCH settings=null is decoder no-op",
+			rec.Code, rec.Body.String())
+	}
+	// Existing settings must be untouched — the row should still
+	// hold the original object, not a `{}` or a scalar `null`.
+	after, err := msps.Get(context.Background(), m.ID)
+	if err != nil {
+		t.Fatalf("get after PATCH: %v", err)
+	}
+	if string(after.Settings) != `{"existing":"data"}` {
+		t.Fatalf("settings mutated by PATCH settings=null: %s, want {\"existing\":\"data\"}",
+			string(after.Settings))
+	}
+}

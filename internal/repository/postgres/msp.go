@@ -66,7 +66,18 @@ func (r *MSPRepository) Create(ctx context.Context, m repository.MSP) (repositor
 	if m.Status == "" {
 		m.Status = repository.MSPStatusActive
 	}
-	if len(m.Settings) == 0 {
+	// Default empty / JSON-`null` settings to `{}` so the column
+	// holds an object per the OpenAPI declaration
+	// `settings: type: object`. Round-22 of Devin Review on
+	// PR #42 (ANALYSIS_0005) flagged that a client sending
+	// `{"settings": null}` produces `m.Settings =
+	// json.RawMessage("null")` (4 bytes, NOT zero), bypassing
+	// the previous `len(m.Settings) == 0` default and writing
+	// the scalar `'null'::jsonb`. The handler boundary now 400s
+	// the `null` literal; the repo normalisation closes the gap
+	// for internal callers. Cross-backend parity lives in
+	// internal/repository/memory/msp.go.
+	if len(m.Settings) == 0 || isJSONNullLiteral(m.Settings) {
 		m.Settings = json.RawMessage(`{}`)
 	}
 	brandBuf, err := json.Marshal(m.Branding)
@@ -239,6 +250,23 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 	if patch.Status != nil && *patch.Status == repository.MSPStatusDeleted {
 		return repository.MSP{}, repository.ErrInvalidArgument
 	}
+	// Round-22 of Devin Review on PR #42 (ANALYSIS_0001) flagged
+	// the cross-backend divergence for `patch.Status = &""`: the
+	// CASE arm below binds `$4::text = ''` into the status column,
+	// the table-level CHECK rejects with `invalid_text_representation`
+	// (postgres surfaces as a generic error), while the memory
+	// backend silently skips empty via `if *patch.Status != ""`.
+	// An internal caller bypassing the handler would see two
+	// different observable outcomes (one error, one no-op) for
+	// the same input. The handler boundary at
+	// internal/handler/msp.go converts "" to nil before constructing
+	// the patch, so this is unreachable via HTTP today, but the
+	// repo boundary should fail fast and identically across
+	// backends regardless of caller. Mirrors the existing
+	// empty-Name / empty-Slug guards above.
+	if patch.Status != nil && *patch.Status == "" {
+		return repository.MSP{}, repository.ErrInvalidArgument
+	}
 	// Same sparse explicit-clear PATCH shape as
 	// TenantRepository.Update: nil arg → keep, non-nil arg → set
 	// to value (including zero).
@@ -290,7 +318,23 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 	}
 	if patch.Settings != nil {
 		payload := *patch.Settings
-		if len(payload) == 0 {
+		// Normalise the empty / JSON-`null` payload to the
+		// empty-object default `{}`. Round-22 of Devin Review on
+		// PR #42 (ANALYSIS_0005) flagged that a client sending
+		// `{"settings": null}` produces `*patch.Settings =
+		// json.RawMessage("null")` (4 bytes), bypassing the
+		// existing `len(payload) == 0` default and writing the
+		// scalar `'null'::jsonb` to the column — valid JSONB but
+		// in conflict with the OpenAPI declaration
+		// `settings: type: object`. The handler boundary at
+		// internal/handler/msp.go now 400s the `null` literal, but
+		// the repo defence-in-depth normalisation here closes the
+		// gap for internal callers (admin tools, migration
+		// scripts, future RPC) that construct `MSPPatch{Settings:
+		// &json.RawMessage("null")}` directly. Cross-backend
+		// parity: the matching normalisation lives in
+		// internal/repository/memory/msp.go.
+		if len(payload) == 0 || isJSONNullLiteral(payload) {
 			payload = []byte("{}")
 		}
 		settingsArg = []byte(payload)

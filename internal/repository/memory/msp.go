@@ -61,18 +61,21 @@ func (r *MSPRepository) Create(ctx context.Context, m repository.MSP) (repositor
 	if m.Status == "" {
 		m.Status = repository.MSPStatusActive
 	}
-	// Default nil/empty Settings to "{}" so memory and postgres
-	// both return a non-null JSON object on Get/Create
+	// Default nil/empty/JSON-`null` Settings to "{}" so memory and
+	// postgres both return a non-null JSON object on Get/Create
 	// responses. Without this, a caller that omits Settings on
 	// Create receives `null` from the memory backend but `{}` from
-	// postgres (which has the same default at
-	// internal/repository/postgres/msp.go:68-70). That cross-backend
-	// divergence trips SDK code-gen and unmarshalling for clients
-	// that expect Settings to always be a JSON object. Round-20 of
-	// Devin Review on PR #42 (ANALYSIS_0001) flagged this; the fix
-	// is to mirror the postgres default here so the response shape
-	// is identical regardless of which backend handled the request.
-	if len(m.Settings) == 0 {
+	// postgres (round-20 of Devin Review on PR #42 — ANALYSIS_0001).
+	// Round-22 (ANALYSIS_0005) added the explicit `null`-literal
+	// case: a client sending `{"settings": null}` produces
+	// `m.Settings = json.RawMessage("null")` (4 bytes, NOT zero),
+	// so the previous `len(m.Settings) == 0` default did NOT trigger
+	// and the column ended up storing `'null'::jsonb` — in conflict
+	// with the OpenAPI declaration `settings: type: object`. The
+	// handler boundary 400s the `null` literal; the repo
+	// normalisation closes the gap for internal callers. Cross-
+	// backend parity lives in internal/repository/postgres/msp.go.
+	if len(m.Settings) == 0 || isJSONNullLiteral(m.Settings) {
 		m.Settings = json.RawMessage(`{}`)
 	}
 	m.Settings = cloneJSON(m.Settings)
@@ -185,6 +188,22 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 	if patch.Status != nil && *patch.Status == repository.MSPStatusDeleted {
 		return repository.MSP{}, repository.ErrInvalidArgument
 	}
+	// Round-22 of Devin Review on PR #42 (ANALYSIS_0001) flagged
+	// the cross-backend divergence for `patch.Status = &""`: the
+	// postgres CASE arm binds `$4::text = ''` into the status
+	// column, the table-level CHECK rejects, while this backend
+	// silently skipped `""` via `if *patch.Status != ""` below.
+	// Same input → two observably different outcomes (one error,
+	// one no-op) for an internal caller bypassing the handler.
+	// Reject `""` here so both backends fail fast and identically.
+	// The HTTP handler at internal/handler/msp.go converts "" to
+	// nil before constructing the patch, so this is unreachable
+	// via HTTP today; the guard pins the contract for every
+	// internal caller. Mirrors the existing empty-Name / empty-
+	// Slug guards above.
+	if patch.Status != nil && *patch.Status == "" {
+		return repository.MSP{}, repository.ErrInvalidArgument
+	}
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 	existing, ok := r.s.msps[id]
@@ -221,14 +240,27 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 	if patch.Name != nil {
 		existing.Name = *patch.Name
 	}
-	if patch.Status != nil && *patch.Status != "" {
+	if patch.Status != nil {
+		// Empty-string rejection happened at the top of this
+		// function; if we got here `*patch.Status` is one of
+		// the valid non-deleted enum values.
 		existing.Status = *patch.Status
 	}
 	if patch.Branding != nil {
 		existing.Branding = *patch.Branding
 	}
 	if patch.Settings != nil {
-		existing.Settings = cloneJSON(*patch.Settings)
+		payload := *patch.Settings
+		// Normalise the JSON-`null` payload to `{}` for cross-
+		// backend parity with the postgres backend and to keep
+		// the stored value aligned with the OpenAPI declaration
+		// `settings: type: object`. Round-22 of Devin Review on
+		// PR #42 (ANALYSIS_0005). The handler 400s `null`; this
+		// is the defence-in-depth for internal callers.
+		if isJSONNullLiteral(payload) {
+			payload = []byte("{}")
+		}
+		existing.Settings = cloneJSON(payload)
 	}
 	existing.UpdatedAt = r.s.clock()
 	r.s.msps[existing.ID] = existing

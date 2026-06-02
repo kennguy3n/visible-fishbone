@@ -900,3 +900,112 @@ func TestMSPRepository_Delete_CascadeClearsTenantPointer_R21(t *testing.T) {
 		t.Fatalf("cascade did not clear tenants.msp_id: still pointing at %v", *got.MSPID)
 	}
 }
+
+// TestMSPRepository_Update_RejectsEmptyStringStatus pins the round-22
+// fix for ANALYSIS_0001: an internal caller that constructs
+// `MSPPatch{Status: &""}` must be rejected at the repo boundary with
+// ErrInvalidArgument on both backends. Prior to the fix the memory
+// backend silently skipped the empty string via `if *patch.Status
+// != ""`, while the postgres backend bound the empty string into
+// the CASE arm and let the table-level CHECK reject. Same input →
+// two observably different outcomes (no-op vs error) for any caller
+// bypassing the HTTP handler. The handler at internal/handler/msp.go
+// already converts "" to nil before constructing the patch, so this
+// is unreachable via HTTP today; the test pins the contract for
+// every internal caller (admin tools, migration scripts, future RPC).
+func TestMSPRepository_Update_RejectsEmptyStringStatus(t *testing.T) {
+	_, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+	m, err := mspRepo.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-empty-status"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	empty := repository.MSPStatus("")
+	_, err = mspRepo.Update(ctx, m.ID, repository.MSPPatch{Status: &empty})
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("Update with patch.Status=\"\" must ErrInvalidArgument, got %v", err)
+	}
+	// Row must be untouched — the active-state precondition is
+	// preserved.
+	after, err := mspRepo.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if after.Status != repository.MSPStatusActive {
+		t.Fatalf("row mutated despite rejected patch.Status=\"\": status = %q, want active", after.Status)
+	}
+}
+
+// TestMSPRepository_Create_RejectsJSONNullSettingsLiteral pins the
+// round-22 fix for ANALYSIS_0005 at the repo boundary: a caller
+// passing `m.Settings = json.RawMessage("null")` must NOT cause the
+// stored column to hold the scalar `null` (which would violate the
+// OpenAPI declaration `settings: type: object`). The repo
+// normalises the literal `null` back to `{}` so the stored shape is
+// always an object regardless of which backend handled the request
+// and regardless of whether the caller went through the HTTP
+// handler (which 400s the literal) or constructed the MSP struct
+// directly (e.g. admin tool, migration script, future RPC).
+func TestMSPRepository_Create_RejectsJSONNullSettingsLiteral(t *testing.T) {
+	_, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		in   json.RawMessage
+		want string
+	}{
+		{"bare null literal", json.RawMessage(`null`), `{}`},
+		{"null literal with leading whitespace", json.RawMessage(" \n null"), `{}`},
+		{"null literal with trailing whitespace", json.RawMessage("null  \t"), `{}`},
+		// Round-trip: a real object survives unchanged.
+		{"populated object survives normalisation", json.RawMessage(`{"k":"v"}`), `{"k":"v"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			created, err := mspRepo.Create(ctx, repository.MSP{
+				Name:     "Acme " + tc.name,
+				Slug:     "acme-null-settings-" + tc.name,
+				Settings: tc.in,
+			})
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if string(created.Settings) != tc.want {
+				t.Fatalf("Settings = %s, want %s", string(created.Settings), tc.want)
+			}
+		})
+	}
+}
+
+// TestMSPRepository_Update_NormalisesJSONNullSettingsLiteral pins
+// the round-22 fix for ANALYSIS_0005 on the PATCH path: a caller
+// constructing `MSPPatch{Settings: &json.RawMessage("null")}` must
+// not cause the stored column to flip from a real object to the
+// scalar `null`. The repo normalises the literal back to `{}` so
+// the stored shape is always an object. This is the same fix as
+// Create above but on the Update code path; we exercise both
+// because PATCH is the more dangerous path (a previously-good row
+// would be silently downgraded into a spec-violating shape).
+func TestMSPRepository_Update_NormalisesJSONNullSettingsLiteral(t *testing.T) {
+	_, mspRepo, _ := mspFixtures(t)
+	ctx := context.Background()
+	m, err := mspRepo.Create(ctx, repository.MSP{
+		Name:     "Acme",
+		Slug:     "acme-null-update",
+		Settings: json.RawMessage(`{"existing":"data"}`),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	nullPayload := json.RawMessage(`null`)
+	updated, err := mspRepo.Update(ctx, m.ID, repository.MSPPatch{Settings: &nullPayload})
+	if err != nil {
+		t.Fatalf("update with null settings: %v", err)
+	}
+	if string(updated.Settings) != `{}` {
+		t.Fatalf("Update did NOT normalise null literal: Settings = %s, want {}", string(updated.Settings))
+	}
+	// And the rest of the row is untouched.
+	if updated.Name != "Acme" || updated.Slug != "acme-null-update" {
+		t.Fatalf("Update mutated unrelated fields: %+v", updated)
+	}
+}

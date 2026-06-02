@@ -27,6 +27,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,18 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	svctenant "github.com/kennguy3n/visible-fishbone/internal/service/tenant"
 )
+
+// isJSONNullPayload reports whether `b` is the JSON `null` literal
+// (after stripping surrounding whitespace). Used to reject explicit
+// `null` on payloads the OpenAPI spec declares as required JSON
+// objects — see round-22 of Devin Review on PR #42 (ANALYSIS_0005).
+// The matching repo-boundary normalisation that maps the `null`
+// literal back to `{}` for any internal caller that bypasses the
+// handler lives in internal/repository/postgres/nulls.go and
+// internal/repository/memory/store.go.
+func isJSONNullPayload(b json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(b), []byte("null"))
+}
 
 // MSPService is the narrow interface the handler needs from the
 // production wiring. Implemented by a concrete *msp.Service that
@@ -447,6 +460,26 @@ func (h *MSPHandler) create(w http.ResponseWriter, r *http.Request) {
 			"status on create must be one of active, suspended (or omitted to default to active); use DELETE or POST .../status to delete")
 		return
 	}
+	// Reject the JSON `null` literal for `settings`. The OpenAPI
+	// schema declares `settings: type: object` (no `nullable: true`),
+	// and the repo defaults nil/empty payloads to `{}` so the stored
+	// row always satisfies the object invariant. Without this guard,
+	// `{"settings": null}` decodes to `json.RawMessage("null")`
+	// (len == 4, NOT zero), the existing `len == 0` default in the
+	// repo skips it, and we end up storing `'null'::jsonb` — valid
+	// JSONB but in conflict with the OpenAPI contract and the
+	// downstream client expectation that `settings` is always an
+	// object. The repo boundary also normalises this defensively
+	// for internal callers (see internal/repository/postgres/msp.go
+	// and internal/repository/memory/msp.go); the handler 400 here
+	// gives spec-strict HTTP clients a precise error rather than a
+	// silent normalisation. Round-22 of Devin Review on PR #42
+	// (ANALYSIS_0005).
+	if isJSONNullPayload(req.Settings) {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			"settings cannot be JSON null; omit the field or send an object")
+		return
+	}
 	m := repository.MSP{
 		Name:     req.Name,
 		Slug:     req.Slug,
@@ -516,6 +549,21 @@ func (h *MSPHandler) update(w http.ResponseWriter, r *http.Request) {
 			"slug cannot be cleared via PATCH; omit the field to leave unchanged")
 		return
 	}
+	// Note on `{"settings": null}` for PATCH: the field type is
+	// `*json.RawMessage`, and encoding/json decodes JSON `null`
+	// for a pointer-typed field as a nil pointer (not a non-nil
+	// pointer holding the 4-byte literal `null`). So `req.Settings
+	// == nil` here, which downstream treats as "field omitted →
+	// keep existing" — the right behaviour for a PATCH that the
+	// client explicitly cleared with `null`. The Create handler
+	// above DOES need an explicit `null`-literal guard because the
+	// CREATE struct uses non-pointer `json.RawMessage` which
+	// decodes `null` as the 4-byte `"null"`. The repo boundary
+	// also defensively normalises the `null` literal back to `{}`
+	// for any internal caller that constructs an MSPPatch with
+	// `Settings: &json.RawMessage("null")` directly — see
+	// internal/repository/postgres/msp.go and the matching memory
+	// helper. Round-22 of Devin Review on PR #42 (ANALYSIS_0005).
 	patch := repository.MSPPatch{
 		Name:     req.Name,
 		Slug:     req.Slug,

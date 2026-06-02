@@ -15,6 +15,7 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -155,6 +156,19 @@ func scopeIDOrZero(p *uuid.UUID) uuid.UUID {
 		return uuid.Nil
 	}
 	return *p
+}
+
+// isJSONNullLiteral returns true when `b` is the JSON `null` token
+// (after stripping surrounding whitespace). Round-22 of Devin Review
+// on PR #42 (ANALYSIS_0005) flagged that `{"settings": null}` decodes
+// to `json.RawMessage("null")` — len == 4, not 0 — and therefore
+// bypasses every `len(payload) == 0` default that the repository
+// boundary uses to enforce the OpenAPI declaration `settings: type:
+// object`. Treat the literal `null` as equivalent to absent so the
+// stored column is always a JSON object. The matching helper on the
+// postgres backend lives in internal/repository/postgres/nulls.go.
+func isJSONNullLiteral(b json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(b), []byte("null"))
 }
 
 // cloneJSON returns a deep copy of a json.RawMessage so callers
