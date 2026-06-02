@@ -153,6 +153,7 @@ func (e *Engine) executeStep(
 		TenantID:    tenantID,
 		StepOrder:   step.Order,
 		Status:      "running",
+		Output:      json.RawMessage(`{}`),
 		StartedAt:   &now,
 	}
 

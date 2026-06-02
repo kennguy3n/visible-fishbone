@@ -392,7 +392,7 @@ func (r *PlaybookApprovalRepository) UpdateStatus(ctx context.Context, tenantID,
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 	a, ok := r.s.playbookApprovals[id]
-	if !ok || a.TenantID != tenantID {
+	if !ok || a.TenantID != tenantID || a.Status != "pending" {
 		return repository.ErrNotFound
 	}
 	a.Status = status

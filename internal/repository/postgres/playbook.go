@@ -447,7 +447,7 @@ func (r *PlaybookApprovalRepository) ListPending(ctx context.Context, tenantID u
 func (r *PlaybookApprovalRepository) UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string, approverID *uuid.UUID) error {
 	return r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		const q = `UPDATE playbook_approvals SET status = $1, approver_id = $2, decided_at = NOW()
-WHERE id = $3`
+WHERE id = $3 AND status = 'pending'`
 		tag, err := tx.Exec(ctx, q, status, optionalUUID(approverID), id)
 		if err != nil {
 			return err
