@@ -37,6 +37,7 @@ type RouterDeps struct {
 	SCIM             *SCIMHandler
 	Compliance       *ComplianceHandler
 	Playbook         *PlaybookHandler
+	Troubleshoot     *TroubleshootHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
 	RateLimiter      *middleware.RateLimiter
@@ -143,6 +144,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.BulkDevice != nil {
 		deps.BulkDevice.Register(apiMux)
+	}
+	if deps.Troubleshoot != nil {
+		deps.Troubleshoot.Register(apiMux)
 	}
 
 	apiChain := middleware.Chain(

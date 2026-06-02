@@ -1073,3 +1073,24 @@ type AISuggestionRepository interface {
 	List(ctx context.Context, tenantID uuid.UUID, status *string, page Page) (PageResult[AISuggestion], error)
 	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, expectedStatus, newStatus string, reviewerID *uuid.UUID, feedback *string) error
 }
+
+// --- Troubleshooting ------------------------------------------------------
+
+// KBEntryRepository owns the kb_entries table. Entries with
+// tenant_id = nil are global (visible to all tenants).
+type KBEntryRepository interface {
+	Create(ctx context.Context, tenantID *uuid.UUID, e KBEntry) (KBEntry, error)
+	Get(ctx context.Context, tenantID *uuid.UUID, id uuid.UUID) (KBEntry, error)
+	List(ctx context.Context, tenantID *uuid.UUID, category *string, page Page) (PageResult[KBEntry], error)
+	Update(ctx context.Context, tenantID *uuid.UUID, id uuid.UUID, patch KBEntryPatch) (KBEntry, error)
+	Delete(ctx context.Context, tenantID *uuid.UUID, id uuid.UUID) error
+	Search(ctx context.Context, tenantID *uuid.UUID, query string, limit int) ([]KBEntry, error)
+}
+
+// TroubleshootSessionRepository owns the troubleshoot_sessions table.
+type TroubleshootSessionRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, s TroubleshootSession) (TroubleshootSession, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (TroubleshootSession, error)
+	Update(ctx context.Context, tenantID, id uuid.UUID, s TroubleshootSession) (TroubleshootSession, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[TroubleshootSession], error)
+}
