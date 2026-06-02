@@ -151,11 +151,16 @@ func (s *BulkDeviceService) BulkRevoke(
 		return BulkResult{}, fmt.Errorf("max %d devices per request: %w", MaxBulkDevices, repository.ErrInvalidArgument)
 	}
 	result := BulkResult{Total: len(deviceIDs)}
+	now := s.nowFunc()
 	for _, did := range deviceIDs {
 		if err := s.enrolls.UpdateEnrollmentStatus(ctx, tenantID, did, repository.EnrollmentStatusRevoked); err != nil {
 			result.Failed++
 			result.Errors = append(result.Errors, fmt.Sprintf("device %s: %v", did, err))
 			continue
+		}
+		if err := s.enrolls.RevokeAllCertificates(ctx, tenantID, did, now); err != nil {
+			s.logger.Warn("bulk revoke: certificate revocation failed",
+				"device_id", did, "tenant_id", tenantID, "error", err)
 		}
 		result.Succeeded++
 	}

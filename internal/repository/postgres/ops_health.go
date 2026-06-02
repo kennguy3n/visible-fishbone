@@ -140,7 +140,7 @@ func (r *PolicyReviewScheduleRepository) UpdateLastReviewed(ctx context.Context,
 		const q = `
 			UPDATE policy_review_schedules
 			SET last_reviewed_at = $1,
-			    next_review_at   = $1 + (review_interval_days || ' days')::interval
+			    next_review_at   = $1 + make_interval(days => review_interval_days)
 			WHERE policy_id = $2::uuid`
 		tag, err := tx.Exec(ctx, q, at, policyID)
 		if err != nil {
