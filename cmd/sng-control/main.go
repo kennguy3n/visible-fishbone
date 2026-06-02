@@ -638,28 +638,30 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 		verifier = aisvc.NewVerifier(policySvc)
 	}
 
-	// Summarizer requires a ClickHouse evidence reader. For now,
-	// we construct without one (nil) — it will be wired later via
-	// svc.SetSummarizer when ClickHouse becomes available
-	// (mirrors the policySimHandler.SetSimulator pattern).
-	svc := aisvc.New(llm, verifier, nil, aisvc.WithLogger(logger))
-	h := handler.NewAIHandler(svc, logger)
-
-	// Enhanced AI capabilities (Tasks 67-71). When a live LLM is
-	// configured we wrap it in the GuardrailedProvider so every
-	// engine call is rate-limited, PII/secret-filtered, and audited;
-	// the engines then run against that guardrailed provider rather
-	// than the raw LLM. When no endpoint is configured, effectiveLLM
-	// stays nil and the engines fall back to deterministic
-	// (template-only) behaviour. The guardrails handle is still
-	// passed to the handler so the status endpoint can report usage;
-	// it is nil (503) when no LLM is configured.
+	// Enhanced AI guardrails (Task 71). When a live LLM is configured
+	// we wrap it once in a GuardrailedProvider so that EVERY AI code
+	// path — the existing summarize/suggest/troubleshoot service as
+	// well as the new correlation, NL-query and report engines — runs
+	// through a single shared per-tenant rate limit, PII/secret
+	// content filter, and audit log. When no endpoint is configured,
+	// effectiveLLM stays nil and all AI features fall back to their
+	// deterministic (template-only) behaviour. The guardrails handle
+	// is also passed to the handler so the status endpoint can report
+	// usage; it is nil (503) when no LLM is configured.
 	var guardrails *aisvc.GuardrailedProvider
 	var effectiveLLM aisvc.LLMProvider
 	if llm != nil {
 		guardrails = aisvc.NewGuardrailedProvider(llm, aisvc.GuardrailConfig{}, logger)
 		effectiveLLM = guardrails
 	}
+
+	// Summarizer requires a ClickHouse evidence reader. For now,
+	// we construct without one (nil) — it will be wired later via
+	// svc.SetSummarizer when ClickHouse becomes available
+	// (mirrors the policySimHandler.SetSimulator pattern).
+	svc := aisvc.New(effectiveLLM, verifier, nil, aisvc.WithLogger(logger))
+	h := handler.NewAIHandler(svc, logger)
+
 	correlation := aisvc.NewCorrelationEngine(effectiveLLM, aisvc.CorrelationConfig{})
 	nlQuery := aisvc.NewNLQueryEngine(effectiveLLM)
 	reports := aisvc.NewReportEngine(effectiveLLM)

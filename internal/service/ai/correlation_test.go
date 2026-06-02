@@ -155,6 +155,47 @@ func TestCorrelationEngine_BelowMinCluster(t *testing.T) {
 	}
 }
 
+func TestCorrelationEngine_NilAlertIDsNotDropped(t *testing.T) {
+	t.Parallel()
+	engine := NewCorrelationEngine(nil, CorrelationConfig{
+		TimeWindow:     time.Hour,
+		MinClusterSize: 2,
+	})
+
+	tenantID := uuid.New()
+	now := time.Now()
+	// All alerts omit ID (uuid.Nil). They share a device, so they
+	// must correlate into a single cluster covering every alert
+	// rather than collapsing onto one nil key.
+	alerts := []AlertInput{
+		{TenantID: tenantID, Kind: "anomaly", Severity: "medium", DeviceID: "d1", CreatedAt: now},
+		{TenantID: tenantID, Kind: "anomaly", Severity: "medium", DeviceID: "d1", CreatedAt: now.Add(2 * time.Minute)},
+		{TenantID: tenantID, Kind: "anomaly", Severity: "medium", DeviceID: "d1", CreatedAt: now.Add(4 * time.Minute)},
+	}
+
+	result, err := engine.Analyze(context.Background(), alerts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Clusters) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(result.Clusters))
+	}
+	if got := len(result.Clusters[0].AlertIDs); got != 3 {
+		t.Fatalf("expected 3 correlated alerts, got %d", got)
+	}
+	// Synthetic IDs must be unique (no nil collisions).
+	seen := map[uuid.UUID]bool{}
+	for _, id := range result.Clusters[0].AlertIDs {
+		if id == uuid.Nil {
+			t.Fatal("alert ID should not be nil after analysis")
+		}
+		if seen[id] {
+			t.Fatalf("duplicate alert ID %s in cluster", id)
+		}
+		seen[id] = true
+	}
+}
+
 func TestCorrelationEngine_WithLLM(t *testing.T) {
 	t.Parallel()
 	llm := &correlationStubLLM{text: "AI-polished cluster summary", modelID: "test-model"}

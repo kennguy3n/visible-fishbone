@@ -34,6 +34,16 @@ func (e *CorrelationEngine) Analyze(ctx context.Context, alerts []AlertInput) (C
 
 	sorted := make([]AlertInput, len(alerts))
 	copy(sorted, alerts)
+	// The alert ID is optional in the API contract, so callers may
+	// send alerts with a zero (uuid.Nil) ID. Assign a synthetic ID to
+	// those before grouping; otherwise the dedup map below would
+	// collapse every nil-ID alert onto a single key and silently drop
+	// all but the first from the analysis.
+	for i := range sorted {
+		if sorted[i].ID == uuid.Nil {
+			sorted[i].ID = uuid.New()
+		}
+	}
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].CreatedAt.Before(sorted[j].CreatedAt)
 	})
