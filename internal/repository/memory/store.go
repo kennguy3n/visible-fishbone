@@ -108,6 +108,15 @@ type Store struct {
 	// AI correlation tables — see migration 029.
 	aiCorrelations map[uuid.UUID]repository.AICorrelation
 
+	// Compliance reports — see migration 022.
+	complianceReports map[uuid.UUID]repository.ComplianceReport
+
+	// Playbook tables — see migrations 023-025.
+	playbooks           map[uuid.UUID]repository.Playbook
+	playbookExecutions  map[uuid.UUID]repository.PlaybookExecution
+	playbookStepResults map[uuid.UUID]repository.StepResult
+	playbookApprovals   map[uuid.UUID]repository.PlaybookApproval
+
 	// clock is injected for deterministic tests. Defaults to
 	// time.Now.UTC.
 	clock func() time.Time
@@ -168,6 +177,11 @@ func NewStore() *Store {
 		roles:                 map[uuid.UUID]repository.Role{},
 		userRoles:             map[userRoleKey]repository.UserRole{},
 		aiCorrelations:        map[uuid.UUID]repository.AICorrelation{},
+		complianceReports:     map[uuid.UUID]repository.ComplianceReport{},
+		playbooks:             map[uuid.UUID]repository.Playbook{},
+		playbookExecutions:    map[uuid.UUID]repository.PlaybookExecution{},
+		playbookStepResults:   map[uuid.UUID]repository.StepResult{},
+		playbookApprovals:     map[uuid.UUID]repository.PlaybookApproval{},
 		clock:                 func() time.Time { return time.Now().UTC() },
 	}
 }
