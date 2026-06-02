@@ -91,7 +91,7 @@ func TestClassify_NotFound(t *testing.T) {
 func TestCreate_InvalidLevel(t *testing.T) {
 	t.Parallel()
 	svc, tid := newTaxonomyService(t)
-	_, err := svc.Create(context.Background(), tid, repository.DataClassification{
+	_, err := svc.Create(context.Background(), tid, nil, repository.DataClassification{
 		Label: "Bad", Level: "invalid",
 	})
 	if err == nil {
@@ -104,11 +104,11 @@ func TestUpdate(t *testing.T) {
 	svc, tid := newTaxonomyService(t)
 	ctx := context.Background()
 
-	created, _ := svc.Create(ctx, tid, repository.DataClassification{
+	created, _ := svc.Create(ctx, tid, nil, repository.DataClassification{
 		Label: "Custom", Level: repository.ClassificationLevelPublic,
 	})
 	newLabel := "Updated"
-	updated, err := svc.Update(ctx, tid, created.ID, repository.DataClassificationPatch{
+	updated, err := svc.Update(ctx, tid, created.ID, nil, repository.DataClassificationPatch{
 		Label: &newLabel,
 	})
 	if err != nil {
@@ -124,10 +124,10 @@ func TestDelete(t *testing.T) {
 	svc, tid := newTaxonomyService(t)
 	ctx := context.Background()
 
-	created, _ := svc.Create(ctx, tid, repository.DataClassification{
+	created, _ := svc.Create(ctx, tid, nil, repository.DataClassification{
 		Label: "ToDelete", Level: repository.ClassificationLevelInternal,
 	})
-	if err := svc.Delete(ctx, tid, created.ID); err != nil {
+	if err := svc.Delete(ctx, tid, created.ID, nil); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	_, err := svc.Get(ctx, tid, created.ID)

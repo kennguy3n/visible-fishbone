@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
@@ -78,6 +79,7 @@ func (s *TaxonomyService) SeedDefaults(ctx context.Context, tenantID uuid.UUID) 
 func (s *TaxonomyService) Create(
 	ctx context.Context,
 	tenantID uuid.UUID,
+	actorID *uuid.UUID,
 	dc repository.DataClassification,
 ) (repository.DataClassification, error) {
 	if dc.Label == "" {
@@ -90,7 +92,7 @@ func (s *TaxonomyService) Create(
 	if err != nil {
 		return repository.DataClassification{}, err
 	}
-	s.logAudit(ctx, tenantID, "data_classification.created", "data_classification", &created.ID)
+	s.logAudit(ctx, tenantID, actorID, "data_classification.created", "data_classification", &created.ID)
 	return created, nil
 }
 
@@ -108,6 +110,7 @@ func (s *TaxonomyService) List(ctx context.Context, tenantID uuid.UUID, page rep
 func (s *TaxonomyService) Update(
 	ctx context.Context,
 	tenantID, id uuid.UUID,
+	actorID *uuid.UUID,
 	patch repository.DataClassificationPatch,
 ) (repository.DataClassification, error) {
 	if patch.Level != nil && !patch.Level.IsValid() {
@@ -117,16 +120,16 @@ func (s *TaxonomyService) Update(
 	if err != nil {
 		return repository.DataClassification{}, err
 	}
-	s.logAudit(ctx, tenantID, "data_classification.updated", "data_classification", &updated.ID)
+	s.logAudit(ctx, tenantID, actorID, "data_classification.updated", "data_classification", &updated.ID)
 	return updated, nil
 }
 
 // Delete removes a classification entry.
-func (s *TaxonomyService) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
+func (s *TaxonomyService) Delete(ctx context.Context, tenantID, id uuid.UUID, actorID *uuid.UUID) error {
 	if err := s.classifications.Delete(ctx, tenantID, id); err != nil {
 		return err
 	}
-	s.logAudit(ctx, tenantID, "data_classification.deleted", "data_classification", &id)
+	s.logAudit(ctx, tenantID, actorID, "data_classification.deleted", "data_classification", &id)
 	return nil
 }
 
@@ -135,16 +138,18 @@ func (s *TaxonomyService) Classify(ctx context.Context, tenantID uuid.UUID, leve
 	return s.classifications.GetByLevel(ctx, tenantID, level)
 }
 
-func (s *TaxonomyService) logAudit(ctx context.Context, tenantID uuid.UUID, action, resourceType string, resourceID *uuid.UUID) {
+func (s *TaxonomyService) logAudit(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, action, resourceType string, resourceID *uuid.UUID) {
 	if s.audit == nil {
 		return
 	}
+	details := middleware.EnrichAuditDetails(ctx, json.RawMessage(`{}`))
 	if _, err := s.audit.Append(ctx, tenantID, repository.AuditEntry{
 		TenantID:     tenantID,
+		ActorID:      actorID,
 		Action:       action,
 		ResourceType: resourceType,
 		ResourceID:   resourceID,
-		Details:      json.RawMessage(`{}`),
+		Details:      details,
 	}); err != nil {
 		s.logger.Error("audit log failed", "action", action, "err", err)
 	}

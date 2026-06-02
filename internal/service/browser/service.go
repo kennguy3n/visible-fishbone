@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
@@ -42,6 +43,7 @@ func New(
 func (s *Service) CreatePolicy(
 	ctx context.Context,
 	tenantID uuid.UUID,
+	actorID *uuid.UUID,
 	p repository.BrowserPolicy,
 ) (repository.BrowserPolicy, error) {
 	if p.Name == "" {
@@ -65,7 +67,7 @@ func (s *Service) CreatePolicy(
 	if err != nil {
 		return repository.BrowserPolicy{}, err
 	}
-	s.logAudit(ctx, tenantID, "browser_policy.created", "browser_policy", &created.ID)
+	s.logAudit(ctx, tenantID, actorID, "browser_policy.created", "browser_policy", &created.ID)
 	return created, nil
 }
 
@@ -87,6 +89,7 @@ func (s *Service) GetPolicy(ctx context.Context, tenantID, id uuid.UUID) (reposi
 func (s *Service) UpdatePolicy(
 	ctx context.Context,
 	tenantID, id uuid.UUID,
+	actorID *uuid.UUID,
 	patch repository.BrowserPolicyPatch,
 ) (repository.BrowserPolicy, error) {
 	if patch.Action != nil && !patch.Action.IsValid() {
@@ -107,29 +110,31 @@ func (s *Service) UpdatePolicy(
 	if err != nil {
 		return repository.BrowserPolicy{}, err
 	}
-	s.logAudit(ctx, tenantID, "browser_policy.updated", "browser_policy", &updated.ID)
+	s.logAudit(ctx, tenantID, actorID, "browser_policy.updated", "browser_policy", &updated.ID)
 	return updated, nil
 }
 
 // DeletePolicy removes a browser policy.
-func (s *Service) DeletePolicy(ctx context.Context, tenantID, id uuid.UUID) error {
+func (s *Service) DeletePolicy(ctx context.Context, tenantID, id uuid.UUID, actorID *uuid.UUID) error {
 	if err := s.policies.Delete(ctx, tenantID, id); err != nil {
 		return err
 	}
-	s.logAudit(ctx, tenantID, "browser_policy.deleted", "browser_policy", &id)
+	s.logAudit(ctx, tenantID, actorID, "browser_policy.deleted", "browser_policy", &id)
 	return nil
 }
 
-func (s *Service) logAudit(ctx context.Context, tenantID uuid.UUID, action, resourceType string, resourceID *uuid.UUID) {
+func (s *Service) logAudit(ctx context.Context, tenantID uuid.UUID, actorID *uuid.UUID, action, resourceType string, resourceID *uuid.UUID) {
 	if s.audit == nil {
 		return
 	}
+	details := middleware.EnrichAuditDetails(ctx, json.RawMessage(`{}`))
 	if _, err := s.audit.Append(ctx, tenantID, repository.AuditEntry{
 		TenantID:     tenantID,
+		ActorID:      actorID,
 		Action:       action,
 		ResourceType: resourceType,
 		ResourceID:   resourceID,
-		Details:      json.RawMessage(`{}`),
+		Details:      details,
 	}); err != nil {
 		s.logger.Error("audit log failed", "action", action, "err", err)
 	}

@@ -23,6 +23,13 @@ func (r *BrowserPolicyRepository) Create(_ context.Context, tenantID uuid.UUID, 
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 
+	// Enforce unique (tenant_id, name).
+	for _, existing := range r.s.browserPolicies {
+		if existing.TenantID == tenantID && existing.Name == p.Name {
+			return repository.BrowserPolicy{}, repository.ErrConflict
+		}
+	}
+
 	now := r.s.clock()
 	p.ID = uuid.New()
 	p.TenantID = tenantID
@@ -78,6 +85,11 @@ func (r *BrowserPolicyRepository) Update(_ context.Context, tenantID, id uuid.UU
 		return repository.BrowserPolicy{}, repository.ErrNotFound
 	}
 	if patch.Name != nil {
+		for _, existing := range r.s.browserPolicies {
+			if existing.TenantID == tenantID && existing.Name == *patch.Name && existing.ID != id {
+				return repository.BrowserPolicy{}, repository.ErrConflict
+			}
+		}
 		p.Name = *patch.Name
 	}
 	if patch.Rules != nil {

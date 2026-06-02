@@ -89,7 +89,8 @@ func (h *BrowserHandler) create(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	created, err := h.svc.CreatePolicy(r.Context(), tenantID, repository.BrowserPolicy{
+	actorID := actorFromCtx(r)
+	created, err := h.svc.CreatePolicy(r.Context(), tenantID, actorID, repository.BrowserPolicy{
 		Name:    req.Name,
 		Rules:   req.Rules,
 		Action:  repository.BrowserPolicyAction(req.Action),
@@ -171,7 +172,8 @@ func (h *BrowserHandler) update(w http.ResponseWriter, r *http.Request) {
 		patch.Scope = &s
 	}
 	patch.Enabled = req.Enabled
-	updated, err := h.svc.UpdatePolicy(r.Context(), tenantID, id, patch)
+	actorID := actorFromCtx(r)
+	updated, err := h.svc.UpdatePolicy(r.Context(), tenantID, id, actorID, patch)
 	if err != nil {
 		WriteRepositoryError(w, err)
 		return
@@ -188,7 +190,8 @@ func (h *BrowserHandler) delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.svc.DeletePolicy(r.Context(), tenantID, id); err != nil {
+	actorID := actorFromCtx(r)
+	if err := h.svc.DeletePolicy(r.Context(), tenantID, id, actorID); err != nil {
 		WriteRepositoryError(w, err)
 		return
 	}

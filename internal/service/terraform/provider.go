@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
@@ -281,11 +282,12 @@ func (p *Provider) logAudit(ctx context.Context, tenantID uuid.UUID, action stri
 	if p.deps.Audit == nil {
 		return
 	}
+	details := middleware.EnrichAuditDetails(ctx, json.RawMessage(`{}`))
 	if _, err := p.deps.Audit.Append(ctx, tenantID, repository.AuditEntry{
 		TenantID:     tenantID,
 		Action:       action,
 		ResourceType: "tenant_config",
-		Details:      json.RawMessage(`{}`),
+		Details:      details,
 	}); err != nil {
 		p.logger.Error("audit log failed", "action", action, "err", err)
 	}

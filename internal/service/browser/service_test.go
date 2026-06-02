@@ -35,7 +35,7 @@ func TestCreatePolicy(t *testing.T) {
 	svc, tid := newTestService(t)
 	ctx := context.Background()
 
-	p, err := svc.CreatePolicy(ctx, tid, repository.BrowserPolicy{
+	p, err := svc.CreatePolicy(ctx, tid, nil, repository.BrowserPolicy{
 		Name:   "block-downloads",
 		Action: repository.BrowserPolicyActionBlock,
 		Scope:  repository.BrowserPolicyScopeUser,
@@ -61,7 +61,7 @@ func TestCreatePolicy(t *testing.T) {
 func TestCreatePolicy_InvalidAction(t *testing.T) {
 	t.Parallel()
 	svc, tid := newTestService(t)
-	_, err := svc.CreatePolicy(context.Background(), tid, repository.BrowserPolicy{
+	_, err := svc.CreatePolicy(context.Background(), tid, nil, repository.BrowserPolicy{
 		Name:   "bad",
 		Action: "invalid",
 		Scope:  repository.BrowserPolicyScopeUser,
@@ -74,7 +74,7 @@ func TestCreatePolicy_InvalidAction(t *testing.T) {
 func TestCreatePolicy_EmptyName(t *testing.T) {
 	t.Parallel()
 	svc, tid := newTestService(t)
-	_, err := svc.CreatePolicy(context.Background(), tid, repository.BrowserPolicy{
+	_, err := svc.CreatePolicy(context.Background(), tid, nil, repository.BrowserPolicy{
 		Action: repository.BrowserPolicyActionBlock,
 		Scope:  repository.BrowserPolicyScopeUser,
 	})
@@ -89,7 +89,7 @@ func TestListPolicies(t *testing.T) {
 	ctx := context.Background()
 
 	for i := range 3 {
-		if _, err := svc.CreatePolicy(ctx, tid, repository.BrowserPolicy{
+		if _, err := svc.CreatePolicy(ctx, tid, nil, repository.BrowserPolicy{
 			Name:   "policy-" + string(rune('a'+i)),
 			Action: repository.BrowserPolicyActionBlock,
 			Scope:  repository.BrowserPolicyScopeUser,
@@ -111,13 +111,13 @@ func TestUpdatePolicy(t *testing.T) {
 	svc, tid := newTestService(t)
 	ctx := context.Background()
 
-	p, _ := svc.CreatePolicy(ctx, tid, repository.BrowserPolicy{
+	p, _ := svc.CreatePolicy(ctx, tid, nil, repository.BrowserPolicy{
 		Name: "orig", Action: repository.BrowserPolicyActionBlock,
 		Scope: repository.BrowserPolicyScopeUser, Enabled: true,
 	})
 
 	newName := "renamed"
-	updated, err := svc.UpdatePolicy(ctx, tid, p.ID, repository.BrowserPolicyPatch{
+	updated, err := svc.UpdatePolicy(ctx, tid, p.ID, nil, repository.BrowserPolicyPatch{
 		Name: &newName,
 	})
 	if err != nil {
@@ -133,12 +133,12 @@ func TestDeletePolicy(t *testing.T) {
 	svc, tid := newTestService(t)
 	ctx := context.Background()
 
-	p, _ := svc.CreatePolicy(ctx, tid, repository.BrowserPolicy{
+	p, _ := svc.CreatePolicy(ctx, tid, nil, repository.BrowserPolicy{
 		Name: "to-delete", Action: repository.BrowserPolicyActionBlock,
 		Scope: repository.BrowserPolicyScopeUser,
 	})
 
-	if err := svc.DeletePolicy(ctx, tid, p.ID); err != nil {
+	if err := svc.DeletePolicy(ctx, tid, p.ID, nil); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	_, err := svc.GetPolicy(ctx, tid, p.ID)
