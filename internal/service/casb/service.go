@@ -296,10 +296,9 @@ func (svc *Service) GetSaaSPosture(
 		return PostureReport{}, err
 	}
 	report := PostureReport{
-		AppID:      appID,
-		AssessedAt: svc.nowFunc(),
-		Score:      computeScore(checks),
-		Checks:     make([]PostureCheck, 0, len(checks)),
+		AppID:  appID,
+		Score:  computeScore(checks),
+		Checks: make([]PostureCheck, 0, len(checks)),
 	}
 	for _, c := range checks {
 		report.Checks = append(report.Checks, PostureCheck{
@@ -310,6 +309,9 @@ func (svc *Service) GetSaaSPosture(
 		if !c.AssessedAt.IsZero() && report.AssessedAt.Before(c.AssessedAt) {
 			report.AssessedAt = c.AssessedAt
 		}
+	}
+	if report.AssessedAt.IsZero() {
+		report.AssessedAt = svc.nowFunc()
 	}
 	return report, nil
 }
