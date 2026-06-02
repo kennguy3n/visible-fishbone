@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"time"
 
@@ -29,6 +30,7 @@ type EnrollmentService struct {
 	enrollments repository.DeviceEnrollmentRepository
 	tokens      repository.ClaimTokenRepository
 	audit       repository.AuditLogRepository
+	logger      *slog.Logger
 	nowFunc     func() time.Time
 	certTTL     time.Duration
 }
@@ -38,11 +40,16 @@ func NewEnrollmentService(
 	enrollments repository.DeviceEnrollmentRepository,
 	tokens repository.ClaimTokenRepository,
 	audit repository.AuditLogRepository,
+	logger *slog.Logger,
 ) *EnrollmentService {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &EnrollmentService{
 		enrollments: enrollments,
 		tokens:      tokens,
 		audit:       audit,
+		logger:      logger,
 		nowFunc:     func() time.Time { return time.Now().UTC() },
 		certTTL:     DefaultCertTTL,
 	}
@@ -89,11 +96,21 @@ func (s *EnrollmentService) RedeemClaimToken(
 
 	saved, err := s.enrollments.CreateEnrollment(ctx, tenantID, enrollment)
 	if err != nil {
+		if unErr := s.tokens.UnredeemByHash(ctx, tenantID, hash[:]); unErr != nil {
+			s.logger.Error("enrollment: failed to un-redeem token after enrollment creation failure",
+				slog.Any("unredeemError", unErr),
+				slog.Any("enrollmentError", err))
+		}
 		return EnrollmentResult{}, fmt.Errorf("create enrollment: %w", err)
 	}
 
 	cert, err := s.issueCertificate(ctx, tenantID, deviceID, publicKey, now)
 	if err != nil {
+		if unErr := s.tokens.UnredeemByHash(ctx, tenantID, hash[:]); unErr != nil {
+			s.logger.Error("enrollment: failed to un-redeem token after certificate issuance failure",
+				slog.Any("unredeemError", unErr),
+				slog.Any("certError", err))
+		}
 		return EnrollmentResult{}, fmt.Errorf("issue certificate: %w", err)
 	}
 

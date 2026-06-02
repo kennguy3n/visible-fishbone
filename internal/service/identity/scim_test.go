@@ -393,6 +393,76 @@ func TestSCIMPatchRemoveExternalID(t *testing.T) {
 	}
 }
 
+func TestSCIMPatchRemoveExternalIDWithOtherUpdates(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	created, err := svc.CreateUser(context.Background(), tid, SCIMUser{
+		UserName:    "atomic-patch@example.com",
+		DisplayName: "Original Name",
+		ExternalID:  "ext-atomic",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	uid := uuidFromString(created.ID)
+	patched, err := svc.PatchUser(context.Background(), tid, uid, []SCIMPatchOp{
+		{Op: "replace", Path: "displayName", Value: "Updated Name"},
+		{Op: "remove", Path: "externalId"},
+	})
+	if err != nil {
+		t.Fatalf("PatchUser atomic update+clear: %v", err)
+	}
+	if patched.DisplayName != "Updated Name" {
+		t.Errorf("displayName = %q, want Updated Name", patched.DisplayName)
+	}
+	if patched.ExternalID != "" {
+		t.Errorf("externalId = %q, want empty after atomic remove", patched.ExternalID)
+	}
+}
+
+func TestSCIMListGroupsExcludesSystemRoles(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tn, err := memory.NewTenantRepository(s).Create(context.Background(), repository.Tenant{
+		Name: "ListGroup Test", Slug: "listgrp-test", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	roles := memory.NewRoleRepository(s)
+	svc := NewSCIMService(
+		memory.NewUserRepository(s),
+		roles,
+		memory.NewAuditLogRepository(s),
+	)
+	if _, err := roles.Create(context.Background(), repository.Role{
+		Name: "platform_admin", Permissions: []string{"*"}, Scope: repository.RoleScopePlatform,
+	}); err != nil {
+		t.Fatalf("create system role: %v", err)
+	}
+	if _, err := svc.CreateGroup(context.Background(), tn.ID, SCIMGroup{
+		DisplayName: "TenantGroup",
+	}); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	list, err := svc.ListGroups(context.Background(), tn.ID, "", 1, 100)
+	if err != nil {
+		t.Fatalf("ListGroups: %v", err)
+	}
+	if list.TotalResults != 1 {
+		t.Errorf("TotalResults = %d, want 1 (system role should be excluded)", list.TotalResults)
+	}
+	for _, res := range list.Resources {
+		g, ok := res.(SCIMGroup)
+		if !ok {
+			continue
+		}
+		if g.DisplayName == "platform_admin" {
+			t.Error("system role platform_admin should not appear in SCIM ListGroups")
+		}
+	}
+}
+
 func TestSCIMServiceProviderConfig(t *testing.T) {
 	t.Parallel()
 	// Just test it doesn't panic — handler test is more comprehensive.

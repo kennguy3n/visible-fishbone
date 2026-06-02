@@ -320,7 +320,7 @@ func buildRouter(
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
 	identitySvc := identity.New(deviceRepo, claimRepo, auditRepo, logger)
-	enrollmentSvc := identity.NewEnrollmentService(enrollmentRepo, claimRepo, auditRepo)
+	enrollmentSvc := identity.NewEnrollmentService(enrollmentRepo, claimRepo, auditRepo, logger)
 	rbacSvc := rbac.New(roleRepo, auditRepo, logger)
 	auditSvc := audit.New(auditRepo)
 	apiKeySvc := apikey.New(apiKeyRepo, auditRepo,

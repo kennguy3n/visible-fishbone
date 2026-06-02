@@ -150,15 +150,14 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 			return SCIMUser{}, fmt.Errorf("unsupported SCIM PatchOp: %s: %w", op.Op, repository.ErrInvalidArgument)
 		}
 	}
-	updated, err := s.users.Update(ctx, tenantID, u)
+	var updated repository.User
+	if clearExternalID {
+		updated, err = s.users.UpdateAndClearExternalID(ctx, tenantID, u)
+	} else {
+		updated, err = s.users.Update(ctx, tenantID, u)
+	}
 	if err != nil {
 		return SCIMUser{}, err
-	}
-	if clearExternalID {
-		updated, err = s.users.ClearExternalID(ctx, tenantID, userID)
-		if err != nil {
-			return SCIMUser{}, err
-		}
 	}
 	return userToSCIM(updated), nil
 }
@@ -346,6 +345,9 @@ func (s *SCIMService) ListGroups(ctx context.Context, tenantID uuid.UUID, filter
 
 	resources := make([]any, 0, len(roles))
 	for _, r := range roles {
+		if r.TenantID == nil {
+			continue
+		}
 		sg := roleToSCIMGroup(r)
 		if parsed != nil && !parsed.MatchGroup(sg) {
 			continue

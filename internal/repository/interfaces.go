@@ -170,6 +170,11 @@ type UserRepository interface {
 	// This is separate from Update because the sparse-update
 	// convention treats empty string as "no change".
 	ClearExternalID(ctx context.Context, tenantID, userID uuid.UUID) (User, error)
+	// UpdateAndClearExternalID applies a sparse update to the user
+	// AND atomically clears the external_id in a single transaction.
+	// Use this when a SCIM PATCH includes both field updates and a
+	// "remove externalId" operation.
+	UpdateAndClearExternalID(ctx context.Context, tenantID uuid.UUID, u User) (User, error)
 }
 
 // --- Device ---------------------------------------------------------------

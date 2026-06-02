@@ -30,6 +30,7 @@ func newEnrollmentService(t *testing.T) (*EnrollmentService, uuid.UUID, reposito
 		memory.NewDeviceEnrollmentRepository(s),
 		tokens,
 		memory.NewAuditLogRepository(s),
+		nil,
 	)
 	return svc, tn.ID, tokens
 }
