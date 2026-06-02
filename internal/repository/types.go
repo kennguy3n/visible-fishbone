@@ -1111,3 +1111,95 @@ type MSPTenantBinding struct {
 	CreatedAt    time.Time
 	CreatedBy    *uuid.UUID
 }
+
+// --- CASB types -----------------------------------------------------------
+
+// CASBConnectorType enumerates the CASB connector kinds.
+type CASBConnectorType string
+
+const (
+	CASBConnectorM365       CASBConnectorType = "m365"
+	CASBConnectorGoogle     CASBConnectorType = "google"
+	CASBConnectorSlack      CASBConnectorType = "slack"
+	CASBConnectorSalesforce CASBConnectorType = "salesforce"
+)
+
+// IsValid reports whether t is a known CASB connector type.
+func (t CASBConnectorType) IsValid() bool {
+	switch t {
+	case CASBConnectorM365, CASBConnectorGoogle,
+		CASBConnectorSlack, CASBConnectorSalesforce:
+		return true
+	}
+	return false
+}
+
+// CASBConnectorStatus enumerates connector lifecycle states.
+type CASBConnectorStatus string
+
+const (
+	CASBConnectorStatusActive      CASBConnectorStatus = "active"
+	CASBConnectorStatusDisabled    CASBConnectorStatus = "disabled"
+	CASBConnectorStatusError       CASBConnectorStatus = "error"
+	CASBConnectorStatusConfiguring CASBConnectorStatus = "configuring"
+)
+
+// IsValid reports whether s is a known status.
+func (s CASBConnectorStatus) IsValid() bool {
+	switch s {
+	case CASBConnectorStatusActive, CASBConnectorStatusDisabled,
+		CASBConnectorStatusError, CASBConnectorStatusConfiguring:
+		return true
+	}
+	return false
+}
+
+// CASBConnector is a per-tenant CASB SaaS API connector. Config
+// holds non-sensitive settings (tenant_id, endpoints); Secret holds
+// sensitive material (client_secret, service-account keys).
+type CASBConnector struct {
+	ID         uuid.UUID
+	TenantID   uuid.UUID
+	Type       CASBConnectorType
+	Name       string
+	Status     CASBConnectorStatus
+	Config     json.RawMessage
+	Secret     []byte
+	LastSyncAt *time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// CASBDiscoveredApp is a SaaS application discovered by a CASB
+// connector sync.
+type CASBDiscoveredApp struct {
+	ID         uuid.UUID
+	TenantID   uuid.UUID
+	Name       string
+	Vendor     string
+	Category   string
+	RiskScore  int
+	UsersCount int
+	FirstSeen  time.Time
+	LastSeen   time.Time
+}
+
+// CASBPostureCheckStatus enumerates posture check outcomes.
+type CASBPostureCheckStatus string
+
+const (
+	CASBPosturePass CASBPostureCheckStatus = "pass"
+	CASBPostureFail CASBPostureCheckStatus = "fail"
+	CASBPostureWarn CASBPostureCheckStatus = "warn"
+)
+
+// CASBPostureCheck is a single posture assessment row.
+type CASBPostureCheck struct {
+	ID         uuid.UUID
+	TenantID   uuid.UUID
+	AppID      uuid.UUID
+	CheckName  string
+	Status     CASBPostureCheckStatus
+	Details    string
+	AssessedAt time.Time
+}
