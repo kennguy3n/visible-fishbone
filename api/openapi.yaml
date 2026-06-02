@@ -179,7 +179,7 @@ paths:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     post:
       tags: [devices]
-      operationId: enrollDevice
+      operationId: enrollTenantDevice
       summary: Redeem claim token and enrol a device
       requestBody:
         required: true
@@ -2060,7 +2060,7 @@ paths:
   /enroll:
     post:
       tags: [enrollment]
-      operationId: redeemEnrollmentToken
+      operationId: enrollDevice
       summary: Redeem a claim token and enroll a device
       description: |
         No auth required — the claim token is the auth. Binds the
