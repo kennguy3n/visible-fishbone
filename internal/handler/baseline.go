@@ -125,7 +125,7 @@ func (h *BaselineHandler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page := repository.Page{
-		Limit:  QueryLimit(r),
+		Limit: QueryLimit(r),
 		After: r.URL.Query().Get("cursor"),
 	}
 	pg, err := h.baselines.List(r.Context(), tenantID, page)

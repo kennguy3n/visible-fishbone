@@ -891,3 +891,37 @@ type CASBPostureCheckRepository interface {
 	Save(ctx context.Context, tenantID uuid.UUID, appID uuid.UUID, checks []CASBPostureCheck) error
 	GetLatest(ctx context.Context, tenantID uuid.UUID, appID uuid.UUID) ([]CASBPostureCheck, error)
 }
+
+// --- DLP ------------------------------------------------------------------
+
+// DLPPolicyRepository owns the dlp_policies table. Tenant-scoped
+// reads/writes flow through `sng.tenant_id` (RLS) on the postgres
+// backend; the memory backend filters on TenantID explicitly.
+type DLPPolicyRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, p DLPPolicy) (DLPPolicy, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (DLPPolicy, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[DLPPolicy], error)
+	Update(ctx context.Context, tenantID, id uuid.UUID, patch DLPPolicyPatch) (DLPPolicy, error)
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+	// ListEnabled returns every enabled policy for the tenant,
+	// ordered by creation time. Used by the classification engine
+	// to build the active rule set.
+	ListEnabled(ctx context.Context, tenantID uuid.UUID) ([]DLPPolicy, error)
+}
+
+// DLPFingerprintRepository owns the dlp_fingerprints table.
+type DLPFingerprintRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, f DLPFingerprint) (DLPFingerprint, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (DLPFingerprint, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[DLPFingerprint], error)
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+	// ListAll returns every fingerprint for the tenant. Used by the
+	// matching engine for full-scan comparisons.
+	ListAll(ctx context.Context, tenantID uuid.UUID) ([]DLPFingerprint, error)
+}
+
+// DLPMatchRepository owns the dlp_matches audit-trail table.
+type DLPMatchRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, m DLPMatch) (DLPMatch, error)
+	List(ctx context.Context, tenantID uuid.UUID, policyID *uuid.UUID, page Page) (PageResult[DLPMatch], error)
+}

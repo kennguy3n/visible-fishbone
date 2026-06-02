@@ -72,9 +72,9 @@ func (s *stubRows) Scan(dest ...any) error {
 	return nil
 }
 
-func (s *stubRows) ScanStruct(any) error           { return errors.New("not implemented") }
+func (s *stubRows) ScanStruct(any) error             { return errors.New("not implemented") }
 func (s *stubRows) ColumnTypes() []driver.ColumnType { return nil }
-func (s *stubRows) Totals(...any) error             { return nil }
+func (s *stubRows) Totals(...any) error              { return nil }
 func (s *stubRows) Columns() []string {
 	return []string{
 		"event_id", "tenant_id", "device_id", "site_id",

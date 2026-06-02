@@ -16,17 +16,17 @@
 //
 // Design constraints:
 //
-//   * Deterministic: every input fed through the same pair of
+//   - Deterministic: every input fed through the same pair of
 //     evaluators must produce the same ImpactReport. The
 //     service must NOT introduce wall-clock variance, RNG, or
 //     concurrency-ordering effects.
 //
-//   * Side-effect free: replay must NOT publish onto NATS, write
+//   - Side-effect free: replay must NOT publish onto NATS, write
 //     to ClickHouse, or otherwise mutate live state. The
 //     downstream consumer is a UI / API that wants to show the
 //     operator "if you approve this diff, here is what changes".
 //
-//   * Resumable: replay over a multi-day window across millions
+//   - Resumable: replay over a multi-day window across millions
 //     of events must be checkpointable so an operator can pause
 //     / resume without losing progress. Implementation defers
 //     persistence to PR B (the simulation handler); this file

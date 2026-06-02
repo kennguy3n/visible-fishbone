@@ -202,19 +202,19 @@ func (f *Feedback) Delete(
 // log / surface what the loop did. Action is one of "raised",
 // "lowered", or "no_change".
 type TuningResult struct {
-	TenantID        uuid.UUID
-	Dimension       string
-	WindowSeconds   int
-	OldZThreshold   float64
-	NewZThreshold   float64
-	FalsePositive   int
-	TruePositive    int
-	Noise           int
-	TotalFeedback   int
-	FalsePositiveR  float64
-	NoiseR          float64
-	Action          string
-	SkippedReason   string
+	TenantID       uuid.UUID
+	Dimension      string
+	WindowSeconds  int
+	OldZThreshold  float64
+	NewZThreshold  float64
+	FalsePositive  int
+	TruePositive   int
+	Noise          int
+	TotalFeedback  int
+	FalsePositiveR float64
+	NoiseR         float64
+	Action         string
+	SkippedReason  string
 }
 
 // TuneDimension inspects the recent feedback for (tenant, dim)
