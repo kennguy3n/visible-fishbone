@@ -1112,6 +1112,7 @@ type MSPTenantBinding struct {
 	CreatedBy    *uuid.UUID
 }
 
+
 // ---------------------------------------------------------------------
 // Browser Protection (Phase 4, Task 43)
 // ---------------------------------------------------------------------
@@ -1276,3 +1277,81 @@ type DataClassificationPatch struct {
 	Description   *string
 	HandlingRules *json.RawMessage
 }
+
+
+// --- DLP ------------------------------------------------------------------
+
+// DLPAction enumerates the enforcement actions a DLP policy can take
+// when content matches one of its rules.
+type DLPAction string
+
+const (
+	DLPActionLog     DLPAction = "log"
+	DLPActionBlock   DLPAction = "block"
+	DLPActionEncrypt DLPAction = "encrypt"
+	DLPActionRedact  DLPAction = "redact"
+)
+
+// DLPRuleType enumerates the detection mechanisms a single DLP rule
+// can use.
+type DLPRuleType string
+
+const (
+	DLPRuleTypeRegex       DLPRuleType = "regex"
+	DLPRuleTypeMIPLabel    DLPRuleType = "mip_label"
+	DLPRuleTypeFingerprint DLPRuleType = "fingerprint"
+	DLPRuleTypeKeyword     DLPRuleType = "keyword"
+)
+
+// DLPRule is one detection rule inside a DLPPolicy.
+type DLPRule struct {
+	Type             DLPRuleType `json:"type"`
+	Pattern          string      `json:"pattern"`
+	SensitivityLevel string      `json:"sensitivity_level"`
+}
+
+// DLPPolicy is a tenant-scoped DLP policy with embedded rules.
+type DLPPolicy struct {
+	ID          uuid.UUID
+	TenantID    uuid.UUID
+	Name        string
+	Description string
+	Rules       []DLPRule
+	Action      DLPAction
+	Enabled     bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// DLPPolicyPatch is the sparse-PATCH input for
+// DLPPolicyRepository.Update. Same nil=leave semantics as
+// TenantPatch.
+type DLPPolicyPatch struct {
+	Name        *string
+	Description *string
+	Rules       *[]DLPRule
+	Action      *DLPAction
+	Enabled     *bool
+}
+
+// DLPFingerprint is a registered document fingerprint for
+// near-duplicate detection.
+type DLPFingerprint struct {
+	ID           uuid.UUID
+	TenantID     uuid.UUID
+	Name         string
+	Hash         []byte
+	ContentType  string
+	RegisteredAt time.Time
+}
+
+// DLPMatch records one audit-trail row when a DLP policy fires.
+type DLPMatch struct {
+	ID        uuid.UUID
+	TenantID  uuid.UUID
+	PolicyID  uuid.UUID
+	Source    string
+	MatchedAt time.Time
+	Details   json.RawMessage
+}
+

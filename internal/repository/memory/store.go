@@ -86,6 +86,11 @@ type Store struct {
 	// Data classification taxonomy — Phase 4, Task 46.
 	dataClassifications map[uuid.UUID]repository.DataClassification
 
+	// DLP tables — see migration 019. All tenant-scoped.
+	dlpPolicies     map[uuid.UUID]repository.DLPPolicy
+	dlpFingerprints map[uuid.UUID]repository.DLPFingerprint
+	dlpMatches      map[uuid.UUID]repository.DLPMatch
+
 	// Role / user_role tables. Roles are NOT tenant-scoped on
 	// their own (system roles have TenantID nil).
 	roles     map[uuid.UUID]repository.Role
@@ -140,6 +145,9 @@ func NewStore() *Store {
 		appOverrides:          map[uuid.UUID]repository.AppRegistryOverride{},
 		browserPolicies:       map[uuid.UUID]repository.BrowserPolicy{},
 		dataClassifications:   map[uuid.UUID]repository.DataClassification{},
+		dlpPolicies:           map[uuid.UUID]repository.DLPPolicy{},
+		dlpFingerprints:       map[uuid.UUID]repository.DLPFingerprint{},
+		dlpMatches:            map[uuid.UUID]repository.DLPMatch{},
 		roles:                 map[uuid.UUID]repository.Role{},
 		userRoles:             map[userRoleKey]repository.UserRole{},
 		clock:                 func() time.Time { return time.Now().UTC() },

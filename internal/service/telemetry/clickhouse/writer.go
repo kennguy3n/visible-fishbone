@@ -222,8 +222,8 @@ func (s StaticRetentionResolver) RetentionDays(_ context.Context, _ uuid.UUID) i
 // Safe for concurrent read; the inner map must not be mutated
 // after construction (use a fresh map on tier change).
 type MapRetentionResolver struct {
-	Default    int
-	PerTenant  map[uuid.UUID]int
+	Default   int
+	PerTenant map[uuid.UUID]int
 }
 
 // RetentionDays implements RetentionResolver.

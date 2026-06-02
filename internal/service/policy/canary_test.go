@@ -18,12 +18,12 @@ import (
 // so each test can branch into its own scenario without
 // duplicating the boring setup.
 type canaryFixture struct {
-	tenantID  uuid.UUID
-	graph     repository.PolicyGraph
-	policy    *Service
-	canary    *CanaryService
-	rollouts  repository.PolicyRolloutRepository
-	policyR   repository.PolicyRepository
+	tenantID uuid.UUID
+	graph    repository.PolicyGraph
+	policy   *Service
+	canary   *CanaryService
+	rollouts repository.PolicyRolloutRepository
+	policyR  repository.PolicyRepository
 }
 
 func newCanaryFixture(t *testing.T) *canaryFixture {

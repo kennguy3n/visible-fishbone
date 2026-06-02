@@ -832,7 +832,7 @@ func TestService_RateLimitExhaustionRoutedToDLQ(t *testing.T) {
 		TenantID: uuid.New(), DeviceID: uuid.New(),
 		Timestamp:  time.Now().UTC(),
 		EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
-		Payload:    newPayload(t),
+		Payload: newPayload(t),
 	}
 	if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
 		t.Fatalf("publish: %v", err)
@@ -916,7 +916,7 @@ func TestService_PerTenantLimiter_NaksWhenBudgetExhausted(t *testing.T) {
 			TenantID: tenant, DeviceID: uuid.New(),
 			Timestamp:  time.Now().UTC(),
 			EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
-			Payload:    newPayload(t),
+			Payload: newPayload(t),
 		}
 		if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
 			t.Fatalf("publish[%d]: %v", i, err)
@@ -973,7 +973,7 @@ func TestService_PerTenantLimiter_NilLimiterIsNoOp(t *testing.T) {
 			TenantID: tenant, DeviceID: uuid.New(),
 			Timestamp:  time.Now().UTC(),
 			EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
-			Payload:    newPayload(t),
+			Payload: newPayload(t),
 		}
 		if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
 			t.Fatalf("publish: %v", err)

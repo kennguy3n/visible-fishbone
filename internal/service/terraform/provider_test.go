@@ -88,6 +88,64 @@ func TestExportImport_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestImport_Upsert(t *testing.T) {
+	t.Parallel()
+	provider, store, tenantID := newTestProvider(t)
+	ctx := context.Background()
+
+	// Seed initial data.
+	bpRepo := memory.NewBrowserPolicyRepository(store)
+	_, _ = bpRepo.Create(ctx, tenantID, repository.BrowserPolicy{
+		Name: "block-dl", Action: repository.BrowserPolicyActionBlock,
+		Scope: repository.BrowserPolicyScopeUser, Enabled: true,
+	})
+
+	siteRepo := memory.NewSiteRepository(store)
+	_, _ = siteRepo.Create(ctx, tenantID, repository.Site{
+		Name: "HQ", Slug: "hq", Template: repository.SiteTemplateBranch,
+	})
+
+	// Import config that modifies existing resources.
+	cfg := terraform.ExportedConfig{
+		Version: terraform.ConfigVersion,
+		Sites: []terraform.ExportedSite{
+			{Name: "HQ-Updated", Slug: "hq", Template: "hub"},
+		},
+		BrowserPolicies: []terraform.ExportedBrowserPolicy{
+			{Name: "block-dl", Action: "allow", Scope: "site", Enabled: false},
+		},
+	}
+	raw, _ := json.Marshal(cfg)
+	if err := provider.ImportTenantConfig(ctx, tenantID, raw); err != nil {
+		t.Fatalf("import upsert: %v", err)
+	}
+
+	// Verify updated data via export.
+	exported, _ := provider.ExportTenantConfig(ctx, tenantID)
+	var result terraform.ExportedConfig
+	_ = json.Unmarshal(exported, &result)
+
+	if len(result.Sites) != 1 {
+		t.Fatalf("sites = %d, want 1", len(result.Sites))
+	}
+	if result.Sites[0].Name != "HQ-Updated" {
+		t.Fatalf("site name = %q, want HQ-Updated", result.Sites[0].Name)
+	}
+	if result.Sites[0].Template != "hub" {
+		t.Fatalf("site template = %q, want hub", result.Sites[0].Template)
+	}
+
+	if len(result.BrowserPolicies) != 1 {
+		t.Fatalf("browser policies = %d, want 1", len(result.BrowserPolicies))
+	}
+	if result.BrowserPolicies[0].Action != "allow" {
+		t.Fatalf("bp action = %q, want allow", result.BrowserPolicies[0].Action)
+	}
+	if result.BrowserPolicies[0].Enabled {
+		t.Fatal("bp enabled = true, want false")
+	}
+}
+
 func TestImport_InvalidVersion(t *testing.T) {
 	t.Parallel()
 	provider, _, tenantID := newTestProvider(t)

@@ -45,8 +45,13 @@ plane, policy model, and telemetry fabric.
 | **Local policy evaluator** — verified policy bundles, hot-swap, fail-closed | Implemented | Edge appliance + endpoint client |
 | **Telemetry collection** — metadata-first, redaction at source, at-least-once egress, dedup | Implemented | Edge appliance + endpoint client |
 | **Native protocol transport** — TLS 1.3 + MessagePack + HTTP/2, mTLS device identity | Implemented | All three enforcement forms |
+| **Policy change simulation** — deterministic simulator, dry-run shadow bundles, canary rollout with one-click rollback | Implemented | Control plane |
+| **Baseline alerts + behavior models** — z-score + EWMA anomaly detection, per-tenant tuning, alert routing + suppression | Implemented | Control plane |
+| **Integration service** — Syslog (RFC 5424/5425), SIEM/XDR webhooks (Splunk/Elastic/Sentinel), Jira + ServiceNow bidirectional sync | Implemented | Control plane |
+| **MSP hierarchy + co-management** — MSP entity model, MSP-scoped RBAC, bulk operations, per-MSP branding | Implemented | Control plane |
 | **CASB discovery + SaaS connectors** | Planned | Control plane |
 | **DLP for web + SaaS** | Planned | Control plane + edge appliance |
+| **Browser protection** — isolation, extension policy, credential phishing detection | Planned | Edge appliance + endpoint |
 | **Hardware appliance SKUs (TPM-rooted)** | Planned | Branch edge |
 
 The SNG control plane in this repo (`cmd/sng-control`, `internal/`,
@@ -150,6 +155,52 @@ Every crate is `#![forbid(unsafe_code)]` at the workspace level
 (per-OS PAL modules lift the ban locally with a documented
 rationale) and goes through the workspace-pedantic clippy profile.
 
+## Quick Start
+
+### Prerequisites
+
+- **Go 1.25+** (the module declares `go 1.25.0`)
+- **Rust 1.85+** (workspace `rust-version = "1.85"`)
+- **Docker** (for testcontainers-based integration tests)
+- **NATS Server** (for JetStream telemetry pipeline tests)
+- **PostgreSQL 14+** (for integration test harness)
+
+### Clone and build
+
+```bash
+git clone https://github.com/kennguy3n/visible-fishbone.git
+cd visible-fishbone
+
+# Go control plane
+go build ./cmd/sng-control/...
+go build ./cmd/sng-migrate/...
+
+# Rust enforcement plane
+cargo build --workspace
+```
+
+### Run migrations
+
+```bash
+go run ./cmd/sng-migrate/...
+```
+
+### Start the control plane
+
+```bash
+go run ./cmd/sng-control/...
+```
+
+### Run tests
+
+```bash
+# Go unit + integration tests (uses testcontainers for Postgres + NATS)
+go test -race -timeout 300s ./...
+
+# Rust workspace tests
+cargo test
+```
+
 ## Endpoint Client Platforms
 
 `sng-agent` targets the same matrix as `sn360-desktop-agent`. The
@@ -167,31 +218,25 @@ capture, posture, and tunnel primitives.
 
 ## Roadmap
 
-The current code in this repo covers the edge appliance and
-endpoint client surfaces. The remaining capability roadmap lives
-across the SN360 family:
+The current code covers the full enforcement plane, unified
+operations layer (Phase 3, ~87% complete), and MSP co-management.
+The remaining capability roadmap:
 
-- **Hardware appliance SKUs.** Small / medium / large branch
+- **Data protection expansion (Phase 4).** CASB discovery + top
+  SaaS API connectors (M365, Google Workspace, Slack, Salesforce);
+  DLP for web + SaaS with MIP label awareness on Microsoft tenants;
+  browser protection (isolation, extension policy, phishing
+  detection); pre-baked policy templates per industry.
+- **Advanced automation (Phase 5).** Guided remediation playbooks
+  for the most common incident classes; AI-proposed policy-
+  tightening deltas that compile through the deterministic verifier
+  before they can be applied; AI-proposed connectivity / policy /
+  posture fixes that always require operator (or pre-approved
+  playbook) execution.
+- **Hardware packaging (Phase 6).** Small / medium / large branch
   profiles on vetted OEM platforms; same `sng-edge` image as the
   VM, with the TPM as the root of device identity and the same
   dual-bank install path.
-- **Data protection expansion.** CASB discovery + top SaaS API
-  connectors (M365, Google Workspace, Slack, Salesforce); DLP for
-  web + SaaS with MIP label awareness on Microsoft tenants; pre-
-  baked policy templates per industry.
-- **Advanced automation.** Guided remediation playbooks for the
-  most common incident classes; AI-proposed policy-tightening
-  deltas that compile through the deterministic verifier before
-  they can be applied; AI-proposed connectivity / policy / posture
-  fixes that always require operator (or pre-approved playbook)
-  execution.
-- **Unified operations layer.** Change-simulation replays of recent
-  telemetry against proposed policy changes before enforcement;
-  baseline alerts on statistical (z-score / EWMA) signals with
-  bounded ML as a second pass; AI-assisted incident summaries
-  grounded in evidence; bidirectional case sync with Jira /
-  ServiceNow / Zendesk / Freshdesk; Terraform provider for tenant
-  config-as-code.
 
 Operator-driven roadmap items should be filed as a GitHub issue
 labelled `roadmap`. Include the use case, the workaround you are
@@ -220,6 +265,26 @@ cloud, identity provider, MSP context).
 | [`docs/deploy.md`](./docs/deploy.md) | Control-plane deployment runbook — PostgreSQL role hierarchy, RLS GUC contract, migration runner privileges, policy signing-key modes, API-key cap |
 | [`SECURITY.md`](./SECURITY.md) | Security policy — supported versions, reporting process, response SLAs, scope, crypto / signing posture |
 | Per-crate `README.md` | Each library / binary crate carries its own README under [`crates/`](./crates) covering module surface, wire-format compatibility, and local verification commands |
+| [`PROGRESS.md`](./PROGRESS.md) | Phase-by-phase task tracker with per-task audit trail |
+
+## Control Plane Service Layout
+
+```
+internal/service/
+├── alert/          — Alert routing, suppression, false-positive feedback
+├── apikey/         — API-key lifecycle with KMS-backed envelope encryption
+├── appdb/          — Application registry, vendor sync, demotion engine
+├── audit/          — Append-only hash-chained audit log
+├── baseline/       — Statistical baseline engine (Welford + EWMA anomaly)
+├── identity/       — User + device identity, session tokens, enrollment
+├── integration/    — External connectors (Syslog, SIEM, Jira, ServiceNow)
+├── policy/         — Policy graph, compiler, simulator, dry-run, canary
+├── rbac/           — Hierarchical RBAC (system / tenant / site / MSP)
+├── site/           — Site CRUD, per-tenant scoping
+├── telemetry/      — Pipeline: consumer, dedup, normalize, CH writer, S3 archiver, replay
+├── tenant/         — Tenant lifecycle, MSP bulk ops, branding
+└── webhook/        — Outbound HMAC-signed event delivery
+```
 
 ## License
 

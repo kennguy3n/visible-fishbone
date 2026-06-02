@@ -126,7 +126,7 @@ type AuthorizedTenantsLister interface {
 const (
 	PermissionBulkApplyPolicy        = "msp.bulk_apply_policy"
 	PermissionBulkProvisionSites     = "msp.bulk_provision_sites"
-	PermissionBulkGenerateClaimToken = "msp.bulk_generate_claim_tokens"
+	PermissionBulkGenerateClaimToken = "msp.bulk_generate_claim_tokens" //nolint:gosec // permission name, not a credential
 )
 
 // BulkService wires the dependencies needed for MSP-fan-out

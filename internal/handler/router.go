@@ -31,6 +31,7 @@ type RouterDeps struct {
 	MSP              *MSPHandler
 	Browser          *BrowserHandler
 	Terraform        *TerraformHandler
+	DLP              *DLPHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
 	RateLimiter      *middleware.RateLimiter
@@ -108,6 +109,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.Terraform != nil {
 		deps.Terraform.Register(apiMux)
+	}
+	if deps.DLP != nil {
+		deps.DLP.Register(apiMux)
 	}
 
 	apiChain := middleware.Chain(

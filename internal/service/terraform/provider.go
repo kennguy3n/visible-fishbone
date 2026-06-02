@@ -215,9 +215,9 @@ func (p *Provider) ExportTenantConfig(ctx context.Context, tenantID uuid.UUID) (
 	return json.Marshal(cfg)
 }
 
-// ImportTenantConfig imports a tenant configuration. Resources are
-// created by name; existing resources with conflicting names are
-// skipped and logged at Warn level.
+// ImportTenantConfig idempotently imports a tenant configuration.
+// Existing resources with matching names are updated; new ones are
+// created.
 func (p *Provider) ImportTenantConfig(ctx context.Context, tenantID uuid.UUID, config json.RawMessage) error {
 	var cfg ExportedConfig
 	if err := json.Unmarshal(config, &cfg); err != nil {
@@ -228,7 +228,7 @@ func (p *Provider) ImportTenantConfig(ctx context.Context, tenantID uuid.UUID, c
 			cfg.Version, ConfigVersion, repository.ErrInvalidArgument)
 	}
 
-	// Import sites.
+	// Import sites (upsert by slug).
 	if p.deps.Sites != nil {
 		for _, es := range cfg.Sites {
 			_, err := p.deps.Sites.Create(ctx, tenantID, repository.Site{
@@ -237,13 +237,22 @@ func (p *Provider) ImportTenantConfig(ctx context.Context, tenantID uuid.UUID, c
 				Template: repository.SiteTemplate(es.Template),
 				Config:   es.Config,
 			})
-			if err != nil {
+			if errors.Is(err, repository.ErrConflict) {
+				if existing, findErr := p.findSiteBySlug(ctx, tenantID, es.Slug); findErr == nil {
+					existing.Name = es.Name
+					existing.Template = repository.SiteTemplate(es.Template)
+					existing.Config = es.Config
+					if _, updErr := p.deps.Sites.Update(ctx, tenantID, existing); updErr != nil {
+						p.logger.Warn("import site update", "slug", es.Slug, "err", updErr)
+					}
+				}
+			} else if err != nil {
 				p.logger.Warn("import site", "name", es.Name, "err", err)
 			}
 		}
 	}
 
-	// Import browser policies.
+	// Import browser policies (upsert by name).
 	if p.deps.BrowserPolicies != nil {
 		for _, ebp := range cfg.BrowserPolicies {
 			_, err := p.deps.BrowserPolicies.Create(ctx, tenantID, repository.BrowserPolicy{
@@ -253,13 +262,26 @@ func (p *Provider) ImportTenantConfig(ctx context.Context, tenantID uuid.UUID, c
 				Scope:   repository.BrowserPolicyScope(ebp.Scope),
 				Enabled: ebp.Enabled,
 			})
-			if err != nil {
+			if errors.Is(err, repository.ErrConflict) {
+				if existing, findErr := p.findBrowserPolicyByName(ctx, tenantID, ebp.Name); findErr == nil {
+					action := repository.BrowserPolicyAction(ebp.Action)
+					scope := repository.BrowserPolicyScope(ebp.Scope)
+					if _, updErr := p.deps.BrowserPolicies.Update(ctx, tenantID, existing.ID, repository.BrowserPolicyPatch{
+						Rules:   ebp.Rules,
+						Action:  &action,
+						Scope:   &scope,
+						Enabled: &ebp.Enabled,
+					}); updErr != nil {
+						p.logger.Warn("import browser policy update", "name", ebp.Name, "err", updErr)
+					}
+				}
+			} else if err != nil {
 				p.logger.Warn("import browser policy", "name", ebp.Name, "err", err)
 			}
 		}
 	}
 
-	// Import data classifications.
+	// Import data classifications (upsert by level).
 	if p.deps.DataClassifications != nil {
 		for _, edc := range cfg.DataClassifications {
 			_, err := p.deps.DataClassifications.Create(ctx, tenantID, repository.DataClassification{
@@ -268,7 +290,18 @@ func (p *Provider) ImportTenantConfig(ctx context.Context, tenantID uuid.UUID, c
 				Description:   edc.Description,
 				HandlingRules: edc.HandlingRules,
 			})
-			if err != nil {
+			if errors.Is(err, repository.ErrConflict) {
+				if existing, findErr := p.findDataClassificationByLevel(ctx, tenantID, repository.ClassificationLevel(edc.Level)); findErr == nil {
+					desc := edc.Description
+					if _, updErr := p.deps.DataClassifications.Update(ctx, tenantID, existing.ID, repository.DataClassificationPatch{
+						Label:         &edc.Label,
+						Description:   &desc,
+						HandlingRules: &edc.HandlingRules,
+					}); updErr != nil {
+						p.logger.Warn("import data classification update", "label", edc.Label, "err", updErr)
+					}
+				}
+			} else if err != nil {
 				p.logger.Warn("import data classification", "label", edc.Label, "err", err)
 			}
 		}
@@ -276,6 +309,50 @@ func (p *Provider) ImportTenantConfig(ctx context.Context, tenantID uuid.UUID, c
 
 	p.logAudit(ctx, tenantID, "config.imported")
 	return nil
+}
+
+func (p *Provider) findSiteBySlug(ctx context.Context, tenantID uuid.UUID, slug string) (repository.Site, error) {
+	page := repository.Page{Limit: repository.MaxPageLimit}
+	for {
+		res, err := p.deps.Sites.List(ctx, tenantID, page)
+		if err != nil {
+			return repository.Site{}, err
+		}
+		for _, s := range res.Items {
+			if s.Slug == slug {
+				return s, nil
+			}
+		}
+		if res.NextCursor == "" {
+			break
+		}
+		page.After = res.NextCursor
+	}
+	return repository.Site{}, repository.ErrNotFound
+}
+
+func (p *Provider) findBrowserPolicyByName(ctx context.Context, tenantID uuid.UUID, name string) (repository.BrowserPolicy, error) {
+	page := repository.Page{Limit: repository.MaxPageLimit}
+	for {
+		res, err := p.deps.BrowserPolicies.List(ctx, tenantID, page)
+		if err != nil {
+			return repository.BrowserPolicy{}, err
+		}
+		for _, bp := range res.Items {
+			if bp.Name == name {
+				return bp, nil
+			}
+		}
+		if res.NextCursor == "" {
+			break
+		}
+		page.After = res.NextCursor
+	}
+	return repository.BrowserPolicy{}, repository.ErrNotFound
+}
+
+func (p *Provider) findDataClassificationByLevel(ctx context.Context, tenantID uuid.UUID, level repository.ClassificationLevel) (repository.DataClassification, error) {
+	return p.deps.DataClassifications.GetByLevel(ctx, tenantID, level)
 }
 
 func (p *Provider) logAudit(ctx context.Context, tenantID uuid.UUID, action string) {
