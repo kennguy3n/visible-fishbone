@@ -23,7 +23,7 @@ type stubAuthz struct {
 	err     error
 }
 
-func (s stubAuthz) ListAuthorizedTenants(_ context.Context, _, _ uuid.UUID, _ repository.MSPRepository) ([]uuid.UUID, error) {
+func (s stubAuthz) ListAuthorizedTenants(_ context.Context, _, _ uuid.UUID, _ string, _ repository.MSPRepository) ([]uuid.UUID, error) {
 	return s.tenants, s.err
 }
 

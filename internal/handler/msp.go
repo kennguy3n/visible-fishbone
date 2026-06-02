@@ -253,17 +253,21 @@ func (h *MSPHandler) requirePlatformPermission(w http.ResponseWriter, r *http.Re
 }
 
 // validMSPStatus filters request-supplied status strings against
-// the repository's enum on PATCH / setStatus paths, where any of
-// the three lifecycle values is acceptable (empty accepted on
-// PATCH to mean "no change"; setStatus additionally rejects
-// empty before calling this helper because the body's required:
-// true contract demands a value).
+// the repository's enum on the dedicated `POST .../status`
+// endpoint where `deleted` is a valid value: `UpdateStatus` and
+// `Delete` both maintain the (status='deleted' ⇔ deleted_at!=NULL)
+// invariant via the database-side `deleted_at = CASE WHEN status
+// = 'deleted' THEN COALESCE(deleted_at, NOW()) ELSE deleted_at
+// END` arm, and the memory backend mirrors that behaviour.
 //
-// `deleted` is acceptable here because UpdateStatus(deleted) and
-// Delete() both maintain the (status='deleted' ⇔ deleted_at!=NULL)
-// invariant. See validMSPCreateStatus for the create-time guard
-// that rejects `deleted` since Create has no soft-delete
-// bookkeeping.
+// PATCH and Create do NOT use this helper anymore: round-6 of
+// Devin Review caught that the generic `MSPRepository.Update`
+// does not stamp `deleted_at` when the patch sets status to
+// 'deleted', so allowing `deleted` on PATCH leaked an
+// unreachable lifecycle row (status='deleted' but deleted_at
+// IS NULL). Both PATCH and Create now use `validMSPCreateStatus`
+// which rejects `deleted`; callers wanting to soft-delete must
+// use `DELETE /api/v1/msps/{msp_id}` or `POST .../status`.
 func validMSPStatus(s string) bool {
 	switch repository.MSPStatus(s) {
 	case "",
@@ -409,6 +413,36 @@ func (h *MSPHandler) update(w http.ResponseWriter, r *http.Request) {
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
+	// Reject empty Name/Slug on PATCH. The MSPPatchRequest
+	// pointer type lets us distinguish absent (nil → no change)
+	// from supplied empty (&""). A client posting `{"name": ""}`
+	// or `{"slug": ""}` would otherwise reach the repository
+	// with `patch.Name = &""` / `patch.Slug = &""`, where the
+	// two backends DISAGREE:
+	//
+	//   - memory backend (internal/repository/memory/msp.go) guards
+	//     `if *patch.Name != ""` and silently ignores the empty
+	//     value (no-op);
+	//   - postgres backend (internal/repository/postgres/msp.go) uses
+	//     a `CASE WHEN $X IS NOT NULL THEN $X ELSE name END` arm
+	//     that binds the empty string, so the column is set to ''.
+	//
+	// Either is wrong — both Name and Slug are required on Create
+	// (the create handler rejects empty for both), so PATCH should
+	// not be a back door to nulling them out. Reject 400 here at
+	// the handler boundary so both backends produce the same
+	// error consistently. Tested by
+	// TestMSPHandler_PatchRejectsEmptyName / _PatchRejectsEmptySlug.
+	if req.Name != nil && *req.Name == "" {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			"name cannot be cleared via PATCH; omit the field to leave unchanged")
+		return
+	}
+	if req.Slug != nil && *req.Slug == "" {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			"slug cannot be cleared via PATCH; omit the field to leave unchanged")
+		return
+	}
 	patch := repository.MSPPatch{
 		Name:     req.Name,
 		Slug:     req.Slug,
@@ -426,10 +460,26 @@ func (h *MSPHandler) update(w http.ResponseWriter, r *http.Request) {
 	// (matching the doc-comment on MSPPatchRequest's pointer
 	// semantics) eliminates the cross-backend divergence and the
 	// hidden 400 path.
+	//
+	// Note: round-6 of Devin Review caught a subtle BUG with the
+	// previous `validMSPStatus` allow-list on PATCH — it accepted
+	// "deleted", but the generic `MSPRepository.Update()` only
+	// writes the status column without touching `deleted_at`. The
+	// result was an inconsistent row (status='deleted' but
+	// deleted_at IS NULL) that broke slug reuse via the partial
+	// unique index (the index considers the slug still "in use"
+	// because deleted_at is NULL) and violated the lifecycle
+	// invariant the rest of the system assumes. We now use the
+	// stricter `validMSPCreateStatus` here, which rejects
+	// "deleted": callers wanting to soft-delete an MSP must use
+	// the dedicated `DELETE /api/v1/msps/{msp_id}` or
+	// `POST .../status` endpoints, both of which correctly stamp
+	// `deleted_at NOW()` alongside the status change. Tested by
+	// TestMSPHandler_PatchRejectsStatusDeleted.
 	if req.Status != nil && *req.Status != "" {
-		if !validMSPStatus(*req.Status) {
+		if !validMSPCreateStatus(*req.Status) {
 			WriteError(w, http.StatusBadRequest, "invalid_param",
-				"status must be one of active, suspended, deleted")
+				"status on PATCH must be one of active, suspended; use DELETE or POST .../status to delete")
 			return
 		}
 		s := repository.MSPStatus(*req.Status)
@@ -621,6 +671,20 @@ type BulkSiteRequest struct {
 }
 
 // BulkClaimTokensRequest carries the count + TTL.
+//
+// TTLSeconds semantics:
+//
+//   - >0 → the issued tokens expire that many seconds after
+//     issuance (typical operator value).
+//   - 0 or omitted → the identity service falls back to its
+//     configured DefaultTokenTTL (see internal/service/identity
+//     and `cfg.Auth.ClaimTokenTTL`). This is INTENTIONAL: it
+//     lets operator UIs default to "use platform setting"
+//     without having to read the config first. The OpenAPI spec
+//     documents this fallback explicitly so SDK clients are not
+//     surprised by the silent default substitution.
+//   - negative values are rejected at the OpenAPI layer
+//     (`minimum: 0`); the handler does NOT need to re-check.
 type BulkClaimTokensRequest struct {
 	Count      int `json:"count"`
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
@@ -739,6 +803,10 @@ func (h *MSPHandler) bulkGenerateClaimTokens(w http.ResponseWriter, r *http.Requ
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
+	// req.TTLSeconds == 0 (omitted or explicit) flows through as
+	// ttl=0, which the identity service interprets as "use
+	// DefaultTokenTTL". See BulkClaimTokensRequest doc-comment for
+	// the contract, and api/openapi.yaml for the spec.
 	ttl := time.Duration(req.TTLSeconds) * time.Second
 	res, err := h.bulk.BulkGenerateClaimTokens(r.Context(), mspID, userID, actorFromCtx(r), req.Count, ttl)
 	if err != nil {

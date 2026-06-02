@@ -105,9 +105,29 @@ type ClaimTokenResult struct {
 // *rbac.Service directly. Returning a flat slice of tenant UUIDs
 // keeps the dependency loose-coupled and avoids dragging the
 // MSPRepository up into this package.
+//
+// `permission` is the bulk-op permission string (e.g.
+// `msp.bulk_apply_policy`) that the caller has already gated at
+// MSP scope via the handler middleware. The rbac service uses it
+// to short-circuit the per-tenant grant scan only for users whose
+// platform/msp-scope grants actually include that permission —
+// round-6 of Devin Review caught the previous wildcard-only check
+// silently denying authorized operators with a specific
+// (non-wildcard) permission.
 type AuthorizedTenantsLister interface {
-	ListAuthorizedTenants(ctx context.Context, userID, mspID uuid.UUID, msps repository.MSPRepository) ([]uuid.UUID, error)
+	ListAuthorizedTenants(ctx context.Context, userID, mspID uuid.UUID, permission string, msps repository.MSPRepository) ([]uuid.UUID, error)
 }
+
+// Bulk-op permission constants used by BulkService when calling
+// AuthorizedTenantsLister.ListAuthorizedTenants. Kept here
+// (rather than the rbac package) because they describe MSP
+// bulk-operation surfaces owned by this service; the rbac
+// package treats them as opaque strings.
+const (
+	PermissionBulkApplyPolicy        = "msp.bulk_apply_policy"
+	PermissionBulkProvisionSites     = "msp.bulk_provision_sites"
+	PermissionBulkGenerateClaimToken = "msp.bulk_generate_claim_tokens"
+)
 
 // BulkService wires the dependencies needed for MSP-fan-out
 // operations. Construction is "supply whatever the call needs, nil
@@ -164,7 +184,7 @@ func (svc *BulkService) ApplyPolicyTemplateToTenants(
 	if len(templateGraph) == 0 {
 		return BulkResult{}, fmt.Errorf("bulk: empty policy template: %w", repository.ErrInvalidArgument)
 	}
-	tenants, err := svc.authorizedTenants(ctx, mspID, userID)
+	tenants, err := svc.authorizedTenants(ctx, mspID, userID, PermissionBulkApplyPolicy)
 	if err != nil {
 		return BulkResult{}, err
 	}
@@ -202,7 +222,7 @@ func (svc *BulkService) BulkProvisionSites(
 	if siteTemplate.Name == "" {
 		return BulkResult{}, fmt.Errorf("bulk: site template name required: %w", repository.ErrInvalidArgument)
 	}
-	tenants, err := svc.authorizedTenants(ctx, mspID, userID)
+	tenants, err := svc.authorizedTenants(ctx, mspID, userID, PermissionBulkProvisionSites)
 	if err != nil {
 		return BulkResult{}, err
 	}
@@ -250,7 +270,7 @@ func (svc *BulkService) BulkGenerateClaimTokens(
 	if count <= 0 {
 		return BulkResult{}, fmt.Errorf("bulk: count must be > 0: %w", repository.ErrInvalidArgument)
 	}
-	tenants, err := svc.authorizedTenants(ctx, mspID, userID)
+	tenants, err := svc.authorizedTenants(ctx, mspID, userID, PermissionBulkGenerateClaimToken)
 	if err != nil {
 		return BulkResult{}, err
 	}
@@ -276,13 +296,17 @@ func (svc *BulkService) BulkGenerateClaimTokens(
 }
 
 // authorizedTenants resolves the per-user authorized tenant subset
-// for `mspID`. Returns an error if no AuthorizedTenantsLister was
-// wired (programmer error).
-func (svc *BulkService) authorizedTenants(ctx context.Context, mspID, userID uuid.UUID) ([]uuid.UUID, error) {
+// for `mspID` and the specific bulk-op `permission`. Returns an
+// error if no AuthorizedTenantsLister was wired (programmer
+// error). The permission string flows through to the rbac
+// service's broad-authority check so platform/msp-scope grants
+// with that specific permission broaden the tenant set; see the
+// AuthorizedTenantsLister doc-comment for the rationale.
+func (svc *BulkService) authorizedTenants(ctx context.Context, mspID, userID uuid.UUID, permission string) ([]uuid.UUID, error) {
 	if svc.authz == nil {
 		return nil, errors.New("bulk: authorized tenants lister not wired")
 	}
-	tenants, err := svc.authz.ListAuthorizedTenants(ctx, userID, mspID, svc.msps)
+	tenants, err := svc.authz.ListAuthorizedTenants(ctx, userID, mspID, permission, svc.msps)
 	if err != nil {
 		return nil, fmt.Errorf("bulk: list authorized tenants: %w", err)
 	}

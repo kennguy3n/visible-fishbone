@@ -1,6 +1,7 @@
 package tenant
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,10 +45,23 @@ type BrandingCacheOptions struct {
 	MaxEntries int
 }
 
+// brandingCacheEntry is the value-side of the LRU node. It is
+// stored inside the lruList element's Value (`*brandingCacheNode`)
+// so the eviction list can name back to the map key on pop.
 type brandingCacheEntry struct {
 	resolved repository.MSPBranding
-	insertAt time.Time
 	expireAt time.Time
+}
+
+// brandingCacheNode is the element-side of the LRU list. Holding
+// both the tenantID and the entry on the same node lets the
+// eviction path delete from `cacheEntries` in O(1) without
+// scanning, which was the round-6 Devin Review concern: the
+// previous map+timestamp scheme rebuilt the "oldest" search per
+// store and was O(n) on the cache cap.
+type brandingCacheNode struct {
+	tenantID uuid.UUID
+	entry    brandingCacheEntry
 }
 
 // DefaultBranding is the platform-wide branding fallback. Returned
@@ -81,14 +95,19 @@ type BrandingResolver struct {
 
 	// Cache fields. cacheTTL == 0 means caching is disabled
 	// (cacheEntries is also nil) and the fast-path checks below
-	// short-circuit immediately. When caching is enabled, all
-	// reads + writes go through cacheMu — a RWMutex because
-	// Resolve traffic vastly outnumbers Set/Clear traffic on
-	// production portals.
-	cacheMu      sync.RWMutex
+	// short-circuit immediately. When caching is enabled,
+	// cacheMu protects both `cacheEntries` and `cacheLRU`. We
+	// use a plain Mutex (not RWMutex) because every cache hit
+	// promotes the entry to the front of the LRU list, which
+	// requires write access — the RWMutex's read-then-upgrade
+	// pattern is not available in Go and a separate try-then-fall
+	// back path would add latency without changing the per-call
+	// lock acquisition cost (still exactly one Lock/Unlock).
+	cacheMu      sync.Mutex
 	cacheTTL     time.Duration
 	cacheMax     int
-	cacheEntries map[uuid.UUID]brandingCacheEntry
+	cacheEntries map[uuid.UUID]*list.Element // map[uuid.UUID]*list.Element{Value: *brandingCacheNode}
+	cacheLRU     *list.List                  // doubly-linked list of *brandingCacheNode, front = most-recently used
 	// now is injected for tests; production code uses time.Now.
 	now func() time.Time
 }
@@ -133,7 +152,8 @@ func NewBrandingResolverWithCache(tenants repository.TenantRepository, msps repo
 		msps:         msps,
 		cacheTTL:     ttl,
 		cacheMax:     maxEntries,
-		cacheEntries: make(map[uuid.UUID]brandingCacheEntry, maxEntries),
+		cacheEntries: make(map[uuid.UUID]*list.Element, maxEntries),
+		cacheLRU:     list.New(),
 		now:          time.Now,
 	}
 }
@@ -145,7 +165,10 @@ func (r *BrandingResolver) Invalidate(tenantID uuid.UUID) {
 		return
 	}
 	r.cacheMu.Lock()
-	delete(r.cacheEntries, tenantID)
+	if elem, ok := r.cacheEntries[tenantID]; ok {
+		r.cacheLRU.Remove(elem)
+		delete(r.cacheEntries, tenantID)
+	}
 	r.cacheMu.Unlock()
 }
 
@@ -159,39 +182,47 @@ func (r *BrandingResolver) InvalidateAll() {
 		return
 	}
 	r.cacheMu.Lock()
-	for k := range r.cacheEntries {
-		delete(r.cacheEntries, k)
-	}
+	r.cacheEntries = make(map[uuid.UUID]*list.Element, r.cacheMax)
+	r.cacheLRU.Init()
 	r.cacheMu.Unlock()
 }
 
 // cacheLookup returns (resolved, true) on hit, zero+false on
-// miss or stale entry. Holds cacheMu.RLock for the duration.
+// miss or stale entry. Promotes the entry to the front of the
+// LRU on hit. Holds cacheMu for the duration.
 func (r *BrandingResolver) cacheLookup(tenantID uuid.UUID) (repository.MSPBranding, bool) {
 	if r.cacheEntries == nil {
 		return repository.MSPBranding{}, false
 	}
-	r.cacheMu.RLock()
-	defer r.cacheMu.RUnlock()
-	e, ok := r.cacheEntries[tenantID]
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	elem, ok := r.cacheEntries[tenantID]
 	if !ok {
 		return repository.MSPBranding{}, false
 	}
-	if r.now().After(e.expireAt) {
-		// Stale — return miss; the caller will recompute and
-		// overwrite the entry. We do not delete here because
-		// the read lock cannot upgrade; the next cacheStore
-		// will replace the entry in place.
+	node := elem.Value.(*brandingCacheNode)
+	if r.now().After(node.entry.expireAt) {
+		// Stale — evict eagerly so the LRU stays accurate. We
+		// hold the write lock so this is safe; the caller will
+		// recompute and reinsert via cacheStore.
+		r.cacheLRU.Remove(elem)
+		delete(r.cacheEntries, tenantID)
 		return repository.MSPBranding{}, false
 	}
-	return e.resolved, true
+	r.cacheLRU.MoveToFront(elem)
+	return node.entry.resolved, true
 }
 
-// cacheStore writes a resolved entry. Evicts the oldest insertion
-// when the cap is exceeded; this is O(n) over the map but the
-// cap is small (1024 by default) and writes are rare relative to
-// reads, so the simpler bookkeeping wins over a doubly-linked
-// LRU. Holds cacheMu.Lock for the duration.
+// cacheStore writes a resolved entry. Evicts the least-recently-
+// used entry in O(1) via the doubly-linked list when the cap is
+// exceeded. Holds cacheMu for the duration.
+//
+// Round-6 of Devin Review caught the previous O(n) scan over the
+// map per store: at cap=1024 the linear search was tolerable but
+// scaled poorly with the cap and any growth of the platform's
+// active-tenant cardinality. The container/list-backed LRU keeps
+// every cache operation O(1) (lookup + promote + evict) without
+// changing the public API or the invalidation contract.
 func (r *BrandingResolver) cacheStore(tenantID uuid.UUID, b repository.MSPBranding) {
 	if r.cacheEntries == nil {
 		return
@@ -199,24 +230,28 @@ func (r *BrandingResolver) cacheStore(tenantID uuid.UUID, b repository.MSPBrandi
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
 	now := r.now()
-	if _, present := r.cacheEntries[tenantID]; !present && len(r.cacheEntries) >= r.cacheMax {
-		var (
-			oldestID uuid.UUID
-			oldestAt time.Time
-		)
-		for k, v := range r.cacheEntries {
-			if oldestAt.IsZero() || v.insertAt.Before(oldestAt) {
-				oldestID = k
-				oldestAt = v.insertAt
-			}
-		}
-		delete(r.cacheEntries, oldestID)
-	}
-	r.cacheEntries[tenantID] = brandingCacheEntry{
+	entry := brandingCacheEntry{
 		resolved: b,
-		insertAt: now,
 		expireAt: now.Add(r.cacheTTL),
 	}
+	if elem, ok := r.cacheEntries[tenantID]; ok {
+		// Refresh in place — update value + promote.
+		node := elem.Value.(*brandingCacheNode)
+		node.entry = entry
+		r.cacheLRU.MoveToFront(elem)
+		return
+	}
+	if r.cacheLRU.Len() >= r.cacheMax {
+		// Pop the LRU (tail) entry. The tail's tenantID is on
+		// the node so we can delete from the map in O(1).
+		if tail := r.cacheLRU.Back(); tail != nil {
+			evicted := tail.Value.(*brandingCacheNode)
+			r.cacheLRU.Remove(tail)
+			delete(r.cacheEntries, evicted.tenantID)
+		}
+	}
+	elem := r.cacheLRU.PushFront(&brandingCacheNode{tenantID: tenantID, entry: entry})
+	r.cacheEntries[tenantID] = elem
 }
 
 // tenantBrandingSettings is the shape of the optional

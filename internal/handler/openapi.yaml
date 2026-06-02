@@ -1661,7 +1661,17 @@ paths:
               required: [count]
               properties:
                 count: { type: integer, minimum: 1 }
-                ttl_seconds: { type: integer, minimum: 0 }
+                ttl_seconds:
+                  type: integer
+                  minimum: 0
+                  description: |
+                    Lifetime of each issued claim token, in
+                    seconds. Omit the field or pass 0 to use the
+                    platform-configured DefaultTokenTTL (set via
+                    the server's claim-token TTL config). Operator
+                    UIs typically rely on the fallback so the
+                    platform setting remains the single source of
+                    truth.
       responses:
         "202": { $ref: "#/components/responses/BulkResult" }
         "400": { $ref: "#/components/responses/Error" }

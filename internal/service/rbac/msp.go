@@ -123,17 +123,51 @@ func (svc *Service) AuthorizePlatform(
 	return false, nil
 }
 
+// ListAuthorizedTenantsMaxPages caps the pagination loop in
+// ListAuthorizedTenants as a safety net. At Limit=1000 per page
+// this allows up to ~1,000,000 tenant bindings per MSP — well
+// above the documented platform target (<10k tenants per MSP)
+// and large enough to avoid spurious failures on legitimate
+// growth, while still guaranteeing the call cannot spin
+// indefinitely if the repository ever returns a non-empty cursor
+// that never advances (e.g. a misconfigured cursor-comparison
+// predicate). When the cap is reached we return an explicit
+// error rather than silently truncating the authorized set,
+// because under-authorization is a security-sensitive bug.
+const ListAuthorizedTenantsMaxPages = 1000
+
+// ErrTooManyMSPBindings is returned by ListAuthorizedTenants when
+// the binding pagination loop exceeds ListAuthorizedTenantsMaxPages.
+// Callers should treat this as a 500-class server error — the MSP
+// has grown beyond the supported size and operator action is
+// required (rather than silently returning a truncated authorized
+// set, which would be a privilege-confused result).
+var ErrTooManyMSPBindings = errors.New("rbac: msp tenant bindings exceed pagination cap; bulk authorization aborted")
+
 // ListAuthorizedTenants returns every tenant under `mspID` that the
-// user is authorized to act on. Composition rule:
+// user is authorized to act on for `permission`. Composition rule:
 //
-//   - If the user holds any platform-scoped grant with the
-//     wildcard permission, they see every tenant the MSP owns or
-//     co-manages.
-//   - If the user holds an msp-scoped grant matching `mspID`,
+//   - If the user holds any platform-scoped grant whose permission
+//     set contains `permission` (literal or `"*"` wildcard), they
+//     see every tenant the MSP owns or co-manages.
+//   - If the user holds an msp-scoped grant matching `mspID` whose
+//     permission set contains `permission` (literal or wildcard),
 //     they see every tenant the MSP owns or co-manages.
 //   - Otherwise the set is restricted to tenants where the user
 //     additionally holds a tenant-scoped grant matching that
 //     tenant.
+//
+// Passing `permission == ""` rejects with ErrInvalidArgument; the
+// caller is responsible for naming the bulk-op permission so the
+// broad-authority short-circuit is correctly gated. Round-6 of
+// Devin Review caught the previous signature (no permission arg)
+// silently misbehaving for platform roles with a specific
+// permission rather than wildcard — such roles fell through the
+// broad branch, hit the per-tenant scan with no tenant-scoped
+// grants, and returned an empty authorized set. Threading the
+// permission through fixes that and also tightens the MSP-scope
+// branch (previously broad for ANY msp-scope role, even ones that
+// did not grant the requested permission).
 //
 // This is the data side of the MSP bulk-operations surface
 // (Task 24): callers fan out across the returned slice rather
@@ -142,18 +176,21 @@ func (svc *Service) AuthorizePlatform(
 func (svc *Service) ListAuthorizedTenants(
 	ctx context.Context,
 	userID, mspID uuid.UUID,
+	permission string,
 	msps repository.MSPRepository,
 ) ([]uuid.UUID, error) {
-	if userID == uuid.Nil || mspID == uuid.Nil {
+	if userID == uuid.Nil || mspID == uuid.Nil || permission == "" {
 		return nil, fmt.Errorf("list authorized tenants: %w", repository.ErrInvalidArgument)
 	}
 	// Pull every binding for the MSP. ListTenants returns paginated
 	// rows; for the platform's expected MSP sizes (<10k tenants)
-	// the unbounded loop is acceptable and matches the bulk-op
-	// fan-out limit.
+	// the loop terminates in 10 iterations, but we cap at
+	// ListAuthorizedTenantsMaxPages as a defensive guard against
+	// pathological repository behaviour (e.g. a misconfigured
+	// cursor predicate that never advances).
 	var bound []uuid.UUID
 	var cursor string
-	for {
+	for i := 0; i < ListAuthorizedTenantsMaxPages; i++ {
 		page, err := msps.ListTenants(ctx, mspID, repository.Page{
 			Limit: 1000,
 			After: cursor,
@@ -165,20 +202,31 @@ func (svc *Service) ListAuthorizedTenants(
 			bound = append(bound, b.TenantID)
 		}
 		if page.NextCursor == "" {
-			break
+			// Decide the broad authorization (platform or msp scope).
+			broad, err := svc.userHasBroadAuthority(ctx, userID, mspID, permission)
+			if err != nil {
+				return nil, err
+			}
+			if broad {
+				return bound, nil
+			}
+			return svc.restrictToTenantGrants(ctx, userID, bound)
 		}
 		cursor = page.NextCursor
 	}
+	return nil, fmt.Errorf("list authorized tenants: %w", ErrTooManyMSPBindings)
+}
 
-	// Decide the broad authorization (platform or msp scope).
-	broad, err := svc.userHasBroadAuthority(ctx, userID, mspID)
-	if err != nil {
-		return nil, err
-	}
-	if broad {
-		return bound, nil
-	}
-
+// restrictToTenantGrants resolves the per-tenant grant subset for
+// a user without broad authority. Split out from
+// ListAuthorizedTenants to keep the pagination loop
+// readable now that the cap-bound for-loop forces early return on
+// the final page.
+func (svc *Service) restrictToTenantGrants(
+	ctx context.Context,
+	userID uuid.UUID,
+	bound []uuid.UUID,
+) ([]uuid.UUID, error) {
 	// Fall back to per-tenant authorization. Read every grant once
 	// and look up scope_ids matching bound tenants.
 	grants, err := svc.roles.GetUserRoles(ctx, userID)
@@ -216,13 +264,37 @@ func (svc *Service) ListAuthorizedTenants(
 	return out, nil
 }
 
-// userHasBroadAuthority reports whether the user holds either a
-// platform-wildcard grant or an msp-scoped grant for `mspID`. It
-// is the precondition that lets ListAuthorizedTenants short-
-// circuit the per-tenant grant scan.
+// userHasBroadAuthority reports whether the user holds a
+// platform-scoped or msp-scoped grant that BOTH (a) matches the
+// scope target and (b) grants `permission` (literal or wildcard).
+// When true, ListAuthorizedTenants short-circuits the per-tenant
+// grant scan and returns every bound tenant.
+//
+// Round-6 of Devin Review: the previous implementation accepted
+// any platform-scoped role iff it carried the wildcard
+// permission, and accepted any msp-scoped role for the matching
+// mspID regardless of permission. Both cases were inconsistent:
+//
+//   - A platform role with a specific permission (e.g.
+//     `msp.bulk_apply_policy` but no `*`) silently produced an
+//     empty authorized set rather than broadening — the
+//     opposite of the operator's expectation.
+//   - An msp-scoped role with a specific permission (e.g.
+//     `tenants.read` only) broadened bulk-op authorization to
+//     all tenants under the MSP without actually granting the
+//     bulk-op permission, which the caller already required at
+//     the middleware boundary.
+//
+// The fix is to gate BOTH branches on rolePermits(role,
+// permission); the middleware contract (the caller has the
+// bulk-op permission at MSP scope) plus this composition rule
+// produces the consistent answer: every grant that names the
+// bulk-op permission at platform or MSP scope broadens, every
+// other grant restricts to tenant-scope subsets.
 func (svc *Service) userHasBroadAuthority(
 	ctx context.Context,
 	userID, mspID uuid.UUID,
+	permission string,
 ) (bool, error) {
 	grants, err := svc.roles.GetUserRoles(ctx, userID)
 	if err != nil {
@@ -236,11 +308,12 @@ func (svc *Service) userHasBroadAuthority(
 			}
 			return false, fmt.Errorf("broad authority: get role: %w", err)
 		}
+		if !rolePermits(role, permission) {
+			continue
+		}
 		switch role.Scope {
 		case repository.RoleScopePlatform:
-			if containsString(role.Permissions, PermWildcard) {
-				return true, nil
-			}
+			return true, nil
 		case repository.RoleScopeMSP:
 			if g.ScopeID != nil && *g.ScopeID == mspID {
 				return true, nil
@@ -283,15 +356,6 @@ func (svc *Service) GrantMSPRole(
 func rolePermits(r repository.Role, permission string) bool {
 	for _, p := range r.Permissions {
 		if p == PermWildcard || p == permission {
-			return true
-		}
-	}
-	return false
-}
-
-func containsString(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
 			return true
 		}
 	}

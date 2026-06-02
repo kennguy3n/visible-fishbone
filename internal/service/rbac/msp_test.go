@@ -202,7 +202,7 @@ func TestListAuthorizedTenants_BroadAuthorityReturnsEveryBoundTenant(t *testing.
 	}); err != nil {
 		t.Fatalf("assign: %v", err)
 	}
-	tenants, err := svc.ListAuthorizedTenants(ctx, userID, mspID, mspRepo)
+	tenants, err := svc.ListAuthorizedTenants(ctx, userID, mspID, rbac.PermTenantsRead, mspRepo)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestListAuthorizedTenants_NoBroadAuthRestrictsToTenantGrants(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("assign: %v", err)
 	}
-	tenants, err := svc.ListAuthorizedTenants(ctx, userID, mspID, mspRepo)
+	tenants, err := svc.ListAuthorizedTenants(ctx, userID, mspID, rbac.PermTenantsRead, mspRepo)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -376,3 +376,125 @@ func TestAuthorizePlatform_RejectsInvalidInputs(t *testing.T) {
 // err1 returns the error out of a (bool, error) tuple. Helper used
 // only by the invalid-input test above.
 func err1(_ bool, err error) error { return err }
+
+// TestListAuthorizedTenants_PlatformSpecificPermissionBroadensSet
+// pins the round-6 fix: a platform-scoped role with a SPECIFIC
+// (non-wildcard) permission MUST now broaden ListAuthorizedTenants
+// to all bound tenants. Previously the implementation required
+// `*` on platform-scoped roles, silently returning empty for
+// operators whose grant was narrower-but-still-applicable. The
+// fix threads the permission through to userHasBroadAuthority,
+// which now gates BOTH scopes (platform + msp) on rolePermits.
+func TestListAuthorizedTenants_PlatformSpecificPermissionBroadensSet(t *testing.T) {
+	svc, store, mspRepo, roleRepo, userID, mspID := mspRBACFixtures(t)
+	tenantRepo := memory.NewTenantRepository(store)
+	ctx := context.Background()
+
+	t1, _ := tenantRepo.Create(ctx, repository.Tenant{Name: "t1", Slug: "p-t1"})
+	t2, _ := tenantRepo.Create(ctx, repository.Tenant{Name: "t2", Slug: "p-t2"})
+	if _, err := mspRepo.AssignTenant(ctx, mspID, t1.ID, repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign t1: %v", err)
+	}
+	if _, err := mspRepo.AssignTenant(ctx, mspID, t2.ID, repository.MSPRelationshipCoManager, nil); err != nil {
+		t.Fatalf("assign t2: %v", err)
+	}
+
+	// Platform-scope role with the specific bulk-apply permission
+	// (NOT wildcard).
+	role := mustSeedRole(t, roleRepo, repository.Role{
+		Name:        "platform_bulk_apply",
+		Scope:       repository.RoleScopePlatform,
+		Permissions: []string{"msp.bulk_apply_policy"},
+	})
+	if err := roleRepo.AssignRole(ctx, repository.UserRole{
+		UserID: userID, RoleID: role.ID,
+	}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+
+	tenants, err := svc.ListAuthorizedTenants(ctx, userID, mspID, "msp.bulk_apply_policy", mspRepo)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tenants) != 2 {
+		t.Fatalf("expected 2 tenants from platform-specific-permission broadening, got %d (%#v)",
+			len(tenants), tenants)
+	}
+
+	// Negative-case: ASKING for a different permission must NOT
+	// broaden (the role does not grant `policy.write`).
+	tenants, err = svc.ListAuthorizedTenants(ctx, userID, mspID, "policy.write", mspRepo)
+	if err != nil {
+		t.Fatalf("list narrow: %v", err)
+	}
+	if len(tenants) != 0 {
+		t.Fatalf("expected empty when asking for permission the role lacks, got %d (%#v)",
+			len(tenants), tenants)
+	}
+}
+
+// TestListAuthorizedTenants_MSPScopeWithoutPermissionDoesNotBroaden
+// pins the round-6 tightening on the msp-scope branch. Previously
+// ANY msp-scope role granted broad authority; the fix requires
+// the role to actually permit the requested permission.
+func TestListAuthorizedTenants_MSPScopeWithoutPermissionDoesNotBroaden(t *testing.T) {
+	svc, store, mspRepo, roleRepo, userID, mspID := mspRBACFixtures(t)
+	tenantRepo := memory.NewTenantRepository(store)
+	ctx := context.Background()
+
+	t1, _ := tenantRepo.Create(ctx, repository.Tenant{Name: "t1", Slug: "m-t1"})
+	t2, _ := tenantRepo.Create(ctx, repository.Tenant{Name: "t2", Slug: "m-t2"})
+	if _, err := mspRepo.AssignTenant(ctx, mspID, t1.ID, repository.MSPRelationshipOwner, nil); err != nil {
+		t.Fatalf("assign t1: %v", err)
+	}
+	if _, err := mspRepo.AssignTenant(ctx, mspID, t2.ID, repository.MSPRelationshipCoManager, nil); err != nil {
+		t.Fatalf("assign t2: %v", err)
+	}
+
+	// MSP-scope role with ONLY tenants.read — not the bulk-op
+	// permission.
+	role := mustSeedRole(t, roleRepo, repository.Role{
+		Name:        "msp_reader",
+		Scope:       repository.RoleScopeMSP,
+		Permissions: []string{rbac.PermTenantsRead},
+	})
+	scope := mspID
+	if err := roleRepo.AssignRole(ctx, repository.UserRole{
+		UserID: userID, RoleID: role.ID, ScopeID: &scope,
+	}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+
+	// Asking for a different permission: must NOT broaden, and
+	// without any tenant-scoped grants, the result is empty.
+	tenants, err := svc.ListAuthorizedTenants(ctx, userID, mspID, "msp.bulk_apply_policy", mspRepo)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tenants) != 0 {
+		t.Fatalf("msp-scope reader role must NOT broaden bulk_apply set, got %d (%#v)",
+			len(tenants), tenants)
+	}
+
+	// Asking for the permission the role DOES grant: broadens.
+	tenants, err = svc.ListAuthorizedTenants(ctx, userID, mspID, rbac.PermTenantsRead, mspRepo)
+	if err != nil {
+		t.Fatalf("list matching perm: %v", err)
+	}
+	if len(tenants) != 2 {
+		t.Fatalf("msp-scope role with matching perm must broaden, got %d (%#v)",
+			len(tenants), tenants)
+	}
+}
+
+// TestListAuthorizedTenants_RejectsEmptyPermission pins the
+// programmer-error guard: passing permission="" rejects with
+// ErrInvalidArgument so callers cannot accidentally skip the
+// authorization gate.
+func TestListAuthorizedTenants_RejectsEmptyPermission(t *testing.T) {
+	svc, _, mspRepo, _, userID, mspID := mspRBACFixtures(t)
+	_, err := svc.ListAuthorizedTenants(context.Background(), userID, mspID, "", mspRepo)
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument for empty permission, got %v", err)
+	}
+}

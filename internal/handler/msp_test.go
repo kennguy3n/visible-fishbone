@@ -50,7 +50,7 @@ type stubBulkAuthz struct {
 	tenants []uuid.UUID
 }
 
-func (s stubBulkAuthz) ListAuthorizedTenants(_ context.Context, _, _ uuid.UUID, _ repository.MSPRepository) ([]uuid.UUID, error) {
+func (s stubBulkAuthz) ListAuthorizedTenants(_ context.Context, _, _ uuid.UUID, _ string, _ repository.MSPRepository) ([]uuid.UUID, error) {
 	return s.tenants, nil
 }
 
@@ -1189,4 +1189,159 @@ func setupMSPHandlerWithCachedBranding(t *testing.T) (
 	mux := http.NewServeMux()
 	h.Register(mux)
 	return mux, msps, tenants, nil
+}
+
+// TestMSPHandler_PatchRejectsStatusDeleted pins the round-6 fix:
+// PATCH must NOT accept status='deleted'. The generic
+// MSPRepository.Update writes status verbatim without stamping
+// deleted_at, so allowing it on PATCH would leak an unreachable
+// lifecycle row (status='deleted' but deleted_at IS NULL) that
+// breaks slug-reuse (the partial unique index treats slug as still
+// in use) and violates the (status='deleted' ⇔ deleted_at!=NULL)
+// invariant the rest of the system assumes. Callers wanting to
+// soft-delete must use DELETE or POST .../status, both of which
+// stamp deleted_at NOW().
+func TestMSPHandler_PatchRejectsStatusDeleted(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	m, err := msps.Create(context.Background(),
+		repository.MSP{Name: "Acme", Slug: "acme-patch-del"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	deleted := "deleted"
+	rec := doMSPJSON(t, mux, http.MethodPatch, "/api/v1/msps/"+m.ID.String(),
+		handler.MSPPatchRequest{Status: &deleted})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400 — PATCH must reject status=deleted",
+			rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "invalid_param" {
+		t.Fatalf("error.code = %q, want invalid_param", body.Error.Code)
+	}
+
+	// Confirm the row is unchanged (status still active, deleted_at nil).
+	after, err := msps.Get(context.Background(), m.ID)
+	if err != nil {
+		t.Fatalf("get after rejection: %v", err)
+	}
+	if after.Status != repository.MSPStatusActive {
+		t.Fatalf("status = %q, want active (unchanged)", after.Status)
+	}
+	if after.DeletedAt != nil {
+		t.Fatalf("deleted_at = %v, want nil (PATCH rejection must not write)", after.DeletedAt)
+	}
+
+	// Sanity-check the dedicated POST .../status endpoint still
+	// accepts status=deleted — that's the right path, and it
+	// stamps deleted_at via UpdateStatus.
+	rec = doMSPJSON(t, mux, http.MethodPost,
+		"/api/v1/msps/"+m.ID.String()+"/status",
+		handler.MSPStatusRequest{Status: "deleted"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST .../status=deleted: code=%d body=%s, want 200",
+			rec.Code, rec.Body.String())
+	}
+	after2, _ := msps.Get(context.Background(), m.ID)
+	if after2.Status != repository.MSPStatusDeleted || after2.DeletedAt == nil {
+		t.Fatalf("after setStatus=deleted: status=%q deleted_at=%v, "+
+			"want both populated (lifecycle invariant)",
+			after2.Status, after2.DeletedAt)
+	}
+}
+
+// TestMSPHandler_PatchRejectsEmptyName pins the round-6 fix on the
+// cross-backend divergence: a client posting `{"name":""}` would
+// previously be silently ignored by the memory backend (guard
+// `if *patch.Name != ""`) but accepted by the postgres backend
+// (CASE arm binds the empty string). The handler now rejects it
+// at the boundary so behavior is consistent.
+func TestMSPHandler_PatchRejectsEmptyName(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	m, err := msps.Create(context.Background(),
+		repository.MSP{Name: "OriginalName", Slug: "acme-empty-name"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	empty := ""
+	rec := doMSPJSON(t, mux, http.MethodPatch, "/api/v1/msps/"+m.ID.String(),
+		handler.MSPPatchRequest{Name: &empty})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400 — PATCH must reject name=\"\"",
+			rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != "invalid_param" {
+		t.Fatalf("error.code = %q, want invalid_param", body.Error.Code)
+	}
+	// Sanity-check that the row's name is unchanged.
+	after, _ := msps.Get(context.Background(), m.ID)
+	if after.Name != "OriginalName" {
+		t.Fatalf("name = %q, want OriginalName (unchanged)", after.Name)
+	}
+}
+
+// TestMSPHandler_PatchRejectsEmptySlug is the slug-side companion
+// to TestMSPHandler_PatchRejectsEmptyName.
+func TestMSPHandler_PatchRejectsEmptySlug(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	m, err := msps.Create(context.Background(),
+		repository.MSP{Name: "Acme", Slug: "acme-empty-slug-original"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	empty := ""
+	rec := doMSPJSON(t, mux, http.MethodPatch, "/api/v1/msps/"+m.ID.String(),
+		handler.MSPPatchRequest{Slug: &empty})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400 — PATCH must reject slug=\"\"",
+			rec.Code, rec.Body.String())
+	}
+	after, _ := msps.Get(context.Background(), m.ID)
+	if after.Slug != "acme-empty-slug-original" {
+		t.Fatalf("slug = %q, want acme-empty-slug-original (unchanged)", after.Slug)
+	}
+}
+
+// TestMSPHandler_PatchOmittedFieldsAreNoOp is the positive-path
+// companion: nil pointer (omitted from JSON) must leave the field
+// untouched, distinguishing it from the &"" "supplied empty" case.
+func TestMSPHandler_PatchOmittedFieldsAreNoOp(t *testing.T) {
+	t.Parallel()
+	mux, msps, _, _, _ := setupMSPHandler(t, false)
+	m, err := msps.Create(context.Background(),
+		repository.MSP{Name: "OriginalName", Slug: "acme-omit"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Empty patch body — every pointer is nil, no field should change.
+	rec := doMSPJSON(t, mux, http.MethodPatch, "/api/v1/msps/"+m.ID.String(),
+		handler.MSPPatchRequest{})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 — empty patch is valid",
+			rec.Code, rec.Body.String())
+	}
+	after, _ := msps.Get(context.Background(), m.ID)
+	if after.Name != "OriginalName" || after.Slug != "acme-omit" {
+		t.Fatalf("after empty patch: name=%q slug=%q, want OriginalName/acme-omit",
+			after.Name, after.Slug)
+	}
 }

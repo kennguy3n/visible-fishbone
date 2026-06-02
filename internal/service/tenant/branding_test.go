@@ -472,3 +472,96 @@ func TestBrandingResolver_UncachedConstructorIgnoresInvalidate(t *testing.T) {
 
 // Suppress staticcheck unused-identifier warnings.
 var _ = errors.New
+
+// TestBrandingResolver_LRUEvictsLeastRecentlyUsed pins the round-6
+// O(1) LRU fix. With cacheMax=2:
+//
+//   1. Resolve(t1) → seeds t1 at MRU.
+//   2. Resolve(t2) → seeds t2 at MRU; t1 moves to LRU.
+//   3. Resolve(t1) → promotes t1 to MRU; t2 is now LRU.
+//   4. Resolve(t3) → evicts t2 (LRU), seeds t3 at MRU.
+//   5. Resolve(t1) → hits cache (still present).
+//   6. Resolve(t2) → MISS (evicted); recomputes.
+//
+// The previous oldest-by-insertion-time scheme would have evicted
+// t1 (the oldest insertion) at step 4 even though step 3 made it
+// the most-recently used — an LRU policy violation that the new
+// list-backed implementation now correctly respects.
+func TestBrandingResolver_LRUEvictsLeastRecentlyUsed(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	tenants := memory.NewTenantRepository(store)
+	msps := memory.NewMSPRepository(store)
+	ctx := context.Background()
+	msp, err := msps.Create(ctx, repository.MSP{Name: "Acme", Slug: "acme-lru",
+		Branding: repository.MSPBranding{PrimaryColor: "#abc"}})
+	if err != nil {
+		t.Fatalf("create msp: %v", err)
+	}
+	mkTenant := func(name, slug string) repository.Tenant {
+		t.Helper()
+		tn, err := tenants.Create(ctx, repository.Tenant{Name: name, Slug: slug})
+		if err != nil {
+			t.Fatalf("create tenant %s: %v", name, err)
+		}
+		if _, err := msps.AssignTenant(ctx, msp.ID, tn.ID, repository.MSPRelationshipOwner, nil); err != nil {
+			t.Fatalf("assign %s: %v", name, err)
+		}
+		out, _ := tenants.Get(ctx, tn.ID)
+		return out
+	}
+	t1 := mkTenant("t1", "lru-t1")
+	t2 := mkTenant("t2", "lru-t2")
+	t3 := mkTenant("t3", "lru-t3")
+
+	r := svctenant.NewBrandingResolverWithCache(tenants, msps,
+		svctenant.BrandingCacheOptions{TTL: 30 * 1e9, MaxEntries: 2})
+
+	if _, err := r.Resolve(ctx, t1.ID); err != nil {
+		t.Fatalf("resolve t1: %v", err)
+	}
+	if _, err := r.Resolve(ctx, t2.ID); err != nil {
+		t.Fatalf("resolve t2: %v", err)
+	}
+	// Step 3: promote t1 to MRU.
+	if _, err := r.Resolve(ctx, t1.ID); err != nil {
+		t.Fatalf("resolve t1 again: %v", err)
+	}
+	// Step 4: writing t3 must evict t2 (LRU), NOT t1 (which is
+	// now MRU). To verify, mutate the underlying repo so a
+	// recompute would observe a different value, then Resolve.
+	override, _ := json.Marshal(map[string]any{
+		"branding": map[string]any{"primary_color": "#ff0000"},
+	})
+	raw := json.RawMessage(override)
+	if _, err := tenants.Update(ctx, t1.ID, repository.TenantPatch{Settings: &raw}); err != nil {
+		t.Fatalf("update t1 settings: %v", err)
+	}
+	if _, err := tenants.Update(ctx, t2.ID, repository.TenantPatch{Settings: &raw}); err != nil {
+		t.Fatalf("update t2 settings: %v", err)
+	}
+	if _, err := r.Resolve(ctx, t3.ID); err != nil {
+		t.Fatalf("resolve t3: %v", err)
+	}
+	// Step 5: t1 should still hit cache (PrimaryColor "#abc"
+	// from MSP default — the post-Resolve mutation didn't
+	// reach because the cache is hit before tenants.Get).
+	hit, err := r.Resolve(ctx, t1.ID)
+	if err != nil {
+		t.Fatalf("resolve t1 post-eviction: %v", err)
+	}
+	if hit.PrimaryColor != "#abc" {
+		t.Fatalf("t1 PrimaryColor=%q, want #abc (cached MSP default; LRU should NOT have evicted t1)",
+			hit.PrimaryColor)
+	}
+	// Step 6: t2 must MISS (got evicted at step 4), so recompute
+	// surfaces the mutated override.
+	miss, err := r.Resolve(ctx, t2.ID)
+	if err != nil {
+		t.Fatalf("resolve t2 post-eviction: %v", err)
+	}
+	if miss.PrimaryColor != "#ff0000" {
+		t.Fatalf("t2 PrimaryColor=%q, want #ff0000 (cache miss → recompute surfaces post-mutation override)",
+			miss.PrimaryColor)
+	}
+}
