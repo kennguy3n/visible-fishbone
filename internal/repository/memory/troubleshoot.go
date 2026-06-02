@@ -212,7 +212,7 @@ func kbEntryOwned(e repository.KBEntry, tenantID *uuid.UUID) bool {
 		return true
 	}
 	if e.TenantID == nil || tenantID == nil {
-		return e.TenantID == nil && tenantID == nil
+		return false
 	}
 	return *e.TenantID == *tenantID
 }

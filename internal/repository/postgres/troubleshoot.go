@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -246,7 +247,8 @@ func (r *KBEntryRepository) Search(
 	}
 	var items []repository.KBEntry
 	run := func(tx pgx.Tx) error {
-		pattern := "%" + query + "%"
+		escaped := strings.NewReplacer("%", `\%`, "_", `\_`).Replace(query)
+		pattern := "%" + escaped + "%"
 		rows, err := tx.Query(ctx, `
 			SELECT id, tenant_id, category, title, content, tags, created_at, updated_at
 			FROM kb_entries

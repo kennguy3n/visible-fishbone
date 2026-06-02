@@ -67,6 +67,11 @@ func (s *KBService) List(ctx context.Context, tenantID *uuid.UUID, category *str
 
 // Update patches a KB entry.
 func (s *KBService) Update(ctx context.Context, tenantID *uuid.UUID, id uuid.UUID, patch repository.KBEntryPatch) (KBEntry, error) {
+	if patch.Category != nil {
+		if !validKBCategory(KBCategory(*patch.Category)) {
+			return KBEntry{}, fmt.Errorf("invalid category %q: %w", *patch.Category, repository.ErrInvalidArgument)
+		}
+	}
 	updated, err := s.repo.Update(ctx, tenantID, id, patch)
 	if err != nil {
 		return KBEntry{}, err

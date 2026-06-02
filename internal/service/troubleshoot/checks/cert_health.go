@@ -14,16 +14,17 @@ import (
 // CertHealthCheck verifies certificate expiry and chain validity.
 // Flags certificates expiring within 30 days.
 type CertHealthCheck struct {
+	devices     repository.DeviceRepository
 	enrollments repository.DeviceEnrollmentRepository
 	warnWindow  time.Duration
 }
 
 // NewCertHealthCheck creates a certificate health check.
-func NewCertHealthCheck(enrollments repository.DeviceEnrollmentRepository, warnWindow time.Duration) *CertHealthCheck {
+func NewCertHealthCheck(devices repository.DeviceRepository, enrollments repository.DeviceEnrollmentRepository, warnWindow time.Duration) *CertHealthCheck {
 	if warnWindow <= 0 {
 		warnWindow = 30 * 24 * time.Hour // 30 days
 	}
-	return &CertHealthCheck{enrollments: enrollments, warnWindow: warnWindow}
+	return &CertHealthCheck{devices: devices, enrollments: enrollments, warnWindow: warnWindow}
 }
 
 func (c *CertHealthCheck) Name() string { return "cert_health" }
@@ -35,13 +36,17 @@ func (c *CertHealthCheck) Run(ctx context.Context, tenantID uuid.UUID) Diagnosti
 		ExecutedAt: now,
 	}
 
-	// List enrollments to check their certificate status.
-	// We can't iterate all certs directly, so we check enrollment status.
-	enrollments, err := c.enrollments.GetEnrollmentAnyStatus(ctx, tenantID, uuid.Nil)
+	// List devices for the tenant, then check each one's enrollment.
+	devices, err := c.devices.List(ctx, tenantID, repository.DeviceListFilter{}, repository.Page{Limit: 200})
 	if err != nil {
-		// If no enrollments exist, that's fine.
+		result.Status = DiagnosticFail
+		result.Message = "Failed to retrieve device list: " + err.Error()
+		return result
+	}
+
+	if len(devices.Items) == 0 {
 		result.Status = DiagnosticPass
-		result.Message = "No device enrollments to check"
+		result.Message = "No devices to check"
 		details, _ := json.Marshal(map[string]any{
 			"warn_window": c.warnWindow.String(),
 		})
@@ -51,19 +56,29 @@ func (c *CertHealthCheck) Run(ctx context.Context, tenantID uuid.UUID) Diagnosti
 
 	expiringSoon := 0
 	expired := 0
-	if enrollments.LastCertIssuedAt != nil {
-		certAge := now.Sub(*enrollments.LastCertIssuedAt)
-		if certAge > 365*24*time.Hour {
-			expired++
-		} else if certAge > (365*24*time.Hour - c.warnWindow) {
-			expiringSoon++
+	checked := 0
+
+	for _, d := range devices.Items {
+		enrollment, err := c.enrollments.GetEnrollmentAnyStatus(ctx, tenantID, d.ID)
+		if err != nil {
+			continue
+		}
+		checked++
+		if enrollment.LastCertIssuedAt != nil {
+			certAge := now.Sub(*enrollment.LastCertIssuedAt)
+			if certAge > 365*24*time.Hour {
+				expired++
+			} else if certAge > (365*24*time.Hour - c.warnWindow) {
+				expiringSoon++
+			}
 		}
 	}
 
 	details, _ := json.Marshal(map[string]any{
-		"warn_window":    c.warnWindow.String(),
-		"expiring_soon":  expiringSoon,
-		"expired":        expired,
+		"warn_window":   c.warnWindow.String(),
+		"checked":       checked,
+		"expiring_soon": expiringSoon,
+		"expired":       expired,
 	})
 	result.Details = details
 

@@ -3,6 +3,7 @@ package troubleshoot
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/google/uuid"
 
@@ -24,11 +25,16 @@ func NewDiagnosticEngine(diagnosticChecks []checks.DiagnosticCheck) *DiagnosticE
 }
 
 // RunAll executes every registered diagnostic check and returns
-// all results.
+// all results sorted by check name for deterministic ordering.
 func (e *DiagnosticEngine) RunAll(ctx context.Context, tenantID uuid.UUID) []DiagnosticResult {
-	results := make([]DiagnosticResult, 0, len(e.registry))
-	for _, c := range e.registry {
-		r := c.Run(ctx, tenantID)
+	names := make([]string, 0, len(e.registry))
+	for name := range e.registry {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	results := make([]DiagnosticResult, 0, len(names))
+	for _, name := range names {
+		r := e.registry[name].Run(ctx, tenantID)
 		results = append(results, toServiceResult(r))
 	}
 	return results

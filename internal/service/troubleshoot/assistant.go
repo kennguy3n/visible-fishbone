@@ -147,11 +147,12 @@ func buildTemplateResponse(issue, _ string, kbEntries []KBEntry, diagnostics []D
 	return b.String()
 }
 
-func truncateContent(s string, maxLen int) string {
-	if len(s) <= maxLen {
+func truncateContent(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return string(runes[:maxRunes]) + "..."
 }
 
 // marshalDiagnosticResults encodes diagnostic results as JSON for storage.

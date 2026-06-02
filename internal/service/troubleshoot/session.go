@@ -102,8 +102,8 @@ func (s *SessionService) SendMessage(ctx context.Context, tenantID uuid.UUID, se
 
 	messages := unmarshalMessages(existing.Messages)
 
-	// Check max message limit.
-	if len(messages) >= s.maxMessages {
+	// Check max message limit (each SendMessage adds 2: operator + assistant).
+	if len(messages)+2 > s.maxMessages {
 		return TroubleshootSession{}, fmt.Errorf("session has reached maximum message limit (%d): %w", s.maxMessages, repository.ErrResourceExhausted)
 	}
 
