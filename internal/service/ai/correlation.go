@@ -34,36 +34,35 @@ func (e *CorrelationEngine) Analyze(ctx context.Context, alerts []AlertInput) (C
 
 	sorted := make([]AlertInput, len(alerts))
 	copy(sorted, alerts)
-	// The alert ID is optional in the API contract, so callers may
-	// send alerts with a zero (uuid.Nil) ID. Assign a synthetic ID to
-	// those before grouping; otherwise the dedup map below would
-	// collapse every nil-ID alert onto a single key and silently drop
-	// all but the first from the analysis.
-	for i := range sorted {
-		if sorted[i].ID == uuid.Nil {
-			sorted[i].ID = uuid.New()
-		}
-	}
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].CreatedAt.Before(sorted[j].CreatedAt)
 	})
 
-	assigned := map[uuid.UUID]bool{}
+	// Deduplicate by position in the sorted slice rather than by alert
+	// ID. The id field is optional in the API contract, so callers may
+	// omit it (uuid.Nil) on some or all alerts; keying the dedup set on
+	// the index keeps every alert distinct without (a) collapsing all
+	// nil-ID alerts onto a single key and silently dropping them, or
+	// (b) fabricating synthetic IDs that would later be persisted into
+	// ai_alert_correlations.alert_ids as dangling references.
+	assigned := make([]bool, len(sorted))
 	var clusters []CorrelationCluster
+	correlated := 0
 
-	for i, anchor := range sorted {
-		if assigned[anchor.ID] {
+	for i := range sorted {
+		if assigned[i] {
 			continue
 		}
+		anchor := sorted[i]
 		group := []AlertInput{anchor}
-		assigned[anchor.ID] = true
+		assigned[i] = true
 		dims := map[CorrelationDimension]bool{}
 
 		for j := i + 1; j < len(sorted); j++ {
-			candidate := sorted[j]
-			if assigned[candidate.ID] {
+			if assigned[j] {
 				continue
 			}
+			candidate := sorted[j]
 			if candidate.TenantID != anchor.TenantID {
 				continue
 			}
@@ -92,17 +91,24 @@ func (e *CorrelationEngine) Analyze(ctx context.Context, alerts []AlertInput) (C
 
 			if matched {
 				group = append(group, candidate)
-				assigned[candidate.ID] = true
+				assigned[j] = true
 			}
 		}
 
 		if len(group) < e.config.MinClusterSize {
 			continue
 		}
+		correlated += len(group)
 
-		alertIDs := make([]uuid.UUID, len(group))
-		for k, a := range group {
-			alertIDs[k] = a.ID
+		// Persist only real alert references. Alerts submitted without
+		// an ID (uuid.Nil) still count toward the cluster (group size,
+		// summary, correlated total) but are not written as dangling
+		// UUIDs into alert_ids.
+		alertIDs := make([]uuid.UUID, 0, len(group))
+		for _, a := range group {
+			if a.ID != uuid.Nil {
+				alertIDs = append(alertIDs, a.ID)
+			}
 		}
 
 		dimSlice := make([]CorrelationDimension, 0, len(dims))
@@ -137,11 +143,6 @@ func (e *CorrelationEngine) Analyze(ctx context.Context, alerts []AlertInput) (C
 				aiGenerated = true
 			}
 		}
-	}
-
-	correlated := 0
-	for _, c := range clusters {
-		correlated += len(c.AlertIDs)
 	}
 
 	return CorrelationResult{

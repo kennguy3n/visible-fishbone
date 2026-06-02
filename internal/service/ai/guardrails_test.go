@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -157,6 +158,45 @@ func TestGuardrailedProvider_TokenLimit(t *testing.T) {
 	_, err = gp.Complete(ctx, LLMRequest{Prompt: "test"})
 	if err == nil {
 		t.Fatal("expected token limit error")
+	}
+}
+
+func TestGuardrailedProvider_EvictsStaleUsage(t *testing.T) {
+	t.Parallel()
+	inner := &guardrailStubLLM{text: "ok", modelID: "test"}
+	gp := NewGuardrailedProvider(inner, GuardrailConfig{
+		MaxRequestsPerMinute: 60,
+		MaxTokensPerDay:      100000,
+	}, nil)
+
+	// Seed an idle tenant whose last activity is well beyond usageTTL,
+	// plus a recently-active tenant that must be retained.
+	old := time.Now().Add(-2 * usageTTL)
+	staleTenant := uuid.New()
+	activeTenant := uuid.New()
+	gp.mu.Lock()
+	gp.usage[staleTenant] = &tenantUsage{minuteStart: old, dayStart: old}
+	gp.usage[activeTenant] = &tenantUsage{minuteStart: time.Now(), dayStart: time.Now()}
+	// Force the sweep to run on the next checkRateLimit call.
+	gp.lastSweep = old
+	gp.mu.Unlock()
+
+	// A live request triggers the (rate-limited) eviction sweep.
+	ctx := ContextWithTenantID(context.Background(), uuid.New())
+	if _, err := gp.Complete(ctx, LLMRequest{Prompt: "hello"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	gp.mu.Lock()
+	_, staleExists := gp.usage[staleTenant]
+	_, activeExists := gp.usage[activeTenant]
+	gp.mu.Unlock()
+
+	if staleExists {
+		t.Fatal("stale tenant usage entry should have been evicted")
+	}
+	if !activeExists {
+		t.Fatal("recently-active tenant usage entry must be retained")
 	}
 }
 

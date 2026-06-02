@@ -71,12 +71,22 @@ type GuardrailedProvider struct {
 	logger  *slog.Logger
 	filters []*regexp.Regexp
 
-	mu       sync.Mutex
-	usage    map[uuid.UUID]*tenantUsage
-	auditLog []AuditRecord
+	mu        sync.Mutex
+	usage     map[uuid.UUID]*tenantUsage
+	auditLog  []AuditRecord
+	lastSweep time.Time
 }
 
 const maxAuditLogSize = 10000
+
+// usageTTL is how long an idle tenant's usage entry is retained before
+// it is evicted; usageSweepInterval bounds how often the (cheap)
+// eviction sweep runs so the per-tenant usage map cannot grow without
+// bound across the process lifetime.
+const (
+	usageTTL           = 24 * time.Hour
+	usageSweepInterval = 10 * time.Minute
+)
 
 // NewGuardrailedProvider constructs a guardrailed LLM wrapper.
 // inner must not be nil.
@@ -100,7 +110,7 @@ func NewGuardrailedProvider(inner LLMProvider, cfg GuardrailConfig, logger *slog
 
 	// Add default PII patterns.
 	defaultPatterns := []string{
-		`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b`,      // email
+		`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`,       // email
 		`\b\d{3}-\d{2}-\d{4}\b`,                                      // SSN
 		`\b(?:\d{4}[- ]?){3}\d{4}\b`,                                 // credit card
 		`(?i)\b(?:api[_-]?key|secret|password|token)\s*[:=]\s*\S+\b`, // secrets
@@ -162,8 +172,9 @@ func (g *GuardrailedProvider) checkRateLimit(tenantID uuid.UUID) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	u := g.getOrCreateUsage(tenantID)
 	now := time.Now()
+	g.evictStaleLocked(now)
+	u := g.getOrCreateUsage(tenantID)
 
 	// Reset minute counter if window has passed.
 	if now.Sub(u.minuteStart) > time.Minute {
@@ -196,6 +207,22 @@ func (g *GuardrailedProvider) trackTokens(tenantID uuid.UUID, tokens int) {
 	defer g.mu.Unlock()
 	u := g.getOrCreateUsage(tenantID)
 	u.tokensToday += tokens
+}
+
+// evictStaleLocked removes usage entries for tenants that have had no
+// activity within usageTTL. It must be called with g.mu held. The
+// sweep runs at most once per usageSweepInterval so the common path
+// stays O(1).
+func (g *GuardrailedProvider) evictStaleLocked(now time.Time) {
+	if now.Sub(g.lastSweep) < usageSweepInterval {
+		return
+	}
+	g.lastSweep = now
+	for id, u := range g.usage {
+		if now.Sub(u.dayStart) > usageTTL && now.Sub(u.minuteStart) > usageTTL {
+			delete(g.usage, id)
+		}
+	}
 }
 
 func (g *GuardrailedProvider) getOrCreateUsage(tenantID uuid.UUID) *tenantUsage {

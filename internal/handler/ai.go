@@ -95,7 +95,13 @@ func (h *AIHandler) summarize(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_time_range", err.Error())
 		return
 	}
-	summary, err := h.svc.Summarize(r.Context(), tenantID, tr)
+	// Tag the context with the tenant ID so the guardrailed LLM
+	// provider (when configured) attributes rate limiting, token
+	// budgets, and audit records to the correct tenant rather than
+	// uuid.Nil. The middleware tenant key is package-private to
+	// middleware, so the ai package cannot read it directly.
+	ctx := ai.ContextWithTenantID(r.Context(), tenantID)
+	summary, err := h.svc.Summarize(ctx, tenantID, tr)
 	if err != nil {
 		h.logger.Error("ai: summarize failed",
 			slog.String("tenant_id", tenantID.String()),
@@ -130,7 +136,8 @@ func (h *AIHandler) suggestPolicy(w http.ResponseWriter, r *http.Request) {
 	if uid := middleware.UserIDFromContext(r.Context()); uid != uuid.Nil {
 		actorID = &uid
 	}
-	verified, err := h.svc.SuggestPolicy(r.Context(), tenantID, actorID, req.Prompt)
+	ctx := ai.ContextWithTenantID(r.Context(), tenantID)
+	verified, err := h.svc.SuggestPolicy(ctx, tenantID, actorID, req.Prompt)
 	if err != nil {
 		h.logger.Error("ai: suggest-policy failed",
 			slog.String("tenant_id", tenantID.String()),
@@ -161,7 +168,8 @@ func (h *AIHandler) troubleshoot(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "query is required")
 		return
 	}
-	result, err := h.svc.Troubleshoot(r.Context(), tenantID, req.Query)
+	ctx := ai.ContextWithTenantID(r.Context(), tenantID)
+	result, err := h.svc.Troubleshoot(ctx, tenantID, req.Query)
 	if err != nil {
 		h.logger.Error("ai: troubleshoot failed",
 			slog.String("tenant_id", tenantID.String()),

@@ -164,13 +164,16 @@ func TestCorrelationEngine_NilAlertIDsNotDropped(t *testing.T) {
 
 	tenantID := uuid.New()
 	now := time.Now()
-	// All alerts omit ID (uuid.Nil). They share a device, so they
-	// must correlate into a single cluster covering every alert
-	// rather than collapsing onto one nil key.
+	// A mix of real-ID and nil-ID alerts sharing a device. Every
+	// alert (including the nil-ID ones) must be grouped — none may be
+	// silently dropped — but only the real IDs may be persisted into
+	// AlertIDs; nil IDs must never appear as dangling references.
+	realA := uuid.New()
+	realB := uuid.New()
 	alerts := []AlertInput{
-		{TenantID: tenantID, Kind: "anomaly", Severity: "medium", DeviceID: "d1", CreatedAt: now},
+		{ID: realA, TenantID: tenantID, Kind: "anomaly", Severity: "medium", DeviceID: "d1", CreatedAt: now},
 		{TenantID: tenantID, Kind: "anomaly", Severity: "medium", DeviceID: "d1", CreatedAt: now.Add(2 * time.Minute)},
-		{TenantID: tenantID, Kind: "anomaly", Severity: "medium", DeviceID: "d1", CreatedAt: now.Add(4 * time.Minute)},
+		{ID: realB, TenantID: tenantID, Kind: "anomaly", Severity: "medium", DeviceID: "d1", CreatedAt: now.Add(4 * time.Minute)},
 	}
 
 	result, err := engine.Analyze(context.Background(), alerts)
@@ -180,19 +183,24 @@ func TestCorrelationEngine_NilAlertIDsNotDropped(t *testing.T) {
 	if len(result.Clusters) != 1 {
 		t.Fatalf("expected 1 cluster, got %d", len(result.Clusters))
 	}
-	if got := len(result.Clusters[0].AlertIDs); got != 3 {
-		t.Fatalf("expected 3 correlated alerts, got %d", got)
+	// All three alerts were correlated (nil-ID one not dropped).
+	if result.CorrelatedAlerts != 3 {
+		t.Fatalf("expected 3 correlated alerts, got %d", result.CorrelatedAlerts)
 	}
-	// Synthetic IDs must be unique (no nil collisions).
-	seen := map[uuid.UUID]bool{}
-	for _, id := range result.Clusters[0].AlertIDs {
+	// Only the two real IDs are persisted; no nil entries.
+	ids := result.Clusters[0].AlertIDs
+	if len(ids) != 2 {
+		t.Fatalf("expected 2 persisted alert IDs, got %d (%v)", len(ids), ids)
+	}
+	got := map[uuid.UUID]bool{}
+	for _, id := range ids {
 		if id == uuid.Nil {
-			t.Fatal("alert ID should not be nil after analysis")
+			t.Fatal("persisted alert ID must not be nil")
 		}
-		if seen[id] {
-			t.Fatalf("duplicate alert ID %s in cluster", id)
-		}
-		seen[id] = true
+		got[id] = true
+	}
+	if !got[realA] || !got[realB] {
+		t.Fatalf("expected persisted IDs to be {%s,%s}, got %v", realA, realB, ids)
 	}
 }
 
