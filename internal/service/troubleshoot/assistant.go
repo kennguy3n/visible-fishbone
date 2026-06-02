@@ -78,8 +78,9 @@ func (a *Assistant) Respond(ctx context.Context, tenantID uuid.UUID, issue strin
 func extractSearchTerms(issue, message string) string {
 	combined := issue + " " + message
 	combined = strings.TrimSpace(combined)
-	if len(combined) > 200 {
-		combined = combined[:200]
+	runes := []rune(combined)
+	if len(runes) > 200 {
+		combined = string(runes[:200])
 	}
 	return combined
 }

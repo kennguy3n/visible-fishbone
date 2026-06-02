@@ -247,12 +247,13 @@ func (r *KBEntryRepository) Search(
 	}
 	var items []repository.KBEntry
 	run := func(tx pgx.Tx) error {
-		escaped := strings.NewReplacer("%", `\%`, "_", `\_`).Replace(query)
+		escaped := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(query)
 		pattern := "%" + escaped + "%"
 		rows, err := tx.Query(ctx, `
 			SELECT id, tenant_id, category, title, content, tags, created_at, updated_at
 			FROM kb_entries
 			WHERE title ILIKE $1 OR content ILIKE $1
+			   OR EXISTS (SELECT 1 FROM unnest(tags) t WHERE t ILIKE $1)
 			ORDER BY created_at DESC
 			LIMIT $2`, pattern, limit)
 		if err != nil {
