@@ -49,11 +49,11 @@ func TestReportEngine_Generate_TemplateOnly(t *testing.T) {
 	if report.Overview.TotalAlerts != 37 {
 		t.Fatalf("expected 37 total alerts, got %d", report.Overview.TotalAlerts)
 	}
-	if report.Overview.CriticalAlerts != 2 {
-		t.Fatalf("expected 2 critical alerts, got %d", report.Overview.CriticalAlerts)
+	if report.Overview.AlertsBySeverity["critical"] != 2 {
+		t.Fatalf("expected 2 critical alerts, got %d", report.Overview.AlertsBySeverity["critical"])
 	}
-	if report.Overview.TrendDirection != "degrading" {
-		t.Fatalf("expected degrading trend, got %s", report.Overview.TrendDirection)
+	if report.Overview.Trend != "degrading" {
+		t.Fatalf("expected degrading trend, got %s", report.Overview.Trend)
 	}
 	if len(report.Recommendations) == 0 {
 		t.Fatal("expected recommendations")
@@ -83,8 +83,8 @@ func TestReportEngine_Generate_WithLLM(t *testing.T) {
 	if !report.AIGenerated {
 		t.Fatal("expected ai_generated=true with LLM")
 	}
-	if report.Overview.SummaryText != "Executive summary from AI." {
-		t.Fatalf("expected LLM summary, got %q", report.Overview.SummaryText)
+	if report.ModelID != "gpt-4" {
+		t.Fatalf("expected model_id gpt-4, got %q", report.ModelID)
 	}
 }
 
@@ -132,8 +132,8 @@ func TestReportEngine_PolicyCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if report.PolicyHealth.CoveragePercent != 50 {
-		t.Fatalf("expected 50%% coverage, got %.1f%%", report.PolicyHealth.CoveragePercent)
+	if report.PolicyHealth.CoveragePct != 50 {
+		t.Fatalf("expected 50%% coverage, got %.1f%%", report.PolicyHealth.CoveragePct)
 	}
 	foundCoverageRec := false
 	for _, r := range report.Recommendations {

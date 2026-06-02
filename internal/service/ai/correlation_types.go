@@ -64,7 +64,8 @@ type CorrelationCluster struct {
 
 // CorrelationResult wraps the output of a full correlation run.
 type CorrelationResult struct {
-	Clusters    []CorrelationCluster `json:"clusters"`
-	TotalAlerts int                  `json:"total_alerts"`
-	AIGenerated bool                 `json:"ai_generated"`
+	Clusters         []CorrelationCluster `json:"clusters"`
+	TotalAlerts      int                  `json:"total_alerts"`
+	CorrelatedAlerts int                  `json:"correlated_alerts"`
+	AIGenerated      bool                 `json:"ai_generated"`
 }

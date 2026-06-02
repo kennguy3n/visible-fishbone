@@ -20,8 +20,8 @@ func TestThreatIntelEngine_NoIndicators(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if tc.SeverityAdjust != "unchanged" {
-		t.Fatalf("expected unchanged, got %s", tc.SeverityAdjust)
+	if tc.EscalatedSeverity != "medium" {
+		t.Fatalf("expected medium (unchanged), got %s", tc.EscalatedSeverity)
 	}
 }
 
@@ -37,8 +37,8 @@ func TestThreatIntelEngine_NoFeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if tc.SeverityAdjust != "unchanged" {
-		t.Fatalf("expected unchanged without feed, got %s", tc.SeverityAdjust)
+	if tc.EscalatedSeverity != "medium" {
+		t.Fatalf("expected medium (unchanged) without feed, got %s", tc.EscalatedSeverity)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestThreatIntelEngine_HighConfidenceEscalation(t *testing.T) {
 		matches: []IOCMatch{
 			{
 				Indicator:   "1.2.3.4",
-				Type:        "ip",
+				ThreatType:  "ip",
 				ThreatActor: "APT29",
 				Campaign:    "SolarWinds",
 				Confidence:  0.95,
@@ -66,11 +66,8 @@ func TestThreatIntelEngine_HighConfidenceEscalation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if tc.SeverityAdjust != "escalate" {
-		t.Fatalf("expected escalate, got %s", tc.SeverityAdjust)
-	}
-	if tc.NewSeverity != "high" {
-		t.Fatalf("expected high severity after escalation, got %s", tc.NewSeverity)
+	if tc.EscalatedSeverity != "high" {
+		t.Fatalf("expected high severity after escalation, got %s", tc.EscalatedSeverity)
 	}
 	if len(tc.ThreatActors) != 1 || tc.ThreatActors[0] != "APT29" {
 		t.Fatalf("expected threat actor APT29, got %v", tc.ThreatActors)
@@ -86,7 +83,7 @@ func TestThreatIntelEngine_LowConfidenceNoEscalation(t *testing.T) {
 		matches: []IOCMatch{
 			{
 				Indicator:  "suspicious.com",
-				Type:       "domain",
+				ThreatType: "domain",
 				Confidence: 0.3,
 				LastSeen:   time.Now(),
 			},
@@ -102,11 +99,8 @@ func TestThreatIntelEngine_LowConfidenceNoEscalation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if tc.SeverityAdjust != "unchanged" {
-		t.Fatalf("expected unchanged for low confidence, got %s", tc.SeverityAdjust)
-	}
-	if tc.NewSeverity != "low" {
-		t.Fatalf("expected severity unchanged, got %s", tc.NewSeverity)
+	if tc.EscalatedSeverity != "low" {
+		t.Fatalf("expected low (unchanged) for low confidence, got %s", tc.EscalatedSeverity)
 	}
 }
 

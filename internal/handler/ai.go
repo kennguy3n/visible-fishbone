@@ -235,7 +235,8 @@ func (h *AIHandler) analyzeCorrelations(w http.ResponseWriter, r *http.Request) 
 	for i := range req.Alerts {
 		req.Alerts[i].TenantID = tenantID
 	}
-	result, err := h.correlation.Analyze(r.Context(), req.Alerts)
+	ctx := ai.ContextWithTenantID(r.Context(), tenantID)
+	result, err := h.correlation.Analyze(ctx, req.Alerts)
 	if err != nil {
 		h.logger.Error("ai: correlate failed",
 			slog.String("tenant_id", tenantID.String()),
@@ -243,15 +244,19 @@ func (h *AIHandler) analyzeCorrelations(w http.ResponseWriter, r *http.Request) 
 		WriteError(w, http.StatusInternalServerError, "ai_error", "correlation analysis failed")
 		return
 	}
-	// Persist clusters.
+	// Persist clusters (fire-and-forget; log errors for diagnostics).
 	if h.correlationRepo != nil {
 		for _, cluster := range result.Clusters {
-			_, _ = h.correlationRepo.Create(r.Context(), tenantID, repository.AICorrelation{
+			if _, err := h.correlationRepo.Create(r.Context(), tenantID, repository.AICorrelation{
 				AlertIDs: cluster.AlertIDs,
 				Summary:  cluster.Summary,
 				Severity: cluster.Severity,
 				Status:   cluster.Status,
-			})
+			}); err != nil {
+				h.logger.Warn("ai: failed to persist correlation cluster",
+					slog.String("tenant_id", tenantID.String()),
+					slog.String("error", err.Error()))
+			}
 		}
 	}
 	WriteJSON(w, http.StatusOK, result)
@@ -277,7 +282,8 @@ func (h *AIHandler) nlPolicyQuery(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "question is required")
 		return
 	}
-	resp, err := h.nlQuery.Query(r.Context(), ai.NLQueryRequest{
+	ctx := ai.ContextWithTenantID(r.Context(), tenantID)
+	resp, err := h.nlQuery.Query(ctx, ai.NLQueryRequest{
 		Question: req.Question,
 		TenantID: tenantID,
 	})
@@ -302,8 +308,9 @@ func (h *AIHandler) getPostureReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Generate on-demand with defaults.
+	ctx := ai.ContextWithTenantID(r.Context(), tenantID)
 	now := time.Now().UTC()
-	report, err := h.reports.Generate(r.Context(), ai.PostureInput{
+	report, err := h.reports.Generate(ctx, ai.PostureInput{
 		TenantID: tenantID,
 		Period: ai.ReportPeriod{
 			Start: now.Add(-7 * 24 * time.Hour),
@@ -352,7 +359,8 @@ func (h *AIHandler) generatePostureReport(w http.ResponseWriter, r *http.Request
 	} else {
 		start = now.Add(-7 * 24 * time.Hour)
 	}
-	report, err := h.reports.Generate(r.Context(), ai.PostureInput{
+	ctx := ai.ContextWithTenantID(r.Context(), tenantID)
+	report, err := h.reports.Generate(ctx, ai.PostureInput{
 		TenantID:         tenantID,
 		Period:           ai.ReportPeriod{Start: start, End: now, Label: req.Period},
 		AlertsBySeverity: req.Alerts,
@@ -385,7 +393,8 @@ func (h *AIHandler) enrichAlert(w http.ResponseWriter, r *http.Request) {
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
-	tc, err := h.threatIntel.Enrich(r.Context(), ai.EnrichRequest{
+	ctx := ai.ContextWithTenantID(r.Context(), tenantID)
+	tc, err := h.threatIntel.Enrich(ctx, ai.EnrichRequest{
 		AlertID:    req.AlertID,
 		TenantID:   tenantID,
 		Indicators: req.Indicators,

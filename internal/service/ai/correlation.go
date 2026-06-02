@@ -129,10 +129,16 @@ func (e *CorrelationEngine) Analyze(ctx context.Context, alerts []AlertInput) (C
 		}
 	}
 
+	correlated := 0
+	for _, c := range clusters {
+		correlated += len(c.AlertIDs)
+	}
+
 	return CorrelationResult{
-		Clusters:    clusters,
-		TotalAlerts: len(alerts),
-		AIGenerated: aiGenerated,
+		Clusters:         clusters,
+		TotalAlerts:      len(alerts),
+		CorrelatedAlerts: correlated,
+		AIGenerated:      aiGenerated,
 	}, nil
 }
 

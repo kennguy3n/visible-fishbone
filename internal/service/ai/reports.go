@@ -3,7 +3,6 @@ package ai
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,23 +31,18 @@ type ReportPeriod struct {
 
 // PostureOverview is the top-level overview section.
 type PostureOverview struct {
-	TotalAlerts     int     `json:"total_alerts"`
-	CriticalAlerts  int     `json:"critical_alerts"`
-	HighAlerts      int     `json:"high_alerts"`
-	MediumAlerts    int     `json:"medium_alerts"`
-	LowAlerts       int     `json:"low_alerts"`
-	ResolvedAlerts  int     `json:"resolved_alerts"`
-	TrendDirection  string  `json:"trend_direction"` // improving, degrading, stable
-	TrendPctChange  float64 `json:"trend_pct_change"`
-	SummaryText     string  `json:"summary_text"`
+	TotalAlerts      int            `json:"total_alerts"`
+	AlertsBySeverity map[string]int `json:"alerts_by_severity"`
+	Trend            string         `json:"trend"` // improving, degrading, stable
 }
 
 // PostureThreatSection summarises top threats.
 type PostureThreatSection struct {
-	TopThreats []ThreatEntry `json:"top_threats"`
+	TopKinds       []string `json:"top_kinds"`
+	NewThreatTypes int      `json:"new_threat_types"`
 }
 
-// ThreatEntry is a single top-threat line item.
+// ThreatEntry is a single top-threat line item (internal use).
 type ThreatEntry struct {
 	Kind  string `json:"kind"`
 	Count int    `json:"count"`
@@ -58,8 +52,7 @@ type ThreatEntry struct {
 type PosturePolicyHealth struct {
 	TotalPolicies   int     `json:"total_policies"`
 	ActivePolicies  int     `json:"active_policies"`
-	CoveragePercent float64 `json:"coverage_percent"`
-	DenyRate        float64 `json:"deny_rate"`
+	CoveragePct     float64 `json:"coverage_pct"`
 }
 
 // PostureInput is the structured data fed into the report engine.
@@ -96,7 +89,7 @@ func (e *ReportEngine) Generate(ctx context.Context, input PostureInput) (Postur
 		totalAlerts += v
 	}
 
-	trendDir, trendPct := computeTrend(totalAlerts, input.PrevPeriodAlerts)
+	trendDir, _ := computeTrend(totalAlerts, input.PrevPeriodAlerts)
 
 	var coveragePct float64
 	if input.TotalPolicies > 0 {
@@ -108,41 +101,38 @@ func (e *ReportEngine) Generate(ctx context.Context, input PostureInput) (Postur
 	}
 
 	overview := PostureOverview{
-		TotalAlerts:    totalAlerts,
-		CriticalAlerts: input.AlertsBySeverity["critical"],
-		HighAlerts:     input.AlertsBySeverity["high"],
-		MediumAlerts:   input.AlertsBySeverity["medium"],
-		LowAlerts:      input.AlertsBySeverity["low"],
-		ResolvedAlerts: input.ResolvedAlerts,
-		TrendDirection: trendDir,
-		TrendPctChange: trendPct,
+		TotalAlerts:      totalAlerts,
+		AlertsBySeverity: input.AlertsBySeverity,
+		Trend:            trendDir,
 	}
 
-	overview.SummaryText = e.buildTemplateSummary(overview, input.Period)
+	topKinds := make([]string, 0, len(input.TopThreats))
+	for _, t := range input.TopThreats {
+		topKinds = append(topKinds, t.Kind)
+	}
 
-	recs := e.buildRecommendations(overview, coveragePct, denyRate)
+	recs := e.buildRecommendations(overview, input, coveragePct, denyRate)
 
 	report := PostureReport{
 		TenantID: input.TenantID,
 		Period:   input.Period,
 		Overview: overview,
 		Threats: PostureThreatSection{
-			TopThreats: input.TopThreats,
+			TopKinds:       topKinds,
+			NewThreatTypes: 0,
 		},
 		PolicyHealth: PosturePolicyHealth{
-			TotalPolicies:   input.TotalPolicies,
-			ActivePolicies:  input.ActivePolicies,
-			CoveragePercent: coveragePct,
-			DenyRate:        denyRate,
+			TotalPolicies:  input.TotalPolicies,
+			ActivePolicies: input.ActivePolicies,
+			CoveragePct:    coveragePct,
 		},
 		Recommendations: recs,
 		GeneratedAt:     time.Now().UTC(),
 	}
 
 	if e.llm != nil {
-		polished, modelID, err := e.polishWithLLM(ctx, report)
+		_, modelID, err := e.polishWithLLM(ctx, report)
 		if err == nil {
-			report.Overview.SummaryText = polished
 			report.AIGenerated = true
 			report.ModelID = modelID
 		}
@@ -151,22 +141,12 @@ func (e *ReportEngine) Generate(ctx context.Context, input PostureInput) (Postur
 	return report, nil
 }
 
-func (e *ReportEngine) buildTemplateSummary(o PostureOverview, period ReportPeriod) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Security posture report for %s.\n", period.Label)
-	fmt.Fprintf(&b, "Total alerts: %d (critical: %d, high: %d, medium: %d, low: %d). ",
-		o.TotalAlerts, o.CriticalAlerts, o.HighAlerts, o.MediumAlerts, o.LowAlerts)
-	fmt.Fprintf(&b, "Resolved: %d. ", o.ResolvedAlerts)
-	fmt.Fprintf(&b, "Trend: %s (%.1f%% change).", o.TrendDirection, o.TrendPctChange)
-	return b.String()
-}
-
-func (e *ReportEngine) buildRecommendations(o PostureOverview, coverage, denyRate float64) []string {
+func (e *ReportEngine) buildRecommendations(o PostureOverview, input PostureInput, coverage, denyRate float64) []string {
 	var recs []string
-	if o.CriticalAlerts > 0 {
-		recs = append(recs, fmt.Sprintf("Investigate %d critical alert(s) immediately.", o.CriticalAlerts))
+	if o.AlertsBySeverity["critical"] > 0 {
+		recs = append(recs, fmt.Sprintf("Investigate %d critical alert(s) immediately.", o.AlertsBySeverity["critical"]))
 	}
-	if o.TrendDirection == "degrading" {
+	if o.Trend == "degrading" {
 		recs = append(recs, "Alert volume is increasing; review detection thresholds.")
 	}
 	if coverage < 80 {
@@ -175,8 +155,8 @@ func (e *ReportEngine) buildRecommendations(o PostureOverview, coverage, denyRat
 	if denyRate > 50 {
 		recs = append(recs, "High deny rate detected; review policy rules for over-restriction.")
 	}
-	if o.TotalAlerts-o.ResolvedAlerts > 0 {
-		recs = append(recs, fmt.Sprintf("%d alert(s) remain open; prioritise triage.", o.TotalAlerts-o.ResolvedAlerts))
+	if o.TotalAlerts-input.ResolvedAlerts > 0 {
+		recs = append(recs, fmt.Sprintf("%d alert(s) remain open; prioritise triage.", o.TotalAlerts-input.ResolvedAlerts))
 	}
 	if len(recs) == 0 {
 		recs = append(recs, "Security posture is healthy. No immediate action required.")
@@ -187,9 +167,10 @@ func (e *ReportEngine) buildRecommendations(o PostureOverview, coverage, denyRat
 func (e *ReportEngine) polishWithLLM(ctx context.Context, report PostureReport) (string, string, error) {
 	prompt := fmt.Sprintf(
 		"You are a ShieldNet Gateway security analyst. "+
-			"Polish the following security posture summary into a professional executive briefing. "+
-			"Do not invent data — only rephrase the evidence provided.\n\n%s",
-		report.Overview.SummaryText)
+			"Polish the following security posture data into a professional executive briefing. "+
+			"Do not invent data — only rephrase the evidence provided.\n\n"+
+			"Total alerts: %d, Trend: %s, Period: %s",
+		report.Overview.TotalAlerts, report.Overview.Trend, report.Period.Label)
 
 	resp, err := e.llm.Complete(ctx, LLMRequest{
 		Prompt:         prompt,

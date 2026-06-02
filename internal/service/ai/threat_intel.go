@@ -18,22 +18,22 @@ type ThreatFeedProvider interface {
 // IOCMatch represents a single IOC match from a threat feed.
 type IOCMatch struct {
 	Indicator   string  `json:"indicator"`
-	Type        string  `json:"type"` // ip, domain, hash, url
+	FeedName    string  `json:"feed_name,omitempty"`
+	ThreatType  string  `json:"threat_type"` // ip, domain, hash, url
 	ThreatActor string  `json:"threat_actor,omitempty"`
 	Campaign    string  `json:"campaign,omitempty"`
 	Confidence  float64 `json:"confidence"` // 0.0–1.0
-	LastSeen    time.Time `json:"last_seen"`
+	LastSeen    time.Time `json:"last_seen,omitempty"`
 }
 
 // ThreatContext is the enrichment result for an alert.
 type ThreatContext struct {
-	IOCMatches     []IOCMatch `json:"ioc_matches"`
-	ThreatActors   []string   `json:"threat_actors"`
-	Campaigns      []string   `json:"campaigns"`
-	Confidence     float64    `json:"confidence"`
-	SeverityAdjust string     `json:"severity_adjust,omitempty"` // escalate, unchanged
-	OrigSeverity   string     `json:"orig_severity"`
-	NewSeverity    string     `json:"new_severity"`
+	AlertID           uuid.UUID  `json:"alert_id"`
+	IOCMatches        []IOCMatch `json:"ioc_matches"`
+	ThreatActors      []string   `json:"threat_actors"`
+	Campaigns         []string   `json:"campaigns"`
+	Confidence        float64    `json:"confidence"`
+	EscalatedSeverity string     `json:"escalated_severity"`
 }
 
 // EnrichRequest is the input for threat intelligence enrichment.
@@ -60,19 +60,17 @@ func NewThreatIntelEngine(feed ThreatFeedProvider) *ThreatIntelEngine {
 func (e *ThreatIntelEngine) Enrich(ctx context.Context, req EnrichRequest) (ThreatContext, error) {
 	if len(req.Indicators) == 0 {
 		return ThreatContext{
-			Confidence:     0,
-			SeverityAdjust: "unchanged",
-			OrigSeverity:   req.Severity,
-			NewSeverity:    req.Severity,
+			AlertID:           req.AlertID,
+			Confidence:        0,
+			EscalatedSeverity: req.Severity,
 		}, nil
 	}
 
 	if e.feed == nil {
 		return ThreatContext{
-			Confidence:     0,
-			SeverityAdjust: "unchanged",
-			OrigSeverity:   req.Severity,
-			NewSeverity:    req.Severity,
+			AlertID:           req.AlertID,
+			Confidence:        0,
+			EscalatedSeverity: req.Severity,
 		}, nil
 	}
 
@@ -99,25 +97,18 @@ func (e *ThreatIntelEngine) Enrich(ctx context.Context, req EnrichRequest) (Thre
 	actors := mapKeys(actorSet)
 	campaigns := mapKeys(campaignSet)
 
-	origSev := req.Severity
-	newSev := origSev
-	adjust := "unchanged"
-
+	escalatedSev := req.Severity
 	if maxConfidence >= 0.8 && len(matches) > 0 {
-		newSev = escalateThreatSeverity(origSev)
-		if newSev != origSev {
-			adjust = "escalate"
-		}
+		escalatedSev = escalateThreatSeverity(req.Severity)
 	}
 
 	return ThreatContext{
-		IOCMatches:     matches,
-		ThreatActors:   actors,
-		Campaigns:      campaigns,
-		Confidence:     maxConfidence,
-		SeverityAdjust: adjust,
-		OrigSeverity:   origSev,
-		NewSeverity:    newSev,
+		AlertID:           req.AlertID,
+		IOCMatches:        matches,
+		ThreatActors:      actors,
+		Campaigns:         campaigns,
+		Confidence:        maxConfidence,
+		EscalatedSeverity: escalatedSev,
 	}, nil
 }
 
