@@ -104,6 +104,21 @@ func (s *Store) NewDeviceEnrollmentRepository() *DeviceEnrollmentRepository {
 	return &DeviceEnrollmentRepository{s: s}
 }
 
+// NewCASBConnectorRepository binds the Store to repository.CASBConnectorRepository.
+func (s *Store) NewCASBConnectorRepository() *CASBConnectorRepository {
+	return &CASBConnectorRepository{s: s}
+}
+
+// NewCASBDiscoveredAppRepository binds the Store to repository.CASBDiscoveredAppRepository.
+func (s *Store) NewCASBDiscoveredAppRepository() *CASBDiscoveredAppRepository {
+	return &CASBDiscoveredAppRepository{s: s}
+}
+
+// NewCASBPostureCheckRepository binds the Store to repository.CASBPostureCheckRepository.
+func (s *Store) NewCASBPostureCheckRepository() *CASBPostureCheckRepository {
+	return &CASBPostureCheckRepository{s: s}
+}
+
 // Compile-time interface compliance asserts. Keeping these in this
 // file means a single grep tells us "did the postgres package
 // implement every interface?" without scanning eight files.
@@ -131,4 +146,7 @@ var (
 	_ repository.IntegrationDeliveryRepository  = (*IntegrationDeliveryRepository)(nil)
 	_ repository.MSPRepository                  = (*MSPRepository)(nil)
 	_ repository.DeviceEnrollmentRepository     = (*DeviceEnrollmentRepository)(nil)
+	_ repository.CASBConnectorRepository        = (*CASBConnectorRepository)(nil)
+	_ repository.CASBDiscoveredAppRepository    = (*CASBDiscoveredAppRepository)(nil)
+	_ repository.CASBPostureCheckRepository     = (*CASBPostureCheckRepository)(nil)
 )

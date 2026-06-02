@@ -76,6 +76,11 @@ type Store struct {
 	deviceEnrollments  map[deviceEnrollmentKey]repository.DeviceEnrollment
 	deviceCertificates map[uuid.UUID]repository.DeviceCertificate
 
+	// CASB tables — see migration 016.
+	casbConnectors     map[uuid.UUID]repository.CASBConnector
+	casbDiscoveredApps map[uuid.UUID]repository.CASBDiscoveredApp
+	casbPostureChecks  map[uuid.UUID]repository.CASBPostureCheck
+
 	// App registry tables — see internal/repository/app_registry.go
 	// and migrations/008_app_registry.up.sql. `appRegistry` is the
 	// global curated catalog (not tenant-scoped); `appOverrides`
@@ -138,6 +143,9 @@ func NewStore() *Store {
 		integrationConnectors: map[uuid.UUID]repository.IntegrationConnector{},
 		integrationDeliveries: map[uuid.UUID]repository.IntegrationDelivery{},
 		msps:                  map[uuid.UUID]repository.MSP{},
+		casbConnectors:        map[uuid.UUID]repository.CASBConnector{},
+		casbDiscoveredApps:    map[uuid.UUID]repository.CASBDiscoveredApp{},
+		casbPostureChecks:     map[uuid.UUID]repository.CASBPostureCheck{},
 		mspTenants:            map[mspTenantKey]repository.MSPTenantBinding{},
 		deviceEnrollments:     map[deviceEnrollmentKey]repository.DeviceEnrollment{},
 		deviceCertificates:    map[uuid.UUID]repository.DeviceCertificate{},
