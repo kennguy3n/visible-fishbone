@@ -100,7 +100,7 @@ func TestReviewService_ApprovedToApplied(t *testing.T) {
 	s := seedSuggestion(t, repo, tenantID)
 	reviewerID := uuid.New()
 
-	if _, err := svc.ApproveSuggestion(context.Background(), tenantID, s.ID, reviewerID, ""); err != nil {
+	if _, err := svc.ApproveSuggestion(context.Background(), tenantID, s.ID, reviewerID, "looks good"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 
@@ -110,6 +110,14 @@ func TestReviewService_ApprovedToApplied(t *testing.T) {
 	}
 	if updated.Status != repository.AISuggestionStatusApplied {
 		t.Fatalf("expected applied, got %s", updated.Status)
+	}
+	// Apply carries no reviewer/feedback; the attribution recorded at
+	// approve time must be preserved, not cleared.
+	if updated.ReviewerID == nil || *updated.ReviewerID != reviewerID {
+		t.Fatalf("reviewer_id not preserved across apply: got %v", updated.ReviewerID)
+	}
+	if updated.Feedback == nil || *updated.Feedback != "looks good" {
+		t.Fatalf("feedback not preserved across apply: got %v", updated.Feedback)
 	}
 }
 

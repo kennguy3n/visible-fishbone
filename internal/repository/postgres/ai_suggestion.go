@@ -170,9 +170,18 @@ func (r *AISuggestionRepository) List(ctx context.Context, tenantID uuid.UUID, s
 func (r *AISuggestionRepository) UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, expectedStatus, newStatus string, reviewerID *uuid.UUID, feedback *string) error {
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		now := time.Now().UTC()
+		// COALESCE preserves the existing reviewer_id/feedback when the
+		// caller passes nil. Transitions such as apply/rollback carry no
+		// reviewer attribution (reviewerID == nil, feedback == nil) and
+		// must not erase the attribution recorded by the earlier
+		// approve/reject step. This mirrors the memory implementation,
+		// which only overwrites these columns when the value is non-nil.
 		tag, err := tx.Exec(ctx, `
 			UPDATE ai_policy_suggestions
-			   SET status = $1, reviewed_at = $2, reviewer_id = $3, feedback = $4
+			   SET status = $1,
+			       reviewed_at = $2,
+			       reviewer_id = COALESCE($3, reviewer_id),
+			       feedback = COALESCE($4, feedback)
 			 WHERE id = $5 AND status = $6`,
 			newStatus, now, reviewerID, feedback, id, expectedStatus,
 		)

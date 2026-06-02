@@ -725,4 +725,54 @@ func TestPostgres_Integration(t *testing.T) {
 			t.Errorf("unknown hash: want ErrNotFound, got %v", err)
 		}
 	})
+
+	t.Run("AISuggestion_TransitionPreservesAttribution", func(t *testing.T) {
+		tnt := mustTenant(t, store.NewTenantRepository())
+		repo := store.NewAISuggestionRepository()
+
+		created, err := repo.Create(bgCtx(), tnt.ID, repository.AISuggestion{
+			RuleID:         "rule-1",
+			Category:       "unused",
+			SuggestionJSON: json.RawMessage(`{"action":"remove_rule"}`),
+			Confidence:     0.9,
+		})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+
+		// Approve records reviewer attribution and feedback.
+		reviewer := uuid.New()
+		feedback := "looks good"
+		if err := repo.UpdateStatus(bgCtx(), tnt.ID, created.ID,
+			string(repository.AISuggestionStatusPending),
+			string(repository.AISuggestionStatusApproved),
+			&reviewer, &feedback,
+		); err != nil {
+			t.Fatalf("approve: %v", err)
+		}
+
+		// Apply carries no attribution (nil reviewer + nil feedback);
+		// the earlier approve attribution must be preserved, not nulled.
+		if err := repo.UpdateStatus(bgCtx(), tnt.ID, created.ID,
+			string(repository.AISuggestionStatusApproved),
+			string(repository.AISuggestionStatusApplied),
+			nil, nil,
+		); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+
+		got, err := repo.Get(bgCtx(), tnt.ID, created.ID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got.Status != repository.AISuggestionStatusApplied {
+			t.Errorf("status: want applied, got %s", got.Status)
+		}
+		if got.ReviewerID == nil || *got.ReviewerID != reviewer {
+			t.Errorf("reviewer_id not preserved across apply: got %v want %s", got.ReviewerID, reviewer)
+		}
+		if got.Feedback == nil || *got.Feedback != feedback {
+			t.Errorf("feedback not preserved across apply: got %v want %q", got.Feedback, feedback)
+		}
+	})
 }
