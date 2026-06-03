@@ -116,6 +116,13 @@ impl AndroidAuthSurface {
 
 #[async_trait]
 impl AuthSurface for AndroidAuthSurface {
+    /// Present `url` in a Custom Tab and await the captured redirect.
+    ///
+    /// Only one authorization can be in flight at a time: calling
+    /// `present_auth_url` again while a previous call is still
+    /// awaiting replaces the stored sender, so the earlier call's
+    /// `rx.await` fails and resolves to [`AuthSurfaceError::Cancelled`].
+    /// This is intentional — a fresh sign-in supersedes a stale one.
     async fn present_auth_url(&self, url: &Url) -> Result<CallbackUrl, AuthSurfaceError> {
         let (tx, rx) = oneshot::channel();
         {
@@ -123,6 +130,8 @@ impl AuthSurface for AndroidAuthSurface {
                 .pending
                 .lock()
                 .map_err(|_| AuthSurfaceError::Presentation("auth surface lock poisoned".into()))?;
+            // Supersede any in-flight authorization (see method doc):
+            // dropping the previous sender cancels that flow.
             *guard = Some(tx);
         }
 

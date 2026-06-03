@@ -2282,7 +2282,6 @@ dependencies = [
  "ipnet",
  "jni",
  "ndk-context",
- "pretty_assertions",
  "serde",
  "serde_json",
  "sng-mobile-core",

@@ -193,14 +193,19 @@ mod imp {
     const BIOMETRIC_STRONG: i32 = 0x0000_000F;
 
     pub(super) fn collect_signals() -> Result<RawPostureSignals, AndroidPalError> {
-        let passcode_set = with_env(passcode_set)?;
+        // Every signal is best-effort: a single unreadable source
+        // (e.g. `KeyguardManager` unavailable in a restricted
+        // profile) degrades that field to `None` ("unknown") rather
+        // than failing the whole snapshot. The control plane already
+        // distinguishes `None` from `Some(false)`.
+        let passcode_set = with_env(passcode_set).ok();
         let biometric_code = with_env(biometric_code).ok();
         let os_version = with_env(os_version).ok();
         let mdm_enrolled = with_env(mdm_enrolled).ok();
         let root_detected = Some(root_signal(su_binary_present(), build_is_test_keys()));
         Ok(RawPostureSignals {
             os_version,
-            passcode_set: Some(passcode_set),
+            passcode_set,
             biometric_code,
             root_detected,
             mdm_enrolled,
@@ -372,6 +377,27 @@ mod tests {
         };
         let snap = assemble_snapshot(raw, "agent", Utc::now());
         assert_eq!(snap.biometric_ready, None);
+    }
+
+    #[test]
+    fn degraded_passcode_signal_stays_none_without_failing_snapshot() {
+        // Mirrors the Android `collect_signals` degraded path: a
+        // `KeyguardManager` JNI failure yields `passcode_set = None`
+        // (via `.ok()`) while the remaining signals are still
+        // reported, instead of failing the whole collection.
+        let raw = RawPostureSignals {
+            os_version: Some("14".to_owned()),
+            passcode_set: None,
+            biometric_code: Some(BIOMETRIC_SUCCESS),
+            root_detected: Some(false),
+            mdm_enrolled: Some(true),
+        };
+        let snap = assemble_snapshot(raw, "agent", Utc::now());
+        assert_eq!(snap.passcode_set, None);
+        assert_eq!(snap.os_version, "14");
+        assert_eq!(snap.biometric_ready, Some(true));
+        assert_eq!(snap.root_detected, Some(false));
+        assert_eq!(snap.mdm_enrolled, Some(true));
     }
 
     #[tokio::test]

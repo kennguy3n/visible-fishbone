@@ -97,10 +97,11 @@ pub fn translate_config(config: &TunnelConfig) -> Result<VpnServiceConfig, Andro
 
 /// Android `VpnService`-backed [`MobileTunnelProvider`].
 ///
-/// Tracks the last observed [`TunnelStatus`] behind a mutex so
-/// `status()` is cheap and lock-free for readers between
-/// transitions. Used as `Arc<dyn MobileTunnelProvider>`, so it does
-/// not need to be `Clone`.
+/// Tracks the last observed [`TunnelStatus`] behind a
+/// `std::sync::Mutex`; `status()` takes the lock briefly to clone
+/// the current value, which is held only for status transitions so
+/// contention is negligible. Used as `Arc<dyn MobileTunnelProvider>`,
+/// so it does not need to be `Clone`.
 #[derive(Debug)]
 pub struct AndroidTunnelProvider {
     status: Mutex<TunnelStatus>,

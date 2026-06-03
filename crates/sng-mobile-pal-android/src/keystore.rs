@@ -96,12 +96,24 @@ pub fn signature_from_raw(raw: &[u8]) -> Result<Signature, AndroidPalError> {
 /// construct, and the constructor exists on every target so the
 /// UniFFI binding layer can name and build it regardless of build
 /// host.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct AndroidSecureKeyStore {
     /// StrongBox preference. When `true`, key generation requests a
     /// StrongBox-resident key and falls back to TEE if the hardware
     /// lacks a StrongBox (`StrongBoxUnavailableException`).
     prefer_strongbox: bool,
+}
+
+impl Default for AndroidSecureKeyStore {
+    /// Defaults to the secure posture: prefer StrongBox. Kept in
+    /// sync with [`AndroidSecureKeyStore::new`] so `Default::default()`
+    /// (struct-update syntax, generic code, derives) never silently
+    /// downgrades to a TEE-only keystore.
+    fn default() -> Self {
+        Self {
+            prefer_strongbox: true,
+        }
+    }
 }
 
 impl AndroidSecureKeyStore {
@@ -110,9 +122,7 @@ impl AndroidSecureKeyStore {
     /// present.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            prefer_strongbox: true,
-        }
+        Self::default()
     }
 
     /// Construct a keystore with an explicit StrongBox preference.
@@ -517,6 +527,18 @@ mod tests {
     fn rejects_wrong_length_signature() {
         let err = signature_from_raw(&[0u8; 10]).expect_err("too short");
         assert!(matches!(err, AndroidPalError::Encoding(_)));
+    }
+
+    #[test]
+    fn default_matches_new_and_prefers_strongbox() {
+        // `Default::default()` must agree with `new()` so struct-update
+        // syntax / generic code never silently downgrades to TEE-only.
+        assert!(AndroidSecureKeyStore::default().prefers_strongbox());
+        assert_eq!(
+            AndroidSecureKeyStore::default().prefers_strongbox(),
+            AndroidSecureKeyStore::new().prefers_strongbox()
+        );
+        assert!(!AndroidSecureKeyStore::with_strongbox(false).prefers_strongbox());
     }
 
     #[tokio::test]
