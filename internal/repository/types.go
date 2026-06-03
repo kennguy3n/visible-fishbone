@@ -1607,3 +1607,59 @@ type AISuggestion struct {
 	ReviewerID     *uuid.UUID
 	Feedback       *string
 }
+
+// --- Troubleshooting ------------------------------------------------------
+
+// KBCategory enumerates the allowed categories for knowledge base entries.
+type KBCategory string
+
+const (
+	KBCategoryConnectivity KBCategory = "connectivity"
+	KBCategoryPolicy       KBCategory = "policy"
+	KBCategoryIdentity     KBCategory = "identity"
+	KBCategoryPerformance  KBCategory = "performance"
+	KBCategoryIntegration  KBCategory = "integration"
+)
+
+// KBEntry is a knowledge base article for the troubleshooting assistant.
+// TenantID nil means a global (system-wide) entry.
+type KBEntry struct {
+	ID        uuid.UUID
+	TenantID  *uuid.UUID
+	Category  KBCategory
+	Title     string
+	Content   string
+	Tags      []string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// KBEntryPatch is the sparse-PATCH input for KBEntryRepository.Update.
+type KBEntryPatch struct {
+	Category *KBCategory
+	Title    *string
+	Content  *string
+	Tags     *[]string
+}
+
+// TroubleshootSessionStatus enumerates session lifecycle states.
+type TroubleshootSessionStatus string
+
+const (
+	TroubleshootSessionActive    TroubleshootSessionStatus = "active"
+	TroubleshootSessionResolved  TroubleshootSessionStatus = "resolved"
+	TroubleshootSessionEscalated TroubleshootSessionStatus = "escalated"
+)
+
+// TroubleshootSession is a conversational troubleshooting session.
+type TroubleshootSession struct {
+	ID                uuid.UUID
+	TenantID          uuid.UUID
+	OperatorID        uuid.UUID
+	Issue             string
+	Status            TroubleshootSessionStatus
+	Messages          json.RawMessage // []SessionMessage as JSON
+	DiagnosticResults json.RawMessage // []DiagnosticResult as JSON
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}

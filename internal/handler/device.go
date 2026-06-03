@@ -388,12 +388,12 @@ func (h *DeviceHandler) revokeDevice(w http.ResponseWriter, r *http.Request) {
 
 // EnrollmentStatusResponse is the JSON response for enrollment status.
 type EnrollmentStatusResponse struct {
-	DeviceID       string  `json:"device_id"`
-	TenantID       string  `json:"tenant_id"`
-	Status         string  `json:"status"`
-	EnrolledAt     string  `json:"enrolled_at"`
-	LastCertIssued *string `json:"last_cert_issued_at,omitempty"`
-	RevokedAt      *string `json:"revoked_at,omitempty"`
+	DeviceID        string  `json:"device_id"`
+	TenantID        string  `json:"tenant_id"`
+	Status          string  `json:"status"`
+	EnrolledAt      string  `json:"enrolled_at"`
+	LastCertIssued  *string `json:"last_cert_issued_at,omitempty"`
+	RevokedAt       *string `json:"revoked_at,omitempty"`
 }
 
 func (h *DeviceHandler) enrollmentStatus(w http.ResponseWriter, r *http.Request) {

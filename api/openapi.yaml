@@ -2648,6 +2648,211 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
 
+  # ── Autonomous Troubleshooting (Tasks 61-66) ───────────────────
+  /tenants/{tenant_id}/troubleshoot/sessions:
+    post:
+      tags: [troubleshoot]
+      operationId: startTroubleshootSession
+      summary: Start a troubleshooting session
+      parameters:
+        - $ref: "#/components/parameters/TenantPathID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TroubleshootStartSessionRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TroubleshootSession" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/troubleshoot/sessions/{id}/messages:
+    post:
+      tags: [troubleshoot]
+      operationId: sendTroubleshootSessionMessage
+      summary: Send an operator message to a troubleshooting session
+      parameters:
+        - $ref: "#/components/parameters/TenantPathID"
+        - $ref: "#/components/parameters/ResourceID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TroubleshootSendMessageRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TroubleshootSession" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/troubleshoot/sessions/{id}:
+    get:
+      tags: [troubleshoot]
+      operationId: getTroubleshootSession
+      summary: Get a troubleshooting session with full history
+      parameters:
+        - $ref: "#/components/parameters/TenantPathID"
+        - $ref: "#/components/parameters/ResourceID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TroubleshootSession" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/troubleshoot/sessions/{id}/resolve:
+    post:
+      tags: [troubleshoot]
+      operationId: resolveTroubleshootSession
+      summary: Mark a troubleshooting session as resolved
+      parameters:
+        - $ref: "#/components/parameters/TenantPathID"
+        - $ref: "#/components/parameters/ResourceID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TroubleshootSession" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/troubleshoot/diagnostics/run:
+    post:
+      tags: [troubleshoot]
+      operationId: runTroubleshootDiagnostics
+      summary: Run all diagnostic checks against tenant state
+      parameters:
+        - $ref: "#/components/parameters/TenantPathID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: "#/components/schemas/TroubleshootDiagnosticResult" }
+
+  /tenants/{tenant_id}/troubleshoot/diagnostics/{check}:
+    post:
+      tags: [troubleshoot]
+      operationId: runTroubleshootDiagnosticCheck
+      summary: Run a single named diagnostic check
+      parameters:
+        - $ref: "#/components/parameters/TenantPathID"
+        - in: path
+          name: check
+          required: true
+          schema:
+            type: string
+            enum: [connectivity, policy_consistency, cert_health, integration_health, performance]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TroubleshootDiagnosticResult" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/troubleshoot/kb:
+    get:
+      tags: [troubleshoot]
+      operationId: listTroubleshootKBEntries
+      summary: List knowledge base entries (global + tenant-custom)
+      parameters:
+        - $ref: "#/components/parameters/TenantPathID"
+        - in: query
+          name: category
+          schema:
+            type: string
+            enum: [connectivity, policy, identity, performance, integration]
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/TroubleshootKBEntry" }
+                  next_cursor: { type: string }
+    post:
+      tags: [troubleshoot]
+      operationId: createTroubleshootKBEntry
+      summary: Create a tenant-custom knowledge base entry
+      parameters:
+        - $ref: "#/components/parameters/TenantPathID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TroubleshootKBEntryInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TroubleshootKBEntry" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /tenants/{tenant_id}/troubleshoot/kb/{id}:
+    get:
+      tags: [troubleshoot]
+      operationId: getTroubleshootKBEntry
+      summary: Get a knowledge base entry
+      parameters:
+        - $ref: "#/components/parameters/TenantPathID"
+        - $ref: "#/components/parameters/ResourceID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TroubleshootKBEntry" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [troubleshoot]
+      operationId: updateTroubleshootKBEntry
+      summary: Update a knowledge base entry
+      parameters:
+        - $ref: "#/components/parameters/TenantPathID"
+        - $ref: "#/components/parameters/ResourceID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TroubleshootKBEntryInput" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TroubleshootKBEntry" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [troubleshoot]
+      operationId: deleteTroubleshootKBEntry
+      summary: Delete a knowledge base entry
+      parameters:
+        - $ref: "#/components/parameters/TenantPathID"
+        - $ref: "#/components/parameters/ResourceID"
+      responses:
+        "204": { description: deleted }
+        "404": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     BearerJWT:
@@ -3924,3 +4129,67 @@ components:
             justification: { type: string }
         confidence: { type: number, format: double, minimum: 0, maximum: 1 }
         reasoning: { type: string }
+    TroubleshootStartSessionRequest:
+      type: object
+      required: [issue]
+      properties:
+        issue: { type: string, description: "Operator's description of the issue." }
+    TroubleshootSendMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string }
+    TroubleshootSessionMessage:
+      type: object
+      required: [role, content, timestamp, ai_generated]
+      properties:
+        role: { type: string, description: "operator or assistant." }
+        content: { type: string }
+        timestamp: { type: string, format: date-time }
+        ai_generated: { type: boolean }
+    TroubleshootDiagnosticResult:
+      type: object
+      required: [check_name, status, message, executed_at]
+      properties:
+        check_name: { type: string }
+        status: { type: string, enum: [pass, warn, fail] }
+        message: { type: string }
+        details: { type: object, additionalProperties: true, nullable: true }
+        executed_at: { type: string, format: date-time }
+    TroubleshootSession:
+      type: object
+      required: [id, tenant_id, operator_id, issue, status, messages, diagnostic_results, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        operator_id: { type: string, format: uuid }
+        issue: { type: string }
+        status: { type: string, enum: [active, resolved, escalated] }
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/TroubleshootSessionMessage" }
+        diagnostic_results:
+          type: array
+          items: { $ref: "#/components/schemas/TroubleshootDiagnosticResult" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TroubleshootKBEntryInput:
+      type: object
+      required: [category, title, content]
+      properties:
+        category: { type: string, enum: [connectivity, policy, identity, performance, integration] }
+        title: { type: string }
+        content: { type: string }
+        tags: { type: array, items: { type: string } }
+    TroubleshootKBEntry:
+      type: object
+      required: [id, category, title, content, tags, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid, nullable: true }
+        category: { type: string, enum: [connectivity, policy, identity, performance, integration] }
+        title: { type: string }
+        content: { type: string }
+        tags: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }

@@ -154,6 +154,16 @@ func (s *Store) NewAISuggestionRepository() *AISuggestionRepository {
 	return &AISuggestionRepository{s: s}
 }
 
+// NewKBEntryRepository binds the Store to repository.KBEntryRepository.
+func (s *Store) NewKBEntryRepository() *KBEntryRepository {
+	return &KBEntryRepository{s: s}
+}
+
+// NewTroubleshootSessionRepository binds the Store to repository.TroubleshootSessionRepository.
+func (s *Store) NewTroubleshootSessionRepository() *TroubleshootSessionRepository {
+	return &TroubleshootSessionRepository{s: s}
+}
+
 // Compile-time interface compliance asserts. Keeping these in this
 // file means a single grep tells us "did the postgres package
 // implement every interface?" without scanning eight files.
@@ -191,4 +201,6 @@ var (
 	_ repository.PolicyReviewScheduleRepository = (*PolicyReviewScheduleRepository)(nil)
 	_ repository.OpsHealthSnapshotRepository    = (*OpsHealthSnapshotRepository)(nil)
 	_ repository.AISuggestionRepository         = (*AISuggestionRepository)(nil)
+	_ repository.KBEntryRepository              = (*KBEntryRepository)(nil)
+	_ repository.TroubleshootSessionRepository  = (*TroubleshootSessionRepository)(nil)
 )

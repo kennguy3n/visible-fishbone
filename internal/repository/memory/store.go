@@ -103,6 +103,10 @@ type Store struct {
 	// AI suggestion tables — see migration 026.
 	aiSuggestions map[uuid.UUID]repository.AISuggestion
 
+	// Troubleshooting tables — see migrations 032-033.
+	kbEntries            map[uuid.UUID]repository.KBEntry
+	troubleshootSessions map[uuid.UUID]repository.TroubleshootSession
+
 	// Role / user_role tables. Roles are NOT tenant-scoped on
 	// their own (system roles have TenantID nil).
 	roles     map[uuid.UUID]repository.Role
@@ -179,6 +183,8 @@ func NewStore() *Store {
 		dlpFingerprints:       map[uuid.UUID]repository.DLPFingerprint{},
 		dlpMatches:            map[uuid.UUID]repository.DLPMatch{},
 		aiSuggestions:         map[uuid.UUID]repository.AISuggestion{},
+		kbEntries:             map[uuid.UUID]repository.KBEntry{},
+		troubleshootSessions:  map[uuid.UUID]repository.TroubleshootSession{},
 		roles:                 map[uuid.UUID]repository.Role{},
 		userRoles:             map[userRoleKey]repository.UserRole{},
 		complianceReports:     map[uuid.UUID]repository.ComplianceReport{},
