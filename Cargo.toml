@@ -49,6 +49,7 @@ members = [
     "crates/sng-sdwan",
     "crates/sng-updater",
     "crates/sng-oidc",
+    "crates/sng-ha",
     "crates/sng-edge",
     "crates/sng-agent",
     "crates/sng-mobile-core",
@@ -162,6 +163,15 @@ windows = { version = "0.61", features = [
 # IP / CIDR utilities (shared across pal posture + future fw rules).
 ipnet = { version = "2", features = ["serde"] }
 
+# Low-level socket configuration. Used by `sng-ha` to build the
+# VRRP multicast UDP socket with the socket options the bare
+# `tokio::net::UdpSocket` constructor does not expose (SO_REUSEADDR
+# for two edge instances co-binding the VRRP port in tests,
+# IP_MULTICAST_TTL = 255 per RFC 5798 §5.1.1.3, and the
+# IP_ADD_MEMBERSHIP join on 224.0.0.18). The configured `socket2`
+# socket is then handed to tokio via `UdpSocket::from_std`.
+socket2 = { version = "0.6", features = ["all"] }
+
 # Networking + TLS stack (shared across sng-comms, sng-swg, sng-ztna,
 # and the binaries). rustls is pinned with the `ring` crypto provider
 # explicitly so cargo-deny's bans block on `aws-lc-sys` (and any
@@ -255,6 +265,7 @@ sng-ztna = { path = "crates/sng-ztna" }
 sng-sdwan = { path = "crates/sng-sdwan" }
 sng-updater = { path = "crates/sng-updater" }
 sng-oidc = { path = "crates/sng-oidc" }
+sng-ha = { path = "crates/sng-ha" }
 sng-mobile-core = { path = "crates/sng-mobile-core" }
 sng-mobile-pal-android = { path = "crates/sng-mobile-pal-android" }
 

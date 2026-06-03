@@ -33,6 +33,7 @@ sng-ips = { workspace = true }
 sng-swg = { workspace = true }
 sng-ztna = { workspace = true }
 sng-sdwan = { workspace = true }
+sng-ha = { workspace = true }
 sng-updater = { workspace = true }
 
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt-multi-thread", "signal"] }

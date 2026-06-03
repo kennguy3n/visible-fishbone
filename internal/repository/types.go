@@ -104,16 +104,39 @@ const (
 	SiteTemplateHomeOffice SiteTemplate = "home_office"
 )
 
+// SiteHAMode enumerates the high-availability posture of a site's
+// edge appliance(s). Mirrors the CHECK constraint on
+// `sites.ha_mode` added in migration 035.
+//
+//   - standalone:     a single edge VM, no failover (the default).
+//   - active_passive: a VRRP-class active/passive pair; one edge
+//     owns the VIP at a time and the other promotes on failure.
+//     The peer device is recorded in `Site.HAPeerDeviceID`.
+type SiteHAMode string
+
+const (
+	SiteHAModeStandalone    SiteHAMode = "standalone"
+	SiteHAModeActivePassive SiteHAMode = "active_passive"
+)
+
 // Site is an enforcement scope owned by a tenant.
 type Site struct {
-	ID        uuid.UUID
-	TenantID  uuid.UUID
-	Name      string
-	Slug      string
-	Template  SiteTemplate
-	Config    json.RawMessage
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID       uuid.UUID
+	TenantID uuid.UUID
+	Name     string
+	Slug     string
+	Template SiteTemplate
+	Config   json.RawMessage
+	// HAMode is the site's failover posture. Defaults to
+	// standalone for every existing site (the migration
+	// backfills the column with that value).
+	HAMode SiteHAMode
+	// HAPeerDeviceID is the partner edge device in an
+	// active/passive pair. Nil when HAMode is standalone (a
+	// nullable FK onto devices.id — see migration 035).
+	HAPeerDeviceID *uuid.UUID
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // UserStatus enumerates lifecycle states for a user identity.

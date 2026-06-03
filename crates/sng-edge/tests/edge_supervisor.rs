@@ -31,8 +31,9 @@ use clap::Parser;
 use rcgen::{CertificateParams, KeyPair, PKCS_ED25519};
 use sng_core::ids::{DeviceId, SiteId, TenantId};
 use sng_edge::config::{
-    CommsConfig, DnsConfig, EdgeConfig, FwConfig, IdentityConfig, IpsConfig, PolicyConfig,
-    SdwanConfig, SupervisorConfig, SwgConfig, TelemetryConfig, UpdaterConfig, ZtnaConfig,
+    CommsConfig, DnsConfig, EdgeConfig, FwConfig, HaConfig, IdentityConfig, IpsConfig,
+    PolicyConfig, SdwanConfig, SupervisorConfig, SwgConfig, TelemetryConfig, UpdaterConfig,
+    ZtnaConfig,
 };
 use sng_edge::{Cli, EdgeBuildError, PalBackend, UpdaterBackend, build_edge};
 use std::path::PathBuf;
@@ -97,6 +98,7 @@ fn fresh_config() -> (EdgeConfig, TempDir) {
         swg: SwgConfig::default(),
         ztna: ZtnaConfig::default(),
         sdwan: SdwanConfig::default(),
+        ha: HaConfig::default(),
         updater: UpdaterConfig::default(),
         supervisor: SupervisorConfig::default(),
     };
