@@ -335,6 +335,7 @@ func buildRouter(
 	casbAppRepo := store.NewCASBDiscoveredAppRepository()
 	casbPostureRepo := store.NewCASBPostureCheckRepository()
 	opsHealthRepo := store.NewOpsHealthSnapshotRepository()
+	aiSuggestionRepo := store.NewAISuggestionRepository()
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -572,7 +573,7 @@ func buildRouter(
 		logger, tenant.BulkOptions{})
 	brandingResolver := tenant.NewBrandingResolver(tenantRepo, mspRepo)
 
-	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, logger)
+	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, aiSuggestionRepo, logger)
 
 	// --- Operational automation wiring (Session 5) --------------------
 	// Bulk device operations reuse the existing device / claim-token /
@@ -652,7 +653,7 @@ func buildRouter(
 // buildAIHandler constructs the AI handler with an optional LLM
 // provider. When AI_LLM_ENDPOINT is not set, the service runs in
 // template-only mode and suggest-policy / troubleshoot return 503.
-func buildAIHandler(cfg *config.Config, policySvc *policy.Service, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
+func buildAIHandler(cfg *config.Config, policySvc *policy.Service, aiSuggestionRepo repository.AISuggestionRepository, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
 	var llm aisvc.LLMProvider
 	if cfg.AI.Endpoint != "" {
 		llm = &aisvc.HTTPProvider{
@@ -678,7 +679,20 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, logger *slog.
 	// svc.SetSummarizer when ClickHouse becomes available
 	// (mirrors the policySimHandler.SetSimulator pattern).
 	svc := aisvc.New(llm, verifier, nil, aisvc.WithLogger(logger))
-	return handler.NewAIHandler(svc, logger), svc
+	aiHandler := handler.NewAIHandler(svc, logger)
+
+	// Wire the policy-tightening suggestion features. The review
+	// service is backed by the ai_suggestions repository; the
+	// tightening service is deterministic and only uses the LLM
+	// (when configured) to polish rationales. Both are attached
+	// here so the suggestion endpoints actually serve instead of
+	// returning the unconfigured 503.
+	if aiSuggestionRepo != nil {
+		aiHandler.SetReviewService(aisvc.NewReviewService(aiSuggestionRepo, logger))
+	}
+	aiHandler.SetTighteningService(aisvc.NewTighteningService(llm, logger))
+
+	return aiHandler, svc
 }
 
 // loadPolicyKeyWrapMaster resolves the AES-GCM master key from
