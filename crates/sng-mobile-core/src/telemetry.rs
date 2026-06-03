@@ -125,25 +125,18 @@ impl MobileTelemetryEvent {
                 device_id: did,
                 event_type: "tunnel_up".to_owned(),
                 posture_snapshot: None,
+                reason: String::new(),
                 platform: ctx.platform,
             })?,
             Self::TunnelDown { reason } => pack_payload(&AgentEvent {
                 device_id: did,
                 event_type: "tunnel_down".to_owned(),
-                // `AgentEvent`'s only free-form slot is the opaque
-                // `pst` (`posture_snapshot`) JSON, which the control
-                // plane stores verbatim and interprets per `event_type`
-                // (posture data only for `et == "posture"`). Reuse it to
-                // carry the tunnel-drop diagnostic so the reason is not
-                // lost at the wire boundary, but self-describe the blob
-                // (`kind: "tunnel_diagnostic"`) so no posture parser can
-                // ever mistake it for a posture snapshot. A dedicated
-                // `AgentEvent` reason field would require a coordinated
-                // Go/Rust wire-schema change, which is out of scope here.
-                posture_snapshot: Some(serde_json::json!({
-                    "kind": "tunnel_diagnostic",
-                    "reason": reason,
-                })),
+                // The tunnel-drop diagnostic rides the dedicated
+                // `AgentEvent::reason` (`rsn`) field; `posture_snapshot`
+                // stays `None` so the opaque `pst` slot remains
+                // unambiguously posture-shaped for the control plane.
+                posture_snapshot: None,
+                reason: reason.clone(),
                 platform: ctx.platform,
             })?,
         };
@@ -302,6 +295,10 @@ mod tests {
         assert_eq!(up.event_class, EventClass::Agent);
         let payload: AgentEvent = unpack_payload(&up.payload).unwrap();
         assert_eq!(payload.event_type, "tunnel_up");
+        // No diagnostic on a tunnel-up; the reason slot stays empty so
+        // it is omitted on the wire.
+        assert!(payload.reason.is_empty());
+        assert!(payload.posture_snapshot.is_none());
 
         let down = MobileTelemetryEvent::TunnelDown {
             reason: "idle".into(),
@@ -310,17 +307,11 @@ mod tests {
         .unwrap();
         let payload: AgentEvent = unpack_payload(&down.payload).unwrap();
         assert_eq!(payload.event_type, "tunnel_down");
-        // The diagnostic reason survives the serialization boundary and
-        // the blob self-describes as a tunnel diagnostic, never posture.
-        let pst = payload.posture_snapshot.as_ref().unwrap();
-        assert_eq!(
-            pst.get("kind").and_then(serde_json::Value::as_str),
-            Some("tunnel_diagnostic")
-        );
-        assert_eq!(
-            pst.get("reason").and_then(serde_json::Value::as_str),
-            Some("idle")
-        );
+        // The diagnostic reason survives the serialization boundary on
+        // the dedicated `reason` field, and the opaque posture slot is
+        // left untouched (never overloaded with a diagnostic blob).
+        assert_eq!(payload.reason, "idle");
+        assert!(payload.posture_snapshot.is_none());
     }
 
     #[tokio::test]

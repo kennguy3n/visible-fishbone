@@ -176,6 +176,7 @@ mod tests {
             device_id: "d1".into(),
             event_type: "posture".into(),
             posture_snapshot: Some(serde_json::json!({"os": "linux"})),
+            reason: String::new(),
             platform: Platform::Linux,
         })
     }

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/vmihailenco/msgpack/v5"
 
 	"github.com/kennguy3n/visible-fishbone/internal/nats/schema"
 )
@@ -221,5 +222,56 @@ func TestAgentEvent_Validate(t *testing.T) {
 		if err := c.Validate(); !errors.Is(err, schema.ErrInvalid) {
 			t.Errorf("case %d: err = %v", i, err)
 		}
+	}
+}
+
+// TestAgentEvent_ReasonRoundTrip locks the dedicated `rsn` diagnostic
+// field's wire contract: it carries the reason under the short tag when
+// set (matching the Rust `crates/sng-core/src/events.rs::AgentEvent.reason`),
+// is omitted when empty so legacy consumers see no spurious key, and a
+// payload lacking `rsn` still decodes (the empty "unspecified" sentinel).
+func TestAgentEvent_ReasonRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	withReason := schema.AgentEvent{
+		DeviceID:  "d1",
+		EventType: "tunnel_down",
+		Reason:    "idle",
+		Platform:  schema.PlatformAndroid,
+	}
+	b, err := msgpack.Marshal(&withReason)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := msgpack.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+	if raw["rsn"] != "idle" {
+		t.Errorf("reason must ride the rsn tag; got map %v", raw)
+	}
+	var back schema.AgentEvent
+	if err := msgpack.Unmarshal(b, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.Reason != "idle" {
+		t.Errorf("reason round trip: got %q", back.Reason)
+	}
+
+	empty := schema.AgentEvent{
+		DeviceID:  "d1",
+		EventType: "tunnel_up",
+		Platform:  schema.PlatformIOS,
+	}
+	eb, err := msgpack.Marshal(&empty)
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	var rawEmpty map[string]any
+	if err := msgpack.Unmarshal(eb, &rawEmpty); err != nil {
+		t.Fatalf("unmarshal empty to map: %v", err)
+	}
+	if _, ok := rawEmpty["rsn"]; ok {
+		t.Errorf("empty reason must be omitted (omitempty); got map %v", rawEmpty)
 	}
 }

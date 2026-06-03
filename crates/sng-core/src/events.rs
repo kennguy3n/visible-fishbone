@@ -249,6 +249,22 @@ pub struct AgentEvent {
     /// Opaque posture snapshot (JSON-encoded bytes).
     #[serde(rename = "pst", default, skip_serializing_if = "Option::is_none")]
     pub posture_snapshot: Option<serde_json::Value>,
+    /// Optional operator-readable diagnostic reason for the event —
+    /// e.g. the cause carried by a `tunnel_down`. Empty for events
+    /// that have no free-form reason (`started` / `stopped` /
+    /// `posture` / `tunnel_up`), so most agent records omit it on
+    /// the wire.
+    ///
+    /// Mirrors [`ZtnaEvent::reason`]'s wire contract: `#[serde(default)]`
+    /// plus `skip_serializing_if` keep the field backward- and
+    /// forward-compatible across rolling deploys — a producer that
+    /// predates the field omits `rsn` and decodes as the empty
+    /// "unspecified" sentinel, and a newer producer's `rsn` is
+    /// ignored by an older consumer. Carrying the reason in its own
+    /// field rather than overloading the opaque [`Self::posture_snapshot`]
+    /// slot keeps `pst` unambiguously posture-shaped.
+    #[serde(rename = "rsn", default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
     /// Platform.
     #[serde(rename = "plt")]
     pub platform: Platform,
@@ -345,11 +361,75 @@ mod tests {
             device_id: "d1".into(),
             event_type: "started".into(),
             posture_snapshot: Some(serde_json::json!({"disk_encrypted": true})),
+            reason: String::new(),
             platform: Platform::Linux,
         };
         let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
         let back: AgentEvent = rmp_serde::from_slice(&bytes).expect("decode");
         assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn agent_event_reason_round_trips_on_rsn_tag() {
+        let ev = AgentEvent {
+            device_id: "d1".into(),
+            event_type: "tunnel_down".into(),
+            posture_snapshot: None,
+            reason: "idle".into(),
+            platform: Platform::Android,
+        };
+        let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
+        // The reason rides the short `rsn` wire tag (matching the Go
+        // `internal/nats/schema/events.go::AgentEvent.Reason`), not the
+        // Rust field name, and survives the round trip.
+        let decoded: std::collections::BTreeMap<String, rmpv::Value> =
+            rmp_serde::from_slice(&bytes).expect("decode map");
+        assert!(decoded.contains_key("rsn"), "rsn tag missing: {decoded:?}");
+        assert!(
+            !decoded.contains_key("reason"),
+            "Rust field name leaked: {decoded:?}"
+        );
+        let back: AgentEvent = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn agent_event_omits_empty_reason_on_wire() {
+        let ev = AgentEvent {
+            device_id: "d1".into(),
+            event_type: "tunnel_up".into(),
+            posture_snapshot: None,
+            reason: String::new(),
+            platform: Platform::Ios,
+        };
+        let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
+        let decoded: std::collections::BTreeMap<String, rmpv::Value> =
+            rmp_serde::from_slice(&bytes).expect("decode map");
+        // An empty reason is omitted (skip_serializing_if), so legacy
+        // consumers never see a spurious `rsn` key, and it decodes back
+        // to the empty "unspecified" sentinel via `#[serde(default)]`.
+        assert!(
+            !decoded.contains_key("rsn"),
+            "empty reason should be omitted: {decoded:?}"
+        );
+        let back: AgentEvent = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn agent_event_decodes_legacy_payload_without_rsn() {
+        // A pre-`rsn` producer emits only the original four fields;
+        // `#[serde(default)]` must decode the missing reason as empty.
+        let legacy = AgentEvent {
+            device_id: "d1".into(),
+            event_type: "started".into(),
+            posture_snapshot: None,
+            reason: String::new(),
+            platform: Platform::Linux,
+        };
+        let bytes = rmp_serde::to_vec_named(&legacy).expect("encode");
+        let back: AgentEvent = rmp_serde::from_slice(&bytes).expect("decode");
+        assert!(back.reason.is_empty());
     }
 
     fn sample_ztna() -> ZtnaEvent {

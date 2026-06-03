@@ -322,6 +322,7 @@ mod tests {
             device_id: "d1".into(),
             event_type: "started".into(),
             posture_snapshot: None,
+            reason: String::new(),
             platform: Platform::Linux,
         });
         let env = e
