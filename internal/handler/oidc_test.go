@@ -197,6 +197,44 @@ func TestOIDCHandler_CreateValidation(t *testing.T) {
 	}
 }
 
+// TestOIDCHandler_NormalizesIssuerTrailingSlash locks in that the
+// handler canonicalizes issuer_url (trim trailing slash + whitespace)
+// before storage, so "https://issuer.example.com/" is stored — and
+// reported back — without the trailing slash. This is what lets the
+// unique (tenant_id, issuer_url) index actually block trailing-slash
+// duplicate registrations of the same issuer.
+func TestOIDCHandler_NormalizesIssuerTrailingSlash(t *testing.T) {
+	h, _, tenantID := newTestOIDCHandler(t, 10)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	base := "/api/v1/tenants/" + tenantID.String() + "/idp-configs"
+
+	w := oidcDo(t, mux, "POST", base, map[string]any{
+		"provider_type": "okta",
+		"issuer_url":    "https://issuer.example.com/",
+		"client_id":     "client-1",
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: got %d: %s", w.Code, w.Body.String())
+	}
+	var created map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &created)
+	if got := created["issuer_url"]; got != "https://issuer.example.com" {
+		t.Fatalf("issuer_url = %v, want normalized https://issuer.example.com", got)
+	}
+
+	// The trailing-slash variant is now the same canonical issuer, so a
+	// second create collides on the unique index and is rejected.
+	w = oidcDo(t, mux, "POST", base, map[string]any{
+		"provider_type": "okta",
+		"issuer_url":    "https://issuer.example.com",
+		"client_id":     "client-2",
+	})
+	if w.Code == http.StatusCreated {
+		t.Fatalf("duplicate issuer create unexpectedly succeeded: %s", w.Body.String())
+	}
+}
+
 func TestOIDCHandler_MaxProvidersCap(t *testing.T) {
 	h, _, tenantID := newTestOIDCHandler(t, 1)
 	mux := http.NewServeMux()

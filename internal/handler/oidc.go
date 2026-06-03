@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -102,6 +103,13 @@ func (h *OIDCHandler) createConfig(w http.ResponseWriter, r *http.Request) {
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
+	// Normalize the issuer to its canonical (no trailing slash) form
+	// before any validation or storage so that e.g.
+	// "https://accounts.google.com/" and "https://accounts.google.com"
+	// collapse to one entry. resolveConfig compares issuers the same
+	// way, and the unique (tenant_id, issuer_url) index then actually
+	// blocks duplicates instead of being bypassable via a trailing slash.
+	req.IssuerURL = strings.TrimRight(strings.TrimSpace(req.IssuerURL), "/")
 	if req.IssuerURL == "" || req.ClientID == "" || req.ProviderType == "" {
 		WriteError(w, http.StatusBadRequest, "missing_field", "provider_type, issuer_url, client_id are required")
 		return
@@ -195,6 +203,9 @@ func (h *OIDCHandler) updateConfig(w http.ResponseWriter, r *http.Request) {
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
+	// Normalize the issuer the same way createConfig does so updates
+	// can't reintroduce a trailing-slash variant of an existing config.
+	req.IssuerURL = strings.TrimRight(strings.TrimSpace(req.IssuerURL), "/")
 	if req.IssuerURL == "" || req.ClientID == "" || req.ProviderType == "" {
 		WriteError(w, http.StatusBadRequest, "missing_field", "provider_type, issuer_url, client_id are required")
 		return
