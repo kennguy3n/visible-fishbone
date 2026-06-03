@@ -390,6 +390,39 @@ func TestAIHandler_PostureReport_200(t *testing.T) {
 	}
 }
 
+func TestAIHandler_PostureReport_TrendUsesPreviousPeriod(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, nil, ai.NewReportEngine(nil), nil, nil, nil)
+	// Previous window had far more alerts than the current window, so a
+	// real period-over-period comparison must report "improving" — not
+	// the "degrading" that results when the previous period is ignored
+	// (treated as zero) and any current alert looks like a jump.
+	h.SetPostureDataSource(trendPostureData{
+		current: map[string]int{"critical": 2},
+		prev:    map[string]int{"critical": 10},
+	})
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/reports/posture", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.getPostureReport(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var report ai.PostureReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if report.Overview.Trend == "degrading" {
+		t.Fatalf("trend = %q, want non-degrading (previous period had more alerts)", report.Overview.Trend)
+	}
+	if report.Overview.Trend != "improving" {
+		t.Fatalf("trend = %q, want improving", report.Overview.Trend)
+	}
+}
+
 func TestAIHandler_PostureReport_DataSourceError500(t *testing.T) {
 	t.Parallel()
 	h := NewAIHandler(nil, nil)
@@ -888,4 +921,21 @@ func (s stubPostureData) AlertCountsBySeverity(_ context.Context, _ uuid.UUID, _
 		return nil, s.err
 	}
 	return s.counts, nil
+}
+
+// trendPostureData returns distinct counts for the current vs previous
+// window (distinguished by the query's end time) so a handler's
+// period-over-period trend computation can be exercised.
+type trendPostureData struct {
+	current map[string]int
+	prev    map[string]int
+}
+
+func (s trendPostureData) AlertCountsBySeverity(_ context.Context, _ uuid.UUID, _, end time.Time) (map[string]int, error) {
+	// The current-window query ends at ~now; the previous-window query
+	// ends at the current window's start (~7d ago).
+	if time.Since(end) < time.Hour {
+		return s.current, nil
+	}
+	return s.prev, nil
 }

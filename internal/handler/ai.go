@@ -377,7 +377,8 @@ func (h *AIHandler) getPostureReport(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := ai.ContextWithTenantID(r.Context(), tenantID)
 	now := time.Now().UTC()
-	start := now.Add(-7 * 24 * time.Hour)
+	const window = 7 * 24 * time.Hour
+	start := now.Add(-window)
 	counts, err := h.postureData.AlertCountsBySeverity(ctx, tenantID, start, now)
 	if err != nil {
 		h.logger.Error("ai: posture report alert counts failed",
@@ -385,6 +386,22 @@ func (h *AIHandler) getPostureReport(w http.ResponseWriter, r *http.Request) {
 			slog.String("error", err.Error()))
 		WriteError(w, http.StatusInternalServerError, "ai_error", "report generation failed")
 		return
+	}
+	// Query the immediately preceding window so the report's trend is a
+	// real period-over-period comparison. Without a baseline,
+	// computeTrend treats any current alerts as a jump from zero and
+	// always reports "degrading".
+	prevCounts, err := h.postureData.AlertCountsBySeverity(ctx, tenantID, start.Add(-window), start)
+	if err != nil {
+		h.logger.Error("ai: posture report previous-period alert counts failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("error", err.Error()))
+		WriteError(w, http.StatusInternalServerError, "ai_error", "report generation failed")
+		return
+	}
+	var prevTotal int
+	for _, v := range prevCounts {
+		prevTotal += v
 	}
 	report, err := h.reports.Generate(ctx, ai.PostureInput{
 		TenantID: tenantID,
@@ -394,6 +411,7 @@ func (h *AIHandler) getPostureReport(w http.ResponseWriter, r *http.Request) {
 			Label: "weekly",
 		},
 		AlertsBySeverity: counts,
+		PrevPeriodAlerts: prevTotal,
 	})
 	if err != nil {
 		h.logger.Error("ai: posture report failed",

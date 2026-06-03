@@ -740,7 +740,12 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	if aiSuggestionRepo != nil {
 		h.SetReviewService(aisvc.NewReviewService(aiSuggestionRepo, logger))
 	}
-	h.SetTighteningService(aisvc.NewTighteningService(llm, logger))
+	// Use effectiveLLM (the guardrailed wrapper when an LLM is
+	// configured) so the tightening service's future LLM-polished
+	// rationales run through the same per-tenant rate limit, content
+	// filter, and audit log as every other AI path — rather than
+	// silently bypassing guardrails with the raw provider.
+	h.SetTighteningService(aisvc.NewTighteningService(effectiveLLM, logger))
 
 	return h, svc
 }
