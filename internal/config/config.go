@@ -1219,6 +1219,19 @@ func (c Config) validate() error {
 	if c.Environment.IsProduction() && c.MobileAuth.MaxProvidersPerTenant <= 0 {
 		return errors.New("MOBILE_AUTH_MAX_PROVIDERS_PER_TENANT must be > 0 in production environments (the cap protects against unbounded IdP-config creation; see docs/deploy.md)")
 	}
+	// Same rationale as AUTH_ACCESS_TOKEN_TTL above: a <= 0 value would
+	// be silently overridden by the service's 1h default
+	// (OIDCService.sessionTTL) instead of honouring operator intent, so
+	// "0s" must fail loudly at boot rather than minting unexpectedly
+	// scoped sessions.
+	if c.MobileAuth.SessionTokenTTL <= 0 {
+		return fmt.Errorf("MOBILE_AUTH_SESSION_TOKEN_TTL must be > 0, got %s", c.MobileAuth.SessionTokenTTL)
+	}
+	// Likewise, a <= 0 discovery-cache TTL would silently fall back to
+	// the service's 24h default rather than the configured value.
+	if c.MobileAuth.DiscoveryCacheTTL <= 0 {
+		return fmt.Errorf("MOBILE_AUTH_DISCOVERY_CACHE_TTL must be > 0, got %s", c.MobileAuth.DiscoveryCacheTTL)
+	}
 	if c.Policy.KeyWrapMasterB64 != "" && c.Policy.KeyWrapMasterFile != "" {
 		return errors.New("POLICY_KEY_WRAP_MASTER_B64 and POLICY_KEY_WRAP_MASTER_FILE are mutually exclusive")
 	}
