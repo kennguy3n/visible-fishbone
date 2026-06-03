@@ -119,6 +119,11 @@ func (s *Store) NewCASBPostureCheckRepository() *CASBPostureCheckRepository {
 	return &CASBPostureCheckRepository{s: s}
 }
 
+// NewAICorrelationRepository binds the Store to repository.AICorrelationRepository.
+func (s *Store) NewAICorrelationRepository() *AICorrelationRepository {
+	return &AICorrelationRepository{s: s}
+}
+
 // NewComplianceReportRepository binds the Store to repository.ComplianceReportRepository.
 func (s *Store) NewComplianceReportRepository() *ComplianceReportRepository {
 	return &ComplianceReportRepository{s: s}
@@ -194,6 +199,7 @@ var (
 	_ repository.CASBConnectorRepository        = (*CASBConnectorRepository)(nil)
 	_ repository.CASBDiscoveredAppRepository    = (*CASBDiscoveredAppRepository)(nil)
 	_ repository.CASBPostureCheckRepository     = (*CASBPostureCheckRepository)(nil)
+	_ repository.AICorrelationRepository        = (*AICorrelationRepository)(nil)
 	_ repository.ComplianceReportRepository     = (*ComplianceReportRepository)(nil)
 	_ repository.PlaybookRepository             = (*PlaybookRepository)(nil)
 	_ repository.PlaybookExecutionRepository    = (*PlaybookExecutionRepository)(nil)

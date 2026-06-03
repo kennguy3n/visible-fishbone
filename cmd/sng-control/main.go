@@ -575,7 +575,7 @@ func buildRouter(
 		logger, tenant.BulkOptions{})
 	brandingResolver := tenant.NewBrandingResolver(tenantRepo, mspRepo)
 
-	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, aiSuggestionRepo, logger)
+	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo, logger)
 
 	// --- Operational automation wiring (Session 5) --------------------
 	// Bulk device operations reuse the existing device / claim-token /
@@ -676,7 +676,7 @@ func buildRouter(
 // buildAIHandler constructs the AI handler with an optional LLM
 // provider. When AI_LLM_ENDPOINT is not set, the service runs in
 // template-only mode and suggest-policy / troubleshoot return 503.
-func buildAIHandler(cfg *config.Config, policySvc *policy.Service, aiSuggestionRepo repository.AISuggestionRepository, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
+func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, alertRepo repository.AlertRepository, auditSvc *audit.Service, aiSuggestionRepo repository.AISuggestionRepository, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
 	var llm aisvc.LLMProvider
 	if cfg.AI.Endpoint != "" {
 		llm = &aisvc.HTTPProvider{
@@ -697,25 +697,158 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, aiSuggestionR
 		verifier = aisvc.NewVerifier(policySvc)
 	}
 
+	// Enhanced AI guardrails (Task 71). When a live LLM is configured
+	// we wrap it once in a GuardrailedProvider so that EVERY AI code
+	// path — the existing summarize/suggest/troubleshoot service as
+	// well as the new correlation, NL-query and report engines — runs
+	// through a single shared per-tenant rate limit, PII/secret
+	// content filter, and audit log. When no endpoint is configured,
+	// effectiveLLM stays nil and all AI features fall back to their
+	// deterministic (template-only) behaviour. The guardrails handle
+	// is also passed to the handler so the status endpoint can report
+	// usage; it is nil (503) when no LLM is configured.
+	var guardrails *aisvc.GuardrailedProvider
+	var effectiveLLM aisvc.LLMProvider
+	if llm != nil {
+		var gopts []aisvc.GuardrailOption
+		// When the audit service is available, persist every AI
+		// interaction durably (in addition to the in-memory ring
+		// buffer) so records survive restarts and are queryable for
+		// compliance.
+		if auditSvc != nil {
+			gopts = append(gopts, aisvc.WithAuditSink(aiAuditSink{audit: auditSvc}))
+		}
+		guardrails = aisvc.NewGuardrailedProvider(llm, aisvc.GuardrailConfig{
+			MaxRequestsPerMinute: cfg.AI.GuardrailMaxRequestsPerMinute,
+			MaxTokensPerDay:      cfg.AI.GuardrailMaxTokensPerDay,
+		}, logger, gopts...)
+		effectiveLLM = guardrails
+	}
+
 	// Summarizer requires a ClickHouse evidence reader. For now,
 	// we construct without one (nil) — it will be wired later via
 	// svc.SetSummarizer when ClickHouse becomes available
 	// (mirrors the policySimHandler.SetSimulator pattern).
-	svc := aisvc.New(llm, verifier, nil, aisvc.WithLogger(logger))
-	aiHandler := handler.NewAIHandler(svc, logger)
+	svc := aisvc.New(effectiveLLM, verifier, nil, aisvc.WithLogger(logger))
+	h := handler.NewAIHandler(svc, logger)
 
-	// Wire the policy-tightening suggestion features. The review
-	// service is backed by the ai_suggestions repository; the
-	// tightening service is deterministic and only uses the LLM
-	// (when configured) to polish rationales. Both are attached
-	// here so the suggestion endpoints actually serve instead of
-	// returning the unconfigured 503.
-	if aiSuggestionRepo != nil {
-		aiHandler.SetReviewService(aisvc.NewReviewService(aiSuggestionRepo, logger))
+	correlation := aisvc.NewCorrelationEngine(effectiveLLM, aisvc.CorrelationConfig{})
+	// Wire the NL-query engine to the tenant's live compiled policy
+	// graph so verdicts come from the real policy evaluator (the LLM
+	// only ever parses intent, never produces the verdict). Falls
+	// back to the heuristic default when policySvc is nil.
+	var nlOpts []aisvc.NLQueryOption
+	if policySvc != nil {
+		nlOpts = append(nlOpts, aisvc.WithPolicyGraphSource(policySvc))
 	}
-	aiHandler.SetTighteningService(aisvc.NewTighteningService(llm, logger))
+	nlQuery := aisvc.NewNLQueryEngine(effectiveLLM, nlOpts...)
+	reports := aisvc.NewReportEngine(effectiveLLM)
+	// No external threat feed is configured by default; enrichment
+	// returns an empty (non-escalated) context until one is wired.
+	threatIntel := aisvc.NewThreatIntelEngine(nil)
+	h.SetEnhancedAI(correlation, nlQuery, reports, threatIntel, guardrails, correlationRepo)
 
-	return aiHandler, svc
+	// Back the read-only GET posture report with real alert counts so
+	// it reflects actual posture rather than an empty baseline.
+	if alertRepo != nil {
+		h.SetPostureDataSource(alertPostureDataSource{alerts: alertRepo})
+	}
+
+	// Wire the policy-tightening suggestion features (Tasks 55-60).
+	// The review service is backed by the ai_suggestions repository;
+	// the tightening service is deterministic and only uses the LLM
+	// (when configured) to polish rationales. Both are attached here
+	// so the suggestion endpoints actually serve instead of returning
+	// the unconfigured 503.
+	if aiSuggestionRepo != nil {
+		h.SetReviewService(aisvc.NewReviewService(aiSuggestionRepo, logger))
+	}
+	// Use effectiveLLM (the guardrailed wrapper when an LLM is
+	// configured) so the tightening service's future LLM-polished
+	// rationales run through the same per-tenant rate limit, content
+	// filter, and audit log as every other AI path — rather than
+	// silently bypassing guardrails with the raw provider.
+	h.SetTighteningService(aisvc.NewTighteningService(effectiveLLM, logger))
+
+	return h, svc
+}
+
+// alertPostureDataSource adapts the AlertRepository to the handler's
+// PostureDataSource interface, counting alerts by severity within a
+// reporting window. The repository returns rows in created-at DESC
+// order, so once we page past the window start we can stop early,
+// bounding the scan to alerts within the period (plus at most one
+// extra page).
+type alertPostureDataSource struct {
+	alerts repository.AlertRepository
+}
+
+func (s alertPostureDataSource) AlertCountsBySeverity(ctx context.Context, tenantID uuid.UUID, start, end time.Time) (map[string]int, error) {
+	counts := map[string]int{}
+	page := repository.Page{Limit: repository.MaxPageLimit, Order: repository.SortDesc}
+	for {
+		res, err := s.alerts.List(ctx, tenantID, repository.AlertListFilter{}, page)
+		if err != nil {
+			return nil, err
+		}
+		stop := false
+		for _, a := range res.Items {
+			if a.CreatedAt.Before(start) {
+				// DESC order: everything after this is older too.
+				stop = true
+				break
+			}
+			if a.CreatedAt.After(end) {
+				continue
+			}
+			counts[string(a.Severity)]++
+		}
+		if stop || res.NextCursor == "" {
+			break
+		}
+		page.After = res.NextCursor
+	}
+	return counts, nil
+}
+
+// aiAuditSink adapts the append-only audit service to the
+// aisvc.AuditSink interface so guardrailed AI interactions are
+// persisted durably. It maps an aisvc.AuditRecord onto an
+// audit.Entry. Records without a tenant (uuid.Nil) are skipped:
+// the audit log is tenant-scoped (RLS) and a nil tenant cannot be
+// attributed or queried, so persisting it would be both rejected by
+// the service and meaningless.
+type aiAuditSink struct {
+	audit *audit.Service
+}
+
+func (s aiAuditSink) RecordAIAudit(ctx context.Context, rec aisvc.AuditRecord) error {
+	if rec.TenantID == uuid.Nil {
+		return nil
+	}
+	details, err := json.Marshal(struct {
+		Model      string `json:"model,omitempty"`
+		TokenCount int    `json:"token_count"`
+		LatencyMS  int64  `json:"latency_ms"`
+		Redacted   bool   `json:"redacted"`
+		Error      string `json:"error,omitempty"`
+	}{
+		Model:      rec.Model,
+		TokenCount: rec.TokenCount,
+		LatencyMS:  rec.LatencyMS,
+		Redacted:   rec.Redacted,
+		Error:      rec.Error,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal ai audit details: %w", err)
+	}
+	_, err = s.audit.Append(ctx, audit.Entry{
+		TenantID:     rec.TenantID,
+		Action:       "ai.llm." + rec.Action,
+		ResourceType: "ai_guardrail",
+		Details:      details,
+	})
+	return err
 }
 
 // loadPolicyKeyWrapMaster resolves the AES-GCM master key from

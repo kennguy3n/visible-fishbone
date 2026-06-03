@@ -1482,6 +1482,20 @@ type DeviceCertificate struct {
 	RevokedAt *time.Time
 }
 
+// --- AI Correlations ------------------------------------------------------
+
+// AICorrelation represents a row in the ai_alert_correlations table.
+type AICorrelation struct {
+	ID        uuid.UUID
+	TenantID  uuid.UUID
+	AlertIDs  []uuid.UUID
+	Summary   string
+	Severity  string
+	Status    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 // --- Compliance -----------------------------------------------------------
 
 // ComplianceReport represents a row in the compliance_reports table.

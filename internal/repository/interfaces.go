@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -996,6 +997,61 @@ type DeviceEnrollmentRepository interface {
 	// RevokeAllCertificates revokes all un-revoked certificates for
 	// a device by stamping revoked_at.
 	RevokeAllCertificates(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, at time.Time) error
+}
+
+// --- AI Correlations ------------------------------------------------------
+
+// AICorrelationRepository owns the ai_alert_correlations table.
+type AICorrelationRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, c AICorrelation) (AICorrelation, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (AICorrelation, error)
+	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[AICorrelation], error)
+	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string) error
+}
+
+// AICorrelationStatuses enumerates the allowed lifecycle states for an
+// AI correlation. It mirrors the OpenAPI `AICorrelation.status` enum
+// and the CHECK constraint on `ai_alert_correlations.status`.
+var AICorrelationStatuses = map[string]bool{
+	"open":         true,
+	"acknowledged": true,
+	"resolved":     true,
+}
+
+// ValidateAICorrelationStatus returns ErrInvalidArgument when status is
+// not an allowed lifecycle state. Both repository backends call this so
+// the contract is enforced uniformly — the postgres CHECK constraint is
+// the durable backstop, but the memory backend (and pre-INSERT
+// validation) reject bad values up front too.
+func ValidateAICorrelationStatus(status string) error {
+	if !AICorrelationStatuses[status] {
+		return fmt.Errorf("%w: invalid correlation status %q", ErrInvalidArgument, status)
+	}
+	return nil
+}
+
+// AICorrelationSeverities enumerates the allowed severity levels for an
+// AI correlation. It mirrors the OpenAPI `AICorrelation.severity` enum
+// and the CHECK constraint on `ai_alert_correlations.severity`.
+var AICorrelationSeverities = map[string]bool{
+	"low":      true,
+	"medium":   true,
+	"high":     true,
+	"critical": true,
+}
+
+// ValidateAICorrelationSeverity returns ErrInvalidArgument when severity
+// is not an allowed level. Both repository backends call this on Create
+// so the contract is enforced uniformly — the postgres CHECK constraint
+// is the durable backstop, but the memory backend (and pre-INSERT
+// validation) reject bad values up front too. Today the correlation
+// engine only emits valid severities, but this guards any future code
+// path that persists a user-supplied severity.
+func ValidateAICorrelationSeverity(severity string) error {
+	if !AICorrelationSeverities[severity] {
+		return fmt.Errorf("%w: invalid correlation severity %q", ErrInvalidArgument, severity)
+	}
+	return nil
 }
 
 // --- Compliance -----------------------------------------------------------

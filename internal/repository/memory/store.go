@@ -112,6 +112,9 @@ type Store struct {
 	roles     map[uuid.UUID]repository.Role
 	userRoles map[userRoleKey]repository.UserRole
 
+	// AI correlation tables — see migration 029.
+	aiCorrelations map[uuid.UUID]repository.AICorrelation
+
 	// Compliance reports — see migration 022.
 	complianceReports map[uuid.UUID]repository.ComplianceReport
 
@@ -187,6 +190,7 @@ func NewStore() *Store {
 		troubleshootSessions:  map[uuid.UUID]repository.TroubleshootSession{},
 		roles:                 map[uuid.UUID]repository.Role{},
 		userRoles:             map[userRoleKey]repository.UserRole{},
+		aiCorrelations:        map[uuid.UUID]repository.AICorrelation{},
 		complianceReports:     map[uuid.UUID]repository.ComplianceReport{},
 		playbooks:             map[uuid.UUID]repository.Playbook{},
 		playbookExecutions:    map[uuid.UUID]repository.PlaybookExecution{},
