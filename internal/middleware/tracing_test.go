@@ -113,6 +113,45 @@ func TestTracingExtractsParentContext(t *testing.T) {
 	}
 }
 
+// TestTracingAnnotatesSpanOnPanic verifies that a handler panic
+// still yields an annotated span (500 status + error + recorded
+// event) and that the panic is re-raised so an outer Recovery
+// middleware is unaffected.
+func TestTracingAnnotatesSpanOnPanic(t *testing.T) {
+	sr := withRecorder(t)
+	h := Tracing()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	}))
+
+	reRaised := false
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				reRaised = true
+			}
+		}()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+	}()
+	if !reRaised {
+		t.Fatal("Tracing swallowed the panic; expected it to re-raise for Recovery")
+	}
+
+	spans := sr.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("recorded %d spans, want 1 (span must end even on panic)", len(spans))
+	}
+	span := spans[0]
+	if got := attrMap(span)[attribute.Key("http.response.status_code")].AsInt64(); got != http.StatusInternalServerError {
+		t.Errorf("status_code attr = %d, want 500 on panic", got)
+	}
+	if span.Status().Code != codes.Error {
+		t.Errorf("span status = %v, want Error on panic", span.Status().Code)
+	}
+	if len(span.Events()) == 0 {
+		t.Error("expected a recorded error event on the span for the panic")
+	}
+}
+
 // TestTracingRecordsTenantFromRequestMeta verifies the tenant_id
 // span attribute is sourced from the late-bound RequestMeta
 // pointer that inner middleware (Auth) writes through — the only

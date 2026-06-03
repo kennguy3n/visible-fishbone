@@ -298,9 +298,15 @@ func run() error {
 		metricsMux := http.NewServeMux()
 		metricsMux.Handle("/metrics", mx.Handler())
 		metricsSrv = &http.Server{
-			Addr:              fmt.Sprintf(":%d", cfg.Metrics.Port),
-			Handler:           metricsMux,
+			Addr:    fmt.Sprintf(":%d", cfg.Metrics.Port),
+			Handler: metricsMux,
+			// Mirror the public API server's full timeout set so a
+			// slow or stuck scraper cannot hold a metrics connection
+			// open indefinitely. Scrapes are small, so the same
+			// bounds are comfortably generous here.
 			ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
+			ReadTimeout:       cfg.HTTP.ReadTimeout,
+			WriteTimeout:      cfg.HTTP.WriteTimeout,
 		}
 		go func() {
 			logger.Info("sng-control: metrics server listening",
