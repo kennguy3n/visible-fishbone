@@ -1763,6 +1763,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "sng-mobile-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "chrono",
+ "ed25519-dalek",
+ "http",
+ "ipnet",
+ "parking_lot",
+ "pretty_assertions",
+ "rand",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sng-comms",
+ "sng-core",
+ "sng-policy-eval",
+ "sng-telemetry",
+ "sng-ztna",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "sng-pal"
 version = "0.1.0"
 dependencies = [
@@ -2858,6 +2888,20 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85a5b4158499876c763cb03bc4e49185d3cccbabb15b33c627f7884f43db852e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "zerotrie"
