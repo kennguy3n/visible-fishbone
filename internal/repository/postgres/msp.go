@@ -88,7 +88,7 @@ func (r *MSPRepository) Create(ctx context.Context, m repository.MSP) (repositor
 		INSERT INTO msps (id, name, slug, status, branding, settings)
 		VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::jsonb)
 		RETURNING ` + mspSelectColumns
-	out, err := scanMSP(r.s.pool.QueryRow(ctx, q,
+	out, err := scanMSP(r.s.pool.Primary().QueryRow(ctx, q,
 		m.ID, m.Name, m.Slug, string(m.Status), brandBuf, []byte(m.Settings),
 	))
 	if err != nil {
@@ -105,7 +105,7 @@ func (r *MSPRepository) Create(ctx context.Context, m repository.MSP) (repositor
 
 func (r *MSPRepository) Get(ctx context.Context, id uuid.UUID) (repository.MSP, error) {
 	const q = `SELECT ` + mspSelectColumns + ` FROM msps WHERE id = $1::uuid`
-	out, err := scanMSP(r.s.pool.QueryRow(ctx, q, id))
+	out, err := scanMSP(r.s.pool.Primary().QueryRow(ctx, q, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.MSP{}, repository.ErrNotFound
 	}
@@ -125,7 +125,7 @@ func (r *MSPRepository) Get(ctx context.Context, id uuid.UUID) (repository.MSP, 
 // lookup deterministic and aligned with the memory backend.
 func (r *MSPRepository) GetBySlug(ctx context.Context, slug string) (repository.MSP, error) {
 	const q = `SELECT ` + mspSelectColumns + ` FROM msps WHERE slug = $1 AND deleted_at IS NULL`
-	out, err := scanMSP(r.s.pool.QueryRow(ctx, q, slug))
+	out, err := scanMSP(r.s.pool.Primary().QueryRow(ctx, q, slug))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.MSP{}, repository.ErrNotFound
 	}
@@ -180,7 +180,7 @@ func (r *MSPRepository) List(ctx context.Context, page repository.Page, filter r
 			args[0] = nil
 		}
 	}
-	rows, err := r.s.pool.Query(ctx, q, args...)
+	rows, err := r.s.pool.Primary().Query(ctx, q, args...)
 	if err != nil {
 		return repository.PageResult[repository.MSP]{}, fmt.Errorf("list msps: %w", err)
 	}
@@ -339,7 +339,7 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 		}
 		settingsArg = []byte(payload)
 	}
-	out, err := scanMSP(r.s.pool.QueryRow(ctx, q,
+	out, err := scanMSP(r.s.pool.Primary().QueryRow(ctx, q,
 		id, nameArg, slugArg, statusArg, brandingArg, settingsArg,
 	))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -348,7 +348,7 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 		// guard, round-13). One extra round-trip to disambiguate;
 		// rare path so cost is acceptable.
 		var dummy uuid.UUID
-		if scanErr := r.s.pool.QueryRow(ctx, `SELECT id FROM msps WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
+		if scanErr := r.s.pool.Primary().QueryRow(ctx, `SELECT id FROM msps WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
 			if errors.Is(scanErr, pgx.ErrNoRows) {
 				return repository.MSP{}, repository.ErrNotFound
 			}
@@ -407,7 +407,7 @@ func (r *MSPRepository) TransitionStatus(ctx context.Context, id uuid.UUID, to r
 		SET status = $2
 		WHERE id = $1::uuid AND status <> 'deleted' AND deleted_at IS NULL
 		RETURNING ` + mspSelectColumns
-	out, err := scanMSP(r.s.pool.QueryRow(ctx, q, id, string(to)))
+	out, err := scanMSP(r.s.pool.Primary().QueryRow(ctx, q, id, string(to)))
 	if err == nil {
 		return out, nil
 	}
@@ -415,7 +415,7 @@ func (r *MSPRepository) TransitionStatus(ctx context.Context, id uuid.UUID, to r
 		return repository.MSP{}, fmt.Errorf("transition msp status: %w", err)
 	}
 	var dummy string
-	if scanErr := r.s.pool.QueryRow(ctx, `SELECT status FROM msps WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
+	if scanErr := r.s.pool.Primary().QueryRow(ctx, `SELECT status FROM msps WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
 		if errors.Is(scanErr, pgx.ErrNoRows) {
 			return repository.MSP{}, repository.ErrNotFound
 		}
@@ -453,13 +453,13 @@ func (r *MSPRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status r
 		    deleted_at = CASE WHEN $2 = 'deleted' THEN COALESCE(deleted_at, NOW()) ELSE deleted_at END
 		WHERE id = $1::uuid AND status <> 'deleted' AND deleted_at IS NULL
 		RETURNING ` + mspSelectColumns
-	out, err := scanMSP(r.s.pool.QueryRow(ctx, q, id, string(status)))
+	out, err := scanMSP(r.s.pool.Primary().QueryRow(ctx, q, id, string(status)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Either the row does not exist, or it's already deleted.
 		// Resolve via a separate SELECT so callers learn the precise
 		// reason.
 		var existing string
-		if scanErr := r.s.pool.QueryRow(ctx,
+		if scanErr := r.s.pool.Primary().QueryRow(ctx,
 			`SELECT status FROM msps WHERE id = $1::uuid`, id).Scan(&existing); scanErr != nil {
 			if errors.Is(scanErr, pgx.ErrNoRows) {
 				return repository.MSP{}, repository.ErrNotFound
@@ -823,7 +823,7 @@ func (r *MSPRepository) ListTenants(ctx context.Context, mspID uuid.UUID, page r
 	if cur.T.IsZero() {
 		args[1] = nil
 	}
-	rows, err := r.s.pool.Query(ctx, q, args...)
+	rows, err := r.s.pool.Primary().Query(ctx, q, args...)
 	if err != nil {
 		return repository.PageResult[repository.MSPTenantBinding]{}, fmt.Errorf("list msp tenants: %w", err)
 	}
@@ -860,7 +860,7 @@ func (r *MSPRepository) ListBindings(ctx context.Context, tenantID uuid.UUID) ([
 		FROM msp_tenants
 		WHERE tenant_id = $1::uuid
 		ORDER BY created_at DESC`
-	rows, err := r.s.pool.Query(ctx, q, tenantID)
+	rows, err := r.s.pool.Primary().Query(ctx, q, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list bindings: %w", err)
 	}

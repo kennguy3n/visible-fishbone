@@ -63,20 +63,31 @@ type PublishOptions struct {
 // Publisher publishes JetStream messages with retries, dedup, and
 // canonical SNG headers. Safe for concurrent use.
 type Publisher struct {
-	js      jetstream.JetStream
-	cfg     *config.NATS
-	source  string
-	timeout time.Duration
+	js          jetstream.JetStream
+	cfg         *config.NATS
+	source      string
+	timeout     time.Duration
+	partitioner *TenantPartitioner
 }
 
 // NewPublisher returns a Publisher bound to js and the global NATS
 // config. The source label is stamped onto every published message.
+// The telemetry partitioner is derived from cfg.Partitions so the
+// canonical telemetry subject is partition-aware whenever fan-out is
+// enabled (NATS_PARTITIONS > 1); with the default of 1 the subject
+// is unchanged.
 func NewPublisher(js jetstream.JetStream, cfg *config.NATS, source string) *Publisher {
 	timeout := cfg.RequestTimeout
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	return &Publisher{js: js, cfg: cfg, source: source, timeout: timeout}
+	return &Publisher{
+		js:          js,
+		cfg:         cfg,
+		source:      source,
+		timeout:     timeout,
+		partitioner: PartitionerFromConfig(cfg),
+	}
 }
 
 // Publish sends data on subject with retries and dedup.
@@ -180,7 +191,10 @@ func (p *Publisher) PublishEnvelope(ctx context.Context, env schema.Envelope, op
 	}
 	subject := opts.Subject
 	if subject == "" {
-		subject = SubjectForTelemetry(env.TenantID.String(), string(env.EventClass))
+		// Route through the partitioner so the subject lands on the
+		// correct telemetry cell when fan-out is enabled. With a
+		// single partition this is exactly SubjectForTelemetry.
+		subject = p.partitioner.SubjectForTenant(env.TenantID.String(), string(env.EventClass))
 	}
 	hdrs := make(map[string]string, len(opts.Headers)+5)
 	for k, v := range opts.Headers {

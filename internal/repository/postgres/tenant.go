@@ -66,7 +66,7 @@ func (r *TenantRepository) Create(ctx context.Context, t repository.Tenant) (rep
 	// exist yet, so there is nothing for the RLS GUC to scope to.
 	// We open a tx anyway because callers (e.g. tenant service)
 	// will commonly seed audit-log rows that DO require the GUC.
-	tx, err := r.s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := r.s.pool.Primary().BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return repository.Tenant{}, fmt.Errorf("begin tx: %w", err)
 	}
@@ -102,7 +102,7 @@ func (r *TenantRepository) Create(ctx context.Context, t repository.Tenant) (rep
 
 func (r *TenantRepository) Get(ctx context.Context, id uuid.UUID) (repository.Tenant, error) {
 	const q = `SELECT ` + tenantSelectColumns + ` FROM tenants WHERE id = $1::uuid`
-	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id))
+	out, err := scanTenant(r.s.pool.Primary().QueryRow(ctx, q, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.Tenant{}, repository.ErrNotFound
 	}
@@ -114,7 +114,7 @@ func (r *TenantRepository) Get(ctx context.Context, id uuid.UUID) (repository.Te
 
 func (r *TenantRepository) GetBySlug(ctx context.Context, slug string) (repository.Tenant, error) {
 	const q = `SELECT ` + tenantSelectColumns + ` FROM tenants WHERE slug = $1`
-	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, slug))
+	out, err := scanTenant(r.s.pool.Primary().QueryRow(ctx, q, slug))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.Tenant{}, repository.ErrNotFound
 	}
@@ -161,7 +161,7 @@ func (r *TenantRepository) List(ctx context.Context, page repository.Page) (repo
 		}
 	}
 
-	rows, err := r.s.pool.Query(ctx, q, args...)
+	rows, err := r.s.pool.Primary().Query(ctx, q, args...)
 	if err != nil {
 		return repository.PageResult[repository.Tenant]{}, fmt.Errorf("list tenants: %w", err)
 	}
@@ -264,7 +264,7 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 		}
 		settings = []byte(payload)
 	}
-	out, err := scanTenant(r.s.pool.QueryRow(ctx, q,
+	out, err := scanTenant(r.s.pool.Primary().QueryRow(ctx, q,
 		id, nameArg, slugArg, statusArg, regionArg, tierArg, settings,
 	))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -276,7 +276,7 @@ func (r *TenantRepository) Update(ctx context.Context, id uuid.UUID, patch repos
 		// extra round-trip on the rare zero-rows-affected path
 		// to give callers the precise error.
 		var dummy uuid.UUID
-		if scanErr := r.s.pool.QueryRow(ctx, `SELECT id FROM tenants WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
+		if scanErr := r.s.pool.Primary().QueryRow(ctx, `SELECT id FROM tenants WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
 			if errors.Is(scanErr, pgx.ErrNoRows) {
 				return repository.Tenant{}, repository.ErrNotFound
 			}
@@ -345,7 +345,7 @@ func (r *TenantRepository) UpdateSettingsKey(ctx context.Context, id uuid.UUID, 
 		SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), ARRAY[$2::text], $3::jsonb, true)
 		WHERE id = $1::uuid AND deleted_at IS NULL
 		RETURNING ` + tenantSelectColumns
-	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, key, []byte(value)))
+	out, err := scanTenant(r.s.pool.Primary().QueryRow(ctx, q, id, key, []byte(value)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.Tenant{}, repository.ErrNotFound
 	}
@@ -377,7 +377,7 @@ func (r *TenantRepository) DeleteSettingsKey(ctx context.Context, id uuid.UUID, 
 		SET settings = COALESCE(settings, '{}'::jsonb) - $2::text
 		WHERE id = $1::uuid AND deleted_at IS NULL
 		RETURNING ` + tenantSelectColumns
-	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, key))
+	out, err := scanTenant(r.s.pool.Primary().QueryRow(ctx, q, id, key))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.Tenant{}, repository.ErrNotFound
 	}
@@ -426,7 +426,7 @@ func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, statu
 		    deleted_at = CASE WHEN $2 = 'deleted' THEN COALESCE(deleted_at, NOW()) ELSE deleted_at END
 		WHERE id = $1::uuid AND (status <> 'deleted' OR $2 = 'deleted')
 		RETURNING ` + tenantSelectColumns
-	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, string(status)))
+	out, err := scanTenant(r.s.pool.Primary().QueryRow(ctx, q, id, string(status)))
 	if err == nil {
 		return out, nil
 	}
@@ -437,7 +437,7 @@ func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, statu
 	// or it exists but is already deleted and the caller asked for
 	// a non-deleted target (ErrForbidden — resurrection rejected).
 	var dummy string
-	if scanErr := r.s.pool.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
+	if scanErr := r.s.pool.Primary().QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
 		if errors.Is(scanErr, pgx.ErrNoRows) {
 			return repository.Tenant{}, repository.ErrNotFound
 		}
@@ -464,7 +464,7 @@ func (r *TenantRepository) TransitionStatus(ctx context.Context, id uuid.UUID, f
 		    deleted_at = CASE WHEN $2 = 'deleted' THEN COALESCE(deleted_at, NOW()) ELSE deleted_at END
 		WHERE id = $1::uuid AND status = $3
 		RETURNING ` + tenantSelectColumns
-	out, err := scanTenant(r.s.pool.QueryRow(ctx, q, id, string(to), string(from)))
+	out, err := scanTenant(r.s.pool.Primary().QueryRow(ctx, q, id, string(to), string(from)))
 	if err == nil {
 		return out, nil
 	}
@@ -475,7 +475,7 @@ func (r *TenantRepository) TransitionStatus(ctx context.Context, id uuid.UUID, f
 	// different status (Forbidden). One extra round-trip to
 	// disambiguate; rare path so cost is acceptable.
 	var dummyStatus string
-	if scanErr := r.s.pool.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1::uuid`, id).Scan(&dummyStatus); scanErr != nil {
+	if scanErr := r.s.pool.Primary().QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1::uuid`, id).Scan(&dummyStatus); scanErr != nil {
 		if errors.Is(scanErr, pgx.ErrNoRows) {
 			return repository.Tenant{}, repository.ErrNotFound
 		}
@@ -494,7 +494,7 @@ func (r *TenantRepository) Delete(ctx context.Context, id uuid.UUID) error {
 		SET status     = 'deleted',
 		    deleted_at = COALESCE(deleted_at, NOW())
 		WHERE id = $1::uuid AND status <> 'deleted'`
-	tag, err := r.s.pool.Exec(ctx, q, id)
+	tag, err := r.s.pool.Primary().Exec(ctx, q, id)
 	if err != nil {
 		return fmt.Errorf("delete tenant: %w", err)
 	}
@@ -503,7 +503,7 @@ func (r *TenantRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	}
 	// Distinguish ErrForbidden (already deleted) from ErrNotFound.
 	var status string
-	if scanErr := r.s.pool.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1::uuid`, id).Scan(&status); scanErr != nil {
+	if scanErr := r.s.pool.Primary().QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1::uuid`, id).Scan(&status); scanErr != nil {
 		if errors.Is(scanErr, pgx.ErrNoRows) {
 			return repository.ErrNotFound
 		}

@@ -244,6 +244,23 @@ type Service struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
+	// wg tracks the per-partition consumer goroutines so Stop can
+	// wait for all of them to drain before returning.
+	wg sync.WaitGroup
+}
+
+// worker is one partition's consumer state: the JetStream consumer
+// it drains plus the limiter and dedup ring scoped to that
+// partition's tenants. With a single partition there is exactly one
+// worker whose limiter/dedup are the service-level instances, so
+// behaviour is identical to the pre-partitioning consumer.
+type worker struct {
+	partition         int
+	cons              jetstream.Consumer
+	limiter           *PerTenantLimiter
+	limiterWaitBudget time.Duration
+	nakBackoff        time.Duration
+	dedup             *dedupRing
 }
 
 // WithPerTenantLimiter wires a PerTenantLimiter onto the
@@ -354,34 +371,97 @@ func (s *Service) Start(ctx context.Context) error {
 		return nil
 	}
 
-	// Use the canonical StreamName helper so the prefix
-	// normalisation (TrimSpace, empty-default) matches
-	// EnsureStreams. Without this a NATS_STREAM_PREFIX with
-	// leading/trailing whitespace would lookup `"SNG _TELEMETRY"`
-	// while EnsureStreams created `"SNG_TELEMETRY"`.
-	stream := sngnats.StreamName(s.cfg.StreamPrefix, sngnats.StreamSuffixTelemetry)
-	cons, err := sngnats.EnsureConsumer(ctx, s.js, sngnats.ConsumerSpec{
-		Stream:        stream,
-		Durable:       s.cfg.Durable,
-		FilterSubject: s.cfg.FilterSubject,
-		MaxAckPending: s.cfg.BatchSize * 4,
-		AckWait:       30 * time.Second,
-		MaxDeliver:    hotPathMaxDeliver,
-		Description:   "SNG telemetry hot-path consumer",
-	})
+	partitioner := sngnats.PartitionerFromConfig(s.natsCfg)
+	workers, err := s.buildWorkers(ctx, partitioner)
 	if err != nil {
-		return fmt.Errorf("telemetry: ensure consumer: %w", err)
+		return err
 	}
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.done = make(chan struct{})
 
-	go s.loop(runCtx, cons)
+	s.wg.Add(len(workers))
+	for _, w := range workers {
+		go s.loop(runCtx, w)
+	}
+	// Close s.done once every partition goroutine has drained, so
+	// Stop can block on a single channel regardless of partition
+	// count.
+	go func() {
+		s.wg.Wait()
+		close(s.done)
+	}()
+
 	s.logger.Info("telemetry: consumer started",
-		slog.String("stream", stream),
+		slog.Int("partitions", len(workers)),
 		slog.String("durable", s.cfg.Durable))
 	return nil
+}
+
+// buildWorkers ensures the durable consumer(s) and returns one
+// worker per telemetry partition. With a single partition it ensures
+// the historical SNG_TELEMETRY consumer and reuses the service-level
+// limiter/dedup; with N partitions it ensures one consumer per
+// SNG_TELEMETRY_<i> stream, each with a partition-scoped limiter and
+// its own dedup ring. Must be called with s.mu held.
+func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantPartitioner) ([]*worker, error) {
+	// Use the canonical StreamName helper so the prefix
+	// normalisation (TrimSpace, empty-default) matches
+	// EnsureStreams. Without this a NATS_STREAM_PREFIX with
+	// leading/trailing whitespace would lookup `"SNG _TELEMETRY"`
+	// while EnsureStreams created `"SNG_TELEMETRY"`.
+	if !partitioner.Enabled() {
+		stream := sngnats.StreamName(s.cfg.StreamPrefix, sngnats.StreamSuffixTelemetry)
+		cons, err := sngnats.EnsureConsumer(ctx, s.js, sngnats.ConsumerSpec{
+			Stream:        stream,
+			Durable:       s.cfg.Durable,
+			FilterSubject: s.cfg.FilterSubject,
+			MaxAckPending: s.cfg.BatchSize * 4,
+			AckWait:       30 * time.Second,
+			MaxDeliver:    hotPathMaxDeliver,
+			Description:   "SNG telemetry hot-path consumer",
+		})
+		if err != nil {
+			return nil, fmt.Errorf("telemetry: ensure consumer: %w", err)
+		}
+		return []*worker{{
+			partition:         0,
+			cons:              cons,
+			limiter:           s.limiter,
+			limiterWaitBudget: s.limiterWaitBudget,
+			nakBackoff:        s.nakBackoff,
+			dedup:             s.dedup,
+		}}, nil
+	}
+
+	n := partitioner.Count()
+	workers := make([]*worker, 0, n)
+	for i := 0; i < n; i++ {
+		stream := sngnats.StreamName(s.cfg.StreamPrefix, sngnats.TelemetryPartitionStreamSuffix(i))
+		durable := fmt.Sprintf("%s-p%d", s.cfg.Durable, i)
+		cons, err := sngnats.EnsureConsumer(ctx, s.js, sngnats.ConsumerSpec{
+			Stream:        stream,
+			Durable:       durable,
+			FilterSubject: sngnats.TelemetryPartitionSubject(i),
+			MaxAckPending: s.cfg.BatchSize * 4,
+			AckWait:       30 * time.Second,
+			MaxDeliver:    hotPathMaxDeliver,
+			Description:   fmt.Sprintf("SNG telemetry hot-path consumer (partition %d/%d)", i, n),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("telemetry: ensure consumer (partition %d): %w", i, err)
+		}
+		workers = append(workers, &worker{
+			partition:         i,
+			cons:              cons,
+			limiter:           s.limiter.ForPartition(),
+			limiterWaitBudget: s.limiterWaitBudget,
+			nakBackoff:        s.nakBackoff,
+			dedup:             newDedupRing(s.cfg.DedupRingSize),
+		})
+	}
+	return workers, nil
 }
 
 // Stop cancels the consumer loop and waits for it to drain in-flight
@@ -404,14 +484,14 @@ func (s *Service) Stop(ctx context.Context) error {
 	}
 }
 
-// loop is the consumer goroutine.
-func (s *Service) loop(ctx context.Context, cons jetstream.Consumer) {
-	defer close(s.done)
+// loop is the consumer goroutine for a single partition worker.
+func (s *Service) loop(ctx context.Context, w *worker) {
+	defer s.wg.Done()
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		batch, err := cons.Fetch(s.cfg.BatchSize, jetstream.FetchMaxWait(s.cfg.MaxWait))
+		batch, err := w.cons.Fetch(s.cfg.BatchSize, jetstream.FetchMaxWait(s.cfg.MaxWait))
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, jetstream.ErrNoMessages) {
 				continue
@@ -419,7 +499,9 @@ func (s *Service) loop(ctx context.Context, cons jetstream.Consumer) {
 			// Brief backoff before retry — avoids spin if the
 			// stream becomes briefly unavailable during a
 			// rolling restart.
-			s.logger.Warn("telemetry: fetch error", slog.Any("error", err))
+			s.logger.Warn("telemetry: fetch error",
+				slog.Int("partition", w.partition),
+				slog.Any("error", err))
 			select {
 			case <-ctx.Done():
 				return
@@ -428,16 +510,18 @@ func (s *Service) loop(ctx context.Context, cons jetstream.Consumer) {
 			continue
 		}
 		for msg := range batch.Messages() {
-			s.dispatch(ctx, msg)
+			s.dispatch(ctx, w, msg)
 		}
 		if fetchErr := batch.Error(); fetchErr != nil && !errors.Is(fetchErr, jetstream.ErrNoMessages) {
-			s.logger.Warn("telemetry: batch error", slog.Any("error", fetchErr))
+			s.logger.Warn("telemetry: batch error",
+				slog.Int("partition", w.partition),
+				slog.Any("error", fetchErr))
 		}
 	}
 }
 
-// dispatch processes a single delivery.
-func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
+// dispatch processes a single delivery on the given partition worker.
+func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 	s.metrics.Received.Add(1)
 	env, err := schema.Unmarshal(msg.Data())
 	if err != nil {
@@ -470,23 +554,18 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 	// the limiter rejects it again until the bucket refills.
 	// A nil limiter is a no-op (existing behaviour preserved).
 	//
-	// Snapshot the mutex-guarded fields (limiter,
-	// limiterWaitBudget, nakBackoff) under s.mu before
-	// consulting them — every setter that touches them
-	// (WithPerTenantLimiter, WithLimiterWaitBudget,
-	// WithNakBackoff) takes s.mu, so reading them lock-free
-	// here would race with a concurrent reconfiguration
-	// (and `go test -race` would flag it). The lock-and-copy
-	// matches the s.dlq pattern already in use by
-	// routeBadPayloadToDLQ / routeHotWriteFailureToDLQ —
-	// pointer + word + Duration copy with no I/O, so the
-	// critical section is microscopic. See PR #38 Devin
-	// Review round-4 BUG_0001.
-	s.mu.Lock()
-	limiter := s.limiter
-	limiterWaitBudget := s.limiterWaitBudget
-	nakBackoff := s.nakBackoff
-	s.mu.Unlock()
+	// The worker's limiter/budgets are captured at Start (under
+	// s.mu, in buildWorkers) and are immutable for the worker's
+	// lifetime, so they are read lock-free here. The With* setters
+	// (WithPerTenantLimiter, WithLimiterWaitBudget, WithNakBackoff)
+	// only mutate the service-level template that buildWorkers
+	// reads, so there is no race between dispatch and a concurrent
+	// reconfiguration; reconfiguration after Start simply does not
+	// affect already-running workers. See PR #38 Devin Review
+	// round-4 BUG_0001 for the original lock-and-copy this replaces.
+	limiter := w.limiter
+	limiterWaitBudget := w.limiterWaitBudget
+	nakBackoff := w.nakBackoff
 
 	if limiter != nil {
 		wait := limiterWaitBudget
@@ -546,7 +625,7 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 	// redelivered copy would look like a duplicate and get acked
 	// without ever being written). See PR5 review finding
 	// BUG_pr-review-job-22734e9d8a4f4b9cbc7782ec198361ca_0001.
-	if s.dedup.Seen(env.EventID) {
+	if w.dedup.Seen(env.EventID) {
 		s.metrics.Deduplicated.Add(1)
 		_ = msg.Ack()
 		s.metrics.Acked.Add(1)
@@ -600,7 +679,7 @@ func (s *Service) dispatch(ctx context.Context, msg jetstream.Msg) {
 	// Only record dedup *after* the hot write succeeded. This way
 	// a subsequent redelivery of a transient-failure message is
 	// allowed to retry the write rather than being silently acked.
-	s.dedup.Add(env.EventID)
+	w.dedup.Add(env.EventID)
 	s.metrics.Enriched.Add(1)
 	if err := msg.Ack(); err != nil {
 		s.logger.Warn("telemetry: ack failed", slog.Any("error", err))

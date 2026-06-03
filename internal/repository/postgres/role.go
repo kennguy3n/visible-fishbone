@@ -64,7 +64,7 @@ func (r *RoleRepository) Create(ctx context.Context, role repository.Role) (repo
 	// from every tenant). Insert directly on the pool, no
 	// withTenant wrap.
 	var out repository.Role
-	row := r.s.pool.QueryRow(ctx, `
+	row := r.s.pool.Primary().QueryRow(ctx, `
 		INSERT INTO roles (id, tenant_id, name, external_id, permissions, scope)
 		VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6)
 		RETURNING `+roleSelectColumns,
@@ -87,7 +87,7 @@ func (r *RoleRepository) Create(ctx context.Context, role repository.Role) (repo
 }
 
 func (r *RoleRepository) Get(ctx context.Context, id uuid.UUID) (repository.Role, error) {
-	row := r.s.pool.QueryRow(ctx, `SELECT `+roleSelectColumns+` FROM roles WHERE id = $1::uuid`, id)
+	row := r.s.pool.Primary().QueryRow(ctx, `SELECT `+roleSelectColumns+` FROM roles WHERE id = $1::uuid`, id)
 	out, err := scanRole(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.Role{}, repository.ErrNotFound
@@ -102,7 +102,7 @@ func (r *RoleRepository) Update(ctx context.Context, id uuid.UUID, name string, 
 	if name == "" {
 		return repository.Role{}, repository.ErrInvalidArgument
 	}
-	row := r.s.pool.QueryRow(ctx, `
+	row := r.s.pool.Primary().QueryRow(ctx, `
 		UPDATE roles SET name = $2, external_id = $3
 		WHERE id = $1::uuid
 		RETURNING `+roleSelectColumns,
@@ -122,7 +122,7 @@ func (r *RoleRepository) Update(ctx context.Context, id uuid.UUID, name string, 
 }
 
 func (r *RoleRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	ct, err := r.s.pool.Exec(ctx, `DELETE FROM roles WHERE id = $1::uuid`, id)
+	ct, err := r.s.pool.Primary().Exec(ctx, `DELETE FROM roles WHERE id = $1::uuid`, id)
 	if err != nil {
 		return fmt.Errorf("delete role: %w", err)
 	}
@@ -149,7 +149,7 @@ func (r *RoleRepository) List(ctx context.Context, tenantID *uuid.UUID) ([]repos
 			ORDER BY name ASC`
 		args = []any{*tenantID}
 	}
-	rows, err := r.s.pool.Query(ctx, q, args...)
+	rows, err := r.s.pool.Primary().Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list roles: %w", err)
 	}
@@ -180,7 +180,7 @@ func (r *RoleRepository) AssignRole(ctx context.Context, ur repository.UserRole)
 	if ur.GrantedBy != nil {
 		grantedBy = *ur.GrantedBy
 	}
-	_, err := r.s.pool.Exec(ctx, `
+	_, err := r.s.pool.Primary().Exec(ctx, `
 		INSERT INTO user_roles (user_id, role_id, scope_id, granted_by)
 		VALUES ($1::uuid, $2::uuid, $3, $4)
 	`, ur.UserID, ur.RoleID, scopeID, grantedBy)
@@ -203,7 +203,7 @@ func (r *RoleRepository) RevokeRole(ctx context.Context, userID, roleID uuid.UUI
 	if scopeID != nil {
 		scope = *scopeID
 	}
-	ct, err := r.s.pool.Exec(ctx, `
+	ct, err := r.s.pool.Primary().Exec(ctx, `
 		DELETE FROM user_roles
 		WHERE user_id = $1::uuid
 		  AND role_id = $2::uuid
@@ -219,7 +219,7 @@ func (r *RoleRepository) RevokeRole(ctx context.Context, userID, roleID uuid.UUI
 }
 
 func (r *RoleRepository) GetUserRoles(ctx context.Context, userID uuid.UUID) ([]repository.UserRole, error) {
-	rows, err := r.s.pool.Query(ctx, `
+	rows, err := r.s.pool.Primary().Query(ctx, `
 		SELECT user_id, role_id, scope_id, granted_at, granted_by
 		FROM user_roles
 		WHERE user_id = $1::uuid
@@ -259,7 +259,7 @@ func (r *RoleRepository) HasPermission(ctx context.Context, userID uuid.UUID, pe
 	// Inline the wildcard check rather than encoding in SQL —
 	// `?` containment vs OR-wildcard is straightforward at the
 	// app layer and keeps the query plan simple.
-	rows, err := r.s.pool.Query(ctx, `
+	rows, err := r.s.pool.Primary().Query(ctx, `
 		SELECT r.permissions
 		FROM user_roles ur
 		JOIN roles r ON r.id = ur.role_id
