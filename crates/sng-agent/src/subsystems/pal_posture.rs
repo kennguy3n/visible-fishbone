@@ -153,6 +153,7 @@ impl Subsystem for PalPostureSubsystem {
                                     device_id: device_id.clone(),
                                     event_type: "posture".to_owned(),
                                     posture_snapshot: serde_json::to_value(&snapshot).ok(),
+                                    reason: String::new(),
                                     platform,
                                 };
                                 if let Err(err) =

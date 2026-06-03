@@ -245,7 +245,16 @@ type AgentEvent struct {
 	DeviceID        string          `msgpack:"did"`
 	EventType       string          `msgpack:"et"` // started|stopped|posture|error
 	PostureSnapshot json.RawMessage `msgpack:"pst,omitempty"`
-	Platform        Platform        `msgpack:"plt"`
+	// Reason is an optional operator-readable diagnostic reason for the
+	// event (e.g. the cause carried by a tunnel_down). It is empty for
+	// events that have no free-form reason (started|stopped|posture|
+	// tunnel_up). `omitempty` plus the Rust-side serde default keep the
+	// field backward/forward compatible across rolling deploys — see the
+	// ZTNAEvent.Reason wire-contract doc. Giving the reason its own field
+	// rather than overloading the opaque PostureSnapshot keeps `pst`
+	// unambiguously posture-shaped for consumers that decode it.
+	Reason   string   `msgpack:"rsn,omitempty"`
+	Platform Platform `msgpack:"plt"`
 }
 
 // Validate enforces required-field invariants for AgentEvent.
