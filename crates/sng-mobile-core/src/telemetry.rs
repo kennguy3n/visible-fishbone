@@ -130,11 +130,20 @@ impl MobileTelemetryEvent {
             Self::TunnelDown { reason } => pack_payload(&AgentEvent {
                 device_id: did,
                 event_type: "tunnel_down".to_owned(),
-                // `AgentEvent` has no dedicated reason field; carry the
-                // diagnostic reason in the JSON `posture_snapshot` slot
-                // so operators see *why* a tunnel dropped rather than
-                // losing it at the wire boundary.
-                posture_snapshot: Some(serde_json::json!({ "reason": reason })),
+                // `AgentEvent`'s only free-form slot is the opaque
+                // `pst` (`posture_snapshot`) JSON, which the control
+                // plane stores verbatim and interprets per `event_type`
+                // (posture data only for `et == "posture"`). Reuse it to
+                // carry the tunnel-drop diagnostic so the reason is not
+                // lost at the wire boundary, but self-describe the blob
+                // (`kind: "tunnel_diagnostic"`) so no posture parser can
+                // ever mistake it for a posture snapshot. A dedicated
+                // `AgentEvent` reason field would require a coordinated
+                // Go/Rust wire-schema change, which is out of scope here.
+                posture_snapshot: Some(serde_json::json!({
+                    "kind": "tunnel_diagnostic",
+                    "reason": reason,
+                })),
                 platform: ctx.platform,
             })?,
         };
@@ -301,13 +310,15 @@ mod tests {
         .unwrap();
         let payload: AgentEvent = unpack_payload(&down.payload).unwrap();
         assert_eq!(payload.event_type, "tunnel_down");
-        // The diagnostic reason survives the serialization boundary.
+        // The diagnostic reason survives the serialization boundary and
+        // the blob self-describes as a tunnel diagnostic, never posture.
+        let pst = payload.posture_snapshot.as_ref().unwrap();
         assert_eq!(
-            payload
-                .posture_snapshot
-                .as_ref()
-                .and_then(|v| v.get("reason"))
-                .and_then(serde_json::Value::as_str),
+            pst.get("kind").and_then(serde_json::Value::as_str),
+            Some("tunnel_diagnostic")
+        );
+        assert_eq!(
+            pst.get("reason").and_then(serde_json::Value::as_str),
             Some("idle")
         );
     }
