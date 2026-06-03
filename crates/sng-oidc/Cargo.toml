@@ -1,0 +1,67 @@
+[package]
+name = "sng-oidc"
+description = "ShieldNet Gateway (SNG) — pure-Rust, platform-independent OpenID Connect (OIDC) client for mobile native-app SSO. Platform browser UI is injected through the `AuthSurface` trait; this crate has no OS dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# HTTP client for discovery, JWKS fetch, and token exchange.
+# `default-features = false` is mandatory: it keeps the OpenSSL-FFI
+# `native-tls` backend (banned by deny.toml) out of the graph and
+# forces rustls + ring, matching the rest of the gateway.
+reqwest = { workspace = true }
+
+# ID-token signature + claim validation (RS256 / ES256). v9 uses
+# `ring`, so no OpenSSL is pulled in.
+jsonwebtoken = { workspace = true }
+
+# Serde stack for discovery docs, token responses, and JWKS.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# PKCE: SHA-256 of the verifier, BASE64URL-encoded; CSRF/nonce use
+# the workspace RNG.
+base64 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+
+# Authorization-URL construction + redirect/callback parsing.
+url = { workspace = true }
+
+# Lock-and-drop-before-await mutex for the discovery / JWKS TTL
+# caches and the session token state (no poisoning => no unwrap).
+parking_lot = { workspace = true }
+
+# Token-expiry clock + ID-token exp/iat reasoning.
+chrono = { workspace = true }
+
+# Typed error taxonomy + async trait surfaces (AuthSurface,
+# TokenStorage).
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+
+# `sync` only: an async mutex serializes the session's
+# refresh-token grants so concurrent callers don't fire parallel
+# (and, with rotating refresh tokens, self-invalidating) refreshes.
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+# Async test runtime.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+# In-process mock OIDC server (no real network in tests).
+wiremock = { workspace = true }
+pretty_assertions = { workspace = true }
+# `jsonwebtoken` (mint signed ID-token / JWKS fixtures) and
+# `serde_json` (assemble JSON response bodies) are also used by the
+# integration test, but they are already regular `[dependencies]`
+# with the same feature set, so Cargo reuses those for test builds —
+# no separate `[dev-dependencies]` entries are needed.
