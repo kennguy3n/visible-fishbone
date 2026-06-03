@@ -30,6 +30,13 @@ tags:
   - name: enrollment
     description: Device enrollment flow (claim-token pattern)
   - name: ai
+  - name: mobile-auth
+    description: |
+      Control-plane IdP federation for mobile native OIDC SSO.
+      Tenant-scoped CRUD for OIDC provider configs, plus the public
+      mobile token-exchange / refresh endpoints that validate an
+      OIDC ID token and mint an SNG session bound to both the
+      device's Ed25519 key and the user's OIDC subject.
 paths:
   /tenants:
     post:
@@ -3015,6 +3022,164 @@ paths:
         "204": { description: deleted }
         "404": { $ref: "#/components/responses/Error" }
 
+  /tenants/{tenant_id}/idp-configs:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [mobile-auth]
+      operationId: createIdpConfig
+      summary: Register an OIDC identity-provider config for a tenant
+      description: |
+        Register a per-tenant OIDC provider (Google Workspace,
+        Microsoft 365, Zoho, Okta, or a custom OIDC issuer) that
+        mobile agents may federate against. Only validation material
+        (issuer, client_id, allowed domains, group-claim path) is
+        stored; OIDC tokens are never persisted. Subject to the
+        per-tenant provider cap.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IDPConfigRequest" }
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IDPConfig" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429":
+          description: |
+            tenant has reached the per-tenant IdP-config cap; the
+            response body carries `error.code = "resource_exhausted"`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    get:
+      tags: [mobile-auth]
+      operationId: listIdpConfigs
+      summary: List a tenant's OIDC provider configs
+      description: |
+        List every OIDC provider config registered for the tenant,
+        newest first.
+      responses:
+        "200":
+          description: list (newest first)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/IDPConfig" }
+  /tenants/{tenant_id}/idp-configs/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - $ref: "#/components/parameters/ResourceID"
+    get:
+      tags: [mobile-auth]
+      operationId: getIdpConfig
+      summary: Get an OIDC provider config by id
+      description: |
+        Fetch a single OIDC provider config by its id within the
+        tenant.
+      responses:
+        "200":
+          description: config
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IDPConfig" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [mobile-auth]
+      operationId: updateIdpConfig
+      summary: Replace an OIDC provider config
+      description: |
+        Replace an existing OIDC provider config in place. The full
+        representation is supplied; toggle `enabled` to disable a
+        provider without deleting it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IDPConfigRequest" }
+      responses:
+        "200":
+          description: updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IDPConfig" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [mobile-auth]
+      operationId: deleteIdpConfig
+      summary: Delete an OIDC provider config
+      description: |
+        Permanently remove an OIDC provider config. Mobile agents can
+        no longer federate against the issuer once deleted.
+      responses:
+        "204": { description: removed }
+        "404": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/auth/mobile/token:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [mobile-auth]
+      operationId: mobileTokenExchange
+      summary: Exchange a validated OIDC ID token for an SNG session
+      description: |
+        Public endpoint. A mobile agent that has completed native
+        OIDC sign-in presents its ID token plus the enrolled
+        device's Ed25519 public key. The control plane validates the
+        token against the tenant's matching IdP config (signature via
+        JWKS, iss/aud/exp/email claims, domain allow-list), maps it to
+        an SNG user (auto-provisioning when enabled), and mints an SNG
+        access token bound to BOTH the device key and the OIDC subject.
+        OIDC tokens are never persisted.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MobileTokenRequest" }
+      responses:
+        "200":
+          description: minted SNG session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MobileSessionResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/auth/mobile/refresh:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [mobile-auth]
+      operationId: mobileTokenRefresh
+      summary: Refresh an SNG session using an IdP refresh token
+      description: |
+        Public endpoint. Exchanges the IdP refresh token at the
+        provider's token endpoint for a fresh ID token, re-validates
+        it, and mints a new SNG session re-bound to the same device.
+        The refresh token is never persisted server-side.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MobileRefreshRequest" }
+      responses:
+        "200":
+          description: minted SNG session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MobileSessionResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     BearerJWT:
@@ -4516,3 +4681,108 @@ components:
         tags: { type: array, items: { type: string } }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    IDPProviderType:
+      type: string
+      description: OIDC identity-provider family.
+      enum: [google_workspace, microsoft365, zoho, okta, custom_oidc]
+    IDPConfigRequest:
+      type: object
+      required: [provider_type, issuer_url, client_id]
+      properties:
+        provider_type: { $ref: "#/components/schemas/IDPProviderType" }
+        issuer_url:
+          type: string
+          format: uri
+          description: OIDC issuer URL; ID tokens must carry this as their `iss`.
+        client_id:
+          type: string
+          description: OAuth client id; ID tokens must carry this in their `aud`.
+        allowed_domains:
+          type: array
+          description: |
+            Email / hosted-domain allow-list. Empty permits any domain
+            the provider asserts.
+          items: { type: string }
+        group_claim_path:
+          type: string
+          description: Dotted path to the groups/roles claim in the ID token.
+        enabled:
+          type: boolean
+          description: Defaults to true on create when omitted.
+    IDPConfig:
+      type: object
+      required: [id, tenant_id, provider_type, issuer_url, client_id, allowed_domains, group_claim_path, enabled, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        provider_type: { $ref: "#/components/schemas/IDPProviderType" }
+        issuer_url: { type: string, format: uri }
+        client_id: { type: string }
+        allowed_domains: { type: array, items: { type: string } }
+        group_claim_path: { type: string }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    MobileTokenRequest:
+      type: object
+      required: [id_token, device_public_key]
+      properties:
+        id_token:
+          type: string
+          description: OIDC ID token obtained by the mobile agent's native sign-in.
+        issuer:
+          type: string
+          format: uri
+          description: |
+            Optional issuer selector. When omitted the issuer is read
+            from the (unverified) token's `iss` claim and matched
+            against the tenant's enabled configs.
+        device_public_key:
+          type: string
+          description: Base64 Ed25519 device public key the session is bound to.
+    MobileRefreshRequest:
+      type: object
+      required: [refresh_token, issuer, device_public_key]
+      properties:
+        refresh_token:
+          type: string
+          description: IdP refresh token; exchanged for a fresh ID token and never persisted.
+        issuer:
+          type: string
+          format: uri
+          description: Issuer selecting which provider's token endpoint to call.
+        device_public_key:
+          type: string
+          description: Base64 Ed25519 device public key the refreshed session is re-bound to.
+    MobileIdentity:
+      type: object
+      required: [user_id, tenant_id, email, subject, provider, issuer]
+      properties:
+        user_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        email: { type: string }
+        subject:
+          type: string
+          description: OIDC `sub` claim — the stable user identifier the session is bound to.
+        provider: { $ref: "#/components/schemas/IDPProviderType" }
+        issuer: { type: string, format: uri }
+        groups: { type: array, items: { type: string } }
+    MobileBinding:
+      type: object
+      required: [device_public_key, user_subject]
+      description: What the minted SNG session is cryptographically bound to.
+      properties:
+        device_public_key: { type: string }
+        user_subject: { type: string }
+    MobileSessionResponse:
+      type: object
+      required: [access_token, token_type, expires_in, expires_at, identity, binding]
+      properties:
+        access_token:
+          type: string
+          description: HS256 SNG session JWT accepted by the standard auth middleware.
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer, description: Session lifetime in seconds. }
+        expires_at: { type: string, format: date-time }
+        identity: { $ref: "#/components/schemas/MobileIdentity" }
+        binding: { $ref: "#/components/schemas/MobileBinding" }

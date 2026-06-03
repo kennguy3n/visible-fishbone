@@ -80,6 +80,34 @@ type Config struct {
 	TelemetryAnalytics TelemetryAnalytics
 	AppRegistry        AppRegistry
 	AI                 AI
+	MobileAuth         MobileAuth
+}
+
+// MobileAuth carries the runtime knobs for control-plane IdP
+// federation — the mobile native-SSO flow where a mobile agent
+// presents an OIDC ID token and the control plane exchanges it for
+// an SNG session bound to device + user identity (see
+// internal/service/identity/oidc.go).
+type MobileAuth struct {
+	// SessionTokenTTL is how long a minted SNG mobile session token
+	// is valid. Independent of Auth.AccessTokenTTL so operators can
+	// give mobile sessions a different (typically shorter) lifetime
+	// than operator-console tokens. Defaults to 1h.
+	SessionTokenTTL time.Duration
+	// DiscoveryCacheTTL is how long an OIDC discovery document (and
+	// its JWKS) is cached per issuer before re-fetching. Defaults to
+	// 24h, matching the OIDC ecosystem's typical key-rotation window.
+	DiscoveryCacheTTL time.Duration
+	// MaxProvidersPerTenant caps how many IdP configs a single tenant
+	// may register. Defaults to 10. The handler enforces this at
+	// create time.
+	MaxProvidersPerTenant int
+	// AutoProvisionUsers controls just-in-time user provisioning: when
+	// a validated ID token maps to an email with no existing user in
+	// the tenant, the OIDCService creates one (reusing the SCIM user
+	// shape). Defaults to true. Set false to require users be
+	// pre-provisioned (e.g. via SCIM) before they can federate.
+	AutoProvisionUsers bool
 }
 
 // AppRegistry carries the runtime knobs for the curated
@@ -819,6 +847,9 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_MAX_BACKLOG_MULTIPLIER", 4, &cfg.TelemetryAnalytics.ClickHouseMaxBacklogMultiplier},
 		{"S3_TELEMETRY_MAX_BYTES_PER_OBJECT", 16 * 1024 * 1024, &cfg.TelemetryAnalytics.S3MaxBytesPerObject},
 		{"S3_TELEMETRY_MAX_EVENTS_PER_OBJECT", 50_000, &cfg.TelemetryAnalytics.S3MaxEventsPerObject},
+		// Per-tenant cap on registered OIDC IdP configs. Parsed
+		// strictly so a typo can't silently revert the limit.
+		{"MOBILE_AUTH_MAX_PROVIDERS_PER_TENANT", 10, &cfg.MobileAuth.MaxProvidersPerTenant},
 	}
 	strictDurations := []struct {
 		key string
@@ -853,6 +884,9 @@ func Load() (Config, error) {
 		{"S3_TELEMETRY_FLUSH_INTERVAL", 30 * time.Second, &cfg.TelemetryAnalytics.S3FlushInterval},
 		{"APP_REGISTRY_SYNC_INTERVAL", 24 * time.Hour, &cfg.AppRegistry.SyncInterval},
 		{"AI_LLM_TIMEOUT", 10 * time.Second, &cfg.AI.Timeout},
+		// Mobile IdP-federation session + discovery-cache lifetimes.
+		{"MOBILE_AUTH_SESSION_TOKEN_TTL", time.Hour, &cfg.MobileAuth.SessionTokenTTL},
+		{"MOBILE_AUTH_DISCOVERY_CACHE_TTL", 24 * time.Hour, &cfg.MobileAuth.DiscoveryCacheTTL},
 	}
 	strictFloats := []struct {
 		key string
@@ -884,6 +918,7 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_TLS", false, &cfg.TelemetryAnalytics.ClickHouseTLS},
 		{"CLICKHOUSE_ENSURE_SCHEMA", true, &cfg.TelemetryAnalytics.ClickHouseEnsureSchema},
 		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
+		{"MOBILE_AUTH_AUTO_PROVISION_USERS", true, &cfg.MobileAuth.AutoProvisionUsers},
 	}
 
 	var strictErrs []error
@@ -1176,6 +1211,26 @@ func (c Config) validate() error {
 	// going through env-config.
 	if c.Environment.IsProduction() && c.Auth.APIKeyMaxActivePerTenant <= 0 {
 		return errors.New("AUTH_API_KEY_MAX_ACTIVE_PER_TENANT must be > 0 in production environments (the cap protects against unbounded key creation; see docs/deploy.md)")
+	}
+	// Same rationale as the API-key cap above: the IdP-config handler
+	// treats <= 0 as "unlimited", so allowing it in production would
+	// silently disable the per-tenant provider cap and permit
+	// unbounded idp_configs creation.
+	if c.Environment.IsProduction() && c.MobileAuth.MaxProvidersPerTenant <= 0 {
+		return errors.New("MOBILE_AUTH_MAX_PROVIDERS_PER_TENANT must be > 0 in production environments (the cap protects against unbounded IdP-config creation; see docs/deploy.md)")
+	}
+	// Same rationale as AUTH_ACCESS_TOKEN_TTL above: a <= 0 value would
+	// be silently overridden by the service's 1h default
+	// (OIDCService.sessionTTL) instead of honouring operator intent, so
+	// "0s" must fail loudly at boot rather than minting unexpectedly
+	// scoped sessions.
+	if c.MobileAuth.SessionTokenTTL <= 0 {
+		return fmt.Errorf("MOBILE_AUTH_SESSION_TOKEN_TTL must be > 0, got %s", c.MobileAuth.SessionTokenTTL)
+	}
+	// Likewise, a <= 0 discovery-cache TTL would silently fall back to
+	// the service's 24h default rather than the configured value.
+	if c.MobileAuth.DiscoveryCacheTTL <= 0 {
+		return fmt.Errorf("MOBILE_AUTH_DISCOVERY_CACHE_TTL must be > 0, got %s", c.MobileAuth.DiscoveryCacheTTL)
 	}
 	if c.Policy.KeyWrapMasterB64 != "" && c.Policy.KeyWrapMasterFile != "" {
 		return errors.New("POLICY_KEY_WRAP_MASTER_B64 and POLICY_KEY_WRAP_MASTER_FILE are mutually exclusive")

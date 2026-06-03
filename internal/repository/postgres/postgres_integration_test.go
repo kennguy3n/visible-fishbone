@@ -176,6 +176,97 @@ func TestPostgres_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("IDPConfig_CRUD_RLS", func(t *testing.T) {
+		tr := store.NewTenantRepository()
+		cr := store.NewIDPConfigRepository()
+		t1 := mustTenant(t, tr)
+		t2 := mustTenant(t, tr)
+
+		cfg, err := cr.Create(bgCtx(), t1.ID, repository.IDPConfig{
+			ProviderType:   repository.IDPProviderGoogleWorkspace,
+			IssuerURL:      "https://accounts.google.com",
+			ClientID:       "client-a",
+			AllowedDomains: []string{"acme.com"},
+			GroupClaimPath: "groups",
+			Enabled:        true,
+		})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+
+		// Same tenant -> visible, round-tripped fields intact.
+		got, err := cr.Get(bgCtx(), t1.ID, cfg.ID)
+		if err != nil {
+			t.Fatalf("get from owner: %v", err)
+		}
+		if got.ClientID != "client-a" || len(got.AllowedDomains) != 1 || got.AllowedDomains[0] != "acme.com" {
+			t.Errorf("round-trip mismatch: %+v", got)
+		}
+
+		// RLS: different tenant cannot see it.
+		if _, err := cr.Get(bgCtx(), t2.ID, cfg.ID); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("cross-tenant get: want ErrNotFound got %v", err)
+		}
+
+		// Same issuer within the same tenant -> unique conflict.
+		if _, err := cr.Create(bgCtx(), t1.ID, repository.IDPConfig{
+			ProviderType: repository.IDPProviderGoogleWorkspace,
+			IssuerURL:    "https://accounts.google.com",
+			ClientID:     "client-a2",
+		}); !errors.Is(err, repository.ErrConflict) {
+			t.Errorf("dup issuer same tenant: want ErrConflict got %v", err)
+		}
+
+		// Same issuer across tenants -> allowed.
+		if _, err := cr.Create(bgCtx(), t2.ID, repository.IDPConfig{
+			ProviderType: repository.IDPProviderGoogleWorkspace,
+			IssuerURL:    "https://accounts.google.com",
+			ClientID:     "client-b",
+		}); err != nil {
+			t.Errorf("same issuer across tenants: %v", err)
+		}
+
+		// Invalid provider_type rejected before hitting the CHECK.
+		if _, err := cr.Create(bgCtx(), t1.ID, repository.IDPConfig{
+			ProviderType: repository.IDPProviderType("bogus"),
+			IssuerURL:    "https://other.example.com",
+			ClientID:     "c",
+		}); !errors.Is(err, repository.ErrInvalidArgument) {
+			t.Errorf("bad provider_type: want ErrInvalidArgument got %v", err)
+		}
+
+		// List is tenant-scoped: t1 sees exactly its one config.
+		list, err := cr.List(bgCtx(), t1.ID)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(list) != 1 || list[0].ID != cfg.ID {
+			t.Errorf("list scope: want [%v] got %+v", cfg.ID, list)
+		}
+
+		// Update toggles enabled and persists.
+		cfg.Enabled = false
+		cfg.ClientID = "client-a-rotated"
+		updated, err := cr.Update(bgCtx(), t1.ID, cfg)
+		if err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if updated.Enabled || updated.ClientID != "client-a-rotated" {
+			t.Errorf("update not applied: %+v", updated)
+		}
+
+		// Delete, then it is gone.
+		if err := cr.Delete(bgCtx(), t1.ID, cfg.ID); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+		if _, err := cr.Get(bgCtx(), t1.ID, cfg.ID); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("get after delete: want ErrNotFound got %v", err)
+		}
+		if err := cr.Delete(bgCtx(), t1.ID, cfg.ID); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("delete missing: want ErrNotFound got %v", err)
+		}
+	})
+
 	t.Run("User_CaseInsensitive_Email", func(t *testing.T) {
 		tr := store.NewTenantRepository()
 		ur := store.NewUserRepository()

@@ -15,6 +15,7 @@ package repository
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"time"
 
@@ -1676,4 +1677,61 @@ type TroubleshootSession struct {
 	DiagnosticResults json.RawMessage // []DiagnosticResult as JSON
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+}
+
+// IDPProviderType enumerates the OIDC identity-provider families a
+// tenant can federate for mobile native SSO. Mirrors the CHECK
+// constraint on idp_configs.provider_type and the OpenAPI enum.
+type IDPProviderType string
+
+const (
+	IDPProviderGoogleWorkspace IDPProviderType = "google_workspace"
+	IDPProviderMicrosoft365    IDPProviderType = "microsoft365"
+	IDPProviderZoho            IDPProviderType = "zoho"
+	IDPProviderOkta            IDPProviderType = "okta"
+	IDPProviderCustomOIDC      IDPProviderType = "custom_oidc"
+)
+
+// IDPProviderTypes is the set of recognised provider families, used
+// by both repository backends to reject invalid values before they
+// reach the postgres CHECK constraint.
+var IDPProviderTypes = map[IDPProviderType]bool{
+	IDPProviderGoogleWorkspace: true,
+	IDPProviderMicrosoft365:    true,
+	IDPProviderZoho:            true,
+	IDPProviderOkta:            true,
+	IDPProviderCustomOIDC:      true,
+}
+
+// ValidateIDPProviderType returns ErrInvalidArgument when t is not a
+// recognised provider family.
+func ValidateIDPProviderType(t IDPProviderType) error {
+	if !IDPProviderTypes[t] {
+		return fmt.Errorf("%w: invalid idp provider_type %q", ErrInvalidArgument, t)
+	}
+	return nil
+}
+
+// IDPConfig is a per-tenant OIDC provider configuration. The control
+// plane uses it to validate mobile-presented ID tokens: the token's
+// `iss` must equal IssuerURL, its `aud` must contain ClientID, and —
+// when AllowedDomains is non-empty — the verified email/hosted-domain
+// must fall within the allow-list. Only validation material is
+// persisted; OIDC tokens are never stored.
+type IDPConfig struct {
+	ID           uuid.UUID
+	TenantID     uuid.UUID
+	ProviderType IDPProviderType
+	IssuerURL    string
+	ClientID     string
+	// AllowedDomains restricts which email / hosted domains may
+	// federate. Empty means "any domain the provider asserts".
+	AllowedDomains []string
+	// GroupClaimPath is the dotted path to the groups/roles claim in
+	// the ID token (e.g. "groups" or "https://acme.com/roles"). Empty
+	// disables group mapping.
+	GroupClaimPath string
+	Enabled        bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
