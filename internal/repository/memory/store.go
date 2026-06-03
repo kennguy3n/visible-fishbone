@@ -128,6 +128,9 @@ type Store struct {
 	policyReviewSchedules map[uuid.UUID]repository.PolicyReviewSchedule
 	opsHealthSnapshots    map[uuid.UUID]repository.OpsHealthSnapshot
 
+	// IdP federation configs — see migration 034. Tenant-scoped.
+	idpConfigs map[uuid.UUID]repository.IDPConfig
+
 	// clock is injected for deterministic tests. Defaults to
 	// time.Now.UTC.
 	clock func() time.Time
@@ -198,6 +201,7 @@ func NewStore() *Store {
 		playbookApprovals:     map[uuid.UUID]repository.PlaybookApproval{},
 		policyReviewSchedules: map[uuid.UUID]repository.PolicyReviewSchedule{},
 		opsHealthSnapshots:    map[uuid.UUID]repository.OpsHealthSnapshot{},
+		idpConfigs:            map[uuid.UUID]repository.IDPConfig{},
 		clock:                 func() time.Time { return time.Now().UTC() },
 	}
 }

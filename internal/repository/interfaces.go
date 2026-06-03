@@ -1150,3 +1150,26 @@ type TroubleshootSessionRepository interface {
 	Update(ctx context.Context, tenantID, id uuid.UUID, s TroubleshootSession) (TroubleshootSession, error)
 	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[TroubleshootSession], error)
 }
+
+// --- IdP Federation -------------------------------------------------------
+
+// IDPConfigRepository owns the idp_configs table — per-tenant OIDC
+// provider configurations for mobile native SSO. All operations are
+// tenant-isolated via the sng.tenant_id GUC / RLS.
+type IDPConfigRepository interface {
+	// Create inserts a new provider config. Returns ErrConflict when
+	// the (tenant_id, issuer_url) pair already exists and
+	// ErrInvalidArgument for an unknown provider_type.
+	Create(ctx context.Context, tenantID uuid.UUID, c IDPConfig) (IDPConfig, error)
+	// Get returns a single config by id. Returns ErrNotFound when the
+	// config does not exist within the tenant.
+	Get(ctx context.Context, tenantID, id uuid.UUID) (IDPConfig, error)
+	// List returns every config for the tenant, newest first.
+	List(ctx context.Context, tenantID uuid.UUID) ([]IDPConfig, error)
+	// Update applies a full replacement of the mutable fields
+	// (provider_type, issuer_url, client_id, allowed_domains,
+	// group_claim_path, enabled). Returns ErrNotFound when absent.
+	Update(ctx context.Context, tenantID uuid.UUID, c IDPConfig) (IDPConfig, error)
+	// Delete removes a config. Returns ErrNotFound when absent.
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+}

@@ -169,6 +169,11 @@ func (s *Store) NewTroubleshootSessionRepository() *TroubleshootSessionRepositor
 	return &TroubleshootSessionRepository{s: s}
 }
 
+// NewIDPConfigRepository binds the Store to repository.IDPConfigRepository.
+func (s *Store) NewIDPConfigRepository() *IDPConfigRepository {
+	return &IDPConfigRepository{s: s}
+}
+
 // Compile-time interface compliance asserts. Keeping these in this
 // file means a single grep tells us "did the postgres package
 // implement every interface?" without scanning eight files.
@@ -209,4 +214,5 @@ var (
 	_ repository.AISuggestionRepository         = (*AISuggestionRepository)(nil)
 	_ repository.KBEntryRepository              = (*KBEntryRepository)(nil)
 	_ repository.TroubleshootSessionRepository  = (*TroubleshootSessionRepository)(nil)
+	_ repository.IDPConfigRepository            = (*IDPConfigRepository)(nil)
 )

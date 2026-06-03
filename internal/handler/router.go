@@ -38,6 +38,7 @@ type RouterDeps struct {
 	Compliance       *ComplianceHandler
 	Playbook         *PlaybookHandler
 	Troubleshoot     *TroubleshootHandler
+	OIDC             *OIDCHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
 	RateLimiter      *middleware.RateLimiter
@@ -67,6 +68,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.Devices != nil {
 		deps.Devices.RegisterPublic(publicMux)
+	}
+	if deps.OIDC != nil {
+		deps.OIDC.RegisterPublic(publicMux)
 	}
 
 	apiMux := http.NewServeMux()
@@ -148,6 +152,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.Troubleshoot != nil {
 		deps.Troubleshoot.Register(apiMux)
 	}
+	if deps.OIDC != nil {
+		deps.OIDC.Register(apiMux)
+	}
 
 	apiChain := middleware.Chain(
 		middleware.Auth(&deps.Config.Auth, deps.APIKeyLookup),
@@ -160,6 +167,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 	root.Handle("/api/v1/docs", publicMux)
 	root.Handle("/api/v1/openapi.yaml", publicMux)
 	root.Handle("/api/v1/enroll", publicMux)
+	// Mobile native-SSO bootstrap endpoints are public (the agent has
+	// no SNG session yet); these specific patterns take precedence
+	// over the catch-all authed /api/v1/ handler below.
+	root.Handle("/api/v1/tenants/{tenant_id}/auth/mobile/token", publicMux)
+	root.Handle("/api/v1/tenants/{tenant_id}/auth/mobile/refresh", publicMux)
 	root.Handle("/api/v1/", authedAPI)
 	root.Handle("/scim/", authedAPI)
 

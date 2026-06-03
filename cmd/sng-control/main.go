@@ -624,6 +624,29 @@ func buildRouter(
 		store.NewTroubleshootSessionRepository(), troubleshootAssistant, nil)
 	troubleshootHandler := handler.NewTroubleshootHandler(troubleshootSessions, troubleshootKB, troubleshootEngine)
 
+	// --- Mobile IdP federation wiring (Session 5) --------------------
+	// Per-tenant OIDC provider configs + the public mobile native-SSO
+	// token/refresh endpoints. The OIDCService mints SNG sessions
+	// signed with the same HMAC secret / iss / aud as operator-console
+	// tokens so the standard auth middleware accepts them; the session
+	// is bound to both the device key and the OIDC subject.
+	idpConfigRepo := store.NewIDPConfigRepository()
+	oidcSvc := identity.NewOIDCService(
+		idpConfigRepo, userRepo, auditRepo,
+		identity.SessionSigner{
+			Secret:   []byte(cfg.Auth.JWTSecret),
+			Issuer:   cfg.Auth.JWTIssuer,
+			Audience: cfg.Auth.JWTAudience,
+		},
+		identity.OIDCOptions{
+			SessionTTL:        cfg.MobileAuth.SessionTokenTTL,
+			DiscoveryCacheTTL: cfg.MobileAuth.DiscoveryCacheTTL,
+			AutoProvision:     cfg.MobileAuth.AutoProvisionUsers,
+		},
+		logger,
+	)
+	oidcHandler := handler.NewOIDCHandler(idpConfigRepo, oidcSvc, cfg.MobileAuth.MaxProvidersPerTenant)
+
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:  cfg,
 		Logger:  logger,
@@ -652,6 +675,7 @@ func buildRouter(
 		Compliance:       complianceHandler,
 		Playbook:         playbookHandler,
 		Troubleshoot:     troubleshootHandler,
+		OIDC:             oidcHandler,
 		APIKeyLookup:     apiKeySvc,
 		Health:           health,
 		OpenAPISpec:      handler.NewOpenAPIHandler(),
