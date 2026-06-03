@@ -262,6 +262,19 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_addr_stays_bracketed() {
+        // `url::Url::host_str` already returns IPv6 literals in their
+        // bracketed `[..]` form, so `control_plane_addr` yields the
+        // RFC-3986 `[host]:port` shape that `sng_comms`'s
+        // `parse_host_port` requires — never an ambiguous, unbracketed
+        // `host:port` that would be split at the wrong colon.
+        let mut cfg = valid_config();
+        cfg.control_plane_url = "https://[2001:db8::1]:8443".into();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.control_plane_addr().unwrap(), "[2001:db8::1]:8443");
+    }
+
+    #[test]
     fn non_https_url_rejected() {
         let mut cfg = valid_config();
         cfg.control_plane_url = "http://cp.example.com".into();
