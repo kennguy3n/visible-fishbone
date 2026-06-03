@@ -59,6 +59,7 @@ func clearAll(t *testing.T) {
 		"INTEGRATION_WORKER_POLL_INTERVAL", "INTEGRATION_WORKER_PROCESSING_TIMEOUT",
 		"AUTH_JWT_SECRET", "AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "AUTH_ACCESS_TOKEN_TTL", "AUTH_CLAIM_TOKEN_TTL", "AUTH_API_KEY_HEADER",
 		"OTEL_EXPORTER_OTLP_ENDPOINT", "SERVICE_VERSION",
+		"METRICS_ENABLED", "METRICS_PORT", "METRICS_NAMESPACE",
 	}
 	for _, k := range keys {
 		k := k
@@ -176,6 +177,102 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Integration.ProcessingTimeout != 5*time.Minute {
 		t.Errorf("Integration.ProcessingTimeout = %s, want 5m", cfg.Integration.ProcessingTimeout)
 	}
+	// Metrics defaults: enabled, port 9090, namespace "sng".
+	if !cfg.Metrics.Enabled {
+		t.Error("Metrics.Enabled default should be true")
+	}
+	if cfg.Metrics.Port != 9090 {
+		t.Errorf("Metrics.Port = %d, want 9090", cfg.Metrics.Port)
+	}
+	if cfg.Metrics.Namespace != "sng" {
+		t.Errorf("Metrics.Namespace = %q, want sng", cfg.Metrics.Namespace)
+	}
+}
+
+// TestLoadMetricsValidation exercises the strict parsing and
+// validation of the METRICS_* knobs added for the observability
+// stack.
+func TestLoadMetricsValidation(t *testing.T) {
+	loadIn := func(t *testing.T) (Config, error) {
+		t.Helper()
+		tmp := t.TempDir()
+		wd, _ := os.Getwd()
+		if err := os.Chdir(tmp); err != nil {
+			t.Fatalf("chdir: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(wd) })
+		return Load()
+	}
+
+	t.Run("overrides", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("METRICS_PORT", "9123")
+		t.Setenv("METRICS_NAMESPACE", "acme")
+		cfg, err := loadIn(t)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Metrics.Port != 9123 {
+			t.Errorf("Metrics.Port = %d, want 9123", cfg.Metrics.Port)
+		}
+		if cfg.Metrics.Namespace != "acme" {
+			t.Errorf("Metrics.Namespace = %q, want acme", cfg.Metrics.Namespace)
+		}
+	})
+
+	t.Run("disabled skips port validation", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("METRICS_ENABLED", "false")
+		// Collide with HTTP port — must be tolerated when disabled.
+		t.Setenv("METRICS_PORT", "8080")
+		cfg, err := loadIn(t)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Metrics.Enabled {
+			t.Error("Metrics.Enabled should be false")
+		}
+	})
+
+	t.Run("port collision rejected when enabled", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("METRICS_PORT", "8080") // == default HTTP_PORT
+		if _, err := loadIn(t); err == nil {
+			t.Fatal("expected error for METRICS_PORT == HTTP_PORT")
+		}
+	})
+
+	t.Run("out of range port rejected", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("METRICS_PORT", "70000")
+		if _, err := loadIn(t); err == nil {
+			t.Fatal("expected error for out-of-range METRICS_PORT")
+		}
+	})
+
+	t.Run("non-integer port rejected", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("METRICS_PORT", "not-a-number")
+		if _, err := loadIn(t); err == nil {
+			t.Fatal("expected error for non-integer METRICS_PORT")
+		}
+	})
+
+	t.Run("invalid namespace rejected", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("METRICS_NAMESPACE", "1bad-ns")
+		if _, err := loadIn(t); err == nil {
+			t.Fatal("expected error for invalid METRICS_NAMESPACE")
+		}
+	})
+
+	t.Run("non-boolean enabled rejected", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("METRICS_ENABLED", "yes")
+		if _, err := loadIn(t); err == nil {
+			t.Fatal("expected error for non-boolean METRICS_ENABLED")
+		}
+	})
 }
 
 // TestIntegrationWorkerEnvOverridesReachConfig verifies the
@@ -476,10 +573,14 @@ func TestDotEnvLoading(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(wd) })
 
 	envFile := filepath.Join(tmp, ".env")
+	// METRICS_PORT is moved off its 9090 default here because this
+	// test pins HTTP_PORT=9090; the strict validator rejects a
+	// metrics port co-located with the public API port.
 	contents := `# Test env
 APP_NAME=from-dotenv
 LOG_LEVEL="debug"
 HTTP_PORT=9090
+METRICS_PORT=9091
 `
 	if err := os.WriteFile(envFile, []byte(contents), 0o600); err != nil {
 		t.Fatalf("write .env: %v", err)

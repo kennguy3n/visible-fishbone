@@ -1,0 +1,29 @@
+# Grafana dashboard provisioning for the ShieldNet Gateway control
+# plane. Mount this file under Grafana's provisioning directory
+# (default /etc/grafana/provisioning/dashboards/) and mount the
+# dashboard JSON next to the configured path below, e.g.:
+#
+#   volumes:
+#     - ./deploy/grafana/provisioning:/etc/grafana/provisioning/dashboards
+#     - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards/sng
+#
+# Grafana then auto-loads every dashboard JSON in that folder on
+# startup and keeps it in sync (updateIntervalSeconds) without any
+# manual import. The dashboards reference a datasource by the
+# template variable ${DS_PROMETHEUS}, so they bind to whichever
+# Prometheus datasource the operator selects (or the default).
+apiVersion: 1
+
+providers:
+  - name: sng
+    orgId: 1
+    folder: ShieldNet Gateway
+    folderUid: sng
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/sng
+      foldersFromFilesStructure: false
