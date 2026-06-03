@@ -321,9 +321,17 @@ func (s *OIDCService) validateIDToken(ctx context.Context, cfg repository.IDPCon
 		return key, nil
 	}
 
+	// Validate `iss` against the discovery document's authoritative
+	// issuer rather than the operator-entered (and trailing-slash
+	// normalized) cfg.IssuerURL. jwt.WithIssuer is an EXACT match, and a
+	// token's `iss` must exactly equal the provider's canonical issuer —
+	// which for some IdPs legitimately ends in "/" (e.g. Azure AD v1
+	// https://sts.windows.net/{tid}/). fetchDiscovery already verified
+	// disc.doc.Issuer matches cfg.IssuerURL modulo trailing slash, so
+	// this is the trustworthy canonical form to compare against.
 	claims := jwt.MapClaims{}
 	tok, err := jwt.ParseWithClaims(idToken, claims, keyFunc,
-		jwt.WithIssuer(strings.TrimRight(cfg.IssuerURL, "/")),
+		jwt.WithIssuer(disc.doc.Issuer),
 		jwt.WithAudience(cfg.ClientID),
 		jwt.WithValidMethods(idTokenSigningMethods),
 		jwt.WithExpirationRequired(),

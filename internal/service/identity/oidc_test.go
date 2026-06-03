@@ -33,6 +33,10 @@ type mockIDP struct {
 	discoveryN  int64 // discovery-doc fetch count (atomic)
 	jwksN       int64 // jwks fetch count (atomic)
 	tokenIDFunc func() string
+	// issuerSuffix is appended to the issuer identifier (but not the
+	// endpoint URLs) so a test can model an IdP whose canonical issuer
+	// legitimately ends in "/" (e.g. Azure AD v1).
+	issuerSuffix string
 }
 
 func newMockIDP(t *testing.T, clientID string) *mockIDP {
@@ -48,8 +52,8 @@ func newMockIDP(t *testing.T, clientID string) *mockIDP {
 		atomic.AddInt64(&m.discoveryN, 1)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"issuer":         m.issuer(),
-			"jwks_uri":       m.issuer() + "/jwks",
-			"token_endpoint": m.issuer() + "/token",
+			"jwks_uri":       m.base() + "/jwks",
+			"token_endpoint": m.base() + "/token",
 		})
 	})
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
@@ -80,7 +84,12 @@ func newMockIDP(t *testing.T, clientID string) *mockIDP {
 	return m
 }
 
-func (m *mockIDP) issuer() string { return m.server.URL }
+// base is the server origin used to build endpoint URLs.
+func (m *mockIDP) base() string { return m.server.URL }
+
+// issuer is the canonical issuer identifier, which may carry a trailing
+// slash via issuerSuffix even though the endpoints hang off base().
+func (m *mockIDP) issuer() string { return m.server.URL + m.issuerSuffix }
 
 // sign mints an ID token with the given claims, defaulting iss/aud/exp.
 func (m *mockIDP) sign(t *testing.T, claims jwt.MapClaims) string {
@@ -209,6 +218,34 @@ func TestIssueSessionFromIDToken_AutoProvision(t *testing.T) {
 	}
 	if claims["iss"] != "sng" || claims["aud"] != "sng-clients" {
 		t.Errorf("session iss/aud = %v/%v", claims["iss"], claims["aud"])
+	}
+}
+
+// TestIssueSessionFromIDToken_TrailingSlashIssuer locks in that a token
+// from a provider whose canonical issuer ends in "/" still validates,
+// even though the stored config issuer is normalized without the slash.
+// jwt.WithIssuer is an exact match, so validateIDToken must compare
+// against the discovery document's authoritative issuer (with the
+// slash), not the normalized cfg.IssuerURL.
+func TestIssueSessionFromIDToken_TrailingSlashIssuer(t *testing.T) {
+	f := newOIDCFixture(t, OIDCOptions{AutoProvision: true})
+	idp := newMockIDP(t, "client-ts")
+	idp.issuerSuffix = "/" // provider's canonical issuer ends in "/"
+	// The stored config issuer is the normalized (no trailing slash)
+	// form, as createConfig would persist it.
+	f.seedConfig(t, repository.IDPConfig{
+		ProviderType: repository.IDPProviderMicrosoft365,
+		IssuerURL:    idp.base(),
+		ClientID:     "client-ts",
+		Enabled:      true,
+	})
+	// Token's iss carries the trailing slash (set by default via issuer()).
+	idToken := idp.sign(t, jwt.MapClaims{"sub": "ms|9", "email": "carol@acme.com"})
+	if _, err := f.svc.IssueSessionFromIDToken(context.Background(), f.tenantID, TokenExchangeInput{
+		IDToken:         idToken,
+		DevicePublicKey: "ZGV2",
+	}); err != nil {
+		t.Fatalf("issue session for trailing-slash issuer: %v", err)
 	}
 }
 
