@@ -681,8 +681,20 @@ fn validate_ha(ha: &HaConfig) -> Result<(), String> {
     if ha.peer_address.is_none() {
         return Err("ha.peer_address is required when ha.enabled".into());
     }
-    if ha.virtual_ip.is_none() {
-        return Err("ha.virtual_ip is required when ha.enabled".into());
+    match ha.virtual_ip {
+        Some(vip) => {
+            // Match the family-aware bound in `sng_ha::VipSpec::validate`
+            // so the operator gets a ConfigError at load time rather
+            // than an HaError at subsystem build time.
+            let max = if vip.is_ipv4() { 32 } else { 128 };
+            if ha.virtual_ip_prefix_len > max {
+                return Err(format!(
+                    "ha.virtual_ip_prefix_len /{} is out of range for the VIP address family (max /{max})",
+                    ha.virtual_ip_prefix_len
+                ));
+            }
+        }
+        None => return Err("ha.virtual_ip is required when ha.enabled".into()),
     }
     if ha.priority == 0 {
         return Err("ha.priority must be in 1..=255 (0 is the VRRP release signal)".into());
@@ -1148,6 +1160,72 @@ event_channel_capacity = 0
             message.contains("ips.event_channel_capacity"),
             "message did not name the bad field: {message}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_ha_vip_prefix_len() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[ha]
+enabled               = true
+local_address         = "192.168.9.2"
+peer_address          = "192.168.9.3"
+virtual_ip            = "192.168.9.1"
+virtual_ip_prefix_len = 33
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("ha.virtual_ip_prefix_len"),
+            "message did not name the bad field: {message}"
+        );
+    }
+
+    #[test]
+    fn enabled_ha_block_with_valid_fields_loads() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[ha]
+enabled       = true
+local_address = "192.168.9.2"
+peer_address  = "192.168.9.3"
+virtual_ip    = "192.168.9.1"
+priority      = 150
+"#,
+        )
+        .unwrap();
+        let cfg = load_from_path(f.path()).expect("valid HA config should load");
+        assert!(cfg.ha.enabled);
+        assert_eq!(cfg.ha.priority, 150);
+        assert_eq!(cfg.ha.virtual_ip_prefix_len, 24);
     }
 
     #[test]

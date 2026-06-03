@@ -68,8 +68,8 @@ pub use state_sync::{
 };
 pub use vip::{NoopVipManager, ShellVipManager, VipManager, VipSpec};
 pub use vrrp::{
-    AdvertisementChannel, MulticastChannel, RoleChange, Transition, VrrpAdvertisement, VrrpConfig,
-    VrrpEvent, VrrpInstance, VrrpState,
+    AdvertisementChannel, MasterDown, MulticastChannel, RoleChange, Transition, VrrpAdvertisement,
+    VrrpConfig, VrrpEvent, VrrpInstance, VrrpState,
 };
 
 use std::net::IpAddr;
@@ -262,7 +262,7 @@ impl HaController {
     where
         F: ShutdownGate,
     {
-        let mut vrrp = VrrpInstance::new(self.settings.vrrp.clone())?;
+        let mut vrrp = VrrpInstance::new(self.settings.vrrp.clone(), self.settings.local_addr)?;
         self.stats.set_role(vrrp.state());
 
         // Leaving Initialize: an address owner promotes immediately.
@@ -301,23 +301,31 @@ impl HaController {
                     match recv {
                         Ok(adv) => {
                             self.stats.advertisements_received.fetch_add(1, Ordering::Relaxed);
-                            let resets = vrrp.resets_master_down_timer(&adv);
-                            let release = adv.priority == vrrp::PRIORITY_RELEASE
-                                && adv.virtual_router_id == vrrp.virtual_router_id();
                             let t = vrrp.handle(&VrrpEvent::Advertisement(adv));
+                            let directive = t.master_down;
+                            let role_changed = t.role_change.is_some();
                             self.apply_transition(&vrrp, t).await?;
-                            // Re-arm the master-down timer: a live
-                            // master pushes it out a full interval; a
-                            // release shortens it to the skew so we
-                            // promote promptly; a promotion/demotion
-                            // is handled by arm_master_down's state
-                            // check.
-                            next_master_down = if release && vrrp.state() == VrrpState::Backup {
-                                Instant::now() + vrrp.skew_time()
-                            } else if resets {
-                                Instant::now() + vrrp.master_down_interval()
-                            } else {
-                                Self::arm_master_down(&vrrp)
+                            // The state machine tells us exactly what
+                            // to do with the master-down timer, so the
+                            // timer decision can never disagree with the
+                            // election decision (which is what made
+                            // preempt mode break before):
+                            //   * ResetFull — heard an acceptable Master.
+                            //   * ResetSkew — Master is releasing; promote
+                            //     promptly.
+                            //   * Leave     — don't touch the deadline, so
+                            //     a preempting Backup's timer runs out;
+                            //     unless we just changed role, in which
+                            //     case re-arm by the new state (a demotion
+                            //     starts a fresh interval, a promotion
+                            //     disables it).
+                            next_master_down = match directive {
+                                MasterDown::ResetSkew => Instant::now() + vrrp.skew_time(),
+                                MasterDown::ResetFull => {
+                                    Instant::now() + vrrp.master_down_interval()
+                                }
+                                MasterDown::Leave if role_changed => Self::arm_master_down(&vrrp),
+                                MasterDown::Leave => next_master_down,
                             };
                         }
                         Err(e) => {
@@ -389,7 +397,7 @@ impl HaController {
     /// A send failure is logged, not fatal — the next interval
     /// re-asserts.
     async fn send_advertisement(&self, vrrp: &VrrpInstance) {
-        let adv = vrrp.advertisement(self.settings.local_addr);
+        let adv = vrrp.advertisement();
         let frame = adv.encode();
         match self.channel.send(&frame).await {
             Ok(()) => {
@@ -622,6 +630,63 @@ mod tests {
             "should never promote behind a higher-priority master"
         );
         assert!(recorder.events().is_empty(), "should never touch the VIP");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn higher_priority_backup_preempts_lower_priority_master() {
+        // BUG-0001 regression at the controller level: a priority-200
+        // Backup that keeps hearing a priority-100 Master must still
+        // promote. With the old `resets_master_down_timer`, the
+        // lower-priority adverts reset the timer forever and preempt
+        // never happened; now the state machine returns
+        // `MasterDown::Leave` so the deadline expires and we take over.
+        let (channel, tx) = TestChannel::new();
+        let recorder = Arc::new(vip::RecordingVipManager::new());
+        let registry = Arc::new(HealthRegistry::new());
+        let queue = Arc::new(SyncQueue::new(16));
+        let controller = HaController::new(
+            settings(200),
+            channel.clone(),
+            recorder.clone(),
+            registry,
+            queue,
+        )
+        .expect("controller");
+        let stats = controller.stats();
+
+        let notify = Arc::new(Notify::new());
+        let gate = NotifyGate {
+            notify: Arc::clone(&notify),
+            fired: false,
+        };
+        let handle = tokio::spawn(async move { controller.run(gate).await });
+
+        // Steady stream of *lower*-priority master adverts.
+        for _ in 0..10 {
+            tx.send(VrrpAdvertisement {
+                virtual_router_id: 5,
+                priority: 100,
+                advertisement_interval: Duration::from_millis(50),
+                source: IpAddr::V4(Ipv4Addr::new(192, 168, 9, 3)),
+            })
+            .await
+            .expect("send");
+            tokio::time::advance(Duration::from_millis(60)).await;
+        }
+
+        notify.notify_one();
+        handle.await.expect("join").expect("run ok");
+
+        let snap = stats.snapshot();
+        assert_eq!(
+            snap.promotions, 1,
+            "higher-priority backup must preempt a lower-priority master"
+        );
+        assert_eq!(
+            recorder.events().first(),
+            Some(&vip::VipEvent::Acquired(settings(200).vip)),
+            "preemption must acquire the VIP"
+        );
     }
 
     #[tokio::test(start_paused = true)]

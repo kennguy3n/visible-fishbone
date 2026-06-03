@@ -99,6 +99,31 @@ pub enum RoleChange {
     Demoted,
 }
 
+/// What a [`Transition`] asks the controller to do with the
+/// Backup master-down timer.
+///
+/// The state machine owns this decision so the controller never
+/// has to second-guess it out-of-band — the timer behaviour and
+/// the role decision always come from the same `on_advertisement`
+/// evaluation, which is what makes preempt mode correct.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum MasterDown {
+    /// Leave the master-down timer exactly as it is. Either the
+    /// event has no bearing on it (a Master's own advertisement
+    /// tick, a foreign-VRID packet, anything received while
+    /// Master) or a Backup is deliberately letting the current
+    /// deadline run out so it preempts a lower-priority Master.
+    #[default]
+    Leave,
+    /// A live, acceptable Master was heard — re-arm to the full
+    /// master-down interval.
+    ResetFull,
+    /// The Master announced it is releasing the role — re-arm to
+    /// the short skew time so this Backup promotes promptly
+    /// instead of waiting out the whole interval.
+    ResetSkew,
+}
+
 /// Outcome of feeding one [`VrrpEvent`] to a [`VrrpInstance`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub struct Transition {
@@ -109,18 +134,22 @@ pub struct Transition {
     /// (a Master's periodic tick, or an immediate re-assert
     /// after hearing a release).
     pub send_advertisement: bool,
+    /// What the controller should do with the master-down timer.
+    pub master_down: MasterDown,
 }
 
 impl Transition {
     const NONE: Self = Self {
         role_change: None,
         send_advertisement: false,
+        master_down: MasterDown::Leave,
     };
 
     const fn send() -> Self {
         Self {
             role_change: None,
             send_advertisement: true,
+            master_down: MasterDown::Leave,
         }
     }
 
@@ -128,6 +157,7 @@ impl Transition {
         Self {
             role_change: Some(RoleChange::Promoted),
             send_advertisement: true,
+            master_down: MasterDown::Leave,
         }
     }
 
@@ -135,7 +165,16 @@ impl Transition {
         Self {
             role_change: Some(RoleChange::Demoted),
             send_advertisement: false,
+            master_down: MasterDown::Leave,
         }
+    }
+
+    /// Override the master-down directive on an otherwise-built
+    /// transition.
+    #[must_use]
+    fn with_master_down(mut self, md: MasterDown) -> Self {
+        self.master_down = md;
+        self
     }
 }
 
@@ -290,21 +329,33 @@ pub struct VrrpInstance {
     config: VrrpConfig,
     state: VrrpState,
     effective_priority: u8,
+    /// This node's own address. Stamped onto outbound
+    /// advertisements and used as the loser's side of the
+    /// equal-priority tie-break (RFC 5798 §6.4.3: higher source
+    /// address wins). Kept on the instance — not [`VrrpConfig`] —
+    /// so the config stays a pure, shareable description while
+    /// the per-node identity lives with the running machine.
+    local_addr: IpAddr,
 }
 
 impl VrrpInstance {
     /// Construct in the `Initialize` state.
     ///
+    /// `local_addr` is this node's own address; it is stamped onto
+    /// outbound advertisements and is the tie-breaker when the peer
+    /// advertises an equal priority.
+    ///
     /// # Errors
     ///
     /// Propagates [`VrrpConfig::validate`].
-    pub fn new(config: VrrpConfig) -> HaResult<Self> {
+    pub fn new(config: VrrpConfig, local_addr: IpAddr) -> HaResult<Self> {
         config.validate()?;
         let effective_priority = config.priority;
         Ok(Self {
             config,
             state: VrrpState::Initialize,
             effective_priority,
+            local_addr,
         })
     }
 
@@ -360,15 +411,21 @@ impl VrrpInstance {
             .saturating_add(self.skew_time())
     }
 
-    /// Build the advertisement this instance would send right
-    /// now, stamped with `source` (its own address).
+    /// This node's own address (advertisement source / tie-break).
     #[must_use]
-    pub fn advertisement(&self, source: IpAddr) -> VrrpAdvertisement {
+    pub fn local_addr(&self) -> IpAddr {
+        self.local_addr
+    }
+
+    /// Build the advertisement this instance would send right
+    /// now, stamped with its own [`local_addr`](Self::local_addr).
+    #[must_use]
+    pub fn advertisement(&self) -> VrrpAdvertisement {
         VrrpAdvertisement {
             virtual_router_id: self.config.virtual_router_id,
             priority: self.effective_priority,
             advertisement_interval: self.config.advertisement_interval,
-            source,
+            source: self.local_addr,
         }
     }
 
@@ -441,36 +498,36 @@ impl VrrpInstance {
             VrrpState::Master => {
                 if self.peer_outranks(&adv) {
                     // A higher-priority (or equal-priority,
-                    // higher-address) Master exists: step down.
+                    // higher-address) Master exists: step down. As a
+                    // Backup the controller re-arms the master-down
+                    // timer off this role change.
                     self.state = VrrpState::Backup;
                     Transition::demote()
                 } else if adv.priority == PRIORITY_RELEASE {
                     // Peer is releasing; re-assert ourselves now.
                     Transition::send()
                 } else {
-                    // Lower-priority chatter — hold the role.
+                    // Lower-priority (or equal, lower-address)
+                    // chatter — hold the role, timer stays disabled.
                     Transition::NONE
                 }
             }
             VrrpState::Backup => {
-                // The caller resets the master-down timer whenever
-                // this returns without a role change. The only
-                // question is whether *this* advertisement should
-                // be allowed to keep us in Backup.
                 if adv.priority == PRIORITY_RELEASE {
-                    // Master is going away — let the (short) skew
-                    // timer fire by NOT treating this as a live
-                    // Master. Caller arms a skew-length timer.
-                    Transition::NONE
+                    // Master is going away — promote after the short
+                    // skew instead of the whole master-down interval.
+                    Transition::NONE.with_master_down(MasterDown::ResetSkew)
                 } else if self.config.preempt_mode && adv.priority < self.effective_priority {
-                    // We outrank this Master and preempt is on:
-                    // ignore it so the master-down timer runs out
-                    // and we take over.
+                    // We strictly outrank this Master and preempt is
+                    // on: leave the master-down timer running so it
+                    // expires and we take the role back. (Equal
+                    // priority is NOT preempted — RFC 5798 §6.4.2
+                    // only preempts a *lower*-priority Master.)
                     Transition::NONE
                 } else {
-                    // A Master we accept — stay Backup. (Caller
-                    // resets the master-down timer.)
-                    Transition::NONE
+                    // A Master we accept — stay Backup and re-arm the
+                    // full master-down interval.
+                    Transition::NONE.with_master_down(MasterDown::ResetFull)
                 }
             }
         }
@@ -478,18 +535,13 @@ impl VrrpInstance {
 
     /// True when `adv` should beat us for the Master role:
     /// strictly higher priority, or equal priority with a higher
-    /// source address (deterministic tie-break).
+    /// source address (deterministic tie-break, RFC 5798 §6.4.3).
+    /// The address comparison prevents two equal-priority Masters
+    /// (the out-of-the-box 100/100 case) from holding the VIP
+    /// simultaneously after a healed partition.
     fn peer_outranks(&self, adv: &VrrpAdvertisement) -> bool {
         adv.priority > self.effective_priority
-    }
-
-    /// Whether a received advertisement counts as "heard a live
-    /// Master" for the purpose of resetting the master-down
-    /// timer. A priority-0 (release) advertisement does not —
-    /// it means the Master is leaving.
-    #[must_use]
-    pub fn resets_master_down_timer(&self, adv: &VrrpAdvertisement) -> bool {
-        adv.virtual_router_id == self.config.virtual_router_id && adv.priority != PRIORITY_RELEASE
+            || (adv.priority == self.effective_priority && adv.source > self.local_addr)
     }
 }
 
@@ -609,12 +661,25 @@ mod tests {
         }
     }
 
+    /// This node's address in the tests. Lower than [`adv`]'s
+    /// source (`10.0.0.2`), so the peer wins an equal-priority
+    /// tie-break by default.
+    const LOCAL: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    fn inst(priority: u8, preempt: bool) -> VrrpInstance {
+        VrrpInstance::new(cfg(priority, preempt), LOCAL).expect("new")
+    }
+
     fn adv(vrid: u8, priority: u8) -> VrrpAdvertisement {
+        adv_from(vrid, priority, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+    }
+
+    fn adv_from(vrid: u8, priority: u8, source: IpAddr) -> VrrpAdvertisement {
         VrrpAdvertisement {
             virtual_router_id: vrid,
             priority,
             advertisement_interval: Duration::from_secs(1),
-            source: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            source,
         }
     }
 
@@ -662,7 +727,7 @@ mod tests {
 
     #[test]
     fn owner_becomes_master_immediately() {
-        let mut vi = VrrpInstance::new(cfg(PRIORITY_OWNER, true)).expect("new");
+        let mut vi = inst(PRIORITY_OWNER, true);
         let t = vi.start();
         assert_eq!(vi.state(), VrrpState::Master);
         assert_eq!(t.role_change, Some(RoleChange::Promoted));
@@ -671,7 +736,7 @@ mod tests {
 
     #[test]
     fn non_owner_starts_backup() {
-        let mut vi = VrrpInstance::new(cfg(100, true)).expect("new");
+        let mut vi = inst(100, true);
         let t = vi.start();
         assert_eq!(vi.state(), VrrpState::Backup);
         assert_eq!(t, Transition::NONE);
@@ -679,7 +744,7 @@ mod tests {
 
     #[test]
     fn backup_promotes_on_master_down() {
-        let mut vi = VrrpInstance::new(cfg(100, true)).expect("new");
+        let mut vi = inst(100, true);
         vi.start();
         let t = vi.handle(&VrrpEvent::MasterDownTimer);
         assert_eq!(vi.state(), VrrpState::Master);
@@ -688,7 +753,7 @@ mod tests {
 
     #[test]
     fn master_steps_down_for_higher_priority_peer() {
-        let mut vi = VrrpInstance::new(cfg(100, true)).expect("new");
+        let mut vi = inst(100, true);
         vi.start();
         vi.handle(&VrrpEvent::MasterDownTimer); // -> Master
         let t = vi.handle(&VrrpEvent::Advertisement(adv(7, 200)));
@@ -698,7 +763,7 @@ mod tests {
 
     #[test]
     fn master_holds_against_lower_priority_peer() {
-        let mut vi = VrrpInstance::new(cfg(200, true)).expect("new");
+        let mut vi = inst(200, true);
         vi.start();
         vi.handle(&VrrpEvent::MasterDownTimer); // -> Master
         let t = vi.handle(&VrrpEvent::Advertisement(adv(7, 100)));
@@ -708,7 +773,7 @@ mod tests {
 
     #[test]
     fn master_reasserts_on_peer_release() {
-        let mut vi = VrrpInstance::new(cfg(200, true)).expect("new");
+        let mut vi = inst(200, true);
         vi.start();
         vi.handle(&VrrpEvent::MasterDownTimer);
         let t = vi.handle(&VrrpEvent::Advertisement(adv(7, PRIORITY_RELEASE)));
@@ -718,7 +783,7 @@ mod tests {
 
     #[test]
     fn advertisement_for_other_vrid_is_ignored() {
-        let mut vi = VrrpInstance::new(cfg(100, true)).expect("new");
+        let mut vi = inst(100, true);
         vi.start();
         vi.handle(&VrrpEvent::MasterDownTimer); // -> Master
         let t = vi.handle(&VrrpEvent::Advertisement(adv(99, 255)));
@@ -728,7 +793,7 @@ mod tests {
 
     #[test]
     fn release_drops_priority_and_emits_when_master() {
-        let mut vi = VrrpInstance::new(cfg(200, true)).expect("new");
+        let mut vi = inst(200, true);
         vi.start();
         vi.handle(&VrrpEvent::MasterDownTimer); // -> Master
         let t = vi.set_released();
@@ -742,7 +807,7 @@ mod tests {
 
     #[test]
     fn clear_released_restores_priority() {
-        let mut vi = VrrpInstance::new(cfg(150, true)).expect("new");
+        let mut vi = inst(150, true);
         vi.set_released();
         assert_eq!(vi.effective_priority(), PRIORITY_RELEASE);
         vi.clear_released();
@@ -750,18 +815,110 @@ mod tests {
     }
 
     #[test]
-    fn release_advertisement_does_not_reset_master_down_timer() {
-        let vi = VrrpInstance::new(cfg(100, true)).expect("new");
-        assert!(vi.resets_master_down_timer(&adv(7, 120)));
-        assert!(!vi.resets_master_down_timer(&adv(7, PRIORITY_RELEASE)));
-        assert!(!vi.resets_master_down_timer(&adv(8, 120)));
+    fn backup_resets_full_master_down_for_acceptable_master() {
+        // A Backup that hears a higher-priority Master accepts it
+        // and re-arms the full master-down interval.
+        let mut vi = inst(100, true);
+        vi.start(); // -> Backup
+        let t = vi.handle(&VrrpEvent::Advertisement(adv(7, 150)));
+        assert_eq!(vi.state(), VrrpState::Backup);
+        assert_eq!(t.master_down, MasterDown::ResetFull);
+        assert!(t.role_change.is_none());
+    }
+
+    #[test]
+    fn backup_preempts_lower_priority_master_by_leaving_timer() {
+        // BUG-0001 regression: a higher-priority Backup with preempt
+        // on must NOT reset its master-down timer when it hears a
+        // lower-priority Master — otherwise it can never take over.
+        let mut vi = inst(200, true);
+        vi.start(); // -> Backup
+        let t = vi.handle(&VrrpEvent::Advertisement(adv(7, 100)));
+        assert_eq!(vi.state(), VrrpState::Backup);
+        assert_eq!(
+            t.master_down,
+            MasterDown::Leave,
+            "preempting Backup must leave its master-down timer running"
+        );
+    }
+
+    #[test]
+    fn backup_without_preempt_accepts_lower_priority_master() {
+        // With preempt off, even a higher-priority Backup yields to a
+        // live lower-priority Master and re-arms the full interval.
+        let mut vi = inst(200, false);
+        vi.start(); // -> Backup
+        let t = vi.handle(&VrrpEvent::Advertisement(adv(7, 100)));
+        assert_eq!(vi.state(), VrrpState::Backup);
+        assert_eq!(t.master_down, MasterDown::ResetFull);
+    }
+
+    #[test]
+    fn backup_equal_priority_master_is_accepted_not_preempted() {
+        // Equal priority is never preempted (RFC 5798 §6.4.2 only
+        // preempts a strictly lower-priority Master), so two
+        // default-100 peers do not both try to be Master.
+        let mut vi = inst(100, true);
+        vi.start(); // -> Backup
+        let t = vi.handle(&VrrpEvent::Advertisement(adv(7, 100)));
+        assert_eq!(vi.state(), VrrpState::Backup);
+        assert_eq!(t.master_down, MasterDown::ResetFull);
+    }
+
+    #[test]
+    fn backup_arms_skew_on_peer_release() {
+        let mut vi = inst(100, true);
+        vi.start(); // -> Backup
+        let t = vi.handle(&VrrpEvent::Advertisement(adv(7, PRIORITY_RELEASE)));
+        assert_eq!(vi.state(), VrrpState::Backup);
+        assert_eq!(t.master_down, MasterDown::ResetSkew);
+    }
+
+    #[test]
+    fn backup_leaves_timer_for_foreign_vrid() {
+        // A packet for another virtual router must not touch our
+        // master-down timer.
+        let mut vi = inst(100, true);
+        vi.start(); // -> Backup
+        let t = vi.handle(&VrrpEvent::Advertisement(adv(99, 200)));
+        assert_eq!(vi.state(), VrrpState::Backup);
+        assert_eq!(t.master_down, MasterDown::Leave);
+        assert_eq!(t, Transition::NONE);
+    }
+
+    #[test]
+    fn equal_priority_master_steps_down_for_higher_source_address() {
+        // BUG-0002 regression: two equal-priority Masters must not
+        // split-brain. The one with the lower address steps down.
+        let mut low =
+            VrrpInstance::new(cfg(100, true), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).expect("new");
+        low.start();
+        low.handle(&VrrpEvent::MasterDownTimer); // -> Master
+        let peer = adv_from(7, 100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
+        let t = low.handle(&VrrpEvent::Advertisement(peer));
+        assert_eq!(low.state(), VrrpState::Backup);
+        assert_eq!(t.role_change, Some(RoleChange::Demoted));
+    }
+
+    #[test]
+    fn equal_priority_master_holds_against_lower_source_address() {
+        // The mirror image: the higher-address node keeps the role
+        // when it hears an equal-priority, lower-address peer.
+        let mut high =
+            VrrpInstance::new(cfg(100, true), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))).expect("new");
+        high.start();
+        high.handle(&VrrpEvent::MasterDownTimer); // -> Master
+        let peer = adv_from(7, 100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let t = high.handle(&VrrpEvent::Advertisement(peer));
+        assert_eq!(high.state(), VrrpState::Master);
+        assert_eq!(t, Transition::NONE);
     }
 
     #[test]
     fn master_down_interval_uses_three_intervals_plus_skew() {
         // skew = (256 - priority)/256 * interval; master-down =
         // 3 * interval + skew (RFC 5798 §6.1).
-        let low = VrrpInstance::new(cfg(128, true)).expect("new");
+        let low = inst(128, true);
         // skew = (256-128)/256 * 1s = 0.5s => 3.5s
         assert_eq!(low.skew_time(), Duration::from_millis(500));
         assert_eq!(low.master_down_interval(), Duration::from_millis(3500));
@@ -769,7 +926,7 @@ mod tests {
         // A higher priority yields a shorter skew, so the
         // higher-priority node always has the earlier deadline and
         // wins a simultaneous start.
-        let high = VrrpInstance::new(cfg(200, true)).expect("new");
+        let high = inst(200, true);
         assert!(high.master_down_interval() < low.master_down_interval());
         assert_eq!(
             high.master_down_interval(),

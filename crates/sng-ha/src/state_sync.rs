@@ -192,6 +192,35 @@ impl SyncQueue {
         // so it cannot truncate.
     }
 
+    /// Atomically drain up to `max` records *and* take (read-and-clear)
+    /// the lagged latch in a single lock acquisition.
+    ///
+    /// Returns `(was_lagged, records)`. Because [`push`](Self::push)
+    /// also sets the latch while holding this same lock, taking it
+    /// here closes the read-then-clear race that
+    /// `drain` + `is_lagged` + `reset_lagged` had: an eviction that
+    /// happens concurrently is either observed by this call (and so
+    /// delivered to the passive) or lands after the lock is released
+    /// (so the latch stays set for the next flush). Either way the
+    /// lag signal is never silently dropped.
+    pub fn drain_with_lag(&self, max: usize) -> (bool, Vec<SyncRecord>) {
+        let mut q = self.inner.lock();
+        let lagged = self.lagged.swap(false, Ordering::AcqRel);
+        let n = q.len().min(max);
+        let drained: Vec<SyncRecord> = q.drain(..n).collect();
+        drop(q);
+        self.drained
+            .fetch_add(drained.len() as u64, Ordering::Relaxed);
+        (lagged, drained)
+    }
+
+    /// Re-arm the lagged latch (used to put back a signal that was
+    /// taken by [`drain_with_lag`](Self::drain_with_lag) but could
+    /// not be delivered because there was nothing else to flush).
+    pub fn mark_lagged(&self) {
+        self.lagged.store(true, Ordering::Release);
+    }
+
     /// Current queue depth.
     #[must_use]
     pub fn depth(&self) -> usize {
@@ -340,18 +369,26 @@ pub async fn pump_to_writer<W>(queue: &SyncQueue, writer: &mut W, batch: usize) 
 where
     W: AsyncWrite + Unpin + Send,
 {
-    let records = queue.drain(batch);
+    // Take the lagged latch together with the batch under one lock,
+    // so a concurrent eviction can never have its lag signal cleared
+    // without being delivered.
+    let (lagged, records) = queue.drain_with_lag(batch);
     if records.is_empty() {
+        // Nothing to flush. If we took a lag signal anyway, put it
+        // back so the next non-empty flush carries the marker instead
+        // of dropping it on the floor.
+        if lagged {
+            queue.mark_lagged();
+        }
         return Ok(0);
     }
     let mut written = 0;
-    if queue.is_lagged() {
+    if lagged {
         let frame = encode_frame(&SyncRecord::Lagged)?;
         writer
             .write_all(&frame)
             .await
             .map_err(|e| HaError::Socket(format!("write lagged marker: {e}")))?;
-        queue.reset_lagged();
     }
     for record in records {
         let frame = encode_frame(&record)?;
@@ -529,5 +566,40 @@ mod tests {
         let records = applier.applied();
         assert_eq!(records.first(), Some(&SyncRecord::Lagged));
         assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn drain_with_lag_takes_latch_atomically() {
+        let q = SyncQueue::new(1);
+        q.push(conntrack(1));
+        q.push(conntrack(2)); // evicts -> lagged latched
+        let (lagged, records) = q.drain_with_lag(16);
+        assert!(lagged, "should report the latched lag");
+        assert_eq!(records, vec![conntrack(2)]);
+        assert!(!q.is_lagged(), "latch consumed by drain_with_lag");
+        // A second take sees no lag and no records.
+        let (lagged2, records2) = q.drain_with_lag(16);
+        assert!(!lagged2);
+        assert!(records2.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pump_rearms_lag_signal_when_nothing_to_flush() {
+        // Lag is latched but the records were already drained
+        // elsewhere, so this flush has nothing to send. The signal
+        // must be preserved for the next non-empty flush, not lost.
+        let q = SyncQueue::new(1);
+        q.push(conntrack(1));
+        q.push(conntrack(2)); // evicts -> lagged latched
+        let _ = q.drain(16); // drain records but leave the latch set
+        assert!(q.is_lagged());
+
+        let (mut active, _passive) = tokio::io::duplex(4096);
+        let written = pump_to_writer(&q, &mut active, 16).await.expect("pump");
+        assert_eq!(written, 0);
+        assert!(
+            q.is_lagged(),
+            "an undeliverable lag signal must be re-armed, not dropped"
+        );
     }
 }
