@@ -37,6 +37,22 @@ func (r *DeviceRepository) Create(ctx context.Context, tenantID uuid.UUID, d rep
 			return repository.Device{}, repository.ErrInvalidArgument
 		}
 	}
+	// Mirror the partial unique index migration 035 installs in
+	// Postgres (uq_devices_tenant_public_key): an Ed25519 device key
+	// is unique within a tenant. Non-empty keys only — multiple
+	// keyless devices (e.g. bulk CSV imports) are allowed, matching
+	// the `WHERE public_key_ed25519 IS NOT NULL` partial predicate.
+	// Keeping the two backends behaviourally aligned lets the mobile
+	// enrolment idempotency (lookup-then-create with an
+	// ErrConflict-to-update fallback) be exercised without a
+	// container.
+	if d.PublicKeyEd25519 != "" {
+		for _, existing := range r.s.devices {
+			if existing.TenantID == tenantID && existing.PublicKeyEd25519 == d.PublicKeyEd25519 {
+				return repository.Device{}, repository.ErrConflict
+			}
+		}
+	}
 	if d.ID == uuid.Nil {
 		d.ID = uuid.New()
 	}
@@ -62,6 +78,23 @@ func (r *DeviceRepository) Get(ctx context.Context, tenantID, id uuid.UUID) (rep
 		return repository.Device{}, repository.ErrNotFound
 	}
 	return d, nil
+}
+
+func (r *DeviceRepository) GetByPublicKey(ctx context.Context, tenantID uuid.UUID, publicKey string) (repository.Device, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.Device{}, err
+	}
+	if publicKey == "" {
+		return repository.Device{}, repository.ErrNotFound
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	for _, d := range r.s.devices {
+		if d.TenantID == tenantID && d.PublicKeyEd25519 == publicKey {
+			return d, nil
+		}
+	}
+	return repository.Device{}, repository.ErrNotFound
 }
 
 func (r *DeviceRepository) List(ctx context.Context, tenantID uuid.UUID, filter repository.DeviceListFilter, page repository.Page) (repository.PageResult[repository.Device], error) {

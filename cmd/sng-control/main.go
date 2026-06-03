@@ -676,6 +676,7 @@ func buildRouter(
 		Playbook:         playbookHandler,
 		Troubleshoot:     troubleshootHandler,
 		OIDC:             oidcHandler,
+		Mobile:           handler.NewMobileHandler(identitySvc),
 		APIKeyLookup:     apiKeySvc,
 		Health:           health,
 		OpenAPISpec:      handler.NewOpenAPIHandler(),

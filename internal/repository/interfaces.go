@@ -192,6 +192,15 @@ type DeviceListFilter struct {
 type DeviceRepository interface {
 	Create(ctx context.Context, tenantID uuid.UUID, d Device) (Device, error)
 	Get(ctx context.Context, tenantID, id uuid.UUID) (Device, error)
+	// GetByPublicKey resolves the device bound to the given base64
+	// Ed25519 public key within the tenant. Returns ErrNotFound when
+	// no device carries that key (or publicKey is empty). Backs the
+	// device-bound mobile flows, where the session JWT carries the
+	// device key and the device must be resolved from it (enrolment
+	// idempotency + posture self-reporting) rather than from a path
+	// id. A device key is unique within a tenant (enforced by a
+	// partial unique index), so at most one device is returned.
+	GetByPublicKey(ctx context.Context, tenantID uuid.UUID, publicKey string) (Device, error)
 	List(ctx context.Context, tenantID uuid.UUID, filter DeviceListFilter, page Page) (PageResult[Device], error)
 	UpdateLastSeen(ctx context.Context, tenantID, id uuid.UUID, at time.Time) error
 	UpdatePosture(ctx context.Context, tenantID, id uuid.UUID, posture Posture) error

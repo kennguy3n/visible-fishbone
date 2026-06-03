@@ -130,6 +130,29 @@ func (r *DeviceRepository) Get(ctx context.Context, tenantID, id uuid.UUID) (rep
 	return out, err
 }
 
+func (r *DeviceRepository) GetByPublicKey(ctx context.Context, tenantID uuid.UUID, publicKey string) (repository.Device, error) {
+	if publicKey == "" {
+		return repository.Device{}, repository.ErrNotFound
+	}
+	var out repository.Device
+	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		row := tx.QueryRow(ctx,
+			`SELECT `+deviceSelectColumns+` FROM devices WHERE public_key_ed25519 = $1`,
+			publicKey,
+		)
+		var err error
+		out, err = scanDevice(row)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return repository.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("select device by public key: %w", err)
+		}
+		return nil
+	})
+	return out, err
+}
+
 func (r *DeviceRepository) List(ctx context.Context, tenantID uuid.UUID, filter repository.DeviceListFilter, page repository.Page) (repository.PageResult[repository.Device], error) {
 	page = page.Normalize()
 	cur, err := decodeCursor(page.After)

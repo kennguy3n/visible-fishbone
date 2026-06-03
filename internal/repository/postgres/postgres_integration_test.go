@@ -351,6 +351,59 @@ func TestPostgres_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("Device_PublicKey_Mobile", func(t *testing.T) {
+		tr := store.NewTenantRepository()
+		dr := store.NewDeviceRepository()
+		tntA := mustTenant(t, tr)
+		tntB := mustTenant(t, tr)
+		key := "bW9iaWxlLWRldmljZS1rZXktMQ==" // arbitrary base64 device key
+
+		devA, err := dr.Create(bgCtx(), tntA.ID, repository.Device{
+			Name: "iphone-A", Platform: repository.DevicePlatformIOS,
+			PublicKeyEd25519: key, Status: repository.DeviceStatusActive,
+		})
+		if err != nil {
+			t.Fatalf("create device A: %v", err)
+		}
+
+		// GetByPublicKey resolves the device within the tenant.
+		got, err := dr.GetByPublicKey(bgCtx(), tntA.ID, key)
+		if err != nil {
+			t.Fatalf("GetByPublicKey: %v", err)
+		}
+		if got.ID != devA.ID {
+			t.Errorf("GetByPublicKey id = %s, want %s", got.ID, devA.ID)
+		}
+
+		// Unknown key → ErrNotFound.
+		if _, err := dr.GetByPublicKey(bgCtx(), tntA.ID, "ZG9lcy1ub3QtZXhpc3Q="); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("unknown key err = %v, want ErrNotFound", err)
+		}
+
+		// Per-tenant uniqueness (migration 035): the same key cannot be
+		// inserted twice within a tenant.
+		if _, err := dr.Create(bgCtx(), tntA.ID, repository.Device{
+			Name: "iphone-A-dup", Platform: repository.DevicePlatformIOS, PublicKeyEd25519: key,
+		}); !errors.Is(err, repository.ErrConflict) {
+			t.Errorf("duplicate key err = %v, want ErrConflict", err)
+		}
+
+		// The SAME key in a DIFFERENT tenant is a distinct device and
+		// must succeed; tenant B must not see tenant A's device.
+		if _, err := dr.Create(bgCtx(), tntB.ID, repository.Device{
+			Name: "iphone-B", Platform: repository.DevicePlatformIOS, PublicKeyEd25519: key,
+		}); err != nil {
+			t.Fatalf("create device B with same key: %v", err)
+		}
+		gotB, err := dr.GetByPublicKey(bgCtx(), tntB.ID, key)
+		if err != nil {
+			t.Fatalf("GetByPublicKey B: %v", err)
+		}
+		if gotB.ID == devA.ID {
+			t.Error("tenant B resolved tenant A's device by key (RLS leak)")
+		}
+	})
+
 	t.Run("Role_Permission", func(t *testing.T) {
 		tr := store.NewTenantRepository()
 		ur := store.NewUserRepository()

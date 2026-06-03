@@ -39,6 +39,7 @@ type RouterDeps struct {
 	Playbook         *PlaybookHandler
 	Troubleshoot     *TroubleshootHandler
 	OIDC             *OIDCHandler
+	Mobile           *MobileHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
 	RateLimiter      *middleware.RateLimiter
@@ -154,6 +155,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.OIDC != nil {
 		deps.OIDC.Register(apiMux)
+	}
+	if deps.Mobile != nil {
+		deps.Mobile.Register(apiMux)
 	}
 
 	apiChain := middleware.Chain(

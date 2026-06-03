@@ -37,6 +37,13 @@ tags:
       mobile token-exchange / refresh endpoints that validate an
       OIDC ID token and mint an SNG session bound to both the
       device's Ed25519 key and the user's OIDC subject.
+  - name: mobile-devices
+    description: |
+      Device-bound mobile self-service: a mobile agent holding a
+      session JWT (token_type=mobile) self-enrols its device and
+      reports posture snapshots. The device identity comes from the
+      token's device_key claim, so a session only ever acts on its
+      own device.
 paths:
   /tenants:
     post:
@@ -3179,6 +3186,73 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/devices/mobile/enroll:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [mobile-devices]
+      operationId: enrollMobileDevice
+      summary: Self-enrol the calling mobile device
+      description: |
+        Authenticated by the device-bound mobile session JWT minted by
+        `/auth/mobile/token` (token_type=mobile). The device key is
+        taken from the session token's `device_key` claim — NOT the
+        request body — so a session can only ever enrol the device it
+        is bound to. A non-mobile credential (operator console / API
+        key) is rejected with 403.
+
+        Idempotent on (tenant_id, device_key): the first call creates an
+        active ios/android device (201); re-enrolling the same key
+        re-activates the existing device and returns it (200). A
+        body-supplied `device_public_key`, when present, must equal the
+        session's `device_key`. Re-enrolling a key under a different
+        platform is rejected (400) — a device key is bound to one
+        physical device.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MobileEnrollRequest" }
+      responses:
+        "200":
+          description: idempotent re-enrolment of an existing device
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MobileEnrollResponse" }
+        "201":
+          description: device created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MobileEnrollResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/devices/mobile/posture:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [mobile-devices]
+      operationId: reportMobilePosture
+      summary: Report a posture snapshot for the calling mobile device
+      description: |
+        Authenticated by the mobile session JWT. The device is resolved
+        from the session token's `device_key`, so a device may only ever
+        update its OWN posture (there is no path id to address another
+        device); a non-mobile credential is rejected with 403, and a
+        device key that has not been enrolled yet yields 404.
+
+        Posture is validated for platform/signal coherence — `jailbroken`
+        is iOS-only and `root_detected` is Android-only; a wrong-platform
+        signal is rejected (400). `collected_at` must fall within a sane
+        window (not far-future, not stale); when omitted it is stamped
+        with the server clock.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MobilePostureReport" }
+      responses:
+        "200": { $ref: "#/components/responses/Device" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 
 components:
   securitySchemes:
@@ -3362,6 +3436,54 @@ components:
         posture: { type: object }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    MobilePosture:
+      type: object
+      description: |
+        Mobile device posture snapshot. All signals are tri-state
+        (present=known, absent=unknown). `jailbroken` is meaningful
+        only on iOS and `root_detected` only on Android; reporting the
+        wrong-platform signal is rejected by the server.
+      properties:
+        os_version: { type: string }
+        agent_version: { type: string }
+        collected_at:
+          type: string
+          format: date-time
+          description: |
+            When the snapshot was collected on-device. Rejected if too
+            far in the future or stale; defaults to the server clock
+            when omitted.
+        passcode_set: { type: boolean }
+        jailbroken: { type: boolean, description: "iOS only" }
+        root_detected: { type: boolean, description: "Android only" }
+        biometric_ready: { type: boolean }
+        mdm_enrolled: { type: boolean }
+        extra: { type: object, description: "free-form additional signals" }
+    MobileEnrollRequest:
+      type: object
+      required: [platform]
+      properties:
+        platform: { type: string, enum: [ios, android] }
+        name: { type: string }
+        device_public_key:
+          type: string
+          description: |
+            Optional. When present MUST equal the session token's
+            device_key; it never overrides the token.
+        posture: { $ref: "#/components/schemas/MobilePosture" }
+    MobileEnrollResponse:
+      type: object
+      required: [device, created]
+      properties:
+        device: { $ref: "#/components/schemas/Device" }
+        created:
+          type: boolean
+          description: "true on first create (201), false on idempotent re-enrol (200)"
+    MobilePostureReport:
+      type: object
+      required: [posture]
+      properties:
+        posture: { $ref: "#/components/schemas/MobilePosture" }
     Role:
       type: object
       required: [id, name, permissions, scope]

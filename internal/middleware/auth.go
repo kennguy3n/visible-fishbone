@@ -113,9 +113,31 @@ func Auth(cfg *config.Auth, keys APIKeyLookup) func(http.Handler) http.Handler {
 					meta.SetTenantID(u)
 				}
 			}
+			// Surface the device-bound mobile session claims (if any)
+			// so the mobile self-service endpoints can scope an action
+			// to the exact device the session is bound to. These are
+			// stashed only after the signature + iss/aud/exp checks
+			// above have passed, so handlers can trust them. Absent on
+			// operator-console / API-key auth (mc stays zero-valued).
+			if mc := extractMobileClaims(claims); mc != (MobileClaims{}) {
+				ctx = withMobileClaims(ctx, mc)
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// extractMobileClaims pulls the device-bound custom claims off a
+// verified mobile session JWT. Returns the zero value when none of
+// the mobile claims are present (operator-console / API-key auth),
+// which the caller treats as "not a mobile session".
+func extractMobileClaims(claims jwt.MapClaims) MobileClaims {
+	var mc MobileClaims
+	mc.TokenType, _ = claims["token_type"].(string)
+	mc.DeviceKey, _ = claims["device_key"].(string)
+	mc.OIDCSubject, _ = claims["oidc_sub"].(string)
+	mc.OIDCIssuer, _ = claims["oidc_iss"].(string)
+	return mc
 }
 
 // writeAuthError emits a structured 401 JSON response.

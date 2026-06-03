@@ -33,14 +33,51 @@ import (
 type contextKey string
 
 const (
-	keyRequestID   contextKey = "request_id"
-	keyTenantID    contextKey = "tenant_id"
-	keyMSPID       contextKey = "msp_id"
-	keyUserID      contextKey = "user_id"
-	keyAPIKeyID    contextKey = "api_key_id"
-	keyAuthSubject contextKey = "auth_subject"
-	keyRequestMeta contextKey = "request_meta"
+	keyRequestID    contextKey = "request_id"
+	keyTenantID     contextKey = "tenant_id"
+	keyMSPID        contextKey = "msp_id"
+	keyUserID       contextKey = "user_id"
+	keyAPIKeyID     contextKey = "api_key_id"
+	keyAuthSubject  contextKey = "auth_subject"
+	keyRequestMeta  contextKey = "request_meta"
+	keyMobileClaims contextKey = "mobile_claims"
 )
+
+// MobileClaims carries the device-bound custom claims that the
+// mobile native-SSO session JWT (minted by OIDCService.mintSession)
+// rides on top of the standard iss/aud/sub/tenant_id set. The base
+// Auth middleware authenticates the token the same way it does an
+// operator-console token; these extra claims are surfaced ON TOP so
+// the mobile self-service endpoints (device enrolment + posture
+// reporting) can scope an action to the exact device the session is
+// bound to, WITHOUT re-parsing or re-verifying the JWT in the
+// handler (which would force the handler to know the signing
+// secret/iss/aud and duplicate the verification the middleware has
+// already done).
+//
+// Surfacing happens only after the signature + iss/aud/exp checks
+// pass, so a handler that reads MobileClaimsFromContext can trust
+// the values are from a cryptographically-valid token.
+type MobileClaims struct {
+	// TokenType is the `token_type` claim. "mobile" marks a
+	// device-bound session minted by the mobile token-exchange
+	// flow. Empty/absent for operator-console and API-key auth.
+	TokenType string
+	// DeviceKey is the base64 Ed25519 device public key the session
+	// is bound to (`device_key` claim).
+	DeviceKey string
+	// OIDCSubject is the upstream IdP `sub` (`oidc_sub` claim) — the
+	// stable provider-scoped user identifier.
+	OIDCSubject string
+	// OIDCIssuer is the upstream IdP issuer (`oidc_iss` claim).
+	OIDCIssuer string
+}
+
+// IsMobile reports whether the claims describe a device-bound mobile
+// session (token_type == "mobile").
+func (c MobileClaims) IsMobile() bool {
+	return c.TokenType == "mobile"
+}
 
 // RequestMeta carries mutable, late-bound identity attributes that
 // downstream middleware (auth, tenant guard) populate after they
@@ -240,6 +277,33 @@ func WithUserIDForTest(ctx context.Context, id uuid.UUID) context.Context {
 // withAuthSubject stamps the auth subject (JWT sub or key name).
 func withAuthSubject(ctx context.Context, sub string) context.Context {
 	return context.WithValue(ctx, keyAuthSubject, sub)
+}
+
+// withMobileClaims stamps the device-bound mobile session claims
+// onto the context. Called by Auth only after the JWT signature +
+// registered-claim checks pass.
+func withMobileClaims(ctx context.Context, c MobileClaims) context.Context {
+	return context.WithValue(ctx, keyMobileClaims, c)
+}
+
+// MobileClaimsFromContext returns the device-bound mobile session
+// claims surfaced by the Auth middleware. The second return value is
+// false when the request was not authenticated by a JWT carrying any
+// of the mobile custom claims (e.g. operator-console JWT, API-key
+// auth, or a public endpoint). Use MobileClaims.IsMobile() to gate
+// the mobile self-service endpoints.
+func MobileClaimsFromContext(ctx context.Context) (MobileClaims, bool) {
+	v, ok := ctx.Value(keyMobileClaims).(MobileClaims)
+	return v, ok
+}
+
+// WithMobileClaimsForTest stamps mobile session claims onto the
+// context for tests that need to simulate a device-bound mobile
+// caller without minting + verifying a real JWT through the Auth
+// middleware. Production code goes through Auth (which calls the
+// unexported withMobileClaims after a real Verify).
+func WithMobileClaimsForTest(ctx context.Context, c MobileClaims) context.Context {
+	return withMobileClaims(ctx, c)
 }
 
 // Chain composes middlewares in left-to-right order. The first
