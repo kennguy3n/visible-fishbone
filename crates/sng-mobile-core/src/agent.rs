@@ -321,12 +321,16 @@ impl MobileAgent {
 
     fn transition(&self, to: LifecycleState) -> Result<(), MobileError> {
         let result = self.lifecycle.lock().transition_to(to);
-        if result.is_ok() {
-            // A state change (notably `suspend`/`terminate`) must wake
-            // a sleeping `run` loop so it re-checks the loop condition
-            // at once rather than finishing the pending coalesced
-            // sleep. `notify_one` stores a permit if no waiter is
-            // parked yet, so this can't be lost to a wakeup race.
+        if result.is_ok() && matches!(to, LifecycleState::Suspended | LifecycleState::Terminated) {
+            // Only a transition *out of* `Connected` needs to wake a
+            // sleeping `run` loop so it re-checks the loop condition at
+            // once rather than finishing the pending coalesced sleep.
+            // Gating on these two targets avoids leaving a stale permit
+            // after e.g. `Enrolling → Connected` that would make the
+            // next `run` burn one no-op iteration. `notify_one` stores
+            // a permit if no waiter is parked yet, so a suspend/
+            // terminate racing the loop's state check is still
+            // delivered.
             self.wake.notify_one();
         }
         result
