@@ -32,7 +32,9 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
+	"github.com/kennguy3n/visible-fishbone/internal/metrics"
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
+	sngotel "github.com/kennguy3n/visible-fishbone/internal/otel"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 	aisvc "github.com/kennguy3n/visible-fishbone/internal/service/ai"
@@ -81,6 +83,35 @@ func run() error {
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Distributed tracing. Always installs the W3C TraceContext +
+	// Baggage propagator; only stands up a real OTLP exporter when
+	// OTEL_EXPORTER_OTLP_ENDPOINT is configured (otherwise the
+	// global tracer stays the no-op and tracerShutdown is a no-op).
+	tracerShutdown, err := sngotel.InitTracer(rootCtx, cfg.Telemetry, cfg.AppName, string(cfg.Environment))
+	if err != nil {
+		return fmt.Errorf("init tracer: %w", err)
+	}
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracerShutdown(shutCtx); err != nil {
+			logger.Warn("sng-control: tracer shutdown error", slog.Any("error", err))
+		}
+	}()
+	if cfg.Telemetry.OTLPEndpoint != "" {
+		logger.Info("sng-control: otel tracing enabled",
+			slog.String("endpoint", cfg.Telemetry.OTLPEndpoint))
+	}
+
+	// Prometheus metrics registry. Constructed once and threaded
+	// into the router (HTTP instrumentation middleware) and the
+	// background pool / JetStream collectors. Nil when disabled, in
+	// which case every consumer degrades to a no-op.
+	var mx *metrics.Metrics
+	if cfg.Metrics.Enabled {
+		mx = metrics.New(cfg.Metrics)
+	}
 
 	pool, err := openPostgres(rootCtx, &cfg, logger)
 	if err != nil {
@@ -144,7 +175,7 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher)
+	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -248,6 +279,42 @@ func run() error {
 		}
 	}()
 
+	// Internal metrics surface. Bound to a dedicated port
+	// (METRICS_PORT, default 9090) — never the public API
+	// listener — so the `/metrics` exposition (tenant counts, pool
+	// sizes, NATS lag) stays on the cluster-internal network. The
+	// background pool / JetStream collectors feed gauges that the
+	// scrape then reads. config.validate already guaranteed the
+	// port differs from HTTP.Port.
+	var metricsSrv *http.Server
+	if mx != nil {
+		go metrics.NewPGCollector(mx, pool, metrics.DefaultPoolScrapeInterval).Run(rootCtx)
+		streamNames := make([]string, 0, len(streams))
+		for _, s := range streams {
+			streamNames = append(streamNames, s.Name)
+		}
+		go metrics.NewNATSCollector(mx, js, streamNames, metrics.DefaultConsumerScrapeInterval, logger).Run(rootCtx)
+
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", mx.Handler())
+		metricsSrv = &http.Server{
+			Addr:              fmt.Sprintf(":%d", cfg.Metrics.Port),
+			Handler:           metricsMux,
+			ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
+		}
+		go func() {
+			logger.Info("sng-control: metrics server listening",
+				slog.Int("port", cfg.Metrics.Port),
+				slog.String("namespace", cfg.Metrics.Namespace))
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				// A metrics-listener failure must not take down the
+				// control plane; log loudly and carry on serving the
+				// API.
+				logger.Error("sng-control: metrics server error", slog.Any("error", err))
+			}
+		}()
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTP.Addr(),
 		Handler:           router,
@@ -275,6 +342,11 @@ func run() error {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("sng-control: http shutdown error", slog.Any("error", err))
+	}
+	if metricsSrv != nil {
+		if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("sng-control: metrics shutdown error", slog.Any("error", err))
+		}
 	}
 
 	if err := webhookWorker.Stop(shutdownCtx); err != nil {
@@ -308,6 +380,7 @@ func buildRouter(
 	health *handler.Health,
 	replay *telreplay.Worker,
 	telPub *sngnats.Publisher,
+	mx *metrics.Metrics,
 ) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, *aisvc.Service, error) {
 	store := postgres.NewStore(pool)
 
@@ -681,6 +754,7 @@ func buildRouter(
 		OpenAPISpec:      handler.NewOpenAPIHandler(),
 		OpsHealth:        handler.NewOpsHealthHandler(opsHealthRepo, logger),
 		BulkDevice:       handler.NewBulkDeviceHandler(bulkDeviceSvc, deviceRepo, logger),
+		Metrics:          mx,
 	})
 	// Return the AppRegistry handler so the caller can attach the
 	// telemetry stats querier post-construction — the ClickHouse

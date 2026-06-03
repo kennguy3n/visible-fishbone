@@ -77,6 +77,7 @@ type Config struct {
 	Auth               Auth
 	Policy             Policy
 	Telemetry          Telemetry
+	Metrics            Metrics
 	TelemetryAnalytics TelemetryAnalytics
 	AppRegistry        AppRegistry
 	AI                 AI
@@ -591,6 +592,33 @@ type Telemetry struct {
 	ServiceVersion string
 }
 
+// Metrics carries the Prometheus exposition configuration. The
+// scrape endpoint binds to a dedicated internal-only port — kept
+// separate from the public API listener (HTTP.Port) so the
+// `/metrics` surface (which leaks tenant counts, pool sizes, and
+// other operational internals) is never routed to the public
+// ingress. Expose it only on the cluster-internal network /
+// scrape target, not through the public load balancer.
+type Metrics struct {
+	// Enabled gates the Prometheus registry + the internal
+	// metrics HTTP listener in main(). When false the middleware
+	// and background collectors are not installed at all, so the
+	// hot path pays nothing. Defaults to true. Parsed strictly
+	// (METRICS_ENABLED) because a typo silently flipping
+	// observability off in production is a real incident risk.
+	Enabled bool
+	// Port is the internal listener port for the Prometheus
+	// `/metrics` endpoint. Defaults to 9090. Must differ from
+	// HTTP.Port (validated below) so the operational surface is
+	// not co-located with the public API.
+	Port int
+	// Namespace is the Prometheus metric namespace prefix applied
+	// to every registered metric (e.g. `sng_http_requests_total`).
+	// Defaults to "sng". Must be a valid Prometheus metric-name
+	// prefix.
+	Namespace string
+}
+
 // TelemetryAnalytics carries the wiring knobs for the hot-path
 // (ClickHouse) and cold-path (S3) telemetry analytics sinks. The
 // fields are independent: a deployment can enable ClickHouse
@@ -773,6 +801,13 @@ func Load() (Config, error) {
 			OTLPEndpoint:   getStr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 			ServiceVersion: getStr("SERVICE_VERSION", ""),
 		},
+		Metrics: Metrics{
+			Namespace: getStr("METRICS_NAMESPACE", "sng"),
+			// Enabled (METRICS_ENABLED) and Port (METRICS_PORT) are
+			// populated by the strict tables below — same
+			// single-source-of-truth rule as the other load-bearing
+			// numeric / boolean knobs.
+		},
 		TelemetryAnalytics: TelemetryAnalytics{
 			ClickHouseEndpoints: splitCSV(getStr("CLICKHOUSE_ENDPOINTS", "")),
 			ClickHouseDatabase:  getStr("CLICKHOUSE_DATABASE", ""),
@@ -850,6 +885,10 @@ func Load() (Config, error) {
 		// Per-tenant cap on registered OIDC IdP configs. Parsed
 		// strictly so a typo can't silently revert the limit.
 		{"MOBILE_AUTH_MAX_PROVIDERS_PER_TENANT", 10, &cfg.MobileAuth.MaxProvidersPerTenant},
+		// Internal Prometheus scrape port. Parsed strictly so a
+		// typo can't silently relocate the operational surface
+		// onto an unexpected port.
+		{"METRICS_PORT", 9090, &cfg.Metrics.Port},
 	}
 	strictDurations := []struct {
 		key string
@@ -919,6 +958,7 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_ENSURE_SCHEMA", true, &cfg.TelemetryAnalytics.ClickHouseEnsureSchema},
 		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
 		{"MOBILE_AUTH_AUTO_PROVISION_USERS", true, &cfg.MobileAuth.AutoProvisionUsers},
+		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},
 	}
 
 	var strictErrs []error
@@ -1250,6 +1290,22 @@ func (c Config) validate() error {
 	if c.TelemetryAnalytics.S3Bucket != "" && c.TelemetryAnalytics.S3Region == "" && c.TelemetryAnalytics.S3Endpoint == "" {
 		return errors.New("S3_TELEMETRY_REGION must be set when S3_TELEMETRY_BUCKET is configured (or set S3_TELEMETRY_ENDPOINT for non-AWS S3-compatible stores)")
 	}
+	// Metrics: the internal scrape listener must bind to a port
+	// distinct from the public API. Co-locating them would expose
+	// the operational `/metrics` surface (tenant counts, pool
+	// sizes, NATS lag) on the public ingress. Skipped when the
+	// metrics subsystem is disabled.
+	if c.Metrics.Enabled {
+		if c.Metrics.Port <= 0 || c.Metrics.Port > 65535 {
+			return fmt.Errorf("METRICS_PORT out of range: %d", c.Metrics.Port)
+		}
+		if c.Metrics.Port == c.HTTP.Port {
+			return fmt.Errorf("METRICS_PORT (%d) must differ from HTTP_PORT (%d): the internal metrics surface must not be co-located with the public API", c.Metrics.Port, c.HTTP.Port)
+		}
+		if !isValidMetricPrefix(c.Metrics.Namespace) {
+			return fmt.Errorf("METRICS_NAMESPACE %q is not a valid Prometheus metric-name prefix (must match [a-zA-Z_][a-zA-Z0-9_]*)", c.Metrics.Namespace)
+		}
+	}
 	if c.Environment.IsProduction() {
 		// In production we require a sslmode that guarantees TLS.
 		// `disable` is unencrypted; `allow` attempts plaintext
@@ -1271,6 +1327,32 @@ func (c Config) validate() error {
 }
 
 // --- env helpers ------------------------------------------------------------
+
+// isValidMetricPrefix reports whether s is a valid Prometheus
+// metric-name prefix, i.e. matches [a-zA-Z_][a-zA-Z0-9_]*. Kept
+// dependency-free (no regexp) in keeping with this package's
+// stdlib-only constraint and to stay allocation-free on the boot
+// path.
+func isValidMetricPrefix(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isAlpha := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+		isDigit := c >= '0' && c <= '9'
+		if i == 0 {
+			if !isAlpha {
+				return false
+			}
+			continue
+		}
+		if !isAlpha && !isDigit {
+			return false
+		}
+	}
+	return true
+}
 
 // splitCSV splits a comma-separated env-style list, trimming
 // whitespace and dropping empty entries. Empty input → empty
