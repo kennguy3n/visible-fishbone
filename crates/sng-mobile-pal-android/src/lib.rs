@@ -73,7 +73,10 @@ mod jni_bridge;
 pub use error::AndroidPalError;
 
 pub use auth_surface::{AndroidAuthSurface, DEFAULT_AUTH_TIMEOUT, interpret_callback};
-pub use keystore::{AndroidSecureKeyStore, signature_from_raw, verifying_key_from_spki};
+pub use keystore::{
+    AndroidSecureKeyStore, STRONGBOX_UNAVAILABLE_EXCEPTION, should_retry_without_strongbox,
+    signature_from_raw, verifying_key_from_spki,
+};
 pub use posture::{
     AndroidPostureCollector, RawPostureSignals, assemble_snapshot, biometric_ready_from_code,
     root_signal,

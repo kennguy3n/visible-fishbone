@@ -89,6 +89,33 @@ pub fn signature_from_raw(raw: &[u8]) -> Result<Signature, AndroidPalError> {
     })
 }
 
+/// Fully-qualified Java class name `KeyPairGenerator.generateKeyPair`
+/// throws when a StrongBox-backed key is requested on a device whose
+/// hardware has no StrongBox.
+pub const STRONGBOX_UNAVAILABLE_EXCEPTION: &str =
+    "android.security.keystore.StrongBoxUnavailableException";
+
+/// Decide whether a failed StrongBox-backed key-generation attempt
+/// should be retried on the TEE-backed Keystore.
+///
+/// Returns `true` only when StrongBox was actually requested *and* the
+/// Java exception that aborted the attempt is
+/// [`StrongBoxUnavailableException`](STRONGBOX_UNAVAILABLE_EXCEPTION)
+/// (matched by class name). Any other failure — including a thrown
+/// exception of a different class, or no pending exception at all —
+/// propagates unchanged, so an unrelated keystore error is never
+/// masked behind a silent TEE downgrade. This is the platform-
+/// independent core of the fallback, exercised by host unit tests
+/// without an Android device.
+#[must_use]
+pub fn should_retry_without_strongbox(
+    strongbox_requested: bool,
+    exception_class: Option<&str>,
+) -> bool {
+    strongbox_requested
+        && exception_class.is_some_and(|class| class == STRONGBOX_UNAVAILABLE_EXCEPTION)
+}
+
 /// Android Keystore / StrongBox-backed [`SecureKeyStore`].
 ///
 /// Holds no key material itself — every operation addresses the
@@ -143,6 +170,18 @@ impl AndroidSecureKeyStore {
 #[async_trait]
 impl SecureKeyStore for AndroidSecureKeyStore {
     async fn generate_keypair(&self, label: &str) -> Result<VerifyingKey, KeyStoreError> {
+        // Contract: `SecureKeyStore::generate_keypair` must reject a
+        // label that already holds a key with `AlreadyExists` rather
+        // than overwriting it. `KeyPairGenerator.generateKeyPair`
+        // silently overwrites an occupied alias, which would destroy
+        // the device's enrolment key and break
+        // `EnrollmentService::ensure_key` (it relies on `AlreadyExists`
+        // to stay idempotent), so generation is gated on the existence
+        // check. The `From<AndroidPalError>` mapping only yields
+        // `Backend`, so the typed variant is returned here directly.
+        if imp::contains(label)? {
+            return Err(KeyStoreError::AlreadyExists(label.to_owned()));
+        }
         Ok(imp::generate_keypair(self.prefer_strongbox, label)?)
     }
 
@@ -211,9 +250,9 @@ mod imp {
 #[cfg(target_os = "android")]
 mod imp {
     use ed25519_dalek::{Signature, VerifyingKey};
-    use jni::objects::{JByteArray, JObject, JValue};
+    use jni::objects::{JByteArray, JObject, JString, JValue};
 
-    use super::{signature_from_raw, verifying_key_from_spki};
+    use super::{should_retry_without_strongbox, signature_from_raw, verifying_key_from_spki};
     use crate::error::AndroidPalError;
     use crate::jni_bridge::with_env;
 
@@ -222,80 +261,189 @@ mod imp {
     // KeyProperties.PURPOSE_SIGN (4) | PURPOSE_VERIFY (8).
     const PURPOSE_SIGN_VERIFY: i32 = 4 | 8;
 
+    /// One failed `generateKeyPair` attempt. `exception_class` carries
+    /// the Java class name of the exception that aborted the
+    /// `generateKeyPair` call (when one was pending), so the caller can
+    /// decide — via [`should_retry_without_strongbox`] — whether to
+    /// retry on the TEE. It is `None` for failures at any earlier step
+    /// (spec build, provider lookup, initialize), which are never
+    /// retried.
+    #[derive(Debug)]
+    struct GenFailure {
+        error: AndroidPalError,
+        exception_class: Option<String>,
+    }
+
+    impl GenFailure {
+        /// A non-retryable failure (no StrongBox decision to make).
+        fn other(error: AndroidPalError) -> Self {
+            Self {
+                error,
+                exception_class: None,
+            }
+        }
+    }
+
     pub(super) fn generate_keypair(
         strongbox: bool,
         label: &str,
     ) -> Result<VerifyingKey, AndroidPalError> {
-        with_env(|env| {
-            // KeyGenParameterSpec.Builder(alias, PURPOSE_SIGN | PURPOSE_VERIFY)
-            let alias = env
-                .new_string(label)
-                .map_err(|e| AndroidPalError::Jni(format!("new_string(alias): {e}")))?;
-            let builder = env
-                .new_object(
-                    "android/security/keystore/KeyGenParameterSpec$Builder",
-                    "(Ljava/lang/String;I)V",
-                    &[JValue::Object(&alias), JValue::Int(PURPOSE_SIGN_VERIFY)],
-                )
-                .map_err(|e| AndroidPalError::Jni(format!("KeyGenParameterSpec.Builder: {e}")))?;
-            if strongbox {
-                // .setIsStrongBoxBacked(true) — best-effort; the
-                // generate call below downgrades to TEE if the
-                // hardware throws StrongBoxUnavailableException.
-                let _ = env.call_method(
-                    &builder,
-                    "setIsStrongBoxBacked",
-                    "(Z)Landroid/security/keystore/KeyGenParameterSpec$Builder;",
-                    &[JValue::Bool(u8::from(true))],
-                );
+        with_env(|env| match attempt_generate(env, strongbox, label) {
+            Ok(public_key) => Ok(public_key),
+            Err(failure) => {
+                if should_retry_without_strongbox(strongbox, failure.exception_class.as_deref()) {
+                    // Documented behaviour: StrongBox was requested but
+                    // the hardware has none, so fall back to the
+                    // TEE-backed Keystore exactly once. Surface the
+                    // downgrade in telemetry.
+                    tracing::warn!(
+                        alias = label,
+                        "Android Keystore reported StrongBox unavailable; \
+                         retrying Ed25519 key generation on the TEE-backed Keystore"
+                    );
+                    attempt_generate(env, false, label).map_err(|f| f.error)
+                } else {
+                    Err(failure.error)
+                }
             }
-            let spec = env
-                .call_method(
-                    &builder,
-                    "build",
-                    "()Landroid/security/keystore/KeyGenParameterSpec;",
-                    &[],
-                )
-                .and_then(|v| v.l())
-                .map_err(|e| AndroidPalError::Jni(format!("KeyGenParameterSpec.build: {e}")))?;
-
-            // KeyPairGenerator.getInstance("Ed25519", "AndroidKeyStore")
-            let algo = env
-                .new_string(ED25519)
-                .map_err(|e| AndroidPalError::Jni(format!("new_string(algo): {e}")))?;
-            let provider = env
-                .new_string(ANDROID_KEYSTORE)
-                .map_err(|e| AndroidPalError::Jni(format!("new_string(provider): {e}")))?;
-            let kpg = env
-                .call_static_method(
-                    "java/security/KeyPairGenerator",
-                    "getInstance",
-                    "(Ljava/lang/String;Ljava/lang/String;)Ljava/security/KeyPairGenerator;",
-                    &[JValue::Object(&algo), JValue::Object(&provider)],
-                )
-                .and_then(|v| v.l())
-                .map_err(|e| {
-                    AndroidPalError::Keystore(format!("KeyPairGenerator.getInstance: {e}"))
-                })?;
-
-            // kpg.initialize(spec); kpg.generateKeyPair()
-            env.call_method(
-                &kpg,
-                "initialize",
-                "(Ljava/security/spec/AlgorithmParameterSpec;)V",
-                &[JValue::Object(&spec)],
-            )
-            .map_err(|e| AndroidPalError::Keystore(format!("KeyPairGenerator.initialize: {e}")))?;
-            let pair = env
-                .call_method(&kpg, "generateKeyPair", "()Ljava/security/KeyPair;", &[])
-                .and_then(|v| v.l())
-                .map_err(|e| AndroidPalError::Keystore(format!("generateKeyPair: {e}")))?;
-            let public = env
-                .call_method(&pair, "getPublic", "()Ljava/security/PublicKey;", &[])
-                .and_then(|v| v.l())
-                .map_err(|e| AndroidPalError::Keystore(format!("KeyPair.getPublic: {e}")))?;
-            public_key_bytes(env, &public)
         })
+    }
+
+    /// Run a single key-generation attempt with the given StrongBox
+    /// preference. On failure of the `generateKeyPair` call itself, the
+    /// pending Java exception's class name is captured (and cleared) so
+    /// the caller can decide whether to retry without StrongBox.
+    fn attempt_generate(
+        env: &mut jni::JNIEnv<'_>,
+        strongbox: bool,
+        label: &str,
+    ) -> Result<VerifyingKey, GenFailure> {
+        // KeyGenParameterSpec.Builder(alias, PURPOSE_SIGN | PURPOSE_VERIFY)
+        let alias = env.new_string(label).map_err(|e| {
+            GenFailure::other(AndroidPalError::Jni(format!("new_string(alias): {e}")))
+        })?;
+        let builder = env
+            .new_object(
+                "android/security/keystore/KeyGenParameterSpec$Builder",
+                "(Ljava/lang/String;I)V",
+                &[JValue::Object(&alias), JValue::Int(PURPOSE_SIGN_VERIFY)],
+            )
+            .map_err(|e| {
+                GenFailure::other(AndroidPalError::Jni(format!(
+                    "KeyGenParameterSpec.Builder: {e}"
+                )))
+            })?;
+        if strongbox {
+            // .setIsStrongBoxBacked(true) — best-effort. Clear any
+            // exception it leaves pending (jni 0.21 reports
+            // `JavaException` from `ExceptionCheck` without clearing),
+            // so a thrown setter does not abort the `build` call below.
+            let _ = env.call_method(
+                &builder,
+                "setIsStrongBoxBacked",
+                "(Z)Landroid/security/keystore/KeyGenParameterSpec$Builder;",
+                &[JValue::Bool(u8::from(true))],
+            );
+            let _ = env.exception_clear();
+        }
+        let spec = env
+            .call_method(
+                &builder,
+                "build",
+                "()Landroid/security/keystore/KeyGenParameterSpec;",
+                &[],
+            )
+            .and_then(|v| v.l())
+            .map_err(|e| {
+                GenFailure::other(AndroidPalError::Jni(format!(
+                    "KeyGenParameterSpec.build: {e}"
+                )))
+            })?;
+
+        // KeyPairGenerator.getInstance("Ed25519", "AndroidKeyStore")
+        let algo = env.new_string(ED25519).map_err(|e| {
+            GenFailure::other(AndroidPalError::Jni(format!("new_string(algo): {e}")))
+        })?;
+        let provider = env.new_string(ANDROID_KEYSTORE).map_err(|e| {
+            GenFailure::other(AndroidPalError::Jni(format!("new_string(provider): {e}")))
+        })?;
+        let kpg = env
+            .call_static_method(
+                "java/security/KeyPairGenerator",
+                "getInstance",
+                "(Ljava/lang/String;Ljava/lang/String;)Ljava/security/KeyPairGenerator;",
+                &[JValue::Object(&algo), JValue::Object(&provider)],
+            )
+            .and_then(|v| v.l())
+            .map_err(|e| {
+                GenFailure::other(AndroidPalError::Keystore(format!(
+                    "KeyPairGenerator.getInstance: {e}"
+                )))
+            })?;
+
+        // kpg.initialize(spec); kpg.generateKeyPair()
+        env.call_method(
+            &kpg,
+            "initialize",
+            "(Ljava/security/spec/AlgorithmParameterSpec;)V",
+            &[JValue::Object(&spec)],
+        )
+        .map_err(|e| {
+            GenFailure::other(AndroidPalError::Keystore(format!(
+                "KeyPairGenerator.initialize: {e}"
+            )))
+        })?;
+        let pair = match env
+            .call_method(&kpg, "generateKeyPair", "()Ljava/security/KeyPair;", &[])
+            .and_then(|v| v.l())
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                // Capture (and clear) the pending exception so the
+                // class name drives the StrongBox-fallback decision and
+                // a retry starts from a clean JNI state.
+                let exception_class = take_pending_exception_class(env);
+                return Err(GenFailure {
+                    error: AndroidPalError::Keystore(format!("generateKeyPair: {e}")),
+                    exception_class,
+                });
+            }
+        };
+        let public = env
+            .call_method(&pair, "getPublic", "()Ljava/security/PublicKey;", &[])
+            .and_then(|v| v.l())
+            .map_err(|e| {
+                GenFailure::other(AndroidPalError::Keystore(format!("KeyPair.getPublic: {e}")))
+            })?;
+        public_key_bytes(env, &public).map_err(GenFailure::other)
+    }
+
+    /// Read and clear the currently-pending Java exception, returning
+    /// its fully-qualified class name (e.g.
+    /// `android.security.keystore.StrongBoxUnavailableException`).
+    ///
+    /// Clearing is mandatory: jni 0.21 reports `Error::JavaException`
+    /// purely from `ExceptionCheck` and never clears the exception, so
+    /// a left-pending throwable would abort the very next JNI call
+    /// (including the TEE retry).
+    fn take_pending_exception_class(env: &mut jni::JNIEnv<'_>) -> Option<String> {
+        if !env.exception_check().unwrap_or(false) {
+            return None;
+        }
+        let throwable = env.exception_occurred().ok()?;
+        // Clear before any further JNI call (the class-name lookup
+        // below would otherwise fail with the same pending exception).
+        let _ = env.exception_clear();
+        if throwable.is_null() {
+            return None;
+        }
+        let class = env.get_object_class(&throwable).ok()?;
+        let name = env
+            .call_method(&class, "getName", "()Ljava/lang/String;", &[])
+            .and_then(|v| v.l())
+            .ok()?;
+        let name: String = env.get_string(&JString::from(name)).ok()?.into();
+        Some(name)
     }
 
     pub(super) fn public_key(label: &str) -> Result<VerifyingKey, AndroidPalError> {
@@ -527,6 +675,28 @@ mod tests {
     fn rejects_wrong_length_signature() {
         let err = signature_from_raw(&[0u8; 10]).expect_err("too short");
         assert!(matches!(err, AndroidPalError::Encoding(_)));
+    }
+
+    #[test]
+    fn retries_without_strongbox_only_on_strongbox_unavailable() {
+        // Retry only when StrongBox was requested AND the hardware
+        // threw StrongBoxUnavailableException.
+        assert!(should_retry_without_strongbox(
+            true,
+            Some(STRONGBOX_UNAVAILABLE_EXCEPTION)
+        ));
+        // An unrelated exception class must propagate, not downgrade.
+        assert!(!should_retry_without_strongbox(
+            true,
+            Some("java.security.ProviderException")
+        ));
+        // No pending exception → no retry.
+        assert!(!should_retry_without_strongbox(true, None));
+        // StrongBox never requested → nothing to fall back from.
+        assert!(!should_retry_without_strongbox(
+            false,
+            Some(STRONGBOX_UNAVAILABLE_EXCEPTION)
+        ));
     }
 
     #[test]

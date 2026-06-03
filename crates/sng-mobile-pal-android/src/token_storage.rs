@@ -313,9 +313,7 @@ mod imp {
                 &[JValue::Object(&jkey), JValue::Object(&jval)],
             )
             .map_err(|e| AndroidPalError::Jni(format!("Editor.putString: {e}")))?;
-            env.call_method(&editor, "apply", "()V", &[])
-                .map_err(|e| AndroidPalError::Jni(format!("Editor.apply: {e}")))?;
-            Ok(())
+            commit_editor(env, &editor)
         })
     }
 
@@ -341,10 +339,32 @@ mod imp {
                 &[JValue::Object(&jkey)],
             )
             .map_err(|e| AndroidPalError::Jni(format!("Editor.remove: {e}")))?;
-            env.call_method(&editor, "apply", "()V", &[])
-                .map_err(|e| AndroidPalError::Jni(format!("Editor.apply: {e}")))?;
-            Ok(())
+            commit_editor(env, &editor)
         })
+    }
+
+    /// Durably flush a `SharedPreferences.Editor` with `commit()`
+    /// (synchronous) instead of `apply()` (asynchronous). Token
+    /// material is security-sensitive, so a write that does not reach
+    /// disk must surface as an error rather than being silently lost
+    /// if the process is killed right after the call — `commit()`
+    /// returns a boolean we map to a `Backend` error, whereas
+    /// `apply()` returns `void` and swallows failures.
+    fn commit_editor(
+        env: &mut jni::JNIEnv<'_>,
+        editor: &JObject<'_>,
+    ) -> Result<(), AndroidPalError> {
+        let committed = env
+            .call_method(editor, "commit", "()Z", &[])
+            .and_then(|v| v.z())
+            .map_err(|e| AndroidPalError::Jni(format!("Editor.commit: {e}")))?;
+        if committed {
+            Ok(())
+        } else {
+            Err(AndroidPalError::Jni(
+                "Editor.commit returned false (token write not persisted)".to_owned(),
+            ))
+        }
     }
 }
 
