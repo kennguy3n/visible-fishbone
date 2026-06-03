@@ -2,6 +2,7 @@ package troubleshoot_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +13,74 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot/checks"
 )
+
+// countingCheck records how many times Run was invoked so cache
+// behavior can be asserted without depending on wall-clock timestamps.
+type countingCheck struct {
+	name string
+	runs *int64
+}
+
+func (c countingCheck) Name() string { return c.name }
+
+func (c countingCheck) Run(_ context.Context, _ uuid.UUID) checks.DiagnosticResult {
+	atomic.AddInt64(c.runs, 1)
+	return checks.DiagnosticResult{CheckName: c.name, Status: checks.DiagnosticPass}
+}
+
+func TestDiagnosticEngine_RunAll_CachesWithinTTL(t *testing.T) {
+	var runs int64
+	engine := troubleshoot.NewDiagnosticEngine([]checks.DiagnosticCheck{
+		countingCheck{name: "counter", runs: &runs},
+	})
+
+	current := time.Unix(0, 0).UTC()
+	engine.SetClock(func() time.Time { return current })
+	engine.SetCacheTTL(30 * time.Second)
+
+	tenantID := uuid.New()
+
+	// First call runs the check.
+	engine.RunAll(context.Background(), tenantID)
+	if got := atomic.LoadInt64(&runs); got != 1 {
+		t.Fatalf("expected 1 run after first call, got %d", got)
+	}
+
+	// Within the TTL window: served from cache, no extra run.
+	current = current.Add(29 * time.Second)
+	engine.RunAll(context.Background(), tenantID)
+	if got := atomic.LoadInt64(&runs); got != 1 {
+		t.Fatalf("expected cache hit (still 1 run), got %d", got)
+	}
+
+	// Past the TTL: re-runs.
+	current = current.Add(2 * time.Second) // now 31s since first run
+	engine.RunAll(context.Background(), tenantID)
+	if got := atomic.LoadInt64(&runs); got != 2 {
+		t.Fatalf("expected re-run after TTL expiry (2 runs), got %d", got)
+	}
+
+	// A different tenant is cached independently.
+	engine.RunAll(context.Background(), uuid.New())
+	if got := atomic.LoadInt64(&runs); got != 3 {
+		t.Fatalf("expected separate run for new tenant (3 runs), got %d", got)
+	}
+}
+
+func TestDiagnosticEngine_RunAll_CacheDisabled(t *testing.T) {
+	var runs int64
+	engine := troubleshoot.NewDiagnosticEngine([]checks.DiagnosticCheck{
+		countingCheck{name: "counter", runs: &runs},
+	})
+	engine.SetCacheTTL(0) // disable caching
+
+	tenantID := uuid.New()
+	engine.RunAll(context.Background(), tenantID)
+	engine.RunAll(context.Background(), tenantID)
+	if got := atomic.LoadInt64(&runs); got != 2 {
+		t.Fatalf("expected 2 runs with caching disabled, got %d", got)
+	}
+}
 
 func TestDiagnosticEngine_RunAll(t *testing.T) {
 	store := memory.NewStore()
