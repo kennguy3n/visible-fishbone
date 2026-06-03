@@ -34,11 +34,14 @@ func scanAICorrelation(row pgx.Row) (repository.AICorrelation, error) {
 // Create inserts a new correlation cluster.
 func (r *AICorrelationRepository) Create(ctx context.Context, tenantID uuid.UUID, c repository.AICorrelation) (repository.AICorrelation, error) {
 	var out repository.AICorrelation
+	status := c.Status
+	if status == "" {
+		status = "open"
+	}
+	if err := repository.ValidateAICorrelationStatus(status); err != nil {
+		return repository.AICorrelation{}, err
+	}
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		status := c.Status
-		if status == "" {
-			status = "open"
-		}
 		row := tx.QueryRow(ctx,
 			`INSERT INTO ai_alert_correlations (tenant_id, alert_ids, summary, severity, status)
 			 VALUES ($1, $2, $3, $4, $5)
@@ -142,6 +145,9 @@ func (r *AICorrelationRepository) List(ctx context.Context, tenantID uuid.UUID, 
 
 // UpdateStatus transitions the status of a correlation.
 func (r *AICorrelationRepository) UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string) error {
+	if err := repository.ValidateAICorrelationStatus(status); err != nil {
+		return err
+	}
 	return r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		ct, err := tx.Exec(ctx,
 			`UPDATE ai_alert_correlations SET status = $1, updated_at = now() WHERE id = $2`,

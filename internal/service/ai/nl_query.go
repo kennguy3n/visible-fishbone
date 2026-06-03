@@ -145,6 +145,16 @@ func (e *NLQueryEngine) Query(ctx context.Context, req NLQueryRequest) (NLQueryR
 	// carries high confidence.
 	if mode == evalModeCompiledBundle {
 		confidence = 0.95
+		// The synthesized access envelope cannot represent user
+		// identity (it lives in class-specific payloads, not the
+		// envelope), so user-subject policy rules are never evaluated.
+		// When the question named a user, the verdict only reflects
+		// app/device/default-action matching — report partial
+		// confidence and say so rather than claiming full authority.
+		if intent.UserRef != "" {
+			confidence = 0.7
+			explanation += " Note: user-subject rules were not evaluated — user identity is not represented in the synthesized access envelope, so this verdict reflects only app/device and default-action matching."
+		}
 	}
 
 	return NLQueryResponse{

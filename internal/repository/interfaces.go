@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -1006,6 +1007,27 @@ type AICorrelationRepository interface {
 	Get(ctx context.Context, tenantID, id uuid.UUID) (AICorrelation, error)
 	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[AICorrelation], error)
 	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string) error
+}
+
+// AICorrelationStatuses enumerates the allowed lifecycle states for an
+// AI correlation. It mirrors the OpenAPI `AICorrelation.status` enum
+// and the CHECK constraint on `ai_alert_correlations.status`.
+var AICorrelationStatuses = map[string]bool{
+	"open":         true,
+	"acknowledged": true,
+	"resolved":     true,
+}
+
+// ValidateAICorrelationStatus returns ErrInvalidArgument when status is
+// not an allowed lifecycle state. Both repository backends call this so
+// the contract is enforced uniformly — the postgres CHECK constraint is
+// the durable backstop, but the memory backend (and pre-INSERT
+// validation) reject bad values up front too.
+func ValidateAICorrelationStatus(status string) error {
+	if !AICorrelationStatuses[status] {
+		return fmt.Errorf("%w: invalid correlation status %q", ErrInvalidArgument, status)
+	}
+	return nil
 }
 
 // --- Compliance -----------------------------------------------------------

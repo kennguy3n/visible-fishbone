@@ -7,7 +7,8 @@ CREATE TABLE ai_alert_correlations (
     alert_ids  UUID[]      NOT NULL,
     summary    TEXT        NOT NULL DEFAULT '',
     severity   TEXT        NOT NULL,
-    status     TEXT        NOT NULL DEFAULT 'open',
+    status     TEXT        NOT NULL DEFAULT 'open'
+                           CHECK (status IN ('open', 'acknowledged', 'resolved')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -50,6 +50,9 @@ func (r *AICorrelationRepository) Create(ctx context.Context, tenantID uuid.UUID
 	if c.Status == "" {
 		c.Status = "open"
 	}
+	if err := repository.ValidateAICorrelationStatus(c.Status); err != nil {
+		return repository.AICorrelation{}, err
+	}
 	r.s.aiCorrelations[c.ID] = c
 	return cloneAICorrelation(c), nil
 }
@@ -102,6 +105,9 @@ func (r *AICorrelationRepository) UpdateStatus(ctx context.Context, tenantID, id
 	}
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
+	if err := repository.ValidateAICorrelationStatus(status); err != nil {
+		return err
+	}
 	c, ok := r.s.aiCorrelations[id]
 	if !ok || c.TenantID != tenantID {
 		return repository.ErrNotFound

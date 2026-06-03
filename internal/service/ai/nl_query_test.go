@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -150,8 +151,10 @@ func TestNLQueryEngine_CompiledBundleAllow(t *testing.T) {
 	src := &fakeGraphSource{graph: repository.PolicyGraph{ID: uuid.New(), Version: 3, Graph: json.RawMessage(graph)}}
 	engine := NewNLQueryEngine(nil, WithPolicyGraphSource(src))
 
+	// No user ref: the verdict is fully representable in the access
+	// envelope, so it carries full compiled-bundle authority.
 	resp, err := engine.Query(context.Background(), NLQueryRequest{
-		Question: "Can user alice access app salesforce.com from device laptop1?",
+		Question: "Can app salesforce.com be reached from device laptop1?",
 		TenantID: uuid.New(),
 	})
 	if err != nil {
@@ -168,6 +171,34 @@ func TestNLQueryEngine_CompiledBundleAllow(t *testing.T) {
 	}
 	if resp.Confidence < 0.9 {
 		t.Fatalf("expected high confidence for authoritative verdict, got %f", resp.Confidence)
+	}
+}
+
+func TestNLQueryEngine_CompiledBundleUserRefPartialConfidence(t *testing.T) {
+	t.Parallel()
+	// The question names a user, but user identity cannot be carried
+	// on the synthesized access envelope — so user-subject rules are
+	// not evaluated. The verdict must NOT be reported with full
+	// authority: confidence is reduced and the explanation says so.
+	graph := `{"default_action":"deny","rules":[{"id":"allow-sf","domain":"swg","verb":"allow","predicates":[{"name":"h","match":{"host":"salesforce.com"}}]}]}`
+	src := &fakeGraphSource{graph: repository.PolicyGraph{ID: uuid.New(), Version: 4, Graph: json.RawMessage(graph)}}
+	engine := NewNLQueryEngine(nil, WithPolicyGraphSource(src))
+
+	resp, err := engine.Query(context.Background(), NLQueryRequest{
+		Question: "Can user alice access app salesforce.com from device laptop1?",
+		TenantID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.EvaluationMode != evalModeCompiledBundle {
+		t.Fatalf("expected mode %q, got %q", evalModeCompiledBundle, resp.EvaluationMode)
+	}
+	if resp.Confidence >= 0.95 {
+		t.Fatalf("expected reduced confidence when user-subject rules can't be evaluated, got %f", resp.Confidence)
+	}
+	if !strings.Contains(resp.Explanation, "user-subject rules were not evaluated") {
+		t.Fatalf("expected explanation caveat about unevaluated user rules, got %q", resp.Explanation)
 	}
 }
 
