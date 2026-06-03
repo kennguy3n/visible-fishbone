@@ -520,8 +520,12 @@ impl MobileAgent {
     /// per cycle, and drain every task that has come due. Runs until
     /// the agent leaves [`LifecycleState::Connected`] (suspended or
     /// terminated). A per-task error that is retryable is logged and
-    /// the loop continues; a permanent error stops the loop and is
-    /// returned.
+    /// the loop continues; a permanent error on a transport-bound task
+    /// (policy pull / telemetry flush) stops the loop and is returned.
+    /// A posture-collection failure is always non-fatal — it is a
+    /// periodic best-effort device sample and must never tear down
+    /// policy enforcement + telemetry — so it is logged and the loop
+    /// continues regardless of the error's retryability.
     pub async fn run(&self, conn: &ControlPlaneConnection) -> Result<(), MobileError> {
         let start = tokio::time::Instant::now();
         let mut scheduler = Scheduler::new(
@@ -537,7 +541,9 @@ impl MobileAgent {
             let now = start.elapsed();
             while let Some(task) = scheduler.pop_due(now) {
                 if let Err(e) = self.run_task(task, conn).await {
-                    if e.is_retryable() {
+                    if task == ScheduledTask::CollectPosture {
+                        warn!(?task, error = %e, "posture collection failed; continuing");
+                    } else if e.is_retryable() {
                         warn!(?task, error = %e, "retryable subsystem error; continuing");
                     } else {
                         return Err(e);

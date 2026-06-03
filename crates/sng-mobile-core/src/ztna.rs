@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
+use tracing::warn;
 
 use sng_ztna::{AccessRequest, ZtnaDecision, ZtnaError, ZtnaService};
 
@@ -100,6 +101,12 @@ impl MobileZtnaManager {
     /// is still recorded as a deny (state + telemetry) before the
     /// typed error is returned, so the caller's accounting stays
     /// consistent with the policy-deny path.
+    ///
+    /// Telemetry recording is best-effort: it is observability, not a
+    /// correctness gate. A failure to spool the event is logged but
+    /// never shadows the access decision or the per-app state update,
+    /// so the tunnel reconciler's view (`allowed_apps`) always tracks
+    /// the latest decision.
     pub async fn evaluate(
         &self,
         request: &AccessRequest,
@@ -115,7 +122,7 @@ impl MobileZtnaManager {
                     posture_result: decision.posture_result.as_str().to_owned(),
                     identity_verified: true,
                 };
-                self.telemetry.record(&event, now).await?;
+                self.record_telemetry_best_effort(&event, now).await;
                 self.record_state(&request.app_id, decision.allow, reason, now);
                 Ok(decision)
             }
@@ -128,10 +135,18 @@ impl MobileZtnaManager {
                     posture_result: "not_evaluated".to_owned(),
                     identity_verified: false,
                 };
-                self.telemetry.record(&event, now).await?;
+                self.record_telemetry_best_effort(&event, now).await;
                 self.record_state(&request.app_id, false, reason, now);
                 Err(MobileError::Ztna(err))
             }
+        }
+    }
+
+    /// Spool a ZTNA telemetry event without letting a telemetry
+    /// failure shadow the access decision that produced it.
+    async fn record_telemetry_best_effort(&self, event: &MobileTelemetryEvent, now: DateTime<Utc>) {
+        if let Err(e) = self.telemetry.record(event, now).await {
+            warn!(error = %e, "failed to record ZTNA telemetry event; continuing");
         }
     }
 
