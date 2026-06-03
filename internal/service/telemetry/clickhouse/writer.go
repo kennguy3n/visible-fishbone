@@ -1360,3 +1360,46 @@ ORDER BY events DESC
 	}
 	return out, nil
 }
+
+// QueryTrafficClassDistributionAllTenants returns the per-class
+// event / byte distribution aggregated across EVERY tenant on this
+// node, for the operator-wide dashboard. It is the cross-tenant
+// companion to QueryTrafficClassDistribution: identical aggregation
+// but without the per-tenant predicate, so a single node returns
+// its local all-tenant rollup. In a sharded deployment each tenant
+// lives on exactly one shard, so ShardedWriter fans this out across
+// all shards in parallel and merges the per-class rows into a
+// platform-wide total.
+func (w *Writer) QueryTrafficClassDistributionAllTenants(ctx context.Context, since time.Time) ([]stats.TrafficClassCount, error) {
+	table, err := w.qualifiedTable()
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: query traffic_class (all tenants): %w", err)
+	}
+	q := fmt.Sprintf(`
+SELECT
+    traffic_class AS class,
+    count() AS events,
+    sum(bytes_in + bytes_out) AS bytes
+FROM %s
+WHERE timestamp >= $1
+GROUP BY traffic_class
+ORDER BY events DESC
+`, table)
+	rows, err := w.conn.Query(ctx, q, since.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: query traffic_class (all tenants): %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []stats.TrafficClassCount
+	for rows.Next() {
+		var row stats.TrafficClassCount
+		if err := rows.Scan(&row.Class, &row.Events, &row.Bytes); err != nil {
+			return nil, fmt.Errorf("clickhouse: scan traffic_class (all tenants): %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("clickhouse: iterate traffic_class (all tenants): %w", err)
+	}
+	return out, nil
+}

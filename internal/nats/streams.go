@@ -106,20 +106,9 @@ func DefaultStreams(cfg *config.NATS) []StreamSpec {
 	if dedup <= 0 {
 		dedup = 2 * time.Minute
 	}
-	return []StreamSpec{
-		{
-			Name:        StreamName(cfg.StreamPrefix, StreamSuffixTelemetry),
-			Subjects:    []string{"sng.*.telemetry.>"},
-			Retention:   jetstream.LimitsPolicy,
-			Storage:     storage,
-			MaxAge:      7 * 24 * time.Hour,
-			MaxMsgSize:  10 * 1024 * 1024,
-			DedupWindow: dedup,
-			Replicas:    replicas,
-			Discard:     jetstream.DiscardOld,
-			Description: "SNG control plane: per-tenant telemetry events",
-		},
-		{
+	specs := telemetryStreamSpecs(cfg, storage, replicas, dedup)
+	specs = append(specs,
+		StreamSpec{
 			Name:        StreamName(cfg.StreamPrefix, StreamSuffixPolicy),
 			Subjects:    []string{"sng.*.policy.>"},
 			Retention:   jetstream.LimitsPolicy,
@@ -130,7 +119,7 @@ func DefaultStreams(cfg *config.NATS) []StreamSpec {
 			Discard:     jetstream.DiscardOld,
 			Description: "SNG control plane: policy graph + bundle change notifications",
 		},
-		{
+		StreamSpec{
 			Name:        StreamName(cfg.StreamPrefix, StreamSuffixEvents),
 			Subjects:    []string{"sng.*.events.>"},
 			Retention:   jetstream.WorkQueuePolicy,
@@ -141,7 +130,7 @@ func DefaultStreams(cfg *config.NATS) []StreamSpec {
 			Discard:     jetstream.DiscardOld,
 			Description: "SNG control plane: tenant/site/device lifecycle events",
 		},
-		{
+		StreamSpec{
 			Name:        StreamName(cfg.StreamPrefix, StreamSuffixDLQ),
 			Subjects:    []string{"sngdlq.>"},
 			Retention:   jetstream.LimitsPolicy,
@@ -152,7 +141,51 @@ func DefaultStreams(cfg *config.NATS) []StreamSpec {
 			Discard:     jetstream.DiscardOld,
 			Description: "SNG control plane: dead-letter queue for failed messages",
 		},
+	)
+	return specs
+}
+
+// telemetryStreamSpecs returns the telemetry stream spec(s). With
+// cfg.Partitions <= 1 it returns the single historical
+// SNG_TELEMETRY stream over `sng.*.telemetry.>` — byte-for-byte the
+// previous behaviour, so existing deployments and tests are
+// unaffected. With cfg.Partitions = N > 1 it returns N streams
+// SNG_TELEMETRY_0 … SNG_TELEMETRY_{N-1}, each scoped to its
+// partition's subject (`sng.<i>.*.telemetry.>`). The partition slot
+// sits after the prefix and before the tenant wildcard, so the
+// `telemetry` keyword stays in a fixed token position distinct from
+// the `policy`/`events` streams and cannot collide with them.
+func telemetryStreamSpecs(cfg *config.NATS, storage jetstream.StorageType, replicas int, dedup time.Duration) []StreamSpec {
+	base := func(name string, subjects []string, desc string) StreamSpec {
+		return StreamSpec{
+			Name:        name,
+			Subjects:    subjects,
+			Retention:   jetstream.LimitsPolicy,
+			Storage:     storage,
+			MaxAge:      7 * 24 * time.Hour,
+			MaxMsgSize:  10 * 1024 * 1024,
+			DedupWindow: dedup,
+			Replicas:    replicas,
+			Discard:     jetstream.DiscardOld,
+			Description: desc,
+		}
 	}
+	if cfg.Partitions <= 1 {
+		return []StreamSpec{base(
+			StreamName(cfg.StreamPrefix, StreamSuffixTelemetry),
+			[]string{"sng.*.telemetry.>"},
+			"SNG control plane: per-tenant telemetry events",
+		)}
+	}
+	specs := make([]StreamSpec, 0, cfg.Partitions)
+	for i := 0; i < cfg.Partitions; i++ {
+		specs = append(specs, base(
+			StreamName(cfg.StreamPrefix, TelemetryPartitionStreamSuffix(i)),
+			[]string{TelemetryPartitionSubject(i)},
+			fmt.Sprintf("SNG control plane: per-tenant telemetry events (partition %d/%d)", i, cfg.Partitions),
+		))
+	}
+	return specs
 }
 
 // EnsureStream creates or updates the stream described by spec.

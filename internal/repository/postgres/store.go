@@ -30,24 +30,127 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Store holds the pgxpool and exposes the repository constructors.
-// Construct via NewStore(pool); the embedded *pgxpool.Pool is
-// shared across repositories so transactions can be coordinated
-// when needed (e.g. tenant create + audit log insert).
+// Store holds the connection pools and exposes the repository
+// constructors. Construct via NewStore(pool) for a single-pool
+// deployment or NewStoreWithPool(rw) to enable the read-write split.
+// The embedded *ReadWritePool is shared across repositories so
+// transactions can be coordinated when needed (e.g. tenant create +
+// audit log insert).
 type Store struct {
-	pool *pgxpool.Pool
+	pool *ReadWritePool
 }
 
-// NewStore wraps a pgxpool.Pool. The pool must already be configured
-// with the production connection settings (see internal/config).
+// NewStore wraps a single primary pgxpool.Pool with no read
+// replicas — every read and write goes to that pool. The pool must
+// already be configured with the production connection settings
+// (see internal/config). This is the backward-compatible
+// constructor used by tests and single-node deployments.
 func NewStore(pool *pgxpool.Pool) *Store {
+	return &Store{pool: NewReadWritePool(ReadWritePoolConfig{Primary: pool})}
+}
+
+// NewStoreWithPool wraps an explicit ReadWritePool, enabling the
+// read-write split: read-only transactions are routed to a healthy
+// replica while mutations and system transactions go to the primary.
+func NewStoreWithPool(pool *ReadWritePool) *Store {
 	return &Store{pool: pool}
 }
 
-// Pool exposes the underlying pgxpool for callers that need raw
-// access (migrations test setup, custom diagnostic queries). Use
+// Pool exposes the underlying primary pgxpool for callers that need
+// raw access (migrations test setup, custom diagnostic queries). Use
 // sparingly — anything tenant-scoped MUST go through the wrappers.
-func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+func (s *Store) Pool() *pgxpool.Pool { return s.pool.Primary() }
+
+// ReadWritePool exposes the underlying pool pair for callers that
+// need to route a read explicitly to a replica.
+func (s *Store) ReadWritePool() *ReadWritePool { return s.pool }
+
+// setLocalRoleSQL is the transaction-local role-adoption statement
+// issued at the top of every transaction when the pool is in
+// PgBouncer (transaction-pooling) mode. It mirrors the session-level
+// SET SESSION ROLE that openPostgres installs in session mode, but
+// is reverted on commit/rollback so it is safe when consecutive
+// transactions land on different server-side connections. The
+// identifier is sanitized via pgx.Identifier so an operator-set role
+// name cannot inject SQL.
+func (s *Store) setLocalRoleSQL() (string, bool) {
+	role := s.pool.AppRole()
+	if !s.pool.PgBouncerMode() || role == "" {
+		return "", false
+	}
+	return "SET LOCAL ROLE " + pgx.Identifier{role}.Sanitize(), true
+}
+
+// adoptLocalRole issues the transaction-local SET LOCAL ROLE when
+// the pool is in PgBouncer mode (a no-op otherwise — session mode
+// adopts the role once per connection via AfterConnect). Called at
+// the top of every transaction helper, before any tenant/system
+// GUC is set, so the role is in effect for the whole transaction.
+func (s *Store) adoptLocalRole(ctx context.Context, tx pgx.Tx) error {
+	sql, ok := s.setLocalRoleSQL()
+	if !ok {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("set local role: %w", err)
+	}
+	return nil
+}
+
+// pgxQuerier is the subset of pgx's query surface shared by
+// *pgxpool.Pool and pgx.Tx. It lets a standalone-query helper hand
+// callers either a bare pooled connection (session mode) or a
+// transaction (PgBouncer mode) behind a single type, so call sites
+// don't branch on the pooling mode themselves.
+type pgxQuerier interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// onPrimary runs `fn` against the primary pool for a standalone
+// (non-RLS-scoped) query — the access pattern of the top-level
+// MSP/Role/Tenant entity repos, which are not tenant-scoped and so
+// do not flow through withTenant.
+//
+// In session mode the app role is already adopted per connection by
+// openPostgres's AfterConnect hook, so `fn` runs directly on the
+// pool with no transaction overhead. In PgBouncer
+// (transaction-pooling) mode that hook is disabled — a session-level
+// SET SESSION ROLE would leak across the server connections
+// PgBouncer multiplexes between clients — so `fn` instead runs
+// inside a short transaction that first issues SET LOCAL ROLE.
+// Without this, every standalone MSP/Role/Tenant query in PgBouncer
+// mode would execute as the unprivileged LOGIN role rather than the
+// app role and fail with "permission denied".
+//
+// Any pgx.Rows `fn` opens MUST be fully consumed before `fn`
+// returns: in PgBouncer mode the transaction commits (and the
+// connection is released) the moment it does.
+func (s *Store) onPrimary(ctx context.Context, fn func(q pgxQuerier) error) error {
+	if _, ok := s.setLocalRoleSQL(); !ok {
+		// Session mode (or no app role configured): the connection
+		// already runs as the app role; skip the transaction.
+		return fn(s.pool.Primary())
+	}
+	tx, err := s.pool.Primary().BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := s.adoptLocalRole(ctx, tx); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		// Propagate verbatim (incl. pgx.ErrNoRows and *pgconn.PgError)
+		// so callers keep their errors.Is / SQLSTATE classification.
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+	return nil
+}
 
 // withTenant runs `fn` inside a transaction whose `sng.tenant_id`
 // GUC is set to `tenantID`. The transaction is rolled back if `fn`
@@ -61,7 +164,7 @@ func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 // commits or rolls back. Without this, a recycled pool connection
 // would carry the previous tenant's GUC into the next query.
 func (s *Store) withTenant(ctx context.Context, tenantID string, fn func(tx pgx.Tx) error) error {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := s.pool.Primary().BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
@@ -69,6 +172,9 @@ func (s *Store) withTenant(ctx context.Context, tenantID string, fn func(tx pgx.
 		// Rollback is a no-op if Commit already ran.
 		_ = tx.Rollback(ctx)
 	}()
+	if err := s.adoptLocalRole(ctx, tx); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, "SELECT set_config('sng.tenant_id', $1, true)", tenantID); err != nil {
 		return fmt.Errorf("set tenant context: %w", err)
 	}
@@ -86,11 +192,19 @@ func (s *Store) withTenant(ctx context.Context, tenantID string, fn func(tx pgx.
 // steps (no XID assignment, no write lock acquisition). Use it for
 // pure SELECT paths to reduce contention under high read load.
 func (s *Store) withTenantRO(ctx context.Context, tenantID string, fn func(tx pgx.Tx) error) error {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	// Reads are routed to a healthy replica (falling back to the
+	// primary when no replica is configured or all are unhealthy).
+	// The RLS set_config below runs inside the replica transaction
+	// exactly as it does on the primary, so tenant isolation is
+	// enforced regardless of which node serves the read.
+	tx, err := s.pool.Replica().BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return fmt.Errorf("begin ro tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := s.adoptLocalRole(ctx, tx); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, "SELECT set_config('sng.tenant_id', $1, true)", tenantID); err != nil {
 		return fmt.Errorf("set tenant context: %w", err)
 	}
@@ -116,11 +230,14 @@ func (s *Store) withTenantRO(ctx context.Context, tenantID string, fn func(tx pg
 // The GUC, like sng.tenant_id, is transaction-local — it cannot
 // leak onto pooled connections after commit/rollback.
 func (s *Store) withSystem(ctx context.Context, fn func(tx pgx.Tx) error) error {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := s.pool.Primary().BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin system tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := s.adoptLocalRole(ctx, tx); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, "SELECT set_config('sng.system_role', 'true', true)"); err != nil {
 		return fmt.Errorf("set system context: %w", err)
 	}
