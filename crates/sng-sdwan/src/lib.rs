@@ -82,6 +82,18 @@
 //! - [`stats`] — atomic counter bank + snapshot.
 //! - [`service`] — [`SdwanService`] orchestrator +
 //!   [`SdwanServiceBuilder`].
+//! - [`sla`] — [`SlaPolicy`] / [`SlaMonitor`] sustained-
+//!   breach detection emitting [`SlaViolation`]s.
+//! - [`failover`] — [`FailoverEngine`] dual-WAN
+//!   primary/backup switching with sub-second,
+//!   pre-computed atomic path swaps.
+//! - [`app_steering`] — [`AppSteeringRule`] /
+//!   [`AppSteeringTable`] application-aware path
+//!   selection with per-app SLA classes + sticky pins.
+//! - [`bandwidth`] — [`BandwidthAggregator`] multi-link
+//!   bonding with per-packet sequence numbers.
+//! - [`cellular`] — [`CellularPath`] / [`CellularBudget`]
+//!   data-cap-aware 4G/5G last-resort backup.
 
 // Test-only allows mirror the sister sng-swg / sng-ztna
 // crates so the workspace lints stay consistent across
@@ -101,22 +113,32 @@
     )
 )]
 
+pub mod app_steering;
+pub mod bandwidth;
+pub mod cellular;
 pub mod decision;
 pub mod error;
+pub mod failover;
 pub mod path;
 pub mod policy;
 pub mod probe;
 pub mod request;
 pub mod score;
 pub mod service;
+pub mod sla;
 pub mod stats;
 
+pub use app_steering::{AppSteeringRule, AppSteeringTable};
+pub use bandwidth::{AggregationMode, BandwidthAggregator, PacketAssignment};
+pub use cellular::{CellularBudget, CellularPath, CellularSignal};
 pub use decision::{SteeringDecision, SteeringReason};
 pub use error::SdwanError;
+pub use failover::{FailbackMode, FailoverEngine, FailoverPolicy};
 pub use path::{Path, PathId, PathProvider, StaticPathProvider, TrafficClass};
 pub use policy::{ScoreWeights, SdwanPolicy, SdwanPolicyHolder};
 pub use probe::{PathProbe, ProbeProvider, StaticProbeProvider};
 pub use request::SteeringRequest;
 pub use score::{ScoreBreakdown, score_path};
 pub use service::{SdwanService, SdwanServiceBuilder, SdwanServiceConfig};
+pub use sla::{SlaClass, SlaMetric, SlaMonitor, SlaPolicy, SlaPolicySet, SlaViolation, SlaWatch};
 pub use stats::{SdwanStats, SdwanStatsSnapshot};

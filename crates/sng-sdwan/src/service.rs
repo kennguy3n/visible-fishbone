@@ -67,13 +67,17 @@ use sng_core::envelope::Verdict;
 use sng_core::events::SdwanEvent;
 use sng_telemetry::TelemetryEvent;
 
+use crate::app_steering::AppSteeringTable;
+use crate::cellular::CellularBudget;
 use crate::decision::{SteeringDecision, SteeringReason};
 use crate::error::SdwanError;
+use crate::failover::FailoverEngine;
 use crate::path::{Path, PathId, PathProvider, StaticPathProvider};
 use crate::policy::{SdwanPolicy, SdwanPolicyHolder};
 use crate::probe::{PathProbe, ProbeProvider, StaticProbeProvider};
 use crate::request::SteeringRequest;
 use crate::score::{ScoreBreakdown, score_path};
+use crate::sla::SlaMonitor;
 use crate::stats::SdwanStats;
 
 /// Map a [`SteeringDecision`] to the wire [`Verdict`]
@@ -166,6 +170,10 @@ pub struct SdwanServiceBuilder {
     paths: Arc<dyn PathProvider>,
     probes: Arc<dyn ProbeProvider>,
     stats: Arc<SdwanStats>,
+    sla_monitor: Option<Arc<SlaMonitor>>,
+    failover: Option<Arc<FailoverEngine>>,
+    app_steering: Option<Arc<AppSteeringTable>>,
+    cellular_budget: Option<Arc<CellularBudget>>,
 }
 
 impl SdwanServiceBuilder {
@@ -178,6 +186,10 @@ impl SdwanServiceBuilder {
             paths: Arc::new(StaticPathProvider::empty()),
             probes: Arc::new(StaticProbeProvider::empty()),
             stats: Arc::new(SdwanStats::default()),
+            sla_monitor: None,
+            failover: None,
+            app_steering: None,
+            cellular_budget: None,
         }
     }
 
@@ -220,6 +232,46 @@ impl SdwanServiceBuilder {
         self
     }
 
+    /// Attach an SLA monitor (see [`crate::sla::SlaMonitor`]).
+    /// Optional — when unset the service performs no
+    /// sustained-breach detection. The monitor is built by
+    /// the caller (it needs a clone of the telemetry
+    /// sender) and shared in; the caller spawns
+    /// [`crate::sla::SlaMonitor::run`] and bridges emitted
+    /// violations to [`Self::with_failover`].
+    #[must_use]
+    pub fn with_sla_monitor(mut self, monitor: Arc<SlaMonitor>) -> Self {
+        self.sla_monitor = Some(monitor);
+        self
+    }
+
+    /// Attach a dual-WAN failover engine (see
+    /// [`crate::failover::FailoverEngine`]). Optional. The
+    /// engine is pre-validated by its constructor, so this
+    /// stays infallible and chainable.
+    #[must_use]
+    pub fn with_failover(mut self, engine: Arc<FailoverEngine>) -> Self {
+        self.failover = Some(engine);
+        self
+    }
+
+    /// Attach an application-aware steering table (see
+    /// [`crate::app_steering::AppSteeringTable`]). Optional.
+    #[must_use]
+    pub fn with_app_steering(mut self, table: Arc<AppSteeringTable>) -> Self {
+        self.app_steering = Some(table);
+        self
+    }
+
+    /// Attach a cellular data-cap budget (see
+    /// [`crate::cellular::CellularBudget`]) for the
+    /// last-resort 4G/5G backup. Optional.
+    #[must_use]
+    pub fn with_cellular_budget(mut self, budget: Arc<CellularBudget>) -> Self {
+        self.cellular_budget = Some(budget);
+        self
+    }
+
     /// Build the service. `telemetry` is the egress
     /// channel — every evaluation `try_send`s one
     /// [`sng_core::events::SdwanEvent`] here.
@@ -238,6 +290,10 @@ impl SdwanServiceBuilder {
             telemetry,
             sticky: Arc::new(Mutex::new(HashMap::new())),
             evictions: Arc::new(AtomicU64::new(0)),
+            sla_monitor: self.sla_monitor,
+            failover: self.failover,
+            app_steering: self.app_steering,
+            cellular_budget: self.cellular_budget,
         }
     }
 }
@@ -279,6 +335,16 @@ pub struct SdwanService {
     // operators can see how often the sticky cache is
     // being pruned.
     evictions: Arc<AtomicU64>,
+    // Optional competitive-depth components. Each is
+    // `None` unless wired via the builder; the core
+    // `evaluate` path is unchanged when they are absent.
+    // They are held as shared handles so the data path /
+    // background tasks (SLA monitor loop, failover health
+    // bridge) can consult them lock-free.
+    sla_monitor: Option<Arc<SlaMonitor>>,
+    failover: Option<Arc<FailoverEngine>>,
+    app_steering: Option<Arc<AppSteeringTable>>,
+    cellular_budget: Option<Arc<CellularBudget>>,
 }
 
 /// Per-flow sticky-pin cache entry.
@@ -306,6 +372,10 @@ impl std::fmt::Debug for SdwanService {
             .field("probes", &"<provider>")
             .field("stats", &self.stats)
             .field("evictions", &self.evictions.load(Ordering::Relaxed))
+            .field("sla_monitor", &self.sla_monitor.is_some())
+            .field("failover", &self.failover.is_some())
+            .field("app_steering", &self.app_steering.is_some())
+            .field("cellular_budget", &self.cellular_budget.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -321,6 +391,34 @@ impl SdwanService {
     #[must_use]
     pub fn policy(&self) -> &Arc<SdwanPolicyHolder> {
         &self.policy
+    }
+
+    /// The attached SLA monitor, if any.
+    #[must_use]
+    pub fn sla_monitor(&self) -> Option<&Arc<SlaMonitor>> {
+        self.sla_monitor.as_ref()
+    }
+
+    /// The attached failover engine, if any. The data path
+    /// reads [`crate::failover::FailoverEngine::active`]
+    /// (a single atomic load) to learn the currently-active
+    /// underlay for the failover group.
+    #[must_use]
+    pub fn failover(&self) -> Option<&Arc<FailoverEngine>> {
+        self.failover.as_ref()
+    }
+
+    /// The attached application-aware steering table, if
+    /// any.
+    #[must_use]
+    pub fn app_steering(&self) -> Option<&Arc<AppSteeringTable>> {
+        self.app_steering.as_ref()
+    }
+
+    /// The attached cellular data-cap budget, if any.
+    #[must_use]
+    pub fn cellular_budget(&self) -> Option<&Arc<CellularBudget>> {
+        self.cellular_budget.as_ref()
     }
 
     /// Configured max flow count.
@@ -2282,5 +2380,113 @@ mod tests {
         fn get(&self, path_id: &PathId) -> Option<PathProbe> {
             self.by_id.lock().get(path_id).copied()
         }
+    }
+
+    // --- Optional competitive-depth component wiring ------
+
+    use crate::app_steering::{AppSteeringRule, AppSteeringTable};
+    use crate::cellular::CellularBudget;
+    use crate::failover::{FailbackMode, FailoverEngine, FailoverPolicy};
+    use crate::sla::{SlaClass, SlaMonitor, SlaPolicy, SlaPolicySet, SlaWatch};
+
+    #[test]
+    fn builder_wires_optional_components_and_core_still_evaluates() {
+        let (tx, _rx) = telemetry();
+        let probes: Arc<dyn ProbeProvider> = Arc::new(StaticProbeProvider::from_probes([(
+            PathId::new("mpls"),
+            PathProbe::new(5.0, 0.0, 1.0, NOW),
+        )]));
+        let stats = Arc::new(SdwanStats::default());
+        let monitor = Arc::new(SlaMonitor::new(
+            SlaPolicySet::default_templates(),
+            probes.clone(),
+            vec![SlaWatch::new("mpls", SlaClass::BusinessCritical)],
+            tx.clone(),
+            stats.clone(),
+        ));
+        let failover = Arc::new(
+            FailoverEngine::new(FailoverPolicy::new(
+                PathId::new("mpls"),
+                [PathId::new("inet")],
+            ))
+            .unwrap(),
+        );
+        let app_steering = Arc::new(AppSteeringTable::from_rules([AppSteeringRule::new(
+            "zoom",
+            [PathId::new("inet")],
+            SlaClass::RealTime,
+        )]));
+        let cellular = Arc::new(CellularBudget::metered(1_000));
+
+        let svc = SdwanServiceBuilder::new()
+            .with_policy(Arc::new(
+                SdwanPolicyHolder::try_new(SdwanPolicy::default()).unwrap(),
+            ))
+            .with_path_provider(Arc::new(StaticPathProvider::from_paths(vec![Path::new(
+                "mpls",
+                [TrafficClass::Interactive],
+            )])))
+            .with_probe_provider(probes)
+            .with_stats(stats)
+            .with_sla_monitor(monitor)
+            .with_failover(failover)
+            .with_app_steering(app_steering)
+            .with_cellular_budget(cellular)
+            .build(tx);
+
+        assert!(svc.sla_monitor().is_some());
+        assert!(svc.failover().is_some());
+        assert!(svc.app_steering().is_some());
+        assert!(svc.cellular_budget().is_some());
+
+        // Core selection is unchanged by the optional wiring.
+        let decision = svc.evaluate(&req("f1", TrafficClass::Interactive, NOW));
+        assert_eq!(decision.reason, SteeringReason::Best);
+        assert_eq!(decision.path_id, Some(PathId::new("mpls")));
+    }
+
+    #[test]
+    fn sla_violation_bridges_to_failover_switch() {
+        // End-to-end: a sustained SLA breach on the primary,
+        // detected by the monitor, drives the failover engine
+        // to switch the active path to the backup.
+        let (tx, _rx) = telemetry();
+        let probes: Arc<dyn ProbeProvider> = Arc::new(StaticProbeProvider::from_probes([
+            // Primary breaches the business-critical latency
+            // SLA (50 ms); backup is healthy.
+            (PathId::new("mpls"), PathProbe::new(120.0, 0.0, 1.0, NOW)),
+            (PathId::new("inet"), PathProbe::new(20.0, 0.0, 1.0, NOW)),
+        ]));
+        let stats = Arc::new(SdwanStats::default());
+        let monitor = SlaMonitor::new(
+            SlaPolicySet::from_policies([(
+                SlaClass::BusinessCritical,
+                SlaPolicy {
+                    max_latency_ms: Some(50.0),
+                    consecutive_breaches: 1,
+                    ..SlaPolicy::default()
+                },
+            )]),
+            probes,
+            vec![SlaWatch::new("mpls", SlaClass::BusinessCritical)],
+            tx,
+            stats,
+        );
+        let failover = FailoverEngine::new(
+            FailoverPolicy::new(PathId::new("mpls"), [PathId::new("inet")])
+                .with_failback(FailbackMode::Immediate),
+        )
+        .unwrap();
+
+        assert_eq!(failover.active(), PathId::new("mpls"));
+
+        // One tick detects the breach; bridge each emitted
+        // violation into the failover engine.
+        for violation in monitor.tick(NOW) {
+            failover.on_violation(&violation.path_id, violation.observed_at_ms);
+        }
+
+        assert_eq!(failover.active(), PathId::new("inet"));
+        assert_eq!(failover.switches(), 1);
     }
 }
