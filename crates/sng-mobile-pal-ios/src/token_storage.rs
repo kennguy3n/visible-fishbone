@@ -11,7 +11,9 @@
 //! and deliberately do **not** derive `Serialize`, so the
 //! platform-independent [`StoredTokenSet`] DTO below mediates between
 //! the in-memory [`TokenSet`] and the on-disk JSON. The transient
-//! serialized buffer is wiped after the Keychain write.
+//! serialized buffer is wiped after the Keychain write, and the buffer
+//! read back on the load path is likewise `Zeroizing`, so the plaintext
+//! JSON never lingers in freed heap on either side.
 //!
 //! Both the JSON (de)serialization round-trip and its conversions are
 //! exercised by host unit tests; only the Keychain I/O is
@@ -172,9 +174,15 @@ mod keychain {
         set_generic_password_options(blob, opts).map_err(|e| IosPalError::Keychain(e.to_string()))
     }
 
-    pub(super) fn load(service: &str, account: &str) -> Result<Option<Vec<u8>>, IosPalError> {
+    pub(super) fn load(
+        service: &str,
+        account: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, IosPalError> {
         match generic_password(PasswordOptions::new_generic_password(service, account)) {
-            Ok(bytes) => Ok(Some(bytes)),
+            // Wrap in `Zeroizing` so the plaintext JSON blob (carrying all
+            // three token secrets) is wiped on drop, mirroring the store
+            // path's `codec::encode` guarantee.
+            Ok(bytes) => Ok(Some(zeroize::Zeroizing::new(bytes))),
             Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
             Err(e) => Err(IosPalError::Keychain(e.to_string())),
         }

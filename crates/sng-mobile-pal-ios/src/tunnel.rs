@@ -336,9 +336,11 @@ mod network_extension {
     }
 
     /// Stop the VPN connection of the manager retained by [`start`]. If
-    /// no start completed in this process the slot is empty and a typed
-    /// error is returned rather than building a fresh, unassociated
-    /// manager (whose `stopVPNTunnel` would be a silent no-op).
+    /// no start completed in this process the slot is empty: the tunnel
+    /// is already down, so this is a no-op success, honoring the
+    /// `MobileTunnelProvider` contract that `stop_tunnel` is idempotent
+    /// on an already-down tunnel (rather than building a fresh,
+    /// unassociated manager whose `stopVPNTunnel` would silently no-op).
     ///
     /// # Safety
     /// `stopVPNTunnel` is a no-argument message send on the retained
@@ -356,9 +358,9 @@ mod network_extension {
                         unsafe { manager.connection().stopVPNTunnel() };
                         Ok(())
                     }
-                    None => Err("no active tunnel manager to stop \
-                         (start_tunnel did not complete in this process)"
-                        .to_owned()),
+                    // No start completed in this process: already down,
+                    // so stopping is a no-op success (idempotent).
+                    None => Ok(()),
                 },
                 None => Err("tunnel stop must be dispatched onto the main thread".to_owned()),
             };
