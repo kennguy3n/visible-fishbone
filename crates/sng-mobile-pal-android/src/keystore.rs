@@ -116,6 +116,27 @@ pub fn should_retry_without_strongbox(
         && exception_class.is_some_and(|class| class == STRONGBOX_UNAVAILABLE_EXCEPTION)
 }
 
+/// Outcome of a key-generation request.
+///
+/// Lets the `imp` layer fold the alias-existence check into the
+/// *same* `with_env` round-trip as `generateKeyPair` (so the
+/// check-then-act TOCTOU window is a single JNI attach rather than
+/// two), while the trait layer still surfaces the typed
+/// [`KeyStoreError::AlreadyExists`] for an occupied alias.
+///
+/// The variants are only constructed by the Android `imp`; on the
+/// host fallback `generate_keypair` always errors before producing
+/// one, so they are dead there.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[derive(Debug)]
+enum GenerateOutcome {
+    /// A fresh key was generated; carries its public half.
+    Created(VerifyingKey),
+    /// The alias already held a key; nothing was generated or
+    /// overwritten.
+    AlreadyExists,
+}
+
 /// Android Keystore / StrongBox-backed [`SecureKeyStore`].
 ///
 /// Holds no key material itself — every operation addresses the
@@ -176,13 +197,16 @@ impl SecureKeyStore for AndroidSecureKeyStore {
         // silently overwrites an occupied alias, which would destroy
         // the device's enrolment key and break
         // `EnrollmentService::ensure_key` (it relies on `AlreadyExists`
-        // to stay idempotent), so generation is gated on the existence
-        // check. The `From<AndroidPalError>` mapping only yields
+        // to stay idempotent). The existence check is performed inside
+        // the same `with_env` attach as generation (see `imp`), so the
+        // unavoidable check-then-act window — the Android Keystore has
+        // no atomic check-and-generate — is as narrow as the platform
+        // allows. The `From<AndroidPalError>` mapping only yields
         // `Backend`, so the typed variant is returned here directly.
-        if imp::contains(label)? {
-            return Err(KeyStoreError::AlreadyExists(label.to_owned()));
+        match imp::generate_keypair(self.prefer_strongbox, label)? {
+            GenerateOutcome::Created(public_key) => Ok(public_key),
+            GenerateOutcome::AlreadyExists => Err(KeyStoreError::AlreadyExists(label.to_owned())),
         }
-        Ok(imp::generate_keypair(self.prefer_strongbox, label)?)
     }
 
     async fn public_key(&self, label: &str) -> Result<VerifyingKey, KeyStoreError> {
@@ -208,13 +232,13 @@ impl SecureKeyStore for AndroidSecureKeyStore {
 /// runnable on the Linux CI host.
 #[cfg(not(target_os = "android"))]
 mod imp {
-    use super::{Signature, VerifyingKey};
+    use super::{GenerateOutcome, Signature, VerifyingKey};
     use crate::error::AndroidPalError;
 
     pub(super) fn generate_keypair(
         _strongbox: bool,
         _label: &str,
-    ) -> Result<VerifyingKey, AndroidPalError> {
+    ) -> Result<GenerateOutcome, AndroidPalError> {
         Err(AndroidPalError::unsupported(
             "AndroidSecureKeyStore::generate_keypair",
         ))
@@ -252,7 +276,10 @@ mod imp {
     use ed25519_dalek::{Signature, VerifyingKey};
     use jni::objects::{JByteArray, JObject, JString, JValue};
 
-    use super::{should_retry_without_strongbox, signature_from_raw, verifying_key_from_spki};
+    use super::{
+        GenerateOutcome, should_retry_without_strongbox, signature_from_raw,
+        verifying_key_from_spki,
+    };
     use crate::error::AndroidPalError;
     use crate::jni_bridge::with_env;
 
@@ -287,25 +314,38 @@ mod imp {
     pub(super) fn generate_keypair(
         strongbox: bool,
         label: &str,
-    ) -> Result<VerifyingKey, AndroidPalError> {
-        with_env(|env| match attempt_generate(env, strongbox, label) {
-            Ok(public_key) => Ok(public_key),
-            Err(failure) => {
-                if should_retry_without_strongbox(strongbox, failure.exception_class.as_deref()) {
-                    // Documented behaviour: StrongBox was requested but
-                    // the hardware has none, so fall back to the
-                    // TEE-backed Keystore exactly once. Surface the
-                    // downgrade in telemetry.
-                    tracing::warn!(
-                        alias = label,
-                        "Android Keystore reported StrongBox unavailable; \
-                         retrying Ed25519 key generation on the TEE-backed Keystore"
-                    );
-                    attempt_generate(env, false, label).map_err(|f| f.error)
-                } else {
-                    Err(failure.error)
-                }
+    ) -> Result<GenerateOutcome, AndroidPalError> {
+        with_env(|env| {
+            // Alias-existence check and generation share this single
+            // `with_env` attach, so the unavoidable check-then-act
+            // window (the Keystore has no atomic check-and-generate) is
+            // as narrow as the platform allows: an occupied alias is
+            // reported as `AlreadyExists` and `generateKeyPair` — which
+            // would silently overwrite it — is never reached.
+            if contains_alias(env, label)? {
+                return Ok(GenerateOutcome::AlreadyExists);
             }
+            let public_key = match attempt_generate(env, strongbox, label) {
+                Ok(public_key) => public_key,
+                Err(failure) => {
+                    if should_retry_without_strongbox(strongbox, failure.exception_class.as_deref())
+                    {
+                        // Documented behaviour: StrongBox was requested
+                        // but the hardware has none, so fall back to the
+                        // TEE-backed Keystore exactly once. Surface the
+                        // downgrade in telemetry.
+                        tracing::warn!(
+                            alias = label,
+                            "Android Keystore reported StrongBox unavailable; \
+                             retrying Ed25519 key generation on the TEE-backed Keystore"
+                        );
+                        attempt_generate(env, false, label).map_err(|f| f.error)?
+                    } else {
+                        return Err(failure.error);
+                    }
+                }
+            };
+            Ok(GenerateOutcome::Created(public_key))
         })
     }
 
@@ -537,22 +577,27 @@ mod imp {
     }
 
     pub(super) fn contains(label: &str) -> Result<bool, AndroidPalError> {
-        with_env(|env| {
-            let ks = load_keystore(env)?;
-            let alias = env
-                .new_string(label)
-                .map_err(|e| AndroidPalError::Jni(format!("new_string(alias): {e}")))?;
-            let present = env
-                .call_method(
-                    &ks,
-                    "containsAlias",
-                    "(Ljava/lang/String;)Z",
-                    &[JValue::Object(&alias)],
-                )
-                .and_then(|v| v.z())
-                .map_err(|e| AndroidPalError::Keystore(format!("KeyStore.containsAlias: {e}")))?;
-            Ok(present)
-        })
+        with_env(|env| contains_alias(env, label))
+    }
+
+    /// `KeyStore.containsAlias(label)` on an already-attached `env`.
+    ///
+    /// Factored out of [`contains`] so `generate_keypair` can run the
+    /// existence check and generation under a single `with_env` attach,
+    /// narrowing the check-then-act window.
+    fn contains_alias(env: &mut jni::JNIEnv<'_>, label: &str) -> Result<bool, AndroidPalError> {
+        let ks = load_keystore(env)?;
+        let alias = env
+            .new_string(label)
+            .map_err(|e| AndroidPalError::Jni(format!("new_string(alias): {e}")))?;
+        env.call_method(
+            &ks,
+            "containsAlias",
+            "(Ljava/lang/String;)Z",
+            &[JValue::Object(&alias)],
+        )
+        .and_then(|v| v.z())
+        .map_err(|e| AndroidPalError::Keystore(format!("KeyStore.containsAlias: {e}")))
     }
 
     pub(super) fn delete(label: &str) -> Result<(), AndroidPalError> {
