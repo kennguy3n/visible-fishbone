@@ -188,27 +188,49 @@ mod imp {
     // Context.KEYGUARD_SERVICE / Context.BIOMETRIC_SERVICE etc. are
     // resolved by name via getSystemService(String).
     const KEYGUARD_SERVICE: &str = "keyguard";
+    const BIOMETRIC_SERVICE: &str = "biometric";
     const DEVICE_POLICY_SERVICE: &str = "device_policy";
     // BiometricManager.Authenticators.BIOMETRIC_STRONG.
     const BIOMETRIC_STRONG: i32 = 0x0000_000F;
 
+    /// Framework signals gathered on a single JVM attachment.
+    #[derive(Default)]
+    struct FrameworkSignals {
+        passcode_set: Option<bool>,
+        biometric_code: Option<i32>,
+        os_version: Option<String>,
+        mdm_enrolled: Option<bool>,
+        test_keys_build: Option<bool>,
+    }
+
     pub(super) fn collect_signals() -> Result<RawPostureSignals, AndroidPalError> {
-        // Every signal is best-effort: a single unreadable source
-        // (e.g. `KeyguardManager` unavailable in a restricted
-        // profile) degrades that field to `None` ("unknown") rather
-        // than failing the whole snapshot. The control plane already
-        // distinguishes `None` from `Some(false)`.
-        let passcode_set = with_env(passcode_set).ok();
-        let biometric_code = with_env(biometric_code).ok();
-        let os_version = with_env(os_version).ok();
-        let mdm_enrolled = with_env(mdm_enrolled).ok();
-        let root_detected = Some(root_signal(su_binary_present(), build_is_test_keys()));
+        // One JVM attach for every framework read. Each signal is
+        // still best-effort: a single unreadable source (e.g.
+        // `KeyguardManager` unavailable in a restricted profile)
+        // degrades that field to `None` ("unknown") rather than
+        // failing the whole snapshot, and a failure to attach at all
+        // leaves every framework field `None` while the filesystem
+        // root probe below still runs. The control plane distinguishes
+        // `None` from `Some(false)`.
+        let framework = with_env(|env| {
+            Ok(FrameworkSignals {
+                passcode_set: passcode_set(env).ok(),
+                biometric_code: biometric_code(env).ok(),
+                os_version: os_version(env).ok(),
+                mdm_enrolled: mdm_enrolled(env).ok(),
+                test_keys_build: build_is_test_keys(env).ok(),
+            })
+        })
+        .unwrap_or_default();
+
+        let test_keys = framework.test_keys_build.unwrap_or(false);
+        let root_detected = Some(root_signal(su_binary_present(), test_keys));
         Ok(RawPostureSignals {
-            os_version,
-            passcode_set,
-            biometric_code,
+            os_version: framework.os_version,
+            passcode_set: framework.passcode_set,
+            biometric_code: framework.biometric_code,
             root_detected,
-            mdm_enrolled,
+            mdm_enrolled: framework.mdm_enrolled,
         })
     }
 
@@ -238,16 +260,11 @@ mod imp {
     }
 
     fn biometric_code(env: &mut jni::JNIEnv<'_>) -> Result<i32, AndroidPalError> {
-        let context = android_context();
-        let bm = env
-            .call_static_method(
-                "android/hardware/biometrics/BiometricManager",
-                "from",
-                "(Landroid/content/Context;)Landroid/hardware/biometrics/BiometricManager;",
-                &[JValue::Object(&context)],
-            )
-            .and_then(|v| v.l())
-            .map_err(|e| AndroidPalError::Jni(format!("BiometricManager.from: {e}")))?;
+        // The framework `android.hardware.biometrics.BiometricManager`
+        // is obtained via `getSystemService("biometric")` — the static
+        // `from(Context)` factory exists only on the Jetpack
+        // `androidx.biometric.BiometricManager`, not the platform class.
+        let bm = system_service(env, BIOMETRIC_SERVICE)?;
         env.call_method(
             &bm,
             "canAuthenticate",
@@ -285,19 +302,16 @@ mod imp {
         SU_PATHS.iter().any(|p| Path::new(p).exists())
     }
 
-    fn build_is_test_keys() -> bool {
-        with_env(|env| {
-            let tags = env
-                .get_static_field("android/os/Build", "TAGS", "Ljava/lang/String;")
-                .and_then(|v| v.l())
-                .map_err(|e| AndroidPalError::Jni(format!("Build.TAGS: {e}")))?;
-            let s: String = env
-                .get_string(&JString::from(tags))
-                .map_err(|e| AndroidPalError::Jni(format!("get_string(TAGS): {e}")))?
-                .into();
-            Ok(s.contains("test-keys"))
-        })
-        .unwrap_or(false)
+    fn build_is_test_keys(env: &mut jni::JNIEnv<'_>) -> Result<bool, AndroidPalError> {
+        let tags = env
+            .get_static_field("android/os/Build", "TAGS", "Ljava/lang/String;")
+            .and_then(|v| v.l())
+            .map_err(|e| AndroidPalError::Jni(format!("Build.TAGS: {e}")))?;
+        let s: String = env
+            .get_string(&JString::from(tags))
+            .map_err(|e| AndroidPalError::Jni(format!("get_string(TAGS): {e}")))?
+            .into();
+        Ok(s.contains("test-keys"))
     }
 }
 

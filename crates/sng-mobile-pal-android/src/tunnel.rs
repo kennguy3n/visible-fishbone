@@ -55,21 +55,50 @@ pub struct VpnServiceConfig {
     pub persistent_keepalive_secs: Option<u64>,
 }
 
-/// Split an `host:port` endpoint, stripping IPv6 brackets.
+/// Split a `host:port` endpoint into its parts.
+///
+/// Accepts an IPv4/hostname `host:port` and a bracketed IPv6
+/// `[addr]:port`. A bare, unbracketed IPv6 literal (which carries its
+/// own colons) is rejected as ambiguous rather than silently
+/// misparsed: WireGuard endpoints always carry a port, and an IPv6
+/// address must be bracketed so the `:port` boundary is unambiguous.
 fn split_endpoint(endpoint: &str) -> Result<(String, u16), AndroidPalError> {
-    let (host, port) = endpoint.rsplit_once(':').ok_or_else(|| {
-        AndroidPalError::InvalidInput(format!("endpoint {endpoint:?} is missing a ':port'"))
-    })?;
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    if host.is_empty() {
-        return Err(AndroidPalError::InvalidInput(format!(
-            "endpoint {endpoint:?} has an empty host"
-        )));
+    let invalid = |msg: &str| {
+        AndroidPalError::InvalidInput(format!("endpoint {endpoint:?} {msg}"))
+    };
+
+    // Bracketed IPv6: `[addr]:port`.
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        let (host, port) = rest
+            .split_once("]:")
+            .ok_or_else(|| invalid("is a bracketed IPv6 address missing a ']:port'"))?;
+        if host.is_empty() {
+            return Err(invalid("has an empty host"));
+        }
+        return Ok((host.to_owned(), parse_port(endpoint, port)?));
     }
-    let port: u16 = port.parse().map_err(|e| {
+
+    let (host, port) = endpoint
+        .rsplit_once(':')
+        .ok_or_else(|| invalid("is missing a ':port'"))?;
+    if host.is_empty() {
+        return Err(invalid("has an empty host"));
+    }
+    if host.contains(':') {
+        // A remaining colon means this was a bare IPv6 literal whose
+        // last group we would otherwise misread as the port.
+        return Err(invalid(
+            "looks like an unbracketed IPv6 address; use the [addr]:port form",
+        ));
+    }
+    Ok((host.to_owned(), parse_port(endpoint, port)?))
+}
+
+/// Parse the `:port` suffix of an endpoint into a `u16`.
+fn parse_port(endpoint: &str, port: &str) -> Result<u16, AndroidPalError> {
+    port.parse().map_err(|e| {
         AndroidPalError::InvalidInput(format!("endpoint {endpoint:?} has an invalid port: {e}"))
-    })?;
-    Ok((host.to_owned(), port))
+    })
 }
 
 /// Translate a [`TunnelConfig`] into the flat [`VpnServiceConfig`].
@@ -278,6 +307,20 @@ mod tests {
     #[test]
     fn rejects_endpoint_without_port() {
         let err = translate_config(&config("vpn.example.com")).expect_err("no port");
+        assert!(matches!(err, AndroidPalError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn rejects_bare_unbracketed_ipv6_endpoint() {
+        // `2001:db8::1` has no port and would otherwise be misparsed
+        // as host `2001:db8:` + port `1`; it must be rejected.
+        let err = translate_config(&config("2001:db8::1")).expect_err("bare ipv6");
+        assert!(matches!(err, AndroidPalError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn rejects_bracketed_ipv6_without_port() {
+        let err = translate_config(&config("[2001:db8::1]")).expect_err("ipv6 no port");
         assert!(matches!(err, AndroidPalError::InvalidInput(_)));
     }
 
