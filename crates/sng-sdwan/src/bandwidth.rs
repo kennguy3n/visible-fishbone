@@ -114,7 +114,8 @@ pub struct BandwidthAggregator {
 impl BandwidthAggregator {
     /// Construct an aggregator over `members` using `mode`.
     /// The minimum-members threshold for bonding defaults
-    /// to 2 (bonding a single link is meaningless).
+    /// to 2 (bonding a single link is meaningless); raise it
+    /// with [`Self::with_min_members`].
     ///
     /// # Errors
     ///
@@ -150,13 +151,46 @@ impl BandwidthAggregator {
             }
         }
         Ok(Self {
-            min_members: members.len().min(2),
+            min_members: 2,
             members,
             mode,
             seq: AtomicU64::new(0),
             rr_cursor: AtomicUsize::new(0),
             weighted_cursor: AtomicU64::new(0),
         })
+    }
+
+    /// Override the minimum number of configured member
+    /// links required for bonding to activate (default 2).
+    /// Bonding still requires *all* members to be healthy;
+    /// this raises the floor on how many members must be
+    /// configured before striping is allowed — e.g. a
+    /// triple-link bond that should only stripe when all
+    /// three links exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdwanError::InvalidPolicy`] when `min` is
+    /// below 2 (bonding a single link is meaningless) or
+    /// exceeds the number of configured members (a floor no
+    /// configuration could ever satisfy would silently pin
+    /// the aggregator to single-path forever).
+    pub fn with_min_members(mut self, min: usize) -> Result<Self, SdwanError> {
+        if min < 2 || min > self.members.len() {
+            return Err(SdwanError::InvalidPolicy(format!(
+                "bandwidth min_members {min} must be in 2..={}",
+                self.members.len()
+            )));
+        }
+        self.min_members = min;
+        Ok(self)
+    }
+
+    /// The minimum number of configured members required
+    /// for bonding to activate.
+    #[must_use]
+    pub fn min_members(&self) -> usize {
+        self.min_members
     }
 
     /// The configured members in priority order.
@@ -349,5 +383,51 @@ mod tests {
             AggregationMode::RoundRobin,
         );
         assert!(agg.is_ok());
+    }
+
+    #[test]
+    fn min_members_defaults_to_two() {
+        assert_eq!(rr().min_members(), 2);
+    }
+
+    #[test]
+    fn with_min_members_gates_bonding_until_threshold_met() {
+        // Three-link bond that only stripes when all three
+        // links exist and are healthy.
+        let agg = BandwidthAggregator::new(
+            vec![
+                BondMember::new("a", 1),
+                BondMember::new("b", 1),
+                BondMember::new("c", 1),
+            ],
+            AggregationMode::RoundRobin,
+        )
+        .unwrap()
+        .with_min_members(3)
+        .unwrap();
+        assert_eq!(agg.min_members(), 3);
+
+        let all = [PathId::new("a"), PathId::new("b"), PathId::new("c")];
+        assert!(agg.assign(&all).unwrap().bonded);
+
+        // One link down: degrades to single-path even though
+        // two healthy links remain, because the activation
+        // gate requires all members healthy.
+        let two = [PathId::new("a"), PathId::new("b")];
+        assert!(!agg.assign(&two).unwrap().bonded);
+    }
+
+    #[test]
+    fn with_min_members_rejects_out_of_range() {
+        let agg = || {
+            BandwidthAggregator::new(
+                vec![BondMember::new("a", 1), BondMember::new("b", 1)],
+                AggregationMode::RoundRobin,
+            )
+            .unwrap()
+        };
+        assert!(agg().with_min_members(1).is_err());
+        assert!(agg().with_min_members(3).is_err());
+        assert!(agg().with_min_members(2).is_ok());
     }
 }

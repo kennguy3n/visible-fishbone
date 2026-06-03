@@ -71,11 +71,15 @@ use crate::stats::SdwanStats;
 ///
 /// Wire strings match the Go control plane's default
 /// templates (`internal/service/policy/sdwan_sla.go`):
-/// `business-critical`, `real-time`, `best-effort`. New
-/// variants extend the set rather than renaming existing
-/// ones so the bundle wire form stays stable.
+/// `business-critical`, `real-time`, `best-effort`. The
+/// serde representation is `kebab-case` so the JSON bundle
+/// form is byte-for-byte identical to both [`Self::as_str`]
+/// and the `class` strings the Go control plane emits — a
+/// bundle serialized on either side deserializes on the
+/// other. New variants extend the set rather than renaming
+/// existing ones so the bundle wire form stays stable.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum SlaClass {
     /// Tightest SLA — low latency + near-zero loss. Maps
     /// from `inspect_full` apps in
@@ -90,12 +94,10 @@ pub enum SlaClass {
 }
 
 impl SlaClass {
-    /// Stable wire string. Hyphenated to match the Go
-    /// control-plane template names exactly (the serde
-    /// representation above is snake_case for JSON bundle
-    /// round-trips; this method is the human / template
-    /// name used in telemetry labels and the control
-    /// plane).
+    /// Stable wire string, identical to the serde
+    /// representation above (`kebab-case`). Used directly
+    /// in telemetry labels and as the template name shared
+    /// with the Go control plane.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -514,7 +516,7 @@ impl SlaMonitor {
             let tp = throughput.get(&watch.path_id).copied();
             let breaches = policy.evaluate(&probe, tp);
             if let Some(violation) = self.record_evaluation(watch, policy, &breaches, now_ms) {
-                self.emit(&violation);
+                self.emit(&violation, &probe);
                 emitted.push(violation);
             }
         }
@@ -561,13 +563,19 @@ impl SlaMonitor {
     /// Emit a violation onto the telemetry channel. Never
     /// blocks — a saturated channel drops the event and
     /// credits [`SdwanStats::record_telemetry_drop`].
-    fn emit(&self, violation: &SlaViolation) {
-        let probe = self.probes.get(&violation.path_id);
+    ///
+    /// `probe` is the exact observation that triggered the
+    /// violation (threaded through from the evaluation pass)
+    /// rather than a fresh read from the provider, so the
+    /// telemetry event's metrics always match the data that
+    /// produced the breach — even if the provider has since
+    /// been updated by a concurrent probe.
+    fn emit(&self, violation: &SlaViolation, probe: &PathProbe) {
         let event = SdwanEvent {
             path_id: violation.path_id.as_str().to_string(),
-            latency_ms: probe.map_or(0.0, |p| p.latency_ms),
-            loss_pct: probe.map_or(0.0, |p| p.loss_pct),
-            jitter_ms: probe.map_or(0.0, |p| p.jitter_ms),
+            latency_ms: probe.latency_ms,
+            loss_pct: probe.loss_pct,
+            jitter_ms: probe.jitter_ms,
             score: 0.0,
             steering_decision: format!("sla_violation:{}", violation.sla_class.as_str()),
         };
@@ -587,9 +595,14 @@ impl SlaMonitor {
     ///
     /// The caller owns spawning (`tokio::spawn(monitor.run(...))`)
     /// so this crate need not pull in the tokio runtime
-    /// feature. The loop ticks first, then checks shutdown,
-    /// so a `true` already latched before the first tick is
-    /// honoured promptly.
+    /// feature. Each loop pass checks shutdown, awaits the
+    /// ticker, then checks shutdown again before evaluating.
+    /// A `true` already latched before the first tick is
+    /// therefore honoured before any evaluation runs. Note
+    /// that `tokio::time::interval` fires its first tick
+    /// immediately, so the first SLA evaluation happens with
+    /// no startup delay; subsequent evaluations are spaced
+    /// by `interval`.
     pub async fn run(
         self,
         interval: Duration,
@@ -807,5 +820,38 @@ mod tests {
         assert_eq!(SlaClass::BusinessCritical.as_str(), "business-critical");
         assert_eq!(SlaClass::RealTime.as_str(), "real-time");
         assert_eq!(SlaClass::BestEffort.as_str(), "best-effort");
+    }
+
+    #[test]
+    fn sla_class_serde_matches_as_str_and_go_wire() {
+        // The serde JSON form must be byte-for-byte identical to
+        // `as_str()` (and the Go control plane's `class` strings)
+        // so a bundle serialized on either side deserializes on
+        // the other. A snake_case drift here would silently break
+        // cross-language bundle exchange.
+        for class in [
+            SlaClass::BusinessCritical,
+            SlaClass::RealTime,
+            SlaClass::BestEffort,
+        ] {
+            let json = serde_json::to_string(&class).expect("serialize");
+            assert_eq!(json, format!("\"{}\"", class.as_str()));
+            let back: SlaClass = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, class);
+            // Deserializing the Go control-plane string directly.
+            let from_go: SlaClass = serde_json::from_str(&format!("\"{}\"", class.as_str()))
+                .expect("deserialize go wire string");
+            assert_eq!(from_go, class);
+        }
+    }
+
+    #[test]
+    fn sla_policy_set_round_trips_through_json() {
+        let set = SlaPolicySet::default_templates();
+        let json = serde_json::to_string(&set).expect("serialize");
+        // Map keys are the kebab-case class strings.
+        assert!(json.contains("business-critical"));
+        let back: SlaPolicySet = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, set);
     }
 }
