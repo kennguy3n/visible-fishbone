@@ -223,7 +223,15 @@ func (svc *Service) reactivateMobileDevice(
 		if err := svc.devices.UpdatePosture(ctx, tenantID, existing.ID, initialPosture); err != nil {
 			return repository.Device{}, err
 		}
-		dev.Posture = initialPosture
+		// Re-read so the returned device reflects DB-persisted state,
+		// in particular the updated_at advanced by the
+		// devices_set_updated_at trigger (and by the memory store).
+		// Patching only dev.Posture would leave a stale updated_at.
+		refreshed, err := svc.devices.Get(ctx, tenantID, existing.ID)
+		if err != nil {
+			return repository.Device{}, err
+		}
+		dev = refreshed
 	}
 
 	svc.logAuditErr(svc.appendAudit(ctx, tenantID, in.Actor, "device.mobile_reenrolled", "device", &existing.ID,
@@ -290,7 +298,16 @@ func (svc *Service) ReportMobilePosture(
 	if err := svc.devices.UpdatePosture(ctx, tenantID, dev.ID, posture); err != nil {
 		return repository.Device{}, err
 	}
-	dev.Posture = posture
+	// Re-read so the returned device carries the freshly persisted
+	// state — notably the updated_at advanced by the
+	// devices_set_updated_at trigger (and by the memory store).
+	// Patching only dev.Posture would echo a stale updated_at and
+	// break client cache/ETag comparisons.
+	refreshed, err := svc.devices.Get(ctx, tenantID, dev.ID)
+	if err != nil {
+		return repository.Device{}, err
+	}
+	dev = refreshed
 
 	svc.logAuditErr(svc.appendAudit(ctx, tenantID, in.Actor, "device.mobile_posture_reported", "device", &dev.ID,
 		mobileAuditDetails(in.OIDCSubject, dev.Platform)))

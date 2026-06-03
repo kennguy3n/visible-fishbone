@@ -360,3 +360,55 @@ func TestReportMobilePosture_RejectsDisabledDevice(t *testing.T) {
 		})
 	}
 }
+
+// TestReportMobilePosture_AdvancesUpdatedAt guards against returning a
+// stale updated_at: the posture-report response must carry the
+// timestamp advanced by the store on UpdatePosture (mirroring the
+// Postgres devices_set_updated_at trigger), not the value read before
+// the update.
+func TestReportMobilePosture_AdvancesUpdatedAt(t *testing.T) {
+	t.Parallel()
+	svc, store, tenantID := newSvc(t)
+	ctx := context.Background()
+
+	// Deterministic, strictly-increasing clock so updated_at changes
+	// observably across operations.
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	var ticks int64
+	store.SetClock(func() time.Time {
+		ticks++
+		return base.Add(time.Duration(ticks) * time.Second)
+	})
+
+	key := mobileKey(t)
+	enrolled, err := svc.EnrollMobileDevice(ctx, tenantID, identity.MobileEnrollInput{
+		DeviceKey: key, Platform: repository.DevicePlatformIOS,
+	})
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+
+	reported, err := svc.ReportMobilePosture(ctx, tenantID, identity.MobilePostureInput{
+		DeviceKey: key,
+		Posture:   repository.Posture{OSVersion: "17.5.1", PasscodeSet: boolPtr(true)},
+	})
+	if err != nil {
+		t.Fatalf("report posture: %v", err)
+	}
+
+	// The returned device must carry the advanced updated_at, not the
+	// stale value from the pre-update lookup.
+	if !reported.UpdatedAt.After(enrolled.Device.UpdatedAt) {
+		t.Errorf("updated_at = %s, want after enroll updated_at %s",
+			reported.UpdatedAt, enrolled.Device.UpdatedAt)
+	}
+	// And it must match exactly what the repository persisted.
+	stored, err := memory.NewDeviceRepository(store).Get(ctx, tenantID, reported.ID)
+	if err != nil {
+		t.Fatalf("get device: %v", err)
+	}
+	if !reported.UpdatedAt.Equal(stored.UpdatedAt) {
+		t.Errorf("returned updated_at %s != stored %s (stale response)",
+			reported.UpdatedAt, stored.UpdatedAt)
+	}
+}

@@ -17,8 +17,6 @@ package handler
 import (
 	"net/http"
 
-	"github.com/google/uuid"
-
 	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
@@ -108,7 +106,7 @@ func (h *MobileHandler) enroll(w http.ResponseWriter, r *http.Request) {
 		Platform:    platform,
 		Name:        req.Name,
 		OIDCSubject: claims.OIDCSubject,
-		Actor:       actorFromContext(r),
+		Actor:       actorFromCtx(r),
 		Posture:     req.Posture,
 	})
 	if err != nil {
@@ -152,7 +150,7 @@ func (h *MobileHandler) reportPosture(w http.ResponseWriter, r *http.Request) {
 		DeviceKey:   claims.DeviceKey,
 		Posture:     req.Posture,
 		OIDCSubject: claims.OIDCSubject,
-		Actor:       actorFromContext(r),
+		Actor:       actorFromCtx(r),
 	})
 	if err != nil {
 		WriteRepositoryError(w, err)
@@ -181,13 +179,4 @@ func requireMobileSession(w http.ResponseWriter, r *http.Request) (middleware.Mo
 		return middleware.MobileClaims{}, false
 	}
 	return claims, true
-}
-
-// actorFromContext returns the authenticated SNG user UUID for audit
-// attribution, or nil when the session has no SNG user binding.
-func actorFromContext(r *http.Request) *uuid.UUID {
-	if uid := middleware.UserIDFromContext(r.Context()); uid != uuid.Nil {
-		return &uid
-	}
-	return nil
 }
