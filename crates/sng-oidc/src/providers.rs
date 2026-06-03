@@ -9,6 +9,8 @@
 
 use std::fmt;
 
+use url::Url;
+
 /// A known OpenID Connect provider.
 ///
 /// `Microsoft365` and `Okta` are parameterised by the tenant /
@@ -47,13 +49,9 @@ impl Provider {
             Self::GoogleWorkspace => {
                 "https://accounts.google.com/.well-known/openid-configuration".to_owned()
             }
-            Self::Microsoft365 { tenant } => format!(
-                "https://login.microsoftonline.com/{tenant}/v2.0/.well-known/openid-configuration"
-            ),
+            Self::Microsoft365 { tenant } => microsoft_discovery_url(tenant),
             Self::Zoho => "https://accounts.zoho.com/.well-known/openid-configuration".to_owned(),
-            Self::Okta { domain } => {
-                format!("https://{domain}/.well-known/openid-configuration")
-            }
+            Self::Okta { domain } => okta_discovery_url(domain),
         }
     }
 
@@ -100,6 +98,52 @@ impl Provider {
             Self::Zoho => "zoho",
             Self::Okta { .. } => "okta",
         }
+    }
+}
+
+/// Build the Microsoft 365 per-tenant discovery URL.
+///
+/// `tenant` is admin-configured, but we still build the URL through
+/// the `url` crate so the value is percent-encoded as a *single*
+/// path segment: a tenant containing `/`, `?`, or `#` (e.g.
+/// `"x?evil=1#"`) cannot break out of the path and re-point the
+/// discovery request. The `Err` arms are unreachable for the
+/// constant base; the raw `format!` fallback preserves the previous
+/// behaviour rather than panicking (no `unwrap`/`expect`).
+fn microsoft_discovery_url(tenant: &str) -> String {
+    let raw = || {
+        format!("https://login.microsoftonline.com/{tenant}/v2.0/.well-known/openid-configuration")
+    };
+    let Ok(mut url) = Url::parse("https://login.microsoftonline.com/") else {
+        return raw();
+    };
+    {
+        // Scope the mutable borrow so it ends before `to_string`.
+        let Ok(mut segments) = url.path_segments_mut() else {
+            return raw();
+        };
+        segments.extend([tenant, "v2.0", ".well-known", "openid-configuration"]);
+    }
+    url.to_string()
+}
+
+/// Build the Okta per-org discovery URL.
+///
+/// `domain` lands in the host position, so we set it via
+/// [`Url::set_host`], which validates it as a real host and rejects
+/// a value carrying a path / port / `?` / `#`. On rejection the URL
+/// keeps its unreachable `.invalid` placeholder host — so discovery
+/// can never be re-pointed at an attacker-influenced host — and the
+/// downstream `DiscoveryClient` then fails cleanly. We never panic.
+fn okta_discovery_url(domain: &str) -> String {
+    match Url::parse("https://placeholder.invalid/.well-known/openid-configuration") {
+        Ok(mut url) => {
+            // Discard the result deliberately: a rejected host
+            // leaves the `.invalid` placeholder in place.
+            let _ = url.set_host(Some(domain));
+            url.to_string()
+        }
+        Err(_) => format!("https://{domain}/.well-known/openid-configuration"),
     }
 }
 
@@ -156,5 +200,38 @@ mod tests {
             "https://dev-12345.okta.com/.well-known/openid-configuration"
         );
         assert_eq!(p.domain_restriction_param(), None);
+    }
+
+    #[test]
+    fn microsoft_tenant_cannot_break_out_of_path() {
+        // `?` / `#` / `/` in the tenant must be percent-encoded so
+        // the discovery path stays `…/{tenant}/v2.0/.well-known/…`
+        // and is not turned into a query, fragment, or extra
+        // segments that re-point the request.
+        let p = Provider::Microsoft365 {
+            tenant: "x?evil=1#frag/extra".to_owned(),
+        };
+        let url = p.discovery_url();
+        let parsed = Url::parse(&url).expect("discovery url parses");
+        assert_eq!(parsed.host_str(), Some("login.microsoftonline.com"));
+        assert!(parsed.query().is_none());
+        assert!(parsed.fragment().is_none());
+        assert!(
+            url.ends_with("/v2.0/.well-known/openid-configuration"),
+            "unexpected discovery url: {url}"
+        );
+    }
+
+    #[test]
+    fn okta_domain_injection_does_not_change_host() {
+        // A domain carrying a path can't smuggle the well-known
+        // path onto an attacker-chosen host.
+        let p = Provider::Okta {
+            domain: "evil.example.com/legit.okta.com".to_owned(),
+        };
+        let url = p.discovery_url();
+        if let Ok(parsed) = Url::parse(&url) {
+            assert_ne!(parsed.host_str(), Some("evil.example.com"));
+        }
     }
 }
