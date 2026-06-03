@@ -154,7 +154,9 @@ fn okta_discovery_url(domain: &str) -> String {
                 PLACEHOLDER.to_owned()
             }
         }
-        Err(_) => format!("https://{domain}/.well-known/openid-configuration"),
+        // Unreachable for the constant `PLACEHOLDER`; return it
+        // verbatim rather than interpolating `domain` unescaped.
+        Err(_) => PLACEHOLDER.to_owned(),
     }
 }
 

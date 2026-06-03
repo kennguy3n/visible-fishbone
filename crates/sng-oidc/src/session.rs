@@ -84,7 +84,14 @@ struct SessionState {
 impl SessionState {
     fn apply(&mut self, response: &TokenResponse) {
         self.access_token.clone_from(&response.access_token);
-        self.expires_at = expires_at_from(response.expires_in);
+        // `expires_in` is RECOMMENDED but not REQUIRED on a refresh
+        // response (RFC 6749 §5.1). Only update the expiry when the
+        // provider sends one; otherwise keep the prior `expires_at` so
+        // a missing `expires_in` doesn't null out the expiry and
+        // silently disable auto-refresh for the rest of the session.
+        if let Some(expires_at) = expires_at_from(response.expires_in) {
+            self.expires_at = Some(expires_at);
+        }
         if let Some(id_token) = &response.id_token {
             self.id_token = Some(id_token.clone());
         }
@@ -369,6 +376,46 @@ mod tests {
         assert_eq!(stored.access_token, "at-1");
         assert_eq!(stored.refresh_token.as_deref(), Some("rt"));
         assert!(stored.expires_at.is_some());
+    }
+
+    #[test]
+    fn apply_preserves_expiry_when_refresh_omits_expires_in() {
+        // A refresh response may omit `expires_in` (RFC 6749 §5.1);
+        // the prior expiry must survive so auto-refresh keeps working.
+        let mut state = SessionState {
+            access_token: "old".to_owned(),
+            refresh_token: Some("rt".to_owned()),
+            id_token: None,
+            expires_at: expires_at_from(Some(3600)),
+            sub: None,
+            groups: Vec::new(),
+        };
+        let before = state.expires_at;
+        assert!(before.is_some());
+
+        state.apply(&token_response(None, Some("rt2")));
+
+        assert_eq!(state.access_token, "at-1");
+        assert_eq!(state.expires_at, before, "expiry must be preserved");
+        assert_eq!(state.refresh_token.as_deref(), Some("rt2"));
+    }
+
+    #[test]
+    fn apply_updates_expiry_when_refresh_includes_expires_in() {
+        let mut state = SessionState {
+            access_token: "old".to_owned(),
+            refresh_token: Some("rt".to_owned()),
+            id_token: None,
+            expires_at: expires_at_from(Some(10)),
+            sub: None,
+            groups: Vec::new(),
+        };
+        let before = state.expires_at.expect("has expiry");
+
+        state.apply(&token_response(Some(3600), None));
+
+        let after = state.expires_at.expect("still has expiry");
+        assert!(after > before, "expiry should advance with new expires_in");
     }
 
     #[test]
