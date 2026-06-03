@@ -4006,7 +4006,7 @@ components:
     AICorrelationCluster:
       type: object
       properties:
-        id: { type: string, format: uuid }
+        id: { type: string, format: uuid, nullable: true, description: "Persisted correlation ID; null when the cluster was not stored (ephemeral)." }
         tenant_id: { type: string, format: uuid }
         alert_ids:
           type: array

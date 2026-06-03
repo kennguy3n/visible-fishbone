@@ -130,8 +130,12 @@ func (e *CorrelationEngine) Analyze(ctx context.Context, alerts []AlertInput) (C
 		severity := escalateSeverity(group)
 		summary := e.buildTemplateSummary(group, dimSlice)
 
+		// ID is intentionally left nil: the engine result is ephemeral
+		// until a caller persists it, at which point the persisted
+		// (retrievable) ID is written back onto the cluster. Assigning
+		// an ID here would produce a plausible-looking UUID that a later
+		// GET could not resolve.
 		cluster := CorrelationCluster{
-			ID:         uuid.New(),
 			TenantID:   anchor.TenantID,
 			AlertIDs:   alertIDs,
 			Summary:    summary,

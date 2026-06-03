@@ -51,8 +51,16 @@ type AlertInput struct {
 
 // CorrelationCluster is the output of the correlation engine: a
 // group of related alerts and a summary.
+//
+// ID is a pointer because it is meaningful only once the cluster has
+// been persisted: it carries the repository-assigned ID (retrievable
+// via GET /ai/correlations/{id}) and is nil for an ephemeral cluster
+// that was not stored (no repository wired, or a persistence failure).
+// A nil ID serialises as JSON null rather than a zero UUID that would
+// 404, so the contract is "id is non-null iff the cluster is
+// retrievable". The engine itself never assigns an ID.
 type CorrelationCluster struct {
-	ID         uuid.UUID              `json:"id"`
+	ID         *uuid.UUID             `json:"id,omitempty"`
 	TenantID   uuid.UUID              `json:"tenant_id"`
 	AlertIDs   []uuid.UUID            `json:"alert_ids"`
 	Summary    string                 `json:"summary"`

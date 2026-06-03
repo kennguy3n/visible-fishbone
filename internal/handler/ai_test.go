@@ -244,7 +244,7 @@ func TestAIHandler_AnalyzeCorrelations_PersistedIDIsRetrievable(t *testing.T) {
 	// Every returned cluster ID must resolve via GET — i.e. the
 	// response carries the persisted ID, not a divergent engine ID.
 	for _, cluster := range result.Clusters {
-		if cluster.ID == uuid.Nil {
+		if cluster.ID == nil {
 			t.Fatal("cluster ID must not be nil")
 		}
 		getReq := httptest.NewRequest(http.MethodGet,

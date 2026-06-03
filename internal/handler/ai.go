@@ -298,14 +298,14 @@ func (h *AIHandler) analyzeCorrelations(w http.ResponseWriter, r *http.Request) 
 	// The repository assigns the canonical ID (the postgres backend
 	// always generates its own), so we write the persisted ID back
 	// onto the response cluster — otherwise a later
-	// GET /ai/correlations/{id} using the engine-assigned ID would
-	// 404 against a row stored under a different ID.
+	// GET /ai/correlations/{id} would have no ID to resolve.
 	//
-	// The response contract is: a cluster's id is set iff that cluster
-	// was persisted and is retrievable via GET. If persistence fails we
-	// zero the engine-assigned id so the caller receives a clear signal
-	// (nil UUID) that this cluster is ephemeral, rather than a plausible
-	// id that would 404.
+	// The response contract is: a cluster's id is non-null iff that
+	// cluster was persisted and is retrievable via GET. The engine
+	// leaves id nil; on success we set it to the persisted ID, and on
+	// failure (or when no repository is wired) it stays nil so the
+	// caller sees JSON null — a clear "ephemeral" signal — rather than a
+	// plausible id that would 404.
 	if h.correlationRepo != nil {
 		for i := range result.Clusters {
 			cluster := result.Clusters[i]
@@ -319,10 +319,10 @@ func (h *AIHandler) analyzeCorrelations(w http.ResponseWriter, r *http.Request) 
 				h.logger.Warn("ai: failed to persist correlation cluster",
 					slog.String("tenant_id", tenantID.String()),
 					slog.String("error", err.Error()))
-				result.Clusters[i].ID = uuid.Nil
 				continue
 			}
-			result.Clusters[i].ID = persisted.ID
+			pid := persisted.ID
+			result.Clusters[i].ID = &pid
 		}
 	}
 	WriteJSON(w, http.StatusOK, result)
@@ -761,7 +761,13 @@ func (h *AIHandler) analyzeTightening(w http.ResponseWriter, r *http.Request) {
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
-	report, err := h.tighteningSvc.Analyze(r.Context(), ai.AnalyzeInput{
+	// Tag the context with the tenant so that any LLM-backed work the
+	// tightening service performs (today its rationales are deterministic,
+	// but the service holds the guardrailed provider) is rate-limited and
+	// audited under the right tenant rather than uuid.Nil. Mirrors every
+	// other AI handler.
+	ctx := ai.ContextWithTenantID(r.Context(), tenantID)
+	report, err := h.tighteningSvc.Analyze(ctx, ai.AnalyzeInput{
 		TenantID:   tenantID,
 		Rules:      req.Rules,
 		HitCounts:  req.HitCounts,

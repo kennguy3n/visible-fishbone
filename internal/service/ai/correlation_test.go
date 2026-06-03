@@ -56,6 +56,13 @@ func TestCorrelationEngine_TemporalCluster(t *testing.T) {
 	if result.AIGenerated {
 		t.Fatal("template-only mode: ai_generated must be false")
 	}
+	// The engine must not assign an ID: a cluster is only retrievable
+	// once a caller persists it and writes the persisted ID back. A
+	// non-nil ID here would be a plausible UUID that a later GET could
+	// not resolve.
+	if c.ID != nil {
+		t.Fatalf("engine must leave cluster ID nil, got %v", *c.ID)
+	}
 }
 
 func TestCorrelationEngine_TemporalProximityAloneDoesNotCluster(t *testing.T) {
