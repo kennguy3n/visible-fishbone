@@ -286,7 +286,10 @@ fn random_jitter(skew: Duration) -> Duration {
         return Duration::ZERO;
     }
     let mut rng = OsRng;
-    Duration::from_millis(rng.next_u64() % (half_ms + 1))
+    // `saturating_add` guards the (practically unreachable) case where
+    // `half_ms == u64::MAX`: a plain `+ 1` would overflow (panic in
+    // debug, wrap to 0 -> `% 0` divide-by-zero in release).
+    Duration::from_millis(rng.next_u64() % half_ms.saturating_add(1))
 }
 
 #[cfg(test)]

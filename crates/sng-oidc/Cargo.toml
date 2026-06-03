@@ -60,7 +60,8 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time
 # In-process mock OIDC server (no real network in tests).
 wiremock = { workspace = true }
 pretty_assertions = { workspace = true }
-# Used by the integration test to mint signed ID-token / JWKS
-# fixtures and assemble JSON response bodies.
-jsonwebtoken = { workspace = true }
-serde_json = { workspace = true }
+# `jsonwebtoken` (mint signed ID-token / JWKS fixtures) and
+# `serde_json` (assemble JSON response bodies) are also used by the
+# integration test, but they are already regular `[dependencies]`
+# with the same feature set, so Cargo reuses those for test builds —
+# no separate `[dev-dependencies]` entries are needed.

@@ -131,17 +131,28 @@ fn microsoft_discovery_url(tenant: &str) -> String {
 ///
 /// `domain` lands in the host position, so we set it via
 /// [`Url::set_host`], which validates it as a real host and rejects
-/// a value carrying a path / port / `?` / `#`. On rejection the URL
-/// keeps its unreachable `.invalid` placeholder host — so discovery
-/// can never be re-pointed at an attacker-influenced host — and the
-/// downstream `DiscoveryClient` then fails cleanly. We never panic.
+/// a value carrying a path / `?` / `#`. The documented contract is a
+/// *bare* org domain, so we also reject any `:` up front: depending
+/// on the `url` version, `set_host` either silently drops a
+/// `host:port` suffix or honours it as a port, and neither is what
+/// the caller asked for — rejecting `:` is deterministic across
+/// versions and keeps a port out of the discovery authority. On
+/// rejection the URL keeps its unreachable `.invalid` placeholder
+/// host — so discovery can never be re-pointed at an attacker- /
+/// misconfig-influenced authority — and the downstream
+/// `DiscoveryClient` then fails cleanly. We never panic.
 fn okta_discovery_url(domain: &str) -> String {
-    match Url::parse("https://placeholder.invalid/.well-known/openid-configuration") {
+    const PLACEHOLDER: &str = "https://placeholder.invalid/.well-known/openid-configuration";
+    if domain.contains(':') {
+        return PLACEHOLDER.to_owned();
+    }
+    match Url::parse(PLACEHOLDER) {
         Ok(mut url) => {
-            // Discard the result deliberately: a rejected host
-            // leaves the `.invalid` placeholder in place.
-            let _ = url.set_host(Some(domain));
-            url.to_string()
+            if url.set_host(Some(domain)).is_ok() && url.port().is_none() {
+                url.to_string()
+            } else {
+                PLACEHOLDER.to_owned()
+            }
         }
         Err(_) => format!("https://{domain}/.well-known/openid-configuration"),
     }
@@ -233,5 +244,18 @@ mod tests {
         if let Ok(parsed) = Url::parse(&url) {
             assert_ne!(parsed.host_str(), Some("evil.example.com"));
         }
+    }
+
+    #[test]
+    fn okta_domain_with_port_is_rejected() {
+        // `set_host` accepts `host:port`; a domain carrying a port
+        // must not produce a discovery URL pointing at that port.
+        let p = Provider::Okta {
+            domain: "dev-12345.okta.com:9999".to_owned(),
+        };
+        let url = p.discovery_url();
+        let parsed = Url::parse(&url).expect("discovery url parses");
+        assert!(parsed.port().is_none(), "unexpected port in {url}");
+        assert_ne!(parsed.host_str(), Some("dev-12345.okta.com"));
     }
 }
