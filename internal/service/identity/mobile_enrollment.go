@@ -150,7 +150,11 @@ func (svc *Service) EnrollMobileDevice(
 		if errors.Is(err, repository.ErrConflict) {
 			existing, gerr := svc.devices.GetByPublicKey(ctx, tenantID, in.DeviceKey)
 			if gerr != nil {
-				return MobileEnrollResult{}, err
+				// Surface the real lookup failure (e.g. a transient DB
+				// error), not the original ErrConflict — returning the
+				// latter would mislead the client into a 409 and an
+				// incorrect retry decision.
+				return MobileEnrollResult{}, gerr
 			}
 			dev, uerr := svc.reactivateMobileDevice(ctx, tenantID, existing, in, initialPosture)
 			if uerr != nil {
@@ -178,6 +182,18 @@ func (svc *Service) reactivateMobileDevice(
 	in MobileEnrollInput,
 	initialPosture repository.Posture,
 ) (repository.Device, error) {
+	// Admin controls are authoritative over a stateless session JWT: a
+	// device an admin has suspended or soft-deleted must NOT be
+	// silently reinstated by a re-enrolment from a still-valid session.
+	// Refuse with 403 so suspend/delete is an effective kill-switch for
+	// the self-service surface; reinstatement must go through the
+	// admin device-status path.
+	if disabled, reason := mobileDeviceDisabled(existing.Status); disabled {
+		return repository.Device{}, fmt.Errorf(
+			"device has been administratively %s and cannot be re-enrolled via self-service: %w",
+			reason, repository.ErrForbidden)
+	}
+
 	if existing.Platform != in.Platform {
 		// The device key is bound to one physical device whose OS does
 		// not change under it, so a platform change is a client error
@@ -190,9 +206,11 @@ func (svc *Service) reactivateMobileDevice(
 	}
 
 	dev := existing
-	// Re-activate if the device was suspended/pending or never had its
-	// enrolment timestamp stamped. UpdateStatus stamps enrolled_at on
-	// the active transition when it is still null.
+	// Re-activate a pending device (or one that never had its enrolment
+	// timestamp stamped). Suspended/deleted devices were already
+	// rejected above, so the only non-active status reaching here is
+	// pending. UpdateStatus stamps enrolled_at on the active transition
+	// when it is still null.
 	if existing.Status != repository.DeviceStatusActive || existing.EnrolledAt == nil {
 		updated, err := svc.devices.UpdateStatus(ctx, tenantID, existing.ID, repository.DeviceStatusActive)
 		if err != nil {
@@ -255,6 +273,15 @@ func (svc *Service) ReportMobilePosture(
 		// signals are validated against a real mobile platform.
 		return repository.Device{}, fmt.Errorf("device %s is not a mobile device: %w", dev.ID, repository.ErrInvalidArgument)
 	}
+	// Same kill-switch as enrolment: an administratively suspended or
+	// soft-deleted device may not keep its posture fresh off a
+	// still-valid session JWT, since stale-but-"healthy" posture could
+	// let a disabled device retain ZTNA access until the token expires.
+	if disabled, reason := mobileDeviceDisabled(dev.Status); disabled {
+		return repository.Device{}, fmt.Errorf(
+			"device has been administratively %s and cannot report posture: %w",
+			reason, repository.ErrForbidden)
+	}
 
 	posture, err := validateMobilePosture(in.Posture, dev.Platform, svc.nowFunc())
 	if err != nil {
@@ -268,6 +295,23 @@ func (svc *Service) ReportMobilePosture(
 	svc.logAuditErr(svc.appendAudit(ctx, tenantID, in.Actor, "device.mobile_posture_reported", "device", &dev.ID,
 		mobileAuditDetails(in.OIDCSubject, dev.Platform)))
 	return dev, nil
+}
+
+// mobileDeviceDisabled reports whether a device has been
+// administratively disabled (suspended or soft-deleted) and therefore
+// must not be acted on by the mobile self-service endpoints. The
+// session JWT is stateless (it only expires), so device status is the
+// authoritative live control: gating both enrolment and posture
+// reporting on it makes admin suspend/delete an effective kill-switch
+// for the self-service surface even while a token remains unexpired.
+// The returned reason is the offending status, for the error message.
+func mobileDeviceDisabled(status repository.DeviceStatus) (bool, repository.DeviceStatus) {
+	switch status {
+	case repository.DeviceStatusSuspended, repository.DeviceStatusDeleted:
+		return true, status
+	default:
+		return false, status
+	}
 }
 
 // validateMobilePosture enforces platform/signal coherence and

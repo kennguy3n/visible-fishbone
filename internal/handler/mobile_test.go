@@ -21,6 +21,15 @@ import (
 
 func newTestMobileHandler(t *testing.T) (*MobileHandler, uuid.UUID) {
 	t.Helper()
+	h, _, tenantID := newTestMobileHandlerWithStore(t)
+	return h, tenantID
+}
+
+// newTestMobileHandlerWithStore is like newTestMobileHandler but also
+// returns the backing store, so a test can mutate device state
+// out-of-band (e.g. simulate an admin suspend/delete).
+func newTestMobileHandlerWithStore(t *testing.T) (*MobileHandler, *memory.Store, uuid.UUID) {
+	t.Helper()
 	s := memory.NewStore()
 	tn, err := memory.NewTenantRepository(s).Create(context.Background(), repository.Tenant{
 		Name: "Test", Slug: "test", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
@@ -34,7 +43,7 @@ func newTestMobileHandler(t *testing.T) (*MobileHandler, uuid.UUID) {
 		memory.NewAuditLogRepository(s),
 		nil,
 	)
-	return NewMobileHandler(svc), tn.ID
+	return NewMobileHandler(svc), s, tn.ID
 }
 
 func testMobileKey(t *testing.T) string {
@@ -219,5 +228,43 @@ func TestMobilePosture_CrossPlatformSignalRejected(t *testing.T) {
 		`{"posture":{"root_detected":true}}`, tenantID, key))
 	if rec2.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec2.Code, rec2.Body.String())
+	}
+}
+
+// TestMobileEnroll_RejectsDisabledDevice verifies the admin
+// kill-switch is honoured end-to-end through the handler: once a
+// device is suspended out-of-band, a re-enrolment from a still-valid
+// mobile session is rejected with 403 (ErrForbidden → forbidden).
+func TestMobileEnroll_RejectsDisabledDevice(t *testing.T) {
+	t.Parallel()
+	h, store, tenantID := newTestMobileHandlerWithStore(t)
+	key := testMobileKey(t)
+	path := "/api/v1/tenants/" + tenantID.String() + "/devices/mobile/enroll"
+
+	rec := httptest.NewRecorder()
+	h.enroll(rec, mobileReq(t, http.MethodPost, path, `{"platform":"ios"}`, tenantID, key))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("enroll status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+	var resp MobileEnrollResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Admin suspends the device.
+	devID, err := uuid.Parse(resp.Device.ID)
+	if err != nil {
+		t.Fatalf("parse device id %q: %v", resp.Device.ID, err)
+	}
+	if _, err := memory.NewDeviceRepository(store).UpdateStatus(
+		context.Background(), tenantID, devID, repository.DeviceStatusSuspended,
+	); err != nil {
+		t.Fatalf("suspend device: %v", err)
+	}
+
+	rec2 := httptest.NewRecorder()
+	h.enroll(rec2, mobileReq(t, http.MethodPost, path, `{"platform":"ios"}`, tenantID, key))
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("re-enroll status = %d, want 403; body = %s", rec2.Code, rec2.Body.String())
 	}
 }

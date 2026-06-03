@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
@@ -275,6 +277,85 @@ func TestReportMobilePosture_TimestampWindow(t *testing.T) {
 			}
 			if !tc.wantErr && err != nil {
 				t.Errorf("err = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// suspendDevice flips an enrolled device to the given admin-controlled
+// status directly through the repository, simulating an admin
+// suspend/delete out-of-band from the mobile self-service path.
+func suspendDevice(t *testing.T, store *memory.Store, tenantID, id uuid.UUID, status repository.DeviceStatus) {
+	t.Helper()
+	if _, err := memory.NewDeviceRepository(store).UpdateStatus(context.Background(), tenantID, id, status); err != nil {
+		t.Fatalf("set device status %s: %v", status, err)
+	}
+}
+
+func TestEnrollMobileDevice_RejectsReenrollOfDisabledDevice(t *testing.T) {
+	t.Parallel()
+	for _, status := range []repository.DeviceStatus{
+		repository.DeviceStatusSuspended,
+		repository.DeviceStatusDeleted,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			svc, store, tenantID := newSvc(t)
+			ctx := context.Background()
+			key := mobileKey(t)
+
+			res, err := svc.EnrollMobileDevice(ctx, tenantID, identity.MobileEnrollInput{
+				DeviceKey: key, Platform: repository.DevicePlatformIOS,
+			})
+			if err != nil {
+				t.Fatalf("enroll: %v", err)
+			}
+			// Admin suspends/deletes the device out-of-band.
+			suspendDevice(t, store, tenantID, res.Device.ID, status)
+
+			// A still-valid session must not self-reinstate it.
+			_, err = svc.EnrollMobileDevice(ctx, tenantID, identity.MobileEnrollInput{
+				DeviceKey: key, Platform: repository.DevicePlatformIOS,
+			})
+			if !errors.Is(err, repository.ErrForbidden) {
+				t.Fatalf("re-enroll err = %v, want ErrForbidden", err)
+			}
+			// The device stays disabled (not flipped back to active).
+			got, err := memory.NewDeviceRepository(store).GetByPublicKey(ctx, tenantID, key)
+			if err != nil {
+				t.Fatalf("get device: %v", err)
+			}
+			if got.Status != status {
+				t.Errorf("status = %q, want %q (unchanged)", got.Status, status)
+			}
+		})
+	}
+}
+
+func TestReportMobilePosture_RejectsDisabledDevice(t *testing.T) {
+	t.Parallel()
+	for _, status := range []repository.DeviceStatus{
+		repository.DeviceStatusSuspended,
+		repository.DeviceStatusDeleted,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			svc, store, tenantID := newSvc(t)
+			ctx := context.Background()
+			key := mobileKey(t)
+
+			res, err := svc.EnrollMobileDevice(ctx, tenantID, identity.MobileEnrollInput{
+				DeviceKey: key, Platform: repository.DevicePlatformIOS,
+			})
+			if err != nil {
+				t.Fatalf("enroll: %v", err)
+			}
+			suspendDevice(t, store, tenantID, res.Device.ID, status)
+
+			_, err = svc.ReportMobilePosture(ctx, tenantID, identity.MobilePostureInput{
+				DeviceKey: key,
+				Posture:   repository.Posture{OSVersion: "17.5.1", PasscodeSet: boolPtr(true)},
+			})
+			if !errors.Is(err, repository.ErrForbidden) {
+				t.Fatalf("report posture err = %v, want ErrForbidden", err)
 			}
 		})
 	}
