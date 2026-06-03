@@ -88,9 +88,14 @@ func (r *MSPRepository) Create(ctx context.Context, m repository.MSP) (repositor
 		INSERT INTO msps (id, name, slug, status, branding, settings)
 		VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::jsonb)
 		RETURNING ` + mspSelectColumns
-	out, err := scanMSP(r.s.pool.Primary().QueryRow(ctx, q,
-		m.ID, m.Name, m.Slug, string(m.Status), brandBuf, []byte(m.Settings),
-	))
+	var out repository.MSP
+	err = r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		var e error
+		out, e = scanMSP(db.QueryRow(ctx, q,
+			m.ID, m.Name, m.Slug, string(m.Status), brandBuf, []byte(m.Settings),
+		))
+		return e
+	})
 	if err != nil {
 		if isUniqueViolation(err) {
 			return repository.MSP{}, repository.ErrConflict
@@ -105,7 +110,12 @@ func (r *MSPRepository) Create(ctx context.Context, m repository.MSP) (repositor
 
 func (r *MSPRepository) Get(ctx context.Context, id uuid.UUID) (repository.MSP, error) {
 	const q = `SELECT ` + mspSelectColumns + ` FROM msps WHERE id = $1::uuid`
-	out, err := scanMSP(r.s.pool.Primary().QueryRow(ctx, q, id))
+	var out repository.MSP
+	err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		var e error
+		out, e = scanMSP(db.QueryRow(ctx, q, id))
+		return e
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.MSP{}, repository.ErrNotFound
 	}
@@ -125,7 +135,12 @@ func (r *MSPRepository) Get(ctx context.Context, id uuid.UUID) (repository.MSP, 
 // lookup deterministic and aligned with the memory backend.
 func (r *MSPRepository) GetBySlug(ctx context.Context, slug string) (repository.MSP, error) {
 	const q = `SELECT ` + mspSelectColumns + ` FROM msps WHERE slug = $1 AND deleted_at IS NULL`
-	out, err := scanMSP(r.s.pool.Primary().QueryRow(ctx, q, slug))
+	var out repository.MSP
+	err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		var e error
+		out, e = scanMSP(db.QueryRow(ctx, q, slug))
+		return e
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.MSP{}, repository.ErrNotFound
 	}
@@ -180,21 +195,26 @@ func (r *MSPRepository) List(ctx context.Context, page repository.Page, filter r
 			args[0] = nil
 		}
 	}
-	rows, err := r.s.pool.Primary().Query(ctx, q, args...)
-	if err != nil {
-		return repository.PageResult[repository.MSP]{}, fmt.Errorf("list msps: %w", err)
-	}
-	defer rows.Close()
 	out := make([]repository.MSP, 0, page.Limit)
-	for rows.Next() {
-		m, err := scanMSP(rows)
-		if err != nil {
-			return repository.PageResult[repository.MSP]{}, fmt.Errorf("scan msp: %w", err)
+	if err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		rows, e := db.Query(ctx, q, args...)
+		if e != nil {
+			return fmt.Errorf("list msps: %w", e)
 		}
-		out = append(out, m)
-	}
-	if err := rows.Err(); err != nil {
-		return repository.PageResult[repository.MSP]{}, fmt.Errorf("iterate msps: %w", err)
+		defer rows.Close()
+		for rows.Next() {
+			m, e := scanMSP(rows)
+			if e != nil {
+				return fmt.Errorf("scan msp: %w", e)
+			}
+			out = append(out, m)
+		}
+		if e := rows.Err(); e != nil {
+			return fmt.Errorf("iterate msps: %w", e)
+		}
+		return nil
+	}); err != nil {
+		return repository.PageResult[repository.MSP]{}, err
 	}
 	res := repository.PageResult[repository.MSP]{Items: out}
 	if len(out) == page.Limit && len(out) > 0 {
@@ -339,16 +359,24 @@ func (r *MSPRepository) Update(ctx context.Context, id uuid.UUID, patch reposito
 		}
 		settingsArg = []byte(payload)
 	}
-	out, err := scanMSP(r.s.pool.Primary().QueryRow(ctx, q,
-		id, nameArg, slugArg, statusArg, brandingArg, settingsArg,
-	))
+	var out repository.MSP
+	err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		var e error
+		out, e = scanMSP(db.QueryRow(ctx, q,
+			id, nameArg, slugArg, statusArg, brandingArg, settingsArg,
+		))
+		return e
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Either the row doesn't exist (NotFound) or the row exists
 		// but is soft-deleted (Forbidden — soft-delete immutability
 		// guard, round-13). One extra round-trip to disambiguate;
 		// rare path so cost is acceptable.
 		var dummy uuid.UUID
-		if scanErr := r.s.pool.Primary().QueryRow(ctx, `SELECT id FROM msps WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
+		scanErr := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+			return db.QueryRow(ctx, `SELECT id FROM msps WHERE id = $1::uuid`, id).Scan(&dummy)
+		})
+		if scanErr != nil {
 			if errors.Is(scanErr, pgx.ErrNoRows) {
 				return repository.MSP{}, repository.ErrNotFound
 			}
@@ -407,7 +435,12 @@ func (r *MSPRepository) TransitionStatus(ctx context.Context, id uuid.UUID, to r
 		SET status = $2
 		WHERE id = $1::uuid AND status <> 'deleted' AND deleted_at IS NULL
 		RETURNING ` + mspSelectColumns
-	out, err := scanMSP(r.s.pool.Primary().QueryRow(ctx, q, id, string(to)))
+	var out repository.MSP
+	err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		var e error
+		out, e = scanMSP(db.QueryRow(ctx, q, id, string(to)))
+		return e
+	})
 	if err == nil {
 		return out, nil
 	}
@@ -415,7 +448,10 @@ func (r *MSPRepository) TransitionStatus(ctx context.Context, id uuid.UUID, to r
 		return repository.MSP{}, fmt.Errorf("transition msp status: %w", err)
 	}
 	var dummy string
-	if scanErr := r.s.pool.Primary().QueryRow(ctx, `SELECT status FROM msps WHERE id = $1::uuid`, id).Scan(&dummy); scanErr != nil {
+	scanErr := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		return db.QueryRow(ctx, `SELECT status FROM msps WHERE id = $1::uuid`, id).Scan(&dummy)
+	})
+	if scanErr != nil {
 		if errors.Is(scanErr, pgx.ErrNoRows) {
 			return repository.MSP{}, repository.ErrNotFound
 		}
@@ -453,14 +489,22 @@ func (r *MSPRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status r
 		    deleted_at = CASE WHEN $2 = 'deleted' THEN COALESCE(deleted_at, NOW()) ELSE deleted_at END
 		WHERE id = $1::uuid AND status <> 'deleted' AND deleted_at IS NULL
 		RETURNING ` + mspSelectColumns
-	out, err := scanMSP(r.s.pool.Primary().QueryRow(ctx, q, id, string(status)))
+	var out repository.MSP
+	err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		var e error
+		out, e = scanMSP(db.QueryRow(ctx, q, id, string(status)))
+		return e
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Either the row does not exist, or it's already deleted.
 		// Resolve via a separate SELECT so callers learn the precise
 		// reason.
 		var existing string
-		if scanErr := r.s.pool.Primary().QueryRow(ctx,
-			`SELECT status FROM msps WHERE id = $1::uuid`, id).Scan(&existing); scanErr != nil {
+		scanErr := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+			return db.QueryRow(ctx,
+				`SELECT status FROM msps WHERE id = $1::uuid`, id).Scan(&existing)
+		})
+		if scanErr != nil {
 			if errors.Is(scanErr, pgx.ErrNoRows) {
 				return repository.MSP{}, repository.ErrNotFound
 			}
@@ -823,28 +867,33 @@ func (r *MSPRepository) ListTenants(ctx context.Context, mspID uuid.UUID, page r
 	if cur.T.IsZero() {
 		args[1] = nil
 	}
-	rows, err := r.s.pool.Primary().Query(ctx, q, args...)
-	if err != nil {
-		return repository.PageResult[repository.MSPTenantBinding]{}, fmt.Errorf("list msp tenants: %w", err)
-	}
-	defer rows.Close()
 	out := make([]repository.MSPTenantBinding, 0, page.Limit)
-	for rows.Next() {
-		var (
-			b         repository.MSPTenantBinding
-			createdBy nullableUUID
-		)
-		if err := rows.Scan(&b.MSPID, &b.TenantID, &b.Relationship, &b.CreatedAt, &createdBy); err != nil {
-			return repository.PageResult[repository.MSPTenantBinding]{}, fmt.Errorf("scan binding: %w", err)
+	if err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		rows, e := db.Query(ctx, q, args...)
+		if e != nil {
+			return fmt.Errorf("list msp tenants: %w", e)
 		}
-		if createdBy.Valid {
-			v := createdBy.ID
-			b.CreatedBy = &v
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				b         repository.MSPTenantBinding
+				createdBy nullableUUID
+			)
+			if e := rows.Scan(&b.MSPID, &b.TenantID, &b.Relationship, &b.CreatedAt, &createdBy); e != nil {
+				return fmt.Errorf("scan binding: %w", e)
+			}
+			if createdBy.Valid {
+				v := createdBy.ID
+				b.CreatedBy = &v
+			}
+			out = append(out, b)
 		}
-		out = append(out, b)
-	}
-	if err := rows.Err(); err != nil {
-		return repository.PageResult[repository.MSPTenantBinding]{}, fmt.Errorf("iterate bindings: %w", err)
+		if e := rows.Err(); e != nil {
+			return fmt.Errorf("iterate bindings: %w", e)
+		}
+		return nil
+	}); err != nil {
+		return repository.PageResult[repository.MSPTenantBinding]{}, err
 	}
 	res := repository.PageResult[repository.MSPTenantBinding]{Items: out}
 	if len(out) == page.Limit && len(out) > 0 {
@@ -860,28 +909,33 @@ func (r *MSPRepository) ListBindings(ctx context.Context, tenantID uuid.UUID) ([
 		FROM msp_tenants
 		WHERE tenant_id = $1::uuid
 		ORDER BY created_at DESC`
-	rows, err := r.s.pool.Primary().Query(ctx, q, tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("list bindings: %w", err)
-	}
-	defer rows.Close()
 	out := make([]repository.MSPTenantBinding, 0)
-	for rows.Next() {
-		var (
-			b         repository.MSPTenantBinding
-			createdBy nullableUUID
-		)
-		if err := rows.Scan(&b.MSPID, &b.TenantID, &b.Relationship, &b.CreatedAt, &createdBy); err != nil {
-			return nil, fmt.Errorf("scan binding: %w", err)
+	if err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		rows, e := db.Query(ctx, q, tenantID)
+		if e != nil {
+			return fmt.Errorf("list bindings: %w", e)
 		}
-		if createdBy.Valid {
-			v := createdBy.ID
-			b.CreatedBy = &v
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				b         repository.MSPTenantBinding
+				createdBy nullableUUID
+			)
+			if e := rows.Scan(&b.MSPID, &b.TenantID, &b.Relationship, &b.CreatedAt, &createdBy); e != nil {
+				return fmt.Errorf("scan binding: %w", e)
+			}
+			if createdBy.Valid {
+				v := createdBy.ID
+				b.CreatedBy = &v
+			}
+			out = append(out, b)
 		}
-		out = append(out, b)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate bindings: %w", err)
+		if e := rows.Err(); e != nil {
+			return fmt.Errorf("iterate bindings: %w", e)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

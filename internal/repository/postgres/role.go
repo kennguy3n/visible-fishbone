@@ -61,16 +61,19 @@ func (r *RoleRepository) Create(ctx context.Context, role repository.Role) (repo
 		return repository.Role{}, fmt.Errorf("encode permissions: %w", err)
 	}
 	// roles is not tenant-RLS'd (system roles must be readable
-	// from every tenant). Insert directly on the pool, no
-	// withTenant wrap.
+	// from every tenant), so it does not flow through withTenant.
+	// onPrimary still adopts the app role in PgBouncer mode.
 	var out repository.Role
-	row := r.s.pool.Primary().QueryRow(ctx, `
+	err = r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		var e error
+		out, e = scanRole(db.QueryRow(ctx, `
 		INSERT INTO roles (id, tenant_id, name, external_id, permissions, scope)
 		VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6)
 		RETURNING `+roleSelectColumns,
-		role.ID, role.TenantID, role.Name, role.ExternalID, perms, role.Scope,
-	)
-	out, err = scanRole(row)
+			role.ID, role.TenantID, role.Name, role.ExternalID, perms, role.Scope,
+		))
+		return e
+	})
 	if err != nil {
 		if isUniqueViolation(err) {
 			return repository.Role{}, repository.ErrConflict
@@ -87,8 +90,12 @@ func (r *RoleRepository) Create(ctx context.Context, role repository.Role) (repo
 }
 
 func (r *RoleRepository) Get(ctx context.Context, id uuid.UUID) (repository.Role, error) {
-	row := r.s.pool.Primary().QueryRow(ctx, `SELECT `+roleSelectColumns+` FROM roles WHERE id = $1::uuid`, id)
-	out, err := scanRole(row)
+	var out repository.Role
+	err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		var e error
+		out, e = scanRole(db.QueryRow(ctx, `SELECT `+roleSelectColumns+` FROM roles WHERE id = $1::uuid`, id))
+		return e
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.Role{}, repository.ErrNotFound
 	}
@@ -102,13 +109,17 @@ func (r *RoleRepository) Update(ctx context.Context, id uuid.UUID, name string, 
 	if name == "" {
 		return repository.Role{}, repository.ErrInvalidArgument
 	}
-	row := r.s.pool.Primary().QueryRow(ctx, `
+	var out repository.Role
+	err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		var e error
+		out, e = scanRole(db.QueryRow(ctx, `
 		UPDATE roles SET name = $2, external_id = $3
 		WHERE id = $1::uuid
 		RETURNING `+roleSelectColumns,
-		id, name, externalID,
-	)
-	out, err := scanRole(row)
+			id, name, externalID,
+		))
+		return e
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repository.Role{}, repository.ErrNotFound
 	}
@@ -122,11 +133,19 @@ func (r *RoleRepository) Update(ctx context.Context, id uuid.UUID, name string, 
 }
 
 func (r *RoleRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	ct, err := r.s.pool.Primary().Exec(ctx, `DELETE FROM roles WHERE id = $1::uuid`, id)
+	var affected int64
+	err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		ct, e := db.Exec(ctx, `DELETE FROM roles WHERE id = $1::uuid`, id)
+		if e != nil {
+			return e
+		}
+		affected = ct.RowsAffected()
+		return nil
+	})
 	if err != nil {
 		return fmt.Errorf("delete role: %w", err)
 	}
-	if ct.RowsAffected() == 0 {
+	if affected == 0 {
 		return repository.ErrNotFound
 	}
 	return nil
@@ -149,21 +168,26 @@ func (r *RoleRepository) List(ctx context.Context, tenantID *uuid.UUID) ([]repos
 			ORDER BY name ASC`
 		args = []any{*tenantID}
 	}
-	rows, err := r.s.pool.Primary().Query(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list roles: %w", err)
-	}
-	defer rows.Close()
 	out := make([]repository.Role, 0)
-	for rows.Next() {
-		role, err := scanRole(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan role: %w", err)
+	if err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		rows, e := db.Query(ctx, q, args...)
+		if e != nil {
+			return fmt.Errorf("list roles: %w", e)
 		}
-		out = append(out, role)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate roles: %w", err)
+		defer rows.Close()
+		for rows.Next() {
+			role, e := scanRole(rows)
+			if e != nil {
+				return fmt.Errorf("scan role: %w", e)
+			}
+			out = append(out, role)
+		}
+		if e := rows.Err(); e != nil {
+			return fmt.Errorf("iterate roles: %w", e)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -180,10 +204,13 @@ func (r *RoleRepository) AssignRole(ctx context.Context, ur repository.UserRole)
 	if ur.GrantedBy != nil {
 		grantedBy = *ur.GrantedBy
 	}
-	_, err := r.s.pool.Primary().Exec(ctx, `
+	err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		_, e := db.Exec(ctx, `
 		INSERT INTO user_roles (user_id, role_id, scope_id, granted_by)
 		VALUES ($1::uuid, $2::uuid, $3, $4)
 	`, ur.UserID, ur.RoleID, scopeID, grantedBy)
+		return e
+	})
 	if isUniqueViolation(err) {
 		return repository.ErrConflict
 	}
@@ -203,54 +230,67 @@ func (r *RoleRepository) RevokeRole(ctx context.Context, userID, roleID uuid.UUI
 	if scopeID != nil {
 		scope = *scopeID
 	}
-	ct, err := r.s.pool.Primary().Exec(ctx, `
+	var affected int64
+	err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		ct, e := db.Exec(ctx, `
 		DELETE FROM user_roles
 		WHERE user_id = $1::uuid
 		  AND role_id = $2::uuid
 		  AND COALESCE(scope_id, '00000000-0000-0000-0000-000000000000'::uuid) = $3::uuid
 	`, userID, roleID, scope)
+		if e != nil {
+			return e
+		}
+		affected = ct.RowsAffected()
+		return nil
+	})
 	if err != nil {
 		return fmt.Errorf("revoke role: %w", err)
 	}
-	if ct.RowsAffected() == 0 {
+	if affected == 0 {
 		return repository.ErrNotFound
 	}
 	return nil
 }
 
 func (r *RoleRepository) GetUserRoles(ctx context.Context, userID uuid.UUID) ([]repository.UserRole, error) {
-	rows, err := r.s.pool.Primary().Query(ctx, `
+	out := make([]repository.UserRole, 0)
+	if err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		rows, e := db.Query(ctx, `
 		SELECT user_id, role_id, scope_id, granted_at, granted_by
 		FROM user_roles
 		WHERE user_id = $1::uuid
 		ORDER BY granted_at ASC
 	`, userID)
-	if err != nil {
-		return nil, fmt.Errorf("get user roles: %w", err)
-	}
-	defer rows.Close()
-	out := make([]repository.UserRole, 0)
-	for rows.Next() {
-		var (
-			ur        repository.UserRole
-			scope     nullableUUID
-			grantedBy nullableUUID
-		)
-		if err := rows.Scan(&ur.UserID, &ur.RoleID, &scope, &ur.GrantedAt, &grantedBy); err != nil {
-			return nil, fmt.Errorf("scan user role: %w", err)
+		if e != nil {
+			return fmt.Errorf("get user roles: %w", e)
 		}
-		if scope.Valid {
-			id := scope.ID
-			ur.ScopeID = &id
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				ur        repository.UserRole
+				scope     nullableUUID
+				grantedBy nullableUUID
+			)
+			if e := rows.Scan(&ur.UserID, &ur.RoleID, &scope, &ur.GrantedAt, &grantedBy); e != nil {
+				return fmt.Errorf("scan user role: %w", e)
+			}
+			if scope.Valid {
+				id := scope.ID
+				ur.ScopeID = &id
+			}
+			if grantedBy.Valid {
+				id := grantedBy.ID
+				ur.GrantedBy = &id
+			}
+			out = append(out, ur)
 		}
-		if grantedBy.Valid {
-			id := grantedBy.ID
-			ur.GrantedBy = &id
+		if e := rows.Err(); e != nil {
+			return fmt.Errorf("iterate user roles: %w", e)
 		}
-		out = append(out, ur)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate user roles: %w", err)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -259,33 +299,40 @@ func (r *RoleRepository) HasPermission(ctx context.Context, userID uuid.UUID, pe
 	// Inline the wildcard check rather than encoding in SQL —
 	// `?` containment vs OR-wildcard is straightforward at the
 	// app layer and keeps the query plan simple.
-	rows, err := r.s.pool.Primary().Query(ctx, `
+	var found bool
+	if err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		rows, e := db.Query(ctx, `
 		SELECT r.permissions
 		FROM user_roles ur
 		JOIN roles r ON r.id = ur.role_id
 		WHERE ur.user_id = $1::uuid
 	`, userID)
-	if err != nil {
-		return false, fmt.Errorf("has permission: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var perms []byte
-		if err := rows.Scan(&perms); err != nil {
-			return false, fmt.Errorf("scan permissions: %w", err)
+		if e != nil {
+			return fmt.Errorf("has permission: %w", e)
 		}
-		var p []string
-		if err := json.Unmarshal(perms, &p); err != nil {
-			return false, fmt.Errorf("decode permissions: %w", err)
-		}
-		for _, candidate := range p {
-			if candidate == permission || candidate == "*" {
-				return true, nil
+		defer rows.Close()
+		for rows.Next() {
+			var perms []byte
+			if e := rows.Scan(&perms); e != nil {
+				return fmt.Errorf("scan permissions: %w", e)
+			}
+			var p []string
+			if e := json.Unmarshal(perms, &p); e != nil {
+				return fmt.Errorf("decode permissions: %w", e)
+			}
+			for _, candidate := range p {
+				if candidate == permission || candidate == "*" {
+					found = true
+					return nil
+				}
 			}
 		}
+		if e := rows.Err(); e != nil {
+			return fmt.Errorf("iterate permissions: %w", e)
+		}
+		return nil
+	}); err != nil {
+		return false, err
 	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("iterate permissions: %w", err)
-	}
-	return false, nil
+	return found, nil
 }

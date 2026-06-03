@@ -97,6 +97,61 @@ func (s *Store) adoptLocalRole(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
+// pgxQuerier is the subset of pgx's query surface shared by
+// *pgxpool.Pool and pgx.Tx. It lets a standalone-query helper hand
+// callers either a bare pooled connection (session mode) or a
+// transaction (PgBouncer mode) behind a single type, so call sites
+// don't branch on the pooling mode themselves.
+type pgxQuerier interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// onPrimary runs `fn` against the primary pool for a standalone
+// (non-RLS-scoped) query — the access pattern of the top-level
+// MSP/Role/Tenant entity repos, which are not tenant-scoped and so
+// do not flow through withTenant.
+//
+// In session mode the app role is already adopted per connection by
+// openPostgres's AfterConnect hook, so `fn` runs directly on the
+// pool with no transaction overhead. In PgBouncer
+// (transaction-pooling) mode that hook is disabled — a session-level
+// SET SESSION ROLE would leak across the server connections
+// PgBouncer multiplexes between clients — so `fn` instead runs
+// inside a short transaction that first issues SET LOCAL ROLE.
+// Without this, every standalone MSP/Role/Tenant query in PgBouncer
+// mode would execute as the unprivileged LOGIN role rather than the
+// app role and fail with "permission denied".
+//
+// Any pgx.Rows `fn` opens MUST be fully consumed before `fn`
+// returns: in PgBouncer mode the transaction commits (and the
+// connection is released) the moment it does.
+func (s *Store) onPrimary(ctx context.Context, fn func(q pgxQuerier) error) error {
+	if _, ok := s.setLocalRoleSQL(); !ok {
+		// Session mode (or no app role configured): the connection
+		// already runs as the app role; skip the transaction.
+		return fn(s.pool.Primary())
+	}
+	tx, err := s.pool.Primary().BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := s.adoptLocalRole(ctx, tx); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		// Propagate verbatim (incl. pgx.ErrNoRows and *pgconn.PgError)
+		// so callers keep their errors.Is / SQLSTATE classification.
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+	return nil
+}
+
 // withTenant runs `fn` inside a transaction whose `sng.tenant_id`
 // GUC is set to `tenantID`. The transaction is rolled back if `fn`
 // returns an error, otherwise committed.

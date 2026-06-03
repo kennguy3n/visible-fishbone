@@ -91,6 +91,13 @@ func (s *ShardedWriter) ShardFor(tenantID uuid.UUID) int {
 // hashes to the same shard, which is required for per-tenant reads
 // to find their data) and uniform (FNV spreads UUIDs evenly so no
 // shard becomes a hot spot).
+//
+// Note: this hashes the raw 16 UUID bytes, whereas the NATS
+// TenantPartitioner hashes the UUID's 36-char string form. The two
+// are intentionally independent scaling axes (different counts, hash
+// domains), so a tenant on NATS partition i will not generally land
+// on ClickHouse shard i — do not assume the assignments correlate
+// when correlating logs across the two subsystems.
 func shardIndex(tenantID uuid.UUID, n int) int {
 	if n <= 1 {
 		return 0

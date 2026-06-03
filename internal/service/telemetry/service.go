@@ -452,6 +452,14 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 		if err != nil {
 			return nil, fmt.Errorf("telemetry: ensure consumer (partition %d): %w", i, err)
 		}
+		// Each partition gets its own dedup ring sized to the
+		// configured DedupRingSize. A tenant is pinned to exactly one
+		// partition, so a per-partition ring never misses a duplicate
+		// for that tenant. The operator-facing consequence: scaling
+		// from 1 to N partitions multiplies *total* dedup capacity by
+		// N (N rings of DedupRingSize each) without changing the
+		// per-tenant dedup window — size DedupRingSize for a single
+		// partition's tenant churn, not the whole fleet's.
 		workers = append(workers, &worker{
 			partition:         i,
 			cons:              cons,

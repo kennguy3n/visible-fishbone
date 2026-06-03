@@ -110,7 +110,27 @@ func run() error {
 		leader.WithIdentity(identity),
 		leader.WithLogger(logger),
 	)
-	go elector.Run(rootCtx)
+	// The elector holds a dedicated primary-pool connection for the
+	// advisory lock's lifetime. Run it under its own cancellable
+	// context and block shutdown on its relinquish so the deferred
+	// pool.Close() (registered earlier, hence run later — defers are
+	// LIFO) never races the elector still returning its connection.
+	// The wait is bounded so a wedged relinquish (e.g. primary
+	// partition) cannot hang graceful shutdown indefinitely.
+	electorCtx, electorCancel := context.WithCancel(rootCtx)
+	electorDone := make(chan struct{})
+	go func() {
+		defer close(electorDone)
+		elector.Run(electorCtx)
+	}()
+	defer func() {
+		electorCancel()
+		select {
+		case <-electorDone:
+		case <-time.After(5 * time.Second):
+			logger.Warn("sng-control: timed out waiting for leader elector to relinquish")
+		}
+	}()
 
 	nc, err := openNATS(rootCtx, &cfg, logger)
 	if err != nil {
