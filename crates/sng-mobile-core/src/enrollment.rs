@@ -209,16 +209,34 @@ impl Enroller {
 
     /// Ensure an enrolment keypair exists in `keystore`, generating
     /// one if absent, and return its public key.
+    ///
+    /// `contains` then `generate_keypair` is a check-then-act pair, so
+    /// a concurrent caller racing on the same label could make
+    /// `generate_keypair` lose and return
+    /// [`KeyStoreError::AlreadyExists`]. That collision is treated as
+    /// success — the winner's key is the one we want — by reading the
+    /// public key back, keeping `ensure_key` idempotent even if a
+    /// future caller drives it outside the agent's single-flight
+    /// `Init → Enrolling` lifecycle guard.
     async fn ensure_key(&self, keystore: &dyn SecureKeyStore) -> Result<VerifyingKey, MobileError> {
         if keystore.contains(&self.key_label).await? {
-            Ok(keystore.public_key(&self.key_label).await?)
-        } else {
-            Ok(keystore.generate_keypair(&self.key_label).await?)
+            return Ok(keystore.public_key(&self.key_label).await?);
+        }
+        match keystore.generate_keypair(&self.key_label).await {
+            Ok(public_key) => Ok(public_key),
+            Err(KeyStoreError::AlreadyExists(_)) => {
+                Ok(keystore.public_key(&self.key_label).await?)
+            }
+            Err(e) => Err(e.into()),
         }
     }
 
     /// Build the enrolment request body for `public_key` + `claim_token`.
-    fn build_request_body(&self, public_key: &VerifyingKey, claim_token: &str) -> EnrollmentRequestBody {
+    fn build_request_body(
+        &self,
+        public_key: &VerifyingKey,
+        claim_token: &str,
+    ) -> EnrollmentRequestBody {
         EnrollmentRequestBody {
             claim_token: claim_token.to_owned(),
             tenant_id: self.tenant_id.to_string(),
@@ -266,10 +284,7 @@ impl Enroller {
 /// [`EnrollmentOutcome`], mapping a non-success status to a typed
 /// error. Pulled out as a free function so it is unit-testable
 /// without a live connection.
-fn parse_response(
-    status: http::StatusCode,
-    body: &[u8],
-) -> Result<EnrollmentOutcome, MobileError> {
+fn parse_response(status: http::StatusCode, body: &[u8]) -> Result<EnrollmentOutcome, MobileError> {
     if !status.is_success() {
         let detail = String::from_utf8_lossy(body);
         return Err(MobileError::Enrollment(format!(
@@ -369,7 +384,10 @@ mod tests {
         assert_eq!(outcome.tenant_id, tenant);
         assert_eq!(outcome.status, "active");
         assert!(outcome.cert_chain_pem.contains("BEGIN CERTIFICATE"));
-        assert_eq!(outcome.cert_expires_at.to_rfc3339(), "2030-01-02T03:04:05+00:00");
+        assert_eq!(
+            outcome.cert_expires_at.to_rfc3339(),
+            "2030-01-02T03:04:05+00:00"
+        );
     }
 
     #[test]

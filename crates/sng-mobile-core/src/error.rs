@@ -120,7 +120,11 @@ impl MobileError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Timeout(_) => true,
-            Self::Comms(e) => comms_is_retryable(e),
+            // Delegate to the canonical classifier rather than
+            // re-deriving it — `sng_comms` owns the authoritative
+            // transient/permanent split and stays exhaustive if a new
+            // `CommsError` variant is added.
+            Self::Comms(e) => e.is_retryable(),
             Self::Config(_)
             | Self::Enrollment(_)
             | Self::KeyStore(_)
@@ -133,23 +137,5 @@ impl MobileError {
             | Self::Wire(_)
             | Self::Lifecycle(_) => false,
         }
-    }
-}
-
-/// Classify a [`sng_comms::CommsError`] as transient or permanent.
-///
-/// A connect / I/O / HTTP-2 fault is transient — the next
-/// reconnect cycle may land on a healthy control-plane replica. A
-/// `4xx` response, an ALPN mismatch, or a bad-config fault is
-/// permanent under the current credentials / build and must not be
-/// hammered on a tight loop.
-fn comms_is_retryable(err: &sng_comms::CommsError) -> bool {
-    use sng_comms::{CommsError, ResponseClass};
-    match err {
-        CommsError::Connect(_) | CommsError::Io(_) | CommsError::Http2(_) => true,
-        CommsError::Server { class, .. } => {
-            matches!(class, ResponseClass::RateLimited | ResponseClass::ServerError)
-        }
-        _ => false,
     }
 }

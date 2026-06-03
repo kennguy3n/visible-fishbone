@@ -121,18 +121,22 @@ impl MobileTelemetryEvent {
                 latency_ms: *latency_ms,
                 upstream: None,
             })?,
-            Self::TunnelUp | Self::TunnelDown { .. } => {
-                let event_type = match self {
-                    Self::TunnelUp => "tunnel_up",
-                    _ => "tunnel_down",
-                };
-                pack_payload(&AgentEvent {
-                    device_id: did,
-                    event_type: event_type.to_owned(),
-                    posture_snapshot: None,
-                    platform: ctx.platform,
-                })?
-            }
+            Self::TunnelUp => pack_payload(&AgentEvent {
+                device_id: did,
+                event_type: "tunnel_up".to_owned(),
+                posture_snapshot: None,
+                platform: ctx.platform,
+            })?,
+            Self::TunnelDown { reason } => pack_payload(&AgentEvent {
+                device_id: did,
+                event_type: "tunnel_down".to_owned(),
+                // `AgentEvent` has no dedicated reason field; carry the
+                // diagnostic reason in the JSON `posture_snapshot` slot
+                // so operators see *why* a tunnel dropped rather than
+                // losing it at the wire boundary.
+                posture_snapshot: Some(serde_json::json!({ "reason": reason })),
+                platform: ctx.platform,
+            })?,
         };
         Ok(bytes)
     }
@@ -182,7 +186,9 @@ pub struct MobileTelemetry {
 
 impl std::fmt::Debug for MobileTelemetry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MobileTelemetry").field("ctx", &self.ctx).finish_non_exhaustive()
+        f.debug_struct("MobileTelemetry")
+            .field("ctx", &self.ctx)
+            .finish_non_exhaustive()
     }
 }
 
@@ -295,6 +301,15 @@ mod tests {
         .unwrap();
         let payload: AgentEvent = unpack_payload(&down.payload).unwrap();
         assert_eq!(payload.event_type, "tunnel_down");
+        // The diagnostic reason survives the serialization boundary.
+        assert_eq!(
+            payload
+                .posture_snapshot
+                .as_ref()
+                .and_then(|v| v.get("reason"))
+                .and_then(serde_json::Value::as_str),
+            Some("idle")
+        );
     }
 
     #[tokio::test]

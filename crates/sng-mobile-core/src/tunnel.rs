@@ -70,7 +70,9 @@ impl fmt::Debug for TunnelPublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Public keys are not secret, but render the short base64
         // form rather than a 32-element byte array for readable logs.
-        f.debug_tuple("TunnelPublicKey").field(&self.to_base64()).finish()
+        f.debug_tuple("TunnelPublicKey")
+            .field(&self.to_base64())
+            .finish()
     }
 }
 

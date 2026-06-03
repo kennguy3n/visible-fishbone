@@ -188,7 +188,7 @@ mod tests {
         UserIdentity {
             user_id: id.into(),
             tenant_id: tenant.into(),
-            groups: Default::default(),
+            groups: std::collections::HashSet::new(),
             mfa_at_ms,
         }
     }
@@ -232,7 +232,10 @@ mod tests {
         let mgr = manager_with(vec![], vec![], vec![], ZtnaPolicy::default());
         let req = AccessRequest::new("ghost", "dev-1", "alice", 1_000);
         let err = mgr.evaluate(&req, Utc::now()).await.unwrap_err();
-        assert!(matches!(err, MobileError::Ztna(ZtnaError::UnknownApp { .. })));
+        assert!(matches!(
+            err,
+            MobileError::Ztna(ZtnaError::UnknownApp { .. })
+        ));
 
         let state = mgr.app_state("ghost").expect("state recorded");
         assert!(!state.allowed);

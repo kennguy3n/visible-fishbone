@@ -259,10 +259,20 @@ pub fn refresh_delay(
 /// jitter share from the thread RNG. This is the scheduler the
 /// agent's auth-refresh timer uses.
 #[must_use]
-pub fn schedule_refresh(now: DateTime<Utc>, expires_at: DateTime<Utc>, cfg: &AuthConfig) -> Duration {
+pub fn schedule_refresh(
+    now: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    cfg: &AuthConfig,
+) -> Duration {
     use rand::Rng;
     let permille = rand::thread_rng().gen_range(0..=1000);
-    refresh_delay(now, expires_at, cfg.refresh_skew, cfg.refresh_jitter, permille)
+    refresh_delay(
+        now,
+        expires_at,
+        cfg.refresh_skew,
+        cfg.refresh_jitter,
+        permille,
+    )
 }
 
 /// In-memory [`TokenStorage`] reference implementation.

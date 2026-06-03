@@ -41,6 +41,13 @@
 //!   + batch-uploaded via [`sng_comms`].
 
 #![forbid(unsafe_code)]
+// `.unwrap()` / `.expect()` are idiomatic fast-fail assertions in
+// test scaffolding, and the workspace CI runs
+// `cargo clippy --all-targets -D warnings`. Allowing them under
+// `#[cfg(test)]` only keeps the workspace `unwrap_used` / `expect_used`
+// / `panic` lints active for production code without a per-test allow,
+// mirroring `sng-core` / `sng-comms` / `sng-ztna`.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod agent;
 pub mod auth;
@@ -62,7 +69,7 @@ pub use auth::{
 };
 pub use config::{AuthConfig, MobileAgentConfig, MobilePlatform};
 pub use enrollment::{
-    DEFAULT_DEVICE_KEY_LABEL, EnrollmentOutcome, Enroller, InMemorySecureKeyStore, KeyStoreError,
+    DEFAULT_DEVICE_KEY_LABEL, Enroller, EnrollmentOutcome, InMemorySecureKeyStore, KeyStoreError,
     SecureKeyStore,
 };
 pub use error::{MobileError, MobileResult};

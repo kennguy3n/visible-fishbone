@@ -38,7 +38,7 @@ use sng_core::BundleTarget;
 
 use crate::auth::AuthSession;
 use crate::config::MobileAgentConfig;
-use crate::enrollment::{DEFAULT_DEVICE_KEY_LABEL, EnrollmentOutcome, Enroller, SecureKeyStore};
+use crate::enrollment::{DEFAULT_DEVICE_KEY_LABEL, Enroller, EnrollmentOutcome, SecureKeyStore};
 use crate::error::MobileError;
 use crate::posture::{MobilePostureCollector, MobilePostureSnapshot};
 use crate::telemetry::MobileTelemetry;
@@ -189,12 +189,20 @@ impl Scheduler {
     /// Pop the earliest task that is due as of `now`, rescheduling
     /// it one interval out. Returns `None` when nothing is due yet.
     /// Call in a loop to drain all coalesced tasks for the instant.
+    ///
+    /// The next fire is computed relative to `now`, not to the missed
+    /// deadline. This is deliberate: after the agent is suspended
+    /// (app backgrounded, radio off) a deadline-relative reschedule
+    /// would fire a catch-up burst of every overdue task the instant
+    /// we resume, spiking wakeups exactly when the mobile power budget
+    /// is tightest. Spacing the next fire a full interval from the
+    /// resume instant trades a little long-run interval drift for
+    /// steady, burst-free wakeups — the right call under the
+    /// sub-0.5%-idle-CPU budget.
     pub fn pop_due(&mut self, now: Duration) -> Option<ScheduledTask> {
         let mut chosen: Option<usize> = None;
         for i in 0..SCHEDULE_SLOTS {
-            if self.next[i] <= now
-                && chosen.is_none_or(|c| self.next[i] < self.next[c])
-            {
+            if self.next[i] <= now && chosen.is_none_or(|c| self.next[i] < self.next[c]) {
                 chosen = Some(i);
             }
         }
@@ -399,7 +407,23 @@ impl MobileAgent {
         self.transition(LifecycleState::Enrolling)?;
         match self.enroll_inner(claim_token).await {
             Ok(outcome) => {
-                self.transition(LifecycleState::Connected)?;
+                // The control plane has already issued the device its
+                // certificate chain. If the `Enrolling → Connected`
+                // transition now fails — only possible if we were
+                // concurrently terminated mid-round-trip — we must
+                // still hand the outcome back rather than drop it,
+                // otherwise the server-side enrolment is orphaned (a
+                // cert was minted that the client threw away). The
+                // caller can persist the cert and re-drive the
+                // lifecycle.
+                if let Err(e) = self.transition(LifecycleState::Connected) {
+                    warn!(
+                        device_id = %outcome.device_id,
+                        error = %e,
+                        "enrolment succeeded but lifecycle left Enrolling (concurrent terminate?); \
+                         returning the issued identity so it is not lost"
+                    );
+                }
                 Ok(outcome)
             }
             Err(e) => {
@@ -594,7 +618,10 @@ mod tests {
             Duration::from_secs(30),
             Duration::ZERO,
         );
-        assert_eq!(s.pop_due(Duration::from_secs(10)), Some(ScheduledTask::PullPolicy));
+        assert_eq!(
+            s.pop_due(Duration::from_secs(10)),
+            Some(ScheduledTask::PullPolicy)
+        );
         // PullPolicy now next at 20s; nothing else due at 10s.
         assert_eq!(s.pop_due(Duration::from_secs(10)), None);
     }

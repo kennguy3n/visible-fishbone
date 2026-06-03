@@ -31,7 +31,11 @@ use thiserror::Error;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobilePostureSnapshot {
     /// OS version string (e.g. `17.4.1`, `14`). Empty when unknown.
-    #[serde(rename = "os_version", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "os_version",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub os_version: String,
     /// Reporting agent's version. Empty when unset.
     #[serde(
@@ -41,13 +45,25 @@ pub struct MobilePostureSnapshot {
     )]
     pub agent_version: String,
     /// When the snapshot was collected.
-    #[serde(rename = "collected_at", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "collected_at",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub collected_at: Option<DateTime<Utc>>,
     /// Whether a device passcode / screen lock is set.
-    #[serde(rename = "passcode_set", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "passcode_set",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub passcode_set: Option<bool>,
     /// iOS: whether the device appears jailbroken.
-    #[serde(rename = "jailbroken", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "jailbroken",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub jailbroken: Option<bool>,
     /// Android: whether the device appears rooted.
     #[serde(
@@ -65,7 +81,11 @@ pub struct MobilePostureSnapshot {
     )]
     pub biometric_ready: Option<bool>,
     /// Whether the device is enrolled in an MDM.
-    #[serde(rename = "mdm_enrolled", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "mdm_enrolled",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub mdm_enrolled: Option<bool>,
 }
 
