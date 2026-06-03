@@ -52,6 +52,7 @@ members = [
     "crates/sng-edge",
     "crates/sng-agent",
     "crates/sng-mobile-core",
+    "crates/sng-mobile-pal-ios",
 ]
 resolver = "3"
 
@@ -232,6 +233,7 @@ sng-sdwan = { path = "crates/sng-sdwan" }
 sng-updater = { path = "crates/sng-updater" }
 sng-oidc = { path = "crates/sng-oidc" }
 sng-mobile-core = { path = "crates/sng-mobile-core" }
+sng-mobile-pal-ios = { path = "crates/sng-mobile-pal-ios" }
 
 # Workspace-wide lints. Set at the workspace level so a new crate
 # added in a later phase automatically inherits the same posture
