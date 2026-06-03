@@ -31,8 +31,8 @@ use rustls::pki_types::ServerName;
 use tracing::{debug, warn};
 
 use sng_comms::{
-    BundlePullOutcome, ControlPlaneClient, ControlPlaneConnection, DeviceIdentity, PolicyPuller,
-    PolicyPullerConfig, PolicyTrustStore, build_client_config_with_webpki_roots,
+    BundlePullOutcome, ControlPlaneClient, ControlPlaneConnection, DeviceIdentity, FlushOutcome,
+    PolicyPuller, PolicyPullerConfig, PolicyTrustStore, build_client_config_with_webpki_roots,
 };
 use sng_core::BundleTarget;
 
@@ -256,6 +256,16 @@ pub struct MobileAgent {
     telemetry: Mutex<Option<MobileTelemetry>>,
     ztna: Mutex<Option<MobileZtnaManager>>,
     policy_puller: Mutex<Option<Arc<PolicyPuller>>>,
+    /// Most recent posture snapshot collected by the steady-state
+    /// loop, retained so the periodic sample has an observable effect
+    /// (host health surface today; control-plane posture upload in a
+    /// later session) instead of being collected and dropped.
+    last_posture: Mutex<Option<MobilePostureSnapshot>>,
+    /// Wakes the steady-state [`Self::run`] loop the instant the
+    /// lifecycle leaves `Connected`, so a `suspend`/`terminate` stops
+    /// work (and radio wakeups) immediately instead of after the
+    /// pending coalesced sleep elapses.
+    wake: tokio::sync::Notify,
 }
 
 impl fmt::Debug for MobileAgent {
@@ -283,6 +293,8 @@ impl MobileAgent {
             telemetry: Mutex::new(None),
             ztna: Mutex::new(None),
             policy_puller: Mutex::new(None),
+            last_posture: Mutex::new(None),
+            wake: tokio::sync::Notify::new(),
         })
     }
 
@@ -308,7 +320,16 @@ impl MobileAgent {
     }
 
     fn transition(&self, to: LifecycleState) -> Result<(), MobileError> {
-        self.lifecycle.lock().transition_to(to)
+        let result = self.lifecycle.lock().transition_to(to);
+        if result.is_ok() {
+            // A state change (notably `suspend`/`terminate`) must wake
+            // a sleeping `run` loop so it re-checks the loop condition
+            // at once rather than finishing the pending coalesced
+            // sleep. `notify_one` stores a permit if no waiter is
+            // parked yet, so this can't be lost to a wakeup race.
+            self.wake.notify_one();
+        }
+        result
     }
 
     /// Suspend the agent (app backgrounded / network lost). Only
@@ -481,10 +502,22 @@ impl MobileAgent {
     pub async fn flush_telemetry(&self, conn: &ControlPlaneConnection) -> Result<(), MobileError> {
         let telemetry = self.telemetry.lock().clone();
         if let Some(telemetry) = telemetry {
-            self.deadline(self.config.request_timeout, async move {
-                telemetry.flush_one(conn).await.map(|_| ())
-            })
-            .await?;
+            let outcome = self
+                .deadline(self.config.request_timeout, async move {
+                    telemetry.flush_one(conn).await
+                })
+                .await?;
+            // A `Transient` outcome means the control plane returned a
+            // retryable (e.g. 5xx) class and the batch was re-spooled,
+            // so no data is lost — the next flush cycle retries it. It
+            // is not an error, but log it so a run of server-side 5xx
+            // on the telemetry path is observable rather than silent.
+            if let FlushOutcome::Transient { class } = outcome {
+                debug!(
+                    ?class,
+                    "telemetry batch re-spooled after transient control-plane response; retrying next cycle"
+                );
+            }
         }
         Ok(())
     }
@@ -492,6 +525,13 @@ impl MobileAgent {
     /// Collect a fresh posture snapshot from the PAL.
     pub async fn collect_posture(&self) -> Result<MobilePostureSnapshot, MobileError> {
         Ok(self.deps.posture.collect().await?)
+    }
+
+    /// The most recent posture snapshot collected by the steady-state
+    /// loop, if one has been taken since enrolment.
+    #[must_use]
+    pub fn last_posture(&self) -> Option<MobilePostureSnapshot> {
+        self.last_posture.lock().clone()
     }
 
     /// Execute a single due subsystem task over `conn`. The
@@ -510,7 +550,8 @@ impl MobileAgent {
                 self.flush_telemetry(conn).await?;
             }
             ScheduledTask::CollectPosture => {
-                let _snapshot = self.collect_posture().await?;
+                let snapshot = self.collect_posture().await?;
+                *self.last_posture.lock() = Some(snapshot);
             }
         }
         Ok(())
@@ -537,7 +578,17 @@ impl MobileAgent {
         while self.state() == LifecycleState::Connected {
             let now = start.elapsed();
             let sleep_for = scheduler.time_until_next(now);
-            tokio::time::sleep(sleep_for).await;
+            tokio::select! {
+                () = tokio::time::sleep(sleep_for) => {}
+                () = self.wake.notified() => {
+                    // A lifecycle transition (suspend / terminate)
+                    // landed: re-check the loop condition immediately
+                    // and skip this cycle's task drain, so the agent
+                    // stops touching the network the moment the host
+                    // parks it rather than firing one last burst.
+                    continue;
+                }
+            }
             let now = start.elapsed();
             while let Some(task) = scheduler.pop_due(now) {
                 if let Err(e) = self.run_task(task, conn).await {

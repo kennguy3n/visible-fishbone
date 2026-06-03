@@ -205,9 +205,20 @@ impl MobileAgentConfig {
     pub fn server_name(&self) -> Result<String, MobileError> {
         let url = url::Url::parse(&self.control_plane_url)
             .map_err(|e| MobileError::Config(format!("control_plane_url is not a URL: {e}")))?;
-        url.host_str()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| MobileError::Config("control_plane_url must contain a host".into()))
+        let host = url
+            .host_str()
+            .ok_or_else(|| MobileError::Config("control_plane_url must contain a host".into()))?;
+        // `host_str` returns an IPv6 literal in its bracketed `[..]`
+        // form (the dial string in `control_plane_addr` needs those
+        // brackets), but the TLS SNI / certificate name must be the
+        // bare address — `rustls`'s `ServerName::try_from` parses it as
+        // an `IpAddr` and rejects the brackets. Strip them here so an
+        // IPv6 control-plane URL connects instead of failing at dial.
+        let bare = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
+        Ok(bare.to_owned())
     }
 }
 
@@ -272,6 +283,17 @@ mod tests {
         cfg.control_plane_url = "https://[2001:db8::1]:8443".into();
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.control_plane_addr().unwrap(), "[2001:db8::1]:8443");
+    }
+
+    #[test]
+    fn ipv6_server_name_is_unbracketed_and_tls_valid() {
+        // The dial address keeps the brackets, but the SNI / cert name
+        // must be the bare IPv6 literal: `ServerName::try_from` parses
+        // it as an `IpAddr` and rejects a bracketed form.
+        let mut cfg = valid_config();
+        cfg.control_plane_url = "https://[2001:db8::1]:8443".into();
+        assert_eq!(cfg.server_name().unwrap(), "2001:db8::1");
+        assert!(rustls::pki_types::ServerName::try_from(cfg.server_name().unwrap()).is_ok());
     }
 
     #[test]
