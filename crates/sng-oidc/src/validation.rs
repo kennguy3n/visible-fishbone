@@ -366,11 +366,14 @@ impl JwksClient {
     }
 
     fn cached(&self, jwks_uri: &str) -> Option<Arc<Jwks>> {
-        let cache = self.cache.lock();
+        let mut cache = self.cache.lock();
         let entry = cache.get(jwks_uri)?;
         if entry.fetched_at.elapsed() < self.ttl {
             Some(Arc::clone(&entry.jwks))
         } else {
+            // Evict the stale entry rather than letting expired
+            // key sets pile up for issuers that are no longer used.
+            cache.remove(jwks_uri);
             None
         }
     }

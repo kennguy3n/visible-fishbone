@@ -53,10 +53,11 @@
 //! - The HTTP client is rustls-only (`reqwest` with
 //!   `default-features = false`); the workspace `deny.toml` bars
 //!   the OpenSSL-FFI / `native-tls` backends.
-//! - Token- and secret-bearing types (`PkceChallenge`,
-//!   `TokenResponse`, `StoredTokens`, `OidcSession`) implement a
-//!   redacting `Debug` so verifiers / tokens never leak into
-//!   logs.
+//! - Every secret-bearing type implements a redacting `Debug` so
+//!   verifiers / codes / tokens / client secrets never leak into
+//!   logs: `PkceChallenge`, `TokenResponse`, `StoredTokens`,
+//!   `OidcSession`, `SessionConfig`, `CodeExchange`, and
+//!   `RefreshRequest`.
 
 #![forbid(unsafe_code)]
 // `.expect("fixture")` / `.unwrap()` are idiomatic in test

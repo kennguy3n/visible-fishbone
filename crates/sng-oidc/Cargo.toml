@@ -49,6 +49,11 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 
+# `sync` only: an async mutex serializes the session's
+# refresh-token grants so concurrent callers don't fire parallel
+# (and, with rotating refresh tokens, self-invalidating) refreshes.
+tokio = { workspace = true, features = ["sync"] }
+
 [dev-dependencies]
 # Async test runtime.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }

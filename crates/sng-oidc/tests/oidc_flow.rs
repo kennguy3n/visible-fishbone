@@ -8,6 +8,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,7 +18,7 @@ use sng_oidc::authorize::AuthorizationRequest;
 use sng_oidc::discovery::DiscoveryClient;
 use sng_oidc::pkce::PkceChallenge;
 use sng_oidc::session::{OidcSession, SessionConfig};
-use sng_oidc::token::{CodeExchange, TokenClient};
+use sng_oidc::token::{CodeExchange, TokenClient, TokenResponse};
 use sng_oidc::validation::{IdTokenValidator, JwksClient};
 use url::Url;
 use wiremock::matchers::{body_string_contains, method, path};
@@ -282,4 +283,59 @@ async fn token_endpoint_oauth_error_is_surfaced() {
         .await
         .expect_err("expired code should error");
     assert!(matches!(err, sng_oidc::OidcError::Token(_)));
+}
+
+/// Regression test for the concurrent-refresh (TOCTOU) guard:
+/// when many tasks call [`OidcSession::access_token`] at once on
+/// an about-to-expire session, exactly one refresh-token grant
+/// must reach the provider. Without serialization every caller
+/// would fire its own grant and, with rotating refresh tokens,
+/// all but the first would fail `invalid_grant`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_access_token_calls_trigger_a_single_refresh() {
+    let server = MockServer::start().await;
+    let refresh_body = serde_json::json!({
+        "access_token": "access-refreshed",
+        "token_type": "Bearer",
+        "expires_in": 3600
+    });
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                // A small delay widens the window so concurrent
+                // callers pile up on the refresh lock.
+                .set_delay(Duration::from_millis(100))
+                .set_body_json(refresh_body),
+        )
+        // The whole point of the test: one grant, not sixteen.
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let initial = TokenResponse {
+        access_token: "access-initial".to_owned(),
+        token_type: "Bearer".to_owned(),
+        id_token: None,
+        refresh_token: Some("refresh-initial".to_owned()),
+        expires_in: Some(1),
+        scope: None,
+    };
+    let config = SessionConfig::new(format!("{}/token", server.uri()), CLIENT_ID);
+    let token_client = TokenClient::with_client(loopback_http_client());
+    let session = Arc::new(OidcSession::start(token_client, config, &initial, None));
+    assert!(session.needs_refresh());
+
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let session = Arc::clone(&session);
+        handles.push(tokio::spawn(async move { session.access_token().await }));
+    }
+    for handle in handles {
+        let token = handle.await.expect("task joins").expect("access token");
+        assert_eq!(token, "access-refreshed");
+    }
+    // `expect(1)` is verified when `server` drops: a single
+    // refresh grant served all 16 concurrent callers.
 }

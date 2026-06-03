@@ -87,7 +87,10 @@ impl fmt::Display for OauthErrorResponse {
 impl std::error::Error for OauthErrorResponse {}
 
 /// Parameters for the authorization-code → token exchange.
-#[derive(Debug, Clone)]
+///
+/// `code`, `code_verifier`, and `client_secret` are secrets; the
+/// custom [`fmt::Debug`] redacts them.
+#[derive(Clone)]
 pub struct CodeExchange {
     /// OAuth2 client identifier.
     pub client_id: String,
@@ -104,7 +107,10 @@ pub struct CodeExchange {
 }
 
 /// Parameters for a refresh-token grant.
-#[derive(Debug, Clone)]
+///
+/// `refresh_token` and `client_secret` are secrets; the custom
+/// [`fmt::Debug`] redacts them.
+#[derive(Clone)]
 pub struct RefreshRequest {
     /// OAuth2 client identifier.
     pub client_id: String,
@@ -114,6 +120,35 @@ pub struct RefreshRequest {
     pub scope: Option<String>,
     /// Optional client secret (confidential clients only).
     pub client_secret: Option<String>,
+}
+
+impl fmt::Debug for CodeExchange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CodeExchange")
+            .field("client_id", &self.client_id)
+            .field("code", &"<redacted>")
+            .field("redirect_uri", &self.redirect_uri)
+            .field("code_verifier", &"<redacted>")
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl fmt::Debug for RefreshRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RefreshRequest")
+            .field("client_id", &self.client_id)
+            .field("refresh_token", &"<redacted>")
+            .field("scope", &self.scope)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Token-endpoint HTTP client.

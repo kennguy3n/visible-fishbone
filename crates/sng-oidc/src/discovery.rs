@@ -51,6 +51,22 @@ impl ProviderMetadata {
         if self.issuer.trim().is_empty() {
             return Err(OidcError::Discovery("issuer is empty".to_owned()));
         }
+        // OIDC Discovery 1.0 §3: the issuer MUST be an https URL
+        // with no query or fragment. Enforcing it here means a
+        // non-URL issuer is rejected at discovery time rather than
+        // silently never matching the ID token `iss` claim later.
+        let issuer_url = url::Url::parse(&self.issuer)
+            .map_err(|e| OidcError::Discovery(format!("issuer is not a valid URL: {e}")))?;
+        if !is_secure_endpoint(&issuer_url) {
+            return Err(OidcError::Discovery(
+                "issuer must be https (or http on loopback for testing)".to_owned(),
+            ));
+        }
+        if issuer_url.query().is_some() || issuer_url.fragment().is_some() {
+            return Err(OidcError::Discovery(
+                "issuer must not contain a query or fragment component".to_owned(),
+            ));
+        }
         for (field, value) in [
             ("authorization_endpoint", &self.authorization_endpoint),
             ("token_endpoint", &self.token_endpoint),
@@ -166,11 +182,16 @@ impl DiscoveryClient {
     /// Return a live (non-expired) cache entry, if any. The lock
     /// is released before the caller awaits anything.
     fn cached(&self, discovery_url: &str) -> Option<Arc<ProviderMetadata>> {
-        let cache = self.cache.lock();
+        let mut cache = self.cache.lock();
         let entry = cache.get(discovery_url)?;
         if entry.fetched_at.elapsed() < self.ttl {
             Some(Arc::clone(&entry.metadata))
         } else {
+            // Drop the stale entry instead of leaving it to
+            // accumulate; a long-lived process that rotates
+            // through many issuers would otherwise retain every
+            // expired document until each is fetched again.
+            cache.remove(discovery_url);
             None
         }
     }
@@ -180,6 +201,15 @@ impl DiscoveryClient {
 ///
 /// `reqwest` is compiled `default-features = false` at the
 /// workspace level, so this is rustls + ring with no OpenSSL.
+///
+/// The client is `https_only`, so it refuses *all* `http://`
+/// requests — including loopback. This is deliberately stricter
+/// than [`is_secure_endpoint`], which permits `http` on loopback:
+/// that allowance exists only so a test (or a caller pointing at a
+/// local mock IdP) can pass validation while supplying its own
+/// permissive client via the `with_client` constructors. The
+/// default clients built here are the production posture and never
+/// talk plain HTTP.
 pub(crate) fn build_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .use_rustls_tls()
@@ -215,6 +245,24 @@ mod tests {
     fn empty_issuer_is_rejected() {
         let err = sample("").validate().unwrap_err();
         assert!(matches!(err, OidcError::Discovery(_)));
+    }
+
+    #[test]
+    fn non_url_issuer_is_rejected() {
+        let err = sample("not-a-url").validate().unwrap_err();
+        assert!(matches!(err, OidcError::Discovery(_)));
+    }
+
+    #[test]
+    fn non_https_issuer_is_rejected() {
+        let err = sample("http://idp.example.com").validate().unwrap_err();
+        assert!(matches!(err, OidcError::Discovery(_)));
+    }
+
+    #[test]
+    fn issuer_with_query_or_fragment_is_rejected() {
+        assert!(sample("https://idp.example.com/?x=1").validate().is_err());
+        assert!(sample("https://idp.example.com/#f").validate().is_err());
     }
 
     #[test]

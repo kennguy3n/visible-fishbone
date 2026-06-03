@@ -16,6 +16,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use rand::RngCore as _;
 use rand::rngs::OsRng;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::error::{OidcError, Result};
 use crate::storage::StoredTokens;
@@ -23,7 +24,10 @@ use crate::token::{RefreshRequest, TokenClient, TokenResponse};
 use crate::validation::IdTokenClaims;
 
 /// Static configuration for an [`OidcSession`].
-#[derive(Debug, Clone)]
+///
+/// `client_secret` is a secret; the custom [`fmt::Debug`] redacts
+/// it so it never lands in a log line.
+#[derive(Clone)]
 pub struct SessionConfig {
     /// The provider token endpoint used for refresh grants.
     pub token_endpoint: String,
@@ -50,6 +54,20 @@ impl SessionConfig {
             client_secret: None,
             refresh_skew: Self::DEFAULT_REFRESH_SKEW,
         }
+    }
+}
+
+impl fmt::Debug for SessionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionConfig")
+            .field("token_endpoint", &self.token_endpoint)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("refresh_skew", &self.refresh_skew)
+            .finish()
     }
 }
 
@@ -92,6 +110,15 @@ pub struct OidcSession {
     config: SessionConfig,
     jitter: Duration,
     state: Mutex<SessionState>,
+    /// Serializes refresh-token grants. Concurrent callers that
+    /// all observe an about-to-expire token would otherwise each
+    /// fire a parallel grant; with rotating refresh tokens
+    /// (RFC 6749 §6) only the first would succeed and the rest
+    /// would fail `invalid_grant`. Holding this async lock across
+    /// the grant (and re-checking under it) collapses the herd
+    /// into a single refresh. `state` is never held across the
+    /// `.await`, so the synchronous `parking_lot` mutex is fine.
+    refresh_lock: AsyncMutex<()>,
 }
 
 impl OidcSession {
@@ -122,6 +149,7 @@ impl OidcSession {
             jitter: random_jitter(config.refresh_skew),
             config,
             state: Mutex::new(state),
+            refresh_lock: AsyncMutex::new(()),
         }
     }
 
@@ -162,17 +190,40 @@ impl OidcSession {
 
     /// Return a valid access token, refreshing first if the
     /// current one is within the refresh window.
+    ///
+    /// Refreshes are serialized: if several tasks call this at
+    /// once they queue on [`Self::refresh_lock`], and each
+    /// re-checks [`Self::needs_refresh`] after acquiring it, so a
+    /// single grant satisfies the whole batch instead of each
+    /// task firing its own.
     pub async fn access_token(&self) -> Result<String> {
         if self.needs_refresh() {
-            self.refresh().await?;
+            let _guard = self.refresh_lock.lock().await;
+            // Another task may have refreshed while we waited for
+            // the guard; only refresh if it is still warranted.
+            if self.needs_refresh() {
+                self.refresh_locked().await?;
+            }
         }
         Ok(self.state.lock().access_token.clone())
     }
 
     /// Force a refresh-token grant now, regardless of expiry.
+    ///
+    /// Takes the same [`Self::refresh_lock`] as the auto-refresh
+    /// path, so a forced refresh never races a concurrent
+    /// auto-refresh.
     pub async fn refresh(&self) -> Result<()> {
-        // Snapshot the refresh token and release the lock before
-        // the await — never hold the mutex across `.await`.
+        let _guard = self.refresh_lock.lock().await;
+        self.refresh_locked().await
+    }
+
+    /// Perform the refresh-token grant. The caller MUST already
+    /// hold [`Self::refresh_lock`].
+    async fn refresh_locked(&self) -> Result<()> {
+        // Snapshot the refresh token and release the state lock
+        // before the await — never hold the sync mutex across
+        // `.await`.
         let refresh_token = {
             let state = self.state.lock();
             state.refresh_token.clone()
