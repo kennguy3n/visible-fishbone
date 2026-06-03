@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -190,6 +191,20 @@ impl IdTokenValidator {
                 header.kid.as_deref().unwrap_or("<none>")
             ))
         })?;
+        // RFC 7517 §4.4: when the JWK pins an intended `alg`, it MUST
+        // match the algorithm in the JWT header. Rejecting a mismatch
+        // stops a key published for one algorithm (e.g. RS384) from
+        // being used to verify a token signed with another (RS256).
+        if let Some(jwk_alg) = jwk.alg.as_deref() {
+            let pinned = Algorithm::from_str(jwk_alg).map_err(|_| {
+                OidcError::Validation(format!("JWKS key pins unsupported alg {jwk_alg:?}"))
+            })?;
+            if pinned != algorithm {
+                return Err(OidcError::Validation(format!(
+                    "JWKS key alg {jwk_alg:?} does not match token header alg {algorithm:?}"
+                )));
+            }
+        }
         let key = decoding_key(jwk, algorithm)?;
 
         let mut validation = Validation::new(algorithm);
@@ -523,6 +538,33 @@ W6hfl/TTkpSnVaa+z8hT842lIfS+Nk+7VWTjBSJSpwn3/rO6yfGu\n\
         let validator = IdTokenValidator::new("https://idp.example.com", "client-abc");
         let err = validator.validate_with_jwks(&token, &jwks).unwrap_err();
         assert!(matches!(err, OidcError::Validation(_)));
+    }
+
+    #[test]
+    fn rejects_jwk_alg_mismatch() {
+        // Token is signed RS256, but the JWK pins RS384.
+        let token = sign(&base_claims(now() + 3600, now()));
+        let mut jwks = test_jwks();
+        jwks.keys[0].alg = Some("RS384".to_owned());
+        let validator =
+            IdTokenValidator::new("https://idp.example.com", "client-abc").with_nonce("nonce-xyz");
+        let err = validator.validate_with_jwks(&token, &jwks).unwrap_err();
+        assert!(matches!(err, OidcError::Validation(_)));
+    }
+
+    #[test]
+    fn accepts_jwk_without_pinned_alg() {
+        // A JWK that omits `alg` must still validate against a
+        // matching `kid` — the cross-check only applies when pinned.
+        let token = sign(&base_claims(now() + 3600, now()));
+        let mut jwks = test_jwks();
+        jwks.keys[0].alg = None;
+        let validator =
+            IdTokenValidator::new("https://idp.example.com", "client-abc").with_nonce("nonce-xyz");
+        let claims = validator
+            .validate_with_jwks(&token, &jwks)
+            .expect("token should validate when JWK omits alg");
+        assert_eq!(claims.sub, "user-42");
     }
 
     #[test]

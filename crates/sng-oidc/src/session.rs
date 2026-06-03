@@ -183,15 +183,21 @@ impl OidcSession {
     /// never auto-refresh.
     #[must_use]
     pub fn needs_refresh(&self) -> bool {
-        let expires_at = self.state.lock().expires_at;
-        match expires_at {
-            Some(expiry) => {
-                let window = self.config.refresh_skew + self.jitter;
-                let threshold = chrono::Duration::from_std(window)
-                    .unwrap_or_else(|_| chrono::Duration::seconds(i64::MAX));
-                Utc::now() + threshold >= expiry
-            }
-            None => false,
+        let Some(expiry) = self.state.lock().expires_at else {
+            return false;
+        };
+        // `saturating_add` on the std `Duration`, then a fallible
+        // conversion + checked datetime add: an absurdly large skew
+        // can't panic here. If the window can't be represented, or
+        // `now + window` overflows, the window dwarfs any real expiry
+        // so the token is, by definition, inside the refresh window.
+        let window = self.config.refresh_skew.saturating_add(self.jitter);
+        let Ok(threshold) = chrono::Duration::from_std(window) else {
+            return true;
+        };
+        match Utc::now().checked_add_signed(threshold) {
+            Some(deadline) => deadline >= expiry,
+            None => true,
         }
     }
 

@@ -95,6 +95,23 @@ pub(crate) fn is_secure_endpoint(url: &url::Url) -> bool {
     }
 }
 
+/// OIDC Discovery 1.0 §4.3: the `issuer` value in the document MUST
+/// be identical to the issuer URL used to retrieve it. The discovery
+/// URL is that issuer with `/.well-known/openid-configuration`
+/// appended, so we rebuild the expected discovery URL from the
+/// returned issuer and compare. Parsing both sides means trivial
+/// serialization differences (a trailing slash, default ports) don't
+/// trip a false mismatch; the string compare is only a fallback for
+/// the unreachable case where either side fails to parse as a URL.
+pub(crate) fn issuer_matches_discovery_url(issuer: &str, discovery_url: &str) -> bool {
+    const SUFFIX: &str = "/.well-known/openid-configuration";
+    let expected = format!("{}{SUFFIX}", issuer.trim_end_matches('/'));
+    match (url::Url::parse(&expected), url::Url::parse(discovery_url)) {
+        (Ok(expected_url), Ok(actual_url)) => expected_url == actual_url,
+        _ => expected == discovery_url,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CacheEntry {
     metadata: Arc<ProviderMetadata>,
@@ -167,6 +184,15 @@ impl DiscoveryClient {
         let metadata: ProviderMetadata =
             serde_json::from_str(&body).map_err(|e| OidcError::decode("discovery", e))?;
         metadata.validate()?;
+        // OIDC Discovery §4.3: defend against a compromised CDN /
+        // misconfigured proxy returning a document for a different
+        // issuer than the one we fetched.
+        if !issuer_matches_discovery_url(&metadata.issuer, discovery_url) {
+            return Err(OidcError::Discovery(format!(
+                "issuer {:?} does not match the discovery URL {discovery_url:?} it was fetched from (OIDC Discovery §4.3)",
+                metadata.issuer
+            )));
+        }
 
         let metadata = Arc::new(metadata);
         self.cache.lock().insert(
@@ -271,6 +297,35 @@ mod tests {
         meta.token_endpoint = "http://idp.example.com/token".to_owned();
         let err = meta.validate().unwrap_err();
         assert!(matches!(err, OidcError::Discovery(_)));
+    }
+
+    #[test]
+    fn issuer_matching_discovery_url_is_accepted() {
+        assert!(issuer_matches_discovery_url(
+            "https://accounts.google.com",
+            "https://accounts.google.com/.well-known/openid-configuration",
+        ));
+        // A trailing slash on the issuer must not cause a false
+        // mismatch.
+        assert!(issuer_matches_discovery_url(
+            "https://login.microsoftonline.com/tenant/v2.0/",
+            "https://login.microsoftonline.com/tenant/v2.0/.well-known/openid-configuration",
+        ));
+    }
+
+    #[test]
+    fn issuer_not_matching_discovery_url_is_rejected() {
+        // Document fetched from one host advertises a different
+        // issuer host (OIDC Discovery §4.3 violation).
+        assert!(!issuer_matches_discovery_url(
+            "https://evil.example.com",
+            "https://accounts.google.com/.well-known/openid-configuration",
+        ));
+        // Right host, wrong tenant path.
+        assert!(!issuer_matches_discovery_url(
+            "https://login.microsoftonline.com/tenant-a/v2.0",
+            "https://login.microsoftonline.com/tenant-b/v2.0/.well-known/openid-configuration",
+        ));
     }
 
     #[test]
