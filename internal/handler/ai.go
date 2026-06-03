@@ -295,18 +295,27 @@ func (h *AIHandler) analyzeCorrelations(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// Persist clusters (fire-and-forget; log errors for diagnostics).
+	// The repository assigns the canonical ID (the postgres backend
+	// always generates its own), so we write the persisted ID back
+	// onto the response cluster — otherwise a later
+	// GET /ai/correlations/{id} using the engine-assigned ID would
+	// 404 against a row stored under a different ID.
 	if h.correlationRepo != nil {
-		for _, cluster := range result.Clusters {
-			if _, err := h.correlationRepo.Create(r.Context(), tenantID, repository.AICorrelation{
+		for i := range result.Clusters {
+			cluster := result.Clusters[i]
+			persisted, err := h.correlationRepo.Create(r.Context(), tenantID, repository.AICorrelation{
 				AlertIDs: cluster.AlertIDs,
 				Summary:  cluster.Summary,
 				Severity: cluster.Severity,
 				Status:   cluster.Status,
-			}); err != nil {
+			})
+			if err != nil {
 				h.logger.Warn("ai: failed to persist correlation cluster",
 					slog.String("tenant_id", tenantID.String()),
 					slog.String("error", err.Error()))
+				continue
 			}
+			result.Clusters[i].ID = persisted.ID
 		}
 	}
 	WriteJSON(w, http.StatusOK, result)

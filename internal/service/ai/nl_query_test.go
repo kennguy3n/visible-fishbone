@@ -171,6 +171,47 @@ func TestNLQueryEngine_CompiledBundleAllow(t *testing.T) {
 	}
 }
 
+func TestNLQueryEngine_TrailingPunctuationDoesNotCorruptHost(t *testing.T) {
+	t.Parallel()
+	// The app ref is the final word before a "?". Before punctuation
+	// stripping this produced AppRef="salesforce.com?", which matched
+	// no SWG host rule and fell through to the default deny — yet was
+	// still reported as an authoritative compiled-bundle verdict. The
+	// ref must be cleaned so the allow rule matches.
+	graph := `{"default_action":"deny","rules":[{"id":"allow-sf","domain":"swg","verb":"allow","predicates":[{"name":"h","match":{"host":"salesforce.com"}}]}]}`
+	src := &fakeGraphSource{graph: repository.PolicyGraph{ID: uuid.New(), Version: 7, Graph: json.RawMessage(graph)}}
+	engine := NewNLQueryEngine(nil, WithPolicyGraphSource(src))
+
+	resp, err := engine.Query(context.Background(), NLQueryRequest{
+		Question: "Can user alice access app salesforce.com?",
+		TenantID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.EvaluationMode != evalModeCompiledBundle {
+		t.Fatalf("expected mode %q, got %q", evalModeCompiledBundle, resp.EvaluationMode)
+	}
+	if resp.Verdict != "allow" {
+		t.Fatalf("expected allow (punctuation stripped so host matches), got %q", resp.Verdict)
+	}
+}
+
+func TestNLQueryEngine_StructuredParsingStripsPunctuation(t *testing.T) {
+	t.Parallel()
+	engine := NewNLQueryEngine(nil)
+	intent := engine.parseStructured("Can user alice, access app salesforce? from device laptop1.")
+	if intent.UserRef != "alice" {
+		t.Fatalf("UserRef = %q, want alice", intent.UserRef)
+	}
+	if intent.AppRef != "salesforce" {
+		t.Fatalf("AppRef = %q, want salesforce", intent.AppRef)
+	}
+	if intent.DeviceRef != "laptop1" {
+		t.Fatalf("DeviceRef = %q, want laptop1", intent.DeviceRef)
+	}
+}
+
 func TestNLQueryEngine_CompiledBundleDefaultDeny(t *testing.T) {
 	t.Parallel()
 	// Same graph, but the queried app doesn't match the allow rule,

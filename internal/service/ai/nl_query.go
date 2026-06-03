@@ -190,36 +190,46 @@ func (e *NLQueryEngine) parseWithLLM(ctx context.Context, question string) (Pars
 	return intent, resp, nil
 }
 
+// entityRefCutset is the punctuation trimmed from entity references
+// extracted from a free-form question. Without it a trailing "?" in
+// "...access app salesforce?" yields AppRef="salesforce?", which then
+// matches no host/device rule and silently falls through to the
+// graph's DefaultAction — an incorrect verdict reported with full
+// compiled-bundle authority.
+const entityRefCutset = "?!.,;:\"'`()[]{}<>"
+
+// cleanEntityRef strips surrounding punctuation and whitespace from a
+// token extracted as an entity reference.
+func cleanEntityRef(s string) string {
+	return strings.Trim(s, entityRefCutset)
+}
+
 func (e *NLQueryEngine) parseStructured(question string) ParsedIntent {
 	q := strings.ToLower(question)
+	parts := strings.Fields(q)
 	var intent ParsedIntent
 
-	if strings.Contains(q, "user") {
-		parts := strings.Fields(q)
-		for i, p := range parts {
-			if p == "user" && i+1 < len(parts) {
-				intent.UserRef = parts[i+1]
-				break
-			}
+	for i, p := range parts {
+		token := cleanEntityRef(p)
+		if i+1 >= len(parts) {
+			continue
 		}
-	}
-
-	if strings.Contains(q, "app") || strings.Contains(q, "application") {
-		parts := strings.Fields(q)
-		for i, p := range parts {
-			if (p == "app" || p == "application") && i+1 < len(parts) {
-				intent.AppRef = parts[i+1]
-				break
-			}
+		next := cleanEntityRef(parts[i+1])
+		if next == "" {
+			continue
 		}
-	}
-
-	if strings.Contains(q, "device") {
-		parts := strings.Fields(q)
-		for i, p := range parts {
-			if p == "device" && i+1 < len(parts) {
-				intent.DeviceRef = parts[i+1]
-				break
+		switch token {
+		case "user":
+			if intent.UserRef == "" {
+				intent.UserRef = next
+			}
+		case "app", "application":
+			if intent.AppRef == "" {
+				intent.AppRef = next
+			}
+		case "device":
+			if intent.DeviceRef == "" {
+				intent.DeviceRef = next
 			}
 		}
 	}

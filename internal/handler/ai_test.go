@@ -207,6 +207,59 @@ func TestAIHandler_GetCorrelation_404(t *testing.T) {
 	}
 }
 
+func TestAIHandler_AnalyzeCorrelations_PersistedIDIsRetrievable(t *testing.T) {
+	t.Parallel()
+	store := newTestMemoryStore()
+	h := NewAIHandler(nil, nil)
+	engine := ai.NewCorrelationEngine(nil, ai.CorrelationConfig{})
+	h.SetEnhancedAI(engine, nil, nil, nil, nil, store.aiCorrelationRepo)
+
+	tenantID := uuid.New()
+	now := time.Now().UTC()
+	// Two alerts sharing a device within the time window correlate
+	// into one cluster.
+	alerts := []ai.AlertInput{
+		{Kind: "malware", Severity: "high", DeviceID: "dev-1", CreatedAt: now},
+		{Kind: "malware", Severity: "critical", DeviceID: "dev-1", CreatedAt: now.Add(time.Minute)},
+	}
+	body, _ := json.Marshal(map[string]any{"alerts": alerts})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID.String()+"/ai/correlations/analyze",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID.String())
+	rec := httptest.NewRecorder()
+	h.analyzeCorrelations(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var result ai.CorrelationResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode analyze response: %v", err)
+	}
+	if len(result.Clusters) == 0 {
+		t.Fatal("expected at least one correlation cluster")
+	}
+	// Every returned cluster ID must resolve via GET — i.e. the
+	// response carries the persisted ID, not a divergent engine ID.
+	for _, cluster := range result.Clusters {
+		if cluster.ID == uuid.Nil {
+			t.Fatal("cluster ID must not be nil")
+		}
+		getReq := httptest.NewRequest(http.MethodGet,
+			"/api/v1/tenants/"+tenantID.String()+"/ai/correlations/"+cluster.ID.String(), nil)
+		getReq.SetPathValue("tenant_id", tenantID.String())
+		getReq.SetPathValue("id", cluster.ID.String())
+		getRec := httptest.NewRecorder()
+		h.getCorrelation(getRec, getReq)
+		if getRec.Code != http.StatusOK {
+			t.Fatalf("GET correlation %s = %d, want 200; body=%s",
+				cluster.ID, getRec.Code, getRec.Body.String())
+		}
+	}
+}
+
 func TestAIHandler_AnalyzeCorrelations_503WhenNotConfigured(t *testing.T) {
 	t.Parallel()
 	h := NewAIHandler(nil, nil)
