@@ -159,9 +159,18 @@ fn hash_sdwan(e: &SdwanEvent, h: &mut DefaultHasher) {
 fn hash_agent(e: &AgentEvent, h: &mut DefaultHasher) {
     e.device_id.hash(h);
     e.event_type.hash(h);
+    // `reason` participates in the dedup key for the same
+    // rationale as `hash_ztna`: a `tunnel_down` carries its
+    // cause here (e.g. `idle` vs `timeout`), so two drops on the
+    // same (device, event_type, platform) for different reasons
+    // must not collapse to one wire event inside the window or
+    // dashboards lose the per-cause breakdown. Empty for events
+    // with no reason, so it is a no-op for `started` / `stopped`
+    // / `posture` / `tunnel_up`.
+    e.reason.hash(h);
     (e.platform as u8).hash(h);
     // posture_snapshot excluded — agent posture events should
-    // dedup on (device, event_type, platform) inside the
+    // dedup on (device, event_type, reason, platform) inside the
     // window. A change in event_type (started → posture →
     // stopped) is what's worth reporting.
 }
@@ -335,6 +344,30 @@ mod tests {
             reason: String::new(),
             platform: Platform::Linux,
         })
+    }
+
+    fn agent_with_reason(et: &str, reason: &str) -> TelemetryEvent {
+        TelemetryEvent::Agent(sng_core::events::AgentEvent {
+            device_id: "d1".into(),
+            event_type: et.into(),
+            posture_snapshot: None,
+            reason: reason.into(),
+            platform: Platform::Linux,
+        })
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_agent_reason() {
+        // Two tunnel_down events on the same (device, event_type,
+        // platform) but different diagnostic reasons must NOT
+        // collapse in the dedup window — operators would otherwise
+        // lose the per-cause breakdown.
+        let idle = agent_with_reason("tunnel_down", "idle");
+        let timeout = agent_with_reason("tunnel_down", "timeout");
+        assert_ne!(Fingerprint::compute(&idle), Fingerprint::compute(&timeout));
+        // Same reason still dedups.
+        let idle2 = agent_with_reason("tunnel_down", "idle");
+        assert_eq!(Fingerprint::compute(&idle), Fingerprint::compute(&idle2));
     }
 
     #[test]
