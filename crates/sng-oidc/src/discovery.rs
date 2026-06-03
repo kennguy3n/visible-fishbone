@@ -90,7 +90,11 @@ impl ProviderMetadata {
 pub(crate) fn is_secure_endpoint(url: &url::Url) -> bool {
     match url.scheme() {
         "https" => true,
-        "http" => matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1")),
+        // `Url::host_str` returns IPv6 literals wrapped in brackets
+        // (e.g. `[::1]`), so the loopback literal must include them
+        // or an `http://[::1]:…` mock endpoint would be wrongly
+        // rejected as insecure.
+        "http" => matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")),
         _ => false,
     }
 }
@@ -297,6 +301,15 @@ mod tests {
         meta.token_endpoint = "http://idp.example.com/token".to_owned();
         let err = meta.validate().unwrap_err();
         assert!(matches!(err, OidcError::Discovery(_)));
+    }
+
+    #[test]
+    fn ipv6_loopback_http_is_accepted_as_secure() {
+        let url = url::Url::parse("http://[::1]:8080/token").expect("parses");
+        assert!(is_secure_endpoint(&url));
+        // Non-loopback http is still rejected.
+        let url = url::Url::parse("http://example.com/token").expect("parses");
+        assert!(!is_secure_endpoint(&url));
     }
 
     #[test]

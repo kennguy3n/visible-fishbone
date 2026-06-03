@@ -179,18 +179,51 @@ impl IdTokenValidator {
         self
     }
 
-    /// Validate `token` against `jwks`, returning the claims on
-    /// success.
+    /// Fetch the JWK Set via `jwks_client` and validate `token`.
+    ///
+    /// This is the entry point callers should prefer over
+    /// [`Self::validate_with_jwks`] because it is rotation-aware:
+    /// providers rotate signing keys periodically, and tokens signed
+    /// with a freshly-rotated key carry a `kid` that is not yet in
+    /// the cached JWKS. When validation fails with
+    /// [`OidcError::UnknownSigningKey`] — the precise symptom of that
+    /// race — the JWK Set is re-fetched once (bypassing the cache via
+    /// [`JwksClient::refresh`]) and validation is retried, so a
+    /// rotation does not break sign-in for the remainder of the cache
+    /// TTL. Every other error (bad signature, wrong `aud`/`iss`,
+    /// expired, …) is returned immediately without a retry.
+    pub async fn validate(
+        &self,
+        token: &str,
+        jwks_client: &JwksClient,
+        jwks_uri: &str,
+    ) -> Result<IdTokenClaims> {
+        let jwks = jwks_client.fetch(jwks_uri).await?;
+        match self.validate_with_jwks(token, &jwks) {
+            Err(OidcError::UnknownSigningKey { .. }) => {
+                let refreshed = jwks_client.refresh(jwks_uri).await?;
+                self.validate_with_jwks(token, &refreshed)
+            }
+            other => other,
+        }
+    }
+
+    /// Validate `token` against an already-fetched `jwks`, returning
+    /// the claims on success.
+    ///
+    /// Prefer [`Self::validate`] in production: it re-fetches the
+    /// JWKS and retries on a `kid` miss (key rotation), which this
+    /// method cannot do because it has no access to the
+    /// [`JwksClient`].
     pub fn validate_with_jwks(&self, token: &str, jwks: &Jwks) -> Result<IdTokenClaims> {
         let header = decode_header(token)?;
         let algorithm = supported_algorithm(header.alg)?;
 
-        let jwk = jwks.select(header.kid.as_deref()).ok_or_else(|| {
-            OidcError::Validation(format!(
-                "no JWKS key matches kid {:?}",
-                header.kid.as_deref().unwrap_or("<none>")
-            ))
-        })?;
+        let jwk =
+            jwks.select(header.kid.as_deref())
+                .ok_or_else(|| OidcError::UnknownSigningKey {
+                    kid: header.kid.clone(),
+                })?;
         // RFC 7517 §4.4: when the JWK pins an intended `alg`, it MUST
         // match the algorithm in the JWT header. Rejecting a mismatch
         // stops a key published for one algorithm (e.g. RS384) from
@@ -350,7 +383,22 @@ impl JwksClient {
         if let Some(hit) = self.cached(jwks_uri) {
             return Ok(hit);
         }
+        self.fetch_remote(jwks_uri).await
+    }
 
+    /// Force a fresh fetch of the JWK Set, bypassing the cache and
+    /// replacing the cached copy with the result.
+    ///
+    /// Used to recover from a provider key rotation: when a token
+    /// references a `kid` that is absent from the cached set, the
+    /// cache is stale and a forced re-fetch picks up the rotated key.
+    pub async fn refresh(&self, jwks_uri: &str) -> Result<Arc<Jwks>> {
+        self.fetch_remote(jwks_uri).await
+    }
+
+    /// Fetch the JWK Set over the network and update the cache,
+    /// unconditionally (callers gate on the cache themselves).
+    async fn fetch_remote(&self, jwks_uri: &str) -> Result<Arc<Jwks>> {
         let response = self
             .http
             .get(jwks_uri)
@@ -537,7 +585,7 @@ W6hfl/TTkpSnVaa+z8hT842lIfS+Nk+7VWTjBSJSpwn3/rO6yfGu\n\
         jwks.keys[0].kid = Some("some-other-kid".to_owned());
         let validator = IdTokenValidator::new("https://idp.example.com", "client-abc");
         let err = validator.validate_with_jwks(&token, &jwks).unwrap_err();
-        assert!(matches!(err, OidcError::Validation(_)));
+        assert!(matches!(err, OidcError::UnknownSigningKey { .. }));
     }
 
     #[test]

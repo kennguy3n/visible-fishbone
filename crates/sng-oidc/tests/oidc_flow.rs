@@ -232,12 +232,13 @@ async fn full_oidc_flow_discovery_authorize_exchange_validate_refresh() {
     assert_eq!(tokens.access_token, "access-initial");
     let id_token = tokens.id_token.clone().expect("id token present");
 
-    // 5. ID-token validation against the served JWKS.
+    // 5. ID-token validation against the served JWKS via the
+    // rotation-aware high-level entry point.
     let jwks_client = JwksClient::with_client(http.clone(), Duration::from_secs(60));
-    let jwks = jwks_client.fetch(&metadata.jwks_uri).await.expect("jwks");
     let validator = IdTokenValidator::new(metadata.issuer.clone(), CLIENT_ID).with_nonce(NONCE);
     let claims = validator
-        .validate_with_jwks(&id_token, &jwks)
+        .validate(&id_token, &jwks_client, &metadata.jwks_uri)
+        .await
         .expect("id token validates");
     assert_eq!(claims.sub, "subject-99");
     assert_eq!(
@@ -338,4 +339,68 @@ async fn concurrent_access_token_calls_trigger_a_single_refresh() {
     }
     // `expect(1)` is verified when `server` drops: a single
     // refresh grant served all 16 concurrent callers.
+}
+
+/// Regression test for the JWKS key-rotation window: after a
+/// provider rotates its signing key, tokens carry a `kid` absent
+/// from the cached JWK Set. `IdTokenValidator::validate` must
+/// re-fetch the JWKS (bypassing the cache) and retry once so the
+/// rotated key is picked up instead of failing for the rest of the
+/// cache TTL.
+#[tokio::test]
+async fn validate_refetches_jwks_on_kid_rotation() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    // The cached set advertises a stale `kid`; the token below is
+    // signed with `TEST_KID`, so the first validation misses.
+    let stale_jwks = serde_json::json!({
+        "keys": [{
+            "kty": "RSA",
+            "kid": "stale-key-0",
+            "alg": "RS256",
+            "use": "sig",
+            "n": TEST_RSA_N,
+            "e": TEST_RSA_E
+        }]
+    });
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(stale_jwks))
+        // Served once (the initial cache fill), then exhausted so
+        // the forced refresh falls through to the rotated set.
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    // The rotated set carries the key the token is actually signed
+    // with.
+    let rotated_jwks = serde_json::json!({
+        "keys": [{
+            "kty": "RSA",
+            "kid": TEST_KID,
+            "alg": "RS256",
+            "use": "sig",
+            "n": TEST_RSA_N,
+            "e": TEST_RSA_E
+        }]
+    });
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(rotated_jwks))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let id_token = sign_id_token(&base, chrono::Utc::now().timestamp() + 3600);
+    let jwks_uri = format!("{base}/jwks");
+    let jwks_client = JwksClient::with_client(loopback_http_client(), Duration::from_secs(60));
+    let validator = IdTokenValidator::new(base.clone(), CLIENT_ID).with_nonce(NONCE);
+
+    let claims = validator
+        .validate(&id_token, &jwks_client, &jwks_uri)
+        .await
+        .expect("validation should succeed after refetching the rotated JWKS");
+    assert_eq!(claims.sub, "subject-99");
 }

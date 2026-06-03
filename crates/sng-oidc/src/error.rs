@@ -72,6 +72,19 @@ pub enum OidcError {
     #[error("id token validation failed: {0}")]
     Validation(String),
 
+    /// The signing key referenced by the ID token's `kid` header was
+    /// not present in the (cached) JWK Set. This is *recoverable*:
+    /// it is the expected symptom of a provider key rotation, so a
+    /// caller should re-fetch the JWKS (bypassing the cache) and
+    /// retry validation once before treating it as fatal. The
+    /// high-level [`IdTokenValidator::validate`](crate::validation::IdTokenValidator::validate)
+    /// does this automatically.
+    #[error("no JWKS key matches kid {kid:?}")]
+    UnknownSigningKey {
+        /// The `kid` the token referenced, if it carried one.
+        kid: Option<String>,
+    },
+
     /// The JWT library rejected the ID token (signature
     /// mismatch, malformed header, unsupported algorithm).
     #[error("id token signature/format invalid: {0}")]
