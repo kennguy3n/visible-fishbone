@@ -9,16 +9,21 @@
 //! * **`passcode_set`** — `LAContext.canEvaluatePolicy(.deviceOwnerAuthentication)`
 //!   (fails with `LAErrorPasscodeNotSet` when no passcode is set).
 //! * **`biometric_ready`** — `LAContext.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics)`.
-//! * **`jailbroken`** — a filesystem heuristic: the presence of any of a
-//!   set of paths that only exist on a jailbroken device (Cydia, the
-//!   substrate dylib, an unsandboxed shell, …).
+//! * **`jailbroken`** — a union of cheap, independent heuristics, any of
+//!   which flags the device: a known jailbreak artifact **path** exists
+//!   (Cydia, the substrate dylib, an unsandboxed shell, …); a **`fork()`**
+//!   succeeds (the app sandbox normally forbids spawning processes); a
+//!   protected **system path** under `/private/` is writable; or a
+//!   jailbreak-manager **URL scheme** (`cydia://`/`sileo://`) reports
+//!   openable via `UIApplication.canOpenURL` (requires the schemes to be
+//!   declared in `LSApplicationQueriesSchemes`).
 //! * **`mdm_enrolled`** — presence of an MDM-pushed *Managed App
 //!   Configuration* under the documented `NSUserDefaults` key, which an
 //!   app can read with no special entitlement.
 //! * **`root_detected`** — always `None`: it is the Android-only signal,
 //!   left unknown on iOS per the `MobilePostureSnapshot` contract.
 //!
-//! The signal→snapshot mapping and the jailbreak heuristic are pure and
+//! The signal→snapshot mapping and the jailbreak decision are pure and
 //! host-tested; only the platform probes are `#[cfg(target_os = "ios")]`.
 //! The host fallback returns [`PostureError::Unavailable`].
 
@@ -95,10 +100,42 @@ mod logic {
         pub mdm_enrolled: Option<bool>,
     }
 
-    /// Decide jailbreak from the path-existence predicate. Pure so the
-    /// host tests can drive it with a fake filesystem.
+    /// Path-existence half of the jailbreak heuristic. Pure so the host
+    /// tests can drive it with a fake filesystem; on device it is fed
+    /// real `Path::exists`. Feeds [`JailbreakSignals::suspicious_path_present`].
     pub(super) fn detect_jailbreak<F: Fn(&str) -> bool>(exists: F) -> bool {
         super::JAILBREAK_PATHS.iter().any(|p| exists(p))
+    }
+
+    /// The independent, cheap jailbreak heuristics, already reduced to
+    /// booleans by the platform probes. Kept separate from the decision
+    /// so the decision stays pure and host-testable over the full truth
+    /// table.
+    // The fields are genuinely independent, equally-weighted boolean
+    // signals (not a state machine), so a flat record is the clearest
+    // model; the pedantic `struct_excessive_bools` heuristic does not fit.
+    #[allow(clippy::struct_excessive_bools)]
+    #[derive(Debug, Default, Clone, Copy)]
+    pub(super) struct JailbreakSignals {
+        /// A known jailbreak artifact path exists on disk.
+        pub suspicious_path_present: bool,
+        /// `fork()` succeeded — the app sandbox normally forbids it.
+        pub can_fork: bool,
+        /// A protected system path (under `/private/`) was writable.
+        pub system_path_writable: bool,
+        /// A jailbreak-manager URL scheme (`cydia://`/`sileo://`) is
+        /// reported openable by `UIApplication.canOpenURL`.
+        pub jailbreak_scheme_openable: bool,
+    }
+
+    /// Decide jailbreak from the collected signals. Pure: the device is
+    /// flagged if *any* heuristic fires (each is individually a strong
+    /// indicator, so the union maximizes detection).
+    pub(super) fn is_jailbroken(signals: &JailbreakSignals) -> bool {
+        signals.suspicious_path_present
+            || signals.can_fork
+            || signals.system_path_writable
+            || signals.jailbreak_scheme_openable
     }
 
     /// Map raw signals + agent metadata onto the wire snapshot.
@@ -125,13 +162,24 @@ mod logic {
 // ---------------------------------------------------------------------
 #[cfg(target_os = "ios")]
 mod probe {
-    use super::logic::{IosPostureSignals, detect_jailbreak};
-    use objc2_foundation::{NSProcessInfo, NSString, NSUserDefaults};
+    use super::logic::{IosPostureSignals, JailbreakSignals, detect_jailbreak, is_jailbroken};
+    use objc2::MainThreadMarker;
+    use objc2_foundation::{NSProcessInfo, NSString, NSURL, NSUserDefaults};
     use objc2_local_authentication::{LAContext, LAPolicy};
+    use objc2_ui_kit::UIApplication;
 
     /// `NSUserDefaults` key under which an MDM pushes Managed App
     /// Configuration.
     const MANAGED_CONFIG_KEY: &str = "com.apple.configuration.managed";
+
+    /// A protected path the app sandbox forbids writing to; writability
+    /// is a jailbreak signal.
+    const PRIVATE_WRITE_PROBE: &str = "/private/.sng_jailbreak_probe";
+
+    /// Jailbreak-manager URL schemes probed via `canOpenURL`. The host
+    /// app must list these under `LSApplicationQueriesSchemes` for the
+    /// query to return a meaningful result.
+    const JAILBREAK_URL_SCHEMES: &[&str] = &["cydia://package/test", "sileo://"];
 
     fn os_version() -> String {
         let v = NSProcessInfo::processInfo().operatingSystemVersion();
@@ -157,15 +205,76 @@ mod probe {
             .is_some()
     }
 
+    /// `fork()` succeeds only outside the app sandbox, so a successful
+    /// fork is a strong jailbreak signal. The child terminates
+    /// immediately and the parent reaps it.
+    #[allow(unsafe_code)]
+    fn fork_succeeds() -> bool {
+        // SAFETY: `fork` has no preconditions. In the child we call only
+        // the async-signal-safe `_exit`, touching no shared state across
+        // the boundary; the parent reaps the child via `waitpid`.
+        unsafe {
+            let pid = libc::fork();
+            if pid < 0 {
+                return false; // sandbox refused the fork: not jailbroken.
+            }
+            if pid == 0 {
+                libc::_exit(0); // child: terminate immediately (diverges).
+            }
+            let mut status: libc::c_int = 0;
+            libc::waitpid(pid, &raw mut status, 0);
+            true
+        }
+    }
+
+    /// A non-jailbroken sandbox cannot write under `/private/`; if the
+    /// write succeeds the device is jailbroken. The probe file is
+    /// removed afterwards.
+    fn system_path_writable() -> bool {
+        use std::io::Write as _;
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(PRIVATE_WRITE_PROBE)
+        else {
+            return false;
+        };
+        let wrote = file.write_all(b"sng").is_ok();
+        drop(file);
+        let _ = std::fs::remove_file(PRIVATE_WRITE_PROBE);
+        wrote
+    }
+
+    /// Probe whether a jailbreak-manager URL scheme is openable. Must run
+    /// on the main thread; if it cannot, the signal is treated as absent
+    /// (the other heuristics still apply).
+    fn jailbreak_scheme_openable() -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let app = UIApplication::sharedApplication(mtm);
+        JAILBREAK_URL_SCHEMES.iter().any(|scheme| {
+            NSURL::URLWithString(&NSString::from_str(scheme))
+                .is_some_and(|url| app.canOpenURL(&url))
+        })
+    }
+
     /// Gather every signal from the live device.
     pub(super) fn collect_signals() -> IosPostureSignals {
+        let jailbreak = JailbreakSignals {
+            suspicious_path_present: detect_jailbreak(|p| std::path::Path::new(p).exists()),
+            can_fork: fork_succeeds(),
+            system_path_writable: system_path_writable(),
+            jailbreak_scheme_openable: jailbreak_scheme_openable(),
+        };
         IosPostureSignals {
             os_version: os_version(),
             passcode_set: Some(can_evaluate(LAPolicy::DeviceOwnerAuthentication)),
             biometric_ready: Some(can_evaluate(
                 LAPolicy::DeviceOwnerAuthenticationWithBiometrics,
             )),
-            jailbroken: Some(detect_jailbreak(|p| std::path::Path::new(p).exists())),
+            jailbroken: Some(is_jailbroken(&jailbreak)),
             mdm_enrolled: Some(mdm_enrolled()),
         }
     }
@@ -193,7 +302,9 @@ impl MobilePostureCollector for IosPostureCollector {
 
 #[cfg(test)]
 mod tests {
-    use super::logic::{IosPostureSignals, detect_jailbreak, to_snapshot};
+    use super::logic::{
+        IosPostureSignals, JailbreakSignals, detect_jailbreak, is_jailbroken, to_snapshot,
+    };
     use super::*;
     use pretty_assertions::assert_eq;
     use std::collections::HashSet;
@@ -212,6 +323,50 @@ mod tests {
         // A path that is not in the heuristic list does not flag.
         let unrelated: HashSet<&str> = ["/Applications/Safari.app"].into_iter().collect();
         assert!(!detect_jailbreak(|p| unrelated.contains(p)));
+    }
+
+    #[test]
+    fn no_signal_means_not_jailbroken() {
+        // All heuristics negative → clean device.
+        assert!(!is_jailbroken(&JailbreakSignals::default()));
+    }
+
+    #[test]
+    fn any_single_signal_flags_jailbreak() {
+        // Each heuristic alone is sufficient to flag the device.
+        for signals in [
+            JailbreakSignals {
+                suspicious_path_present: true,
+                ..Default::default()
+            },
+            JailbreakSignals {
+                can_fork: true,
+                ..Default::default()
+            },
+            JailbreakSignals {
+                system_path_writable: true,
+                ..Default::default()
+            },
+            JailbreakSignals {
+                jailbreak_scheme_openable: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                is_jailbroken(&signals),
+                "expected jailbreak for {signals:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_signals_set_flags_jailbreak() {
+        assert!(is_jailbroken(&JailbreakSignals {
+            suspicious_path_present: true,
+            can_fork: true,
+            system_path_writable: true,
+            jailbreak_scheme_openable: true,
+        }));
     }
 
     #[test]

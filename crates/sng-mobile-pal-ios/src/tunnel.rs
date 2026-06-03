@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use sng_mobile_core::{MobileTunnelProvider, TunnelConfig, TunnelError, TunnelStatus};
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 /// `providerConfiguration` key under which the packet-tunnel extension
 /// reads the `wg-quick` configuration string.
@@ -97,8 +98,12 @@ impl WireGuardSettings {
     /// consumes. The `[Interface]` `Address` line is intentionally
     /// omitted: the device's tunnel IP is assigned by the extension
     /// from the gateway handshake, not pinned here.
+    ///
+    /// The result is wrapped in [`Zeroizing`] because it embeds the
+    /// interface private key: the transient buffer is wiped on drop once
+    /// the caller has copied it into the system `providerConfiguration`.
     #[must_use]
-    pub fn to_wg_quick(&self) -> String {
+    pub fn to_wg_quick(&self) -> Zeroizing<String> {
         use std::fmt::Write as _;
         let mut out = String::new();
         out.push_str("[Interface]\n");
@@ -117,7 +122,7 @@ impl WireGuardSettings {
         if let Some(secs) = self.persistent_keepalive_secs {
             let _ = writeln!(out, "PersistentKeepalive = {secs}");
         }
-        out
+        Zeroizing::new(out)
     }
 }
 
