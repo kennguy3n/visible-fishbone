@@ -531,6 +531,37 @@ func TestAIHandler_GeneratePostureReport_400InvalidPeriod(t *testing.T) {
 	}
 }
 
+func TestAIHandler_GeneratePostureReport_NoBaselineNotDegrading(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, nil, ai.NewReportEngine(nil), nil, nil, nil)
+	tenantID := uuid.New().String()
+	body, _ := json.Marshal(map[string]any{
+		"period":             "weekly",
+		"alerts_by_severity": map[string]int{"critical": 3, "high": 4},
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID+"/ai/reports/posture/generate",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.generatePostureReport(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var report ai.PostureReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	// The POST handler supplies no previous-period baseline, so the
+	// trend must be "stable" — not "degrading" fabricated from an
+	// assumed-zero baseline.
+	if report.Overview.Trend != "stable" {
+		t.Fatalf("trend = %q, want stable (no baseline supplied)", report.Overview.Trend)
+	}
+}
+
 func TestAIHandler_GuardrailsStatus_503WhenNotConfigured(t *testing.T) {
 	t.Parallel()
 	h := NewAIHandler(nil, nil)

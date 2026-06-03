@@ -11,6 +11,7 @@ import (
 func TestReportEngine_Generate_TemplateOnly(t *testing.T) {
 	t.Parallel()
 	engine := NewReportEngine(nil)
+	prevPeriodAlerts := 30
 	input := PostureInput{
 		TenantID: uuid.New(),
 		Period: ReportPeriod{
@@ -25,7 +26,7 @@ func TestReportEngine_Generate_TemplateOnly(t *testing.T) {
 			"low":      20,
 		},
 		ResolvedAlerts:   15,
-		PrevPeriodAlerts: 30,
+		PrevPeriodAlerts: &prevPeriodAlerts,
 		TopThreats: []ThreatEntry{
 			{Kind: "brute_force", Count: 8},
 			{Kind: "anomaly", Count: 5},
@@ -88,6 +89,46 @@ func TestReportEngine_Generate_WithLLM(t *testing.T) {
 	}
 	if report.ModelID != "gpt-4" {
 		t.Fatalf("expected model_id gpt-4, got %q", report.ModelID)
+	}
+}
+
+func TestReportEngine_NoBaselineIsStable(t *testing.T) {
+	t.Parallel()
+	engine := NewReportEngine(nil)
+	report, err := engine.Generate(context.Background(), PostureInput{
+		TenantID:         uuid.New(),
+		Period:           ReportPeriod{Label: "weekly"},
+		AlertsBySeverity: map[string]int{"critical": 5, "high": 10},
+		// PrevPeriodAlerts left nil: no baseline available.
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// With alerts present but no previous-period baseline, the trend
+	// must be "stable" — not a fabricated "degrading" from an
+	// assumed-zero baseline.
+	if report.Overview.Trend != "stable" {
+		t.Fatalf("trend = %q, want stable (no baseline)", report.Overview.Trend)
+	}
+}
+
+func TestReportEngine_GenuineZeroBaselineIsDegrading(t *testing.T) {
+	t.Parallel()
+	engine := NewReportEngine(nil)
+	zero := 0
+	report, err := engine.Generate(context.Background(), PostureInput{
+		TenantID:         uuid.New(),
+		Period:           ReportPeriod{Label: "weekly"},
+		AlertsBySeverity: map[string]int{"critical": 5},
+		PrevPeriodAlerts: &zero, // genuine "previous period had no alerts"
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// A non-nil zero baseline is a real comparison: going from 0 to 5
+	// alerts is genuinely degrading.
+	if report.Overview.Trend != "degrading" {
+		t.Fatalf("trend = %q, want degrading (real zero baseline)", report.Overview.Trend)
 	}
 }
 

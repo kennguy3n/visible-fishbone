@@ -64,7 +64,13 @@ type PostureInput struct {
 
 	AlertsBySeverity map[string]int
 	ResolvedAlerts   int
-	PrevPeriodAlerts int
+	// PrevPeriodAlerts is the total alert count for the immediately
+	// preceding period, used to compute the trend. It is optional: nil
+	// means no baseline is available, in which case the trend is
+	// reported as "stable" rather than fabricating a "degrading" signal
+	// from an assumed-zero baseline. A non-nil zero is a genuine
+	// "previous period had no alerts" and is compared normally.
+	PrevPeriodAlerts *int
 	TopThreats       []ThreatEntry
 	TotalPolicies    int
 	ActivePolicies   int
@@ -90,7 +96,13 @@ func (e *ReportEngine) Generate(ctx context.Context, input PostureInput) (Postur
 		totalAlerts += v
 	}
 
-	trendDir, _ := computeTrend(totalAlerts, input.PrevPeriodAlerts)
+	// Without a previous-period baseline we cannot honestly claim a
+	// direction, so report "stable" instead of treating an
+	// assumed-zero baseline as a jump (which always reads "degrading").
+	trendDir := "stable"
+	if input.PrevPeriodAlerts != nil {
+		trendDir, _ = computeTrend(totalAlerts, *input.PrevPeriodAlerts)
+	}
 
 	var coveragePct float64
 	if input.TotalPolicies > 0 {

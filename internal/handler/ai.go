@@ -411,7 +411,7 @@ func (h *AIHandler) getPostureReport(w http.ResponseWriter, r *http.Request) {
 			Label: "weekly",
 		},
 		AlertsBySeverity: counts,
-		PrevPeriodAlerts: prevTotal,
+		PrevPeriodAlerts: &prevTotal,
 	})
 	if err != nil {
 		h.logger.Error("ai: posture report failed",
