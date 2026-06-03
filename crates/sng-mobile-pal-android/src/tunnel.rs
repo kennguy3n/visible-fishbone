@@ -63,9 +63,7 @@ pub struct VpnServiceConfig {
 /// misparsed: WireGuard endpoints always carry a port, and an IPv6
 /// address must be bracketed so the `:port` boundary is unambiguous.
 fn split_endpoint(endpoint: &str) -> Result<(String, u16), AndroidPalError> {
-    let invalid = |msg: &str| {
-        AndroidPalError::InvalidInput(format!("endpoint {endpoint:?} {msg}"))
-    };
+    let invalid = |msg: &str| AndroidPalError::InvalidInput(format!("endpoint {endpoint:?} {msg}"));
 
     // Bracketed IPv6: `[addr]:port`.
     if let Some(rest) = endpoint.strip_prefix('[') {
