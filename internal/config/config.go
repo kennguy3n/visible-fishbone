@@ -1212,6 +1212,13 @@ func (c Config) validate() error {
 	if c.Environment.IsProduction() && c.Auth.APIKeyMaxActivePerTenant <= 0 {
 		return errors.New("AUTH_API_KEY_MAX_ACTIVE_PER_TENANT must be > 0 in production environments (the cap protects against unbounded key creation; see docs/deploy.md)")
 	}
+	// Same rationale as the API-key cap above: the IdP-config handler
+	// treats <= 0 as "unlimited", so allowing it in production would
+	// silently disable the per-tenant provider cap and permit
+	// unbounded idp_configs creation.
+	if c.Environment.IsProduction() && c.MobileAuth.MaxProvidersPerTenant <= 0 {
+		return errors.New("MOBILE_AUTH_MAX_PROVIDERS_PER_TENANT must be > 0 in production environments (the cap protects against unbounded IdP-config creation; see docs/deploy.md)")
+	}
 	if c.Policy.KeyWrapMasterB64 != "" && c.Policy.KeyWrapMasterFile != "" {
 		return errors.New("POLICY_KEY_WRAP_MASTER_B64 and POLICY_KEY_WRAP_MASTER_FILE are mutually exclusive")
 	}

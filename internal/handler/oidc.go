@@ -110,6 +110,13 @@ func (h *OIDCHandler) createConfig(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
+	// Enforce the per-tenant provider cap. The count→create check is
+	// not atomic, but this mirrors the deliberate tradeoff documented
+	// for the analogous API-key cap (apikey.Service.Create): IdP
+	// configs are created at human/admin rate, so the only effect of a
+	// race is briefly exceeding the cap by N-1 for N concurrent
+	// requests, and the next create rejects. The unique
+	// (tenant_id, issuer_url) index still prevents duplicate providers.
 	if h.maxProviders > 0 {
 		existing, err := h.configs.List(r.Context(), tenantID)
 		if err != nil {
@@ -229,7 +236,7 @@ func (h *OIDCHandler) deleteConfig(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusNoContent, nil)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // --- mobile native SSO ---------------------------------------------------

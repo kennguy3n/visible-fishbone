@@ -2,6 +2,9 @@ package identity
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
@@ -31,11 +34,14 @@ const DefaultDiscoveryCacheTTL = 24 * time.Hour
 const DefaultSessionTTL = time.Hour
 
 // idTokenSigningMethods is the set of asymmetric algorithms accepted
-// on incoming OIDC ID tokens. Symmetric (HS*) algorithms are rejected
-// outright: a JWKS only ever publishes asymmetric public keys, so an
-// HS-signed token would be an attempt to confuse the verifier into
-// treating a public key as an HMAC secret.
-var idTokenSigningMethods = []string{"RS256", "RS384", "RS512"}
+// on incoming OIDC ID tokens. Both RSA (RS*) and ECDSA (ES*) are
+// supported so EC-signing providers (e.g. Apple, which signs with
+// ES256, and custom_oidc issuers) validate alongside Google, Microsoft
+// and Okta. Symmetric (HS*) algorithms are rejected outright: a JWKS
+// only ever publishes asymmetric public keys, so an HS-signed token
+// would be an attempt to confuse the verifier into treating a public
+// key as an HMAC secret.
+var idTokenSigningMethods = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
 
 // SessionSigner mints SNG session JWTs that the standard
 // middleware.Auth chain accepts. It MUST mirror the operator-console
@@ -299,7 +305,12 @@ func (s *OIDCService) validateIDToken(ctx context.Context, cfg repository.IDPCon
 	}
 
 	keyFunc := func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
+		// Defense in depth alongside jwt.WithValidMethods: only the
+		// asymmetric RSA/ECDSA families are acceptable for a JWKS-backed
+		// key. This rejects any HS* alg-confusion attempt outright.
+		switch t.Method.(type) {
+		case *jwt.SigningMethodRSA, *jwt.SigningMethodECDSA:
+		default:
 			return nil, fmt.Errorf("unexpected signing method %q", t.Method.Alg())
 		}
 		kid, _ := t.Header["kid"].(string)
@@ -480,14 +491,15 @@ type oidcDiscoveryDoc struct {
 
 type discoveryEntry struct {
 	doc       oidcDiscoveryDoc
-	keys      map[string]*rsa.PublicKey
+	keys      map[string]crypto.PublicKey
 	fetchedAt time.Time
 }
 
-// keyForKID returns the RSA public key for the given key id. When the
-// token carries no kid (or an unknown one) and the JWKS published
-// exactly one key, that key is used as the unambiguous fallback.
-func (e *discoveryEntry) keyForKID(kid string) (*rsa.PublicKey, bool) {
+// keyForKID returns the public key (RSA or ECDSA) for the given key id.
+// When the token carries no kid (or an unknown one) and the JWKS
+// published exactly one key, that key is used as the unambiguous
+// fallback.
+func (e *discoveryEntry) keyForKID(kid string) (crypto.PublicKey, bool) {
 	if k, ok := e.keys[kid]; ok {
 		return k, true
 	}
@@ -553,24 +565,37 @@ type jwkKey struct {
 	Kid string `json:"kid"`
 	Use string `json:"use"`
 	Alg string `json:"alg"`
-	N   string `json:"n"`
-	E   string `json:"e"`
+	// RSA parameters.
+	N string `json:"n"`
+	E string `json:"e"`
+	// EC parameters.
+	Crv string `json:"crv"`
+	X   string `json:"x"`
+	Y   string `json:"y"`
 }
 
-func (s *OIDCService) fetchJWKS(ctx context.Context, jwksURI string) (map[string]*rsa.PublicKey, error) {
+func (s *OIDCService) fetchJWKS(ctx context.Context, jwksURI string) (map[string]crypto.PublicKey, error) {
 	var set jwksDoc
 	if err := s.getJSON(ctx, jwksURI, &set); err != nil {
 		return nil, fmt.Errorf("fetch jwks: %w", err)
 	}
-	keys := map[string]*rsa.PublicKey{}
+	keys := map[string]crypto.PublicKey{}
 	for _, k := range set.Keys {
-		if k.Kty != "" && k.Kty != "RSA" {
-			continue
-		}
 		if k.Use != "" && k.Use != "sig" {
 			continue
 		}
-		pub, err := parseRSAJWK(k)
+		var (
+			pub crypto.PublicKey
+			err error
+		)
+		switch k.Kty {
+		case "RSA", "":
+			pub, err = parseRSAJWK(k)
+		case "EC":
+			pub, err = parseECJWK(k)
+		default:
+			continue
+		}
 		if err != nil {
 			s.logger.Warn("oidc: skipping unparseable JWKS key", slog.String("kid", k.Kid), slog.Any("error", err))
 			continue
@@ -578,7 +603,7 @@ func (s *OIDCService) fetchJWKS(ctx context.Context, jwksURI string) (map[string
 		keys[k.Kid] = pub
 	}
 	if len(keys) == 0 {
-		return nil, fmt.Errorf("jwks contained no usable RSA signing keys: %w", repository.ErrInvalidArgument)
+		return nil, fmt.Errorf("jwks contained no usable RSA or EC signing keys: %w", repository.ErrInvalidArgument)
 	}
 	return keys, nil
 }
@@ -603,6 +628,40 @@ func parseRSAJWK(k jwkKey) (*rsa.PublicKey, error) {
 		N: new(big.Int).SetBytes(nBytes),
 		E: int(e.Int64()),
 	}, nil
+}
+
+// parseECJWK reconstructs an ECDSA public key from an EC JWK (RFC 7518
+// §6.2.1). The crv parameter selects the curve (P-256/384/521) and the
+// x/y parameters are the base64url-encoded affine coordinates.
+func parseECJWK(k jwkKey) (*ecdsa.PublicKey, error) {
+	if k.X == "" || k.Y == "" {
+		return nil, errors.New("ec jwk missing x or y coordinate")
+	}
+	var curve elliptic.Curve
+	switch k.Crv {
+	case "P-256":
+		curve = elliptic.P256()
+	case "P-384":
+		curve = elliptic.P384()
+	case "P-521":
+		curve = elliptic.P521()
+	default:
+		return nil, fmt.Errorf("unsupported ec curve %q", k.Crv)
+	}
+	xBytes, err := base64.RawURLEncoding.DecodeString(k.X)
+	if err != nil {
+		return nil, fmt.Errorf("decode ec x: %w", err)
+	}
+	yBytes, err := base64.RawURLEncoding.DecodeString(k.Y)
+	if err != nil {
+		return nil, fmt.Errorf("decode ec y: %w", err)
+	}
+	x := new(big.Int).SetBytes(xBytes)
+	y := new(big.Int).SetBytes(yBytes)
+	if !curve.IsOnCurve(x, y) {
+		return nil, errors.New("ec jwk point is not on the named curve")
+	}
+	return &ecdsa.PublicKey{Curve: curve, X: x, Y: y}, nil
 }
 
 func (s *OIDCService) exchangeRefreshToken(ctx context.Context, tokenEndpoint, clientID, refreshToken string) (string, error) {

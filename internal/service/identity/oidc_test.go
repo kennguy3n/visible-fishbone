@@ -2,6 +2,8 @@ package identity
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
@@ -516,5 +518,112 @@ func TestDiscoveryCaching(t *testing.T) {
 	}
 	if got := atomic.LoadInt64(&idp.discoveryN); got != 2 {
 		t.Errorf("discovery fetched %d times after TTL expiry, want 2", got)
+	}
+}
+
+// mockECIDP is an httptest-backed OIDC provider that signs ID tokens
+// with an ES256 (EC P-256) key — the family Apple Sign-In and many
+// custom_oidc issuers use.
+type mockECIDP struct {
+	server   *httptest.Server
+	key      *ecdsa.PrivateKey
+	kid      string
+	clientID string
+}
+
+func newMockECIDP(t *testing.T, clientID string) *mockECIDP {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ec key: %v", err)
+	}
+	m := &mockECIDP{key: key, kid: "ec-key-1", clientID: clientID}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"issuer":         m.server.URL,
+			"jwks_uri":       m.server.URL + "/jwks",
+			"token_endpoint": m.server.URL + "/token",
+		})
+	})
+	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		pub := m.key.PublicKey
+		// P-256 coordinates are fixed-width (32 bytes); left-pad so a
+		// leading-zero byte is never dropped.
+		size := (pub.Curve.Params().BitSize + 7) / 8
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"keys": []map[string]string{{
+				"kty": "EC",
+				"use": "sig",
+				"alg": "ES256",
+				"crv": "P-256",
+				"kid": m.kid,
+				"x":   base64.RawURLEncoding.EncodeToString(pub.X.FillBytes(make([]byte, size))),
+				"y":   base64.RawURLEncoding.EncodeToString(pub.Y.FillBytes(make([]byte, size))),
+			}},
+		})
+	})
+
+	m.server = httptest.NewServer(mux)
+	t.Cleanup(m.server.Close)
+	return m
+}
+
+func (m *mockECIDP) sign(t *testing.T, claims jwt.MapClaims) string {
+	t.Helper()
+	if _, ok := claims["iss"]; !ok {
+		claims["iss"] = m.server.URL
+	}
+	if _, ok := claims["aud"]; !ok {
+		claims["aud"] = m.clientID
+	}
+	if _, ok := claims["exp"]; !ok {
+		claims["exp"] = time.Now().Add(time.Hour).Unix()
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	tok.Header["kid"] = m.kid
+	signed, err := tok.SignedString(m.key)
+	if err != nil {
+		t.Fatalf("sign ec id token: %v", err)
+	}
+	return signed
+}
+
+// TestIssueSessionFromIDToken_ECProvider exercises the full validation
+// path against an ES256-signing IdP, covering EC JWKS parsing and the
+// ECDSA branch of the signing-method check.
+func TestIssueSessionFromIDToken_ECProvider(t *testing.T) {
+	f := newOIDCFixture(t, OIDCOptions{AutoProvision: true})
+	idp := newMockECIDP(t, "client-ec")
+	f.seedConfig(t, repository.IDPConfig{
+		ProviderType: repository.IDPProviderCustomOIDC,
+		IssuerURL:    idp.server.URL,
+		ClientID:     "client-ec",
+		Enabled:      true,
+	})
+
+	idToken := idp.sign(t, jwt.MapClaims{
+		"sub":            "apple|abc",
+		"email":          "Eve@acme.com",
+		"email_verified": true,
+	})
+
+	res, err := f.svc.IssueSessionFromIDToken(context.Background(), f.tenantID, TokenExchangeInput{
+		IDToken:         idToken,
+		DevicePublicKey: "ZGV2",
+	})
+	if err != nil {
+		t.Fatalf("issue session (ES256): %v", err)
+	}
+	if res.Identity.Subject != "apple|abc" {
+		t.Errorf("subject = %q", res.Identity.Subject)
+	}
+	if res.Identity.Email != "eve@acme.com" {
+		t.Errorf("email = %q, want lowercased eve@acme.com", res.Identity.Email)
+	}
+	claims := f.parseSession(t, res.AccessToken)
+	if claims["oidc_sub"] != "apple|abc" {
+		t.Errorf("oidc_sub claim = %v", claims["oidc_sub"])
 	}
 }
