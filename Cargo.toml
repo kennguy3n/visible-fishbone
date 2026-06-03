@@ -53,6 +53,7 @@ members = [
     "crates/sng-agent",
     "crates/sng-mobile-core",
     "crates/sng-mobile-pal-ios",
+    "crates/sng-mobile-pal-android",
 ]
 resolver = "3"
 
@@ -215,6 +216,29 @@ wiremock = "0.6"
 # version.
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
 
+# Android Platform Abstraction Layer dependencies. These are
+# Android-only — they are referenced exclusively from
+# `[target.'cfg(target_os = "android")'.dependencies]` in
+# `sng-mobile-pal-android`, so they never enter the host
+# (Linux / macOS / Windows) build graph that CI compiles and
+# cargo-deny audits. Versions are pinned here so the Android PAL
+# and any future Android bridge crate cannot drift.
+#
+#   * `jni`         — safe JNI bindings used to call the Android
+#                     framework (KeyStore, KeyguardManager,
+#                     EncryptedSharedPreferences, VpnService,
+#                     Custom Tabs). Its safe surface keeps every
+#                     PAL backend `unsafe`-free; the lone scoped
+#                     `#[allow(unsafe_code)]` lives in the crate's
+#                     `jni_bridge` module for the unavoidable
+#                     ndk-context raw-pointer conversion.
+#   * `ndk-context` — retrieves the host app's `JavaVM` + Android
+#                     `Context` (the JNI bootstrap seam) without
+#                     the PAL having to thread them through every
+#                     constructor.
+jni = "0.21"
+ndk-context = "0.1"
+
 # Internal crate references — each member crate is reachable via
 # `{ workspace = true }` from every other crate without having to
 # repeat the relative path. New crates added in later phases just
@@ -234,6 +258,7 @@ sng-updater = { path = "crates/sng-updater" }
 sng-oidc = { path = "crates/sng-oidc" }
 sng-mobile-core = { path = "crates/sng-mobile-core" }
 sng-mobile-pal-ios = { path = "crates/sng-mobile-pal-ios" }
+sng-mobile-pal-android = { path = "crates/sng-mobile-pal-android" }
 
 # Workspace-wide lints. Set at the workspace level so a new crate
 # added in a later phase automatically inherits the same posture
