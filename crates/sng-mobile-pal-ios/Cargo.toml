@@ -1,0 +1,49 @@
+[package]
+name = "sng-mobile-pal-ios"
+description = "ShieldNet Gateway (SNG) iOS Platform Abstraction Layer: Apple-platform implementations of the sng-mobile-core mobile traits and the sng-oidc AuthSurface. Real Apple-framework code lives behind cfg(target_os = \"ios\"); a typed-Unsupported host fallback keeps the crate compiling and testable on the Linux CI host."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+sng-mobile-core = { workspace = true }
+sng-oidc = { workspace = true }
+
+async-trait = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }
+base64 = { workspace = true }
+zeroize = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ipnet = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync"] }
+pretty_assertions = { workspace = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+block2 = "0.6.1"
+core-foundation = "0.10.1"
+dispatch2 = "0.3.1"
+libc = "0.2"
+objc2 = "0.6.4"
+objc2-authentication-services = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-local-authentication = "0.3.2"
+objc2-network-extension = "0.3.2"
+objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "UIApplication", "UIResponder"] }
+security-framework = "3.7.0"
