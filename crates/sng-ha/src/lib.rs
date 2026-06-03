@@ -335,7 +335,13 @@ impl HaController {
                 }
 
                 _ = health_timer.tick() => {
-                    self.evaluate_health(&mut vrrp).await?;
+                    if self.evaluate_health(&mut vrrp).await? {
+                        // Priority was restored on a health-recovery edge;
+                        // recompute the Backup master-down deadline from the
+                        // now-correct (shorter) skew instead of leaving the
+                        // stale priority-0 deadline in place.
+                        next_master_down = Self::arm_master_down(&vrrp);
+                    }
                 }
             }
         }
@@ -413,16 +419,24 @@ impl HaController {
 
     /// Poll the health registry and drive voluntary demotion /
     /// recovery off the result.
-    async fn evaluate_health(&self, vrrp: &mut VrrpInstance) -> HaResult<()> {
+    ///
+    /// Returns `true` when a Backup just restored its priority after a
+    /// health recovery, so the caller must re-arm the master-down timer:
+    /// the deadline was computed from the released (priority-0) skew, and
+    /// leaving it would delay promotion by up to one advertisement
+    /// interval. Re-arming recomputes it from the restored priority.
+    async fn evaluate_health(&self, vrrp: &mut VrrpInstance) -> HaResult<bool> {
         let verdict = self.health.evaluate().await;
         if verdict.fit_for_master {
+            let mut rearm_master_down = false;
             if vrrp.effective_priority() == vrrp::PRIORITY_RELEASE {
                 // Health recovered — restore our configured
                 // priority so preempt can win the role back.
                 vrrp.clear_released();
+                rearm_master_down = vrrp.state() == VrrpState::Backup;
                 tracing::info!(target: "sng_ha", "health recovered; priority restored");
             }
-            return Ok(());
+            return Ok(rearm_master_down);
         }
         // A mandatory probe is red.
         if vrrp.effective_priority() != vrrp::PRIORITY_RELEASE {
@@ -441,7 +455,11 @@ impl HaController {
                 self.send_advertisement(vrrp).await;
             }
         }
-        Ok(())
+        // A release lowers priority; the master-down deadline is
+        // re-armed only on the recovery edge, not here (a released
+        // Master keeps the role until the peer takes over, and a
+        // released Backup's deadline is already the longest possible).
+        Ok(false)
     }
 }
 
@@ -728,5 +746,37 @@ mod tests {
             snap.health_releases >= 1,
             "health failure should release priority"
         );
+    }
+
+    #[tokio::test]
+    async fn health_recovery_rearms_master_down_for_released_backup() {
+        // A Backup that had voluntarily released its priority computed
+        // its master-down deadline from the priority-0 (full) skew. When
+        // health recovers, `evaluate_health` must restore the priority
+        // *and* tell the run loop to re-arm the now-stale deadline so
+        // promotion is not delayed by the longer released interval.
+        let (channel, _tx) = TestChannel::new();
+        let recorder = Arc::new(vip::RecordingVipManager::new());
+        let probe = Arc::new(StaticHealthProbe::new("iface", true, true));
+        let registry = Arc::new(HealthRegistry::new().with_probe(probe.clone()));
+        let queue = Arc::new(SyncQueue::new(16));
+        let controller = HaController::new(settings(100), channel, recorder, registry, queue)
+            .expect("controller");
+
+        let mut vrrp =
+            VrrpInstance::new(settings(100).vrrp, settings(100).local_addr).expect("vrrp");
+        vrrp.start();
+        assert_eq!(vrrp.state(), VrrpState::Backup);
+        vrrp.set_released();
+        assert_eq!(vrrp.effective_priority(), vrrp::PRIORITY_RELEASE);
+
+        // Probe is green: recovery edge restores priority and requests a re-arm.
+        let rearm = controller.evaluate_health(&mut vrrp).await.expect("health");
+        assert!(rearm, "recovery on a released Backup must request a re-arm");
+        assert_eq!(vrrp.effective_priority(), 100, "priority restored");
+
+        // Idempotent: nothing changed on a second green evaluation, so no re-arm.
+        let rearm_again = controller.evaluate_health(&mut vrrp).await.expect("health");
+        assert!(!rearm_again, "no re-arm when priority is already restored");
     }
 }
