@@ -1,0 +1,44 @@
+[package]
+name = "sng-mobile-pal-android"
+description = "ShieldNet Gateway (SNG) Android Platform Abstraction Layer: concrete Android implementations of the sng-mobile-core mobile traits and the sng-oidc AuthSurface, behind cfg(target_os = \"android\") with a host fallback so the workspace still builds on Linux CI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+sng-mobile-core = { workspace = true }
+sng-oidc = { workspace = true }
+
+async-trait = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `sync` for the Custom Tabs redirect one-shot channel; `time` for
+# the auth-callback timeout.
+tokio = { workspace = true, features = ["sync", "time"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+base64 = { workspace = true }
+ipnet = { workspace = true }
+
+# Android-only backends. Declared under a per-target table so the
+# JNI / NDK crates never enter the host (Linux / macOS / Windows)
+# build graph that CI compiles and cargo-deny audits. The real
+# Android implementations in each module are gated behind
+# `cfg(target_os = "android")`; the host build links a typed
+# `UnsupportedPlatform` fallback instead.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+ndk-context = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
