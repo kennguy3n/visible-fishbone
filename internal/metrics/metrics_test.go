@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +12,10 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 )
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 func newTestMetrics(t *testing.T) *Metrics {
 	t.Helper()
@@ -94,23 +100,6 @@ func TestStatusClass(t *testing.T) {
 	}
 }
 
-func TestNormalizePath(t *testing.T) {
-	cases := map[string]string{
-		"":                   "",
-		"/":                  "/",
-		"/api/v1/health":     "/api/v1/health",
-		"/api/v1/tenants/42": "/api/v1/tenants/:id",
-		"/api/v1/devices/0":  "/api/v1/devices/:id",
-		"/api/v1/tenants/9f8b2c1d-1234-4567-89ab-0123456789ab/sites": "/api/v1/tenants/:id/sites",
-		"/api/v1/tenants/not-a-uuid":                                 "/api/v1/tenants/not-a-uuid",
-	}
-	for in, want := range cases {
-		if got := normalizePath(in); got != want {
-			t.Errorf("normalizePath(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestPGCollectorRecord(t *testing.T) {
 	m := newTestMetrics(t)
 	c := NewPGCollector(m, nil, 0)
@@ -158,5 +147,43 @@ func TestConsumerLag(t *testing.T) {
 	info := &jetstream.ConsumerInfo{NumPending: 100, NumAckPending: 25}
 	if got := consumerLag(info); got != 125 {
 		t.Errorf("consumerLag = %d, want 125 (100 pending + 25 ack-pending)", got)
+	}
+}
+
+// TestNATSCollectorPrunesStaleSeries verifies the churn-cleanup
+// logic: a consumer that disappears from a scraped stream has its
+// gauge series deleted, while a consumer on a stream that failed to
+// scrape this round is left untouched (no flapping).
+func TestNATSCollectorPrunesStaleSeries(t *testing.T) {
+	m := newTestMetrics(t)
+	c := NewNATSCollector(m, nil, []string{"ORDERS", "EVENTS"}, 0, discardLogger())
+
+	// Seed a prior sweep that recorded three consumers.
+	prior := [][2]string{{"ORDERS", "c1"}, {"ORDERS", "c2"}, {"EVENTS", "c3"}}
+	for _, k := range prior {
+		m.NATSConsumerLag.WithLabelValues(k[0], k[1]).Set(1)
+		c.tracked[k] = struct{}{}
+	}
+	if got := testutil.CollectAndCount(m.NATSConsumerLag); got != 3 {
+		t.Fatalf("precondition: series count = %d, want 3", got)
+	}
+
+	// This round: ORDERS scraped but only c1 seen (c2 gone); EVENTS
+	// failed to scrape (transient), so c3 must be preserved.
+	seen := map[[2]string]struct{}{{"ORDERS", "c1"}: {}}
+	scraped := map[string]struct{}{"ORDERS": {}}
+	c.prune(seen, scraped)
+
+	if got := testutil.CollectAndCount(m.NATSConsumerLag); got != 2 {
+		t.Fatalf("series count = %d, want 2 (c2 pruned, c1+c3 kept)", got)
+	}
+	if _, ok := c.tracked[[2]string{"ORDERS", "c2"}]; ok {
+		t.Error("ORDERS/c2 should be pruned from tracked set")
+	}
+	if _, ok := c.tracked[[2]string{"ORDERS", "c1"}]; !ok {
+		t.Error("ORDERS/c1 should remain tracked")
+	}
+	if _, ok := c.tracked[[2]string{"EVENTS", "c3"}]; !ok {
+		t.Error("EVENTS/c3 should remain tracked (stream not scraped this round)")
 	}
 }

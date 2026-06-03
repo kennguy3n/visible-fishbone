@@ -3,8 +3,9 @@ package metrics
 import (
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
+
+	"github.com/kennguy3n/visible-fishbone/internal/routenorm"
 )
 
 // statusRecorder captures the response status code so the metrics
@@ -33,6 +34,16 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return s.ResponseWriter.Write(b)
 }
 
+// Unwrap exposes the wrapped ResponseWriter so net/http's
+// ResponseController (and any handler that walks Unwrap chains) can
+// reach optional interfaces — http.Flusher, http.Hijacker,
+// io.ReaderFrom — that the underlying writer implements but this
+// recorder does not. Without it, wrapping the writer would mask
+// those capabilities from streaming/SSE handlers.
+func (s *statusRecorder) Unwrap() http.ResponseWriter {
+	return s.ResponseWriter
+}
+
 // Middleware returns an HTTP middleware that records
 // request_duration_seconds, requests_total, and requests_in_flight
 // for every request. It is installed at the top of the chain (see
@@ -44,11 +55,11 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 // a real *Metrics is constructed.
 //
 // Cardinality: the `path` label is the normalised route template
-// (normalizePath), not the raw URL, so high-cardinality segments
-// (tenant UUIDs, device IDs) collapse to a fixed token set. The
-// duration histogram is labelled by status *class* (2xx, 4xx, …)
-// while the counter keeps the exact status code — the histogram is
-// the expensive one, so it gets the coarser label.
+// (routenorm.Normalize), not the raw URL, so high-cardinality
+// segments (tenant UUIDs, device IDs) collapse to a fixed token
+// set. The duration histogram is labelled by status *class* (2xx,
+// 4xx, …) while the counter keeps the exact status code — the
+// histogram is the expensive one, so it gets the coarser label.
 func (m *Metrics) Middleware() func(http.Handler) http.Handler {
 	if m == nil {
 		return func(next http.Handler) http.Handler { return next }
@@ -62,7 +73,7 @@ func (m *Metrics) Middleware() func(http.Handler) http.Handler {
 			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 			next.ServeHTTP(rec, r)
 
-			path := normalizePath(r.URL.Path)
+			path := routenorm.Normalize(r.URL.Path)
 			elapsed := time.Since(start).Seconds()
 
 			m.HTTPRequestsTotal.WithLabelValues(r.Method, path, strconv.Itoa(rec.status)).Inc()
@@ -89,84 +100,4 @@ func statusClass(code int) string {
 	default:
 		return "unknown"
 	}
-}
-
-// normalizePath rewrites a request path into a bounded route
-// template by replacing high-cardinality segments — UUIDs and
-// purely numeric IDs — with a fixed `:id` token. This keeps the
-// `path` label cardinality proportional to the number of routes
-// (a few dozen) rather than the number of tenants/devices (tens of
-// thousands).
-//
-// The function is allocation-light: it returns the input unchanged
-// when no segment needs rewriting (the common case for static
-// routes), only allocating a rebuilt string when a variable
-// segment is present.
-func normalizePath(path string) string {
-	if path == "" || path == "/" {
-		return path
-	}
-	// Fast path: scan for any segment that would be rewritten. If
-	// none, return the original string without allocating.
-	needsRewrite := false
-	for _, seg := range strings.Split(path, "/") {
-		if isVariableSegment(seg) {
-			needsRewrite = true
-			break
-		}
-	}
-	if !needsRewrite {
-		return path
-	}
-
-	segs := strings.Split(path, "/")
-	for i, seg := range segs {
-		if isVariableSegment(seg) {
-			segs[i] = ":id"
-		}
-	}
-	return strings.Join(segs, "/")
-}
-
-// isVariableSegment reports whether a single path segment looks
-// like a high-cardinality identifier: a UUID or an all-digit ID.
-func isVariableSegment(seg string) bool {
-	if seg == "" {
-		return false
-	}
-	if isAllDigits(seg) {
-		return true
-	}
-	return isUUID(seg)
-}
-
-func isAllDigits(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-// isUUID reports whether s is a canonical 8-4-4-4-12 hyphenated
-// UUID. Avoids a regexp / google/uuid parse on the hot path.
-func isUUID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if i == 8 || i == 13 || i == 18 || i == 23 {
-			if c != '-' {
-				return false
-			}
-			continue
-		}
-		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
-		if !isHex {
-			return false
-		}
-	}
-	return true
 }

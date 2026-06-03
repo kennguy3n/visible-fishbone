@@ -34,6 +34,13 @@ type NATSCollector struct {
 	streams  []string
 	interval time.Duration
 	logger   *slog.Logger
+
+	// tracked records the (stream, consumer) label pairs currently
+	// present on the consumer_lag gauge so that series for consumers
+	// that disappear can be deleted, preventing unbounded stale
+	// series. Only ever touched from the single Run goroutine, so no
+	// synchronisation is required.
+	tracked map[[2]string]struct{}
 }
 
 // NewNATSCollector builds a JetStream consumer-lag collector for
@@ -53,6 +60,7 @@ func NewNATSCollector(m *Metrics, js jetstream.JetStream, streams []string, inte
 		streams:  streams,
 		interval: interval,
 		logger:   logger,
+		tracked:  make(map[[2]string]struct{}),
 	}
 }
 
@@ -81,11 +89,26 @@ func (c *NATSCollector) Run(ctx context.Context) {
 // sample walks every configured stream's consumers and updates the
 // consumer_lag gauge. Per-stream errors are logged at debug and do
 // not abort the sweep so one missing stream cannot blind the rest.
+//
+// After the sweep it prunes gauge series for consumers that have
+// disappeared so removed consumers do not leave a stale lag value
+// behind forever. To avoid flapping, a series is only pruned when
+// its stream was actually scraped this round: a transient lookup
+// or iteration error leaves that stream's series untouched, while a
+// stream that no longer exists (ErrStreamNotFound) counts as
+// scraped-with-zero-consumers so its orphaned series are removed.
 func (c *NATSCollector) sample(ctx context.Context) {
+	seen := make(map[[2]string]struct{})
+	scraped := make(map[string]struct{})
+
 	for _, name := range c.streams {
 		stream, err := c.js.Stream(ctx, name)
 		if err != nil {
-			if !errors.Is(err, jetstream.ErrStreamNotFound) {
+			if errors.Is(err, jetstream.ErrStreamNotFound) {
+				// The stream is genuinely gone; treat it as scraped
+				// so any series it used to own are pruned below.
+				scraped[name] = struct{}{}
+			} else {
 				c.logger.Debug("metrics: jetstream stream lookup failed",
 					slog.String("stream", name), slog.Any("error", err))
 			}
@@ -93,6 +116,8 @@ func (c *NATSCollector) sample(ctx context.Context) {
 		}
 		lister := stream.ListConsumers(ctx)
 		for info := range lister.Info() {
+			key := [2]string{info.Stream, info.Name}
+			seen[key] = struct{}{}
 			c.metrics.NATSConsumerLag.
 				WithLabelValues(info.Stream, info.Name).
 				Set(float64(consumerLag(info)))
@@ -100,7 +125,32 @@ func (c *NATSCollector) sample(ctx context.Context) {
 		if err := lister.Err(); err != nil {
 			c.logger.Debug("metrics: jetstream consumer iteration error",
 				slog.String("stream", name), slog.Any("error", err))
+			// Incomplete listing: do not prune this stream's series.
+			continue
 		}
+		scraped[name] = struct{}{}
+	}
+
+	c.prune(seen, scraped)
+}
+
+// prune deletes consumer_lag series whose (stream, consumer) pair
+// was tracked previously but not seen this round, restricted to
+// streams that were successfully scraped so transient errors do not
+// cause series to flap.
+func (c *NATSCollector) prune(seen map[[2]string]struct{}, scraped map[string]struct{}) {
+	for key := range c.tracked {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		if _, ok := scraped[key[0]]; !ok {
+			continue
+		}
+		c.metrics.NATSConsumerLag.DeleteLabelValues(key[0], key[1])
+		delete(c.tracked, key)
+	}
+	for key := range seen {
+		c.tracked[key] = struct{}{}
 	}
 }
 

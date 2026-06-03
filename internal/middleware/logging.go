@@ -9,8 +9,10 @@ import (
 )
 
 // statusRecorder wraps http.ResponseWriter to record the final
-// status code + bytes written. It implements http.Flusher and
-// http.Hijacker by passthrough when the underlying writer does.
+// status code + bytes written. It preserves the optional
+// interfaces of the underlying writer (http.Flusher, http.Hijacker,
+// io.ReaderFrom, …) by exposing Unwrap, which net/http's
+// ResponseController walks to find them.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -20,6 +22,13 @@ type statusRecorder struct {
 func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
+}
+
+// Unwrap returns the wrapped ResponseWriter so http.NewResponseController
+// (and other Unwrap-aware callers) can reach optional interfaces the
+// underlying writer implements but this recorder does not.
+func (s *statusRecorder) Unwrap() http.ResponseWriter {
+	return s.ResponseWriter
 }
 
 func (s *statusRecorder) Write(b []byte) (int, error) {

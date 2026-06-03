@@ -1,10 +1,13 @@
 package middleware
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -110,17 +113,32 @@ func TestTracingExtractsParentContext(t *testing.T) {
 	}
 }
 
-func TestNormalizeRoute(t *testing.T) {
-	cases := map[string]string{
-		"/":                  "/",
-		"/api/v1/health":     "/api/v1/health",
-		"/api/v1/tenants/42": "/api/v1/tenants/:id",
-		"/api/v1/tenants/9f8b2c1d-1234-4567-89ab-0123456789ab": "/api/v1/tenants/:id",
-		"/api/v1/tenants/abc": "/api/v1/tenants/abc",
+// TestTracingRecordsTenantFromRequestMeta verifies the tenant_id
+// span attribute is sourced from the late-bound RequestMeta
+// pointer that inner middleware (Auth) writes through — the only
+// mechanism that works given immutable request contexts.
+func TestTracingRecordsTenantFromRequestMeta(t *testing.T) {
+	sr := withRecorder(t)
+	tenant := uuid.New()
+
+	// Outer: install the RequestMeta pointer the way Logging does.
+	// Inner (under Tracing): simulate Auth resolving the tenant by
+	// writing through that same pointer.
+	h := Logging(slog.New(slog.NewTextHandler(io.Discard, nil)))(
+		Tracing()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if meta := RequestMetaFromContext(r.Context()); meta != nil {
+				meta.SetTenantID(tenant)
+			}
+			w.WriteHeader(http.StatusOK)
+		})),
+	)
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	spans := sr.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("recorded %d spans, want 1", len(spans))
 	}
-	for in, want := range cases {
-		if got := normalizeRoute(in); got != want {
-			t.Errorf("normalizeRoute(%q) = %q, want %q", in, got, want)
-		}
+	if got := attrMap(spans[0])[attribute.Key("tenant_id")].AsString(); got != tenant.String() {
+		t.Errorf("tenant_id attr = %q, want %q", got, tenant.String())
 	}
 }

@@ -16,11 +16,13 @@ package otel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -122,23 +124,47 @@ func newExporter(ctx context.Context, endpoint string) (sdktrace.SpanExporter, e
 }
 
 // newResource assembles the OTel resource describing this service
-// instance. service.version is omitted when unset rather than
-// emitting an empty attribute.
+// instance.
+//
+// It explicitly enables the SDK detectors for host, OS, and
+// process attributes, plus OTEL_RESOURCE_ATTRIBUTES / OTEL_SERVICE_NAME
+// (WithFromEnv) and the telemetry SDK identity (WithTelemetrySDK).
+// resource.New does NOT include these unless the corresponding
+// options are passed, so they are listed here deliberately. The
+// explicit service attributes are applied last so they win over any
+// env- or detector-supplied value of the same key.
+//
+// service.version is omitted when unset rather than emitting an
+// empty attribute.
+//
+// Partial-detection and schema-URL-conflict errors are treated as
+// non-fatal: resource.New still returns a usable resource in those
+// cases (e.g. when the container detector finds no cgroup), so only
+// a genuine failure aborts tracer initialisation.
 func newResource(ctx context.Context, serviceName, serviceVersion, environment string) (*resource.Resource, error) {
 	if serviceName == "" {
 		serviceName = "sng-control"
 	}
-	base := []resource.Option{
-		resource.WithAttributes(
-			semconv.ServiceName(serviceName),
-			semconv.DeploymentEnvironment(environment),
-		),
+	attrs := []attribute.KeyValue{
+		semconv.ServiceName(serviceName),
+		semconv.DeploymentEnvironment(environment),
 	}
 	if serviceVersion != "" {
-		base = append(base, resource.WithAttributes(semconv.ServiceVersion(serviceVersion)))
+		attrs = append(attrs, semconv.ServiceVersion(serviceVersion))
 	}
-	// Merge with SDK-detected defaults (host, OS, process, and any
-	// OTEL_RESOURCE_ATTRIBUTES the operator sets) so the explicit
-	// attributes win on conflict.
-	return resource.New(ctx, base...)
+
+	res, err := resource.New(ctx,
+		resource.WithFromEnv(),
+		resource.WithTelemetrySDK(),
+		resource.WithHost(),
+		resource.WithOS(),
+		resource.WithProcess(),
+		resource.WithAttributes(attrs...),
+	)
+	if err != nil &&
+		!errors.Is(err, resource.ErrPartialResource) &&
+		!errors.Is(err, resource.ErrSchemaURLConflict) {
+		return nil, err
+	}
+	return res, nil
 }
