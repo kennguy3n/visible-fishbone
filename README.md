@@ -49,18 +49,29 @@ plane, policy model, and telemetry fabric.
 | **Baseline alerts + behavior models** — z-score + EWMA anomaly detection, per-tenant tuning, alert routing + suppression | Implemented | Control plane |
 | **Integration service** — Syslog (RFC 5424/5425), SIEM/XDR webhooks (Splunk/Elastic/Sentinel), Jira + ServiceNow bidirectional sync | Implemented | Control plane |
 | **MSP hierarchy + co-management** — MSP entity model, MSP-scoped RBAC, bulk operations, per-MSP branding | Implemented | Control plane |
-| **CASB discovery + SaaS connectors** | Planned | Control plane |
-| **DLP for web + SaaS** | Planned | Control plane + edge appliance |
-| **Browser protection** — isolation, extension policy, credential phishing detection | Planned | Edge appliance + endpoint |
+| **CASB discovery + SaaS connectors** — passive discovery + M365 / Google Workspace / Slack / Salesforce API connectors, SaaS posture assessment | Implemented | Control plane |
+| **DLP for web + SaaS** — regex (PII/PCI/PHI) + MIP-label + content-fingerprint classification, policy template catalog, data-classification taxonomy | Implemented | Control plane |
+| **Browser protection** — unified browser policy engine (download / upload / clipboard / print / screenshot / URL-category) | Implemented | Control plane |
+| **Compliance reporting** — PCI-DSS / HIPAA / SOC2 / ISO-27001 control mapping with JSON evidence packs | Implemented | Control plane |
+| **Remediation playbook engine** — triggered, approval-gated response playbooks with 7 step executors | Implemented | Control plane |
+| **AI policy tightening** — unused / shadowed / overly-permissive rule detection; verifier-checked suggestions with operator review | Implemented | Control plane |
+| **Autonomous troubleshooting** — RAG assistant over a knowledge base plus a diagnostic engine | Implemented | Control plane |
+| **Enhanced AI** — alert correlation, NL policy query, posture reports, threat-intel enrichment, guardrails | Implemented | Control plane |
+| **Operational automation** — policy-review scheduler, certificate monitor, capacity planning, bulk device ops, ops-health snapshots, automation audit report | Implemented | Control plane |
+| **Config-as-code** — Terraform-style tenant config export / import + drift detection | Implemented | Control plane |
 | **Hardware appliance SKUs (TPM-rooted)** | Planned | Branch edge |
 
 The SNG control plane in this repo (`cmd/sng-control`, `internal/`,
 `migrations/`, `api/openapi.yaml`) is the Go service that compiles
 the policy graph, signs bundles, accepts telemetry, and serves the
-REST API. Operator-facing concerns — admin UI, MSP portal,
-tenant + identity service, ClickHouse hot analytics, S3 cold
-archive, AI assistant — are shared across the SN360 family and
-live in [`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform).
+REST API. It also owns the SNG-specific data-protection,
+compliance, remediation-playbook, AI (policy tightening,
+correlation, NL query, posture reports, threat intel, guardrails),
+troubleshooting, and operational-automation services under
+`internal/service/`. Purely operator-facing surfaces — admin UI,
+MSP portal, ClickHouse hot analytics, S3 cold archive, and the
+shared cross-product platform — live in
+[`sn360-security-platform`](https://github.com/kennguy3n/sn360-security-platform).
 
 ## Architecture Overview
 
@@ -122,7 +133,7 @@ performance-sensitive edge component.
 | L7 proxying (SWG) | **Envoy** | Forward proxy with ext-authz handoff to `sng-swg` |
 | IDS/IPS | **Suricata** | Inline on edge VM via `sng-ips`; longer-term opt-in eBPF fast-path |
 | Container platform | Managed **Kubernetes** / **k3s** | Control plane only |
-| Infrastructure as code | **Terraform** | Tenant Terraform provider in the SN360 platform repo |
+| Infrastructure as code | **Terraform** | In-repo tenant config-as-code service (`internal/service/terraform/`): versioned export / import + drift detection |
 | Agent ↔ gateway wire | **TLS 1.3 + MessagePack + HTTP/2** | SN360 native protocol, same as SDA / VMA / SKA |
 | Artifact signing | **Ed25519** | Policy bundles, action jobs, edge images, endpoint installers |
 
@@ -218,24 +229,29 @@ capture, posture, and tunnel primitives.
 
 ## Roadmap
 
-The current code covers the full enforcement plane, unified
-operations layer (Phase 3, ~87% complete), and MSP co-management.
-The remaining capability roadmap:
+The current code covers the full enforcement plane, the unified
+operations layer (Phase 3), data-protection expansion (Phase 4),
+and advanced automation (Phase 5). See [`PROGRESS.md`](./PROGRESS.md)
+for the per-task audit trail. Shipped and remaining roadmap:
 
-- **Data protection expansion (Phase 4).** CASB discovery + top
-  SaaS API connectors (M365, Google Workspace, Slack, Salesforce);
-  DLP for web + SaaS with MIP label awareness on Microsoft tenants;
-  browser protection (isolation, extension policy, phishing
-  detection); pre-baked policy templates per industry.
-- **Advanced automation (Phase 5).** Guided remediation playbooks
-  for the most common incident classes; AI-proposed policy-
-  tightening deltas that compile through the deterministic verifier
-  before they can be applied; AI-proposed connectivity / policy /
-  posture fixes that always require operator (or pre-approved
-  playbook) execution.
-- **Hardware packaging (Phase 6).** Small / medium / large branch
-  profiles on vetted OEM platforms; same `sng-edge` image as the
-  VM, with the TPM as the root of device identity and the same
+- **Data protection expansion (Phase 4) — shipped.** CASB discovery
+  + SaaS API connectors (M365, Google Workspace, Slack, Salesforce)
+  with SaaS posture assessment; DLP for web + SaaS with regex
+  (PII/PCI/PHI), MIP label awareness, and content fingerprinting;
+  unified browser protection policy engine; data-classification
+  taxonomy; Terraform-style config-as-code + drift detection.
+- **Advanced automation (Phase 5) — shipped.** Compliance reporting;
+  guided remediation playbooks (approval-gated, 7 step executors);
+  AI policy-tightening deltas that compile through the deterministic
+  verifier before they can be applied; autonomous troubleshooting
+  assistant; enhanced AI (alert correlation, NL policy query,
+  posture reports, threat-intel enrichment, guardrails); operational
+  automation (policy-review scheduler, certificate monitor, capacity
+  planning, bulk device ops, ops-health snapshots, automation audit
+  report).
+- **Hardware packaging (Phase 6) — planned.** Small / medium / large
+  branch profiles on vetted OEM platforms; same `sng-edge` image as
+  the VM, with the TPM as the root of device identity and the same
   dual-bank install path.
 
 Operator-driven roadmap items should be filed as a GitHub issue
@@ -271,18 +287,26 @@ cloud, identity provider, MSP context).
 
 ```
 internal/service/
+├── ai/             — AI: policy tightening, suggestion review, correlation, NL query, posture reports, threat intel, guardrails, verifier
 ├── alert/          — Alert routing, suppression, false-positive feedback
 ├── apikey/         — API-key lifecycle with KMS-backed envelope encryption
 ├── appdb/          — Application registry, vendor sync, demotion engine
-├── audit/          — Append-only hash-chained audit log
+├── audit/          — Append-only hash-chained audit log + automation audit report
 ├── baseline/       — Statistical baseline engine (Welford + EWMA anomaly)
-├── identity/       — User + device identity, session tokens, enrollment
+├── browser/        — Browser protection policy engine (download/upload/clipboard/print/screenshot/URL-category)
+├── casb/           — CASB discovery, SaaS API connectors (M365/Google/Slack/Salesforce), posture assessment, telemetry
+├── compliance/     — Compliance reports (PCI-DSS/HIPAA/SOC2/ISO-27001) with evidence packs
+├── dlp/            — DLP classification (regex/MIP/fingerprint), template catalog, data-classification taxonomy
+├── identity/       — User + device identity, SCIM 2.0, enrollment, cert monitor, bulk device ops
 ├── integration/    — External connectors (Syslog, SIEM, Jira, ServiceNow)
-├── policy/         — Policy graph, compiler, simulator, dry-run, canary
+├── playbook/       — Remediation playbook engine, step executors, approval workflow, templates
+├── policy/         — Policy graph, compiler, simulator, dry-run, canary, review scheduler
 ├── rbac/           — Hierarchical RBAC (system / tenant / site / MSP)
 ├── site/           — Site CRUD, per-tenant scoping
-├── telemetry/      — Pipeline: consumer, dedup, normalize, CH writer, S3 archiver, replay
+├── telemetry/      — Pipeline: consumer, dedup, normalize, CH writer, S3 archiver, replay, capacity planning
 ├── tenant/         — Tenant lifecycle, MSP bulk ops, branding
+├── terraform/      — Tenant config-as-code export / import + drift detection
+├── troubleshoot/   — RAG troubleshooting assistant, diagnostic engine, knowledge base
 └── webhook/        — Outbound HMAC-signed event delivery
 ```
 

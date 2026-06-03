@@ -172,16 +172,53 @@ S3 (telemetry).
 
 ### 3.5 AI Service
 
-- Provides **policy auto-suggest**, **baseline modeling**, **incident
-  summarization**, and **troubleshooting assistance** as described in
-  [`PROPOSAL.md` §8.1](./PROPOSAL.md#81-ai-use-cases).
-- **All AI-proposed enforcement changes pass through the
-  deterministic verifier** (the same code path as operator-authored
-  changes) before they can be queued for canary rollout. The AI never
-  ships a policy bundle that did not compile through the Policy
-  Graph + Compiler.
-- Refuses to assert facts outside the evidence already in the
-  telemetry store; flags AI-generated artifacts explicitly.
+The AI service lives in `internal/service/ai/` and is wired through
+`internal/handler/ai.go`. It covers policy auto-suggest, baseline
+modeling, incident summarization, and the enhanced capabilities
+added in Phase 5. Its design invariants are unchanged from
+[`PROPOSAL.md` §8.1](./PROPOSAL.md#81-ai-use-cases):
+
+- **Verifier-gated enforcement.** All AI-proposed enforcement
+  changes pass through the deterministic verifier
+  (`internal/service/ai/verifier.go`, the same compile path as
+  operator-authored changes) before they can be queued for canary
+  rollout. The AI never ships a policy bundle that did not compile
+  through the Policy Graph + Compiler.
+- **Evidence-bound.** Refuses to assert facts outside the evidence
+  already in the telemetry store; flags AI-generated artifacts
+  explicitly.
+
+Capabilities:
+
+- **Policy tightening + suggestions** (`policy_suggest.go`,
+  `tightening.go`, `suggestion_templates.go`). Heuristic + LLM
+  analysis surfaces unused, shadowed, and overly-permissive rules
+  and emits typed `PolicyChangeSuggestion`s. Each suggestion is
+  verifier-checked, then flows through an operator approve / reject
+  / modify workflow (`review.go`) with full audit attribution and
+  TOCTOU-safe status transitions. A scheduler (`scheduler.go`) paces
+  per-tenant analysis. Suggestions persist to `ai_suggestions`
+  (`migrations/026_ai_suggestions.*`).
+- **Alert correlation** (`correlation.go`). Clusters related alerts
+  along temporal, entity, and pattern dimensions into incident
+  groups; LLM (or template-fallback) cluster summaries. Only real
+  alert IDs are persisted to `ai_alert_correlations`
+  (`migrations/029_ai_correlations.*`).
+- **Natural-language policy query** (`nl_query.go`). LLM parses the
+  operator's intent; the answer is computed **deterministically**
+  against the tenant's compiled policy graph (no LLM-authored
+  verdicts), and partial results are flagged.
+- **Security posture reports** (`reports.go`). Weekly / monthly
+  posture summaries with trend analysis and an LLM-polished
+  narrative section.
+- **Threat-intelligence enrichment** (`threat_intel.go`). Pluggable
+  threat-feed provider, IOC matching, and enum-bounded severity
+  escalation.
+- **Guardrails** (`guardrails.go`). A `GuardrailedProvider` wraps
+  every LLM call — legacy (summarize / suggest / troubleshoot) and
+  enhanced — with per-tenant rate limiting, PII / secret redaction,
+  and a durable, bounded audit log. Idle per-tenant usage entries
+  are evicted on a TTL sweep so the usage map stays bounded.
 
 ### 3.6 API + Integration Gateway
 
@@ -288,20 +325,132 @@ Multi-tier partner hierarchy for Managed Service Providers.
   assignments, bulk operations, branding config, MSP-role
   authorization middleware.
 
-### 3.11 Planned Phase 4 Additions (Data Protection)
+### 3.11 Data Protection (Phase 4)
 
-The following capabilities are planned for the control plane in
-Phase 4 and are not yet implemented:
+Shipped in Phase 4. The detectors / connectors run in the control
+plane; enforcement verdicts feed the policy graph and telemetry
+fabric.
 
-- **CASB** — passive SaaS discovery from SWG flow logs + active
-  SaaS API connectors (M365, Google Workspace, Slack, Salesforce)
-  for audit-log ingestion and file-level visibility.
-- **DLP** — content inspection engine with regex + keyword
-  detectors, inline (SWG ext-authz) and out-of-band (CASB API)
-  enforcement, per-industry policy templates (PCI-DSS, HIPAA,
-  GDPR).
-- **Browser protection** — isolation proxy for high-risk URLs,
-  extension policy enforcement, credential phishing detection.
+- **CASB** (`internal/service/casb/`). Passive SaaS discovery plus
+  active SaaS API connectors (`connectors/{m365,google,slack,
+  salesforce}.go`) behind a common `Connector` interface (OAuth 2.0
+  lifecycle, pagination, rate-limit backoff). `posture.go` runs an
+  8-check SaaS posture assessment (MFA, SSO, admin count, external
+  sharing, API access, audit logging, password policy, session
+  timeout) into a weighted 0-100 risk score and raises an alert past
+  threshold. `telemetry.go` publishes CASB / DLP / posture events to
+  `sng.<tenant>.telemetry.{casb,dlp,posture}`
+  (`migrations/016_casb.*`).
+- **DLP** (`internal/service/dlp/`). A content-classification engine
+  (`engine/`) composes a regex detector (`regex.go` — `credit_card`
+  with Luhn validation, `ssn_us`, `passport_us`, e-mail; LRU-cached),
+  a Microsoft Information Protection label reader (`mip.go`), and a
+  content-fingerprint engine (`fingerprint.go` — exact / partial
+  document match). A pre-baked template catalog (`templates.go` —
+  PCI-DSS, HIPAA, PII, GDPR, Financial) and a hierarchical
+  data-classification taxonomy (`taxonomy.go`, `public` →
+  `top_secret`) round it out. Served by `internal/handler/dlp.go`
+  (`migrations/017_dlp.*`, `019_data_classification.*`). *Note: the
+  inline SWG ext-authz and out-of-band CASB-scan enforcement paths
+  named in early planning were not built; classification + MIP +
+  fingerprinting shipped instead.*
+- **Browser protection** (`internal/service/browser/`). A single
+  unified `BrowserPolicy` engine governs download / upload /
+  clipboard / print / screenshot / URL-category rules per tenant
+  (`(tenant_id, name)` unique, RLS-isolated), served by
+  `internal/handler/browser.go` (`migrations/018_browser_policies.*`).
+  *This replaced the separately-planned isolation-proxy /
+  extension-policy / phishing modules.*
+- **Config-as-code** (`internal/service/terraform/`). `provider.go`
+  exports / imports a versioned, idempotent tenant configuration
+  document; `drift.go` diffs a declared config against the live
+  export and reports added / modified / removed resources. Served by
+  `internal/handler/terraform.go` at `/config/{export,import,drift}`.
+
+### 3.12 Remediation Playbook Engine
+
+Triggered, approval-gated incident response in
+`internal/service/playbook/`.
+
+- **Engine** (`engine.go`, `types.go`). A playbook pairs a trigger
+  condition with an ordered list of response steps. The engine
+  executes steps with rollback on failure and concurrency control,
+  publishing progress over NATS. Definitions and runs persist to
+  `playbooks` / `playbook_executions` / `playbook_step_results`
+  (`migrations/023_playbooks.*`, `024_playbook_executions.*`).
+- **Step executors** (`executors/`). Seven typed executors behind an
+  `ExecutorRegistry`: `isolate`, `block_ip`, `quarantine`, `notify`,
+  `ticket`, `policy_update`, `revoke_access`. Failed steps emit an
+  empty (non-NULL) JSON output.
+- **Approval workflow** (`approval.go`). Executions that require
+  operator sign-off move through pending → approved / rejected /
+  expired with TTL expiry. Status transitions are guarded
+  (`WHERE status = 'pending'`) against concurrent approve / reject
+  races; `ExpireOld` runs under the system role with an RLS bypass
+  matching the established pattern (`migrations/025_playbook_approvals.*`).
+- **Templates** (`templates.go`). Five built-in incident-response
+  playbooks. Served by `internal/handler/playbook.go`.
+
+### 3.13 Troubleshooting Assistant
+
+Autonomous, RAG-based troubleshooting in
+`internal/service/troubleshoot/`.
+
+- **Knowledge base** (`kb.go`). CRUD, search, and category / tag
+  filtering over global (tenant-`NULL`) and per-tenant entries.
+  RLS is split into command-specific policies so tenants can read
+  global entries but mutate only their own
+  (`migrations/032_kb_entries.*`).
+- **Diagnostic engine** (`diagnostic.go`, `checks/`). Connectivity,
+  policy, `cert_health`, `integration_health`, and performance
+  checks, each walking every page of devices / connectors via cursor
+  pagination. `RunAll` caches a tenant's sweep for a 30 s TTL behind
+  a bounded cache; on-demand `RunCheck` stays live.
+- **Assistant** (`assistant.go`). Retrieves relevant KB entries, runs
+  diagnostics, and answers through the shared guardrailed
+  `LLMProvider`.
+- **Sessions** (`session.go`). Configurable message limits and
+  inactivity timeout; active / resolved / escalated lifecycle
+  (`migrations/033_troubleshoot_sessions.*`). Served by
+  `internal/handler/troubleshoot.go` (11 tenant-scoped endpoints).
+
+### 3.14 Compliance Reporting
+
+`internal/service/compliance/` generates point-in-time compliance
+assessments per tenant and framework.
+
+- **Report service** (`report.go`, `types.go`). Maps enforced
+  policies to PCI-DSS, HIPAA, SOC2, and ISO-27001 controls and
+  produces a compliance score, per-control status, and a JSONB
+  evidence pack with a consistent evidence timestamp. Persisted to
+  `compliance_reports` (`migrations/022_compliance.*`) and served by
+  `internal/handler/compliance.go`.
+
+### 3.15 Operational Automation (Phase 5)
+
+Operational health and lifecycle automation across several packages.
+
+- **Policy review scheduler** (`internal/service/policy/review.go`).
+  Periodic review reminders with stale-policy detection and an
+  upcoming-expiry lookahead (`migrations/030_scheduled_reviews.*`).
+- **Certificate monitor** (`internal/service/identity/cert_monitor.go`).
+  Device certificate health summary, expiring-cert detection, and
+  renewal-status tracking (a still-expiring sole cert does not count
+  as renewed).
+- **Capacity planning** (`internal/service/telemetry/capacity.go`).
+  Linear growth forecast, tier recommendations, and threshold alerts
+  as a tenant approaches its tier limit.
+- **Bulk device operations** (`internal/service/identity/bulk_device.go`).
+  Bulk enroll / revoke (fail-closed certificate revocation) and CSV
+  import / export with per-row failure isolation and audit entries;
+  served by `internal/handler/bulk_device.go` (10 MB CSV cap,
+  `X-Truncated` header on partial exports).
+- **Operational health** (`internal/handler/ops_health.go`). Records
+  validated per-tenant health-score snapshots and serves capped
+  history (`migrations/031_ops_health.*`).
+- **Automation audit report**
+  (`internal/service/audit/automation_report.go`). Compliance-grade
+  JSON export of automated actions.
 
 ---
 
