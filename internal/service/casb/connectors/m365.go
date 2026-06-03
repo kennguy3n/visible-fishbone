@@ -215,17 +215,17 @@ func (m *M365) checkMFAEnforcement(ctx context.Context, token string) casb.Postu
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		m.graphBase+"/identity/conditionalAccess/policies", nil)
 	if err != nil {
-		return casb.PostureCheck{Name:     "mfa_enforcement", Status: casb.CheckStatusWarn, Evidence: "unable to check: " + err.Error()}
+		return casb.PostureCheck{Name: "mfa_enforcement", Status: casb.CheckStatusWarn, Evidence: "unable to check: " + err.Error()}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", m.userAgent)
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return casb.PostureCheck{Name:     "mfa_enforcement", Status: casb.CheckStatusWarn, Evidence: "request failed: " + err.Error()}
+		return casb.PostureCheck{Name: "mfa_enforcement", Status: casb.CheckStatusWarn, Evidence: "request failed: " + err.Error()}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return casb.PostureCheck{Name:     "mfa_enforcement", Status: casb.CheckStatusWarn, Evidence: fmt.Sprintf("API returned %d", resp.StatusCode)}
+		return casb.PostureCheck{Name: "mfa_enforcement", Status: casb.CheckStatusWarn, Evidence: fmt.Sprintf("API returned %d", resp.StatusCode)}
 	}
 	var result struct {
 		Value []struct {
@@ -236,7 +236,7 @@ func (m *M365) checkMFAEnforcement(ctx context.Context, token string) casb.Postu
 		} `json:"value"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return casb.PostureCheck{Name:     "mfa_enforcement", Status: casb.CheckStatusWarn, Evidence: "decode error: " + err.Error()}
+		return casb.PostureCheck{Name: "mfa_enforcement", Status: casb.CheckStatusWarn, Evidence: "decode error: " + err.Error()}
 	}
 	for _, p := range result.Value {
 		if p.State != "enabled" {
@@ -244,44 +244,44 @@ func (m *M365) checkMFAEnforcement(ctx context.Context, token string) casb.Postu
 		}
 		for _, c := range p.GrantControls.BuiltInControls {
 			if c == "mfa" {
-				return casb.PostureCheck{Name:     "mfa_enforcement", Status: casb.CheckStatusPass, Evidence: "MFA enforced via conditional access policy"}
+				return casb.PostureCheck{Name: "mfa_enforcement", Status: casb.CheckStatusPass, Evidence: "MFA enforced via conditional access policy"}
 			}
 		}
 	}
-	return casb.PostureCheck{Name:     "mfa_enforcement", Status: casb.CheckStatusFail, Evidence: "no active conditional access policy enforcing MFA"}
+	return casb.PostureCheck{Name: "mfa_enforcement", Status: casb.CheckStatusFail, Evidence: "no active conditional access policy enforcing MFA"}
 }
 
 func (m *M365) checkLegacyAuthBlocked(ctx context.Context, token string) casb.PostureCheck {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		m.graphBase+"/identity/conditionalAccess/policies", nil)
 	if err != nil {
-		return casb.PostureCheck{Name:     "legacy_auth_blocked", Status: casb.CheckStatusWarn, Evidence: "unable to check"}
+		return casb.PostureCheck{Name: "legacy_auth_blocked", Status: casb.CheckStatusWarn, Evidence: "unable to check"}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", m.userAgent)
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return casb.PostureCheck{Name:     "legacy_auth_blocked", Status: casb.CheckStatusWarn, Evidence: "request failed"}
+		return casb.PostureCheck{Name: "legacy_auth_blocked", Status: casb.CheckStatusWarn, Evidence: "request failed"}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return casb.PostureCheck{Name:     "legacy_auth_blocked", Status: casb.CheckStatusWarn, Evidence: fmt.Sprintf("API returned %d", resp.StatusCode)}
+		return casb.PostureCheck{Name: "legacy_auth_blocked", Status: casb.CheckStatusWarn, Evidence: fmt.Sprintf("API returned %d", resp.StatusCode)}
 	}
 	var result struct {
 		Value []json.RawMessage `json:"value"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return casb.PostureCheck{Name:     "legacy_auth_blocked", Status: casb.CheckStatusWarn, Evidence: "decode error"}
+		return casb.PostureCheck{Name: "legacy_auth_blocked", Status: casb.CheckStatusWarn, Evidence: "decode error"}
 	}
 	for _, raw := range result.Value {
 		s := string(raw)
 		if strings.Contains(s, "exchangeActiveSync") || strings.Contains(s, "other") {
 			if strings.Contains(s, `"block"`) || strings.Contains(s, `"Block"`) {
-				return casb.PostureCheck{Name:     "legacy_auth_blocked", Status: casb.CheckStatusPass, Evidence: "legacy authentication is blocked"}
+				return casb.PostureCheck{Name: "legacy_auth_blocked", Status: casb.CheckStatusPass, Evidence: "legacy authentication is blocked"}
 			}
 		}
 	}
-	return casb.PostureCheck{Name:     "legacy_auth_blocked", Status: casb.CheckStatusFail, Evidence: "legacy authentication may not be blocked"}
+	return casb.PostureCheck{Name: "legacy_auth_blocked", Status: casb.CheckStatusFail, Evidence: "legacy authentication may not be blocked"}
 }
 
 func (m *M365) checkAdminMFA(_ context.Context, _ string) casb.PostureCheck {
@@ -296,28 +296,28 @@ func (m *M365) checkGuestAccessPolicy(ctx context.Context, token string) casb.Po
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		m.graphBase+"/policies/authorizationPolicy", nil)
 	if err != nil {
-		return casb.PostureCheck{Name:     "guest_access_policy", Status: casb.CheckStatusWarn, Evidence: "unable to check"}
+		return casb.PostureCheck{Name: "guest_access_policy", Status: casb.CheckStatusWarn, Evidence: "unable to check"}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", m.userAgent)
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return casb.PostureCheck{Name:     "guest_access_policy", Status: casb.CheckStatusWarn, Evidence: "request failed"}
+		return casb.PostureCheck{Name: "guest_access_policy", Status: casb.CheckStatusWarn, Evidence: "request failed"}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return casb.PostureCheck{Name:     "guest_access_policy", Status: casb.CheckStatusWarn, Evidence: fmt.Sprintf("API returned %d", resp.StatusCode)}
+		return casb.PostureCheck{Name: "guest_access_policy", Status: casb.CheckStatusWarn, Evidence: fmt.Sprintf("API returned %d", resp.StatusCode)}
 	}
 	var result struct {
 		AllowInvitesFrom string `json:"allowInvitesFrom"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return casb.PostureCheck{Name:     "guest_access_policy", Status: casb.CheckStatusWarn, Evidence: "decode error"}
+		return casb.PostureCheck{Name: "guest_access_policy", Status: casb.CheckStatusWarn, Evidence: "decode error"}
 	}
 	if result.AllowInvitesFrom == "none" || result.AllowInvitesFrom == "adminsAndGuestInviters" {
-		return casb.PostureCheck{Name:     "guest_access_policy", Status: casb.CheckStatusPass, Evidence: "guest invitations restricted to " + result.AllowInvitesFrom}
+		return casb.PostureCheck{Name: "guest_access_policy", Status: casb.CheckStatusPass, Evidence: "guest invitations restricted to " + result.AllowInvitesFrom}
 	}
-	return casb.PostureCheck{Name:     "guest_access_policy", Status: casb.CheckStatusFail, Evidence: "guest invitations allowed from: " + result.AllowInvitesFrom}
+	return casb.PostureCheck{Name: "guest_access_policy", Status: casb.CheckStatusFail, Evidence: "guest invitations allowed from: " + result.AllowInvitesFrom}
 }
 
 func (m *M365) getToken(ctx context.Context, config json.RawMessage, secret []byte) (string, error) {
