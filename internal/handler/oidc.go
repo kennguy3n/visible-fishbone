@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"crypto/ed25519"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -331,6 +333,26 @@ func idOrEmpty(id uuid.UUID) string {
 	return id.String()
 }
 
+// validateDeviceKey fails fast on a device_public_key that is not a
+// base64-encoded 32-byte Ed25519 public key. Without this the value
+// would be embedded verbatim as an opaque session claim and only
+// rejected (if at all) by downstream ZTNA enforcement. decodePublicKey
+// is shared with the claim-token enrollment path so the accepted base64
+// variants stay consistent across enrollment surfaces.
+func validateDeviceKey(w http.ResponseWriter, key string) bool {
+	b, err := decodePublicKey(key)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_param", "invalid device_public_key: "+err.Error())
+		return false
+	}
+	if len(b) != ed25519.PublicKeySize {
+		WriteError(w, http.StatusBadRequest, "invalid_param",
+			fmt.Sprintf("device_public_key must be a %d-byte Ed25519 key, got %d bytes", ed25519.PublicKeySize, len(b)))
+		return false
+	}
+	return true
+}
+
 func (h *OIDCHandler) mobileToken(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := PathUUID(w, r, "tenant_id")
 	if !ok {
@@ -342,6 +364,9 @@ func (h *OIDCHandler) mobileToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.IDToken == "" || req.DevicePublicKey == "" {
 		WriteError(w, http.StatusBadRequest, "missing_field", "id_token and device_public_key are required")
+		return
+	}
+	if !validateDeviceKey(w, req.DevicePublicKey) {
 		return
 	}
 	res, err := h.oidc.IssueSessionFromIDToken(r.Context(), tenantID, identity.TokenExchangeInput{
@@ -367,6 +392,9 @@ func (h *OIDCHandler) mobileRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.RefreshToken == "" || req.Issuer == "" || req.DevicePublicKey == "" {
 		WriteError(w, http.StatusBadRequest, "missing_field", "refresh_token, issuer and device_public_key are required")
+		return
+	}
+	if !validateDeviceKey(w, req.DevicePublicKey) {
 		return
 	}
 	res, err := h.oidc.RefreshSession(r.Context(), tenantID, identity.RefreshInput{

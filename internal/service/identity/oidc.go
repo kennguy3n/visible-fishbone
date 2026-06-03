@@ -447,6 +447,12 @@ func (s *OIDCService) mintSession(ident ValidatedIdentity, devicePublicKey strin
 		"oidc_iss":   ident.Issuer,
 		"device_key": devicePublicKey,
 		"amr":        []string{"oidc", "mtls"},
+		// token_type marks this as a device-bound mobile session so a
+		// future authorization layer can scope it more narrowly than an
+		// operator-console token, even though both are accepted by the
+		// shared middleware.Auth chain today (the Auth middleware ignores
+		// unknown claims, so emitting it now is forward-compatible).
+		"token_type": "mobile",
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := tok.SignedString(s.signer.Secret)

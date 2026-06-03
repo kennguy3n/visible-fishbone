@@ -2,6 +2,7 @@ package handler_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
@@ -256,8 +257,20 @@ func TestOIDCHandler_MaxProvidersCap(t *testing.T) {
 	}
 }
 
+// testDeviceKey returns a base64 std-encoded, well-formed 32-byte
+// Ed25519 public key — the shape the mobile endpoints now require.
+func testDeviceKey(t *testing.T) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("gen ed25519 key: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(pub)
+}
+
 func TestOIDCHandler_MobileToken(t *testing.T) {
 	h, configs, tenantID := newTestOIDCHandler(t, 10)
+	deviceKey := testDeviceKey(t)
 	idp := newHandlerMockIDP(t, "client-1")
 	if _, err := configs.Create(context.Background(), tenantID, repository.IDPConfig{
 		ProviderType: repository.IDPProviderOkta,
@@ -275,7 +288,7 @@ func TestOIDCHandler_MobileToken(t *testing.T) {
 	idToken := idp.sign(t, jwt.MapClaims{"sub": "okta|7", "email": "user@acme.com", "email_verified": true})
 	w := oidcDo(t, mux, "POST", path, map[string]any{
 		"id_token":          idToken,
-		"device_public_key": "ZGV2aWNlLWtleQ==",
+		"device_public_key": deviceKey,
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("mobile token: got %d: %s", w.Code, w.Body.String())
@@ -293,7 +306,7 @@ func TestOIDCHandler_MobileToken(t *testing.T) {
 	if resp.Identity.Subject != "okta|7" {
 		t.Errorf("identity.subject = %q", resp.Identity.Subject)
 	}
-	if resp.Binding.DevicePublicKey != "ZGV2aWNlLWtleQ==" {
+	if resp.Binding.DevicePublicKey != deviceKey {
 		t.Errorf("binding.device_public_key = %q", resp.Binding.DevicePublicKey)
 	}
 	if resp.Binding.UserSubject != "okta|7" {
@@ -313,12 +326,22 @@ func TestOIDCHandler_MobileToken_BadRequest(t *testing.T) {
 		t.Fatalf("got %d, want 400", w.Code)
 	}
 
+	// Malformed device_public_key (valid base64 but not a 32-byte
+	// Ed25519 key) → 400, before any issuer resolution.
+	w = oidcDo(t, mux, "POST", path, map[string]any{
+		"id_token":          "x",
+		"device_public_key": "ZGV2",
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("malformed key: got %d, want 400", w.Code)
+	}
+
 	// No matching idp config → 404 (resolveConfig ErrNotFound).
 	idp := newHandlerMockIDP(t, "client-1")
 	idToken := idp.sign(t, jwt.MapClaims{"sub": "s", "email": "u@acme.com"})
 	w = oidcDo(t, mux, "POST", path, map[string]any{
 		"id_token":          idToken,
-		"device_public_key": "ZGV2",
+		"device_public_key": testDeviceKey(t),
 	})
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("got %d, want 404", w.Code)
