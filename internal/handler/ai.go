@@ -300,6 +300,12 @@ func (h *AIHandler) analyzeCorrelations(w http.ResponseWriter, r *http.Request) 
 	// onto the response cluster — otherwise a later
 	// GET /ai/correlations/{id} using the engine-assigned ID would
 	// 404 against a row stored under a different ID.
+	//
+	// The response contract is: a cluster's id is set iff that cluster
+	// was persisted and is retrievable via GET. If persistence fails we
+	// zero the engine-assigned id so the caller receives a clear signal
+	// (nil UUID) that this cluster is ephemeral, rather than a plausible
+	// id that would 404.
 	if h.correlationRepo != nil {
 		for i := range result.Clusters {
 			cluster := result.Clusters[i]
@@ -313,6 +319,7 @@ func (h *AIHandler) analyzeCorrelations(w http.ResponseWriter, r *http.Request) 
 				h.logger.Warn("ai: failed to persist correlation cluster",
 					slog.String("tenant_id", tenantID.String()),
 					slog.String("error", err.Error()))
+				result.Clusters[i].ID = uuid.Nil
 				continue
 			}
 			result.Clusters[i].ID = persisted.ID

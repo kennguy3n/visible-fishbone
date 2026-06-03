@@ -2478,6 +2478,11 @@ paths:
       tags: [ai]
       operationId: aiGeneratePostureReport
       summary: Generate a new security posture report
+      description: >-
+        Generates a posture report from caller-supplied alert counts. Because
+        the request carries no previous-period baseline, the report's `trend`
+        is always `stable`. Use GET ./reports/posture for a period-over-period
+        trend computed from stored alert data.
       requestBody:
         required: true
         content:

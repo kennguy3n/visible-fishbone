@@ -41,6 +41,9 @@ func (r *AICorrelationRepository) Create(ctx context.Context, tenantID uuid.UUID
 	if err := repository.ValidateAICorrelationStatus(status); err != nil {
 		return repository.AICorrelation{}, err
 	}
+	if err := repository.ValidateAICorrelationSeverity(c.Severity); err != nil {
+		return repository.AICorrelation{}, err
+	}
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx,
 			`INSERT INTO ai_alert_correlations (tenant_id, alert_ids, summary, severity, status)

@@ -6,7 +6,8 @@ CREATE TABLE ai_alert_correlations (
     tenant_id  UUID        NOT NULL REFERENCES tenants(id),
     alert_ids  UUID[]      NOT NULL,
     summary    TEXT        NOT NULL DEFAULT '',
-    severity   TEXT        NOT NULL,
+    severity   TEXT        NOT NULL
+                           CHECK (severity IN ('low', 'medium', 'high', 'critical')),
     status     TEXT        NOT NULL DEFAULT 'open'
                            CHECK (status IN ('open', 'acknowledged', 'resolved')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

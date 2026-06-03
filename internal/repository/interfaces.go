@@ -1030,6 +1030,30 @@ func ValidateAICorrelationStatus(status string) error {
 	return nil
 }
 
+// AICorrelationSeverities enumerates the allowed severity levels for an
+// AI correlation. It mirrors the OpenAPI `AICorrelation.severity` enum
+// and the CHECK constraint on `ai_alert_correlations.severity`.
+var AICorrelationSeverities = map[string]bool{
+	"low":      true,
+	"medium":   true,
+	"high":     true,
+	"critical": true,
+}
+
+// ValidateAICorrelationSeverity returns ErrInvalidArgument when severity
+// is not an allowed level. Both repository backends call this on Create
+// so the contract is enforced uniformly — the postgres CHECK constraint
+// is the durable backstop, but the memory backend (and pre-INSERT
+// validation) reject bad values up front too. Today the correlation
+// engine only emits valid severities, but this guards any future code
+// path that persists a user-supplied severity.
+func ValidateAICorrelationSeverity(severity string) error {
+	if !AICorrelationSeverities[severity] {
+		return fmt.Errorf("%w: invalid correlation severity %q", ErrInvalidArgument, severity)
+	}
+	return nil
+}
+
 // --- Compliance -----------------------------------------------------------
 
 // ComplianceReportRepository owns the compliance_reports table.

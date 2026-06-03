@@ -53,6 +53,9 @@ func (r *AICorrelationRepository) Create(ctx context.Context, tenantID uuid.UUID
 	if err := repository.ValidateAICorrelationStatus(c.Status); err != nil {
 		return repository.AICorrelation{}, err
 	}
+	if err := repository.ValidateAICorrelationSeverity(c.Severity); err != nil {
+		return repository.AICorrelation{}, err
+	}
 	r.s.aiCorrelations[c.ID] = c
 	return cloneAICorrelation(c), nil
 }
