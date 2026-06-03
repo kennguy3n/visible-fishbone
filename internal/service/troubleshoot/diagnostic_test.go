@@ -67,6 +67,32 @@ func TestDiagnosticEngine_RunAll_CachesWithinTTL(t *testing.T) {
 	}
 }
 
+func TestDiagnosticEngine_RunAll_CacheStaysBounded(t *testing.T) {
+	var runs int64
+	engine := troubleshoot.NewDiagnosticEngine([]checks.DiagnosticCheck{
+		countingCheck{name: "counter", runs: &runs},
+	})
+
+	// Fixed clock so no entry is ever TTL-expired — this forces the
+	// drop-oldest eviction path rather than the purge-expired path.
+	current := time.Unix(0, 0).UTC()
+	engine.SetClock(func() time.Time { return current })
+	engine.SetCacheTTL(30 * time.Second)
+
+	const maxEntries = 10
+	engine.SetMaxCacheEntries(maxEntries)
+
+	for i := 0; i < maxEntries*5; i++ {
+		engine.RunAll(context.Background(), uuid.New())
+		if got := engine.CacheLen(); got > maxEntries {
+			t.Fatalf("cache exceeded cap: got %d, want <= %d", got, maxEntries)
+		}
+	}
+	if got := engine.CacheLen(); got != maxEntries {
+		t.Fatalf("expected cache pinned at cap %d, got %d", maxEntries, got)
+	}
+}
+
 func TestDiagnosticEngine_RunAll_CacheDisabled(t *testing.T) {
 	var runs int64
 	engine := troubleshoot.NewDiagnosticEngine([]checks.DiagnosticCheck{

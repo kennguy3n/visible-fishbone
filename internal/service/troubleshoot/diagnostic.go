@@ -19,12 +19,18 @@ import (
 // is never cached, so on-demand refresh is always live.
 const DefaultDiagnosticCacheTTL = 30 * time.Second
 
+// maxDiagnosticCacheEntries caps the per-tenant RunAll cache so it cannot
+// grow without bound as distinct tenants come and go. Once exceeded, the
+// next insert evicts expired then oldest entries (see evictLocked).
+const maxDiagnosticCacheEntries = 4096
+
 // DiagnosticEngine runs diagnostic checks against tenant state.
 type DiagnosticEngine struct {
 	registry map[string]checks.DiagnosticCheck
 
-	cacheTTL time.Duration
-	clock    func() time.Time
+	cacheTTL        time.Duration
+	maxCacheEntries int
+	clock           func() time.Time
 
 	mu    sync.Mutex
 	cache map[uuid.UUID]diagCacheEntry
@@ -43,10 +49,11 @@ func NewDiagnosticEngine(diagnosticChecks []checks.DiagnosticCheck) *DiagnosticE
 		reg[c.Name()] = c
 	}
 	return &DiagnosticEngine{
-		registry: reg,
-		cacheTTL: DefaultDiagnosticCacheTTL,
-		clock:    nowFunc,
-		cache:    make(map[uuid.UUID]diagCacheEntry),
+		registry:        reg,
+		cacheTTL:        DefaultDiagnosticCacheTTL,
+		maxCacheEntries: maxDiagnosticCacheEntries,
+		clock:           nowFunc,
+		cache:           make(map[uuid.UUID]diagCacheEntry),
 	}
 }
 
@@ -56,6 +63,23 @@ func (e *DiagnosticEngine) SetCacheTTL(ttl time.Duration) { e.cacheTTL = ttl }
 
 // SetClock overrides the time source used for cache expiry (for tests).
 func (e *DiagnosticEngine) SetClock(fn func() time.Time) { e.clock = fn }
+
+// SetMaxCacheEntries overrides the cache size cap. A value <= 0 restores
+// the default. Exposed for tests.
+func (e *DiagnosticEngine) SetMaxCacheEntries(n int) {
+	if n <= 0 {
+		n = maxDiagnosticCacheEntries
+	}
+	e.maxCacheEntries = n
+}
+
+// CacheLen returns the number of cached tenant entries. Exposed for tests
+// asserting the cache stays bounded.
+func (e *DiagnosticEngine) CacheLen() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.cache)
+}
 
 // RunAll executes every registered diagnostic check and returns
 // all results sorted by check name for deterministic ordering. Results
@@ -85,10 +109,41 @@ func (e *DiagnosticEngine) RunAll(ctx context.Context, tenantID uuid.UUID) []Dia
 
 	if e.cacheTTL > 0 {
 		e.mu.Lock()
+		if _, exists := e.cache[tenantID]; !exists && len(e.cache) >= e.maxCacheEntries {
+			e.evictLocked(now)
+		}
 		e.cache[tenantID] = diagCacheEntry{results: cloneResults(results), at: now}
 		e.mu.Unlock()
 	}
 	return results
+}
+
+// evictLocked frees room in the cache when it has hit the cap. It first
+// drops every entry older than cacheTTL (those are already stale and
+// would be re-run on access anyway); if that frees nothing, it drops the
+// single oldest entry so the map never exceeds the cap. Caller must hold e.mu.
+func (e *DiagnosticEngine) evictLocked(now time.Time) {
+	purged := false
+	for id, ent := range e.cache {
+		if now.Sub(ent.at) >= e.cacheTTL {
+			delete(e.cache, id)
+			purged = true
+		}
+	}
+	if purged {
+		return
+	}
+	var oldestID uuid.UUID
+	var oldestAt time.Time
+	first := true
+	for id, ent := range e.cache {
+		if first || ent.at.Before(oldestAt) {
+			oldestID, oldestAt, first = id, ent.at, false
+		}
+	}
+	if !first {
+		delete(e.cache, oldestID)
+	}
 }
 
 // cloneResults returns a shallow copy of the slice so a cached entry is
