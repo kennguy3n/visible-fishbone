@@ -396,6 +396,60 @@ func TestGroupClaimMapping(t *testing.T) {
 	}
 }
 
+func TestExtractGroups_PathForms(t *testing.T) {
+	cases := []struct {
+		name   string
+		path   string
+		claims jwt.MapClaims
+		want   string
+	}{
+		{
+			name:   "top-level array",
+			path:   "groups",
+			claims: jwt.MapClaims{"groups": []any{"a", "b"}},
+			want:   "a,b",
+		},
+		{
+			name:   "namespaced key containing dots is a literal key",
+			path:   "https://acme.com/roles",
+			claims: jwt.MapClaims{"https://acme.com/roles": []any{"admin"}},
+			want:   "admin",
+		},
+		{
+			name:   "nested dotted path",
+			path:   "resource_access.roles",
+			claims: jwt.MapClaims{"resource_access": map[string]any{"roles": []any{"x", "y"}}},
+			want:   "x,y",
+		},
+		{
+			name:   "single string value",
+			path:   "role",
+			claims: jwt.MapClaims{"role": "operator"},
+			want:   "operator",
+		},
+		{
+			name:   "absent claim",
+			path:   "groups",
+			claims: jwt.MapClaims{},
+			want:   "",
+		},
+		{
+			name:   "empty path",
+			path:   "",
+			claims: jwt.MapClaims{"groups": []any{"a"}},
+			want:   "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := strings.Join(extractGroups(tc.claims, tc.path), ",")
+			if got != tc.want {
+				t.Errorf("extractGroups(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRefreshSession(t *testing.T) {
 	f := newOIDCFixture(t, OIDCOptions{AutoProvision: true})
 	idp := newMockIDP(t, "client-123")

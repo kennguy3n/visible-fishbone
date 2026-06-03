@@ -704,23 +704,20 @@ func enforceAllowedDomains(cfg repository.IDPConfig, claims jwt.MapClaims, email
 	return fmt.Errorf("identity domain not in allow-list: %w", repository.ErrForbidden)
 }
 
-// extractGroups resolves a dotted-path claim (e.g. "groups" or
-// "https://acme.com/roles") into a string slice. Returns nil when the
-// path is empty or the claim is absent / not a string array.
+// extractGroups resolves the configured group-claim into a string
+// slice. The path is first tried as a single literal top-level claim
+// key — so namespaced claims that themselves contain dots (e.g.
+// "https://acme.com/roles", common with Auth0/Okta) resolve correctly
+// — and only falls back to dotted-path traversal (e.g.
+// "resource_access.roles") when no literal key matches. Returns nil
+// when the path is empty or the claim is absent / not string-valued.
 func extractGroups(claims jwt.MapClaims, path string) []string {
 	if path == "" {
 		return nil
 	}
-	var cur any = map[string]any(claims)
-	for _, seg := range strings.Split(path, ".") {
-		m, ok := cur.(map[string]any)
-		if !ok {
-			return nil
-		}
-		cur, ok = m[seg]
-		if !ok {
-			return nil
-		}
+	cur, ok := resolveClaim(claims, path)
+	if !ok {
+		return nil
 	}
 	switch v := cur.(type) {
 	case []any:
@@ -738,4 +735,28 @@ func extractGroups(claims jwt.MapClaims, path string) []string {
 	default:
 		return nil
 	}
+}
+
+// resolveClaim looks up a claim by path. It first treats the whole
+// path as a single literal key (handling namespaced claim names that
+// contain dots), then falls back to "."-separated nested traversal.
+func resolveClaim(claims jwt.MapClaims, path string) (any, bool) {
+	if v, ok := claims[path]; ok {
+		return v, true
+	}
+	if !strings.Contains(path, ".") {
+		return nil, false
+	}
+	var cur any = map[string]any(claims)
+	for _, seg := range strings.Split(path, ".") {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cur, ok = m[seg]
+		if !ok {
+			return nil, false
+		}
+	}
+	return cur, true
 }
