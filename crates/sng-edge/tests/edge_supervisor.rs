@@ -115,7 +115,7 @@ fn fresh_cli() -> Cli {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn build_edge_assembles_ten_subsystems_with_in_memory_backends() {
+async fn build_edge_assembles_eleven_subsystems_with_in_memory_backends() {
     let cli = fresh_cli();
     let (cfg, _dir) = fresh_config();
     let built = build_edge(&cli, &cfg).expect("build_edge");
@@ -132,6 +132,7 @@ async fn build_edge_assembles_ten_subsystems_with_in_memory_backends() {
     assert_eq!(built.swg.name_for_debug(), "swg");
     assert_eq!(built.ztna.name_for_debug(), "ztna");
     assert_eq!(built.sdwan.name_for_debug(), "sdwan");
+    assert_eq!(built.ha.name_for_debug(), "ha");
     assert_eq!(built.updater.name_for_debug(), "updater");
 }
 
