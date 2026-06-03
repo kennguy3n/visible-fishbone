@@ -1072,3 +1072,14 @@ type OpsHealthSnapshotRepository interface {
 	// first, capped at MaxOpsHealthHistory rows.
 	ListHistory(ctx context.Context, tenantID uuid.UUID, since time.Time) ([]OpsHealthSnapshot, error)
 }
+
+// --- AI Suggestions -------------------------------------------------------
+
+// AISuggestionRepository owns the ai_policy_suggestions table.
+// All operations are tenant-isolated.
+type AISuggestionRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, s AISuggestion) (AISuggestion, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (AISuggestion, error)
+	List(ctx context.Context, tenantID uuid.UUID, status *string, page Page) (PageResult[AISuggestion], error)
+	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, expectedStatus, newStatus string, reviewerID *uuid.UUID, feedback *string) error
+}

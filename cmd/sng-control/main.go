@@ -335,6 +335,7 @@ func buildRouter(
 	casbAppRepo := store.NewCASBDiscoveredAppRepository()
 	casbPostureRepo := store.NewCASBPostureCheckRepository()
 	opsHealthRepo := store.NewOpsHealthSnapshotRepository()
+	aiSuggestionRepo := store.NewAISuggestionRepository()
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -572,7 +573,7 @@ func buildRouter(
 		logger, tenant.BulkOptions{})
 	brandingResolver := tenant.NewBrandingResolver(tenantRepo, mspRepo)
 
-	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, logger)
+	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo, logger)
 
 	// --- Operational automation wiring (Session 5) --------------------
 	// Bulk device operations reuse the existing device / claim-token /
@@ -652,7 +653,7 @@ func buildRouter(
 // buildAIHandler constructs the AI handler with an optional LLM
 // provider. When AI_LLM_ENDPOINT is not set, the service runs in
 // template-only mode and suggest-policy / troubleshoot return 503.
-func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, alertRepo repository.AlertRepository, auditSvc *audit.Service, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
+func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, alertRepo repository.AlertRepository, auditSvc *audit.Service, aiSuggestionRepo repository.AISuggestionRepository, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
 	var llm aisvc.LLMProvider
 	if cfg.AI.Endpoint != "" {
 		llm = &aisvc.HTTPProvider{
@@ -729,6 +730,17 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	if alertRepo != nil {
 		h.SetPostureDataSource(alertPostureDataSource{alerts: alertRepo})
 	}
+
+	// Wire the policy-tightening suggestion features (Tasks 55-60).
+	// The review service is backed by the ai_suggestions repository;
+	// the tightening service is deterministic and only uses the LLM
+	// (when configured) to polish rationales. Both are attached here
+	// so the suggestion endpoints actually serve instead of returning
+	// the unconfigured 503.
+	if aiSuggestionRepo != nil {
+		h.SetReviewService(aisvc.NewReviewService(aiSuggestionRepo, logger))
+	}
+	h.SetTighteningService(aisvc.NewTighteningService(llm, logger))
 
 	return h, svc
 }

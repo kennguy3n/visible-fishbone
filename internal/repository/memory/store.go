@@ -100,6 +100,9 @@ type Store struct {
 	dlpFingerprints map[uuid.UUID]repository.DLPFingerprint
 	dlpMatches      map[uuid.UUID]repository.DLPMatch
 
+	// AI suggestion tables — see migration 026.
+	aiSuggestions map[uuid.UUID]repository.AISuggestion
+
 	// Role / user_role tables. Roles are NOT tenant-scoped on
 	// their own (system roles have TenantID nil).
 	roles     map[uuid.UUID]repository.Role
@@ -178,6 +181,7 @@ func NewStore() *Store {
 		dlpPolicies:           map[uuid.UUID]repository.DLPPolicy{},
 		dlpFingerprints:       map[uuid.UUID]repository.DLPFingerprint{},
 		dlpMatches:            map[uuid.UUID]repository.DLPMatch{},
+		aiSuggestions:         map[uuid.UUID]repository.AISuggestion{},
 		roles:                 map[uuid.UUID]repository.Role{},
 		userRoles:             map[userRoleKey]repository.UserRole{},
 		aiCorrelations:        map[uuid.UUID]repository.AICorrelation{},

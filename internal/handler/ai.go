@@ -2,7 +2,10 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -29,6 +32,10 @@ type AIHandler struct {
 	guardrails      *ai.GuardrailedProvider
 	correlationRepo repository.AICorrelationRepository
 	postureData     PostureDataSource
+
+	// AI policy-tightening suggestions (Tasks 55-60).
+	reviewSvc     *ai.ReviewService
+	tighteningSvc *ai.TighteningService
 }
 
 // PostureDataSource supplies real per-tenant alert counts for a
@@ -77,6 +84,12 @@ func (h *AIHandler) SetPostureDataSource(src PostureDataSource) {
 	h.postureData = src
 }
 
+// SetReviewService attaches the suggestion review service.
+func (h *AIHandler) SetReviewService(svc *ai.ReviewService) { h.reviewSvc = svc }
+
+// SetTighteningService attaches the policy tightening analysis service.
+func (h *AIHandler) SetTighteningService(svc *ai.TighteningService) { h.tighteningSvc = svc }
+
 // Register wires AI endpoints onto mux.
 func (h *AIHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/summarize", h.summarize)
@@ -92,6 +105,14 @@ func (h *AIHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/reports/posture/generate", h.generatePostureReport)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/enrich", h.enrichAlert)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/ai/guardrails/status", h.guardrailsStatus)
+
+	// AI suggestion review workflow (Tasks 55-60).
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/ai/suggestions", h.listSuggestions)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/ai/suggestions/{id}", h.getSuggestion)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/suggestions/{id}/approve", h.approveSuggestion)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/suggestions/{id}/reject", h.rejectSuggestion)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/ai/tightening/analyze", h.analyzeTightening)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/ai/tightening/report", h.getTighteningReport)
 }
 
 func (h *AIHandler) summarize(w http.ResponseWriter, r *http.Request) {
@@ -485,6 +506,274 @@ func (h *AIHandler) guardrailsStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	status := h.guardrails.Status(tenantID)
 	WriteJSON(w, http.StatusOK, status)
+}
+
+// --- AI suggestion review handlers ----------------------------------------
+
+// aiSuggestionResponse is the wire representation of an AI policy
+// suggestion. The repository struct repository.AISuggestion has no
+// JSON tags, so serialising it directly would emit PascalCase field
+// names; this type pins the snake_case contract declared by the
+// AISuggestion OpenAPI schema. Optional fields use pointers with
+// omitempty so they are absent (not null/empty) when unset.
+type aiSuggestionResponse struct {
+	ID             uuid.UUID       `json:"id"`
+	TenantID       uuid.UUID       `json:"tenant_id"`
+	RuleID         string          `json:"rule_id"`
+	Category       string          `json:"category"`
+	SuggestionJSON json.RawMessage `json:"suggestion_json"`
+	Confidence     float64         `json:"confidence"`
+	Status         string          `json:"status"`
+	CreatedAt      time.Time       `json:"created_at"`
+	ReviewedAt     *time.Time      `json:"reviewed_at,omitempty"`
+	ReviewerID     *uuid.UUID      `json:"reviewer_id,omitempty"`
+	Feedback       *string         `json:"feedback,omitempty"`
+}
+
+func toAISuggestionResponse(s repository.AISuggestion) aiSuggestionResponse {
+	return aiSuggestionResponse{
+		ID:             s.ID,
+		TenantID:       s.TenantID,
+		RuleID:         s.RuleID,
+		Category:       s.Category,
+		SuggestionJSON: s.SuggestionJSON,
+		Confidence:     s.Confidence,
+		Status:         string(s.Status),
+		CreatedAt:      s.CreatedAt,
+		ReviewedAt:     s.ReviewedAt,
+		ReviewerID:     s.ReviewerID,
+		Feedback:       s.Feedback,
+	}
+}
+
+func (h *AIHandler) listSuggestions(w http.ResponseWriter, r *http.Request) {
+	if h.reviewSvc == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI suggestion service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	var statusFilter *string
+	if s := r.URL.Query().Get("status"); s != "" {
+		if !ai.SuggestionStatus(s).Valid() {
+			WriteError(w, http.StatusBadRequest, "invalid_status",
+				"status must be one of: pending, approved, rejected, applied, rolled_back")
+			return
+		}
+		statusFilter = &s
+	}
+	page := repository.Page{
+		After: r.URL.Query().Get("after"),
+		Limit: QueryLimit(r),
+	}
+	result, err := h.reviewSvc.ListSuggestions(r.Context(), tenantID, statusFilter, page)
+	if err != nil {
+		// A malformed/tampered cursor surfaces as ErrInvalidArgument
+		// from the repository; that is a client error (400), not a
+		// server fault, matching how getSuggestion maps repository
+		// errors via WriteRepositoryError.
+		if errors.Is(err, repository.ErrInvalidArgument) {
+			WriteError(w, http.StatusBadRequest, "invalid_argument", "invalid cursor")
+			return
+		}
+		h.logger.Error("ai: list suggestions failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("error", err.Error()))
+		WriteError(w, http.StatusInternalServerError, "ai_error", "failed to list suggestions")
+		return
+	}
+	items := make([]aiSuggestionResponse, 0, len(result.Items))
+	for _, s := range result.Items {
+		items = append(items, toAISuggestionResponse(s))
+	}
+	// next_cursor is a required field in the AISuggestionPage schema,
+	// so it is always emitted (no omitempty) even when empty.
+	WriteJSON(w, http.StatusOK, struct {
+		Items      []aiSuggestionResponse `json:"items"`
+		NextCursor string                 `json:"next_cursor"`
+	}{Items: items, NextCursor: result.NextCursor})
+}
+
+func (h *AIHandler) getSuggestion(w http.ResponseWriter, r *http.Request) {
+	if h.reviewSvc == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI suggestion service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	id, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	suggestion, err := h.reviewSvc.GetSuggestion(r.Context(), tenantID, id)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, toAISuggestionResponse(suggestion))
+}
+
+// decodeOptionalReviewBody decodes an optional JSON request body into
+// dst. A missing body is allowed: a zero Content-Length or an empty
+// chunked body (Content-Length == -1, decoder returns io.EOF) is
+// treated as "no body" rather than a 400, mirroring the pattern used
+// by device.go and msp.go. Any other decode error writes a 400 and
+// returns false.
+func decodeOptionalReviewBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if r.ContentLength == 0 {
+		return true
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			return true
+		}
+		WriteError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return false
+	}
+	return true
+}
+
+func (h *AIHandler) approveSuggestion(w http.ResponseWriter, r *http.Request) {
+	if h.reviewSvc == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI suggestion service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	id, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Feedback string `json:"feedback"`
+	}
+	if !decodeOptionalReviewBody(w, r, &req) {
+		return
+	}
+	reviewerID := actorFromCtx(r)
+	if reviewerID == nil {
+		WriteError(w, http.StatusUnauthorized, "unauthorized",
+			"authenticated user required for approval")
+		return
+	}
+	updated, err := h.reviewSvc.ApproveSuggestion(r.Context(), tenantID, id, *reviewerID, req.Feedback)
+	if err != nil {
+		writeReviewError(w, h.logger, "approve", err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, toAISuggestionResponse(updated))
+}
+
+func (h *AIHandler) rejectSuggestion(w http.ResponseWriter, r *http.Request) {
+	if h.reviewSvc == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI suggestion service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	id, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Feedback string `json:"feedback"`
+	}
+	if !decodeOptionalReviewBody(w, r, &req) {
+		return
+	}
+	reviewerID := actorFromCtx(r)
+	if reviewerID == nil {
+		WriteError(w, http.StatusUnauthorized, "unauthorized",
+			"authenticated user required for rejection")
+		return
+	}
+	updated, err := h.reviewSvc.RejectSuggestion(r.Context(), tenantID, id, *reviewerID, req.Feedback)
+	if err != nil {
+		writeReviewError(w, h.logger, "reject", err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, toAISuggestionResponse(updated))
+}
+
+func (h *AIHandler) analyzeTightening(w http.ResponseWriter, r *http.Request) {
+	if h.tighteningSvc == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI tightening service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Rules      []json.RawMessage `json:"rules"`
+		HitCounts  map[string]int64  `json:"hit_counts"`
+		WindowDays int               `json:"window_days"`
+	}
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	report, err := h.tighteningSvc.Analyze(r.Context(), ai.AnalyzeInput{
+		TenantID:   tenantID,
+		Rules:      req.Rules,
+		HitCounts:  req.HitCounts,
+		WindowDays: req.WindowDays,
+	})
+	if err != nil {
+		h.logger.Error("ai: tightening analysis failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("error", err.Error()))
+		WriteError(w, http.StatusInternalServerError, "ai_error", "tightening analysis failed")
+		return
+	}
+	WriteJSON(w, http.StatusOK, report)
+}
+
+func (h *AIHandler) getTighteningReport(w http.ResponseWriter, r *http.Request) {
+	if h.tighteningSvc == nil {
+		WriteError(w, http.StatusServiceUnavailable, "ai_not_configured",
+			"AI tightening service is not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	report, ok := h.tighteningSvc.LastReport(tenantID)
+	if !ok {
+		WriteError(w, http.StatusNotFound, "not_found",
+			"no tightening report available; run an analysis first")
+		return
+	}
+	WriteJSON(w, http.StatusOK, report)
+}
+
+func writeReviewError(w http.ResponseWriter, logger *slog.Logger, action string, err error) {
+	switch {
+	case errors.Is(err, repository.ErrNotFound):
+		WriteError(w, http.StatusNotFound, "not_found", "suggestion not found")
+	case errors.Is(err, repository.ErrConflict):
+		WriteError(w, http.StatusConflict, "conflict", "concurrent status change")
+	case errors.Is(err, ai.ErrInvalidTransition):
+		WriteError(w, http.StatusBadRequest, "invalid_transition", err.Error())
+	default:
+		logger.Error("ai: "+action+" suggestion failed", slog.String("error", err.Error()))
+		WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+	}
 }
 
 func parseTimeRange(start, end string) (ai.TimeRange, error) {

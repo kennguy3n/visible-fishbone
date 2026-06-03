@@ -1593,3 +1593,31 @@ type OpsHealthSnapshot struct {
 	ComponentScores json.RawMessage
 	CreatedAt       time.Time
 }
+
+// --- AI Suggestions -------------------------------------------------------
+
+// AISuggestionStatus tracks a suggestion through the review workflow.
+type AISuggestionStatus string
+
+const (
+	AISuggestionStatusPending    AISuggestionStatus = "pending"
+	AISuggestionStatusApproved   AISuggestionStatus = "approved"
+	AISuggestionStatusRejected   AISuggestionStatus = "rejected"
+	AISuggestionStatusApplied    AISuggestionStatus = "applied"
+	AISuggestionStatusRolledBack AISuggestionStatus = "rolled_back"
+)
+
+// AISuggestion represents a row in the ai_policy_suggestions table.
+type AISuggestion struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	RuleID         string
+	Category       string
+	SuggestionJSON json.RawMessage
+	Confidence     float64
+	Status         AISuggestionStatus
+	CreatedAt      time.Time
+	ReviewedAt     *time.Time
+	ReviewerID     *uuid.UUID
+	Feedback       *string
+}
