@@ -244,6 +244,41 @@ func TestReportMobilePosture_CrossPlatformSignalRejected(t *testing.T) {
 	}
 }
 
+// TestReportMobilePosture_DesktopSignalRejected asserts that desktop/
+// general posture signals (not part of the mobile contract) are
+// rejected for a mobile device rather than silently persisted.
+func TestReportMobilePosture_DesktopSignalRejected(t *testing.T) {
+	t.Parallel()
+	svc, _, tenantID := newSvc(t)
+	ctx := context.Background()
+	key := mobileKey(t)
+	if _, err := svc.EnrollMobileDevice(ctx, tenantID, identity.MobileEnrollInput{
+		DeviceKey: key, Platform: repository.DevicePlatformIOS,
+	}); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	cases := []struct {
+		name    string
+		posture repository.Posture
+	}{
+		{"disk_encrypted", repository.Posture{DiskEncrypted: boolPtr(true)}},
+		{"firewall_enabled", repository.Posture{FirewallEnabled: boolPtr(true)}},
+		{"screen_lock", repository.Posture{ScreenLock: boolPtr(true)}},
+		{"patch_level", repository.Posture{PatchLevel: "2025-05"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.ReportMobilePosture(ctx, tenantID, identity.MobilePostureInput{
+				DeviceKey: key,
+				Posture:   tc.posture,
+			})
+			if !errors.Is(err, repository.ErrInvalidArgument) {
+				t.Errorf("err = %v, want ErrInvalidArgument", err)
+			}
+		})
+	}
+}
+
 func TestReportMobilePosture_TimestampWindow(t *testing.T) {
 	t.Parallel()
 	svc, _, tenantID := newSvc(t)

@@ -3442,7 +3442,10 @@ components:
         Mobile device posture snapshot. All signals are tri-state
         (present=known, absent=unknown). `jailbroken` is meaningful
         only on iOS and `root_detected` only on Android; reporting the
-        wrong-platform signal is rejected by the server.
+        wrong-platform signal is rejected by the server. Desktop/general
+        signals (`disk_encrypted`, `firewall_enabled`, `screen_lock`,
+        `patch_level`) are not part of the mobile contract and are
+        rejected if present.
       properties:
         os_version: { type: string }
         agent_version: { type: string }

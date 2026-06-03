@@ -359,6 +359,25 @@ func validateMobilePosture(p repository.Posture, platform repository.DevicePlatf
 		return repository.Posture{}, fmt.Errorf("platform %q is not a mobile platform: %w", platform, repository.ErrInvalidArgument)
 	}
 
+	// Desktop/general signals have no meaning on ios/android (the
+	// mobile equivalents are passcode_set / biometric_ready /
+	// mdm_enrolled) and are intentionally absent from the OpenAPI
+	// MobilePosture schema. Reject them rather than silently
+	// persisting an incoherent snapshot — fail-closed, consistent with
+	// the cross-platform mobile-signal rejection above. (DecodeJSON's
+	// DisallowUnknownFields cannot catch these: they are real Go fields
+	// on the shared Posture struct, so the strictness must live here.)
+	switch {
+	case p.DiskEncrypted != nil:
+		return repository.Posture{}, fmt.Errorf("disk_encrypted is a desktop-only signal, not valid for %s: %w", platform, repository.ErrInvalidArgument)
+	case p.FirewallEnabled != nil:
+		return repository.Posture{}, fmt.Errorf("firewall_enabled is a desktop-only signal, not valid for %s: %w", platform, repository.ErrInvalidArgument)
+	case p.ScreenLock != nil:
+		return repository.Posture{}, fmt.Errorf("screen_lock is a desktop-only signal, not valid for %s: %w", platform, repository.ErrInvalidArgument)
+	case p.PatchLevel != "":
+		return repository.Posture{}, fmt.Errorf("patch_level is a desktop-only signal, not valid for %s: %w", platform, repository.ErrInvalidArgument)
+	}
+
 	if p.CollectedAt == nil {
 		t := now
 		p.CollectedAt = &t
