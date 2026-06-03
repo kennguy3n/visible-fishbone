@@ -96,6 +96,8 @@
 
 pub mod auth;
 pub mod bypass;
+pub mod casb;
+pub mod casb_rules;
 pub mod categorizer;
 pub mod config;
 pub mod error;
@@ -109,6 +111,12 @@ pub mod verdict;
 
 pub use auth::{ExtAuthzHandler, ExtAuthzRequest, ExtAuthzResponse};
 pub use bypass::{BypassDecision, BypassList, BypassReason};
+pub use casb::{
+    AppCatalog, AppSignature, DetectedApp, InlineCasbInspector, PathRule, RequestSignals,
+};
+pub use casb_rules::{
+    CasbAction, CasbConditions, CasbDecision, CasbRequestMeta, CasbRule, CasbRuleSet, CasbVerdict,
+};
 pub use categorizer::{Category, CategoryEntry, LocalCategoryDb, UrlCategorizer};
 pub use config::{
     DEFAULT_ADMIN_PORT, DEFAULT_EXT_AUTHZ_TIMEOUT_MS, EnvoyConfig, ListenerConfig,
