@@ -48,6 +48,7 @@ members = [
     "crates/sng-ztna",
     "crates/sng-sdwan",
     "crates/sng-updater",
+    "crates/sng-oidc",
     "crates/sng-edge",
     "crates/sng-agent",
 ]
@@ -178,9 +179,26 @@ url = "2"
 zstd = "0.13"
 rand = "0.8"
 
+# OIDC client (sng-oidc). `reqwest` is the HTTP client used for
+# OpenID Connect discovery, JWKS fetch, and token exchange. It is
+# pinned `default-features = false` so the OpenSSL-FFI `native-tls`
+# default backend never activates — the workspace mandates `rustls`
+# with the `ring` provider (see deny.toml bans on openssl /
+# openssl-sys / native-tls). `http2` keeps the connection shape
+# consistent with the rest of the gateway's h2 transport.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2", "charset"] }
+# ID-token validation. jsonwebtoken v9 uses `ring` by default (no
+# OpenSSL), which satisfies the same `rustls`/`ring`-only crypto
+# posture the bans block enforces.
+jsonwebtoken = "9"
+
 # Test-only dependencies.
 tempfile = "3"
 pretty_assertions = "1"
+# In-process mock OIDC server for sng-oidc integration tests
+# (discovery → authorize-url → token exchange → refresh) so the
+# suite exercises the full HTTP path with zero real network calls.
+wiremock = "0.6"
 # rcgen mints self-signed leaf + CA certificates for the in-process
 # TLS server used by sng-comms integration tests. Pinned at the
 # workspace level so future crates that need an ephemeral test PKI
@@ -204,6 +222,7 @@ sng-swg = { path = "crates/sng-swg" }
 sng-ztna = { path = "crates/sng-ztna" }
 sng-sdwan = { path = "crates/sng-sdwan" }
 sng-updater = { path = "crates/sng-updater" }
+sng-oidc = { path = "crates/sng-oidc" }
 
 # Workspace-wide lints. Set at the workspace level so a new crate
 # added in a later phase automatically inherits the same posture
