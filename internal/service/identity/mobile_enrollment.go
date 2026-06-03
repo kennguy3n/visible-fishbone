@@ -298,11 +298,22 @@ func (svc *Service) ReportMobilePosture(
 	if err := svc.devices.UpdatePosture(ctx, tenantID, dev.ID, posture); err != nil {
 		return repository.Device{}, err
 	}
+	// A posture report is also proof-of-liveness: the device made a
+	// fresh, authenticated round-trip to the control plane. The desktop
+	// path advances last_seen_at via an explicit Heartbeat; mobile has
+	// no separate heartbeat, so fold liveness into the posture report.
+	// Without this, a device actively reporting healthy posture would
+	// still show as stale/offline in monitoring that filters on
+	// last_seen_at.
+	if err := svc.devices.UpdateLastSeen(ctx, tenantID, dev.ID, svc.nowFunc()); err != nil {
+		return repository.Device{}, err
+	}
 	// Re-read so the returned device carries the freshly persisted
-	// state — notably the updated_at advanced by the
-	// devices_set_updated_at trigger (and by the memory store).
-	// Patching only dev.Posture would echo a stale updated_at and
-	// break client cache/ETag comparisons.
+	// state — the posture, the updated_at advanced by the
+	// devices_set_updated_at trigger (and by the memory store), and the
+	// last_seen_at just stamped above. Patching only dev.Posture would
+	// echo a stale updated_at/last_seen_at and break client cache/ETag
+	// comparisons.
 	refreshed, err := svc.devices.Get(ctx, tenantID, dev.ID)
 	if err != nil {
 		return repository.Device{}, err

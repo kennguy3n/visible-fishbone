@@ -244,6 +244,36 @@ func TestReportMobilePosture_CrossPlatformSignalRejected(t *testing.T) {
 	}
 }
 
+// TestReportMobilePosture_AdvancesLastSeen asserts a posture report
+// doubles as a heartbeat: a freshly enrolled device has no last_seen_at
+// (enrolment does not stamp it), and reporting posture sets it.
+func TestReportMobilePosture_AdvancesLastSeen(t *testing.T) {
+	t.Parallel()
+	svc, _, tenantID := newSvc(t)
+	ctx := context.Background()
+	key := mobileKey(t)
+	enrolled, err := svc.EnrollMobileDevice(ctx, tenantID, identity.MobileEnrollInput{
+		DeviceKey: key, Platform: repository.DevicePlatformIOS,
+	})
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if enrolled.Device.LastSeenAt != nil {
+		t.Fatalf("precondition: enrolled device LastSeenAt = %v, want nil", enrolled.Device.LastSeenAt)
+	}
+
+	reported, err := svc.ReportMobilePosture(ctx, tenantID, identity.MobilePostureInput{
+		DeviceKey: key,
+		Posture:   repository.Posture{OSVersion: "17.5.1"},
+	})
+	if err != nil {
+		t.Fatalf("report posture: %v", err)
+	}
+	if reported.LastSeenAt == nil {
+		t.Error("LastSeenAt = nil after posture report, want it stamped (posture report is proof-of-liveness)")
+	}
+}
+
 // TestReportMobilePosture_DesktopSignalRejected asserts that desktop/
 // general posture signals (not part of the mobile contract) are
 // rejected for a mobile device rather than silently persisted.
