@@ -105,9 +105,15 @@ fn parse_port(endpoint: &str, port: &str) -> Result<u16, AndroidPalError> {
 /// endpoint or empty route set is rejected here rather than at the
 /// platform boundary.
 pub fn translate_config(config: &TunnelConfig) -> Result<VpnServiceConfig, AndroidPalError> {
-    config
-        .validate()
-        .map_err(|e| AndroidPalError::InvalidInput(e.to_string()))?;
+    // `TunnelError::Config`'s Display already prefixes `"tunnel config: "`,
+    // and `From<AndroidPalError> for TunnelError` re-wraps an
+    // `InvalidInput` back into `TunnelError::Config` — so stringifying the
+    // whole error here would double the prefix once it surfaces through
+    // `start_tunnel`. Pass the inner message through instead.
+    config.validate().map_err(|e| match e {
+        TunnelError::Config(msg) => AndroidPalError::InvalidInput(msg),
+        other => AndroidPalError::InvalidInput(other.to_string()),
+    })?;
     let (endpoint_host, endpoint_port) = split_endpoint(&config.endpoint)?;
     Ok(VpnServiceConfig {
         interface_private_key_b64: base64::engine::general_purpose::STANDARD
@@ -331,7 +337,30 @@ mod tests {
     #[test]
     fn rejects_empty_endpoint_via_core_validation() {
         let err = translate_config(&config("")).expect_err("empty endpoint");
-        assert!(matches!(err, AndroidPalError::InvalidInput(_)));
+        let AndroidPalError::InvalidInput(msg) = &err else {
+            panic!("expected InvalidInput, got {err:?}");
+        };
+        // `translate_config` passes the inner `TunnelError::Config`
+        // message through verbatim — it must NOT carry the
+        // `"tunnel config: "` Display prefix here, or it would be
+        // doubled once it surfaces through `start_tunnel`.
+        assert_eq!(msg, "endpoint must not be empty");
+        assert!(!msg.contains("tunnel config:"));
+    }
+
+    #[test]
+    fn validate_error_surfaces_with_a_single_tunnel_config_prefix() {
+        // Drive the full surface path: `translate_config`'s
+        // `AndroidPalError::InvalidInput` is re-wrapped by
+        // `From<AndroidPalError> for TunnelError` into
+        // `TunnelError::Config`, whose Display adds `"tunnel config: "`
+        // exactly once (no double prefix).
+        let surfaced: TunnelError = translate_config(&config(""))
+            .expect_err("empty endpoint")
+            .into();
+        let rendered = surfaced.to_string();
+        assert_eq!(rendered, "tunnel config: endpoint must not be empty");
+        assert_eq!(rendered.matches("tunnel config:").count(), 1);
     }
 
     #[tokio::test]
