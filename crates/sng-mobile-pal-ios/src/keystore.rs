@@ -175,7 +175,11 @@ mod keychain {
     /// Load the seed under `service`/`account`, or `None` if absent.
     pub(super) fn load(service: &str, account: &str) -> Result<Option<KeySeed>, IosPalError> {
         match generic_password(options(service, account)) {
-            Ok(bytes) => Ok(Some(KeySeed::from_slice(&bytes)?)),
+            // Wrap the raw Keychain bytes in `Zeroizing` so the transient
+            // heap buffer carrying the Ed25519 seed is wiped on drop, not
+            // just the `KeySeed` copy `from_slice` builds (mirrors the
+            // token-storage load path).
+            Ok(bytes) => Ok(Some(KeySeed::from_slice(&zeroize::Zeroizing::new(bytes))?)),
             Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
             Err(e) => Err(IosPalError::Keychain(e.to_string())),
         }
