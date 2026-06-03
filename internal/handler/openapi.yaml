@@ -4118,6 +4118,7 @@ components:
         max_requests_per_minute: { type: integer }
         tokens_today: { type: integer }
         max_tokens_per_day: { type: integer }
+        audit_log_size: { type: integer }
 
     # --- Operational Health Schemas -------------------------------------------
 

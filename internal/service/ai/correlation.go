@@ -205,14 +205,20 @@ func (e *CorrelationEngine) llmSummarize(ctx context.Context, cluster Correlatio
 
 // escalateSeverity returns the highest severity in the group, or
 // "critical" if the group shows multi-stage attack patterns
-// (multiple distinct alert kinds).
+// (multiple distinct alert kinds). The returned value is always one of
+// the canonical lowercase levels (low/medium/high/critical) so it
+// satisfies the AICorrelation severity enum / CHECK constraint
+// regardless of the casing callers used on the input alerts.
 func escalateSeverity(group []AlertInput) string {
 	kinds := map[string]bool{}
 	maxSev := "low"
 	for _, a := range group {
 		kinds[a.Kind] = true
+		// severityRank lowercases internally for comparison; store the
+		// normalized form so a "High"/"CRITICAL" input doesn't leak its
+		// original casing into the persisted (enum-validated) value.
 		if severityRank(a.Severity) > severityRank(maxSev) {
-			maxSev = a.Severity
+			maxSev = strings.ToLower(a.Severity)
 		}
 	}
 	// Multi-stage attack: multiple distinct kinds → escalate.

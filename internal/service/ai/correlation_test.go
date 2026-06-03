@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
 func TestCorrelationEngine_NoAlerts(t *testing.T) {
@@ -137,6 +139,42 @@ func TestCorrelationEngine_MultiStageEscalation(t *testing.T) {
 	}
 	if result.Clusters[0].Severity != "critical" {
 		t.Fatalf("expected critical severity for multi-stage attack, got %s", result.Clusters[0].Severity)
+	}
+}
+
+func TestCorrelationEngine_SeverityNormalizedToEnum(t *testing.T) {
+	t.Parallel()
+	engine := NewCorrelationEngine(nil, CorrelationConfig{
+		TimeWindow:     time.Hour,
+		MinClusterSize: 2,
+	})
+
+	tenantID := uuid.New()
+	now := time.Now()
+	// Same kind so the multi-stage escalation paths don't override the
+	// per-alert max; the cluster severity must be the highest input
+	// severity, normalized to its canonical lowercase enum form.
+	alerts := []AlertInput{
+		{ID: uuid.New(), TenantID: tenantID, Kind: "brute_force", Severity: "High", DeviceID: "d1", CreatedAt: now},
+		{ID: uuid.New(), TenantID: tenantID, Kind: "brute_force", Severity: "MEDIUM", DeviceID: "d1", CreatedAt: now.Add(5 * time.Minute)},
+	}
+
+	result, err := engine.Analyze(context.Background(), alerts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Clusters) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(result.Clusters))
+	}
+	got := result.Clusters[0].Severity
+	if got != "high" {
+		t.Fatalf("severity = %q, want lowercase enum value \"high\"", got)
+	}
+	// The persisted value must satisfy the repository enum contract so
+	// the cluster is actually stored (and retrievable via GET) rather
+	// than silently dropped on a validation error.
+	if err := repository.ValidateAICorrelationSeverity(got); err != nil {
+		t.Fatalf("severity %q failed enum validation: %v", got, err)
 	}
 }
 
