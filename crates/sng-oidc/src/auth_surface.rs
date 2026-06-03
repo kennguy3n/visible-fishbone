@@ -107,8 +107,11 @@ impl CallbackUrl {
 ///
 /// The trait is object-safe (`Arc<dyn AuthSurface>`); it has a
 /// single async method and uses no generics or associated types.
+/// `Debug` is required (mirroring [`TokenStorage`](crate::storage::TokenStorage))
+/// so a surface can be embedded in a higher-level type's derived
+/// `Debug` without leaking anything sensitive.
 #[async_trait]
-pub trait AuthSurface: Send + Sync {
+pub trait AuthSurface: Send + Sync + std::fmt::Debug {
     /// Present `url` to the user and resolve with the redirect
     /// [`CallbackUrl`] once the flow completes.
     async fn present_auth_url(&self, url: &Url) -> Result<CallbackUrl, AuthSurfaceError>;
