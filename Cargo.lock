@@ -2343,6 +2343,7 @@ dependencies = [
  "sng-core",
  "sng-dns",
  "sng-fw",
+ "sng-ha",
  "sng-ips",
  "sng-pal",
  "sng-policy-eval",
@@ -2378,6 +2379,25 @@ dependencies = [
  "sha2",
  "sng-core",
  "sng-policy-eval",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sng-ha"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "parking_lot",
+ "pretty_assertions",
+ "rmp-serde",
+ "serde",
+ "sng-comms",
+ "sng-core",
+ "socket2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

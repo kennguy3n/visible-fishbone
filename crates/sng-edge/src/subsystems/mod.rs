@@ -25,6 +25,7 @@
 pub mod comms;
 pub mod dns;
 pub mod fw;
+pub mod ha;
 pub mod ips;
 pub mod policy_eval;
 pub mod sdwan;
@@ -36,6 +37,7 @@ pub mod ztna;
 pub use comms::CommsSubsystem;
 pub use dns::DnsSubsystem;
 pub use fw::FwSubsystem;
+pub use ha::HaSubsystem;
 pub use ips::IpsSubsystem;
 pub use policy_eval::PolicyEvalSubsystem;
 pub use sdwan::SdwanSubsystem;

@@ -48,6 +48,11 @@ pub struct EdgeConfig {
     /// SD-WAN settings.
     #[serde(default)]
     pub sdwan: SdwanConfig,
+    /// Active/passive HA (VRRP-class failover) settings. Disabled
+    /// by default — a single-edge deployment leaves `[ha]` out of
+    /// the file entirely and the subsystem installs a no-op.
+    #[serde(default)]
+    pub ha: HaConfig,
     /// Self-update engine tuning.
     #[serde(default)]
     pub updater: UpdaterConfig,
@@ -412,6 +417,93 @@ impl Default for SdwanConfig {
     }
 }
 
+/// Active/passive HA (VRRP-class failover) settings.
+///
+/// The five operator-facing knobs the spec calls out map onto
+/// the fields below: `ha_enabled` → [`enabled`](Self::enabled),
+/// `ha_peer_address` → [`peer_address`](Self::peer_address),
+/// `ha_virtual_ip` → [`virtual_ip`](Self::virtual_ip),
+/// `ha_priority` → [`priority`](Self::priority), and
+/// `ha_interface` → [`interface`](Self::interface). The
+/// remaining fields are protocol parameters with RFC-default
+/// values so a minimal `[ha]` block only needs the five.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HaConfig {
+    /// Master switch. When `false` the subsystem is a no-op and
+    /// none of the other fields are consulted.
+    #[serde(default)]
+    pub enabled: bool,
+    /// L2 interface the VIP and the VRRP multicast socket live
+    /// on (e.g. `eth0`).
+    #[serde(default = "default_ha_interface")]
+    pub interface: String,
+    /// This node's own IPv4 on [`interface`](Self::interface).
+    /// Used to bind the VRRP multicast socket and as the
+    /// advertisement source for the tie-break. Required (and
+    /// must be IPv4) when [`enabled`](Self::enabled).
+    #[serde(default)]
+    pub local_address: Option<std::net::IpAddr>,
+    /// The peer edge's address — the far end of the state-sync
+    /// channel. Required when [`enabled`](Self::enabled).
+    #[serde(default)]
+    pub peer_address: Option<std::net::IpAddr>,
+    /// The virtual IP this pair fails over. Required when
+    /// [`enabled`](Self::enabled).
+    #[serde(default)]
+    pub virtual_ip: Option<std::net::IpAddr>,
+    /// CIDR prefix length the VIP is configured with. Default 24.
+    #[serde(default = "default_ha_vip_prefix_len")]
+    pub virtual_ip_prefix_len: u8,
+    /// VRRP virtual router id — both peers share it. Default 1.
+    #[serde(default = "default_ha_virtual_router_id")]
+    pub virtual_router_id: u8,
+    /// VRRP priority in `1..=255`; higher wins. Default 100.
+    #[serde(default = "default_ha_priority")]
+    pub priority: u8,
+    /// Advertisement cadence (Master) / master-down unit
+    /// (Backup). Default 1s.
+    #[serde(default = "default_ha_advertisement_interval")]
+    #[serde(with = "humantime_serde")]
+    pub advertisement_interval: Duration,
+    /// When `true`, a higher-priority node preempts a
+    /// lower-priority Master. Default `true`.
+    #[serde(default = "default_true")]
+    pub preempt_mode: bool,
+    /// How often the controller re-polls its health registry.
+    /// Default 1s.
+    #[serde(default = "default_ha_health_interval")]
+    #[serde(with = "humantime_serde")]
+    pub health_interval: Duration,
+    /// Bounded state-sync queue depth. Default 1024.
+    #[serde(default = "default_ha_sync_queue_capacity")]
+    pub sync_queue_capacity: usize,
+    /// Maximum records drained from the sync queue per flush.
+    /// Default 256.
+    #[serde(default = "default_ha_sync_batch")]
+    pub sync_batch: usize,
+}
+
+impl Default for HaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interface: default_ha_interface(),
+            local_address: None,
+            peer_address: None,
+            virtual_ip: None,
+            virtual_ip_prefix_len: default_ha_vip_prefix_len(),
+            virtual_router_id: default_ha_virtual_router_id(),
+            priority: default_ha_priority(),
+            advertisement_interval: default_ha_advertisement_interval(),
+            preempt_mode: true,
+            health_interval: default_ha_health_interval(),
+            sync_queue_capacity: default_ha_sync_queue_capacity(),
+            sync_batch: default_ha_sync_batch(),
+        }
+    }
+}
+
 /// Self-update settings.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -560,6 +652,76 @@ fn validate(cfg: &EdgeConfig) -> Result<(), String> {
     if cfg.ips.event_channel_capacity == 0 {
         return Err("ips.event_channel_capacity must be > 0".into());
     }
+    validate_ha(&cfg.ha)?;
+    Ok(())
+}
+
+/// HA cross-field invariants. Only enforced when the subsystem
+/// is enabled — a disabled `[ha]` block (the default) leaves the
+/// optional addresses `None` and is always valid. The protocol
+/// invariants (`priority != 0`, non-zero intervals, VIP prefix
+/// in range) are re-checked at build time by
+/// [`sng_ha::HaSettings::validate`]; mirroring the cheap ones
+/// here turns an operator typo into a load-time error rather
+/// than a boot-time one.
+fn validate_ha(ha: &HaConfig) -> Result<(), String> {
+    if !ha.enabled {
+        return Ok(());
+    }
+    match ha.local_address {
+        Some(std::net::IpAddr::V4(_)) => {}
+        Some(std::net::IpAddr::V6(_)) => {
+            return Err(
+                "ha.local_address must be IPv4 (the VRRP multicast group 224.0.0.18 is IPv4)"
+                    .into(),
+            );
+        }
+        None => return Err("ha.local_address is required when ha.enabled".into()),
+    }
+    match ha.peer_address {
+        // The peer shares the L2 segment and the IPv4-only VRRP group,
+        // so its address family must match `local_address`.
+        Some(std::net::IpAddr::V4(_)) => {}
+        Some(std::net::IpAddr::V6(_)) => {
+            return Err(
+                "ha.peer_address must be IPv4 (the HA pair shares the IPv4 VRRP segment)".into(),
+            );
+        }
+        None => return Err("ha.peer_address is required when ha.enabled".into()),
+    }
+    match ha.virtual_ip {
+        Some(vip) => {
+            // Match the family-aware bound in `sng_ha::VipSpec::validate`
+            // so the operator gets a ConfigError at load time rather
+            // than an HaError at subsystem build time.
+            let max = if vip.is_ipv4() { 32 } else { 128 };
+            if ha.virtual_ip_prefix_len > max {
+                return Err(format!(
+                    "ha.virtual_ip_prefix_len /{} is out of range for the VIP address family (max /{max})",
+                    ha.virtual_ip_prefix_len
+                ));
+            }
+        }
+        None => return Err("ha.virtual_ip is required when ha.enabled".into()),
+    }
+    if ha.priority == 0 {
+        return Err("ha.priority must be in 1..=255 (0 is the VRRP release signal)".into());
+    }
+    if ha.virtual_router_id == 0 {
+        return Err("ha.virtual_router_id must be in 1..=255".into());
+    }
+    if ha.advertisement_interval.is_zero() {
+        return Err("ha.advertisement_interval must be > 0".into());
+    }
+    if ha.health_interval.is_zero() {
+        return Err("ha.health_interval must be > 0".into());
+    }
+    if ha.sync_queue_capacity == 0 {
+        return Err("ha.sync_queue_capacity must be > 0".into());
+    }
+    if ha.sync_batch == 0 {
+        return Err("ha.sync_batch must be > 0".into());
+    }
     Ok(())
 }
 
@@ -646,6 +808,30 @@ const fn default_ztna_max_inflight() -> usize {
 }
 const fn default_sdwan_sticky_capacity() -> usize {
     1024
+}
+fn default_ha_interface() -> String {
+    "eth0".into()
+}
+const fn default_ha_vip_prefix_len() -> u8 {
+    24
+}
+const fn default_ha_virtual_router_id() -> u8 {
+    1
+}
+const fn default_ha_priority() -> u8 {
+    100
+}
+const fn default_ha_advertisement_interval() -> Duration {
+    Duration::from_secs(1)
+}
+const fn default_ha_health_interval() -> Duration {
+    Duration::from_secs(1)
+}
+const fn default_ha_sync_queue_capacity() -> usize {
+    1024
+}
+const fn default_ha_sync_batch() -> usize {
+    256
 }
 const fn default_updater_poll_interval() -> Duration {
     Duration::from_secs(300)
@@ -982,6 +1168,106 @@ event_channel_capacity = 0
             message.contains("ips.event_channel_capacity"),
             "message did not name the bad field: {message}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_ha_vip_prefix_len() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[ha]
+enabled               = true
+local_address         = "192.168.9.2"
+peer_address          = "192.168.9.3"
+virtual_ip            = "192.168.9.1"
+virtual_ip_prefix_len = 33
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("ha.virtual_ip_prefix_len"),
+            "message did not name the bad field: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_ipv6_ha_peer_address() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[ha]
+enabled       = true
+local_address = "192.168.9.2"
+peer_address  = "fd00::3"
+virtual_ip    = "192.168.9.1"
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("ha.peer_address must be IPv4"),
+            "message did not reject the IPv6 peer: {message}"
+        );
+    }
+
+    #[test]
+    fn enabled_ha_block_with_valid_fields_loads() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[ha]
+enabled       = true
+local_address = "192.168.9.2"
+peer_address  = "192.168.9.3"
+virtual_ip    = "192.168.9.1"
+priority      = 150
+"#,
+        )
+        .unwrap();
+        let cfg = load_from_path(f.path()).expect("valid HA config should load");
+        assert!(cfg.ha.enabled);
+        assert_eq!(cfg.ha.priority, 150);
+        assert_eq!(cfg.ha.virtual_ip_prefix_len, 24);
     }
 
     #[test]
