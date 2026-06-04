@@ -1132,6 +1132,35 @@ tmpfs /run tmpfs rw 0 0
         assert!(watcher.try_pop().is_none());
     }
 
+    // A symlink that points back at an ancestor directory cannot send the
+    // walker into a loop: `DirEntry::metadata` is lstat on Unix, so the
+    // symlink reports neither `is_dir` nor `is_file` and `walk` skips it
+    // without descending. The only real file is reported exactly once and
+    // the scan terminates regardless of the cycle.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn dir_watcher_does_not_follow_symlink_loops() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("real.txt"), b"ssn 123-45-6789").expect("write");
+        // root/loop -> root  (a self-referential cycle)
+        std::os::unix::fs::symlink(root, root.join("loop")).expect("symlink");
+
+        let watcher = SensitiveDirWatcher::new(DlpChannel::FileWrite, vec![root.to_path_buf()])
+            .with_poll_interval(Duration::from_millis(10));
+
+        // Exactly one event (real.txt); the symlinked dir is not traversed.
+        assert_eq!(watcher.scan(), 1);
+        let event = watcher.try_pop().expect("event");
+        assert_eq!(event.metadata.filename.as_deref(), Some("real.txt"));
+        assert!(watcher.try_pop().is_none());
+        // Only the single real file holds a watermark — the symlink left
+        // no entry behind.
+        assert_eq!(watcher.watermark_count(), 1);
+        // A re-scan over the same cycle still terminates and reports nothing.
+        assert_eq!(watcher.scan(), 0);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn warm_started_watcher_skips_preexisting_then_reports_new_writes() {
         let dir = tempfile::tempdir().expect("tempdir");
