@@ -53,6 +53,15 @@ pub(crate) fn assemble(
             "oidc_redirect_uri must not be empty",
         ));
     }
+    // Reject a malformed redirect URI up front on *every* platform so
+    // the failure surfaces at assembly time, not midway through an
+    // interactive sign-in. (iOS additionally needs the parsed scheme
+    // below; Android/host only need the well-formedness guarantee.)
+    if let Err(e) = url::Url::parse(&sdk_config.oidc_redirect_uri) {
+        return Err(MobileSdkError::invalid_config(format!(
+            "oidc_redirect_uri: {e}"
+        )));
+    }
     let policy_trust = sdk_config.build_trust_store()?;
     let redirect_uri = sdk_config.oidc_redirect_uri.clone();
 

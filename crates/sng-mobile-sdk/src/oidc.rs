@@ -85,20 +85,31 @@ impl OidcAuthSession {
     /// `surface`.
     ///
     /// # Errors
-    /// Returns [`MobileSdkError`] if the cached discovery / JWKS HTTP
-    /// clients cannot be constructed (e.g. the platform TLS backend
-    /// fails to initialise).
+    /// Returns [`MobileSdkError::InvalidConfig`] if the cached
+    /// discovery / JWKS HTTP clients cannot be constructed (e.g. the
+    /// platform TLS backend fails to initialise). This runs at SDK
+    /// construction time, not during sign-in, so the failure is
+    /// surfaced as a config error rather than the `SignIn` class the
+    /// blanket `From<OidcError>` would otherwise produce.
     pub fn new(
         auth: AuthConfig,
         redirect_uri: String,
         surface: Arc<dyn AuthSurface>,
     ) -> Result<Self, MobileSdkError> {
+        let discovery = DiscoveryClient::new().map_err(|e| {
+            MobileSdkError::invalid_config(format!(
+                "failed to initialise OIDC discovery client: {e}"
+            ))
+        })?;
+        let jwks = JwksClient::new().map_err(|e| {
+            MobileSdkError::invalid_config(format!("failed to initialise JWKS client: {e}"))
+        })?;
         Ok(Self {
             auth,
             redirect_uri,
             surface,
-            discovery: DiscoveryClient::new()?,
-            jwks: JwksClient::new()?,
+            discovery,
+            jwks,
             sign_in_active: AtomicBool::new(false),
             session: Mutex::new(None),
         })
