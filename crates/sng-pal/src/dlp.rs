@@ -36,7 +36,7 @@
 
 use async_trait::async_trait;
 use sng_dlp::{ChannelError, ChannelInterceptor, ContentEvent, ContentMetadata, DlpChannel};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -200,21 +200,34 @@ impl SensitiveDirWatcher {
     /// the watermark (no read, no event); otherwise each new write is
     /// read into a queued event. Returns the count of files acted on
     /// (events queued, or watermarks recorded in `record_only`).
+    ///
+    /// When a pass completes cleanly — every watched directory was
+    /// readable and the per-scan file cap was not hit — the watermark
+    /// map is pruned to the set of files observed this pass, so entries
+    /// for deleted files do not accumulate for a long-lived agent on a
+    /// high-churn directory. A truncated or partially-failed pass skips
+    /// the prune so a transiently-unreadable directory cannot cause its
+    /// files to be re-reported as fresh writes on the next scan.
     fn walk(&self, record_only: bool) -> usize {
         let dirs = lock(&self.dirs).clone();
         let mut stack: Vec<(PathBuf, usize)> = dirs.into_iter().map(|d| (d, 0)).collect();
         let mut examined = 0usize;
         let mut queued = 0usize;
+        let mut observed: HashSet<PathBuf> = HashSet::new();
+        let mut complete = true;
 
         while let Some((dir, depth)) = stack.pop() {
             if examined >= MAX_FILES_PER_SCAN {
+                complete = false;
                 break;
             }
             let Ok(entries) = std::fs::read_dir(&dir) else {
+                complete = false;
                 continue;
             };
             for entry in entries.flatten() {
                 if examined >= MAX_FILES_PER_SCAN {
+                    complete = false;
                     break;
                 }
                 let path = entry.path();
@@ -234,6 +247,7 @@ impl SensitiveDirWatcher {
                 let Ok(modified) = meta.modified() else {
                     continue;
                 };
+                observed.insert(path.clone());
                 if !self.is_new_write(&path, modified) {
                     continue;
                 }
@@ -247,7 +261,27 @@ impl SensitiveDirWatcher {
                 }
             }
         }
+        if complete {
+            self.prune_unseen(&observed);
+        }
         queued
+    }
+
+    /// Drop watermarks for files that no longer exist. Called only after
+    /// a complete walk, so `observed` is the full live file set and any
+    /// watermark not in it is for a deleted (or moved) file.
+    fn prune_unseen(&self, observed: &HashSet<PathBuf>) {
+        let mut seen = lock(&self.seen);
+        if seen.len() == observed.len() {
+            return;
+        }
+        seen.retain(|path, _| observed.contains(path));
+    }
+
+    /// Number of watermarks currently retained. Test-only introspection.
+    #[cfg(test)]
+    fn watermark_count(&self) -> usize {
+        lock(&self.seen).len()
     }
 
     /// Whether `path` at `modified` is a write we have not reported.
@@ -1095,6 +1129,40 @@ tmpfs /run tmpfs rw 0 0
         assert_eq!(watcher.scan(), 1);
         let event = watcher.try_pop().expect("event");
         assert_eq!(event.metadata.filename.as_deref(), Some("new.txt"));
+        assert!(watcher.try_pop().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dir_watcher_prunes_watermarks_for_deleted_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), b"alpha").expect("write a");
+        std::fs::write(dir.path().join("b.txt"), b"bravo").expect("write b");
+
+        let watcher =
+            SensitiveDirWatcher::new(DlpChannel::FileWrite, vec![dir.path().to_path_buf()]);
+
+        // First scan reports both files and records a watermark each.
+        assert_eq!(watcher.scan(), 2);
+        assert_eq!(watcher.watermark_count(), 2);
+        while watcher.try_pop().is_some() {}
+
+        // Delete one file. The next complete scan reports nothing new
+        // and prunes the stale watermark so the map cannot grow without
+        // bound on a long-lived agent over a high-churn directory.
+        std::fs::remove_file(dir.path().join("a.txt")).expect("rm a");
+        assert_eq!(watcher.scan(), 0);
+        assert_eq!(watcher.watermark_count(), 1);
+        assert!(watcher.try_pop().is_none());
+
+        // The surviving file stays tracked (a fresh write of c.txt is
+        // reported, b.txt is not re-reported), and pruning has not
+        // resurrected the deleted entry — the map tracks exactly the two
+        // live files.
+        std::fs::write(dir.path().join("c.txt"), b"charlie").expect("write c");
+        assert_eq!(watcher.scan(), 1);
+        assert_eq!(watcher.watermark_count(), 2);
+        let event = watcher.try_pop().expect("event");
+        assert_eq!(event.metadata.filename.as_deref(), Some("c.txt"));
         assert!(watcher.try_pop().is_none());
     }
 

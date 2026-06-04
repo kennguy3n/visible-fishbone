@@ -155,9 +155,17 @@ func (s *Service) CompileEndpointBundle(
 }
 
 // compileEndpointRules flattens a set of policies into endpoint
-// rules. A policy with N rules yields N endpoint rules, each tagged
-// with a stable `<policy-id>:<index>` id so the agent's audit trail
-// can attribute a match back to the source policy.
+// rules. A policy with N rules normally yields N endpoint rules, each
+// tagged with a stable `<policy-id>:<index>` id so the agent's audit
+// trail can attribute a match back to the source policy.
+//
+// One web rule can expand to more than one endpoint rule: an MIP-label
+// rule that carries both a label id and a sensitivity level is an OR
+// match on the web side, but the endpoint rule's single `pattern_data`
+// holds only one match path. To preserve the web OR-semantics without
+// widening the wire schema, such a rule is split into two endpoint
+// rules — `<policy-id>:<index>:label` and `<policy-id>:<index>:sens` —
+// that both attribute back to the same source policy.
 func compileEndpointRules(policies []repository.DLPPolicy) []EndpointDLPRule {
 	// Non-nil so a tenant with no enabled policies marshals to
 	// `"rules": []`, not `"rules": null`. sng-dlp's `#[serde(default)]`
@@ -169,33 +177,57 @@ func compileEndpointRules(policies []repository.DLPPolicy) []EndpointDLPRule {
 			continue
 		}
 		for i, r := range p.Rules {
-			rules = append(rules, EndpointDLPRule{
-				ID:          fmt.Sprintf("%s:%d", p.ID, i),
-				Name:        p.Name,
-				PatternType: r.Type,
-				PatternData: endpointPatternData(r),
-				Severity:    endpointSeverity(p.Action),
-				Action:      endpointAction(p.Action),
-				// Web/SaaS policies are not channel-scoped, so each
-				// rule applies to every endpoint channel (empty list
-				// = all channels in sng-dlp).
-				Channels: []EndpointDLPChannel{},
-			})
+			baseID := fmt.Sprintf("%s:%d", p.ID, i)
+			for _, m := range endpointMatchPaths(r) {
+				rules = append(rules, EndpointDLPRule{
+					ID:          baseID + m.idSuffix,
+					Name:        p.Name,
+					PatternType: r.Type,
+					PatternData: m.patternData,
+					Severity:    endpointSeverity(p.Action),
+					Action:      endpointAction(p.Action),
+					// Web/SaaS policies are not channel-scoped, so each
+					// rule applies to every endpoint channel (empty list
+					// = all channels in sng-dlp).
+					Channels: []EndpointDLPChannel{},
+				})
+			}
 		}
 	}
 	return rules
 }
 
-// endpointPatternData extracts the mechanism-specific payload sng-dlp
-// expects. MIP-label rules carry the label id in Pattern, falling
-// back to SensitivityLevel; every other rule type carries its raw
-// payload (regex source, keyword dictionary, fingerprint hex) in
-// Pattern.
-func endpointPatternData(r repository.DLPRule) string {
-	if r.Type == repository.DLPRuleTypeMIPLabel && r.Pattern == "" {
-		return r.SensitivityLevel
+// endpointMatch is one compiled match path: the `pattern_data` payload
+// sng-dlp inspects and the id suffix that disambiguates it when a
+// single web rule yields more than one endpoint rule.
+type endpointMatch struct {
+	idSuffix    string
+	patternData string
+}
+
+// endpointMatchPaths expands a web DLP rule into the endpoint match
+// paths it should compile to.
+//
+// Web DLP treats an MIP-label rule's label id and sensitivity level as
+// an OR match. The endpoint rule's single `pattern_data` can only hold
+// one of them, so a rule with both set is split into two paths
+// (`:label` and `:sens`) to keep the OR-semantics; a rule with just one
+// of the two collapses to that one. Every other rule type (and any MIP
+// rule with neither field) yields a single unsuffixed path carrying its
+// raw payload (regex source, keyword dictionary, fingerprint hex).
+func endpointMatchPaths(r repository.DLPRule) []endpointMatch {
+	if r.Type == repository.DLPRuleTypeMIPLabel {
+		if r.Pattern != "" && r.SensitivityLevel != "" {
+			return []endpointMatch{
+				{idSuffix: ":label", patternData: r.Pattern},
+				{idSuffix: ":sens", patternData: r.SensitivityLevel},
+			}
+		}
+		if r.Pattern == "" {
+			return []endpointMatch{{patternData: r.SensitivityLevel}}
+		}
 	}
-	return r.Pattern
+	return []endpointMatch{{patternData: r.Pattern}}
 }
 
 // endpointAction maps a web/SaaS DLPAction onto the endpoint's

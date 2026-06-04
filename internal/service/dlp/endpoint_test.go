@@ -230,3 +230,74 @@ func TestCompileEndpointBundle_EmptyTenantIsValid(t *testing.T) {
 		t.Errorf("expected \"rules\":[] in bundle, got %s", blob)
 	}
 }
+
+// An MIP-label rule with both a label id and a sensitivity level is an
+// OR match in web DLP. The endpoint rule's single pattern_data can hold
+// only one of them, so the compiler splits such a rule into two
+// endpoint rules — `<id>:label` and `<id>:sens` — that both attribute
+// back to the same source policy, preserving the OR-semantics without
+// widening the wire schema.
+func TestCompileEndpointBundle_MIPLabelDualMatchEmitsTwoRules(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	created, err := svc.CreatePolicy(ctx, tid, repository.DLPPolicy{
+		Name: "MIP both fields",
+		Rules: []repository.DLPRule{{
+			Type:             repository.DLPRuleTypeMIPLabel,
+			Pattern:          "label-1234",
+			SensitivityLevel: "confidential",
+		}},
+		Action:  repository.DLPActionBlock,
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	blob, err := svc.CompileEndpointBundle(ctx, tid, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(blob, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	rawRules, ok := doc["rules"].([]any)
+	if !ok || len(rawRules) != 2 {
+		t.Fatalf("expected 2 endpoint rules for a dual-field MIP rule, got %v", doc["rules"])
+	}
+
+	byID := make(map[string]map[string]any, len(rawRules))
+	for _, r := range rawRules {
+		rule := r.(map[string]any)
+		byID[rule["id"].(string)] = rule
+	}
+
+	base := created.ID.String() + ":0"
+	label, ok := byID[base+":label"]
+	if !ok {
+		t.Fatalf("missing %s:label rule; got rules %s", base, blob)
+	}
+	if label["pattern_data"] != "label-1234" {
+		t.Errorf("label pattern_data = %v, want label-1234", label["pattern_data"])
+	}
+	sens, ok := byID[base+":sens"]
+	if !ok {
+		t.Fatalf("missing %s:sens rule; got rules %s", base, blob)
+	}
+	if sens["pattern_data"] != "confidential" {
+		t.Errorf("sens pattern_data = %v, want confidential", sens["pattern_data"])
+	}
+
+	// Both paths carry the same source policy's type and action, so a
+	// match on either fires the same verdict.
+	for name, rule := range map[string]map[string]any{"label": label, "sens": sens} {
+		if rule["pattern_type"] != "mip_label" {
+			t.Errorf("%s pattern_type = %v, want mip_label", name, rule["pattern_type"])
+		}
+		if rule["action"] != "block" {
+			t.Errorf("%s action = %v, want block", name, rule["action"])
+		}
+	}
+}
