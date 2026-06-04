@@ -145,7 +145,10 @@ func TestComplianceEvidence_Integration(t *testing.T) {
 	})
 
 	t.Run("LatestByType", func(t *testing.T) {
-		ct := "latest-" + uuid.NewString()[:8]
+		// collection_type is constrained to the weekly|monthly|manual enum
+		// (migration 039). Use "manual" — unused by the other subtests in
+		// this test — to isolate these rows without violating the CHECK.
+		ct := "manual"
 		_, err := repo.Create(bgCtx(), mk(ct, "k/lat/old/"+uuid.NewString(), base, "collected"))
 		if err != nil {
 			t.Fatalf("create: %v", err)
