@@ -1,0 +1,11 @@
+# Edge SKU profile: medium branch appliance.
+#
+# Mid-range deployment (regional office). A 4-core box on a 10 GbE
+# uplink; the published acceptance target is 5 Gbps of inspected
+# throughput (half of line rate, the realistic ceiling once full
+# inspection is enabled on this core count).
+name = "branch-medium"
+vcpus = 4
+ram_gb = 8
+nic_gbps = 10.0
+target_gbps = 5.0
