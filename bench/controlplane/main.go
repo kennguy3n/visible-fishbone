@@ -12,6 +12,11 @@ import (
 	"time"
 )
 
+// ModeCompare grades a freshly produced report against a baseline
+// without running any benchmark. It is a CLI action, not a report mode,
+// so it is defined here rather than alongside the report Mode* values.
+const ModeCompare = "compare"
+
 // usage is printed for -h and on a missing/unknown subcommand.
 const usage = `controlplane-bench — SNG control-plane scale benchmark
 
@@ -23,12 +28,18 @@ Subcommands:
   policy-compile   In-process policy-graph compilation across sizes/targets/concurrency
   tenant-scale     Postgres RLS overhead, pool saturation, and online-DDL speed at scale
   full-suite       All of the above, into one report
+  compare          Compare two existing report.json files and fail on regression (no benchmark run)
 
 Common flags:
   --dry-run                Synthesise the workload (no live control plane / Postgres). Self-testable on CI.
   --out DIR                Directory to write report.json + report.md (default: stdout only)
   --git-sha SHA            Record the commit under test (default: $GIT_SHA)
   --baseline FILE          Compare against a prior report.json and fail on >20% regression
+
+compare flags:
+  --current FILE           Freshly produced report.json to grade (required)
+  --baseline FILE          Prior report.json to compare against (required)
+  --threshold F            Fractional regression threshold (default: 0.20)
 
 api-latency / full-suite flags:
   --url URL                Control-plane base URL (required unless --dry-run)
@@ -52,6 +63,8 @@ type options struct {
 	out         string
 	gitSHA      string
 	baseline    string
+	current     string
+	threshold   float64
 	url         string
 	tenantTiers string
 	concurrency int
@@ -75,14 +88,20 @@ func main() {
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usage)
 		return
-	case ModeAPILatency, ModePolicyCompile, ModeTenantScale, ModeFullSuite:
+	case ModeAPILatency, ModePolicyCompile, ModeTenantScale, ModeFullSuite, ModeCompare:
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s", mode, usage)
 		os.Exit(2)
 	}
 
 	opts := parseFlags(mode, os.Args[2:])
-	if err := run(context.Background(), mode, opts); err != nil {
+	var err error
+	if mode == ModeCompare {
+		err = runCompare(opts)
+	} else {
+		err = run(context.Background(), mode, opts)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -95,6 +114,8 @@ func parseFlags(mode string, args []string) *options {
 	fs.StringVar(&opts.out, "out", "", "directory to write report.json + report.md")
 	fs.StringVar(&opts.gitSHA, "git-sha", os.Getenv("GIT_SHA"), "commit under test")
 	fs.StringVar(&opts.baseline, "baseline", "", "prior report.json to compare against")
+	fs.StringVar(&opts.current, "current", "", "freshly produced report.json to grade (compare)")
+	fs.Float64Var(&opts.threshold, "threshold", RegressionThreshold, "fractional regression threshold (compare)")
 	fs.StringVar(&opts.url, "url", "", "control-plane base URL")
 	fs.StringVar(&opts.tenantTiers, "tenant-tiers", "100,500,1000,5000", "tenant pre-seed tiers (CSV)")
 	fs.IntVar(&opts.concurrency, "concurrency", 32, "concurrent virtual clients")
@@ -228,35 +249,73 @@ func emit(report *BusinessBenchmarkReport, outDir string) error {
 	return nil
 }
 
-// checkRegression loads a baseline report (when provided), compares the
-// current report against it, and returns a non-nil error when any
-// metric regressed past RegressionThreshold — so CI fails the run.
+// checkRegression loads a baseline report (when provided) and compares
+// the in-memory current report against it, failing on a >threshold
+// regression. Used by the benchmark subcommands via the --baseline flag.
 func checkRegression(current *BusinessBenchmarkReport, baselinePath string) error {
 	if baselinePath == "" {
 		return nil
 	}
-	raw, err := os.ReadFile(baselinePath) //nolint:gosec // operator-supplied baseline path
+	baseline, err := loadReport(baselinePath)
 	if err != nil {
-		return fmt.Errorf("read baseline: %w", err)
+		return fmt.Errorf("baseline: %w", err)
 	}
-	baseline, err := ReportFromJSON(string(raw))
+	return compareReports(baseline, current, RegressionThreshold)
+}
+
+// runCompare implements the `compare` subcommand: it grades two
+// already-produced report.json files against each other without
+// re-running any benchmark. This keeps the graded numbers identical to
+// the uploaded artifact (the api-latency / policy-compile / tenant-scale
+// benches are not re-executed, so CPU-bound compile timings can't drift
+// between the artifact and the gate).
+func runCompare(opts *options) error {
+	if opts.current == "" || opts.baseline == "" {
+		return errors.New("compare requires --current and --baseline")
+	}
+	current, err := loadReport(opts.current)
 	if err != nil {
-		return fmt.Errorf("parse baseline: %w", err)
+		return fmt.Errorf("current: %w", err)
 	}
-	regs, err := DetectRegressions(baseline, current, RegressionThreshold)
+	baseline, err := loadReport(opts.baseline)
+	if err != nil {
+		return fmt.Errorf("baseline: %w", err)
+	}
+	return compareReports(baseline, current, opts.threshold)
+}
+
+// loadReport reads and decodes a report.json file.
+func loadReport(path string) (*BusinessBenchmarkReport, error) {
+	raw, err := os.ReadFile(path) //nolint:gosec // operator-supplied report path
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	report, err := ReportFromJSON(string(raw))
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return report, nil
+}
+
+// compareReports runs the regression detector and returns a non-nil
+// error (so the process exits non-zero) when any metric regressed past
+// the threshold.
+func compareReports(baseline, current *BusinessBenchmarkReport, threshold float64) error {
+	regs, err := DetectRegressions(baseline, current, threshold)
 	if err != nil {
 		return fmt.Errorf("compare against baseline: %w", err)
 	}
-	if len(regs) > 0 {
-		var b strings.Builder
-		fmt.Fprintf(&b, "%d metric(s) regressed past %.0f%%:\n", len(regs), RegressionThreshold*100)
-		for _, r := range regs {
-			fmt.Fprintf(&b, "  - %s: %.2f -> %.2f (+%.1f%%)\n",
-				r.Metric, r.Previous, r.Current, r.ChangeFraction*100)
-		}
-		return errors.New(b.String())
+	if len(regs) == 0 {
+		fmt.Fprintf(os.Stderr, "no regression past %.0f%%\n", threshold*100)
+		return nil
 	}
-	return nil
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d metric(s) regressed past %.0f%%:\n", len(regs), threshold*100)
+	for _, r := range regs {
+		fmt.Fprintf(&b, "  - %s: %.2f -> %.2f (+%.1f%%)\n",
+			r.Metric, r.Previous, r.Current, r.ChangeFraction*100)
+	}
+	return errors.New(b.String())
 }
 
 // parseCSVInts parses a comma-separated list of positive integers.

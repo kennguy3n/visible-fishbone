@@ -53,6 +53,11 @@ jobs:
     name: control-plane scale bench
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Scheduled runs are always dry-run (hosted runner has no live deps).
+      # A manual dispatch with dry_run=false drops --dry-run to publish real
+      # numbers against the environment pointed at by SCALE_BENCH_URL/_DSN.
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && '' || '--dry-run' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -63,26 +68,28 @@ jobs:
       - name: build harness
         run: go build ./bench/controlplane/
 
-      # Pure-CPU + dry-run sweep: self-contained, no control plane or
-      # Postgres required. Produces report.json + report.md under results/.
-      - name: run full-suite (dry-run)
+      # Sweep: $DRY_RUN is "--dry-run" for scheduled runs (self-contained, no
+      # control plane or Postgres) and empty for a manual real run. Produces
+      # report.json + report.md under results/.
+      - name: run full-suite
         run: |
           go run ./bench/controlplane full-suite \
-            --dry-run \
+            $DRY_RUN \
             --tenant-tiers 100,1000 \
             --out results \
             --git-sha "${GITHUB_SHA}"
 
-      # Regression gate: compare against the committed baseline when one
-      # exists. The baseline is a prior dry-run report committed to the
-      # repo; a >20% movement on any graded metric fails the job.
+      # Regression gate: grade the report.json just produced (NOT a second
+      # benchmark run) against the committed baseline when one exists, so the
+      # graded numbers match the uploaded artifact exactly. A >threshold
+      # movement on any graded metric fails the job.
       - name: compare against baseline
         run: |
           if [ -f bench/controlplane/testdata/baseline.json ]; then
-            go run ./bench/controlplane full-suite \
-              --dry-run \
-              --tenant-tiers 100,1000 \
-              --baseline bench/controlplane/testdata/baseline.json
+            go run ./bench/controlplane compare \
+              --current results/report.json \
+              --baseline bench/controlplane/testdata/baseline.json \
+              --threshold "${SCALE_BENCH_REGRESSION}"
           else
             echo "no committed baseline (bench/controlplane/testdata/baseline.json); skipping regression gate"
           fi

@@ -257,9 +257,14 @@ type workloadOp struct {
 
 // buildWorkloadOps returns the weighted operation list: 60% reads,
 // 30% writes, 10% heavy. Weighting is by repetition count in the
-// returned slice so a uniform pick reproduces the mix.
-func buildWorkloadOps() []workloadOp {
-	graph, _ := GenerateGraphJSON(50)
+// returned slice so a uniform pick reproduces the mix. It returns an
+// error if the simulation graph can't be generated — sending a nil
+// graph would silently inflate the simulation error rate.
+func buildWorkloadOps() ([]workloadOp, error) {
+	graph, err := GenerateGraphJSON(50)
+	if err != nil {
+		return nil, fmt.Errorf("generate workload graph: %w", err)
+	}
 	reads := []workloadOp{
 		{key: "GET /tenants/{id}", method: http.MethodGet,
 			path: func(t seededTenant) string { return "/api/v1/tenants/" + t.ID }},
@@ -300,7 +305,7 @@ func buildWorkloadOps() []workloadOp {
 	appendN(reads, 60)
 	appendN(writes, 30)
 	appendN(heavy, 10)
-	return ops
+	return ops, nil
 }
 
 // isError reports whether an HTTP status counts as a failed request
@@ -311,8 +316,11 @@ func isError(status int) bool {
 
 // runTier runs the weighted workload against the seeded tenants for the
 // configured duration and folds the result into an APILatencyTier.
-func (c *apiClient) runTier(ctx context.Context, tenantCount int, tenants []seededTenant) APILatencyTier {
-	ops := buildWorkloadOps()
+func (c *apiClient) runTier(ctx context.Context, tenantCount int, tenants []seededTenant) (APILatencyTier, error) {
+	ops, err := buildWorkloadOps()
+	if err != nil {
+		return APILatencyTier{}, err
+	}
 	recorders := make(map[string]*latencyRecorder)
 	var recMu sync.Mutex
 	recorderFor := func(op workloadOp) *latencyRecorder {
@@ -358,7 +366,7 @@ func (c *apiClient) runTier(ctx context.Context, tenantCount int, tenants []seed
 	for _, rec := range recorders {
 		recs = append(recs, rec)
 	}
-	return aggregateTier(tenantCount, int(c.cfg.Duration.Seconds()), c.cfg.Concurrency, elapsed, recs)
+	return aggregateTier(tenantCount, int(c.cfg.Duration.Seconds()), c.cfg.Concurrency, elapsed, recs), nil
 }
 
 // RunAPILatencyBench seeds each tenant tier and runs the workload
@@ -383,7 +391,10 @@ func RunAPILatencyBench(ctx context.Context, cfg *APILatencyConfig) (*APILatency
 		if len(tenants) == 0 {
 			return nil, fmt.Errorf("seeded 0 tenants for tier %d", count)
 		}
-		tier := client.runTier(ctx, count, tenants)
+		tier, err := client.runTier(ctx, count, tenants)
+		if err != nil {
+			return nil, fmt.Errorf("run tier %d: %w", count, err)
+		}
 		section.Tiers = append(section.Tiers, tier)
 	}
 	return section, nil

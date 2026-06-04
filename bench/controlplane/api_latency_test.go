@@ -55,7 +55,10 @@ func TestMintTokenOmitsEmptyClaims(t *testing.T) {
 
 func TestBuildWorkloadOpsMix(t *testing.T) {
 	t.Parallel()
-	ops := buildWorkloadOps()
+	ops, err := buildWorkloadOps()
+	if err != nil {
+		t.Fatalf("buildWorkloadOps: %v", err)
+	}
 	if len(ops) != 100 {
 		t.Fatalf("expected 100 weighted ops, got %d", len(ops))
 	}
@@ -253,7 +256,10 @@ func TestRunTierRecordsAndAggregates(t *testing.T) {
 	cfg := &APILatencyConfig{BaseURL: srv.URL, JWTSecret: "s", Concurrency: 4, Duration: 300 * time.Millisecond}
 	c := newAPIClient(cfg)
 	tenants := []seededTenant{{ID: "tenant-1"}, {ID: "tenant-2"}}
-	tier := c.runTier(context.Background(), 1000, tenants)
+	tier, err := c.runTier(context.Background(), 1000, tenants)
+	if err != nil {
+		t.Fatalf("runTier: %v", err)
+	}
 
 	if tier.TenantCount != 1000 {
 		t.Fatalf("tier.TenantCount = %d, want 1000", tier.TenantCount)
