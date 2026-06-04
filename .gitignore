@@ -22,3 +22,7 @@ coverage.html
 # Go workspace files (use go.mod, not go.work, for this repo)
 go.work
 go.work.sum
+
+# Generated UniFFI bindings (regenerate with
+# crates/sng-mobile-sdk/bindings/generate.sh — do not hand-edit/commit)
+/crates/sng-mobile-sdk/bindings/generated/

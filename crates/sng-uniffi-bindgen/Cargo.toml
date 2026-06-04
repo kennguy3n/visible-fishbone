@@ -1,0 +1,27 @@
+# Copyright 2026 ShieldNet Gateway contributors.
+# SPDX-License-Identifier: LicenseRef-Proprietary
+
+[package]
+name = "sng-uniffi-bindgen"
+description = "ShieldNet Gateway (SNG) foreign-binding generator: a thin wrapper around uniffi's bindgen CLI, pinned to the workspace `uniffi` version so the Swift/Kotlin bindings generated for `sng-mobile-sdk` always match the scaffolding compiled into its cdylib. Run via `cargo run -p sng-uniffi-bindgen -- generate --library …`."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "sng-uniffi-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+# The `cli` feature exposes `uniffi::uniffi_bindgen_main`, the exact
+# generator entry point the upstream `uniffi-bindgen` binary uses.
+# Pinned to the same workspace `uniffi` version as `sng-mobile-sdk`
+# so the generator and the embedded scaffolding can never drift.
+uniffi = { workspace = true, features = ["cli"] }

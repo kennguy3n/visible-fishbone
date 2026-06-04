@@ -56,6 +56,8 @@ members = [
     "crates/sng-mobile-core",
     "crates/sng-mobile-pal-ios",
     "crates/sng-mobile-pal-android",
+    "crates/sng-mobile-sdk",
+    "crates/sng-uniffi-bindgen",
 ]
 resolver = "3"
 
@@ -215,6 +217,18 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # posture the bans block enforces.
 jsonwebtoken = "9"
 
+# UniFFI foreign-function-interface generator (sng-mobile-sdk). The
+# mobile SDK uses the procedural-macro flavour (no UDL), so the
+# binding metadata is embedded into the compiled `sng_mobile_sdk`
+# cdylib and the `sng-uniffi-bindgen` binary reads it back via
+# `generate --library`. Pinned here so the runtime scaffolding
+# (`sng-mobile-sdk`, the `tokio` feature) and the generator
+# (`sng-uniffi-bindgen`, the `cli` feature) can never drift apart.
+# All of UniFFI's dependency subtree is MIT/Apache-2.0 (cargo-deny
+# licences gate stays green); it pulls no OpenSSL / native-tls /
+# async-std (the deny.toml bans stay satisfied).
+uniffi = { version = "0.31" }
+
 # Secret-buffer zeroization. The mobile agent core (`sng-mobile-core`)
 # holds short-lived OIDC tokens and Ed25519 enrolment key material in
 # memory; `zeroize` wipes those buffers on drop so a process-memory
@@ -281,6 +295,7 @@ sng-ha = { path = "crates/sng-ha" }
 sng-mobile-core = { path = "crates/sng-mobile-core" }
 sng-mobile-pal-ios = { path = "crates/sng-mobile-pal-ios" }
 sng-mobile-pal-android = { path = "crates/sng-mobile-pal-android" }
+sng-mobile-sdk = { path = "crates/sng-mobile-sdk" }
 
 # Workspace-wide lints. Set at the workspace level so a new crate
 # added in a later phase automatically inherits the same posture

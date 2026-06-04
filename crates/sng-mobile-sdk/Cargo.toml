@@ -1,0 +1,63 @@
+# Copyright 2026 ShieldNet Gateway contributors.
+# SPDX-License-Identifier: LicenseRef-Proprietary
+
+[package]
+name = "sng-mobile-sdk"
+description = "ShieldNet Gateway (SNG) mobile SDK: the UniFFI binding layer that composes sng-mobile-core + the iOS/Android PALs + sng-oidc into a single foreign-function interface an iOS (Swift) or Android (Kotlin) app links against. Real Apple/Android backings live behind cfg(target_os = \"ios\"/\"android\"); a typed-Unsupported host fallback keeps the crate compiling and testable on the Linux CI host."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# UniFFI consumers link a `cdylib` (Android `.so` / iOS dynamic
+# framework) at runtime and a `staticlib` when an `.xcframework` /
+# static archive is cross-built. `rlib` is kept so the crate is a
+# normal workspace member that `cargo build`/`cargo test` exercise on
+# the Linux CI host.
+crate-type = ["cdylib", "staticlib", "rlib"]
+name = "sng_mobile_sdk"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The mobile pieces this SDK composes (glue + FFI only — no agent
+# behaviour is reimplemented here).
+sng-mobile-core = { workspace = true }
+sng-oidc = { workspace = true }
+# Trust-anchor seeding for the policy puller + the canonical
+# id/key-id newtypes parsed out of the FFI config record.
+sng-comms = { workspace = true }
+sng-core = { workspace = true }
+
+# UniFFI proc-macro mode (no UDL). The `tokio` feature routes the
+# exported `async fn`s through a Tokio runtime context so the agent's
+# Tokio-based futures (timers, rustls/h2 IO) drive correctly across
+# the FFI boundary. The bindgen CLI lives in the sibling
+# `sng-uniffi-bindgen` crate (the `cli` feature), so this crate pulls
+# none of the generator machinery into the shipped cdylib.
+uniffi = { workspace = true, features = ["tokio"] }
+
+async-trait = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+
+# Real Apple-platform backings; only enter the build graph on iOS.
+[target.'cfg(target_os = "ios")'.dependencies]
+sng-mobile-pal-ios = { workspace = true }
+
+# Real Android backings; only enter the build graph on Android.
+[target.'cfg(target_os = "android")'.dependencies]
+sng-mobile-pal-android = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+pretty_assertions = { workspace = true }

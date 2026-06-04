@@ -161,6 +161,12 @@ and [`sn360-desktop-agent`](https://github.com/kennguy3n/sn360-desktop-agent).
 | [`sng-ips`](./crates/sng-ips) | lib | Suricata wrapper — rule sync, alert normalization, supervisor + signal lifecycle |
 | [`sng-fw`](./crates/sng-fw) | lib | Firewall — L3-L7 policy, NAT, app awareness, deterministic nftables rule set |
 | [`sng-updater`](./crates/sng-updater) | lib | Self-update with signed manifests (Ed25519), dual-bank image install, rollback |
+| [`sng-mobile-core`](./crates/sng-mobile-core) | lib | Platform-agnostic mobile agent brain — lifecycle, enrolment, posture, telemetry, ZTNA; pure Rust, driven through a UniFFI binding layer |
+| [`sng-oidc`](./crates/sng-oidc) | lib | Pure-Rust OIDC client (discovery, PKCE, token exchange, ID-token validation) + the `AuthSurface` browser-presentation trait |
+| [`sng-mobile-pal-ios`](./crates/sng-mobile-pal-ios) | lib | iOS Platform Abstraction Layer — Keychain key store, posture, `NEPacketTunnelProvider`, `ASWebAuthenticationSession`; real code under `cfg(target_os = "ios")`, typed-Unsupported host fallback otherwise |
+| [`sng-mobile-pal-android`](./crates/sng-mobile-pal-android) | lib | Android Platform Abstraction Layer — Keystore, posture, VpnService, Custom Tabs; real code under `cfg(target_os = "android")`, typed-Unsupported host fallback otherwise |
+| [`sng-mobile-sdk`](./crates/sng-mobile-sdk) | lib | UniFFI binding layer composing mobile-core + the iOS/Android PALs + sng-oidc into a single Swift/Kotlin FFI (`MobileSdk`); see its [README](./crates/sng-mobile-sdk) for binding generation + packaging |
+| [`sng-uniffi-bindgen`](./crates/sng-uniffi-bindgen) | bin | Workspace `uniffi-bindgen` wrapper used to generate the `sng-mobile-sdk` Swift/Kotlin bindings |
 
 Every crate is `#![forbid(unsafe_code)]` at the workspace level
 (per-OS PAL modules lift the ban locally with a documented
