@@ -678,10 +678,14 @@ func buildRouter(
 		OIDC:             oidcHandler,
 		Mobile:           handler.NewMobileHandler(identitySvc),
 		APIKeyLookup:     apiKeySvc,
-		Health:           health,
-		OpenAPISpec:      handler.NewOpenAPIHandler(),
-		OpsHealth:        handler.NewOpsHealthHandler(opsHealthRepo, logger),
-		BulkDevice:       handler.NewBulkDeviceHandler(bulkDeviceSvc, deviceRepo, logger),
+		// Device kill-switch for stateless mobile session JWTs: a
+		// token bound to a suspended/deleted device is refused by the
+		// auth middleware on every endpoint, not just self-service.
+		MobileDeviceStatus: handler.NewMobileDeviceStatusResolver(identitySvc),
+		Health:             health,
+		OpenAPISpec:        handler.NewOpenAPIHandler(),
+		OpsHealth:          handler.NewOpsHealthHandler(opsHealthRepo, logger),
+		BulkDevice:         handler.NewBulkDeviceHandler(bulkDeviceSvc, deviceRepo, logger),
 	})
 	// Return the AppRegistry handler so the caller can attach the
 	// telemetry stats querier post-construction — the ClickHouse

@@ -15,7 +15,10 @@ package handler
 // self-enroll or self-report for its own device.
 
 import (
+	"context"
 	"net/http"
+
+	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -32,6 +35,39 @@ type MobileHandler struct {
 // NewMobileHandler wires the handler.
 func NewMobileHandler(identitySvc *identity.Service) *MobileHandler {
 	return &MobileHandler{identity: identitySvc}
+}
+
+// mobileDeviceStatusResolver adapts identity.Service to
+// middleware.MobileDeviceStatusResolver so the auth middleware can
+// enforce the device kill-switch on EVERY endpoint a mobile session
+// token can reach (not just the self-service ones). It lives in the
+// handler package, which already depends on both identity and
+// middleware, keeping the identity service free of any middleware
+// import.
+type mobileDeviceStatusResolver struct {
+	identity *identity.Service
+}
+
+// NewMobileDeviceStatusResolver builds the resolver wired into
+// middleware.WithMobileDeviceStatus.
+func NewMobileDeviceStatusResolver(identitySvc *identity.Service) middleware.MobileDeviceStatusResolver {
+	return mobileDeviceStatusResolver{identity: identitySvc}
+}
+
+// MobileSessionAllowed maps the service-layer revocation decision onto
+// the middleware contract: a revoked (suspended/deleted/absent) device
+// yields middleware.ErrMobileDeviceRevoked (→ 403); an infrastructure
+// error is returned verbatim so the middleware can apply its
+// fail-open policy.
+func (a mobileDeviceStatusResolver) MobileSessionAllowed(ctx context.Context, tenantID uuid.UUID, deviceKey string) error {
+	revoked, err := a.identity.MobileDeviceRevoked(ctx, tenantID, deviceKey)
+	if err != nil {
+		return err
+	}
+	if revoked {
+		return middleware.ErrMobileDeviceRevoked
+	}
+	return nil
 }
 
 // Register attaches the authenticated, tenant-scoped mobile routes.

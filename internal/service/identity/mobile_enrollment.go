@@ -347,6 +347,37 @@ func mobileDeviceDisabled(status repository.DeviceStatus) (bool, repository.Devi
 	}
 }
 
+// MobileDeviceRevoked reports whether a mobile session bound to
+// deviceKey under tenantID must be refused because the device it is
+// bound to is no longer usable. It is the live-status check behind the
+// auth-middleware kill-switch (handler.NewMobileDeviceStatusResolver
+// adapts it to middleware.MobileDeviceStatusResolver), extending the
+// suspend/delete control from just the self-service endpoints to every
+// endpoint a mobile token can reach.
+//
+// Returns (true, nil) when the device has been administratively
+// suspended/deleted OR no longer exists (a token bound to a
+// hard-deleted device must stop working). Returns (false, nil) when
+// the device is active and the session may proceed. Returns
+// (false, err) on an infrastructure failure so the caller can decide
+// its fail-open/closed policy; a partially-identified session (missing
+// tenant or key) is treated as not-revoked here and left to the
+// endpoint's own validation.
+func (svc *Service) MobileDeviceRevoked(ctx context.Context, tenantID uuid.UUID, deviceKey string) (bool, error) {
+	if tenantID == uuid.Nil || deviceKey == "" {
+		return false, nil
+	}
+	dev, err := svc.devices.GetByPublicKey(ctx, tenantID, deviceKey)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return true, nil
+		}
+		return false, err
+	}
+	disabled, _ := mobileDeviceDisabled(dev.Status)
+	return disabled, nil
+}
+
 // validateMobilePosture enforces platform/signal coherence and
 // timestamp sanity, returning a normalised posture.
 //

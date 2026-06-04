@@ -477,3 +477,55 @@ func TestReportMobilePosture_AdvancesUpdatedAt(t *testing.T) {
 			reported.UpdatedAt, stored.UpdatedAt)
 	}
 }
+
+// TestMobileDeviceRevoked covers the live-status check behind the
+// auth-middleware kill-switch: active devices may proceed, while
+// suspended/deleted/absent ones are reported revoked.
+func TestMobileDeviceRevoked(t *testing.T) {
+	t.Parallel()
+	svc, store, tenantID := newSvc(t)
+	ctx := context.Background()
+	devices := memory.NewDeviceRepository(store)
+	key := mobileKey(t)
+
+	res, err := svc.EnrollMobileDevice(ctx, tenantID, identity.MobileEnrollInput{
+		DeviceKey:   key,
+		Platform:    repository.DevicePlatformAndroid,
+		OIDCSubject: "google|abc",
+	})
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+
+	// Active device: not revoked.
+	if revoked, err := svc.MobileDeviceRevoked(ctx, tenantID, key); err != nil || revoked {
+		t.Fatalf("active device: revoked=%v err=%v, want false/nil", revoked, err)
+	}
+
+	// Unknown key (e.g. hard-deleted device): revoked.
+	if revoked, err := svc.MobileDeviceRevoked(ctx, tenantID, mobileKey(t)); err != nil || !revoked {
+		t.Fatalf("unknown key: revoked=%v err=%v, want true/nil", revoked, err)
+	}
+
+	// Empty/zero identifiers are left for the endpoint's own
+	// validation, never treated as revoked.
+	if revoked, err := svc.MobileDeviceRevoked(ctx, tenantID, ""); err != nil || revoked {
+		t.Fatalf("empty key: revoked=%v err=%v, want false/nil", revoked, err)
+	}
+	if revoked, err := svc.MobileDeviceRevoked(ctx, uuid.Nil, key); err != nil || revoked {
+		t.Fatalf("nil tenant: revoked=%v err=%v, want false/nil", revoked, err)
+	}
+
+	for _, status := range []repository.DeviceStatus{
+		repository.DeviceStatusSuspended,
+		repository.DeviceStatusDeleted,
+	} {
+		if _, err := devices.UpdateStatus(ctx, tenantID, res.Device.ID, status); err != nil {
+			t.Fatalf("set status %s: %v", status, err)
+		}
+		revoked, err := svc.MobileDeviceRevoked(ctx, tenantID, key)
+		if err != nil || !revoked {
+			t.Errorf("status %s: revoked=%v err=%v, want true/nil", status, revoked, err)
+		}
+	}
+}
