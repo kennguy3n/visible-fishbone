@@ -388,9 +388,22 @@ func (s *pgStore) RecordHealth(ctx context.Context, h Health) error {
 		h.ReportedAt = time.Now().UTC()
 	}
 	return s.onPrimary(ctx, func(q pgxQuerier) error {
+		// Upsert on the (pop_id, reported_at) primary key: two beacons
+		// that land on the same microsecond (e.g. after future-skew
+		// clamping to server time) would otherwise collide and the
+		// second would be rejected with ErrConflict, dropping it from
+		// both the time-series AND the in-memory registry (IngestHealth
+		// only folds on RecordHealth success). Treating an exact-key
+		// collision as latest-wins keeps the beacon instead of silently
+		// losing it, matching the registry's own latest-wins fold.
 		const sql = `
 			INSERT INTO pop_health (pop_id, reported_at, cpu_pct, memory_pct, active_connections, bandwidth_mbps)
-			VALUES ($1::uuid, $2, $3, $4, $5, $6)`
+			VALUES ($1::uuid, $2, $3, $4, $5, $6)
+			ON CONFLICT (pop_id, reported_at) DO UPDATE SET
+				cpu_pct = EXCLUDED.cpu_pct,
+				memory_pct = EXCLUDED.memory_pct,
+				active_connections = EXCLUDED.active_connections,
+				bandwidth_mbps = EXCLUDED.bandwidth_mbps`
 		_, err := q.Exec(ctx, sql, h.PoPID, h.ReportedAt, h.CPUPct, h.MemoryPct, h.ActiveConnections, h.BandwidthMbps)
 		if err != nil {
 			return classifyWrite(err, "insert pop_health")

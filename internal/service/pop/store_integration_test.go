@@ -252,6 +252,27 @@ func TestStore_HealthBeacons(t *testing.T) {
 	if _, err := store.LatestHealth(ctx, uuid.New()); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("LatestHealth(unknown) err = %v, want ErrNotFound", err)
 	}
+
+	// Two beacons on the exact same (pop_id, reported_at) must not
+	// collide on the primary key: the second is an idempotent
+	// latest-wins upsert, not an ErrConflict that would drop the
+	// beacon from both the time-series and the in-memory registry.
+	sameTS := time.Now().Add(-500 * time.Millisecond).UTC()
+	first := pop.Health{PoPID: p.ID, ReportedAt: sameTS, CPUPct: 11, MemoryPct: 22, ActiveConnections: 100, BandwidthMbps: 2}
+	second := pop.Health{PoPID: p.ID, ReportedAt: sameTS, CPUPct: 33, MemoryPct: 44, ActiveConnections: 250, BandwidthMbps: 9}
+	if err := store.RecordHealth(ctx, first); err != nil {
+		t.Fatalf("RecordHealth first same-ts: %v", err)
+	}
+	if err := store.RecordHealth(ctx, second); err != nil {
+		t.Fatalf("RecordHealth second same-ts must upsert, not conflict: %v", err)
+	}
+	latest, err = store.LatestHealth(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("LatestHealth after upsert: %v", err)
+	}
+	if latest.ActiveConnections != 250 {
+		t.Fatalf("LatestHealth.ActiveConnections = %d, want 250 (upserted beacon won)", latest.ActiveConnections)
+	}
 }
 
 // TestStore_AssignmentRLSIsolation is the load-bearing security
