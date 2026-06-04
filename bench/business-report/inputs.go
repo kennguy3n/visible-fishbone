@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -221,7 +222,9 @@ type TelemetryMetric struct {
 // benchmark name for stable output.
 func loadTelemetry(spec string) ([]*TelemetryReport, error) {
 	var paths []string
-	if info, err := os.Stat(spec); err == nil && info.IsDir() {
+	info, statErr := os.Stat(spec)
+	switch {
+	case statErr == nil && info.IsDir():
 		entries, err := os.ReadDir(spec)
 		if err != nil {
 			return nil, err
@@ -231,7 +234,11 @@ func loadTelemetry(spec string) ([]*TelemetryReport, error) {
 				paths = append(paths, filepath.Join(spec, e.Name()))
 			}
 		}
-	} else {
+	case statErr != nil && !strings.Contains(spec, ",") && !errors.Is(statErr, os.ErrNotExist):
+		// A single concrete path that exists but cannot be stat'd (e.g.
+		// permission denied) is a real error, not a comma-separated list.
+		return nil, statErr
+	default:
 		for _, p := range strings.Split(spec, ",") {
 			if p = strings.TrimSpace(p); p != "" {
 				paths = append(paths, p)

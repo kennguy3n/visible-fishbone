@@ -159,7 +159,9 @@ func (r *BusinessReport) verdict(v string) string {
 }
 
 func num(f float64) string {
-	if f == float64(int64(f)) {
+	// Only take the integer shortcut when f is safely within int64 range;
+	// converting an out-of-range float64 to int64 is implementation-defined.
+	if f > -1e15 && f < 1e15 && f == float64(int64(f)) {
 		return strconv.FormatInt(int64(f), 10)
 	}
 	return strconv.FormatFloat(f, 'f', 2, 64)

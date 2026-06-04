@@ -56,6 +56,57 @@ func TestTableCells(t *testing.T) {
 	}
 }
 
+func TestNumLargeValueNoOverflow(t *testing.T) {
+	// Beyond int64 range: must fall back to float formatting, not take the
+	// integer shortcut (which would be implementation-defined).
+	got := num(1e19)
+	if !strings.Contains(got, "e") && len(got) < 18 {
+		t.Errorf("num(1e19) = %q, expected float formatting", got)
+	}
+	if num(8) != "8" || num(2.5) != "2.50" {
+		t.Errorf("num regressed on normal values: %q %q", num(8), num(2.5))
+	}
+}
+
+func costReport(costPerUser float64) *TelemetryReport {
+	return &TelemetryReport{
+		Benchmark: "cost-model",
+		Sections: []TelemetrySection{{
+			Title:   "Cost",
+			Metrics: []TelemetryMetric{{Name: "Infra cost / user / mo", Actual: costPerUser}},
+		}},
+	}
+}
+
+func TestCostEnvelopeStrengthAndGap(t *testing.T) {
+	theo := &Theoretical{UnitEconomics: UnitEconomics{OverallEnvelope: []float64{0.30, 1.20}}}
+
+	inside := &BusinessReport{Theoretical: theo, Telemetry: []*TelemetryReport{costReport(0.50)}}
+	if !containsSubstr(inside.strengths(), "sits inside") {
+		t.Error("cost inside envelope should be reported as a strength")
+	}
+	if containsSubstr(inside.gaps(), "exceeds") {
+		t.Error("cost inside envelope should not be flagged as a gap")
+	}
+
+	over := &BusinessReport{Theoretical: theo, Telemetry: []*TelemetryReport{costReport(5.00)}}
+	if containsSubstr(over.strengths(), "sits inside") {
+		t.Error("cost above envelope must NOT be claimed as inside (regression of review bug 0001)")
+	}
+	if !containsSubstr(over.gaps(), "exceeds") {
+		t.Error("cost above envelope should be flagged as a gap")
+	}
+}
+
+func containsSubstr(items []string, want string) bool {
+	for _, s := range items {
+		if strings.Contains(s, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestParseNs(t *testing.T) {
 	for _, tc := range []struct {
 		in   string

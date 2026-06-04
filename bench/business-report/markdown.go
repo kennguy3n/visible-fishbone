@@ -77,7 +77,7 @@ func (r *BusinessReport) strengths() []string {
 				worst = c.Ns
 			}
 		}
-		if r.Theoretical != nil && r.Theoretical.PolicyEval.TargetNs > 0 && worst < r.Theoretical.PolicyEval.TargetNs {
+		if r.Theoretical != nil && r.Theoretical.PolicyEval.TargetNs > 0 && worst <= r.Theoretical.PolicyEval.TargetNs {
 			out = append(out, fmt.Sprintf("Policy evaluation is comfortably sub-microsecond on every benchmarked shape (worst case %.0f ns vs %.0f ns target) — real Criterion measurements.", worst, r.Theoretical.PolicyEval.TargetNs))
 		}
 	}
@@ -91,7 +91,8 @@ func (r *BusinessReport) strengths() []string {
 			out = append(out, fmt.Sprintf("Test suite is fully green across all layers (%d tests, 0 failures).", run))
 		}
 	}
-	if c := r.telemetryCostPerUser(); c != nil && r.Theoretical != nil && len(r.Theoretical.UnitEconomics.OverallEnvelope) == 2 {
+	if c := r.telemetryCostPerUser(); c != nil && r.Theoretical != nil && len(r.Theoretical.UnitEconomics.OverallEnvelope) == 2 &&
+		*c >= r.Theoretical.UnitEconomics.OverallEnvelope[0] && *c <= r.Theoretical.UnitEconomics.OverallEnvelope[1] {
 		out = append(out, fmt.Sprintf("Modeled telemetry-pipeline infra cost ($%.2f/user/mo) sits inside the $%.2f–%.2f/user/mo design envelope.", *c, r.Theoretical.UnitEconomics.OverallEnvelope[0], r.Theoretical.UnitEconomics.OverallEnvelope[1]))
 	}
 	if len(out) == 0 {
@@ -111,6 +112,9 @@ func (r *BusinessReport) gaps() []string {
 	}
 	if r.ControlPlane == nil {
 		out = append(out, "No control-plane report supplied — Section 2 is empty.")
+	}
+	if c := r.telemetryCostPerUser(); c != nil && r.Theoretical != nil && len(r.Theoretical.UnitEconomics.OverallEnvelope) == 2 && *c > r.Theoretical.UnitEconomics.OverallEnvelope[1] {
+		out = append(out, fmt.Sprintf("Modeled telemetry-pipeline infra cost ($%.2f/user/mo) exceeds the $%.2f–%.2f/user/mo design envelope upper bound.", *c, r.Theoretical.UnitEconomics.OverallEnvelope[0], r.Theoretical.UnitEconomics.OverallEnvelope[1]))
 	}
 	return out
 }
@@ -136,10 +140,16 @@ func (r *BusinessReport) writeEdge(b *strings.Builder) {
 				continue
 			}
 			forti, pa := equivFor(rep)
-			v := r.verdict(grade(rep.Throughput.MaxGbps, sku.Profile.TargetGbps, true))
+			// Grade against the per-mode target carried by the report row; fall
+			// back to the SKU-level target when the upstream report omits it.
+			target := rep.TargetGbps
+			if target <= 0 {
+				target = sku.Profile.TargetGbps
+			}
+			v := r.verdict(grade(rep.Throughput.MaxGbps, target, true))
 			fmt.Fprintf(b, "| %s (%dc/%dG) | %s | %s | %s | %s | %s | %s |\n",
 				sku.Profile.Name, sku.Profile.VCPUs, sku.Profile.RAMGB, insp,
-				num(sku.Profile.TargetGbps), num(rep.Throughput.MaxGbps),
+				num(target), num(rep.Throughput.MaxGbps),
 				gbpsOrDash(forti), gbpsOrDash(pa), v)
 		}
 	}
@@ -495,7 +505,7 @@ func policyEvalStatus(r *BusinessReport) string {
 		return "measured"
 	}
 	for _, c := range rows {
-		if c.Ns >= r.Theoretical.PolicyEval.TargetNs {
+		if c.Ns > r.Theoretical.PolicyEval.TargetNs {
 			return "WARN/FAIL"
 		}
 	}
