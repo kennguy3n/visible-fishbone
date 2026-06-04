@@ -502,9 +502,13 @@ func TestMobileDeviceRevoked(t *testing.T) {
 		t.Fatalf("active device: revoked=%v err=%v, want false/nil", revoked, err)
 	}
 
-	// Unknown key (e.g. hard-deleted device): revoked.
-	if revoked, err := svc.MobileDeviceRevoked(ctx, tenantID, mobileKey(t)); err != nil || !revoked {
-		t.Fatalf("unknown key: revoked=%v err=%v, want true/nil", revoked, err)
+	// Unknown key (device not yet enrolled): NOT revoked — otherwise
+	// the middleware kill-switch would 403 first-time enrolment before
+	// the request reaches the enrol handler. Suspend/delete are soft
+	// transitions that keep the row, so a genuinely disabled device is
+	// still resolved and caught by status below.
+	if revoked, err := svc.MobileDeviceRevoked(ctx, tenantID, mobileKey(t)); err != nil || revoked {
+		t.Fatalf("unknown key: revoked=%v err=%v, want false/nil", revoked, err)
 	}
 
 	// Empty/zero identifiers are left for the endpoint's own

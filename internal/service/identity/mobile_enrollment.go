@@ -349,20 +349,26 @@ func mobileDeviceDisabled(status repository.DeviceStatus) (bool, repository.Devi
 
 // MobileDeviceRevoked reports whether a mobile session bound to
 // deviceKey under tenantID must be refused because the device it is
-// bound to is no longer usable. It is the live-status check behind the
-// auth-middleware kill-switch (handler.NewMobileDeviceStatusResolver
-// adapts it to middleware.MobileDeviceStatusResolver), extending the
-// suspend/delete control from just the self-service endpoints to every
-// endpoint a mobile token can reach.
+// bound to has been administratively disabled. It is the live-status
+// check behind the auth-middleware kill-switch
+// (handler.NewMobileDeviceStatusResolver adapts it to
+// middleware.MobileDeviceStatusResolver), extending the suspend/delete
+// control from just the self-service endpoints to every endpoint a
+// mobile token can reach.
 //
-// Returns (true, nil) when the device has been administratively
-// suspended/deleted OR no longer exists (a token bound to a
-// hard-deleted device must stop working). Returns (false, nil) when
-// the device is active and the session may proceed. Returns
-// (false, err) on an infrastructure failure so the caller can decide
-// its fail-open/closed policy; a partially-identified session (missing
-// tenant or key) is treated as not-revoked here and left to the
-// endpoint's own validation.
+// Returns (true, nil) when the device exists but has been suspended or
+// soft-deleted. Returns (false, nil) when the device is active OR not
+// yet enrolled: suspend/delete are soft transitions that leave the row
+// in place (see UpdateStatus), so a disabled device is always resolved
+// and caught by status — an ErrNotFound therefore means "no device for
+// this key yet", which is precisely the state of a valid session
+// calling the enrolment endpoint for the first time. Treating that as
+// revoked would 403 first-time enrolment in the middleware before the
+// request ever reached the handler, so a not-yet-enrolled key must be
+// allowed through (the enrolment endpoint then creates the device).
+// Returns (false, err) on an infrastructure failure so the caller can
+// apply its fail-open/closed policy; a partially-identified session
+// (missing tenant or key) is left to the endpoint's own validation.
 func (svc *Service) MobileDeviceRevoked(ctx context.Context, tenantID uuid.UUID, deviceKey string) (bool, error) {
 	if tenantID == uuid.Nil || deviceKey == "" {
 		return false, nil
@@ -370,7 +376,7 @@ func (svc *Service) MobileDeviceRevoked(ctx context.Context, tenantID uuid.UUID,
 	dev, err := svc.devices.GetByPublicKey(ctx, tenantID, deviceKey)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
-			return true, nil
+			return false, nil
 		}
 		return false, err
 	}
