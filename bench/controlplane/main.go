@@ -34,7 +34,8 @@ Common flags:
   --dry-run                Synthesise the workload (no live control plane / Postgres). Self-testable on CI.
   --out DIR                Directory to write report.json + report.md (default: stdout only)
   --git-sha SHA            Record the commit under test (default: $GIT_SHA)
-  --baseline FILE          Compare against a prior report.json and fail on >20% regression
+  --baseline FILE          Compare against a prior report.json and fail on regression
+  --threshold F            Fractional regression threshold for --baseline (default: 0.20)
 
 compare flags:
   --current FILE           Freshly produced report.json to grade (required)
@@ -180,7 +181,7 @@ func run(ctx context.Context, mode string, opts *options) error {
 	if err := emit(report, opts.out); err != nil {
 		return err
 	}
-	return checkRegression(report, opts.baseline)
+	return checkRegression(report, opts.baseline, opts.threshold)
 }
 
 func buildAPILatency(ctx context.Context, opts *options) (*APILatencySection, error) {
@@ -251,8 +252,10 @@ func emit(report *BusinessBenchmarkReport, outDir string) error {
 
 // checkRegression loads a baseline report (when provided) and compares
 // the in-memory current report against it, failing on a >threshold
-// regression. Used by the benchmark subcommands via the --baseline flag.
-func checkRegression(current *BusinessBenchmarkReport, baselinePath string) error {
+// regression. Used by the benchmark subcommands via the --baseline flag;
+// threshold is --threshold (default RegressionThreshold) so the inline
+// gate honours the same flag the compare subcommand does.
+func checkRegression(current *BusinessBenchmarkReport, baselinePath string, threshold float64) error {
 	if baselinePath == "" {
 		return nil
 	}
@@ -260,7 +263,7 @@ func checkRegression(current *BusinessBenchmarkReport, baselinePath string) erro
 	if err != nil {
 		return fmt.Errorf("baseline: %w", err)
 	}
-	return compareReports(baseline, current, RegressionThreshold)
+	return compareReports(baseline, current, threshold)
 }
 
 // runCompare implements the `compare` subcommand: it grades two

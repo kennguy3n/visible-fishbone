@@ -69,9 +69,10 @@ jobs:
       # numbers against the environment in SCALE_BENCH_URL/_DSN.
       - name: resolve dry-run flag
         env:
+          EVENT_NAME: ${{ github.event_name }}
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${DRY_RUN_INPUT}" = "false" ]; then
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ] && [ "${DRY_RUN_INPUT}" = "false" ]; then
             echo "DRY_RUN=" >> "$GITHUB_ENV"
           else
             echo "DRY_RUN=--dry-run" >> "$GITHUB_ENV"
