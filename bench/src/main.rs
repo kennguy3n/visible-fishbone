@@ -784,8 +784,9 @@ fn write_report(out_dir: &Path, report: &BenchmarkReport) -> Result<PathBuf, Ben
     Ok(path)
 }
 
-/// Sweep every profile across all modes, packet sizes, and inspection
-/// depths, then assemble and persist one consolidated business report.
+/// Sweep every profile: throughput and latency across all packet sizes
+/// and inspection depths, plus one concurrent-flows run per profile, then
+/// assemble and persist one consolidated business report.
 fn run_business_report(args: &BusinessReportArgs) -> Result<std::process::ExitCode, BenchError> {
     if args.duration_ms == 0 {
         return Err(BenchError::Config("duration-ms must be > 0".to_string()));
@@ -803,16 +804,17 @@ fn run_business_report(args: &BusinessReportArgs) -> Result<std::process::ExitCo
         )));
     }
     let duration = Duration::from_millis(args.duration_ms);
-    let modes = [
-        BenchMode::Throughput,
-        BenchMode::Latency,
-        BenchMode::ConcurrentFlows,
-    ];
+    // Throughput and latency vary with frame size and inspection depth, so
+    // they sweep every cell. Concurrent-flows is a SYN flow-table-capacity
+    // stress whose result is independent of packet size and depth, so it
+    // runs once per profile (see below) rather than redundantly per cell.
+    let swept_modes = [BenchMode::Throughput, BenchMode::Latency];
 
     let mut skus = Vec::with_capacity(profiles.len());
     for profile in profiles {
-        let mut reports =
-            Vec::with_capacity(args.packet_sizes.len() * InspectionDepth::ALL.len() * modes.len());
+        let mut reports = Vec::with_capacity(
+            args.packet_sizes.len() * InspectionDepth::ALL.len() * swept_modes.len() + 1,
+        );
         for &packet_size in &args.packet_sizes {
             for depth in InspectionDepth::ALL {
                 let spec = RunSpec {
@@ -828,11 +830,28 @@ fn run_business_report(args: &BusinessReportArgs) -> Result<std::process::ExitCo
                     dry_run: args.dry_run,
                     git_sha: args.git_sha.clone(),
                 };
-                for mode in modes {
+                for mode in swept_modes {
                     reports.push(run_single(mode, &spec, &profile)?);
                 }
             }
         }
+        // One concurrent-flows run per profile at a representative point
+        // (smallest frame, no-inspect): the SYN stress saturates the flow
+        // table regardless of frame size or inspection depth.
+        let cf_spec = RunSpec {
+            interface: args.interface.clone(),
+            packet_size: args.packet_sizes.iter().copied().min().unwrap_or(64),
+            policy_rules: args.policy_rules,
+            inspection: Inspection::from_depth(InspectionDepth::NoInspect),
+            ip_version: args.ip_version,
+            l4: args.l4,
+            target_pps: args.target_pps,
+            seed: args.seed,
+            duration,
+            dry_run: args.dry_run,
+            git_sha: args.git_sha.clone(),
+        };
+        reports.push(run_single(BenchMode::ConcurrentFlows, &cf_spec, &profile)?);
         skus.push(BusinessSku::new(profile, reports));
     }
 
