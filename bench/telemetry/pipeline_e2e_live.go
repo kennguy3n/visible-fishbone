@@ -134,13 +134,14 @@ func liveFullPipeline(opts Options) (*Report, error) {
 		return nil, fmt.Errorf("stop cold writer: %w", err)
 	}
 	cs := cold.Stats()
-	// The cold path only archives events that survive dedup, across both
-	// the throughput and latency phases. Dividing by e2eBulkEvents would
-	// overcount the denominator by the ~DupRate duplicates the consumer
-	// dropped and undercount it by the latency probes, so derive the real
-	// archived count from the service metrics instead.
+	// The cold path archives an event only after it survives dedup and a
+	// successful hot write — that is exactly what the service's Enriched
+	// counter tracks, across both the throughput and latency phases.
+	// Dividing by e2eBulkEvents would overcount by the ~DupRate
+	// duplicates the consumer dropped and undercount by the latency
+	// probes, so use the real archived count from the service metrics.
 	final := svc.MetricsSnapshot()
-	archived := final.Received - final.Deduplicated
+	archived := final.Enriched
 	var avgObj, bytesPerEvent float64
 	if cs.Uploaded > 0 {
 		avgObj = float64(cs.UploadBytes) / float64(cs.Uploaded)
