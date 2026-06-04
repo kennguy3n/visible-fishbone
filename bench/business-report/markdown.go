@@ -226,12 +226,12 @@ func (r *BusinessReport) writeControlPlane(b *strings.Builder) {
 		target := cp.Theoretical.APIP99Ms
 		b.WriteString("### API latency by tenant tier\n\n")
 		fmt.Fprintf(b, "| Metric | Target | @100 | @1000 | @5000 | Verdict |\n|---|---:|---:|---:|---:|---|\n")
-		p99 := func(n int) string { return msOrDash(tiers, n, func(t cpAPITier) float64 { return t.OverallP99Ms }) }
+		p99 := func(n int) string { return tierCell(tiers, n, func(t cpAPITier) float64 { return t.OverallP99Ms }) }
 		rps := func(n int) string {
-			return rawOrDash(tiers, n, func(t cpAPITier) float64 { return t.OverallRequestsPerSec })
+			return tierCell(tiers, n, func(t cpAPITier) float64 { return t.OverallRequestsPerSec })
 		}
 		errp := func(n int) string {
-			return rawOrDash(tiers, n, func(t cpAPITier) float64 { return t.ErrorRate * 100 })
+			return tierCell(tiers, n, func(t cpAPITier) float64 { return t.ErrorRate * 100 })
 		}
 		var verdict string
 		if t, ok := tiers[5000]; ok {
@@ -271,14 +271,9 @@ func (r *BusinessReport) writeControlPlane(b *strings.Builder) {
 		num(cp.Competitor.ZscalerTenantCRUDP99Ms), num(cp.Competitor.PaloAltoPolicyCompileP99Ms))
 }
 
-func msOrDash(tiers map[int]cpAPITier, n int, get func(cpAPITier) float64) string {
-	if t, ok := tiers[n]; ok {
-		return num(get(t))
-	}
-	return "—"
-}
-
-func rawOrDash(tiers map[int]cpAPITier, n int, get func(cpAPITier) float64) string {
+// tierCell formats a per-tenant-tier metric, returning an em dash when the tier
+// was not measured.
+func tierCell(tiers map[int]cpAPITier, n int, get func(cpAPITier) float64) string {
 	if t, ok := tiers[n]; ok {
 		return num(get(t))
 	}
