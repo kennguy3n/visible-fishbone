@@ -40,12 +40,18 @@ type RouterDeps struct {
 	Playbook         *PlaybookHandler
 	Troubleshoot     *TroubleshootHandler
 	OIDC             *OIDCHandler
+	Mobile           *MobileHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
-	RateLimiter      *middleware.RateLimiter
-	Health           *Health
-	OpsHealth        *OpsHealthHandler
-	BulkDevice       *BulkDeviceHandler
+	// MobileDeviceStatus, when set, enables the auth-middleware
+	// device kill-switch for mobile session JWTs: a token bound to a
+	// suspended/deleted device is refused on every endpoint, not just
+	// the mobile self-service ones.
+	MobileDeviceStatus middleware.MobileDeviceStatusResolver
+	RateLimiter        *middleware.RateLimiter
+	Health             *Health
+	OpsHealth          *OpsHealthHandler
+	BulkDevice         *BulkDeviceHandler
 	// Metrics, when non-nil, installs the Prometheus HTTP
 	// instrumentation middleware (request count / duration /
 	// in-flight) at the top of the chain. Nil disables it (the
@@ -162,9 +168,16 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.OIDC != nil {
 		deps.OIDC.Register(apiMux)
 	}
+	if deps.Mobile != nil {
+		deps.Mobile.Register(apiMux)
+	}
 
+	authOpts := []middleware.AuthOption{}
+	if deps.MobileDeviceStatus != nil {
+		authOpts = append(authOpts, middleware.WithMobileDeviceStatus(deps.MobileDeviceStatus))
+	}
 	apiChain := middleware.Chain(
-		middleware.Auth(&deps.Config.Auth, deps.APIKeyLookup),
+		middleware.Auth(&deps.Config.Auth, deps.APIKeyLookup, authOpts...),
 	)
 	authedAPI := apiChain(apiMux)
 
