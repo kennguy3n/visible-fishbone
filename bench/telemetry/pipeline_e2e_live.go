@@ -134,19 +134,26 @@ func liveFullPipeline(opts Options) (*Report, error) {
 		return nil, fmt.Errorf("stop cold writer: %w", err)
 	}
 	cs := cold.Stats()
+	// The cold path only archives events that survive dedup, across both
+	// the throughput and latency phases. Dividing by e2eBulkEvents would
+	// overcount the denominator by the ~DupRate duplicates the consumer
+	// dropped and undercount it by the latency probes, so derive the real
+	// archived count from the service metrics instead.
+	final := svc.MetricsSnapshot()
+	archived := final.Received - final.Deduplicated
 	var avgObj, bytesPerEvent float64
 	if cs.Uploaded > 0 {
 		avgObj = float64(cs.UploadBytes) / float64(cs.Uploaded)
 	}
-	if e2eBulkEvents > 0 {
-		bytesPerEvent = float64(cs.UploadBytes) / float64(e2eBulkEvents)
+	if archived > 0 {
+		bytesPerEvent = float64(cs.UploadBytes) / float64(archived)
 	}
 	r.AddSection(Section{
 		Title: "Cold-path archive (observed during run)",
 		Metrics: []MetricRow{
 			{Name: "objects uploaded", Unit: "", Actual: float64(cs.Uploaded), Verdict: VerdictInfo},
 			{Name: "avg object size", Unit: "B", Actual: avgObj, Verdict: VerdictInfo},
-			{Name: "compressed size", Unit: "B/event", Actual: bytesPerEvent, Verdict: VerdictInfo},
+			{Name: "compressed size", Unit: "B/event", Actual: bytesPerEvent, Verdict: VerdictInfo, Note: "over events actually archived (post-dedup), not events published"},
 		},
 	})
 
