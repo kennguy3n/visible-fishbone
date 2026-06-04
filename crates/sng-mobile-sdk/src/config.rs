@@ -57,10 +57,6 @@ pub struct SdkAuthConfig {
     /// Refresh the access token this many seconds *before* it
     /// expires. Must be greater than zero.
     pub refresh_skew_secs: u64,
-    /// Upper bound, in seconds, on the random jitter added to each
-    /// scheduled refresh so a fleet does not stampede the token
-    /// endpoint. Zero disables jitter.
-    pub refresh_jitter_secs: u64,
 }
 
 impl From<SdkAuthConfig> for AuthConfig {
@@ -70,7 +66,13 @@ impl From<SdkAuthConfig> for AuthConfig {
             client_id: value.client_id,
             scopes: value.scopes,
             refresh_skew: Duration::from_secs(value.refresh_skew_secs),
-            refresh_jitter: Duration::from_secs(value.refresh_jitter_secs),
+            // The SDK drives refresh lazily through `OidcSession`'s
+            // own internal stampede-jitter (derived from
+            // `refresh_skew`); the core's `schedule_refresh` helper —
+            // the sole consumer of `refresh_jitter` — is never invoked
+            // on this path, so there is no FFI knob for it. Leave it
+            // disabled rather than expose a field with no effect.
+            refresh_jitter: Duration::ZERO,
         }
     }
 }
@@ -213,7 +215,6 @@ pub(crate) mod tests {
                 client_id: "client-123".into(),
                 scopes: vec!["openid".into(), "profile".into()],
                 refresh_skew_secs: 60,
-                refresh_jitter_secs: 5,
             },
             oidc_redirect_uri: "com.example.app://oauth/callback".into(),
             poll_interval_secs: 900,
