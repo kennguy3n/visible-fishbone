@@ -9,11 +9,18 @@
 //!     latency histogram, and a `/proc` resource sampler.
 //!   * [`report`] — the JSON/markdown report model and the run-over-run
 //!     regression detector.
+//!   * [`competitor`] — published competitor figures and the SNG
+//!     inspection-depth → vendor-feature mapping.
+//!   * [`business_report`] — aggregation of per-run reports into a single
+//!     RFP-datasheet document (per-SKU matrices, competitor comparison,
+//!     cost analysis).
 //!
 //! Keeping these in a library target (rather than private `mod`s inside
 //! the binary) means their public surface is genuinely reachable API,
 //! exercised directly by the test suite.
 
+pub mod business_report;
+pub mod competitor;
 pub mod measurement;
 pub mod report;
 pub mod traffic_gen;

@@ -41,8 +41,12 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 # Report serialization. JSON is the machine-readable artifact the
 # `benchmark.yml` workflow diffs run-over-run; TOML is the profile
 # input format (matching the rest of the repo's config convention).
+# `float_roundtrip` makes f64 parsing correctly-rounded so reports
+# (including computed competitor deltas) survive a JSON round-trip
+# bit-for-bit, which `detect_regression` relies on when diffing against
+# a committed baseline.
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 toml = "0.8"
 
 # Typed error taxonomy — same crate the enforcement-plane crates use.

@@ -16,9 +16,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use serde::Deserialize;
 use thiserror::Error;
 
+use sng_bench::business_report::{BusinessReport, BusinessSku, SkuProfile};
+use sng_bench::competitor::{self, InspectionDepth};
 use sng_bench::measurement::{
     self, LatencyHistogram, ResourceMeasurement, ThroughputMeasurement, rate_between,
 };
@@ -71,6 +72,9 @@ enum Command {
     ConcurrentFlows(RunArgs),
     /// Compare two report JSON files and flag regressions.
     Compare(CompareArgs),
+    /// Sweep every profile across all modes, packet sizes, and inspection
+    /// depths and emit one consolidated business/RFP datasheet.
+    BusinessReport(BusinessReportArgs),
 }
 
 /// IP version selector for the CLI.
@@ -98,10 +102,23 @@ enum Inspection {
 
 impl Inspection {
     fn label(self) -> &'static str {
+        self.depth().label()
+    }
+
+    /// The library inspection-depth this CLI value denotes.
+    fn depth(self) -> InspectionDepth {
         match self {
-            Inspection::NoInspect => "no-inspect",
-            Inspection::UrlCat => "url-cat",
-            Inspection::FullTls => "full-tls",
+            Inspection::NoInspect => InspectionDepth::NoInspect,
+            Inspection::UrlCat => InspectionDepth::UrlCat,
+            Inspection::FullTls => InspectionDepth::FullTls,
+        }
+    }
+
+    fn from_depth(depth: InspectionDepth) -> Self {
+        match depth {
+            InspectionDepth::NoInspect => Inspection::NoInspect,
+            InspectionDepth::UrlCat => Inspection::UrlCat,
+            InspectionDepth::FullTls => Inspection::FullTls,
         }
     }
 }
@@ -165,6 +182,96 @@ struct RunArgs {
     dry_run: bool,
 }
 
+impl RunArgs {
+    fn to_spec(&self) -> RunSpec {
+        RunSpec {
+            interface: self.interface.clone(),
+            packet_size: self.packet_size,
+            policy_rules: self.policy_rules,
+            inspection: self.inspection,
+            ip_version: self.ip_version,
+            l4: self.l4,
+            target_pps: self.target_pps,
+            seed: self.seed,
+            duration: Duration::from_secs(self.duration),
+            dry_run: self.dry_run,
+            git_sha: self.git_sha.clone(),
+        }
+    }
+}
+
+/// The emitter + measurement parameters for one run, decoupled from the
+/// CLI surface so both the single-mode subcommands and the multi-run
+/// `business-report` sweep drive the same measurement core.
+#[derive(Debug, Clone)]
+struct RunSpec {
+    interface: String,
+    packet_size: u32,
+    policy_rules: u32,
+    inspection: Inspection,
+    ip_version: CliIpVersion,
+    l4: CliL4,
+    target_pps: u64,
+    seed: u64,
+    duration: Duration,
+    dry_run: bool,
+    git_sha: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct BusinessReportArgs {
+    /// Directory of profile TOMLs to sweep; every `*.toml` is one SKU.
+    #[arg(long, default_value = "bench/profiles")]
+    profiles_dir: PathBuf,
+
+    /// Egress interface for live (non-dry-run) transmission.
+    #[arg(long, default_value = "lo")]
+    interface: String,
+
+    /// Per-run measurement duration in milliseconds. Kept small so the
+    /// full sweep (profiles × packet sizes × depths × modes) is runnable
+    /// on an unprivileged CI runner.
+    #[arg(long, default_value_t = 250)]
+    duration_ms: u64,
+
+    /// Wire frame sizes to sweep.
+    #[arg(long, value_delimiter = ',', default_values_t = [64u32, 512, 1500, 9000])]
+    packet_sizes: Vec<u32>,
+
+    /// Policy-rule count recorded on every run.
+    #[arg(long, default_value_t = 100)]
+    policy_rules: u32,
+
+    /// IP version of the generated traffic.
+    #[arg(long, value_enum, default_value_t = CliIpVersion::V4)]
+    ip_version: CliIpVersion,
+
+    /// L4 protocol for throughput/latency runs (concurrent-flows is always
+    /// a SYN stress).
+    #[arg(long, value_enum, default_value_t = CliL4::Udp)]
+    l4: CliL4,
+
+    /// Target packets-per-second (0 = transmit as fast as possible).
+    #[arg(long, default_value_t = 0)]
+    target_pps: u64,
+
+    /// RNG seed for reproducible 5-tuple sampling.
+    #[arg(long, default_value_t = 0)]
+    seed: u64,
+
+    /// Directory the consolidated markdown + JSON are written to.
+    #[arg(long, default_value = "bench/results")]
+    out_dir: PathBuf,
+
+    /// Git commit recorded in the document.
+    #[arg(long, env = "SNG_BENCH_GIT_SHA")]
+    git_sha: Option<String>,
+
+    /// Exercise the full pipeline in-process without raw sockets or root.
+    #[arg(long)]
+    dry_run: bool,
+}
+
 #[derive(Debug, Args)]
 struct CompareArgs {
     /// Baseline (previous) report JSON.
@@ -182,19 +289,6 @@ struct CompareArgs {
     /// Concurrent-flows-drop fraction that counts as a regression.
     #[arg(long, default_value_t = 0.10)]
     concurrent_flows_drop: f64,
-}
-
-/// Per-edge-SKU profile loaded from `bench/profiles/*.toml`.
-#[derive(Debug, Clone, Deserialize)]
-struct Profile {
-    name: String,
-    #[allow(dead_code)]
-    vcpus: u32,
-    #[allow(dead_code)]
-    ram_gb: u32,
-    #[allow(dead_code)]
-    nic_gbps: f64,
-    target_gbps: f64,
 }
 
 fn main() -> std::process::ExitCode {
@@ -218,6 +312,7 @@ fn run(cli: Cli) -> Result<std::process::ExitCode, BenchError> {
         Command::Latency(args) => run_mode(BenchMode::Latency, &args),
         Command::ConcurrentFlows(args) => run_mode(BenchMode::ConcurrentFlows, &args),
         Command::Compare(args) => run_compare(&args),
+        Command::BusinessReport(args) => run_business_report(&args),
     }
 }
 
@@ -256,7 +351,7 @@ fn load_report(path: &Path) -> Result<BenchmarkReport, BenchError> {
     Ok(BenchmarkReport::from_json(&s)?)
 }
 
-fn load_profile(path: &Path) -> Result<Profile, BenchError> {
+fn load_profile(path: &Path) -> Result<SkuProfile, BenchError> {
     let s = std::fs::read_to_string(path).map_err(|source| BenchError::Io {
         path: path.display().to_string(),
         source,
@@ -267,10 +362,33 @@ fn load_profile(path: &Path) -> Result<Profile, BenchError> {
     })
 }
 
-fn build_emitter(args: &RunArgs, l4: L4Proto) -> Result<Box<dyn TrafficGenerator>, BenchError> {
-    let sampler = build_sampler(args)?;
+/// Load every `*.toml` under `dir` as a SKU profile, sorted by path for a
+/// deterministic sweep order.
+fn load_profiles_dir(dir: &Path) -> Result<Vec<SkuProfile>, BenchError> {
+    let entries = std::fs::read_dir(dir).map_err(|source| BenchError::Io {
+        path: dir.display().to_string(),
+        source,
+    })?;
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|source| BenchError::Io {
+                path: dir.display().to_string(),
+                source,
+            })?
+            .path();
+        if path.extension().is_some_and(|e| e == "toml") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.iter().map(|p| load_profile(p)).collect()
+}
+
+fn build_emitter(spec: &RunSpec, l4: L4Proto) -> Result<Box<dyn TrafficGenerator>, BenchError> {
+    let sampler = build_sampler(spec)?;
     let config = PacketConfig {
-        frame_size: args.packet_size,
+        frame_size: spec.packet_size,
         l4,
         // Locally-administered unicast MACs; the real bind MAC on a live
         // run is the egress NIC's, but AF_PACKET ignores the Ethernet
@@ -280,16 +398,16 @@ fn build_emitter(args: &RunArgs, l4: L4Proto) -> Result<Box<dyn TrafficGenerator
         ttl: 64,
     };
     let builder = PacketBuilder::new(config, sampler)?;
-    if args.dry_run {
+    if spec.dry_run {
         Ok(Box::new(DryRunGenerator::new(builder)))
     } else {
-        let generator = RawSocketGenerator::open(&args.interface, builder)?;
+        let generator = RawSocketGenerator::open(&spec.interface, builder)?;
         Ok(Box::new(generator))
     }
 }
 
-fn build_sampler(args: &RunArgs) -> Result<FiveTupleSampler, BenchError> {
-    let (src, dst) = match args.ip_version {
+fn build_sampler(spec: &RunSpec) -> Result<FiveTupleSampler, BenchError> {
+    let (src, dst) = match spec.ip_version {
         CliIpVersion::V4 => (
             Subnet::V4 {
                 base: std::net::Ipv4Addr::new(10, 0, 0, 0),
@@ -316,52 +434,66 @@ fn build_sampler(args: &RunArgs) -> Result<FiveTupleSampler, BenchError> {
         dst,
         (1024, 65_535),
         (1, 1024),
-        args.seed,
+        spec.seed,
     )?)
 }
 
-fn run_mode(mode: BenchMode, args: &RunArgs) -> Result<std::process::ExitCode, BenchError> {
-    if args.duration == 0 {
-        return Err(BenchError::Config("duration must be > 0".to_string()));
-    }
-    let profile = load_profile(&args.profile)?;
+/// Run one `(mode, spec)` against `profile` and assemble its report.
+///
+/// This is the shared measurement core: it builds the emitter, drives the
+/// mode's measurement loop, samples resources, and — for throughput runs —
+/// attaches the same-class competitor comparison. It does no I/O beyond
+/// the run itself (no file write, no printing), so both the single-mode
+/// subcommands and the `business-report` sweep reuse it identically.
+fn run_single(
+    mode: BenchMode,
+    spec: &RunSpec,
+    profile: &SkuProfile,
+) -> Result<BenchmarkReport, BenchError> {
     // Concurrent-flows is a SYN stress regardless of the --l4 flag.
     let l4 = if matches!(mode, BenchMode::ConcurrentFlows) {
         L4Proto::TcpSyn
     } else {
-        match args.l4 {
+        match spec.l4 {
             CliL4::Udp => L4Proto::Udp,
             CliL4::TcpSyn => L4Proto::TcpSyn,
         }
     };
-    let mut emitter = build_emitter(args, l4)?;
+    let mut emitter = build_emitter(spec, l4)?;
     let mut resources = ResourceMeasurement::new();
 
     let (throughput, latency, flows) = match mode {
         BenchMode::Throughput => {
-            let t = run_throughput(emitter.as_mut(), args, &mut resources)?;
+            let t = run_throughput(emitter.as_mut(), spec, &mut resources)?;
             (Some(t), None, None)
         }
         BenchMode::Latency => {
-            let l = run_latency(emitter.as_mut(), args, &mut resources)?;
+            let l = run_latency(emitter.as_mut(), spec, &mut resources)?;
             (None, Some(l), None)
         }
         BenchMode::ConcurrentFlows => {
-            let f = run_concurrent_flows(emitter.as_mut(), args, &mut resources)?;
+            let f = run_concurrent_flows(emitter.as_mut(), spec, &mut resources)?;
             (None, None, Some(f))
         }
     };
 
-    let report = BenchmarkReport {
+    // Attach a competitor comparison only when there is a measured
+    // throughput number AND a same-class appliance to compare against.
+    let competitor_comparison = throughput.as_ref().and_then(|t| {
+        let cmp = competitor::comparison_for(profile.vcpus, spec.inspection.depth(), t.max_gbps);
+        (!cmp.rows.is_empty()).then_some(cmp)
+    });
+
+    Ok(BenchmarkReport {
         schema_version: SCHEMA_VERSION,
         profile: profile.name.clone(),
         mode,
         unix_time_secs: now_secs(),
-        git_sha: args.git_sha.clone(),
+        git_sha: spec.git_sha.clone(),
         dimensions: RunDimensions {
-            packet_size: args.packet_size,
-            policy_rules: args.policy_rules,
-            inspection: args.inspection.label().to_string(),
+            packet_size: spec.packet_size,
+            policy_rules: spec.policy_rules,
+            inspection: spec.inspection.label().to_string(),
         },
         throughput,
         latency,
@@ -371,7 +503,16 @@ fn run_mode(mode: BenchMode, args: &RunArgs) -> Result<std::process::ExitCode, B
             peak_rss_bytes: resources.peak_rss_bytes(),
         },
         target_gbps: profile.target_gbps,
-    };
+        competitor_comparison,
+    })
+}
+
+fn run_mode(mode: BenchMode, args: &RunArgs) -> Result<std::process::ExitCode, BenchError> {
+    if args.duration == 0 {
+        return Err(BenchError::Config("duration must be > 0".to_string()));
+    }
+    let profile = load_profile(&args.profile)?;
+    let report = run_single(mode, &args.to_spec(), &profile)?;
 
     let out_path = write_report(&args.out_dir, &report)?;
     println!("{}", report.to_markdown());
@@ -402,14 +543,14 @@ fn run_mode(mode: BenchMode, args: &RunArgs) -> Result<std::process::ExitCode, B
 /// 0), windowing the cumulative counters into a per-second rate series.
 fn run_throughput(
     emitter: &mut dyn TrafficGenerator,
-    args: &RunArgs,
+    spec: &RunSpec,
     resources: &mut ResourceMeasurement,
 ) -> Result<ThroughputResult, BenchError> {
     let counter = ThroughputMeasurement::new();
     let frame_len = emitter.frame_len() as u64;
     let start = Instant::now();
-    let total = Duration::from_secs(args.duration);
-    let mut pacer = Pacer::new(args.target_pps, start);
+    let total = spec.duration;
+    let mut pacer = Pacer::new(spec.target_pps, start);
 
     let mut last_snap = counter.snapshot();
     let mut last_window = start;
@@ -444,7 +585,7 @@ fn run_throughput(
 
         // Flat-out (`target_pps == 0`) runs with no inter-packet sleep; a
         // paced run sleeps until its next token is due.
-        if args.target_pps != 0 {
+        if spec.target_pps != 0 {
             pacer.sleep_until_next();
         }
     }
@@ -492,13 +633,13 @@ fn mean_pps(counter: &ThroughputMeasurement, start: Instant) -> f64 {
 /// up to 1s with 3 significant digits.
 fn run_latency(
     emitter: &mut dyn TrafficGenerator,
-    args: &RunArgs,
+    spec: &RunSpec,
     resources: &mut ResourceMeasurement,
 ) -> Result<LatencyResult, BenchError> {
     let mut hist = LatencyHistogram::new(1_000_000_000, 3);
     let start = Instant::now();
-    let total = Duration::from_secs(args.duration);
-    let mut pacer = Pacer::new(args.target_pps, start);
+    let total = spec.duration;
+    let mut pacer = Pacer::new(spec.target_pps, start);
     let mut last_window = start;
     let _ = resources.sample();
 
@@ -512,7 +653,7 @@ fn run_latency(
             hist.record(u64::try_from(elapsed_ns).unwrap_or(u64::MAX));
         }
         pacer.advance(due);
-        if args.target_pps != 0 {
+        if spec.target_pps != 0 {
             pacer.sleep_until_next();
         }
         if last_window.elapsed() >= Duration::from_secs(1) {
@@ -541,12 +682,12 @@ fn run_latency(
 /// successfully offered, which is the harness's half of that measurement.
 fn run_concurrent_flows(
     emitter: &mut dyn TrafficGenerator,
-    args: &RunArgs,
+    spec: &RunSpec,
     resources: &mut ResourceMeasurement,
 ) -> Result<ConcurrentFlowsResult, BenchError> {
     let start = Instant::now();
-    let total = Duration::from_secs(args.duration);
-    let mut pacer = Pacer::new(args.target_pps, start);
+    let total = spec.duration;
+    let mut pacer = Pacer::new(spec.target_pps, start);
     let mut flows = 0u64;
     let mut last_window = start;
     let _ = resources.sample();
@@ -558,7 +699,7 @@ fn run_concurrent_flows(
             flows += 1;
         }
         pacer.advance(due);
-        if args.target_pps != 0 {
+        if spec.target_pps != 0 {
             pacer.sleep_until_next();
         }
         if last_window.elapsed() >= Duration::from_secs(1) {
@@ -643,11 +784,95 @@ fn write_report(out_dir: &Path, report: &BenchmarkReport) -> Result<PathBuf, Ben
     Ok(path)
 }
 
+/// Sweep every profile across all modes, packet sizes, and inspection
+/// depths, then assemble and persist one consolidated business report.
+fn run_business_report(args: &BusinessReportArgs) -> Result<std::process::ExitCode, BenchError> {
+    if args.duration_ms == 0 {
+        return Err(BenchError::Config("duration-ms must be > 0".to_string()));
+    }
+    if args.packet_sizes.is_empty() {
+        return Err(BenchError::Config(
+            "at least one packet size required".to_string(),
+        ));
+    }
+    let profiles = load_profiles_dir(&args.profiles_dir)?;
+    if profiles.is_empty() {
+        return Err(BenchError::Config(format!(
+            "no .toml profiles found in {}",
+            args.profiles_dir.display()
+        )));
+    }
+    let duration = Duration::from_millis(args.duration_ms);
+    let modes = [
+        BenchMode::Throughput,
+        BenchMode::Latency,
+        BenchMode::ConcurrentFlows,
+    ];
+
+    let mut skus = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        let mut reports =
+            Vec::with_capacity(args.packet_sizes.len() * InspectionDepth::ALL.len() * modes.len());
+        for &packet_size in &args.packet_sizes {
+            for depth in InspectionDepth::ALL {
+                let spec = RunSpec {
+                    interface: args.interface.clone(),
+                    packet_size,
+                    policy_rules: args.policy_rules,
+                    inspection: Inspection::from_depth(depth),
+                    ip_version: args.ip_version,
+                    l4: args.l4,
+                    target_pps: args.target_pps,
+                    seed: args.seed,
+                    duration,
+                    dry_run: args.dry_run,
+                    git_sha: args.git_sha.clone(),
+                };
+                for mode in modes {
+                    reports.push(run_single(mode, &spec, &profile)?);
+                }
+            }
+        }
+        skus.push(BusinessSku::new(profile, reports));
+    }
+
+    let doc = BusinessReport::new(now_secs(), args.git_sha.clone(), skus);
+    let (md_path, json_path) = write_business_report(&args.out_dir, &doc)?;
+    println!("{}", doc.to_markdown());
+    println!(
+        "\nbusiness report written to {} and {}",
+        md_path.display(),
+        json_path.display()
+    );
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn write_business_report(
+    out_dir: &Path,
+    doc: &BusinessReport,
+) -> Result<(PathBuf, PathBuf), BenchError> {
+    std::fs::create_dir_all(out_dir).map_err(|source| BenchError::Io {
+        path: out_dir.display().to_string(),
+        source,
+    })?;
+    let stem = format!("business-report-{}", doc.generated_unix_secs);
+    let md_path = out_dir.join(format!("{stem}.md"));
+    let json_path = out_dir.join(format!("{stem}.json"));
+    std::fs::write(&md_path, doc.to_markdown()).map_err(|source| BenchError::Io {
+        path: md_path.display().to_string(),
+        source,
+    })?;
+    std::fs::write(&json_path, doc.to_json()?).map_err(|source| BenchError::Io {
+        path: json_path.display().to_string(),
+        source,
+    })?;
+    Ok((md_path, json_path))
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]
@@ -683,5 +908,79 @@ mod tests {
         assert_eq!(Inspection::NoInspect.label(), "no-inspect");
         assert_eq!(Inspection::UrlCat.label(), "url-cat");
         assert_eq!(Inspection::FullTls.label(), "full-tls");
+    }
+
+    #[test]
+    fn inspection_depth_round_trips() {
+        for d in InspectionDepth::ALL {
+            assert_eq!(Inspection::from_depth(d).depth(), d);
+        }
+    }
+
+    fn test_spec(inspection: Inspection) -> RunSpec {
+        RunSpec {
+            interface: "lo".to_string(),
+            packet_size: 1500,
+            policy_rules: 100,
+            inspection,
+            ip_version: CliIpVersion::V4,
+            l4: CliL4::Udp,
+            target_pps: 0,
+            seed: 7,
+            duration: Duration::from_millis(20),
+            dry_run: true,
+            git_sha: None,
+        }
+    }
+
+    fn test_profile() -> SkuProfile {
+        SkuProfile {
+            name: "branch-medium".to_string(),
+            vcpus: 4,
+            ram_gb: 8,
+            nic_gbps: 10.0,
+            target_gbps: 5.0,
+        }
+    }
+
+    #[test]
+    fn run_single_throughput_attaches_competitor_comparison() {
+        let r = run_single(
+            BenchMode::Throughput,
+            &test_spec(Inspection::NoInspect),
+            &test_profile(),
+        )
+        .unwrap();
+        assert!(r.throughput.is_some());
+        let cmp = r
+            .competitor_comparison
+            .as_ref()
+            .expect("comparison attached");
+        assert_eq!(cmp.feature, "firewall throughput");
+        assert!(!cmp.rows.is_empty());
+        // Report round-trips with the new field populated.
+        assert_eq!(
+            BenchmarkReport::from_json(&r.to_json().unwrap()).unwrap(),
+            r
+        );
+    }
+
+    #[test]
+    fn run_single_latency_has_no_competitor_comparison() {
+        let r = run_single(
+            BenchMode::Latency,
+            &test_spec(Inspection::FullTls),
+            &test_profile(),
+        )
+        .unwrap();
+        assert!(r.latency.is_some());
+        assert!(r.competitor_comparison.is_none());
+    }
+
+    #[test]
+    fn profiles_dir_loads_committed_skus() {
+        let profiles = load_profiles_dir(Path::new("profiles")).unwrap();
+        assert!(profiles.iter().any(|p| p.name == "cloud-pop-small"));
+        assert!(profiles.len() >= 4, "expected the committed profile set");
     }
 }
