@@ -41,6 +41,7 @@ type RouterDeps struct {
 	Troubleshoot     *TroubleshootHandler
 	OIDC             *OIDCHandler
 	Mobile           *MobileHandler
+	Metering         *MeteringHandler
 	PoP              *PoPHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
@@ -174,6 +175,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.Mobile != nil {
 		deps.Mobile.Register(apiMux)
+	}
+	if deps.Metering != nil {
+		deps.Metering.Register(apiMux)
 	}
 	if deps.PoP != nil {
 		deps.PoP.Register(apiMux)

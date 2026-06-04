@@ -337,3 +337,105 @@ func (s *stubAuditSink) records() []AuditRecord {
 	copy(out, s.recs)
 	return out
 }
+
+// --- cost-metering budget gate / usage recorder (Session K) -------------
+
+var errBudgetExceededStub = errors.New("budget_exceeded: llm_tokens_used hard limit reached")
+
+// stubBudgetGate fails the budget check when blocked is true.
+type stubBudgetGate struct {
+	blocked bool
+	calls   int
+}
+
+func (g *stubBudgetGate) CheckLLMTokenBudget(_ context.Context, _ uuid.UUID, _ int64) error {
+	g.calls++
+	if g.blocked {
+		return errBudgetExceededStub
+	}
+	return nil
+}
+
+// stubUsageRecorder records the metered tokens/calls of each completion.
+type stubUsageRecorder struct {
+	mu     sync.Mutex
+	tokens int64
+	calls  int64
+}
+
+func (r *stubUsageRecorder) RecordLLMUsage(_ context.Context, _ uuid.UUID, tokens, calls int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tokens += tokens
+	r.calls += calls
+	return nil
+}
+
+// countingLLM records how many times Complete is invoked.
+type countingLLM struct {
+	calls int
+}
+
+func (c *countingLLM) Complete(_ context.Context, _ LLMRequest) (LLMResponse, error) {
+	c.calls++
+	return LLMResponse{Text: "model output", ModelID: "test", TokenCount: 100}, nil
+}
+
+func TestGuardrailedProvider_BudgetExceededReturnsTemplateFallback(t *testing.T) {
+	t.Parallel()
+	inner := &countingLLM{}
+	gate := &stubBudgetGate{blocked: true}
+	gp := NewGuardrailedProvider(inner, GuardrailConfig{
+		MaxRequestsPerMinute: 10,
+		MaxTokensPerDay:      100000,
+	}, nil, WithBudgetGate(gate))
+
+	ctx := ContextWithTenantID(context.Background(), uuid.New())
+	resp, err := gp.Complete(ctx, LLMRequest{Prompt: "summarise this alert", MaxTokens: 200})
+	if err != nil {
+		t.Fatalf("budget fallback must not be an error: %v", err)
+	}
+	if inner.calls != 0 {
+		t.Fatalf("upstream LLM must NOT be called when budget is exceeded; got %d calls", inner.calls)
+	}
+	if resp.ModelID != budgetFallbackModelID {
+		t.Fatalf("model_id = %q, want %q", resp.ModelID, budgetFallbackModelID)
+	}
+	if resp.TokenCount != 0 {
+		t.Fatalf("fallback must spend 0 tokens, got %d", resp.TokenCount)
+	}
+	if resp.Text == "" {
+		t.Fatal("fallback must carry a user-visible note")
+	}
+}
+
+func TestGuardrailedProvider_BudgetWithinLimitCallsModelAndMeters(t *testing.T) {
+	t.Parallel()
+	inner := &countingLLM{}
+	gate := &stubBudgetGate{blocked: false}
+	rec := &stubUsageRecorder{}
+	gp := NewGuardrailedProvider(inner, GuardrailConfig{
+		MaxRequestsPerMinute: 10,
+		MaxTokensPerDay:      100000,
+	}, nil, WithBudgetGate(gate), WithUsageRecorder(rec))
+
+	ctx := ContextWithTenantID(context.Background(), uuid.New())
+	resp, err := gp.Complete(ctx, LLMRequest{Prompt: "hello", MaxTokens: 50})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("upstream LLM call count = %d, want 1", inner.calls)
+	}
+	if resp.ModelID != "test" {
+		t.Fatalf("model_id = %q, want real model", resp.ModelID)
+	}
+	if gate.calls != 1 {
+		t.Fatalf("budget gate call count = %d, want 1", gate.calls)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.tokens != 100 || rec.calls != 1 {
+		t.Fatalf("metered usage = (tokens %d, calls %d), want (100, 1)", rec.tokens, rec.calls)
+	}
+}

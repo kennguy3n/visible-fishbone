@@ -51,6 +51,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration/connectors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/leader"
+	"github.com/kennguy3n/visible-fishbone/internal/service/metering"
 	"github.com/kennguy3n/visible-fishbone/internal/service/playbook"
 	"github.com/kennguy3n/visible-fishbone/internal/service/playbook/executors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
@@ -222,10 +223,33 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, popSvc, evidenceScheduler, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
+	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, popSvc, evidenceScheduler, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
+
+	// Start the cost-metering flush loop. It batch-upserts the
+	// accumulated per-tenant usage deltas into tenant_usage every
+	// FlushInterval and performs a final flush when rootCtx is
+	// cancelled, so usage recorded just before shutdown is not lost.
+	// Block shutdown on its completion (bounded) so the deferred
+	// pool.Close() (registered earlier, hence run later — defers are
+	// LIFO) never races the final flush still writing on a connection
+	// from the pool, which would drop the trailing usage window. The
+	// wait exceeds Run's own 10s final-flush timeout so a healthy
+	// flush always lands; a wedged flush cannot hang shutdown forever.
+	meteringDone := make(chan struct{})
+	go func() {
+		defer close(meteringDone)
+		meteringSvc.Run(rootCtx)
+	}()
+	defer func() {
+		select {
+		case <-meteringDone:
+		case <-time.After(15 * time.Second):
+			logger.Warn("sng-control: timed out waiting for metering final flush")
+		}
+	}()
 
 	// Start the webhook delivery worker before the HTTP server so
 	// queued deliveries from a previous run start draining
@@ -503,7 +527,7 @@ func buildRouter(
 	replay *telreplay.Worker,
 	telPub *sngnats.Publisher,
 	mx *metrics.Metrics,
-) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, *aisvc.Service, *pop.Service, *compliance.Scheduler, error) {
+) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, *aisvc.Service, *metering.MeteringService, *pop.Service, *compliance.Scheduler, error) {
 	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
@@ -572,11 +596,11 @@ func buildRouter(
 	// the same in all cases.
 	keyOpts := []policy.KeyOption{}
 	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
 	} else if len(master) > 0 {
 		w, err := policy.NewAESGCMWrapper(master)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
 		}
 		keyOpts = append(keyOpts, policy.WithKeyWrapper(w))
 		logger.Info("policy: AES-256-GCM at-rest wrap enabled for signing seeds")
@@ -587,7 +611,7 @@ func buildRouter(
 	if cfg.Policy.SigningKeyPath != "" {
 		ks, err := policy.LoadKeySignerFromFile(cfg.Policy.SigningKeyPath)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
 		}
 		policySigner = ks
 		fileSigner = ks
@@ -668,7 +692,7 @@ func buildRouter(
 	canarySvc, err := policy.NewCanaryService(policySvc, policyRolloutRepo,
 		policy.WithCanaryLogger(logger))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
 	}
 	policySimHandler := handler.NewPolicySimulationHandler(
 		policySvc, canarySvc, nil, policyRepo, logger)
@@ -776,7 +800,38 @@ func buildRouter(
 		logger, tenant.BulkOptions{})
 	brandingResolver := tenant.NewBrandingResolver(tenantRepo, mspRepo)
 
-	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo, logger)
+	// --- Cost metering + budget guardrails (Session K) ---------------
+	// The metering store is backed by the primary pool and adopts the
+	// app role on every transaction so the RLS policies on
+	// tenant_usage / tenant_budgets (migration 040) apply; per-tenant
+	// work runs tenant-scoped, the background flush and the platform
+	// cost report run system-scoped (sng.system_role), matching the
+	// webhook delivery worker. The MeteringService accumulates usage in
+	// sync/atomic counters and is flushed by main() via meteringSvc.Run.
+	meteringStore, err := metering.NewPostgresStore(pool.Primary(), cfg.Postgres.AppRole, cfg.Postgres.PgBouncerMode)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering store: %w", err)
+	}
+	meteringSvc, err := metering.NewMeteringService(meteringStore, logger,
+		metering.WithFlushInterval(cfg.Metering.FlushInterval))
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering service: %w", err)
+	}
+	meteringTiers := meteringTierResolver{tenants: tenantRepo}
+	budgetEnforcer, err := metering.NewBudgetEnforcer(meteringSvc, meteringStore, meteringTiers, logger,
+		metering.WithGlobalDefaults(cfg.Metering.DefaultBudgets))
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: budget enforcer: %w", err)
+	}
+	costCalc := metering.NewCostCalculator(metering.DefaultUnitCosts)
+	meteringReports, err := metering.NewReports(meteringSvc, budgetEnforcer, meteringStore, meteringTiers, costCalc)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering reports: %w", err)
+	}
+	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports, rbacSvc)
+
+	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo,
+		metering.NewGuardrailBudgetGate(budgetEnforcer), metering.NewGuardrailUsageRecorder(meteringSvc), logger)
 
 	// --- Operational automation wiring (Session 5) --------------------
 	// Bulk device operations reuse the existing device / claim-token /
@@ -797,7 +852,7 @@ func buildRouter(
 	// unchanged; the scheduler's leader loop is launched by run().
 	evidenceSvc, evidenceScheduler, err := buildEvidenceAutomation(cfg, store, logger)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("compliance evidence automation: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("compliance evidence automation: %w", err)
 	}
 	complianceHandler := handler.NewComplianceHandler(
 		compliance.NewReportService(store.NewComplianceReportRepository(), logger),
@@ -901,6 +956,7 @@ func buildRouter(
 		Troubleshoot:     troubleshootHandler,
 		OIDC:             oidcHandler,
 		Mobile:           handler.NewMobileHandler(identitySvc),
+		Metering:         meteringHandler,
 		PoP:              popHandler,
 		APIKeyLookup:     apiKeySvc,
 		// Device kill-switch for stateless mobile session JWTs: a
@@ -925,13 +981,29 @@ func buildRouter(
 	// admin `POST /admin/app-registry/sync` endpoint is the only
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
-	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, popSvc, evidenceScheduler, nil
+	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, popSvc, evidenceScheduler, nil
+}
+
+// meteringTierResolver adapts the TenantRepository onto the metering
+// TierResolver so the budget enforcer can resolve a tenant's
+// commercial tier (and thus its default budgets). The lookup runs in
+// the caller's request/worker context, so RLS applies as usual.
+type meteringTierResolver struct {
+	tenants repository.TenantRepository
+}
+
+func (m meteringTierResolver) TenantTier(ctx context.Context, tenantID uuid.UUID) (repository.TenantTier, error) {
+	t, err := m.tenants.Get(ctx, tenantID)
+	if err != nil {
+		return "", fmt.Errorf("metering: resolve tenant tier: %w", err)
+	}
+	return t.Tier, nil
 }
 
 // buildAIHandler constructs the AI handler with an optional LLM
 // provider. When AI_LLM_ENDPOINT is not set, the service runs in
 // template-only mode and suggest-policy / troubleshoot return 503.
-func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, alertRepo repository.AlertRepository, auditSvc *audit.Service, aiSuggestionRepo repository.AISuggestionRepository, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
+func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, alertRepo repository.AlertRepository, auditSvc *audit.Service, aiSuggestionRepo repository.AISuggestionRepository, budgetGate aisvc.BudgetGate, usageRecorder aisvc.UsageRecorder, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
 	var llm aisvc.LLMProvider
 	if cfg.AI.Endpoint != "" {
 		llm = &aisvc.HTTPProvider{
@@ -972,6 +1044,17 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 		// compliance.
 		if auditSvc != nil {
 			gopts = append(gopts, aisvc.WithAuditSink(aiAuditSink{audit: auditSvc}))
+		}
+		// Cost-metering integration (Session K): gate every LLM call
+		// on the tenant's token budget and meter actual consumption.
+		// Both are best-effort with respect to availability — when
+		// metering is not wired the args are nil and the guardrails
+		// behave exactly as before.
+		if budgetGate != nil {
+			gopts = append(gopts, aisvc.WithBudgetGate(budgetGate))
+		}
+		if usageRecorder != nil {
+			gopts = append(gopts, aisvc.WithUsageRecorder(usageRecorder))
 		}
 		guardrails = aisvc.NewGuardrailedProvider(llm, aisvc.GuardrailConfig{
 			MaxRequestsPerMinute: cfg.AI.GuardrailMaxRequestsPerMinute,
