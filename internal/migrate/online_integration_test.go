@@ -187,6 +187,76 @@ func TestOnlineMigrator_ChangeColumnTypeShadow(t *testing.T) {
 	}
 }
 
+// TestOnlineMigrator_BackfillKeysetCompleteness drives the backfill
+// across many batches to guard the keyset-pagination rewrite: every
+// source row must land in the promoted table exactly once and the
+// loop must terminate. The source PKs are sparse (only even ids) so
+// a batch boundary never coincides with a contiguous id range, and
+// a block of high-id rows is pre-mirrored into the shadow by the
+// trigger before the backfill — those rows hit ON CONFLICT DO
+// NOTHING, so the cursor must advance past them via the scanned
+// batch's max pk rather than stalling (the failure mode if the
+// cursor tracked only inserted rows).
+func TestOnlineMigrator_BackfillKeysetCompleteness(t *testing.T) {
+	ctx := context.Background()
+	conn := connectRaw(t, startPostgres(t))
+
+	mustExec(t, conn, `CREATE TABLE big (id bigint PRIMARY KEY, seq integer NOT NULL)`)
+	// 1000 rows at even ids 2,4,...,2000.
+	mustExec(t, conn, `INSERT INTO big (id, seq) SELECT 2*g, 2*g FROM generate_series(1, 1000) g`)
+
+	op := migrate.ChangeColumnTypeOp{
+		TableName: "big", Column: "seq", NewType: "bigint",
+		PrimaryKey: "id", NotNull: true, BatchSize: 100,
+	}
+	steps, err := op.Steps()
+	if err != nil {
+		t.Fatalf("Steps: %v", err)
+	}
+	m := migrate.NewOnlineMigrator(migrate.NewLockMonitor(migrate.LockMonitorConfig{}))
+
+	if err := m.ApplyStep(ctx, conn, steps[0]); err != nil {
+		t.Fatalf("create shadow: %v", err)
+	}
+	if err := m.ApplyStep(ctx, conn, steps[1]); err != nil {
+		t.Fatalf("install trigger: %v", err)
+	}
+	// Pre-mirror a contiguous block of the highest existing ids via
+	// the trigger. The backfill will scan these rows and hit ON
+	// CONFLICT DO NOTHING; the cursor must still advance past them.
+	mustExec(t, conn, `UPDATE big SET seq = seq + 1 WHERE id > 1980`)
+	if err := m.ApplyStep(ctx, conn, steps[2]); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if err := m.ApplyStep(ctx, conn, steps[3]); err != nil {
+		t.Fatalf("swap: %v", err)
+	}
+
+	var n int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM big`).Scan(&n); err != nil {
+		t.Fatalf("count big: %v", err)
+	}
+	if n != 1000 {
+		t.Errorf("expected all 1000 rows copied exactly once, got %d", n)
+	}
+	// No duplicates and the full id range survived.
+	var distinct int
+	if err := conn.QueryRow(ctx, `SELECT count(DISTINCT id) FROM big`).Scan(&distinct); err != nil {
+		t.Fatalf("count distinct: %v", err)
+	}
+	if distinct != 1000 {
+		t.Errorf("expected 1000 distinct ids, got %d", distinct)
+	}
+	// A trigger-mirrored high-id row kept its newer value.
+	var seq2000 int64
+	if err := conn.QueryRow(ctx, `SELECT seq FROM big WHERE id = 2000`).Scan(&seq2000); err != nil {
+		t.Fatalf("read seq for id=2000: %v", err)
+	}
+	if seq2000 != 2001 {
+		t.Errorf("expected trigger's value seq=2001 for id=2000, got %d", seq2000)
+	}
+}
+
 // TestLockMonitor_Integration exercises CountActiveLockers,
 // ApplyLockTimeout, and the contention wait against a real lock held
 // by a second connection.

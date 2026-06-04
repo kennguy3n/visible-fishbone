@@ -374,7 +374,7 @@ func (m *OnlineMigrator) DryRun(op Operation) ([]string, error) {
 	var out []string
 	for _, st := range steps {
 		if st.Backfill != nil {
-			out = append(out, "-- "+st.Description, backfillSQL(st.Backfill, false))
+			out = append(out, "-- "+st.Description, backfillSQL(st.Backfill, false, false))
 			continue
 		}
 		if st.Description != "" {
@@ -491,43 +491,74 @@ func (m *OnlineMigrator) runStandalone(ctx context.Context, conn Conn, st Step) 
 // indefinitely on a row lock held by a concurrent writer, and uses
 // ON CONFLICT DO NOTHING so rows the sync trigger already mirrored
 // are not duplicated.
+//
+// Batches are keyset-paginated: a cursor holds the largest primary
+// key copied so far and each batch scans only rows with pk > cursor
+// (the first batch has no lower bound). Each statement returns the
+// max pk of the batch it *scanned* — not merely the rows it inserted
+// — so the cursor advances past rows the sync trigger already
+// mirrored (ON CONFLICT DO NOTHING) instead of stalling on them, and
+// later batches never re-scan already-copied rows.
 func (m *OnlineMigrator) runBackfill(ctx context.Context, conn Conn, p *BackfillPlan) error {
 	if err := m.monitor.ApplyLockTimeout(ctx, conn); err != nil {
 		return err
 	}
+	var cursor any // largest pk copied so far; nil = from the start
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		tag, err := conn.Exec(ctx, backfillSQL(p, true), p.BatchSize)
+		var (
+			next any
+			err  error
+		)
+		if cursor == nil {
+			err = conn.QueryRow(ctx, backfillSQL(p, true, false), p.BatchSize).Scan(&next)
+		} else {
+			err = conn.QueryRow(ctx, backfillSQL(p, true, true), cursor, p.BatchSize).Scan(&next)
+		}
 		if err != nil {
 			return err
 		}
-		if tag.RowsAffected() == 0 {
+		// max() over an empty batch is NULL -> nothing left to copy.
+		if next == nil {
 			return nil
 		}
+		cursor = next
 	}
 }
 
-// backfillSQL renders the keyset-paginated copy. When parametrised
-// is true the batch size is bound as $1; otherwise it is inlined for
-// dry-run display. The "next unsynced PK" is found with a NOT EXISTS
-// anti-join against the shadow so each call advances and the loop
-// terminates.
-func backfillSQL(p *BackfillPlan, parametrised bool) string {
+// backfillSQL renders one keyset-paginated batch as a data-modifying
+// CTE: a `batch` CTE selects the next BatchSize source rows ordered
+// by pk, an unreferenced `ins` CTE inserts them into the shadow (run
+// to completion by Postgres regardless of being unreferenced), and
+// the outer query returns max(pk) of the scanned batch so the caller
+// can advance its cursor. When withCursor is true the batch is bound
+// below by the cursor (pk > $1) and the limit is $2; otherwise there
+// is no lower bound and the limit is $1 (the first batch). When
+// parametrised is false the cursor-less, inlined-limit form is
+// rendered for dry-run display.
+func backfillSQL(p *BackfillPlan, parametrised, withCursor bool) string {
 	src := ident(p.Source)
 	shadow := ident(p.Shadow)
 	pk := ident(p.PrimaryKey)
-	limit := "$1"
-	if !parametrised {
+	var where, limit string
+	switch {
+	case !parametrised:
 		limit = strconv.Itoa(p.BatchSize)
+	case withCursor:
+		where = fmt.Sprintf("WHERE s.%s > $1 ", pk)
+		limit = "$2"
+	default:
+		limit = "$1"
 	}
 	return fmt.Sprintf(
-		"INSERT INTO %s SELECT s.* FROM %s s WHERE NOT EXISTS "+
-			"(SELECT 1 FROM %s d WHERE d.%s = s.%s) ORDER BY s.%s LIMIT %s ON CONFLICT (%s) DO NOTHING",
-		shadow, src, shadow, pk, pk, pk, limit, pk)
+		"WITH batch AS (SELECT s.* FROM %s s %sORDER BY s.%s LIMIT %s), "+
+			"ins AS (INSERT INTO %s SELECT * FROM batch ON CONFLICT (%s) DO NOTHING) "+
+			"SELECT max(%s) FROM batch",
+		src, where, pk, limit, shadow, pk, pk)
 }
 
 // --- DSN + pending-migration helpers (used by the CLI) ---------------------
@@ -549,8 +580,16 @@ func WithLockTimeout(baseURL string, d time.Duration) (string, error) {
 	q := u.Query()
 	// `-c lock_timeout=<ms>` is the PGOPTIONS form Postgres applies
 	// at connection start; url encoding handles the embedded space
-	// and equals sign.
-	q.Set("options", fmt.Sprintf("-c lock_timeout=%d", d.Milliseconds()))
+	// and equals sign. Append to any pre-existing `options` rather
+	// than overwriting it, so a DSN that already sets e.g.
+	// search_path or statement_timeout keeps those settings (the
+	// last `-c` for a given GUC wins, so an explicit caller-supplied
+	// lock_timeout would still take precedence over ours).
+	opt := fmt.Sprintf("-c lock_timeout=%d", d.Milliseconds())
+	if existing := strings.TrimSpace(q.Get("options")); existing != "" {
+		opt = existing + " " + opt
+	}
+	q.Set("options", opt)
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }

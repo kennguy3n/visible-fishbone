@@ -57,7 +57,15 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
-          base="origin/${BASE_REF}"
+          # github.base_ref is only set for pull_request events; on a
+          # manual workflow_dispatch it is empty, which would make the
+          # ref "origin/" and fail the diff. Fall back to origin/main
+          # so manual runs diff against the default branch.
+          if [ -z "$BASE_REF" ]; then
+            base="origin/main"
+          else
+            base="origin/${BASE_REF}"
+          fi
           # Added or modified up.sql migrations only; deletions are not
           # forward-migration risks and are skipped.
           files="$(git diff --name-only --diff-filter=AM "$base"...HEAD -- 'migrations/*.up.sql' | tr '\n' ' ')"

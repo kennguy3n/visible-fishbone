@@ -428,19 +428,18 @@ func maskSQL(sql string) string {
 			}
 			blank(i, j)
 			i = j
+		case (b[i] == 'E' || b[i] == 'e') && i+1 < len(b) && b[i+1] == '\'' &&
+			(i == 0 || !isIdentByte(b[i-1])):
+			// Postgres escape string `E'...'`: a backslash escapes the
+			// next byte, so `\'` is a literal quote, not a terminator.
+			// Blank the leading E together with the string body.
+			j := scanQuoted(b, i+1, true)
+			blank(i, j)
+			i = j
 		case b[i] == '\'':
-			j := i + 1
-			for j < len(b) {
-				if b[j] == '\'' {
-					if j+1 < len(b) && b[j+1] == '\'' {
-						j += 2
-						continue
-					}
-					j++
-					break
-				}
-				j++
-			}
+			// Standard string literal: backslashes are literal and only
+			// a doubled `''` escapes a quote.
+			j := scanQuoted(b, i, false)
 			blank(i, j)
 			i = j
 		case b[i] == '$':
@@ -456,6 +455,43 @@ func maskSQL(sql string) string {
 		}
 	}
 	return string(out)
+}
+
+// scanQuoted returns the index just past the closing quote of the
+// single-quoted string whose opening quote is at b[q]. A doubled
+// quote (two apostrophes) is always an embedded quote, not a
+// terminator. When escape is true (a Postgres E'...' string) a
+// backslash also escapes the following byte, so a backslash-quote
+// does not terminate the string. An
+// unterminated string scans to EOF, which masks the remainder — the
+// safe direction (the trailing text cannot then trip a rule).
+func scanQuoted(b []byte, q int, escape bool) int {
+	j := q + 1
+	for j < len(b) {
+		if escape && b[j] == '\\' && j+1 < len(b) {
+			j += 2
+			continue
+		}
+		if b[j] == '\'' {
+			if j+1 < len(b) && b[j+1] == '\'' {
+				j += 2
+				continue
+			}
+			return j + 1
+		}
+		j++
+	}
+	return j
+}
+
+// isIdentByte reports whether c can appear in a SQL identifier, used
+// to ensure an `E'...'` escape-string prefix is a standalone token
+// and not the tail of an identifier (e.g. the `e` in `code'x'`).
+func isIdentByte(c byte) bool {
+	return c == '_' ||
+		(c >= 'a' && c <= 'z') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9')
 }
 
 // dollarTag returns the dollar-quote opening tag (e.g. "$$" or

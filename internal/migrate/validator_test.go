@@ -178,6 +178,29 @@ $$;`
 	}
 }
 
+// TestValidator_EscapeStringQuotes ensures a Postgres escape string
+// (E'...') is masked with backslash-escape awareness: a `\'` inside
+// it is a literal quote, not a terminator. A naive single-quote
+// scanner would mis-detect the string's end here, "exiting" the
+// string at the escaped quote (flagging the LOCK TABLE keyword that
+// is actually string content) and then "re-entering" a string that
+// swallows — and hides — the real CREATE INDEX that follows.
+func TestValidator_EscapeStringQuotes(t *testing.T) {
+	mv := NewMigrationValidator(nil)
+	sql := "INSERT INTO audit (msg) VALUES (E'oops\\' LOCK TABLE t');\n" +
+		"CREATE INDEX idx ON t (a);"
+	vs := mv.ValidateContent("x.up.sql", sql)
+	// LOCK TABLE lives inside the escape string -> must NOT be flagged.
+	if hasRule(vs, RuleLockTable) {
+		t.Errorf("LOCK TABLE inside an E'...' string must be ignored, got %v", rules(vs))
+	}
+	// The trailing CREATE INDEX (no CONCURRENTLY) is real DDL -> must be
+	// flagged, proving the escape string's mask ended at the right place.
+	if !hasRule(vs, RuleIndexNotConcurrent) {
+		t.Errorf("CREATE INDEX after an E'...' string should still be checked, got %v", rules(vs))
+	}
+}
+
 // TestValidator_LineNumbers checks that the reported line points at
 // the offending statement.
 func TestValidator_LineNumbers(t *testing.T) {

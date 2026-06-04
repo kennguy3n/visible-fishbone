@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -109,11 +110,34 @@ func TestChangeColumnTypeOp_Plan(t *testing.T) {
 	if steps[2].Backfill == nil {
 		t.Fatal("step 3 should be a backfill")
 	}
-	bf := backfillSQL(steps[2].Backfill, true)
-	for _, want := range []string{"ON CONFLICT", "NOT EXISTS", "LIMIT $1", "ORDER BY"} {
-		if !strings.Contains(bf, want) {
-			t.Errorf("backfill SQL missing %q: %s", want, bf)
+	// First batch: no cursor bound, batch size is $1, and the
+	// data-modifying CTE returns max(pk) so the caller can advance.
+	bfFirst := backfillSQL(steps[2].Backfill, true, false)
+	for _, want := range []string{
+		"WITH batch AS",
+		"ON CONFLICT",
+		"ORDER BY",
+		"LIMIT $1",
+		`SELECT max("id") FROM batch`,
+	} {
+		if !strings.Contains(bfFirst, want) {
+			t.Errorf("first-batch backfill SQL missing %q: %s", want, bfFirst)
 		}
+	}
+	if strings.Contains(bfFirst, "WHERE") {
+		t.Errorf("first-batch backfill SQL should have no cursor bound: %s", bfFirst)
+	}
+	// Subsequent batches are keyset-paginated: bound below by the
+	// cursor (pk > $1), batch size is $2. No NOT EXISTS anti-join (the
+	// old approach that re-scanned copied rows every batch).
+	bfNext := backfillSQL(steps[2].Backfill, true, true)
+	for _, want := range []string{`WHERE s."id" > $1`, "LIMIT $2", "ON CONFLICT"} {
+		if !strings.Contains(bfNext, want) {
+			t.Errorf("keyset backfill SQL missing %q: %s", want, bfNext)
+		}
+	}
+	if strings.Contains(bfNext, "NOT EXISTS") {
+		t.Errorf("backfill SQL should use keyset pagination, not a NOT EXISTS anti-join: %s", bfNext)
 	}
 
 	// Step 4: swap renames original aside, promotes shadow, drops trigger/fn.
@@ -165,6 +189,22 @@ func TestWithLockTimeout(t *testing.T) {
 	same, err := WithLockTimeout(base, 0)
 	if err != nil || same != base {
 		t.Fatalf("zero duration should return base unchanged, got %q (%v)", same, err)
+	}
+
+	// A pre-existing `options` must be preserved, not overwritten:
+	// our `-c lock_timeout` is appended after the caller's settings.
+	withOpts := "pgx5://u:p@localhost:5432/db?options=-c%20search_path%3Dsng"
+	merged, err := WithLockTimeout(withOpts, 5*time.Second)
+	if err != nil {
+		t.Fatalf("WithLockTimeout (merge): %v", err)
+	}
+	u, err := url.Parse(merged)
+	if err != nil {
+		t.Fatalf("parse merged dsn: %v", err)
+	}
+	gotOpts := u.Query().Get("options")
+	if want := "-c search_path=sng -c lock_timeout=5000"; gotOpts != want {
+		t.Fatalf("expected merged options %q, got %q", want, gotOpts)
 	}
 }
 
