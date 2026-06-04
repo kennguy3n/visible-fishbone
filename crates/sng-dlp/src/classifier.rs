@@ -460,7 +460,7 @@ impl ContentClassifier {
 #[must_use]
 pub fn builtin_pattern(name: &str) -> Option<&'static str> {
     let pat = match name {
-        "credit_card" => r"(?:\d[ -]*?){13,19}",
+        "credit_card" => r"\b(?:\d[ -]*?){13,19}\b",
         "ssn_us" => r"\b\d{3}-\d{2}-\d{4}\b",
         "ni_uk" => r"(?i)\b[A-CEGHJ-PR-TW-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b",
         "tfn_au" => r"\b\d{3}\s?\d{3}\s?\d{2,3}\b",
@@ -538,7 +538,9 @@ pub fn hamming_similarity(a: u64, b: u64) -> f64 {
 #[must_use]
 pub fn luhn_valid(s: &str) -> bool {
     let digits: Vec<u32> = s.chars().filter_map(|c| c.to_digit(10)).collect();
-    if digits.len() < 13 {
+    // Match the Go `luhnValid` bounds exactly (regex.go): a PAN is
+    // 13-19 digits, so anything outside that range is not a card.
+    if digits.len() < 13 || digits.len() > 19 {
         return false;
     }
     let mut sum = 0u32;
@@ -623,6 +625,28 @@ mod tests {
             &ContentMetadata::default(),
         );
         assert!(!bad.is_match());
+    }
+
+    #[test]
+    fn credit_card_not_matched_inside_longer_digit_run() {
+        // Regression: the builtin must carry the same `\b` word
+        // boundaries as the Go side (regex.go), so a Luhn-valid 16-digit
+        // PAN embedded in a longer contiguous digit identifier does NOT
+        // match — matching it would produce endpoint false positives the
+        // web/SaaS classifier never raises.
+        let c = ContentClassifier::compile(&[rule(
+            "cc",
+            PatternType::Regex,
+            "credit_card",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        let res = c.classify(
+            DlpChannel::Clipboard,
+            b"99994111111111111111999",
+            &ContentMetadata::default(),
+        );
+        assert!(!res.is_match());
     }
 
     #[test]
@@ -794,6 +818,11 @@ mod tests {
         assert!(luhn_valid("4111111111111111"));
         assert!(!luhn_valid("4111111111111112"));
         assert!(!luhn_valid("123"));
+        // Regression: mirror the Go upper bound — a digit run longer than
+        // 19 is not a PAN even if the trailing digits would checksum.
+        assert!(!luhn_valid("41111111111111110000000"));
+        // 19 digits, Luhn-valid, stays accepted at the upper boundary.
+        assert!(luhn_valid("4111111111111111110"));
     }
 
     #[test]
