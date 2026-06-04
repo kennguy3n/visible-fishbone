@@ -294,3 +294,50 @@ func (r *DeviceRepository) UpdateStatus(ctx context.Context, tenantID, id uuid.U
 	})
 	return out, err
 }
+
+func (r *DeviceRepository) TransitionStatus(ctx context.Context, tenantID, id uuid.UUID, from, to repository.DeviceStatus) (repository.Device, error) {
+	switch to {
+	case repository.DeviceStatusPending, repository.DeviceStatusActive,
+		repository.DeviceStatusSuspended, repository.DeviceStatusDeleted:
+	default:
+		return repository.Device{}, repository.ErrInvalidArgument
+	}
+	var out repository.Device
+	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		// Single atomic UPDATE: the `status = $3` precondition prevents
+		// the TOCTOU window present in a Get+UpdateStatus pair. No rows
+		// means either the device doesn't exist (NotFound) or its status
+		// no longer equals `from` (Forbidden); a follow-up lookup
+		// disambiguates.
+		const q = `
+			UPDATE devices
+			SET status      = $2,
+			    enrolled_at = CASE
+			        WHEN $2 = 'active' AND enrolled_at IS NULL THEN NOW()
+			        ELSE enrolled_at
+			    END
+			WHERE id = $1::uuid AND status = $3
+			RETURNING ` + deviceSelectColumns
+		row := tx.QueryRow(ctx, q, id, string(to), string(from))
+		var serr error
+		out, serr = scanDevice(row)
+		if serr == nil {
+			return nil
+		}
+		if isCheckViolation(serr) {
+			return repository.ErrInvalidArgument
+		}
+		if !errors.Is(serr, pgx.ErrNoRows) {
+			return fmt.Errorf("transition status: %w", serr)
+		}
+		var cur string
+		if scanErr := tx.QueryRow(ctx, `SELECT status FROM devices WHERE id = $1::uuid`, id).Scan(&cur); scanErr != nil {
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				return repository.ErrNotFound
+			}
+			return fmt.Errorf("transition status lookup: %w", scanErr)
+		}
+		return repository.ErrForbidden
+	})
+	return out, err
+}

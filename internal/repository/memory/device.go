@@ -189,3 +189,35 @@ func (r *DeviceRepository) UpdateStatus(ctx context.Context, tenantID, id uuid.U
 	r.s.devices[id] = existing
 	return existing, nil
 }
+
+func (r *DeviceRepository) TransitionStatus(ctx context.Context, tenantID, id uuid.UUID, from, to repository.DeviceStatus) (repository.Device, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.Device{}, err
+	}
+	switch to {
+	case repository.DeviceStatusPending, repository.DeviceStatusActive,
+		repository.DeviceStatusSuspended, repository.DeviceStatusDeleted:
+	default:
+		return repository.Device{}, repository.ErrInvalidArgument
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.devices[id]
+	if !ok || existing.TenantID != tenantID {
+		return repository.Device{}, repository.ErrNotFound
+	}
+	// Conditional transition: refuse if the device is no longer in the
+	// expected `from` state (mirrors the Postgres `status = $3`
+	// precondition that closes the TOCTOU window).
+	if existing.Status != from {
+		return repository.Device{}, repository.ErrForbidden
+	}
+	existing.Status = to
+	if to == repository.DeviceStatusActive && existing.EnrolledAt == nil {
+		t := r.s.clock()
+		existing.EnrolledAt = &t
+	}
+	existing.UpdatedAt = r.s.clock()
+	r.s.devices[id] = existing
+	return existing, nil
+}

@@ -533,3 +533,116 @@ func TestMobileDeviceRevoked(t *testing.T) {
 		}
 	}
 }
+
+// raceDeviceRepo wraps a DeviceRepository to reproduce an admin
+// suspend/delete landing in the TOCTOU window between the device-status
+// read and the re-activation write in reactivateMobileDevice. The first
+// time GetByPublicKey returns a still-pending device, it suspends that
+// device out-of-band in the backing store but hands back the stale
+// pre-suspend snapshot — exactly what a racing admin action would do.
+type raceDeviceRepo struct {
+	repository.DeviceRepository
+	suspendedOnce bool
+}
+
+func (r *raceDeviceRepo) GetByPublicKey(ctx context.Context, tenantID uuid.UUID, key string) (repository.Device, error) {
+	dev, err := r.DeviceRepository.GetByPublicKey(ctx, tenantID, key)
+	if err == nil && !r.suspendedOnce && dev.Status == repository.DeviceStatusPending {
+		r.suspendedOnce = true
+		if _, serr := r.UpdateStatus(ctx, tenantID, dev.ID, repository.DeviceStatusSuspended); serr != nil {
+			return repository.Device{}, serr
+		}
+	}
+	return dev, err
+}
+
+// TestEnrollMobileDevice_ReactivationLosesRaceToAdminSuspend guards the
+// TOCTOU fix: reactivateMobileDevice now re-activates via a conditional
+// TransitionStatus(from: observed status) rather than an unconditional
+// UpdateStatus. When an admin suspend lands between the disabled-check
+// read and the write, the compare-and-swap must FAIL (the row is no
+// longer pending) so the device is NOT silently reinstated.
+func TestEnrollMobileDevice_ReactivationLosesRaceToAdminSuspend(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tn, err := memory.NewTenantRepository(s).Create(context.Background(), repository.Tenant{
+		Name: "Tenant", Slug: "tenant", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	ctx := context.Background()
+	devices := memory.NewDeviceRepository(s)
+	key := mobileKey(t)
+
+	// Seed a pending device for the key so enrolment takes the
+	// reactivation (pending -> active) path.
+	if _, err := devices.Create(ctx, tn.ID, repository.Device{
+		Name: "iphone", Platform: repository.DevicePlatformIOS, PublicKeyEd25519: key,
+		Status: repository.DeviceStatusPending,
+	}); err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+
+	svc := identity.New(&raceDeviceRepo{DeviceRepository: devices}, memory.NewClaimTokenRepository(s), memory.NewAuditLogRepository(s), nil)
+
+	_, err = svc.EnrollMobileDevice(ctx, tn.ID, identity.MobileEnrollInput{
+		DeviceKey: key, Platform: repository.DevicePlatformIOS,
+	})
+	if !errors.Is(err, repository.ErrForbidden) {
+		t.Fatalf("re-enrol racing an admin suspend: err=%v, want ErrForbidden", err)
+	}
+
+	// The device must remain suspended — the racing reactivation must
+	// not have clobbered the admin's action.
+	got, gerr := devices.GetByPublicKey(ctx, tn.ID, key)
+	if gerr != nil {
+		t.Fatalf("lookup after race: %v", gerr)
+	}
+	if got.Status != repository.DeviceStatusSuspended {
+		t.Fatalf("device status after race = %q, want suspended (admin suspend must survive)", got.Status)
+	}
+}
+
+// TestDeviceRepository_TransitionStatus_Memory covers the conditional
+// transition primitive directly: a CAS that matches succeeds (and
+// stamps enrolled_at on the active transition), a stale `from` is
+// rejected with ErrForbidden, and an unknown id is ErrNotFound.
+func TestDeviceRepository_TransitionStatus_Memory(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tn, err := memory.NewTenantRepository(s).Create(context.Background(), repository.Tenant{
+		Name: "Tenant", Slug: "tenant", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	ctx := context.Background()
+	devices := memory.NewDeviceRepository(s)
+	dev, err := devices.Create(ctx, tn.ID, repository.Device{
+		Name: "d", Platform: repository.DevicePlatformAndroid,
+		PublicKeyEd25519: mobileKey(t), Status: repository.DeviceStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+
+	// Matching CAS pending -> active succeeds and stamps enrolled_at.
+	out, err := devices.TransitionStatus(ctx, tn.ID, dev.ID, repository.DeviceStatusPending, repository.DeviceStatusActive)
+	if err != nil {
+		t.Fatalf("matching transition: %v", err)
+	}
+	if out.Status != repository.DeviceStatusActive || out.EnrolledAt == nil {
+		t.Fatalf("after transition: status=%q enrolled_at=%v", out.Status, out.EnrolledAt)
+	}
+
+	// Stale precondition (device is now active, not pending) -> Forbidden.
+	if _, err := devices.TransitionStatus(ctx, tn.ID, dev.ID, repository.DeviceStatusPending, repository.DeviceStatusActive); !errors.Is(err, repository.ErrForbidden) {
+		t.Fatalf("stale-from transition: err=%v, want ErrForbidden", err)
+	}
+
+	// Unknown id -> NotFound.
+	if _, err := devices.TransitionStatus(ctx, tn.ID, uuid.New(), repository.DeviceStatusActive, repository.DeviceStatusSuspended); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("unknown id transition: err=%v, want ErrNotFound", err)
+	}
+}

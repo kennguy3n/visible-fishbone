@@ -404,6 +404,45 @@ func TestPostgres_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("Device_TransitionStatus_CAS", func(t *testing.T) {
+		tr := store.NewTenantRepository()
+		dr := store.NewDeviceRepository()
+		tnt := mustTenant(t, tr)
+
+		dev, err := dr.Create(bgCtx(), tnt.ID, repository.Device{
+			Name: "android", Platform: repository.DevicePlatformAndroid,
+			Status: repository.DeviceStatusPending,
+		})
+		if err != nil {
+			t.Fatalf("create device: %v", err)
+		}
+
+		// Matching precondition: pending -> active succeeds and stamps
+		// enrolled_at via the conditional UPDATE.
+		out, err := dr.TransitionStatus(bgCtx(), tnt.ID, dev.ID, repository.DeviceStatusPending, repository.DeviceStatusActive)
+		if err != nil {
+			t.Fatalf("matching transition: %v", err)
+		}
+		if out.Status != repository.DeviceStatusActive || out.EnrolledAt == nil {
+			t.Fatalf("after transition: status=%q enrolled_at=%v", out.Status, out.EnrolledAt)
+		}
+
+		// Stale precondition (still expecting pending) must not clobber
+		// the now-active row: the CAS affects 0 rows -> ErrForbidden.
+		if _, err := dr.TransitionStatus(bgCtx(), tnt.ID, dev.ID, repository.DeviceStatusPending, repository.DeviceStatusSuspended); !errors.Is(err, repository.ErrForbidden) {
+			t.Fatalf("stale-from transition: err=%v, want ErrForbidden", err)
+		}
+		got, _ := dr.Get(bgCtx(), tnt.ID, dev.ID)
+		if got.Status != repository.DeviceStatusActive {
+			t.Fatalf("status after failed CAS = %q, want active (must be untouched)", got.Status)
+		}
+
+		// Unknown id -> ErrNotFound.
+		if _, err := dr.TransitionStatus(bgCtx(), tnt.ID, uuid.New(), repository.DeviceStatusActive, repository.DeviceStatusSuspended); !errors.Is(err, repository.ErrNotFound) {
+			t.Fatalf("unknown id transition: err=%v, want ErrNotFound", err)
+		}
+	})
+
 	t.Run("Role_Permission", func(t *testing.T) {
 		tr := store.NewTenantRepository()
 		ur := store.NewUserRepository()

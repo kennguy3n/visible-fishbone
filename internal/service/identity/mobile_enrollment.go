@@ -209,10 +209,15 @@ func (svc *Service) reactivateMobileDevice(
 	// Re-activate a pending device (or one that never had its enrolment
 	// timestamp stamped). Suspended/deleted devices were already
 	// rejected above, so the only non-active status reaching here is
-	// pending. UpdateStatus stamps enrolled_at on the active transition
-	// when it is still null.
+	// pending. Use a conditional TransitionStatus(from: observed status)
+	// rather than an unconditional UpdateStatus: it closes the TOCTOU
+	// window where an admin suspends/deletes the device between the
+	// mobileDeviceDisabled check above and this write — without the
+	// precondition the write would silently clobber that suspend and
+	// reinstate the device. A lost CAS surfaces as ErrForbidden, which
+	// is exactly the "device was just disabled" answer the caller wants.
 	if existing.Status != repository.DeviceStatusActive || existing.EnrolledAt == nil {
-		updated, err := svc.devices.UpdateStatus(ctx, tenantID, existing.ID, repository.DeviceStatusActive)
+		updated, err := svc.devices.TransitionStatus(ctx, tenantID, existing.ID, existing.Status, repository.DeviceStatusActive)
 		if err != nil {
 			return repository.Device{}, err
 		}
