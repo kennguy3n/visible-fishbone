@@ -447,7 +447,13 @@ func buildRouter(
 
 	tenantRepo := store.NewTenantRepository()
 	siteRepo := store.NewSiteRepository()
-	deviceRepo := store.NewDeviceRepository()
+	// Short-TTL cache for the auth-middleware mobile device kill-switch.
+	// Decorating the device repository here means every status mutation
+	// (suspend / delete / reactivate) — through any service — invalidates
+	// the matching entry, so the kill-switch stays immediate while the
+	// per-request GetByPublicKey lookups collapse to one per TTL window.
+	mobileDeviceStatusCache := handler.NewMobileDeviceStatusCache(handler.DefaultMobileDeviceStatusTTL)
+	deviceRepo := mobileDeviceStatusCache.InstrumentRepository(store.NewDeviceRepository())
 	roleRepo := store.NewRoleRepository()
 	claimRepo := store.NewClaimTokenRepository()
 	auditRepo := store.NewAuditLogRepository()
@@ -815,7 +821,7 @@ func buildRouter(
 		// Device kill-switch for stateless mobile session JWTs: a
 		// token bound to a suspended/deleted device is refused by the
 		// auth middleware on every endpoint, not just self-service.
-		MobileDeviceStatus: handler.NewMobileDeviceStatusResolver(identitySvc),
+		MobileDeviceStatus: mobileDeviceStatusCache.Resolver(handler.NewMobileDeviceStatusResolver(identitySvc)),
 		Health:             health,
 		OpenAPISpec:        handler.NewOpenAPIHandler(),
 		OpsHealth:          handler.NewOpsHealthHandler(opsHealthRepo, logger),
