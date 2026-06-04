@@ -55,6 +55,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/playbook"
 	"github.com/kennguy3n/visible-fishbone/internal/service/playbook/executors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
+	"github.com/kennguy3n/visible-fishbone/internal/service/pop"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
 	"github.com/kennguy3n/visible-fishbone/internal/service/site"
 	"github.com/kennguy3n/visible-fishbone/internal/service/telemetry"
@@ -222,7 +223,7 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, evidenceScheduler, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
+	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, popSvc, evidenceScheduler, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -290,6 +291,53 @@ func run() error {
 			slog.Duration("interval", cfg.AppRegistry.SyncInterval))
 	} else {
 		logger.Info("sng-control: app-registry sync loop disabled (APP_REGISTRY_SYNC_ENABLED=false)")
+	}
+
+	// --- Cloud PoP service (Session F) -------------------------------
+	// Every replica keeps its own lock-free PoP registry warm by
+	// refreshing it from Postgres on PoP.RegistryRefreshInterval, so a
+	// load-balanced AssignPoP / public-bootstrap request hits a local
+	// snapshot rather than the DB. Health beacons published by PoP
+	// edges on `sng.pop.<id>.health` (core NATS — high-frequency,
+	// ephemeral telemetry that must not be persisted in JetStream) are
+	// folded into the same registry in real time so a PoP that goes
+	// hot or silent drops out of the assignable set within one TTL
+	// window instead of one refresh interval.
+	// Warm the registry from Postgres synchronously BEFORE subscribing
+	// to health beacons. ApplyHealth drops beacons for PoPs the registry
+	// has not loaded yet, so subscribing first would open a startup
+	// window where early beacons are dropped from the in-memory snapshot
+	// (they are still persisted and self-heal on the next refresh, but
+	// warming first closes the window). Run still owns the periodic
+	// refresh loop below.
+	if err := popSvc.Registry().Refresh(rootCtx); err != nil {
+		logger.Warn("sng-control: initial pop registry refresh failed", slog.Any("error", err))
+	}
+	popHealthSub, err := subscribePoPHealth(nc, popSvc, logger)
+	if err != nil {
+		return fmt.Errorf("subscribe pop health: %w", err)
+	}
+	defer func() {
+		// Drain (not just unsubscribe) so in-flight beacons finish
+		// being folded into the registry before shutdown.
+		if err := popHealthSub.Drain(); err != nil {
+			logger.Warn("sng-control: pop health subscription drain failed", slog.Any("error", err))
+		}
+	}()
+	go popSvc.Run(rootCtx, cfg.PoP.RegistryRefreshInterval)
+	// The capacity rebalancer is a singleton: only the leader scans
+	// for overloaded PoPs and moves non-override tenants off them, so
+	// a multi-replica deployment performs one coordinated rebalance
+	// per interval rather than N racing ones (which would thrash
+	// assignments). Disabled via POP_REBALANCE_ENABLED=false.
+	if cfg.PoP.RebalanceEnabled {
+		go elector.RunIfLeader(rootCtx, "pop-rebalance", func(ctx context.Context) {
+			runPoPRebalance(ctx, popSvc, cfg.PoP.RebalanceInterval, logger)
+		})
+		logger.Info("sng-control: pop rebalance loop registered (runs on leader only)",
+			slog.Duration("interval", cfg.PoP.RebalanceInterval))
+	} else {
+		logger.Info("sng-control: pop rebalance loop disabled (POP_REBALANCE_ENABLED=false)")
 	}
 
 	// SOC2 evidence collection is a singleton background workload:
@@ -479,7 +527,7 @@ func buildRouter(
 	replay *telreplay.Worker,
 	telPub *sngnats.Publisher,
 	mx *metrics.Metrics,
-) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, *aisvc.Service, *metering.MeteringService, *compliance.Scheduler, error) {
+) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, *aisvc.Service, *metering.MeteringService, *pop.Service, *compliance.Scheduler, error) {
 	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
@@ -548,11 +596,11 @@ func buildRouter(
 	// the same in all cases.
 	keyOpts := []policy.KeyOption{}
 	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
 	} else if len(master) > 0 {
 		w, err := policy.NewAESGCMWrapper(master)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
 		}
 		keyOpts = append(keyOpts, policy.WithKeyWrapper(w))
 		logger.Info("policy: AES-256-GCM at-rest wrap enabled for signing seeds")
@@ -563,7 +611,7 @@ func buildRouter(
 	if cfg.Policy.SigningKeyPath != "" {
 		ks, err := policy.LoadKeySignerFromFile(cfg.Policy.SigningKeyPath)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
 		}
 		policySigner = ks
 		fileSigner = ks
@@ -644,7 +692,7 @@ func buildRouter(
 	canarySvc, err := policy.NewCanaryService(policySvc, policyRolloutRepo,
 		policy.WithCanaryLogger(logger))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
 	}
 	policySimHandler := handler.NewPolicySimulationHandler(
 		policySvc, canarySvc, nil, policyRepo, logger)
@@ -762,23 +810,23 @@ func buildRouter(
 	// sync/atomic counters and is flushed by main() via meteringSvc.Run.
 	meteringStore, err := metering.NewPostgresStore(pool.Primary(), cfg.Postgres.AppRole, cfg.Postgres.PgBouncerMode)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering store: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering store: %w", err)
 	}
 	meteringSvc, err := metering.NewMeteringService(meteringStore, logger,
 		metering.WithFlushInterval(cfg.Metering.FlushInterval))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering service: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering service: %w", err)
 	}
 	meteringTiers := meteringTierResolver{tenants: tenantRepo}
 	budgetEnforcer, err := metering.NewBudgetEnforcer(meteringSvc, meteringStore, meteringTiers, logger,
 		metering.WithGlobalDefaults(cfg.Metering.DefaultBudgets))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: budget enforcer: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: budget enforcer: %w", err)
 	}
 	costCalc := metering.NewCostCalculator(metering.DefaultUnitCosts)
 	meteringReports, err := metering.NewReports(meteringSvc, budgetEnforcer, meteringStore, meteringTiers, costCalc)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering reports: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering reports: %w", err)
 	}
 	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports)
 
@@ -804,7 +852,7 @@ func buildRouter(
 	// unchanged; the scheduler's leader loop is launched by run().
 	evidenceSvc, evidenceScheduler, err := buildEvidenceAutomation(cfg, store, logger)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("compliance evidence automation: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("compliance evidence automation: %w", err)
 	}
 	complianceHandler := handler.NewComplianceHandler(
 		compliance.NewReportService(store.NewComplianceReportRepository(), logger),
@@ -863,6 +911,21 @@ func buildRouter(
 	)
 	oidcHandler := handler.NewOIDCHandler(idpConfigRepo, oidcSvc, cfg.MobileAuth.MaxProvidersPerTenant)
 
+	// --- Cloud PoP service (Session F) -------------------------------
+	// The PoP store builds on the same ReadWritePool so its RLS GUC /
+	// app-role semantics match the rest of the control plane. The
+	// registry is a lock-free in-memory cache refreshed from Postgres
+	// (Service.Run) and folded in real time by NATS health beacons.
+	// The platform-admin routes are gated by the RBAC service's
+	// AuthorizePlatform; the public bootstrap list needs no authority.
+	popStore := pop.NewPostgresStore(pool)
+	popRegistry := pop.NewRegistry(popStore, pop.WithHealthTTL(cfg.PoP.HealthTTL))
+	popSvc := pop.NewService(popStore, popRegistry,
+		pop.WithLogger(logger),
+		pop.WithHighWaterFraction(cfg.PoP.HighWaterFraction),
+	)
+	popHandler := handler.NewPoPHandler(popSvc, rbacSvc)
+
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:  cfg,
 		Logger:  logger,
@@ -894,6 +957,7 @@ func buildRouter(
 		OIDC:             oidcHandler,
 		Mobile:           handler.NewMobileHandler(identitySvc),
 		Metering:         meteringHandler,
+		PoP:              popHandler,
 		APIKeyLookup:     apiKeySvc,
 		// Device kill-switch for stateless mobile session JWTs: a
 		// token bound to a suspended/deleted device is refused by the
@@ -917,7 +981,7 @@ func buildRouter(
 	// admin `POST /admin/app-registry/sync` endpoint is the only
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
-	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, evidenceScheduler, nil
+	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, popSvc, evidenceScheduler, nil
 }
 
 // meteringTierResolver adapts the TenantRepository onto the metering
@@ -1647,6 +1711,94 @@ func afterConnectSetRole(appRole string) func(context.Context, *pgx.Conn) error 
 			)
 		}
 		return nil
+	}
+}
+
+// popHealthBeacon is the JSON payload a PoP edge publishes on
+// `sng.pop.<pop_id>.health`. The pop_id is carried in the subject
+// (not the body) so the control plane can route the beacon without
+// trusting a self-reported id in the payload.
+type popHealthBeacon struct {
+	ReportedAt        time.Time `json:"reported_at"`
+	CPUPct            float64   `json:"cpu_pct"`
+	MemoryPct         float64   `json:"memory_pct"`
+	ActiveConnections int       `json:"active_connections"`
+	BandwidthMbps     float64   `json:"bandwidth_mbps"`
+}
+
+// subscribePoPHealth wires the core-NATS subscription that folds PoP
+// health beacons into the registry. Beacons are ephemeral,
+// high-frequency telemetry, so they ride plain NATS pub/sub rather
+// than a persisted JetStream stream: a missed beacon is self-healing
+// (the next one arrives within the edge's report interval, and a PoP
+// that goes silent ages out of the assignable set after the health
+// TTL regardless).
+func subscribePoPHealth(nc *nats.Conn, svc *pop.Service, logger *slog.Logger) (*nats.Subscription, error) {
+	return nc.Subscribe("sng.pop.*.health", func(msg *nats.Msg) {
+		// Subject shape: sng.pop.<pop_id>.health
+		parts := strings.Split(msg.Subject, ".")
+		if len(parts) != 4 {
+			logger.Warn("pop: dropping health beacon with unexpected subject",
+				slog.String("subject", msg.Subject))
+			return
+		}
+		popID, err := uuid.Parse(parts[2])
+		if err != nil {
+			logger.Warn("pop: dropping health beacon with non-uuid pop id",
+				slog.String("subject", msg.Subject), slog.Any("error", err))
+			return
+		}
+		var b popHealthBeacon
+		if err := json.Unmarshal(msg.Data, &b); err != nil {
+			logger.Warn("pop: dropping malformed health beacon",
+				slog.String("pop_id", popID.String()), slog.Any("error", err))
+			return
+		}
+		h := pop.Health{
+			PoPID:             popID,
+			ReportedAt:        b.ReportedAt,
+			CPUPct:            b.CPUPct,
+			MemoryPct:         b.MemoryPct,
+			ActiveConnections: b.ActiveConnections,
+			BandwidthMbps:     b.BandwidthMbps,
+		}
+		// A dedicated short-lived context: IngestHealth does one INSERT
+		// plus an in-memory fold, and the message callback must not
+		// block the NATS dispatcher indefinitely if Postgres stalls.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := svc.IngestHealth(ctx, h); err != nil {
+			logger.Warn("pop: ingest health beacon failed",
+				slog.String("pop_id", popID.String()), slog.Any("error", err))
+		}
+	})
+}
+
+// runPoPRebalance drives the leader-only capacity rebalancer until ctx
+// is cancelled. It is invoked through elector.RunIfLeader, so it both
+// starts on leadership acquisition and returns (stopping the ticker)
+// when leadership is lost or the process shuts down.
+func runPoPRebalance(ctx context.Context, svc *pop.Service, interval time.Duration, logger *slog.Logger) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			moved, err := svc.Rebalance(ctx)
+			if err != nil && ctx.Err() == nil {
+				logger.Warn("pop: rebalance pass failed", slog.Any("error", err))
+				continue
+			}
+			if moved > 0 {
+				logger.Info("pop: rebalance moved tenants off overloaded PoPs",
+					slog.Int("moved", moved))
+			}
+		}
 	}
 }
 

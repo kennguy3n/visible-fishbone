@@ -83,6 +83,7 @@ type Config struct {
 	AI                 AI
 	MobileAuth         MobileAuth
 	Metering           Metering
+	PoP                PoP
 }
 
 // Metering carries the runtime knobs for the cost-metering and
@@ -106,6 +107,49 @@ type Metering struct {
 	// as a comma-separated "meter=value" list. Optional: nil means the
 	// only fallbacks are the built-in per-tier defaults.
 	DefaultBudgets map[string]int64
+}
+
+// PoP carries the runtime knobs for the Cloud PoP
+// (Point-of-Presence) service — the cloud-delivered SWG/DNS/ZTNA
+// edge for tenants without an on-premise edge VM (see
+// internal/service/pop). The control plane keeps an in-memory
+// registry of PoP locations refreshed from Postgres, ingests their
+// health beacons over NATS, routes cloud-only tenants to their
+// nearest healthy PoP, and publishes GeoDNS steering records.
+type PoP struct {
+	// RegistryRefreshInterval is how often each replica reloads the
+	// PoP fleet from Postgres into its lock-free in-memory registry.
+	// Defaults to 30s. Beacons keep the registry fresh between
+	// refreshes; this bounds how long a newly-registered or disabled
+	// PoP takes to appear/disappear fleet-wide.
+	RegistryRefreshInterval time.Duration
+	// HealthTTL is how recent a PoP's last health beacon must be for
+	// the PoP to count as healthy for assignment. Beacons older than
+	// this drop the PoP out of the assignable set. Defaults to 90s.
+	HealthTTL time.Duration
+	// HighWaterFraction is the utilization (0,1] at or above which a
+	// PoP is considered overloaded: excluded from new assignments and
+	// a rebalance candidate. Defaults to 0.85.
+	HighWaterFraction float64
+	// GeoDNSHostname is the steering FQDN clients resolve during
+	// enrolment. Defaults to edge.sng.example.com.
+	GeoDNSHostname string
+	// GeoDNSRoutingPolicy selects the DNS steering strategy:
+	// latency | weighted | simple. Defaults to latency.
+	GeoDNSRoutingPolicy string
+	// GeoDNSTTL is the TTL stamped on every emitted steering record.
+	// Short TTLs let a failed PoP drain quickly. Defaults to 30s.
+	GeoDNSTTL time.Duration
+	// GeoDNSPublishInterval is how often the leader re-publishes the
+	// steering zone from the live registry. Defaults to 30s.
+	GeoDNSPublishInterval time.Duration
+	// RebalanceEnabled gates the leader-only capacity rebalancer that
+	// drains overloaded PoPs by moving non-override tenants to
+	// less-loaded PoPs. Defaults to true.
+	RebalanceEnabled bool
+	// RebalanceInterval is the cadence of the capacity rebalancer.
+	// Defaults to 60s.
+	RebalanceInterval time.Duration
 }
 
 // MobileAuth carries the runtime knobs for control-plane IdP
@@ -910,6 +954,15 @@ func Load() (Config, error) {
 			KeyWrapMasterB64:  getStr("POLICY_KEY_WRAP_MASTER_B64", ""),
 			KeyWrapMasterFile: getStr("POLICY_KEY_WRAP_MASTER_FILE", ""),
 		},
+		PoP: PoP{
+			// Free-form string knobs are parsed leniently; the
+			// load-bearing numeric / duration / bool knobs are
+			// populated by the strict tables below. The routing
+			// policy and hostname are validated downstream by
+			// pop.NewZoneGenerator, which fails fast on a bad value.
+			GeoDNSHostname:      getStr("POP_GEODNS_HOSTNAME", "edge.sng.example.com"),
+			GeoDNSRoutingPolicy: getStr("POP_GEODNS_ROUTING_POLICY", "latency"),
+		},
 		Telemetry: Telemetry{
 			OTLPEndpoint:   getStr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 			ServiceVersion: getStr("SERVICE_VERSION", ""),
@@ -1046,6 +1099,15 @@ func Load() (Config, error) {
 		// Session K spec and metering.DefaultFlushInterval). Parsed
 		// strictly so a typo can't silently skew cost accounting.
 		{"METERING_FLUSH_INTERVAL", 60 * time.Second, &cfg.Metering.FlushInterval},
+		// Cloud PoP service duration knobs. Parsed strictly so an
+		// operator typo fails boot rather than silently reverting to
+		// the default (a stale-beacon TTL or refresh cadence quietly
+		// reverting could mis-route tenant traffic).
+		{"POP_REGISTRY_REFRESH_INTERVAL", 30 * time.Second, &cfg.PoP.RegistryRefreshInterval},
+		{"POP_HEALTH_TTL", 90 * time.Second, &cfg.PoP.HealthTTL},
+		{"POP_GEODNS_TTL", 30 * time.Second, &cfg.PoP.GeoDNSTTL},
+		{"POP_GEODNS_PUBLISH_INTERVAL", 30 * time.Second, &cfg.PoP.GeoDNSPublishInterval},
+		{"POP_REBALANCE_INTERVAL", 60 * time.Second, &cfg.PoP.RebalanceInterval},
 	}
 	strictFloats := []struct {
 		key string
@@ -1053,6 +1115,10 @@ func Load() (Config, error) {
 		dst *float64
 	}{
 		{"RATE_LIMIT_RATE", 30.0, &cfg.RateLimit.Rate},
+		// PoP overload threshold. Parsed strictly because a typo
+		// silently reverting to the default would weaken the capacity
+		// guardrail that keeps a PoP from being over-subscribed.
+		{"POP_HIGH_WATER_FRACTION", 0.85, &cfg.PoP.HighWaterFraction},
 	}
 	// Boolean fields parsed strictly. Both entries below toggle
 	// security- or correctness-adjacent behaviour:
@@ -1081,6 +1147,7 @@ func Load() (Config, error) {
 		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
 		{"MOBILE_AUTH_AUTO_PROVISION_USERS", true, &cfg.MobileAuth.AutoProvisionUsers},
 		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},
+		{"POP_REBALANCE_ENABLED", true, &cfg.PoP.RebalanceEnabled},
 	}
 
 	var strictErrs []error
@@ -1469,6 +1536,38 @@ func (c Config) validate() error {
 		default:
 			return fmt.Errorf("PG_SSLMODE must be one of require|verify-ca|verify-full in production environments, got %q", c.Postgres.SSLMode)
 		}
+	}
+	// Cloud PoP service knobs. The strict parser accepts "0s"/0 and the
+	// service-level options (WithHighWaterFraction, WithHealthTTL)
+	// silently ignore out-of-range values, so an operator typo would
+	// quietly run with a default instead of the intended value. A zero
+	// POP_REGISTRY_REFRESH_INTERVAL is worse than silent — it panics
+	// time.NewTicker. Fail boot loudly, mirroring the Rust edge config
+	// (crates/sng-edge/src/config.rs) which rejects the same
+	// out-of-range high-water fraction.
+	//
+	// The bound is written as the negation of the in-range predicate
+	// (not `<= 0 || > 1`) so it also rejects NaN: strconv.ParseFloat
+	// accepts "NaN", and every NaN comparison is false, so the
+	// open-coded form would let NaN through to silently revert to the
+	// 0.85 default. This matches the Rust edge's `!(f > 0.0 && f <= 1.0)`.
+	if !(c.PoP.HighWaterFraction > 0 && c.PoP.HighWaterFraction <= 1) {
+		return fmt.Errorf("POP_HIGH_WATER_FRACTION must be in (0, 1], got %v", c.PoP.HighWaterFraction)
+	}
+	if c.PoP.RegistryRefreshInterval <= 0 {
+		return fmt.Errorf("POP_REGISTRY_REFRESH_INTERVAL must be > 0, got %s", c.PoP.RegistryRefreshInterval)
+	}
+	if c.PoP.HealthTTL <= 0 {
+		return fmt.Errorf("POP_HEALTH_TTL must be > 0, got %s", c.PoP.HealthTTL)
+	}
+	if c.PoP.GeoDNSTTL <= 0 {
+		return fmt.Errorf("POP_GEODNS_TTL must be > 0, got %s", c.PoP.GeoDNSTTL)
+	}
+	if c.PoP.GeoDNSPublishInterval <= 0 {
+		return fmt.Errorf("POP_GEODNS_PUBLISH_INTERVAL must be > 0, got %s", c.PoP.GeoDNSPublishInterval)
+	}
+	if c.PoP.RebalanceInterval <= 0 {
+		return fmt.Errorf("POP_REBALANCE_INTERVAL must be > 0, got %s", c.PoP.RebalanceInterval)
 	}
 	return nil
 }
