@@ -1,0 +1,119 @@
+# Weekly control-plane scale benchmark for the Go `bench/controlplane/`
+# harness.
+#
+# Separate from `ci.yml` (which gates every PR) and from `benchmark.yml`
+# (the Rust edge data-path sweep): this measures the SaaS control plane —
+# REST API latency under a mixed tenant workload, in-process policy-graph
+# compilation, and Postgres RLS/pool/online-DDL behaviour at tenant scale.
+#
+# What it does each run:
+#   * runs the policy-compile bench (pure CPU, always real),
+#   * runs the api-latency and tenant-scale benches in --dry-run on the
+#     hosted runner (a full live sweep at 5000 tenants needs dedicated
+#     hardware — see below), exercising the full craft → measure → report
+#     pipeline,
+#   * writes report.json + report.md, compares against the committed
+#     baseline, and FAILS the job on a >20% regression,
+#   * uploads the reports as a build artifact.
+#
+# A real workload at 100/1000 tenants requires a running control plane and
+# a Postgres with the SNG migrations applied; 5000 tenants needs dedicated
+# hardware (the seed alone is millions of rows). Point `SCALE_BENCH_URL` /
+# `SCALE_BENCH_DSN` at a provisioned environment and drop `--dry-run` to
+# publish real numbers.
+
+name: scale-bench
+
+on:
+  schedule:
+    # 08:00 UTC every Monday (an hour after the Rust benchmark).
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run api-latency / tenant-scale in dry-run (no live deps)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.25"
+  # Fractional metric movement past which the compare gate fails the run.
+  # 0.20 == a >20% regression.
+  SCALE_BENCH_REGRESSION: "0.20"
+
+jobs:
+  scale-bench:
+    name: control-plane scale bench
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Resolve the dry-run flag in the shell rather than a `&& '' || ...`
+      # expression: in GitHub Actions an empty string is falsy, so the
+      # ternary idiom collapses back to its right operand whenever the
+      # "true" branch is '' (it would always force --dry-run). Scheduled
+      # runs are always dry-run (the hosted runner has no live deps); only a
+      # manual dispatch with dry_run=false drops --dry-run to publish real
+      # numbers against the environment in SCALE_BENCH_URL/_DSN.
+      - name: resolve dry-run flag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+        run: |
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ] && [ "${DRY_RUN_INPUT}" = "false" ]; then
+            echo "DRY_RUN=" >> "$GITHUB_ENV"
+          else
+            echo "DRY_RUN=--dry-run" >> "$GITHUB_ENV"
+          fi
+
+      - name: build harness
+        run: go build ./bench/controlplane/
+
+      # Sweep: $DRY_RUN is "--dry-run" for scheduled runs (self-contained, no
+      # control plane or Postgres) and empty for a manual real run. Produces
+      # report.json + report.md under results/.
+      - name: run full-suite
+        run: |
+          go run ./bench/controlplane full-suite \
+            $DRY_RUN \
+            --tenant-tiers 100,1000 \
+            --out results \
+            --git-sha "${GITHUB_SHA}"
+
+      # Regression gate: grade the report.json just produced (NOT a second
+      # benchmark run) against the committed baseline when one exists, so the
+      # graded numbers match the uploaded artifact exactly. A >threshold
+      # movement on any graded metric fails the job.
+      - name: compare against baseline
+        run: |
+          if [ -f bench/controlplane/testdata/baseline.json ]; then
+            go run ./bench/controlplane compare \
+              --current results/report.json \
+              --baseline bench/controlplane/testdata/baseline.json \
+              --threshold "${SCALE_BENCH_REGRESSION}"
+          else
+            echo "no committed baseline (bench/controlplane/testdata/baseline.json); skipping regression gate"
+          fi
+
+      - name: upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scale-bench-report
+          path: |
+            results/report.json
+            results/report.md
+          if-no-files-found: warn
+          retention-days: 90
