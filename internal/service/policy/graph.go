@@ -138,7 +138,7 @@ type Rule struct {
 	// changes across versions.
 	ID string `json:"id"`
 
-	// Domain is one of {ngfw,swg,dns,ztna,sdwan,dlp}.
+	// Domain is one of {ngfw,swg,dns,ztna,sdwan,dlp,inline_casb}.
 	Domain Domain `json:"domain"`
 
 	// Verb is the policy verb to apply on match.

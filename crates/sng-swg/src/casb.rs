@@ -74,28 +74,47 @@ pub struct PathRule {
     pub path_glob: String,
     /// Action a matching request is classified as.
     pub action: CasbAction,
+    /// Whether the path's matched final segment is a real filename
+    /// (and thus carries a meaningful extension). Drives whether
+    /// [`inspect`](InlineCasbInspector::inspect) derives `file_type`
+    /// from the request path.
+    ///
+    /// This is an explicit property of the rule, NOT inferred from
+    /// the glob shape: a trailing `*` is just as likely to match an
+    /// opaque resource id (Graph drive-item id, Salesforce
+    /// `ContentVersion` id) as a filename, and a literal tail (Slack
+    /// `files.upload`) is an API method name whose embedded dot must
+    /// never be read as an extension. Inferring "tail is `*`" ⇒
+    /// "filename" would wrongly enable extension derivation for every
+    /// id-tailed delete/download endpoint. None of the four builtin
+    /// SaaS APIs put a filename in the path, so all builtin rules set
+    /// this `false`; a future catalog whose path genuinely ends in a
+    /// filename uses [`PathRule::new_filename`].
+    pub filename_in_path: bool,
 }
 
 impl PathRule {
+    /// A rule whose matched tail segment is NOT a filename — the
+    /// common case (literal API method names, opaque resource ids).
+    /// `file_type` is not derived from the path.
     fn new(method: Option<&str>, path_glob: &str, action: CasbAction) -> Self {
         Self {
             method: method.map(str::to_ascii_lowercase),
             path_glob: path_glob.to_string(),
             action,
+            filename_in_path: false,
         }
     }
 
-    /// Whether the glob's final segment is a bare `*` wildcard. When
-    /// true, the request path's last segment is a path variable that
-    /// may carry a filename (and thus a meaningful extension); when
-    /// false, the last segment is a literal — typically an API
-    /// method name such as `files.upload` whose embedded dot must
-    /// NOT be mistaken for a file extension. Drives whether
-    /// [`inspect`](InlineCasbInspector::inspect) derives `file_type`
-    /// from the path.
-    #[must_use]
-    fn filename_in_path(&self) -> bool {
-        self.path_glob.rsplit('/').next() == Some("*")
+    /// A rule whose final `*` segment is a real filename, so a file
+    /// extension is derived from it for file-type-gated rules. Use
+    /// only when the matched segment genuinely carries a filename.
+    #[cfg(test)]
+    fn new_filename(method: Option<&str>, path_glob: &str, action: CasbAction) -> Self {
+        Self {
+            filename_in_path: true,
+            ..Self::new(method, path_glob, action)
+        }
     }
 }
 
@@ -120,28 +139,34 @@ pub struct AppSignature {
 }
 
 impl AppSignature {
-    /// True when the request's SNI or host resolves to this app.
+    /// True when the request's authoritative target host resolves to
+    /// this app. The SNI is authoritative when present (on a CONNECT
+    /// tunnel it is the real TLS destination and cannot be forged by
+    /// a mismatched inner `Host` header); the request host is only a
+    /// fallback when there is no SNI. Using SNI-or-host (rather than
+    /// SNI-then-host) would let a spoofed `Host` header steer
+    /// detection to a different app than the connection actually
+    /// terminates at.
     #[must_use]
     fn host_matches(&self, ctx: &RequestContext) -> bool {
-        self.host_suffixes.iter().any(|suffix| {
-            ctx.sni
-                .as_deref()
-                .is_some_and(|sni| sni_suffix_match(suffix, sni))
-                || sni_suffix_match(suffix, &ctx.host)
-        })
+        let target = ctx.sni.as_deref().unwrap_or(ctx.host.as_str());
+        self.host_suffixes
+            .iter()
+            .any(|suffix| sni_suffix_match(suffix, target))
     }
 
     /// Classify the request against this app's path rules, returning
     /// the first matching [`PathRule`] in declaration order.
     #[must_use]
     fn classify(&self, ctx: &RequestContext) -> Option<&PathRule> {
+        let path = match_path(&ctx.path);
         self.path_rules.iter().find(|pr| {
             if let Some(m) = &pr.method {
                 if !ctx.method.eq_ignore_ascii_case(m) {
                     return false;
                 }
             }
-            path_glob_match(&pr.path_glob, &ctx.path)
+            path_glob_match(&pr.path_glob, path)
         })
     }
 }
@@ -153,10 +178,9 @@ pub struct DetectedApp {
     pub app_id: String,
     /// Detected action.
     pub action: CasbAction,
-    /// True when the matched path rule's final segment is a `*`
-    /// wildcard, i.e. the request path's last segment is a variable
-    /// that may carry a filename. Drives whether `file_type` is
-    /// derived from the request path (see [`PathRule::filename_in_path`]).
+    /// Mirrors the matched [`PathRule::filename_in_path`]: true when
+    /// the request path's last segment is a real filename. Drives
+    /// whether `file_type` is derived from the request path.
     pub filename_in_path: bool,
 }
 
@@ -199,7 +223,7 @@ impl AppCatalog {
             sig.classify(ctx).map(|pr| DetectedApp {
                 app_id: sig.app_id.clone(),
                 action: pr.action,
-                filename_in_path: pr.filename_in_path(),
+                filename_in_path: pr.filename_in_path,
             })
         })
     }
@@ -433,7 +457,7 @@ impl InlineCasbInspector {
         // yield a bogus `"upload"` and silently break file-type-gated
         // rules, so literal-tailed globs contribute no file type.
         let file_type = if detected.filename_in_path {
-            file_type_from_path(&ctx.path)
+            file_type_from_path(match_path(&ctx.path))
         } else {
             None
         };
@@ -479,6 +503,20 @@ fn file_type_from_path(path: &str) -> Option<String> {
     } else {
         Some(ext.to_ascii_lowercase())
     }
+}
+
+/// Normalise a request path for CASB matching by trimming trailing
+/// slashes. [`RequestContext::normalize`] strips the query but leaves
+/// a trailing slash intact, so `/api/files.upload/` would otherwise
+/// gain an empty trailing segment and fail the segment-count parity
+/// [`path_glob_match`] requires, silently bypassing detection (a
+/// fail-open miss). Envoy normalises this away in production, but a
+/// hand-built context or a non-conforming client must not slip past
+/// the inspector. The root path stays `/` so it never collapses to
+/// the empty string.
+fn match_path(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() { "/" } else { trimmed }
 }
 
 /// Segment-wise path glob match. `*` matches exactly one non-empty
@@ -637,6 +675,51 @@ mod tests {
             cat.detect(&ctx("GET", "slack.com", "/api/files.upload")),
             None
         );
+    }
+
+    #[test]
+    fn trailing_slash_still_detects() {
+        // A request path with a trailing slash must not silently
+        // bypass detection: `match_path` trims it so segment-count
+        // parity with the glob holds. Otherwise `/api/files.upload/`
+        // would gain an empty trailing segment and fail to match
+        // `/api/files.upload`, fail-open past the inspector.
+        let cat = AppCatalog::builtin();
+        assert_eq!(
+            cat.detect(&ctx("POST", "slack.com", "/api/files.upload/"))
+                .map(|d| (d.app_id, d.action)),
+            Some(("slack".to_string(), CasbAction::Upload)),
+            "trailing slash must not defeat detection"
+        );
+        // Multiple trailing slashes are trimmed too.
+        assert_eq!(
+            cat.detect(&ctx("POST", "slack.com", "/api/files.upload///"))
+                .map(|d| d.action),
+            Some(CasbAction::Upload)
+        );
+    }
+
+    #[test]
+    fn host_used_only_when_sni_absent() {
+        // SNI is authoritative: a Host header pointing at a different
+        // app must not steer detection when the SNI says otherwise.
+        let cat = AppCatalog::builtin();
+        let mut c = ctx("POST", "graph.microsoft.com", "/api/files.upload");
+        c.sni = Some("slack.com".to_string());
+        c.normalize();
+        // SNI (slack) wins over the M365 Host header; the M365 share
+        // path does not match the Slack upload path, so this resolves
+        // to the Slack upload rule, not M365.
+        assert_eq!(
+            cat.detect(&c).map(|d| d.app_id),
+            Some("slack".to_string()),
+            "SNI must override a mismatched Host header"
+        );
+        // With no SNI, the Host header is the fallback signal.
+        let mut c2 = ctx("POST", "slack.com", "/api/files.upload");
+        c2.sni = None;
+        c2.normalize();
+        assert_eq!(cat.detect(&c2).map(|d| d.app_id), Some("slack".to_string()));
     }
 
     #[test]
@@ -883,7 +966,11 @@ mod tests {
         let cat = AppCatalog::new(vec![AppSignature {
             app_id: "acme".to_string(),
             host_suffixes: vec!["acme.example".to_string()],
-            path_rules: vec![PathRule::new(Some("post"), "/files/*", CasbAction::Upload)],
+            path_rules: vec![PathRule::new_filename(
+                Some("post"),
+                "/files/*",
+                CasbAction::Upload,
+            )],
         }]);
         let detected = cat
             .detect(&ctx("POST", "acme.example", "/files/report.docx"))

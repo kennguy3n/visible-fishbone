@@ -152,9 +152,14 @@ type InlineRule struct {
 	Verdict    InlineVerdict    `json:"verdict"`
 	Conditions InlineConditions `json:"conditions"`
 	Enabled    bool             `json:"enabled"`
-	Priority   int              `json:"priority"`
-	CreatedAt  time.Time        `json:"created_at"`
-	UpdatedAt  time.Time        `json:"updated_at"`
+	// Priority is int32 to match the Postgres INTEGER column
+	// (037_inline_casb.up.sql) and the Rust data plane's i32
+	// (crates/sng-swg/src/casb_rules.rs); a wider type would let a
+	// value past i32::MAX persist in-memory and then fail bundle
+	// deserialisation on the data plane.
+	Priority  int32     `json:"priority"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // InlineRuleStore is the persistence port for inline-CASB rules.
@@ -214,7 +219,7 @@ type CreateInlineRuleInput struct {
 	Verdict    InlineVerdict
 	Conditions InlineConditions
 	Enabled    bool
-	Priority   int
+	Priority   int32
 }
 
 func (in CreateInlineRuleInput) validate() error {
@@ -279,7 +284,7 @@ type UpdateInlineRuleInput struct {
 	Verdict    *InlineVerdict
 	Conditions *InlineConditions
 	Enabled    *bool
-	Priority   *int
+	Priority   *int32
 }
 
 // UpdateInlineRule applies a partial update to an existing rule.
@@ -383,7 +388,7 @@ type casbBundlePayload struct {
 	Action     InlineAction     `json:"action"`
 	Verdict    InlineVerdict    `json:"verdict"`
 	Conditions InlineConditions `json:"conditions"`
-	Priority   int              `json:"priority"`
+	Priority   int32            `json:"priority"`
 }
 
 // CompileRules loads a tenant's enabled inline-CASB rules and

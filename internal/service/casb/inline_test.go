@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/google/uuid"
@@ -182,7 +183,7 @@ func TestListInlineRules_OrderedByPriorityDesc(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
 	tenant := uuid.New()
-	for _, p := range []int{10, 100, 50} {
+	for _, p := range []int32{10, 100, 50} {
 		if _, err := svc.CreateInlineRule(ctx, tenant, CreateInlineRuleInput{
 			AppID: "m365", Action: InlineActionUpload, Verdict: InlineVerdictLog, Enabled: true, Priority: p,
 		}, nil); err != nil {
@@ -193,8 +194,8 @@ func TestListInlineRules_OrderedByPriorityDesc(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	got := []int{rules[0].Priority, rules[1].Priority, rules[2].Priority}
-	want := []int{100, 50, 10}
+	got := []int32{rules[0].Priority, rules[1].Priority, rules[2].Priority}
+	want := []int32{100, 50, 10}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("priority order: want %v, got %v", want, got)
@@ -246,6 +247,35 @@ func TestCompileRules_SkipsDisabledAndTagsDomain(t *testing.T) {
 	}
 	if payload.AppID != "m365" || payload.Action != InlineActionShare || payload.Verdict != InlineVerdictBlock {
 		t.Errorf("unexpected payload: %+v", payload)
+	}
+}
+
+func TestCompileRules_PriorityFitsInt32WireContract(t *testing.T) {
+	t.Parallel()
+	// Priority is int32 end-to-end (Go struct, Postgres INTEGER, Rust
+	// i32). A max-int32 priority must round-trip through the compiled
+	// bundle payload unchanged so the data plane's i32 deserialisation
+	// never overflows. A wider Go type would have let an out-of-range
+	// value reach the bundle and silently break installation.
+	svc := newTestService(t)
+	ctx := context.Background()
+	tenant := uuid.New()
+	const maxI32 int32 = math.MaxInt32
+	if _, err := svc.CreateInlineRule(ctx, tenant, CreateInlineRuleInput{
+		AppID: "m365", Action: InlineActionShare, Verdict: InlineVerdictBlock, Enabled: true, Priority: maxI32,
+	}, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	compiled, err := svc.CompileRules(ctx, tenant)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var payload casbBundlePayload
+	if err := json.Unmarshal(compiled[0].Extra["casb"], &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Priority != maxI32 {
+		t.Errorf("priority: want %d, got %d", maxI32, payload.Priority)
 	}
 }
 
