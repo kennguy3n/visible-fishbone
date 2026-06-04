@@ -80,6 +80,38 @@ func TestLogging_RecordsStatus(t *testing.T) {
 	}
 }
 
+// TestLoggingOutsideRecovery_LogsPanicStatus verifies the boot-time
+// ordering invariant that Logging wraps Recovery: when a handler
+// panics, Recovery converts it to a 500 and returns normally, so
+// Logging's post-handler code still runs and emits an access-log
+// line carrying that 500. If Logging were placed inside Recovery,
+// the panic would unwind through it and the request would be absent
+// from the access log.
+func TestLoggingOutsideRecovery_LogsPanicStatus(t *testing.T) {
+	t.Parallel()
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	// Logging OUTSIDE Recovery, mirroring the router chain.
+	h := middleware.Logging(logger)(
+		middleware.Recovery(discardLogger())(
+			http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+				panic("boom")
+			}),
+		),
+	)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("status=500")) {
+		t.Errorf("access log missing panicked request (status=500): %s", buf.String())
+	}
+}
+
 func TestCORS_AllowsConfiguredOrigin(t *testing.T) {
 	t.Parallel()
 	cfg := &config.CORS{AllowedOrigins: []string{"https://app.example"}, AllowedMethods: []string{"GET"}, AllowedHeaders: []string{"Authorization"}, MaxAge: 60 * time.Second}

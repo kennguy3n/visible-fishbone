@@ -339,7 +339,11 @@ func run() error {
 	// port differs from HTTP.Port.
 	var metricsSrv *http.Server
 	if mx != nil {
-		go metrics.NewPGCollector(mx, pool, metrics.DefaultPoolScrapeInterval).Run(rootCtx)
+		// Pool gauges track the primary (writer) pool; it carries
+		// the acquire/idle pressure the collector reports. pool is a
+		// *postgres.ReadWritePool wrapper, so reach the underlying
+		// *pgxpool.Pool (which exposes Stat) via Primary().
+		go metrics.NewPGCollector(mx, pool.Primary(), metrics.DefaultPoolScrapeInterval).Run(rootCtx)
 		streamNames := make([]string, 0, len(streams))
 		for _, s := range streams {
 			streamNames = append(streamNames, s.Name)

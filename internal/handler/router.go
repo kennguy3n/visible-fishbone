@@ -189,17 +189,23 @@ func NewRouter(deps RouterDeps) http.Handler {
 	} else {
 		rlmw = func(next http.Handler) http.Handler { return next }
 	}
-	// Metrics is placed OUTSIDE Recovery so a handler panic — which
-	// Recovery converts to a 500 — is still counted (with its 500
-	// status) rather than lost. Tracing is placed AFTER Logging so
-	// the late-bound RequestMeta (installed by Logging) is present
-	// when the span records tenant_id. Both degrade to
-	// pass-throughs when their dependency is absent.
+	// Metrics and Logging are placed OUTSIDE Recovery so a handler
+	// panic — which Recovery converts to a 500 — is still observed
+	// by both: counted in Prometheus and emitted as an access-log
+	// line with its 500 status. A middleware placed INSIDE Recovery
+	// has its post-handler code skipped when the panic unwinds
+	// through it, which is why Logging used to miss panicked
+	// requests. Tracing is kept inside Recovery and AFTER Logging so
+	// (a) the late-bound RequestMeta installed by Logging is present
+	// when the span records tenant_id, and (b) its deferred span
+	// annotation can re-raise the panic for Recovery to convert to a
+	// 500. All three degrade to pass-throughs when their dependency
+	// is absent.
 	chain := middleware.Chain(
 		middleware.RequestID(),
 		deps.Metrics.Middleware(),
-		middleware.Recovery(deps.Logger),
 		middleware.Logging(deps.Logger),
+		middleware.Recovery(deps.Logger),
 		middleware.Tracing(),
 		middleware.CORS(&deps.Config.CORS),
 		rlmw,
