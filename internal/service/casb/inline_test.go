@@ -86,6 +86,31 @@ func TestCreateInlineRule_NormalizesConditions(t *testing.T) {
 	}
 }
 
+func TestInlineConditionsNormalize(t *testing.T) {
+	t.Parallel()
+	// The leading dot must be stripped regardless of surrounding
+	// whitespace: the data plane's file_type_from_path yields a
+	// dot-less, lowercase extension, so a stored ".docx" would never
+	// match and the file-type-gated rule would silently never fire.
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{".DOCX", "docx"},
+		{" .DOCX", "docx"},
+		{"  .pdf  ", "pdf"},
+		{"XLSX", "xlsx"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		c := InlineConditions{FileType: tc.in}
+		c.normalize()
+		if c.FileType != tc.want {
+			t.Errorf("normalize(%q): file_type = %q, want %q", tc.in, c.FileType, tc.want)
+		}
+	}
+}
+
 func TestInlineRuleCRUDLifecycle(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t)

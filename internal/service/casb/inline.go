@@ -130,7 +130,7 @@ type InlineConditions struct {
 // normalize trims and lowercases the string conditions so the
 // stored shape matches what the data plane compares against.
 func (c *InlineConditions) normalize() {
-	c.FileType = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(c.FileType, ".")))
+	c.FileType = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(c.FileType), "."))
 	c.LabelMatch = strings.TrimSpace(c.LabelMatch)
 }
 
