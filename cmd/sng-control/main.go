@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -220,7 +222,7 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
+	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, evidenceScheduler, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -288,6 +290,17 @@ func run() error {
 			slog.Duration("interval", cfg.AppRegistry.SyncInterval))
 	} else {
 		logger.Info("sng-control: app-registry sync loop disabled (APP_REGISTRY_SYNC_ENABLED=false)")
+	}
+
+	// SOC2 evidence collection is a singleton background workload:
+	// only the leader runs the weekly collection / monthly aggregation
+	// / gap-detection loop, so a multi-replica deployment produces one
+	// signed bundle per cadence rather than one per replica.
+	// RunIfLeader blocks until rootCtx is cancelled, so it runs in its
+	// own goroutine.
+	if evidenceScheduler != nil {
+		go elector.RunIfLeader(rootCtx, "compliance-evidence", evidenceScheduler.Run)
+		logger.Info("sng-control: compliance evidence scheduler registered (runs on leader only)")
 	}
 
 	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher)
@@ -466,7 +479,7 @@ func buildRouter(
 	replay *telreplay.Worker,
 	telPub *sngnats.Publisher,
 	mx *metrics.Metrics,
-) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, *aisvc.Service, *metering.MeteringService, error) {
+) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, *aisvc.Service, *metering.MeteringService, *compliance.Scheduler, error) {
 	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
@@ -535,11 +548,11 @@ func buildRouter(
 	// the same in all cases.
 	keyOpts := []policy.KeyOption{}
 	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
 	} else if len(master) > 0 {
 		w, err := policy.NewAESGCMWrapper(master)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
 		}
 		keyOpts = append(keyOpts, policy.WithKeyWrapper(w))
 		logger.Info("policy: AES-256-GCM at-rest wrap enabled for signing seeds")
@@ -550,7 +563,7 @@ func buildRouter(
 	if cfg.Policy.SigningKeyPath != "" {
 		ks, err := policy.LoadKeySignerFromFile(cfg.Policy.SigningKeyPath)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
 		}
 		policySigner = ks
 		fileSigner = ks
@@ -631,7 +644,7 @@ func buildRouter(
 	canarySvc, err := policy.NewCanaryService(policySvc, policyRolloutRepo,
 		policy.WithCanaryLogger(logger))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
 	}
 	policySimHandler := handler.NewPolicySimulationHandler(
 		policySvc, canarySvc, nil, policyRepo, logger)
@@ -749,23 +762,23 @@ func buildRouter(
 	// sync/atomic counters and is flushed by main() via meteringSvc.Run.
 	meteringStore, err := metering.NewPostgresStore(pool.Primary(), cfg.Postgres.AppRole, cfg.Postgres.PgBouncerMode)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering store: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering store: %w", err)
 	}
 	meteringSvc, err := metering.NewMeteringService(meteringStore, logger,
 		metering.WithFlushInterval(cfg.Metering.FlushInterval))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering service: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering service: %w", err)
 	}
 	meteringTiers := meteringTierResolver{tenants: tenantRepo}
 	budgetEnforcer, err := metering.NewBudgetEnforcer(meteringSvc, meteringStore, meteringTiers, logger,
 		metering.WithGlobalDefaults(cfg.Metering.DefaultBudgets))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: budget enforcer: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: budget enforcer: %w", err)
 	}
 	costCalc := metering.NewCostCalculator(metering.DefaultUnitCosts)
 	meteringReports, err := metering.NewReports(meteringSvc, budgetEnforcer, meteringStore, meteringTiers, costCalc)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering reports: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering reports: %w", err)
 	}
 	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports)
 
@@ -786,8 +799,16 @@ func buildRouter(
 	// engine and its executors publish NATS commands via the same
 	// adapter the alert router uses for `sng.<tenant>.alerts.*`.
 	playbookPub := natsAlertAdapter{p: telPub}
+	// SOC2 evidence automation (platform-level): signer + archive +
+	// collector + scheduler. Wired additively so the report APIs work
+	// unchanged; the scheduler's leader loop is launched by run().
+	evidenceSvc, evidenceScheduler, err := buildEvidenceAutomation(cfg, store, logger)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("compliance evidence automation: %w", err)
+	}
 	complianceHandler := handler.NewComplianceHandler(
-		compliance.NewReportService(store.NewComplianceReportRepository(), logger))
+		compliance.NewReportService(store.NewComplianceReportRepository(), logger),
+		handler.WithEvidenceAutomation(evidenceSvc, evidenceScheduler, rbacSvc))
 	playbookEngine := playbook.NewEngine(
 		store.NewPlaybookRepository(),
 		store.NewPlaybookExecutionRepository(),
@@ -896,7 +917,7 @@ func buildRouter(
 	// admin `POST /admin/app-registry/sync` endpoint is the only
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
-	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, nil
+	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, evidenceScheduler, nil
 }
 
 // meteringTierResolver adapts the TenantRepository onto the metering
@@ -1320,6 +1341,137 @@ func loadAWSConfig(ctx context.Context, cfg *config.Config) (aws.Config, error) 
 		return aws.Config{}, err
 	}
 	return awsCfg, nil
+}
+
+// Environment variables configuring the SOC2 evidence automation.
+// Kept as direct env reads (not config.Config fields) so this change
+// stays within the Session J file boundary and does not touch the
+// shared config schema.
+const (
+	envEvidenceSigningKey = "COMPLIANCE_EVIDENCE_SIGNING_KEY_HEX"
+	envEvidenceS3Bucket   = "COMPLIANCE_EVIDENCE_S3_BUCKET"
+	envEvidenceS3Prefix   = "COMPLIANCE_EVIDENCE_S3_PREFIX"
+)
+
+// buildEvidenceAutomation wires the SOC2 evidence collector, signer,
+// archive object store and scheduler. It is intentionally resilient to
+// a partially-configured environment so the control plane still boots
+// in dev/test:
+//
+//   - signing key: from COMPLIANCE_EVIDENCE_SIGNING_KEY_HEX (hex seed
+//     or expanded key); a fresh ephemeral key with a loud warning when
+//     unset (signatures then only verify within this process lifetime);
+//   - archive: an S3 object store with 7-year object-lock retention
+//     when COMPLIANCE_EVIDENCE_S3_BUCKET is set, else an in-memory
+//     store (dev/test) with a warning.
+//
+// The collector's evidence sources are wired from the data that is
+// genuinely platform-level and available at boot (the RBAC system-role
+// catalog for CC6.1, and the HA topology for CC8.1). Per-tenant sources
+// are intentionally left unwired; the scheduler's gap detection flags
+// the missing controls rather than fabricating evidence.
+func buildEvidenceAutomation(cfg *config.Config, store *postgres.Store, logger *slog.Logger) (*compliance.EvidenceService, *compliance.Scheduler, error) {
+	signer, err := evidenceSigner(logger)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	objStore, err := evidenceObjectStore(cfg, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	opts := []compliance.EvidenceServiceOption{}
+	if prefix := strings.TrimSpace(os.Getenv(envEvidenceS3Prefix)); prefix != "" {
+		opts = append(opts, compliance.WithKeyPrefix(prefix))
+	}
+	evidenceSvc, err := compliance.NewEvidenceService(
+		store.NewComplianceEvidenceRepository(), objStore, signer, logger, opts...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("evidence service: %w", err)
+	}
+
+	collector := compliance.NewSOC2Collector(evidenceSources(cfg), logger)
+	if err := collector.Validate(); err != nil {
+		return nil, nil, err
+	}
+
+	scheduler, err := compliance.NewScheduler(collector, evidenceSvc, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	return evidenceSvc, scheduler, nil
+}
+
+// evidenceSigner builds the Ed25519 signer from configured key material
+// or falls back to an ephemeral key.
+func evidenceSigner(logger *slog.Logger) (*compliance.Signer, error) {
+	raw := strings.TrimSpace(os.Getenv(envEvidenceSigningKey))
+	if raw == "" {
+		logger.Warn("compliance: no evidence signing key configured; generating an EPHEMERAL key — archived bundles will not verify after a restart",
+			slog.String("env", envEvidenceSigningKey))
+		return compliance.GenerateSigner()
+	}
+	key, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s: %w", envEvidenceSigningKey, err)
+	}
+	signer, err := compliance.NewSigner(key)
+	if err != nil {
+		return nil, fmt.Errorf("evidence signing key: %w", err)
+	}
+	logger.Info("compliance: evidence signing key loaded from configuration")
+	return signer, nil
+}
+
+// evidenceObjectStore builds the archive sink: S3 with compliance
+// object-lock retention when a bucket is configured, else an in-memory
+// store for dev/test.
+func evidenceObjectStore(cfg *config.Config, logger *slog.Logger) (compliance.ObjectStore, error) {
+	bucket := strings.TrimSpace(os.Getenv(envEvidenceS3Bucket))
+	if bucket == "" {
+		logger.Warn("compliance: no evidence S3 bucket configured; archiving to an in-memory store — evidence is NOT durable",
+			slog.String("env", envEvidenceS3Bucket))
+		return compliance.NewMemoryObjectStore(), nil
+	}
+	awsCfg, err := loadAWSConfig(context.Background(), cfg)
+	if err != nil {
+		return nil, fmt.Errorf("evidence aws config: %w", err)
+	}
+	objStore, err := compliance.NewS3ObjectStore(s3.NewFromConfig(awsCfg), compliance.S3Config{
+		Bucket: bucket,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("evidence s3 store: %w", err)
+	}
+	logger.Info("compliance: evidence archive enabled", slog.String("bucket", bucket))
+	return objStore, nil
+}
+
+// evidenceSources wires the platform-level evidence exports the control
+// plane can produce at boot. Sources that require tenant context are
+// left nil and surface via gap detection.
+func evidenceSources(cfg *config.Config) compliance.Sources {
+	return compliance.Sources{
+		// CC6.1 — the canonical platform RBAC role/permission catalog
+		// is the logical-access policy of record.
+		RBACPolicy: func(context.Context) (any, error) {
+			return rbac.SystemRoles, nil
+		},
+		// CC8.1 — the control plane's high-availability topology:
+		// active/active replicas coordinated by a Postgres
+		// advisory-lock leader election.
+		HAConfig: func(context.Context) (any, error) {
+			return map[string]any{
+				"model":                 "active-active-replicas",
+				"leader_election":       "postgres-advisory-lock",
+				"leader_check_interval": leader.DefaultCheckInterval.String(),
+				"environment":           string(cfg.Environment),
+				"singleton_workloads":   []string{"app-registry-sync", "compliance-evidence"},
+				"database_failover":     "primary/replica pool",
+			}, nil
+		},
+	}
 }
 
 // newLogger constructs the process-wide structured logger.

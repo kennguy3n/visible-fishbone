@@ -118,6 +118,10 @@ type Store struct {
 	// Compliance reports — see migration 022.
 	complianceReports map[uuid.UUID]repository.ComplianceReport
 
+	// Compliance evidence — see migration 039. Platform-level
+	// (not tenant-scoped).
+	complianceEvidence map[uuid.UUID]repository.ComplianceEvidence
+
 	// Playbook tables — see migrations 023-025.
 	playbooks           map[uuid.UUID]repository.Playbook
 	playbookExecutions  map[uuid.UUID]repository.PlaybookExecution
@@ -195,6 +199,7 @@ func NewStore() *Store {
 		userRoles:             map[userRoleKey]repository.UserRole{},
 		aiCorrelations:        map[uuid.UUID]repository.AICorrelation{},
 		complianceReports:     map[uuid.UUID]repository.ComplianceReport{},
+		complianceEvidence:    map[uuid.UUID]repository.ComplianceEvidence{},
 		playbooks:             map[uuid.UUID]repository.Playbook{},
 		playbookExecutions:    map[uuid.UUID]repository.PlaybookExecution{},
 		playbookStepResults:   map[uuid.UUID]repository.StepResult{},

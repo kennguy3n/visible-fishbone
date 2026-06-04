@@ -1535,6 +1535,21 @@ type ComplianceReport struct {
 	CreatedAt    time.Time
 }
 
+// ComplianceEvidence represents a row in the platform-level
+// compliance_evidence table (migration 039). Unlike ComplianceReport
+// it is NOT tenant-scoped: SOC2 Type II evidence attests to the SNG
+// platform's own controls, so there is no TenantID and no RLS. Rows
+// index the signed evidence bundles archived in S3.
+type ComplianceEvidence struct {
+	ID             uuid.UUID
+	CollectionType string // weekly | monthly | manual
+	CollectedAt    time.Time
+	S3Key          string
+	Signature      string // hex-encoded Ed25519 signature over the bundle bytes
+	Status         string // collecting | collected | failed | aggregated
+	CreatedAt      time.Time
+}
+
 // --- Playbooks ------------------------------------------------------------
 
 // Playbook represents a row in the playbooks table.

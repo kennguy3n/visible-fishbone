@@ -129,6 +129,11 @@ func (s *Store) NewComplianceReportRepository() *ComplianceReportRepository {
 	return &ComplianceReportRepository{s: s}
 }
 
+// NewComplianceEvidenceRepository binds the Store to repository.ComplianceEvidenceRepository.
+func (s *Store) NewComplianceEvidenceRepository() *ComplianceEvidenceRepository {
+	return &ComplianceEvidenceRepository{s: s}
+}
+
 // NewPlaybookRepository binds the Store to repository.PlaybookRepository.
 func (s *Store) NewPlaybookRepository() *PlaybookRepository {
 	return &PlaybookRepository{s: s}
@@ -206,6 +211,7 @@ var (
 	_ repository.CASBPostureCheckRepository     = (*CASBPostureCheckRepository)(nil)
 	_ repository.AICorrelationRepository        = (*AICorrelationRepository)(nil)
 	_ repository.ComplianceReportRepository     = (*ComplianceReportRepository)(nil)
+	_ repository.ComplianceEvidenceRepository   = (*ComplianceEvidenceRepository)(nil)
 	_ repository.PlaybookRepository             = (*PlaybookRepository)(nil)
 	_ repository.PlaybookExecutionRepository    = (*PlaybookExecutionRepository)(nil)
 	_ repository.PlaybookApprovalRepository     = (*PlaybookApprovalRepository)(nil)
