@@ -56,12 +56,14 @@
 
 pub mod cli;
 pub mod config;
+pub mod pop;
 pub mod subsystems;
 pub mod supervisor;
 pub mod tracing_init;
 
 pub use cli::{Cli, PalBackend, UpdaterBackend};
-pub use config::{ConfigError, EdgeConfig};
+pub use config::{ConfigError, EdgeConfig, EdgeMode, PopConfig};
+pub use pop::{AtCapacity, CapacityReport, ConnGuard, PoPRouter, RouteError, TenantSelector};
 pub use supervisor::{BuiltEdge, EdgeBuildError, build_edge, run_edge};
 
 use anyhow::Result;

@@ -44,6 +44,16 @@ tags:
       reports posture snapshots. The device identity comes from the
       token's device_key claim, so a session only ever acts on its
       own device.
+  - name: pops
+    description: |
+      Cloud PoP (Point-of-Presence) service. A PoP is a shared,
+      multi-tenant deployment of the sng-edge binary in a cloud
+      region that serves tenants without an on-premise edge VM. The
+      `pops` registry is GLOBAL infrastructure (not tenant-owned):
+      the admin register/health routes are platform-scoped
+      (`pops:write` / `pops:read`), and `GET /pops` is public so a
+      not-yet-enrolled client can bootstrap. The per-tenant override
+      route is tenant-scoped (RLS on `tenant_pop_assignments`).
 paths:
   /tenants:
     post:
@@ -3254,6 +3264,89 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /pops:
+    get:
+      tags: [pops]
+      operationId: listPoPs
+      summary: List available PoPs (public bootstrap)
+      description: |
+        Public, unauthenticated. Returns the enabled PoP fleet so a
+        not-yet-enrolled client can resolve the DNS steering hostname
+        and connect to its nearest PoP. Served from the in-memory
+        registry, so there is no per-request DB hit on this hot path.
+      security: []
+      responses:
+        "200":
+          description: enabled PoP fleet
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/PoP" }
+    post:
+      tags: [pops]
+      operationId: registerPoP
+      summary: Register a new PoP (platform admin)
+      description: |
+        Platform-scoped (`pops:write`). A PoP is global
+        infrastructure, so a tenant- or MSP-scoped grant does NOT
+        satisfy the gate — only a platform-scoped grant (or the
+        platform_admin wildcard) does.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PoPCreateRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/PoP" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /pops/{pop_id}/health:
+    parameters: [ { $ref: "#/components/parameters/PoPPathID" } ]
+    get:
+      tags: [pops]
+      operationId: getPoPHealth
+      summary: Get a PoP's health (platform admin)
+      description: |
+        Platform-scoped (`pops:read`). Returns the PoP plus its
+        latest health beacon and derived `healthy` / `overloaded`
+        flags. `healthy` is false when the most recent beacon is
+        older than the health TTL (the PoP is presumed dead); the
+        `health` object is omitted entirely when no beacon has ever
+        been seen.
+      responses:
+        "200": { $ref: "#/components/responses/PoPHealth" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/pop-assignment:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [pops]
+      operationId: setPoPAssignment
+      summary: Pin a tenant to a specific PoP (operator override)
+      description: |
+        Tenant-scoped: the path `tenant_id` must match the caller's
+        tenant (platform_admin may address any tenant). Pins the
+        tenant to the named PoP and marks the assignment as an
+        operator override so the auto-rebalancer never moves it. The
+        target PoP must exist and be enabled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PoPAssignmentRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/PoPAssignment" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     BearerJWT:
@@ -3287,6 +3380,11 @@ components:
     MSPPathID:
       in: path
       name: msp_id
+      required: true
+      schema: { type: string, format: uuid }
+    PoPPathID:
+      in: path
+      name: pop_id
       required: true
       schema: { type: string, format: uuid }
     After:
@@ -3323,6 +3421,21 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    PoP:
+      description: pop
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/PoP" }
+    PoPHealth:
+      description: pop health view
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/PoPHealth" }
+    PoPAssignment:
+      description: tenant-to-pop assignment
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/PoPAssignment" }
   schemas:
     Error:
       type: object
@@ -4911,3 +5024,64 @@ components:
         expires_at: { type: string, format: date-time }
         identity: { $ref: "#/components/schemas/MobileIdentity" }
         binding: { $ref: "#/components/schemas/MobileBinding" }
+    PoP:
+      type: object
+      required: [id, region, provider, anycast_ip, dns_name, capacity_tier, enabled]
+      properties:
+        id: { type: string, format: uuid }
+        region: { type: string, description: "Cloud region, e.g. us-east-1." }
+        provider: { type: string, enum: [aws, gcp, azure] }
+        anycast_ip: { type: string, description: "IPv4/IPv6 anycast address clients steer to." }
+        dns_name: { type: string, description: "Steering hostname for this PoP." }
+        capacity_tier: { type: string, enum: [small, medium, large] }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PoPCreateRequest:
+      type: object
+      required: [region, provider, anycast_ip, dns_name, capacity_tier]
+      properties:
+        region: { type: string }
+        provider: { type: string, enum: [aws, gcp, azure] }
+        anycast_ip: { type: string }
+        dns_name: { type: string }
+        capacity_tier: { type: string, enum: [small, medium, large] }
+        enabled:
+          type: boolean
+          description: Defaults to true on create when omitted; send false to stage a PoP.
+    PoPHealthSnapshot:
+      type: object
+      required: [reported_at, cpu_pct, memory_pct, active_connections, bandwidth_mbps]
+      properties:
+        reported_at: { type: string, format: date-time }
+        cpu_pct: { type: number, format: float }
+        memory_pct: { type: number, format: float }
+        active_connections: { type: integer }
+        bandwidth_mbps: { type: number, format: float }
+    PoPHealth:
+      type: object
+      required: [pop, healthy, overloaded]
+      properties:
+        pop: { $ref: "#/components/schemas/PoP" }
+        healthy:
+          type: boolean
+          description: False when the latest beacon is older than the health TTL.
+        overloaded:
+          type: boolean
+          description: True when the latest beacon is at or above the high-water mark.
+        health: { $ref: "#/components/schemas/PoPHealthSnapshot" }
+    PoPAssignmentRequest:
+      type: object
+      required: [pop_id]
+      properties:
+        pop_id: { type: string, format: uuid }
+    PoPAssignment:
+      type: object
+      required: [tenant_id, pop_id, assigned_at, override]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        pop_id: { type: string, format: uuid }
+        assigned_at: { type: string, format: date-time }
+        override:
+          type: boolean
+          description: True for operator-pinned assignments the auto-rebalancer must not move.

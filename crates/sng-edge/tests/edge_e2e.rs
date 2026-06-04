@@ -64,9 +64,9 @@ use serde::Serialize;
 use sng_core::ids::{DeviceId, PolicySigningKeyId, SiteId, TenantId};
 use sng_core::policy::BundleTarget;
 use sng_edge::config::{
-    CommsConfig, DnsConfig, EdgeConfig, FwConfig, HaConfig, IdentityConfig, IpsConfig,
-    PolicyConfig, SdwanConfig, SupervisorConfig, SwgConfig, TelemetryConfig, UpdaterConfig,
-    ZtnaConfig,
+    CommsConfig, DnsConfig, EdgeConfig, EdgeMode, FwConfig, HaConfig, IdentityConfig, IpsConfig,
+    PolicyConfig, PopConfig, SdwanConfig, SupervisorConfig, SwgConfig, TelemetryConfig,
+    UpdaterConfig, ZtnaConfig,
 };
 use sng_edge::{BuiltEdge, Cli, build_edge};
 use std::path::PathBuf;
@@ -577,6 +577,8 @@ fn fresh_config_wired_to(endpoint: &str, pki: &OnDiskPki) -> EdgeConfig {
         ha: HaConfig::default(),
         updater: UpdaterConfig::default(),
         supervisor: SupervisorConfig::default(),
+        mode: EdgeMode::default(),
+        pop: PopConfig::default(),
     }
 }
 
