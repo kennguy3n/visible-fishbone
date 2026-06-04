@@ -115,11 +115,29 @@ func TestOnlineMigrator_ChangeColumnTypeShadow(t *testing.T) {
 	if err := m.ApplyStep(ctx, conn, steps[1]); err != nil {
 		t.Fatalf("install trigger: %v", err)
 	}
-	// Concurrent write mirrored by the trigger.
+	// Concurrent writes mirrored by the trigger BEFORE the backfill:
+	//   - a brand-new row (id=26), and
+	//   - an UPDATE of an existing row (id=5) that the backfill will
+	//     also try to copy. The trigger upserts id=5 into the shadow
+	//     with seq=500; the backfill's INSERT ... ON CONFLICT DO
+	//     NOTHING must then skip id=5 (no duplicate-key error) and
+	//     leave the trigger's newer value in place. This is the
+	//     regression guard for the ON CONFLICT DO UPDATE fix.
 	mustExec(t, conn, `INSERT INTO events (id, seq) VALUES (26, 26)`)
+	mustExec(t, conn, `UPDATE events SET seq = 500 WHERE id = 5`)
 	// Remaining steps: backfill + swap.
 	if err := m.ApplyStep(ctx, conn, steps[2]); err != nil {
 		t.Fatalf("backfill: %v", err)
+	}
+	// runBackfill must set the session lock_timeout (default 5s) so a
+	// batch INSERT cannot block forever on a contended row — regression
+	// guard for the lock_timeout-in-backfill fix.
+	var lt string
+	if err := conn.QueryRow(ctx, `SHOW lock_timeout`).Scan(&lt); err != nil {
+		t.Fatalf("SHOW lock_timeout after backfill: %v", err)
+	}
+	if lt != "5s" {
+		t.Errorf("expected backfill to set lock_timeout=5s on the session, got %q", lt)
 	}
 	if err := m.ApplyStep(ctx, conn, steps[3]); err != nil {
 		t.Fatalf("swap: %v", err)
@@ -144,6 +162,17 @@ func TestOnlineMigrator_ChangeColumnTypeShadow(t *testing.T) {
 	}
 	if n != 26 {
 		t.Errorf("expected 26 rows after swap, got %d", n)
+	}
+
+	// The trigger's newer value for id=5 (seq=500) must have won over
+	// the backfill's stale copy (seq=5): the upsert overwrites, and the
+	// backfill's DO NOTHING did not clobber it back.
+	var seq5 int64
+	if err := conn.QueryRow(ctx, `SELECT seq FROM events WHERE id = 5`).Scan(&seq5); err != nil {
+		t.Fatalf("read seq for id=5: %v", err)
+	}
+	if seq5 != 500 {
+		t.Errorf("expected trigger's value seq=500 for id=5 to win, got %d", seq5)
 	}
 
 	// The original is kept aside for the deprecation window.

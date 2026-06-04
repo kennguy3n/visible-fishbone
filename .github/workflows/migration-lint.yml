@@ -50,8 +50,14 @@ jobs:
         run: go build -o bin/sng-migrate ./cmd/sng-migrate
       - name: collect changed up.sql migrations
         id: changed
+        # github.base_ref reaches the shell through an env var, never
+        # interpolated into the script: a hostile branch name (git
+        # permits `$`, backticks, …) cannot then be evaluated by the
+        # shell.
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          base="origin/${{ github.base_ref }}"
+          base="origin/${BASE_REF}"
           # Added or modified up.sql migrations only; deletions are not
           # forward-migration risks and are skipped.
           files="$(git diff --name-only --diff-filter=AM "$base"...HEAD -- 'migrations/*.up.sql' | tr '\n' ' ')"
@@ -63,7 +69,16 @@ jobs:
           fi
       - name: validate lock safety
         if: steps.changed.outputs.files != ''
-        run: ./bin/sng-migrate validate ${{ steps.changed.outputs.files }}
+        # Likewise pass the file list via the environment. ${{ }}
+        # interpolation would paste the (PR-author-controlled)
+        # filenames straight into the script, so a file named e.g.
+        # `migrations/$(…).up.sql` would execute. A shell variable is
+        # only word-split, never re-evaluated for command
+        # substitution; word-splitting is what we want, since the list
+        # is space-separated and migration names contain no spaces.
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.files }}
+        run: ./bin/sng-migrate validate $CHANGED_FILES
       - name: no migrations changed
         if: steps.changed.outputs.files == ''
         run: echo "migration-lint: nothing to validate"

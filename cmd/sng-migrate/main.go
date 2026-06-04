@@ -114,6 +114,16 @@ func run(args []string, stdout, stderr *os.File) error {
 		dsn = cfg.Postgres.MigrationURL()
 	}
 
+	// `--online up` builds its own Runner from a lock_timeout-augmented
+	// DSN (see runOnlineUp), so creating the shared Runner below would
+	// open a second connection that is never used. Short-circuit before
+	// that. `--dry-run` keeps precedence over `--online` (it touches no
+	// DB at all but still reads pending migrations through the shared
+	// Runner), so it is excluded here.
+	if rest[0] == "up" && *onlineFlag && !*dryRunFlag {
+		return runOnlineUp(stdout, dsn, *lockTimeoutFlag)
+	}
+
 	r, err := migrate.New(dsn)
 	if err != nil {
 		return err
@@ -124,9 +134,6 @@ func run(args []string, stdout, stderr *os.File) error {
 	case "up":
 		if *dryRunFlag {
 			return runDryRun(stdout, r)
-		}
-		if *onlineFlag {
-			return runOnlineUp(stdout, dsn, *lockTimeoutFlag)
 		}
 		if err := r.Up(); err != nil {
 			return err

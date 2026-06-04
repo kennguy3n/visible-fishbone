@@ -278,21 +278,41 @@ func (o ChangeColumnTypeOp) Steps() ([]Step, error) {
 	}
 
 	// Step 2: a trigger that mirrors every write on the source into
-	// the shadow. DELETE/UPDATE remove the old shadow row by PK;
-	// INSERT/UPDATE re-insert NEW, relying on Postgres assignment
-	// casts to coerce the changed column to its new type.
+	// the shadow. INSERT/UPDATE upsert NEW so the trigger's row — the
+	// newest copy — always wins: the backfill (step 3) inserts with
+	// ON CONFLICT DO NOTHING, so without DO UPDATE here a write that
+	// fires the trigger while a backfill batch holds an uncommitted
+	// row on the same PK would hit a duplicate-key violation and roll
+	// back the user's DML (the very writability the pattern exists to
+	// preserve). The SET list is built at trigger-fire time from the
+	// shadow's live columns (pg_attribute), so the trigger needs no
+	// compile-time column list and the assignment casts that coerce
+	// the changed column to its new type apply on the INSERT. A
+	// leading DELETE by OLD PK still runs on UPDATE/DELETE so a row
+	// whose primary key changed does not leave a stale shadow row.
 	fnBody := fmt.Sprintf(`CREATE OR REPLACE FUNCTION %s() RETURNS trigger
 LANGUAGE plpgsql AS $sng_online$
+DECLARE
+    set_clause text;
 BEGIN
     IF (TG_OP = 'DELETE' OR TG_OP = 'UPDATE') THEN
         DELETE FROM %s WHERE %s = OLD.%s;
     END IF;
     IF (TG_OP = 'INSERT' OR TG_OP = 'UPDATE') THEN
-        INSERT INTO %s SELECT (NEW).*;
+        SELECT string_agg(format('%%I = EXCLUDED.%%I', attname, attname), ', ')
+          INTO set_clause
+          FROM pg_attribute
+         WHERE attrelid = '%s'::regclass
+           AND attnum > 0
+           AND NOT attisdropped;
+        EXECUTE format(
+            'INSERT INTO %s SELECT ($1).* ON CONFLICT (%s) DO UPDATE SET %%s',
+            set_clause
+        ) USING NEW;
     END IF;
     RETURN COALESCE(NEW, OLD);
 END;
-$sng_online$`, fn, shadow, pk, pk, shadow)
+$sng_online$`, fn, shadow, pk, pk, shadow, shadow, pk)
 	trigger := fmt.Sprintf(
 		"CREATE TRIGGER %s AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION %s()",
 		trg, src, fn)
@@ -464,11 +484,17 @@ func (m *OnlineMigrator) runStandalone(ctx context.Context, conn Conn, st Step) 
 }
 
 // runBackfill copies rows from Source into Shadow ordered by the
-// primary key, BatchSize rows per committed transaction, until a
-// batch copies nothing. Each batch sets a local lock_timeout and
-// uses ON CONFLICT DO NOTHING so rows the sync trigger already
-// mirrored are not duplicated.
+// primary key, BatchSize rows per committed batch, until a batch
+// copies nothing. It sets a session lock_timeout once up front (each
+// batch is an autocommit statement on the same connection, so the
+// session setting bounds every batch) so a batch INSERT cannot block
+// indefinitely on a row lock held by a concurrent writer, and uses
+// ON CONFLICT DO NOTHING so rows the sync trigger already mirrored
+// are not duplicated.
 func (m *OnlineMigrator) runBackfill(ctx context.Context, conn Conn, p *BackfillPlan) error {
+	if err := m.monitor.ApplyLockTimeout(ctx, conn); err != nil {
+		return err
+	}
 	for {
 		select {
 		case <-ctx.Done():

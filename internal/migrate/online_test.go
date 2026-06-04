@@ -89,6 +89,21 @@ func TestChangeColumnTypeOp_Plan(t *testing.T) {
 	if !strings.Contains(trig, "CREATE OR REPLACE FUNCTION") || !strings.Contains(trig, "AFTER INSERT OR UPDATE OR DELETE") {
 		t.Errorf("trigger step malformed:\n%s", trig)
 	}
+	// The trigger must upsert (ON CONFLICT ... DO UPDATE) so its row —
+	// the newest copy — wins over the backfill's ON CONFLICT DO NOTHING
+	// instead of colliding with it (the duplicate-key race).
+	for _, want := range []string{
+		`ON CONFLICT ("id") DO UPDATE SET`,
+		"FROM pg_attribute",
+		`'"events__shadow_seq"'::regclass`,
+	} {
+		if !strings.Contains(trig, want) {
+			t.Errorf("trigger step missing %q\ngot:\n%s", want, trig)
+		}
+	}
+	if strings.Contains(trig, "INSERT INTO \"events__shadow_seq\" SELECT (NEW).*;") {
+		t.Errorf("trigger still uses bare INSERT (no ON CONFLICT):\n%s", trig)
+	}
 
 	// Step 3: backfill plan.
 	if steps[2].Backfill == nil {
