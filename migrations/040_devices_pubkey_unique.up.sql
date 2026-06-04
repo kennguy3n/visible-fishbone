@@ -1,4 +1,4 @@
--- Migration 037: enforce that an Ed25519 device public key is unique
+-- Migration 040: enforce that an Ed25519 device public key is unique
 -- within a tenant.
 --
 -- Why: the mobile self-enrolment flow
