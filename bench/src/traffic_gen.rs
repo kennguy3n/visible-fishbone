@@ -472,6 +472,11 @@ fn fold_checksum(mut sum: u32) -> u16 {
 /// plus the L4 segment. The segment's own checksum field must be zero on
 /// entry.
 fn l4_checksum(ip: IpProto, proto: u8, segment: &[u8]) -> u16 {
+    // The one's-complement sum is associative over 16-bit words, so a
+    // 32-bit addend folds to the same result as summing its two BE
+    // halves; `proto` sits in the low byte of an otherwise-zero word.
+    // That lets us add `len`/`proto` directly instead of serializing the
+    // pseudo-header fields. `fold_checksum` carries the high half back in.
     let mut sum = 0u32;
     match ip {
         IpProto::V4 { src, dst } => {
