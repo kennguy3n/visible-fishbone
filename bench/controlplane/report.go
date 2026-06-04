@@ -124,15 +124,31 @@ type APILatencySection struct {
 	Tiers []APILatencyTier `json:"tiers"`
 }
 
-// headlineP99Ms returns the OverallP99Ms of the highest-tenant-count
-// tier — the single API number both the verdict and the regression
-// gate key off, so a graded report and its regression check never
-// disagree about which figure they mean. Returns 0 for an empty section.
-func (s *APILatencySection) headlineP99Ms() float64 {
-	if tier := s.maxTenantTier(); tier != nil {
-		return tier.OverallP99Ms
+// p99ForTenantCount returns the OverallP99Ms of the tier seeded with
+// exactly n tenants, and whether such a tier exists. The regression
+// detector uses it to compare like-for-like tiers across two reports.
+func (s *APILatencySection) p99ForTenantCount(n int) (float64, bool) {
+	for i := range s.Tiers {
+		if s.Tiers[i].TenantCount == n {
+			return s.Tiers[i].OverallP99Ms, true
+		}
 	}
-	return 0
+	return 0, false
+}
+
+// largestCommonTenantCount returns the largest TenantCount measured in
+// both sections, and whether any tier count is shared. The regression
+// detector keys off this so it always compares the same tenant tier on
+// each side rather than each report's own (possibly different) max tier.
+func largestCommonTenantCount(a, b *APILatencySection) (int, bool) {
+	best, found := 0, false
+	for i := range a.Tiers {
+		n := a.Tiers[i].TenantCount
+		if _, ok := b.p99ForTenantCount(n); ok && (!found || n > best) {
+			best, found = n, true
+		}
+	}
+	return best, found
 }
 
 // maxTenantTier returns the tier with the largest TenantCount, or nil
@@ -579,7 +595,15 @@ func DetectRegressions(baseline, current *BusinessBenchmarkReport, threshold flo
 	}
 
 	if baseline.APILatency != nil && current.APILatency != nil {
-		add("api_p99_ms", baseline.APILatency.headlineP99Ms(), current.APILatency.headlineP99Ms())
+		// Compare like-for-like: the p99 of the largest tenant tier present
+		// in BOTH reports. Comparing each report's own max tier could pit a
+		// 1000-tenant baseline against a 5000-tenant current and flag scale,
+		// not regression.
+		if n, ok := largestCommonTenantCount(baseline.APILatency, current.APILatency); ok {
+			bp, _ := baseline.APILatency.p99ForTenantCount(n)
+			cp, _ := current.APILatency.p99ForTenantCount(n)
+			add(fmt.Sprintf("api_p99_ms@%d_tenants", n), bp, cp)
+		}
 	}
 	if baseline.PolicyCompile != nil && current.PolicyCompile != nil {
 		for _, target := range []int{100, 1000} {

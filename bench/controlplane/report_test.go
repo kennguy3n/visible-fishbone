@@ -245,3 +245,51 @@ func TestDetectRegressionsModeMismatch(t *testing.T) {
 		t.Fatal("expected error on mode mismatch, got nil")
 	}
 }
+
+// TestDetectRegressionsAPITierMatched verifies the API regression keys
+// off the largest tenant tier common to both reports, so adding a new
+// higher-scale tier to the current run is not mistaken for a regression,
+// while a real degradation at a shared tier is still caught.
+func TestDetectRegressionsAPITierMatched(t *testing.T) {
+	t.Parallel()
+
+	// Current run adds a 5000-tenant tier (higher latency at higher
+	// scale) but the 100/1000 tiers are unchanged. Comparing each
+	// report's own max tier (1000 vs 5000) would false-flag; matching
+	// the shared 1000-tier must not.
+	base := sampleReport()
+	cur := sampleReport()
+	cur.APILatency.Tiers = append(cur.APILatency.Tiers, APILatencyTier{
+		TenantCount: 5000, DurationSecs: 60, Concurrency: 128, OverallP99Ms: 600,
+	})
+	regs, err := DetectRegressions(base, cur, RegressionThreshold)
+	if err != nil {
+		t.Fatalf("DetectRegressions: %v", err)
+	}
+	for _, r := range regs {
+		if strings.HasPrefix(r.Metric, "api_p99_ms") {
+			t.Fatalf("added higher-scale tier wrongly flagged as API regression: %+v", r)
+		}
+	}
+
+	// A real degradation at the shared 1000-tenant tier IS a regression.
+	cur2 := sampleReport()
+	for i := range cur2.APILatency.Tiers {
+		if cur2.APILatency.Tiers[i].TenantCount == 1000 {
+			cur2.APILatency.Tiers[i].OverallP99Ms *= 1.5
+		}
+	}
+	regs2, err := DetectRegressions(base, cur2, RegressionThreshold)
+	if err != nil {
+		t.Fatalf("DetectRegressions: %v", err)
+	}
+	var found bool
+	for _, r := range regs2 {
+		if r.Metric == "api_p99_ms@1000_tenants" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected api_p99_ms@1000_tenants regression, got %+v", regs2)
+	}
+}
