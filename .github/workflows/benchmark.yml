@@ -77,8 +77,10 @@ jobs:
     defaults:
       run:
         working-directory: bench
-    outputs:
-      regressed: ${{ steps.compare.outputs.regressed }}
+    # No job-level `outputs` here: with a matrix, GitHub keeps only the
+    # last-finishing leg's value, which would silently mask a regression
+    # in another profile. The regression gate is enforced per-leg via the
+    # `alert on regression` step below instead.
     steps:
       - uses: actions/checkout@v4
 

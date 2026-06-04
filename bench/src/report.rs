@@ -247,6 +247,10 @@ pub struct RegressionThresholds {
     pub throughput_drop: f64,
     /// Fractional latency-p99 *increase* that counts as a regression.
     pub latency_increase: f64,
+    /// Fractional concurrent-flows *drop* that counts as a regression.
+    /// Kept separate from `throughput_drop` so flow-count and bandwidth
+    /// sensitivities can be tuned independently.
+    pub concurrent_flows_drop: f64,
 }
 
 impl Default for RegressionThresholds {
@@ -255,6 +259,7 @@ impl Default for RegressionThresholds {
         Self {
             throughput_drop: 0.10,
             latency_increase: 0.10,
+            concurrent_flows_drop: 0.10,
         }
     }
 }
@@ -351,7 +356,7 @@ pub fn detect_regression(
         if let Some(change) =
             fractional_change(base.max_active_flows as f64, cur.max_active_flows as f64)
         {
-            if change <= -thresholds.throughput_drop {
+            if change <= -thresholds.concurrent_flows_drop {
                 regressions.push(Regression {
                     metric: "max_active_flows".to_string(),
                     previous: base.max_active_flows as f64,
@@ -493,6 +498,29 @@ mod tests {
         let mut cur = sample_report(BenchMode::ConcurrentFlows);
         cur.concurrent_flows.as_mut().unwrap().max_active_flows = 500_000;
         let rr = detect_regression(&base, &cur, RegressionThresholds::default()).unwrap();
+        assert!(rr.has_regression());
+        assert_eq!(rr.regressions[0].metric, "max_active_flows");
+    }
+
+    #[test]
+    fn concurrent_flows_threshold_is_independent_of_throughput() {
+        let base = sample_report(BenchMode::ConcurrentFlows);
+        let mut cur = sample_report(BenchMode::ConcurrentFlows);
+        let base_flows = base.concurrent_flows.as_ref().unwrap().max_active_flows;
+        // A 5% flow-count drop: ignored at the default 10% bar, but flagged
+        // once the dedicated concurrent-flows threshold is tightened to 1%,
+        // independent of `throughput_drop`.
+        cur.concurrent_flows.as_mut().unwrap().max_active_flows = (base_flows as f64 * 0.95) as u64;
+        assert!(
+            !detect_regression(&base, &cur, RegressionThresholds::default())
+                .unwrap()
+                .has_regression()
+        );
+        let tight = RegressionThresholds {
+            concurrent_flows_drop: 0.01,
+            ..RegressionThresholds::default()
+        };
+        let rr = detect_regression(&base, &cur, tight).unwrap();
         assert!(rr.has_regression());
         assert_eq!(rr.regressions[0].metric, "max_active_flows");
     }

@@ -179,6 +179,9 @@ struct CompareArgs {
     /// Latency-increase fraction that counts as a regression.
     #[arg(long, default_value_t = 0.10)]
     latency_increase: f64,
+    /// Concurrent-flows-drop fraction that counts as a regression.
+    #[arg(long, default_value_t = 0.10)]
+    concurrent_flows_drop: f64,
 }
 
 /// Per-edge-SKU profile loaded from `bench/profiles/*.toml`.
@@ -224,6 +227,7 @@ fn run_compare(args: &CompareArgs) -> Result<std::process::ExitCode, BenchError>
     let thresholds = RegressionThresholds {
         throughput_drop: args.throughput_drop,
         latency_increase: args.latency_increase,
+        concurrent_flows_drop: args.concurrent_flows_drop,
     };
     let rr = detect_regression(&baseline, &current, thresholds).map_err(BenchError::Regression)?;
     if rr.has_regression() {
@@ -438,13 +442,9 @@ fn run_throughput(
             let _ = resources.sample();
         }
 
-        if args.target_pps == 0 {
-            // Flat-out: no sleep, but yield occasionally so the OS can
-            // schedule the sampling work.
-            if due == 0 {
-                std::hint::spin_loop();
-            }
-        } else {
+        // Flat-out (`target_pps == 0`) runs with no inter-packet sleep; a
+        // paced run sleeps until its next token is due.
+        if args.target_pps != 0 {
             pacer.sleep_until_next();
         }
     }
