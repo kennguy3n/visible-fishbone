@@ -1,0 +1,47 @@
+# lint_baseline.txt — migrations that pre-date the lock-safety validator.
+#
+# These files are grandfathered: the MigrationValidator skips any
+# file listed here so CI never fails on pre-existing migrations
+# (rewriting them would be far riskier than the outage the
+# validator prevents). NEW migrations are NOT added here and are
+# therefore validated. One filename per line; blank lines and
+# lines beginning with # are ignored.
+#
+# Frozen on 2026-06-03. Do not add new migrations to this list.
+
+001_initial_schema.up.sql
+002_role_bootstrap.up.sql
+003_webhooks.up.sql
+004_webhook_processing.up.sql
+005_policy_signing_keys.up.sql
+006_tenant_api_keys.up.sql
+007_policy_bundle_sha256.up.sql
+008_app_registry.up.sql
+009_app_registry_seed.up.sql
+010_policy_rollouts.up.sql
+011_policy_graphs_is_draft.up.sql
+012_baseline_models.up.sql
+013_alerts.up.sql
+014_integrations.up.sql
+015_msps.up.sql
+016_casb.up.sql
+017_dlp.up.sql
+018_browser_policies.up.sql
+019_data_classification.up.sql
+020_scim_external_ids.up.sql
+021_device_enrollment.up.sql
+022_compliance.up.sql
+023_playbooks.up.sql
+024_playbook_executions.up.sql
+025_playbook_approvals.up.sql
+026_ai_suggestions.up.sql
+027_reserved.up.sql
+028_reserved.up.sql
+029_ai_correlations.up.sql
+030_scheduled_reviews.up.sql
+031_ops_health.up.sql
+032_kb_entries.up.sql
+033_troubleshoot_sessions.up.sql
+034_idp_configs.up.sql
+035_site_ha.up.sql
+036_sdwan_sla.up.sql

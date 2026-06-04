@@ -10,6 +10,15 @@
 //	sng-migrate status            # print the current version
 //	sng-migrate version           # alias of `status`
 //	sng-migrate force <V>         # force-set version (recovery only)
+//	sng-migrate validate [files]  # lint migration SQL for lock safety
+//
+// Lock-safety flags (apply to `up`):
+//
+//	--lock-timeout DUR  bound each DDL statement's lock wait (default 5s)
+//	--online            route through the OnlineMigrator: inject
+//	                    lock_timeout into the connection and reject
+//	                    pending migrations that violate the validator
+//	--dry-run           print the DDL `up` would apply, then exit
 //
 // Configuration is read from the same `PG_*` environment variables
 // as the main service (see `.env.example`).
@@ -21,6 +30,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	"github.com/kennguy3n/visible-fishbone/internal/migrate"
@@ -65,16 +75,20 @@ func run(args []string, stdout, stderr *os.File) error {
 	fs := flag.NewFlagSet("sng-migrate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dsnFlag := fs.String("dsn", os.Getenv("MIGRATIONS_DSN"), "explicit Postgres URL (defaults to PG_* env vars)")
+	onlineFlag := fs.Bool("online", false, "route `up` through the OnlineMigrator (lock_timeout + validator gate)")
+	dryRunFlag := fs.Bool("dry-run", false, "print the DDL `up` would apply, without applying it")
+	lockTimeoutFlag := fs.Duration("lock-timeout", migrate.DefaultLockTimeout, "per-statement lock_timeout for `up` (used with --online)")
 	fs.Usage = func() {
 		// Errors from stderr writes are intentionally ignored — if
 		// stderr is broken the process is already in trouble.
-		_, _ = fmt.Fprintf(stderr, "Usage: sng-migrate [--dsn URL] <command> [args]\n\n")
+		_, _ = fmt.Fprintf(stderr, "Usage: sng-migrate [--dsn URL] [--online] [--dry-run] [--lock-timeout DUR] <command> [args]\n\n")
 		_, _ = fmt.Fprintf(stderr, "Commands:\n")
 		_, _ = fmt.Fprintf(stderr, "  up               apply every pending migration\n")
 		_, _ = fmt.Fprintf(stderr, "  down [N]         roll back N steps (default 1)\n")
 		_, _ = fmt.Fprintf(stderr, "  status           print current schema version + dirty flag\n")
 		_, _ = fmt.Fprintf(stderr, "  version          alias of status\n")
 		_, _ = fmt.Fprintf(stderr, "  force <V>        forcibly set version (recovery only)\n")
+		_, _ = fmt.Fprintf(stderr, "  validate [files] lint migration SQL for lock safety (no DB needed)\n")
 	}
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("parse flags: %v", err)
@@ -83,6 +97,12 @@ func run(args []string, stdout, stderr *os.File) error {
 	if len(rest) == 0 {
 		fs.Usage()
 		return newUsageError("missing command")
+	}
+
+	// `validate` is a static-analysis command: it needs no database
+	// connection, so it is handled before any DSN resolution.
+	if rest[0] == "validate" {
+		return runValidate(stdout, stderr, rest[1:])
 	}
 
 	dsn := *dsnFlag
@@ -102,6 +122,12 @@ func run(args []string, stdout, stderr *os.File) error {
 
 	switch rest[0] {
 	case "up":
+		if *dryRunFlag {
+			return runDryRun(stdout, r)
+		}
+		if *onlineFlag {
+			return runOnlineUp(stdout, dsn, *lockTimeoutFlag)
+		}
 		if err := r.Up(); err != nil {
 			return err
 		}
@@ -140,6 +166,96 @@ func run(args []string, stdout, stderr *os.File) error {
 		fs.Usage()
 		return newUsageError("unknown command: %s", rest[0])
 	}
+}
+
+// runValidate lints migration SQL for lock safety. With explicit
+// file paths it validates exactly those (the CI use case: only the
+// migrations a PR adds). With no arguments it validates every
+// embedded migration except the grandfathered baseline, so the
+// command is also useful as a local pre-flight.
+func runValidate(stdout, stderr *os.File, files []string) error {
+	mv := migrate.NewMigrationValidator(migrate.DefaultBaseline())
+
+	if len(files) == 0 {
+		// No paths given: validate every embedded migration. The frozen
+		// baseline shields pre-existing files, so this stays green until
+		// a NEW migration is added that is not on the baseline.
+		all, err := migrate.BaselineFromFS(migrate.SourceFS())
+		if err != nil {
+			return fmt.Errorf("list embedded migrations: %w", err)
+		}
+		if err := mv.ValidateFiles(migrate.SourceFS(), all); err != nil {
+			_, _ = fmt.Fprintln(stderr, err.Error())
+			return err
+		}
+		_, _ = fmt.Fprintln(stdout, "sng-migrate: validate ok — no lock-safety violations")
+		return nil
+	}
+
+	// Explicit paths are validated from the OS filesystem.
+	if err := mv.ValidateFiles(os.DirFS("."), files); err != nil {
+		_, _ = fmt.Fprintln(stderr, err.Error())
+		return err
+	}
+	_, _ = fmt.Fprintf(stdout, "sng-migrate: validate ok — %d file(s) clean\n", len(files))
+	return nil
+}
+
+// runDryRun prints the SQL that an `up` would apply, derived from the
+// current schema version and the embedded migrations, without
+// touching the database beyond reading its version.
+func runDryRun(stdout *os.File, r *migrate.Runner) error {
+	v, _, err := r.Status()
+	if err != nil {
+		return err
+	}
+	pending, err := migrate.PendingUp(v)
+	if err != nil {
+		return err
+	}
+	if len(pending) == 0 {
+		_, _ = fmt.Fprintf(stdout, "sng-migrate: dry-run — no pending migrations (version=%d)\n", v)
+		return nil
+	}
+	_, _ = fmt.Fprintf(stdout, "sng-migrate: dry-run — %d pending migration(s) from version %d:\n", len(pending), v)
+	for _, p := range pending {
+		_, _ = fmt.Fprintf(stdout, "\n-- %s (version %d)\n%s\n", p.Name, p.Version, p.UpSQL)
+	}
+	return nil
+}
+
+// runOnlineUp applies pending migrations through the OnlineMigrator
+// path: it gates on the validator (refusing lock-unsafe new
+// migrations) and injects lock_timeout into the connection so every
+// DDL statement the runner executes is bounded — a stuck migration
+// can no longer pin ACCESS EXCLUSIVE indefinitely.
+func runOnlineUp(stdout *os.File, dsn string, lockTimeout time.Duration) error {
+	// Gate: validate every embedded migration; the frozen baseline
+	// grandfathers pre-existing files, so only NEW unsafe migrations
+	// trip this.
+	all, err := migrate.BaselineFromFS(migrate.SourceFS())
+	if err != nil {
+		return fmt.Errorf("list embedded migrations: %w", err)
+	}
+	if err := migrate.NewMigrationValidator(migrate.DefaultBaseline()).ValidateFiles(migrate.SourceFS(), all); err != nil {
+		return err
+	}
+
+	timeoutDSN, err := migrate.WithLockTimeout(dsn, lockTimeout)
+	if err != nil {
+		return err
+	}
+	r, err := migrate.New(timeoutDSN)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = r.Close() }()
+
+	if err := r.Up(); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(stdout, "sng-migrate: online up ok — lock_timeout=%s\n", lockTimeout)
+	return printStatus(stdout, r, "up")
 }
 
 func printStatus(out *os.File, r *migrate.Runner, op string) error {
