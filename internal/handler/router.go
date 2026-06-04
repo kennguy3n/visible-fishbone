@@ -41,6 +41,7 @@ type RouterDeps struct {
 	Troubleshoot     *TroubleshootHandler
 	OIDC             *OIDCHandler
 	Mobile           *MobileHandler
+	PoP              *PoPHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
 	// MobileDeviceStatus, when set, enables the auth-middleware
@@ -84,6 +85,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.OIDC != nil {
 		deps.OIDC.RegisterPublic(publicMux)
+	}
+	if deps.PoP != nil {
+		deps.PoP.RegisterPublic(publicMux)
 	}
 
 	apiMux := http.NewServeMux()
@@ -171,6 +175,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.Mobile != nil {
 		deps.Mobile.Register(apiMux)
 	}
+	if deps.PoP != nil {
+		deps.PoP.Register(apiMux)
+	}
 
 	authOpts := []middleware.AuthOption{}
 	if deps.MobileDeviceStatus != nil {
@@ -187,6 +194,14 @@ func NewRouter(deps RouterDeps) http.Handler {
 	root.Handle("/api/v1/docs", publicMux)
 	root.Handle("/api/v1/openapi.yaml", publicMux)
 	root.Handle("/api/v1/enroll", publicMux)
+	// Public PoP bootstrap: a not-yet-enrolled client lists the PoP
+	// fleet to resolve the steering hostname. Only GET is public —
+	// POST /api/v1/pops (admin register) falls through to the authed
+	// catch-all below, which is more specific than this method-scoped
+	// pattern only for GET.
+	if deps.PoP != nil {
+		root.Handle("GET /api/v1/pops", publicMux)
+	}
 	// Mobile native-SSO bootstrap endpoints are public (the agent has
 	// no SNG session yet); these specific patterns take precedence
 	// over the catch-all authed /api/v1/ handler below.

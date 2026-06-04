@@ -60,6 +60,88 @@ pub struct EdgeConfig {
     /// listed here use the supervisor's default (30s).
     #[serde(default)]
     pub supervisor: SupervisorConfig,
+    /// Edge operating mode. `site` (the default) is the existing
+    /// single-tenant branch/site appliance: every subsystem is
+    /// bound to the one tenant in `[identity]`. `pop` turns the
+    /// same binary into a shared, multi-tenant cloud
+    /// Point-of-Presence that loads policy bundles for ALL
+    /// assigned tenants and routes each incoming connection to the
+    /// owning tenant's evaluator (see [`crate::pop`]).
+    #[serde(default)]
+    pub mode: EdgeMode,
+    /// Cloud-PoP tuning. Only consulted when `mode = "pop"`; a
+    /// `site`-mode appliance leaves `[pop]` out of the file
+    /// entirely and the defaults are never read.
+    #[serde(default)]
+    pub pop: PopConfig,
+}
+
+/// Edge operating mode — selects single-tenant (`site`) versus
+/// multi-tenant cloud (`pop`) behaviour. Defaults to `site` so an
+/// existing appliance config (which has no `mode` key) keeps its
+/// current single-tenant semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EdgeMode {
+    /// Single-tenant branch/site appliance (the historical
+    /// default). Bound to the one tenant in `[identity]`.
+    #[default]
+    Site,
+    /// Multi-tenant cloud inspection point. Serves many tenants
+    /// from one deployment; connections are demultiplexed to the
+    /// correct tenant's policy evaluator by [`crate::pop::PoPRouter`].
+    Pop,
+}
+
+impl EdgeMode {
+    /// Wire/string form (`"site"` / `"pop"`), matching the
+    /// kebab-case serde representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Site => "site",
+            Self::Pop => "pop",
+        }
+    }
+
+    /// True iff this is the multi-tenant cloud PoP mode.
+    #[must_use]
+    pub const fn is_pop(self) -> bool {
+        matches!(self, Self::Pop)
+    }
+}
+
+/// Cloud-PoP capacity tuning. A PoP is shared infrastructure, so
+/// it shields itself from resource exhaustion two ways: a hard
+/// admission ceiling (`max_connections`) past which new
+/// connections are shed, and a soft high-water mark
+/// (`high_water_fraction`) at which it reports itself overloaded
+/// so the control-plane rebalancer drains non-pinned tenants
+/// away. The fraction mirrors the control plane's
+/// `POP_HIGH_WATER_FRACTION` default so both ends agree on what
+/// "overloaded" means.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PopConfig {
+    /// Hard ceiling on concurrent tenant connections this PoP
+    /// admits. Connections beyond it are refused so one PoP
+    /// cannot be driven past its sizing. Default: 50000.
+    #[serde(default = "default_pop_max_connections")]
+    pub max_connections: u64,
+    /// Fraction `(0, 1]` of `max_connections` at or above which
+    /// the PoP reports itself overloaded and asks the control
+    /// plane to rebalance tenants away. Default: 0.85.
+    #[serde(default = "default_pop_high_water_fraction")]
+    pub high_water_fraction: f64,
+}
+
+impl Default for PopConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: default_pop_max_connections(),
+            high_water_fraction: default_pop_high_water_fraction(),
+        }
+    }
 }
 
 /// Device-identity binding shared across every subsystem.
@@ -652,6 +734,23 @@ fn validate(cfg: &EdgeConfig) -> Result<(), String> {
     if cfg.ips.event_channel_capacity == 0 {
         return Err("ips.event_channel_capacity must be > 0".into());
     }
+    // PoP capacity invariants only bite in pop mode — a site-mode
+    // appliance never reads `[pop]`, so a stray/defaulted value
+    // there must not fail an otherwise-valid site config.
+    if cfg.mode.is_pop() {
+        if cfg.pop.max_connections == 0 {
+            return Err("pop.max_connections must be > 0 in pop mode".into());
+        }
+        // Feeds `PoPRouter`'s overload predicate; a fraction outside
+        // (0, 1] would make the high-water mark either unreachable
+        // or permanently tripped, so reject it at load time.
+        if !(cfg.pop.high_water_fraction > 0.0 && cfg.pop.high_water_fraction <= 1.0) {
+            return Err(format!(
+                "pop.high_water_fraction must be in (0, 1], got {}",
+                cfg.pop.high_water_fraction
+            ));
+        }
+    }
     validate_ha(&cfg.ha)?;
     Ok(())
 }
@@ -809,6 +908,12 @@ const fn default_ztna_max_inflight() -> usize {
 const fn default_sdwan_sticky_capacity() -> usize {
     1024
 }
+const fn default_pop_max_connections() -> u64 {
+    50_000
+}
+const fn default_pop_high_water_fraction() -> f64 {
+    0.85
+}
 fn default_ha_interface() -> String {
     "eth0".into()
 }
@@ -953,6 +1058,101 @@ client_key  = "/etc/sng/client.key"
         assert_eq!(cfg.telemetry.event_channel_capacity, 4096);
         assert_eq!(cfg.policy.pull_interval, Duration::from_secs(60));
         assert_eq!(cfg.supervisor.health_interval, Duration::from_secs(2));
+        // A config with no `[pop]` / `mode` key defaults to the
+        // historical single-tenant site behaviour.
+        assert_eq!(cfg.mode, EdgeMode::Site);
+        assert!(!cfg.mode.is_pop());
+        assert_eq!(cfg.pop.max_connections, 50_000);
+        assert!((cfg.pop.high_water_fraction - 0.85).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pop_mode_parses_with_overrides() {
+        // `mode` is a top-level key, so it must precede any table
+        // header; `[pop]` is appended as its own table.
+        let mut raw = String::from("mode = \"pop\"\n");
+        raw.push_str(&minimal_toml());
+        raw.push_str(
+            r"
+[pop]
+max_connections = 12000
+high_water_fraction = 0.7
+",
+        );
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), raw).unwrap();
+        let cfg = load_from_path(f.path()).unwrap();
+        assert_eq!(cfg.mode, EdgeMode::Pop);
+        assert!(cfg.mode.is_pop());
+        assert_eq!(cfg.mode.as_str(), "pop");
+        assert_eq!(cfg.pop.max_connections, 12_000);
+        assert!((cfg.pop.high_water_fraction - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pop_mode_uses_pop_defaults_when_section_omitted() {
+        let mut raw = String::from("mode = \"pop\"\n");
+        raw.push_str(&minimal_toml());
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), raw).unwrap();
+        let cfg = load_from_path(f.path()).unwrap();
+        assert_eq!(cfg.mode, EdgeMode::Pop);
+        assert_eq!(cfg.pop.max_connections, 50_000);
+    }
+
+    #[test]
+    fn pop_mode_rejects_zero_max_connections() {
+        let mut raw = String::from("mode = \"pop\"\n");
+        raw.push_str(&minimal_toml());
+        raw.push_str(
+            r"
+[pop]
+max_connections = 0
+",
+        );
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), raw).unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Invariant { message, .. } if message.contains("pop.max_connections")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn pop_mode_rejects_out_of_range_high_water_fraction() {
+        for bad in ["0.0", "1.5", "-0.2"] {
+            let mut raw = String::from("mode = \"pop\"\n");
+            raw.push_str(&minimal_toml());
+            raw.push_str("\n[pop]\nhigh_water_fraction = ");
+            raw.push_str(bad);
+            raw.push('\n');
+            let f = NamedTempFile::new().unwrap();
+            std::fs::write(f.path(), raw).unwrap();
+            let err = load_from_path(f.path()).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invariant { message, .. } if message.contains("high_water_fraction")),
+                "fraction {bad}: unexpected error: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn site_mode_ignores_pop_invariants() {
+        // A bogus `[pop]` block is harmless in site mode — the PoP
+        // knobs are never read, so the config still loads.
+        let mut raw = minimal_toml();
+        raw.push_str(
+            r"
+[pop]
+max_connections = 0
+high_water_fraction = 9.0
+",
+        );
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), raw).unwrap();
+        let cfg = load_from_path(f.path()).unwrap();
+        assert_eq!(cfg.mode, EdgeMode::Site);
     }
 
     #[test]
