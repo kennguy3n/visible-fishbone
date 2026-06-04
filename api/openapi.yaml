@@ -215,7 +215,7 @@ paths:
           schema: { $ref: "#/components/schemas/DevicePlatform" }
         - in: query
           name: status
-          schema: { type: string, enum: [pending, active, retired] }
+          schema: { type: string, enum: [pending, active, suspended, deleted] }
         - in: query
           name: site_id
           schema: { type: string, format: uuid }
@@ -3432,7 +3432,7 @@ components:
         public_key_ed25519: { type: string }
         enrolled_at: { type: string, format: date-time }
         last_seen_at: { type: string, format: date-time }
-        status: { type: string, enum: [pending, active, retired] }
+        status: { type: string, enum: [pending, active, suspended, deleted] }
         posture: { type: object }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
