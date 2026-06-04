@@ -54,7 +54,15 @@ var DefaultUnitCosts = UnitCosts{
 }
 
 const (
-	bytesPerGB = 1024 * 1024 * 1024
+	// bytesPerGB is the SI gigabyte (10^9 bytes), not the binary GiB
+	// (2^30). The per-GB unit prices (EgressPerGBUSD, S3PerGBMonthUSD)
+	// mirror cloud-provider list prices, which are quoted per SI GB, so
+	// the denominator must match to avoid systematically under-counting
+	// GB. Using the binary GiB here would inflate the denominator by
+	// ~7.4%, under-reporting bandwidth/archive cost and thus
+	// over-reporting margin — the wrong direction for a margin estimate,
+	// which should stay conservative.
+	bytesPerGB = 1_000_000_000
 )
 
 // tierMonthlyPriceUSD is the assumed monthly subscription revenue per
