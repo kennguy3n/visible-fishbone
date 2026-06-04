@@ -1,0 +1,92 @@
+# Migration lock-safety lint.
+#
+# Statically analyses the `.up.sql` migrations a pull request ADDS or
+# MODIFIES and fails the PR if any of them use a DDL pattern that
+# takes a heavyweight lock for the length of a table rewrite — the
+# class of change that, at 5,000 tenants, turns a routine migration
+# into a global outage. The rules live in
+# internal/migrate/validator.go (MigrationValidator); this workflow
+# is the CI surface that runs them.
+#
+# Scope: only files changed in the PR are checked, so pre-existing
+# migrations are never re-litigated. The validator additionally
+# carries a frozen baseline (internal/migrate/lint_baseline.txt) of
+# the migrations that pre-date the tool, so a touched-but-grandfathered
+# file does not fail either. The net effect: a brand-new migration
+# must be lock-safe, while history is left untouched.
+
+name: migration-lint
+
+on:
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  migration-lint:
+    name: migration lock-safety lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the base..head diff can be computed.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: build sng-migrate
+        run: go build -o bin/sng-migrate ./cmd/sng-migrate
+      - name: collect changed up.sql migrations
+        id: changed
+        # github.base_ref reaches the shell through an env var, never
+        # interpolated into the script: a hostile branch name (git
+        # permits `$`, backticks, …) cannot then be evaluated by the
+        # shell.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # github.base_ref is only set for pull_request events; on a
+          # manual workflow_dispatch it is empty, which would make the
+          # ref "origin/" and fail the diff. Fall back to origin/main
+          # so manual runs diff against the default branch.
+          if [ -z "$BASE_REF" ]; then
+            base="origin/main"
+          else
+            base="origin/${BASE_REF}"
+          fi
+          # Added or modified up.sql migrations only; deletions are not
+          # forward-migration risks and are skipped.
+          files="$(git diff --name-only --diff-filter=AM "$base"...HEAD -- 'migrations/*.up.sql' | tr '\n' ' ')"
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+          if [ -z "$files" ]; then
+            echo "No added/modified up.sql migrations in this PR."
+          else
+            echo "Changed migrations: $files"
+          fi
+      - name: validate lock safety
+        if: steps.changed.outputs.files != ''
+        # Likewise pass the file list via the environment. ${{ }}
+        # interpolation would paste the (PR-author-controlled)
+        # filenames straight into the script, so a file named e.g.
+        # `migrations/$(…).up.sql` would execute. A shell variable is
+        # only word-split, never re-evaluated for command
+        # substitution; word-splitting is what we want, since the list
+        # is space-separated and migration names contain no spaces.
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.files }}
+        run: ./bin/sng-migrate validate $CHANGED_FILES
+      - name: no migrations changed
+        if: steps.changed.outputs.files == ''
+        run: echo "migration-lint: nothing to validate"
