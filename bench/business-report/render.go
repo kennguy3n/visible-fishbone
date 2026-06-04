@@ -12,8 +12,13 @@ type BusinessReport struct {
 	GeneratedUnixSecs int64  `json:"generated_unix_secs"`
 	GitSHA            string `json:"git_sha,omitempty"`
 	// Live is false for synthetic/dry-run inputs (verdicts shown as N/A).
-	Live         bool                `json:"live"`
-	Theoretical  *Theoretical        `json:"theoretical"`
+	Live        bool         `json:"live"`
+	Theoretical *Theoretical `json:"theoretical"`
+	// Competitors is the canonical reference dataset, carried through into
+	// business-report.json. The markdown tables render from the matched figures
+	// the upstream harnesses embed (rep.CompetitorComparison / cp.Competitor),
+	// so editing competitors.json alone does not change rendered tables — the
+	// upstream report must be regenerated.
 	Competitors  *Competitors        `json:"competitors"`
 	ControlPlane *ControlPlaneReport `json:"control_plane,omitempty"`
 	Telemetry    []*TelemetryReport  `json:"telemetry,omitempty"`
