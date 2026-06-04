@@ -1,0 +1,99 @@
+# Weekly control-plane scale benchmark for the Go `bench/controlplane/`
+# harness.
+#
+# Separate from `ci.yml` (which gates every PR) and from `benchmark.yml`
+# (the Rust edge data-path sweep): this measures the SaaS control plane —
+# REST API latency under a mixed tenant workload, in-process policy-graph
+# compilation, and Postgres RLS/pool/online-DDL behaviour at tenant scale.
+#
+# What it does each run:
+#   * runs the policy-compile bench (pure CPU, always real),
+#   * runs the api-latency and tenant-scale benches in --dry-run on the
+#     hosted runner (a full live sweep at 5000 tenants needs dedicated
+#     hardware — see below), exercising the full craft → measure → report
+#     pipeline,
+#   * writes report.json + report.md, compares against the committed
+#     baseline, and FAILS the job on a >20% regression,
+#   * uploads the reports as a build artifact.
+#
+# A real workload at 100/1000 tenants requires a running control plane and
+# a Postgres with the SNG migrations applied; 5000 tenants needs dedicated
+# hardware (the seed alone is millions of rows). Point `SCALE_BENCH_URL` /
+# `SCALE_BENCH_DSN` at a provisioned environment and drop `--dry-run` to
+# publish real numbers.
+
+name: scale-bench
+
+on:
+  schedule:
+    # 08:00 UTC every Monday (an hour after the Rust benchmark).
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run api-latency / tenant-scale in dry-run (no live deps)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scale-bench-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.25"
+  # Fractional metric movement past which the compare gate fails the run.
+  # 0.20 == a >20% regression.
+  SCALE_BENCH_REGRESSION: "0.20"
+
+jobs:
+  scale-bench:
+    name: control-plane scale bench
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: build harness
+        run: go build ./bench/controlplane/
+
+      # Pure-CPU + dry-run sweep: self-contained, no control plane or
+      # Postgres required. Produces report.json + report.md under results/.
+      - name: run full-suite (dry-run)
+        run: |
+          go run ./bench/controlplane full-suite \
+            --dry-run \
+            --tenant-tiers 100,1000 \
+            --out results \
+            --git-sha "${GITHUB_SHA}"
+
+      # Regression gate: compare against the committed baseline when one
+      # exists. The baseline is a prior dry-run report committed to the
+      # repo; a >20% movement on any graded metric fails the job.
+      - name: compare against baseline
+        run: |
+          if [ -f bench/controlplane/testdata/baseline.json ]; then
+            go run ./bench/controlplane full-suite \
+              --dry-run \
+              --tenant-tiers 100,1000 \
+              --baseline bench/controlplane/testdata/baseline.json
+          else
+            echo "no committed baseline (bench/controlplane/testdata/baseline.json); skipping regression gate"
+          fi
+
+      - name: upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scale-bench-report
+          path: |
+            results/report.json
+            results/report.md
+          if-no-files-found: warn
+          retention-days: 90
