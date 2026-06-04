@@ -1,6 +1,7 @@
 package dlp_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
@@ -213,5 +214,19 @@ func TestCompileEndpointBundle_EmptyTenantIsValid(t *testing.T) {
 	}
 	if policy.Target != repository.PolicyBundleTargetEndpoint {
 		t.Errorf("target = %q", policy.Target)
+	}
+
+	// Wire-shape regression: an empty tenant must emit `"rules": []`,
+	// never `"rules": null`. sng-dlp's `rules` uses `#[serde(default)]`,
+	// which fills only a *missing* key — a present null would fail to
+	// decode into Vec<DlpRule> and break the bundle for every tenant
+	// without enabled policies. Decoding into a Go struct can't catch
+	// this (Go maps both null and [] to a zero-length slice), so assert
+	// on the raw bytes the Rust agent actually sees.
+	if bytes.Contains(blob, []byte(`"rules":null`)) {
+		t.Fatalf("bundle emitted \"rules\":null, which sng-dlp cannot decode: %s", blob)
+	}
+	if !bytes.Contains(blob, []byte(`"rules":[]`)) {
+		t.Errorf("expected \"rules\":[] in bundle, got %s", blob)
 	}
 }

@@ -159,7 +159,11 @@ func (s *Service) CompileEndpointBundle(
 // with a stable `<policy-id>:<index>` id so the agent's audit trail
 // can attribute a match back to the source policy.
 func compileEndpointRules(policies []repository.DLPPolicy) []EndpointDLPRule {
-	var rules []EndpointDLPRule
+	// Non-nil so a tenant with no enabled policies marshals to
+	// `"rules": []`, not `"rules": null`. sng-dlp's `#[serde(default)]`
+	// only fills a missing key, so a present null would fail to decode
+	// into Vec<DlpRule> and break the bundle for every empty tenant.
+	rules := make([]EndpointDLPRule, 0)
 	for _, p := range policies {
 		if !p.Enabled {
 			continue

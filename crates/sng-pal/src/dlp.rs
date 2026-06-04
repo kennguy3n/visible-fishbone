@@ -477,6 +477,7 @@ mod linux {
     use sng_dlp::{ChannelError, ChannelInterceptor, ContentEvent, ContentMetadata, DlpChannel};
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Default directories an endpoint watches for sensitive-file
@@ -694,10 +695,30 @@ mod linux {
     }
 
     /// Reads the desktop clipboard selection.
+    ///
+    /// The selection is read on demand each [`next_event`]; the agent
+    /// drives this from its display-server change signal rather than
+    /// the monitor self-polling. [`shutdown`](Self::shutdown) lets a
+    /// consumer that loops to end-of-stream observe the
+    /// [`ChannelInterceptor`] contract's `Ok(None)` termination.
     #[derive(Clone, Debug, Default)]
-    pub struct LinuxClipboardMonitor;
+    pub struct LinuxClipboardMonitor {
+        closed: Arc<AtomicBool>,
+    }
 
     impl LinuxClipboardMonitor {
+        /// A new, open clipboard monitor.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Tear the monitor down; the next [`next_event`] returns
+        /// `Ok(None)` per the [`ChannelInterceptor`] contract.
+        pub fn shutdown(&self) {
+            self.closed.store(true, Ordering::SeqCst);
+        }
+
         /// Read the current clipboard selection, if a display server
         /// and a reader tool are available.
         fn read_selection() -> Result<Vec<u8>, ChannelError> {
@@ -730,6 +751,9 @@ mod linux {
             DlpChannel::Clipboard
         }
         async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
+            if self.closed.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
             let content = Self::read_selection()?;
             let metadata = ContentMetadata {
                 filename: None,
@@ -767,6 +791,8 @@ mod macos {
     use sng_dlp::{ChannelError, ChannelInterceptor, ContentEvent, ContentMetadata, DlpChannel};
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// macOS file-write monitor.
     #[derive(Debug)]
@@ -824,8 +850,28 @@ mod macos {
     }
 
     /// macOS clipboard monitor — reads `NSPasteboard` via `pbpaste`.
+    ///
+    /// Read on demand each [`next_event`]; [`shutdown`](Self::shutdown)
+    /// makes a subsequent call return `Ok(None)` per the
+    /// [`ChannelInterceptor`] contract.
     #[derive(Clone, Debug, Default)]
-    pub struct MacClipboardMonitor;
+    pub struct MacClipboardMonitor {
+        closed: Arc<AtomicBool>,
+    }
+
+    impl MacClipboardMonitor {
+        /// A new, open clipboard monitor.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Tear the monitor down; the next [`next_event`] returns
+        /// `Ok(None)`.
+        pub fn shutdown(&self) {
+            self.closed.store(true, Ordering::SeqCst);
+        }
+    }
 
     #[async_trait]
     impl ChannelInterceptor for MacClipboardMonitor {
@@ -833,6 +879,9 @@ mod macos {
             DlpChannel::Clipboard
         }
         async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
+            if self.closed.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
             let output = Command::new("/usr/bin/pbpaste")
                 .output()
                 .map_err(|e| ChannelError::Unavailable(format!("pbpaste unavailable: {e}")))?;
@@ -878,6 +927,8 @@ mod windows_impl {
     use sng_dlp::{ChannelError, ChannelInterceptor, ContentEvent, ContentMetadata, DlpChannel};
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Windows file-write monitor.
     #[derive(Debug)]
@@ -909,8 +960,28 @@ mod windows_impl {
 
     /// Windows clipboard monitor — reads via PowerShell
     /// `Get-Clipboard`.
+    ///
+    /// Read on demand each [`next_event`]; [`shutdown`](Self::shutdown)
+    /// makes a subsequent call return `Ok(None)` per the
+    /// [`ChannelInterceptor`] contract.
     #[derive(Clone, Debug, Default)]
-    pub struct WindowsClipboardMonitor;
+    pub struct WindowsClipboardMonitor {
+        closed: Arc<AtomicBool>,
+    }
+
+    impl WindowsClipboardMonitor {
+        /// A new, open clipboard monitor.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Tear the monitor down; the next [`next_event`] returns
+        /// `Ok(None)`.
+        pub fn shutdown(&self) {
+            self.closed.store(true, Ordering::SeqCst);
+        }
+    }
 
     #[async_trait]
     impl ChannelInterceptor for WindowsClipboardMonitor {
@@ -918,6 +989,9 @@ mod windows_impl {
             DlpChannel::Clipboard
         }
         async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
+            if self.closed.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
             let output = Command::new("powershell")
                 .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
                 .output()
@@ -1101,5 +1175,24 @@ tmpfs /run tmpfs rw 0 0
         let event = monitor.next_event().await.expect("ok").expect("some");
         assert_eq!(event.channel, DlpChannel::UsbTransfer);
         assert_eq!(event.content, b"exfiltrated");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn clipboard_monitor_honors_shutdown_with_none() {
+        // After shutdown the stateless clipboard reader must observe the
+        // ChannelInterceptor contract and return Ok(None) — a consumer
+        // looping to end-of-stream then terminates cleanly instead of
+        // hanging on the interceptor for a signal it would never get.
+        let monitor = LinuxClipboardMonitor::new();
+        monitor.shutdown();
+        let result = monitor
+            .next_event()
+            .await
+            .expect("shutdown is not an error");
+        assert!(
+            result.is_none(),
+            "post-shutdown next_event must yield None, got {result:?}"
+        );
     }
 }
