@@ -301,3 +301,50 @@ func TestCompileEndpointBundle_MIPLabelDualMatchEmitsTwoRules(t *testing.T) {
 		}
 	}
 }
+
+// A rule whose compiled pattern_data is empty (here an MIP-label rule
+// with neither a label id nor a sensitivity level) is a dead match path:
+// it can never match, and an empty fingerprint payload would make the
+// agent reject the entire bundle. compileEndpointRules drops the dead
+// path while keeping the rest of the policy's rules — and the surviving
+// rules keep their original `:<index>` id so audit attribution is
+// stable.
+func TestCompileEndpointBundle_EmptyPatternRuleIsDropped(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	created, err := svc.CreatePolicy(ctx, tid, repository.DLPPolicy{
+		Name: "mixed",
+		Rules: []repository.DLPRule{
+			// index 0: no payload at all — must be dropped.
+			{Type: repository.DLPRuleTypeMIPLabel},
+			// index 1: a real rule — must survive with its :1 id.
+			{Type: repository.DLPRuleTypeRegex, Pattern: "ssn_us"},
+		},
+		Action:  repository.DLPActionBlock,
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	blob, err := svc.CompileEndpointBundle(ctx, tid, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(blob, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	rawRules, ok := doc["rules"].([]any)
+	if !ok || len(rawRules) != 1 {
+		t.Fatalf("expected exactly 1 endpoint rule (dead path dropped), got %s", blob)
+	}
+	rule := rawRules[0].(map[string]any)
+	if want := created.ID.String() + ":1"; rule["id"] != want {
+		t.Errorf("surviving rule id = %v, want %s (index preserved)", rule["id"], want)
+	}
+	if rule["pattern_data"] != "ssn_us" {
+		t.Errorf("pattern_data = %v, want ssn_us", rule["pattern_data"])
+	}
+}

@@ -179,6 +179,16 @@ func compileEndpointRules(policies []repository.DLPPolicy) []EndpointDLPRule {
 		for i, r := range p.Rules {
 			baseID := fmt.Sprintf("%s:%d", p.ID, i)
 			for _, m := range endpointMatchPaths(r) {
+				// Skip a match path with no payload. An empty
+				// pattern_data can never match meaningfully (an MIP
+				// label "" or empty keyword dictionary is a no-op; an
+				// empty regex matches everything) and an empty
+				// fingerprint would fail sng-dlp's hex parse and reject
+				// the whole bundle. Dropping the dead path keeps a
+				// misconfigured rule from poisoning every other rule.
+				if m.patternData == "" {
+					continue
+				}
 				rules = append(rules, EndpointDLPRule{
 					ID:          baseID + m.idSuffix,
 					Name:        p.Name,

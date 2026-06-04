@@ -457,26 +457,34 @@ pub fn parse_proc_mounts(contents: &str) -> Vec<MountEntry> {
 
 /// Decode the `\NNN` octal escapes the kernel uses in
 /// `/proc/mounts` for whitespace and backslashes.
+///
+/// The kernel escapes each *byte* it cannot emit literally, so a
+/// multi-byte UTF-8 path is a run of octal escapes (e.g. `é` →
+/// `\303\251`). Decoded bytes are accumulated and interpreted as UTF-8
+/// at the end — decoding each escape to a `char` independently would map
+/// the raw byte to its Latin-1 code point and corrupt any non-ASCII
+/// mount point (which would then fail to match the real directory and
+/// silently drop a removable volume from monitoring).
 fn decode_octal(field: &str) -> String {
     if !field.contains('\\') {
         return field.to_owned();
     }
     let bytes = field.as_bytes();
-    let mut out = String::with_capacity(field.len());
+    let mut out = Vec::with_capacity(field.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 3 < bytes.len() {
             let digits = &field[i + 1..i + 4];
             if let Ok(code) = u8::from_str_radix(digits, 8) {
-                out.push(code as char);
+                out.push(code);
                 i += 4;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(target_os = "linux")]
@@ -1086,6 +1094,20 @@ tmpfs /run tmpfs rw 0 0
         assert_eq!(mounts[1].mount_point, PathBuf::from("/media/My Drive"));
         assert_eq!(mounts[1].fstype, "vfat");
         assert_eq!(mounts[2].device, "tmpfs");
+    }
+
+    #[test]
+    fn parse_proc_mounts_decodes_multibyte_utf8_labels() {
+        // The kernel octal-escapes each byte of a non-ASCII path, so a
+        // UTF-8 label is a run of escapes: "Café" → "Caf\303\251",
+        // "Привет" (Cyrillic) is all two-byte sequences. Decoding each
+        // escape independently to a char would yield Latin-1 mojibake
+        // ("CafÃ©") that no longer matches the real mount point.
+        let contents = "/dev/sdb1 /media/Caf\\303\\251 vfat rw 0 0\n/dev/sdc1 /media/\\320\\237\\321\\200\\320\\270\\320\\262\\320\\265\\321\\202 vfat rw 0 0\n";
+        let mounts = parse_proc_mounts(contents);
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].mount_point, PathBuf::from("/media/Café"));
+        assert_eq!(mounts[1].mount_point, PathBuf::from("/media/Привет"));
     }
 
     #[tokio::test(flavor = "current_thread")]
