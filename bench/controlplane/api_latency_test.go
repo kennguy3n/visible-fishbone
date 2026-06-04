@@ -126,7 +126,9 @@ func newFakeControlPlane() *fakeControlPlane {
 func (f *fakeControlPlane) handler(t *testing.T) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/tenants", func(w http.ResponseWriter, r *http.Request) {
-		f.requireAuth(t, w, r)
+		if !f.requireAuth(t, w, r) {
+			return
+		}
 		f.mu.Lock()
 		f.tenantSeq++
 		id := "tenant-" + itoa(f.tenantSeq)
@@ -134,7 +136,9 @@ func (f *fakeControlPlane) handler(t *testing.T) http.Handler {
 		writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 	})
 	mux.HandleFunc("POST /api/v1/tenants/{id}/sites", func(w http.ResponseWriter, r *http.Request) {
-		f.requireAuth(t, w, r)
+		if !f.requireAuth(t, w, r) {
+			return
+		}
 		f.count("sites")
 		f.mu.Lock()
 		f.siteSeq++
@@ -143,54 +147,77 @@ func (f *fakeControlPlane) handler(t *testing.T) http.Handler {
 		writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 	})
 	mux.HandleFunc("PUT /api/v1/tenants/{id}/policy", func(w http.ResponseWriter, r *http.Request) {
-		f.requireAuth(t, w, r)
+		if !f.requireAuth(t, w, r) {
+			return
+		}
 		f.count("policy-put")
 		w.WriteHeader(http.StatusCreated)
 	})
 	mux.HandleFunc("GET /api/v1/tenants/{id}", func(w http.ResponseWriter, r *http.Request) {
-		f.requireAuth(t, w, r)
+		if !f.requireAuth(t, w, r) {
+			return
+		}
 		f.count("get-tenant")
 		writeJSON(w, http.StatusOK, map[string]string{"id": r.PathValue("id")})
 	})
 	mux.HandleFunc("GET /api/v1/tenants/{id}/sites", func(w http.ResponseWriter, r *http.Request) {
-		f.requireAuth(t, w, r)
+		if !f.requireAuth(t, w, r) {
+			return
+		}
 		writeJSON(w, http.StatusOK, []any{})
 	})
 	mux.HandleFunc("GET /api/v1/tenants/{id}/devices", func(w http.ResponseWriter, r *http.Request) {
-		f.requireAuth(t, w, r)
+		if !f.requireAuth(t, w, r) {
+			return
+		}
 		writeJSON(w, http.StatusOK, []any{})
 	})
 	mux.HandleFunc("GET /api/v1/tenants/{id}/policy", func(w http.ResponseWriter, r *http.Request) {
-		f.requireAuth(t, w, r)
+		if !f.requireAuth(t, w, r) {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"rules": []any{}})
 	})
 	mux.HandleFunc("PATCH /api/v1/tenants/{id}", func(w http.ResponseWriter, r *http.Request) {
-		f.requireAuth(t, w, r)
+		if !f.requireAuth(t, w, r) {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"id": r.PathValue("id")})
 	})
 	mux.HandleFunc("POST /api/v1/tenants/{id}/claim-tokens", func(w http.ResponseWriter, r *http.Request) {
-		f.requireAuth(t, w, r)
+		if !f.requireAuth(t, w, r) {
+			return
+		}
 		writeJSON(w, http.StatusCreated, map[string]string{"token": "claim-xyz"})
 	})
 	mux.HandleFunc("POST /api/v1/tenants/{id}/policy/compile", func(w http.ResponseWriter, r *http.Request) {
-		f.requireAuth(t, w, r)
+		if !f.requireAuth(t, w, r) {
+			return
+		}
 		f.count("compile")
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("POST /api/v1/tenants/{id}/policy/simulations", func(w http.ResponseWriter, r *http.Request) {
-		f.requireAuth(t, w, r)
+		if !f.requireAuth(t, w, r) {
+			return
+		}
 		f.count("simulate")
 		writeJSON(w, http.StatusOK, map[string]any{"changed": 0})
 	})
 	return mux
 }
 
-func (f *fakeControlPlane) requireAuth(t *testing.T, w http.ResponseWriter, r *http.Request) {
+// requireAuth reports whether the request carried a bearer token. On
+// failure it writes a 401 and fails the test; the caller must return so
+// no 2xx body is written after the 401 status.
+func (f *fakeControlPlane) requireAuth(t *testing.T, w http.ResponseWriter, r *http.Request) bool {
 	t.Helper()
 	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 		w.WriteHeader(http.StatusUnauthorized)
 		t.Errorf("%s %s missing bearer token", r.Method, r.URL.Path)
+		return false
 	}
+	return true
 }
 
 func (f *fakeControlPlane) count(key string) {

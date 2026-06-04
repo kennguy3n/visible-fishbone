@@ -224,11 +224,12 @@ func (c *apiClient) seedTenants(ctx context.Context, n int) ([]seededTenant, err
 				"template": siteTemplates[s%len(siteTemplates)],
 			}, &site)
 			if serr != nil {
-				return nil, fmt.Errorf("create site for tenant %d: %w", i, serr)
+				return nil, fmt.Errorf("create site %d for tenant %d: %w", s, i, serr)
 			}
-			if scode == http.StatusCreated && site.ID != "" {
-				st.SiteIDs = append(st.SiteIDs, site.ID)
+			if scode != http.StatusCreated || site.ID == "" {
+				return nil, fmt.Errorf("create site %d for tenant %d: unexpected status %d", s, i, scode)
 			}
+			st.SiteIDs = append(st.SiteIDs, site.ID)
 		}
 
 		// Seed a policy graph so GET /policy, compile, and simulate
