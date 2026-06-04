@@ -307,7 +307,10 @@ func classifyWrite(err error, what string) error {
 
 // --- pops (global) ---
 
-const popColumns = `id, region, provider, anycast_ip::text, dns_name, capacity_tier, enabled, created_at, updated_at`
+// anycast_ip is an inet column; host() yields the bare address (e.g.
+// 203.0.113.10) rather than ::text's CIDR form (203.0.113.10/32), which is
+// what callers and GeoDNS A-records expect for a single anycast VIP.
+const popColumns = `id, region, provider, host(anycast_ip), dns_name, capacity_tier, enabled, created_at, updated_at`
 
 func scanPoP(row pgx.Row) (PoP, error) {
 	var p PoP
