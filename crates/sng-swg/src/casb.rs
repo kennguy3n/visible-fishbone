@@ -365,13 +365,24 @@ impl InlineCasbInspector {
 
     /// Atomically swap in a new rule set, preserving the current
     /// app catalog.
-    pub fn install_rules(&self, rules: CasbRuleSet) -> usize {
-        let cur = self.inner.load();
+    ///
+    /// Uses [`ArcSwap::rcu`] so the read-copy-update is atomic with
+    /// respect to a concurrent [`install`](Self::install) /
+    /// `install_rules`: the closure re-reads the current catalog and
+    /// retries if another writer raced in between, rather than
+    /// load-then-store (which could clobber a concurrent catalog
+    /// swap with a stale clone). The closure may run more than once
+    /// under contention, so it only clones — no side effects. The
+    /// rule set is borrowed (not moved) because the closure may need
+    /// to re-clone it on a retry.
+    pub fn install_rules(&self, rules: &CasbRuleSet) -> usize {
         let n = rules.len();
-        self.inner.store(Arc::new(InspectorState {
-            catalog: cur.catalog.clone(),
-            rules,
-        }));
+        self.inner.rcu(|cur| {
+            Arc::new(InspectorState {
+                catalog: cur.catalog.clone(),
+                rules: rules.clone(),
+            })
+        });
         n
     }
 
@@ -424,7 +435,7 @@ fn verdict_from_decision(d: &CasbDecision) -> Verdict {
         CasbVerdict::Allow => Verdict::allow_categorized(category),
         CasbVerdict::Log => Verdict {
             action: Action::Allow,
-            reason: format!("allow.casb.log.{category}"),
+            reason: format!("log.{category}"),
             category: Some(category),
             retry_after_secs: None,
         },
@@ -658,7 +669,7 @@ mod tests {
             )
             .expect("verdict");
         assert_eq!(v.action, Action::Allow);
-        assert_eq!(v.reason, "allow.casb.log.casb.salesforce.upload");
+        assert_eq!(v.reason, "log.casb.salesforce.upload");
         assert!(v.is_completing());
 
         // A small upload does not meet the threshold -> no verdict.
@@ -724,7 +735,7 @@ mod tests {
         );
         assert_eq!(inspector.inspect(&c, &RequestSignals::default()), None);
 
-        let n = inspector.install_rules(CasbRuleSet::new(vec![crate::casb_rules::CasbRule {
+        let n = inspector.install_rules(&CasbRuleSet::new(vec![crate::casb_rules::CasbRule {
             id: "block-upload".to_string(),
             app_id: "m365".to_string(),
             action: CasbAction::Upload,
@@ -737,6 +748,49 @@ mod tests {
             .inspect(&c, &RequestSignals::default())
             .expect("verdict");
         assert_eq!(v.action, Action::Deny);
+    }
+
+    #[test]
+    fn install_rules_preserves_installed_catalog() {
+        // install_rules must keep whatever catalog install() last
+        // set — the rcu read-copy-update reads the current catalog
+        // rather than reverting to the builtin one.
+        let custom = AppCatalog::new(vec![AppSignature {
+            app_id: "acme".to_string(),
+            host_suffixes: vec!["acme.example".to_string()],
+            path_rules: vec![PathRule::new(
+                Some("post"),
+                "/files/*/upload",
+                CasbAction::Upload,
+            )],
+        }]);
+        let inspector = InlineCasbInspector::new(custom, CasbRuleSet::default());
+
+        inspector.install_rules(&CasbRuleSet::new(vec![crate::casb_rules::CasbRule {
+            id: "block-acme-upload".to_string(),
+            app_id: "acme".to_string(),
+            action: CasbAction::Upload,
+            verdict: CasbVerdict::Block,
+            conditions: crate::casb_rules::CasbConditions::default(),
+            priority: 1,
+        }]));
+
+        // The custom catalog is still in effect after install_rules.
+        let c = ctx("POST", "acme.example", "/files/42/upload");
+        let v = inspector
+            .inspect(&c, &RequestSignals::default())
+            .expect("verdict");
+        assert_eq!(v.action, Action::Deny);
+        assert_eq!(v.reason, "deny.casb.acme.upload");
+
+        // A builtin host is NOT detected — the builtin catalog was
+        // never restored.
+        let builtin_host = ctx(
+            "PUT",
+            "graph.microsoft.com",
+            "/v1.0/me/drive/items/01X/content",
+        );
+        assert_eq!(inspector.detect(&builtin_host), None);
     }
 
     #[test]
