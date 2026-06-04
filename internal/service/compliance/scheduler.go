@@ -158,7 +158,14 @@ func (s *Scheduler) collect(ctx context.Context, collectionType string) (reposit
 // constituent weekly rows are transitioned to 'aggregated'.
 func (s *Scheduler) AggregateMonthly(ctx context.Context) (repository.ComplianceEvidence, error) {
 	cutoff := s.now().Add(-s.aggregationWindow)
-	weeklies, err := s.listSince(ctx, CollectionWeekly, cutoff)
+	// Only roll up successfully-collected weeklies. Including 'failed'
+	// or 'collecting' rows would (a) put incomplete evidence into an
+	// audit-ready package and (b) let the status transition below mask
+	// those failures as 'aggregated'. Restricting to 'collected' also
+	// makes monthly partitions non-overlapping: once a weekly is
+	// aggregated it is no longer 'collected', so a later monthly run
+	// over the same window will not pick it up again.
+	weeklies, err := s.listSince(ctx, CollectionWeekly, StatusCollected, cutoff)
 	if err != nil {
 		return repository.ComplianceEvidence{}, err
 	}
@@ -278,14 +285,15 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
-// listSince pages through evidence of a type collected at or after
-// cutoff, oldest-bounded by the List ordering (most-recent first). It
-// stops as soon as it crosses the cutoff to bound work.
-func (s *Scheduler) listSince(ctx context.Context, collectionType string, cutoff time.Time) ([]repository.ComplianceEvidence, error) {
+// listSince pages through evidence of a type (optionally narrowed to a
+// status; empty status means any) collected at or after cutoff,
+// oldest-bounded by the List ordering (most-recent first). It stops as
+// soon as it crosses the cutoff to bound work.
+func (s *Scheduler) listSince(ctx context.Context, collectionType, status string, cutoff time.Time) ([]repository.ComplianceEvidence, error) {
 	var out []repository.ComplianceEvidence
 	page := repository.Page{Limit: 100}
 	for {
-		res, err := s.evidence.List(ctx, repository.ComplianceEvidenceFilter{CollectionType: collectionType}, page)
+		res, err := s.evidence.List(ctx, repository.ComplianceEvidenceFilter{CollectionType: collectionType, Status: status}, page)
 		if err != nil {
 			return nil, fmt.Errorf("list %s evidence: %w", collectionType, err)
 		}
