@@ -108,6 +108,14 @@ type Metering struct {
 	// METERING_DEFAULT_BUDGETS as a comma-separated "meter=value"
 	// list. Optional: nil means the only fallbacks are the built-in
 	// per-tier defaults.
+	//
+	// These also act as the fail-open safety net: if the budget store
+	// is unreachable and there is no cached limit set for a tenant, the
+	// enforcer falls back to these global defaults. With none configured
+	// the fallback is unbounded (budget enforcement is fail-open during
+	// a store outage — appropriate for a cost-control, not security,
+	// feature), so operators who need cost containment to hold even
+	// during a DB outage should configure them.
 	DefaultBudgets map[string]int64
 }
 
