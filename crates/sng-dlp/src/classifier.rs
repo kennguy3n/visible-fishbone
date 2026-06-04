@@ -331,6 +331,20 @@ impl ContentClassifier {
 
     /// Classify `content` observed on `channel`. Only rules scoped
     /// to `channel` (or scoped to all channels) are considered.
+    ///
+    /// `max_scan_bytes` bounds the *span* detectors (regex, keyword):
+    /// they decode the buffer into a UTF-8 string and run compiled
+    /// matchers over it, so their cost — and the one large allocation —
+    /// scales with the scanned length and is capped for safety. The
+    /// fingerprint detector is a *whole-document* SimHash: to match the
+    /// hash the control plane registered over the full document
+    /// (`engine.RegisterFingerprint`), it must fold over the entire
+    /// delivered `content`, not the span-truncated prefix — otherwise a
+    /// document larger than the span ceiling would hash differently and
+    /// silently fail to match (a fail-open DLP gap). The SimHash fold is
+    /// O(n) and token-streaming, so running it over the full buffer is
+    /// cheap; the buffer is itself bounded upstream by the channel source
+    /// (e.g. the PAL's per-file read ceiling).
     #[must_use]
     pub fn classify(
         &self,
@@ -344,7 +358,7 @@ impl ContentClassifier {
         let mut matches = Vec::new();
         self.scan_regex(channel, &text, &mut matches);
         self.scan_keywords(channel, &text, &mut matches);
-        self.scan_fingerprints(channel, scanned, &mut matches);
+        self.scan_fingerprints(channel, content, &mut matches);
         self.scan_mip_labels(channel, metadata, &mut matches);
 
         ClassificationResult { matches }
@@ -756,6 +770,56 @@ mod tests {
             &ContentMetadata::default(),
         );
         assert!(res.is_match());
+        assert_eq!(res.matches[0].confidence, 1.0);
+    }
+
+    // The control plane registers a fingerprint's SimHash over the whole
+    // document; the endpoint must hash over the whole delivered content
+    // too, even when that content is larger than the span-detector scan
+    // ceiling (`max_scan_bytes`). If the fingerprint detector hashed only
+    // the truncated prefix, a document longer than the ceiling would hash
+    // to a different value and silently fail to match — a fail-open DLP
+    // gap. This builds content whose full-document SimHash differs from
+    // its first-`limit`-bytes SimHash, registers the full-document hash,
+    // then classifies with a deliberately small ceiling and asserts the
+    // match still lands.
+    #[test]
+    fn fingerprint_uses_full_content_not_span_truncated_prefix() {
+        // Distinct token streams in the two halves so the prefix SimHash
+        // and the whole-document SimHash diverge.
+        let head = "alpha bravo charlie delta echo foxtrot golf hotel ";
+        let tail = "november oscar papa quebec romeo sierra tango uniform ";
+        let mut doc = String::new();
+        for _ in 0..32 {
+            doc.push_str(head);
+        }
+        for _ in 0..32 {
+            doc.push_str(tail);
+        }
+        let content = doc.as_bytes();
+
+        let limit = head.len() * 32; // exactly the head; tail is truncated off.
+        let prefix_hash = simhash(&content[..limit]);
+        let full_hash = simhash(content);
+        // Guard the test's own premise: the two hashes really do differ,
+        // so hashing the prefix instead of the whole doc would miss.
+        assert_ne!(
+            prefix_hash, full_hash,
+            "test setup: prefix and full SimHash must differ"
+        );
+
+        let hex = format!("{full_hash:016x}");
+        let c = ContentClassifier::compile_with_limit(
+            &[rule("fp", PatternType::Fingerprint, &hex, RuleAction::Warn)],
+            limit,
+        )
+        .expect("compile");
+
+        let res = c.classify(DlpChannel::FileWrite, content, &ContentMetadata::default());
+        assert!(
+            res.is_match(),
+            "fingerprint must match on the full document despite the small scan ceiling"
+        );
         assert_eq!(res.matches[0].confidence, 1.0);
     }
 
