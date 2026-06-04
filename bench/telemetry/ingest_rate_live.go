@@ -98,6 +98,19 @@ type ingestTierResult struct {
 }
 
 func measureIngestTier(ctx context.Context, js jetstream.JetStream, streamName string, opts Options, tier, n int) (ingestTierResult, error) {
+	// Purge the stream so this tier measures only its own messages. The
+	// telemetry stream is LimitsPolicy retention, so acked messages from
+	// previous tiers would otherwise linger and a fresh DeliverAll
+	// consumer would drain that whole backlog — inflating peak lag and
+	// folding earlier tiers' tenants into the fairness sample.
+	stream, err := js.Stream(ctx, streamName)
+	if err != nil {
+		return ingestTierResult{}, fmt.Errorf("get stream: %w", err)
+	}
+	if err := stream.Purge(ctx); err != nil {
+		return ingestTierResult{}, fmt.Errorf("purge stream: %w", err)
+	}
+
 	// A fresh durable per tier so each tier drains from the start.
 	durable := fmt.Sprintf("bench_ingest_%d", tier)
 	cons, err := natsstreams.EnsureConsumer(ctx, js, natsstreams.ConsumerSpec{

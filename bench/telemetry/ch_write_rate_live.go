@@ -168,6 +168,15 @@ func measureCHQueryLatency(ctx context.Context, baseCfg clickhouse.Config, opts 
 			return Section{}, fmt.Errorf("seed write: %w", err)
 		}
 	}
+	// Wait for the buffered writer to drain its tail batch before
+	// probing, so the read sees the whole seeded table rather than
+	// (chLiveQueryRows mod BatchSize) fewer rows still in the buffer.
+	// The reader shares the writer's connection, so we cannot Stop the
+	// writer here; instead we wait on the async flush (FlushInterval).
+	if err := waitDrained(ctx, w, 30*time.Second); err != nil {
+		_ = w.Stop(ctx)
+		return Section{}, fmt.Errorf("await flush: %w", err)
+	}
 	reader, err := w.NewReader()
 	if err != nil {
 		_ = w.Stop(ctx)
@@ -196,6 +205,25 @@ func measureCHQueryLatency(ctx context.Context, baseCfg clickhouse.Config, opts 
 			{Name: "rows returned", Unit: "", Actual: float64(len(rows)), Verdict: VerdictInfo},
 		},
 	}, nil
+}
+
+// waitDrained blocks until the writer's buffer is empty (all seeded rows
+// flushed to ClickHouse) or the timeout elapses.
+func waitDrained(ctx context.Context, w *clickhouse.Writer, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if w.Stats().Pending == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("writer still has %d pending rows after %s", w.Stats().Pending, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 func repeatEndpoint(ep string, n int) []string {

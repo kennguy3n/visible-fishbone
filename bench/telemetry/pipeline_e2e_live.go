@@ -126,7 +126,13 @@ func liveFullPipeline(opts Options) (*Report, error) {
 	}
 	r.AddSection(lat)
 
-	// 3. Cold-path object stats observed during the run.
+	// 3. Cold-path object stats observed during the run. Stop the cold
+	// writer first so its final partition is flushed and the counters
+	// are exact rather than missing the last sub-FlushInterval batch
+	// (Stop is guarded by sync.Once, so the deferred Stop is a no-op).
+	if err := cold.Stop(ctx); err != nil {
+		return nil, fmt.Errorf("stop cold writer: %w", err)
+	}
 	cs := cold.Stats()
 	var avgObj, bytesPerEvent float64
 	if cs.Uploaded > 0 {
