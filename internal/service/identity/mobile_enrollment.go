@@ -291,7 +291,12 @@ func (svc *Service) ReportMobilePosture(
 			reason, repository.ErrForbidden)
 	}
 
-	posture, err := validateMobilePosture(in.Posture, dev.Platform, svc.nowFunc())
+	// Capture the clock once so posture validation and the liveness
+	// stamp below share a single instant (mirrors EnrollMobileDevice).
+	// Two separate nowFunc() calls would drift apart under a
+	// deterministic test clock that advances on every call.
+	now := svc.nowFunc()
+	posture, err := validateMobilePosture(in.Posture, dev.Platform, now)
 	if err != nil {
 		return repository.Device{}, err
 	}
@@ -305,7 +310,7 @@ func (svc *Service) ReportMobilePosture(
 	// Without this, a device actively reporting healthy posture would
 	// still show as stale/offline in monitoring that filters on
 	// last_seen_at.
-	if err := svc.devices.UpdateLastSeen(ctx, tenantID, dev.ID, svc.nowFunc()); err != nil {
+	if err := svc.devices.UpdateLastSeen(ctx, tenantID, dev.ID, now); err != nil {
 		return repository.Device{}, err
 	}
 	// Re-read so the returned device carries the freshly persisted
