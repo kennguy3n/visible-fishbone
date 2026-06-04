@@ -1,0 +1,920 @@
+//! Content classification engine.
+//!
+//! [`ContentClassifier`] compiles a set of [`DlpRule`]s into the
+//! runtime matchers the inspection hot path uses and applies them
+//! to a content buffer:
+//!
+//! * **Regex** — every regex rule's pattern is compiled into a
+//!   shared [`regex::RegexSet`] so one pass over the content tells
+//!   the classifier *which* of the N patterns hit; only the rules
+//!   that hit are then re-run individually to recover the match
+//!   offset (metadata only). Builtin pattern names (`ssn_us`,
+//!   `credit_card`, …) resolve to the same expressions the Go
+//!   control plane ships (`internal/service/dlp/engine/regex.go`),
+//!   and `credit_card` hits are Luhn-validated exactly as the Go
+//!   side does.
+//! * **Keyword** — every keyword rule's comma-separated dictionary
+//!   is folded into a single case-insensitive [`aho_corasick`]
+//!   automaton, so M keyword dictionaries cost one pass, not M.
+//! * **Fingerprint** — a 64-bit SimHash (token-wise, SHA-256
+//!   truncated, MSB-first — byte-identical to the Go `SimHash`) is
+//!   compared by Hamming similarity against the rule's registered
+//!   hash.
+//! * **MIP label** — the content metadata's declared Microsoft
+//!   Information Protection labels are checked for the rule's label
+//!   id.
+//!
+//! ## Redaction invariant
+//!
+//! A [`ClassificationResult`] carries **metadata only**: the
+//! matched rule id, its severity / action, a confidence score, and
+//! (for span-based detectors) the byte offset + length of the hit.
+//! The matched bytes themselves are never copied out of the input
+//! buffer, so a verdict event can never leak the sensitive payload
+//! that produced it.
+
+use crate::channels::DlpChannel;
+use crate::error::{DlpError, DlpResult};
+use crate::rules::{DlpRule, PatternType, RuleAction, Severity};
+use aho_corasick::AhoCorasick;
+use regex::{Regex, RegexSet};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Default ceiling on how many bytes of a single content event the
+/// classifier scans. Bounds worst-case work + allocation on a
+/// pathologically large clipboard / file-write event. 1 MiB is
+/// comfortably above any realistic clipboard or form-field payload
+/// while keeping a single classification cheap.
+pub const DEFAULT_MAX_SCAN_BYTES: usize = 1024 * 1024;
+
+/// Hamming-similarity threshold above which a SimHash fingerprint
+/// is considered a match. Matches the Go side's 0.8 cut-off in
+/// `internal/service/dlp/engine/fingerprint.go`.
+pub const FINGERPRINT_SIMILARITY_THRESHOLD: f64 = 0.8;
+
+/// Out-of-band context about a content buffer. Filled in by the
+/// `sng-pal` channel hook from whatever the OS exposes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentMetadata {
+    /// Originating filename, if the channel has one (file write,
+    /// USB copy, print job).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// Declared MIME type, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// Free-form source attribution for the audit trail (target
+    /// application, destination host, removable-volume id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Microsoft Information Protection sensitivity labels the host
+    /// already attached to the content (e.g. read from an Office
+    /// document's custom XML part by the PAL hook).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mip_labels: Vec<String>,
+}
+
+/// A single detection hit. **Metadata only** — never the matched
+/// bytes (see the module-level redaction invariant).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RuleMatch {
+    /// The id of the rule that fired.
+    pub rule_id: String,
+    /// The detector that produced the hit.
+    pub pattern_type: PatternType,
+    /// Severity of the rule.
+    pub severity: Severity,
+    /// Action the rule requested.
+    pub action: RuleAction,
+    /// Confidence in the hit, `0.0..=1.0`.
+    pub confidence: f64,
+    /// Byte offset of the hit within the scanned (possibly truncated)
+    /// content, measured in the UTF-8 text the classifier inspects.
+    /// Because content is decoded with [`String::from_utf8_lossy`]
+    /// before matching, this equals the offset in the original byte
+    /// buffer for valid UTF-8 input; for input containing invalid byte
+    /// sequences (each replaced by a 3-byte U+FFFD) it is the offset in
+    /// that lossy-decoded text and may not map 1:1 onto the raw bytes.
+    /// It is reported for span-based detectors only and is purely
+    /// informational — the redaction invariant means no consumer indexes
+    /// back into the content with it. `None` for whole-document
+    /// detectors (fingerprint, MIP label).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    /// Byte length of the hit in the same lossy-decoded UTF-8 text space
+    /// as [`Self::offset`], for span-based detectors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<usize>,
+}
+
+/// The output of [`ContentClassifier::classify`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClassificationResult {
+    /// Every rule that matched, in detector order (regex, then
+    /// keyword, then fingerprint, then MIP label).
+    pub matches: Vec<RuleMatch>,
+}
+
+impl ClassificationResult {
+    /// Whether any rule matched.
+    #[must_use]
+    pub fn is_match(&self) -> bool {
+        !self.matches.is_empty()
+    }
+
+    /// The strictest action across all matches, if any.
+    #[must_use]
+    pub fn strictest_action(&self) -> Option<RuleAction> {
+        self.matches.iter().map(|m| m.action).max()
+    }
+
+    /// The highest severity across all matches, if any.
+    #[must_use]
+    pub fn max_severity(&self) -> Option<Severity> {
+        self.matches.iter().map(|m| m.severity).max()
+    }
+}
+
+/// Lightweight per-rule descriptor retained after compilation so a
+/// match can be attributed without re-reading the original rule.
+#[derive(Clone, Debug)]
+struct RuleMeta {
+    id: String,
+    severity: Severity,
+    action: RuleAction,
+    channels: Vec<DlpChannel>,
+}
+
+impl RuleMeta {
+    fn from_rule(rule: &DlpRule) -> Self {
+        Self {
+            id: rule.id.clone(),
+            severity: rule.severity,
+            action: rule.action,
+            channels: rule.channels.clone(),
+        }
+    }
+
+    fn applies_to(&self, channel: DlpChannel) -> bool {
+        self.channels.is_empty() || self.channels.contains(&channel)
+    }
+}
+
+struct RegexEntry {
+    meta: RuleMeta,
+    regex: Regex,
+    luhn: bool,
+}
+
+struct FingerprintEntry {
+    meta: RuleMeta,
+    simhash: u64,
+}
+
+struct MipEntry {
+    meta: RuleMeta,
+    label: String,
+}
+
+/// Compiled content classifier. Construct once with
+/// [`ContentClassifier::compile`]; cheap to call [`Self::classify`]
+/// repeatedly. The struct is immutable after construction — the
+/// engine swaps a whole new classifier in atomically when the
+/// policy rotates.
+pub struct ContentClassifier {
+    regex_entries: Vec<RegexEntry>,
+    regex_set: RegexSet,
+    keyword_ac: Option<AhoCorasick>,
+    keyword_pat_to_rule: Vec<usize>,
+    keyword_metas: Vec<RuleMeta>,
+    fingerprint_entries: Vec<FingerprintEntry>,
+    mip_entries: Vec<MipEntry>,
+    max_scan_bytes: usize,
+}
+
+impl std::fmt::Debug for ContentClassifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContentClassifier")
+            .field("regex_rules", &self.regex_entries.len())
+            .field("keyword_patterns", &self.keyword_pat_to_rule.len())
+            .field("fingerprint_rules", &self.fingerprint_entries.len())
+            .field("mip_rules", &self.mip_entries.len())
+            .field("max_scan_bytes", &self.max_scan_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ContentClassifier {
+    /// Compile `rules` into a classifier with the default scan
+    /// ceiling ([`DEFAULT_MAX_SCAN_BYTES`]).
+    ///
+    /// # Errors
+    /// Returns [`DlpError::RuleCompile`] if a regex rule's pattern
+    /// fails to compile, a keyword rule has an empty dictionary, or
+    /// a fingerprint rule's `pattern_data` is not valid 16-char
+    /// hex.
+    pub fn compile(rules: &[DlpRule]) -> DlpResult<Self> {
+        Self::compile_with_limit(rules, DEFAULT_MAX_SCAN_BYTES)
+    }
+
+    /// Compile `rules` with an explicit scan ceiling.
+    ///
+    /// # Errors
+    /// See [`Self::compile`].
+    pub fn compile_with_limit(rules: &[DlpRule], max_scan_bytes: usize) -> DlpResult<Self> {
+        let mut regex_entries = Vec::new();
+        let mut regex_patterns = Vec::new();
+        let mut keyword_patterns: Vec<String> = Vec::new();
+        let mut keyword_pat_to_rule = Vec::new();
+        let mut keyword_metas = Vec::new();
+        let mut fingerprint_entries = Vec::new();
+        let mut mip_entries = Vec::new();
+
+        for rule in rules {
+            let meta = RuleMeta::from_rule(rule);
+            match rule.pattern_type {
+                PatternType::Regex => {
+                    let pattern = builtin_pattern(&rule.pattern_data)
+                        .map_or_else(|| rule.pattern_data.clone(), ToOwned::to_owned);
+                    let regex = Regex::new(&pattern).map_err(|e| DlpError::RuleCompile {
+                        rule_id: rule.id.clone(),
+                        reason: e.to_string(),
+                    })?;
+                    regex_patterns.push(pattern);
+                    regex_entries.push(RegexEntry {
+                        meta,
+                        regex,
+                        luhn: rule.pattern_data == "credit_card",
+                    });
+                }
+                PatternType::Keyword => {
+                    let meta_idx = keyword_metas.len();
+                    let mut any = false;
+                    for kw in rule
+                        .pattern_data
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        keyword_patterns.push(kw.to_owned());
+                        keyword_pat_to_rule.push(meta_idx);
+                        any = true;
+                    }
+                    if !any {
+                        return Err(DlpError::RuleCompile {
+                            rule_id: rule.id.clone(),
+                            reason: "keyword dictionary is empty".to_owned(),
+                        });
+                    }
+                    keyword_metas.push(meta);
+                }
+                PatternType::Fingerprint => {
+                    let simhash = parse_simhash_hex(&rule.pattern_data).ok_or_else(|| {
+                        DlpError::RuleCompile {
+                            rule_id: rule.id.clone(),
+                            reason: format!(
+                                "fingerprint pattern_data must be 16-char hex, got {:?}",
+                                rule.pattern_data
+                            ),
+                        }
+                    })?;
+                    fingerprint_entries.push(FingerprintEntry { meta, simhash });
+                }
+                PatternType::MipLabel => {
+                    mip_entries.push(MipEntry {
+                        meta,
+                        label: rule.pattern_data.clone(),
+                    });
+                }
+            }
+        }
+
+        let regex_set = RegexSet::new(&regex_patterns).map_err(|e| DlpError::RuleCompile {
+            rule_id: "<regex-set>".to_owned(),
+            reason: e.to_string(),
+        })?;
+
+        let keyword_ac = if keyword_patterns.is_empty() {
+            None
+        } else {
+            let ac = AhoCorasick::builder()
+                .ascii_case_insensitive(true)
+                .build(&keyword_patterns)
+                .map_err(|e| DlpError::RuleCompile {
+                    rule_id: "<keyword-automaton>".to_owned(),
+                    reason: e.to_string(),
+                })?;
+            Some(ac)
+        };
+
+        Ok(Self {
+            regex_entries,
+            regex_set,
+            keyword_ac,
+            keyword_pat_to_rule,
+            keyword_metas,
+            fingerprint_entries,
+            mip_entries,
+            max_scan_bytes,
+        })
+    }
+
+    /// Total number of compiled rules across every detector.
+    #[must_use]
+    pub fn rule_count(&self) -> usize {
+        self.regex_entries.len()
+            + self.keyword_metas.len()
+            + self.fingerprint_entries.len()
+            + self.mip_entries.len()
+    }
+
+    /// Classify `content` observed on `channel`. Only rules scoped
+    /// to `channel` (or scoped to all channels) are considered.
+    ///
+    /// `max_scan_bytes` bounds the *span* detectors (regex, keyword):
+    /// they decode the buffer into a UTF-8 string and run compiled
+    /// matchers over it, so their cost — and the one large allocation —
+    /// scales with the scanned length and is capped for safety. The
+    /// fingerprint detector is a *whole-document* SimHash: to match the
+    /// hash the control plane registered over the full document
+    /// (`engine.RegisterFingerprint`), it must fold over the entire
+    /// delivered `content`, not the span-truncated prefix — otherwise a
+    /// document larger than the span ceiling would hash differently and
+    /// silently fail to match (a fail-open DLP gap). The SimHash fold is
+    /// O(n) and token-streaming, so running it over the full buffer is
+    /// cheap; the buffer is itself bounded upstream by the channel source
+    /// (e.g. the PAL's per-file read ceiling).
+    #[must_use]
+    pub fn classify(
+        &self,
+        channel: DlpChannel,
+        content: &[u8],
+        metadata: &ContentMetadata,
+    ) -> ClassificationResult {
+        let scanned = &content[..content.len().min(self.max_scan_bytes)];
+        let text = String::from_utf8_lossy(scanned);
+
+        let mut matches = Vec::new();
+        self.scan_regex(channel, &text, &mut matches);
+        self.scan_keywords(channel, &text, &mut matches);
+        self.scan_fingerprints(channel, content, &mut matches);
+        self.scan_mip_labels(channel, metadata, &mut matches);
+
+        ClassificationResult { matches }
+    }
+
+    fn scan_regex(&self, channel: DlpChannel, text: &str, out: &mut Vec<RuleMatch>) {
+        if self.regex_entries.is_empty() {
+            return;
+        }
+        // One pass: which of the N patterns matched at all.
+        for idx in self.regex_set.matches(text) {
+            let Some(entry) = self.regex_entries.get(idx) else {
+                continue;
+            };
+            if !entry.meta.applies_to(channel) {
+                continue;
+            }
+            // Recover the match span (metadata only) for the rules
+            // that actually hit.
+            for m in entry.regex.find_iter(text) {
+                let mut confidence = 0.8;
+                if entry.luhn {
+                    if luhn_valid(m.as_str()) {
+                        confidence = 1.0;
+                    } else {
+                        continue;
+                    }
+                }
+                out.push(RuleMatch {
+                    rule_id: entry.meta.id.clone(),
+                    pattern_type: PatternType::Regex,
+                    severity: entry.meta.severity,
+                    action: entry.meta.action,
+                    confidence,
+                    offset: Some(m.start()),
+                    length: Some(m.end() - m.start()),
+                });
+            }
+        }
+    }
+
+    fn scan_keywords(&self, channel: DlpChannel, text: &str, out: &mut Vec<RuleMatch>) {
+        let Some(ac) = self.keyword_ac.as_ref() else {
+            return;
+        };
+        for m in ac.find_iter(text) {
+            let Some(&meta_idx) = self.keyword_pat_to_rule.get(m.pattern().as_usize()) else {
+                continue;
+            };
+            let Some(meta) = self.keyword_metas.get(meta_idx) else {
+                continue;
+            };
+            if !meta.applies_to(channel) {
+                continue;
+            }
+            out.push(RuleMatch {
+                rule_id: meta.id.clone(),
+                pattern_type: PatternType::Keyword,
+                severity: meta.severity,
+                action: meta.action,
+                confidence: 0.8,
+                offset: Some(m.start()),
+                length: Some(m.end() - m.start()),
+            });
+        }
+    }
+
+    fn scan_fingerprints(&self, channel: DlpChannel, content: &[u8], out: &mut Vec<RuleMatch>) {
+        if self.fingerprint_entries.is_empty() {
+            return;
+        }
+        let hash = simhash(content);
+        for entry in &self.fingerprint_entries {
+            if !entry.meta.applies_to(channel) {
+                continue;
+            }
+            let sim = hamming_similarity(hash, entry.simhash);
+            if sim >= FINGERPRINT_SIMILARITY_THRESHOLD {
+                out.push(RuleMatch {
+                    rule_id: entry.meta.id.clone(),
+                    pattern_type: PatternType::Fingerprint,
+                    severity: entry.meta.severity,
+                    action: entry.meta.action,
+                    confidence: sim,
+                    offset: None,
+                    length: None,
+                });
+            }
+        }
+    }
+
+    fn scan_mip_labels(
+        &self,
+        channel: DlpChannel,
+        metadata: &ContentMetadata,
+        out: &mut Vec<RuleMatch>,
+    ) {
+        for entry in &self.mip_entries {
+            if !entry.meta.applies_to(channel) {
+                continue;
+            }
+            if metadata.mip_labels.iter().any(|l| l == &entry.label) {
+                out.push(RuleMatch {
+                    rule_id: entry.meta.id.clone(),
+                    pattern_type: PatternType::MipLabel,
+                    severity: entry.meta.severity,
+                    action: entry.meta.action,
+                    confidence: 1.0,
+                    offset: None,
+                    length: None,
+                });
+            }
+        }
+    }
+}
+
+/// Resolve a builtin PII pattern name to its regular expression.
+/// Mirrors `builtinPatterns` in
+/// `internal/service/dlp/engine/regex.go` so a rule authored on the
+/// control plane with `pattern_data = "ssn_us"` detects the same
+/// thing on the endpoint.
+#[must_use]
+pub fn builtin_pattern(name: &str) -> Option<&'static str> {
+    let pat = match name {
+        "credit_card" => r"\b(?:\d[ -]*?){13,19}\b",
+        "ssn_us" => r"\b\d{3}-\d{2}-\d{4}\b",
+        "ni_uk" => r"(?i)\b[A-CEGHJ-PR-TW-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b",
+        "tfn_au" => r"\b\d{3}\s?\d{3}\s?\d{2,3}\b",
+        "email" => r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b",
+        "phone" => r"\+\d{1,3}[\s.-]?\(?\d{1,4}\)?[\s.-]?\d{1,4}[\s.-]?\d{1,9}",
+        "iban" => r"\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b",
+        "swift" => r"\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?\b",
+        "routing_number" => r"\b\d{9}\b",
+        "passport_us" => r"\b[A-Z]\d{8}\b",
+        "drivers_license" => r"\b[A-Z]\d{4,8}\b",
+        "icd10" => r"\b[A-TV-Z]\d{2}(\.\d{1,4})?\b",
+        "mrn" => r"\b\d{6,10}\b",
+        _ => return None,
+    };
+    Some(pat)
+}
+
+/// Parse a 16-char (64-bit) hex SimHash, as produced by the Go
+/// fingerprint registrar (`binary.BigEndian` 8-byte hash, hex
+/// encoded). Returns `None` for any non-16-hex-char input.
+#[must_use]
+pub fn parse_simhash_hex(s: &str) -> Option<u64> {
+    if s.len() != 16 {
+        return None;
+    }
+    u64::from_str_radix(s, 16).ok()
+}
+
+/// 64-bit SimHash of `content`, byte-identical to the Go
+/// `engine.SimHash`: whitespace-delimited tokens, each hashed with
+/// SHA-256 and truncated to the leading 8 bytes (big-endian u64),
+/// bit-voted MSB-first.
+#[must_use]
+pub fn simhash(content: &[u8]) -> u64 {
+    let text = String::from_utf8_lossy(content);
+    let mut votes = [0i64; 64];
+    let mut token_count = 0u64;
+    for token in text.split_whitespace() {
+        token_count += 1;
+        let digest = Sha256::digest(token.as_bytes());
+        let mut bits = [0u8; 8];
+        bits.copy_from_slice(&digest[..8]);
+        let value = u64::from_be_bytes(bits);
+        for (i, vote) in votes.iter_mut().enumerate() {
+            // MSB-first: bit (63 - i).
+            if value & (1u64 << (63 - i)) != 0 {
+                *vote += 1;
+            } else {
+                *vote -= 1;
+            }
+        }
+    }
+    if token_count == 0 {
+        return 0;
+    }
+    let mut result = 0u64;
+    for (i, vote) in votes.iter().enumerate() {
+        if *vote > 0 {
+            result |= 1u64 << (63 - i);
+        }
+    }
+    result
+}
+
+/// Hamming similarity of two 64-bit hashes: `1 - distance / 64`.
+#[must_use]
+pub fn hamming_similarity(a: u64, b: u64) -> f64 {
+    let distance = (a ^ b).count_ones();
+    1.0 - f64::from(distance) / 64.0
+}
+
+/// Luhn checksum validation over the digits in `s` (ignoring any
+/// separators). Mirrors the Go `luhnValid` used to suppress
+/// credit-card false positives.
+#[must_use]
+pub fn luhn_valid(s: &str) -> bool {
+    let digits: Vec<u32> = s.chars().filter_map(|c| c.to_digit(10)).collect();
+    // Match the Go `luhnValid` bounds exactly (regex.go): a PAN is
+    // 13-19 digits, so anything outside that range is not a card.
+    if digits.len() < 13 || digits.len() > 19 {
+        return false;
+    }
+    let mut sum = 0u32;
+    let mut double = false;
+    for &d in digits.iter().rev() {
+        let mut v = d;
+        if double {
+            v *= 2;
+            if v > 9 {
+                v -= 9;
+            }
+        }
+        sum += v;
+        double = !double;
+    }
+    sum % 10 == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rules::DlpRule;
+    use pretty_assertions::assert_eq;
+
+    fn rule(id: &str, pt: PatternType, data: &str, action: RuleAction) -> DlpRule {
+        DlpRule {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            pattern_type: pt,
+            pattern_data: data.to_owned(),
+            severity: Severity::High,
+            action,
+            channels: vec![],
+        }
+    }
+
+    #[test]
+    fn regex_builtin_ssn_matches_metadata_only() {
+        let c = ContentClassifier::compile(&[rule(
+            "ssn",
+            PatternType::Regex,
+            "ssn_us",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        let res = c.classify(
+            DlpChannel::FileWrite,
+            b"my ssn is 123-45-6789 ok",
+            &ContentMetadata::default(),
+        );
+        assert!(res.is_match());
+        assert_eq!(res.matches.len(), 1);
+        let m = &res.matches[0];
+        assert_eq!(m.rule_id, "ssn");
+        assert_eq!(m.pattern_type, PatternType::Regex);
+        assert_eq!(m.offset, Some(10));
+        assert_eq!(m.length, Some(11));
+    }
+
+    #[test]
+    fn credit_card_requires_luhn() {
+        let c = ContentClassifier::compile(&[rule(
+            "cc",
+            PatternType::Regex,
+            "credit_card",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        // Luhn-valid Visa test number.
+        let good = c.classify(
+            DlpChannel::Clipboard,
+            b"card 4111111111111111 here",
+            &ContentMetadata::default(),
+        );
+        assert!(good.is_match());
+        assert_eq!(good.matches[0].confidence, 1.0);
+
+        // Same shape, invalid checksum.
+        let bad = c.classify(
+            DlpChannel::Clipboard,
+            b"card 4111111111111112 here",
+            &ContentMetadata::default(),
+        );
+        assert!(!bad.is_match());
+    }
+
+    #[test]
+    fn credit_card_not_matched_inside_longer_digit_run() {
+        // Regression: the builtin must carry the same `\b` word
+        // boundaries as the Go side (regex.go), so a Luhn-valid 16-digit
+        // PAN embedded in a longer contiguous digit identifier does NOT
+        // match — matching it would produce endpoint false positives the
+        // web/SaaS classifier never raises.
+        let c = ContentClassifier::compile(&[rule(
+            "cc",
+            PatternType::Regex,
+            "credit_card",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        let res = c.classify(
+            DlpChannel::Clipboard,
+            b"99994111111111111111999",
+            &ContentMetadata::default(),
+        );
+        assert!(!res.is_match());
+    }
+
+    #[test]
+    fn keyword_dictionary_is_case_insensitive_single_pass() {
+        let c = ContentClassifier::compile(&[rule(
+            "secret-kw",
+            PatternType::Keyword,
+            "confidential, top secret",
+            RuleAction::Warn,
+        )])
+        .expect("compile");
+        let res = c.classify(
+            DlpChannel::Print,
+            b"This is CONFIDENTIAL material",
+            &ContentMetadata::default(),
+        );
+        assert!(res.is_match());
+        assert_eq!(res.matches[0].rule_id, "secret-kw");
+        assert_eq!(res.matches[0].pattern_type, PatternType::Keyword);
+    }
+
+    #[test]
+    fn empty_keyword_dictionary_is_a_compile_error() {
+        let err = ContentClassifier::compile(&[rule(
+            "empty",
+            PatternType::Keyword,
+            "  , ,",
+            RuleAction::Log,
+        )])
+        .unwrap_err();
+        assert_eq!(err.code(), crate::error::DlpErrorCode::RuleCompileFailed);
+    }
+
+    #[test]
+    fn channel_scoping_filters_rules() {
+        let mut r = rule(
+            "usb-only",
+            PatternType::Keyword,
+            "secret",
+            RuleAction::Block,
+        );
+        r.channels = vec![DlpChannel::UsbTransfer];
+        let c = ContentClassifier::compile(&[r]).expect("compile");
+        assert!(
+            c.classify(
+                DlpChannel::UsbTransfer,
+                b"secret",
+                &ContentMetadata::default()
+            )
+            .is_match()
+        );
+        assert!(
+            !c.classify(
+                DlpChannel::Clipboard,
+                b"secret",
+                &ContentMetadata::default()
+            )
+            .is_match()
+        );
+    }
+
+    #[test]
+    fn mip_label_matches_declared_metadata() {
+        let c = ContentClassifier::compile(&[rule(
+            "mip-restricted",
+            PatternType::MipLabel,
+            "restricted",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        let meta = ContentMetadata {
+            mip_labels: vec!["restricted".to_owned()],
+            ..ContentMetadata::default()
+        };
+        assert!(c.classify(DlpChannel::FileWrite, b"", &meta).is_match());
+        assert!(
+            !c.classify(DlpChannel::FileWrite, b"", &ContentMetadata::default())
+                .is_match()
+        );
+    }
+
+    #[test]
+    fn fingerprint_matches_near_duplicate() {
+        let original = b"the quick brown fox jumps over the lazy dog repeatedly today";
+        let hash = simhash(original);
+        let hex = format!("{hash:016x}");
+        let c = ContentClassifier::compile(&[rule(
+            "fp",
+            PatternType::Fingerprint,
+            &hex,
+            RuleAction::Warn,
+        )])
+        .expect("compile");
+        // Exact content → similarity 1.0.
+        let res = c.classify(
+            DlpChannel::BrowserUpload,
+            original,
+            &ContentMetadata::default(),
+        );
+        assert!(res.is_match());
+        assert_eq!(res.matches[0].confidence, 1.0);
+    }
+
+    // The control plane registers a fingerprint's SimHash over the whole
+    // document; the endpoint must hash over the whole delivered content
+    // too, even when that content is larger than the span-detector scan
+    // ceiling (`max_scan_bytes`). If the fingerprint detector hashed only
+    // the truncated prefix, a document longer than the ceiling would hash
+    // to a different value and silently fail to match — a fail-open DLP
+    // gap. This builds content whose full-document SimHash differs from
+    // its first-`limit`-bytes SimHash, registers the full-document hash,
+    // then classifies with a deliberately small ceiling and asserts the
+    // match still lands.
+    #[test]
+    fn fingerprint_uses_full_content_not_span_truncated_prefix() {
+        // Distinct token streams in the two halves so the prefix SimHash
+        // and the whole-document SimHash diverge.
+        let head = "alpha bravo charlie delta echo foxtrot golf hotel ";
+        let tail = "november oscar papa quebec romeo sierra tango uniform ";
+        let mut doc = String::new();
+        for _ in 0..32 {
+            doc.push_str(head);
+        }
+        for _ in 0..32 {
+            doc.push_str(tail);
+        }
+        let content = doc.as_bytes();
+
+        let limit = head.len() * 32; // exactly the head; tail is truncated off.
+        let prefix_hash = simhash(&content[..limit]);
+        let full_hash = simhash(content);
+        // Guard the test's own premise: the two hashes really do differ,
+        // so hashing the prefix instead of the whole doc would miss.
+        assert_ne!(
+            prefix_hash, full_hash,
+            "test setup: prefix and full SimHash must differ"
+        );
+
+        let hex = format!("{full_hash:016x}");
+        let c = ContentClassifier::compile_with_limit(
+            &[rule("fp", PatternType::Fingerprint, &hex, RuleAction::Warn)],
+            limit,
+        )
+        .expect("compile");
+
+        let res = c.classify(DlpChannel::FileWrite, content, &ContentMetadata::default());
+        assert!(
+            res.is_match(),
+            "fingerprint must match on the full document despite the small scan ceiling"
+        );
+        assert_eq!(res.matches[0].confidence, 1.0);
+    }
+
+    #[test]
+    fn bad_fingerprint_hex_is_a_compile_error() {
+        let err = ContentClassifier::compile(&[rule(
+            "fp",
+            PatternType::Fingerprint,
+            "not-hex",
+            RuleAction::Warn,
+        )])
+        .unwrap_err();
+        assert_eq!(err.code(), crate::error::DlpErrorCode::RuleCompileFailed);
+    }
+
+    #[test]
+    fn invalid_regex_is_a_compile_error() {
+        let err =
+            ContentClassifier::compile(&[rule("bad", PatternType::Regex, "(", RuleAction::Log)])
+                .unwrap_err();
+        assert_eq!(err.code(), crate::error::DlpErrorCode::RuleCompileFailed);
+    }
+
+    #[test]
+    fn simhash_is_deterministic_and_self_similar() {
+        let a = simhash(b"alpha beta gamma delta");
+        let b = simhash(b"alpha beta gamma delta");
+        assert_eq!(a, b);
+        assert_eq!(hamming_similarity(a, b), 1.0);
+        assert_eq!(simhash(b""), 0);
+        assert_eq!(simhash(b"   "), 0);
+    }
+
+    #[test]
+    fn strictest_action_and_max_severity() {
+        let rules = vec![
+            rule("log", PatternType::Keyword, "alpha", RuleAction::Log),
+            rule("block", PatternType::Keyword, "beta", RuleAction::Block),
+        ];
+        let c = ContentClassifier::compile(&rules).expect("compile");
+        let res = c.classify(
+            DlpChannel::Clipboard,
+            b"alpha and beta",
+            &ContentMetadata::default(),
+        );
+        assert_eq!(res.matches.len(), 2);
+        assert_eq!(res.strictest_action(), Some(RuleAction::Block));
+        assert_eq!(res.max_severity(), Some(Severity::High));
+    }
+
+    #[test]
+    fn max_scan_bytes_bounds_the_scan() {
+        let c = ContentClassifier::compile_with_limit(
+            &[rule("ssn", PatternType::Regex, "ssn_us", RuleAction::Block)],
+            4,
+        )
+        .expect("compile");
+        // The SSN is past the 4-byte scan ceiling, so it is not seen.
+        let res = c.classify(
+            DlpChannel::FileWrite,
+            b"xxxx123-45-6789",
+            &ContentMetadata::default(),
+        );
+        assert!(!res.is_match());
+    }
+
+    #[test]
+    fn luhn_validation_basics() {
+        assert!(luhn_valid("4111111111111111"));
+        assert!(!luhn_valid("4111111111111112"));
+        assert!(!luhn_valid("123"));
+        // Regression: mirror the Go upper bound — a digit run longer than
+        // 19 is not a PAN even if the trailing digits would checksum.
+        assert!(!luhn_valid("41111111111111110000000"));
+        // 19 digits, Luhn-valid, stays accepted at the upper boundary.
+        assert!(luhn_valid("4111111111111111110"));
+    }
+
+    #[test]
+    fn rule_match_result_serialises_without_raw_bytes() {
+        let c = ContentClassifier::compile(&[rule(
+            "ssn",
+            PatternType::Regex,
+            "ssn_us",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        let res = c.classify(
+            DlpChannel::FileWrite,
+            b"ssn 123-45-6789",
+            &ContentMetadata::default(),
+        );
+        let json = serde_json::to_string(&res).expect("encode");
+        // Metadata only: the matched digits must never appear.
+        assert!(!json.contains("123-45-6789"));
+        assert!(json.contains("\"rule_id\":\"ssn\""));
+    }
+}

@@ -27,6 +27,7 @@
 //! sibling modules.
 
 pub mod budget;
+pub mod dlp;
 pub mod keystore;
 pub mod posture;
 pub mod sysinfo;
@@ -34,6 +35,10 @@ pub mod traffic;
 pub mod tunnel;
 
 pub use budget::{CpuBudget, MemoryBudget, ResourceBudgetReport};
+pub use dlp::{
+    BrowserUploadBridge, MountEntry, RemovableMount, SensitiveDirWatcher, mime_for_path,
+    parse_proc_mounts,
+};
 pub use keystore::{KeyHandle, KeyStoreError, SecureKeyStore};
 pub use posture::{
     DiskEncryptionState, FirewallState, PostureCollector, PostureSnapshot, ScreenLockState,

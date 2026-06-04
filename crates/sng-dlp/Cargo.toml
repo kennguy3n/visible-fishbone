@@ -1,0 +1,67 @@
+[package]
+name = "sng-dlp"
+description = "ShieldNet Gateway (SNG) — endpoint Data Loss Prevention: content classification engine, channel interceptor contracts, and policy-bundle-driven verdict emission for the desktop agent."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# Serde stack. The endpoint DLP policy is delivered inside the
+# signed `endpoint` policy bundle as a JSON-encoded blob (the Go
+# control plane compiles it in `internal/service/dlp`), so this
+# crate needs the JSON decoder to round-trip a real policy.
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+
+# The per-channel interceptor contract (`ChannelInterceptor`) is an
+# async trait — the `sng-pal` backends that implement it await on OS
+# hooks (inotify, FSEvents, WMI). `async-trait` only rewrites the
+# trait surface; it pulls in no async runtime, so the inspection
+# engine itself stays runtime-agnostic and synchronous.
+async-trait = { workspace = true }
+
+# Lock-free rule reads. The classifier rule set is hot-swapped
+# atomically via `arc-swap` so the inspection hot path never takes
+# a lock — the same pattern `sng-policy-eval` uses for bundle
+# rotation.
+arc-swap = { workspace = true }
+
+# Hashing for the SimHash document fingerprint. `sha2` is already a
+# workspace dependency (sng-core bundle verification) and the Go
+# side (`internal/service/dlp/engine/fingerprint.go`) hashes each
+# token with SHA-256 truncated to 64 bits, so the Rust fingerprint
+# must speak the same primitive to stay wire-compatible.
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+# Content scanning primitives. `regex` drives the pattern detectors
+# (SSN, credit card, …) via a compiled `RegexSet` so a single pass
+# tells the classifier which of N patterns hit; `aho-corasick`
+# compiles the keyword-dictionary rules into one automaton for an
+# allocation-conscious multi-keyword scan.
+regex = { workspace = true }
+aho-corasick = { workspace = true }
+
+# Local crate dependencies: sng-core supplies the strongly-typed
+# identifier newtypes + the `BundleTarget` enum the policy loader
+# binds against; sng-policy-eval supplies the `EnforcementDomain`
+# the DLP rules are routed under in the policy graph.
+sng-core = { workspace = true }
+sng-policy-eval = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+serde_json = { workspace = true }
+# Drives the async `ChannelInterceptor` test double in unit tests.
+# A current-thread runtime is all the in-memory interceptor needs.
+tokio = { workspace = true, features = ["rt", "macros"] }

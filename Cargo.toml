@@ -40,6 +40,7 @@ members = [
     "crates/sng-pal",
     "crates/sng-comms",
     "crates/sng-policy-eval",
+    "crates/sng-dlp",
     "crates/sng-telemetry",
     "crates/sng-dns",
     "crates/sng-fw",
@@ -123,6 +124,15 @@ async-trait = "0.1"
 # (e.g. SNG_EDGE_CONFIG) so systemd / container manifests can drop
 # the operator into the same shape as a CLI invocation.
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+
+# Content scanning. `regex` + `aho-corasick` back the endpoint DLP
+# classifier (`sng-dlp`): a compiled `RegexSet` evaluates the N
+# pattern detectors in one pass, and a single `aho-corasick`
+# automaton scans every keyword dictionary at once. Both are
+# already in the dependency graph transitively (tracing-subscriber's
+# env-filter), so pinning them here adds no new crates to audit.
+regex = "1"
+aho-corasick = "1"
 
 # Utilities.
 bytes = "1"
@@ -257,6 +267,7 @@ sng-core = { path = "crates/sng-core" }
 sng-pal = { path = "crates/sng-pal" }
 sng-comms = { path = "crates/sng-comms" }
 sng-policy-eval = { path = "crates/sng-policy-eval" }
+sng-dlp = { path = "crates/sng-dlp" }
 sng-telemetry = { path = "crates/sng-telemetry" }
 sng-dns = { path = "crates/sng-dns" }
 sng-fw = { path = "crates/sng-fw" }
