@@ -113,8 +113,14 @@ func (r *BusinessReport) gaps() []string {
 	if r.ControlPlane == nil {
 		out = append(out, "No control-plane report supplied — Section 2 is empty.")
 	}
-	if c := r.telemetryCostPerUser(); c != nil && r.Theoretical != nil && len(r.Theoretical.UnitEconomics.OverallEnvelope) == 2 && *c > r.Theoretical.UnitEconomics.OverallEnvelope[1] {
-		out = append(out, fmt.Sprintf("Modeled telemetry-pipeline infra cost ($%.2f/user/mo) exceeds the $%.2f–%.2f/user/mo design envelope upper bound.", *c, r.Theoretical.UnitEconomics.OverallEnvelope[0], r.Theoretical.UnitEconomics.OverallEnvelope[1]))
+	if c := r.telemetryCostPerUser(); c != nil && r.Theoretical != nil && len(r.Theoretical.UnitEconomics.OverallEnvelope) == 2 {
+		lo, hi := r.Theoretical.UnitEconomics.OverallEnvelope[0], r.Theoretical.UnitEconomics.OverallEnvelope[1]
+		switch {
+		case *c > hi:
+			out = append(out, fmt.Sprintf("Modeled telemetry-pipeline infra cost ($%.2f/user/mo) exceeds the $%.2f–%.2f/user/mo design envelope upper bound.", *c, lo, hi))
+		case *c < lo:
+			out = append(out, fmt.Sprintf("Modeled telemetry-pipeline infra cost ($%.2f/user/mo) is below the $%.2f–%.2f/user/mo design envelope lower bound — likely an under-modeled cost rather than a genuine saving.", *c, lo, hi))
+		}
 	}
 	return out
 }
@@ -391,10 +397,14 @@ func (r *BusinessReport) writeUnitEconomics(b *strings.Builder) {
 	if c := r.telemetryCostPerUser(); c != nil {
 		within := ""
 		if len(ue.OverallEnvelope) == 2 {
-			if *c <= ue.OverallEnvelope[1] {
-				within = fmt.Sprintf(" — within the $%.2f–%.2f envelope", ue.OverallEnvelope[0], ue.OverallEnvelope[1])
-			} else {
-				within = fmt.Sprintf(" — **above** the $%.2f–%.2f envelope", ue.OverallEnvelope[0], ue.OverallEnvelope[1])
+			lo, hi := ue.OverallEnvelope[0], ue.OverallEnvelope[1]
+			switch {
+			case *c < lo:
+				within = fmt.Sprintf(" — **below** the $%.2f–%.2f envelope", lo, hi)
+			case *c > hi:
+				within = fmt.Sprintf(" — **above** the $%.2f–%.2f envelope", lo, hi)
+			default:
+				within = fmt.Sprintf(" — within the $%.2f–%.2f envelope", lo, hi)
 			}
 		}
 		fmt.Fprintf(b, "**Measured (modeled) — telemetry-pipeline slice only:** $%.2f/user/mo%s. ", *c, within)

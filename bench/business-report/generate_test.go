@@ -96,6 +96,14 @@ func TestCostEnvelopeStrengthAndGap(t *testing.T) {
 	if !containsSubstr(over.gaps(), "exceeds") {
 		t.Error("cost above envelope should be flagged as a gap")
 	}
+
+	below := &BusinessReport{Theoretical: theo, Telemetry: []*TelemetryReport{costReport(0.10)}}
+	if containsSubstr(below.strengths(), "sits inside") {
+		t.Error("cost below envelope must NOT be claimed as inside")
+	}
+	if !containsSubstr(below.gaps(), "below") {
+		t.Error("cost below envelope lower bound should be flagged as a gap")
+	}
 }
 
 func containsSubstr(items []string, want string) bool {

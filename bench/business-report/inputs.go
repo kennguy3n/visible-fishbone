@@ -325,8 +325,8 @@ func loadEdge(path string) (*EdgeReport, error) {
 	return &r, nil
 }
 
-// readJSON decodes a JSON file, disallowing unknown root corruption while
-// tolerating extra fields the upstream tools may add.
+// readJSON reads and decodes a JSON file. It tolerates extra fields the
+// upstream tools may add (standard json.Unmarshal semantics).
 func readJSON(path string, v any) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
