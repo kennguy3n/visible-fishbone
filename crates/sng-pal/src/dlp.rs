@@ -101,6 +101,12 @@ pub struct SensitiveDirWatcher {
     max_file_bytes: usize,
     poll_interval: Duration,
     closed: AtomicBool,
+    /// When set, the first [`scan`](Self::scan) only records the
+    /// watermark for files that already exist and queues no events, so
+    /// startup does not re-report every pre-existing file as a fresh
+    /// write. See [`warm_started`](Self::warm_started).
+    warm_start: bool,
+    primed: AtomicBool,
 }
 
 impl SensitiveDirWatcher {
@@ -115,7 +121,20 @@ impl SensitiveDirWatcher {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             poll_interval: DEFAULT_POLL_INTERVAL,
             closed: AtomicBool::new(false),
+            warm_start: false,
+            primed: AtomicBool::new(false),
         }
+    }
+
+    /// Prime the watermark on the first scan instead of reporting every
+    /// pre-existing file as a new write. Use this for monitors pointed
+    /// at long-lived sensitive directories (file-write), where a burst
+    /// of events for files that predate the agent would be spurious;
+    /// only writes that happen after start-up are then reported.
+    #[must_use]
+    pub fn warm_started(mut self) -> Self {
+        self.warm_start = true;
+        self
     }
 
     /// Override the per-file read ceiling.
@@ -158,7 +177,30 @@ impl SensitiveDirWatcher {
 
     /// Run one scan pass, queueing an event per newly-written file.
     /// Returns the number of events queued.
+    ///
+    /// When [`warm_started`](Self::warm_started) is set, the first pass
+    /// only records the current watermark and queues nothing.
     pub fn scan(&self) -> usize {
+        if self.warm_start && !self.primed.swap(true, Ordering::SeqCst) {
+            self.walk(true);
+            return 0;
+        }
+        self.walk(false)
+    }
+
+    /// Record the current mtime of every watched file without queuing
+    /// events. Returns the number of files primed. Exposed for callers
+    /// that want to prime explicitly (e.g. after remounting a volume).
+    pub fn warm_up(&self) -> usize {
+        self.primed.store(true, Ordering::SeqCst);
+        self.walk(true)
+    }
+
+    /// Shared directory walk. With `record_only`, new files only update
+    /// the watermark (no read, no event); otherwise each new write is
+    /// read into a queued event. Returns the count of files acted on
+    /// (events queued, or watermarks recorded in `record_only`).
+    fn walk(&self, record_only: bool) -> usize {
         let dirs = lock(&self.dirs).clone();
         let mut stack: Vec<(PathBuf, usize)> = dirs.into_iter().map(|d| (d, 0)).collect();
         let mut examined = 0usize;
@@ -193,6 +235,10 @@ impl SensitiveDirWatcher {
                     continue;
                 };
                 if !self.is_new_write(&path, modified) {
+                    continue;
+                }
+                if record_only {
+                    queued += 1;
                     continue;
                 }
                 if let Some(event) = self.read_event(&path) {
@@ -464,7 +510,9 @@ mod linux {
                 dirs
             };
             Self {
-                watcher: SensitiveDirWatcher::new(DlpChannel::FileWrite, dirs),
+                // Warm-start: don't re-report files that predate the
+                // agent; only writes after start-up are sensitive here.
+                watcher: SensitiveDirWatcher::new(DlpChannel::FileWrite, dirs).warm_started(),
             }
         }
 
@@ -731,7 +779,9 @@ mod macos {
         #[must_use]
         pub fn new(dirs: Vec<PathBuf>) -> Self {
             Self {
-                watcher: SensitiveDirWatcher::new(DlpChannel::FileWrite, dirs),
+                // Warm-start: don't re-report files that predate the
+                // agent; only writes after start-up are sensitive here.
+                watcher: SensitiveDirWatcher::new(DlpChannel::FileWrite, dirs).warm_started(),
             }
         }
     }
@@ -840,7 +890,9 @@ mod windows_impl {
         #[must_use]
         pub fn new(dirs: Vec<PathBuf>) -> Self {
             Self {
-                watcher: SensitiveDirWatcher::new(DlpChannel::FileWrite, dirs),
+                // Warm-start: don't re-report files that predate the
+                // agent; only writes after start-up are sensitive here.
+                watcher: SensitiveDirWatcher::new(DlpChannel::FileWrite, dirs).warm_started(),
             }
         }
     }
@@ -947,6 +999,28 @@ tmpfs /run tmpfs rw 0 0
 
         // Re-scan with no change reports nothing.
         assert_eq!(watcher.scan(), 0);
+        assert!(watcher.try_pop().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn warm_started_watcher_skips_preexisting_then_reports_new_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("old.txt"), b"predates the agent").expect("write");
+
+        let watcher =
+            SensitiveDirWatcher::new(DlpChannel::FileWrite, vec![dir.path().to_path_buf()])
+                .warm_started();
+
+        // First scan primes the watermark for pre-existing files and
+        // queues nothing — no spurious burst on start-up.
+        assert_eq!(watcher.scan(), 0);
+        assert!(watcher.try_pop().is_none());
+
+        // A genuinely new write after start-up is reported.
+        std::fs::write(dir.path().join("new.txt"), b"written after start").expect("write");
+        assert_eq!(watcher.scan(), 1);
+        let event = watcher.try_pop().expect("event");
+        assert_eq!(event.metadata.filename.as_deref(), Some("new.txt"));
         assert!(watcher.try_pop().is_none());
     }
 
