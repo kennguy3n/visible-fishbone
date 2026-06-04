@@ -237,8 +237,11 @@ func TestScheduler_AggregateMonthly_ExcludesAndPreservesFailed(t *testing.T) {
 	var manifest struct {
 		WeeklyCount   int `json:"weekly_count"`
 		WeeklyBundles []struct {
-			ID string `json:"id"`
+			ID       string   `json:"id"`
+			Controls []string `json:"controls"`
 		} `json:"weekly_bundles"`
+		ControlsCovered []string `json:"controls_covered"`
+		ControlsMissing []string `json:"controls_missing"`
 	}
 	if len(bundle.Artifacts) != 1 {
 		t.Fatalf("monthly bundle artifacts = %d, want 1", len(bundle.Artifacts))
@@ -251,6 +254,24 @@ func TestScheduler_AggregateMonthly_ExcludesAndPreservesFailed(t *testing.T) {
 	}
 	if len(manifest.WeeklyBundles) != 1 || manifest.WeeklyBundles[0].ID != collected.ID.String() {
 		t.Fatalf("manifest should reference only the collected weekly, got %+v", manifest.WeeklyBundles)
+	}
+	// Only CC6.1 (RBACPolicy) is wired, so coverage must reflect the
+	// actual single control — not the full expected set — and the other
+	// four controls must be reported missing.
+	if len(manifest.ControlsCovered) != 1 || manifest.ControlsCovered[0] != "CC6.1" {
+		t.Fatalf("controls_covered = %v, want [CC6.1] (actual coverage)", manifest.ControlsCovered)
+	}
+	if len(manifest.WeeklyBundles[0].Controls) != 1 || manifest.WeeklyBundles[0].Controls[0] != "CC6.1" {
+		t.Fatalf("weekly entry controls = %v, want [CC6.1]", manifest.WeeklyBundles[0].Controls)
+	}
+	for _, c := range manifest.ControlsMissing {
+		if c == "CC6.1" {
+			t.Fatalf("CC6.1 must not be reported missing; missing=%v", manifest.ControlsMissing)
+		}
+	}
+	if len(manifest.ControlsMissing) != len(compliance.ExpectedControls)-1 {
+		t.Fatalf("controls_missing = %v, want the %d uncovered expected controls",
+			manifest.ControlsMissing, len(compliance.ExpectedControls)-1)
 	}
 }
 

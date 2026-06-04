@@ -57,6 +57,29 @@ func TestComplianceEvidence_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("Create_preserves_caller_supplied_id", func(t *testing.T) {
+		// EvidenceService embeds this id in the signed bundle and the S3
+		// key, so the row id must equal the supplied id rather than a
+		// DEFAULT gen_random_uuid() value.
+		want := uuid.New()
+		e := mk("weekly", "k/id/"+uuid.NewString(), base, "collected")
+		e.ID = want
+		row, err := repo.Create(bgCtx(), e)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if row.ID != want {
+			t.Fatalf("row id = %s, want caller-supplied %s", row.ID, want)
+		}
+		got, err := repo.Get(bgCtx(), want)
+		if err != nil {
+			t.Fatalf("get by caller id: %v", err)
+		}
+		if got.ID != want {
+			t.Fatalf("get id = %s, want %s", got.ID, want)
+		}
+	})
+
 	t.Run("Get_unknown_is_not_found", func(t *testing.T) {
 		if _, err := repo.Get(bgCtx(), uuid.New()); !errors.Is(err, repository.ErrNotFound) {
 			t.Fatalf("want ErrNotFound, got %v", err)

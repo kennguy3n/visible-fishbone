@@ -39,13 +39,23 @@ func scanComplianceEvidence(row pgx.Row) (repository.ComplianceEvidence, error) 
 }
 
 func (r *ComplianceEvidenceRepository) Create(ctx context.Context, e repository.ComplianceEvidence) (repository.ComplianceEvidence, error) {
+	// The caller-supplied ID is authoritative: EvidenceService embeds it
+	// in the signed bundle and derives the S3 object key from it, so the
+	// index row's id MUST equal the bundle's id. Insert it explicitly
+	// (mirroring tenants/sites) rather than letting the column DEFAULT
+	// gen_random_uuid() mint a different value. Generate one only when the
+	// caller passes the nil UUID, matching the memory backend.
+	if e.ID == uuid.Nil {
+		e.ID = uuid.New()
+	}
 	var out repository.ComplianceEvidence
 	err := r.s.onPrimary(ctx, func(q pgxQuerier) error {
 		const sql = `
-INSERT INTO compliance_evidence (collection_type, collected_at, s3_key, signature, status)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO compliance_evidence (id, collection_type, collected_at, s3_key, signature, status)
+VALUES ($1::uuid, $2, $3, $4, $5, $6)
 RETURNING ` + complianceEvidenceCols
 		scanned, err := scanComplianceEvidence(q.QueryRow(ctx, sql,
+			e.ID,
 			e.CollectionType,
 			e.CollectedAt,
 			e.S3Key,

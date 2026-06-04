@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -173,7 +174,7 @@ func (s *Scheduler) AggregateMonthly(ctx context.Context) (repository.Compliance
 		return repository.ComplianceEvidence{}, fmt.Errorf("aggregate monthly: %w", ErrNoEvidence)
 	}
 
-	manifest := newMonthlyManifest(s.now(), cutoff, weeklies)
+	manifest := s.newMonthlyManifest(ctx, s.now(), cutoff, weeklies)
 	bundle := NewBundle(CollectionMonthly, s.now())
 	data, err := jsonRaw(manifest)
 	if err != nil {
@@ -321,38 +322,97 @@ type monthlyManifestEntry struct {
 	S3Key       string    `json:"s3_key"`
 	Signature   string    `json:"signature"`
 	Status      string    `json:"status"`
+	// Controls is the set of SOC2 controls this weekly bundle actually
+	// carries evidence for, read back from the signed bundle body.
+	Controls []string `json:"controls"`
 }
 
 // monthlyManifest is the audit-ready summary embedded in a monthly
 // aggregation bundle.
 type monthlyManifest struct {
-	GeneratedAt     time.Time              `json:"generated_at"`
-	WindowStart     time.Time              `json:"window_start"`
-	WindowEnd       time.Time              `json:"window_end"`
-	WeeklyCount     int                    `json:"weekly_count"`
-	WeeklyBundles   []monthlyManifestEntry `json:"weekly_bundles"`
-	ControlsCovered []string               `json:"controls_covered"`
+	GeneratedAt   time.Time              `json:"generated_at"`
+	WindowStart   time.Time              `json:"window_start"`
+	WindowEnd     time.Time              `json:"window_end"`
+	WeeklyCount   int                    `json:"weekly_count"`
+	WeeklyBundles []monthlyManifestEntry `json:"weekly_bundles"`
+	// ControlsCovered is the actual union of controls present across the
+	// constituent weekly bundles — computed from their signed contents,
+	// not assumed. ControlsExpected is the canonical SOC2 set, and
+	// ControlsMissing is the difference, so an auditor can see at a
+	// glance whether the month's coverage is complete.
+	ControlsCovered  []string `json:"controls_covered"`
+	ControlsExpected []string `json:"controls_expected"`
+	ControlsMissing  []string `json:"controls_missing"`
 }
 
-func newMonthlyManifest(now, windowStart time.Time, weeklies []repository.ComplianceEvidence) monthlyManifest {
+// newMonthlyManifest builds the audit summary. It downloads each
+// constituent weekly bundle and reads back the controls it actually
+// carries, so ControlsCovered reflects real coverage rather than the
+// expected set. A weekly whose bundle can't be fetched/verified is
+// still listed (with empty controls) and logged — its absence from the
+// covered union surfaces as a missing control instead of being masked.
+func (s *Scheduler) newMonthlyManifest(ctx context.Context, now, windowStart time.Time, weeklies []repository.ComplianceEvidence) monthlyManifest {
 	entries := make([]monthlyManifestEntry, 0, len(weeklies))
+	coveredSet := make(map[string]struct{})
 	for _, w := range weeklies {
+		controls := s.bundleControls(ctx, w)
+		for _, c := range controls {
+			coveredSet[c] = struct{}{}
+		}
 		entries = append(entries, monthlyManifestEntry{
 			ID:          w.ID.String(),
 			CollectedAt: w.CollectedAt,
 			S3Key:       w.S3Key,
 			Signature:   w.Signature,
 			Status:      w.Status,
+			Controls:    controls,
 		})
 	}
-	return monthlyManifest{
-		GeneratedAt:     now.UTC(),
-		WindowStart:     windowStart.UTC(),
-		WindowEnd:       now.UTC(),
-		WeeklyCount:     len(entries),
-		WeeklyBundles:   entries,
-		ControlsCovered: append([]string(nil), ExpectedControls...),
+
+	covered := make([]string, 0, len(coveredSet))
+	for c := range coveredSet {
+		covered = append(covered, c)
 	}
+	sort.Strings(covered)
+
+	missing := make([]string, 0)
+	for _, c := range ExpectedControls {
+		if _, ok := coveredSet[c]; !ok {
+			missing = append(missing, c)
+		}
+	}
+
+	return monthlyManifest{
+		GeneratedAt:      now.UTC(),
+		WindowStart:      windowStart.UTC(),
+		WindowEnd:        now.UTC(),
+		WeeklyCount:      len(entries),
+		WeeklyBundles:    entries,
+		ControlsCovered:  covered,
+		ControlsExpected: append([]string(nil), ExpectedControls...),
+		ControlsMissing:  missing,
+	}
+}
+
+// bundleControls fetches a weekly bundle and returns the controls it
+// actually carries evidence for. On any download/parse failure it logs
+// and returns nil rather than failing aggregation: the weekly is still
+// listed in the manifest, and the controls it would have covered show
+// up in ControlsMissing instead of being silently assumed present.
+func (s *Scheduler) bundleControls(ctx context.Context, w repository.ComplianceEvidence) []string {
+	_, body, err := s.evidence.Download(ctx, w.ID)
+	if err != nil {
+		s.logger.Warn("compliance: could not read weekly bundle for coverage",
+			slog.String("id", w.ID.String()), slog.Any("error", err))
+		return nil
+	}
+	var bundle EvidenceBundle
+	if err := json.Unmarshal(body, &bundle); err != nil {
+		s.logger.Warn("compliance: could not parse weekly bundle for coverage",
+			slog.String("id", w.ID.String()), slog.Any("error", err))
+		return nil
+	}
+	return bundle.Controls()
 }
 
 // jsonRaw marshals v into a json.RawMessage.
