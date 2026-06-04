@@ -454,7 +454,7 @@ fn run_throughput(
     } else {
         // Sub-second run: derive a single rate over the whole interval.
         let snap = counter.snapshot();
-        rate_between(CounterZero, snap, start.elapsed()).map_or(0.0, |r| r.gbps())
+        rate_between(COUNTER_ZERO, snap, start.elapsed()).map_or(0.0, |r| r.gbps())
     };
 
     Ok(ThroughputResult {
@@ -469,8 +469,7 @@ fn run_throughput(
 }
 
 /// Zero snapshot sentinel for the sub-second mean fallback.
-#[allow(non_upper_case_globals)]
-const CounterZero: measurement::CounterSnapshot = measurement::CounterSnapshot {
+const COUNTER_ZERO: measurement::CounterSnapshot = measurement::CounterSnapshot {
     packets: 0,
     bytes: 0,
 };
