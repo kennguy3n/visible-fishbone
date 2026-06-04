@@ -77,25 +77,30 @@ impl BusinessSku {
         })
     }
 
-    /// Packet sizes present across throughput reports, ascending.
-    fn packet_sizes(&self) -> Vec<u32> {
+    /// Packet sizes present in `mode`'s reports, ascending.
+    ///
+    /// Scoped to the mode so each rendered table enumerates exactly the
+    /// operating points it has data for — the throughput matrix and the
+    /// latency table can legitimately cover different sizes.
+    fn packet_sizes_for(&self, mode: BenchMode) -> Vec<u32> {
         self.reports
             .iter()
-            .filter(|r| r.mode == BenchMode::Throughput)
+            .filter(|r| r.mode == mode)
             .map(|r| r.dimensions.packet_size)
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
     }
 
-    /// Inspection depths present, in canonical (cost-ascending) order.
-    fn depths(&self) -> Vec<InspectionDepth> {
+    /// Inspection depths present in `mode`'s reports, in canonical
+    /// (cost-ascending) order.
+    fn depths_for(&self, mode: BenchMode) -> Vec<InspectionDepth> {
         InspectionDepth::ALL
             .into_iter()
             .filter(|d| {
                 self.reports
                     .iter()
-                    .any(|r| r.dimensions.inspection == d.label())
+                    .any(|r| r.mode == mode && r.dimensions.inspection == d.label())
             })
             .collect()
     }
@@ -346,8 +351,8 @@ fn sng_1500(sku: &BusinessSku, depth: InspectionDepth) -> Option<f64> {
 }
 
 fn write_throughput_matrix(out: &mut String, sku: &BusinessSku) {
-    let depths = sku.depths();
-    let sizes = sku.packet_sizes();
+    let depths = sku.depths_for(BenchMode::Throughput);
+    let sizes = sku.packet_sizes_for(BenchMode::Throughput);
     if depths.is_empty() || sizes.is_empty() {
         let _ = writeln!(out, "_No throughput runs recorded._\n");
         return;
@@ -380,8 +385,8 @@ fn write_throughput_matrix(out: &mut String, sku: &BusinessSku) {
 }
 
 fn write_latency_table(out: &mut String, sku: &BusinessSku) {
-    let depths = sku.depths();
-    let sizes = sku.packet_sizes();
+    let depths = sku.depths_for(BenchMode::Latency);
+    let sizes = sku.packet_sizes_for(BenchMode::Latency);
     let mut any = false;
     let mut body = String::new();
     for ps in &sizes {
@@ -416,8 +421,8 @@ fn write_latency_table(out: &mut String, sku: &BusinessSku) {
 }
 
 fn write_resource_table(out: &mut String, sku: &BusinessSku) {
-    let depths = sku.depths();
-    let sizes = sku.packet_sizes();
+    let depths = sku.depths_for(BenchMode::Throughput);
+    let sizes = sku.packet_sizes_for(BenchMode::Throughput);
     let mut any = false;
     let mut body = String::new();
     for ps in &sizes {
@@ -614,5 +619,24 @@ mod tests {
         // no-inspect measured at 1500B=4.0 and 64B=2.5 → peak 4.0.
         assert_eq!(sku.peak_throughput(InspectionDepth::NoInspect), Some(4.0));
         assert_eq!(sku.peak_throughput(InspectionDepth::UrlCat), None);
+    }
+
+    #[test]
+    fn latency_table_covers_sizes_with_no_throughput_run() {
+        // A latency run at 9000B with no throughput counterpart must still
+        // appear: latency rendering is scoped to latency reports, not to
+        // the throughput packet sizes.
+        let prof = profile("cloud-pop-small", 4);
+        let reports = vec![
+            throughput_report("cloud-pop-small", 1500, InspectionDepth::NoInspect, 4.0),
+            latency_report("cloud-pop-small", 9000, InspectionDepth::NoInspect),
+        ];
+        let report = BusinessReport::new(1, None, vec![BusinessSku::new(prof, reports)]);
+        let md = report.to_markdown();
+        let latency_line = md
+            .lines()
+            .find(|l| l.contains("9000B") && l.contains("no-inspect"))
+            .expect("latency row for the 9000B latency-only operating point");
+        assert!(latency_line.contains("ns") || latency_line.contains("µs"));
     }
 }
