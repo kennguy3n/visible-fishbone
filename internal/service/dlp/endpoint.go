@@ -179,14 +179,18 @@ func compileEndpointRules(policies []repository.DLPPolicy) []EndpointDLPRule {
 		for i, r := range p.Rules {
 			baseID := fmt.Sprintf("%s:%d", p.ID, i)
 			for _, m := range endpointMatchPaths(r) {
-				// Skip a match path with no payload. An empty
-				// pattern_data can never match meaningfully (an MIP
-				// label "" or empty keyword dictionary is a no-op; an
-				// empty regex matches everything) and an empty
-				// fingerprint would fail sng-dlp's hex parse and reject
-				// the whole bundle. Dropping the dead path keeps a
-				// misconfigured rule from poisoning every other rule.
-				if m.patternData == "" {
+				// Skip a match path whose payload can't produce a working
+				// sng-dlp rule. An empty pattern_data never matches
+				// meaningfully (an MIP label "" or empty keyword dictionary
+				// is a no-op; an empty regex matches everything), and a
+				// fingerprint payload that isn't a 16-char hex SimHash —
+				// the only shape sng-dlp's parse_simhash_hex accepts —
+				// would make the agent reject the ENTIRE bundle on decode.
+				// (Web fingerprint matching is repository-driven, so a
+				// fingerprint rule's Pattern is not guaranteed to hold the
+				// hex hash.) Dropping the dead/poison path keeps one
+				// misconfigured rule from taking down every other rule.
+				if !validEndpointPatternData(r.Type, m.patternData) {
 					continue
 				}
 				rules = append(rules, EndpointDLPRule{
@@ -238,6 +242,43 @@ func endpointMatchPaths(r repository.DLPRule) []endpointMatch {
 		}
 	}
 	return []endpointMatch{{patternData: r.Pattern}}
+}
+
+// validEndpointPatternData reports whether a compiled match path can
+// produce a working sng-dlp rule. Every type needs a non-empty payload;
+// a fingerprint payload must additionally be a 16-char hex SimHash — the
+// shape sng-dlp's `parse_simhash_hex` accepts. An unparseable fingerprint
+// payload is special: sng-dlp fails the whole-bundle compile on it rather
+// than just that rule, so emitting one would drop every rule for the
+// tenant. Validating here turns that bundle-wide poison into an isolated
+// drop of the single offending rule.
+func validEndpointPatternData(t repository.DLPRuleType, data string) bool {
+	if data == "" {
+		return false
+	}
+	if t == repository.DLPRuleTypeFingerprint {
+		return isHex16(data)
+	}
+	return true
+}
+
+// isHex16 reports whether s is exactly 16 hexadecimal digits (the
+// hex encoding of an 8-byte big-endian SimHash, as produced by
+// engine.RegisterFingerprint and decoded by sng-dlp's parse_simhash_hex).
+func isHex16(s string) bool {
+	if len(s) != 16 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isDigit := c >= '0' && c <= '9'
+		isLower := c >= 'a' && c <= 'f'
+		isUpper := c >= 'A' && c <= 'F'
+		if !isDigit && !isLower && !isUpper {
+			return false
+		}
+	}
+	return true
 }
 
 // endpointAction maps a web/SaaS DLPAction onto the endpoint's

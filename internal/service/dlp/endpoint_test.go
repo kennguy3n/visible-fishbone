@@ -348,3 +348,71 @@ func TestCompileEndpointBundle_EmptyPatternRuleIsDropped(t *testing.T) {
 		t.Errorf("pattern_data = %v, want ssn_us", rule["pattern_data"])
 	}
 }
+
+// Web fingerprint matching is repository-driven, so a fingerprint
+// DLPRule's Pattern is not guaranteed to be the 16-char hex SimHash the
+// endpoint agent expects. A non-hex fingerprint payload would make
+// sng-dlp fail the WHOLE-bundle compile (parse_simhash_hex rejects it),
+// dropping every rule for the tenant. compileEndpointRules must drop just
+// the offending fingerprint rule and keep the rest — while a fingerprint
+// rule that does carry a valid 16-char hex hash is preserved verbatim.
+func TestCompileEndpointBundle_InvalidFingerprintRuleIsDropped(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	created, err := svc.CreatePolicy(ctx, tid, repository.DLPPolicy{
+		Name: "fingerprints",
+		Rules: []repository.DLPRule{
+			// index 0: fingerprint whose Pattern is a human-readable
+			// name, not a hex SimHash — would poison the bundle, so drop.
+			{Type: repository.DLPRuleTypeFingerprint, Pattern: "Q3 board deck"},
+			// index 1: fingerprint carrying a valid 16-char hex hash —
+			// must survive verbatim with its :1 id.
+			{Type: repository.DLPRuleTypeFingerprint, Pattern: "0123456789abcdef"},
+			// index 2: a regex rule — must survive with its :2 id,
+			// proving the bad fingerprint didn't take the bundle down.
+			{Type: repository.DLPRuleTypeRegex, Pattern: "ssn_us"},
+		},
+		Action:  repository.DLPActionBlock,
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	blob, err := svc.CompileEndpointBundle(ctx, tid, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(blob, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	rawRules, ok := doc["rules"].([]any)
+	if !ok || len(rawRules) != 2 {
+		t.Fatalf("expected exactly 2 endpoint rules (bad fingerprint dropped), got %s", blob)
+	}
+
+	byID := make(map[string]map[string]any, len(rawRules))
+	for _, raw := range rawRules {
+		r := raw.(map[string]any)
+		byID[r["id"].(string)] = r
+	}
+	// The bad fingerprint (index 0) must be absent.
+	if _, present := byID[created.ID.String()+":0"]; present {
+		t.Errorf("non-hex fingerprint rule :0 should have been dropped, got %s", blob)
+	}
+	// The valid hex fingerprint (index 1) survives verbatim.
+	fp := byID[created.ID.String()+":1"]
+	if fp == nil {
+		t.Fatalf("valid fingerprint rule :1 missing, got %s", blob)
+	}
+	if fp["pattern_data"] != "0123456789abcdef" {
+		t.Errorf("fingerprint pattern_data = %v, want 0123456789abcdef", fp["pattern_data"])
+	}
+	// The regex rule (index 2) survives — the bad fingerprint did not
+	// poison the bundle.
+	if rx := byID[created.ID.String()+":2"]; rx == nil || rx["pattern_data"] != "ssn_us" {
+		t.Errorf("regex rule :2 should survive with pattern_data ssn_us, got %s", blob)
+	}
+}

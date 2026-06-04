@@ -89,12 +89,21 @@ pub struct RuleMatch {
     pub action: RuleAction,
     /// Confidence in the hit, `0.0..=1.0`.
     pub confidence: f64,
-    /// Byte offset of the hit within the (scanned, possibly
-    /// truncated) content, for span-based detectors. `None` for
-    /// whole-document detectors (fingerprint, MIP label).
+    /// Byte offset of the hit within the scanned (possibly truncated)
+    /// content, measured in the UTF-8 text the classifier inspects.
+    /// Because content is decoded with [`String::from_utf8_lossy`]
+    /// before matching, this equals the offset in the original byte
+    /// buffer for valid UTF-8 input; for input containing invalid byte
+    /// sequences (each replaced by a 3-byte U+FFFD) it is the offset in
+    /// that lossy-decoded text and may not map 1:1 onto the raw bytes.
+    /// It is reported for span-based detectors only and is purely
+    /// informational — the redaction invariant means no consumer indexes
+    /// back into the content with it. `None` for whole-document
+    /// detectors (fingerprint, MIP label).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<usize>,
-    /// Byte length of the hit, for span-based detectors.
+    /// Byte length of the hit in the same lossy-decoded UTF-8 text space
+    /// as [`Self::offset`], for span-based detectors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length: Option<usize>,
 }
