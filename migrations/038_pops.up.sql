@@ -111,7 +111,13 @@ CREATE TABLE tenant_pop_assignments (
 -- capacity rebalancer when a PoP signals it is overloaded.
 CREATE INDEX idx_tenant_pop_assignments_pop ON tenant_pop_assignments (pop_id);
 
+-- ENABLE applies RLS to the runtime app role; FORCE extends it to
+-- the table owner too, so even a connection using the migration /
+-- owner credentials cannot bypass tenant isolation. Both are the
+-- documented standard for tenant-scoped tables (see migration 002
+-- and 037_inline_casb).
 ALTER TABLE tenant_pop_assignments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_pop_assignments FORCE ROW LEVEL SECURITY;
 
 -- Tenant-scoped policy: a request bound to sng.tenant_id sees only
 -- its own assignment. Mirrors every other tenant-scoped table.
