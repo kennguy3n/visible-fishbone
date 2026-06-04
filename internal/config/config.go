@@ -77,6 +77,7 @@ type Config struct {
 	Auth               Auth
 	Policy             Policy
 	Telemetry          Telemetry
+	Metrics            Metrics
 	TelemetryAnalytics TelemetryAnalytics
 	AppRegistry        AppRegistry
 	AI                 AI
@@ -228,6 +229,19 @@ type NATS struct {
 	// why overlap rejection in JetStream makes single-account
 	// sharing impractical. Defaults to "SNG".
 	StreamPrefix string
+	// Partitions is the number of telemetry stream cells the
+	// control plane fans out across (env NATS_PARTITIONS, default
+	// 1). At 1 the behaviour is identical to the historical
+	// single-stream layout (`SNG_TELEMETRY`, subject
+	// `sng.*.telemetry.>`). At N>1 the telemetry workload is
+	// sharded into N cells `SNG_TELEMETRY_0`…`SNG_TELEMETRY_{N-1}`,
+	// each scoped to a partition slot in the subject
+	// (`sng.{partition}.*.telemetry.>`), so the control plane can
+	// scale telemetry ingestion horizontally past the throughput
+	// ceiling of a single JetStream stream. The owning tenant of an
+	// event determines its partition via the consistent-hash
+	// TenantPartitioner. validate() bounds this to [1, 256].
+	Partitions int
 }
 
 // Postgres carries database connection config.
@@ -265,6 +279,35 @@ type Postgres struct {
 	// must always set PG_APP_ROLE (default: `sng_app`) so RLS
 	// policies are enforced.
 	AppRole string
+	// ReadReplicaHosts is the comma-separated list of read-replica
+	// hosts (env PG_READ_REPLICA_HOSTS). Empty disables the
+	// read-write split — every query goes to the primary. When
+	// populated, the repository layer routes read-only
+	// transactions (List*/Get*/Count*, all `withTenantRO` paths)
+	// to a healthy replica chosen round-robin, falling back to the
+	// primary if every replica is unhealthy. RLS `set_config` runs
+	// inside the replica transaction exactly as it does on the
+	// primary, so tenant isolation is enforced on replicas too.
+	ReadReplicaHosts []string
+	// ReadReplicaPort is the TCP port the replicas listen on
+	// (env PG_READ_REPLICA_PORT). 0 (the default) means "inherit
+	// Port" — the common topology where every node listens on the
+	// same port. validate() bounds a non-zero value to [1, 65535].
+	ReadReplicaPort int
+	// PgBouncerMode toggles transaction-pooling-safe behaviour
+	// (env PG_PGBOUNCER_MODE). When false (default) the runtime
+	// adopts AppRole once per physical connection via a
+	// session-level `SET SESSION ROLE` (the AfterConnect hook).
+	// That command is incompatible with a PgBouncer running in
+	// transaction-pooling mode, where each transaction may land on
+	// a different server-side connection and session state is
+	// reset between transactions. When true, the session-level
+	// hook is skipped and the repository layer instead issues a
+	// transaction-local `SET LOCAL ROLE` at the top of every
+	// tenant/system transaction, which is reverted on
+	// commit/rollback and therefore safe under transaction
+	// pooling.
+	PgBouncerMode bool
 }
 
 // MigrationURL returns a `pgx5://` URL suitable for passing to
@@ -324,6 +367,32 @@ func (p Postgres) DSN() string {
 	writePair("sslmode", p.SSLMode)
 	writePair("connect_timeout", strconv.Itoa(connectTimeoutSeconds(p.ConnTimeout)))
 	return b.String()
+}
+
+// ReplicaPort returns the port read replicas listen on: the
+// explicit ReadReplicaPort when set, otherwise the primary Port.
+// Centralising the 0-means-inherit rule here keeps DSN rendering
+// and validation in agreement.
+func (p Postgres) ReplicaPort() int {
+	if p.ReadReplicaPort > 0 {
+		return p.ReadReplicaPort
+	}
+	return p.Port
+}
+
+// ReplicaDSN returns a libpq keyword/value connection string for a
+// read replica reachable at `host`. It is identical to DSN() except
+// the host and port are overridden with the replica endpoint
+// (ReplicaPort): user, password, database, sslmode, and
+// connect_timeout are inherited from the primary so a replica is
+// authenticated and TLS-protected exactly like the primary. The
+// AppRole / RLS posture is applied by the pool layer (AfterConnect
+// in session mode, SET LOCAL ROLE in PgBouncer mode), not the DSN.
+func (p Postgres) ReplicaDSN(host string) string {
+	rp := p
+	rp.Host = host
+	rp.Port = p.ReplicaPort()
+	return rp.DSN()
 }
 
 // connectTimeoutSeconds renders ConnTimeout as the integer-seconds value
@@ -591,6 +660,33 @@ type Telemetry struct {
 	ServiceVersion string
 }
 
+// Metrics carries the Prometheus exposition configuration. The
+// scrape endpoint binds to a dedicated internal-only port — kept
+// separate from the public API listener (HTTP.Port) so the
+// `/metrics` surface (which leaks tenant counts, pool sizes, and
+// other operational internals) is never routed to the public
+// ingress. Expose it only on the cluster-internal network /
+// scrape target, not through the public load balancer.
+type Metrics struct {
+	// Enabled gates the Prometheus registry + the internal
+	// metrics HTTP listener in main(). When false the middleware
+	// and background collectors are not installed at all, so the
+	// hot path pays nothing. Defaults to true. Parsed strictly
+	// (METRICS_ENABLED) because a typo silently flipping
+	// observability off in production is a real incident risk.
+	Enabled bool
+	// Port is the internal listener port for the Prometheus
+	// `/metrics` endpoint. Defaults to 9090. Must differ from
+	// HTTP.Port (validated below) so the operational surface is
+	// not co-located with the public API.
+	Port int
+	// Namespace is the Prometheus metric namespace prefix applied
+	// to every registered metric (e.g. `sng_http_requests_total`).
+	// Defaults to "sng". Must be a valid Prometheus metric-name
+	// prefix.
+	Namespace string
+}
+
 // TelemetryAnalytics carries the wiring knobs for the hot-path
 // (ClickHouse) and cold-path (S3) telemetry analytics sinks. The
 // fields are independent: a deployment can enable ClickHouse
@@ -639,6 +735,23 @@ type TelemetryAnalytics struct {
 	// out-of-band (e.g. dbt / Liquibase / a managed-service
 	// provisioning workflow).
 	ClickHouseEnsureSchema bool
+
+	// ClickHouseSharding switches the hot-path writer from the
+	// default single-cluster mode (where every endpoint in
+	// CLICKHOUSE_ENDPOINTS is treated as an interchangeable
+	// replica the driver load-balances across) to shard-aware
+	// mode (env CLICKHOUSE_SHARDING). In shard-aware mode each
+	// endpoint is a distinct ClickHouse shard and rows are routed
+	// by a stable hash of tenant_id modulo the shard count, with
+	// one independent Writer (its own batch buffer + flush loop)
+	// per shard. This lifts the single-node ingest/storage ceiling
+	// the platform hits past ~5,000 tenants. Cross-tenant operator
+	// analytics fan out across all shards in parallel and merge.
+	// Defaults false so existing single-cluster deployments are
+	// unaffected; only meaningful when more than one endpoint is
+	// configured (with a single endpoint the two modes are
+	// identical).
+	ClickHouseSharding bool
 
 	// S3: bucket name. Empty disables the cold-path sink.
 	S3Bucket string
@@ -741,7 +854,11 @@ func Load() (Config, error) {
 			// escape hatch and force every dev to either provision
 			// `sng_app` or live with confusing SET SESSION ROLE
 			// errors. validate() enforces non-empty in production.
-			AppRole: getStrAllowEmpty("PG_APP_ROLE", "sng_app"),
+			AppRole:          getStrAllowEmpty("PG_APP_ROLE", "sng_app"),
+			ReadReplicaHosts: splitCSV(getStr("PG_READ_REPLICA_HOSTS", "")),
+			// ReadReplicaPort + PgBouncerMode are populated by the
+			// strict tables below so a typo fails boot rather than
+			// silently reverting to the default.
 		},
 		RateLimit: RateLimit{
 			CleanupInterval: getDuration("RATE_LIMIT_CLEANUP_INTERVAL", time.Minute),
@@ -772,6 +889,13 @@ func Load() (Config, error) {
 		Telemetry: Telemetry{
 			OTLPEndpoint:   getStr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 			ServiceVersion: getStr("SERVICE_VERSION", ""),
+		},
+		Metrics: Metrics{
+			Namespace: getStr("METRICS_NAMESPACE", "sng"),
+			// Enabled (METRICS_ENABLED) and Port (METRICS_PORT) are
+			// populated by the strict tables below — same
+			// single-source-of-truth rule as the other load-bearing
+			// numeric / boolean knobs.
 		},
 		TelemetryAnalytics: TelemetryAnalytics{
 			ClickHouseEndpoints: splitCSV(getStr("CLICKHOUSE_ENDPOINTS", "")),
@@ -815,8 +939,11 @@ func Load() (Config, error) {
 		{"PG_PORT", 5432, &cfg.Postgres.Port},
 		{"PG_MAX_OPEN_CONNS", 20, &cfg.Postgres.MaxOpenConns},
 		{"PG_MIN_CONNS", 2, &cfg.Postgres.MinConns},
+		// 0 = inherit primary PG_PORT (see Postgres.ReplicaPort).
+		{"PG_READ_REPLICA_PORT", 0, &cfg.Postgres.ReadReplicaPort},
 		{"NATS_MAX_RECONNECTS", -1, &cfg.NATS.MaxReconnects},
 		{"NATS_REPLICAS", 1, &cfg.NATS.Replicas},
+		{"NATS_PARTITIONS", 1, &cfg.NATS.Partitions},
 		{"NATS_FETCH_BATCH_SIZE", 50, &cfg.NATS.FetchBatchSize},
 		{"NATS_PUBLISH_RETRY_ATTEMPTS", 3, &cfg.NATS.PublishRetryAttempts},
 		{"RATE_LIMIT_BURST", 60, &cfg.RateLimit.Burst},
@@ -850,6 +977,10 @@ func Load() (Config, error) {
 		// Per-tenant cap on registered OIDC IdP configs. Parsed
 		// strictly so a typo can't silently revert the limit.
 		{"MOBILE_AUTH_MAX_PROVIDERS_PER_TENANT", 10, &cfg.MobileAuth.MaxProvidersPerTenant},
+		// Internal Prometheus scrape port. Parsed strictly so a
+		// typo can't silently relocate the operational surface
+		// onto an unexpected port.
+		{"METRICS_PORT", 9090, &cfg.Metrics.Port},
 	}
 	strictDurations := []struct {
 		key string
@@ -914,11 +1045,14 @@ func Load() (Config, error) {
 		dst *bool
 	}{
 		{"NATS_TLS_INSECURE", false, &cfg.NATS.TLSInsecure},
+		{"PG_PGBOUNCER_MODE", false, &cfg.Postgres.PgBouncerMode},
 		{"RATE_LIMIT_ENABLED", true, &cfg.RateLimit.Enabled},
 		{"CLICKHOUSE_TLS", false, &cfg.TelemetryAnalytics.ClickHouseTLS},
 		{"CLICKHOUSE_ENSURE_SCHEMA", true, &cfg.TelemetryAnalytics.ClickHouseEnsureSchema},
+		{"CLICKHOUSE_SHARDING", false, &cfg.TelemetryAnalytics.ClickHouseSharding},
 		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
 		{"MOBILE_AUTH_AUTO_PROVISION_USERS", true, &cfg.MobileAuth.AutoProvisionUsers},
+		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},
 	}
 
 	var strictErrs []error
@@ -1061,6 +1195,14 @@ func (c Config) validate() error {
 	default:
 		return fmt.Errorf("PG_SSLMODE: invalid value %q", c.Postgres.SSLMode)
 	}
+	// PG_READ_REPLICA_PORT: 0 means "inherit PG_PORT" (see
+	// Postgres.ReplicaPort). Any explicit value must be a valid TCP
+	// port so a typo fails boot rather than producing an
+	// unconnectable replica DSN at first read.
+	if c.Postgres.ReadReplicaPort != 0 &&
+		(c.Postgres.ReadReplicaPort < 1 || c.Postgres.ReadReplicaPort > 65535) {
+		return fmt.Errorf("PG_READ_REPLICA_PORT out of range [1,65535] (0 inherits PG_PORT): %d", c.Postgres.ReadReplicaPort)
+	}
 	if c.NATS.URL == "" {
 		return errors.New("NATS_URL must be set")
 	}
@@ -1104,6 +1246,15 @@ func (c Config) validate() error {
 	case "file", "memory":
 	default:
 		return fmt.Errorf("NATS_STORAGE: invalid value %q (expected file|memory)", c.NATS.Storage)
+	}
+	// NATS_PARTITIONS is the telemetry stream cell count. 1 keeps
+	// the historical single-stream layout; >1 fans out into N cells
+	// (SNG_TELEMETRY_0…). Reject 0/negative (which would leave the
+	// partitioner with no cells to hash into) and cap the upper
+	// bound so a typo like NATS_PARTITIONS=100000 can't try to
+	// stand up an absurd number of streams/consumers at boot.
+	if c.NATS.Partitions < 1 || c.NATS.Partitions > 256 {
+		return fmt.Errorf("NATS_PARTITIONS out of range [1,256]: %d", c.NATS.Partitions)
 	}
 	if c.RateLimit.Enabled {
 		if c.RateLimit.Rate <= 0 {
@@ -1250,6 +1401,22 @@ func (c Config) validate() error {
 	if c.TelemetryAnalytics.S3Bucket != "" && c.TelemetryAnalytics.S3Region == "" && c.TelemetryAnalytics.S3Endpoint == "" {
 		return errors.New("S3_TELEMETRY_REGION must be set when S3_TELEMETRY_BUCKET is configured (or set S3_TELEMETRY_ENDPOINT for non-AWS S3-compatible stores)")
 	}
+	// Metrics: the internal scrape listener must bind to a port
+	// distinct from the public API. Co-locating them would expose
+	// the operational `/metrics` surface (tenant counts, pool
+	// sizes, NATS lag) on the public ingress. Skipped when the
+	// metrics subsystem is disabled.
+	if c.Metrics.Enabled {
+		if c.Metrics.Port <= 0 || c.Metrics.Port > 65535 {
+			return fmt.Errorf("METRICS_PORT out of range: %d", c.Metrics.Port)
+		}
+		if c.Metrics.Port == c.HTTP.Port {
+			return fmt.Errorf("METRICS_PORT (%d) must differ from HTTP_PORT (%d): the internal metrics surface must not be co-located with the public API", c.Metrics.Port, c.HTTP.Port)
+		}
+		if !isValidMetricPrefix(c.Metrics.Namespace) {
+			return fmt.Errorf("METRICS_NAMESPACE %q is not a valid Prometheus metric-name prefix (must match [a-zA-Z_][a-zA-Z0-9_]*)", c.Metrics.Namespace)
+		}
+	}
 	if c.Environment.IsProduction() {
 		// In production we require a sslmode that guarantees TLS.
 		// `disable` is unencrypted; `allow` attempts plaintext
@@ -1271,6 +1438,32 @@ func (c Config) validate() error {
 }
 
 // --- env helpers ------------------------------------------------------------
+
+// isValidMetricPrefix reports whether s is a valid Prometheus
+// metric-name prefix, i.e. matches [a-zA-Z_][a-zA-Z0-9_]*. Kept
+// dependency-free (no regexp) in keeping with this package's
+// stdlib-only constraint and to stay allocation-free on the boot
+// path.
+func isValidMetricPrefix(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isAlpha := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+		isDigit := c >= '0' && c <= '9'
+		if i == 0 {
+			if !isAlpha {
+				return false
+			}
+			continue
+		}
+		if !isAlpha && !isDigit {
+			return false
+		}
+	}
+	return true
+}
 
 // splitCSV splits a comma-separated env-style list, trimming
 // whitespace and dropping empty entries. Empty input → empty

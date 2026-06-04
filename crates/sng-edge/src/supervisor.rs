@@ -46,8 +46,8 @@
 use crate::cli::{Cli, PalBackend, UpdaterBackend};
 use crate::config::EdgeConfig;
 use crate::subsystems::{
-    CommsSubsystem, DnsSubsystem, FwSubsystem, IpsSubsystem, PolicyEvalSubsystem, SdwanSubsystem,
-    SwgSubsystem, TelemetrySubsystem, UpdaterSubsystem,
+    CommsSubsystem, DnsSubsystem, FwSubsystem, HaSubsystem, IpsSubsystem, PolicyEvalSubsystem,
+    SdwanSubsystem, SwgSubsystem, TelemetrySubsystem, UpdaterSubsystem,
     comms::{BundlePublisher, CommsBuildError},
     telemetry::TelemetryBuildError,
     updater::UpdaterSubsystemError,
@@ -97,6 +97,10 @@ pub enum EdgeBuildError {
     /// regression rather than an operator config issue.
     #[error("bootstrap policy bundle rejected: {0}")]
     BootstrapBundle(#[from] sng_policy_eval::PolicyEvalError),
+    /// HA subsystem build failed (config invariant or VRRP
+    /// multicast socket bind / join).
+    #[error("ha subsystem build failed: {0}")]
+    Ha(#[from] sng_ha::HaError),
     /// Supervisor run task itself returned an error (e.g. one of
     /// the subsystems' `start` calls failed during boot).
     #[error("supervisor failed during boot: {0}")]
@@ -136,6 +140,8 @@ pub struct BuiltEdge {
     pub ztna: Arc<ZtnaSubsystem>,
     /// SD-WAN adapter.
     pub sdwan: Arc<SdwanSubsystem>,
+    /// HA adapter. No-op when `[ha]` is disabled.
+    pub ha: Arc<HaSubsystem>,
     /// Updater adapter.
     pub updater: Arc<UpdaterSubsystem>,
 }
@@ -144,7 +150,7 @@ impl std::fmt::Debug for BuiltEdge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuiltEdge")
             .field("supervisor", &"Supervisor { .. }")
-            .field("subsystems", &10_usize)
+            .field("subsystems", &11_usize)
             .finish_non_exhaustive()
     }
 }
@@ -300,7 +306,12 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     // 9. SD-WAN.
     let sdwan = Arc::new(SdwanSubsystem::new(&cfg.sdwan, telemetry_tx));
 
-    // 10. Updater.
+    // 10. HA. No-op unless `[ha]` is enabled. Built before the
+    //     updater so a failover demotion can quiesce the data
+    //     plane before the updater is ever tempted to swap banks.
+    let ha = Arc::new(HaSubsystem::new(&cfg.ha)?);
+
+    // 11. Updater.
     let updater = Arc::new(UpdaterSubsystem::default_in_memory(&cfg.updater)?);
 
     // Register subsystems onto the builder we created above.
@@ -316,6 +327,7 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     builder = builder.with_subsystem(Arc::clone(&swg));
     builder = builder.with_subsystem(Arc::clone(&ztna));
     builder = builder.with_subsystem(Arc::clone(&sdwan));
+    builder = builder.with_subsystem(Arc::clone(&ha));
     builder = builder.with_subsystem(Arc::clone(&updater));
 
     let supervisor = builder.build();
@@ -331,6 +343,7 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
         swg,
         ztna,
         sdwan,
+        ha,
         updater,
     })
 }
@@ -405,6 +418,7 @@ pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, Edg
         swg,
         ztna,
         sdwan,
+        ha,
         updater,
     } = built;
     drop(telemetry);
@@ -416,6 +430,7 @@ pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, Edg
     drop(swg);
     drop(ztna);
     drop(sdwan);
+    drop(ha);
     drop(updater);
     supervisor.run().await.map_err(EdgeBuildError::from)
 }

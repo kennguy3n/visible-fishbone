@@ -91,7 +91,7 @@ type MobileEnrollResult struct {
 // a snapshot is supplied) and returned with Created=false. Otherwise a
 // new active device is created with Created=true. A create that loses
 // a race to a concurrent first-enrolment surfaces as ErrConflict from
-// the repository (the partial unique index in migration 035); we
+// the repository (the partial unique index in migration 037); we
 // recover by re-reading the now-existing device and taking the update
 // path, so concurrent first-enrolments converge on a single device.
 func (svc *Service) EnrollMobileDevice(

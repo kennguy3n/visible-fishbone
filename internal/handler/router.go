@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
+	"github.com/kennguy3n/visible-fishbone/internal/metrics"
 	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 )
 
@@ -51,6 +52,12 @@ type RouterDeps struct {
 	Health             *Health
 	OpsHealth          *OpsHealthHandler
 	BulkDevice         *BulkDeviceHandler
+	// Metrics, when non-nil, installs the Prometheus HTTP
+	// instrumentation middleware (request count / duration /
+	// in-flight) at the top of the chain. Nil disables it (the
+	// middleware degrades to a transparent pass-through), so tests
+	// that don't care about metrics can leave it unset.
+	Metrics *metrics.Metrics
 }
 
 // NewRouter composes the full API mux + middleware chain.
@@ -195,10 +202,24 @@ func NewRouter(deps RouterDeps) http.Handler {
 	} else {
 		rlmw = func(next http.Handler) http.Handler { return next }
 	}
+	// Metrics and Logging are placed OUTSIDE Recovery so a handler
+	// panic — which Recovery converts to a 500 — is still observed
+	// by both: counted in Prometheus and emitted as an access-log
+	// line with its 500 status. A middleware placed INSIDE Recovery
+	// has its post-handler code skipped when the panic unwinds
+	// through it, which is why Logging used to miss panicked
+	// requests. Tracing is kept inside Recovery and AFTER Logging so
+	// (a) the late-bound RequestMeta installed by Logging is present
+	// when the span records tenant_id, and (b) its deferred span
+	// annotation can re-raise the panic for Recovery to convert to a
+	// 500. All three degrade to pass-throughs when their dependency
+	// is absent.
 	chain := middleware.Chain(
 		middleware.RequestID(),
-		middleware.Recovery(deps.Logger),
+		deps.Metrics.Middleware(),
 		middleware.Logging(deps.Logger),
+		middleware.Recovery(deps.Logger),
+		middleware.Tracing(),
 		middleware.CORS(&deps.Config.CORS),
 		rlmw,
 	)

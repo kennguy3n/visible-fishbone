@@ -37,7 +37,7 @@ func (r *DeviceRepository) Create(ctx context.Context, tenantID uuid.UUID, d rep
 			return repository.Device{}, repository.ErrInvalidArgument
 		}
 	}
-	// Mirror the partial unique index migration 035 installs in
+	// Mirror the partial unique index migration 037 installs in
 	// Postgres (uq_devices_tenant_public_key): an Ed25519 device key
 	// is unique within a tenant. Non-empty keys only — multiple
 	// keyless devices (e.g. bulk CSV imports) are allowed, matching

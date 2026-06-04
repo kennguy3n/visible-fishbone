@@ -5,13 +5,24 @@
 //
 // Order matters. The recommended boot-time chain is:
 //
-//	requestID -> logging -> recovery -> cors -> ratelimit -> auth -> tenant
+//	requestID -> metrics -> logging -> recovery -> tracing -> cors -> ratelimit -> auth -> tenant
 //
 // so that:
 //
 //   - every request gets an X-Request-ID (even panics);
+//   - metrics and logging sit OUTSIDE recovery, so a panic — which
+//     recovery turns into a 500 — is still counted in Prometheus and
+//     emitted as an access-log line with its 500 status. A
+//     middleware placed inside recovery has its post-handler code
+//     skipped when the panic unwinds through it, so it would miss
+//     panicked requests entirely;
 //   - logging sees the final status + latency for the entire stack;
 //   - recovery converts panics to 500 + a logged stack trace;
+//   - tracing sits inside recovery and after logging so the
+//     late-bound RequestMeta (installed by logging) is present when
+//     the span records tenant_id, and so its deferred span
+//     annotation can re-raise the panic for recovery to convert to a
+//     500;
 //   - CORS preflights short-circuit before any auth work;
 //   - rate limit drops attackers before auth burns crypto;
 //   - auth resolves the identity for subsequent layers;

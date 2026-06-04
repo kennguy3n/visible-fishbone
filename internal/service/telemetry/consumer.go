@@ -208,6 +208,23 @@ func NewPerTenantLimiter(resolver LimitResolver) *PerTenantLimiter {
 	}
 }
 
+// ForPartition returns a sibling limiter that shares this limiter's
+// budget resolver but owns an independent bucket map. It is used by
+// the partitioned telemetry consumer so each partition goroutine
+// holds only the buckets for its own tenants — a tenant is pinned
+// to exactly one partition, so the per-partition maps are disjoint
+// and there is no cross-partition lock contention on the bucket
+// map. Budgets stay globally consistent because every sibling
+// resolves through the same LimitResolver. Returns nil when called
+// on a nil receiver so callers can clone an optional limiter
+// without a nil check.
+func (l *PerTenantLimiter) ForPartition() *PerTenantLimiter {
+	if l == nil {
+		return nil
+	}
+	return NewPerTenantLimiter(l.resolver)
+}
+
 // limit is the single-event budget-check entry point.
 //
 //   - Resolves the per-tenant TenantLimit (refresh-on-call so an

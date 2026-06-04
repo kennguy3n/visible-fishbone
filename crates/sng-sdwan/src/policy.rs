@@ -34,7 +34,10 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::app_steering::AppSteeringRule;
 use crate::error::SdwanError;
+use crate::failover::FailoverPolicy;
+use crate::sla::{SlaPolicySet, SlaWatch};
 
 /// Score weight vector. Linear cost coefficients applied
 /// in [`crate::score::score_path`]. All weights are
@@ -123,6 +126,33 @@ pub struct SdwanPolicy {
     /// new underlay every probe cycle.
     #[serde(default = "default_sticky_window_ms")]
     pub sticky_window_ms: u64,
+    /// Per-SLA-class thresholds the [`crate::sla::SlaMonitor`]
+    /// evaluates probe results against. Empty by default —
+    /// SLA monitoring is opt-in and orthogonal to the
+    /// per-metric SLO floors above (floors gate *selection*,
+    /// SLA classes drive *sustained-breach alerting* and
+    /// failover). See [`crate::sla`].
+    #[serde(default)]
+    pub sla: SlaPolicySet,
+    /// Which paths the SLA monitor watches, and the SLA
+    /// class each is held to. Empty by default.
+    #[serde(default)]
+    pub sla_watches: Vec<SlaWatch>,
+    /// Optional dual-WAN failover group. `None` disables
+    /// automatic failover. See [`crate::failover`].
+    #[serde(default)]
+    pub failover: Option<FailoverPolicy>,
+    /// Application-aware steering rules mapping app ids to
+    /// preferred path order + SLA class. Empty by default.
+    /// See [`crate::app_steering`].
+    #[serde(default)]
+    pub app_steering: Vec<AppSteeringRule>,
+    /// Optional cellular data-cap in megabytes for the
+    /// last-resort 4G/5G backup. `None` means no cellular
+    /// budget is configured (the backup, if any, is
+    /// unmetered). See [`crate::cellular`].
+    #[serde(default)]
+    pub cellular_budget_mb: Option<u64>,
 }
 
 const fn default_probe_max_age_ms() -> u64 {
@@ -141,6 +171,11 @@ impl Default for SdwanPolicy {
             max_jitter_ms: None,
             probe_max_age_ms: default_probe_max_age_ms(),
             sticky_window_ms: default_sticky_window_ms(),
+            sla: SlaPolicySet::default(),
+            sla_watches: Vec::new(),
+            failover: None,
+            app_steering: Vec::new(),
+            cellular_budget_mb: None,
         }
     }
 }
@@ -200,6 +235,13 @@ impl SdwanPolicy {
             return Err(SdwanError::InvalidPolicy(
                 "probe_max_age_ms must be > 0 — every probe would be stale".into(),
             ));
+        }
+        self.sla.validate()?;
+        if let Some(failover) = &self.failover {
+            failover.validate()?;
+        }
+        for rule in &self.app_steering {
+            rule.validate()?;
         }
         Ok(())
     }

@@ -64,8 +64,9 @@ use serde::Serialize;
 use sng_core::ids::{DeviceId, PolicySigningKeyId, SiteId, TenantId};
 use sng_core::policy::BundleTarget;
 use sng_edge::config::{
-    CommsConfig, DnsConfig, EdgeConfig, FwConfig, IdentityConfig, IpsConfig, PolicyConfig,
-    SdwanConfig, SupervisorConfig, SwgConfig, TelemetryConfig, UpdaterConfig, ZtnaConfig,
+    CommsConfig, DnsConfig, EdgeConfig, FwConfig, HaConfig, IdentityConfig, IpsConfig,
+    PolicyConfig, SdwanConfig, SupervisorConfig, SwgConfig, TelemetryConfig, UpdaterConfig,
+    ZtnaConfig,
 };
 use sng_edge::{BuiltEdge, Cli, build_edge};
 use std::path::PathBuf;
@@ -573,6 +574,7 @@ fn fresh_config_wired_to(endpoint: &str, pki: &OnDiskPki) -> EdgeConfig {
         },
         ztna: ZtnaConfig::default(),
         sdwan: SdwanConfig::default(),
+        ha: HaConfig::default(),
         updater: UpdaterConfig::default(),
         supervisor: SupervisorConfig::default(),
     }
@@ -699,6 +701,7 @@ async fn full_stack_boots_pulls_bundle_then_drains_cleanly() {
         swg,
         ztna,
         sdwan,
+        ha,
         updater,
     } = built;
     drop(telemetry);
@@ -710,6 +713,7 @@ async fn full_stack_boots_pulls_bundle_then_drains_cleanly() {
     drop(swg);
     drop(ztna);
     drop(sdwan);
+    drop(ha);
     drop(updater);
 
     let supervisor_handle = tokio::spawn(supervisor.run());
@@ -862,6 +866,7 @@ async fn supervisor_drain_under_continuous_load_within_budget() {
         swg,
         ztna,
         sdwan,
+        ha,
         updater,
     } = built;
     drop(telemetry);
@@ -873,6 +878,7 @@ async fn supervisor_drain_under_continuous_load_within_budget() {
     drop(swg);
     drop(ztna);
     drop(sdwan);
+    drop(ha);
     drop(updater);
     let supervisor_handle = tokio::spawn(supervisor.run());
 
@@ -972,6 +978,7 @@ async fn comms_reconnects_after_control_plane_transient_outage() {
         swg,
         ztna,
         sdwan,
+        ha,
         updater,
     } = built;
     drop(telemetry);
@@ -983,6 +990,7 @@ async fn comms_reconnects_after_control_plane_transient_outage() {
     drop(swg);
     drop(ztna);
     drop(sdwan);
+    drop(ha);
     drop(updater);
     let supervisor_handle = tokio::spawn(supervisor.run());
 

@@ -32,7 +32,9 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
+	"github.com/kennguy3n/visible-fishbone/internal/metrics"
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
+	sngotel "github.com/kennguy3n/visible-fishbone/internal/otel"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 	aisvc "github.com/kennguy3n/visible-fishbone/internal/service/ai"
@@ -46,6 +48,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration/connectors"
+	"github.com/kennguy3n/visible-fishbone/internal/service/leader"
 	"github.com/kennguy3n/visible-fishbone/internal/service/playbook"
 	"github.com/kennguy3n/visible-fishbone/internal/service/playbook/executors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
@@ -82,11 +85,83 @@ func run() error {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Distributed tracing. Always installs the W3C TraceContext +
+	// Baggage propagator; only stands up a real OTLP exporter when
+	// OTEL_EXPORTER_OTLP_ENDPOINT is configured (otherwise the
+	// global tracer stays the no-op and tracerShutdown is a no-op).
+	tracerShutdown, err := sngotel.InitTracer(rootCtx, cfg.Telemetry, cfg.AppName, string(cfg.Environment))
+	if err != nil {
+		return fmt.Errorf("init tracer: %w", err)
+	}
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracerShutdown(shutCtx); err != nil {
+			logger.Warn("sng-control: tracer shutdown error", slog.Any("error", err))
+		}
+	}()
+	if cfg.Telemetry.OTLPEndpoint != "" {
+		logger.Info("sng-control: otel tracing enabled",
+			slog.String("endpoint", cfg.Telemetry.OTLPEndpoint))
+	}
+
+	// Prometheus metrics registry. Constructed once and threaded
+	// into the router (HTTP instrumentation middleware) and the
+	// background pool / JetStream collectors. Nil when disabled, in
+	// which case every consumer degrades to a no-op.
+	var mx *metrics.Metrics
+	if cfg.Metrics.Enabled {
+		mx = metrics.New(cfg.Metrics)
+	}
+
 	pool, err := openPostgres(rootCtx, &cfg, logger)
 	if err != nil {
 		return fmt.Errorf("postgres: %w", err)
 	}
 	defer pool.Close()
+	// Begin evicting unhealthy read replicas from the rotation. No-op
+	// when no replicas are configured. Bound to rootCtx so the loop
+	// winds down with the rest of the process.
+	pool.StartHealthChecks(rootCtx)
+
+	// Leader election for singleton workloads. Every replica runs
+	// the elector and the HTTP server + NATS consumers; only the
+	// replica that holds the Postgres advisory lock runs the
+	// singleton background loops (wrapped in RunIfLeader below). The
+	// lock is taken on the PRIMARY pool — never a read replica. To
+	// scale the control plane horizontally, deploy 2–3 replicas
+	// behind a load balancer: all serve API traffic and consume
+	// telemetry, and exactly one runs the singletons; on leader
+	// crash the advisory lock is released by Postgres when the dead
+	// session is reaped and another replica takes over within one
+	// election interval.
+	identity, _ := os.Hostname()
+	elector := leader.New(
+		leader.NewPgSessionOpener(pool.Primary()),
+		leader.WithIdentity(identity),
+		leader.WithLogger(logger),
+	)
+	// The elector holds a dedicated primary-pool connection for the
+	// advisory lock's lifetime. Run it under its own cancellable
+	// context and block shutdown on its relinquish so the deferred
+	// pool.Close() (registered earlier, hence run later — defers are
+	// LIFO) never races the elector still returning its connection.
+	// The wait is bounded so a wedged relinquish (e.g. primary
+	// partition) cannot hang graceful shutdown indefinitely.
+	electorCtx, electorCancel := context.WithCancel(rootCtx)
+	electorDone := make(chan struct{})
+	go func() {
+		defer close(electorDone)
+		elector.Run(electorCtx)
+	}()
+	defer func() {
+		electorCancel()
+		select {
+		case <-electorDone:
+		case <-time.After(5 * time.Second):
+			logger.Warn("sng-control: timed out waiting for leader elector to relinquish")
+		}
+	}()
 
 	nc, err := openNATS(rootCtx, &cfg, logger)
 	if err != nil {
@@ -122,7 +197,7 @@ func run() error {
 
 	health := handler.NewHealth(2 * time.Second)
 	health.Register("postgres", handler.PingerFunc(func(ctx context.Context) error {
-		return pool.Ping(ctx)
+		return pool.Primary().Ping(ctx)
 	}))
 	health.Register("nats", handler.PingerFunc(func(_ context.Context) error {
 		if nc.Status() != nats.CONNECTED {
@@ -144,7 +219,7 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher)
+	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -176,36 +251,43 @@ func run() error {
 	// cancelled, and an in-flight HTTP fetch will be unblocked by
 	// the same ctx that gates the rest of the process.
 	if cfg.AppRegistry.SyncEnabled {
-		go appSyncer.Run(rootCtx, cfg.AppRegistry.SyncInterval)
-		logger.Info("sng-control: app-registry sync loop started",
+		// Singleton: only the leader runs the periodic sync, so a
+		// multi-replica deployment performs exactly one vendor fetch
+		// per interval instead of one per replica. RunIfLeader
+		// blocks until rootCtx is cancelled and starts/stops the
+		// loop as leadership is gained/lost, so it is launched in
+		// its own goroutine.
+		go elector.RunIfLeader(rootCtx, "app-registry-sync", func(ctx context.Context) {
+			appSyncer.Run(ctx, cfg.AppRegistry.SyncInterval)
+		})
+		logger.Info("sng-control: app-registry sync loop registered (runs on leader only)",
 			slog.Duration("interval", cfg.AppRegistry.SyncInterval))
 	} else {
 		logger.Info("sng-control: app-registry sync loop disabled (APP_REGISTRY_SYNC_ENABLED=false)")
 	}
 
-	rawTelShutdown, chWriter, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher)
+	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
-	// Wire the ClickHouse writer into the AppRegistry handler so
+	// Wire the ClickHouse hot tier into the AppRegistry handler so
 	// the /app-registry/stats endpoint can serve per-class
-	// distributions. When ClickHouse is not configured, chWriter
-	// is nil and the handler keeps returning 503 on /stats.
-	if chWriter != nil {
-		// chwriter.Writer.QueryTrafficClassDistribution now
-		// returns []stats.TrafficClassCount, which matches the
-		// handler.TelemetryClassQuerier contract directly — no
-		// adapter shim required.
-		appRegHandler.SetStats(chWriter)
+	// distributions. When ClickHouse is not configured, chStats is
+	// nil and the handler keeps returning 503 on /stats. chStats is
+	// satisfied by either the single-cluster *Writer or the
+	// shard-aware *ShardedWriter, so this path is identical in both
+	// modes.
+	if chStats != nil {
+		appRegHandler.SetStats(chStats)
 
 		// Wire the policy simulator now that the ClickHouse hot
-		// tier is alive. Reader.NewReader on Writer shares the
-		// connection, so we don't open a second pool just for
+		// tier is alive. The reader factory shares the writer's
+		// connection(s), so we don't open a second pool just for
 		// reads — and the simulator's lifecycle is bound to the
 		// telemetry stack's, which is exactly what we want
 		// (operator-driven simulation requires recent telemetry).
 		if policySimHandler != nil {
-			chReader, rErr := chWriter.NewReader()
+			chReader, rErr := chReaderFactory()
 			if rErr != nil {
 				logger.Warn("policy.simulator: clickhouse reader unavailable; /simulations endpoint returns 503",
 					slog.String("error", rErr.Error()))
@@ -248,6 +330,52 @@ func run() error {
 		}
 	}()
 
+	// Internal metrics surface. Bound to a dedicated port
+	// (METRICS_PORT, default 9090) — never the public API
+	// listener — so the `/metrics` exposition (tenant counts, pool
+	// sizes, NATS lag) stays on the cluster-internal network. The
+	// background pool / JetStream collectors feed gauges that the
+	// scrape then reads. config.validate already guaranteed the
+	// port differs from HTTP.Port.
+	var metricsSrv *http.Server
+	if mx != nil {
+		// Pool gauges track the primary (writer) pool; it carries
+		// the acquire/idle pressure the collector reports. pool is a
+		// *postgres.ReadWritePool wrapper, so reach the underlying
+		// *pgxpool.Pool (which exposes Stat) via Primary().
+		go metrics.NewPGCollector(mx, pool.Primary(), metrics.DefaultPoolScrapeInterval).Run(rootCtx)
+		streamNames := make([]string, 0, len(streams))
+		for _, s := range streams {
+			streamNames = append(streamNames, s.Name)
+		}
+		go metrics.NewNATSCollector(mx, js, streamNames, metrics.DefaultConsumerScrapeInterval, logger).Run(rootCtx)
+
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", mx.Handler())
+		metricsSrv = &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.Metrics.Port),
+			Handler: metricsMux,
+			// Mirror the public API server's full timeout set so a
+			// slow or stuck scraper cannot hold a metrics connection
+			// open indefinitely. Scrapes are small, so the same
+			// bounds are comfortably generous here.
+			ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
+			ReadTimeout:       cfg.HTTP.ReadTimeout,
+			WriteTimeout:      cfg.HTTP.WriteTimeout,
+		}
+		go func() {
+			logger.Info("sng-control: metrics server listening",
+				slog.Int("port", cfg.Metrics.Port),
+				slog.String("namespace", cfg.Metrics.Namespace))
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				// A metrics-listener failure must not take down the
+				// control plane; log loudly and carry on serving the
+				// API.
+				logger.Error("sng-control: metrics server error", slog.Any("error", err))
+			}
+		}()
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTP.Addr(),
 		Handler:           router,
@@ -275,6 +403,11 @@ func run() error {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("sng-control: http shutdown error", slog.Any("error", err))
+	}
+	if metricsSrv != nil {
+		if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("sng-control: metrics shutdown error", slog.Any("error", err))
+		}
 	}
 
 	if err := webhookWorker.Stop(shutdownCtx); err != nil {
@@ -304,12 +437,13 @@ func run() error {
 func buildRouter(
 	cfg *config.Config,
 	logger *slog.Logger,
-	pool *pgxpool.Pool,
+	pool *postgres.ReadWritePool,
 	health *handler.Health,
 	replay *telreplay.Worker,
 	telPub *sngnats.Publisher,
+	mx *metrics.Metrics,
 ) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, *aisvc.Service, error) {
-	store := postgres.NewStore(pool)
+	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
 	siteRepo := store.NewSiteRepository()
@@ -686,6 +820,7 @@ func buildRouter(
 		OpenAPISpec:        handler.NewOpenAPIHandler(),
 		OpsHealth:          handler.NewOpsHealthHandler(opsHealthRepo, logger),
 		BulkDevice:         handler.NewBulkDeviceHandler(bulkDeviceSvc, deviceRepo, logger),
+		Metrics:            mx,
 	})
 	// Return the AppRegistry handler so the caller can attach the
 	// telemetry stats querier post-construction — the ClickHouse
@@ -929,12 +1064,18 @@ func startTelemetry(
 	logger *slog.Logger,
 	js jetstream.JetStream,
 	pub *sngnats.Publisher,
-) (func(context.Context) error, *chwriter.Writer, error) {
+) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), error) {
 	var hot telemetry.HotWriter
 	var cold telemetry.ColdWriter
 	var hotStop func(context.Context) error
 	var coldStop func(context.Context) error
-	var chWriter *chwriter.Writer
+	// chStats serves the /app-registry/stats endpoint; chReaderFactory
+	// builds the policy simulator's read source. Both are nil when no
+	// ClickHouse hot tier is configured, and both are satisfied by
+	// either a single *chwriter.Writer or a *chwriter.ShardedWriter so
+	// the rest of main is oblivious to the sharding mode.
+	var chStats handler.TelemetryClassQuerier
+	var chReaderFactory func() (policy.TelemetrySource, error)
 
 	if len(cfg.TelemetryAnalytics.ClickHouseEndpoints) > 0 {
 		chCfg := chwriter.Config{
@@ -948,23 +1089,46 @@ func startTelemetry(
 			BatchSize:            cfg.TelemetryAnalytics.ClickHouseBatchSize,
 			MaxBacklogMultiplier: cfg.TelemetryAnalytics.ClickHouseMaxBacklogMultiplier,
 		}
-		w, err := chwriter.New(ctx, chCfg, logger)
-		if err != nil {
-			return nil, nil, fmt.Errorf("clickhouse writer: %w", err)
-		}
-		if cfg.TelemetryAnalytics.ClickHouseEnsureSchema {
-			if err := w.EnsureSchema(ctx); err != nil {
-				_ = w.Stop(ctx)
-				return nil, nil, fmt.Errorf("clickhouse schema: %w", err)
+		if cfg.TelemetryAnalytics.ClickHouseSharding {
+			sw, err := chwriter.NewShardedWriter(ctx, chCfg, logger)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("clickhouse sharded writer: %w", err)
 			}
+			if cfg.TelemetryAnalytics.ClickHouseEnsureSchema {
+				if err := sw.EnsureSchema(ctx); err != nil {
+					_ = sw.Stop(ctx)
+					return nil, nil, nil, fmt.Errorf("clickhouse schema: %w", err)
+				}
+			}
+			hot = sw
+			hotStop = sw.Stop
+			chStats = sw
+			chReaderFactory = func() (policy.TelemetrySource, error) { return sw.NewReader() }
+			logger.Info("telemetry: clickhouse hot-path writer enabled (shard-aware)",
+				slog.Int("shards", sw.ShardCount()),
+				slog.String("endpoints", strings.Join(chCfg.Endpoints, ",")),
+				slog.String("database", chCfg.Database),
+				slog.String("table", chCfg.Table))
+		} else {
+			w, err := chwriter.New(ctx, chCfg, logger)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("clickhouse writer: %w", err)
+			}
+			if cfg.TelemetryAnalytics.ClickHouseEnsureSchema {
+				if err := w.EnsureSchema(ctx); err != nil {
+					_ = w.Stop(ctx)
+					return nil, nil, nil, fmt.Errorf("clickhouse schema: %w", err)
+				}
+			}
+			hot = w
+			hotStop = w.Stop
+			chStats = w
+			chReaderFactory = func() (policy.TelemetrySource, error) { return w.NewReader() }
+			logger.Info("telemetry: clickhouse hot-path writer enabled",
+				slog.String("endpoints", strings.Join(chCfg.Endpoints, ",")),
+				slog.String("database", chCfg.Database),
+				slog.String("table", chCfg.Table))
 		}
-		hot = w
-		hotStop = w.Stop
-		chWriter = w
-		logger.Info("telemetry: clickhouse hot-path writer enabled",
-			slog.String("endpoints", strings.Join(chCfg.Endpoints, ",")),
-			slog.String("database", chCfg.Database),
-			slog.String("table", chCfg.Table))
 	}
 
 	if cfg.TelemetryAnalytics.S3Bucket != "" {
@@ -973,7 +1137,7 @@ func startTelemetry(
 			if hotStop != nil {
 				_ = hotStop(ctx)
 			}
-			return nil, nil, fmt.Errorf("aws config: %w", err)
+			return nil, nil, nil, fmt.Errorf("aws config: %w", err)
 		}
 		s3Cfg := s3writer.Config{
 			Bucket:             cfg.TelemetryAnalytics.S3Bucket,
@@ -988,7 +1152,7 @@ func startTelemetry(
 			if hotStop != nil {
 				_ = hotStop(ctx)
 			}
-			return nil, nil, fmt.Errorf("s3 writer: %w", err)
+			return nil, nil, nil, fmt.Errorf("s3 writer: %w", err)
 		}
 		cold = w
 		coldStop = w.Stop
@@ -1005,7 +1169,7 @@ func startTelemetry(
 		if coldStop != nil {
 			_ = coldStop(ctx)
 		}
-		return nil, nil, fmt.Errorf("telemetry service: %w", err)
+		return nil, nil, nil, fmt.Errorf("telemetry service: %w", err)
 	}
 	svc.WithDLQ(pub)
 	if err := svc.Start(ctx); err != nil {
@@ -1015,7 +1179,7 @@ func startTelemetry(
 		if coldStop != nil {
 			_ = coldStop(ctx)
 		}
-		return nil, nil, fmt.Errorf("telemetry start: %w", err)
+		return nil, nil, nil, fmt.Errorf("telemetry start: %w", err)
 	}
 	logger.Info("telemetry: consumer started")
 
@@ -1036,7 +1200,7 @@ func startTelemetry(
 		}
 		return firstErr
 	}
-	return shutdown, chWriter, nil
+	return shutdown, chStats, chReaderFactory, nil
 }
 
 // loadAWSConfig resolves an AWS config for the cold-path writer.
@@ -1103,8 +1267,64 @@ func parseLogLevel(s string) slog.Level {
 // and pings it to verify connectivity at startup. Returning before
 // the pool is reachable lets operators see a clear boot-time error
 // instead of a flapping readiness probe.
-func openPostgres(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*pgxpool.Pool, error) {
-	poolCfg, err := pgxpool.ParseConfig(cfg.Postgres.DSN())
+func openPostgres(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*postgres.ReadWritePool, error) {
+	primary, err := buildPgxPool(ctx, cfg, cfg.Postgres.DSN())
+	if err != nil {
+		return nil, fmt.Errorf("primary: %w", err)
+	}
+	// Fail boot if the primary is unreachable: the primary serves
+	// every write, so a flapping readiness probe is preferable to a
+	// process that starts but cannot persist anything.
+	pingCtx, cancel := context.WithTimeout(ctx, cfg.Postgres.ConnTimeout)
+	err = primary.Ping(pingCtx)
+	cancel()
+	if err != nil {
+		primary.Close()
+		return nil, fmt.Errorf("ping primary postgres: %w", err)
+	}
+	logger.Info("sng-control: postgres primary connected",
+		slog.String("host", cfg.Postgres.Host),
+		slog.Int("port", cfg.Postgres.Port),
+		slog.String("database", cfg.Postgres.Database),
+		slog.String("app_role", cfg.Postgres.AppRole),
+		slog.Bool("pgbouncer_mode", cfg.Postgres.PgBouncerMode))
+
+	// Read replicas are opened best-effort: a replica that is down
+	// at boot is NOT a fatal error (the health-check loop evicts it
+	// and Replica() falls back to the primary). We still fail boot
+	// if a replica pool cannot even be *constructed* (e.g. a bad
+	// DSN), since that is a config error, not a transient outage.
+	var replicas []*pgxpool.Pool
+	for _, host := range cfg.Postgres.ReadReplicaHosts {
+		rp, rerr := buildPgxPool(ctx, cfg, cfg.Postgres.ReplicaDSN(host))
+		if rerr != nil {
+			primary.Close()
+			for _, opened := range replicas {
+				opened.Close()
+			}
+			return nil, fmt.Errorf("replica %s: %w", host, rerr)
+		}
+		replicas = append(replicas, rp)
+		logger.Info("sng-control: postgres read replica configured",
+			slog.String("host", host),
+			slog.Int("port", cfg.Postgres.ReplicaPort()))
+	}
+
+	return postgres.NewReadWritePool(postgres.ReadWritePoolConfig{
+		Primary:       primary,
+		Replicas:      replicas,
+		AppRole:       cfg.Postgres.AppRole,
+		PgBouncerMode: cfg.Postgres.PgBouncerMode,
+		Logger:        logger,
+	}), nil
+}
+
+// buildPgxPool constructs (but does not ping) a single pgxpool.Pool
+// from the given DSN, applying the shared connection-pool sizing and
+// the role-adoption posture. It is used for both the primary and
+// every read replica so they are configured identically.
+func buildPgxPool(ctx context.Context, cfg *config.Config, dsn string) (*pgxpool.Pool, error) {
+	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres DSN: %w", err)
 	}
@@ -1144,10 +1364,11 @@ func openPostgres(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 	//   3. The pooler runs in transaction-pooling mode and the
 	//      `SET SESSION ROLE` is reverted between transactions;
 	//      this would manifest as alternating successful and
-	//      `permission denied` queries, but the boot-time probe
-	//      below at least verifies the first connection is
-	//      configured correctly.
-	if cfg.Postgres.AppRole != "" {
+	//      `permission denied` queries. This is exactly the case
+	//      PG_PGBOUNCER_MODE addresses: when set, the session-level
+	//      hook is skipped here and the repository layer adopts the
+	//      role per-transaction via `SET LOCAL ROLE` instead.
+	if cfg.Postgres.AppRole != "" && !cfg.Postgres.PgBouncerMode {
 		poolCfg.AfterConnect = afterConnectSetRole(cfg.Postgres.AppRole)
 	}
 
@@ -1155,17 +1376,6 @@ func openPostgres(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 	if err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
 	}
-	pingCtx, cancel := context.WithTimeout(ctx, cfg.Postgres.ConnTimeout)
-	defer cancel()
-	if err := pool.Ping(pingCtx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("ping postgres: %w", err)
-	}
-	logger.Info("sng-control: postgres connected",
-		slog.String("host", cfg.Postgres.Host),
-		slog.Int("port", cfg.Postgres.Port),
-		slog.String("database", cfg.Postgres.Database),
-		slog.String("app_role", cfg.Postgres.AppRole))
 	return pool, nil
 }
 

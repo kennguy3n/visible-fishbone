@@ -380,7 +380,7 @@ func TestPostgres_Integration(t *testing.T) {
 			t.Errorf("unknown key err = %v, want ErrNotFound", err)
 		}
 
-		// Per-tenant uniqueness (migration 035): the same key cannot be
+		// Per-tenant uniqueness (migration 037): the same key cannot be
 		// inserted twice within a tenant.
 		if _, err := dr.Create(bgCtx(), tntA.ID, repository.Device{
 			Name: "iphone-A-dup", Platform: repository.DevicePlatformIOS, PublicKeyEd25519: key,
