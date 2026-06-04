@@ -601,7 +601,11 @@ type PendingMigration struct {
 	UpSQL   string
 }
 
-var reUpName = regexp.MustCompile(`^(\d+)_([a-z0-9_]+)\.up\.sql$`)
+// reUpName matches golang-migrate up filenames: <version>_<name>.up.sql.
+// The name part is matched case-insensitively so a mixed-case
+// migration is not silently invisible to --dry-run (the repo
+// convention is lowercase, but nothing enforces it on disk).
+var reUpName = regexp.MustCompile(`^(\d+)_([A-Za-z0-9_]+)\.up\.sql$`)
 
 // PendingUp returns every embedded up migration whose numeric
 // version is greater than currentVersion, sorted ascending. It backs

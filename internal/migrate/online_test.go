@@ -235,3 +235,26 @@ func TestPendingUp(t *testing.T) {
 		t.Errorf("expected no pending migrations, got %d", len(pend2))
 	}
 }
+
+func TestUpNameCaseInsensitive(t *testing.T) {
+	// Mixed-case names must be recognised so PendingUp (and hence
+	// --dry-run) never silently skips a migration that exists on disk.
+	for _, name := range []string{
+		"037_my_feature.up.sql",
+		"037_MyFeature.up.sql",
+		"037_AddIndex.up.sql",
+	} {
+		if !reUpName.MatchString(name) {
+			t.Errorf("reUpName should match %q", name)
+		}
+	}
+	for _, name := range []string{
+		"037_my_feature.down.sql",
+		"my_feature.up.sql",
+		"037-my-feature.up.sql",
+	} {
+		if reUpName.MatchString(name) {
+			t.Errorf("reUpName should not match %q", name)
+		}
+	}
+}

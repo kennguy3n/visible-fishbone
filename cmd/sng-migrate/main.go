@@ -133,6 +133,14 @@ func run(args []string, stdout, stderr *os.File) error {
 	switch rest[0] {
 	case "up":
 		if *dryRunFlag {
+			if *onlineFlag {
+				// --dry-run touches no DB, so it cannot exercise the
+				// online wrapper; it just prints pending DDL. Warn so an
+				// operator who passed both does not assume the online
+				// path was simulated.
+				_, _ = fmt.Fprintln(stderr, "sng-migrate: --dry-run takes precedence over --online; "+
+					"printing pending migrations without the online wrapper")
+			}
 			return runDryRun(stdout, r)
 		}
 		if err := r.Up(); err != nil {
