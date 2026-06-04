@@ -129,15 +129,16 @@ func TestCompileTarget_DomainRouting(t *testing.T) {
 			{ID: "ztna-1", Domain: DomainZTNA, Verb: VerbAllow},
 			{ID: "sdwan-1", Domain: DomainSDWAN, Verb: VerbSteer},
 			{ID: "dlp-1", Domain: DomainDLP, Verb: VerbLog},
+			{ID: "casb-1", Domain: DomainInlineCASB, Verb: VerbInspect},
 		},
 	}
 	cases := []struct {
 		target  repository.PolicyBundleTarget
 		wantIDs []string
 	}{
-		{repository.PolicyBundleTargetEdge, []string{"ngfw-1", "swg-1", "dns-1", "ztna-1", "sdwan-1", "dlp-1"}},
+		{repository.PolicyBundleTargetEdge, []string{"ngfw-1", "swg-1", "dns-1", "ztna-1", "sdwan-1", "dlp-1", "casb-1"}},
 		{repository.PolicyBundleTargetEndpoint, []string{"dns-1", "ztna-1", "sdwan-1", "dlp-1"}},
-		{repository.PolicyBundleTargetCloud, []string{"swg-1", "dns-1", "ztna-1", "dlp-1"}},
+		{repository.PolicyBundleTargetCloud, []string{"swg-1", "dns-1", "ztna-1", "dlp-1", "casb-1"}},
 		{repository.PolicyBundleTargetMobile, []string{"ztna-1"}},
 	}
 	for _, c := range cases {

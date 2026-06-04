@@ -87,11 +87,17 @@ const (
 	DomainZTNA  Domain = "ztna"
 	DomainSDWAN Domain = "sdwan"
 	DomainDLP   Domain = "dlp"
+	// DomainInlineCASB carries inline-CASB rules (real-time SaaS
+	// upload/share/download inspection). These rules ride inside
+	// the SWG bundle slice — the edge / cloud SWG decodes them
+	// into the inline CASB inspector (crates/sng-swg/src/casb.rs)
+	// — so they route to the same targets as DomainSWG.
+	DomainInlineCASB Domain = "inline_casb"
 )
 
 // validDomains is the set used by validation.
 var validDomains = []Domain{
-	DomainDLP, DomainDNS, DomainNGFW, DomainSDWAN, DomainSWG, DomainZTNA,
+	DomainDLP, DomainDNS, DomainInlineCASB, DomainNGFW, DomainSDWAN, DomainSWG, DomainZTNA,
 }
 
 // SubjectKind enumerates the subject vertex types ARCHITECTURE.md
@@ -132,7 +138,7 @@ type Rule struct {
 	// changes across versions.
 	ID string `json:"id"`
 
-	// Domain is one of {ngfw,swg,dns,ztna,sdwan,dlp}.
+	// Domain is one of {ngfw,swg,dns,ztna,sdwan,dlp,inline_casb}.
 	Domain Domain `json:"domain"`
 
 	// Verb is the policy verb to apply on match.
@@ -400,10 +406,13 @@ func domainTargets(d Domain) map[repository.PolicyBundleTarget]bool {
 		return map[repository.PolicyBundleTarget]bool{
 			repository.PolicyBundleTargetEdge: true,
 		}
-	case DomainSWG:
+	case DomainSWG, DomainInlineCASB:
 		// §3.2 + §4: SWG is enforced at the edge and the cloud
 		// PoP. Endpoint receives steering hints (covered in
-		// SD-WAN below) but not the URL category tables.
+		// SD-WAN below) but not the URL category tables. Inline
+		// CASB rules ship inside the same SWG bundle slice — the
+		// inline inspector only runs where the SWG ext-authz
+		// pipeline does, i.e. the edge and cloud targets.
 		return map[repository.PolicyBundleTarget]bool{
 			repository.PolicyBundleTargetEdge:  true,
 			repository.PolicyBundleTargetCloud: true,
