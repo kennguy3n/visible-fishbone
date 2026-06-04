@@ -1082,6 +1082,37 @@ type ComplianceReportRepository interface {
 	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[ComplianceReport], error)
 }
 
+// ComplianceEvidenceFilter narrows a ComplianceEvidenceRepository.List
+// query. Zero-value fields are treated as "any".
+type ComplianceEvidenceFilter struct {
+	CollectionType string // empty = any of weekly/monthly/manual
+	Status         string // empty = any status
+}
+
+// ComplianceEvidenceRepository owns the platform-level
+// compliance_evidence table (migration 039). NOT tenant-scoped: SOC2
+// evidence attests to the platform's own controls, so there is no
+// tenant_id parameter and reads/writes run under the system role. The
+// admin REST surface and the leader-only evidence collector are the
+// only callers.
+type ComplianceEvidenceRepository interface {
+	// Create inserts a new evidence row. ID/CreatedAt are assigned by
+	// the store when zero.
+	Create(ctx context.Context, e ComplianceEvidence) (ComplianceEvidence, error)
+	// Get returns one row by id, or ErrNotFound.
+	Get(ctx context.Context, id uuid.UUID) (ComplianceEvidence, error)
+	// List returns evidence rows ordered by collected_at (cursor
+	// paginated), optionally filtered.
+	List(ctx context.Context, filter ComplianceEvidenceFilter, page Page) (PageResult[ComplianceEvidence], error)
+	// UpdateStatus transitions a row to a new status, returning the
+	// updated row or ErrNotFound.
+	UpdateStatus(ctx context.Context, id uuid.UUID, status string) (ComplianceEvidence, error)
+	// LatestByType returns the most-recently collected row of the given
+	// collection type, or ErrNotFound when none exists. Used by gap
+	// detection and monthly aggregation.
+	LatestByType(ctx context.Context, collectionType string) (ComplianceEvidence, error)
+}
+
 // --- Playbooks ------------------------------------------------------------
 
 // PlaybookRepository owns the playbooks table.
