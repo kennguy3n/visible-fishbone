@@ -29,19 +29,25 @@ case "$(uname -s)" in
   *)      LIB="libsng_mobile_sdk.so" ;;
 esac
 
-# The workspace `[profile.release]` sets `strip = true`, which strips
-# the symbols UniFFI's `generate --library` reads its metadata from
-# (a stripped library yields *no* bindings, silently). Override
-# `strip` to keep the optimized library while retaining the metadata
-# the generator needs. The binding *source* is identical across
-# profiles, so debug works too.
-if [ "$PROFILE" = "release" ]; then
-  BUILD_FLAGS=(--release --config profile.release.strip=false)
-  LIB_PATH="target/release/$LIB"
-else
-  BUILD_FLAGS=()
-  LIB_PATH="target/$PROFILE/$LIB"
-fi
+# Map the requested profile to (a) its cargo build flag, (b) the cargo
+# *profile name* used in `--config profile.<name>.…`, and (c) its
+# `target/` output sub-directory. Cargo's dev profile is named `dev`
+# but emits to `target/debug`; every other profile's directory matches
+# its name. The binding *source* is identical across profiles, so any
+# profile works.
+case "$PROFILE" in
+  release)   BUILD_FLAGS=(--release)            ; PROFILE_NAME="release" ; TARGET_DIR="release" ;;
+  dev|debug) BUILD_FLAGS=()                      ; PROFILE_NAME="dev"     ; TARGET_DIR="debug"   ;;
+  *)         BUILD_FLAGS=(--profile "$PROFILE")  ; PROFILE_NAME="$PROFILE"; TARGET_DIR="$PROFILE" ;;
+esac
+
+# A profile with `strip = true` (the workspace sets this on `release`)
+# strips the symbols UniFFI's `generate --library` reads its metadata
+# from — a stripped library yields *no* bindings, silently. Override
+# `strip` for the selected profile so the (optimized) library still
+# carries the metadata the generator needs.
+BUILD_FLAGS+=(--config "profile.$PROFILE_NAME.strip=false")
+LIB_PATH="target/$TARGET_DIR/$LIB"
 
 echo "==> building $LIB ($PROFILE)"
 cargo build -p sng-mobile-sdk "${BUILD_FLAGS[@]}"

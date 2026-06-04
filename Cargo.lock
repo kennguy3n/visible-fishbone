@@ -2734,7 +2734,6 @@ dependencies = [
  "tokio",
  "uniffi",
  "url",
- "uuid",
 ]
 
 [[package]]

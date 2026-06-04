@@ -25,6 +25,7 @@
 //!   resulting [`OidcSession`].
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -34,9 +35,18 @@ use sng_oidc::{
     AuthSurface, AuthorizationRequest, CodeExchange, DiscoveryClient, IdTokenClaims,
     IdTokenValidator, JwksClient, OidcSession, PkceChallenge, TokenClient,
 };
-use uuid::Uuid;
 
 use crate::error::MobileSdkError;
+
+/// RAII gate that clears [`OidcAuthSession::sign_in_active`] on drop,
+/// so a sign-in that fails (or panics) still releases the flag.
+struct SignInGate<'a>(&'a AtomicBool);
+
+impl Drop for SignInGate<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 /// An [`AuthSession`] backed by `sng-oidc`.
 ///
@@ -49,6 +59,20 @@ pub struct OidcAuthSession {
     auth: AuthConfig,
     redirect_uri: String,
     surface: Arc<dyn AuthSurface>,
+    /// Held for the lifetime of the session so the provider-metadata
+    /// cache persists across sign-ins: a repeat sign-in against the
+    /// same issuer skips the discovery network fetch.
+    discovery: DiscoveryClient,
+    /// Held for the lifetime of the session so the JWKS cache
+    /// persists: the ID-token validator's key-rotation retry path
+    /// (`IdTokenValidator::validate`) starts warm instead of
+    /// re-fetching the key set on every sign-in.
+    jwks: JwksClient,
+    /// `true` while an interactive [`Self::sign_in`] is in flight. A
+    /// second concurrent call is rejected rather than driving a
+    /// duplicate browser presentation / code exchange that would race
+    /// the first and silently clobber its session.
+    sign_in_active: AtomicBool,
     /// `None` until [`Self::sign_in`] succeeds. Cloned out (cheap
     /// `Arc` bump) before any `.await` so the lock is never held
     /// across the network round trip.
@@ -59,14 +83,25 @@ impl OidcAuthSession {
     /// Build an as-yet-unauthenticated session around `auth`, the
     /// `redirect_uri` the IdP redirects back to, and the platform
     /// `surface`.
-    #[must_use]
-    pub fn new(auth: AuthConfig, redirect_uri: String, surface: Arc<dyn AuthSurface>) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// Returns [`MobileSdkError`] if the cached discovery / JWKS HTTP
+    /// clients cannot be constructed (e.g. the platform TLS backend
+    /// fails to initialise).
+    pub fn new(
+        auth: AuthConfig,
+        redirect_uri: String,
+        surface: Arc<dyn AuthSurface>,
+    ) -> Result<Self, MobileSdkError> {
+        Ok(Self {
             auth,
             redirect_uri,
             surface,
+            discovery: DiscoveryClient::new()?,
+            jwks: JwksClient::new()?,
+            sign_in_active: AtomicBool::new(false),
             session: Mutex::new(None),
-        }
+        })
     }
 
     /// Whether sign-in has installed a live session.
@@ -83,22 +118,33 @@ impl OidcAuthSession {
     /// becomes authenticated and [`Self::access_token`] starts
     /// returning live tokens.
     pub async fn sign_in(&self) -> Result<(), MobileSdkError> {
+        // 0. Reject a concurrent sign-in. `compare_exchange` claims the
+        //    gate atomically; the guard clears it on every exit path.
+        if self
+            .sign_in_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(MobileSdkError::sign_in("a sign-in is already in progress"));
+        }
+        let _gate = SignInGate(&self.sign_in_active);
+
         let redirect_uri = self.redirect_uri.as_str();
         // 1. Discover the provider's endpoints from the issuer.
         let issuer = self.auth.issuer.trim_end_matches('/');
         let discovery_url = format!("{issuer}/.well-known/openid-configuration");
-        let discovery = DiscoveryClient::new()?;
-        let meta = discovery.discover(&discovery_url).await?;
+        let meta = self.discovery.discover(&discovery_url).await?;
 
-        // 2. Mint the PKCE pair and our own state/nonce so we can
-        //    verify the callback and bind the ID token.
+        // 2. Mint the PKCE pair plus the request's `state`/`nonce`.
+        //    `AuthorizationRequest::new` already generates a 256-bit
+        //    random `state` (CSRF) and `nonce` (replay binding); read
+        //    those back rather than overriding with lower-entropy
+        //    values.
         let pkce = PkceChallenge::generate();
-        let state = Uuid::new_v4().to_string();
-        let nonce = Uuid::new_v4().to_string();
         let scope = self.auth.scopes.join(" ");
-        let authz = AuthorizationRequest::new(&self.auth.client_id, redirect_uri, scope, &pkce)
-            .with_state(state.clone())
-            .with_nonce(nonce.clone());
+        let authz = AuthorizationRequest::new(&self.auth.client_id, redirect_uri, scope, &pkce);
+        let state = authz.state.clone();
+        let nonce = authz.nonce.clone();
         let url = authz.to_url(&meta.authorization_endpoint)?;
 
         // 3. Present the browser leg through the platform surface.
@@ -136,8 +182,16 @@ impl OidcAuthSession {
         // 6. Validate the ID token (if the IdP returned one), binding
         //    it to our nonce. Absent ID token => no identity claims,
         //    but the access/refresh tokens still drive the session.
+        //    The issuer compared against the `iss` claim must be the
+        //    provider's canonical issuer from discovery (OIDC Core
+        //    §3.1.3.7), not the user-configured input.
         let identity = self
-            .validate_id_token(tokens.id_token.as_deref(), &meta.jwks_uri, &nonce)
+            .validate_id_token(
+                tokens.id_token.as_deref(),
+                &meta.issuer,
+                &meta.jwks_uri,
+                &nonce,
+            )
             .await?;
 
         // 7. Install the live session (moves `token_client` in so the
@@ -154,17 +208,21 @@ impl OidcAuthSession {
     async fn validate_id_token(
         &self,
         id_token: Option<&str>,
+        canonical_issuer: &str,
         jwks_uri: &str,
         nonce: &str,
     ) -> Result<Option<IdTokenClaims>, MobileSdkError> {
         let Some(id_token) = id_token else {
             return Ok(None);
         };
+        // `canonical_issuer` is `meta.issuer` from the discovery
+        // document — the value the `iss` claim is compared against —
+        // not `self.auth.issuer`, which may differ by a trailing
+        // slash and would spuriously fail validation.
         let validator =
-            IdTokenValidator::new(self.auth.issuer.clone(), self.auth.client_id.clone())
+            IdTokenValidator::new(canonical_issuer.to_owned(), self.auth.client_id.clone())
                 .with_nonce(nonce);
-        let jwks_client = JwksClient::new()?;
-        let claims = validator.validate(id_token, &jwks_client, jwks_uri).await?;
+        let claims = validator.validate(id_token, &self.jwks, jwks_uri).await?;
         Ok(Some(claims))
     }
 }
@@ -188,6 +246,15 @@ impl AuthSession for OidcAuthSession {
             .map_err(|e| AuthError::RefreshRejected(e.to_string()))
     }
 
+    // NOTE on the no-expiry edge case: when the IdP omits `expires_in`
+    // (RECOMMENDED, not REQUIRED, by the OIDC spec) the session has no
+    // known `expires_at`, so neither method below can *prove* the
+    // token is currently valid and both report the conservative
+    // not-authenticated view (`Expired` / `false`). The token still
+    // works — `access_token()` returns it and triggers no refresh —
+    // so a foreign caller that gets `Expired`/`false` should still
+    // attempt the operation rather than forcing an interactive
+    // sign-in.
     fn state(&self) -> AuthState {
         match self.current() {
             None => AuthState::Unauthenticated,

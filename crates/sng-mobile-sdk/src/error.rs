@@ -161,6 +161,17 @@ pub enum MobileSdkError {
         /// Human-readable detail.
         description: String,
     },
+
+    /// An error class the agent core introduced after this binding
+    /// was built. Reached only via the `#[non_exhaustive]`
+    /// [`sng_mobile_core::MobileError`] fallback, so a new core
+    /// variant surfaces as a neutral "unknown" rather than being
+    /// mislabelled as a configuration error.
+    #[error("unknown error: {description}")]
+    Unknown {
+        /// Human-readable detail.
+        description: String,
+    },
 }
 
 impl MobileSdkError {
@@ -187,17 +198,10 @@ impl From<sng_mobile_core::MobileError> for MobileSdkError {
         // `#[from]` chain's detail in the single `description`
         // string. `MobileError` is `#[non_exhaustive]`, so the
         // wildcard arm keeps this mapping compiling if the core
-        // adds a new failure class — it degrades to a `Config`-class
-        // description carrying the new variant's `Display`, never a
-        // panic.
+        // adds a new failure class — it degrades to the neutral
+        // `Unknown` class carrying the new variant's `Display`,
+        // never a panic.
         let description = err.to_string();
-        // The explicit `Config` arm shares a body with the
-        // `#[non_exhaustive]` wildcard fallback below, but is kept
-        // listed so this mapping enumerates every *known* core
-        // variant 1:1; only genuinely unknown future variants fall
-        // through the wildcard. Collapsing them would hide that
-        // intent.
-        #[allow(clippy::match_same_arms)]
         match err {
             E::Config(_) => Self::Config { description },
             E::Enrollment(_) => Self::Enrollment { description },
@@ -213,10 +217,11 @@ impl From<sng_mobile_core::MobileError> for MobileSdkError {
             E::Timeout(_) => Self::Timeout { description },
             E::Lifecycle(_) => Self::Lifecycle { description },
             // `MobileError` is `#[non_exhaustive]`: any future
-            // variant maps to the closest stable foreign class
-            // rather than breaking the build or leaking an untyped
-            // panic.
-            _ => Self::Config { description },
+            // variant maps to the neutral `Unknown` class (carrying
+            // its `Display`) rather than breaking the build, leaking
+            // an untyped panic, or being mislabelled as a config
+            // error.
+            _ => Self::Unknown { description },
         }
     }
 }

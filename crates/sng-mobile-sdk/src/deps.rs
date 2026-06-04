@@ -112,7 +112,7 @@ pub(crate) fn assemble(
         core_config.auth.clone(),
         redirect_uri,
         surface,
-    ));
+    )?);
     let auth_session: Arc<dyn AuthSession> = auth.clone();
 
     let deps = MobileAgentDeps {

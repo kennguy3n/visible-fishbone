@@ -49,7 +49,6 @@ ed25519-dalek = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
-uuid = { workspace = true }
 
 # Real Apple-platform backings; only enter the build graph on iOS.
 [target.'cfg(target_os = "ios")'.dependencies]
