@@ -9,10 +9,13 @@
 // The three tenant-scoped routes inherit RequireTenant via
 // MountTenantScoped, so a JWT bound to tenant-A cannot read or mutate
 // tenant-B's budgets by forging the path. The admin cost-report is not
-// tenant-scoped; it is gated on a platform-admin credential — a JWT
-// with no tenant_id claim — mirroring how the auth chain leaves
-// TenantIDFromContext == uuid.Nil for global operators (see
-// middleware/tenant.go). A tenant-bound caller is refused with 403.
+// tenant-scoped; it is gated on an explicit platform-scoped RBAC grant
+// (metering:read_platform_report) via AuthorizePlatform, mirroring the
+// PoP / MSP / compliance admin surfaces. Absence of a tenant_id claim
+// is necessary but NOT sufficient — the caller must additionally hold a
+// platform-scoped role carrying the permission (or the platform
+// wildcard), so a future non-admin tenant-less token cannot read the
+// platform-wide cost / revenue / margin breakdown.
 package handler
 
 import (
@@ -51,18 +54,30 @@ type MeteringPlatformReporter interface {
 	PlatformReport(ctx context.Context) (metering.PlatformCostReport, error)
 }
 
+// permMeteringReadPlatformReport is the platform-scoped permission the
+// admin cost-report endpoint requires. It is platform-scoped (the
+// report spans every tenant), so an MSP- or tenant-scoped grant does
+// NOT satisfy it — only a platform-scoped role with this permission
+// (or the platform wildcard "*"). The PlatformAuthorizer interface is
+// shared with the PoP admin surface (see pop.go).
+const permMeteringReadPlatformReport = "metering:read_platform_report"
+
 // MeteringHandler exposes the cost-metering REST surface.
 type MeteringHandler struct {
 	usage    MeteringUsageReader
 	budgets  MeteringBudgetService
 	reporter MeteringPlatformReporter
+	authz    PlatformAuthorizer
 }
 
 // NewMeteringHandler wires the handler. Any nil dependency disables the
 // routes that need it (Register skips a nil handler entirely), so a
-// deployment without metering wired can still boot.
-func NewMeteringHandler(usage MeteringUsageReader, budgets MeteringBudgetService, reporter MeteringPlatformReporter) *MeteringHandler {
-	return &MeteringHandler{usage: usage, budgets: budgets, reporter: reporter}
+// deployment without metering wired can still boot. The admin
+// cost-report route additionally requires authz: a nil authorizer
+// leaves it unregistered (it 404s) rather than serving platform-wide
+// cost data behind a weaker gate.
+func NewMeteringHandler(usage MeteringUsageReader, budgets MeteringBudgetService, reporter MeteringPlatformReporter, authz PlatformAuthorizer) *MeteringHandler {
+	return &MeteringHandler{usage: usage, budgets: budgets, reporter: reporter, authz: authz}
 }
 
 // Register attaches the metering routes.
@@ -79,7 +94,7 @@ func (h *MeteringHandler) Register(mux *http.ServeMux) {
 	if h.budgets != nil {
 		MountTenantScoped(mux, "PUT /api/v1/tenants/{tenant_id}/budgets", h.putBudgets)
 	}
-	if h.reporter != nil {
+	if h.reporter != nil && h.authz != nil {
 		mux.HandleFunc("GET /api/v1/admin/cost-report", h.adminCostReport)
 	}
 }
@@ -323,10 +338,11 @@ func (h *MeteringHandler) putBudgets(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, budgetsResponse{TenantID: tenantID, Budgets: lines})
 }
 
-// adminCostReport returns the platform-wide cost report. MSP/admin
-// only: a tenant-bound credential is refused.
+// adminCostReport returns the platform-wide cost report. Platform
+// admin only: the caller must hold the metering:read_platform_report
+// permission via a platform-scoped role.
 func (h *MeteringHandler) adminCostReport(w http.ResponseWriter, r *http.Request) {
-	if !requirePlatformAdmin(w, r) {
+	if !h.requirePlatform(w, r, permMeteringReadPlatformReport) {
 		return
 	}
 	report, err := h.reporter.PlatformReport(r.Context())
@@ -337,14 +353,38 @@ func (h *MeteringHandler) adminCostReport(w http.ResponseWriter, r *http.Request
 	WriteJSON(w, http.StatusOK, report)
 }
 
-// requirePlatformAdmin enforces that the caller is a platform-admin
-// (global) credential rather than a tenant-scoped one. The auth chain
-// binds a tenant_id onto the context for tenant credentials; a global
-// operator's JWT carries none, leaving TenantIDFromContext == Nil.
-// Returns false (and writes 403) when a tenant-bound caller is seen.
-func requirePlatformAdmin(w http.ResponseWriter, r *http.Request) bool {
+// requirePlatform gates a platform-scoped metering route on an explicit
+// RBAC grant. Returns true when the request may proceed, false (after
+// writing the response) otherwise. Mirrors PoPHandler.requirePlatform /
+// MSPHandler.requirePlatformPermission: an authenticated user identity
+// is required, and AuthorizePlatform must grant the permission against
+// a platform-scoped role (an MSP- or tenant-scoped grant does not
+// qualify).
+func (h *MeteringHandler) requirePlatform(w http.ResponseWriter, r *http.Request, permission string) bool {
+	// Defense in depth: a platform operator's JWT carries no tenant_id,
+	// so a tenant-bound credential is refused outright before the RBAC
+	// lookup. This is necessary but NOT sufficient — the grant check
+	// below is the real gate.
 	if middleware.TenantIDFromContext(r.Context()) != uuid.Nil {
-		WriteError(w, http.StatusForbidden, "forbidden", "platform admin privileges required")
+		WriteError(w, http.StatusForbidden, "platform_forbidden",
+			"platform-scoped metering routes are not accessible to tenant-bound credentials")
+		return false
+	}
+	userID := middleware.UserIDFromContext(r.Context())
+	if userID == uuid.Nil {
+		WriteError(w, http.StatusUnauthorized, "unauthenticated",
+			"platform-scoped metering routes require an authenticated user identity")
+		return false
+	}
+	allowed, err := h.authz.AuthorizePlatform(r.Context(), userID, permission)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "authorization_failed",
+			"failed to evaluate platform authorization")
+		return false
+	}
+	if !allowed {
+		WriteError(w, http.StatusForbidden, "platform_forbidden",
+			"credentials do not authorise platform-scoped metering operations")
 		return false
 	}
 	return true

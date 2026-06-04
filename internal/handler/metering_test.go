@@ -72,6 +72,13 @@ func (f *fakeReporter) PlatformReport(_ context.Context) (metering.PlatformCostR
 const meteringJWTSecret = "test-jwt-secret-key"
 
 func newMeteringTestRouter(usage handler.MeteringUsageReader, budgets handler.MeteringBudgetService, reporter handler.MeteringPlatformReporter) http.Handler {
+	// Default to a granting authorizer so the admin route is registered
+	// and reachable; tests that exercise the authorization gate use
+	// newMeteringTestRouterAuthz with an explicit double.
+	return newMeteringTestRouterAuthz(usage, budgets, reporter, platformAuthz{allow: true})
+}
+
+func newMeteringTestRouterAuthz(usage handler.MeteringUsageReader, budgets handler.MeteringBudgetService, reporter handler.MeteringPlatformReporter, authz handler.PlatformAuthorizer) http.Handler {
 	cfg := &config.Config{
 		Auth: config.Auth{
 			JWTSecret:    meteringJWTSecret,
@@ -82,7 +89,7 @@ func newMeteringTestRouter(usage handler.MeteringUsageReader, budgets handler.Me
 	}
 	return handler.NewRouter(handler.RouterDeps{
 		Config:   cfg,
-		Metering: handler.NewMeteringHandler(usage, budgets, reporter),
+		Metering: handler.NewMeteringHandler(usage, budgets, reporter, authz),
 	})
 }
 
@@ -210,9 +217,12 @@ func TestMeteringCrossTenantPathForbidden(t *testing.T) {
 func TestMeteringAdminCostReportRequiresPlatformAdmin(t *testing.T) {
 	t.Parallel()
 	reporter := &fakeReporter{report: metering.PlatformCostReport{TenantCount: 3, TotalRevenueUSD: 2098}}
-	router := newMeteringTestRouter(fakeUsageReader{}, &fakeBudgetService{}, reporter)
+	// Granting authorizer: a platform-scoped operator holding
+	// metering:read_platform_report.
+	router := newMeteringTestRouterAuthz(fakeUsageReader{}, &fakeBudgetService{}, reporter, platformAuthz{allow: true})
 
-	// Tenant-bound token → 403.
+	// Tenant-bound token → 403 (RequireTenant binds a tenant_id, but the
+	// platform gate also rejects it since it carries no platform grant).
 	rec := doJSON(t, router, http.MethodGet, "/api/v1/admin/cost-report", meteringToken(t, uuid.New().String()), nil)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("tenant token status = %d, want 403", rec.Code)
@@ -221,12 +231,32 @@ func TestMeteringAdminCostReportRequiresPlatformAdmin(t *testing.T) {
 		t.Fatal("reporter must not run for a forbidden caller")
 	}
 
-	// Global (no tenant_id) token → 200.
+	// Global (no tenant_id) token WITH the platform grant → 200.
 	rec = doJSON(t, router, http.MethodGet, "/api/v1/admin/cost-report", meteringToken(t, ""), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin token status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	if !reporter.called {
 		t.Fatal("reporter should have run for a platform admin")
+	}
+}
+
+// TestMeteringAdminCostReportDeniesTenantlessWithoutGrant pins the fix
+// for the Devin Review finding that the admin cost-report was gated on
+// the mere absence of a tenant_id claim. A tenant-less token that does
+// NOT hold the platform grant must be refused (403) and the reporter
+// must not run — absence of a tenant_id is necessary but not
+// sufficient.
+func TestMeteringAdminCostReportDeniesTenantlessWithoutGrant(t *testing.T) {
+	t.Parallel()
+	reporter := &fakeReporter{report: metering.PlatformCostReport{TenantCount: 3}}
+	router := newMeteringTestRouterAuthz(fakeUsageReader{}, &fakeBudgetService{}, reporter, platformAuthz{allow: false})
+
+	rec := doJSON(t, router, http.MethodGet, "/api/v1/admin/cost-report", meteringToken(t, ""), nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("tenant-less, ungranted status = %d, want 403", rec.Code)
+	}
+	if reporter.called {
+		t.Fatal("reporter must not run without the platform grant")
 	}
 }

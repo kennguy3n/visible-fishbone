@@ -122,6 +122,25 @@ func TestTenantOverrideTakesPrecedenceOverTier(t *testing.T) {
 	}
 }
 
+func TestGlobalDefaultsRejectUnknownMeter(t *testing.T) {
+	// A typo'd meter name in METERING_DEFAULT_BUDGETS must fail boot
+	// rather than being silently dropped (matches the strict-parse
+	// contract of the config layer).
+	_, err := NewBudgetEnforcer(staticCurrent{}, newFakeStore(), fakeTiers{tier: repository.TenantTierStarter}, nil,
+		WithGlobalDefaults(map[string]int64{"llm_callz": 100}))
+	if err == nil {
+		t.Fatal("expected construction error for unknown meter name, got nil")
+	}
+}
+
+func TestGlobalDefaultsRejectNonPositive(t *testing.T) {
+	_, err := NewBudgetEnforcer(staticCurrent{}, newFakeStore(), fakeTiers{tier: repository.TenantTierStarter}, nil,
+		WithGlobalDefaults(map[string]int64{string(MeterLLMCalls): 0}))
+	if err == nil {
+		t.Fatal("expected construction error for non-positive default, got nil")
+	}
+}
+
 func TestGlobalDefaultsFallback(t *testing.T) {
 	tid := uuid.New()
 	// No tier default for malware_scans; supply a global default.

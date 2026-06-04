@@ -102,10 +102,12 @@ type Metering struct {
 	// DefaultBudgets is the global, tier-independent fallback map of
 	// per-meter hard limits applied only when neither a tenant
 	// override nor a tier default exists. Keys are meter names (e.g.
-	// "s3_bytes_archived"); unknown meters and non-positive values are
-	// ignored by the enforcer. Populated from METERING_DEFAULT_BUDGETS
-	// as a comma-separated "meter=value" list. Optional: nil means the
-	// only fallbacks are the built-in per-tier defaults.
+	// "s3_bytes_archived"); an unknown meter name or a non-positive
+	// value is a fatal config error — the enforcer fails construction
+	// (boot fails) rather than silently dropping it. Populated from
+	// METERING_DEFAULT_BUDGETS as a comma-separated "meter=value"
+	// list. Optional: nil means the only fallbacks are the built-in
+	// per-tier defaults.
 	DefaultBudgets map[string]int64
 }
 

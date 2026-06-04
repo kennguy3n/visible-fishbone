@@ -828,7 +828,7 @@ func buildRouter(
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering reports: %w", err)
 	}
-	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports)
+	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports, rbacSvc)
 
 	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo,
 		metering.NewGuardrailBudgetGate(budgetEnforcer), metering.NewGuardrailUsageRecorder(meteringSvc), logger)

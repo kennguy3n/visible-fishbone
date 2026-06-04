@@ -138,6 +138,12 @@ type BudgetEnforcer struct {
 	// after construction.
 	globalDefaults map[Meter]int64
 
+	// optErrs accumulates validation errors raised by options during
+	// construction; NewBudgetEnforcer fails if any were recorded, so an
+	// invalid config (e.g. a typo'd meter name) fails boot rather than
+	// being silently dropped.
+	optErrs []error
+
 	mu    sync.RWMutex
 	cache map[uuid.UUID]tenantBudgetCache
 
@@ -149,8 +155,12 @@ type BudgetEnforcer struct {
 type BudgetOption func(*BudgetEnforcer)
 
 // WithGlobalDefaults sets the config-supplied per-meter fallback hard
-// limits (from cfg.Metering.DefaultBudgets). Keys are meter names;
-// unknown meters are ignored.
+// limits (from cfg.Metering.DefaultBudgets). Keys are meter names. An
+// unknown meter name or a non-positive limit is a construction error
+// (recorded on the enforcer and surfaced by NewBudgetEnforcer) rather
+// than being silently dropped — a typo in METERING_DEFAULT_BUDGETS
+// fails boot, matching the strict-parse contract of the config layer
+// that produced this map.
 func WithGlobalDefaults(d map[string]int64) BudgetOption {
 	return func(b *BudgetEnforcer) {
 		if len(d) == 0 {
@@ -159,9 +169,15 @@ func WithGlobalDefaults(d map[string]int64) BudgetOption {
 		m := make(map[Meter]int64, len(d))
 		for k, v := range d {
 			meter := Meter(k)
-			if meter.Valid() && v > 0 {
-				m[meter] = v
+			if !meter.Valid() {
+				b.optErrs = append(b.optErrs, fmt.Errorf("unknown meter %q", k))
+				continue
 			}
+			if v <= 0 {
+				b.optErrs = append(b.optErrs, fmt.Errorf("meter %q: default budget must be positive, got %d", k, v))
+				continue
+			}
+			m[meter] = v
 		}
 		b.globalDefaults = m
 	}
@@ -211,6 +227,9 @@ func NewBudgetEnforcer(usage CurrentReader, store BudgetStore, tiers TierResolve
 	}
 	for _, opt := range opts {
 		opt(b)
+	}
+	if len(b.optErrs) > 0 {
+		return nil, fmt.Errorf("metering: budget: invalid global defaults: %w", errors.Join(b.optErrs...))
 	}
 	return b, nil
 }
