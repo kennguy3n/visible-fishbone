@@ -1,0 +1,104 @@
+# `sng-bench` — ShieldNet Gateway edge performance benchmark harness.
+#
+# This is a STANDALONE binary crate. It is deliberately NOT a member of
+# the root `visible-fishbone` workspace: pulling a synthetic-traffic
+# harness (raw sockets, libc, a throwaway `results/` corpus) into
+# `cargo build --workspace` / `cargo test --workspace` / `cargo deny`
+# would inflate every CI run for code that only ever runs on a
+# dedicated benchmark runner.
+#
+# The empty `[workspace]` table below makes this directory its own
+# workspace root, so the parent workspace ignores it entirely without
+# the root `Cargo.toml` needing an `exclude` entry (which a parallel
+# session also editing the root manifest would conflict with).
+[workspace]
+
+[package]
+name = "sng-bench"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "LicenseRef-Proprietary"
+authors = ["ShieldNet Gateway Contributors"]
+repository = "https://github.com/kennguy3n/visible-fishbone"
+description = "ShieldNet Gateway edge data-path benchmark harness: synthetic traffic generation, throughput / latency / concurrent-flow measurement, and regression-aware reporting per edge SKU"
+publish = false
+
+[lib]
+name = "sng_bench"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sng-bench"
+path = "src/main.rs"
+
+[dependencies]
+# CLI surface — mirrors the feature set the workspace binaries use
+# (`derive` for the typed config, `env` for env-var fallbacks, and
+# `wrap_help` for readable `--help` on narrow terminals).
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+
+# Report serialization. JSON is the machine-readable artifact the
+# `benchmark.yml` workflow diffs run-over-run; TOML is the profile
+# input format (matching the rest of the repo's config convention).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Typed error taxonomy — same crate the enforcement-plane crates use.
+thiserror = "2"
+
+# Raw-socket lifecycle. `socket2` gives us the full setsockopt surface
+# (AF_PACKET bind, send buffer sizing) over a safe API; the one place
+# that genuinely needs `unsafe` (building the link-layer `sockaddr_ll`)
+# is scoped and documented in `traffic_gen.rs`.
+socket2 = { version = "0.6", features = ["all"] }
+libc = "0.2"
+
+# Deterministic-but-randomized 5-tuple sampling. Pinned to the same
+# major the workspace uses (`rand = "0.8"`).
+rand = "0.8"
+
+[dev-dependencies]
+# Float-tolerant assertions for the histogram percentile tests.
+approx = "0.5"
+
+# Release profile tuned for the harness: the measurement loop must not
+# be perturbed by debug assertions or missed inlining, so we build it
+# optimized. Unlike the workspace edge binaries we keep the unwinder
+# (no `panic = "abort"`) so a generator fault produces a readable
+# backtrace on the bench runner rather than an opaque abort.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+# Workspace-wide lint posture, mirrored from the parent repo so the
+# harness holds itself to the same bar: `unsafe_code` is denied by
+# default and only re-enabled, with a documented rationale, on the
+# single module that builds the AF_PACKET `sockaddr_ll`.
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"
+# Numeric conversions are pervasive and intentional in packet-crafting
+# and rate/percentile math (byte counts, jiffies, ns timestamps); the
+# values are bounded well within range at every site, so the lossy-cast
+# family is noise here rather than signal.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+cast_lossless = "allow"
+
+[lints]
+workspace = true

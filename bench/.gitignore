@@ -1,0 +1,4 @@
+# Build output for the standalone bench workspace. The root .gitignore's
+# `/target/` is anchored to the repo root and does not cover this nested
+# workspace, so ignore it explicitly here.
+/target/

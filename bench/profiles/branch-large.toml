@@ -1,0 +1,11 @@
+# Edge SKU profile: large branch / campus appliance.
+#
+# High-end deployment (campus / data-center edge). An 8-core box on a
+# 25 GbE uplink; the published acceptance target is 10 Gbps of inspected
+# throughput, the point at which per-core inspection cost — rather than
+# the NIC — becomes the bottleneck.
+name = "branch-large"
+vcpus = 8
+ram_gb = 16
+nic_gbps = 25.0
+target_gbps = 10.0

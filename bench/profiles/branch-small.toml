@@ -1,0 +1,11 @@
+# Edge SKU profile: small branch appliance.
+#
+# Entry-level deployment (small office / retail branch). Sizing reflects
+# a 2-core box on a 1 GbE uplink; the published acceptance target is
+# 800 Mbps of inspected throughput, leaving headroom on the NIC for
+# bursts and control-plane traffic.
+name = "branch-small"
+vcpus = 2
+ram_gb = 4
+nic_gbps = 1.0
+target_gbps = 0.8

@@ -1,0 +1,234 @@
+# Weekly edge data-path benchmark for the SNG `bench/` harness.
+#
+# This is intentionally separate from `ci.yml`: the benchmark crate is a
+# STANDALONE cargo workspace under `bench/` (not a member of the root
+# workspace), so none of the per-PR Rust gates build or run it. Pulling a
+# full benchmark sweep into every PR would be wasteful; instead it runs on
+# a weekly schedule (and on demand via workflow_dispatch).
+#
+# What it does each run:
+#   * builds the `sng-bench` harness in release mode,
+#   * sweeps every edge SKU profile across the three measurement modes,
+#   * writes one JSON report per (profile, mode) into `bench/results/`,
+#   * compares each fresh throughput report against the committed baseline
+#     (`bench/results/baseline-<profile>.json`) and FAILS the job — and
+#     files a tracking issue — if throughput regresses by more than the
+#     configured threshold (default 10%),
+#   * uploads every report as a build artifact, and on the scheduled run
+#     commits the refreshed reports back to the repository.
+#
+# Traffic generation: the live modes transmit real frames over AF_PACKET
+# and require CAP_NET_RAW plus an edge in-path, which a stock
+# GitHub-hosted runner does not provide. The default sweep therefore runs
+# in `--dry-run` mode (full craft + measure + report pipeline, no wire
+# I/O), which keeps the pipeline self-testing on a hosted runner. Point
+# `BENCH_RUNNER` at a dedicated self-hosted runner wired in-path with the
+# edge under test and set `BENCH_DRY_RUN=` (empty) to publish real
+# line-rate numbers.
+
+name: benchmark
+
+on:
+  schedule:
+    # 07:00 UTC every Monday.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run in dry-run mode (no AF_PACKET wire I/O)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Must match `rust-version` in the bench workspace Cargo.toml.
+  RUST_TOOLCHAIN: "1.85"
+  CARGO_TERM_COLOR: always
+  # Per-mode wall-clock. Kept small for the hosted dry-run sweep; raise it
+  # on a dedicated runner where you want a statistically stable sample.
+  BENCH_DURATION: "15"
+  # Throughput regression threshold (fractional drop) the compare gate
+  # alerts on. 0.10 == a >10% throughput drop fails the run.
+  BENCH_THROUGHPUT_DROP: "0.10"
+  # Latency regression threshold (fractional increase).
+  BENCH_LATENCY_INCREASE: "0.10"
+
+jobs:
+  benchmark:
+    name: benchmark (${{ matrix.profile }})
+    # ubuntu-latest runs the self-testing dry-run sweep. Swap to a
+    # self-hosted, in-path runner label to capture real line-rate numbers.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [branch-small, branch-medium, branch-large]
+    defaults:
+      run:
+        working-directory: bench
+    outputs:
+      regressed: ${{ steps.compare.outputs.regressed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bench
+          shared-key: bench-${{ runner.os }}
+
+      - name: build harness (release)
+        run: cargo build --release --locked
+
+      - name: run benchmark sweep
+        env:
+          # workflow_dispatch can disable dry-run; the scheduled run is
+          # always dry-run on a hosted runner. Set to empty on a dedicated
+          # in-path runner to transmit real traffic.
+          BENCH_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && '' || '--dry-run' }}
+        run: |
+          set -euo pipefail
+          bin=target/release/sng-bench
+          profile=profiles/${{ matrix.profile }}.toml
+          mkdir -p results
+          # Representative slice of the dimension matrix: a small-frame
+          # pps-bound point and a jumbo-frame bandwidth-bound point, each
+          # at the mid policy-complexity tier. Widen on a dedicated runner.
+          for mode in throughput latency concurrent-flows; do
+            echo "::group::${mode} / ${{ matrix.profile }}"
+            "$bin" "$mode" \
+              --profile "$profile" \
+              --duration "${BENCH_DURATION}" \
+              --packet-size 1500 \
+              --policy-rules 100 \
+              --inspection url-cat \
+              --out-dir results \
+              --git-sha "${GITHUB_SHA}" \
+              ${BENCH_DRY_RUN}
+            echo "::endgroup::"
+          done
+
+      - name: compare against baseline
+        id: compare
+        run: |
+          set -uo pipefail
+          bin=target/release/sng-bench
+          baseline="results/baseline-${{ matrix.profile }}.json"
+          echo "regressed=false" >> "$GITHUB_OUTPUT"
+          if [ ! -f "$baseline" ]; then
+            echo "no committed baseline at ${baseline}; skipping regression gate (first run seeds it)"
+            exit 0
+          fi
+          latest=$(ls -t results/${{ matrix.profile }}-throughput-*.json | head -n1)
+          echo "comparing ${latest} against ${baseline}"
+          set +e
+          "$bin" compare \
+            --baseline "$baseline" \
+            --current "$latest" \
+            --throughput-drop "${BENCH_THROUGHPUT_DROP}" \
+            --latency-increase "${BENCH_LATENCY_INCREASE}"
+          rc=$?
+          set -e
+          # Exit code 2 == ran fine but found a regression (see EXIT_REGRESSION
+          # in bench/src/main.rs). Any other non-zero is a harness failure.
+          if [ "$rc" -eq 2 ]; then
+            echo "regressed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::sng-bench compare failed with exit code ${rc}"
+            exit "$rc"
+          fi
+
+      - name: upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ matrix.profile }}-${{ github.run_id }}
+          path: bench/results/${{ matrix.profile }}-*.json
+          retention-days: 90
+
+      - name: alert on regression
+        if: steps.compare.outputs.regressed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const profile = '${{ matrix.profile }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title = `Benchmark regression: ${profile} throughput dropped >${{ env.BENCH_THROUGHPUT_DROP }}`;
+            const body = [
+              `The weekly benchmark detected a throughput regression on the **${profile}** edge SKU `,
+              `exceeding the ${{ env.BENCH_THROUGHPUT_DROP }} fractional threshold.`,
+              ``,
+              `- Run: ${runUrl}`,
+              `- Commit: ${context.sha}`,
+              ``,
+              `Reports are attached to the run as the \`bench-results-${profile}-${context.runId}\` artifact. `,
+              `Review the regression, then update \`bench/results/baseline-${profile}.json\` if the new number is the intended baseline.`,
+            ].join('\n');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['benchmark', 'regression'],
+            });
+
+      - name: fail run on regression
+        if: steps.compare.outputs.regressed == 'true'
+        run: |
+          echo "::error::throughput regression detected for ${{ matrix.profile }} (threshold ${BENCH_THROUGHPUT_DROP})"
+          exit 1
+
+  publish:
+    name: publish results to bench/results
+    needs: benchmark
+    # Only persist refreshed reports back to the repo on the scheduled
+    # run; on-demand dispatches stay artifact-only so a manual experiment
+    # never rewrites the committed history.
+    if: github.event_name == 'schedule' && always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download all reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-results-*
+          path: incoming
+          merge-multiple: true
+
+      - name: stage and commit reports
+        run: |
+          set -euo pipefail
+          mkdir -p bench/results
+          # download-artifact flattens into incoming/; copy the per-run
+          # reports into the tracked results directory.
+          if ! ls incoming/*.json >/dev/null 2>&1; then
+            echo "no reports to publish"
+            exit 0
+          fi
+          cp incoming/*.json bench/results/
+          if git diff --quiet -- bench/results; then
+            echo "no changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bench/results
+          git commit -m "bench: publish weekly results ($(date -u +%Y-%m-%d))"
+          git push
