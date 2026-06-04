@@ -1,0 +1,14 @@
+# Edge SKU profile: small cloud PoP (multi-tenant).
+#
+# Cloud point-of-presence deployment, not a branch appliance. A shared
+# 4-core VM in a public-cloud region fronting many small tenants; the
+# published acceptance target is 2 Gbps of inspected throughput
+# *aggregated* across ~100 tenants (per-tenant slices are small but the
+# PoP is sized for the fan-in). Same 4-core/8 GB class as branch-medium
+# but a lower aggregate target because the box is shared and oversubscribed
+# rather than dedicated to a single site.
+name = "cloud-pop-small"
+vcpus = 4
+ram_gb = 8
+nic_gbps = 10.0
+target_gbps = 2.0

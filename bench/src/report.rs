@@ -130,10 +130,86 @@ pub struct BenchmarkReport {
     /// Target throughput in Gbps declared by the profile (for context in
     /// the markdown summary; not used by regression detection).
     pub target_gbps: f64,
+    /// Optional same-class competitor comparison (throughput runs only).
+    ///
+    /// Additive and optional: older `results/` files predating this field
+    /// deserialize with `None`, and a report without a comparison
+    /// serializes identically to before — so [`SCHEMA_VERSION`] does not
+    /// move and committed baselines still compare cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub competitor_comparison: Option<CompetitorComparison>,
 }
 
 /// Current report schema version.
+///
+/// Deliberately *not* bumped for `competitor_comparison`: that field is a
+/// purely additive `Option` that round-trips against pre-existing JSON, so
+/// bumping would only break [`detect_regression`] against committed
+/// `baseline-*.json` files (which carry the old version) for no benefit.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// SNG's measured throughput at one operating point, set against the
+/// published figures of same-class competitor appliances.
+///
+/// Attached to a throughput [`BenchmarkReport`] so a single report is
+/// self-describing for an RFP datasheet. Every [`CompetitorRow`] carries
+/// its own caveat because the comparison is hardware/ASIC-vs-software and
+/// never apples-to-apples (see [`crate::competitor`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompetitorComparison {
+    /// SNG measured throughput (Gbps) at this operating point.
+    pub sng_measured_gbps: f64,
+    /// Competitor feature category compared against (e.g. `"firewall
+    /// throughput"`).
+    pub feature: String,
+    /// One row per same-class competitor appliance.
+    pub rows: Vec<CompetitorRow>,
+}
+
+/// A single competitor's published number set against SNG's measured one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompetitorRow {
+    /// Competitor display name, e.g. `"Fortinet FortiGate 60F"`.
+    pub competitor: String,
+    /// Competitor's published throughput (Gbps).
+    pub published_gbps: f64,
+    /// SNG-vs-competitor delta as a percentage:
+    /// `(sng - published) / published * 100`.
+    pub delta_pct: f64,
+    /// One-line verdict, including the apples-to-apples caveat.
+    pub verdict: String,
+}
+
+impl CompetitorRow {
+    /// Build a row, computing the delta and a caveated verdict from the
+    /// SNG measured number, the competitor's published number, and the
+    /// competitor's own apples-to-apples caveat.
+    #[must_use]
+    pub fn new(
+        competitor: impl Into<String>,
+        published_gbps: f64,
+        sng_measured_gbps: f64,
+        caveat: &str,
+    ) -> Self {
+        let competitor = competitor.into();
+        // published numbers are always > 0 in the catalog; guard anyway so
+        // a future zero never produces a NaN/inf delta.
+        let delta_pct = if published_gbps > 0.0 {
+            (sng_measured_gbps - published_gbps) / published_gbps * 100.0
+        } else {
+            0.0
+        };
+        let verdict = format!(
+            "SNG {sng_measured_gbps:.2} Gbps (software, VM) vs {competitor} {published_gbps:.2} Gbps published ({delta_pct:+.0}%) — informative, not apples-to-apples: {caveat}",
+        );
+        Self {
+            competitor,
+            published_gbps,
+            delta_pct,
+            verdict,
+        }
+    }
+}
 
 impl BenchmarkReport {
     /// Serialize to pretty JSON.
@@ -224,6 +300,67 @@ impl BenchmarkReport {
             "- mean CPU: **{:.1}%** · peak RSS: **{:.1} MiB**",
             self.resources.mean_cpu_busy_pct,
             self.resources.peak_rss_bytes as f64 / (1024.0 * 1024.0)
+        );
+        out
+    }
+
+    /// Render the standard markdown summary followed by the competitor
+    /// comparison table, when one is attached.
+    ///
+    /// This is the business/RFP-flavoured view of a single report: the
+    /// measured numbers plus how they stack up against same-class vendor
+    /// appliances, each row carrying its hardware-vs-software caveat. A
+    /// report with no comparison renders identically to [`Self::to_markdown`]
+    /// (plus a one-line note).
+    #[must_use]
+    pub fn to_business_markdown(&self) -> String {
+        let mut out = self.to_markdown();
+        let _ = writeln!(out);
+        match &self.competitor_comparison {
+            Some(cmp) => {
+                let _ = out.write_str(&cmp.to_markdown());
+            }
+            None => {
+                let _ = writeln!(out, "_No competitor comparison attached._");
+            }
+        }
+        out
+    }
+}
+
+impl CompetitorComparison {
+    /// Render the comparison as a markdown table (one row per competitor),
+    /// headed by the SNG measured number and the feature category, and
+    /// footed by the shared honesty caveat.
+    #[must_use]
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::with_capacity(512);
+        let _ = writeln!(out, "### Competitor comparison — {}", self.feature);
+        let _ = writeln!(
+            out,
+            "\nSNG measured: **{:.2} Gbps** (software-only, generic x86 VM).\n",
+            self.sng_measured_gbps
+        );
+        let _ = writeln!(out, "| competitor | published | SNG | delta | verdict |");
+        let _ = writeln!(out, "| --- | ---: | ---: | ---: | --- |");
+        for r in &self.rows {
+            let _ = writeln!(
+                out,
+                "| {} | {:.2} Gbps | {:.2} Gbps | {:+.0}% | {} |",
+                r.competitor, r.published_gbps, self.sng_measured_gbps, r.delta_pct, r.verdict
+            );
+        }
+        if self.rows.is_empty() {
+            let _ = writeln!(
+                out,
+                "| _(no same-class competitor published a figure)_ | | | | |"
+            );
+        }
+        let _ = writeln!(
+            out,
+            "\n> Vendor figures are for purpose-built hardware/ASIC appliances; SNG is \
+             software-only on a generic x86 VM. Treat the comparison as informative, not \
+             apples-to-apples."
         );
         out
     }
@@ -415,6 +552,18 @@ mod tests {
                 peak_rss_bytes: 256 * 1024 * 1024,
             },
             target_gbps: 5.0,
+            competitor_comparison: None,
+        }
+    }
+
+    fn sample_comparison() -> CompetitorComparison {
+        CompetitorComparison {
+            sng_measured_gbps: 4.8,
+            feature: "firewall throughput".to_string(),
+            rows: vec![
+                CompetitorRow::new("Fortinet FortiGate 60F", 10.0, 4.8, "ASIC appliance"),
+                CompetitorRow::new("Palo Alto PA-450", 5.2, 4.8, "hardware appliance"),
+            ],
         }
     }
 
@@ -539,5 +688,84 @@ mod tests {
         let mut cur = sample_report(BenchMode::Throughput);
         cur.schema_version = SCHEMA_VERSION + 1;
         assert!(detect_regression(&base, &cur, RegressionThresholds::default()).is_err());
+    }
+
+    #[test]
+    fn competitor_row_computes_signed_delta() {
+        // SNG below the published number → negative delta.
+        let under = CompetitorRow::new("X", 10.0, 4.8, "c");
+        assert!((under.delta_pct + 52.0).abs() < 1e-9);
+        // SNG above → positive delta, and the verdict carries the caveat.
+        let over = CompetitorRow::new("Y", 4.0, 5.0, "purpose-built ASIC");
+        assert!((over.delta_pct - 25.0).abs() < 1e-9);
+        assert!(over.verdict.contains("purpose-built ASIC"));
+        assert!(over.verdict.contains("not apples-to-apples"));
+    }
+
+    #[test]
+    fn competitor_row_guards_zero_published() {
+        let r = CompetitorRow::new("Z", 0.0, 4.8, "c");
+        assert!(r.delta_pct.abs() < 1e-9);
+    }
+
+    #[test]
+    fn report_with_competitor_comparison_round_trips() {
+        let mut r = sample_report(BenchMode::Throughput);
+        r.competitor_comparison = Some(sample_comparison());
+        let json = r.to_json().unwrap();
+        let back = BenchmarkReport::from_json(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn report_without_comparison_omits_the_field_in_json() {
+        let r = sample_report(BenchMode::Throughput);
+        let json = r.to_json().unwrap();
+        assert!(!json.contains("competitor_comparison"));
+    }
+
+    #[test]
+    fn legacy_json_without_field_deserializes_to_none() {
+        // A report serialized before the field existed must still load.
+        let r = sample_report(BenchMode::Throughput);
+        let mut value: serde_json::Value = serde_json::from_str(&r.to_json().unwrap()).unwrap();
+        assert!(
+            value
+                .as_object_mut()
+                .unwrap()
+                .remove("competitor_comparison")
+                .is_none()
+        );
+        let back = BenchmarkReport::from_json(&value.to_string()).unwrap();
+        assert!(back.competitor_comparison.is_none());
+    }
+
+    #[test]
+    fn business_markdown_renders_full_comparison_table() {
+        let mut r = sample_report(BenchMode::Throughput);
+        r.competitor_comparison = Some(sample_comparison());
+        let md = r.to_business_markdown();
+        assert!(md.contains("Competitor comparison"));
+        assert!(md.contains("Fortinet FortiGate 60F"));
+        assert!(md.contains("Palo Alto PA-450"));
+        assert!(md.contains("-52%"));
+        assert!(md.contains("not apples-to-apples"));
+    }
+
+    #[test]
+    fn business_markdown_notes_absent_comparison() {
+        let md = sample_report(BenchMode::Throughput).to_business_markdown();
+        assert!(md.contains("No competitor comparison"));
+    }
+
+    #[test]
+    fn empty_comparison_table_renders_placeholder_row() {
+        let cmp = CompetitorComparison {
+            sng_measured_gbps: 1.0,
+            feature: "NGFW (URL filtering + app-id) throughput".to_string(),
+            rows: Vec::new(),
+        };
+        let md = cmp.to_markdown();
+        assert!(md.contains("no same-class competitor"));
     }
 }

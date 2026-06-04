@@ -32,7 +32,10 @@ Three measurement modes, each a subcommand of the `sng-bench` binary:
 | `concurrent-flows` | How many active flows before degradation? | max flows |
 
 A fourth subcommand, `compare`, diffs two JSON reports and exits non-zero
-on regression (see [Regression detection](#regression-detection)).
+on regression (see [Regression detection](#regression-detection)). A fifth,
+`business-report`, sweeps every profile across all three modes, packet
+sizes, and inspection depths and renders one consolidated RFP-response
+datasheet (see [Business report](#business-report)).
 
 ### Dimensions
 
@@ -62,6 +65,10 @@ falls short.
 | [`branch-small`](./profiles/branch-small.toml) | 2 | 4 GB | 1 Gbps | 800 Mbps |
 | [`branch-medium`](./profiles/branch-medium.toml) | 4 | 8 GB | 10 Gbps | 5 Gbps |
 | [`branch-large`](./profiles/branch-large.toml) | 8 | 16 GB | 25 Gbps | 10 Gbps |
+| [`cloud-pop-small`](./profiles/cloud-pop-small.toml) | 4 | 8 GB | 10 Gbps | 2 Gbps |
+
+`cloud-pop-small` models a shared multi-tenant cloud PoP (2 Gbps
+aggregate across ~100 tenants) rather than a single-tenant branch box.
 
 ## Methodology
 
@@ -134,6 +141,27 @@ sng-bench compare \
 
 Exit codes: `0` within thresholds, `2` regression detected (distinct from
 a harness failure), other non-zero = error.
+
+## Business report
+
+`business-report` runs the full sweep (every profile × `{throughput,
+latency, concurrent-flows}` × packet sizes × inspection depths) and
+renders one consolidated markdown datasheet plus its backing JSON, with
+an executive summary, per-SKU detail (throughput matrix, latency
+percentiles, resource use), a competitor comparison, and a cost analysis:
+
+```bash
+target/release/sng-bench business-report \
+  --profiles-dir profiles --dry-run \
+  --out-dir results --git-sha "$(git rev-parse HEAD)"
+```
+
+The competitor section compares SNG's measured per-depth throughput
+against published Fortinet / Palo Alto / Check Point numbers for the same
+core class ([`competitor.rs`](./src/competitor.rs)). Those are
+purpose-built hardware/ASIC figures and SNG is software-only on a generic
+x86 VM, so **every row carries that caveat** — the comparison is
+informative, not apples-to-apples.
 
 ## CI
 
