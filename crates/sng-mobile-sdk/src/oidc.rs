@@ -160,17 +160,21 @@ impl OidcAuthSession {
 
         // 3. Present the browser leg through the platform surface.
         let callback = self.surface.present_auth_url(&url).await?;
-        if let Some(err) = callback.error() {
-            return Err(MobileSdkError::sign_in(format!(
-                "identity provider returned an error on the callback: {err}"
-            )));
-        }
         // 4. Reject a callback whose `state` does not echo ours
-        //    (CSRF / mix-up defence) before touching the code.
+        //    (CSRF / mix-up defence) before inspecting *any* other
+        //    parameter. Per RFC 6749 §10.12 and OIDC Core §3.1.2.7 the
+        //    `state` check gates everything else, so a forged callback
+        //    — even one carrying `error=…` — is classified as a CSRF
+        //    attempt rather than mistaken for a genuine IdP error.
         if callback.state().as_deref() != Some(state.as_str()) {
             return Err(MobileSdkError::sign_in(
                 "authorization callback state did not match the request (possible CSRF)",
             ));
+        }
+        if let Some(err) = callback.error() {
+            return Err(MobileSdkError::sign_in(format!(
+                "identity provider returned an error on the callback: {err}"
+            )));
         }
         let code = callback
             .code()
