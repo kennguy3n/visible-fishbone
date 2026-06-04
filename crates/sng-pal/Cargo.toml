@@ -24,6 +24,7 @@ dev-keystore = []
 
 [dependencies]
 sng-core = { workspace = true }
+sng-dlp = { workspace = true }
 async-trait = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand_core = { workspace = true }

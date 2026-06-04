@@ -2298,6 +2298,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "sng-dlp"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "arc-swap",
+ "async-trait",
+ "chrono",
+ "hex",
+ "pretty_assertions",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sng-core",
+ "sng-policy-eval",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sng-dns"
 version = "0.1.0"
 dependencies = [
@@ -2551,6 +2572,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sng-core",
+ "sng-dlp",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

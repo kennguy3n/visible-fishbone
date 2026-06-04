@@ -1,0 +1,217 @@
+package dlp_test
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/service/dlp"
+)
+
+func TestService_EndpointRules_CompilesEnabledPolicies(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	if _, err := svc.CreatePolicy(ctx, tid, repository.DLPPolicy{
+		Name:    "PCI",
+		Rules:   []repository.DLPRule{{Type: repository.DLPRuleTypeRegex, Pattern: `\d{16}`}},
+		Action:  repository.DLPActionBlock,
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("create enabled: %v", err)
+	}
+	// A disabled policy must not contribute any rules.
+	if _, err := svc.CreatePolicy(ctx, tid, repository.DLPPolicy{
+		Name:    "Disabled",
+		Rules:   []repository.DLPRule{{Type: repository.DLPRuleTypeKeyword, Pattern: "secret"}},
+		Action:  repository.DLPActionLog,
+		Enabled: false,
+	}); err != nil {
+		t.Fatalf("create disabled: %v", err)
+	}
+
+	rules, err := svc.EndpointRules(ctx, tid)
+	if err != nil {
+		t.Fatalf("endpoint rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 endpoint rule, got %d", len(rules))
+	}
+	r := rules[0]
+	if r.PatternType != repository.DLPRuleTypeRegex {
+		t.Errorf("pattern_type = %q, want regex", r.PatternType)
+	}
+	if r.PatternData != `\d{16}` {
+		t.Errorf("pattern_data = %q", r.PatternData)
+	}
+	if r.Action != dlp.EndpointActionBlock {
+		t.Errorf("action = %q, want block", r.Action)
+	}
+	if r.Severity != dlp.EndpointSeverityCritical {
+		t.Errorf("severity = %q, want critical", r.Severity)
+	}
+	if len(r.Channels) != 0 {
+		t.Errorf("expected all-channels (empty list), got %v", r.Channels)
+	}
+}
+
+func TestService_CompileEndpointBundle_WireShape(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	if _, err := svc.CreatePolicy(ctx, tid, repository.DLPPolicy{
+		Name:    "Redact PII",
+		Rules:   []repository.DLPRule{{Type: repository.DLPRuleTypeMIPLabel, SensitivityLevel: "confidential"}},
+		Action:  repository.DLPActionRedact,
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	blob, err := svc.CompileEndpointBundle(ctx, tid, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Decode into a generic map and assert the keys/values match the
+	// shape sng-dlp's DlpPolicy / DlpRule deserialize.
+	var doc map[string]any
+	if err := json.Unmarshal(blob, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc["schema_version"].(float64) != 1 {
+		t.Errorf("schema_version = %v, want 1", doc["schema_version"])
+	}
+	if doc["target"] != "endpoint" {
+		t.Errorf("target = %v, want endpoint", doc["target"])
+	}
+	if doc["domain"] != "dlp" {
+		t.Errorf("domain = %v, want dlp", doc["domain"])
+	}
+
+	rules, ok := doc["rules"].([]any)
+	if !ok || len(rules) != 1 {
+		t.Fatalf("rules = %v", doc["rules"])
+	}
+	rule := rules[0].(map[string]any)
+	if rule["pattern_type"] != "mip_label" {
+		t.Errorf("pattern_type = %v, want mip_label", rule["pattern_type"])
+	}
+	// Redact maps to a user warning on the endpoint.
+	if rule["action"] != "warn" {
+		t.Errorf("action = %v, want warn", rule["action"])
+	}
+	if rule["pattern_data"] != "confidential" {
+		t.Errorf("pattern_data = %v, want confidential (from SensitivityLevel)", rule["pattern_data"])
+	}
+
+	channels, ok := doc["channels"].(map[string]any)
+	if !ok || len(channels) != 5 {
+		t.Fatalf("channels = %v", doc["channels"])
+	}
+	clip, ok := channels["clipboard"].(map[string]any)
+	if !ok || clip["enabled"] != true {
+		t.Errorf("clipboard channel = %v", channels["clipboard"])
+	}
+}
+
+func TestCompileEndpointBundle_ActionFloorOverride(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	if _, err := svc.CreatePolicy(ctx, tid, repository.DLPPolicy{
+		Name:    "Log only",
+		Rules:   []repository.DLPRule{{Type: repository.DLPRuleTypeKeyword, Pattern: "internal"}},
+		Action:  repository.DLPActionLog,
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	channels := dlp.DefaultEndpointChannelConfig()
+	block := dlp.EndpointActionBlock
+	channels[dlp.EndpointChannelUSBTransfer] = dlp.EndpointChannelConfig{
+		Enabled:        true,
+		ActionOverride: &block,
+	}
+
+	blob, err := svc.CompileEndpointBundle(ctx, tid, channels)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(blob, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	usb := doc["channels"].(map[string]any)["usb_transfer"].(map[string]any)
+	if usb["action_override"] != "block" {
+		t.Errorf("usb action_override = %v, want block", usb["action_override"])
+	}
+	// A channel with no floor must omit action_override entirely.
+	clip := doc["channels"].(map[string]any)["clipboard"].(map[string]any)
+	if _, present := clip["action_override"]; present {
+		t.Errorf("clipboard must omit action_override, got %v", clip["action_override"])
+	}
+}
+
+func TestValidateEndpointPolicy_RejectsBadDocuments(t *testing.T) {
+	base := func() dlp.EndpointDLPPolicy {
+		return dlp.EndpointDLPPolicy{
+			SchemaVersion: 1,
+			Target:        repository.PolicyBundleTargetEndpoint,
+			Domain:        "dlp",
+			Rules: []dlp.EndpointDLPRule{
+				{ID: "p:0", Name: "n", PatternType: repository.DLPRuleTypeRegex, PatternData: "x",
+					Severity: dlp.EndpointSeverityHigh, Action: dlp.EndpointActionLog},
+			},
+			Channels: dlp.DefaultEndpointChannelConfig(),
+		}
+	}
+
+	if err := dlp.ValidateEndpointPolicy(base()); err != nil {
+		t.Fatalf("base policy should be valid: %v", err)
+	}
+
+	wrongTarget := base()
+	wrongTarget.Target = repository.PolicyBundleTargetEdge
+	if err := dlp.ValidateEndpointPolicy(wrongTarget); err == nil {
+		t.Error("expected error for non-endpoint target")
+	}
+
+	wrongDomain := base()
+	wrongDomain.Domain = "swg"
+	if err := dlp.ValidateEndpointPolicy(wrongDomain); err == nil {
+		t.Error("expected error for non-dlp domain")
+	}
+
+	newer := base()
+	newer.SchemaVersion = 2
+	if err := dlp.ValidateEndpointPolicy(newer); err == nil {
+		t.Error("expected error for unsupported schema version")
+	}
+
+	dup := base()
+	dup.Rules = append(dup.Rules, dup.Rules[0])
+	if err := dlp.ValidateEndpointPolicy(dup); err == nil {
+		t.Error("expected error for duplicate rule id")
+	}
+}
+
+func TestCompileEndpointBundle_EmptyTenantIsValid(t *testing.T) {
+	svc, tid := setup(t)
+	blob, err := svc.CompileEndpointBundle(context.Background(), tid, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var policy dlp.EndpointDLPPolicy
+	if err := json.Unmarshal(blob, &policy); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(policy.Rules) != 0 {
+		t.Errorf("expected no rules, got %d", len(policy.Rules))
+	}
+	if policy.Target != repository.PolicyBundleTargetEndpoint {
+		t.Errorf("target = %q", policy.Target)
+	}
+}
