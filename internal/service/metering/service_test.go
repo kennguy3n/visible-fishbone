@@ -3,6 +3,8 @@ package metering
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -283,5 +285,105 @@ func TestRunFinalFlushOnContextCancel(t *testing.T) {
 	start, _ := DefaultMeterPeriod(MeterLLMCalls).Bounds(time.Now())
 	if got, _ := store.TenantPeriodUsage(context.Background(), tid, MeterLLMCalls, start); got != 7 {
 		t.Fatalf("final flush persisted = %d, want 7", got)
+	}
+}
+
+// TestConcurrentFlushRolloverNoLossOrDoubleCount stresses the three-way
+// interleaving of Record (hot path), periodic Flush, and period
+// rollover. Each recorded unit must be persisted exactly once across
+// all periods: a regression in the claim/flush handshake shows up as
+// either a lost count (sum < total) or a double count (sum > total).
+// Run with -race to also catch unsynchronised access.
+func TestConcurrentFlushRolloverNoLossOrDoubleCount(t *testing.T) {
+	const (
+		recorders   = 8
+		perRecorder = 2000
+		meter       = MeterURLCatLookups // daily period
+	)
+	store := newFakeStore()
+
+	// Monotonic clock advanced in 6h steps so the daily meter rolls
+	// over repeatedly while records and flushes are in flight.
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var steps int64
+	clock := func() time.Time {
+		return base.Add(time.Duration(atomic.LoadInt64(&steps)) * 6 * time.Hour)
+	}
+	svc := mustService(t, store, withClock(clock))
+	ctx := context.Background()
+	tid := uuid.New()
+
+	stop := make(chan struct{})
+	var bg sync.WaitGroup // background helpers (advancer + flusher)
+
+	// Clock advancer: forces period rollovers while records are in flight.
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				atomic.AddInt64(&steps, 1)
+				time.Sleep(50 * time.Microsecond)
+			}
+		}
+	}()
+
+	// Periodic flusher racing the recorders and rollovers.
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if err := svc.Flush(ctx); err != nil {
+					t.Errorf("Flush: %v", err)
+				}
+				time.Sleep(30 * time.Microsecond)
+			}
+		}
+	}()
+
+	var recWG sync.WaitGroup
+	for i := 0; i < recorders; i++ {
+		recWG.Add(1)
+		go func() {
+			defer recWG.Done()
+			for j := 0; j < perRecorder; j++ {
+				if err := svc.Record(ctx, tid, meter, 1); err != nil {
+					t.Errorf("Record: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	recWG.Wait() // all records issued
+	close(stop)  // halt advancer + flusher
+	bg.Wait()    // they observed stop and returned
+
+	// Drain anything still buffered (in-flight cell deltas + retries).
+	if err := svc.Flush(ctx); err != nil {
+		t.Fatalf("final Flush: %v", err)
+	}
+
+	// Every unit must be persisted exactly once across all periods.
+	hist, err := store.TenantUsageHistory(ctx, tid, 0)
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	var sum int64
+	for _, r := range hist {
+		if r.Value < 0 {
+			t.Fatalf("negative persisted value %d (flushed high-water corruption)", r.Value)
+		}
+		sum += r.Value
+	}
+	want := int64(recorders * perRecorder)
+	if sum != want {
+		t.Fatalf("persisted total = %d across %d periods, want %d (loss or double-count)", sum, len(hist), want)
 	}
 }

@@ -229,7 +229,24 @@ func run() error {
 	// accumulated per-tenant usage deltas into tenant_usage every
 	// FlushInterval and performs a final flush when rootCtx is
 	// cancelled, so usage recorded just before shutdown is not lost.
-	go meteringSvc.Run(rootCtx)
+	// Block shutdown on its completion (bounded) so the deferred
+	// pool.Close() (registered earlier, hence run later — defers are
+	// LIFO) never races the final flush still writing on a connection
+	// from the pool, which would drop the trailing usage window. The
+	// wait exceeds Run's own 10s final-flush timeout so a healthy
+	// flush always lands; a wedged flush cannot hang shutdown forever.
+	meteringDone := make(chan struct{})
+	go func() {
+		defer close(meteringDone)
+		meteringSvc.Run(rootCtx)
+	}()
+	defer func() {
+		select {
+		case <-meteringDone:
+		case <-time.After(15 * time.Second):
+			logger.Warn("sng-control: timed out waiting for metering final flush")
+		}
+	}()
 
 	// Start the webhook delivery worker before the HTTP server so
 	// queued deliveries from a previous run start draining

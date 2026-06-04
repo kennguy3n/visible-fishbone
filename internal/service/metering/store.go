@@ -333,16 +333,38 @@ func (s *PostgresStore) TenantBudgets(ctx context.Context, tenantID uuid.UUID) (
 
 // UpsertTenantBudget inserts or replaces one budget override.
 func (s *PostgresStore) UpsertTenantBudget(ctx context.Context, tenantID uuid.UUID, limit BudgetLimit) error {
-	return s.withTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		const q = `
+	return s.UpsertTenantBudgets(ctx, tenantID, []BudgetLimit{limit})
+}
+
+// UpsertTenantBudgets inserts or replaces every override in a single
+// tenant-scoped transaction via one multi-row upsert, so a batch of
+// overrides is applied all-or-nothing: if any row fails the whole
+// transaction rolls back and no partial set is left behind. The unnest
+// form keeps the statement count at one regardless of batch size.
+func (s *PostgresStore) UpsertTenantBudgets(ctx context.Context, tenantID uuid.UUID, limits []BudgetLimit) error {
+	if len(limits) == 0 {
+		return nil
+	}
+	meters := make([]string, len(limits))
+	softs := make([]int64, len(limits))
+	hards := make([]int64, len(limits))
+	periods := make([]string, len(limits))
+	for i, l := range limits {
+		meters[i] = string(l.Meter)
+		softs[i] = l.SoftLimit
+		hards[i] = l.HardLimit
+		periods[i] = string(l.Period)
+	}
+	const q = `
 INSERT INTO tenant_budgets (tenant_id, meter, soft_limit, hard_limit, period)
-VALUES ($1, $2, $3, $4, $5)
+SELECT $1, * FROM unnest($2::text[], $3::bigint[], $4::bigint[], $5::text[])
 ON CONFLICT (tenant_id, meter)
 DO UPDATE SET soft_limit = EXCLUDED.soft_limit,
               hard_limit = EXCLUDED.hard_limit,
               period     = EXCLUDED.period`
-		if _, err := tx.Exec(ctx, q, tenantID, string(limit.Meter), limit.SoftLimit, limit.HardLimit, string(limit.Period)); err != nil {
-			return fmt.Errorf("upsert tenant budget: %w", err)
+	return s.withTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, q, tenantID, meters, softs, hards, periods); err != nil {
+			return fmt.Errorf("upsert tenant budgets: %w", err)
 		}
 		return nil
 	})

@@ -39,7 +39,10 @@ type MeteringUsageReader interface {
 // needs from the BudgetEnforcer.
 type MeteringBudgetService interface {
 	TenantBudgets(ctx context.Context, tenantID uuid.UUID) (map[metering.Meter]metering.BudgetLimit, error)
-	SetTenantBudget(ctx context.Context, tenantID uuid.UUID, limit metering.BudgetLimit) error
+	// SetTenantBudgets applies a batch of overrides atomically (all or
+	// nothing), so a mid-batch store failure cannot leave a partially
+	// applied set behind.
+	SetTenantBudgets(ctx context.Context, tenantID uuid.UUID, limits []metering.BudgetLimit) error
 }
 
 // MeteringPlatformReporter is the platform-wide report surface the
@@ -246,8 +249,9 @@ func (h *MeteringHandler) getUsageHistory(w http.ResponseWriter, r *http.Request
 
 // putBudgets applies one or more per-tenant budget overrides, then
 // returns the tenant's full resolved budget set. The whole request is
-// validated before any write so a malformed entry cannot leave a
-// partially-applied set.
+// validated before any write, and the overrides are persisted in a
+// single atomic batch, so neither a malformed entry nor a mid-batch
+// store failure can leave a partially-applied set.
 func (h *MeteringHandler) putBudgets(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := PathUUID(w, r, "tenant_id")
 	if !ok {
@@ -293,11 +297,9 @@ func (h *MeteringHandler) putBudgets(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	for _, limit := range overrides {
-		if err := h.budgets.SetTenantBudget(r.Context(), tenantID, limit); err != nil {
-			WriteRepositoryError(w, err)
-			return
-		}
+	if err := h.budgets.SetTenantBudgets(r.Context(), tenantID, overrides); err != nil {
+		WriteRepositoryError(w, err)
+		return
 	}
 
 	resolved, err := h.budgets.TenantBudgets(r.Context(), tenantID)

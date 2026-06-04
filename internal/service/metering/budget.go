@@ -72,6 +72,9 @@ type BudgetStore interface {
 	TenantBudgets(ctx context.Context, tenantID uuid.UUID) ([]BudgetLimit, error)
 	// UpsertTenantBudget writes (inserts or replaces) one override.
 	UpsertTenantBudget(ctx context.Context, tenantID uuid.UUID, limit BudgetLimit) error
+	// UpsertTenantBudgets writes (inserts or replaces) a batch of
+	// overrides atomically — all rows commit together or none do.
+	UpsertTenantBudgets(ctx context.Context, tenantID uuid.UUID, limits []BudgetLimit) error
 }
 
 // tierDefaults holds the built-in per-tier, per-meter hard limits.
@@ -212,11 +215,26 @@ func NewBudgetEnforcer(usage CurrentReader, store BudgetStore, tiers TierResolve
 	return b, nil
 }
 
+// cloneLimits returns a shallow copy of a resolved limit set.
+// BudgetLimit is a value type, so copying the map fully detaches it
+// from the cache — callers may freely mutate the result.
+func cloneLimits(in map[Meter]BudgetLimit) map[Meter]BudgetLimit {
+	out := make(map[Meter]BudgetLimit, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 // resolveLimits returns the tenant's resolved per-meter limits, using
 // the cache when fresh and reloading (tier + overrides) otherwise. A
 // reload failure falls back to the stale cache entry when present, or
 // to tier-less global defaults, so a transient DB error degrades to
 // the safest available budget rather than failing the hot path.
+//
+// The returned map MAY alias the cached entry, so callers MUST treat
+// it as read-only. The sole hot-path caller (CheckBudget) only reads;
+// the public TenantBudgets accessor returns a defensive copy instead.
 func (b *BudgetEnforcer) resolveLimits(ctx context.Context, tenantID uuid.UUID) map[Meter]BudgetLimit {
 	now := b.now()
 	b.mu.RLock()
@@ -371,8 +389,55 @@ func (b *BudgetEnforcer) SetTenantBudget(ctx context.Context, tenantID uuid.UUID
 	return nil
 }
 
+// SetTenantBudgets persists a batch of per-tenant overrides atomically
+// (all or nothing) and invalidates the cache once so the new limits
+// take effect on the next check. Every override is fully validated
+// before any write, and duplicate meters within the batch collapse to
+// the last occurrence so the underlying single-statement upsert never
+// touches the same row twice.
+func (b *BudgetEnforcer) SetTenantBudgets(ctx context.Context, tenantID uuid.UUID, limits []BudgetLimit) error {
+	if tenantID == uuid.Nil {
+		return fmt.Errorf("metering: set budgets: tenant id must not be nil")
+	}
+	if len(limits) == 0 {
+		return fmt.Errorf("metering: set budgets: at least one override is required")
+	}
+	deduped := make(map[Meter]BudgetLimit, len(limits))
+	order := make([]Meter, 0, len(limits))
+	for _, limit := range limits {
+		if !limit.Meter.Valid() {
+			return fmt.Errorf("metering: set budgets: unknown meter %q", limit.Meter)
+		}
+		if limit.SoftLimit < 0 || limit.HardLimit < 0 {
+			return fmt.Errorf("metering: set budgets: limits must be non-negative")
+		}
+		if !limit.hardUnbounded() && !limit.softUnbounded() && limit.SoftLimit > limit.HardLimit {
+			return fmt.Errorf("metering: set budgets: soft limit (%d) must not exceed hard limit (%d)", limit.SoftLimit, limit.HardLimit)
+		}
+		if !limit.Period.Valid() {
+			limit.Period = b.periodOf(limit.Meter)
+		}
+		if _, seen := deduped[limit.Meter]; !seen {
+			order = append(order, limit.Meter)
+		}
+		deduped[limit.Meter] = limit
+	}
+	batch := make([]BudgetLimit, 0, len(order))
+	for _, m := range order {
+		batch = append(batch, deduped[m])
+	}
+	if err := b.store.UpsertTenantBudgets(ctx, tenantID, batch); err != nil {
+		return fmt.Errorf("metering: set budgets: %w", err)
+	}
+	b.mu.Lock()
+	delete(b.cache, tenantID)
+	b.mu.Unlock()
+	return nil
+}
+
 // TenantBudgets returns the resolved, effective limits for a tenant
-// (defaults merged with overrides) ordered by meter.
+// (defaults merged with overrides). The returned map is a private copy
+// the caller may freely mutate without affecting the cache.
 func (b *BudgetEnforcer) TenantBudgets(ctx context.Context, tenantID uuid.UUID) (map[Meter]BudgetLimit, error) {
 	if tenantID == uuid.Nil {
 		return nil, fmt.Errorf("metering: tenant budgets: tenant id must not be nil")
@@ -384,7 +449,7 @@ func (b *BudgetEnforcer) TenantBudgets(ctx context.Context, tenantID uuid.UUID) 
 	b.mu.Lock()
 	b.cache[tenantID] = tenantBudgetCache{limits: limits, loadedAt: b.now()}
 	b.mu.Unlock()
-	return limits, nil
+	return cloneLimits(limits), nil
 }
 
 // BudgetStats reports the cumulative soft-alert and hard-block counts.

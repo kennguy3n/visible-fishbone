@@ -229,3 +229,102 @@ func TestResolveLimitsFallsBackToStaleCacheOnError(t *testing.T) {
 		t.Fatalf("stale-cache fallback should still enforce, got %v", err)
 	}
 }
+
+func TestSetTenantBudgetsValidatesWholeBatchBeforeWrite(t *testing.T) {
+	store := newFakeStore()
+	e := mustEnforcer(t, staticCurrent{}, store, fakeTiers{tier: repository.TenantTierStarter})
+	ctx := context.Background()
+	tid := uuid.New()
+
+	if err := e.SetTenantBudgets(ctx, tid, nil); err == nil {
+		t.Fatal("expected error for empty batch")
+	}
+	// A single invalid entry must abort the whole batch — including the
+	// valid sibling — so no partial set is persisted.
+	batch := []BudgetLimit{
+		{Meter: MeterLLMCalls, HardLimit: 100, Period: PeriodMonthly},
+		{Meter: Meter("nope"), HardLimit: 5},
+	}
+	if err := e.SetTenantBudgets(ctx, tid, batch); err == nil {
+		t.Fatal("expected error for unknown meter in batch")
+	}
+	if got, _ := store.TenantBudgets(ctx, tid); len(got) != 0 {
+		t.Fatalf("a rejected batch must persist nothing, got %d rows", len(got))
+	}
+}
+
+func TestSetTenantBudgetsIsAllOrNothingOnStoreFailure(t *testing.T) {
+	store := newFakeStore()
+	store.failUpsertBudgets = errors.New("db down")
+	e := mustEnforcer(t, staticCurrent{}, store, fakeTiers{tier: repository.TenantTierStarter})
+	ctx := context.Background()
+	tid := uuid.New()
+
+	batch := []BudgetLimit{
+		{Meter: MeterLLMCalls, HardLimit: 100, Period: PeriodMonthly},
+		{Meter: MeterURLCatLookups, HardLimit: 200, Period: PeriodDaily},
+	}
+	if err := e.SetTenantBudgets(ctx, tid, batch); err == nil {
+		t.Fatal("expected store failure to propagate")
+	}
+	store.failUpsertBudgets = nil
+	if got, _ := store.TenantBudgets(ctx, tid); len(got) != 0 {
+		t.Fatalf("failed atomic batch must leave no rows, got %d", len(got))
+	}
+
+	// A subsequent successful batch persists every entry together.
+	if err := e.SetTenantBudgets(ctx, tid, batch); err != nil {
+		t.Fatalf("SetTenantBudgets: %v", err)
+	}
+	got, _ := store.TenantBudgets(ctx, tid)
+	if len(got) != 2 {
+		t.Fatalf("successful batch should persist both rows, got %d", len(got))
+	}
+}
+
+func TestSetTenantBudgetsDedupesMeterLastWins(t *testing.T) {
+	store := newFakeStore()
+	e := mustEnforcer(t, staticCurrent{}, store, fakeTiers{tier: repository.TenantTierStarter})
+	ctx := context.Background()
+	tid := uuid.New()
+
+	// Two entries for the same meter must collapse to the last so the
+	// single-statement upsert never touches one row twice.
+	batch := []BudgetLimit{
+		{Meter: MeterLLMCalls, HardLimit: 100, Period: PeriodMonthly},
+		{Meter: MeterLLMCalls, HardLimit: 250, Period: PeriodMonthly},
+	}
+	if err := e.SetTenantBudgets(ctx, tid, batch); err != nil {
+		t.Fatalf("SetTenantBudgets: %v", err)
+	}
+	got, _ := store.TenantBudgets(ctx, tid)
+	if len(got) != 1 || got[0].HardLimit != 250 {
+		t.Fatalf("dedup should keep last write (250), got %+v", got)
+	}
+}
+
+func TestTenantBudgetsReturnsDefensiveCopy(t *testing.T) {
+	tid := uuid.New()
+	store := newFakeStore()
+	// Used sits below the real starter limit (1000) but above the
+	// tampered limit (1), so a corrupted cache would flip the decision.
+	cur := staticCurrent{values: map[Meter]int64{MeterLLMCalls: 500}}
+	e := mustEnforcer(t, cur, store, fakeTiers{tier: repository.TenantTierStarter})
+	ctx := context.Background()
+
+	budgets, err := e.TenantBudgets(ctx, tid)
+	if err != nil {
+		t.Fatalf("TenantBudgets: %v", err)
+	}
+	// TenantBudgets seeds the cache that the hot-path CheckBudget reads.
+	// Mutating the returned map must not bleed into that cached set.
+	budgets[MeterLLMCalls] = BudgetLimit{Meter: MeterLLMCalls, HardLimit: 1, Period: PeriodMonthly}
+
+	dec, err := e.CheckBudget(ctx, MeterLLMCalls, tid, 1)
+	if err != nil {
+		t.Fatalf("CheckBudget after caller mutation: %v", err)
+	}
+	if !dec.Allowed || dec.Limit.HardLimit != 1000 {
+		t.Fatalf("caller mutation leaked into cache: decision=%+v, want allowed with hard=1000", dec)
+	}
+}

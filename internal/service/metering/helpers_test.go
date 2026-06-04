@@ -24,6 +24,7 @@ type fakeStore struct {
 	// Error injection knobs (nil => succeed).
 	failBatch         error
 	failTenantBudgets error
+	failUpsertBudgets error
 	failPlatform      error
 
 	// Call counters for assertions.
@@ -147,6 +148,24 @@ func (f *fakeStore) UpsertTenantBudget(_ context.Context, tenantID uuid.UUID, li
 		f.budgets[tenantID] = make(map[Meter]BudgetLimit)
 	}
 	f.budgets[tenantID][limit.Meter] = limit
+	return nil
+}
+
+// UpsertTenantBudgets mirrors the production all-or-nothing contract:
+// either every override in the batch is applied or, on injected
+// failure, none are.
+func (f *fakeStore) UpsertTenantBudgets(_ context.Context, tenantID uuid.UUID, limits []BudgetLimit) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failUpsertBudgets != nil {
+		return f.failUpsertBudgets
+	}
+	if f.budgets[tenantID] == nil {
+		f.budgets[tenantID] = make(map[Meter]BudgetLimit)
+	}
+	for _, limit := range limits {
+		f.budgets[tenantID][limit.Meter] = limit
+	}
 	return nil
 }
 

@@ -195,6 +195,19 @@ type cellKey struct {
 	meter  Meter
 }
 
+// pendingFlush is an immutable snapshot of a delta that has already
+// been claimed off a cell (its high-water mark advanced) but not yet
+// durably persisted — either because the owning store write failed or
+// because a period rollover claimed it. It carries its own period
+// bounds so it can be retried independently of the (possibly reset)
+// cell it came from, guaranteeing the delta is persisted exactly once.
+type pendingFlush struct {
+	key   cellKey
+	start time.Time
+	end   time.Time
+	delta int64
+}
+
 // MeteringService tracks per-tenant resource consumption in real time
 // and flushes it to Postgres on a fixed cadence.
 type MeteringService struct {
@@ -204,8 +217,9 @@ type MeteringService struct {
 	flushInterval time.Duration
 	now           func() time.Time
 
-	mu    sync.RWMutex
-	cells map[cellKey]*meterCell
+	mu      sync.RWMutex
+	cells   map[cellKey]*meterCell
+	pending []pendingFlush // claimed-but-unpersisted deltas awaiting retry
 
 	// flushes / flushErrors are observability counters surfaced via
 	// Stats for tests and the ops-health endpoint.
@@ -275,7 +289,9 @@ func NewMeteringService(store UsageStore, logger *slog.Logger, opts ...Option) (
 // getCell returns the live cell for (tenant, meter), creating and
 // baseline-seeding it on first use and rolling it over when the active
 // period has elapsed. The common path (cell exists, same period) takes
-// only a read lock and no allocation.
+// only a read lock and no allocation. Read-only callers (Current) use
+// this; Record must instead increment under a held lock (see Record)
+// so its write cannot race a concurrent rollover's reset.
 func (s *MeteringService) getCell(ctx context.Context, tenantID uuid.UUID, meter Meter) *meterCell {
 	key := cellKey{tenant: tenantID, meter: meter}
 	now := s.now()
@@ -290,7 +306,17 @@ func (s *MeteringService) getCell(ctx context.Context, tenantID uuid.UUID, meter
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c, ok = s.cells[key]
+	return s.getOrRollLocked(ctx, key, start, end)
+}
+
+// getOrRollLocked returns the cell for key in the [start,end) period,
+// creating it (first use) or rolling it over (period elapsed) as
+// needed. The caller MUST hold s.mu for writing. Splitting this out of
+// getCell lets Record perform its increment inside the same critical
+// section as a rollover, so an increment can never be clobbered by the
+// rollover's reset-to-zero.
+func (s *MeteringService) getOrRollLocked(ctx context.Context, key cellKey, start, end time.Time) *meterCell {
+	c, ok := s.cells[key]
 	if ok && atomic.LoadInt64(&c.periodStart) == start.Unix() {
 		return c
 	}
@@ -344,8 +370,33 @@ func (s *MeteringService) Record(ctx context.Context, tenantID uuid.UUID, meter 
 	if !meter.Valid() {
 		return fmt.Errorf("metering: record: unknown meter %q", meter)
 	}
-	c := s.getCell(ctx, tenantID, meter)
+	key := cellKey{tenant: tenantID, meter: meter}
+	now := s.now()
+	start, end := s.periodOf(meter).Bounds(now)
+
+	// Fast path: the cell already exists in the active period. Hold the
+	// read lock across the increment so it is mutually exclusive with a
+	// rollover (which resets value to 0 under the write lock). Without
+	// this, an increment landing between the rollover's value-load and
+	// its store-zero would be silently dropped. The read lock still
+	// admits concurrent recorders (the add itself is atomic).
+	s.mu.RLock()
+	c, ok := s.cells[key]
+	if ok && atomic.LoadInt64(&c.periodStart) == start.Unix() {
+		atomic.AddInt64(&c.value, amount)
+		s.mu.RUnlock()
+		s.recordSeen.Add(1)
+		return nil
+	}
+	s.mu.RUnlock()
+
+	// Slow path: create or roll over the cell and increment while still
+	// holding the write lock, so the fresh value cannot be clobbered by
+	// the very rollover that produced it.
+	s.mu.Lock()
+	c = s.getOrRollLocked(ctx, key, start, end)
 	atomic.AddInt64(&c.value, amount)
+	s.mu.Unlock()
 	s.recordSeen.Add(1)
 	return nil
 }
@@ -362,12 +413,14 @@ func (s *MeteringService) Current(ctx context.Context, tenantID uuid.UUID, meter
 	return atomic.LoadInt64(&c.value)
 }
 
-// flushCellLocked appends the cell's pending delta to `out`-style
-// persistence by issuing a single-delta upsert. Used only on the
-// rollover path (where we already hold the lock and want a synchronous
-// write); the periodic flush batches all cells instead. Must hold
-// s.mu. Errors are logged, not returned, so a rollover is never
-// blocked by a transient DB error.
+// flushCellLocked persists the cell's trailing delta synchronously on
+// the period-rollover path so the previous period's tail lands
+// promptly rather than waiting for the next periodic flush. Must hold
+// s.mu (the write lock), which is what makes the claim below mutually
+// exclusive with Flush's claim — a given delta is therefore claimed,
+// and persisted, exactly once. On a store error the claimed delta is
+// queued for the next periodic flush to retry, so a rollover never
+// silently drops counts.
 func (s *MeteringService) flushCellLocked(ctx context.Context, key cellKey, c *meterCell) {
 	value := atomic.LoadInt64(&c.value)
 	flushed := atomic.LoadInt64(&c.flushed)
@@ -377,32 +430,37 @@ func (s *MeteringService) flushCellLocked(ctx context.Context, key cellKey, c *m
 	}
 	start := time.Unix(atomic.LoadInt64(&c.periodStart), 0).UTC()
 	end := time.Unix(atomic.LoadInt64(&c.periodEnd), 0).UTC()
+	// Claim the delta before the write so a concurrent Flush (which
+	// claims under the same lock) cannot re-emit it.
+	atomic.StoreInt64(&c.flushed, value)
 	d := UsageDelta{TenantID: key.tenant, Meter: key.meter, PeriodStart: start, PeriodEnd: end, Delta: delta}
 	if err := s.store.BatchUpsertUsage(ctx, []UsageDelta{d}); err != nil {
 		s.flushErrs.Add(1)
-		s.logger.WarnContext(ctx, "metering: rollover flush failed",
+		s.pending = append(s.pending, pendingFlush{key: key, start: start, end: end, delta: delta})
+		s.logger.WarnContext(ctx, "metering: rollover flush failed, queued for retry",
 			slog.String("tenant_id", key.tenant.String()),
 			slog.String("meter", string(key.meter)),
 			slog.String("error", err.Error()))
-		return
 	}
-	atomic.AddInt64(&c.flushed, delta)
 }
 
 // Flush persists every cell's accumulated delta in one batch upsert.
-// Safe to call concurrently with Record: each cell's delta is snapshot
-// via atomic loads and the high-water mark is only advanced after the
-// batch commits, so a Record that races a Flush is counted in the next
-// flush rather than lost or double-counted.
+//
+// Each delta is *claimed* under the write lock — the cell's high-water
+// mark (flushed) is advanced to the snapshotted value before the lock
+// is released — and recorded as an immutable snapshot. Claiming under
+// the same lock that period rollover uses means a given delta is
+// emitted exactly once: a concurrent Record/rollover either runs before
+// the claim (its delta is included) or after it (its delta is left for
+// the next flush), never both. The store write happens *after* the
+// lock is released so a slow DB round-trip never blocks the Record hot
+// path. If the write fails, the claimed deltas are re-queued (with
+// their own period bounds) so no count is lost and none is
+// double-written.
 func (s *MeteringService) Flush(ctx context.Context) error {
-	type pending struct {
-		key   cellKey
-		cell  *meterCell
-		delta int64
-	}
-	s.mu.RLock()
-	pend := make([]pending, 0, len(s.cells))
-	deltas := make([]UsageDelta, 0, len(s.cells))
+	s.mu.Lock()
+	claimed := s.pending
+	s.pending = nil
 	for key, c := range s.cells {
 		value := atomic.LoadInt64(&c.value)
 		flushed := atomic.LoadInt64(&c.flushed)
@@ -412,24 +470,26 @@ func (s *MeteringService) Flush(ctx context.Context) error {
 		}
 		start := time.Unix(atomic.LoadInt64(&c.periodStart), 0).UTC()
 		end := time.Unix(atomic.LoadInt64(&c.periodEnd), 0).UTC()
-		deltas = append(deltas, UsageDelta{TenantID: key.tenant, Meter: key.meter, PeriodStart: start, PeriodEnd: end, Delta: delta})
-		pend = append(pend, pending{key: key, cell: c, delta: delta})
+		atomic.StoreInt64(&c.flushed, value) // claim
+		claimed = append(claimed, pendingFlush{key: key, start: start, end: end, delta: delta})
 	}
-	s.mu.RUnlock()
+	s.mu.Unlock()
 
-	if len(deltas) == 0 {
+	if len(claimed) == 0 {
 		return nil
+	}
+	deltas := make([]UsageDelta, len(claimed))
+	for i, p := range claimed {
+		deltas[i] = UsageDelta{TenantID: p.key.tenant, Meter: p.key.meter, PeriodStart: p.start, PeriodEnd: p.end, Delta: p.delta}
 	}
 	if err := s.store.BatchUpsertUsage(ctx, deltas); err != nil {
 		s.flushErrs.Add(1)
+		// Re-queue the claimed deltas (already debited from their cells)
+		// so the next flush retries them; the cell won't re-emit them.
+		s.mu.Lock()
+		s.pending = append(s.pending, claimed...)
+		s.mu.Unlock()
 		return fmt.Errorf("metering: flush: %w", err)
-	}
-	// Advance each high-water mark by exactly the delta we committed.
-	// Using AddInt64 (not Store) means concurrent Record increments
-	// that arrived after the snapshot remain pending for the next
-	// flush instead of being dropped.
-	for _, p := range pend {
-		atomic.AddInt64(&p.cell.flushed, p.delta)
 	}
 	s.flushes.Add(1)
 	s.lastFlush.Store(s.now().UnixNano())
@@ -490,6 +550,13 @@ func (s *MeteringService) Stats() Stats {
 // CurrentUsage returns the current-period usage for a tenant, merging
 // the persisted rows with any unflushed in-memory increments so the
 // reading is live rather than as-of-last-flush. Tenant-scoped.
+//
+// This is a cold observability read (the GET usage endpoint), not the
+// budget hot path, so it scans the cell map under the read lock rather
+// than maintaining a per-tenant index that every Record would have to
+// keep current. The scan is O(live cells) = O(active tenants × meters)
+// and holds only the read lock, so it neither blocks concurrent
+// recorders nor allocates on the Record path.
 func (s *MeteringService) CurrentUsage(ctx context.Context, tenantID uuid.UUID) ([]UsageRecord, error) {
 	now := s.now()
 	rows, err := s.store.TenantCurrentUsage(ctx, tenantID, now)

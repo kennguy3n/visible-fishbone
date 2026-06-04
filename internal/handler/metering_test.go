@@ -46,12 +46,14 @@ func (f *fakeBudgetService) TenantBudgets(_ context.Context, _ uuid.UUID) (map[m
 	return f.limits, nil
 }
 
-func (f *fakeBudgetService) SetTenantBudget(_ context.Context, _ uuid.UUID, limit metering.BudgetLimit) error {
-	f.sets = append(f.sets, limit)
+func (f *fakeBudgetService) SetTenantBudgets(_ context.Context, _ uuid.UUID, limits []metering.BudgetLimit) error {
 	if f.limits == nil {
 		f.limits = make(map[metering.Meter]metering.BudgetLimit)
 	}
-	f.limits[limit.Meter] = limit
+	for _, limit := range limits {
+		f.sets = append(f.sets, limit)
+		f.limits[limit.Meter] = limit
+	}
 	return nil
 }
 
