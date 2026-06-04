@@ -84,6 +84,19 @@ impl PathRule {
             action,
         }
     }
+
+    /// Whether the glob's final segment is a bare `*` wildcard. When
+    /// true, the request path's last segment is a path variable that
+    /// may carry a filename (and thus a meaningful extension); when
+    /// false, the last segment is a literal — typically an API
+    /// method name such as `files.upload` whose embedded dot must
+    /// NOT be mistaken for a file extension. Drives whether
+    /// [`inspect`](InlineCasbInspector::inspect) derives `file_type`
+    /// from the path.
+    #[must_use]
+    fn filename_in_path(&self) -> bool {
+        self.path_glob.rsplit('/').next() == Some("*")
+    }
 }
 
 /// Detection signature for one SaaS app: the host suffixes that
@@ -118,21 +131,17 @@ impl AppSignature {
         })
     }
 
-    /// Classify the request's action against this app's path
-    /// rules, returning the first match in declaration order.
+    /// Classify the request against this app's path rules, returning
+    /// the first matching [`PathRule`] in declaration order.
     #[must_use]
-    fn classify(&self, ctx: &RequestContext) -> Option<CasbAction> {
-        self.path_rules.iter().find_map(|pr| {
+    fn classify(&self, ctx: &RequestContext) -> Option<&PathRule> {
+        self.path_rules.iter().find(|pr| {
             if let Some(m) = &pr.method {
                 if !ctx.method.eq_ignore_ascii_case(m) {
-                    return None;
+                    return false;
                 }
             }
-            if path_glob_match(&pr.path_glob, &ctx.path) {
-                Some(pr.action)
-            } else {
-                None
-            }
+            path_glob_match(&pr.path_glob, &ctx.path)
         })
     }
 }
@@ -144,6 +153,11 @@ pub struct DetectedApp {
     pub app_id: String,
     /// Detected action.
     pub action: CasbAction,
+    /// True when the matched path rule's final segment is a `*`
+    /// wildcard, i.e. the request path's last segment is a variable
+    /// that may carry a filename. Drives whether `file_type` is
+    /// derived from the request path (see [`PathRule::filename_in_path`]).
+    pub filename_in_path: bool,
 }
 
 /// Catalog of SaaS-app detection signatures. The default catalog
@@ -182,9 +196,10 @@ impl AppCatalog {
             if !sig.host_matches(ctx) {
                 return None;
             }
-            sig.classify(ctx).map(|action| DetectedApp {
+            sig.classify(ctx).map(|pr| DetectedApp {
                 app_id: sig.app_id.clone(),
-                action,
+                action: pr.action,
+                filename_in_path: pr.filename_in_path(),
             })
         })
     }
@@ -411,10 +426,21 @@ impl InlineCasbInspector {
     pub fn inspect(&self, ctx: &RequestContext, signals: &RequestSignals) -> Option<Verdict> {
         let state = self.inner.load();
         let detected = state.catalog.detect(ctx)?;
+        // Only derive a file extension when the matched rule's last
+        // path segment is a wildcard (a real filename variable).
+        // SaaS APIs like Slack put a dotted *method* name in the path
+        // (`/api/files.upload`); deriving `file_type` from that would
+        // yield a bogus `"upload"` and silently break file-type-gated
+        // rules, so literal-tailed globs contribute no file type.
+        let file_type = if detected.filename_in_path {
+            file_type_from_path(&ctx.path)
+        } else {
+            None
+        };
         let meta = CasbRequestMeta {
             app_id: detected.app_id,
             action: detected.action,
-            file_type: file_type_from_path(&ctx.path),
+            file_type,
             size_bytes: signals.content_length,
             label: signals.sensitivity_label.clone(),
         };
@@ -805,5 +831,101 @@ mod tests {
             Some("hidden")
         );
         assert_eq!(file_type_from_path("/a/b/trailingdot."), None);
+    }
+
+    #[test]
+    fn slack_dotted_method_path_yields_no_file_type() {
+        // Regression: Slack's API paths use dotted *method* names
+        // (`/api/files.upload`). The trailing segment is a literal,
+        // not a `*` wildcard, so `file_type` must NOT be derived from
+        // it — otherwise it would spuriously be `Some("upload")` and
+        // silently break (or wrongly trigger) file-type-gated rules.
+        let cat = AppCatalog::builtin();
+        let detected = cat
+            .detect(&ctx("POST", "slack.com", "/api/files.upload"))
+            .expect("slack upload detected");
+        assert_eq!(detected.action, CasbAction::Upload);
+        assert!(
+            !detected.filename_in_path,
+            "literal dotted method segment must not be treated as a filename"
+        );
+
+        // A rule keyed on the bogus pre-fix file type `"upload"` must
+        // NOT fire, because `file_type` is now `None` for this path.
+        let inspector =
+            InlineCasbInspector::with_rules(CasbRuleSet::new(vec![crate::casb_rules::CasbRule {
+                id: "block-upload-ext".to_string(),
+                app_id: "slack".to_string(),
+                action: CasbAction::Upload,
+                verdict: CasbVerdict::Block,
+                conditions: crate::casb_rules::CasbConditions {
+                    file_type: Some("upload".to_string()),
+                    size_threshold: None,
+                    label_match: None,
+                },
+                priority: 1,
+            }]));
+        assert_eq!(
+            inspector.inspect(
+                &ctx("POST", "slack.com", "/api/files.upload"),
+                &RequestSignals::default(),
+            ),
+            None,
+            "dotted method name must not be mistaken for a file extension"
+        );
+    }
+
+    #[test]
+    fn wildcard_tail_path_derives_file_type() {
+        // When the matched rule's last glob segment IS a wildcard, the
+        // request path's last segment is a real filename, so the
+        // extension is derived and file-type-gated rules work.
+        let cat = AppCatalog::new(vec![AppSignature {
+            app_id: "acme".to_string(),
+            host_suffixes: vec!["acme.example".to_string()],
+            path_rules: vec![PathRule::new(Some("post"), "/files/*", CasbAction::Upload)],
+        }]);
+        let detected = cat
+            .detect(&ctx("POST", "acme.example", "/files/report.docx"))
+            .expect("acme upload detected");
+        assert!(
+            detected.filename_in_path,
+            "wildcard tail carries a filename"
+        );
+
+        let inspector = InlineCasbInspector::new(
+            cat,
+            CasbRuleSet::new(vec![crate::casb_rules::CasbRule {
+                id: "block-docx".to_string(),
+                app_id: "acme".to_string(),
+                action: CasbAction::Upload,
+                verdict: CasbVerdict::Block,
+                conditions: crate::casb_rules::CasbConditions {
+                    file_type: Some("docx".to_string()),
+                    size_threshold: None,
+                    label_match: None,
+                },
+                priority: 1,
+            }]),
+        );
+
+        // A .docx upload matches the file-type-gated rule.
+        let v = inspector
+            .inspect(
+                &ctx("POST", "acme.example", "/files/report.docx"),
+                &RequestSignals::default(),
+            )
+            .expect("verdict");
+        assert_eq!(v.action, Action::Deny);
+        assert_eq!(v.reason, "deny.casb.acme.upload");
+
+        // A .pdf upload to the same path does not match (wrong type).
+        assert_eq!(
+            inspector.inspect(
+                &ctx("POST", "acme.example", "/files/report.pdf"),
+                &RequestSignals::default(),
+            ),
+            None
+        );
     }
 }
