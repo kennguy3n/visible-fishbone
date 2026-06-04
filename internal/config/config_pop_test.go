@@ -141,6 +141,10 @@ func TestPoPValidationRejectsOutOfRange(t *testing.T) {
 		{"high-water above 1", "POP_HIGH_WATER_FRACTION", "1.5"},
 		{"high-water zero", "POP_HIGH_WATER_FRACTION", "0"},
 		{"high-water negative", "POP_HIGH_WATER_FRACTION", "-0.1"},
+		// strconv.ParseFloat accepts "NaN"/"Inf"; every NaN comparison is
+		// false, so the in-range check must be written so NaN/Inf fail.
+		{"high-water NaN", "POP_HIGH_WATER_FRACTION", "NaN"},
+		{"high-water +Inf", "POP_HIGH_WATER_FRACTION", "+Inf"},
 		{"zero refresh interval", "POP_REGISTRY_REFRESH_INTERVAL", "0s"},
 		{"zero health ttl", "POP_HEALTH_TTL", "0s"},
 		{"zero geodns ttl", "POP_GEODNS_TTL", "0s"},

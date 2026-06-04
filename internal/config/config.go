@@ -1509,7 +1509,13 @@ func (c Config) validate() error {
 	// time.NewTicker. Fail boot loudly, mirroring the Rust edge config
 	// (crates/sng-edge/src/config.rs) which rejects the same
 	// out-of-range high-water fraction.
-	if c.PoP.HighWaterFraction <= 0 || c.PoP.HighWaterFraction > 1 {
+	//
+	// The bound is written as the negation of the in-range predicate
+	// (not `<= 0 || > 1`) so it also rejects NaN: strconv.ParseFloat
+	// accepts "NaN", and every NaN comparison is false, so the
+	// open-coded form would let NaN through to silently revert to the
+	// 0.85 default. This matches the Rust edge's `!(f > 0.0 && f <= 1.0)`.
+	if !(c.PoP.HighWaterFraction > 0 && c.PoP.HighWaterFraction <= 1) {
 		return fmt.Errorf("POP_HIGH_WATER_FRACTION must be in (0, 1], got %v", c.PoP.HighWaterFraction)
 	}
 	if c.PoP.RegistryRefreshInterval <= 0 {
