@@ -253,13 +253,19 @@ impl PoPRouter {
     /// Resolve a connection's [`TenantSelector`] to the tenant that
     /// owns it, *without* loading the engine. A `CertClaim` is
     /// honoured only if that tenant is assigned here; an `Sni` is
-    /// resolved through the SNI table.
+    /// resolved through the SNI table, which `with_tenant` /
+    /// `without_tenant` keep in lockstep with `engines` within each
+    /// snapshot — so an SNI hit always names an assigned tenant.
     ///
     /// # Errors
     ///
-    /// [`RouteError::UnknownSni`] if the ServerName maps to no
-    /// tenant; [`RouteError::TenantNotAssigned`] if the named
-    /// tenant has no loaded engine.
+    /// [`RouteError::UnknownSni`] if the ServerName maps to no tenant.
+    /// [`RouteError::TenantNotAssigned`] only on the `CertClaim` path,
+    /// when the asserted tenant has no loaded engine — a cert may
+    /// claim any tenant id, so this is the isolation check. The `Sni`
+    /// path never returns it, because SNI rows exist only for tenants
+    /// that are assigned (and therefore have an engine) in the same
+    /// snapshot.
     pub fn resolve(&self, selector: TenantSelector<'_>) -> Result<TenantId, RouteError> {
         let table = self.tenants.load();
         match selector {

@@ -1501,6 +1501,32 @@ func (c Config) validate() error {
 			return fmt.Errorf("PG_SSLMODE must be one of require|verify-ca|verify-full in production environments, got %q", c.Postgres.SSLMode)
 		}
 	}
+	// Cloud PoP service knobs. The strict parser accepts "0s"/0 and the
+	// service-level options (WithHighWaterFraction, WithHealthTTL)
+	// silently ignore out-of-range values, so an operator typo would
+	// quietly run with a default instead of the intended value. A zero
+	// POP_REGISTRY_REFRESH_INTERVAL is worse than silent — it panics
+	// time.NewTicker. Fail boot loudly, mirroring the Rust edge config
+	// (crates/sng-edge/src/config.rs) which rejects the same
+	// out-of-range high-water fraction.
+	if c.PoP.HighWaterFraction <= 0 || c.PoP.HighWaterFraction > 1 {
+		return fmt.Errorf("POP_HIGH_WATER_FRACTION must be in (0, 1], got %v", c.PoP.HighWaterFraction)
+	}
+	if c.PoP.RegistryRefreshInterval <= 0 {
+		return fmt.Errorf("POP_REGISTRY_REFRESH_INTERVAL must be > 0, got %s", c.PoP.RegistryRefreshInterval)
+	}
+	if c.PoP.HealthTTL <= 0 {
+		return fmt.Errorf("POP_HEALTH_TTL must be > 0, got %s", c.PoP.HealthTTL)
+	}
+	if c.PoP.GeoDNSTTL <= 0 {
+		return fmt.Errorf("POP_GEODNS_TTL must be > 0, got %s", c.PoP.GeoDNSTTL)
+	}
+	if c.PoP.GeoDNSPublishInterval <= 0 {
+		return fmt.Errorf("POP_GEODNS_PUBLISH_INTERVAL must be > 0, got %s", c.PoP.GeoDNSPublishInterval)
+	}
+	if c.PoP.RebalanceInterval <= 0 {
+		return fmt.Errorf("POP_REBALANCE_INTERVAL must be > 0, got %s", c.PoP.RebalanceInterval)
+	}
 	return nil
 }
 

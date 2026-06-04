@@ -279,6 +279,53 @@ func TestIngestHealth_RejectsNilPoP(t *testing.T) {
 	}
 }
 
+func TestIngestHealth_ClampsFarFutureTimestamp(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(10_000, 0).UTC()
+	store := newFakeStore()
+	p := store.seedPoP(PoP{Region: "us-east", AnycastIP: "203.0.113.1", CapacityTier: CapacityMedium, Enabled: true})
+	svc := newTestService(t, store, now)
+
+	// A beacon dated far in the future (a mis-set or hostile edge
+	// clock) must be clamped to server time; otherwise the staleness
+	// check clock().Sub(reported_at) goes negative and pins the PoP
+	// healthy forever, and the future timestamp would shadow every
+	// later honest beacon in the registry's latest-wins ordering.
+	future := now.Add(time.Hour)
+	if err := svc.IngestHealth(context.Background(), Health{PoPID: p.ID, ReportedAt: future, ActiveConnections: 3}); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	h, ok := svc.Registry().Health(p.ID)
+	if !ok {
+		t.Fatalf("registry missing health for %s", p.ID)
+	}
+	if !h.ReportedAt.Equal(now) {
+		t.Fatalf("ReportedAt = %s, want clamped to now %s", h.ReportedAt, now)
+	}
+	// Persisted copy is clamped too.
+	if ph, err := store.LatestHealth(context.Background(), p.ID); err != nil || !ph.ReportedAt.Equal(now) {
+		t.Fatalf("persisted ReportedAt = (%s, %v), want clamped to %s", ph.ReportedAt, err, now)
+	}
+}
+
+func TestIngestHealth_KeepsWithinSkewTimestamp(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(10_000, 0).UTC()
+	store := newFakeStore()
+	p := store.seedPoP(PoP{Region: "us-east", AnycastIP: "203.0.113.1", CapacityTier: CapacityMedium, Enabled: true})
+	svc := newTestService(t, store, now)
+
+	// A small forward skew (legitimate NTP drift, within tolerance) is
+	// preserved rather than clamped.
+	skewed := now.Add(5 * time.Second)
+	if err := svc.IngestHealth(context.Background(), Health{PoPID: p.ID, ReportedAt: skewed, ActiveConnections: 3}); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if h, ok := svc.Registry().Health(p.ID); !ok || !h.ReportedAt.Equal(skewed) {
+		t.Fatalf("ReportedAt = %v (ok=%v), want preserved %s", h.ReportedAt, ok, skewed)
+	}
+}
+
 func TestRebalance_MovesNonOverrideTenants(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(10_000, 0).UTC()

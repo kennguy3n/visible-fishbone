@@ -126,3 +126,52 @@ func TestPoPStrictParseRejectsBadValues(t *testing.T) {
 		})
 	}
 }
+
+// TestPoPValidationRejectsOutOfRange confirms that syntactically valid
+// but semantically out-of-range PoP knobs fail boot in validate()
+// (rather than being silently ignored by the service-level options and
+// falling back to a default). A zero refresh interval is especially
+// load-bearing: it would panic time.NewTicker at runtime.
+func TestPoPValidationRejectsOutOfRange(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   string
+		value string
+	}{
+		{"high-water above 1", "POP_HIGH_WATER_FRACTION", "1.5"},
+		{"high-water zero", "POP_HIGH_WATER_FRACTION", "0"},
+		{"high-water negative", "POP_HIGH_WATER_FRACTION", "-0.1"},
+		{"zero refresh interval", "POP_REGISTRY_REFRESH_INTERVAL", "0s"},
+		{"zero health ttl", "POP_HEALTH_TTL", "0s"},
+		{"zero geodns ttl", "POP_GEODNS_TTL", "0s"},
+		{"zero geodns publish", "POP_GEODNS_PUBLISH_INTERVAL", "0s"},
+		{"zero rebalance interval", "POP_REBALANCE_INTERVAL", "0s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearAll(t)
+			withEnv(t, map[string]string{tc.env: tc.value})
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected validation error for %s=%s", tc.env, tc.value)
+			}
+			if !strings.Contains(err.Error(), tc.env) {
+				t.Errorf("error should name %s: %v", tc.env, err)
+			}
+		})
+	}
+}
+
+// TestPoPValidationAcceptsBoundary confirms the inclusive upper bound
+// (1.0) on the high-water fraction is accepted.
+func TestPoPValidationAcceptsBoundary(t *testing.T) {
+	clearAll(t)
+	withEnv(t, map[string]string{"POP_HIGH_WATER_FRACTION": "1"})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load with POP_HIGH_WATER_FRACTION=1: %v", err)
+	}
+	if cfg.PoP.HighWaterFraction != 1 {
+		t.Errorf("HighWaterFraction = %v, want 1", cfg.PoP.HighWaterFraction)
+	}
+}

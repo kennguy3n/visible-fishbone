@@ -279,7 +279,16 @@ func run() error {
 	// folded into the same registry in real time so a PoP that goes
 	// hot or silent drops out of the assignable set within one TTL
 	// window instead of one refresh interval.
-	go popSvc.Run(rootCtx, cfg.PoP.RegistryRefreshInterval)
+	// Warm the registry from Postgres synchronously BEFORE subscribing
+	// to health beacons. ApplyHealth drops beacons for PoPs the registry
+	// has not loaded yet, so subscribing first would open a startup
+	// window where early beacons are dropped from the in-memory snapshot
+	// (they are still persisted and self-heal on the next refresh, but
+	// warming first closes the window). Run still owns the periodic
+	// refresh loop below.
+	if err := popSvc.Registry().Refresh(rootCtx); err != nil {
+		logger.Warn("sng-control: initial pop registry refresh failed", slog.Any("error", err))
+	}
 	popHealthSub, err := subscribePoPHealth(nc, popSvc, logger)
 	if err != nil {
 		return fmt.Errorf("subscribe pop health: %w", err)
@@ -291,6 +300,7 @@ func run() error {
 			logger.Warn("sng-control: pop health subscription drain failed", slog.Any("error", err))
 		}
 	}()
+	go popSvc.Run(rootCtx, cfg.PoP.RegistryRefreshInterval)
 	// The capacity rebalancer is a singleton: only the leader scans
 	// for overloaded PoPs and moves non-override tenants off them, so
 	// a multi-replica deployment performs one coordinated rebalance

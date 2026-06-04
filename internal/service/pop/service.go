@@ -28,6 +28,18 @@ const DefaultHighWaterFraction = 0.85
 // from Postgres when Service.Run drives the loop.
 const DefaultRefreshInterval = 30 * time.Second
 
+// maxBeaconFutureSkew bounds how far ahead of the control plane's
+// clock a beacon's reported_at may be before we stop trusting it.
+// Staleness is judged by clock().Sub(reported_at) <= healthTTL, so a
+// beacon dated far in the future (a mis-set or hostile edge clock)
+// would make that difference negative and keep the PoP "healthy"
+// forever; because the registry keeps the latest reading by
+// reported_at, such a beacon would also shadow every subsequent
+// honest one. A minute comfortably covers real NTP skew between an
+// edge and the control plane; anything beyond it is clamped to
+// server time so the PoP still ages out normally.
+const maxBeaconFutureSkew = time.Minute
+
 // RegionLocator maps a client IP to a coarse geographic region (e.g.
 // "us-east", "eu-west") used to bias PoP selection toward the
 // client's locale. Production wires a GeoIP-backed implementation;
@@ -181,8 +193,13 @@ func (s *Service) IngestHealth(ctx context.Context, h Health) error {
 	if h.PoPID == uuid.Nil {
 		return fmt.Errorf("%w: beacon missing pop_id", repository.ErrInvalidArgument)
 	}
-	if h.ReportedAt.IsZero() {
-		h.ReportedAt = s.clock()
+	// Stamp server time when the edge omitted the timestamp, and refuse
+	// to trust a reported_at that is implausibly far in the future
+	// (clamp it to now) so a skewed or hostile edge clock cannot pin a
+	// PoP as permanently healthy or shadow later honest beacons.
+	now := s.clock()
+	if h.ReportedAt.IsZero() || h.ReportedAt.After(now.Add(maxBeaconFutureSkew)) {
+		h.ReportedAt = now
 	}
 	if err := s.store.RecordHealth(ctx, h); err != nil {
 		return err
