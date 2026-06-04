@@ -124,16 +124,15 @@ type APILatencySection struct {
 	Tiers []APILatencyTier `json:"tiers"`
 }
 
-// peakP99 returns the worst (highest) OverallP99Ms across tiers — the
-// headline number the verdict grades. Returns 0 for an empty section.
-func (s *APILatencySection) peakP99() float64 {
-	var peak float64
-	for i := range s.Tiers {
-		if s.Tiers[i].OverallP99Ms > peak {
-			peak = s.Tiers[i].OverallP99Ms
-		}
+// headlineP99Ms returns the OverallP99Ms of the highest-tenant-count
+// tier — the single API number both the verdict and the regression
+// gate key off, so a graded report and its regression check never
+// disagree about which figure they mean. Returns 0 for an empty section.
+func (s *APILatencySection) headlineP99Ms() float64 {
+	if tier := s.maxTenantTier(); tier != nil {
+		return tier.OverallP99Ms
 	}
-	return peak
+	return 0
 }
 
 // maxTenantTier returns the tier with the largest TenantCount, or nil
@@ -580,7 +579,7 @@ func DetectRegressions(baseline, current *BusinessBenchmarkReport, threshold flo
 	}
 
 	if baseline.APILatency != nil && current.APILatency != nil {
-		add("api_p99_ms", baseline.APILatency.peakP99(), current.APILatency.peakP99())
+		add("api_p99_ms", baseline.APILatency.headlineP99Ms(), current.APILatency.headlineP99Ms())
 	}
 	if baseline.PolicyCompile != nil && current.PolicyCompile != nil {
 		for _, target := range []int{100, 1000} {

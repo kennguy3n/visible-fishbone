@@ -53,17 +53,29 @@ jobs:
     name: control-plane scale bench
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      # Scheduled runs are always dry-run (hosted runner has no live deps).
-      # A manual dispatch with dry_run=false drops --dry-run to publish real
-      # numbers against the environment pointed at by SCALE_BENCH_URL/_DSN.
-      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && '' || '--dry-run' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+
+      # Resolve the dry-run flag in the shell rather than a `&& '' || ...`
+      # expression: in GitHub Actions an empty string is falsy, so the
+      # ternary idiom collapses back to its right operand whenever the
+      # "true" branch is '' (it would always force --dry-run). Scheduled
+      # runs are always dry-run (the hosted runner has no live deps); only a
+      # manual dispatch with dry_run=false drops --dry-run to publish real
+      # numbers against the environment in SCALE_BENCH_URL/_DSN.
+      - name: resolve dry-run flag
+        env:
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${DRY_RUN_INPUT}" = "false" ]; then
+            echo "DRY_RUN=" >> "$GITHUB_ENV"
+          else
+            echo "DRY_RUN=--dry-run" >> "$GITHUB_ENV"
+          fi
 
       - name: build harness
         run: go build ./bench/controlplane/
