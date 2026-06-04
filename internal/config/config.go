@@ -82,6 +82,30 @@ type Config struct {
 	AppRegistry        AppRegistry
 	AI                 AI
 	MobileAuth         MobileAuth
+	Metering           Metering
+}
+
+// Metering carries the runtime knobs for the cost-metering and
+// budget-guardrail subsystem (internal/service/metering). The metering
+// service accumulates per-tenant resource consumption in atomic
+// counters and flushes them to Postgres every FlushInterval;
+// BudgetEnforcer gates LLM (and other) usage against per-tenant
+// budgets that resolve in precedence order
+// override → tier default → global default → unbounded.
+type Metering struct {
+	// FlushInterval is the cadence at which accumulated usage deltas
+	// are batch-upserted into tenant_usage. Defaults to 60s. Parsed
+	// strictly (METERING_FLUSH_INTERVAL) so a typo fails boot rather
+	// than silently reverting and skewing cost accounting.
+	FlushInterval time.Duration
+	// DefaultBudgets is the global, tier-independent fallback map of
+	// per-meter hard limits applied only when neither a tenant
+	// override nor a tier default exists. Keys are meter names (e.g.
+	// "s3_bytes_archived"); unknown meters and non-positive values are
+	// ignored by the enforcer. Populated from METERING_DEFAULT_BUDGETS
+	// as a comma-separated "meter=value" list. Optional: nil means the
+	// only fallbacks are the built-in per-tier defaults.
+	DefaultBudgets map[string]int64
 }
 
 // MobileAuth carries the runtime knobs for control-plane IdP
@@ -1018,6 +1042,10 @@ func Load() (Config, error) {
 		// Mobile IdP-federation session + discovery-cache lifetimes.
 		{"MOBILE_AUTH_SESSION_TOKEN_TTL", time.Hour, &cfg.MobileAuth.SessionTokenTTL},
 		{"MOBILE_AUTH_DISCOVERY_CACHE_TTL", 24 * time.Hour, &cfg.MobileAuth.DiscoveryCacheTTL},
+		// Cost-metering flush cadence. Defaults to 60s (matching the
+		// Session K spec and metering.DefaultFlushInterval). Parsed
+		// strictly so a typo can't silently skew cost accounting.
+		{"METERING_FLUSH_INTERVAL", 60 * time.Second, &cfg.Metering.FlushInterval},
 	}
 	strictFloats := []struct {
 		key string
@@ -1087,6 +1115,14 @@ func Load() (Config, error) {
 			continue
 		}
 		*s.dst = v
+	}
+	// METERING_DEFAULT_BUDGETS is a map (meter=value,...), so it cannot
+	// ride the scalar strict tables; parse it strictly here so a
+	// malformed entry fails boot like every other load-bearing setting.
+	if budgets, err := getInt64MapStrict("METERING_DEFAULT_BUDGETS"); err != nil {
+		strictErrs = append(strictErrs, err)
+	} else {
+		cfg.Metering.DefaultBudgets = budgets
 	}
 	if len(strictErrs) > 0 {
 		return cfg, errors.Join(strictErrs...)
@@ -1579,6 +1615,38 @@ func getDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// getInt64MapStrict parses a comma-separated "key=value" list into a
+// map[string]int64. An unset / empty variable yields a nil map (the
+// caller's documented "no entries" case). Any malformed pair or
+// non-integer value is a config error so a typo fails boot rather than
+// silently dropping a budget — the same strictness rule the scalar
+// helpers enforce.
+func getInt64MapStrict(key string) (map[string]int64, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return nil, nil
+	}
+	out := make(map[string]int64)
+	for _, pair := range strings.Split(v, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		name, val, found := strings.Cut(pair, "=")
+		name = strings.TrimSpace(name)
+		val = strings.TrimSpace(val)
+		if !found || name == "" || val == "" {
+			return nil, fmt.Errorf("config: %s=%q has an invalid entry %q (want meter=value)", key, v, pair)
+		}
+		n, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("config: %s entry %q has a non-integer value: %w", key, pair, err)
+		}
+		out[name] = n
+	}
+	return out, nil
 }
 
 // parseCSV splits a comma-separated list into a trimmed slice. Empty

@@ -77,15 +77,41 @@ type AuditSink interface {
 	RecordAIAudit(ctx context.Context, rec AuditRecord) error
 }
 
+// BudgetGate is the slice of the cost-metering BudgetEnforcer the
+// guardrails need: a pre-flight check that a tenant still has budget
+// for an estimated number of LLM tokens. It returns a non-nil error
+// (wrapping the budget-exceeded sentinel) only when the hard limit
+// would be breached; a soft-limit crossing is allowed and handled
+// (alerted) inside the enforcer.
+//
+// Declared here, rather than importing the metering package, so the ai
+// package takes no dependency on it (mirroring AuditSink) and tests can
+// stub it. A thin adapter in cmd/sng-control maps this onto
+// metering.BudgetEnforcer.CheckBudget("llm_tokens_used", ...).
+type BudgetGate interface {
+	CheckLLMTokenBudget(ctx context.Context, tenantID uuid.UUID, estimatedTokens int64) error
+}
+
+// UsageRecorder meters the actual LLM consumption of a completed call
+// (token count and a single call) so the cost-metering service can
+// accumulate it. Failures are logged, never surfaced to the caller —
+// metering must not break the live LLM path. A thin adapter in
+// cmd/sng-control maps this onto metering.MeteringService.Record.
+type UsageRecorder interface {
+	RecordLLMUsage(ctx context.Context, tenantID uuid.UUID, tokens, calls int64) error
+}
+
 // GuardrailedProvider wraps an LLMProvider with guardrails:
 // rate limiting, content filtering, output validation, and audit
 // logging. The audit log is capped at maxAuditLogSize entries (ring buffer).
 type GuardrailedProvider struct {
-	inner     LLMProvider
-	config    GuardrailConfig
-	logger    *slog.Logger
-	filters   []*regexp.Regexp
-	auditSink AuditSink
+	inner        LLMProvider
+	config       GuardrailConfig
+	logger       *slog.Logger
+	filters      []*regexp.Regexp
+	auditSink    AuditSink
+	budgetGate   BudgetGate
+	costRecorder UsageRecorder
 
 	mu        sync.Mutex
 	usage     map[uuid.UUID]*tenantUsage
@@ -102,6 +128,21 @@ type GuardrailOption func(*GuardrailedProvider)
 // only.
 func WithAuditSink(sink AuditSink) GuardrailOption {
 	return func(g *GuardrailedProvider) { g.auditSink = sink }
+}
+
+// WithBudgetGate wires the cost-metering budget pre-check into the LLM
+// path. When set, every Complete call is gated on the tenant's LLM
+// token budget before any tokens are spent. When nil (the default) the
+// guardrails behave exactly as before.
+func WithBudgetGate(gate BudgetGate) GuardrailOption {
+	return func(g *GuardrailedProvider) { g.budgetGate = gate }
+}
+
+// WithUsageRecorder wires the cost-metering usage recorder so the
+// actual token / call consumption of each successful completion is
+// metered. When nil (the default) no metering is recorded.
+func WithUsageRecorder(rec UsageRecorder) GuardrailOption {
+	return func(g *GuardrailedProvider) { g.costRecorder = rec }
 }
 
 const maxAuditLogSize = 10000
@@ -175,6 +216,23 @@ func (g *GuardrailedProvider) Complete(ctx context.Context, req LLMRequest) (LLM
 		return LLMResponse{}, err
 	}
 
+	// Cost-budget pre-check. Refuse to spend LLM tokens a tenant has no
+	// budget for: on a hard-limit breach we return a template-only
+	// fallback (no LLM call) with a user-visible note instead of an
+	// error, so the AI feature degrades gracefully while security
+	// enforcement is unaffected.
+	estTokens := estimateLLMTokens(req)
+	if g.budgetGate != nil {
+		if err := g.budgetGate.CheckLLMTokenBudget(ctx, tenantID, estTokens); err != nil {
+			g.recordAudit(ctx, tenantID, budgetFallbackModelID, "budget_blocked", 0, time.Since(start), false, err.Error())
+			g.logger.WarnContext(ctx, "ai/guardrails: llm call blocked by cost budget",
+				slog.String("tenant_id", tenantID.String()),
+				slog.Int64("estimated_tokens", estTokens),
+				slog.String("error", err.Error()))
+			return budgetFallbackResponse(), nil
+		}
+	}
+
 	// Content filtering: redact PII/secrets from prompt.
 	filteredPrompt, redacted := g.filterContent(req.Prompt)
 	filteredReq := LLMRequest{
@@ -195,9 +253,56 @@ func (g *GuardrailedProvider) Complete(ctx context.Context, req LLMRequest) (LLM
 	// Track token usage.
 	g.trackTokens(tenantID, resp.TokenCount)
 
+	// Meter the actual consumption for cost accounting (best-effort).
+	g.recordLLMUsage(ctx, tenantID, int64(resp.TokenCount))
+
 	g.recordAudit(ctx, tenantID, resp.ModelID, "complete", resp.TokenCount, elapsed, redacted, "")
 
 	return resp, nil
+}
+
+// budgetFallbackModelID marks a response synthesised locally because
+// the tenant's LLM budget was exhausted (no upstream model was called).
+const budgetFallbackModelID = "budget-fallback"
+
+// budgetFallbackNote is the user-visible message returned in place of
+// an LLM completion when a tenant's hard LLM budget is exceeded.
+const budgetFallbackNote = "AI assistance is temporarily unavailable for your account because your AI usage budget has been reached. Security enforcement is unaffected. Contact your administrator to raise the limit."
+
+// budgetFallbackResponse builds the template-only fallback returned
+// when a tenant's hard LLM budget is exceeded.
+func budgetFallbackResponse() LLMResponse {
+	return LLMResponse{Text: budgetFallbackNote, ModelID: budgetFallbackModelID, TokenCount: 0}
+}
+
+// estimateLLMTokens estimates the worst-case tokens a request will
+// consume for the pre-flight budget check: a rough prompt estimate
+// (~4 chars/token) plus the requested completion ceiling (MaxTokens),
+// falling back to a conservative default completion size when MaxTokens
+// is unset. Deliberately an upper bound so the budget gate errs toward
+// protecting spend.
+func estimateLLMTokens(req LLMRequest) int64 {
+	promptTokens := int64(len(req.Prompt)/4) + 1
+	completion := int64(req.MaxTokens)
+	if completion <= 0 {
+		completion = 256
+	}
+	return promptTokens + completion
+}
+
+// recordLLMUsage meters one completed LLM call (tokens + a single
+// call) when a recorder is configured. Best-effort: a metering failure
+// is logged, never returned, so cost accounting cannot break the live
+// LLM path.
+func (g *GuardrailedProvider) recordLLMUsage(ctx context.Context, tenantID uuid.UUID, tokens int64) {
+	if g.costRecorder == nil {
+		return
+	}
+	if err := g.costRecorder.RecordLLMUsage(ctx, tenantID, tokens, 1); err != nil {
+		g.logger.WarnContext(ctx, "ai/guardrails: cost metering record failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("error", err.Error()))
+	}
 }
 
 func (g *GuardrailedProvider) checkRateLimit(tenantID uuid.UUID) error {

@@ -41,6 +41,7 @@ type RouterDeps struct {
 	Troubleshoot     *TroubleshootHandler
 	OIDC             *OIDCHandler
 	Mobile           *MobileHandler
+	Metering         *MeteringHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
 	// MobileDeviceStatus, when set, enables the auth-middleware
@@ -170,6 +171,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.Mobile != nil {
 		deps.Mobile.Register(apiMux)
+	}
+	if deps.Metering != nil {
+		deps.Metering.Register(apiMux)
 	}
 
 	authOpts := []middleware.AuthOption{}
