@@ -68,6 +68,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      # `alert on regression` files a tracking issue via github-script.
+      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -223,12 +225,15 @@ jobs:
             exit 0
           fi
           cp incoming/*.json bench/results/
-          if git diff --quiet -- bench/results; then
-            echo "no changes to commit"
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add bench/results
+          # Stage first, then diff the index: the fresh reports are new,
+          # uniquely-timestamped (untracked) files, which a working-tree
+          # `git diff` cannot see — only `--cached` detects them.
+          if git diff --cached --quiet -- bench/results; then
+            echo "no changes to commit"
+            exit 0
+          fi
           git commit -m "bench: publish weekly results ($(date -u +%Y-%m-%d))"
           git push

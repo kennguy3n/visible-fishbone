@@ -39,6 +39,12 @@ const ETHERTYPE_IPV6: u16 = 0x86DD;
 const IPPROTO_UDP: u8 = 17;
 const IPPROTO_TCP: u8 = 6;
 
+/// Largest frame the crafter will build. The IPv4 total-length and IPv6
+/// payload-length fields are 16-bit, so the IP portion of a frame cannot
+/// exceed 65535 bytes without truncating that field; capping the whole
+/// frame at `ETH_HLEN + 65535` keeps both within range.
+pub const MAX_FRAME_SIZE: usize = ETH_HLEN + u16::MAX as usize;
+
 /// Errors raised while generating or transmitting synthetic traffic.
 #[derive(Debug, Error)]
 pub enum TrafficError {
@@ -54,6 +60,11 @@ pub enum TrafficError {
     /// The requested wire packet size cannot hold the protocol headers.
     #[error("packet size {0} is smaller than the required headers")]
     PacketTooSmall(u32),
+
+    /// The requested wire packet size exceeds the largest frame whose IP
+    /// length field is representable in 16 bits ([`MAX_FRAME_SIZE`]).
+    #[error("packet size {0} exceeds the maximum representable frame ({MAX_FRAME_SIZE})")]
+    PacketTooLarge(u32),
 
     /// The operator-supplied generator config is invalid (empty subnet,
     /// inverted port range, zero-length MAC, ...).
@@ -276,11 +287,15 @@ impl PacketBuilder {
     ///
     /// # Errors
     /// Returns [`TrafficError::PacketTooSmall`] if `config.frame_size`
-    /// cannot hold the headers for the sampler's IP version.
+    /// cannot hold the headers for the sampler's IP version, or
+    /// [`TrafficError::PacketTooLarge`] if it exceeds [`MAX_FRAME_SIZE`].
     pub fn new(config: PacketConfig, sampler: FiveTupleSampler) -> Result<Self, TrafficError> {
         let min = config.min_frame_size(sampler.ip_version());
         if (config.frame_size as usize) < min {
             return Err(TrafficError::PacketTooSmall(config.frame_size));
+        }
+        if config.frame_size as usize > MAX_FRAME_SIZE {
+            return Err(TrafficError::PacketTooLarge(config.frame_size));
         }
         Ok(Self {
             config,
@@ -756,6 +771,18 @@ mod tests {
         // 40 bytes cannot hold eth(14)+ipv4(20)+udp(8) = 42.
         let r = PacketBuilder::new(cfg(40, L4Proto::Udp), v4_sampler(24));
         assert!(matches!(r, Err(TrafficError::PacketTooSmall(40))));
+    }
+
+    #[test]
+    fn builder_rejects_oversized_frame() {
+        // One byte past the largest representable IP length field.
+        let size = (MAX_FRAME_SIZE + 1) as u32;
+        let r = PacketBuilder::new(cfg(size, L4Proto::Udp), v4_sampler(24));
+        assert!(matches!(r, Err(TrafficError::PacketTooLarge(s)) if s == size));
+        // The boundary itself is accepted.
+        assert!(
+            PacketBuilder::new(cfg(MAX_FRAME_SIZE as u32, L4Proto::Udp), v4_sampler(24)).is_ok()
+        );
     }
 
     #[test]
