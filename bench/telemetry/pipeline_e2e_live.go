@@ -285,18 +285,26 @@ func measureE2ELatency(ctx context.Context, js publisher, hot *clickhouse.Writer
 	if probes > 0 {
 		meanMs = float64(total.Microseconds()) / float64(probes) / 1000.0
 	}
+	maxMs := float64(maxLatency.Microseconds()) / 1000.0
 	return Section{
 		Title:   "Publish→queryable latency",
 		Summary: fmt.Sprintf("%d single-event probes through NATS→consumer→ClickHouse.", probes),
 		Metrics: []MetricRow{
+			// The mean is reported for context but not judged: the design
+			// target is a P99, and mean <= P99 always, so judging the mean
+			// against it would pass even when the tail blows the budget.
+			{Name: "mean latency", Unit: "ms", Actual: meanMs, Verdict: VerdictInfo},
+			// With only e2eLatencyProbes samples a true P99 is not
+			// meaningful, so judge the worst observed probe against the P99
+			// budget — a conservative stand-in for the tail.
 			{
-				Name: "mean latency", Unit: "ms",
-				Actual:      meanMs,
+				Name: "max latency", Unit: "ms",
+				Actual:      maxMs,
 				Theoretical: ptr(TargetE2ELatencyP99Ms),
 				Competitor:  ptr(competitorE2ELatencyP99Ms),
-				Verdict:     classify(meanMs, ptr(TargetE2ELatencyP99Ms), false, DefaultWarnBand),
+				Verdict:     classify(maxMs, ptr(TargetE2ELatencyP99Ms), false, DefaultWarnBand),
+				Note:        "worst observed probe vs the P99 budget (sample too small for a true P99)",
 			},
-			{Name: "max latency", Unit: "ms", Actual: float64(maxLatency.Microseconds()) / 1000.0, Verdict: VerdictInfo},
 		},
 	}, nil
 }
