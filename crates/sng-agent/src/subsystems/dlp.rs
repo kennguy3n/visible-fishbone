@@ -195,6 +195,15 @@ async fn run_channel_worker(
 ) {
     let channel = interceptor.channel();
     loop {
+        // Cancellation safety: when the shutdown branch wins, the
+        // `next_event()` future is dropped mid-poll. This is safe
+        // because the `ChannelInterceptor` contract is that an event
+        // is only removed from the backend's source at the point it
+        // is returned — every in-tree impl pops then returns with no
+        // intervening await, so the sole await point (an empty-buffer
+        // backoff sleep) holds no event. Dropping there loses nothing;
+        // the event is still queued for the next `next_event()` call,
+        // and on shutdown we are tearing the worker down regardless.
         tokio::select! {
             () = shutdown.wait() => break,
             next = interceptor.next_event() => match next {
