@@ -336,7 +336,7 @@ func (s *Service) verdictFromPoll(sha, sandboxID string, res providers.PollResul
 	if s.provider != nil {
 		provider = s.provider.ID()
 	}
-	return Verdict{
+	v := Verdict{
 		SHA256:         sha,
 		Classification: mapClassification(res.Classification),
 		Confidence:     res.Confidence,
@@ -345,6 +345,12 @@ func (s *Service) verdictFromPoll(sha, sandboxID string, res providers.PollResul
 		Summary:        res.Summary,
 		AnalyzedAt:     analyzed,
 	}
+	// Canonicalise the digest + provider before the verdict is
+	// persisted or handed back to the data plane so cache keys and
+	// stored rows use one form regardless of how the provider cased
+	// them in its poll response.
+	v.normalize()
+	return v
 }
 
 // mapClassification converts the providers package's string enum to

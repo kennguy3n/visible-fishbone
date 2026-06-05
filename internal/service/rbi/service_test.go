@@ -25,15 +25,29 @@ func seedTenant(t *testing.T, store *memory.Store) uuid.UUID {
 	return tid
 }
 
+// testClock is the fixed timestamp the test service stamps via the
+// injected clock seam, so assertions on session expiry are
+// deterministic instead of racing wall-clock.
+var testClock = time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+
 func newTestSvc(t *testing.T, proxyURL string, policy PolicyConfig) (*Service, uuid.UUID) {
 	t.Helper()
 	store := memory.NewStore()
 	tid := seedTenant(t, store)
 	repo := memory.NewRBISessionRepository(store)
+	// Deterministic clock + monotonic id generator: keeps session
+	// expiry and ids reproducible while still handing out distinct ids
+	// per session.
+	var idCounter byte
 	return NewService(repo,
 		WithProxy(ProxyConfig{BaseURL: proxyURL}),
 		WithPolicy(policy),
 		WithSessionTTL(10*time.Minute),
+		withClock(func() time.Time { return testClock }),
+		withIDGen(func() uuid.UUID {
+			idCounter++
+			return uuid.NewSHA1(uuid.NameSpaceOID, []byte{idCounter})
+		}),
 	), tid
 }
 
@@ -67,6 +81,21 @@ func TestCreateSession_Configured(t *testing.T) {
 	}
 	if got.TargetURL != "https://gambling.example" {
 		t.Fatalf("unexpected target url: %s", got.TargetURL)
+	}
+}
+
+func TestCreateSession_ExpiryUsesInjectedClock(t *testing.T) {
+	svc, tid := newTestSvc(t, "https://rbi.example.com", PolicyConfig{})
+	sess, err := svc.CreateSession(context.Background(), tid, CreateSessionInput{
+		TargetURL: "https://gambling.example",
+		UserID:    uuid.New(),
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	want := testClock.Add(10 * time.Minute)
+	if !sess.ExpiresAt.Equal(want) {
+		t.Fatalf("expected ExpiresAt %v from injected clock, got %v", want, sess.ExpiresAt)
 	}
 }
 

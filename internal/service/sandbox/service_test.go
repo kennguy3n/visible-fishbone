@@ -28,13 +28,28 @@ func seedTenant(t *testing.T, store *memory.Store) uuid.UUID {
 
 const testSHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
+// testClock is the fixed timestamp the test service stamps via the
+// injected clock seam, so assertions on service-generated timestamps
+// are deterministic instead of racing wall-clock.
+var testClock = time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+
 func newTestEnv(t *testing.T, p providers.Provider) (*Service, uuid.UUID) {
 	t.Helper()
 	store := memory.NewStore()
 	tid := seedTenant(t, store)
 	repo := memory.NewSandboxVerdictRepository(store)
+	// Deterministic clock + monotonic id generator: the seams keep the
+	// service's timestamps and row ids reproducible across runs while
+	// still handing out distinct ids per row (the repository upserts by
+	// (tenant, sha256), so distinct shas must not collide on id).
+	var idCounter byte
 	opts := []Option{
 		WithCache(NewCache(WithCacheCapacity(16), WithCacheTTL(time.Minute))),
+		withClock(func() time.Time { return testClock }),
+		withIDGen(func() uuid.UUID {
+			idCounter++
+			return uuid.NewSHA1(uuid.NameSpaceOID, []byte{idCounter})
+		}),
 	}
 	if p != nil {
 		opts = append(opts, WithProvider(p))
@@ -230,9 +245,19 @@ type stubProvider struct {
 	classification providers.Classification
 	score          float64
 	submitCalled   int
+	// zeroAnalyzedAt makes the provider return a zero AnalyzedAt so a
+	// test can assert the service stamps its own (injected) clock.
+	zeroAnalyzedAt bool
 }
 
 func (s *stubProvider) ID() string { return "stub" }
+
+func (s *stubProvider) analyzedAt() time.Time {
+	if s.zeroAnalyzedAt {
+		return time.Time{}
+	}
+	return time.Now().UTC()
+}
 
 func (s *stubProvider) Submit(_ context.Context, f providers.File) (providers.SubmitResult, error) {
 	s.submitCalled++
@@ -245,11 +270,34 @@ func (s *stubProvider) Submit(_ context.Context, f providers.File) (providers.Su
 				Classification: s.classification,
 				Confidence:     s.score,
 				Summary:        "stub sync verdict",
-				AnalyzedAt:     time.Now().UTC(),
+				AnalyzedAt:     s.analyzedAt(),
 			},
 		}, nil
 	}
 	return providers.SubmitResult{SandboxID: "test-id-async", Status: providers.StatusPending}, nil
+}
+
+// TestSubmit_StampsInjectedClockWhenProviderOmitsAnalyzedAt verifies
+// the service falls back to its own clock (the injected seam) when the
+// provider returns a zero AnalyzedAt, rather than persisting a zero
+// timestamp.
+func TestSubmit_StampsInjectedClockWhenProviderOmitsAnalyzedAt(t *testing.T) {
+	p := &stubProvider{
+		syncResult:     true,
+		classification: providers.ClassMalicious,
+		score:          0.9,
+		zeroAnalyzedAt: true,
+	}
+	svc, tid := newTestEnv(t, p)
+	v, err := svc.Submit(context.Background(), Submission{
+		TenantID: tid, SHA256: testSHA256, Content: []byte("x"),
+	}, nil)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !v.AnalyzedAt.Equal(testClock) {
+		t.Fatalf("expected AnalyzedAt to use injected clock %v, got %v", testClock, v.AnalyzedAt)
+	}
 }
 
 func (s *stubProvider) Poll(_ context.Context, _ string) (providers.PollResult, error) {

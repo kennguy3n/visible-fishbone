@@ -15,15 +15,15 @@ import (
 
 // Session is the service-level view of an RBI session.
 type Session struct {
-	ID         uuid.UUID
-	TenantID   uuid.UUID
-	UserID     uuid.UUID
-	TargetURL  string
-	Status     string
-	ProxyURL   string
-	ExpiresAt  time.Time
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ID        uuid.UUID
+	TenantID  uuid.UUID
+	UserID    uuid.UUID
+	TargetURL string
+	Status    string
+	ProxyURL  string
+	ExpiresAt time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // CreateSessionInput is the validated input to CreateSession.
