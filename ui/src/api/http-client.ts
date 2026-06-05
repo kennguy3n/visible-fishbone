@@ -42,21 +42,13 @@ instance.interceptors.response.use(
 export const sngRequest = <T>(
   config: AxiosRequestConfig,
   options?: AxiosRequestConfig,
-): Promise<T> => {
-  const source = axios.CancelToken.source();
-  const promise = instance({
+): Promise<T> =>
+  // Cancellation flows through the AbortSignal that TanStack Query v5 passes
+  // into the orval-generated request config (`config.signal`); axios aborts
+  // on it natively. We deliberately avoid the deprecated `CancelToken` here.
+  instance({
     ...config,
     ...options,
-    cancelToken: source.token,
   }).then(({ data }: AxiosResponse<T>) => data);
-
-  // orval's query hooks look for a `.cancel` to wire up React Query
-  // cancellation; attach it without breaking the Promise contract.
-  (promise as Promise<T> & { cancel?: () => void }).cancel = () => {
-    source.cancel("Query was cancelled");
-  };
-
-  return promise;
-};
 
 export default sngRequest;

@@ -49,7 +49,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const setSession = useCallback((token: string) => {
     setAccessToken(token);
-    setClaims(decodeJwt(token));
+    // Mirror deriveClaims(): reject an already-expired token instead of
+    // briefly flipping to authenticated and getting kicked out on the first
+    // 401. Keeps the paste/OIDC-callback path consistent with page reload.
+    const next = decodeJwt(token);
+    if (isExpired(next)) {
+      clearAccessToken();
+      setClaims(null);
+      return;
+    }
+    setClaims(next);
   }, []);
 
   const logout = useCallback(() => {

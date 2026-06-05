@@ -18,9 +18,25 @@ interface Template {
 
 const STORAGE_KEY = "sng.msp.templates";
 
+function isTemplate(value: unknown): value is Template {
+  if (typeof value !== "object" || value === null) return false;
+  const t = value as Record<string, unknown>;
+  return (
+    typeof t.id === "string" &&
+    typeof t.name === "string" &&
+    typeof t.description === "string" &&
+    typeof t.graph === "string"
+  );
+}
+
 function load(): Template[] {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as Template[];
+    const parsed: unknown = JSON.parse(
+      localStorage.getItem(STORAGE_KEY) ?? "[]",
+    );
+    // A corrupted or tampered entry must not flow through as Template[]:
+    // keep only well-shaped records and drop the rest.
+    return Array.isArray(parsed) ? parsed.filter(isTemplate) : [];
   } catch {
     return [];
   }
