@@ -52,13 +52,17 @@ cargo run --release -- --out efficacy-report.json --git-sha "$(git rev-parse --s
 
 Flags: `--out <path>` (default `efficacy-report.json`), `--git-sha <sha>`, and
 per-function toggles (`--firewall`, `--swg`, `--ztna`, `--ips`) to run a
-subset. Exit code is `0` when every function PASSes, `2` otherwise.
+subset. Exit code is `0` only when every function PASSes, `2` otherwise (a
+`WARN` or `UNTESTED` overall verdict also exits `2`, so a half-run suite never
+reads as green to a CI gate).
 
 ### IPS prerequisite
 
 The IPS driver needs the `suricata` binary on `PATH`. If it is missing, that
-function is reported as `UNTESTED` (with a reason) rather than failing — the
-other three still run. Install on Debian/Ubuntu with `apt-get install
+function is reported as `UNTESTED` (with a reason) instead of aborting the
+run — the other three still execute and are scored. Note this makes the overall
+verdict `UNTESTED`, so the process still exits `2` (the measurement is
+incomplete, not green). Install on Debian/Ubuntu with `apt-get install
 suricata`.
 
 ### Fixtures

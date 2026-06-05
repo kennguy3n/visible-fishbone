@@ -98,10 +98,13 @@ async fn main() {
 
     print_summary(&report, &cli.out);
 
-    // Non-zero exit if any tested function failed, so the harness can
-    // gate a CI/bench job if desired (the consolidator reads the JSON
-    // regardless).
-    if report.overall_verdict == Grade::Fail {
+    // Honour the documented contract (README): exit 0 only when every
+    // function PASSes, 2 otherwise. WARN and UNTESTED are both non-zero so a
+    // half-run suite — e.g. IPS skipped because Suricata is absent — can never
+    // masquerade as green at the exit-code level. The JSON always records the
+    // true per-function verdict, so the consolidator renders the accurate
+    // status regardless of the exit code.
+    if report.overall_verdict != Grade::Pass {
         std::process::exit(2);
     }
 }
