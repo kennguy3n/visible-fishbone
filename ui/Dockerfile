@@ -3,9 +3,12 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 
-# Install dependencies against the lockfile for reproducible builds.
-COPY package.json package-lock.json* ./
-RUN npm ci || npm install
+# Install dependencies strictly from the committed lockfile for reproducible
+# builds. `npm ci` fails loudly if package.json and package-lock.json are out
+# of sync, which is what we want in CI/image builds (no silent `npm install`
+# fallback that could resolve different versions).
+COPY package.json package-lock.json ./
+RUN npm ci
 
 # Build the static bundle.
 COPY . .
@@ -14,8 +17,10 @@ RUN npm run build
 # --- Runtime stage ------------------------------------------------------
 FROM nginx:1.27-alpine AS runtime
 
-# SPA-aware nginx config (history fallback + asset caching).
+# SPA-aware nginx config (history fallback + asset caching) plus the shared
+# hardening-headers snippet that each location block includes.
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+COPY docker/security-headers.conf /etc/nginx/snippets/sng-security-headers.conf
 
 # Static assets from the build stage.
 COPY --from=build /app/dist /usr/share/nginx/html

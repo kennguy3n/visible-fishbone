@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -45,12 +46,12 @@ export function TenantProvider({ children }: { children: ReactNode }) {
     }
   }, [tenants, selectedTenantId]);
 
-  const setSelectedTenantId = (id: string) => {
+  const setSelectedTenantId = useCallback((id: string) => {
     setSelected(id);
     if (typeof localStorage !== "undefined") {
       localStorage.setItem(STORAGE_KEY, id);
     }
-  };
+  }, []);
 
   const value = useMemo<TenantState>(
     () => ({
@@ -61,7 +62,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       setSelectedTenantId,
       isLoading,
     }),
-    [tenants, selectedTenantId, isLoading],
+    [tenants, selectedTenantId, setSelectedTenantId, isLoading],
   );
 
   return (

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useAuth } from "@/auth/auth-context";
 
@@ -8,9 +8,13 @@ export function Login() {
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  if (isAuthenticated) {
-    navigate({ to: "/" });
-  }
+  // Redirect away from the login screen once authenticated. Navigation is a
+  // side effect, so it must run in an effect rather than during render.
+  useEffect(() => {
+    if (isAuthenticated) {
+      navigate({ to: "/" });
+    }
+  }, [isAuthenticated, navigate]);
 
   const onJwtSubmit = (e: React.FormEvent) => {
     e.preventDefault();
