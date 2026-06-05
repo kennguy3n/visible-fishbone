@@ -953,6 +953,20 @@ type CASBPostureCheckRepository interface {
 	GetLatest(ctx context.Context, tenantID uuid.UUID, appID uuid.UUID) ([]CASBPostureCheck, error)
 }
 
+// InlineCASBRuleRepository owns the inline_casb_rules table
+// (migration 037). Tenant-scoped reads/writes flow through
+// `sng.tenant_id` (RLS) on the postgres backend; the memory backend
+// filters on TenantID explicitly. List returns every rule for the
+// tenant (enabled and disabled); the service layer filters to
+// enabled rules at compile time.
+type InlineCASBRuleRepository interface {
+	List(ctx context.Context, tenantID uuid.UUID) ([]InlineCASBRule, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (InlineCASBRule, error)
+	Create(ctx context.Context, tenantID uuid.UUID, rule InlineCASBRule) (InlineCASBRule, error)
+	Update(ctx context.Context, tenantID uuid.UUID, rule InlineCASBRule) (InlineCASBRule, error)
+	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+}
+
 // --- DLP ------------------------------------------------------------------
 
 // DLPPolicyRepository owns the dlp_policies table. Tenant-scoped

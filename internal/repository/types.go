@@ -1394,6 +1394,28 @@ type CASBPostureCheck struct {
 	AssessedAt time.Time
 }
 
+// InlineCASBRule is a persisted inline-CASB rule row
+// (inline_casb_rules, migration 037). The service-layer type with
+// typed Action/Verdict/Conditions lives in internal/service/casb;
+// this repository projection keeps Action and Verdict as plain
+// strings and Conditions as the raw JSONB document so the
+// repository layer stays decoupled from the service's enums.
+type InlineCASBRule struct {
+	ID         uuid.UUID
+	TenantID   uuid.UUID
+	AppID      string
+	Action     string
+	Verdict    string
+	Conditions json.RawMessage
+	Enabled    bool
+	// Priority maps the INTEGER column; int32 matches the data
+	// plane's i32 so a value that round-trips here cannot overflow
+	// on bundle deserialisation.
+	Priority  int32
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 // --- DLP ------------------------------------------------------------------
 
 // DLPAction enumerates the enforcement actions a DLP policy can take

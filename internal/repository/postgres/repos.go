@@ -119,6 +119,11 @@ func (s *Store) NewCASBPostureCheckRepository() *CASBPostureCheckRepository {
 	return &CASBPostureCheckRepository{s: s}
 }
 
+// NewInlineCASBRuleRepository binds the Store to repository.InlineCASBRuleRepository.
+func (s *Store) NewInlineCASBRuleRepository() *InlineCASBRuleRepository {
+	return &InlineCASBRuleRepository{s: s}
+}
+
 // NewAICorrelationRepository binds the Store to repository.AICorrelationRepository.
 func (s *Store) NewAICorrelationRepository() *AICorrelationRepository {
 	return &AICorrelationRepository{s: s}

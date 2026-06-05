@@ -561,6 +561,7 @@ func buildRouter(
 	casbConnectorRepo := store.NewCASBConnectorRepository()
 	casbAppRepo := store.NewCASBDiscoveredAppRepository()
 	casbPostureRepo := store.NewCASBPostureCheckRepository()
+	inlineCASBRuleRepo := store.NewInlineCASBRuleRepository()
 	opsHealthRepo := store.NewOpsHealthSnapshotRepository()
 	aiSuggestionRepo := store.NewAISuggestionRepository()
 
@@ -622,12 +623,24 @@ func buildRouter(
 	appSvc := appdb.New(appRepo, appOverrideRepo, auditRepo, logger)
 	appSyncer := appdb.NewSyncer(appSvc, nil)
 	appRegHandler := handler.NewAppRegistryHandler(appSvc, nil, appSyncer)
+	// Inline-CASB service is constructed before the policy service
+	// so the latter can fold its rules into the SWG bundle slice at
+	// compile time (WithInlineCASBCompiler). It is backed by the
+	// inline_casb_rules table (migration 037) via the repository
+	// adapter, sharing the same RLS-scoped store as every other
+	// tenant-scoped repo.
+	inlineCASBSvc := casb.NewInline(
+		casb.NewRepositoryInlineRuleStore(inlineCASBRuleRepo),
+		auditRepo,
+		logger,
+	)
 	policySvc := policy.New(
 		policyRepo,
 		auditRepo,
 		policySigner,
 		policy.WithLogger(logger),
 		policy.WithSteeringCompiler(appdb.PolicySteeringAdapter{Svc: appSvc}),
+		policy.WithInlineCASBCompiler(inlineCASBSvc),
 	)
 
 	// When the file-backed signer is active, expose its public key
@@ -947,18 +960,22 @@ func buildRouter(
 		Baseline:         handler.NewBaselineHandler(baselineRepo, logger),
 		Alert:            handler.NewAlertHandler(alertRouter, alertFeedback, logger),
 		Integrations:     handler.NewIntegrationHandler(integrationSvc),
-		CASB:             handler.NewCASBHandler(casbSvc),
-		MSP:              handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
-		AI:               aiHandler,
-		SCIM:             handler.NewSCIMHandler(scimSvc),
-		Compliance:       complianceHandler,
-		Playbook:         playbookHandler,
-		Troubleshoot:     troubleshootHandler,
-		OIDC:             oidcHandler,
-		Mobile:           handler.NewMobileHandler(identitySvc),
-		Metering:         meteringHandler,
-		PoP:              popHandler,
-		APIKeyLookup:     apiKeySvc,
+		CASB: func() *handler.CASBHandler {
+			h := handler.NewCASBHandler(casbSvc)
+			h.SetInlineService(inlineCASBSvc)
+			return h
+		}(),
+		MSP:          handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
+		AI:           aiHandler,
+		SCIM:         handler.NewSCIMHandler(scimSvc),
+		Compliance:   complianceHandler,
+		Playbook:     playbookHandler,
+		Troubleshoot: troubleshootHandler,
+		OIDC:         oidcHandler,
+		Mobile:       handler.NewMobileHandler(identitySvc),
+		Metering:     meteringHandler,
+		PoP:          popHandler,
+		APIKeyLookup: apiKeySvc,
 		// Device kill-switch for stateless mobile session JWTs: a
 		// token bound to a suspended/deleted device is refused by the
 		// auth middleware on every endpoint, not just self-service.

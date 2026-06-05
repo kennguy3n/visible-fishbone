@@ -99,13 +99,31 @@ type SteeringSnapshot interface {
 	CompileForTarget(target repository.PolicyBundleTarget) (any, error)
 }
 
+// InlineCASBCompiler produces a tenant's inline-CASB rules as
+// policy.Rule entries (Domain == DomainInlineCASB) for the compiler
+// to fold into the policy graph before per-target slicing. It is
+// satisfied directly by *casb.InlineCASBService.CompileRules —
+// declared as an interface here so the policy package does not
+// import the casb service package (avoiding an import cycle and
+// keeping Compile unit-testable with a tiny fake).
+//
+// Returned rules already carry their CASB payload in Extra["casb"]
+// and route to the edge + cloud targets via domainTargets, exactly
+// like a DomainSWG rule. A nil compiler (in-process tests, dry
+// runs) leaves the inline-CASB section out of every bundle,
+// matching the pre-inline-CASB behaviour.
+type InlineCASBCompiler interface {
+	CompileRules(ctx context.Context, tenantID uuid.UUID) ([]Rule, error)
+}
+
 // Service is the policy service.
 type Service struct {
-	repo     repository.PolicyRepository
-	audit    repository.AuditLogRepository
-	signer   Signer
-	logger   *slog.Logger
-	steering SteeringCompiler
+	repo       repository.PolicyRepository
+	audit      repository.AuditLogRepository
+	signer     Signer
+	logger     *slog.Logger
+	steering   SteeringCompiler
+	inlineCASB InlineCASBCompiler
 }
 
 // ServiceOption configures New.
@@ -137,6 +155,19 @@ func WithLogger(l *slog.Logger) ServiceOption {
 func WithSteeringCompiler(c SteeringCompiler) ServiceOption {
 	return func(s *Service) {
 		s.steering = c
+	}
+}
+
+// WithInlineCASBCompiler installs the inline-CASB rule compiler.
+// When supplied, Compile merges the tenant's enabled inline-CASB
+// rules into the typed graph before per-target slicing, so they
+// ship in the edge + cloud bundles' rule slice. When nil, bundles
+// carry no inline-CASB rules (the SWG inspector enforces nothing
+// until rules are installed). Production callers pass the
+// *casb.InlineCASBService from cmd/sng-control.
+func WithInlineCASBCompiler(c InlineCASBCompiler) ServiceOption {
+	return func(s *Service) {
+		s.inlineCASB = c
 	}
 }
 
@@ -346,6 +377,34 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 			slog.Int("graph_version", graph.Version),
 			slog.Any("error", parseErr),
 		)
+	}
+	// Fold the tenant's inline-CASB rules into the typed graph so
+	// they ride the same per-target slicing, signing, and
+	// versioning as every other SWG rule. They route to the edge +
+	// cloud targets via domainTargets(DomainInlineCASB). This runs
+	// once per Compile (not per target): CompileTarget re-reads the
+	// merged typed.Rules for each bundle. A nil compiler is a
+	// no-op. When the graph is on the legacy verbatim path
+	// (typed == nil) the rules cannot be merged into the parsed
+	// model — log a warning rather than silently dropping them so
+	// an operator can re-publish their graph to opt into the typed
+	// path and get inline-CASB enforcement.
+	if s.inlineCASB != nil {
+		casbRules, casbErr := s.inlineCASB.CompileRules(ctx, tenantID)
+		if casbErr != nil {
+			return CompileResult{}, fmt.Errorf("compile inline casb rules: %w", casbErr)
+		}
+		if len(casbRules) > 0 {
+			if typed != nil {
+				typed.Rules = append(typed.Rules, casbRules...)
+			} else {
+				s.logger.Warn("policy: inline-CASB rules skipped for tenant on legacy verbatim-rules path (re-publish the policy graph to enable inline-CASB enforcement)",
+					slog.String("tenant_id", tenantID.String()),
+					slog.String("graph_id", graph.ID.String()),
+					slog.Int("inline_casb_rules", len(casbRules)),
+				)
+			}
+		}
 	}
 	// Snapshot the appdb catalog + tenant overrides once per
 	// Compile so the per-target steering build below doesn't

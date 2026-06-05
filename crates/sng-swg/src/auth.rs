@@ -29,12 +29,22 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::bypass::BypassList;
+use crate::casb::{InlineCasbInspector, RequestSignals};
+use crate::casb_rules::CasbRuleSet;
 use crate::categorizer::UrlCategorizer;
 use crate::error::SwgError;
 use crate::malware::{MalwareVerdict, MalwareVerdictProvider};
 use crate::rate_limit::RateLimiter;
 use crate::telemetry::{TelemetryEmitter, VerdictEvent};
 use crate::verdict::{Action, RequestContext, Verdict};
+
+/// Header carrying an upstream-applied sensitivity label (e.g. a
+/// Microsoft Purview / MIP label id). Read into
+/// [`RequestSignals::sensitivity_label`] for inline-CASB
+/// label-gated rules. Distinct from the `:`-prefixed Envoy pseudo
+/// headers so an operator's `allowed_headers` allow-list controls
+/// whether the label is forwarded.
+const DLP_LABEL_HEADER: &str = "x-sng-dlp-label";
 
 /// JSON shape Envoy POSTs at the ext-authz endpoint. Field
 /// names match what an operator can configure via Envoy's
@@ -115,6 +125,33 @@ impl ExtAuthzRequest {
         };
         ctx.normalize();
         Ok(ctx)
+    }
+
+    /// Extract the out-of-band inline-CASB signals (content length,
+    /// sensitivity label) from the request headers. Borrows `self`
+    /// so the caller can build the signals before consuming the
+    /// request via [`Self::into_context`].
+    ///
+    /// `content-length` is parsed leniently: a missing, empty, or
+    /// non-numeric value yields `None` (unknown size), matching the
+    /// inspector's fail-open-on-size contract — a request whose
+    /// length the proxy could not forward never matches a
+    /// size-gated rule rather than being wrongly blocked.
+    #[must_use]
+    pub fn signals(&self) -> RequestSignals {
+        let header = |k: &str| {
+            self.headers
+                .iter()
+                .find(|(h, _)| h.eq_ignore_ascii_case(k))
+                .map(|(_, v)| v.as_str())
+        };
+        RequestSignals {
+            content_length: header("content-length").and_then(|v| v.trim().parse::<u64>().ok()),
+            sensitivity_label: header(DLP_LABEL_HEADER)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string),
+        }
     }
 }
 
@@ -241,6 +278,17 @@ struct HandlerInner {
     /// a deployment that wants the higher-vigilance posture
     /// opts in explicitly.
     elevated_risk_mode: bool,
+    /// Optional inline-CASB inspector. When set, the verdict
+    /// pipeline runs the inspector on every request after the rate
+    /// limiter (so abusive callers are throttled before they reach
+    /// the CASB stage) and before URL categorisation. A CASB
+    /// `block` short-circuits to Deny; a CASB `log` / `allow` is
+    /// carried forward and surfaced on the allow path so the
+    /// verdict telemetry reflects the CASB hit — but it does NOT
+    /// suppress a later malware or deny-category block. `None`
+    /// leaves the pipeline exactly as it was before inline CASB
+    /// existed.
+    casb: Option<Arc<InlineCasbInspector>>,
 }
 
 impl std::fmt::Debug for ExtAuthzHandler {
@@ -269,6 +317,7 @@ pub struct ExtAuthzHandlerBuilder {
     telemetry: Option<Arc<dyn TelemetryEmitter>>,
     deny_categories: Vec<String>,
     elevated_risk_mode: bool,
+    casb: Option<Arc<InlineCasbInspector>>,
 }
 
 impl std::fmt::Debug for ExtAuthzHandlerBuilder {
@@ -281,6 +330,7 @@ impl std::fmt::Debug for ExtAuthzHandlerBuilder {
             .field("telemetry_set", &self.telemetry.is_some())
             .field("deny_categories", &self.deny_categories)
             .field("elevated_risk_mode", &self.elevated_risk_mode)
+            .field("casb_set", &self.casb.is_some())
             .finish()
     }
 }
@@ -299,6 +349,7 @@ impl ExtAuthzHandlerBuilder {
             telemetry: None,
             deny_categories: Vec::new(),
             elevated_risk_mode: false,
+            casb: None,
         }
     }
 
@@ -358,6 +409,19 @@ impl ExtAuthzHandlerBuilder {
         self
     }
 
+    /// Install an inline-CASB inspector. Optional: a handler built
+    /// without one runs the pre-CASB verdict pipeline unchanged.
+    /// The inspector's rule set is hot-swappable post-build via
+    /// [`ExtAuthzHandler::install_casb_rules`], so a handler can be
+    /// built with the inspector wired (built-in app catalog, empty
+    /// rule set) and have its rules installed later from the first
+    /// policy-bundle the control plane publishes.
+    #[must_use]
+    pub fn with_casb_inspector(mut self, inspector: Arc<InlineCasbInspector>) -> Self {
+        self.casb = Some(inspector);
+        self
+    }
+
     /// Build the handler. Returns an error when any required
     /// dep was not set.
     pub fn build(mut self) -> Result<ExtAuthzHandler, SwgError> {
@@ -389,6 +453,7 @@ impl ExtAuthzHandlerBuilder {
                     .ok_or_else(|| SwgError::Config("telemetry emitter not set".into()))?,
                 deny_categories: self.deny_categories,
                 elevated_risk_mode: self.elevated_risk_mode,
+                casb: self.casb,
             }),
         })
     }
@@ -408,11 +473,27 @@ impl ExtAuthzHandler {
         *self.inner.bypass.write() = list;
     }
 
+    /// Hot-swap the inline-CASB rule set, preserving the inspector's
+    /// app catalog. No-op (returns 0) when the handler was built
+    /// without an inspector. Returns the number of rules installed
+    /// so the policy-bundle controller can log it. The control
+    /// plane calls this on every bundle install with the CASB slice
+    /// decoded from the freshly-signed bundle.
+    pub fn install_casb_rules(&self, rules: CasbRuleSet) -> usize {
+        match &self.inner.casb {
+            Some(insp) => insp.install_rules(&rules),
+            None => 0,
+        }
+    }
+
     /// Convenience: process a decoded JSON request envelope.
     /// Returns the response envelope ready for serialisation.
     pub async fn handle_request(&self, req: ExtAuthzRequest) -> Result<ExtAuthzResponse, SwgError> {
+        // Build the out-of-band CASB signals before `into_context`
+        // consumes the request envelope.
+        let signals = req.signals();
         let ctx = req.into_context()?;
-        let verdict = self.evaluate(&ctx).await;
+        let verdict = self.evaluate(&ctx, &signals).await;
         let resp = ExtAuthzResponse::from_verdict(&verdict);
         self.inner
             .telemetry
@@ -468,9 +549,18 @@ impl ExtAuthzHandler {
     /// Decision order:
     /// 1. TLS bypass — exempt the request entirely if SNI matches
     /// 2. Rate limit — protect the verdict pipeline from runaways
-    /// 3. URL categorisation — operator deny-list wins; default allow
-    /// 4. Malware verdict on the response body hash (when supplied)
-    pub async fn evaluate(&self, ctx: &RequestContext) -> Verdict {
+    /// 3. Inline CASB — block short-circuits; log/allow is carried
+    ///    forward so a later deny still wins
+    /// 4. URL categorisation — operator deny-list wins; default allow
+    /// 5. Malware verdict on the response body hash (when supplied)
+    ///
+    /// `signals` carries the out-of-band inline-CASB inputs (content
+    /// length, sensitivity label) extracted from the request by
+    /// [`ExtAuthzRequest::signals`]. They are ignored when no CASB
+    /// inspector is wired, so the verdict stays a pure function of
+    /// `(ctx, signals)` over the configured trait + inspector
+    /// snapshot.
+    pub async fn evaluate(&self, ctx: &RequestContext, signals: &RequestSignals) -> Verdict {
         // 1. TLS bypass — we *only* short-circuit when SNI
         //    matches a bypass entry. Other paths see the full
         //    pipeline. Pulling a clone of the Arc out of the
@@ -508,7 +598,30 @@ impl ExtAuthzHandler {
             return v;
         }
 
-        // 3. Categorise + apply deny list.
+        // 3. Inline CASB. Runs after the rate limiter (so an
+        //    abusive caller is throttled before reaching the
+        //    inspector) and before URL categorisation. A `block`
+        //    rule short-circuits straight to Deny. A `log` / `allow`
+        //    rule does NOT short-circuit: it is carried forward in
+        //    `casb_verdict` so a later malware or deny-category hit
+        //    can still override it with a Deny, and only surfaces on
+        //    the allow path below — where it takes precedence over a
+        //    plain categoriser allow so the verdict telemetry
+        //    reflects the specific SaaS action (e.g. tagging an
+        //    OneDrive download for DLP). `None` (not CASB-relevant,
+        //    or no rule matched) leaves the pipeline unchanged.
+        let casb_verdict = self
+            .inner
+            .casb
+            .as_ref()
+            .and_then(|insp| insp.inspect(ctx, signals));
+        if let Some(v) = &casb_verdict {
+            if v.action == Action::Deny {
+                return v.clone();
+            }
+        }
+
+        // 4. Categorise + apply deny list.
         //
         // The verdict's `category` field is canonicalised to
         // ASCII lowercase here rather than carried through with
@@ -541,7 +654,7 @@ impl ExtAuthzHandler {
             }
         }
 
-        // 4. Malware verdict on response body hash. Only kicks
+        // 5. Malware verdict on response body hash. Only kicks
         //    in when an upstream scanner has supplied a hash —
         //    a missing hash is *not* a deny signal.
         //
@@ -564,6 +677,17 @@ impl ExtAuthzHandler {
                 }
                 MalwareVerdict::Suspicious | MalwareVerdict::Clean | MalwareVerdict::Unknown => {}
             }
+        }
+        // Allow path. A carried-forward CASB `log` / `allow`
+        // verdict wins over the categoriser's allow: it is the
+        // higher-signal decision (a specific SaaS action the
+        // operator asked to log or explicitly allow) and it carries
+        // the `casb.<app>.<action>` category the DLP / CASB
+        // dashboards group on. Falling through to the categoriser
+        // allow would drop that signal. When no CASB verdict was
+        // produced, behaviour is identical to the pre-CASB pipeline.
+        if let Some(v) = casb_verdict {
+            return v;
         }
         match category_canonical {
             // Use the canonicalised category for the allow path
@@ -1136,5 +1260,253 @@ mod tests {
             SwgError::Config(msg) => assert!(msg.contains("categorizer"), "{msg}"),
             other => panic!("expected Config, got {other:?}"),
         }
+    }
+
+    // --- Inline CASB wiring -------------------------------------
+
+    use crate::casb::InlineCasbInspector;
+    use crate::casb_rules::{CasbAction, CasbConditions, CasbRule, CasbRuleSet, CasbVerdict};
+
+    fn casb_rule(app: &str, action: CasbAction, verdict: CasbVerdict) -> CasbRule {
+        CasbRule {
+            id: format!("{app}-{}", action.as_str()),
+            app_id: app.to_string(),
+            action,
+            verdict,
+            conditions: CasbConditions::default(),
+            priority: 0,
+        }
+    }
+
+    /// Build a handler with an inline-CASB inspector wired and the
+    /// given rule set installed. Generous rate-limit budget so the
+    /// CASB behaviour under test is not masked by throttling.
+    fn make_casb_handler(rules: Vec<CasbRule>) -> (ExtAuthzHandler, Arc<CapturingEmitter>) {
+        let cap = Arc::new(CapturingEmitter::default());
+        let bypass = Arc::new(BypassList::new(vec![]));
+        // Categorise graph.microsoft.com so we can prove a CASB
+        // log/allow verdict wins over the plain categoriser allow.
+        let cats = LocalCategoryDb::new(vec![CategoryEntry {
+            host: "graph.microsoft.com".into(),
+            path_prefix: None,
+            category: Category("business.saas".into()),
+        }]);
+        let mal = Arc::new(StaticMalwareList::new(vec![(
+            "a".repeat(64),
+            MalwareVerdict::Malicious,
+        )]));
+        let clock = Arc::new(TestClock::new());
+        let rl = RateLimiter::new(1000.0, 1000.0, clock);
+        let inspector = Arc::new(InlineCasbInspector::with_rules(CasbRuleSet::new(rules)));
+        let h = ExtAuthzHandlerBuilder::new()
+            .with_categorizer(Arc::new(cats))
+            .with_malware(mal)
+            .with_bypass(bypass)
+            .with_rate_limiter(rl)
+            .with_telemetry(cap.clone() as Arc<dyn TelemetryEmitter>)
+            .with_casb_inspector(inspector)
+            .build()
+            .unwrap();
+        (h, cap)
+    }
+
+    /// An M365 OneDrive upload via Graph: `PUT /v1.0/me/drive/items/{id}/content`.
+    fn m365_upload_req(size: Option<u64>, label: Option<&str>) -> ExtAuthzRequest {
+        let mut headers = vec![
+            (":method".into(), "PUT".into()),
+            (":scheme".into(), "https".into()),
+            (":path".into(), "/v1.0/me/drive/items/01ABC/content".into()),
+            ("host".into(), "graph.microsoft.com".into()),
+            ("x-sng-tenant".into(), "tenant-1".into()),
+            ("x-sng-principal".into(), "principal-1".into()),
+        ];
+        if let Some(s) = size {
+            headers.push(("content-length".into(), s.to_string()));
+        }
+        if let Some(l) = label {
+            headers.push((DLP_LABEL_HEADER.into(), l.into()));
+        }
+        ExtAuthzRequest {
+            headers,
+            body_sha256: None,
+        }
+    }
+
+    #[test]
+    fn signals_parses_content_length_and_label() {
+        let s = m365_upload_req(Some(4096), Some("confidential")).signals();
+        assert_eq!(s.content_length, Some(4096));
+        assert_eq!(s.sensitivity_label.as_deref(), Some("confidential"));
+        // Missing / unset → None (fail-open on size).
+        let s2 = m365_upload_req(None, None).signals();
+        assert_eq!(s2.content_length, None);
+        assert_eq!(s2.sensitivity_label, None);
+    }
+
+    #[test]
+    fn signals_ignores_non_numeric_content_length() {
+        let mut r = m365_upload_req(None, None);
+        r.headers.push(("content-length".into(), "not-a-number".into()));
+        assert_eq!(r.signals().content_length, None);
+    }
+
+    #[tokio::test]
+    async fn casb_block_rule_denies_upload() {
+        let (h, cap) = make_casb_handler(vec![casb_rule(
+            "m365",
+            CasbAction::Upload,
+            CasbVerdict::Block,
+        )]);
+        let resp = h
+            .handle_request(m365_upload_req(None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.status, Some(403));
+        assert_eq!(resp.category.as_deref(), Some("casb.m365.upload"));
+        assert_eq!(cap.events.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn casb_log_rule_allows_but_tags_and_wins_over_categoriser() {
+        let (h, _cap) = make_casb_handler(vec![casb_rule(
+            "m365",
+            CasbAction::Upload,
+            CasbVerdict::Log,
+        )]);
+        let resp = h
+            .handle_request(m365_upload_req(None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+        assert!(resp.status.is_none());
+        // The CASB log verdict's category wins over the
+        // categoriser's "business.saas" so DLP dashboards see the
+        // tagged SaaS action.
+        assert_eq!(resp.category.as_deref(), Some("casb.m365.upload"));
+        assert!(
+            resp.reason.starts_with("log.casb.m365.upload"),
+            "got: {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn casb_block_short_circuits_before_categoriser_allow() {
+        // A block rule on a host the categoriser would otherwise
+        // allow must still deny — proves CASB runs ahead of the
+        // categorise/allow stage.
+        let (h, _cap) = make_casb_handler(vec![casb_rule(
+            "m365",
+            CasbAction::Upload,
+            CasbVerdict::Block,
+        )]);
+        let resp = h
+            .handle_request(m365_upload_req(None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+    }
+
+    #[tokio::test]
+    async fn casb_size_threshold_gates_block() {
+        // Block uploads >= 10 MiB only.
+        let mut rule = casb_rule("m365", CasbAction::Upload, CasbVerdict::Block);
+        rule.conditions.size_threshold = Some(10 * 1024 * 1024);
+        let (h, _cap) = make_casb_handler(vec![rule]);
+
+        // Small upload: under threshold → allowed (no rule match).
+        let small = h
+            .handle_request(m365_upload_req(Some(1024), None))
+            .await
+            .unwrap();
+        assert_eq!(small.action, "allow");
+
+        // Large upload: over threshold → blocked.
+        let large = h
+            .handle_request(m365_upload_req(Some(20 * 1024 * 1024), None))
+            .await
+            .unwrap();
+        assert_eq!(large.action, "deny");
+    }
+
+    #[tokio::test]
+    async fn malware_deny_wins_over_casb_log() {
+        // A CASB log verdict must not suppress a malware block: the
+        // download is tagged for DLP *and* still denied when the
+        // body hash is known-malicious.
+        let (h, _cap) = make_casb_handler(vec![casb_rule(
+            "m365",
+            CasbAction::Download,
+            CasbVerdict::Log,
+        )]);
+        let r = ExtAuthzRequest {
+            headers: vec![
+                (":method".into(), "GET".into()),
+                (":scheme".into(), "https".into()),
+                (":path".into(), "/v1.0/me/drive/items/01ABC/content".into()),
+                ("host".into(), "graph.microsoft.com".into()),
+                ("x-sng-tenant".into(), "tenant-1".into()),
+                ("x-sng-principal".into(), "principal-1".into()),
+            ],
+            body_sha256: Some("a".repeat(64)),
+        };
+        let resp = h.handle_request(r).await.unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.category.as_deref(), Some("malware.detected"));
+    }
+
+    #[tokio::test]
+    async fn no_casb_rule_match_leaves_pipeline_unchanged() {
+        // Inspector wired but no rule matches the action → behaves
+        // exactly like the pre-CASB allow path (categoriser allow).
+        let (h, _cap) = make_casb_handler(vec![casb_rule(
+            "slack",
+            CasbAction::Upload,
+            CasbVerdict::Block,
+        )]);
+        let resp = h
+            .handle_request(m365_upload_req(None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+        assert_eq!(resp.category.as_deref(), Some("business.saas"));
+    }
+
+    #[tokio::test]
+    async fn install_casb_rules_hot_swaps_ruleset() {
+        let (h, _cap) = make_casb_handler(vec![]);
+        // No rules installed → upload allowed.
+        let before = h
+            .handle_request(m365_upload_req(None, None))
+            .await
+            .unwrap();
+        assert_eq!(before.action, "allow");
+        // Install a block rule, then the same request is denied.
+        let n = h.install_casb_rules(CasbRuleSet::new(vec![casb_rule(
+            "m365",
+            CasbAction::Upload,
+            CasbVerdict::Block,
+        )]));
+        assert_eq!(n, 1);
+        let after = h
+            .handle_request(m365_upload_req(None, None))
+            .await
+            .unwrap();
+        assert_eq!(after.action, "deny");
+    }
+
+    #[tokio::test]
+    async fn install_casb_rules_is_noop_without_inspector() {
+        // A handler built without an inspector must accept the
+        // install call (returns 0) rather than panicking.
+        let (h, _cap) = make_handler(vec![]);
+        assert_eq!(
+            h.install_casb_rules(CasbRuleSet::new(vec![casb_rule(
+                "m365",
+                CasbAction::Upload,
+                CasbVerdict::Block,
+            )])),
+            0
+        );
     }
 }
