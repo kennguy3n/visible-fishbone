@@ -36,7 +36,9 @@ function deriveClaims(): JwtClaims | null {
   const token = getAccessToken();
   if (!token) return null;
   const claims = decodeJwt(token);
-  if (isExpired(claims)) {
+  // Drop the stored token if it's malformed (decode failed) or expired so
+  // dead credentials don't linger in storage.
+  if (!claims || isExpired(claims)) {
     clearAccessToken();
     return null;
   }
@@ -49,11 +51,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const setSession = useCallback((token: string) => {
     setAccessToken(token);
-    // Mirror deriveClaims(): reject an already-expired token instead of
-    // briefly flipping to authenticated and getting kicked out on the first
-    // 401. Keeps the paste/OIDC-callback path consistent with page reload.
+    // Mirror deriveClaims(): reject a malformed or already-expired token
+    // (clearing it from storage) instead of briefly flipping to authenticated
+    // and getting kicked out on the first 401. Keeps the paste/OIDC-callback
+    // path consistent with page reload.
     const next = decodeJwt(token);
-    if (isExpired(next)) {
+    if (!next || isExpired(next)) {
       clearAccessToken();
       setClaims(null);
       return;

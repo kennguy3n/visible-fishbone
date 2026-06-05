@@ -25,13 +25,17 @@ SNG_OIDC_SCOPE="${SNG_OIDC_SCOPE:-openid profile email}"
 #   \  -> \\        backslash first so later escapes aren't doubled
 #   "  -> \"        string terminator
 #   /  -> \/        so the substring </script> can never appear verbatim
-#   newline -> \n   (JSON strings cannot contain raw newlines)
+#   tab -> \t, CR -> \r, newline -> \n   (JSON forbids raw control chars)
+# These four whitespace controls are the only C0 characters that plausibly
+# appear in a deployment env var (URLs, client IDs, scopes); other control
+# bytes are not handled because they cannot occur here in practice.
 # The surrounding quotes are added by printf so an empty value still yields
 # a valid "" literal.
 json_string() {
   escaped=$(
     printf '%s' "$1" \
       | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's#/#\\/#g' \
+      | sed -e 's/\t/\\t/g' -e 's/\r/\\r/g' \
       | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g'
   )
   printf '"%s"' "$escaped"

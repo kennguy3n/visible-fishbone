@@ -97,27 +97,33 @@ export async function completeOidcLogin(
   const verifier = sessionStorage.getItem(PKCE_VERIFIER_KEY);
   if (!verifier) throw new Error("Missing PKCE verifier");
 
-  const doc = await discover(cfg.oidcIssuer);
-  const body = new URLSearchParams({
-    grant_type: "authorization_code",
-    code,
-    redirect_uri: redirectUri(),
-    client_id: cfg.oidcClientId,
-    code_verifier: verifier,
-  });
-  const res = await fetch(doc.token_endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  if (!res.ok) {
-    throw new Error(`Token exchange failed (${res.status})`);
+  // The code, state, and verifier are single-use. Clear them in `finally`
+  // so a failed exchange (network error / non-OK response) doesn't leave
+  // stale PKCE material in sessionStorage.
+  try {
+    const doc = await discover(cfg.oidcIssuer);
+    const body = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri(),
+      client_id: cfg.oidcClientId,
+      code_verifier: verifier,
+    });
+    const res = await fetch(doc.token_endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    if (!res.ok) {
+      throw new Error(`Token exchange failed (${res.status})`);
+    }
+    const tokens = (await res.json()) as { access_token?: string };
+    if (!tokens.access_token) {
+      throw new Error("Token response missing access_token");
+    }
+    return { accessToken: tokens.access_token };
+  } finally {
+    sessionStorage.removeItem(PKCE_VERIFIER_KEY);
+    sessionStorage.removeItem(OIDC_STATE_KEY);
   }
-  const tokens = (await res.json()) as { access_token?: string };
-  sessionStorage.removeItem(PKCE_VERIFIER_KEY);
-  sessionStorage.removeItem(OIDC_STATE_KEY);
-  if (!tokens.access_token) {
-    throw new Error("Token response missing access_token");
-  }
-  return { accessToken: tokens.access_token };
 }

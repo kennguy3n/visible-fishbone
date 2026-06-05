@@ -75,17 +75,18 @@ export function formatRelative(value?: string | null): string {
   const diffMs = Date.now() - d.getTime();
   const sec = Math.round(diffMs / 1000);
   const abs = Math.abs(sec);
-  const units: [number, string][] = [
-    [60, "s"],
-    [3600, "m"],
-    [86400, "h"],
-    [2592000, "d"],
+  // [exclusive upper bound in seconds, seconds-per-unit, label]. The first
+  // step whose bound exceeds the elapsed time wins; the value is rendered in
+  // that step's unit. Keeping the divisor and label on the same row avoids
+  // the off-by-one that mislabels e.g. 90s as "s" instead of "m".
+  const steps: [number, number, string][] = [
+    [60, 1, "s"],
+    [3600, 60, "m"],
+    [86400, 3600, "h"],
+    [Infinity, 86400, "d"],
   ];
-  if (abs < 60) return `${sec}s ago`;
-  for (let i = 1; i < units.length; i++) {
-    if (abs < units[i][0]) {
-      return `${Math.round(sec / units[i - 1][0])}${units[i - 1][1]} ago`;
-    }
+  for (const [bound, perUnit, label] of steps) {
+    if (abs < bound) return `${Math.round(sec / perUnit)}${label} ago`;
   }
   return `${Math.round(sec / 86400)}d ago`;
 }
