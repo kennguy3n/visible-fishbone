@@ -219,21 +219,30 @@ pub async fn run() -> FunctionReport {
     let mut cases = Vec::new();
     for c in corpus() {
         let pcap = fixtures.join(c.file);
-        let (alerted, actual) = match alerts_for_pcap(&yaml_path, &pcap, &work, &eve).await {
-            Ok(n) => (n > 0, format!("{} alert(s)", n)),
+        // A Suricata execution failure means the measurement is unreliable,
+        // not a detection signal. Report the whole function UNTESTED rather
+        // than fabricating a verdict: scoring `alerted = false` here would
+        // silently book a good case as a clean true-negative (and a bad case
+        // as a missed detection), inflating the matrix from a broken run.
+        let n = match alerts_for_pcap(&yaml_path, &pcap, &work, &eve).await {
+            Ok(n) => n,
             Err(e) => {
-                // Treat a Suricata execution failure as untested for
-                // this case rather than a false signal.
-                (false, format!("error: {e}"))
+                return FunctionReport::untested(
+                    "ips",
+                    "sng-ips",
+                    Kind::Detection,
+                    &format!("suricata execution failed on {}: {e}", c.file),
+                );
             }
         };
         // bad => expect >=1 alert (detected); good => expect 0 alerts.
+        let alerted = n > 0;
         let correct = if c.bad { alerted } else { !alerted };
         cases.push(Case {
             description: c.desc.into(),
             bad: c.bad,
             expected: if c.bad { "detect" } else { "no-alert" }.into(),
-            actual,
+            actual: format!("{n} alert(s)"),
             correct,
         });
     }

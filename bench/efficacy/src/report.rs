@@ -362,10 +362,8 @@ mod tests {
             vec![case(true, true), case(false, true)],
             None,
         );
-        let untested =
-            FunctionReport::untested("b", "c", Kind::Detection, "tool missing");
-        let rep =
-            EfficacyReport::new("sha".into(), "host".into(), vec![pass, untested]);
+        let untested = FunctionReport::untested("b", "c", Kind::Detection, "tool missing");
+        let rep = EfficacyReport::new("sha".into(), "host".into(), vec![pass, untested]);
         assert_eq!(rep.overall_verdict, Grade::Untested);
     }
 }

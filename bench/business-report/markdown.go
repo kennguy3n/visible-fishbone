@@ -98,7 +98,7 @@ func (r *BusinessReport) strengths() []string {
 		out = append(out, fmt.Sprintf("Modeled telemetry-pipeline infra cost ($%.2f/user/mo) sits inside the $%.2f–%.2f/user/mo design envelope.", *c, r.Theoretical.UnitEconomics.OverallEnvelope[0], r.Theoretical.UnitEconomics.OverallEnvelope[1]))
 	}
 	if e := r.Efficacy; e != nil && len(e.Functions) > 0 {
-		tested, tp, bad, fp := 0, 0, 0, 0
+		tested, tp, bad, fns, fp := 0, 0, 0, 0, 0
 		for _, f := range e.Functions {
 			if !f.Tested {
 				continue
@@ -106,9 +106,15 @@ func (r *BusinessReport) strengths() []string {
 			tested++
 			tp += f.TP
 			bad += f.BadCases
+			fns += f.FN
 			fp += f.FP
 		}
-		if tested > 0 && tp == bad && fp == 0 {
+		// Only claim the strength over a non-empty known-bad corpus that was
+		// caught with zero misses and zero false-positives. Checking fn==0
+		// directly (rather than tp==bad) is robust to a hand-crafted report
+		// with inconsistent TP/BadCases, and bad>0 avoids a vacuous "0/0
+		// known-bad stopped" when no bad cases were exercised at all.
+		if tested > 0 && bad > 0 && fns == 0 && fp == 0 {
 			out = append(out, fmt.Sprintf("Security enforcement is correct end-to-end: %d/%d known-bad cases stopped and zero false-positives across %d functions (FW/SWG/ZTNA/IPS) — real decision-path measurements.", tp, bad, tested))
 		}
 	}

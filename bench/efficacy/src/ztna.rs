@@ -93,6 +93,11 @@ pub async fn run() -> FunctionReport {
         ..ZtnaPolicy::default()
     };
 
+    // The broker emits one audit/telemetry event per evaluation on `tx`. We
+    // don't assert on them here, but `_rx` is a named binding (not `_`), so
+    // the receiver is held for the whole function scope — the channel stays
+    // open and the buffered sends (<= corpus size, well under 256) succeed
+    // rather than erroring on a closed channel.
     let (tx, _rx) = tokio::sync::mpsc::channel(256);
     let svc = ZtnaServiceBuilder::new()
         .with_policy(Arc::new(ZtnaPolicyHolder::new(policy)))
