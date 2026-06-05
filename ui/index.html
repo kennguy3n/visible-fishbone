@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ShieldNet Gateway Console</title>
+    <!--
+      Runtime configuration is loaded from /config.js, which the nginx
+      entrypoint (docker/docker-entrypoint.sh) regenerates from environment
+      variables at container start. In local dev the committed public/config.js
+      default is served and the app falls back to Vite env vars / the dev proxy.
+    -->
+    <script src="/config.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
