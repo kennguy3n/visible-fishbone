@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sng-control.configMapName" . }}
+  labels:
+    {{- include "sng-control.labels" . | nindent 4 }}
+data:
+  {{- /* Render every plain config key except the three PG networking
+         knobs, which are derived so the PgBouncer sidecar cannot drift
+         from the runtime flag (see _helpers.tpl). */}}
+  {{- range $key, $val := .Values.config }}
+  {{- if not (or (eq $key "PG_HOST") (eq $key "PG_PORT") (eq $key "PG_PGBOUNCER_MODE")) }}
+  {{ $key }}: {{ $val | quote }}
+  {{- end }}
+  {{- end }}
+  PG_HOST: {{ include "sng-control.pgHost" . | quote }}
+  PG_PORT: {{ include "sng-control.pgPort" . | quote }}
+  PG_PGBOUNCER_MODE: {{ include "sng-control.pgbouncerMode" . | quote }}

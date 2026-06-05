@@ -1,0 +1,21 @@
+{{- if .Values.grafanaDashboards.enabled }}
+{{- /* One ConfigMap per dashboard JSON vendored under files/dashboards/.
+       Labelled so the Grafana sidecar (kiwigrid/k8s-sidecar) discovers
+       and imports them. Source of truth is deploy/grafana/dashboards/. */}}
+{{- range $path, $_ := .Files.Glob "files/dashboards/*.json" }}
+{{- $name := base $path | trimSuffix ".json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sng-control.fullname" $ }}-dashboard-{{ $name }}
+  labels:
+    {{- include "sng-control.labels" $ | nindent 4 }}
+    {{ $.Values.grafanaDashboards.label }}: {{ $.Values.grafanaDashboards.labelValue | quote }}
+  annotations:
+    grafana_folder: {{ $.Values.grafanaDashboards.folder | quote }}
+data:
+  {{ base $path }}: |-
+    {{- $.Files.Get $path | nindent 4 }}
+{{- end }}
+{{- end }}

@@ -16,9 +16,12 @@ import (
 	"strings"
 )
 
-// SchemaVersion is the report schema version. Bump it whenever the
-// JSON shape changes so a stale artifact is never silently compared
-// against a new one by the regression detector.
+// SchemaVersion is the report schema version. Bump it when the JSON
+// shape changes in a backward-incompatible way (a field is removed,
+// renamed, or its meaning/units change) so the regression detector
+// rejects a stale artifact instead of silently comparing it against a
+// new one. Purely additive changes (appending a new field old baselines
+// simply lack) stay comparable and need not bump it.
 const SchemaVersion = 1
 
 // Mode labels the benchmark that produced a report. They mirror the
@@ -27,6 +30,7 @@ const (
 	ModeAPILatency    = "api-latency"
 	ModePolicyCompile = "policy-compile"
 	ModeTenantScale   = "tenant-scale"
+	ModeCapacityPlan  = "capacity-plan"
 	ModeFullSuite     = "full-suite"
 )
 
@@ -67,6 +71,10 @@ type BusinessBenchmarkReport struct {
 	// PostgresScale is present for the tenant-scale and full-suite
 	// modes.
 	PostgresScale *PostgresScaleSection `json:"postgres_scale,omitempty"`
+	// CapacityPlan is present for the capacity-plan and full-suite
+	// modes. Unlike the other sections it is a deterministic analytical
+	// projection, not a measured workload.
+	CapacityPlan *CapacityPlanSection `json:"capacity_plan,omitempty"`
 
 	// Theoretical holds the design targets the verdicts are graded
 	// against (sourced from PROPOSAL.md / ARCHITECTURE.md).
@@ -264,6 +272,66 @@ type PostgresScaleSection struct {
 	RowCounts map[string]int64 `json:"row_counts"`
 	// IndexSizeBytes maps index name -> on-disk size.
 	IndexSizeBytes map[string]int64 `json:"index_size_bytes"`
+}
+
+// CapacityPlanSection is the deterministic capacity projection: the
+// data-plane footprint at a given tenant count across the three
+// horizontal-scaling axes. See capacity_plan.go for the model.
+type CapacityPlanSection struct {
+	// TenantCount is the modelled fleet size.
+	TenantCount int `json:"tenant_count"`
+	// TelemetryClasses is the set of telemetry classes the throughput
+	// and subject-cardinality models fan out across.
+	TelemetryClasses []string `json:"telemetry_classes"`
+	// Postgres is the connection-pool pressure projection.
+	Postgres PostgresPoolPlan `json:"postgres"`
+	// ClickHouse is the hot-path write-throughput projection.
+	ClickHouse ClickHouseWritePlan `json:"clickhouse"`
+	// NATS is the subject-cardinality + JetStream storage projection.
+	NATS NATSSubjectPlan `json:"nats"`
+}
+
+// PostgresPoolPlan projects connection-pool pressure at scale.
+type PostgresPoolPlan struct {
+	Replicas              int     `json:"replicas"`
+	PoolSizePerReplica    int     `json:"pool_size_per_replica"`
+	TotalAppConns         int     `json:"total_app_conns"`
+	PeakConcurrentQueries float64 `json:"peak_concurrent_queries"`
+	RecommendedPoolSize   int     `json:"recommended_pool_size"`
+	PGBouncerMode         bool    `json:"pgbouncer_mode"`
+	BackendConnsRequired  int     `json:"backend_conns_required"`
+	MaxConnections        int     `json:"max_connections"`
+	WithinMaxConnections  bool    `json:"within_max_connections"`
+	Note                  string  `json:"note"`
+}
+
+// ClickHouseWritePlan projects hot-path write load at scale.
+type ClickHouseWritePlan struct {
+	Shards                 int     `json:"shards"`
+	BatchSize              int     `json:"batch_size"`
+	TotalRowsPerSec        float64 `json:"total_rows_per_sec"`
+	RowsPerSecPerShard     float64 `json:"rows_per_sec_per_shard"`
+	InsertsPerSecPerShard  float64 `json:"inserts_per_sec_per_shard"`
+	MonthlyRows            int64   `json:"monthly_rows"`
+	PerTenantMonthlyRows   int64   `json:"per_tenant_monthly_rows"`
+	HotStorageGBCompressed float64 `json:"hot_storage_gb_compressed"`
+	IngestBytesPerSec      int64   `json:"ingest_bytes_per_sec"`
+	RecommendedShards      int     `json:"recommended_shards"`
+	RecommendedBatchSize   int     `json:"recommended_batch_size"`
+	Note                   string  `json:"note"`
+}
+
+// NATSSubjectPlan projects subject cardinality + JetStream storage.
+type NATSSubjectPlan struct {
+	Partitions              int     `json:"partitions"`
+	DistinctSubjects        int     `json:"distinct_subjects"`
+	SubjectsPerPartitionAvg float64 `json:"subjects_per_partition_avg"`
+	SubjectsPerPartitionMax int     `json:"subjects_per_partition_max"`
+	MsgsPerSec              float64 `json:"msgs_per_sec"`
+	RetentionHours          float64 `json:"retention_hours"`
+	StreamBytesHot          int64   `json:"stream_bytes_hot"`
+	RecommendedPartitions   int     `json:"recommended_partitions"`
+	Note                    string  `json:"note"`
 }
 
 // TheoreticalTargets are the design goals the verdicts grade against.
@@ -486,6 +554,9 @@ func (r *BusinessBenchmarkReport) ToMarkdown() string {
 	}
 	if r.PostgresScale != nil {
 		r.writePostgresScaleMarkdown(&b)
+	}
+	if r.CapacityPlan != nil {
+		r.writeCapacityPlanMarkdown(&b)
 	}
 	return b.String()
 }

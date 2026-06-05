@@ -1,0 +1,146 @@
+apiVersion: apps/v1
+kind: {{ .Values.kind }}
+metadata:
+  name: {{ include "sng-edge.fullname" . }}
+  labels:
+    {{- include "sng-edge.labels" . | nindent 4 }}
+spec:
+  {{- if eq .Values.kind "Deployment" }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "sng-edge.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "sng-edge.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "sng-edge.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.ips.ruleLoader.enabled }}
+      initContainers:
+        - name: ips-rule-loader
+          image: "{{ .Values.ips.ruleLoader.image.repository }}:{{ .Values.ips.ruleLoader.image.tag }}"
+          imagePullPolicy: {{ .Values.ips.ruleLoader.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.ips.ruleLoader.command | nindent 12 }}
+          env:
+            - name: RULE_FILE
+              value: {{ .Values.ips.ruleLoader.ruleFilePath | quote }}
+          volumeMounts:
+            - name: var-lib-sng
+              mountPath: /var/lib/sng
+      {{- end }}
+      containers:
+        - name: sng-edge
+          image: {{ include "sng-edge.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--config"
+            - {{ .Values.args.config | quote }}
+            {{- if .Values.args.healthBind }}
+            - "--health-bind"
+            - {{ .Values.args.healthBind | quote }}
+            {{- end }}
+            {{- with .Values.args.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.args.healthBind }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/sng-edge
+              readOnly: true
+            - name: var-lib-sng
+              mountPath: /var/lib/sng
+            - name: run-sng
+              mountPath: /run/sng
+            - name: tmp
+              mountPath: /tmp
+        {{- if .Values.envoy.enabled }}
+        - name: envoy
+          image: "{{ .Values.envoy.image.repository }}:{{ .Values.envoy.image.tag }}"
+          imagePullPolicy: {{ .Values.envoy.image.pullPolicy }}
+          args:
+            - "-c"
+            - "/etc/envoy/envoy.yaml"
+          resources:
+            {{- toYaml .Values.envoy.resources | nindent 12 }}
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy
+              readOnly: true
+        {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "sng-edge.configMapName" . }}
+        - name: var-lib-sng
+          emptyDir: {}
+        - name: run-sng
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.envoy.enabled }}
+        - name: envoy-config
+          configMap:
+            name: {{ include "sng-edge.envoyConfigMapName" . }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,16 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "sng-control.fullname" . }}
+  labels:
+    {{- include "sng-control.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- /* Vendored verbatim from deploy/prometheus/alerts/sng.rules.yml
+         (the read-only source of truth). The file's top-level `groups:`
+         maps directly onto a PrometheusRule spec. */}}
+  {{- .Files.Get "files/sng.rules.yml" | nindent 2 }}
+{{- end }}

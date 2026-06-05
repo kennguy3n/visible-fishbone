@@ -38,6 +38,13 @@ type UnitCosts struct {
 	ClickHousePer1MRowsUSD float64
 	// S3PerGBMonthUSD is the price per GB-month of cold archive storage.
 	S3PerGBMonthUSD float64
+	// NATSPerGBMonthUSD is the price per GB-month of NATS JetStream
+	// file-storage retained on disk. JetStream persistence is backed by
+	// block storage (a provisioned volume that is paid for whether or
+	// not it is full), so it is priced higher than S3 cold archive and
+	// billed against the stream's point-in-time retained size rather
+	// than a cumulative write counter.
+	NATSPerGBMonthUSD float64
 }
 
 // DefaultUnitCosts are conservative public-cloud list-price estimates.
@@ -51,6 +58,7 @@ var DefaultUnitCosts = UnitCosts{
 	EgressPerGBUSD:         0.09,
 	ClickHousePer1MRowsUSD: 0.20,
 	S3PerGBMonthUSD:        0.023,
+	NATSPerGBMonthUSD:      0.10,
 }
 
 const (
@@ -275,6 +283,158 @@ func (c *CostCalculator) BuildReport(tenantID uuid.UUID, tier repository.TenantT
 		rep.MarginPct = round4(rep.MarginUSD / rep.MonthlyRevenueUSD)
 	}
 	return rep
+}
+
+// NATSStorageCostUSD returns the monthly cost of retaining
+// `streamBytes` of NATS JetStream file storage for one tenant.
+//
+// Unlike ClickHouse rows or S3 archived bytes — both cumulative *flow*
+// counters that the additive meter pipeline records and BuildReport
+// extrapolates — a JetStream stream's size is a point-in-time *gauge*:
+// retention (max age / max bytes) bounds it, so a tenant pays for the
+// volume the stream currently occupies, not the lifetime sum of bytes
+// ever published. Pricing it per GB-month against the sampled size is
+// therefore the correct model; running it through the additive
+// pipeline would double-count every redelivered or re-published
+// message.
+func (c *CostCalculator) NATSStorageCostUSD(streamBytes int64) float64 {
+	if streamBytes <= 0 {
+		return 0
+	}
+	return float64(streamBytes) / bytesPerGB * c.costs.NATSPerGBMonthUSD
+}
+
+// S3StorageCostUSD returns the monthly cost of retaining `archiveBytes`
+// of S3 cold archive for one tenant.
+//
+// Like NATS JetStream — and unlike the per-request meters — a tenant's
+// cold-archive footprint is a point-in-time *gauge* sized by the
+// retention/compaction policy, so it is priced directly per GB-month
+// against the sampled size rather than summed through the additive
+// meter pipeline. This is numerically identical to
+// MeterCostUSD(MeterS3BytesArchived, archiveBytes); it exists so the
+// gauge semantics are explicit at the infra-projection call site and
+// symmetric with NATSStorageCostUSD. The MeterS3BytesArchived branch in
+// MeterCostUSD is retained for callers that record S3 through the meter
+// pipeline.
+func (c *CostCalculator) S3StorageCostUSD(archiveBytes int64) float64 {
+	if archiveBytes <= 0 {
+		return 0
+	}
+	return float64(archiveBytes) / bytesPerGB * c.costs.S3PerGBMonthUSD
+}
+
+// InfraUsageSample captures the three infrastructure cost drivers for a
+// single tenant at one point in time. It is the input to
+// ProjectInfraMonthlyCost and is populated either from a tenant's
+// actual recorded usage (ClickHouse) plus sampled backend gauges (NATS,
+// S3), or from a capacity-planning model (see bench/controlplane).
+type InfraUsageSample struct {
+	TenantID uuid.UUID `json:"tenant_id"`
+	// ClickHouseRowsThisPeriod is the telemetry rows written so far in
+	// the current ClickHousePeriod. It is a flow counter and is
+	// extrapolated to a full month.
+	ClickHouseRowsThisPeriod int64 `json:"clickhouse_rows_this_period"`
+	// ClickHousePeriod is the accumulation window the row count was
+	// measured over. Zero/invalid defaults to monthly.
+	ClickHousePeriod Period `json:"clickhouse_period"`
+	// NATSStreamBytes is the tenant's current JetStream retained size
+	// (a gauge). Priced directly per GB-month.
+	NATSStreamBytes int64 `json:"nats_stream_bytes"`
+	// S3ArchiveBytes is the tenant's current cold-archive footprint (a
+	// gauge). Priced directly per GB-month.
+	S3ArchiveBytes int64 `json:"s3_archive_bytes"`
+}
+
+// InfraCostProjection is the per-driver and total projected monthly
+// infrastructure cost for one tenant. It isolates the three storage /
+// write-amplification drivers (ClickHouse, NATS, S3) from the
+// per-request meters in TenantCostReport so the cost-model doc and the
+// metering dashboard can attribute spend to a specific backend.
+type InfraCostProjection struct {
+	TenantID uuid.UUID `json:"tenant_id"`
+	// ClickHouseProjectedRows is ClickHouseRowsThisPeriod extrapolated
+	// to a full calendar month at the current rate.
+	ClickHouseProjectedRows int64   `json:"clickhouse_projected_rows"`
+	ClickHouseMonthlyUSD    float64 `json:"clickhouse_monthly_usd"`
+	NATSStreamBytes         int64   `json:"nats_stream_bytes"`
+	NATSMonthlyUSD          float64 `json:"nats_monthly_usd"`
+	S3ArchiveBytes          int64   `json:"s3_archive_bytes"`
+	S3MonthlyUSD            float64 `json:"s3_monthly_usd"`
+	// TotalMonthlyUSD is the sum of the three driver costs.
+	TotalMonthlyUSD float64 `json:"total_monthly_usd"`
+}
+
+// ProjectInfraMonthlyCost turns one tenant's infrastructure usage
+// sample into a projected monthly cost broken down per backend.
+//
+// ClickHouse rows are a flow: the in-period count is divided by the
+// elapsed fraction of its period (so an early-month sample is not
+// under-projected) and scaled to a whole month. NATS and S3 are gauges
+// priced directly per GB-month. The clock is the calculator's own
+// (overridable in tests) so the elapsed-fraction maths is deterministic.
+func (c *CostCalculator) ProjectInfraMonthlyCost(sample InfraUsageSample) InfraCostProjection {
+	now := c.now()
+	period := sample.ClickHousePeriod
+	if !period.Valid() {
+		period = PeriodMonthly
+	}
+	frac := elapsedFraction(period, now)
+	projectedRows := int64(0)
+	if sample.ClickHouseRowsThisPeriod > 0 {
+		// Extrapolate the in-period count to a full period (÷ elapsed
+		// fraction), then to a full calendar month (× the period's
+		// monthly multiplier) so ClickHouseProjectedRows is a genuine
+		// monthly figure consistent with ClickHouseMonthlyUSD — not just
+		// a full-period count that would diverge for sub-monthly periods.
+		fullPeriodRows := float64(sample.ClickHouseRowsThisPeriod) / frac
+		projectedRows = int64(math.Ceil(fullPeriodRows * monthlyMultiplier(period, now)))
+	}
+	chMonthly := round2(c.MeterCostUSD(MeterClickHouseRowsWritten, projectedRows))
+	natsMonthly := round2(c.NATSStorageCostUSD(sample.NATSStreamBytes))
+	s3Monthly := round2(c.S3StorageCostUSD(sample.S3ArchiveBytes))
+	return InfraCostProjection{
+		TenantID:                sample.TenantID,
+		ClickHouseProjectedRows: projectedRows,
+		ClickHouseMonthlyUSD:    chMonthly,
+		NATSStreamBytes:         sample.NATSStreamBytes,
+		NATSMonthlyUSD:          natsMonthly,
+		S3ArchiveBytes:          sample.S3ArchiveBytes,
+		S3MonthlyUSD:            s3Monthly,
+		TotalMonthlyUSD:         round2(chMonthly + natsMonthly + s3Monthly),
+	}
+}
+
+// PlatformInfraCost aggregates per-tenant infrastructure projections
+// into a fleet-wide monthly total, preserving the per-driver split so a
+// capacity planner can see which backend dominates spend at scale.
+type PlatformInfraCost struct {
+	GeneratedAt          time.Time             `json:"generated_at"`
+	TenantCount          int                   `json:"tenant_count"`
+	Tenants              []InfraCostProjection `json:"tenants"`
+	ClickHouseMonthlyUSD float64               `json:"clickhouse_monthly_usd"`
+	NATSMonthlyUSD       float64               `json:"nats_monthly_usd"`
+	S3MonthlyUSD         float64               `json:"s3_monthly_usd"`
+	TotalMonthlyUSD      float64               `json:"total_monthly_usd"`
+}
+
+// AggregateInfraCost projects every sample and sums the results into a
+// PlatformInfraCost. Tenant order is preserved from the input.
+func (c *CostCalculator) AggregateInfraCost(samples []InfraUsageSample) PlatformInfraCost {
+	out := PlatformInfraCost{GeneratedAt: c.now(), Tenants: make([]InfraCostProjection, 0, len(samples))}
+	for _, s := range samples {
+		p := c.ProjectInfraMonthlyCost(s)
+		out.Tenants = append(out.Tenants, p)
+		out.ClickHouseMonthlyUSD += p.ClickHouseMonthlyUSD
+		out.NATSMonthlyUSD += p.NATSMonthlyUSD
+		out.S3MonthlyUSD += p.S3MonthlyUSD
+	}
+	out.TenantCount = len(out.Tenants)
+	out.ClickHouseMonthlyUSD = round2(out.ClickHouseMonthlyUSD)
+	out.NATSMonthlyUSD = round2(out.NATSMonthlyUSD)
+	out.S3MonthlyUSD = round2(out.S3MonthlyUSD)
+	out.TotalMonthlyUSD = round2(out.ClickHouseMonthlyUSD + out.NATSMonthlyUSD + out.S3MonthlyUSD)
+	return out
 }
 
 // PlatformCostReport aggregates per-tenant reports into a platform-wide

@@ -1,0 +1,26 @@
+sng-control {{ .Chart.AppVersion }} has been deployed as release "{{ .Release.Name }}".
+
+Image:    {{ include "sng-control.image" . }}
+Replicas: {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.replicaCount }}{{ end }}
+
+API service:     {{ include "sng-control.fullname" . }}:{{ .Values.service.port }}
+Metrics service: {{ include "sng-control.fullname" . }}:{{ .Values.service.metricsPort }} (/metrics)
+
+{{- if .Values.pgbouncer.enabled }}
+
+PgBouncer sidecar is ENABLED: the app connects via 127.0.0.1:{{ .Values.pgbouncer.port }}
+(transaction pooling) and PG_PGBOUNCER_MODE is forced true. Schema
+migrations still run directly against {{ .Values.config.PG_HOST }}.
+{{- end }}
+
+{{- if not .Values.config.PG_HOST }}
+
+WARNING: config.PG_HOST is empty. Set it to your PostgreSQL primary (or
+enable the bundled postgresql subchart with `--set postgresql.enabled=true`).
+{{- end }}
+
+Scaling guidance:  docs/scaling.md
+Cost model:        docs/cost-model.md
+
+Check rollout:
+  kubectl rollout status deploy/{{ include "sng-control.fullname" . }}

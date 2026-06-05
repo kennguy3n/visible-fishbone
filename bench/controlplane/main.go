@@ -27,6 +27,7 @@ Subcommands:
   api-latency      Mixed REST workload (60% read / 30% write / 10% heavy) per tenant tier
   policy-compile   In-process policy-graph compilation across sizes/targets/concurrency
   tenant-scale     Postgres RLS overhead, pool saturation, and online-DDL speed at scale
+  capacity-plan    Analytical data-plane projection (PG pool, ClickHouse write, NATS subjects) at N tenants
   full-suite       All of the above, into one report
   compare          Compare two existing report.json files and fail on regression (no benchmark run)
 
@@ -56,6 +57,11 @@ tenant-scale / full-suite flags:
   --dsn DSN                Postgres DSN with SNG migrations applied (required unless --dry-run)
   --tenants N              Tenants to seed (default: 5000)
   --pool-size N            App connection-pool size to probe (default: 32)
+
+capacity-plan / full-suite flags:
+  --tenants N              Fleet size to model (default: 5000)
+  --ch-shards N            ClickHouse shard count to model (default: 2)
+  --nats-partitions N      NATS_PARTITIONS fan-out to model (default: 16)
 `
 
 // options holds the parsed CLI flags shared across subcommands.
@@ -77,6 +83,8 @@ type options struct {
 	dsn         string
 	tenants     int
 	poolSize    int
+	chShards    int
+	natsParts   int
 }
 
 func main() {
@@ -89,7 +97,7 @@ func main() {
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usage)
 		return
-	case ModeAPILatency, ModePolicyCompile, ModeTenantScale, ModeFullSuite, ModeCompare:
+	case ModeAPILatency, ModePolicyCompile, ModeTenantScale, ModeCapacityPlan, ModeFullSuite, ModeCompare:
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s", mode, usage)
 		os.Exit(2)
@@ -126,8 +134,10 @@ func parseFlags(mode string, args []string) *options {
 	fs.StringVar(&opts.jwtAudience, "jwt-audience", "", "expected aud claim")
 	fs.StringVar(&opts.apiKey, "api-key", "", "API key (alternative to JWT)")
 	fs.StringVar(&opts.dsn, "dsn", os.Getenv("SNG_BENCH_DSN"), "Postgres DSN")
-	fs.IntVar(&opts.tenants, "tenants", 5000, "tenants to seed (tenant-scale)")
+	fs.IntVar(&opts.tenants, "tenants", 5000, "tenants to seed (tenant-scale) / model (capacity-plan)")
 	fs.IntVar(&opts.poolSize, "pool-size", 32, "app connection-pool size to probe")
+	fs.IntVar(&opts.chShards, "ch-shards", 0, "ClickHouse shard count to model (capacity-plan; 0 = default)")
+	fs.IntVar(&opts.natsParts, "nats-partitions", 0, "NATS_PARTITIONS to model (capacity-plan; 0 = default)")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	// ExitOnError handles the error path; the assignment keeps the
 	// linter from flagging the unchecked return.
@@ -149,6 +159,7 @@ func run(ctx context.Context, mode string, opts *options) error {
 	wantAPI := mode == ModeAPILatency || mode == ModeFullSuite
 	wantCompile := mode == ModePolicyCompile || mode == ModeFullSuite
 	wantPG := mode == ModeTenantScale || mode == ModeFullSuite
+	wantCapacity := mode == ModeCapacityPlan || mode == ModeFullSuite
 
 	if wantAPI {
 		section, err := buildAPILatency(ctx, opts)
@@ -174,6 +185,9 @@ func run(ctx context.Context, mode string, opts *options) error {
 			return err
 		}
 		report.PostgresScale = section
+	}
+	if wantCapacity {
+		report.CapacityPlan = buildCapacityPlan(opts)
 	}
 
 	report.Grade()
@@ -221,6 +235,24 @@ func buildPostgresScale(ctx context.Context, opts *options) (*PostgresScaleSecti
 		return nil, fmt.Errorf("postgres-scale bench: %w", err)
 	}
 	return section, nil
+}
+
+// buildCapacityPlan assembles the capacity-plan config from CLI flags
+// (falling back to the documented defaults for any unset knob) and runs
+// the analytical model. It needs no live dependencies, so there is no
+// dry-run branch — the projection is identical either way.
+func buildCapacityPlan(opts *options) *CapacityPlanSection {
+	cfg := DefaultCapacityPlanConfig()
+	if opts.tenants > 0 {
+		cfg.TenantCount = opts.tenants
+	}
+	if opts.chShards > 0 {
+		cfg.ClickHouseShards = opts.chShards
+	}
+	if opts.natsParts > 0 {
+		cfg.NATSPartitions = opts.natsParts
+	}
+	return RunCapacityPlan(cfg)
 }
 
 // emit writes the report as JSON + markdown to outDir (when set) and

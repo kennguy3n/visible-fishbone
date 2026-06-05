@@ -1,0 +1,245 @@
+# Default values for sng-control.
+# Every key under `config` maps to an environment variable consumed by
+# internal/config/config.go. Non-secret values render into a ConfigMap;
+# secrets render into a Secret (see `secrets` below).
+
+replicaCount: 3
+
+image:
+  repository: ghcr.io/kennguy3n/sng-control
+  tag: ""            # defaults to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}    # e.g. eks.amazonaws.com/role-arn for IRSA (S3 archive)
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Spread replicas across nodes/zones for availability.
+topologySpreadConstraints: []
+priorityClassName: ""
+terminationGracePeriodSeconds: 30
+
+# ---------------------------------------------------------------------------
+# Application configuration (-> environment variables)
+# ---------------------------------------------------------------------------
+config:
+  ENVIRONMENT: production
+  APP_NAME: sng-control
+  LOG_LEVEL: info
+  LOG_FORMAT: json
+
+  # HTTP API listener.
+  HTTP_HOST: 0.0.0.0
+  HTTP_PORT: "8080"
+  HTTP_READ_TIMEOUT: 15s
+  HTTP_READ_HEADER_TIMEOUT: 5s
+  HTTP_WRITE_TIMEOUT: 30s
+  HTTP_SHUTDOWN_TIMEOUT: 10s
+
+  # Internal Prometheus metrics listener (must differ from HTTP_PORT).
+  METRICS_ENABLED: "true"
+  METRICS_PORT: "9090"
+  METRICS_NAMESPACE: sng
+
+  # PostgreSQL (system of record).
+  PG_HOST: ""
+  PG_PORT: "5432"
+  PG_DATABASE: sng
+  PG_USER: sng
+  PG_SSLMODE: require
+  PG_APP_ROLE: sng_app
+  PG_MAX_OPEN_CONNS: "20"
+  PG_MIN_CONNS: "2"
+  PG_CONN_TIMEOUT: 5s
+  PG_CONN_MAX_LIFETIME: 1h
+  # Read scaling: comma-separated replica hosts. Empty = primary only.
+  PG_READ_REPLICA_HOSTS: ""
+  PG_READ_REPLICA_PORT: "0"     # 0 inherits PG_PORT
+  # Set true when fronting Postgres with the PgBouncer sidecar (see
+  # `pgbouncer.enabled`). The chart keeps these two in sync via a check.
+  PG_PGBOUNCER_MODE: "false"
+
+  # NATS JetStream (telemetry bus).
+  NATS_URL: nats://sng-nats:4222
+  NATS_NAME: sng-control
+  NATS_STORAGE: file
+  NATS_STREAM_PREFIX: SNG
+  NATS_REPLICAS: "1"
+  # Telemetry stream fan-out (1-256). Raise for >2.5K tenants; see
+  # docs/scaling.md.
+  NATS_PARTITIONS: "1"
+  NATS_TLS_INSECURE: "false"
+  NATS_CONNECT_TIMEOUT: 5s
+  NATS_REQUEST_TIMEOUT: 5s
+  NATS_DEDUP_WINDOW: 2m
+  NATS_PUBLISH_RETRY_ATTEMPTS: "3"
+
+  # ClickHouse (hot telemetry analytics). Empty endpoints disables it.
+  CLICKHOUSE_ENDPOINTS: ""
+  CLICKHOUSE_DATABASE: sng
+  CLICKHOUSE_TABLE: telemetry_events
+  CLICKHOUSE_USERNAME: sng
+  CLICKHOUSE_TLS: "true"
+  CLICKHOUSE_BATCH_SIZE: "1024"
+  CLICKHOUSE_FLUSH_INTERVAL: 2s
+  CLICKHOUSE_MAX_BACKLOG_MULTIPLIER: "4"
+  # Shard fan-out for the hot path. See docs/scaling.md.
+  CLICKHOUSE_SHARDING: ""
+
+  # S3 cold archive.
+  S3_TELEMETRY_BUCKET: ""
+  S3_TELEMETRY_PREFIX: telemetry
+  S3_TELEMETRY_REGION: ""
+  S3_TELEMETRY_STORAGE_CLASS: STANDARD
+  S3_TELEMETRY_FLUSH_INTERVAL: 30s
+  S3_TELEMETRY_MAX_BYTES_PER_OBJECT: "16777216"
+  S3_TELEMETRY_MAX_EVENTS_PER_OBJECT: "50000"
+
+  # Auth.
+  AUTH_JWT_ISSUER: ""
+  AUTH_JWT_AUDIENCE: ""
+  AUTH_API_KEY_HEADER: X-SNG-API-Key
+
+  # Metering.
+  METERING_FLUSH_INTERVAL: 60s
+
+# Secret-valued environment variables. Rendered into a Secret unless
+# `existingSecret` is set, in which case the chart references that Secret
+# (by env var name -> key) and ignores these inline values. NEVER commit
+# real secrets to values.yaml — pass them with --set or a sealed secret.
+secrets:
+  existingSecret: ""
+  values:
+    PG_PASSWORD: ""
+    NATS_PASSWORD: ""
+    NATS_TOKEN: ""
+    CLICKHOUSE_PASSWORD: ""
+    AUTH_JWT_SECRET: ""
+    S3_TELEMETRY_ACCESS_KEY_ID: ""
+    S3_TELEMETRY_SECRET_ACCESS_KEY: ""
+    AI_LLM_API_KEY: ""
+
+# ---------------------------------------------------------------------------
+# Schema migrations (sng-migrate up) as a pre-install/pre-upgrade hook.
+# ---------------------------------------------------------------------------
+migrations:
+  enabled: true
+  # Command run by the hook Job. Uses the same image as the app.
+  args: ["up"]
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+
+# ---------------------------------------------------------------------------
+# PgBouncer transaction-pooling sidecar. When enabled, the app connects to
+# 127.0.0.1:6432 and PgBouncer forwards to PG_HOST; PG_PGBOUNCER_MODE is
+# forced true. See docs/scaling.md §2.
+# ---------------------------------------------------------------------------
+pgbouncer:
+  enabled: false
+  image:
+    repository: bitnami/pgbouncer
+    tag: "1.24.0"
+    pullPolicy: IfNotPresent
+  port: 6432
+  poolMode: transaction
+  maxClientConn: 1000
+  defaultPoolSize: 25
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
+
+service:
+  type: ClusterIP
+  port: 80
+  metricsPort: 9090
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: sng.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 0   # 0 disables the memory metric
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+  maxUnavailable: ""
+
+# Prometheus Operator integration. Disabled by default so a plain
+# `helm template`/`helm lint` does not require the CRDs to be installed.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+prometheusRule:
+  enabled: false
+  labels: {}
+
+grafanaDashboards:
+  enabled: false
+  # Label that the Grafana sidecar watches for dashboard ConfigMaps.
+  label: grafana_dashboard
+  labelValue: "1"
+  folder: ShieldNet Gateway
+
+# ---------------------------------------------------------------------------
+# Optional bundled backends (subcharts). Off by default — point the
+# `config.*` knobs at managed/external services in production.
+# ---------------------------------------------------------------------------
+postgresql:
+  enabled: false
+nats:
+  enabled: false
+altinity-clickhouse-operator:
+  enabled: false

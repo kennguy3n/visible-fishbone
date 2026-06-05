@@ -1,0 +1,20 @@
+sng-edge {{ .Chart.AppVersion }} deployed as "{{ .Release.Name }}" ({{ .Values.kind }}).
+
+Image: {{ include "sng-edge.image" . }}
+Config: {{ .Values.args.config }} (from ConfigMap {{ include "sng-edge.configMapName" . }})
+
+{{- if .Values.ips.ruleLoader.enabled }}
+
+IPS rule loader init container is ENABLED: it stages rules into
+{{ .Values.ips.ruleLoader.ruleFilePath }} before sng-edge starts. The default
+command is a placeholder — wire it to your real rule source.
+{{- end }}
+{{- if .Values.envoy.enabled }}
+
+Standalone Envoy sidecar is ENABLED (bootstrap from ConfigMap
+{{ include "sng-edge.envoyConfigMapName" . }}). Note: sng-edge also manages
+Envoy in-process via its ShellEnvoy supervisor — run only one of the two.
+{{- end }}
+
+IMPORTANT: edgeConfig in values.yaml is a PLACEHOLDER. Replace it with a real
+EdgeConfig (crates/sng-edge/src/config.rs) before production use.

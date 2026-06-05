@@ -1,0 +1,11 @@
+# Patterns to ignore when building packages.
+.DS_Store
+.git/
+.gitignore
+*.tmproj
+*.bak
+*.orig
+*~
+# Keep the resolved dependency archives out of the packaged chart's VCS
+# footprint; they are rebuilt from Chart.lock with `helm dependency build`.
+charts/*.tgz

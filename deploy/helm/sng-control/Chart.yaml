@@ -1,0 +1,36 @@
+apiVersion: v2
+name: sng-control
+description: ShieldNet Gateway (SNG) control plane — multi-tenant ZTNA + SWG SaaS control plane (Go).
+type: application
+# version is the chart version; appVersion tracks the sng-control image.
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/kennguy3n/visible-fishbone
+sources:
+  - https://github.com/kennguy3n/visible-fishbone
+maintainers:
+  - name: ShieldNet Gateway
+keywords:
+  - ztna
+  - swg
+  - security
+  - multi-tenant
+# Optional stateful backends. All are disabled by default: production
+# deployments typically point sng-control at managed PostgreSQL (RDS),
+# a dedicated NATS cluster, and a ClickHouse cluster (see the Terraform
+# module under deploy/terraform/sng-infra). Enable them with the
+# `*.enabled` values for an all-in-one dev/test install.
+dependencies:
+  - name: postgresql
+    version: "18.7.0"
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+  - name: nats
+    version: "2.14.0"
+    repository: https://nats-io.github.io/k8s/helm/charts/
+    condition: nats.enabled
+  - name: altinity-clickhouse-operator
+    version: "0.27.1"
+    repository: https://docs.altinity.com/clickhouse-operator/
+    condition: altinity-clickhouse-operator.enabled

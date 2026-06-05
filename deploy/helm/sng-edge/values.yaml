@@ -1,0 +1,145 @@
+# Default values for sng-edge.
+#
+# sng-edge is the Rust edge appliance: it composes the enforcement
+# library crates behind a single supervisor and manages Suricata (IPS)
+# and Envoy (SWG) as child processes via its Shell* supervisors. The
+# `suricata` and `envoy` binaries are therefore expected to be present
+# in the sng-edge image; this chart wires the volumes, rule staging, and
+# capabilities those subsystems need.
+
+# Workload kind:
+#   Deployment — cloud-PoP form (scheduled onto PoP nodes; default).
+#   DaemonSet  — site-appliance form (one node-local enforcer per host).
+kind: Deployment
+replicaCount: 1
+
+image:
+  repository: ghcr.io/kennguy3n/sng-edge
+  tag: ""            # defaults to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+# Edge VMs run nftables (NET_ADMIN) and bind AF_PACKET on a data-plane
+# NIC (NET_RAW). hostNetwork is the realistic site-appliance posture;
+# leave it off for the cloud-PoP form unless the PoP gives the pod a
+# dedicated data NIC.
+hostNetwork: false
+podSecurityContext:
+  fsGroup: 65532
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+    add: ["NET_ADMIN", "NET_RAW"]
+
+# CLI passed to the sng-edge binary. --config is required; --health-bind
+# exposes the supervisor health aggregator (wired to the readiness probe
+# when set).
+args:
+  config: /etc/sng-edge/edge.toml
+  healthBind: "0.0.0.0:9119"
+  extraArgs: []      # e.g. ["--log-json"]
+
+# Edge appliance configuration (TOML), rendered into a ConfigMap and
+# mounted at args.config. This is a PLACEHOLDER skeleton — replace it
+# with the real EdgeConfig (see crates/sng-edge/src/config.rs). The
+# chart does not validate the TOML.
+edgeConfig: |
+  # ShieldNet Gateway edge appliance configuration.
+  # Reference schema: crates/sng-edge/src/config.rs (EdgeConfig).
+  [identity]
+  tenant_id = "00000000-0000-0000-0000-000000000000"
+  device_id = "00000000-0000-0000-0000-000000000000"
+  site_id   = "00000000-0000-0000-0000-000000000000"
+
+  [ips]
+  enable = true
+  interface = "eth0"
+  rule_file_path = "/var/lib/sng/ips/sng.rules"
+  staging_dir    = "/var/lib/sng/ips"
+  runtime = "ids"
+
+  [swg]
+  config_path = "/var/lib/sng/swg/envoy.yaml"
+
+# IPS rule loading. The init container stages the Suricata rules into the
+# shared /var/lib/sng volume before sng-edge starts, so the in-process
+# Suricata supervisor finds them at rule_file_path. Replace `command`
+# with your rule source (object storage pull, suricata-update, etc.).
+ips:
+  ruleLoader:
+    enabled: true
+    image:
+      repository: busybox
+      tag: "1.36"
+      pullPolicy: IfNotPresent
+    # Destination must match edgeConfig [ips].rule_file_path.
+    ruleFilePath: /var/lib/sng/ips/sng.rules
+    # Default is a no-op placeholder that just ensures the rules file
+    # exists; replace with the real rule fetch.
+    command:
+      - /bin/sh
+      - -c
+      - 'mkdir -p "$(dirname "$RULE_FILE")" && touch "$RULE_FILE" && echo "staged $RULE_FILE"'
+
+# Optional standalone Envoy sidecar. By default sng-edge runs Envoy
+# in-process via its ShellEnvoy supervisor, so this is OFF. Enable it
+# only for deployments that front sng-edge with a separately-managed
+# Envoy and a static bootstrap.
+envoy:
+  enabled: false
+  image:
+    repository: envoyproxy/envoy
+    tag: "v1.31-latest"
+    pullPolicy: IfNotPresent
+  # Bootstrap config rendered into a ConfigMap and mounted at
+  # /etc/envoy/envoy.yaml. Placeholder admin-only bootstrap.
+  bootstrap: |
+    admin:
+      address:
+        socket_address: { address: 127.0.0.1, port_value: 9901 }
+    static_resources:
+      listeners: []
+      clusters: []
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+# Health aggregator port (parsed from args.healthBind). Used for the
+# readiness probe and the optional Service.
+healthPort: 9119
+
+service:
+  enabled: true
+  type: ClusterIP
+  port: 9119
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+terminationGracePeriodSeconds: 30

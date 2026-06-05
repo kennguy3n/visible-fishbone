@@ -1,0 +1,64 @@
+{{- if .Values.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "sng-control.fullname" . }}-migrate
+  labels:
+    {{- include "sng-control.labels" . | nindent 4 }}
+  annotations:
+    # Run before the app starts on install and every upgrade. The
+    # migrations are idempotent (sng-migrate up is a no-op when current).
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "sng-control.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "sng-control.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "sng-control.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # sng-migrate shares the control-plane image; PG_* come from
+          # the same ConfigMap/Secret as the app.
+          command: ["sng-migrate"]
+          args:
+            {{- toYaml .Values.migrations.args | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "sng-control.configMapName" . }}
+          env:
+            {{- /* Always migrate against the real primary directly, never
+                   through PgBouncer: transaction pooling breaks DDL that
+                   relies on session state / advisory locks, and the Job
+                   pod has no PgBouncer sidecar. These override the
+                   ConfigMap values above (explicit env wins over envFrom). */}}
+            - name: PG_HOST
+              value: {{ .Values.config.PG_HOST | quote }}
+            - name: PG_PORT
+              value: {{ .Values.config.PG_PORT | quote }}
+            - name: PG_PGBOUNCER_MODE
+              value: "false"
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sng-control.secretName" . }}
+                  key: PG_PASSWORD
+                  optional: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}
