@@ -23,6 +23,7 @@ sng-comms = { workspace = true }
 sng-policy-eval = { workspace = true }
 sng-telemetry = { workspace = true }
 sng-ztna = { workspace = true }
+sng-dlp = { workspace = true }
 
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt-multi-thread", "signal"] }
 async-trait = { workspace = true }

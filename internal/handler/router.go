@@ -43,6 +43,8 @@ type RouterDeps struct {
 	Mobile           *MobileHandler
 	Metering         *MeteringHandler
 	PoP              *PoPHandler
+	Sandbox          *SandboxHandler
+	RBI              *RBIHandler
 	OpenAPISpec      *OpenAPIHandler
 	APIKeyLookup     middleware.APIKeyLookup
 	// MobileDeviceStatus, when set, enables the auth-middleware
@@ -181,6 +183,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.PoP != nil {
 		deps.PoP.Register(apiMux)
+	}
+	if deps.Sandbox != nil {
+		deps.Sandbox.Register(apiMux)
+	}
+	if deps.RBI != nil {
+		deps.RBI.Register(apiMux)
 	}
 
 	authOpts := []middleware.AuthOption{}

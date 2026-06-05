@@ -661,6 +661,40 @@ func TestSimulator_CustomEventClasses(t *testing.T) {
 	}
 }
 
+// TestDomainMatchesEventClass_InlineCASBSharesSWG pins the
+// simulator's domain→event-class mapping for DomainInlineCASB to
+// be identical to DomainSWG. Inline-CASB rules ride the SWG
+// bundle slice and are enforced on the same HTTP path, and
+// domainTargets routes them to the same targets — so without
+// this case the simulator would silently never match inline-CASB
+// rules (default returns false), reporting their changes as
+// zero-impact. This guards against that regression.
+func TestDomainMatchesEventClass_InlineCASBSharesSWG(t *testing.T) {
+	t.Parallel()
+	classes := []schema.EventClass{
+		schema.EventClassFlow,
+		schema.EventClassDNS,
+		schema.EventClassHTTP,
+		schema.EventClassZTNA,
+		schema.EventClassPosture,
+	}
+	for _, cls := range classes {
+		cls := cls
+		t.Run(string(cls), func(t *testing.T) {
+			swg := domainMatchesEventClass(DomainSWG, cls)
+			casb := domainMatchesEventClass(DomainInlineCASB, cls)
+			if swg != casb {
+				t.Fatalf("class %s: DomainInlineCASB match=%v, want parity with DomainSWG match=%v", cls, casb, swg)
+			}
+		})
+	}
+	// And concretely: an HTTP event (the inline-CASB enforcement
+	// path) must match.
+	if !domainMatchesEventClass(DomainInlineCASB, schema.EventClassHTTP) {
+		t.Fatal("DomainInlineCASB must match EventClassHTTP")
+	}
+}
+
 // quickJSON keeps the test file self-contained for fixture
 // generation without dragging in encoding/json everywhere.
 func quickJSON(t *testing.T, v any) []byte {

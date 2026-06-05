@@ -194,6 +194,142 @@ func cloneCASBConnector(c repository.CASBConnector) repository.CASBConnector {
 	return c
 }
 
+// --- InlineCASBRuleRepository ---
+
+// InlineCASBRuleRepository is the in-memory implementation of
+// repository.InlineCASBRuleRepository (inline_casb_rules,
+// migration 037). It mirrors the Postgres store's tenant scoping
+// and ordering so service/handler tests behave identically against
+// either backend.
+type InlineCASBRuleRepository struct{ s *Store }
+
+func NewInlineCASBRuleRepository(s *Store) *InlineCASBRuleRepository {
+	return &InlineCASBRuleRepository{s: s}
+}
+
+var _ repository.InlineCASBRuleRepository = (*InlineCASBRuleRepository)(nil)
+
+func cloneInlineCASBRule(r repository.InlineCASBRule) repository.InlineCASBRule {
+	r.Conditions = cloneJSON(r.Conditions)
+	return r
+}
+
+func (r *InlineCASBRuleRepository) List(
+	ctx context.Context,
+	tenantID uuid.UUID,
+) ([]repository.InlineCASBRule, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return nil, err
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	out := make([]repository.InlineCASBRule, 0, len(r.s.inlineCASBRules))
+	for _, rule := range r.s.inlineCASBRules {
+		if rule.TenantID != tenantID {
+			continue
+		}
+		out = append(out, cloneInlineCASBRule(rule))
+	}
+	// Deterministic: descending priority, then id — matching the
+	// Postgres store's ORDER BY priority DESC, id.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority > out[j].Priority
+		}
+		return out[i].ID.String() < out[j].ID.String()
+	})
+	return out, nil
+}
+
+func (r *InlineCASBRuleRepository) Get(
+	ctx context.Context,
+	tenantID, id uuid.UUID,
+) (repository.InlineCASBRule, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.InlineCASBRule{}, err
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	rule, ok := r.s.inlineCASBRules[id]
+	if !ok || rule.TenantID != tenantID {
+		return repository.InlineCASBRule{}, repository.ErrNotFound
+	}
+	return cloneInlineCASBRule(rule), nil
+}
+
+func (r *InlineCASBRuleRepository) Create(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	rule repository.InlineCASBRule,
+) (repository.InlineCASBRule, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.InlineCASBRule{}, err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if tenantID == uuid.Nil {
+		return repository.InlineCASBRule{}, repository.ErrInvalidArgument
+	}
+	if _, ok := r.s.tenants[tenantID]; !ok {
+		return repository.InlineCASBRule{}, repository.ErrNotFound
+	}
+	if rule.ID == uuid.Nil {
+		rule.ID = uuid.New()
+	}
+	if _, exists := r.s.inlineCASBRules[rule.ID]; exists {
+		return repository.InlineCASBRule{}, repository.ErrConflict
+	}
+	rule.TenantID = tenantID
+	now := r.s.clock()
+	rule.CreatedAt = now
+	rule.UpdatedAt = now
+	rule.Conditions = cloneJSON(rule.Conditions)
+	r.s.inlineCASBRules[rule.ID] = rule
+	return cloneInlineCASBRule(rule), nil
+}
+
+func (r *InlineCASBRuleRepository) Update(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	rule repository.InlineCASBRule,
+) (repository.InlineCASBRule, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.InlineCASBRule{}, err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.inlineCASBRules[rule.ID]
+	if !ok || existing.TenantID != tenantID {
+		return repository.InlineCASBRule{}, repository.ErrNotFound
+	}
+	existing.AppID = rule.AppID
+	existing.Action = rule.Action
+	existing.Verdict = rule.Verdict
+	existing.Conditions = cloneJSON(rule.Conditions)
+	existing.Enabled = rule.Enabled
+	existing.Priority = rule.Priority
+	existing.UpdatedAt = r.s.clock()
+	r.s.inlineCASBRules[rule.ID] = existing
+	return cloneInlineCASBRule(existing), nil
+}
+
+func (r *InlineCASBRuleRepository) Delete(
+	ctx context.Context,
+	tenantID, id uuid.UUID,
+) error {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	rule, ok := r.s.inlineCASBRules[id]
+	if !ok || rule.TenantID != tenantID {
+		return repository.ErrNotFound
+	}
+	delete(r.s.inlineCASBRules, id)
+	return nil
+}
+
 // --- CASBDiscoveredAppRepository ---
 
 type CASBDiscoveredAppRepository struct{ s *Store }

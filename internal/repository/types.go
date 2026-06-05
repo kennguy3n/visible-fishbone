@@ -1175,13 +1175,18 @@ const (
 	BrowserPolicyActionAllow BrowserPolicyAction = "allow"
 	BrowserPolicyActionWarn  BrowserPolicyAction = "warn"
 	BrowserPolicyActionLog   BrowserPolicyAction = "log"
+	// BrowserPolicyActionRBI redirects the user to the Remote Browser
+	// Isolation proxy so the page renders in a disposable container
+	// rather than the endpoint's local browser. Added by Gap #8.
+	BrowserPolicyActionRBI BrowserPolicyAction = "rbi"
 )
 
 // IsValid reports whether a is a recognised BrowserPolicyAction.
 func (a BrowserPolicyAction) IsValid() bool {
 	switch a {
 	case BrowserPolicyActionBlock, BrowserPolicyActionAllow,
-		BrowserPolicyActionWarn, BrowserPolicyActionLog:
+		BrowserPolicyActionWarn, BrowserPolicyActionLog,
+		BrowserPolicyActionRBI:
 		return true
 	}
 	return false
@@ -1392,6 +1397,74 @@ type CASBPostureCheck struct {
 	Status     CASBPostureCheckStatus
 	Details    string
 	AssessedAt time.Time
+}
+
+// InlineCASBRule is a persisted inline-CASB rule row
+// (inline_casb_rules, migration 037). The service-layer type with
+// typed Action/Verdict/Conditions lives in internal/service/casb;
+// this repository projection keeps Action and Verdict as plain
+// strings and Conditions as the raw JSONB document so the
+// repository layer stays decoupled from the service's enums.
+type InlineCASBRule struct {
+	ID         uuid.UUID
+	TenantID   uuid.UUID
+	AppID      string
+	Action     string
+	Verdict    string
+	Conditions json.RawMessage
+	Enabled    bool
+	// Priority maps the INTEGER column; int32 matches the data
+	// plane's i32 so a value that round-trips here cannot overflow
+	// on bundle deserialisation.
+	Priority  int32
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// SandboxVerdict is a persisted zero-day file-analysis verdict row
+// (sandbox_verdicts, migration 042). One row per (tenant, file
+// SHA-256): the SWG malware stage looks a file up by digest and, on
+// a miss, the control plane submits it to a detonation sandbox and
+// upserts the result here so the file is detonated at most once.
+// The service-layer type with typed Classification/Status lives in
+// internal/service/sandbox; this projection keeps them as plain
+// strings so the repository stays decoupled from the service enums.
+type SandboxVerdict struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	SHA256         string
+	Classification string
+	// Confidence is the provider's confidence in [0,1].
+	Confidence float64
+	Provider   string
+	// SandboxID is the provider-side analysis id (nullable until a
+	// submission is made); kept as a plain string ("" means none).
+	SandboxID string
+	Summary   string
+	// Status is the lifecycle state: pending | complete | error.
+	Status string
+	// AnalyzedAt is when the provider finished analysis; nil while a
+	// submission is still pending.
+	AnalyzedAt *time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// RBISession is a persisted Remote Browser Isolation session row
+// (rbi_sessions, migration 043). The session is created when the
+// SWG redirects a URL to the RBI proxy; it tracks the isolated
+// browsing context so the operator can audit and the proxy can
+// enforce tenant-scoped session limits.
+type RBISession struct {
+	ID        uuid.UUID
+	TenantID  uuid.UUID
+	UserID    uuid.UUID
+	TargetURL string
+	// Status: active | closed | expired.
+	Status    string
+	ExpiresAt time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // --- DLP ------------------------------------------------------------------

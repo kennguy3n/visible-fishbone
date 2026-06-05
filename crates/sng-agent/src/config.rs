@@ -48,6 +48,9 @@ pub struct AgentConfig {
     /// PAL tunnel-provider cadence.
     #[serde(default)]
     pub tunnel: TunnelConfig,
+    /// Endpoint DLP (sng-dlp) channel-monitoring settings.
+    #[serde(default)]
+    pub dlp: DlpConfig,
     /// Per-subsystem drain budget overrides. Subsystems not
     /// listed here use the supervisor's default (30s).
     #[serde(default)]
@@ -266,6 +269,57 @@ impl Default for TunnelConfig {
     }
 }
 
+/// Endpoint DLP channel-monitoring settings.
+///
+/// Drives the [`crate::subsystems::DlpSubsystem`], which runs the
+/// `sng-dlp` engine over the `sng-pal` channel interceptors
+/// (clipboard / file-write / USB / print / browser-upload). The
+/// portable polling backends run everywhere (including headless
+/// CI); the edge-triggered native hooks (USN journal / FSEvents /
+/// inotify) are upgrades on top with identical observable
+/// behaviour, so this config is OS-agnostic.
+///
+/// `disabled` is the safe default: with no DLP policy delivered
+/// the engine evaluates every event as `Allow`, so a deployment
+/// that hasn't authored endpoint DLP rules pays no monitoring cost
+/// until an operator opts in.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DlpConfig {
+    /// Whether the DLP subsystem runs at all. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directories watched for sensitive file writes / USB copies.
+    /// Empty (the default) means the file-write and USB channels
+    /// have nothing to watch and stay idle.
+    #[serde(default)]
+    pub watch_dirs: Vec<PathBuf>,
+    /// Poll cadence for the portable directory watcher.
+    /// Default: 2s — matches `sng_pal::dlp::DEFAULT_POLL_INTERVAL`.
+    #[serde(default = "default_dlp_poll_interval", with = "humantime_serde")]
+    pub poll_interval: Duration,
+    /// Per-file read ceiling for content events. Default: 1 MiB —
+    /// matches `sng_pal::dlp::DEFAULT_MAX_FILE_BYTES`.
+    #[serde(default = "default_dlp_max_file_bytes")]
+    pub max_file_bytes: usize,
+    /// Idle backoff applied when every channel reports closed, so a
+    /// fully torn-down interceptor set doesn't spin. Default: 1s.
+    #[serde(default = "default_dlp_idle_sleep", with = "humantime_serde")]
+    pub idle_sleep: Duration,
+}
+
+impl Default for DlpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            watch_dirs: Vec::new(),
+            poll_interval: default_dlp_poll_interval(),
+            max_file_bytes: default_dlp_max_file_bytes(),
+            idle_sleep: default_dlp_idle_sleep(),
+        }
+    }
+}
+
 /// Supervisor lifecycle settings.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -436,6 +490,15 @@ const fn default_posture_interval() -> Duration {
 }
 const fn default_tunnel_reconcile_interval() -> Duration {
     Duration::from_secs(5)
+}
+const fn default_dlp_poll_interval() -> Duration {
+    Duration::from_secs(2)
+}
+const fn default_dlp_max_file_bytes() -> usize {
+    1024 * 1024
+}
+const fn default_dlp_idle_sleep() -> Duration {
+    Duration::from_secs(1)
 }
 const fn default_health_interval() -> Duration {
     Duration::from_secs(2)

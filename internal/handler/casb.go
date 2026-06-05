@@ -11,14 +11,25 @@ import (
 
 // CASBHandler exposes the CASB discovery REST surface: connector
 // CRUD, test/sync triggers, discovered-apps listing, and posture
-// reports.
+// reports. When an inline-CASB service is wired via
+// SetInlineService it also serves inline-rule CRUD.
 type CASBHandler struct {
-	svc *casb.Service
+	svc    *casb.Service
+	inline *casb.InlineCASBService
 }
 
 // NewCASBHandler wires the handler.
 func NewCASBHandler(svc *casb.Service) *CASBHandler {
 	return &CASBHandler{svc: svc}
+}
+
+// SetInlineService attaches the inline-CASB rule service so the
+// inline-rule CRUD routes become live. Kept as a post-construction
+// setter (mirroring DeviceHandler.SetEnrollmentService) so the
+// constructor signature stays stable for the many call sites and
+// tests that only exercise discovery.
+func (h *CASBHandler) SetInlineService(svc *casb.InlineCASBService) {
+	h.inline = svc
 }
 
 // Register attaches routes.
@@ -32,6 +43,16 @@ func (h *CASBHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/casb/connectors/{id}/sync", h.syncConnector)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/casb/apps", h.listApps)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/casb/apps/{app_id}/posture", h.getPosture)
+
+	// Inline-CASB rule CRUD. Only mounted when an inline service is
+	// wired; deployments without it keep the discovery surface only.
+	if h.inline != nil {
+		MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/casb/inline-rules", h.listInlineRules)
+		MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/casb/inline-rules", h.createInlineRule)
+		MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/casb/inline-rules/{id}", h.getInlineRule)
+		MountTenantScoped(mux, "PATCH /api/v1/tenants/{tenant_id}/casb/inline-rules/{id}", h.updateInlineRule)
+		MountTenantScoped(mux, "DELETE /api/v1/tenants/{tenant_id}/casb/inline-rules/{id}", h.deleteInlineRule)
+	}
 }
 
 // --- JSON request/response projections ---
@@ -307,4 +328,163 @@ func (h *CASBHandler) getPosture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	WriteJSON(w, http.StatusOK, report)
+}
+
+// --- inline-CASB rule CRUD ---
+
+type casbInlineRuleCreateRequest struct {
+	AppID      string                `json:"app_id"`
+	Action     string                `json:"action"`
+	Verdict    string                `json:"verdict"`
+	Conditions casb.InlineConditions `json:"conditions"`
+	Enabled    bool                  `json:"enabled"`
+	Priority   int32                 `json:"priority"`
+}
+
+// casbInlineRuleUpdateRequest is a partial update: nil fields are
+// left unchanged. Action/Verdict are validated by the service.
+type casbInlineRuleUpdateRequest struct {
+	AppID      *string                `json:"app_id"`
+	Action     *string                `json:"action"`
+	Verdict    *string                `json:"verdict"`
+	Conditions *casb.InlineConditions `json:"conditions"`
+	Enabled    *bool                  `json:"enabled"`
+	Priority   *int32                 `json:"priority"`
+}
+
+type casbInlineRuleResponse struct {
+	ID         string                `json:"id"`
+	TenantID   string                `json:"tenant_id"`
+	AppID      string                `json:"app_id"`
+	Action     string                `json:"action"`
+	Verdict    string                `json:"verdict"`
+	Conditions casb.InlineConditions `json:"conditions"`
+	Enabled    bool                  `json:"enabled"`
+	Priority   int32                 `json:"priority"`
+	CreatedAt  string                `json:"created_at"`
+	UpdatedAt  string                `json:"updated_at"`
+}
+
+func toCASBInlineRuleResponse(r casb.InlineRule) casbInlineRuleResponse {
+	return casbInlineRuleResponse{
+		ID:         r.ID.String(),
+		TenantID:   r.TenantID.String(),
+		AppID:      r.AppID,
+		Action:     string(r.Action),
+		Verdict:    string(r.Verdict),
+		Conditions: r.Conditions,
+		Enabled:    r.Enabled,
+		Priority:   r.Priority,
+		CreatedAt:  r.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:  r.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+	}
+}
+
+func (h *CASBHandler) listInlineRules(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	rules, err := h.inline.ListInlineRules(r.Context(), tenantID)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	items := make([]casbInlineRuleResponse, 0, len(rules))
+	for _, rule := range rules {
+		items = append(items, toCASBInlineRuleResponse(rule))
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *CASBHandler) createInlineRule(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	var req casbInlineRuleCreateRequest
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	created, err := h.inline.CreateInlineRule(r.Context(), tenantID, casb.CreateInlineRuleInput{
+		AppID:      req.AppID,
+		Action:     casb.InlineAction(req.Action),
+		Verdict:    casb.InlineVerdict(req.Verdict),
+		Conditions: req.Conditions,
+		Enabled:    req.Enabled,
+		Priority:   req.Priority,
+	}, actorFromCtx(r))
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusCreated, toCASBInlineRuleResponse(created))
+}
+
+func (h *CASBHandler) getInlineRule(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	id, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	rule, err := h.inline.GetInlineRule(r.Context(), tenantID, id)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, toCASBInlineRuleResponse(rule))
+}
+
+func (h *CASBHandler) updateInlineRule(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	id, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req casbInlineRuleUpdateRequest
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	input := casb.UpdateInlineRuleInput{
+		AppID:      req.AppID,
+		Conditions: req.Conditions,
+		Enabled:    req.Enabled,
+		Priority:   req.Priority,
+	}
+	if req.Action != nil {
+		a := casb.InlineAction(*req.Action)
+		input.Action = &a
+	}
+	if req.Verdict != nil {
+		v := casb.InlineVerdict(*req.Verdict)
+		input.Verdict = &v
+	}
+	updated, err := h.inline.UpdateInlineRule(r.Context(), tenantID, id, input, actorFromCtx(r))
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, toCASBInlineRuleResponse(updated))
+}
+
+func (h *CASBHandler) deleteInlineRule(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	id, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	if err := h.inline.DeleteInlineRule(r.Context(), tenantID, id, actorFromCtx(r)); err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

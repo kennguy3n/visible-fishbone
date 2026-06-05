@@ -584,6 +584,93 @@ func TestPostgres_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("InlineCASBRule_CRUD_RLS", func(t *testing.T) {
+		tr := store.NewTenantRepository()
+		ir := store.NewInlineCASBRuleRepository()
+		t1 := mustTenant(t, tr)
+		t2 := mustTenant(t, tr)
+
+		created, err := ir.Create(bgCtx(), t1.ID, repository.InlineCASBRule{
+			AppID:      "m365",
+			Action:     "share",
+			Verdict:    "block",
+			Conditions: json.RawMessage(`{"file_type":"docx"}`),
+			Enabled:    true,
+			Priority:   100,
+		})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if created.ID == uuid.Nil {
+			t.Fatalf("create returned nil id")
+		}
+		if created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
+			t.Errorf("timestamps not populated: %+v", created)
+		}
+
+		// Same tenant -> visible.
+		if _, err := ir.Get(bgCtx(), t1.ID, created.ID); err != nil {
+			t.Errorf("get from owner: %v", err)
+		}
+		// Different tenant -> RLS hides it -> NotFound.
+		if _, err := ir.Get(bgCtx(), t2.ID, created.ID); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("cross-tenant get: want ErrNotFound got %v", err)
+		}
+
+		// List is tenant-scoped and ordered priority DESC.
+		lower, err := ir.Create(bgCtx(), t1.ID, repository.InlineCASBRule{
+			AppID: "slack", Action: "upload", Verdict: "log",
+			Conditions: json.RawMessage(`{}`), Enabled: false, Priority: 10,
+		})
+		if err != nil {
+			t.Fatalf("create lower: %v", err)
+		}
+		list, err := ir.List(bgCtx(), t1.ID)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(list) != 2 {
+			t.Fatalf("list count = %d, want 2", len(list))
+		}
+		if list[0].ID != created.ID || list[1].ID != lower.ID {
+			t.Errorf("list not ordered by priority DESC: %+v", list)
+		}
+		if l2, _ := ir.List(bgCtx(), t2.ID); len(l2) != 0 {
+			t.Errorf("cross-tenant list = %d, want 0", len(l2))
+		}
+
+		// Update.
+		updated, err := ir.Update(bgCtx(), t1.ID, repository.InlineCASBRule{
+			ID: created.ID, AppID: "m365", Action: "share", Verdict: "log",
+			Conditions: json.RawMessage(`{"label_match":"confidential"}`),
+			Enabled:    false, Priority: 100,
+		})
+		if err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if updated.Verdict != "log" || updated.Enabled {
+			t.Errorf("update not applied: %+v", updated)
+		}
+		// Cross-tenant update -> NotFound.
+		if _, err := ir.Update(bgCtx(), t2.ID, repository.InlineCASBRule{
+			ID: created.ID, AppID: "m365", Action: "share", Verdict: "allow",
+			Conditions: json.RawMessage(`{}`), Priority: 1,
+		}); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("cross-tenant update: want ErrNotFound got %v", err)
+		}
+
+		// Delete is tenant-scoped.
+		if err := ir.Delete(bgCtx(), t2.ID, created.ID); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("cross-tenant delete: want ErrNotFound got %v", err)
+		}
+		if err := ir.Delete(bgCtx(), t1.ID, created.ID); err != nil {
+			t.Errorf("delete from owner: %v", err)
+		}
+		if _, err := ir.Get(bgCtx(), t1.ID, created.ID); !errors.Is(err, repository.ErrNotFound) {
+			t.Errorf("get-after-delete: want ErrNotFound got %v", err)
+		}
+	})
+
 	t.Run("Webhook_Endpoint_Delivery_RLS", func(t *testing.T) {
 		tr := store.NewTenantRepository()
 		er := store.NewWebhookEndpointRepository()

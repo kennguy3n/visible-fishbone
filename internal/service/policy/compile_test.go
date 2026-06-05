@@ -382,3 +382,117 @@ func TestCompile_DoesNotLogFallbackForValidGraphs(t *testing.T) {
 		t.Fatalf("did not expect fallback warning for valid graph; got:\n%s", buf.String())
 	}
 }
+
+// fakeInlineCASBCompiler is a tiny InlineCASBCompiler test double:
+// it returns a fixed rule set (or error) without touching a store.
+type fakeInlineCASBCompiler struct {
+	rules []Rule
+	err   error
+}
+
+func (f fakeInlineCASBCompiler) CompileRules(_ context.Context, _ uuid.UUID) ([]Rule, error) {
+	return f.rules, f.err
+}
+
+func TestCompile_InlineCASBRulesMergedIntoEdgeAndCloudOnly(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(s)
+	tnt, err := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "t", Slug: "t", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	policyRepo := memory.NewPolicyRepository(s)
+	keyRepo := memory.NewPolicySigningKeyRepository(s)
+	keys := NewKeyService(keyRepo, nil)
+
+	// One inline-CASB rule carrying its CASB payload in Extra,
+	// exactly as casb.InlineCASBService.CompileRules emits it.
+	casbRule := Rule{
+		ID:     "casb-rule-1",
+		Domain: DomainInlineCASB,
+		Verb:   VerbDeny,
+		Extra: map[string]json.RawMessage{
+			"casb": json.RawMessage(`{"id":"casb-rule-1","app_id":"m365","action":"share","verdict":"block","conditions":{},"priority":100}`),
+		},
+	}
+	svc := New(policyRepo, nil, keys,
+		WithInlineCASBCompiler(fakeInlineCASBCompiler{rules: []Rule{casbRule}}))
+
+	raw := json.RawMessage(`{"default_action":"deny","rules":[{"id":"ztna-1","domain":"ztna","verb":"allow"}]}`)
+	if _, err := svc.PutGraph(context.Background(), tnt.ID, nil, raw); err != nil {
+		t.Fatalf("put graph: %v", err)
+	}
+	res, err := svc.Compile(context.Background(), tnt.ID, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	type decoded struct {
+		RawRules json.RawMessage `msgpack:"r"`
+	}
+	for _, b := range res.Bundles {
+		var d decoded
+		if err := msgpack.Unmarshal(b.Bundle, &d); err != nil {
+			t.Fatalf("unmarshal %s: %v", b.TargetType, err)
+		}
+		var rules []struct {
+			ID     string                     `json:"id"`
+			Domain string                     `json:"domain"`
+			Casb   map[string]json.RawMessage `json:"casb"`
+		}
+		if err := json.Unmarshal(d.RawRules, &rules); err != nil {
+			t.Fatalf("unmarshal rules %s: %v", b.TargetType, err)
+		}
+		var found bool
+		var domain string
+		var hasPayload bool
+		for _, r := range rules {
+			if r.ID == "casb-rule-1" {
+				found = true
+				domain = r.Domain
+				_, hasPayload = r.Casb["app_id"]
+			}
+		}
+		switch b.TargetType {
+		case repository.PolicyBundleTargetEdge, repository.PolicyBundleTargetCloud:
+			if !found {
+				t.Errorf("%s bundle missing inline-CASB rule", b.TargetType)
+				continue
+			}
+			if domain != string(DomainInlineCASB) {
+				t.Errorf("%s casb rule domain = %q, want %q", b.TargetType, domain, DomainInlineCASB)
+			}
+			if !hasPayload {
+				t.Errorf("%s casb rule missing Extra[casb] payload", b.TargetType)
+			}
+		case repository.PolicyBundleTargetEndpoint, repository.PolicyBundleTargetMobile:
+			if found {
+				t.Errorf("%s bundle leaked inline-CASB rule", b.TargetType)
+			}
+		}
+	}
+}
+
+func TestCompile_InlineCASBCompilerErrorFailsCompile(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(s)
+	tnt, _ := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "t", Slug: "t", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	policyRepo := memory.NewPolicyRepository(s)
+	keyRepo := memory.NewPolicySigningKeyRepository(s)
+	keys := NewKeyService(keyRepo, nil)
+	svc := New(policyRepo, nil, keys,
+		WithInlineCASBCompiler(fakeInlineCASBCompiler{err: errors.New("boom")}))
+	if _, err := svc.PutGraph(context.Background(), tnt.ID, nil, json.RawMessage(`{"default_action":"deny"}`)); err != nil {
+		t.Fatalf("put graph: %v", err)
+	}
+	_, err := svc.Compile(context.Background(), tnt.ID, nil)
+	if err == nil || !strings.Contains(err.Error(), "compile inline casb rules") {
+		t.Fatalf("expected inline casb compile error, got: %v", err)
+	}
+}

@@ -82,8 +82,9 @@ use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, PKCS_ED25519};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::Serialize;
 use sng_agent::config::{
-    AgentConfig, CaptureConfig, CommsConfig, IdentityConfig, PolicyConfig, PostureConfig,
-    SupervisorConfig, TelemetryConfig, TunnelConfig as TunnelCadenceConfig, ZtnaConfig,
+    AgentConfig, CaptureConfig, CommsConfig, DlpConfig, IdentityConfig, PolicyConfig,
+    PostureConfig, SupervisorConfig, TelemetryConfig, TunnelConfig as TunnelCadenceConfig,
+    ZtnaConfig,
 };
 use sng_agent::{BuiltAgent, Cli, build_agent};
 use sng_core::ids::{DeviceId, PolicySigningKeyId, TenantId};
@@ -527,6 +528,7 @@ fn fresh_config_wired_to(endpoint: &str, pki: &OnDiskPki) -> AgentConfig {
             // wall-clock rather than the default 30 s.
             reconcile_interval: Duration::from_millis(20),
         },
+        dlp: DlpConfig::default(),
         supervisor: SupervisorConfig::default(),
     }
 }
@@ -636,6 +638,7 @@ async fn full_stack_boots_pulls_bundle_then_drains_cleanly() {
         pal_capture,
         pal_posture,
         pal_tunnel,
+        dlp,
         desired_tunnels_tx: built_desired_tunnels_tx,
     } = built;
     drop(telemetry);
@@ -645,6 +648,7 @@ async fn full_stack_boots_pulls_bundle_then_drains_cleanly() {
     drop(pal_capture);
     drop(pal_posture);
     drop(pal_tunnel);
+    drop(dlp);
     drop(built_desired_tunnels_tx);
 
     let supervisor_handle = tokio::spawn(supervisor.run());
@@ -808,6 +812,7 @@ async fn agent_supervisor_drain_under_continuous_load_within_budget() {
         pal_capture,
         pal_posture,
         pal_tunnel,
+        dlp,
         desired_tunnels_tx: built_desired_tunnels_tx,
     } = built;
     drop(telemetry);
@@ -817,6 +822,7 @@ async fn agent_supervisor_drain_under_continuous_load_within_budget() {
     drop(pal_capture);
     drop(pal_posture);
     drop(pal_tunnel);
+    drop(dlp);
     drop(built_desired_tunnels_tx);
 
     let supervisor_handle = tokio::spawn(supervisor.run());
