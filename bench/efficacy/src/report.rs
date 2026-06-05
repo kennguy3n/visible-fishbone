@@ -140,7 +140,10 @@ pub struct ThroughputStat {
     /// (DLP scan). `None` for fixed-size ops (a ZTNA decision).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes_per_op: Option<u64>,
-    /// Sustained scan bandwidth in MB/s, derived from bytes_per_op.
+    /// Sustained scan bandwidth in **mebibytes/s (MiB/s, 1024² bytes)**,
+    /// derived from bytes_per_op — the same binary-megabyte convention Go's
+    /// `testing.B` uses for its "MB/s". The JSON key stays `mb_per_sec` for
+    /// wire-compat; consumers render it labelled "MiB/s".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mb_per_sec: Option<f64>,
     /// `true` when measured from a debug (unoptimized) build, where these
@@ -309,8 +312,8 @@ impl FunctionReport {
 /// dead-code elimination; its return value is fed to `black_box`.
 ///
 /// `bytes_per_op` is the payload size when the op consumes one (DLP scan),
-/// which is used to derive a MB/s bandwidth; pass `None` for fixed-size
-/// ops such as a ZTNA decision.
+/// which is used to derive a MiB/s bandwidth (1024² bytes); pass `None` for
+/// fixed-size ops such as a ZTNA decision.
 pub fn measure<T>(
     label: &str,
     unit: &str,
@@ -549,7 +552,7 @@ mod tests {
         assert!(s.ops_per_sec > 0.0);
         // ops_per_sec and per_op_ns are reciprocal (within rounding).
         assert!((s.ops_per_sec - 1e9 / s.per_op_ns).abs() / s.ops_per_sec < 1e-6);
-        // MB/s = bytes * ops_per_sec / 2^20.
+        // MiB/s = bytes * ops_per_sec / 2^20.
         let want_mb = 1024.0 * s.ops_per_sec / (1024.0 * 1024.0);
         assert!((s.mb_per_sec.unwrap() - want_mb).abs() / want_mb < 1e-9);
         // Built under cfg(test) => debug assertions on.

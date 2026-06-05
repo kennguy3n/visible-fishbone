@@ -584,7 +584,7 @@ func (r *BusinessReport) writeEfficacyCapabilities(b *strings.Builder) {
 			for _, t := range f.Throughput {
 				bw := "—"
 				if t.MBPerSec != nil {
-					bw = fmt.Sprintf("%s MB/s", humanFloat(*t.MBPerSec))
+					bw = fmt.Sprintf("%s MiB/s", humanFloat(*t.MBPerSec))
 				}
 				fmt.Fprintf(b, "| `%s` | %s %s | %s | %s | %s |\n",
 					mdCell(t.Label),

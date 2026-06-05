@@ -84,13 +84,15 @@ type EfficacyFeature struct {
 
 // EfficacyThroughput is one measured hot-path performance point.
 type EfficacyThroughput struct {
-	Label      string   `json:"label"`
-	Unit       string   `json:"unit"`
-	Iterations int64    `json:"iterations"`
-	PerOpNs    float64  `json:"per_op_ns"`
-	OpsPerSec  float64  `json:"ops_per_sec"`
-	BytesPerOp *int64   `json:"bytes_per_op,omitempty"`
-	MBPerSec   *float64 `json:"mb_per_sec,omitempty"`
+	Label      string  `json:"label"`
+	Unit       string  `json:"unit"`
+	Iterations int64   `json:"iterations"`
+	PerOpNs    float64 `json:"per_op_ns"`
+	OpsPerSec  float64 `json:"ops_per_sec"`
+	BytesPerOp *int64  `json:"bytes_per_op,omitempty"`
+	// MBPerSec is mebibytes/s (MiB/s, 1024² bytes); the JSON key stays
+	// mb_per_sec for wire-compat with the harness but is rendered "MiB/s".
+	MBPerSec *float64 `json:"mb_per_sec,omitempty"`
 	// DebugBuild is true when the figure came from an unoptimized build
 	// (an order of magnitude slower than release) — surfaced as a caveat.
 	DebugBuild bool `json:"debug_build"`

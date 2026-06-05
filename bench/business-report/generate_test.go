@@ -348,8 +348,8 @@ func TestSecurityEfficacyCapabilities(t *testing.T) {
 		// Pipe inside a feature description must be escaped so the row stays intact.
 		"confirms each match \\| suppresses fakes",
 		"**Performance (measured hot path)**",
-		// Thousands separators + µs latency conversion + MB/s bandwidth.
-		"| `classify` | 4,810 scans/s | 208 µs | 2.5 MB/s | 5,000 |",
+		// Thousands separators + µs latency conversion + MiB/s bandwidth.
+		"| `classify` | 4,810 scans/s | 208 µs | 2.5 MiB/s | 5,000 |",
 		"release build",
 	} {
 		if !strings.Contains(md, want) {
