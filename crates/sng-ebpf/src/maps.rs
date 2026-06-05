@@ -67,7 +67,18 @@ impl FlowKey {
     #[must_use]
     pub fn new(src_ip: IpAddr, dst_ip: IpAddr, src_port: u16, dst_port: u16, protocol: u8) -> Self {
         let (src, src_fam) = addr_bytes(src_ip);
-        let (dst, _) = addr_bytes(dst_ip);
+        let (dst, dst_fam) = addr_bytes(dst_ip);
+        // A single `family` discriminant covers both endpoints, so the key
+        // is only well-formed for a same-family flow. Mixed-family 5-tuples
+        // are unroutable — no IP stack (and so no kernel XDP hook) produces
+        // one — and folding them into one key would mislabel the dst bytes.
+        // Assert the invariant in debug builds; release keeps the source
+        // family (matching the kernel side, which only sees same-family
+        // flows) rather than panicking on the data path.
+        debug_assert_eq!(
+            src_fam, dst_fam,
+            "FlowKey requires src and dst to share an address family"
+        );
         Self {
             src,
             dst,

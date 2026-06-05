@@ -251,26 +251,30 @@ impl DataPathBackend for EbpfDataPath {
     }
 
     async fn install_rules(&self, compiled: &CompiledRuleSet) -> Result<(), FirewallError> {
-        // Offload the hot-path subset to XDP first. A failure here is a
-        // real error (bad rule / map update), so surface it — but the
-        // nftables fallback below still installs the authoritative full
-        // ruleset, so enforcement is never lost.
+        // Install the authoritative nftables ruleset *first*. It owns the
+        // full policy and the per-packet evaluation path reads its engine,
+        // so it must commit before the XDP fast path is allowed to advance.
+        // If it fails it rolls back its own swap; we return without touching
+        // XDP, leaving the fast path consistent with the last-good ruleset
+        // rather than holding a newer version than nftables is enforcing.
+        if let Err(e) = self.fallback.install_rules(compiled).await {
+            self.install_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(e);
+        }
+
+        // nftables committed. Now offload the hot-path subset to XDP. A
+        // failure here is a real error (bad rule / map update) and is
+        // surfaced, but enforcement is never lost because nftables already
+        // holds the authoritative full ruleset.
         let hot = compile_hot_path(compiled);
-        let xdp_result = self.control.install_rules(hot).map_err(map_ebpf_err);
-
-        // Always install the full ruleset into the nftables fallback.
-        let fallback_result = self.fallback.install_rules(compiled).await;
-
-        match (xdp_result, fallback_result) {
-            (Ok(()), Ok(())) => {
+        match self.control.install_rules(hot).map_err(map_ebpf_err) {
+            Ok(()) => {
                 self.installs_total.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
-            (xdp, fallback) => {
+            Err(e) => {
                 self.install_failures.fetch_add(1, Ordering::Relaxed);
-                // The fallback (authoritative) error takes precedence; an
-                // XDP-only failure is reported when nftables succeeded.
-                fallback.and(xdp)
+                Err(e)
             }
         }
     }
@@ -648,6 +652,31 @@ mod tests {
         assert!(!stats.kernel_offload);
         // Fallback installed the full ruleset too.
         assert_eq!(dp.fallback().get_stats().unwrap().installs_total, 1);
+    }
+
+    #[tokio::test]
+    async fn ebpf_backend_does_not_advance_xdp_when_nftables_fails() {
+        // nftables is authoritative; if its apply fails, the XDP fast path
+        // must not be left holding a newer ruleset than nftables enforces.
+        let mock = Arc::new(MockNftables::new());
+        mock.fail_next_apply("kernel rejected");
+        let backend: Arc<dyn NftablesBackend> = Arc::clone(&mock) as _;
+        let engine = Arc::new(FirewallEngine::new(backend));
+        let control = Arc::new(XdpControlPlane::in_memory());
+        let dp = EbpfDataPath::new(Arc::clone(&control), NftablesDataPath::new(engine));
+
+        let rs = ruleset(
+            vec![l3l4_rule("a", "203.0.113.0/24", RuleAction::Deny)],
+            RuleAction::Deny,
+        );
+        // The install fails (the nftables apply was forced to fail)…
+        assert!(dp.install_rules(&rs).await.is_err());
+        // …and XDP was never advanced — no rules offloaded, no install
+        // counted, the failure recorded.
+        assert_eq!(control.stats().rules_active, 0);
+        let stats = dp.get_stats().unwrap();
+        assert_eq!(stats.installs_total, 0);
+        assert_eq!(stats.install_failures, 1);
     }
 
     #[tokio::test]
