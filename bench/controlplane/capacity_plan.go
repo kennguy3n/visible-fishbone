@@ -24,6 +24,13 @@ import (
 
 const secondsPerMonth = 30.0 * 24 * 3600
 
+// boolPtr returns a pointer to v, for tri-state config fields where the
+// nil zero value means "unset — apply the documented default".
+func boolPtr(v bool) *bool { return &v }
+
+// derefBool reports *p, treating a nil pointer as false.
+func derefBool(p *bool) bool { return p != nil && *p }
+
 // classEventRate is the modelled sustained per-tenant publish rate
 // (events/sec) for one telemetry class. flow dominates; control-plane
 // classes (ztna, agent) are sparse. These are deliberately conservative
@@ -65,8 +72,12 @@ type CapacityPlanConfig struct {
 	PGMaxOpenConns int
 	// PGBouncerMode mirrors PG_PGBOUNCER_MODE: when true, a
 	// transaction pooler multiplexes the app pools onto a far smaller
-	// set of backend connections.
-	PGBouncerMode bool
+	// set of backend connections. It is a tri-state pointer rather than
+	// a bare bool so withDefaults can tell "unset" (nil → apply the
+	// default, which is enabled) apart from an explicit false — a plain
+	// bool's zero value would silently disable pooling on a partial
+	// config and contradict the documented default.
+	PGBouncerMode *bool
 	// PGMaxConnections is the Postgres server's max_connections the
 	// plan is graded against.
 	PGMaxConnections int
@@ -121,7 +132,7 @@ func DefaultCapacityPlanConfig() CapacityPlanConfig {
 		TenantCount:          5000,
 		ControlPlaneReplicas: 3,
 		PGMaxOpenConns:       20,
-		PGBouncerMode:        true,
+		PGBouncerMode:        boolPtr(true),
 		PGMaxConnections:     200,
 		// ControlPlaneRPS left 0 so it derives from the per-tenant rate
 		// below and scales with TenantCount (0.5 × 5000 = 2500 RPS at the
@@ -156,6 +167,9 @@ func (c CapacityPlanConfig) withDefaults() CapacityPlanConfig {
 	}
 	if c.PGMaxConnections <= 0 {
 		c.PGMaxConnections = d.PGMaxConnections
+	}
+	if c.PGBouncerMode == nil {
+		c.PGBouncerMode = d.PGBouncerMode
 	}
 	if c.ControlPlaneRPSPerTenant <= 0 {
 		c.ControlPlaneRPSPerTenant = d.ControlPlaneRPSPerTenant
@@ -236,11 +250,16 @@ func planPostgresPool(cfg CapacityPlanConfig) PostgresPoolPlan {
 	requiredPerReplica := int(math.Ceil(peakConcurrent * headroom / float64(cfg.ControlPlaneReplicas)))
 	totalAppConns := cfg.PGMaxOpenConns * cfg.ControlPlaneReplicas
 
+	// cfg has been through withDefaults, so PGBouncerMode is non-nil here;
+	// derefBool stays defensive in case planPostgresPool is ever called
+	// on a raw config.
+	pgbouncer := derefBool(cfg.PGBouncerMode)
+
 	// Without PgBouncer every app connection is a backend connection.
 	// With transaction pooling the backend only needs to cover the
 	// genuinely concurrent transactions (peak, with headroom).
 	backendConns := totalAppConns
-	if cfg.PGBouncerMode {
+	if pgbouncer {
 		backendConns = int(math.Ceil(peakConcurrent * headroom))
 	}
 
@@ -250,7 +269,7 @@ func planPostgresPool(cfg CapacityPlanConfig) PostgresPoolPlan {
 		TotalAppConns:         totalAppConns,
 		PeakConcurrentQueries: round1(peakConcurrent),
 		RecommendedPoolSize:   requiredPerReplica,
-		PGBouncerMode:         cfg.PGBouncerMode,
+		PGBouncerMode:         pgbouncer,
 		BackendConnsRequired:  backendConns,
 		MaxConnections:        cfg.PGMaxConnections,
 		WithinMaxConnections:  backendConns <= cfg.PGMaxConnections,

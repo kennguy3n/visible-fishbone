@@ -25,6 +25,29 @@ func TestNATSStorageCostUSD(t *testing.T) {
 	}
 }
 
+func TestS3StorageCostUSD(t *testing.T) {
+	c := NewCostCalculator(DefaultUnitCosts)
+	cases := []struct {
+		bytes int64
+		want  float64
+	}{
+		{0, 0},
+		{-1, 0},
+		{bytesPerGB, 0.023},      // 1 GB-month * $0.023
+		{100 * bytesPerGB, 2.30}, // 100 GB-month * $0.023
+	}
+	for _, tc := range cases {
+		if got := c.S3StorageCostUSD(tc.bytes); !approx(got, tc.want) {
+			t.Errorf("S3StorageCostUSD(%d) = %v, want %v", tc.bytes, got, tc.want)
+		}
+		// The dedicated gauge helper must stay numerically identical to
+		// the meter-pipeline branch it documents as equivalent.
+		if got, viaMeter := c.S3StorageCostUSD(tc.bytes), c.MeterCostUSD(MeterS3BytesArchived, tc.bytes); !approx(got, viaMeter) {
+			t.Errorf("S3StorageCostUSD(%d)=%v diverges from MeterCostUSD=%v", tc.bytes, got, viaMeter)
+		}
+	}
+}
+
 func TestProjectInfraMonthlyCostGaugesAndFlow(t *testing.T) {
 	// Pin now to the middle of a 30-day month so the ClickHouse flow
 	// roughly doubles when projected, while the NATS/S3 gauges are

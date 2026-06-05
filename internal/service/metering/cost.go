@@ -304,6 +304,26 @@ func (c *CostCalculator) NATSStorageCostUSD(streamBytes int64) float64 {
 	return float64(streamBytes) / bytesPerGB * c.costs.NATSPerGBMonthUSD
 }
 
+// S3StorageCostUSD returns the monthly cost of retaining `archiveBytes`
+// of S3 cold archive for one tenant.
+//
+// Like NATS JetStream — and unlike the per-request meters — a tenant's
+// cold-archive footprint is a point-in-time *gauge* sized by the
+// retention/compaction policy, so it is priced directly per GB-month
+// against the sampled size rather than summed through the additive
+// meter pipeline. This is numerically identical to
+// MeterCostUSD(MeterS3BytesArchived, archiveBytes); it exists so the
+// gauge semantics are explicit at the infra-projection call site and
+// symmetric with NATSStorageCostUSD. The MeterS3BytesArchived branch in
+// MeterCostUSD is retained for callers that record S3 through the meter
+// pipeline.
+func (c *CostCalculator) S3StorageCostUSD(archiveBytes int64) float64 {
+	if archiveBytes <= 0 {
+		return 0
+	}
+	return float64(archiveBytes) / bytesPerGB * c.costs.S3PerGBMonthUSD
+}
+
 // InfraUsageSample captures the three infrastructure cost drivers for a
 // single tenant at one point in time. It is the input to
 // ProjectInfraMonthlyCost and is populated either from a tenant's
@@ -372,7 +392,7 @@ func (c *CostCalculator) ProjectInfraMonthlyCost(sample InfraUsageSample) InfraC
 	}
 	chMonthly := round2(c.MeterCostUSD(MeterClickHouseRowsWritten, projectedRows))
 	natsMonthly := round2(c.NATSStorageCostUSD(sample.NATSStreamBytes))
-	s3Monthly := round2(c.MeterCostUSD(MeterS3BytesArchived, sample.S3ArchiveBytes))
+	s3Monthly := round2(c.S3StorageCostUSD(sample.S3ArchiveBytes))
 	return InfraCostProjection{
 		TenantID:                sample.TenantID,
 		ClickHouseProjectedRows: projectedRows,

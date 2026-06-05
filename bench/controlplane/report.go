@@ -16,9 +16,12 @@ import (
 	"strings"
 )
 
-// SchemaVersion is the report schema version. Bump it whenever the
-// JSON shape changes so a stale artifact is never silently compared
-// against a new one by the regression detector.
+// SchemaVersion is the report schema version. Bump it when the JSON
+// shape changes in a backward-incompatible way (a field is removed,
+// renamed, or its meaning/units change) so the regression detector
+// rejects a stale artifact instead of silently comparing it against a
+// new one. Purely additive changes (appending a new field old baselines
+// simply lack) stay comparable and need not bump it.
 const SchemaVersion = 1
 
 // Mode labels the benchmark that produced a report. They mirror the

@@ -25,6 +25,29 @@ func TestCapacityPlanDefaultsAndCardinality(t *testing.T) {
 	if s.NATS.SubjectsPerPartitionMax > s.NATS.DistinctSubjects {
 		t.Fatalf("max per partition %d exceeds total %d", s.NATS.SubjectsPerPartitionMax, s.NATS.DistinctSubjects)
 	}
+	// An empty config must inherit the documented default knobs, including
+	// PgBouncer enabled — withDefaults cannot rely on the bool zero value
+	// to express "enabled", so this guards that the tri-state default is
+	// actually applied (regression for the partial-config bug).
+	if !s.Postgres.PGBouncerMode {
+		t.Fatalf("empty config should default to PgBouncer enabled, got disabled")
+	}
+}
+
+func TestCapacityPlanPartialConfigKeepsPgBouncerDefault(t *testing.T) {
+	// A partial config that only sets TenantCount must still pick up the
+	// PgBouncer default. With a bare bool this silently modelled the
+	// fleet without pooling; the tri-state pointer fixes it.
+	partial := RunCapacityPlan(CapacityPlanConfig{TenantCount: 1000})
+	if !partial.Postgres.PGBouncerMode {
+		t.Fatalf("partial config should keep PgBouncer enabled by default")
+	}
+	// Pooling must actually take effect: the backend needs fewer conns
+	// than the summed app pools.
+	if partial.Postgres.BackendConnsRequired >= partial.Postgres.TotalAppConns {
+		t.Fatalf("pooled backend conns (%d) should be below total app conns (%d)",
+			partial.Postgres.BackendConnsRequired, partial.Postgres.TotalAppConns)
+	}
 }
 
 func TestCapacityPlanSinglePartitionNoSkew(t *testing.T) {
@@ -83,8 +106,8 @@ func TestCapacityPlanClickHouseHealthyAtLowLoad(t *testing.T) {
 }
 
 func TestCapacityPlanPostgresPgBouncerReducesBackendConns(t *testing.T) {
-	with := RunCapacityPlan(CapacityPlanConfig{PGBouncerMode: true})
-	without := RunCapacityPlan(CapacityPlanConfig{PGBouncerMode: false})
+	with := RunCapacityPlan(CapacityPlanConfig{PGBouncerMode: boolPtr(true)})
+	without := RunCapacityPlan(CapacityPlanConfig{PGBouncerMode: boolPtr(false)})
 	if with.Postgres.BackendConnsRequired >= without.Postgres.BackendConnsRequired {
 		t.Fatalf("PgBouncer should reduce backend conns: with=%d without=%d",
 			with.Postgres.BackendConnsRequired, without.Postgres.BackendConnsRequired)
