@@ -201,7 +201,13 @@ func domainMatchesEventClass(d Domain, cls schema.EventClass) bool {
 		return cls == schema.EventClassFlow
 	case DomainDNS:
 		return cls == schema.EventClassDNS
-	case DomainSWG:
+	case DomainSWG, DomainInlineCASB:
+		// Inline-CASB rules ride the SWG bundle slice and are
+		// enforced on the same HTTP path (SaaS upload/share/
+		// download/delete), so they share SWG's event-class
+		// mapping. Keeping this in lockstep with domainTargets
+		// (which groups DomainInlineCASB with DomainSWG) means
+		// policy simulation covers inline-CASB rule changes too.
 		return cls == schema.EventClassHTTP || cls == schema.EventClassFlow
 	case DomainZTNA:
 		// ZTNA verdicts cover both flow + dedicated ZTNA events.

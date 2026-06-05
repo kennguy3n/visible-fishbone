@@ -141,7 +141,7 @@ func (h *RBIHandler) closeSession(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusNoContent, nil)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *RBIHandler) getPolicy(w http.ResponseWriter, r *http.Request) {

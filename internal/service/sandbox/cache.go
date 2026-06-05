@@ -113,12 +113,17 @@ func (c *Cache) Put(tenantID uuid.UUID, v Verdict) {
 		return
 	}
 	now := c.now()
+	key := cacheKey(tenantID, v.SHA256)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.entries) >= c.maxEntries {
+	// Only evict when inserting a genuinely new key would push the map
+	// over capacity. Overwriting an existing digest's verdict doesn't
+	// grow the map, so evicting another (still-valid) entry there would
+	// be a spurious eviction and an avoidable later DB read.
+	if _, exists := c.entries[key]; !exists && len(c.entries) >= c.maxEntries {
 		c.evictOldestLocked()
 	}
-	c.entries[cacheKey(tenantID, v.SHA256)] = cacheEntry{
+	c.entries[key] = cacheEntry{
 		verdict:   v,
 		expiresAt: now.Add(c.ttl),
 		inserted:  now,
