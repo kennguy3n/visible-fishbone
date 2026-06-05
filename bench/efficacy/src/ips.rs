@@ -22,6 +22,17 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/ips")
 }
 
+/// Best-effort cleanup of the per-run work dir on every exit path (the happy
+/// path and the early UNTESTED returns alike), so repeated runs on a
+/// long-lived CI runner don't accumulate stale `sng-efficacy-ips-*` dirs.
+struct WorkDirGuard(PathBuf);
+
+impl Drop for WorkDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 async fn suricata_available() -> Option<String> {
     let out = tokio::process::Command::new("suricata")
         .arg("-V")
@@ -201,6 +212,9 @@ pub async fn run() -> FunctionReport {
             &format!("could not create IPS work dir {}: {e}", work.display()),
         );
     }
+    // Remove the work dir on every return path below (UNTESTED early-returns
+    // and the happy path), now that it's guaranteed to exist.
+    let _work_guard = WorkDirGuard(work.clone());
     let eve = work.join("eve.json");
     let stats_sock = work.join("suricata-command.socket");
     let yaml_path = work.join("suricata.yaml");

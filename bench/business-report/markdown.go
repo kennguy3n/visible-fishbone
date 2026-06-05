@@ -38,8 +38,10 @@ func (r *BusinessReport) writeBanner(b *strings.Builder) {
 	b.WriteString("> data path, single commodity runner, no dedicated hardware). Throughput/latency figures\n")
 	b.WriteString("> characterise the **load generators and CPU-bound code paths**, not the enforced data\n")
 	b.WriteString("> plane, and cost figures are **models** over published cloud list prices. Pass/Fail\n")
-	b.WriteString("> verdicts are therefore shown as `N/A (dry-run)`. The Criterion policy-eval numbers\n")
-	b.WriteString("> (Section 4) are the exception — those are real microbenchmark measurements. Re-run the\n")
+	b.WriteString("> verdicts are therefore shown as `N/A (dry-run)`. Two sections are the exception and stay\n")
+	b.WriteString("> graded even here: the Criterion policy-eval numbers (Section 4) are real microbenchmark\n")
+	b.WriteString("> measurements, and the security-efficacy verdicts (Section 7) are real enforcement decisions\n")
+	b.WriteString("> over known-bad/known-good corpora. Re-run the\n")
 	b.WriteString("> harnesses with the live integration setup on representative hardware and regenerate with\n")
 	b.WriteString("> `--live` to obtain gradeable numbers.\n\n")
 }
