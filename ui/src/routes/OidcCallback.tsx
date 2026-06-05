@@ -22,9 +22,15 @@ export function OidcCallback() {
         if (setSession(accessToken)) {
           navigate({ to: "/" });
         } else {
+          // setSession only rejects a token it can't decode as a JWT or that
+          // is already expired. The common real-world cause is an IdP issuing
+          // an opaque access token — which SNG's JWT-bearer API can't use
+          // either — so the message points operators at token format/audience.
           setError(
             new Error(
-              "The identity provider returned an invalid or expired access token.",
+              "The identity provider returned an access token the console can't use. " +
+                "SNG requires an unexpired JWT access token (opaque tokens aren't supported) — " +
+                "check the OIDC client's token format and audience.",
             ),
           );
         }

@@ -35,23 +35,32 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       : null,
   );
 
-  // Default to the first tenant once the list loads if nothing is
-  // selected or the stored selection is no longer present.
-  useEffect(() => {
-    if (tenants.length === 0) return;
-    const stillExists =
-      selectedTenantId && tenants.some((t) => t.id === selectedTenantId);
-    if (!stillExists) {
-      setSelected(tenants[0].id ?? null);
-    }
-  }, [tenants, selectedTenantId]);
-
   const setSelectedTenantId = useCallback((id: string) => {
     setSelected(id);
     if (typeof localStorage !== "undefined") {
       localStorage.setItem(STORAGE_KEY, id);
     }
   }, []);
+
+  // Default to the first tenant once the list loads if nothing is selected or
+  // the stored selection is no longer present (e.g. the tenant was deleted).
+  // We persist the fallback through setSelectedTenantId — otherwise a stale,
+  // now-invalid id would sit in localStorage and this effect would re-run the
+  // fallback on every reload, never saving the operator's effective tenant.
+  useEffect(() => {
+    if (tenants.length === 0) return;
+    const stillExists =
+      selectedTenantId && tenants.some((t) => t.id === selectedTenantId);
+    if (stillExists) return;
+    const first = tenants[0].id;
+    if (first) {
+      setSelectedTenantId(first);
+    } else if (typeof localStorage !== "undefined") {
+      // Degenerate case: a tenant with no id — clear the stale entry.
+      localStorage.removeItem(STORAGE_KEY);
+      setSelected(null);
+    }
+  }, [tenants, selectedTenantId, setSelectedTenantId]);
 
   const value = useMemo<TenantState>(
     () => ({
