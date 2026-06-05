@@ -479,9 +479,9 @@ impl ExtAuthzHandler {
     /// so the policy-bundle controller can log it. The control
     /// plane calls this on every bundle install with the CASB slice
     /// decoded from the freshly-signed bundle.
-    pub fn install_casb_rules(&self, rules: CasbRuleSet) -> usize {
+    pub fn install_casb_rules(&self, rules: &CasbRuleSet) -> usize {
         match &self.inner.casb {
-            Some(insp) => insp.install_rules(&rules),
+            Some(insp) => insp.install_rules(rules),
             None => 0,
         }
     }
@@ -1346,7 +1346,8 @@ mod tests {
     #[test]
     fn signals_ignores_non_numeric_content_length() {
         let mut r = m365_upload_req(None, None);
-        r.headers.push(("content-length".into(), "not-a-number".into()));
+        r.headers
+            .push(("content-length".into(), "not-a-number".into()));
         assert_eq!(r.signals().content_length, None);
     }
 
@@ -1357,10 +1358,7 @@ mod tests {
             CasbAction::Upload,
             CasbVerdict::Block,
         )]);
-        let resp = h
-            .handle_request(m365_upload_req(None, None))
-            .await
-            .unwrap();
+        let resp = h.handle_request(m365_upload_req(None, None)).await.unwrap();
         assert_eq!(resp.action, "deny");
         assert_eq!(resp.status, Some(403));
         assert_eq!(resp.category.as_deref(), Some("casb.m365.upload"));
@@ -1374,10 +1372,7 @@ mod tests {
             CasbAction::Upload,
             CasbVerdict::Log,
         )]);
-        let resp = h
-            .handle_request(m365_upload_req(None, None))
-            .await
-            .unwrap();
+        let resp = h.handle_request(m365_upload_req(None, None)).await.unwrap();
         assert_eq!(resp.action, "allow");
         assert!(resp.status.is_none());
         // The CASB log verdict's category wins over the
@@ -1400,10 +1395,7 @@ mod tests {
             CasbAction::Upload,
             CasbVerdict::Block,
         )]);
-        let resp = h
-            .handle_request(m365_upload_req(None, None))
-            .await
-            .unwrap();
+        let resp = h.handle_request(m365_upload_req(None, None)).await.unwrap();
         assert_eq!(resp.action, "deny");
     }
 
@@ -1464,10 +1456,7 @@ mod tests {
             CasbAction::Upload,
             CasbVerdict::Block,
         )]);
-        let resp = h
-            .handle_request(m365_upload_req(None, None))
-            .await
-            .unwrap();
+        let resp = h.handle_request(m365_upload_req(None, None)).await.unwrap();
         assert_eq!(resp.action, "allow");
         assert_eq!(resp.category.as_deref(), Some("business.saas"));
     }
@@ -1476,22 +1465,16 @@ mod tests {
     async fn install_casb_rules_hot_swaps_ruleset() {
         let (h, _cap) = make_casb_handler(vec![]);
         // No rules installed → upload allowed.
-        let before = h
-            .handle_request(m365_upload_req(None, None))
-            .await
-            .unwrap();
+        let before = h.handle_request(m365_upload_req(None, None)).await.unwrap();
         assert_eq!(before.action, "allow");
         // Install a block rule, then the same request is denied.
-        let n = h.install_casb_rules(CasbRuleSet::new(vec![casb_rule(
+        let n = h.install_casb_rules(&CasbRuleSet::new(vec![casb_rule(
             "m365",
             CasbAction::Upload,
             CasbVerdict::Block,
         )]));
         assert_eq!(n, 1);
-        let after = h
-            .handle_request(m365_upload_req(None, None))
-            .await
-            .unwrap();
+        let after = h.handle_request(m365_upload_req(None, None)).await.unwrap();
         assert_eq!(after.action, "deny");
     }
 
@@ -1501,7 +1484,7 @@ mod tests {
         // install call (returns 0) rather than panicking.
         let (h, _cap) = make_handler(vec![]);
         assert_eq!(
-            h.install_casb_rules(CasbRuleSet::new(vec![casb_rule(
+            h.install_casb_rules(&CasbRuleSet::new(vec![casb_rule(
                 "m365",
                 CasbAction::Upload,
                 CasbVerdict::Block,
