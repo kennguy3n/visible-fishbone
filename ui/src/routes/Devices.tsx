@@ -9,7 +9,7 @@ import { PageHeader, Card, AsyncBoundary, StatusBadge, Badge } from "@/component
 import { DataTable, type Column } from "@/components/DataTable";
 import { Modal } from "@/components/Modal";
 import { RequireTenant } from "@/components/RequireTenant";
-import { formatRelative, titleCase } from "@/lib/format";
+import { formatRelative, titleCase, summarizePosture } from "@/lib/format";
 
 export function Devices() {
   return (
@@ -72,7 +72,13 @@ function DevicesInner({ tenantId }: { tenantId: string }) {
     { header: "Name", cell: (d) => d.name },
     { header: "Platform", cell: (d) => <Badge tone="neutral">{titleCase(d.platform)}</Badge> },
     { header: "Status", cell: (d) => <StatusBadge status={d.status} /> },
-    { header: "Posture", cell: (d) => <StatusBadge status={String(d.posture)} /> },
+    {
+      header: "Posture",
+      cell: (d) => {
+        const { tone, label } = summarizePosture(d.posture);
+        return <Badge tone={tone}>{label}</Badge>;
+      },
+    },
     { header: "Last seen", cell: (d) => formatRelative(d.last_seen_at) },
   ];
 

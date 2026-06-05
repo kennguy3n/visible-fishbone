@@ -16,7 +16,7 @@ import {
   useResolveAlert,
 } from "@/api/generated/endpoints/alert/alert";
 import { useListBaselineModels } from "@/api/generated/endpoints/baseline/baseline";
-import type { Alert } from "@/api/generated/model";
+import { AlertSeverity, type Alert } from "@/api/generated/model";
 import { PageHeader, Card, AsyncBoundary, StatusBadge } from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
 import { RequireTenant } from "@/components/RequireTenant";
@@ -34,6 +34,11 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
   const ack = useAcknowledgeAlert();
   const resolve = useResolveAlert();
   const [severity, setSeverity] = useState<string>("all");
+
+  // Derive the filter options from the generated enum so they can never drift
+  // from the API contract (the previous hard-coded high/medium/low values
+  // matched nothing and omitted "warning").
+  const severityOptions = ["all", ...Object.values(AlertSeverity)];
 
   const all = list.data?.items ?? [];
   const filtered = severity === "all" ? all : all.filter((a) => a.severity === severity);
@@ -147,7 +152,7 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
           value={severity}
           onChange={(e) => setSeverity(e.target.value)}
         >
-          {["all", "critical", "high", "medium", "low", "info"].map((s) => (
+          {severityOptions.map((s) => (
             <option key={s} value={s}>
               {s}
             </option>

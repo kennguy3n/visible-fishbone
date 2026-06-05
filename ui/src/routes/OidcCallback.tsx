@@ -15,8 +15,19 @@ export function OidcCallback() {
     ran.current = true;
     completeOidcLogin(window.location.search)
       .then(({ accessToken }) => {
-        setSession(accessToken);
-        navigate({ to: "/" });
+        // setSession rejects a malformed/expired token. The PKCE material is
+        // already consumed (cleared in completeOidcLogin's finally), so this
+        // callback can't be retried — surface an error instead of bouncing to
+        // "/" and silently back to the login screen.
+        if (setSession(accessToken)) {
+          navigate({ to: "/" });
+        } else {
+          setError(
+            new Error(
+              "The identity provider returned an invalid or expired access token.",
+            ),
+          );
+        }
       })
       .catch(setError);
   }, [setSession, navigate]);

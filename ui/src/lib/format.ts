@@ -107,3 +107,41 @@ export function titleCase(s?: string | null): string {
     .replace(/[_-]/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
+
+// Device `posture` is a free-form JSON object (no `status` field) holding the
+// health snapshot from `repository.Posture` — desktop signals (disk_encrypted,
+// firewall_enabled, screen_lock) and mobile ones (passcode_set, jailbroken,
+// root_detected, …). Rendering the raw object yields "[object Object]", so we
+// distil the security-relevant signals into a single badge tone + label:
+//   danger  — device looks compromised (jailbroken / rooted)
+//   warn    — a hardening signal is explicitly off (no disk crypto / lock / …)
+//   ok      — signals present and none are failing
+//   neutral — no recognised signals reported yet
+export function summarizePosture(
+  posture: unknown,
+): { tone: Tone; label: string } {
+  if (typeof posture !== "object" || posture === null) {
+    return { tone: "neutral", label: "Unknown" };
+  }
+  const p = posture as Record<string, unknown>;
+  const bool = (k: string): boolean | undefined =>
+    typeof p[k] === "boolean" ? (p[k] as boolean) : undefined;
+
+  if (bool("jailbroken") === true || bool("root_detected") === true) {
+    return { tone: "danger", label: "Compromised" };
+  }
+  const hardening = [
+    "disk_encrypted",
+    "firewall_enabled",
+    "screen_lock",
+    "passcode_set",
+  ];
+  const known = hardening.map(bool).filter((v) => v !== undefined);
+  if (known.some((v) => v === false)) {
+    return { tone: "warn", label: "At risk" };
+  }
+  if (known.length > 0 || bool("biometric_ready") || bool("mdm_enrolled")) {
+    return { tone: "ok", label: "Healthy" };
+  }
+  return { tone: "neutral", label: "Unknown" };
+}
