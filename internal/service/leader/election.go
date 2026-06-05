@@ -246,9 +246,19 @@ func (e *LeaderElector) tick(ctx context.Context) {
 		return
 	}
 	e.session = sess
-	e.isLeader.Store(true)
+	// Publish ordering: establish the term's generation and fencing
+	// epoch BEFORE setting isLeader=true. FencingToken/HoldsToken read
+	// isLeader and epoch with lock-free atomics, so if isLeader were
+	// stored first a concurrent reader could observe leadership with a
+	// stale epoch from the previous term (whose Valid()/HoldsToken
+	// would wrongly pass on a re-acquisition). Go's atomics are
+	// sequentially consistent, so storing epoch first guarantees any
+	// observer that sees isLeader==true also sees this term's epoch.
+	// generation is incremented first because acquireEpoch falls back
+	// to generation.Load() when the session has no EpochReader.
 	e.generation.Add(1)
 	e.epoch.Store(e.acquireEpoch(ctx, sess))
+	e.isLeader.Store(true)
 	if e.transitions != nil {
 		e.transitions.Inc()
 	}

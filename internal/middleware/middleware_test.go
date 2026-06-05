@@ -349,8 +349,6 @@ func TestLogging_CapturesIdentityResolvedByInnerMiddleware(t *testing.T) {
 	}
 }
 
-// TestLogging_CapturesUserIDFromJWT verifies the JWT path also
-// late-binds user_id onto the access log.
 func TestRequireTenant_Mismatch(t *testing.T) {
 	t.Parallel()
 	pathTenant := uuid.New()
