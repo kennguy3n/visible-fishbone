@@ -86,7 +86,7 @@ fn pick_filter_directive(cli: &crate::Cli) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{Cli, PalBackend, UpdaterBackend};
+    use crate::cli::{Cli, DataPathSelection, PalBackend, UpdaterBackend};
     use std::path::PathBuf;
 
     fn synthetic_cli(filter: Option<&str>) -> Cli {
@@ -95,6 +95,7 @@ mod tests {
             health_bind: None,
             updater_backend: UpdaterBackend::InMemory,
             pal_backend: PalBackend::InMemory,
+            datapath: DataPathSelection::Auto,
             log_filter: filter.map(String::from),
             log_json: false,
         }

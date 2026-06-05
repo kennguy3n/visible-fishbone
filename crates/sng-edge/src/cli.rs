@@ -58,6 +58,16 @@ pub struct Cli {
     #[arg(long, env = "SNG_EDGE_PAL_BACKEND", value_enum, default_value_t = PalBackend::InMemory)]
     pub pal_backend: PalBackend,
 
+    /// Data-path backend for firewall enforcement. `auto`
+    /// (default) probes for an XDP-capable kernel and uses the
+    /// eBPF fast path when available, falling back to nftables
+    /// otherwise. `nftables` forces the classic slow path;
+    /// `ebpf` forces the fast path (the eBPF backend keeps an
+    /// nftables fallback for the L7 / inspect / steer verdicts
+    /// XDP cannot express). See STREAM B / ARCHITECTURE.md §4.1.
+    #[arg(long, env = "SNG_EDGE_DATAPATH", value_enum, default_value_t = DataPathSelection::Auto)]
+    pub datapath: DataPathSelection,
+
     /// Override the tracing-subscriber `EnvFilter` directive.
     /// Equivalent to setting `RUST_LOG=…` before the binary
     /// starts. Useful for ad-hoc debug runs without
@@ -103,6 +113,28 @@ pub enum PalBackend {
     /// crates (PR 14 / PR 15) — this binary refuses to boot
     /// in this mode until those crates land.
     Native,
+}
+
+/// Firewall data-path backend selector. See [`Cli::datapath`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum DataPathSelection {
+    /// Probe the kernel for XDP support
+    /// ([`sng_ebpf::detect_xdp_capable`]) and pick the eBPF fast
+    /// path when available, nftables otherwise. The default —
+    /// an operator who does nothing gets the fastest path their
+    /// kernel can run with no risk of a boot failure on an
+    /// XDP-incapable box.
+    #[default]
+    Auto,
+    /// Force the classic nftables slow path regardless of kernel
+    /// capability.
+    Nftables,
+    /// Force the eBPF/XDP fast path. The backend still keeps an
+    /// nftables fallback for the verdicts XDP cannot express, so
+    /// this never loses L7 enforcement; on an XDP-incapable
+    /// kernel the userspace control-plane model is used and the
+    /// fallback carries all traffic.
+    Ebpf,
 }
 
 #[cfg(test)]

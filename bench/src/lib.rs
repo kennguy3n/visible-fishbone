@@ -11,6 +11,8 @@
 //!     regression detector.
 //!   * [`competitor`] — published competitor figures and the SNG
 //!     inspection-depth → vendor-feature mapping.
+//!   * [`datapath`] — in-process decision-throughput comparison of the
+//!     nftables slow path vs the eBPF/XDP fast path (STREAM B).
 //!   * [`business_report`] — aggregation of per-run reports into a single
 //!     RFP-datasheet document (per-SKU matrices, competitor comparison,
 //!     cost analysis).
@@ -21,6 +23,7 @@
 
 pub mod business_report;
 pub mod competitor;
+pub mod datapath;
 pub mod measurement;
 pub mod report;
 pub mod traffic_gen;

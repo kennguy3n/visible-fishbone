@@ -18,6 +18,13 @@ sng-core = { workspace = true }
 # compile the NGFW slice of the bundle into nftables rule sets.
 sng-policy-eval = { workspace = true }
 
+# eBPF/XDP fast path. The `DataPathBackend` abstraction's
+# `EbpfDataPath` impl translates the hot-path L3/L4 subset of a
+# compiled ruleset into this crate's userspace XDP model. The
+# default (no `xdp` feature) is the in-memory control plane, so
+# this dependency adds no eBPF-toolchain requirement to the build.
+sng-ebpf = { workspace = true }
+
 # Async runtime + sync primitives. nftables backend `apply` is
 # async so a real shell-out doesn't block the data path; arc-swap
 # drives the compiled-ruleset hot-swap on bundle reload.

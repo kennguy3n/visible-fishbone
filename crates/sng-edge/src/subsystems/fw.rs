@@ -21,13 +21,18 @@
 //! which the engine's own evaluate path treats as fail-closed
 //! (every packet denied).
 
+use crate::cli::DataPathSelection;
 use crate::config::FwConfig;
 use async_trait::async_trait;
 use sng_core::{
     HealthCheck, HealthStatus, ShutdownSignal, Subsystem, SubsystemError, SubsystemHandle,
     SubsystemHealth,
 };
-use sng_fw::{CompiledRuleSet, FirewallEngine, NftablesBackend, ShellNftables};
+use sng_ebpf::XdpControlPlane;
+use sng_fw::{
+    CompiledRuleSet, DataPathBackend, EbpfDataPath, FirewallEngine, NftablesBackend,
+    NftablesDataPath,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::watch;
@@ -35,7 +40,17 @@ use tokio::task;
 
 /// Edge-tier firewall subsystem.
 pub struct FwSubsystem {
+    /// The firewall engine, used by other subsystems for
+    /// per-packet evaluation. Shared with the data-path backend:
+    /// for the nftables backend it *is* the install target; for
+    /// the eBPF backend it is the nftables fallback the backend
+    /// also installs into, so evaluation always sees the full
+    /// ruleset.
     engine: Arc<FirewallEngine>,
+    /// The selected enforcement substrate. The install loop
+    /// drives [`DataPathBackend::install_rules`] on every bundle
+    /// reload; which backend is live is fixed at construction.
+    datapath: Arc<dyn DataPathBackend>,
     rx: watch::Receiver<Option<Arc<CompiledRuleSet>>>,
     /// Holds the producer half so the subsystem outlives the
     /// last external sender — without this, the watch channel
@@ -62,29 +77,53 @@ impl std::fmt::Debug for FwSubsystem {
 }
 
 impl FwSubsystem {
-    /// Build a subsystem with a [`ShellNftables`] backend
-    /// honouring the operator-supplied `nft` binary override.
-    /// The watch channel starts with `None` (no ruleset
-    /// installed); the policy puller pushes the first ruleset
-    /// once it lands the first bundle.
+    /// Build a subsystem honouring the operator-supplied `nft`
+    /// binary override and data-path selection. `selection` is
+    /// the already-resolved backend (the supervisor turns
+    /// [`DataPathSelection::Auto`] into a concrete choice via the
+    /// XDP capability probe before calling this). The watch
+    /// channel starts with `None` (no ruleset installed); the
+    /// policy puller pushes the first ruleset once it lands the
+    /// first bundle.
     #[must_use]
-    pub fn new(cfg: &FwConfig) -> Self {
-        let backend: Arc<dyn NftablesBackend> = match &cfg.nft_binary {
-            Some(p) => Arc::new(ShellNftables::with_binary(p.to_string_lossy().into_owned())),
-            None => Arc::new(ShellNftables::new()),
+    pub fn new(cfg: &FwConfig, selection: DataPathSelection) -> Self {
+        let nft_binary = cfg
+            .nft_binary
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
+        let (nft_dp, engine) = NftablesDataPath::with_shell(nft_binary.as_deref());
+        let datapath: Arc<dyn DataPathBackend> = match selection {
+            // `Auto` must be resolved by the caller; treat a
+            // leftover `Auto` here as nftables (the safe default)
+            // so this constructor is total.
+            DataPathSelection::Nftables | DataPathSelection::Auto => Arc::new(nft_dp),
+            DataPathSelection::Ebpf => {
+                let control = Arc::new(XdpControlPlane::in_memory());
+                Arc::new(EbpfDataPath::new(control, nft_dp))
+            }
         };
-        Self::with_backend(backend)
+        Self::from_parts(engine, datapath)
     }
 
-    /// Build with an explicit backend. Used by the integration
-    /// tests so they can drive a [`sng_fw::MockNftables`] (or
-    /// the in-memory test double the FW crate ships).
+    /// Build with an explicit nftables backend. Used by the
+    /// integration tests so they can drive a
+    /// [`sng_fw::MockNftables`] (or the in-memory test double the
+    /// FW crate ships). Always selects the nftables data path.
     #[must_use]
     pub fn with_backend(backend: Arc<dyn NftablesBackend>) -> Self {
-        let (tx, rx) = watch::channel(None);
         let engine = Arc::new(FirewallEngine::new(backend));
+        let datapath: Arc<dyn DataPathBackend> =
+            Arc::new(NftablesDataPath::new(Arc::clone(&engine)));
+        Self::from_parts(engine, datapath)
+    }
+
+    /// Assemble from an engine + a chosen data-path backend.
+    #[must_use]
+    fn from_parts(engine: Arc<FirewallEngine>, datapath: Arc<dyn DataPathBackend>) -> Self {
+        let (tx, rx) = watch::channel(None);
         Self {
             engine,
+            datapath,
             rx,
             tx_anchor: tx,
             installs_total: Arc::new(AtomicU64::new(0)),
@@ -98,6 +137,14 @@ impl FwSubsystem {
     #[must_use]
     pub fn engine(&self) -> &Arc<FirewallEngine> {
         &self.engine
+    }
+
+    /// The name of the live data-path backend (`"nftables"` /
+    /// `"ebpf"`). Surfaced on the health detail line so an
+    /// operator can confirm which path is enforcing.
+    #[must_use]
+    pub fn datapath_name(&self) -> &'static str {
+        self.datapath.name()
     }
 
     /// Producer half of the ruleset channel. Hand the result to
@@ -116,7 +163,7 @@ impl Subsystem for FwSubsystem {
     }
 
     async fn start(&self, shutdown: ShutdownSignal) -> Result<SubsystemHandle, SubsystemError> {
-        let engine = Arc::clone(&self.engine);
+        let datapath = Arc::clone(&self.datapath);
         let mut rx = self.rx.clone();
         let installs_total = Arc::clone(&self.installs_total);
         let install_failures = Arc::clone(&self.install_failures);
@@ -135,8 +182,12 @@ impl Subsystem for FwSubsystem {
                         }
                         let next = rx.borrow_and_update().clone();
                         let Some(ruleset) = next else { continue };
-                        let ruleset = Arc::try_unwrap(ruleset).unwrap_or_else(|arc| (*arc).clone());
-                        match engine.install(ruleset).await {
+                        // The backend installs by reference (the
+                        // nftables path clones internally for its
+                        // memory-first swap; the eBPF path borrows
+                        // to translate the hot-path subset), so no
+                        // unwrap-or-clone of the Arc is needed.
+                        match datapath.install_rules(&ruleset).await {
                             Ok(()) => {
                                 installs_total.fetch_add(1, Ordering::Relaxed);
                                 tracing::info!(
@@ -182,7 +233,8 @@ impl HealthCheck for FwSubsystem {
             name: <Self as HealthCheck>::name(self).into(),
             status,
             detail: Some(format!(
-                "installs={installs}, failures={failures}, has_ruleset={has_ruleset}"
+                "datapath={}, installs={installs}, failures={failures}, has_ruleset={has_ruleset}",
+                self.datapath.name()
             )),
         }
     }
