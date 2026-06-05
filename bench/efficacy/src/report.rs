@@ -254,10 +254,17 @@ pub struct EfficacyReport {
 
 impl EfficacyReport {
     pub fn new(git_sha: String, host: String, functions: Vec<FunctionReport>) -> Self {
-        let overall_verdict = functions
-            .iter()
-            .map(|f| f.verdict)
-            .fold(Grade::Pass, Grade::worst);
+        // An empty report is not a pass: fold the per-function verdicts but
+        // treat "nothing was tested" as UNTESTED so an accidentally-empty run
+        // can never read as green.
+        let overall_verdict = if functions.is_empty() {
+            Grade::Untested
+        } else {
+            functions
+                .iter()
+                .map(|f| f.verdict)
+                .fold(Grade::Pass, Grade::worst)
+        };
         Self {
             suite: "security-efficacy".into(),
             git_sha,

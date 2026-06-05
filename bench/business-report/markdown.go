@@ -99,6 +99,7 @@ func (r *BusinessReport) strengths() []string {
 	}
 	if e := r.Efficacy; e != nil && len(e.Functions) > 0 {
 		tested, tp, bad, fns, fp := 0, 0, 0, 0, 0
+		var names []string
 		for _, f := range e.Functions {
 			if !f.Tested {
 				continue
@@ -108,6 +109,7 @@ func (r *BusinessReport) strengths() []string {
 			bad += f.BadCases
 			fns += f.FN
 			fp += f.FP
+			names = append(names, efficacyLabel(f.Function))
 		}
 		// Only claim the strength over a non-empty known-bad corpus that was
 		// caught with zero misses and zero false-positives. Checking fn==0
@@ -115,13 +117,31 @@ func (r *BusinessReport) strengths() []string {
 		// with inconsistent TP/BadCases, and bad>0 avoids a vacuous "0/0
 		// known-bad stopped" when no bad cases were exercised at all.
 		if tested > 0 && bad > 0 && fns == 0 && fp == 0 {
-			out = append(out, fmt.Sprintf("Security enforcement is correct end-to-end: %d/%d known-bad cases stopped and zero false-positives across %d functions (FW/SWG/ZTNA/IPS) — real decision-path measurements.", tp, bad, tested))
+			out = append(out, fmt.Sprintf("Security enforcement is correct end-to-end: %d/%d known-bad cases stopped and zero false-positives across %d function(s) (%s) — real decision-path measurements.", tp, bad, tested, strings.Join(names, "/")))
 		}
 	}
 	if len(out) == 0 {
 		out = append(out, "No gradeable strengths yet — supply live inputs.")
 	}
 	return out
+}
+
+// efficacyLabel maps an efficacy function key to the short display label used
+// in prose. Unknown keys fall back to upper-cased name so the parenthetical
+// always reflects the functions actually tested rather than a fixed list.
+func efficacyLabel(name string) string {
+	switch name {
+	case "firewall":
+		return "FW"
+	case "swg":
+		return "SWG"
+	case "ztna":
+		return "ZTNA"
+	case "ips":
+		return "IPS"
+	default:
+		return strings.ToUpper(name)
+	}
 }
 
 func (r *BusinessReport) gaps() []string {

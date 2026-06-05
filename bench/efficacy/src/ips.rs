@@ -190,7 +190,9 @@ pub async fn run() -> FunctionReport {
         );
     }
 
-    let work = std::env::temp_dir().join("sng-efficacy-ips");
+    // Per-process work dir so concurrent harness runs (or a shared CI
+    // runner) don't clobber each other's rendered config / EVE logs.
+    let work = std::env::temp_dir().join(format!("sng-efficacy-ips-{}", std::process::id()));
     if let Err(e) = tokio::fs::create_dir_all(&work).await {
         return FunctionReport::untested(
             "ips",

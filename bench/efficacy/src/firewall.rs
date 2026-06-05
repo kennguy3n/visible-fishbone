@@ -64,6 +64,21 @@ fn allow_port(id: &str, port: u16) -> FirewallRule {
     }
 }
 
+fn allow_udp_port(id: &str, port: u16) -> FirewallRule {
+    FirewallRule {
+        id: id.into(),
+        matches: RuleMatch {
+            dst_ports: vec![PortRange::single(port)],
+            protocol: Protocol::Udp,
+            ..RuleMatch::default()
+        },
+        action: RuleAction::Allow,
+        from_zones: vec![],
+        to_zones: vec![],
+        description: format!("allow udp/{port}"),
+    }
+}
+
 /// Realistic edge policy: explicit allowlist for web/DNS, explicit
 /// deny for legacy/admin services + a known-bad destination block,
 /// default-deny baseline (fail-closed).
@@ -80,7 +95,12 @@ fn policy_ruleset() -> CompiledRuleSet {
             // Allow sanctioned egress.
             allow_port("allow-https", 443),
             allow_port("allow-http", 80),
-            allow_port("allow-dns", 53),
+            // DNS over both transports: UDP is the common path, TCP for
+            // zone transfers / large (>512B) responses. Protocol is matched
+            // exactly (only `Protocol::Any` wildcards), so each transport
+            // needs its own allow rule.
+            allow_udp_port("allow-dns-udp", 53),
+            allow_port("allow-dns-tcp", 53),
         ],
         zones: ZoneTable::new(),
         nat: NatTable::new(),
@@ -97,6 +117,7 @@ struct FlowCase {
     src: IpAddr,
     dst: IpAddr,
     dport: u16,
+    proto: Protocol,
 }
 
 fn corpus() -> Vec<FlowCase> {
@@ -108,6 +129,7 @@ fn corpus() -> Vec<FlowCase> {
             src: v4(10, 0, 0, 5),
             dst: v4(10, 0, 0, 9),
             dport: 23,
+            proto: Protocol::Tcp,
         },
         FlowCase {
             desc: "SMB/445 east-west (ransomware spread vector)",
@@ -115,6 +137,7 @@ fn corpus() -> Vec<FlowCase> {
             src: v4(10, 0, 0, 5),
             dst: v4(10, 0, 0, 20),
             dport: 445,
+            proto: Protocol::Tcp,
         },
         FlowCase {
             desc: "RDP/3389 exposed to workstation",
@@ -122,6 +145,7 @@ fn corpus() -> Vec<FlowCase> {
             src: v4(10, 0, 0, 5),
             dst: v4(10, 0, 0, 30),
             dport: 3389,
+            proto: Protocol::Tcp,
         },
         FlowCase {
             desc: "exfil to high port 9999",
@@ -129,6 +153,7 @@ fn corpus() -> Vec<FlowCase> {
             src: v4(10, 0, 0, 5),
             dst: v4(198, 51, 100, 7),
             dport: 9999,
+            proto: Protocol::Tcp,
         },
         FlowCase {
             desc: "egress to known-bad net 203.0.113.0/24",
@@ -136,13 +161,23 @@ fn corpus() -> Vec<FlowCase> {
             src: v4(10, 0, 0, 5),
             dst: v4(203, 0, 113, 5),
             dport: 443,
+            proto: Protocol::Tcp,
         },
         FlowCase {
-            desc: "unsanctioned port 31337 (default-deny)",
+            desc: "unsanctioned tcp port 31337 (default-deny)",
             bad: true,
             src: v4(10, 0, 0, 5),
             dst: v4(93, 184, 216, 34),
             dport: 31337,
+            proto: Protocol::Tcp,
+        },
+        FlowCase {
+            desc: "unsanctioned udp port 12345 (default-deny, UDP path)",
+            bad: true,
+            src: v4(10, 0, 0, 5),
+            dst: v4(93, 184, 216, 34),
+            dport: 12345,
+            proto: Protocol::Udp,
         },
         // --- known-good: MUST be allowed ---
         FlowCase {
@@ -151,6 +186,7 @@ fn corpus() -> Vec<FlowCase> {
             src: v4(10, 0, 0, 5),
             dst: v4(93, 184, 216, 34),
             dport: 443,
+            proto: Protocol::Tcp,
         },
         FlowCase {
             desc: "HTTP/80 to public web",
@@ -158,13 +194,23 @@ fn corpus() -> Vec<FlowCase> {
             src: v4(10, 0, 0, 5),
             dst: v4(93, 184, 216, 34),
             dport: 80,
+            proto: Protocol::Tcp,
         },
         FlowCase {
-            desc: "DNS/53 to resolver",
+            desc: "DNS/53 (UDP) to resolver",
             bad: false,
             src: v4(10, 0, 0, 5),
             dst: v4(1, 1, 1, 1),
             dport: 53,
+            proto: Protocol::Udp,
+        },
+        FlowCase {
+            desc: "DNS/53 (TCP) zone transfer to resolver",
+            bad: false,
+            src: v4(10, 0, 0, 5),
+            dst: v4(1, 1, 1, 1),
+            dport: 53,
+            proto: Protocol::Tcp,
         },
         FlowCase {
             desc: "HTTPS/443 to SaaS app",
@@ -172,6 +218,7 @@ fn corpus() -> Vec<FlowCase> {
             src: v4(10, 0, 0, 6),
             dst: v4(140, 82, 112, 3),
             dport: 443,
+            proto: Protocol::Tcp,
         },
     ]
 }
@@ -279,7 +326,7 @@ pub async fn run() -> FunctionReport {
     let mut cases = Vec::new();
     for f in corpus() {
         let verdict = engine.evaluate(&EvaluationContext {
-            flow: FlowKey::new(f.src, f.dst, 33333, f.dport, Protocol::Tcp),
+            flow: FlowKey::new(f.src, f.dst, 33333, f.dport, f.proto),
             direction: FlowDirection::Original,
             subject_value: None,
         });
