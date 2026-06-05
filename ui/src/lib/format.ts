@@ -80,24 +80,22 @@ export function formatRelative(value?: string | null): string {
   // the unit and compute the magnitude from `abs`, then phrase it as "in 5m"
   // rather than letting the sign leak into "-5m ago".
   const future = sec < 0;
+  const phrase = (n: number, label: string) =>
+    future ? `in ${n}${label}` : `${n}${label} ago`;
   // [exclusive upper bound in seconds, seconds-per-unit, label]. The first
   // step whose bound exceeds the elapsed time wins; the value is rendered in
   // that step's unit. Keeping the divisor and label on the same row avoids
-  // the off-by-one that mislabels e.g. 90s as "s" instead of "m".
+  // the off-by-one that mislabels e.g. 90s as "s" instead of "m". Anything
+  // from a day up falls through to the final "d" return below.
   const steps: [number, number, string][] = [
     [60, 1, "s"],
     [3600, 60, "m"],
     [86400, 3600, "h"],
-    [Infinity, 86400, "d"],
   ];
   for (const [bound, perUnit, label] of steps) {
-    if (abs < bound) {
-      const n = Math.round(abs / perUnit);
-      return future ? `in ${n}${label}` : `${n}${label} ago`;
-    }
+    if (abs < bound) return phrase(Math.round(abs / perUnit), label);
   }
-  const days = Math.round(abs / 86400);
-  return future ? `in ${days}d` : `${days}d ago`;
+  return phrase(Math.round(abs / 86400), "d");
 }
 
 export function shortId(id?: string | null): string {
