@@ -1,0 +1,75 @@
+{
+  "_comment": "Published competitor datasheet numbers. All hardware-appliance entries are ASIC-accelerated and NOT apples-to-apples with SNG's software-only x86 VM data path; see 'caveat'. Cloud-native (Zscaler) entries are more directly comparable.",
+  "vendors": [
+    {
+      "vendor": "Fortinet",
+      "model": "FortiGate 40F",
+      "cores": 2,
+      "metrics": [
+        { "metric": "firewall_throughput", "value": 5.0, "unit": "Gbps", "maps_to_inspection": "no-inspect", "source_url": "https://www.fortinet.com/products/next-generation-firewall/fortigate-40f", "caveat": "ASIC (SPU/NP) accelerated appliance; not comparable to software-only VM" },
+        { "metric": "ips_throughput", "value": 0.8, "unit": "Gbps", "maps_to_inspection": "full-tls", "source_url": "https://www.fortinet.com/products/next-generation-firewall/fortigate-40f", "caveat": "ASIC accelerated" },
+        { "metric": "ngfw_throughput", "value": 0.6, "unit": "Gbps", "maps_to_inspection": "url-cat", "source_url": "https://www.fortinet.com/products/next-generation-firewall/fortigate-40f", "caveat": "ASIC accelerated (NGFW = IPS+AppCtrl)" }
+      ]
+    },
+    {
+      "vendor": "Fortinet",
+      "model": "FortiGate 60F",
+      "cores": 4,
+      "metrics": [
+        { "metric": "firewall_throughput", "value": 10.0, "unit": "Gbps", "maps_to_inspection": "no-inspect", "source_url": "https://www.fortinet.com/products/next-generation-firewall/fortigate-60f", "caveat": "ASIC accelerated" },
+        { "metric": "ips_throughput", "value": 1.4, "unit": "Gbps", "maps_to_inspection": "full-tls", "source_url": "https://www.fortinet.com/products/next-generation-firewall/fortigate-60f", "caveat": "ASIC accelerated" },
+        { "metric": "ngfw_throughput", "value": 1.0, "unit": "Gbps", "maps_to_inspection": "url-cat", "source_url": "https://www.fortinet.com/products/next-generation-firewall/fortigate-60f", "caveat": "ASIC accelerated" }
+      ]
+    },
+    {
+      "vendor": "Fortinet",
+      "model": "FortiGate 100F",
+      "cores": 8,
+      "metrics": [
+        { "metric": "firewall_throughput", "value": 20.0, "unit": "Gbps", "maps_to_inspection": "no-inspect", "source_url": "https://www.fortinet.com/products/next-generation-firewall/fortigate-100f", "caveat": "ASIC accelerated" },
+        { "metric": "ips_throughput", "value": 2.6, "unit": "Gbps", "maps_to_inspection": "full-tls", "source_url": "https://www.fortinet.com/products/next-generation-firewall/fortigate-100f", "caveat": "ASIC accelerated" },
+        { "metric": "ngfw_throughput", "value": 1.6, "unit": "Gbps", "maps_to_inspection": "url-cat", "source_url": "https://www.fortinet.com/products/next-generation-firewall/fortigate-100f", "caveat": "ASIC accelerated" }
+      ]
+    },
+    {
+      "vendor": "Palo Alto Networks",
+      "model": "PA-440",
+      "cores": 2,
+      "metrics": [
+        { "metric": "firewall_throughput", "value": 3.1, "unit": "Gbps", "maps_to_inspection": "no-inspect", "source_url": "https://www.paloaltonetworks.com/resources/datasheets/pa-400-series", "caveat": "Purpose-built appliance; App-ID enabled" },
+        { "metric": "threat_prevention_throughput", "value": 0.7, "unit": "Gbps", "maps_to_inspection": "full-tls", "source_url": "https://www.paloaltonetworks.com/resources/datasheets/pa-400-series", "caveat": "Threat prevention = IPS+AV+anti-spyware" }
+      ]
+    },
+    {
+      "vendor": "Palo Alto Networks",
+      "model": "PA-450",
+      "cores": 4,
+      "metrics": [
+        { "metric": "firewall_throughput", "value": 5.2, "unit": "Gbps", "maps_to_inspection": "no-inspect", "source_url": "https://www.paloaltonetworks.com/resources/datasheets/pa-400-series", "caveat": "Purpose-built appliance" },
+        { "metric": "threat_prevention_throughput", "value": 1.6, "unit": "Gbps", "maps_to_inspection": "full-tls", "source_url": "https://www.paloaltonetworks.com/resources/datasheets/pa-400-series", "caveat": "Threat prevention" }
+      ]
+    },
+    {
+      "vendor": "Check Point",
+      "model": "Quantum 3600",
+      "cores": 4,
+      "metrics": [
+        { "metric": "firewall_throughput", "value": 3.4, "unit": "Gbps", "maps_to_inspection": "no-inspect", "source_url": "https://www.checkpoint.com/quantum/next-generation-firewall/", "caveat": "Purpose-built appliance" },
+        { "metric": "ips_throughput", "value": 0.65, "unit": "Gbps", "maps_to_inspection": "full-tls", "source_url": "https://www.checkpoint.com/quantum/next-generation-firewall/", "caveat": "Threat-prevention mode" }
+      ]
+    },
+    {
+      "vendor": "Zscaler",
+      "model": "ZIA (cloud SWG)",
+      "cores": null,
+      "metrics": [
+        { "metric": "admin_api_p99", "value": 300, "unit": "ms", "maps_to_inspection": "control-plane", "source_url": "https://help.zscaler.com/zia/api", "caveat": "Cloud-native; most directly comparable to SNG control plane / cloud PoP" }
+      ]
+    }
+  ],
+  "control_plane": [
+    { "vendor": "Fortinet", "product": "FortiManager API", "metric": "policy_push_p99", "value_range_ms": [200, 500], "at_scale": "1000 managed devices", "caveat": "Management plane, on-prem appliance" },
+    { "vendor": "Zscaler", "product": "Admin API", "metric": "tenant_crud_p99", "value_range_ms": [100, 300], "caveat": "Cloud-native, directly comparable" },
+    { "vendor": "Palo Alto Networks", "product": "Panorama", "metric": "policy_compile_p99", "value_range_ms": [300, 800], "caveat": "Management plane" }
+  ]
+}

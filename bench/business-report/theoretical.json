@@ -1,0 +1,34 @@
+{
+  "_comment": "Theoretical design targets extracted from PROPOSAL.md and ARCHITECTURE.md plus the bench/profiles SKU definitions. Used by bench/business-report/generate.go as the 'Design Target' column.",
+  "edge_throughput": [
+    { "sku": "branch-small",     "vcpus": 2, "ram_gb": 4,  "nic_gbps": 1.0,  "target_gbps": 0.8 },
+    { "sku": "branch-medium",    "vcpus": 4, "ram_gb": 8,  "nic_gbps": 10.0, "target_gbps": 5.0 },
+    { "sku": "branch-large",     "vcpus": 8, "ram_gb": 16, "nic_gbps": 25.0, "target_gbps": 10.0 },
+    { "sku": "cloud-pop-small",  "vcpus": 4, "ram_gb": 8,  "nic_gbps": 10.0, "target_gbps": 2.0, "note": "aggregate across 100 tenants" }
+  ],
+  "control_plane": {
+    "api_p99_ms_at_5k_tenants": 200,
+    "policy_compile_100_rules_ms": 100,
+    "policy_compile_1000_rules_ms": 1000
+  },
+  "policy_eval": {
+    "target": "sub-microsecond per-flow verdict",
+    "target_ns": 1000,
+    "shapes": ["evaluate/default_action", "evaluate/literal_subject", "evaluate/steer_with_steering_lookup", "evaluate/100_rules_last_matches"]
+  },
+  "telemetry": {
+    "bus": "NATS JetStream (sole bus)",
+    "rate_limiting": "per-tenant token bucket",
+    "ch_write_target": "~order of magnitude faster than per-row INSERT VALUES",
+    "delivery": "at-least-once with dedup on receive",
+    "hot_retention_days": [30, 90],
+    "cold_retention": "1+ year, compressed"
+  },
+  "unit_economics": {
+    "_source": "PROPOSAL.md cohort tables (direct infra cost / user / month)",
+    "starter":   { "infra_cost_user_month": [0.30, 0.80], "site_month": [10, 25] },
+    "growth":    { "infra_cost_user_month": [0.40, 1.00], "site_month": [15, 40] },
+    "scale":     { "infra_cost_user_month": [0.60, 1.20], "site_month": [25, 60], "data_guard_user_month": [0.50, 1.50] },
+    "overall_envelope_user_month": [0.30, 1.20]
+  }
+}
