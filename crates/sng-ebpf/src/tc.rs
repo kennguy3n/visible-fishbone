@@ -134,11 +134,25 @@ impl EgressSteeringTable {
 
     /// Stable array index for a class — its position in
     /// [`TrafficClass::all`].
+    ///
+    /// Written as an exhaustive `match` (not a runtime search with a
+    /// fallback) on purpose: adding a `TrafficClass` variant must be a
+    /// *compile* error here, not a silent fail-open. A search with
+    /// `unwrap_or(0)` would map any unmodelled class to slot 0
+    /// (`TrustedDirect`) — defaulting an unknown class to the most-trusted
+    /// egress tier in a security data path is exactly the failure mode to
+    /// avoid. The arm order mirrors [`TrafficClass::all`], which
+    /// `index_matches_all_ordering` pins so the BPF map layout stays
+    /// correct.
     fn index(class: TrafficClass) -> usize {
-        TrafficClass::all()
-            .iter()
-            .position(|c| *c == class)
-            .unwrap_or(0)
+        match class {
+            TrafficClass::TrustedDirect => 0,
+            TrafficClass::TrustedMediaBypass => 1,
+            TrafficClass::InspectLite => 2,
+            TrafficClass::InspectFull => 3,
+            TrafficClass::TunnelPrivate => 4,
+            TrafficClass::Block => 5,
+        }
     }
 
     /// Set the egress target for `class`.
@@ -195,6 +209,16 @@ mod tests {
             t.target_for(TrafficClass::TrustedDirect).action,
             SteeringAction::Pass
         );
+    }
+
+    #[test]
+    fn index_matches_all_ordering() {
+        // The hardcoded slots in `index` must stay aligned with
+        // `TrafficClass::all` ordering — that ordering defines the BPF map
+        // layout the TC program reads.
+        for (slot, class) in TrafficClass::all().into_iter().enumerate() {
+            assert_eq!(EgressSteeringTable::index(class), slot);
+        }
     }
 
     #[test]

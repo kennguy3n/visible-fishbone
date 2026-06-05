@@ -212,6 +212,26 @@ impl Subsystem for FwSubsystem {
     }
 }
 
+/// Derive the firewall subsystem health from its install counters and
+/// whether the engine currently holds a ruleset.
+///
+/// `Down` is reserved for *no live enforcement*: nothing has ever
+/// installed successfully **and** the engine holds no ruleset. This last
+/// clause matters for the eBPF data path — a failed XDP offload still
+/// commits the authoritative ruleset to the nftables fallback, so
+/// `has_ruleset` is `true` and enforcement is live even though
+/// `install_failures > 0` and `installs_total == 0`. That state is
+/// `Degraded` (fast path lost, slow path enforcing), never `Down`.
+fn fw_health_status(installs: u64, failures: u64, has_ruleset: bool) -> HealthStatus {
+    if failures > 0 && installs == 0 && !has_ruleset {
+        HealthStatus::Down
+    } else if failures > 0 || !has_ruleset {
+        HealthStatus::Degraded
+    } else {
+        HealthStatus::Up
+    }
+}
+
 #[async_trait]
 impl HealthCheck for FwSubsystem {
     fn name(&self) -> &'static str {
@@ -222,13 +242,7 @@ impl HealthCheck for FwSubsystem {
         let installs = self.installs_total.load(Ordering::Relaxed);
         let failures = self.install_failures.load(Ordering::Relaxed);
         let has_ruleset = self.engine.current_ruleset().is_some();
-        let status = if failures > 0 && installs == 0 {
-            HealthStatus::Down
-        } else if failures > 0 || !has_ruleset {
-            HealthStatus::Degraded
-        } else {
-            HealthStatus::Up
-        };
+        let status = fw_health_status(installs, failures, has_ruleset);
         SubsystemHealth {
             name: <Self as HealthCheck>::name(self).into(),
             status,
@@ -268,5 +282,21 @@ mod tests {
         // No ruleset installed yet — degraded (operator's
         // signal that the policy puller hasn't delivered).
         assert_eq!(h.status, HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn health_status_decision_table() {
+        // Fresh start: nothing installed, no ruleset — degraded, not down.
+        assert_eq!(fw_health_status(0, 0, false), HealthStatus::Degraded);
+        // Healthy: a successful install and a live ruleset.
+        assert_eq!(fw_health_status(1, 0, true), HealthStatus::Up);
+        // Total failure, nothing enforcing — the only genuine `Down`.
+        assert_eq!(fw_health_status(0, 1, false), HealthStatus::Down);
+        // eBPF regression case: the XDP offload failed (failures>0,
+        // installs==0) but the nftables fallback committed the ruleset, so
+        // enforcement is live — `Degraded`, never `Down`.
+        assert_eq!(fw_health_status(0, 1, true), HealthStatus::Degraded);
+        // A transient failure after earlier success stays degraded.
+        assert_eq!(fw_health_status(3, 1, true), HealthStatus::Degraded);
     }
 }
