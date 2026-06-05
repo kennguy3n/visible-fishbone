@@ -375,10 +375,8 @@ impl ZtnaService {
         if self.revocation.is_revoked(&request.device_id)
             || self.revocation.is_user_revoked(&request.user_id)
         {
-            let decision = ZtnaDecision::deny(
-                ZtnaDecisionReason::Revoked,
-                PostureResult::NotEvaluated,
-            );
+            let decision =
+                ZtnaDecision::deny(ZtnaDecisionReason::Revoked, PostureResult::NotEvaluated);
             self.stats.record_decision(&decision.reason);
             let event = build_ztna_event(&request.device_id, &request.app_id, &decision, true);
             if self
@@ -1110,8 +1108,7 @@ mod tests {
         // reach `evaluate_policy` and drive the geo gate.
         let now = 1_000_000;
         let mut wiki = app("wiki", PostureRequirement::NONE, &[]);
-        wiki.conditions.blocked_countries =
-            Some(["CN".to_string()].into_iter().collect());
+        wiki.conditions.blocked_countries = Some(["CN".to_string()].into_iter().collect());
         let (svc, _rx) = mk_service(
             vec![wiki],
             vec![device("dev-1", TENANT, pristine_posture(now))],

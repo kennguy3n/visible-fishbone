@@ -99,12 +99,13 @@ pub fn china_resident_id(s: &str) -> bool {
 
     let sum: u32 = body.iter().zip(WEIGHTS).map(|(&d, w)| d * w).sum();
     let expected = (12 - sum % 11) % 11;
-    let actual = match chars[17] {
-        'X' | 'x' => 10,
-        c => match c.to_digit(10) {
+    let actual = match chars.get(17) {
+        Some('X' | 'x') => 10,
+        Some(c) => match c.to_digit(10) {
             Some(d) => d,
             None => return false,
         },
+        None => return false,
     };
     expected == actual
 }
@@ -145,10 +146,10 @@ pub fn korea_rrn(s: &str) -> bool {
         return false;
     }
     // Gender digit selects the birth century; reject unknown codes.
-    let year_prefix = match d[6] {
-        1 | 2 | 5 | 6 => 1900,
-        3 | 4 | 7 | 8 => 2000,
-        0 | 9 => 1800,
+    let year_prefix = match d.get(6) {
+        Some(1 | 2 | 5 | 6) => 1900,
+        Some(3 | 4 | 7 | 8) => 2000,
+        Some(0 | 9) => 1800,
         _ => return false,
     };
     let year = year_prefix + u32::from(d[0]) * 10 + u32::from(d[1]);
@@ -203,18 +204,15 @@ pub fn singapore_nric(s: &str) -> bool {
 
     let expected = match prefix {
         'S' | 'T' => {
-            const TABLE: [char; 11] =
-                ['J', 'Z', 'I', 'H', 'G', 'F', 'E', 'D', 'C', 'B', 'A'];
+            const TABLE: [char; 11] = ['J', 'Z', 'I', 'H', 'G', 'F', 'E', 'D', 'C', 'B', 'A'];
             TABLE[(sum % 11) as usize]
         }
         'F' | 'G' => {
-            const TABLE: [char; 11] =
-                ['X', 'W', 'U', 'T', 'R', 'Q', 'P', 'N', 'M', 'L', 'K'];
+            const TABLE: [char; 11] = ['X', 'W', 'U', 'T', 'R', 'Q', 'P', 'N', 'M', 'L', 'K'];
             TABLE[(sum % 11) as usize]
         }
         'M' => {
-            const TABLE: [char; 11] =
-                ['K', 'L', 'J', 'N', 'P', 'Q', 'R', 'T', 'U', 'W', 'X'];
+            const TABLE: [char; 11] = ['K', 'L', 'J', 'N', 'P', 'Q', 'R', 'T', 'U', 'W', 'X'];
             TABLE[(10 - sum % 11) as usize]
         }
         _ => return false,
@@ -348,10 +346,10 @@ pub fn kuwait_civil_id(s: &str) -> bool {
     if d.len() != 12 {
         return false;
     }
-    let century = match d[0] {
-        1 => 1800,
-        2 => 1900,
-        3 => 2000,
+    let century = match d.first() {
+        Some(1) => 1800,
+        Some(2) => 1900,
+        Some(3) => 2000,
         _ => return false,
     };
     let year = century + u32::from(d[1]) * 10 + u32::from(d[2]);

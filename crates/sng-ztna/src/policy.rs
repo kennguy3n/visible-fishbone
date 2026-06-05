@@ -1642,10 +1642,7 @@ mod tests {
         a.conditions.allowed_network_types = Some([NetworkType::Corporate].into_iter().collect());
         let d = device("t1", DevicePosture::pristine(now()));
         let u = user("t1", &[], now());
-        let dec = evaluate_policy(
-            &p,
-            inputs_ctx(&a, &d, &u, now(), None, NetworkType::Public),
-        );
+        let dec = evaluate_policy(&p, inputs_ctx(&a, &d, &u, now(), None, NetworkType::Public));
         assert_eq!(dec.reason, ZtnaDecisionReason::NetworkTypeBlocked);
 
         let dec = evaluate_policy(

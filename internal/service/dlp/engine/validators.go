@@ -96,22 +96,22 @@ func validYMD(year, month, day int) bool {
 		return false
 	}
 	leap := (year%4 == 0 && year%100 != 0) || year%400 == 0
-	var max int
+	var maxDay int
 	switch month {
 	case 1, 3, 5, 7, 8, 10, 12:
-		max = 31
+		maxDay = 31
 	case 4, 6, 9, 11:
-		max = 30
+		maxDay = 30
 	case 2:
 		if leap {
-			max = 29
+			maxDay = 29
 		} else {
-			max = 28
+			maxDay = 28
 		}
 	default:
 		return false
 	}
-	return day <= max
+	return day <= maxDay
 }
 
 // nonSpaceRunes returns the runes of s with Unicode whitespace

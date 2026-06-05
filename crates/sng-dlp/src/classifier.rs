@@ -472,13 +472,12 @@ impl ContentClassifier {
             // in `scan_keywords`, so the automaton itself is built
             // case-sensitive over the folded forms (full Unicode case
             // folding, unlike the ASCII-only `ascii_case_insensitive`).
-            let ac =
-                AhoCorasick::builder()
-                    .build(&keyword_patterns)
-                    .map_err(|e| DlpError::RuleCompile {
-                        rule_id: "<keyword-automaton>".to_owned(),
-                        reason: e.to_string(),
-                    })?;
+            let ac = AhoCorasick::builder()
+                .build(&keyword_patterns)
+                .map_err(|e| DlpError::RuleCompile {
+                    rule_id: "<keyword-automaton>".to_owned(),
+                    reason: e.to_string(),
+                })?;
             Some(ac)
         };
 
