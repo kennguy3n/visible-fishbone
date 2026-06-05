@@ -11,7 +11,10 @@ use sng_ztna::{
     ZtnaServiceBuilder,
 };
 
-use crate::report::{Case, FunctionReport, Kind, Targets};
+use crate::report::{measure, Case, Feature, FunctionReport, Kind, Targets};
+
+/// Timed iterations for the decision-throughput microbenchmark.
+const THROUGHPUT_ITERS: u64 = 50_000;
 
 // Fixed "now" well above the policy max-ages so stale offsets stay
 // positive (12h posture / 8h MFA freshness windows).
@@ -225,6 +228,20 @@ pub async fn run() -> FunctionReport {
         });
     }
 
+    // Throughput: time the real evaluate() decision path over a fully
+    // authorized request (the worst case — it runs every step instead of
+    // short-circuiting on an early deny), so decisions/s reflects a request
+    // that traverses revocation → tenant → conditions → entitlement →
+    // posture → MFA.
+    let hot_req = AccessRequest::new("crm", "dev-good", "alice", NOW);
+    let throughput = vec![measure(
+        "evaluate",
+        "decisions/s",
+        THROUGHPUT_ITERS,
+        None,
+        |_| svc.evaluate(&hot_req).map(|d| d.allow),
+    )];
+
     FunctionReport::from_cases(
         "ztna",
         "sng-ztna",
@@ -238,4 +255,69 @@ pub async fn run() -> FunctionReport {
                 .into(),
         ),
     )
+    .with_features(features())
+    .with_throughput(throughput)
+}
+
+/// Capability catalog for the ZTNA broker, in evaluation order. Each entry
+/// maps to a real step in `ZtnaService::evaluate` / `evaluate_policy`.
+fn features() -> Vec<Feature> {
+    fn f(name: &str, how: &str, coverage: &str) -> Feature {
+        Feature {
+            name: name.into(),
+            how: how.into(),
+            coverage: coverage.into(),
+        }
+    }
+    vec![
+        f(
+            "Session revocation (step 0)",
+            "Before any other check, the device-id and user-id are tested against an \
+             ArcSwap revocation set the control plane pushes over NATS; a hit denies \
+             immediately — enabling instant cut-off on compromise or offboarding without \
+             waiting for posture/MFA TTLs to expire.",
+            "Per-device and per-user revocation, reason `Revoked`",
+        ),
+        f(
+            "Tenant isolation guard",
+            "The request's app/device/identity must all resolve within the policy's \
+             tenant; a cross-tenant mismatch is denied before any entitlement logic runs.",
+            "Hard tenant boundary on every request",
+        ),
+        f(
+            "Geo / time / network conditions",
+            "Optional per-app AccessConditions check the request's GeoIP country against \
+             allow/block lists, the source network class (corporate/vpn/public), and a \
+             UTC TimeWindow (hours + days-of-week) carried in the signed bundle.",
+            "Reasons `GeoBlocked`, `NetworkTypeBlocked`, `OutsideAllowedHours`",
+        ),
+        f(
+            "Tag / label conditions",
+            "App, device, and user carry key=value tag maps; per-app TagConditions assert \
+             Equals/NotEquals/Exists/NotExists against them (e.g. device managed=true, \
+             user risk_tier=elevated) as policy-driven gates with no connector required.",
+            "Foundation for attribute-based access on bundle-delivered tags",
+        ),
+        f(
+            "Group entitlement",
+            "The resolved identity's group memberships must satisfy the app's required \
+             groups before access is granted.",
+            "Group-to-app entitlement matrix",
+        ),
+        f(
+            "Risk-adaptive posture",
+            "Device posture is scored 0-100 from weighted signals (disk encryption 25, OS \
+             patch 25, anti-malware 20, firewall 15, screen-lock 15) and compared to a \
+             per-app min-score threshold (None/Basic/Strict map to 0/60/90), replacing the \
+             old 3-level bucket with any-granularity thresholds.",
+            "Weighted numeric posture, attestation-freshness window",
+        ),
+        f(
+            "Per-app MFA freshness override",
+            "MFA recency is enforced against the policy-global max-age unless the app sets \
+             an mfa_max_age_override_ms, letting a high-risk app demand MFA every 30 min \
+             while low-risk apps stay at the 8 h default.",
+            "Per-app step-up MFA windows",
+        ),
+    ]
 }

@@ -19,7 +19,11 @@ use sng_dlp::{
     ContentClassifier, ContentMetadata, DlpChannel, DlpRule, PatternType, RuleAction, Severity,
 };
 
-use crate::report::{Case, FunctionReport, Kind, Targets};
+use crate::report::{measure, Case, Feature, FunctionReport, Kind, Targets};
+
+/// Timed iterations for the scan-throughput microbenchmark. Large enough
+/// to amortise warm-up and produce a stable per-scan mean.
+const THROUGHPUT_ITERS: u64 = 5_000;
 
 /// Number of valid (and, separately, invalid) identifiers generated
 /// per detector. 50 each satisfies the corpus-size requirement and
@@ -408,6 +412,25 @@ pub async fn run() -> FunctionReport {
         }
     }
 
+    // Throughput: time the real classify() hot path over a representative
+    // mixed-content document (multi-language prose with several embedded
+    // identifiers), so the MB/s figure reflects realistic scan input rather
+    // than a degenerate all-match or all-miss buffer.
+    let doc = sample_document();
+    let doc_bytes = doc.as_bytes();
+    let throughput = vec![measure(
+        "classify",
+        "scans/s",
+        THROUGHPUT_ITERS,
+        Some(doc_bytes.len() as u64),
+        |_| {
+            classifier
+                .classify(DlpChannel::FileWrite, doc_bytes, &meta)
+                .matches
+                .len()
+        },
+    )];
+
     FunctionReport::from_cases(
         "dlp",
         "sng-dlp",
@@ -421,5 +444,74 @@ pub async fn run() -> FunctionReport {
              validators."
                 .into(),
         ),
+    )
+    .with_features(features())
+    .with_throughput(throughput)
+}
+
+/// Capability catalog for the DLP engine: what it does and how, for the
+/// business-report feature section. Each entry maps to code exercised by
+/// the corpus above (validators) or the multi-language content path.
+fn features() -> Vec<Feature> {
+    fn f(name: &str, how: &str, coverage: &str) -> Feature {
+        Feature {
+            name: name.into(),
+            how: how.into(),
+            coverage: coverage.into(),
+        }
+    }
+    vec![
+        f(
+            "Check-digit validators",
+            "Each national-ID regex match is confirmed by its statutory check-digit \
+             algorithm (ISO 7064 Mod 11-2, weighted mod-11, Luhn, Verhoeff, per-series \
+             tables) plus date/prefix invariants; a pass boosts confidence to 1.0, a \
+             fail suppresses the match — this is what keeps the false-positive rate at 0%.",
+            "11 validated detectors across China, Japan, Korea, Singapore, Malaysia, \
+             Thailand, India (Aadhaar+PAN), UAE, Saudi, Kuwait",
+        ),
+        f(
+            "Proximity context analysis",
+            "An Aho-Corasick automaton scans a window around each match for per-locale \
+             context keywords (e.g. 身份证, マイナンバー, آधার, emirates id); a hit raises \
+             confidence (+0.15) and counter-context (test/sample/example) lowers it (-0.30).",
+            "Per-locale keyword dictionaries for CN/JP/IN/AE/SA, used for detectors \
+             without a check digit (Qatar QID, Bahrain CPR)",
+        ),
+        f(
+            "Unicode normalization + CJK/Thai tokenization",
+            "Text is NFC-normalized and Unicode case-folded before matching (handles \
+             Arabic diacritics and full/half-width CJK); SimHash fingerprints segment \
+             CJK into character bigrams and Thai into trigrams instead of whitespace tokens.",
+            "Byte-for-byte synchronized Rust + Go normalization paths",
+        ),
+        f(
+            "Regional compliance templates",
+            "Pre-built rule bundles bind the validated detectors to a jurisdiction's \
+             PII regime and an enforcement action (block/redact), so an operator enables \
+             a regime in one click rather than wiring individual patterns.",
+            "PIPL, APPI, PIPA, PDPA (SG/TH), India PII, Malaysia PII, PDPL (SA), GCC PII",
+        ),
+    ]
+}
+
+/// A representative ~1 KB mixed-language document with several embedded
+/// valid identifiers, used only for the throughput microbenchmark. Built
+/// from the generators so the embedded IDs are structurally valid and the
+/// scan exercises both the regex and check-digit paths.
+fn sample_document() -> String {
+    let (cn, _) = china(7);
+    let (sg, _) = singapore(3);
+    let (aadhaar, _) = aadhaar(11);
+    let (uae_id, _) = uae(5);
+    format!(
+        "Customer onboarding record (multi-region).\n\
+         Name: 李雷 / Lei Li. China resident ID 身份证号码: {cn}.\n\
+         Singapore office NRIC: {sg}; contact email lei.li@example.com, phone +65 6123 4567.\n\
+         India branch Aadhaar आधार: {aadhaar}; UAE Emirates ID الهوية: {uae_id}.\n\
+         Notes: this is a routine KYC dossier with no card numbers. \
+         Reference ticket ZD-48210 filed by the compliance desk for periodic review. \
+         The record is stored under the regional retention policy and replicated to the \
+         in-region archive tier only."
     )
 }

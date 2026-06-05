@@ -67,6 +67,33 @@ type EfficacyFunction struct {
 	Accuracy       float64 `json:"accuracy"`
 	Verdict        string  `json:"verdict"`
 	Notes          string  `json:"notes,omitempty"`
+	// Features describes WHAT the function does and HOW (capability
+	// catalog); Throughput holds measured hot-path performance. Both are
+	// optional — only DLP/ZTNA populate them today.
+	Features   []EfficacyFeature    `json:"features,omitempty"`
+	Throughput []EfficacyThroughput `json:"throughput,omitempty"`
+}
+
+// EfficacyFeature is one capability the function exercises, with a
+// one-line mechanism description for the feature catalog.
+type EfficacyFeature struct {
+	Name     string `json:"name"`
+	How      string `json:"how"`
+	Coverage string `json:"coverage"`
+}
+
+// EfficacyThroughput is one measured hot-path performance point.
+type EfficacyThroughput struct {
+	Label      string   `json:"label"`
+	Unit       string   `json:"unit"`
+	Iterations int64    `json:"iterations"`
+	PerOpNs    float64  `json:"per_op_ns"`
+	OpsPerSec  float64  `json:"ops_per_sec"`
+	BytesPerOp *int64   `json:"bytes_per_op,omitempty"`
+	MBPerSec   *float64 `json:"mb_per_sec,omitempty"`
+	// DebugBuild is true when the figure came from an unoptimized build
+	// (an order of magnitude slower than release) — surfaced as a caveat.
+	DebugBuild bool `json:"debug_build"`
 }
 
 // ---------------------------------------------------------------------------

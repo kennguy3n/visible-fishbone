@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -494,7 +495,8 @@ func (r *BusinessReport) writeSecurityEfficacy(b *strings.Builder) {
 	b.WriteString("Each function's real decision code is driven over a curated **known-bad** corpus (must be stopped) ")
 	b.WriteString("and a **known-good** corpus (must be allowed); we report catch-rate (block/detection-rate on bad), ")
 	b.WriteString("false-positive-rate (on good), and accuracy. These are real enforcement decisions, so the ")
-	b.WriteString("PASS/WARN/FAIL verdicts stand even in dry-run mode (like the Section 4 Criterion numbers)._\n\n")
+	b.WriteString("PASS/WARN/FAIL verdicts stand even in dry-run mode (like the Section 4 Criterion numbers). ")
+	b.WriteString("Per-engine **capability catalogs** (what each feature does and how) and **measured hot-path throughput** follow the matrix._\n\n")
 
 	if r.Efficacy == nil || len(r.Efficacy.Functions) == 0 {
 		b.WriteString("_No efficacy report supplied (`--efficacy`). Run `bench/efficacy` (`sng-efficacy`) and pass its `efficacy-report.json`._\n\n")
@@ -542,9 +544,92 @@ func (r *BusinessReport) writeSecurityEfficacy(b *strings.Builder) {
 		}
 	}
 	b.WriteString("\n")
+
+	r.writeEfficacyCapabilities(b)
+
 	b.WriteString("> **Scope caveat.** These are *single-host, development-environment* efficacy measurements over representative corpora — ")
 	b.WriteString("they prove the enforcement decisions are correct end-to-end, not catch-rate at line-rate. ")
 	b.WriteString("Line-rate efficacy (sustained block-rate under load) requires an in-path deployment on representative hardware.\n\n")
+}
+
+// writeEfficacyCapabilities renders, per function that supplies them, a
+// "what it does + how" feature catalog and a measured hot-path throughput
+// table. This is the buyer-facing answer to "what DLP/ZTNA features ship,
+// how do they work, and how fast are they" — distinct from the confusion
+// matrix above, which answers "are the decisions correct".
+func (r *BusinessReport) writeEfficacyCapabilities(b *strings.Builder) {
+	for _, f := range r.Efficacy.Functions {
+		if len(f.Features) == 0 && len(f.Throughput) == 0 {
+			continue
+		}
+		fmt.Fprintf(b, "### 7.%s — Capabilities & Performance\n\n",
+			efficacyTitle(f.Function))
+
+		if len(f.Features) > 0 {
+			b.WriteString("**What it does / how it works**\n\n")
+			b.WriteString("| Capability | How it works | Coverage |\n")
+			b.WriteString("|---|---|---|\n")
+			for _, ft := range f.Features {
+				fmt.Fprintf(b, "| **%s** | %s | %s |\n",
+					mdCell(ft.Name), mdCell(ft.How), mdCell(ft.Coverage))
+			}
+			b.WriteString("\n")
+		}
+
+		if len(f.Throughput) > 0 {
+			b.WriteString("**Performance (measured hot path)**\n\n")
+			b.WriteString("| Operation | Throughput | Latency / op | Bandwidth | Iterations |\n")
+			b.WriteString("|---|---:|---:|---:|---:|\n")
+			debug := false
+			for _, t := range f.Throughput {
+				bw := "—"
+				if t.MBPerSec != nil {
+					bw = fmt.Sprintf("%s MB/s", humanFloat(*t.MBPerSec))
+				}
+				fmt.Fprintf(b, "| `%s` | %s %s | %s | %s | %s |\n",
+					mdCell(t.Label),
+					humanFloat(t.OpsPerSec), mdCell(t.Unit),
+					perOpLatency(t.PerOpNs), bw,
+					humanInt(t.Iterations))
+				debug = debug || t.DebugBuild
+			}
+			b.WriteString("\n")
+			if debug {
+				b.WriteString("> ⚠️ **Debug build.** These throughput numbers were captured from an ")
+				b.WriteString("unoptimized (debug) build and are roughly an order of magnitude slower than a ")
+				b.WriteString("release build — treat them as a floor, not product performance. ")
+				b.WriteString("Re-run the harness with `cargo run --release` for representative figures.\n\n")
+			} else {
+				b.WriteString("_Single-host microbenchmark over the real decision code (release build), ")
+				b.WriteString("warm-up excluded. Characterises the CPU-bound hot path, not line-rate under a live load generator._\n\n")
+			}
+		}
+	}
+}
+
+// efficacyTitle maps a function id to a numbered sub-section label.
+func efficacyTitle(fn string) string {
+	switch fn {
+	case "dlp":
+		return "1 DLP (Data Loss Prevention)"
+	case "ztna":
+		return "2 ZTNA (Zero Trust Network Access)"
+	default:
+		return fn
+	}
+}
+
+// perOpLatency renders a nanosecond-per-op figure in the most readable
+// unit (ns / µs / ms).
+func perOpLatency(ns float64) string {
+	switch {
+	case ns >= 1e6:
+		return fmt.Sprintf("%s ms", humanFloat(ns/1e6))
+	case ns >= 1e3:
+		return fmt.Sprintf("%s µs", humanFloat(ns/1e3))
+	default:
+		return fmt.Sprintf("%s ns", humanFloat(ns))
+	}
 }
 
 func efficacyKPI(kind string) string {
@@ -568,7 +653,7 @@ func (r *BusinessReport) writeMethodology(b *strings.Builder) {
 	b.WriteString("- **Control plane** (Session 1, Go `bench/controlplane`): `full-suite` — API latency by tenant tier, policy compile, Postgres RLS.\n")
 	b.WriteString("- **Telemetry** (Session 2, Go `bench/telemetry`): NATS→ClickHouse→S3 throughput + AWS list-price cost model.\n")
 	b.WriteString("- **Policy eval & test health** (Session 4): `cargo bench -p sng-policy-eval` Criterion numbers and the full Go+Rust suite run, from `bench/results/test-suite-report.md`.\n")
-	b.WriteString("- **Security efficacy** (`bench/efficacy`, Rust `sng-efficacy`): drives the real FW/SWG/ZTNA decision code and a Suricata-backed IPS over known-bad + known-good corpora; reports block/detection-rate and false-positive-rate. EVE alerts are normalised via `sng_ips::EveAlert::to_ips_event`; the firewall ruleset is additionally validated against the Linux `nft` kernel parser.\n")
+	b.WriteString("- **Security efficacy** (`bench/efficacy`, Rust `sng-efficacy`): drives the real FW/SWG/ZTNA decision code and a Suricata-backed IPS over known-bad + known-good corpora; reports block/detection-rate and false-positive-rate. EVE alerts are normalised via `sng_ips::EveAlert::to_ips_event`; the firewall ruleset is additionally validated against the Linux `nft` kernel parser. The DLP/ZTNA **capability catalogs** are emitted by the harness alongside the matrix, and the **throughput** figures are wall-clock microbenchmarks over the real `classify`/`evaluate` hot path (warm-up excluded; flagged when taken from a debug build).\n")
 	b.WriteString("- **Competitor figures**: vendor datasheets in `competitors.json` (each row carries a caveat). Hardware appliances are ASIC-accelerated; SNG is software-only on a generic x86 VM.\n")
 }
 
@@ -595,6 +680,63 @@ func rangeStr(v []float64) string {
 		return "—"
 	}
 	return fmt.Sprintf("$%.2f–%.2f", v[0], v[1])
+}
+
+// mdCell makes a string safe to drop into a Markdown table cell: pipes are
+// escaped and any newlines are collapsed to spaces so the row stays intact.
+func mdCell(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "|", "\\|")
+	return strings.TrimSpace(s)
+}
+
+// humanFloat renders a non-negative magnitude for display: values ≥ 100
+// are rounded to a whole number with thousands separators (so a 1,901,606
+// decisions/s figure reads cleanly), smaller values keep one decimal.
+func humanFloat(v float64) string {
+	if v >= 100 {
+		return groupThousands(strconv.FormatInt(int64(v+0.5), 10))
+	}
+	return strconv.FormatFloat(v, 'f', 1, 64)
+}
+
+// humanInt renders an integer count with thousands separators.
+func humanInt(n int64) string {
+	return groupThousands(strconv.FormatInt(n, 10))
+}
+
+// groupThousands inserts commas into a base-10 integer string (which may
+// carry a leading '-').
+func groupThousands(s string) string {
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	n := len(s)
+	if n <= 3 {
+		if neg {
+			return "-" + s
+		}
+		return s
+	}
+	var b strings.Builder
+	pre := n % 3
+	if pre > 0 {
+		b.WriteString(s[:pre])
+		if n > pre {
+			b.WriteByte(',')
+		}
+	}
+	for i := pre; i < n; i += 3 {
+		b.WriteString(s[i : i+3])
+		if i+3 < n {
+			b.WriteByte(',')
+		}
+	}
+	if neg {
+		return "-" + b.String()
+	}
+	return b.String()
 }
 
 func present(ok bool) string {
