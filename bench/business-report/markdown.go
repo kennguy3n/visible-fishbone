@@ -23,6 +23,7 @@ func (r *BusinessReport) ToMarkdown() string {
 	r.writePolicyEval(&b)
 	r.writeUnitEconomics(&b)
 	r.writeTestSuite(&b)
+	r.writeSecurityEfficacy(&b)
 	r.writeMethodology(&b)
 	return b.String()
 }
@@ -55,6 +56,7 @@ func (r *BusinessReport) writeExecutiveSummary(b *strings.Builder) {
 	row("Policy evaluation", presentN(len(critRows(r))), policyEvalStatus(r))
 	row("Unit economics", present(r.Theoretical != nil), dimStatus(r, r.Theoretical != nil))
 	row("Test-suite health", testSuiteInputs(r), testSuiteStatus(r))
+	row("Security efficacy", efficacyInputs(r), efficacyStatus(r))
 	b.WriteString("\n")
 
 	b.WriteString("**Strengths (data-backed):**\n")
@@ -94,6 +96,21 @@ func (r *BusinessReport) strengths() []string {
 	if c := r.telemetryCostPerUser(); c != nil && r.Theoretical != nil && len(r.Theoretical.UnitEconomics.OverallEnvelope) == 2 &&
 		*c >= r.Theoretical.UnitEconomics.OverallEnvelope[0] && *c <= r.Theoretical.UnitEconomics.OverallEnvelope[1] {
 		out = append(out, fmt.Sprintf("Modeled telemetry-pipeline infra cost ($%.2f/user/mo) sits inside the $%.2f–%.2f/user/mo design envelope.", *c, r.Theoretical.UnitEconomics.OverallEnvelope[0], r.Theoretical.UnitEconomics.OverallEnvelope[1]))
+	}
+	if e := r.Efficacy; e != nil && len(e.Functions) > 0 {
+		tested, tp, bad, fp := 0, 0, 0, 0
+		for _, f := range e.Functions {
+			if !f.Tested {
+				continue
+			}
+			tested++
+			tp += f.TP
+			bad += f.BadCases
+			fp += f.FP
+		}
+		if tested > 0 && tp == bad && fp == 0 {
+			out = append(out, fmt.Sprintf("Security enforcement is correct end-to-end: %d/%d known-bad cases stopped and zero false-positives across %d functions (FW/SWG/ZTNA/IPS) — real decision-path measurements.", tp, bad, tested))
+		}
 	}
 	if len(out) == 0 {
 		out = append(out, "No gradeable strengths yet — supply live inputs.")
@@ -443,12 +460,87 @@ func (r *BusinessReport) writeTestSuite(b *strings.Builder) {
 	fmt.Fprintf(b, "| **Total** | **%d** | **%d** | **%d** | **%d** |\n\n", tr, tp, tf, tsk)
 }
 
+func (r *BusinessReport) writeSecurityEfficacy(b *strings.Builder) {
+	b.WriteString("## 7. Security Efficacy\n\n")
+	b.WriteString("_Does the box actually **block**? This section measures enforcement outcomes — not throughput. ")
+	b.WriteString("Each function's real decision code is driven over a curated **known-bad** corpus (must be stopped) ")
+	b.WriteString("and a **known-good** corpus (must be allowed); we report catch-rate (block/detection-rate on bad), ")
+	b.WriteString("false-positive-rate (on good), and accuracy. These are real enforcement decisions, so the ")
+	b.WriteString("PASS/WARN/FAIL verdicts stand even in dry-run mode (like the Section 4 Criterion numbers)._\n\n")
+
+	if r.Efficacy == nil || len(r.Efficacy.Functions) == 0 {
+		b.WriteString("_No efficacy report supplied (`--efficacy`). Run `bench/efficacy` (`sng-efficacy`) and pass its `efficacy-report.json`._\n\n")
+		return
+	}
+	e := r.Efficacy
+	fmt.Fprintf(b, "**Overall efficacy verdict: %s**", e.OverallVerdict)
+	if e.Host != "" {
+		fmt.Fprintf(b, " · host `%s`", e.Host)
+	}
+	if e.GitSHA != "" && e.GitSHA != "unknown" {
+		fmt.Fprintf(b, " · git `%s`", e.GitSHA)
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString("| Function | Crate | KPI | Bad | Good | Catch-rate | False-positive | Accuracy | Verdict |\n")
+	b.WriteString("|---|---|---|---:|---:|---:|---:|---:|---|\n")
+	for _, f := range e.Functions {
+		if !f.Tested {
+			fmt.Fprintf(b, "| %s | `%s` | %s | — | — | — | — | — | UNTESTED |\n",
+				f.Function, f.Crate, efficacyKPI(f.Kind))
+			continue
+		}
+		fmt.Fprintf(b, "| %s | `%s` | %s | %d | %d | %s | %s | %s | %s |\n",
+			f.Function, f.Crate, efficacyKPI(f.Kind),
+			f.BadCases, f.GoodCases,
+			pct(f.CatchRate), pct(f.FalsePosRate), pct(f.Accuracy),
+			f.Verdict)
+	}
+	b.WriteString("\n")
+	b.WriteString("_Catch-rate = TP / (TP + FN) — fraction of known-bad cases stopped. ")
+	b.WriteString("False-positive = FP / (FP + TN) — fraction of known-good cases wrongly stopped. ")
+	b.WriteString("Targets: PASS needs catch ≥ 99% and FP ≤ 2%; WARN ≥ 90% / ≤ 5%._\n\n")
+
+	for _, f := range e.Functions {
+		if !f.Tested {
+			if f.UntestedReason != "" {
+				fmt.Fprintf(b, "- **%s** — UNTESTED: %s\n", f.Function, f.UntestedReason)
+			}
+			continue
+		}
+		if f.Notes != "" {
+			fmt.Fprintf(b, "- **%s** (%d/%d bad stopped, %d/%d good allowed): %s\n",
+				f.Function, f.TP, f.BadCases, f.TN, f.GoodCases, f.Notes)
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString("> **Scope caveat.** These are *single-host, development-environment* efficacy measurements over representative corpora — ")
+	b.WriteString("they prove the enforcement decisions are correct end-to-end, not catch-rate at line-rate. ")
+	b.WriteString("Line-rate efficacy (sustained block-rate under load) requires an in-path deployment on representative hardware.\n\n")
+}
+
+func efficacyKPI(kind string) string {
+	switch kind {
+	case "detection":
+		return "detection-rate"
+	case "enforcement":
+		return "block-rate"
+	default:
+		return kind
+	}
+}
+
+func pct(v float64) string {
+	return fmt.Sprintf("%.1f%%", v*100)
+}
+
 func (r *BusinessReport) writeMethodology(b *strings.Builder) {
 	b.WriteString("## Methodology & sources\n\n")
 	b.WriteString("- **Edge** (Session 3, Rust `bench/`): `business-report` sweep across profiles × packet sizes × inspection depths.\n")
 	b.WriteString("- **Control plane** (Session 1, Go `bench/controlplane`): `full-suite` — API latency by tenant tier, policy compile, Postgres RLS.\n")
 	b.WriteString("- **Telemetry** (Session 2, Go `bench/telemetry`): NATS→ClickHouse→S3 throughput + AWS list-price cost model.\n")
 	b.WriteString("- **Policy eval & test health** (Session 4): `cargo bench -p sng-policy-eval` Criterion numbers and the full Go+Rust suite run, from `bench/results/test-suite-report.md`.\n")
+	b.WriteString("- **Security efficacy** (`bench/efficacy`, Rust `sng-efficacy`): drives the real FW/SWG/ZTNA decision code and a Suricata-backed IPS over known-bad + known-good corpora; reports block/detection-rate and false-positive-rate. EVE alerts are normalised via `sng_ips::EveAlert::to_ips_event`; the firewall ruleset is additionally validated against the Linux `nft` kernel parser.\n")
 	b.WriteString("- **Competitor figures**: vendor datasheets in `competitors.json` (each row carries a caveat). Hardware appliances are ASIC-accelerated; SNG is software-only on a generic x86 VM.\n")
 }
 
@@ -499,6 +591,29 @@ func dimStatus(r *BusinessReport, ok bool) string {
 		return "synthetic (N/A)"
 	}
 	return "see section"
+}
+
+func efficacyInputs(r *BusinessReport) string {
+	if r.Efficacy == nil || len(r.Efficacy.Functions) == 0 {
+		return "missing"
+	}
+	tested := 0
+	for _, f := range r.Efficacy.Functions {
+		if f.Tested {
+			tested++
+		}
+	}
+	return fmt.Sprintf("%d/%d functions", tested, len(r.Efficacy.Functions))
+}
+
+// efficacyStatus surfaces the harness's own verdict. Efficacy is a real
+// enforcement measurement, so (like policy-eval) it is graded regardless
+// of dry-run mode.
+func efficacyStatus(r *BusinessReport) string {
+	if r.Efficacy == nil || len(r.Efficacy.Functions) == 0 {
+		return "no data"
+	}
+	return r.Efficacy.OverallVerdict
 }
 
 func policyEvalStatus(r *BusinessReport) string {

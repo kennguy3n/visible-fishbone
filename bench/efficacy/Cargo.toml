@@ -1,0 +1,69 @@
+# `sng-efficacy` — ShieldNet Gateway security-EFFICACY benchmark harness.
+#
+# Where `sng-bench` (the sibling crate) measures *performance* (Gbps,
+# latency, concurrent flows), this crate measures *efficacy*: does the
+# firewall actually deny a denied flow, does the SWG block a forbidden
+# URL category, does ZTNA deny an unauthorized / stale-posture session,
+# and does the IPS detect a known-bad PCAP. It drives the *real* SNG
+# enforcement crates (`sng-fw`, `sng-swg`, `sng-ztna`, `sng-ips`,
+# `sng-policy-eval`) over a known-bad + known-good corpus and reports
+# block-rate / detection-rate, false-positive-rate and accuracy.
+#
+# Like `sng-bench` this is a STANDALONE binary crate with its own empty
+# `[workspace]` table so the parent `visible-fishbone` workspace ignores
+# it entirely: the enforcement crates are pulled in as path deps for the
+# harness only, not for `cargo build --workspace` / `cargo deny`.
+[workspace]
+
+[package]
+name = "sng-efficacy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "LicenseRef-Proprietary"
+authors = ["ShieldNet Gateway Contributors"]
+repository = "https://github.com/kennguy3n/visible-fishbone"
+description = "ShieldNet Gateway security-efficacy benchmark harness: drives the real FW/SWG/ZTNA/IPS enforcement crates over known-bad + known-good corpora and reports block-rate / detection-rate / false-positive-rate"
+publish = false
+
+[[bin]]
+name = "sng-efficacy"
+path = "src/main.rs"
+
+[dependencies]
+# Enforcement plane — the real decision code under test.
+sng-fw = { path = "../../crates/sng-fw" }
+sng-swg = { path = "../../crates/sng-swg" }
+sng-ztna = { path = "../../crates/sng-ztna" }
+sng-ips = { path = "../../crates/sng-ips" }
+sng-policy-eval = { path = "../../crates/sng-policy-eval" }
+sng-core = { path = "../../crates/sng-core" }
+sng-telemetry = { path = "../../crates/sng-telemetry" }
+
+# CLI surface — matches the sibling harness conventions.
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+
+# Report serialization. JSON is the artifact the Go `business-report`
+# consolidator reads to render "Section 7: Security Efficacy".
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+# Async runtime — the SWG ext-authz decision path is async.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "process"] }
+
+# IP types for firewall / policy flow tuples.
+ipnet = "2"
+
+# Bundle envelope encoding for the policy-eval / firewall load path
+# (mirrors the production `LoadedBundle::from_body` decode path).
+rmp-serde = "1"
+serde_bytes = "0.11"
+
+# Timestamps for the report header.
+chrono = { version = "0.4", features = ["clock"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1

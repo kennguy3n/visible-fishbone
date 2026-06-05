@@ -1,0 +1,12 @@
+# SNG efficacy IPS corpus rules.
+#
+# A small, self-contained signature set that matches the byte patterns
+# in the companion `bad-*.pcap` fixtures. These stand in for a real
+# ET-Open / commercial ruleset so the harness can measure detection
+# rate against a known-bad corpus on any box (no rule-feed download
+# required). Local SIDs use the 1000000+ range per Suricata convention.
+
+alert tcp any any -> any any (msg:"SNG-EFFICACY EICAR test string detected"; content:"EICAR-STANDARD-ANTIVIRUS-TEST-FILE"; sid:1000001; rev:1;)
+alert tcp any any -> any any (msg:"SNG-EFFICACY directory traversal attempt"; content:"/../../../../etc/passwd"; sid:1000002; rev:1;)
+alert tcp any any -> any any (msg:"SNG-EFFICACY SQL injection UNION SELECT"; content:"UNION%20SELECT"; nocase; sid:1000003; rev:1;)
+alert tcp any any -> any any (msg:"SNG-EFFICACY known C2 beacon user-agent"; content:"SNG-EFFICACY-C2-BEACON"; sid:1000004; rev:1;)

@@ -325,6 +325,14 @@ func loadEdge(path string) (*EdgeReport, error) {
 	return &r, nil
 }
 
+func loadEfficacy(path string) (*EfficacyReport, error) {
+	var r EfficacyReport
+	if err := readJSON(path, &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
 // readJSON reads and decodes a JSON file. It tolerates extra fields the
 // upstream tools may add (standard json.Unmarshal semantics).
 func readJSON(path string, v any) error {
