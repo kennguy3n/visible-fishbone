@@ -39,10 +39,11 @@ export function useCasbConnectors(
 ): UseQueryResult<ListEnvelope<CasbConnector>> {
   return useQuery({
     queryKey: ["casb", "connectors", tenantId],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       sngRequest<ListEnvelope<CasbConnector>>({
         method: "GET",
         url: `${base(tenantId)}/casb/connectors`,
+        signal,
       }),
     enabled: !!tenantId,
   });
@@ -53,10 +54,11 @@ export function useCasbApps(
 ): UseQueryResult<ListEnvelope<CasbApp>> {
   return useQuery({
     queryKey: ["casb", "apps", tenantId],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       sngRequest<ListEnvelope<CasbApp>>({
         method: "GET",
         url: `${base(tenantId)}/casb/apps`,
+        signal,
       }),
     enabled: !!tenantId,
   });
@@ -96,10 +98,11 @@ export function useDlpPolicies(
 ): UseQueryResult<ListEnvelope<DlpPolicy>> {
   return useQuery({
     queryKey: ["dlp", "policies", tenantId],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       sngRequest<ListEnvelope<DlpPolicy>>({
         method: "GET",
         url: `${base(tenantId)}/dlp/policies`,
+        signal,
       }),
     enabled: !!tenantId,
   });
@@ -110,10 +113,11 @@ export function useDlpTemplates(
 ): UseQueryResult<ListEnvelope<DlpTemplate>> {
   return useQuery({
     queryKey: ["dlp", "templates", tenantId],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       sngRequest<ListEnvelope<DlpTemplate>>({
         method: "GET",
         url: `${base(tenantId)}/dlp/templates`,
+        signal,
       }),
     enabled: !!tenantId,
   });
@@ -164,10 +168,11 @@ export function useComplianceReports(
 ): UseQueryResult<ListEnvelope<ComplianceReport>> {
   return useQuery({
     queryKey: ["compliance", "reports", tenantId],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       sngRequest<ListEnvelope<ComplianceReport>>({
         method: "GET",
         url: `${base(tenantId)}/compliance/reports`,
+        signal,
       }),
     enabled: !!tenantId,
   });
@@ -201,10 +206,11 @@ export function complianceEvidenceUrl(
 export function useUsage(tenantId: string): UseQueryResult<UsageResponse> {
   return useQuery({
     queryKey: ["metering", "usage", tenantId],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       sngRequest<UsageResponse>({
         method: "GET",
         url: `${base(tenantId)}/usage`,
+        signal,
       }),
     enabled: !!tenantId,
   });
@@ -215,10 +221,11 @@ export function useUsageHistory(
 ): UseQueryResult<UsageHistoryResponse> {
   return useQuery({
     queryKey: ["metering", "usage-history", tenantId],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       sngRequest<UsageHistoryResponse>({
         method: "GET",
         url: `${base(tenantId)}/usage/history`,
+        signal,
       }),
     enabled: !!tenantId,
   });
@@ -231,10 +238,11 @@ export function usePlaybooks(
 ): UseQueryResult<ListEnvelope<Playbook>> {
   return useQuery({
     queryKey: ["playbooks", tenantId],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       sngRequest<ListEnvelope<Playbook>>({
         method: "GET",
         url: `${base(tenantId)}/playbooks`,
+        signal,
       }),
     enabled: !!tenantId,
   });
@@ -245,10 +253,11 @@ export function usePlaybookExecutions(
 ): UseQueryResult<ListEnvelope<PlaybookExecution>> {
   return useQuery({
     queryKey: ["playbooks", "executions", tenantId],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       sngRequest<ListEnvelope<PlaybookExecution>>({
         method: "GET",
         url: `${base(tenantId)}/playbooks/executions`,
+        signal,
       }),
     enabled: !!tenantId,
   });
@@ -259,10 +268,11 @@ export function usePendingApprovals(
 ): UseQueryResult<ListEnvelope<PlaybookApproval>> {
   return useQuery({
     queryKey: ["playbooks", "approvals", tenantId],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       sngRequest<ListEnvelope<PlaybookApproval>>({
         method: "GET",
         url: `${base(tenantId)}/playbooks/approvals/pending`,
+        signal,
       }),
     enabled: !!tenantId,
   });
