@@ -608,6 +608,52 @@ mod tests {
         assert_eq!(xdp.default_action(), XdpRuleAction::Pass);
     }
 
+    #[test]
+    fn hot_path_stops_at_zoned_rule() {
+        // A pure-L3/L4 Deny that is nonetheless zone-scoped is not XDP
+        // eligible (the fast path can't evaluate zone membership), so
+        // translation must stop at it exactly like the subject-gated case —
+        // covering the second half of the eligibility predicate
+        // (`from_zones`/`to_zones` empty) so the break invariant is pinned
+        // for both gates.
+        let mut zoned_rule = l3l4_rule("zoned", "10.0.0.0/8", RuleAction::Deny);
+        zoned_rule.from_zones = vec!["trusted".to_owned()];
+        let rs = ruleset(
+            vec![
+                l3l4_rule("first", "203.0.113.0/24", RuleAction::Deny),
+                zoned_rule,
+                l3l4_rule("late", "192.0.2.0/24", RuleAction::Deny),
+            ],
+            RuleAction::Allow,
+        );
+        let xdp = compile_hot_path(&rs);
+        // Only the leading Deny is modelled; the zoned rule stops translation
+        // and the trailing rule is dropped from the fast path.
+        assert_eq!(xdp.len(), 1);
+        assert_eq!(xdp.rules()[0].id, "first");
+        // Incomplete → default must defer to nftables (Pass).
+        assert_eq!(xdp.default_action(), XdpRuleAction::Pass);
+    }
+
+    #[test]
+    fn hot_path_stops_at_to_zone_scoped_rule() {
+        // Same as above but the gate is on `to_zones`, so both zone fields
+        // are exercised by the eligibility check.
+        let mut zoned_rule = l3l4_rule("to-zoned", "10.0.0.0/8", RuleAction::Allow);
+        zoned_rule.to_zones = vec!["dmz".to_owned()];
+        let rs = ruleset(
+            vec![
+                l3l4_rule("first", "203.0.113.0/24", RuleAction::Allow),
+                zoned_rule,
+            ],
+            RuleAction::Deny,
+        );
+        let xdp = compile_hot_path(&rs);
+        assert_eq!(xdp.len(), 1);
+        assert_eq!(xdp.rules()[0].id, "first");
+        assert_eq!(xdp.default_action(), XdpRuleAction::Pass);
+    }
+
     #[tokio::test]
     async fn nftables_backend_installs_and_counts() {
         let backend: Arc<dyn NftablesBackend> = Arc::new(MockNftables::new());

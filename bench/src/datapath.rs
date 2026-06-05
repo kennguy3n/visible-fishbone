@@ -98,16 +98,28 @@ impl DataPathComparison {
 /// a default `Deny`. Every rule is pure L3/L4 (no subject gate, no zone
 /// filter), so the entire set is eligible for XDP offload and the two
 /// paths are guaranteed to agree on every verdict.
+///
+/// `rule_count` must be `<= 65_536`: the `10.<hi>.<lo>.0/24` encoding has
+/// only 16 bits of room, so larger counts wrap the high byte and produce
+/// colliding (non-disjoint) `/24`s, which would break the one-rule-per-flow
+/// invariant the comparison relies on. The benchmark's realistic range is
+/// hundreds-to-thousands of rules, well inside this bound; the
+/// `debug_assert!` catches misuse loudly rather than silently overlapping.
 #[must_use]
 pub fn build_synthetic_ruleset(rule_count: usize) -> CompiledRuleSet {
+    debug_assert!(
+        rule_count <= 0x1_0000,
+        "build_synthetic_ruleset: rule_count {rule_count} exceeds the 65536 \
+         disjoint /24s the 10.<hi>.<lo>.0 encoding can represent"
+    );
     let rules = (0..rule_count)
         .map(|i| {
             // Spread destinations across 10.<hi>.<lo>.0/24 so each rule
             // matches a disjoint /24 and only one rule can fire per flow.
             let hi = u8::try_from((i >> 8) & 0xff).unwrap_or(0);
             let lo = u8::try_from(i & 0xff).unwrap_or(0);
-            let dst: IpNet = IpNet::new(IpAddr::V4(Ipv4Addr::new(10, hi, lo, 0)), 24)
-                .expect("valid /24");
+            let dst: IpNet =
+                IpNet::new(IpAddr::V4(Ipv4Addr::new(10, hi, lo, 0)), 24).expect("valid /24");
             FirewallRule {
                 id: format!("rule-{i}"),
                 matches: RuleMatch {
@@ -153,6 +165,15 @@ pub const FLOW_POOL: usize = 1024;
 #[must_use]
 pub fn build_flows(packet_count: usize, rule_count: usize, miss_every: usize) -> Vec<FlowKey> {
     let rule_count = rule_count.max(1);
+    // Hit flows are addressed `10.<hi>.<lo>.7` from `idx % rule_count`, the
+    // same 16-bit encoding as `build_synthetic_ruleset`; counts above 65_536
+    // collide and a "hit" flow could land on the wrong rule's /24. Guard the
+    // shared invariant (see `build_synthetic_ruleset`).
+    debug_assert!(
+        rule_count <= 0x1_0000,
+        "build_flows: rule_count {rule_count} exceeds the 65536 disjoint /24s \
+         the 10.<hi>.<lo>.0 encoding can represent"
+    );
     let miss_every = miss_every.max(1);
     let pool_len = packet_count.clamp(1, FLOW_POOL);
 
@@ -179,7 +200,9 @@ pub fn build_flows(packet_count: usize, rule_count: usize, miss_every: usize) ->
         .collect();
 
     // Stream packet_count packets by cycling the pool.
-    (0..packet_count).map(|i| pool[i % pool_len].clone()).collect()
+    (0..packet_count)
+        .map(|i| pool[i % pool_len].clone())
+        .collect()
 }
 
 /// Run the comparison: build a `rule_count`-rule set, install it into a
@@ -285,9 +308,15 @@ mod tests {
             };
             let nft = engine.evaluate(&ctx).action;
             let proto = flow.protocol.iana_number().unwrap_or(6);
-            let xdp_action =
-                xdp.evaluate(flow.src_ip, flow.dst_ip, flow.src_port, flow.dst_port, proto)
-                    .action;
+            let xdp_action = xdp
+                .evaluate(
+                    flow.src_ip,
+                    flow.dst_ip,
+                    flow.src_port,
+                    flow.dst_port,
+                    proto,
+                )
+                .action;
             // The two substrates must reach the same allow/deny verdict
             // for every L3/L4 flow — that is the correctness contract the
             // offload relies on.

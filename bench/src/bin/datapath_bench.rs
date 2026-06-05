@@ -77,6 +77,10 @@ fn print_report(cmp: &DataPathComparison) {
     // Machine-readable line for CI capture.
     println!(
         "{{\"rules\":{},\"packets\":{},\"nftables_pps\":{:.3},\"ebpf_pps\":{:.3},\"speedup\":{:.3}}}",
-        cmp.rule_count, cmp.nftables.packets, nft, ebpf, cmp.speedup()
+        cmp.rule_count,
+        cmp.nftables.packets,
+        nft,
+        ebpf,
+        cmp.speedup()
     );
 }

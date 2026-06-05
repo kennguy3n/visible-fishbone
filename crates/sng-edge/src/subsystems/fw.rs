@@ -93,13 +93,40 @@ impl FwSubsystem {
             .map(|p| p.to_string_lossy().into_owned());
         let (nft_dp, engine) = NftablesDataPath::with_shell(nft_binary.as_deref());
         let datapath: Arc<dyn DataPathBackend> = match selection {
-            // `Auto` must be resolved by the caller; treat a
-            // leftover `Auto` here as nftables (the safe default)
-            // so this constructor is total.
-            DataPathSelection::Nftables | DataPathSelection::Auto => Arc::new(nft_dp),
+            DataPathSelection::Nftables => Arc::new(nft_dp),
+            // `Auto` must be resolved by the caller (the supervisor's
+            // `resolve_datapath` XDP-capability probe runs before this).
+            // Reaching here with `Auto` means a caller bypassed that
+            // resolution; fall back to nftables (the safe default) so the
+            // constructor stays total, but warn so the misuse surfaces in
+            // development rather than as a silent downgrade.
+            DataPathSelection::Auto => {
+                tracing::warn!(
+                    target: "sng_edge::fw",
+                    "data-path selection reached FwSubsystem unresolved (Auto); \
+                     defaulting to nftables — the supervisor should resolve Auto \
+                     via the XDP capability probe before constructing the subsystem"
+                );
+                Arc::new(nft_dp)
+            }
             DataPathSelection::Ebpf => {
                 let control = Arc::new(XdpControlPlane::in_memory());
-                Arc::new(EbpfDataPath::new(control, nft_dp))
+                let ebpf = EbpfDataPath::new(control, nft_dp);
+                // The eBPF path is selected, but the in-memory control plane
+                // (NoopLoader) loads no kernel XDP program — the real
+                // AyaLoader integration ships with the BPF object crate in a
+                // later phase. Surface that so an operator who sees
+                // `datapath=ebpf` is not misled into thinking traffic is being
+                // offloaded; nftables is still carrying all enforcement.
+                if !ebpf.capabilities().kernel_offload {
+                    tracing::warn!(
+                        target: "sng_edge::fw",
+                        "eBPF data path selected but kernel XDP offload is not \
+                         active (in-memory control plane); nftables is carrying \
+                         enforcement"
+                    );
+                }
+                Arc::new(ebpf)
             }
         };
         Self::from_parts(engine, datapath)
@@ -242,12 +269,17 @@ impl HealthCheck for FwSubsystem {
         let installs = self.installs_total.load(Ordering::Relaxed);
         let failures = self.install_failures.load(Ordering::Relaxed);
         let has_ruleset = self.engine.current_ruleset().is_some();
+        // Whether enforcement is genuinely running in the kernel fast path.
+        // For the eBPF backend on the in-memory control plane this is
+        // `false`, so the health line distinguishes "ebpf selected" from
+        // "ebpf actually offloading" — see `FwSubsystem::new`.
+        let kernel_offload = self.datapath.get_stats().is_ok_and(|s| s.kernel_offload);
         let status = fw_health_status(installs, failures, has_ruleset);
         SubsystemHealth {
             name: <Self as HealthCheck>::name(self).into(),
             status,
             detail: Some(format!(
-                "datapath={}, installs={installs}, failures={failures}, has_ruleset={has_ruleset}",
+                "datapath={}, kernel_offload={kernel_offload}, installs={installs}, failures={failures}, has_ruleset={has_ruleset}",
                 self.datapath.name()
             )),
         }
