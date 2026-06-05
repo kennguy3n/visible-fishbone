@@ -35,6 +35,7 @@ path = "src/main.rs"
 sng-fw = { path = "../../crates/sng-fw" }
 sng-swg = { path = "../../crates/sng-swg" }
 sng-ztna = { path = "../../crates/sng-ztna" }
+sng-dlp = { path = "../../crates/sng-dlp" }
 sng-ips = { path = "../../crates/sng-ips" }
 sng-policy-eval = { path = "../../crates/sng-policy-eval" }
 sng-core = { path = "../../crates/sng-core" }

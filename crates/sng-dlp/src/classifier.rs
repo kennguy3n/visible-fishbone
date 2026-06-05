@@ -36,10 +36,161 @@
 use crate::channels::DlpChannel;
 use crate::error::{DlpError, DlpResult};
 use crate::rules::{DlpRule, PatternType, RuleAction, Severity};
+use crate::validators;
 use aho_corasick::AhoCorasick;
 use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
+
+/// A check-digit / structural validator applied to a regex hit to
+/// suppress same-shaped false positives. Signature matches every
+/// function in [`crate::validators`].
+type Validator = fn(&str) -> bool;
+
+/// Resolve a builtin pattern name to the validator that confirms a
+/// hit is structurally a real identifier (check digit / date / prefix
+/// invariants hold), or `None` when the pattern has no validator and
+/// relies on regex shape + proximity context alone (Qatar QID,
+/// Bahrain CPR). Mirrors the `validatorFor` switch in
+/// `internal/service/dlp/engine/regex.go`.
+fn validator_for(name: &str) -> Option<Validator> {
+    let v: Validator = match name {
+        "china_resident_id" => validators::china_resident_id,
+        "japan_my_number" => validators::japan_my_number,
+        "korea_rrn" => validators::korea_rrn,
+        "singapore_nric" => validators::singapore_nric,
+        "malaysia_mykad" => validators::malaysia_mykad,
+        "thailand_id" => validators::thailand_id,
+        "india_aadhaar" => validators::india_aadhaar,
+        "india_pan" => validators::india_pan,
+        "uae_emirates_id" => validators::uae_emirates_id,
+        "saudi_id" => validators::saudi_national_id,
+        "kuwait_civil_id" => validators::kuwait_civil_id,
+        _ => return None,
+    };
+    Some(v)
+}
+
+/// Base confidence for a regex hit whose validator passed (or that
+/// is `credit_card`, validated by Luhn). A passing check-digit
+/// validator is a strong structural signal, so the hit starts fully
+/// confident and proximity can only *reduce* it (counter-context).
+const CONFIDENCE_VALIDATED: f64 = 1.0;
+
+/// Base confidence for a bare regex hit with no validator. Proximity
+/// context keywords can lift it; counter-context can sink it.
+const CONFIDENCE_BARE: f64 = 0.5;
+
+/// Confidence delta applied when a locale context keyword is found
+/// within the proximity window of a hit.
+const PROXIMITY_CONTEXT_BOOST: f64 = 0.15;
+
+/// Confidence penalty applied when a counter-context keyword
+/// (`example` / `test` / `sample`) is found within the window — the
+/// hit is most likely illustrative, not real PII.
+const PROXIMITY_COUNTER_PENALTY: f64 = 0.30;
+
+/// Hard floor confidence after a counter-context penalty.
+const PROXIMITY_FLOOR: f64 = 0.1;
+
+/// Number of bytes scanned on each side of a hit for context
+/// keywords. The window is clamped to char boundaries before search.
+const PROXIMITY_WINDOW_BYTES: usize = 200;
+
+/// Counter-context keywords that mark a hit as illustrative rather
+/// than real PII, anywhere in any locale. Mirrors `counterContext`
+/// in `internal/service/dlp/engine/proximity.go`.
+const COUNTER_CONTEXT: &[&str] = &["example", "test", "sample"];
+
+/// Per-pattern locale context keywords. A hit whose builtin pattern
+/// name appears here gets a [`ProximityAnalyzer`]; the keywords are
+/// the surrounding-text cues a real document carries (field labels in
+/// the local language and English). Mirrors `contextKeywords` in
+/// `internal/service/dlp/engine/proximity.go`.
+fn context_keywords(name: &str) -> Option<&'static [&'static str]> {
+    let kws: &'static [&'static str] = match name {
+        "china_resident_id" => &["身份证", "证件号", "身份证号码", "id number", "identity"],
+        "japan_my_number" => &["マイナンバー", "個人番号", "my number"],
+        "india_aadhaar" => &["आधार", "aadhaar", "uid"],
+        "uae_emirates_id" => &["الهوية", "emirates id", "هوية"],
+        "saudi_id" => &["الهوية الوطنية", "national id", "إقامة", "iqama"],
+        // Patterns without a check-digit validator lean on proximity
+        // alone, so give them English field-label cues.
+        "qatar_qid" => &["qatar id", "qid", "national id"],
+        "bahrain_cpr" => &["cpr", "bahrain", "personal number"],
+        _ => return None,
+    };
+    Some(kws)
+}
+
+/// Adjusts a hit's base confidence using the text surrounding the
+/// match. Built once per regex entry that has a locale dictionary;
+/// holds two Aho-Corasick automata (locale context + global
+/// counter-context) so a window scan is a single pass each.
+///
+/// Keyword matching is ASCII-case-insensitive, which is sufficient:
+/// the English cues are ASCII and the CJK / Arabic cues are
+/// caseless, so no information is lost while byte offsets stay
+/// aligned with the (already NFC-normalized) scan text.
+struct ProximityAnalyzer {
+    context: AhoCorasick,
+    counter: AhoCorasick,
+}
+
+impl ProximityAnalyzer {
+    /// Build an analyzer for `name`, or `None` if the pattern has no
+    /// locale dictionary.
+    fn for_pattern(name: &str) -> Option<Self> {
+        let kws = context_keywords(name)?;
+        let context = AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .build(kws)
+            .ok()?;
+        let counter = AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .build(COUNTER_CONTEXT)
+            .ok()?;
+        Some(Self { context, counter })
+    }
+
+    /// Return `base` adjusted by the context found within
+    /// [`PROXIMITY_WINDOW_BYTES`] on either side of the `start..end`
+    /// hit. Counter-context dominates a context boost: an "example"
+    /// nearby sinks confidence even if a label is also present.
+    fn adjust(&self, text: &str, start: usize, end: usize, base: f64) -> f64 {
+        let lo = floor_char_boundary(text, start.saturating_sub(PROXIMITY_WINDOW_BYTES));
+        let hi = ceil_char_boundary(text, (end + PROXIMITY_WINDOW_BYTES).min(text.len()));
+        let window = &text[lo..hi];
+
+        if self.counter.is_match(window) {
+            return (base - PROXIMITY_COUNTER_PENALTY).max(PROXIMITY_FLOOR);
+        }
+        if self.context.is_match(window) {
+            return (base + PROXIMITY_CONTEXT_BOOST).min(1.0);
+        }
+        base
+    }
+}
+
+/// Largest char-boundary `<= i` in `s`. `str::floor_char_boundary`
+/// is still unstable, so this is the stable equivalent.
+fn floor_char_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Smallest char-boundary `>= i` in `s`.
+fn ceil_char_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
 
 /// Default ceiling on how many bytes of a single content event the
 /// classifier scans. Bounds worst-case work + allocation on a
@@ -164,7 +315,12 @@ impl RuleMeta {
 struct RegexEntry {
     meta: RuleMeta,
     regex: Regex,
-    luhn: bool,
+    /// Structural validator for this pattern (check digit / Luhn), if
+    /// any. A hit that fails its validator is dropped.
+    validator: Option<Validator>,
+    /// Locale proximity analyzer, present only for patterns with a
+    /// context dictionary.
+    proximity: Option<ProximityAnalyzer>,
 }
 
 struct FingerprintEntry {
@@ -241,11 +397,21 @@ impl ContentClassifier {
                         rule_id: rule.id.clone(),
                         reason: e.to_string(),
                     })?;
+                    // `credit_card` keeps its dedicated Luhn check; the
+                    // Asia/GCC builtins each resolve to their check-digit
+                    // validator. Custom (non-builtin) patterns have none.
+                    let validator: Option<Validator> = if rule.pattern_data == "credit_card" {
+                        Some(luhn_valid)
+                    } else {
+                        validator_for(&rule.pattern_data)
+                    };
+                    let proximity = ProximityAnalyzer::for_pattern(&rule.pattern_data);
                     regex_patterns.push(pattern);
                     regex_entries.push(RegexEntry {
                         meta,
                         regex,
-                        luhn: rule.pattern_data == "credit_card",
+                        validator,
+                        proximity,
                     });
                 }
                 PatternType::Keyword => {
@@ -257,7 +423,11 @@ impl ContentClassifier {
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                     {
-                        keyword_patterns.push(kw.to_owned());
+                        // Pre-fold the dictionary with Unicode-aware
+                        // lowercasing so the automaton folds case for
+                        // non-ASCII scripts too (see `scan_keywords`,
+                        // which folds the input the same way).
+                        keyword_patterns.push(kw.to_lowercase());
                         keyword_pat_to_rule.push(meta_idx);
                         any = true;
                     }
@@ -298,8 +468,11 @@ impl ContentClassifier {
         let keyword_ac = if keyword_patterns.is_empty() {
             None
         } else {
+            // Dictionary is already lowercased; the input is lowercased
+            // in `scan_keywords`, so the automaton itself is built
+            // case-sensitive over the folded forms (full Unicode case
+            // folding, unlike the ASCII-only `ascii_case_insensitive`).
             let ac = AhoCorasick::builder()
-                .ascii_case_insensitive(true)
                 .build(&keyword_patterns)
                 .map_err(|e| DlpError::RuleCompile {
                     rule_id: "<keyword-automaton>".to_owned(),
@@ -353,7 +526,13 @@ impl ContentClassifier {
         metadata: &ContentMetadata,
     ) -> ClassificationResult {
         let scanned = &content[..content.len().min(self.max_scan_bytes)];
-        let text = String::from_utf8_lossy(scanned);
+        let raw = String::from_utf8_lossy(scanned);
+        // Canonicalise to NFC before the span detectors run so Arabic
+        // diacritics and CJK full-/half-width variants compare equal to
+        // the shipped patterns. ASCII is unchanged by NFC, so existing
+        // ASCII offset semantics are preserved. The Go control plane
+        // applies the same `norm.NFC` before matching.
+        let text: String = raw.nfc().collect();
 
         let mut matches = Vec::new();
         self.scan_regex(channel, &text, &mut matches);
@@ -379,14 +558,28 @@ impl ContentClassifier {
             // Recover the match span (metadata only) for the rules
             // that actually hit.
             for m in entry.regex.find_iter(text) {
-                let mut confidence = 0.8;
-                if entry.luhn {
-                    if luhn_valid(m.as_str()) {
-                        confidence = 1.0;
-                    } else {
-                        continue;
+                // Drop hits that fail the pattern's structural
+                // validator (check digit / Luhn) — the FP suppressor.
+                let validated = match entry.validator {
+                    Some(v) => {
+                        if !v(m.as_str()) {
+                            continue;
+                        }
+                        true
                     }
-                }
+                    None => false,
+                };
+                let base = if validated {
+                    CONFIDENCE_VALIDATED
+                } else {
+                    CONFIDENCE_BARE
+                };
+                // Locale proximity context lifts a bare hit and sinks
+                // an illustrative one ("example"/"test"/"sample").
+                let confidence = match entry.proximity.as_ref() {
+                    Some(p) => p.adjust(text, m.start(), m.end(), base),
+                    None => base,
+                };
                 out.push(RuleMatch {
                     rule_id: entry.meta.id.clone(),
                     pattern_type: PatternType::Regex,
@@ -404,7 +597,13 @@ impl ContentClassifier {
         let Some(ac) = self.keyword_ac.as_ref() else {
             return;
         };
-        for m in ac.find_iter(text) {
+        // Fold the input the same Unicode-aware way the dictionary was
+        // folded at compile time. For ASCII this preserves byte offsets;
+        // for scripts whose case mapping changes byte length the offset
+        // is into the folded text (metadata only, never used to slice
+        // out matched bytes — see the redaction invariant).
+        let folded = text.to_lowercase();
+        for m in ac.find_iter(&folded) {
             let Some(&meta_idx) = self.keyword_pat_to_rule.get(m.pattern().as_usize()) else {
                 continue;
             };
@@ -481,6 +680,13 @@ impl ContentClassifier {
 /// control plane with `pattern_data = "ssn_us"` detects the same
 /// thing on the endpoint.
 #[must_use]
+// Several builtins intentionally share a regex shape (e.g. Japan My
+// Number and India Aadhaar are both 12 grouped digits; Bahrain CPR
+// and `routing_number` are both 9 digits). They stay distinct arms
+// because each resolves to a different validator / proximity
+// dictionary and is documented separately — merging them would lose
+// that intent.
+#[allow(clippy::match_same_arms)]
 pub fn builtin_pattern(name: &str) -> Option<&'static str> {
     let pat = match name {
         "credit_card" => r"\b(?:\d[ -]*?){13,19}\b",
@@ -496,6 +702,23 @@ pub fn builtin_pattern(name: &str) -> Option<&'static str> {
         "drivers_license" => r"\b[A-Z]\d{4,8}\b",
         "icd10" => r"\b[A-TV-Z]\d{2}(\.\d{1,4})?\b",
         "mrn" => r"\b\d{6,10}\b",
+
+        // Asia national IDs.
+        "china_resident_id" => r"\b\d{17}[\dXx]\b",
+        "japan_my_number" => r"\b\d{4}\s?\d{4}\s?\d{4}\b",
+        "korea_rrn" => r"\b\d{6}-?\d{7}\b",
+        "singapore_nric" => r"(?i)\b[STFGM]\d{7}[A-Z]\b",
+        "malaysia_mykad" => r"\b\d{6}-?\d{2}-?\d{4}\b",
+        "thailand_id" => r"\b\d{1}-?\d{4}-?\d{5}-?\d{2}-?\d{1}\b",
+        "india_aadhaar" => r"\b\d{4}\s?\d{4}\s?\d{4}\b",
+        "india_pan" => r"\b[A-Z]{5}\d{4}[A-Z]\b",
+
+        // GCC national IDs.
+        "uae_emirates_id" => r"\b784-?\d{4}-?\d{7}-?\d{1}\b",
+        "saudi_id" => r"\b[12]\d{9}\b",
+        "qatar_qid" => r"\b\d{11}\b",
+        "kuwait_civil_id" => r"\b\d{12}\b",
+        "bahrain_cpr" => r"\b\d{9}\b",
         _ => return None,
     };
     Some(pat)
@@ -513,15 +736,29 @@ pub fn parse_simhash_hex(s: &str) -> Option<u64> {
 }
 
 /// 64-bit SimHash of `content`, byte-identical to the Go
-/// `engine.SimHash`: whitespace-delimited tokens, each hashed with
-/// SHA-256 and truncated to the leading 8 bytes (big-endian u64),
-/// bit-voted MSB-first.
+/// `engine.SimHash`: tokens are hashed with SHA-256, truncated to the
+/// leading 8 bytes (big-endian u64), and bit-voted MSB-first.
+///
+/// Tokenization is script-aware so locality-sensitive hashing works
+/// for scripts that do not delimit words with spaces:
+///
+/// * **CJK** (any U+4E00..=U+9FFF ideograph present) → overlapping
+///   character *bigrams* of the non-whitespace characters.
+/// * **Thai** (any U+0E00..=U+0E7F present, and no CJK) → overlapping
+///   character *trigrams*.
+/// * otherwise → whitespace-delimited tokens (the original behaviour;
+///   correct for Latin, Arabic, etc., which use spaces).
+///
+/// The Go side (`internal/service/dlp/engine/fingerprint.go`) applies
+/// the identical rule so a fingerprint registered on the control
+/// plane matches on the endpoint.
 #[must_use]
 pub fn simhash(content: &[u8]) -> u64 {
     let text = String::from_utf8_lossy(content);
+    let tokens = simhash_tokens(&text);
     let mut votes = [0i64; 64];
     let mut token_count = 0u64;
-    for token in text.split_whitespace() {
+    for token in tokens {
         token_count += 1;
         let digest = Sha256::digest(token.as_bytes());
         let mut bits = [0u8; 8];
@@ -546,6 +783,49 @@ pub fn simhash(content: &[u8]) -> u64 {
         }
     }
     result
+}
+
+/// True if `c` is a CJK Unified Ideograph (U+4E00..=U+9FFF).
+fn is_cjk(c: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&c)
+}
+
+/// True if `c` is in the Thai block (U+0E00..=U+0E7F).
+fn is_thai(c: char) -> bool {
+    ('\u{0E00}'..='\u{0E7F}').contains(&c)
+}
+
+/// Tokenize `text` for [`simhash`] using the script-aware rule
+/// documented there. Returned tokens own their bytes so the shingle
+/// strings outlive the per-character iteration.
+fn simhash_tokens(text: &str) -> Vec<String> {
+    let has_cjk = text.chars().any(is_cjk);
+    let has_thai = !has_cjk && text.chars().any(is_thai);
+
+    if has_cjk {
+        return char_shingles(text, 2);
+    }
+    if has_thai {
+        return char_shingles(text, 3);
+    }
+    text.split_whitespace().map(ToOwned::to_owned).collect()
+}
+
+/// Overlapping character n-grams (`n`-shingles) over the
+/// non-whitespace characters of `text`. If fewer than `n` characters
+/// remain, the whole sequence is emitted as a single token so short
+/// inputs still fingerprint.
+fn char_shingles(text: &str, n: usize) -> Vec<String> {
+    let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    if chars.len() < n {
+        return vec![chars.into_iter().collect()];
+    }
+    (0..=chars.len() - n)
+        .map(|i| chars[i..i + n].iter().collect())
+        .collect()
 }
 
 /// Hamming similarity of two 64-bit hashes: `1 - distance / 64`.
@@ -916,5 +1196,141 @@ mod tests {
         // Metadata only: the matched digits must never appear.
         assert!(!json.contains("123-45-6789"));
         assert!(json.contains("\"rule_id\":\"ssn\""));
+    }
+
+    #[test]
+    fn national_id_validator_suppresses_invalid_checksum() {
+        let c = ContentClassifier::compile(&[rule(
+            "cn",
+            PatternType::Regex,
+            "china_resident_id",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        // Valid MOD 11-2 id with a 身份证 label nearby → validated hit.
+        let good = c.classify(
+            DlpChannel::FileWrite,
+            "身份证 110101199001010015".as_bytes(),
+            &ContentMetadata::default(),
+        );
+        assert!(good.is_match());
+        assert_eq!(good.matches[0].confidence, 1.0);
+        // Same shape, wrong check digit → dropped entirely.
+        let bad = c.classify(
+            DlpChannel::FileWrite,
+            "身份证 110101199001010010".as_bytes(),
+            &ContentMetadata::default(),
+        );
+        assert!(!bad.is_match());
+    }
+
+    #[test]
+    fn proximity_context_boosts_bare_pattern() {
+        let c = ContentClassifier::compile(&[rule(
+            "qa",
+            PatternType::Regex,
+            "qatar_qid",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        // Bare regex (no validator): base 0.5, lifted by the "qatar id"
+        // cue to 0.65.
+        let res = c.classify(
+            DlpChannel::FileWrite,
+            b"qatar id 12345678901 on file",
+            &ContentMetadata::default(),
+        );
+        assert!(res.is_match());
+        assert!((res.matches[0].confidence - 0.65).abs() < 1e-9);
+
+        // No cue at all → stays at the bare base.
+        let plain = c.classify(
+            DlpChannel::FileWrite,
+            b"reference 12345678901 here",
+            &ContentMetadata::default(),
+        );
+        assert!((plain.matches[0].confidence - CONFIDENCE_BARE).abs() < 1e-9);
+    }
+
+    #[test]
+    fn proximity_counter_context_suppresses_confidence() {
+        let c = ContentClassifier::compile(&[rule(
+            "qa",
+            PatternType::Regex,
+            "qatar_qid",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        // "sample" within the window → counter penalty dominates even
+        // though the "qid" cue is also present.
+        let res = c.classify(
+            DlpChannel::FileWrite,
+            b"sample qid 12345678901",
+            &ContentMetadata::default(),
+        );
+        assert!(res.is_match());
+        assert!((res.matches[0].confidence - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn counter_context_floors_validated_hit() {
+        let c = ContentClassifier::compile(&[rule(
+            "cn",
+            PatternType::Regex,
+            "china_resident_id",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        // Validated (base 1.0) but flagged as a test sample → 0.7.
+        let res = c.classify(
+            DlpChannel::FileWrite,
+            "test 身份证 110101199001010015".as_bytes(),
+            &ContentMetadata::default(),
+        );
+        assert!(res.is_match());
+        assert!((res.matches[0].confidence - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nfc_normalization_unifies_decomposed_keyword() {
+        let c = ContentClassifier::compile(&[rule(
+            "kw",
+            PatternType::Keyword,
+            "café",
+            RuleAction::Warn,
+        )])
+        .expect("compile");
+        // Input uses the decomposed form: 'e' + U+0301 COMBINING ACUTE.
+        // NFC composes it to 'é' so it matches the composed dictionary.
+        let res = c.classify(
+            DlpChannel::Print,
+            "meet at the cafe\u{0301} now".as_bytes(),
+            &ContentMetadata::default(),
+        );
+        assert!(res.is_match());
+        assert_eq!(res.matches[0].rule_id, "kw");
+    }
+
+    #[test]
+    fn simhash_cjk_bigrams_detect_near_duplicates() {
+        // Two sentences differing by a single ideograph share almost
+        // every character bigram, so they fingerprint as near-dupes.
+        let a = simhash("我爱北京天安门今天天气很好".as_bytes());
+        let b = simhash("我爱北京天安门今天天气很坏".as_bytes());
+        let unrelated = simhash("完全没有关系的另外一句中文内容".as_bytes());
+        assert!(hamming_similarity(a, b) >= FINGERPRINT_SIMILARITY_THRESHOLD);
+        assert!(hamming_similarity(a, b) > hamming_similarity(a, unrelated));
+        // Determinism + non-empty hash for short CJK input.
+        assert_eq!(simhash("好的".as_bytes()), simhash("好的".as_bytes()));
+        assert_ne!(simhash("好的".as_bytes()), 0);
+    }
+
+    #[test]
+    fn simhash_thai_trigrams_are_deterministic() {
+        // Thai has no inter-word spaces, so trigrams drive the hash.
+        let a = simhash("สวัสดีครับยินดีต้อนรับ".as_bytes());
+        let b = simhash("สวัสดีครับยินดีต้อนรับ".as_bytes());
+        assert_eq!(a, b);
+        assert_ne!(a, 0);
     }
 }

@@ -66,6 +66,42 @@ impl DevicePosture {
         }
     }
 
+    /// Weighted compliance score in `0..=100`, summed
+    /// from the individual posture signals:
+    ///
+    /// | Signal                | Weight |
+    /// |-----------------------|--------|
+    /// | `disk_encrypted`      | 25     |
+    /// | `os_patched`          | 25     |
+    /// | `antimalware_running` | 20     |
+    /// | `firewall_enabled`    | 15     |
+    /// | `screen_lock_configured` | 15  |
+    ///
+    /// A fully-attested device scores 100; an un-attested
+    /// one scores 0. [`crate::policy::PostureRequirement`]
+    /// gates on this score, letting operators pick a floor
+    /// at any granularity instead of three fixed buckets.
+    #[must_use]
+    pub const fn risk_score(&self) -> u8 {
+        let mut score: u8 = 0;
+        if self.disk_encrypted {
+            score += 25;
+        }
+        if self.os_patched {
+            score += 25;
+        }
+        if self.antimalware_running {
+            score += 20;
+        }
+        if self.firewall_enabled {
+            score += 15;
+        }
+        if self.screen_lock_configured {
+            score += 15;
+        }
+        score
+    }
+
     /// Convenience: a posture where every signal is off
     /// (i.e. an un-attested device).
     #[must_use]
@@ -91,6 +127,12 @@ pub struct DeviceTrust {
     pub tenant_id: String,
     /// Latest posture snapshot reported by the agent.
     pub posture: DevicePosture,
+    /// Free-form device tags from the control-plane
+    /// bundle (e.g. `managed=true`, `compliance_level=high`).
+    /// Evaluated against
+    /// [`crate::policy::AccessConditions::device_tag_conditions`].
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
 }
 
 impl DeviceTrust {
@@ -241,6 +283,7 @@ mod tests {
             device_id: id.into(),
             tenant_id: "t1".into(),
             posture: DevicePosture::pristine(1_000),
+            tags: HashMap::new(),
         }
     }
 

@@ -65,6 +65,7 @@ pub mod engine;
 pub mod error;
 pub mod policy;
 pub mod rules;
+pub mod validators;
 
 pub use channels::{
     ChannelConfig, ChannelError, ChannelInterceptor, ContentEvent, DlpChannel, InMemoryInterceptor,

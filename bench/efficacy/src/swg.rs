@@ -7,7 +7,7 @@ use std::sync::Arc;
 use sng_swg::auth::ExtAuthzHandlerBuilder;
 use sng_swg::{
     Action, BypassList, Category, CategoryEntry, LocalCategoryDb, RateLimiter, RequestContext,
-    StaticMalwareList, TelemetryEmitter, VerdictEvent,
+    RequestSignals, StaticMalwareList, TelemetryEmitter, VerdictEvent,
 };
 
 use crate::report::{Case, FunctionReport, Kind, Targets};
@@ -160,7 +160,11 @@ pub async fn run() -> FunctionReport {
 
     let mut cases = Vec::new();
     for u in corpus {
-        let v = handler.evaluate(&ctx(u.host, u.path)).await;
+        // This corpus exercises only URL-category verdicts; no CASB
+        // size/label signals are relevant, so pass the defaults.
+        let v = handler
+            .evaluate(&ctx(u.host, u.path), &RequestSignals::default())
+            .await;
         let denied = v.action == Action::Deny;
         let correct = if u.bad { denied } else { !denied };
         cases.push(Case {

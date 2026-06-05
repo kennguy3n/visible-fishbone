@@ -137,6 +137,13 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 regex = "1"
 aho-corasick = "1"
 
+# Unicode NFC normalization for the DLP classifier: incoming content
+# is canonicalised before regex/keyword scanning so Arabic diacritics
+# and CJK full-/half-width variants compare equal to the patterns the
+# control plane ships. The Go side mirrors this with
+# `golang.org/x/text/unicode/norm`.
+unicode-normalization = "0.1"
+
 # Utilities.
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }

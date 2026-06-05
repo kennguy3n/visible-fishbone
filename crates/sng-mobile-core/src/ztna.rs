@@ -196,6 +196,7 @@ mod tests {
                 screen_lock_configured: true,
                 attested_at_ms: 1_000,
             },
+            tags: std::collections::HashMap::new(),
         }
     }
 
@@ -205,6 +206,7 @@ mod tests {
             tenant_id: tenant.into(),
             groups: std::collections::HashSet::new(),
             mfa_at_ms,
+            tags: std::collections::HashMap::new(),
         }
     }
 

@@ -27,63 +27,319 @@
 
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::app::App;
 use crate::device::{DevicePosture, DeviceTrust};
 use crate::error::ZtnaError;
 use crate::identity::UserIdentity;
+use crate::request::NetworkType;
 
-/// Minimum device-posture requirement an app may declare.
+/// Minimum device-posture requirement an app may declare,
+/// expressed as a numeric floor on
+/// [`DevicePosture::risk_score`] (0–100).
 ///
-/// Variants are ordered from least to most strict — the
-/// derived `Ord` impl agrees with
-/// [`PostureRequirement::satisfied_by`] so callers can
-/// `cmp` two requirements directly if they ever need to
-/// pick the more-strict of a pair.
+/// This replaces the prior three-bucket
+/// `None` / `Basic` / `Strict` enum: operators can now
+/// set a threshold at any granularity (e.g. "this app
+/// needs a 75") instead of being pinned to three points.
+/// The old buckets survive as the [`Self::NONE`],
+/// [`Self::BASIC`], and [`Self::STRICT`] sugar constants
+/// (mapping to scores 0 / 60 / 90) so existing catalog
+/// entries keep a readable spelling.
+///
+/// `Ord` is derived on the single `min_score` field, so
+/// comparing two requirements still orders them
+/// least-to-most strict, matching the old enum's
+/// ordering contract.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PostureRequirement {
-    /// No posture floor. Useful for low-risk apps that
-    /// the catalog wants open to any authenticated user.
-    None,
-    /// Basic posture: disk encryption + OS patched. The
-    /// floor for most internal-tooling apps.
-    Basic,
-    /// Strict posture: every signal in
-    /// [`DevicePosture`] must be true.
-    Strict,
+pub struct PostureRequirement {
+    /// Minimum [`DevicePosture::risk_score`] (0–100) the
+    /// device must reach to satisfy this requirement.
+    pub min_score: u8,
 }
 
 impl PostureRequirement {
-    /// True iff `posture` meets this requirement.
+    /// No posture floor (score 0). Every device — even a
+    /// fully un-attested one — satisfies it. The spelling
+    /// the catalog uses for low-risk apps open to any
+    /// authenticated user.
+    pub const NONE: Self = Self { min_score: 0 };
+    /// Basic posture floor (score 60). Roughly "disk
+    /// encryption + OS patched plus one more signal" under
+    /// the [`DevicePosture::risk_score`] weights — the
+    /// floor for most internal-tooling apps.
+    pub const BASIC: Self = Self { min_score: 60 };
+    /// Strict posture floor (score 90). Requires nearly
+    /// every posture signal on; the spelling for
+    /// high-sensitivity apps.
+    pub const STRICT: Self = Self { min_score: 90 };
+
+    /// Construct a requirement with an explicit score
+    /// floor. Scores above 100 are clamped to 100 (the
+    /// maximum [`DevicePosture::risk_score`] can return),
+    /// so an out-of-range bundle value can never make the
+    /// requirement permanently unsatisfiable.
     #[must_use]
-    pub const fn satisfied_by(self, posture: &DevicePosture) -> bool {
-        match self {
-            Self::None => true,
-            Self::Basic => posture.disk_encrypted && posture.os_patched,
-            Self::Strict => {
-                posture.disk_encrypted
-                    && posture.os_patched
-                    && posture.antimalware_running
-                    && posture.firewall_enabled
-                    && posture.screen_lock_configured
-            }
+    pub const fn new(min_score: u8) -> Self {
+        Self {
+            min_score: if min_score > 100 { 100 } else { min_score },
         }
     }
 
-    /// Stable wire string. Dashboards and the
-    /// [`sng_core::events::ZtnaEvent`] use this — the
-    /// serde rename is the same string but lifted here
-    /// so non-serde call sites get the canonical label
-    /// without going through `serde_json`.
+    /// True iff `posture` meets this requirement, i.e. its
+    /// [`DevicePosture::risk_score`] is at least
+    /// [`Self::min_score`].
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Basic => "basic",
-            Self::Strict => "strict",
+    pub const fn satisfied_by(self, posture: &DevicePosture) -> bool {
+        posture.risk_score() >= self.min_score
+    }
+}
+
+/// Operator over a single tag in a tag map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TagOp {
+    /// The tag exists and its value equals
+    /// [`TagCondition::value`].
+    Equals,
+    /// The tag is absent, or present with a value
+    /// different from [`TagCondition::value`].
+    NotEquals,
+    /// The tag key exists (any value). [`TagCondition::value`]
+    /// is ignored.
+    Exists,
+    /// The tag key is absent. [`TagCondition::value`] is
+    /// ignored.
+    NotExists,
+}
+
+/// One predicate over a tag map (the `tags` field on
+/// [`App`], [`crate::device::DeviceTrust`], or
+/// [`crate::identity::UserIdentity`]).
+///
+/// Tags arrive in the signed policy bundle from the
+/// control plane; this is the foundation for
+/// attribute-based access (e.g. device `managed=true`,
+/// user `risk_tier=elevated`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagCondition {
+    /// Tag key the condition tests.
+    pub key: String,
+    /// Comparison operator.
+    pub op: TagOp,
+    /// Comparison value. Required for [`TagOp::Equals`] /
+    /// [`TagOp::NotEquals`]; ignored for [`TagOp::Exists`] /
+    /// [`TagOp::NotExists`] (conventionally `None` there).
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+impl TagCondition {
+    /// True iff `tags` satisfies this condition.
+    ///
+    /// For [`TagOp::Equals`] a `None` [`Self::value`] can
+    /// never match (there is nothing to equal); for
+    /// [`TagOp::NotEquals`] a `None` value means "any
+    /// value other than absent", i.e. it matches whenever
+    /// the key is present.
+    #[must_use]
+    pub fn matches(&self, tags: &HashMap<String, String>) -> bool {
+        let current = tags.get(&self.key).map(String::as_str);
+        match self.op {
+            TagOp::Equals => current.is_some() && current == self.value.as_deref(),
+            TagOp::NotEquals => current != self.value.as_deref(),
+            TagOp::Exists => current.is_some(),
+            TagOp::NotExists => current.is_none(),
         }
+    }
+}
+
+/// A daily UTC access window. Carried by
+/// [`AccessConditions::allowed_hours`].
+///
+/// The window is `[start_hour, end_hour)` on a 24-hour
+/// clock. When `start_hour <= end_hour` it is a normal
+/// same-day window (e.g. 09→17 = 9am–5pm). When
+/// `start_hour > end_hour` it wraps past midnight (e.g.
+/// 22→06 = 10pm–6am). `start_hour == end_hour` is an
+/// empty window that admits no hour — an operator who
+/// means "all day" should leave
+/// [`AccessConditions::allowed_hours`] as `None`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeWindow {
+    /// Inclusive start hour, 0–23 UTC.
+    pub start_hour: u8,
+    /// Exclusive end hour, 0–23 UTC.
+    pub end_hour: u8,
+    /// Days of week the window applies to, `0`=Sunday …
+    /// `6`=Saturday. An empty set means "every day".
+    #[serde(default)]
+    pub days: HashSet<u8>,
+}
+
+impl TimeWindow {
+    /// True iff `now_ms` (Unix epoch milliseconds, UTC)
+    /// falls inside this window — both the day-of-week
+    /// set (when non-empty) and the hour range must match.
+    #[must_use]
+    pub fn contains(&self, now_ms: u64) -> bool {
+        // Days since the Unix epoch (1970-01-01, a
+        // Thursday). 0=Sunday, so the epoch's weekday is
+        // 4 and we offset by that before taking mod 7.
+        let days_since_epoch = now_ms / 86_400_000;
+        let weekday = ((days_since_epoch + 4) % 7) as u8;
+        if !self.days.is_empty() && !self.days.contains(&weekday) {
+            return false;
+        }
+        let hour = ((now_ms / 3_600_000) % 24) as u8;
+        if self.start_hour <= self.end_hour {
+            hour >= self.start_hour && hour < self.end_hour
+        } else {
+            // Wrapping window: admit the late-evening tail
+            // and the early-morning head.
+            hour >= self.start_hour || hour < self.end_hour
+        }
+    }
+}
+
+/// Per-app contextual access conditions, evaluated after
+/// the tenant guard but before group entitlement. Every
+/// field is "unset = no constraint", so a default
+/// [`AccessConditions`] admits any request and existing
+/// catalog entries keep their current behaviour.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessConditions {
+    /// ISO 3166-1 alpha-2 countries the request may
+    /// originate from. `None` = any country. Compared
+    /// case-insensitively. A request whose
+    /// `source_country` is absent fails a non-`None`
+    /// allow-list (the evaluator cannot prove it is
+    /// allowed).
+    #[serde(default)]
+    pub allowed_countries: Option<HashSet<String>>,
+    /// ISO 3166-1 alpha-2 countries that are always
+    /// denied, checked before [`Self::allowed_countries`].
+    /// `None` = no deny-list.
+    #[serde(default)]
+    pub blocked_countries: Option<HashSet<String>>,
+    /// Network classes the request may arrive on. `None`
+    /// = any. A request with no `network_type` is treated
+    /// as [`NetworkType::Unknown`] for this check.
+    #[serde(default)]
+    pub allowed_network_types: Option<HashSet<NetworkType>>,
+    /// Daily UTC window access is permitted in. `None` =
+    /// always.
+    #[serde(default)]
+    pub allowed_hours: Option<TimeWindow>,
+    /// Conditions evaluated against the *device's* tag
+    /// map. All must hold (logical AND).
+    #[serde(default)]
+    pub device_tag_conditions: Vec<TagCondition>,
+    /// Conditions evaluated against the *user's* tag map.
+    /// All must hold (logical AND).
+    #[serde(default)]
+    pub user_tag_conditions: Vec<TagCondition>,
+}
+
+impl AccessConditions {
+    /// True iff `country` is denied — either on the
+    /// blocked list, or absent / outside a non-`None`
+    /// allow list. Comparison is ASCII-case-insensitive.
+    #[must_use]
+    fn country_denied(&self, country: Option<&str>) -> bool {
+        let upper = country.map(str::to_ascii_uppercase);
+        if let (Some(blocked), Some(c)) = (self.blocked_countries.as_ref(), upper.as_ref()) {
+            if blocked.iter().any(|b| b.eq_ignore_ascii_case(c)) {
+                return true;
+            }
+        }
+        if let Some(allowed) = self.allowed_countries.as_ref() {
+            match upper.as_ref() {
+                Some(c) => !allowed.iter().any(|a| a.eq_ignore_ascii_case(c)),
+                // Allow-list set but the request carries no
+                // country: cannot prove it is allowed.
+                None => true,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// True iff `network` is not in a non-`None` allowed
+    /// set.
+    #[must_use]
+    fn network_denied(&self, network: NetworkType) -> bool {
+        self.allowed_network_types
+            .as_ref()
+            .is_some_and(|set| !set.contains(&network))
+    }
+
+    /// True iff `now_ms` is outside a non-`None` window.
+    #[must_use]
+    fn outside_hours(&self, now_ms: u64) -> bool {
+        self.allowed_hours
+            .as_ref()
+            .is_some_and(|w| !w.contains(now_ms))
+    }
+}
+
+/// Source of device / user revocations. Production wires
+/// a control-plane-backed implementation that NATS
+/// pushes revocation events into; the in-memory
+/// [`StaticRevocationList`] is the test / single-process
+/// default.
+pub trait RevocationProvider: Send + Sync + 'static {
+    /// True iff `device_id` has been revoked (device
+    /// compromise / de-enrollment).
+    fn is_revoked(&self, device_id: &str) -> bool;
+    /// True iff `user_id` has been revoked (off-boarding
+    /// / forced re-auth).
+    fn is_user_revoked(&self, user_id: &str) -> bool;
+}
+
+/// In-memory [`RevocationProvider`]. Two
+/// `ArcSwap<HashSet<String>>` sets — one for device ids,
+/// one for user ids — so the bundle adapter can swap a
+/// whole revocation set atomically while the data path
+/// reads without a lock (same pattern as the other
+/// providers).
+#[derive(Debug, Default)]
+pub struct StaticRevocationList {
+    devices: ArcSwap<HashSet<String>>,
+    users: ArcSwap<HashSet<String>>,
+}
+
+impl StaticRevocationList {
+    /// Construct from initial device + user revocation
+    /// sets.
+    #[must_use]
+    pub fn new(devices: HashSet<String>, users: HashSet<String>) -> Self {
+        Self {
+            devices: ArcSwap::new(Arc::new(devices)),
+            users: ArcSwap::new(Arc::new(users)),
+        }
+    }
+
+    /// Atomically replace the revoked-device set.
+    pub fn replace_devices(&self, devices: HashSet<String>) {
+        self.devices.store(Arc::new(devices));
+    }
+
+    /// Atomically replace the revoked-user set.
+    pub fn replace_users(&self, users: HashSet<String>) {
+        self.users.store(Arc::new(users));
+    }
+}
+
+impl RevocationProvider for StaticRevocationList {
+    fn is_revoked(&self, device_id: &str) -> bool {
+        self.devices.load().contains(device_id)
+    }
+
+    fn is_user_revoked(&self, user_id: &str) -> bool {
+        self.users.load().contains(user_id)
     }
 }
 
@@ -125,6 +381,25 @@ pub enum ZtnaDecisionReason {
     /// device's or identity's tenant. Cross-tenant
     /// requests are never allowed.
     TenantMismatch,
+    /// Deny — the device or user is on the active
+    /// revocation list. Checked before any other signal
+    /// so a compromised device / off-boarded user is cut
+    /// off immediately, without waiting for posture or
+    /// MFA TTLs to expire.
+    Revoked,
+    /// Deny — the request's `source_country` is on the
+    /// app's blocked-country list, or is absent / outside
+    /// its allowed-country list.
+    GeoBlocked,
+    /// Deny — the request's `network_type` is not in the
+    /// app's allowed-network-type set.
+    NetworkTypeBlocked,
+    /// Deny — the request arrived outside the app's
+    /// allowed access hours / days.
+    OutsideAllowedHours,
+    /// Deny — a device or user tag condition declared on
+    /// the app's [`AccessConditions`] was not satisfied.
+    TagMismatch,
 }
 
 impl ZtnaDecisionReason {
@@ -144,6 +419,11 @@ impl ZtnaDecisionReason {
             Self::MfaStale => "mfa_stale",
             Self::NotEntitled => "not_entitled",
             Self::TenantMismatch => "tenant_mismatch",
+            Self::Revoked => "revoked",
+            Self::GeoBlocked => "geo_blocked",
+            Self::NetworkTypeBlocked => "network_type_blocked",
+            Self::OutsideAllowedHours => "outside_allowed_hours",
+            Self::TagMismatch => "tag_mismatch",
         }
     }
 
@@ -497,8 +777,22 @@ pub struct EvaluationInputs<'a> {
     pub identity: &'a UserIdentity,
     /// Monotonic millisecond timestamp the orchestrator
     /// captured when the request arrived. Used for the
-    /// MFA + posture freshness checks.
+    /// MFA + posture freshness checks (and, interpreted
+    /// as Unix epoch ms, the [`AccessConditions::allowed_hours`]
+    /// gate).
     pub now_ms: u64,
+    /// ISO 3166-1 alpha-2 country the proxy resolved for
+    /// the request's source IP, copied from
+    /// [`crate::request::AccessRequest::source_country`].
+    /// `None` when unknown — see
+    /// [`AccessConditions::allowed_countries`] for how an
+    /// absent country interacts with an allow-list.
+    pub source_country: Option<&'a str>,
+    /// Network class the request arrived on, copied from
+    /// [`crate::request::AccessRequest::network_type`].
+    /// An absent network type is normalized to
+    /// [`NetworkType::Unknown`] by the orchestrator.
+    pub network_type: NetworkType,
 }
 
 /// Run the policy. **Order matters** — the evaluator
@@ -512,16 +806,29 @@ pub struct EvaluationInputs<'a> {
 ///    tenant; the device and the identity must both
 ///    belong to the same tenant. Cross-tenant requests
 ///    are denied without further checks.
-/// 2. **Identity entitlement.** If the app has a non-
+/// 2. **Access conditions.** The app's
+///    [`AccessConditions`] gate the request on
+///    geography ([`ZtnaDecisionReason::GeoBlocked`]),
+///    network class
+///    ([`ZtnaDecisionReason::NetworkTypeBlocked`]), time
+///    of day ([`ZtnaDecisionReason::OutsideAllowedHours`]),
+///    and device / user tags
+///    ([`ZtnaDecisionReason::TagMismatch`]). Runs after
+///    the tenant guard but before entitlement so a
+///    context failure short-circuits the group lookup.
+/// 3. **Identity entitlement.** If the app has a non-
 ///    empty `required_groups` set, the user's groups
 ///    must intersect it. Otherwise the user is
 ///    `not_entitled`.
-/// 3. **MFA freshness.** The user's `mfa_at_ms` must
-///    be within `policy.mfa_max_age_ms` of `now_ms`.
-/// 4. **Device posture freshness.** The device's
+/// 4. **MFA freshness.** The user's `mfa_at_ms` must
+///    be within the effective MFA budget of `now_ms` —
+///    the app's
+///    [`App::mfa_max_age_override_ms`] when set, else
+///    `policy.mfa_max_age_ms`.
+/// 5. **Device posture freshness.** The device's
 ///    `attested_at_ms` must be within
 ///    `policy.device_posture_max_age_ms` of `now_ms`.
-/// 5. **Device posture sufficiency.** The device's
+/// 6. **Device posture sufficiency.** The device's
 ///    posture must satisfy the app's
 ///    [`PostureRequirement`].
 ///
@@ -534,12 +841,13 @@ pub struct EvaluationInputs<'a> {
 ///   posture failure, so a `(deny, Pass)` decision is
 ///   unreachable today but the variant is reserved for
 ///   future checks ordered after posture).
-/// - [`PostureResult::Fail`] — on denies in steps 4-5
+/// - [`PostureResult::Fail`] — on denies in steps 5-6
 ///   ([`ZtnaDecisionReason::DevicePostureStale`] and
 ///   [`ZtnaDecisionReason::DevicePostureInsufficient`]),
 ///   i.e. the posture check ran and failed.
 /// - [`PostureResult::NotEvaluated`] — on denies in
-///   steps 1-3 ([`ZtnaDecisionReason::TenantMismatch`],
+///   steps 1-4 ([`ZtnaDecisionReason::TenantMismatch`],
+///   the access-condition reasons,
 ///   [`ZtnaDecisionReason::NotEntitled`],
 ///   [`ZtnaDecisionReason::MfaStale`]), i.e. the
 ///   evaluator short-circuited before the posture check
@@ -566,6 +874,8 @@ pub fn evaluate_policy(policy: &ZtnaPolicy, inputs: EvaluationInputs<'_>) -> Ztn
         device,
         identity,
         now_ms,
+        source_country,
+        network_type,
     } = inputs;
 
     // 1. Tenant guard. Cross-tenant requests never
@@ -579,7 +889,38 @@ pub fn evaluate_policy(policy: &ZtnaPolicy, inputs: EvaluationInputs<'_>) -> Ztn
         );
     }
 
-    // 2. Group entitlement. Empty `required_groups`
+    // 2. Access conditions (geo / network / time /
+    // tags). All are "unset = no constraint", so an app
+    // with default conditions falls straight through.
+    let conditions = &app.conditions;
+    if conditions.country_denied(source_country) {
+        return ZtnaDecision::deny(ZtnaDecisionReason::GeoBlocked, PostureResult::NotEvaluated);
+    }
+    if conditions.network_denied(network_type) {
+        return ZtnaDecision::deny(
+            ZtnaDecisionReason::NetworkTypeBlocked,
+            PostureResult::NotEvaluated,
+        );
+    }
+    if conditions.outside_hours(now_ms) {
+        return ZtnaDecision::deny(
+            ZtnaDecisionReason::OutsideAllowedHours,
+            PostureResult::NotEvaluated,
+        );
+    }
+    let tags_ok = conditions
+        .device_tag_conditions
+        .iter()
+        .all(|c| c.matches(&device.tags))
+        && conditions
+            .user_tag_conditions
+            .iter()
+            .all(|c| c.matches(&identity.tags));
+    if !tags_ok {
+        return ZtnaDecision::deny(ZtnaDecisionReason::TagMismatch, PostureResult::NotEvaluated);
+    }
+
+    // 3. Group entitlement. Empty `required_groups`
     // means "any authenticated user", consistent with
     // the catalog's documented semantics.
     if !app.required_groups.is_empty() {
@@ -595,17 +936,19 @@ pub fn evaluate_policy(policy: &ZtnaPolicy, inputs: EvaluationInputs<'_>) -> Ztn
         }
     }
 
-    // 3. MFA freshness.
-    if !identity.mfa_fresh(now_ms, policy.mfa_max_age_ms) {
+    // 4. MFA freshness. A per-app override tightens (or
+    // loosens) the policy-global budget for this app.
+    let mfa_max_age_ms = app.mfa_max_age_override_ms.unwrap_or(policy.mfa_max_age_ms);
+    if !identity.mfa_fresh(now_ms, mfa_max_age_ms) {
         return ZtnaDecision::deny(ZtnaDecisionReason::MfaStale, PostureResult::NotEvaluated);
     }
 
-    // 4. Device posture freshness.
+    // 5. Device posture freshness.
     if !device.posture_fresh(now_ms, policy.device_posture_max_age_ms) {
         return ZtnaDecision::deny(ZtnaDecisionReason::DevicePostureStale, PostureResult::Fail);
     }
 
-    // 5. Device posture sufficiency.
+    // 6. Device posture sufficiency.
     if !app.posture_requirement.satisfied_by(&device.posture) {
         return ZtnaDecision::deny(
             ZtnaDecisionReason::DevicePostureInsufficient,
@@ -623,13 +966,10 @@ mod tests {
     use std::collections::HashSet;
 
     fn app(name: &str, posture: PostureRequirement, groups: &[&str]) -> App {
-        App {
-            app_id: name.into(),
-            display_name: name.into(),
-            host_patterns: Vec::new(),
-            required_groups: groups.iter().map(|s| (*s).to_string()).collect(),
-            posture_requirement: posture,
-        }
+        let mut a = App::new(name, name);
+        a.required_groups = groups.iter().map(|s| (*s).to_string()).collect();
+        a.posture_requirement = posture;
+        a
     }
 
     fn device(tenant: &str, posture: DevicePosture) -> DeviceTrust {
@@ -637,6 +977,7 @@ mod tests {
             device_id: "dev-1".into(),
             tenant_id: tenant.into(),
             posture,
+            tags: HashMap::new(),
         }
     }
 
@@ -646,6 +987,7 @@ mod tests {
             tenant_id: tenant.into(),
             groups: groups.iter().map(|s| (*s).to_string()).collect(),
             mfa_at_ms,
+            tags: HashMap::new(),
         }
     }
 
@@ -674,43 +1016,93 @@ mod tests {
             device: d,
             identity: u,
             now_ms,
+            source_country: None,
+            network_type: NetworkType::Unknown,
         }
+    }
+
+    /// Like [`inputs`] but carries an explicit
+    /// `source_country` / `network_type` so the
+    /// access-condition branch can be exercised.
+    fn inputs_ctx<'a>(
+        a: &'a App,
+        d: &'a DeviceTrust,
+        u: &'a UserIdentity,
+        now_ms: u64,
+        source_country: Option<&'a str>,
+        network_type: NetworkType,
+    ) -> EvaluationInputs<'a> {
+        EvaluationInputs {
+            app: a,
+            device: d,
+            identity: u,
+            now_ms,
+            source_country,
+            network_type,
+        }
+    }
+
+    fn set<const N: usize>(items: [&str; N]) -> HashSet<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
     }
 
     #[test]
     fn posture_none_satisfied_by_unmanaged() {
-        assert!(PostureRequirement::None.satisfied_by(&DevicePosture::unmanaged()));
+        assert!(PostureRequirement::NONE.satisfied_by(&DevicePosture::unmanaged()));
     }
 
     #[test]
-    fn posture_basic_requires_disk_encrypted_and_os_patched() {
+    fn risk_score_sums_signal_weights() {
+        assert_eq!(DevicePosture::unmanaged().risk_score(), 0);
         let mut p = DevicePosture::unmanaged();
-        assert!(!PostureRequirement::Basic.satisfied_by(&p));
+        p.disk_encrypted = true; // 25
+        assert_eq!(p.risk_score(), 25);
+        p.os_patched = true; // +25
+        assert_eq!(p.risk_score(), 50);
+        p.antimalware_running = true; // +20
+        assert_eq!(p.risk_score(), 70);
+        p.firewall_enabled = true; // +15
+        p.screen_lock_configured = true; // +15
+        assert_eq!(p.risk_score(), 100);
+    }
+
+    #[test]
+    fn posture_basic_floor_is_score_60() {
+        // disk + os alone = 50, below the Basic floor of
+        // 60; adding any third signal clears it.
+        let mut p = DevicePosture::unmanaged();
         p.disk_encrypted = true;
-        assert!(!PostureRequirement::Basic.satisfied_by(&p));
         p.os_patched = true;
-        assert!(PostureRequirement::Basic.satisfied_by(&p));
+        assert_eq!(p.risk_score(), 50);
+        assert!(!PostureRequirement::BASIC.satisfied_by(&p));
+        p.firewall_enabled = true; // +15 -> 65
+        assert!(PostureRequirement::BASIC.satisfied_by(&p));
     }
 
     #[test]
     fn posture_strict_requires_every_signal() {
-        assert!(!PostureRequirement::Strict.satisfied_by(&DevicePosture::unmanaged()));
-        assert!(PostureRequirement::Strict.satisfied_by(&DevicePosture::pristine(now())));
+        assert!(!PostureRequirement::STRICT.satisfied_by(&DevicePosture::unmanaged()));
+        assert!(PostureRequirement::STRICT.satisfied_by(&DevicePosture::pristine(now())));
     }
 
     #[test]
     fn posture_requirement_ord_matches_satisfied_by_strictness() {
         // None is least strict (always passes), Strict is
         // most strict — derived Ord agrees.
-        assert!(PostureRequirement::None < PostureRequirement::Basic);
-        assert!(PostureRequirement::Basic < PostureRequirement::Strict);
+        assert!(PostureRequirement::NONE < PostureRequirement::BASIC);
+        assert!(PostureRequirement::BASIC < PostureRequirement::STRICT);
     }
 
     #[test]
-    fn posture_requirement_wire_strings_are_stable() {
-        assert_eq!(PostureRequirement::None.as_str(), "none");
-        assert_eq!(PostureRequirement::Basic.as_str(), "basic");
-        assert_eq!(PostureRequirement::Strict.as_str(), "strict");
+    fn posture_requirement_sugar_maps_to_scores() {
+        assert_eq!(PostureRequirement::NONE.min_score, 0);
+        assert_eq!(PostureRequirement::BASIC.min_score, 60);
+        assert_eq!(PostureRequirement::STRICT.min_score, 90);
+        // `new` clamps out-of-range scores to 100 so a bad
+        // bundle value can't make a requirement
+        // permanently unsatisfiable.
+        assert_eq!(PostureRequirement::new(200).min_score, 100);
+        assert_eq!(PostureRequirement::new(75).min_score, 75);
     }
 
     #[test]
@@ -739,6 +1131,17 @@ mod tests {
             ZtnaDecisionReason::TenantMismatch.as_str(),
             "tenant_mismatch"
         );
+        assert_eq!(ZtnaDecisionReason::Revoked.as_str(), "revoked");
+        assert_eq!(ZtnaDecisionReason::GeoBlocked.as_str(), "geo_blocked");
+        assert_eq!(
+            ZtnaDecisionReason::NetworkTypeBlocked.as_str(),
+            "network_type_blocked"
+        );
+        assert_eq!(
+            ZtnaDecisionReason::OutsideAllowedHours.as_str(),
+            "outside_allowed_hours"
+        );
+        assert_eq!(ZtnaDecisionReason::TagMismatch.as_str(), "tag_mismatch");
     }
 
     #[test]
@@ -754,6 +1157,11 @@ mod tests {
             ZtnaDecisionReason::MfaStale,
             ZtnaDecisionReason::NotEntitled,
             ZtnaDecisionReason::TenantMismatch,
+            ZtnaDecisionReason::Revoked,
+            ZtnaDecisionReason::GeoBlocked,
+            ZtnaDecisionReason::NetworkTypeBlocked,
+            ZtnaDecisionReason::OutsideAllowedHours,
+            ZtnaDecisionReason::TagMismatch,
         ] {
             assert!(r.is_deny(), "expected deny: {r:?}");
             assert!(!r.is_allow(), "expected !allow: {r:?}");
@@ -763,7 +1171,7 @@ mod tests {
     #[test]
     fn allow_when_all_signals_pass() {
         let p = policy("t1");
-        let a = app("wiki", PostureRequirement::Basic, &["eng"]);
+        let a = app("wiki", PostureRequirement::BASIC, &["eng"]);
         let d = device("t1", DevicePosture::pristine(now()));
         let u = user("t1", &["eng"], now());
         let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
@@ -775,7 +1183,7 @@ mod tests {
     #[test]
     fn deny_when_user_not_in_required_groups() {
         let p = policy("t1");
-        let a = app("payroll", PostureRequirement::Basic, &["finance"]);
+        let a = app("payroll", PostureRequirement::BASIC, &["finance"]);
         let d = device("t1", DevicePosture::pristine(now()));
         let u = user("t1", &["eng"], now());
         let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
@@ -789,7 +1197,7 @@ mod tests {
     #[test]
     fn allow_when_required_groups_empty() {
         let p = policy("t1");
-        let a = app("public", PostureRequirement::None, &[]);
+        let a = app("public", PostureRequirement::NONE, &[]);
         let d = device("t1", DevicePosture::pristine(now()));
         let u = user("t1", &[], now());
         let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
@@ -799,7 +1207,7 @@ mod tests {
     #[test]
     fn deny_on_stale_mfa() {
         let p = policy("t1");
-        let a = app("wiki", PostureRequirement::None, &[]);
+        let a = app("wiki", PostureRequirement::NONE, &[]);
         let d = device("t1", DevicePosture::pristine(now()));
         // MFA was completed 10 hours ago; default
         // mfa_max_age_ms is 8 hours.
@@ -812,7 +1220,7 @@ mod tests {
     #[test]
     fn deny_on_stale_posture() {
         let p = policy("t1");
-        let a = app("wiki", PostureRequirement::None, &[]);
+        let a = app("wiki", PostureRequirement::NONE, &[]);
         let mut posture = DevicePosture::pristine(now());
         // Posture attested 13 hours ago; default
         // device_posture_max_age_ms is 12 hours.
@@ -827,7 +1235,7 @@ mod tests {
     #[test]
     fn deny_on_posture_insufficient() {
         let p = policy("t1");
-        let a = app("admin", PostureRequirement::Strict, &[]);
+        let a = app("admin", PostureRequirement::STRICT, &[]);
         let mut posture = DevicePosture::pristine(now());
         // Strict requires every signal; drop one.
         posture.antimalware_running = false;
@@ -841,7 +1249,7 @@ mod tests {
     #[test]
     fn deny_on_cross_tenant_device() {
         let p = policy("t1");
-        let a = app("wiki", PostureRequirement::None, &[]);
+        let a = app("wiki", PostureRequirement::NONE, &[]);
         let d = device("t-other", DevicePosture::pristine(now()));
         let u = user("t1", &[], now());
         let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
@@ -852,7 +1260,7 @@ mod tests {
     #[test]
     fn deny_on_cross_tenant_identity() {
         let p = policy("t1");
-        let a = app("wiki", PostureRequirement::None, &[]);
+        let a = app("wiki", PostureRequirement::NONE, &[]);
         let d = device("t1", DevicePosture::pristine(now()));
         let u = user("t-other", &[], now());
         let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
@@ -867,7 +1275,7 @@ mod tests {
         // deployments where the bundle adapter does not
         // bother setting the tenant string.
         let p = ZtnaPolicy::default();
-        let a = app("wiki", PostureRequirement::None, &[]);
+        let a = app("wiki", PostureRequirement::NONE, &[]);
         let d = device("anything", DevicePosture::pristine(now()));
         let u = user("anything-else", &[], now());
         let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
@@ -881,7 +1289,7 @@ mod tests {
         // tenant signal is structurally cheaper and more
         // informative.
         let p = policy("t1");
-        let a = app("payroll", PostureRequirement::Basic, &["finance"]);
+        let a = app("payroll", PostureRequirement::BASIC, &["finance"]);
         let d = device("t-other", DevicePosture::pristine(now()));
         let u = user("t-other", &[], now());
         let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
@@ -893,7 +1301,7 @@ mod tests {
         // If both group and MFA fail, group check fires
         // first (preserves the order in the doc above).
         let p = policy("t1");
-        let a = app("payroll", PostureRequirement::None, &["finance"]);
+        let a = app("payroll", PostureRequirement::NONE, &["finance"]);
         let d = device("t1", DevicePosture::pristine(now()));
         let u = user("t1", &["eng"], now() - 10 * 60 * 60 * 1_000);
         let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
@@ -903,7 +1311,7 @@ mod tests {
     #[test]
     fn mfa_check_runs_before_posture_freshness() {
         let p = policy("t1");
-        let a = app("wiki", PostureRequirement::None, &[]);
+        let a = app("wiki", PostureRequirement::NONE, &[]);
         let mut posture = DevicePosture::pristine(now());
         posture.attested_at_ms = now() - 13 * 60 * 60 * 1_000;
         let d = device("t1", posture);
@@ -916,7 +1324,7 @@ mod tests {
     #[test]
     fn posture_freshness_runs_before_sufficiency() {
         let p = policy("t1");
-        let a = app("admin", PostureRequirement::Strict, &[]);
+        let a = app("admin", PostureRequirement::STRICT, &[]);
         let mut posture = DevicePosture::unmanaged();
         posture.attested_at_ms = now() - 13 * 60 * 60 * 1_000;
         let d = device("t1", posture);
@@ -963,7 +1371,10 @@ mod tests {
             display_name: "x".into(),
             host_patterns: Vec::new(),
             required_groups: groups,
-            posture_requirement: PostureRequirement::None,
+            posture_requirement: PostureRequirement::NONE,
+            mfa_max_age_override_ms: None,
+            conditions: AccessConditions::default(),
+            tags: HashMap::new(),
         };
         let d = device("t1", DevicePosture::pristine(now()));
         let u = user("t1", &["admin"], now());
@@ -1024,7 +1435,7 @@ mod tests {
         // emit Fail; allow emits Pass. This pins the
         // doc on evaluate_policy as executable contract.
         let p = policy("t1");
-        let a = app("wiki", PostureRequirement::Basic, &["eng"]);
+        let a = app("wiki", PostureRequirement::BASIC, &["eng"]);
 
         // Step 1: tenant mismatch — NotEvaluated.
         let d_wrong = device("t2", DevicePosture::pristine(now()));
@@ -1057,7 +1468,7 @@ mod tests {
         // Step 5: posture insufficient — Fail. Build a
         // *fresh-attested* unmanaged posture so the
         // staleness check (step 4) doesn't fire first.
-        let a_strict = app("admin", PostureRequirement::Strict, &["eng"]);
+        let a_strict = app("admin", PostureRequirement::STRICT, &["eng"]);
         let mut unmanaged_fresh = DevicePosture::unmanaged();
         unmanaged_fresh.attested_at_ms = now();
         let d_unmanaged = device("t1", unmanaged_fresh);
@@ -1069,6 +1480,296 @@ mod tests {
         let dec = evaluate_policy(&p, inputs(&a, &d, &u_ok, now()));
         assert!(dec.allow);
         assert_eq!(dec.posture_result, PostureResult::Pass);
+    }
+
+    // ----- WS2C: access conditions (geo / network / time) -----
+
+    #[test]
+    fn tag_condition_matches_every_operator() {
+        let mut tags = HashMap::new();
+        tags.insert("managed".to_string(), "true".to_string());
+
+        let eq_true = TagCondition {
+            key: "managed".into(),
+            op: TagOp::Equals,
+            value: Some("true".into()),
+        };
+        assert!(eq_true.matches(&tags));
+
+        let eq_false = TagCondition {
+            key: "managed".into(),
+            op: TagOp::Equals,
+            value: Some("false".into()),
+        };
+        assert!(!eq_false.matches(&tags));
+
+        // Equals with no value can never match.
+        let eq_none = TagCondition {
+            key: "managed".into(),
+            op: TagOp::Equals,
+            value: None,
+        };
+        assert!(!eq_none.matches(&tags));
+
+        let ne = TagCondition {
+            key: "managed".into(),
+            op: TagOp::NotEquals,
+            value: Some("false".into()),
+        };
+        assert!(ne.matches(&tags));
+
+        let exists = TagCondition {
+            key: "managed".into(),
+            op: TagOp::Exists,
+            value: None,
+        };
+        assert!(exists.matches(&tags));
+
+        let exists_missing = TagCondition {
+            key: "absent".into(),
+            op: TagOp::Exists,
+            value: None,
+        };
+        assert!(!exists_missing.matches(&tags));
+
+        let not_exists = TagCondition {
+            key: "absent".into(),
+            op: TagOp::NotExists,
+            value: None,
+        };
+        assert!(not_exists.matches(&tags));
+    }
+
+    #[test]
+    fn time_window_same_day_and_day_filter() {
+        // now() is Monday (weekday 1) 13:00 UTC.
+        let w = TimeWindow {
+            start_hour: 9,
+            end_hour: 17,
+            days: HashSet::new(),
+        };
+        assert!(w.contains(now()));
+
+        // End is exclusive: 13:00 is out of a 9→13 window.
+        let w_excl = TimeWindow {
+            start_hour: 9,
+            end_hour: 13,
+            days: HashSet::new(),
+        };
+        assert!(!w_excl.contains(now()));
+
+        // Day filter that excludes Monday rejects even an
+        // in-hours request.
+        let w_days = TimeWindow {
+            start_hour: 9,
+            end_hour: 17,
+            days: [2u8, 3u8].into_iter().collect(),
+        };
+        assert!(!w_days.contains(now()));
+    }
+
+    #[test]
+    fn time_window_wraps_midnight() {
+        // 22→06 admits the late tail and early head but not
+        // mid-afternoon.
+        let w = TimeWindow {
+            start_hour: 22,
+            end_hour: 6,
+            days: HashSet::new(),
+        };
+        let h = |hour: u64| hour * 3_600_000;
+        assert!(w.contains(h(23)));
+        assert!(w.contains(h(2)));
+        assert!(!w.contains(h(13)));
+    }
+
+    #[test]
+    fn geo_blocked_when_country_not_in_allow_list() {
+        let p = policy("t1");
+        let mut a = app("crm", PostureRequirement::NONE, &[]);
+        a.conditions.allowed_countries = Some(set(["US", "GB"]));
+        let d = device("t1", DevicePosture::pristine(now()));
+        let u = user("t1", &[], now());
+        let dec = evaluate_policy(
+            &p,
+            inputs_ctx(&a, &d, &u, now(), Some("CN"), NetworkType::Unknown),
+        );
+        assert_eq!(dec.reason, ZtnaDecisionReason::GeoBlocked);
+        assert_eq!(dec.posture_result, PostureResult::NotEvaluated);
+
+        // Case-insensitive match on an allowed country
+        // passes the geo gate.
+        let dec = evaluate_policy(
+            &p,
+            inputs_ctx(&a, &d, &u, now(), Some("us"), NetworkType::Unknown),
+        );
+        assert!(dec.allow);
+    }
+
+    #[test]
+    fn geo_blocked_takes_precedence_over_allow_list() {
+        let p = policy("t1");
+        let mut a = app("crm", PostureRequirement::NONE, &[]);
+        a.conditions.allowed_countries = Some(set(["US", "RU"]));
+        a.conditions.blocked_countries = Some(set(["RU"]));
+        let d = device("t1", DevicePosture::pristine(now()));
+        let u = user("t1", &[], now());
+        let dec = evaluate_policy(
+            &p,
+            inputs_ctx(&a, &d, &u, now(), Some("RU"), NetworkType::Unknown),
+        );
+        assert_eq!(dec.reason, ZtnaDecisionReason::GeoBlocked);
+    }
+
+    #[test]
+    fn geo_blocked_when_country_absent_but_allow_list_set() {
+        let p = policy("t1");
+        let mut a = app("crm", PostureRequirement::NONE, &[]);
+        a.conditions.allowed_countries = Some(set(["US"]));
+        let d = device("t1", DevicePosture::pristine(now()));
+        let u = user("t1", &[], now());
+        let dec = evaluate_policy(
+            &p,
+            inputs_ctx(&a, &d, &u, now(), None, NetworkType::Unknown),
+        );
+        assert_eq!(dec.reason, ZtnaDecisionReason::GeoBlocked);
+    }
+
+    #[test]
+    fn network_type_blocked_when_not_in_allowed_set() {
+        let p = policy("t1");
+        let mut a = app("crm", PostureRequirement::NONE, &[]);
+        a.conditions.allowed_network_types = Some([NetworkType::Corporate].into_iter().collect());
+        let d = device("t1", DevicePosture::pristine(now()));
+        let u = user("t1", &[], now());
+        let dec = evaluate_policy(&p, inputs_ctx(&a, &d, &u, now(), None, NetworkType::Public));
+        assert_eq!(dec.reason, ZtnaDecisionReason::NetworkTypeBlocked);
+
+        let dec = evaluate_policy(
+            &p,
+            inputs_ctx(&a, &d, &u, now(), None, NetworkType::Corporate),
+        );
+        assert!(dec.allow);
+    }
+
+    #[test]
+    fn outside_allowed_hours_denied() {
+        let p = policy("t1");
+        let mut a = app("crm", PostureRequirement::NONE, &[]);
+        // now() is 13:00 UTC; a 9→12 window excludes it.
+        a.conditions.allowed_hours = Some(TimeWindow {
+            start_hour: 9,
+            end_hour: 12,
+            days: HashSet::new(),
+        });
+        let d = device("t1", DevicePosture::pristine(now()));
+        let u = user("t1", &[], now());
+        let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
+        assert_eq!(dec.reason, ZtnaDecisionReason::OutsideAllowedHours);
+    }
+
+    #[test]
+    fn tag_mismatch_denied_for_device_and_user_conditions() {
+        let p = policy("t1");
+        let mut a = app("crm", PostureRequirement::NONE, &[]);
+        a.conditions.device_tag_conditions = vec![TagCondition {
+            key: "managed".into(),
+            op: TagOp::Equals,
+            value: Some("true".into()),
+        }];
+
+        // Device without the required tag is denied.
+        let d_bad = device("t1", DevicePosture::pristine(now()));
+        let u = user("t1", &[], now());
+        let dec = evaluate_policy(&p, inputs(&a, &d_bad, &u, now()));
+        assert_eq!(dec.reason, ZtnaDecisionReason::TagMismatch);
+
+        // Device carrying the tag clears the gate.
+        let mut d_ok = device("t1", DevicePosture::pristine(now()));
+        d_ok.tags.insert("managed".into(), "true".into());
+        let dec = evaluate_policy(&p, inputs(&a, &d_ok, &u, now()));
+        assert!(dec.allow);
+
+        // A user tag condition is enforced independently.
+        a.conditions.user_tag_conditions = vec![TagCondition {
+            key: "risk_tier".into(),
+            op: TagOp::NotEquals,
+            value: Some("elevated".into()),
+        }];
+        let mut u_bad = user("t1", &[], now());
+        u_bad.tags.insert("risk_tier".into(), "elevated".into());
+        let dec = evaluate_policy(&p, inputs(&a, &d_ok, &u_bad, now()));
+        assert_eq!(dec.reason, ZtnaDecisionReason::TagMismatch);
+    }
+
+    #[test]
+    fn access_conditions_run_before_group_entitlement() {
+        // A geo-blocked request must deny with GeoBlocked,
+        // not NotEntitled, even when the user also lacks the
+        // group — i.e. step 1.5 precedes step 2.
+        let p = policy("t1");
+        let mut a = app("crm", PostureRequirement::NONE, &["eng"]);
+        a.conditions.blocked_countries = Some(set(["CN"]));
+        let d = device("t1", DevicePosture::pristine(now()));
+        let u = user("t1", &["sales"], now()); // wrong group
+        let dec = evaluate_policy(
+            &p,
+            inputs_ctx(&a, &d, &u, now(), Some("CN"), NetworkType::Unknown),
+        );
+        assert_eq!(dec.reason, ZtnaDecisionReason::GeoBlocked);
+    }
+
+    // ----- WS2B: per-app MFA override -----
+
+    #[test]
+    fn per_app_mfa_override_tightens_freshness_budget() {
+        // Policy default MFA budget is 8h; the app tightens
+        // it to 30 minutes. An MFA 1h old is fresh under the
+        // policy default but stale under the override.
+        let p = policy("t1");
+        let mut a = app("crm", PostureRequirement::NONE, &[]);
+        a.mfa_max_age_override_ms = Some(30 * 60 * 1_000);
+        let d = device("t1", DevicePosture::pristine(now()));
+        let u = user("t1", &[], now() - 60 * 60 * 1_000); // 1h old
+        let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
+        assert_eq!(dec.reason, ZtnaDecisionReason::MfaStale);
+
+        // Without the override the same request is allowed.
+        let mut a_default = app("crm", PostureRequirement::NONE, &[]);
+        a_default.mfa_max_age_override_ms = None;
+        let dec = evaluate_policy(&p, inputs(&a_default, &d, &u, now()));
+        assert!(dec.allow);
+    }
+
+    #[test]
+    fn per_app_mfa_override_can_loosen_budget() {
+        // Policy default is 8h; an MFA 10h old is stale by
+        // default but fresh under a 12h override.
+        let p = policy("t1");
+        let mut a = app("crm", PostureRequirement::NONE, &[]);
+        a.mfa_max_age_override_ms = Some(12 * 60 * 60 * 1_000);
+        let d = device("t1", DevicePosture::pristine(now()));
+        let u = user("t1", &[], now() - 10 * 60 * 60 * 1_000);
+        let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
+        assert!(dec.allow);
+    }
+
+    // ----- WS2D: revocation provider -----
+
+    #[test]
+    fn static_revocation_list_reports_and_swaps() {
+        let rl = StaticRevocationList::new(set(["dev-x"]), set(["user-y"]));
+        assert!(rl.is_revoked("dev-x"));
+        assert!(!rl.is_revoked("dev-z"));
+        assert!(rl.is_user_revoked("user-y"));
+        assert!(!rl.is_user_revoked("user-z"));
+
+        rl.replace_devices(set(["dev-z"]));
+        assert!(!rl.is_revoked("dev-x"));
+        assert!(rl.is_revoked("dev-z"));
+
+        rl.replace_users(HashSet::new());
+        assert!(!rl.is_user_revoked("user-y"));
     }
 
     #[test]
