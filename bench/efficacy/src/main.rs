@@ -188,7 +188,7 @@ fn print_summary(report: &EfficacyReport, out: &std::path::Path) {
             for t in &f.throughput {
                 let bw = t
                     .mb_per_sec
-                    .map(|m| format!("  {m:.1} MB/s"))
+                    .map(|m| format!("  {m:.1} MiB/s"))
                     .unwrap_or_default();
                 let dbg = if t.debug_build { "  [DEBUG build]" } else { "" };
                 println!(
