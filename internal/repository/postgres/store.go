@@ -152,6 +152,75 @@ func (s *Store) onPrimary(ctx context.Context, fn func(q pgxQuerier) error) erro
 	return nil
 }
 
+// expectedTenantKey is the context key under which the request edge
+// records the tenant the caller was authoritatively resolved to. A
+// distinct unexported struct type cannot collide with any other
+// package's context keys.
+type expectedTenantKey struct{}
+
+// WithExpectedTenant records the tenant the caller has been
+// authoritatively resolved to — e.g. the JWT `tenant_id` claim, pinned
+// by the auth/tenant middleware (internal/middleware). It is the
+// trusted "this request may only act as tenant X" assertion that the
+// data layer cross-checks: every tenant-scoped query verifies the
+// tenant it is about to scope the RLS GUC to equals this value (see
+// setTenantGUC), so a handler that resolved one tenant for
+// authorization but then issues a repository call for a DIFFERENT
+// tenant fails closed instead of crossing the boundary.
+//
+// Callers that legitimately operate across tenants — background jobs,
+// MSP-level reads, the tenant-create path before a tenant exists —
+// simply do not stamp it; the assertion is skipped when absent.
+func WithExpectedTenant(ctx context.Context, tenantID string) context.Context {
+	return context.WithValue(ctx, expectedTenantKey{}, tenantID)
+}
+
+// ExpectedTenantFromContext returns the authoritatively-resolved
+// tenant stamped by WithExpectedTenant and whether one was present.
+func ExpectedTenantFromContext(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(expectedTenantKey{}).(string)
+	return v, ok && v != ""
+}
+
+// setTenantGUC sets the `sng.tenant_id` GUC for the current
+// transaction and asserts, in the same round trip, that the value
+// Postgres actually applied is exactly the tenant we intended. It is
+// a defense-in-depth check layered beneath RLS (which is the primary
+// boundary): set_config returns the value it stored, so comparing
+// that return against tenantID catches the failure mode where the
+// GUC is silently not what we asked for — e.g. a transaction-pooling
+// middlebox that strips or rewrites SET, or a future refactor that
+// accidentally sets the GUC at the wrong scope. Because every
+// tenant-scoped RLS policy reads `current_setting('sng.tenant_id')`,
+// a divergence here means RLS would be evaluating against the WRONG
+// tenant; we fail the transaction closed rather than risk a
+// cross-tenant read or write.
+//
+// It also closes the request-edge → data-layer loop: when the context
+// carries an authoritatively-resolved tenant (WithExpectedTenant,
+// stamped by the auth/tenant middleware), this asserts the tenant the
+// query is about to scope to equals that resolved tenant. A divergence
+// means a handler authorized tenant X but is querying as tenant Y; we
+// fail closed rather than trust the query's own tenant argument.
+func setTenantGUC(ctx context.Context, tx pgx.Tx, tenantID string) error {
+	if expected, ok := ExpectedTenantFromContext(ctx); ok && expected != tenantID {
+		// Terse on purpose: do not echo either tenant id, so a mixup
+		// cannot leak one tenant's id into the other's error/log path.
+		return fmt.Errorf("tenant context mismatch: the resolved request tenant does not match the tenant this query is scoped to; refusing to run tenant-scoped query")
+	}
+	var applied string
+	if err := tx.QueryRow(ctx, "SELECT set_config('sng.tenant_id', $1, true)", tenantID).Scan(&applied); err != nil {
+		return fmt.Errorf("set tenant context: %w", err)
+	}
+	if applied != tenantID {
+		// Do not echo the applied value at full fidelity — it is not
+		// secret, but keeping the message terse avoids leaking another
+		// tenant's id into logs on the off chance of a mixup.
+		return fmt.Errorf("tenant GUC assertion failed: RLS tenant context did not match the requested tenant; refusing to run tenant-scoped query")
+	}
+	return nil
+}
+
 // withTenant runs `fn` inside a transaction whose `sng.tenant_id`
 // GUC is set to `tenantID`. The transaction is rolled back if `fn`
 // returns an error, otherwise committed.
@@ -175,8 +244,8 @@ func (s *Store) withTenant(ctx context.Context, tenantID string, fn func(tx pgx.
 	if err := s.adoptLocalRole(ctx, tx); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, "SELECT set_config('sng.tenant_id', $1, true)", tenantID); err != nil {
-		return fmt.Errorf("set tenant context: %w", err)
+	if err := setTenantGUC(ctx, tx, tenantID); err != nil {
+		return err
 	}
 	if err := fn(tx); err != nil {
 		return err
@@ -205,8 +274,8 @@ func (s *Store) withTenantRO(ctx context.Context, tenantID string, fn func(tx pg
 	if err := s.adoptLocalRole(ctx, tx); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, "SELECT set_config('sng.tenant_id', $1, true)", tenantID); err != nil {
-		return fmt.Errorf("set tenant context: %w", err)
+	if err := setTenantGUC(ctx, tx, tenantID); err != nil {
+		return err
 	}
 	if err := fn(tx); err != nil {
 		return err

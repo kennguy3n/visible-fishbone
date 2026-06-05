@@ -69,6 +69,37 @@ when both run against the same pooler.
 
 ---
 
+## Operator authentication in production
+
+Production (`uat`/`prod`) binaries are built with `-tags production`,
+which **compiles out the HMAC (HS256) JWT path entirely** and makes
+config validation hard-fail if `AUTH_JWT_SECRET` is set (see
+`SECURITY.md`, "Operator authentication: HMAC excluded from production
+builds"). The practical consequence for deployment:
+
+* A production control plane has exactly one in-process auth path:
+  the **API key** presented in the `X-SNG-API-Key` header. Every
+  `Bearer` token — operator-console JWTs and the HMAC-signed
+  device-bound mobile session tokens alike — is verified by the same
+  `verifyBearerJWT` function, whose production stub always refuses
+  (`jwt_hmac_disabled`). The binary contains **no OIDC
+  token-verification code.**
+* **An OIDC gateway in front of the control plane is therefore a hard
+  prerequisite, not an optional pattern.** The gateway terminates the
+  operator's OIDC session and translates it into a credential the
+  control plane accepts — either by injecting a provisioned API key or
+  by asserting a trusted, gateway-set header on the proxied request.
+* Roll out order matters: stand up (or confirm) the gateway and its
+  OIDC↔credential translation **before** deploying the production
+  binary. Deploying the binary first leaves operators with no working
+  console authentication path (Bearer/HMAC tokens return
+  `jwt_hmac_disabled`).
+
+Dev and local builds (no `production` tag) keep the HMAC path and
+`AUTH_JWT_SECRET` for engineers who have not stood up an IdP.
+
+---
+
 ## Initial provisioning
 
 The migration runner refuses to run if `sng_app` is missing.
@@ -179,6 +210,15 @@ denied" message, the most common cause is that migration 002 did
 not run (or was rolled back) — re-applying the migration set
 restores the grants.
 
+`/readyz` additionally reports **leadership state** under a
+`leader` key, e.g. `{"status":"ready", "checks":{...},
+"leader":{"is_leader":true}}`. Exactly one replica should report
+`is_leader: true` at any time. Leadership is **not** a readiness
+gate — followers return `200` and serve API traffic normally — so
+the field is informational: it tells an operator which replica is
+currently running the singleton background loops (see *Leader
+election and split-brain* below).
+
 ---
 
 ## Backup considerations
@@ -244,6 +284,84 @@ ROLE` between transactions, the first transaction succeeds and
 subsequent ones see `permission denied`. The combination of
 session-pooling at every layer + the boot-time probe + readiness
 checks running as `sng_app` is what closes the loop.
+
+---
+
+## Leader election and split-brain
+
+The control plane is deployed as 2–3 horizontally scaled replicas.
+Every replica serves API traffic and consumes NATS, but the
+**singleton** background loops (app-registry sync, certificate
+rotation monitor, scheduled compliance reviews, capacity planning,
+policy-review scheduler) must run on exactly one replica at a time.
+Coordination uses a **Postgres session-level advisory lock**
+(`internal/service/leader`, `pg_try_advisory_lock` on lock id
+`0x534E474C45414400`) — no extra coordination service
+(etcd/Consul/ZooKeeper) is required because Postgres is already a
+hard dependency.
+
+### How the advisory lock prevents split-brain
+
+A session-level advisory lock is held for as long as the holding
+database **session** lives and is released automatically when that
+session ends — on a clean unlock, on connection drop, on replica
+crash, or when the server reaps a connection it has detected as
+dead (e.g. after a network partition). Because at most one session
+can hold a given advisory-lock key at a time, at most one replica
+can be the leader. A crashed leader needs **no** manual
+intervention: the server releases its lock when the dead session
+is reaped, and another replica acquires it on its next election
+tick (default `DefaultCheckInterval = 30s`).
+
+### The dual-leader window and `pgxpool` reconnection
+
+Split-brain at the lock layer is impossible, but there is a bounded
+window in which a **stale** leader still *believes* it is the
+leader after it has actually lost the lock:
+
+1. The old leader's lock-holding connection drops (partition, TCP
+   reset, server-side reap). Postgres releases the advisory lock.
+2. A second replica acquires the lock and becomes the real leader.
+3. The old leader has not yet run its next tick (which calls
+   `Session.Ping`), so `IsLeader()` still returns `true` for up to
+   one `DefaultCheckInterval`. During this window two replicas can
+   both run a singleton loop.
+
+`pgxpool` will transparently reconnect a broken pool connection,
+but the elector holds its lock on a **dedicated** connection and
+treats any `Ping` error as loss of leadership — it steps down and
+re-contends rather than silently reconnecting, so a reconnect can
+never resurrect a lock the server already released.
+
+Two mechanisms bound and neutralise this window:
+
+* **Fencing tokens.** Each leadership term carries a `FencingToken`
+  whose `Epoch` is the Postgres transaction id
+  (`pg_current_xact_id()`) captured at the instant the lock was
+  acquired. This value is globally monotonic and survives process
+  restarts, so the new leader's token is always strictly greater
+  than the stale leader's. Singleton loops run under
+  `RunIfLeaderFenced`, stamp their leader-scoped writes with the
+  token, and re-check `HoldsToken` before committing; a write
+  bearing an older epoch is rejected, so a stale leader cannot
+  corrupt state even while it still thinks it leads.
+* **`PG_CONN_MAX_LIFETIME` < advisory-lock detection time.** Set
+  `PG_CONN_MAX_LIFETIME` (config field `Postgres.ConnMaxLifetime`,
+  default `1h`) **shorter** than the time it takes the server to
+  detect and reap a dead lock-holding session (driven by
+  `tcp_keepalives_*` / `idle_session_timeout` on the primary). This
+  bounds how long a half-open connection can keep a lock alive, so
+  the stale-leader window stays small and failover is prompt.
+
+### Observability
+
+The elector exports `sng_leader_transitions_total` (a counter,
+incremented on every `0 -> leader` acquisition). A healthy cluster
+shows occasional increments on deploys/failovers; a high
+`rate(sng_leader_transitions_total[5m])` indicates election
+flapping — usually an unstable lock-holding connection (tune
+keepalives / `PG_CONN_MAX_LIFETIME`). Current leadership is visible
+per replica via the `leader.is_leader` field of `/readyz`.
 
 ## Policy signing-key modes
 

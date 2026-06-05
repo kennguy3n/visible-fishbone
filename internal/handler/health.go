@@ -36,9 +36,10 @@ type Pinger interface {
 type Health struct {
 	timeout time.Duration
 
-	mu    sync.RWMutex
-	deps  map[string]Pinger
-	start time.Time
+	mu       sync.RWMutex
+	deps     map[string]Pinger
+	start    time.Time
+	leaderFn func() bool
 }
 
 // NewHealth constructs a Health handler. The per-check timeout
@@ -52,6 +53,19 @@ func NewHealth(timeout time.Duration) *Health {
 		deps:    make(map[string]Pinger),
 		start:   time.Now().UTC(),
 	}
+}
+
+// SetLeaderReporter wires a function that reports whether this
+// replica currently holds singleton-workload leadership (see
+// internal/service/leader). When set, /readyz includes a "leader"
+// section so an operator can see which replica runs the singleton
+// background loops. Leadership is NOT a readiness gate — followers
+// are fully ready to serve API traffic — so the reported state never
+// changes the HTTP status. A nil fn clears the reporter.
+func (h *Health) SetLeaderReporter(fn func() bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.leaderFn = fn
 }
 
 // Register adds (or replaces) a named dependency to be checked by
@@ -95,6 +109,7 @@ func (h *Health) Readiness(w http.ResponseWriter, r *http.Request) {
 	for k, v := range h.deps {
 		checks[k] = v
 	}
+	leaderFn := h.leaderFn
 	h.mu.RUnlock()
 
 	results := make(map[string]checkResult, len(checks))
@@ -132,6 +147,9 @@ func (h *Health) Readiness(w http.ResponseWriter, r *http.Request) {
 		Status: status,
 		Checks: results,
 	}
+	if leaderFn != nil {
+		resp.Leader = &leaderInfo{IsLeader: leaderFn()}
+	}
 	writeJSON(w, overall, resp)
 }
 
@@ -149,6 +167,14 @@ type checkResult struct {
 type readinessResponse struct {
 	Status string                 `json:"status"`
 	Checks map[string]checkResult `json:"checks"`
+	// Leader is informational leadership state, present only when a
+	// reporter has been wired via SetLeaderReporter. It does not
+	// affect the readiness status.
+	Leader *leaderInfo `json:"leader,omitempty"`
+}
+
+type leaderInfo struct {
+	IsLeader bool `json:"is_leader"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

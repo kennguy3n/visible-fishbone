@@ -70,6 +70,25 @@ func (s *pgSession) Ping(ctx context.Context) error {
 	return s.conn.Ping(ctx)
 }
 
+// Epoch implements EpochReader: it returns the current Postgres
+// transaction id as the fencing epoch for the leadership term being
+// acquired. pg_current_xact_id() is monotonically increasing across
+// the whole cluster and never reused (unlike the 32-bit txid that
+// wraps), and it survives process restarts — so a stale leader that
+// acquired the lock earlier always carries a strictly smaller epoch
+// than the replica that takes over after it. The xid8 value is cast
+// to bigint for transport; the elector stores it as a uint64.
+func (s *pgSession) Epoch(ctx context.Context) (uint64, error) {
+	// Scan into int64 (pgx's native mapping for bigint) and widen to
+	// uint64. The transaction id is monotonically increasing and will
+	// not approach the int64 ceiling in any realistic deployment.
+	var epoch int64
+	if err := s.conn.QueryRow(ctx, "SELECT pg_current_xact_id()::text::bigint").Scan(&epoch); err != nil {
+		return 0, fmt.Errorf("leader: read fencing epoch: %w", err)
+	}
+	return uint64(epoch), nil
+}
+
 func (s *pgSession) Close(_ context.Context) {
 	// Release returns the connection to the pool. pgxpool discards a
 	// connection whose session state is broken, so a dead connection

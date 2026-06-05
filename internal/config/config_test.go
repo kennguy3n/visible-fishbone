@@ -382,20 +382,41 @@ func TestEnvironmentValid(t *testing.T) {
 	}
 }
 
-func TestProductionRequiresJWTSecret(t *testing.T) {
+// TestProductionRejectsJWTSecret pins the inverted production
+// contract introduced with the build-tagged HMAC removal (Gap #11):
+// the symmetric HMAC dev-signing path is compiled out of production
+// builds, so a configured AUTH_JWT_SECRET in uat/prod is a
+// security-relevant misconfiguration and must fail boot. The absence
+// of the secret in production is the supported configuration.
+func TestProductionRejectsJWTSecret(t *testing.T) {
 	clearAll(t)
 	withEnv(t, map[string]string{
 		"ENVIRONMENT":       "prod",
-		"AUTH_JWT_SECRET":   "",
+		"AUTH_JWT_SECRET":   "supersecret",
 		"NATS_TLS_INSECURE": "false",
 		"PG_SSLMODE":        "require",
 	})
 	_, err := Load()
 	if err == nil {
-		t.Fatal("expected validation error for missing JWT secret in prod")
+		t.Fatal("expected validation error for AUTH_JWT_SECRET set in prod")
 	}
 	if !strings.Contains(err.Error(), "AUTH_JWT_SECRET") {
 		t.Errorf("error should mention AUTH_JWT_SECRET: %v", err)
+	}
+}
+
+// TestProductionAllowsAbsentJWTSecret verifies the supported
+// production posture: with AUTH_JWT_SECRET unset, validation passes
+// (identity is terminated at the gateway via OIDC).
+func TestProductionAllowsAbsentJWTSecret(t *testing.T) {
+	clearAll(t)
+	withEnv(t, map[string]string{
+		"ENVIRONMENT":       "prod",
+		"NATS_TLS_INSECURE": "false",
+		"PG_SSLMODE":        "require",
+	})
+	if _, err := Load(); err != nil {
+		t.Fatalf("prod config with no AUTH_JWT_SECRET should be valid: %v", err)
 	}
 }
 
@@ -414,9 +435,8 @@ func TestProductionRequiresPGSSL(t *testing.T) {
 		t.Run("rejected_"+mode, func(t *testing.T) {
 			clearAll(t)
 			withEnv(t, map[string]string{
-				"ENVIRONMENT":     "prod",
-				"AUTH_JWT_SECRET": "supersecret",
-				"PG_SSLMODE":      mode,
+				"ENVIRONMENT": "prod",
+				"PG_SSLMODE":  mode,
 			})
 			_, err := Load()
 			if err == nil {
@@ -431,9 +451,8 @@ func TestProductionRequiresPGSSL(t *testing.T) {
 		t.Run("accepted_"+mode, func(t *testing.T) {
 			clearAll(t)
 			withEnv(t, map[string]string{
-				"ENVIRONMENT":     "prod",
-				"AUTH_JWT_SECRET": "supersecret",
-				"PG_SSLMODE":      mode,
+				"ENVIRONMENT": "prod",
+				"PG_SSLMODE":  mode,
 			})
 			if _, err := Load(); err != nil {
 				t.Fatalf("did not expect error for %q sslmode in prod: %v", mode, err)
@@ -694,7 +713,6 @@ func TestNATSTLSInsecureBlockedInProd(t *testing.T) {
 	clearAll(t)
 	withEnv(t, map[string]string{
 		"ENVIRONMENT":       "prod",
-		"AUTH_JWT_SECRET":   "supersecret",
 		"PG_SSLMODE":        "require",
 		"NATS_TLS_INSECURE": "true",
 	})
@@ -1261,7 +1279,6 @@ func TestValidateRejectsEmptyAppRoleInProduction(t *testing.T) {
 	setRawEnv(t, "PG_APP_ROLE", "")
 	withEnv(t, map[string]string{
 		"ENVIRONMENT":       "prod",
-		"AUTH_JWT_SECRET":   "a-very-long-secret-string-for-production-use-only-not-a-default",
 		"PG_SSLMODE":        "require",
 		"NATS_TLS_INSECURE": "false",
 	})
@@ -1364,7 +1381,6 @@ func TestTelemetryAnalytics_ProdRequiresClickHouseAuth(t *testing.T) {
 	clearAll(t)
 	withEnv(t, map[string]string{
 		"ENVIRONMENT":          "prod",
-		"AUTH_JWT_SECRET":      "a-very-long-secret-string-for-production-use",
 		"PG_SSLMODE":           "require",
 		"CLICKHOUSE_ENDPOINTS": "clickhouse:9000",
 	})

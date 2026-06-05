@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 )
 
 // RequireTenant ensures the resolved tenant ID matches the
@@ -44,6 +46,14 @@ func RequireTenant(pathParam string) func(http.Handler) http.Handler {
 			// cases we bind the path tenant onto the context so
 			// downstream handlers can scope queries.
 			ctx := withTenantID(r.Context(), pid)
+			// Defense-in-depth: record the path tenant (now proven to
+			// match the JWT claim for tenant-bound credentials) as the
+			// authoritative RLS tenant. The repository layer asserts the
+			// live sng.tenant_id GUC equals this value before running any
+			// tenant-scoped query (see postgres.setTenantGUC), so a
+			// divergence between the resolved tenant and the connection
+			// state fails closed instead of crossing a tenant boundary.
+			ctx = postgres.WithExpectedTenant(ctx, pid.String())
 			// Late-bind onto the outer Logging meta too — for
 			// platform_admin requests the JWT had no tenant_id
 			// claim, so Auth left the meta's tenant_id empty;

@@ -1452,8 +1452,18 @@ func (c Config) validate() error {
 	if c.Auth.ClaimTokenTTL <= 0 {
 		return fmt.Errorf("AUTH_CLAIM_TOKEN_TTL must be > 0, got %s", c.Auth.ClaimTokenTTL)
 	}
-	if c.Auth.JWTSecret == "" && c.Environment.IsProduction() {
-		return errors.New("AUTH_JWT_SECRET must be set in production environments")
+	// AUTH_JWT_SECRET drives the symmetric (HMAC) dev-signing path
+	// that lets a developer mint operator JWTs without standing up an
+	// IdP. Production (uat/prod) terminates identity at the gateway
+	// via OIDC and the HMAC verification path is compiled out of
+	// production builds entirely (see the //go:build !production guard
+	// in internal/middleware/auth.go and SECURITY.md). A configured
+	// AUTH_JWT_SECRET in production is therefore either dead config or
+	// — worse — an operator's mistaken belief that HMAC auth is
+	// active; either way it is a security-relevant misconfiguration we
+	// refuse to boot with rather than silently ignore.
+	if c.Auth.JWTSecret != "" && c.Environment.IsProduction() {
+		return errors.New("AUTH_JWT_SECRET must NOT be set in production environments: the HMAC JWT signing/verification path is excluded from production builds; terminate identity at the gateway via OIDC instead (see SECURITY.md and docs/deploy.md)")
 	}
 	if c.Environment.IsProduction() && c.NATS.TLSInsecure {
 		return errors.New("NATS_TLS_INSECURE must be false in production environments")

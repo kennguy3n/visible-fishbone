@@ -1,3 +1,11 @@
+//go:build !production
+
+// Every test in this file mints an HS256 (HMAC) mobile session JWT and
+// drives it through middleware.Auth, exercising the device-revocation
+// re-check that only runs once a Bearer token has been verified. That
+// verification path is compiled out of production builds (the stub in
+// auth_hmac_prod.go refuses every Bearer token), so these tests are
+// constrained to non-production builds to match the code they cover.
 package middleware_test
 
 import (

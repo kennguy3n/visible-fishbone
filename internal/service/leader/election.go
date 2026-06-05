@@ -31,6 +31,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // DefaultCheckInterval is how often the elector attempts to acquire
@@ -103,6 +105,19 @@ type LeaderElector struct {
 	// of its polls) and restart the wrapped job even if IsLeader
 	// reads true at both polls.
 	generation atomic.Uint64
+	// epoch is the fencing token for the CURRENT leadership term —
+	// see fencing.go. When the SessionOpener yields a session that
+	// implements EpochReader (the production pgSession does, via the
+	// Postgres transaction id), epoch is a globally monotonic value
+	// that survives process restarts so a stale leader's token is
+	// always strictly less than the live leader's. Otherwise it
+	// falls back to the in-process generation counter.
+	epoch atomic.Uint64
+
+	// transitions counts leadership *acquisitions* (0 -> leader
+	// edges) for the sng_leader_transitions_total metric. Nil when
+	// no registerer was supplied; increments are guarded.
+	transitions prometheus.Counter
 }
 
 // Option customises a LeaderElector.
@@ -231,11 +246,26 @@ func (e *LeaderElector) tick(ctx context.Context) {
 		return
 	}
 	e.session = sess
-	e.isLeader.Store(true)
+	// Publish ordering: establish the term's generation and fencing
+	// epoch BEFORE setting isLeader=true. FencingToken/HoldsToken read
+	// isLeader and epoch with lock-free atomics, so if isLeader were
+	// stored first a concurrent reader could observe leadership with a
+	// stale epoch from the previous term (whose Valid()/HoldsToken
+	// would wrongly pass on a re-acquisition). Go's atomics are
+	// sequentially consistent, so storing epoch first guarantees any
+	// observer that sees isLeader==true also sees this term's epoch.
+	// generation is incremented first because acquireEpoch falls back
+	// to generation.Load() when the session has no EpochReader.
 	e.generation.Add(1)
+	e.epoch.Store(e.acquireEpoch(ctx, sess))
+	e.isLeader.Store(true)
+	if e.transitions != nil {
+		e.transitions.Inc()
+	}
 	e.logger.Info("leader: acquired leadership",
 		slog.String("identity", e.identity),
-		slog.Int64("lock_id", e.lockID))
+		slog.Int64("lock_id", e.lockID),
+		slog.Uint64("fencing_epoch", e.epoch.Load()))
 }
 
 // demoteLocked relinquishes leadership. Caller must hold e.mu.
