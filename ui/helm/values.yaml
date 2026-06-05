@@ -1,0 +1,49 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/kennguy3n/sng-ui
+  tag: ""            # defaults to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Runtime configuration injected into window.__SNG_CONFIG__ by the container
+# entrypoint. A single immutable image is promoted across environments by
+# changing only these values.
+config:
+  apiBaseUrl: "/api/v1"
+  authMode: "jwt"          # "jwt" (dev) or "oidc" (prod)
+  oidcIssuer: ""
+  oidcClientId: ""
+  oidcScope: "openid profile email"
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: console.shieldnet.example
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

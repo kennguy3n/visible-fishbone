@@ -176,3 +176,42 @@ migrate-status: build-migrate
 clean:
 	rm -rf $(BIN_DIR) coverage.out
 	@if [ -d target ]; then $(CARGO) clean; fi
+
+# --- UI (Admin / MSP portal) -----------------------------------------------
+#
+# Self-contained targets for the Vite + React + TypeScript admin UI under
+# ui/. They are intentionally decoupled from the Go/Rust targets above so
+# the combined `build`/`lint`/`test` targets do not require Node tooling on
+# control-plane-only machines. Run `make ui-build` (etc.) explicitly.
+
+UI_DIR    ?= ui
+NPM       ?= npm
+UI_IMAGE  ?= sng-ui:dev
+
+.PHONY: ui-install
+ui-install:
+	cd $(UI_DIR) && $(NPM) install
+
+.PHONY: ui-gen-api
+ui-gen-api:
+	cd $(UI_DIR) && $(NPM) run gen:api
+
+.PHONY: ui-dev
+ui-dev:
+	cd $(UI_DIR) && $(NPM) run dev
+
+.PHONY: ui-lint
+ui-lint:
+	cd $(UI_DIR) && $(NPM) run lint
+
+.PHONY: ui-typecheck
+ui-typecheck:
+	cd $(UI_DIR) && $(NPM) run typecheck
+
+.PHONY: ui-build
+ui-build:
+	cd $(UI_DIR) && $(NPM) run build
+
+.PHONY: ui-docker
+ui-docker:
+	cd $(UI_DIR) && docker build -t $(UI_IMAGE) .

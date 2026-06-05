@@ -1,0 +1,6 @@
+apiVersion: v2
+name: sng-ui
+description: ShieldNet Gateway Admin UI / MSP Portal (static nginx SPA)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
