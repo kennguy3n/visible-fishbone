@@ -49,6 +49,36 @@ var builtinPatterns = map[string]*regexp.Regexp{
 	"icd10": regexp.MustCompile(`\b[A-TV-Z]\d{2}(\.\d{1,4})?\b`),
 	// Medical Record Number (MRN): 6-10 digits.
 	"mrn": regexp.MustCompile(`\b\d{6,10}\b`),
+
+	// --- Asia national IDs (confirmed by validators.go) ---
+	// China resident identity card: 17 digits + check (digit or X).
+	"china_resident_id": regexp.MustCompile(`\b\d{17}[\dXx]\b`),
+	// Japan My Number: 12 digits in 4-4-4 groups.
+	"japan_my_number": regexp.MustCompile(`\b\d{4}\s?\d{4}\s?\d{4}\b`),
+	// South Korea RRN: 6 + 7 digits, optional hyphen.
+	"korea_rrn": regexp.MustCompile(`\b\d{6}-?\d{7}\b`),
+	// Singapore NRIC / FIN: prefix letter + 7 digits + check letter.
+	"singapore_nric": regexp.MustCompile(`(?i)\b[STFGM]\d{7}[A-Z]\b`),
+	// Malaysia MyKad: 12 digits, optional 6-2-4 hyphenation.
+	"malaysia_mykad": regexp.MustCompile(`\b\d{6}-?\d{2}-?\d{4}\b`),
+	// Thailand national ID: 13 digits, optional 1-4-5-2-1 hyphenation.
+	"thailand_id": regexp.MustCompile(`\b\d{1}-?\d{4}-?\d{5}-?\d{2}-?\d{1}\b`),
+	// India Aadhaar: 12 digits in 4-4-4 groups.
+	"india_aadhaar": regexp.MustCompile(`\b\d{4}\s?\d{4}\s?\d{4}\b`),
+	// India PAN: 5 letters + 4 digits + 1 letter.
+	"india_pan": regexp.MustCompile(`\b[A-Z]{5}\d{4}[A-Z]\b`),
+
+	// --- GCC national IDs ---
+	// UAE Emirates ID: 784 + 4 + 7 + 1 digits, optional hyphens.
+	"uae_emirates_id": regexp.MustCompile(`\b784-?\d{4}-?\d{7}-?\d{1}\b`),
+	// Saudi national / Iqama ID: 10 digits starting 1 or 2.
+	"saudi_id": regexp.MustCompile(`\b[12]\d{9}\b`),
+	// Qatar QID: 11 digits (no validator; proximity-gated).
+	"qatar_qid": regexp.MustCompile(`\b\d{11}\b`),
+	// Kuwait Civil ID: 12 digits.
+	"kuwait_civil_id": regexp.MustCompile(`\b\d{12}\b`),
+	// Bahrain CPR: 9 digits (no validator; proximity-gated).
+	"bahrain_cpr": regexp.MustCompile(`\b\d{9}\b`),
 }
 
 // RegexEngine provides pre-compiled regex matching for PII patterns.
@@ -81,7 +111,10 @@ func NewRegexEngine() *RegexEngine {
 // builtin regex is used; otherwise the pattern is compiled as a
 // custom regex.
 func (e *RegexEngine) Match(content []byte, rules []repository.DLPRule) []Match {
-	text := string(content)
+	// NFC-normalize before scanning so Arabic diacritics and CJK
+	// full-/half-width variants compare equal to the shipped patterns.
+	// ASCII is unchanged, so existing offsets / snippets are preserved.
+	text := normalizeNFC(string(content))
 	var out []Match
 	for _, r := range rules {
 		if r.Type != repository.DLPRuleTypeRegex && r.Type != repository.DLPRuleTypeKeyword {
@@ -91,15 +124,40 @@ func (e *RegexEngine) Match(content []byte, rules []repository.DLPRule) []Match 
 		if re == nil {
 			continue
 		}
+		// A regex rule may carry a check-digit validator and/or a
+		// proximity dictionary; keyword rules keep the legacy 0.8.
+		var validator func(string) bool
+		var keywords []string
+		if r.Type == repository.DLPRuleTypeRegex {
+			if r.Pattern == "credit_card" {
+				validator = luhnValid
+			} else {
+				validator = validatorFor(r.Pattern)
+			}
+			keywords = proximityKeywords(r.Pattern)
+		}
+
 		locs := re.FindAllStringIndex(text, -1)
 		for _, loc := range locs {
 			snippet := text[loc[0]:loc[1]]
 			conf := 0.8
-			if r.Type == repository.DLPRuleTypeRegex && r.Pattern == "credit_card" {
-				if luhnValid(snippet) {
-					conf = 1.0
+			if r.Type == repository.DLPRuleTypeRegex {
+				validated := true
+				if validator != nil {
+					if !validator(snippet) {
+						// A failed check digit means same-shaped noise.
+						continue
+					}
 				} else {
-					continue
+					validated = false
+				}
+				if validated {
+					conf = confidenceValidated
+				} else {
+					conf = confidenceBare
+				}
+				if keywords != nil {
+					conf = proximityAdjust(text, loc[0], loc[1], conf, keywords)
 				}
 			}
 			out = append(out, Match{

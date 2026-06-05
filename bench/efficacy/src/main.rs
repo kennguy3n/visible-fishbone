@@ -5,6 +5,7 @@
 //! the Go `business-report` consolidator (Section 7), plus a
 //! human-readable summary to stdout.
 
+mod dlp;
 mod firewall;
 mod ips;
 mod report;
@@ -43,15 +44,30 @@ struct Cli {
     /// Run only the IPS driver.
     #[arg(long)]
     ips: bool,
+    /// Run only the DLP driver.
+    #[arg(long)]
+    dlp: bool,
 }
 
 impl Cli {
     /// When no per-function flag is set, run every driver.
-    fn selected(&self) -> (bool, bool, bool, bool) {
-        if self.firewall || self.swg || self.ztna || self.ips {
-            (self.firewall, self.swg, self.ztna, self.ips)
+    fn selected(&self) -> Selected {
+        if self.firewall || self.swg || self.ztna || self.ips || self.dlp {
+            Selected {
+                firewall: self.firewall,
+                swg: self.swg,
+                ztna: self.ztna,
+                ips: self.ips,
+                dlp: self.dlp,
+            }
         } else {
-            (true, true, true, true)
+            Selected {
+                firewall: true,
+                swg: true,
+                ztna: true,
+                ips: true,
+                dlp: true,
+            }
         }
     }
 }
@@ -65,25 +81,38 @@ fn host() -> String {
         .unwrap_or_else(|| "unknown-host".into())
 }
 
+/// Which drivers to run this invocation.
+struct Selected {
+    firewall: bool,
+    swg: bool,
+    ztna: bool,
+    ips: bool,
+    dlp: bool,
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let (fw, swg, ztna, ips) = cli.selected();
+    let sel = cli.selected();
 
     let mut functions: Vec<FunctionReport> = Vec::new();
-    if fw {
+    if sel.firewall {
         eprintln!("running firewall efficacy (sng-fw)...");
         functions.push(firewall::run().await);
     }
-    if swg {
+    if sel.swg {
         eprintln!("running SWG efficacy (sng-swg)...");
         functions.push(swg::run().await);
     }
-    if ztna {
+    if sel.ztna {
         eprintln!("running ZTNA efficacy (sng-ztna)...");
         functions.push(ztna::run().await);
     }
-    if ips {
+    if sel.dlp {
+        eprintln!("running DLP efficacy (sng-dlp)...");
+        functions.push(dlp::run().await);
+    }
+    if sel.ips {
         eprintln!("running IPS efficacy (sng-ips + suricata)...");
         functions.push(ips::run().await);
     }

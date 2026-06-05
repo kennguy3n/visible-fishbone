@@ -52,6 +52,11 @@ hex = { workspace = true }
 regex = { workspace = true }
 aho-corasick = { workspace = true }
 
+# NFC normalization of scanned content (see workspace manifest). Keeps
+# the endpoint classifier's Unicode handling in lock-step with the Go
+# control plane's `norm.NFC`.
+unicode-normalization = { workspace = true }
+
 # Local crate dependencies: sng-core supplies the strongly-typed
 # identifier newtypes + the `BundleTarget` enum the policy loader
 # binds against; sng-policy-eval supplies the `EnforcementDomain`

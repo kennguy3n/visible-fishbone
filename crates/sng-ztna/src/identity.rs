@@ -28,6 +28,12 @@ pub struct UserIdentity {
     /// When the user last completed MFA (millisecond
     /// epoch, monotonic on the IdP).
     pub mfa_at_ms: u64,
+    /// Free-form user tags from the control-plane bundle
+    /// (e.g. `risk_tier=elevated`, `department=finance`).
+    /// Evaluated against
+    /// [`crate::policy::AccessConditions::user_tag_conditions`].
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
 }
 
 impl UserIdentity {
@@ -120,6 +126,7 @@ mod tests {
             tenant_id: "t1".into(),
             groups: groups.iter().map(|s| (*s).to_string()).collect(),
             mfa_at_ms,
+            tags: HashMap::new(),
         }
     }
 

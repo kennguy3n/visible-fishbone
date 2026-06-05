@@ -40,10 +40,10 @@ use crate::device::{DeviceTrustProvider, StaticDeviceTrustProvider};
 use crate::error::ZtnaError;
 use crate::identity::{IdentityProvider, StaticIdentityProvider};
 use crate::policy::{
-    EvaluationInputs, PostureResult, ZtnaDecision, ZtnaDecisionReason, ZtnaPolicy,
-    ZtnaPolicyHolder, evaluate_policy,
+    EvaluationInputs, PostureResult, RevocationProvider, StaticRevocationList, ZtnaDecision,
+    ZtnaDecisionReason, ZtnaPolicy, ZtnaPolicyHolder, evaluate_policy,
 };
-use crate::request::AccessRequest;
+use crate::request::{AccessRequest, NetworkType};
 use crate::stats::ZtnaStats;
 use sng_core::envelope::Verdict;
 use sng_core::events::ZtnaEvent;
@@ -131,12 +131,15 @@ pub struct ZtnaServiceBuilder {
     apps: Arc<dyn AppCatalogProvider>,
     devices: Arc<dyn DeviceTrustProvider>,
     identities: Arc<dyn IdentityProvider>,
+    revocation: Arc<dyn RevocationProvider>,
     stats: Arc<ZtnaStats>,
 }
 
 impl ZtnaServiceBuilder {
     /// Initialise a builder with default providers
-    /// (empty in-memory tables) and default config.
+    /// (empty in-memory tables) and default config. The
+    /// default revocation provider is an empty
+    /// [`StaticRevocationList`] (nothing revoked).
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -145,6 +148,7 @@ impl ZtnaServiceBuilder {
             apps: Arc::new(StaticAppCatalog::default()),
             devices: Arc::new(StaticDeviceTrustProvider::default()),
             identities: Arc::new(StaticIdentityProvider::default()),
+            revocation: Arc::new(StaticRevocationList::default()),
             stats: Arc::new(ZtnaStats::default()),
         }
     }
@@ -184,6 +188,16 @@ impl ZtnaServiceBuilder {
         self
     }
 
+    /// Override the revocation provider. The control
+    /// plane pushes device / user revocations into this;
+    /// the evaluator checks it before any other signal so
+    /// a revoked device or user is cut off immediately.
+    #[must_use]
+    pub fn with_revocation(mut self, p: Arc<dyn RevocationProvider>) -> Self {
+        self.revocation = p;
+        self
+    }
+
     /// Override the stats handle (so peers can share a
     /// single bucket).
     #[must_use]
@@ -203,6 +217,7 @@ impl ZtnaServiceBuilder {
             apps: self.apps,
             devices: self.devices,
             identities: self.identities,
+            revocation: self.revocation,
             stats: self.stats,
             telemetry,
         }
@@ -228,6 +243,7 @@ pub struct ZtnaService {
     apps: Arc<dyn AppCatalogProvider>,
     devices: Arc<dyn DeviceTrustProvider>,
     identities: Arc<dyn IdentityProvider>,
+    revocation: Arc<dyn RevocationProvider>,
     stats: Arc<ZtnaStats>,
     telemetry: mpsc::Sender<TelemetryEvent>,
 }
@@ -240,6 +256,7 @@ impl std::fmt::Debug for ZtnaService {
             .field("apps", &"<provider>")
             .field("devices", &"<provider>")
             .field("identities", &"<provider>")
+            .field("revocation", &"<provider>")
             .field("stats", &self.stats)
             .finish_non_exhaustive()
     }
@@ -350,6 +367,30 @@ impl ZtnaService {
     /// the producer drops the error on the floor. The
     /// data path then treats the error as a deny.
     pub fn evaluate(&self, request: &AccessRequest) -> Result<ZtnaDecision, ZtnaError> {
+        // Step 0: revocation. Checked before any provider
+        // resolution so a compromised device or off-boarded
+        // user is cut off immediately — even if its app /
+        // device / identity records are otherwise valid —
+        // without waiting for posture or MFA TTLs to lapse.
+        if self.revocation.is_revoked(&request.device_id)
+            || self.revocation.is_user_revoked(&request.user_id)
+        {
+            let decision = ZtnaDecision::deny(
+                ZtnaDecisionReason::Revoked,
+                PostureResult::NotEvaluated,
+            );
+            self.stats.record_decision(&decision.reason);
+            let event = build_ztna_event(&request.device_id, &request.app_id, &decision, true);
+            if self
+                .telemetry
+                .try_send(TelemetryEvent::Ztna(event))
+                .is_err()
+            {
+                self.stats.record_telemetry_drop();
+            }
+            return Ok(decision);
+        }
+
         // Step 1: resolve the app.
         let Some(app) = self.apps.get(&request.app_id) else {
             self.emit_deny(
@@ -406,6 +447,11 @@ impl ZtnaService {
                 device: &device,
                 identity: &identity,
                 now_ms: request.now_ms,
+                source_country: request.source_country.as_deref(),
+                // An absent network type is normalized to
+                // `Unknown` so the access-conditions check
+                // sees a concrete class.
+                network_type: request.network_type.unwrap_or(NetworkType::Unknown),
             },
         );
 
@@ -508,7 +554,7 @@ mod tests {
     use crate::app::App;
     use crate::device::{DevicePosture, DeviceTrust};
     use crate::identity::UserIdentity;
-    use crate::policy::PostureRequirement;
+    use crate::policy::{AccessConditions, PostureRequirement};
     use pretty_assertions::assert_eq;
     use std::collections::HashSet;
     use tokio::sync::mpsc;
@@ -520,13 +566,10 @@ mod tests {
     }
 
     fn app(name: &str, posture: PostureRequirement, groups: &[&str]) -> App {
-        App {
-            app_id: name.into(),
-            display_name: name.into(),
-            host_patterns: Vec::new(),
-            required_groups: groups.iter().map(|s| (*s).to_string()).collect(),
-            posture_requirement: posture,
-        }
+        let mut a = App::new(name, name);
+        a.required_groups = groups.iter().map(|s| (*s).to_string()).collect();
+        a.posture_requirement = posture;
+        a
     }
 
     fn device(id: &str, tenant: &str, posture: DevicePosture) -> DeviceTrust {
@@ -534,6 +577,7 @@ mod tests {
             device_id: id.into(),
             tenant_id: tenant.into(),
             posture,
+            tags: std::collections::HashMap::new(),
         }
     }
 
@@ -543,6 +587,7 @@ mod tests {
             tenant_id: tenant.into(),
             groups: groups.iter().map(|s| (*s).to_string()).collect(),
             mfa_at_ms,
+            tags: std::collections::HashMap::new(),
         }
     }
 
@@ -593,7 +638,7 @@ mod tests {
     fn allow_path_emits_allow_event_and_returns_allow_decision() {
         let now = 1_000_000;
         let (svc, mut rx) = mk_service(
-            vec![app("wiki", PostureRequirement::Basic, &["eng"])],
+            vec![app("wiki", PostureRequirement::BASIC, &["eng"])],
             vec![device("dev-1", TENANT, pristine_posture(now))],
             vec![user("alice", TENANT, &["eng"], now)],
             policy(TENANT),
@@ -673,7 +718,7 @@ mod tests {
     fn device_not_enrolled_short_circuits_with_error() {
         let now = 1_000_000;
         let (svc, mut rx) = mk_service(
-            vec![app("wiki", PostureRequirement::None, &[])],
+            vec![app("wiki", PostureRequirement::NONE, &[])],
             vec![],
             vec![user("alice", TENANT, &[], now)],
             policy(TENANT),
@@ -696,7 +741,7 @@ mod tests {
     fn identity_not_found_short_circuits_with_error() {
         let now = 1_000_000;
         let (svc, mut rx) = mk_service(
-            vec![app("wiki", PostureRequirement::None, &[])],
+            vec![app("wiki", PostureRequirement::NONE, &[])],
             vec![device("dev-1", TENANT, pristine_posture(now))],
             vec![],
             policy(TENANT),
@@ -724,7 +769,7 @@ mod tests {
     fn tenant_mismatch_denies_with_structured_reason() {
         let now = 1_000_000;
         let (svc, mut rx) = mk_service(
-            vec![app("wiki", PostureRequirement::None, &[])],
+            vec![app("wiki", PostureRequirement::NONE, &[])],
             vec![device("dev-1", "OTHER_TENANT", pristine_posture(now))],
             vec![user("alice", TENANT, &[], now)],
             policy(TENANT),
@@ -748,7 +793,7 @@ mod tests {
     fn not_entitled_denies_when_user_lacks_required_group() {
         let now = 1_000_000;
         let (svc, mut rx) = mk_service(
-            vec![app("wiki", PostureRequirement::None, &["eng"])],
+            vec![app("wiki", PostureRequirement::NONE, &["eng"])],
             vec![device("dev-1", TENANT, pristine_posture(now))],
             vec![user("alice", TENANT, &["sales"], now)],
             policy(TENANT),
@@ -771,7 +816,7 @@ mod tests {
             ..policy(TENANT)
         };
         let (svc, mut rx) = mk_service(
-            vec![app("wiki", PostureRequirement::None, &[])],
+            vec![app("wiki", PostureRequirement::NONE, &[])],
             vec![device("dev-1", TENANT, pristine_posture(now))],
             // mfa_at_ms is 5 minutes ago; max age is 1 min.
             vec![user("alice", TENANT, &[], now - 5 * 60_000)],
@@ -799,7 +844,7 @@ mod tests {
             ..DevicePosture::pristine(0)
         };
         let (svc, mut rx) = mk_service(
-            vec![app("wiki", PostureRequirement::None, &[])],
+            vec![app("wiki", PostureRequirement::NONE, &[])],
             vec![device("dev-1", TENANT, stale_posture)],
             vec![user("alice", TENANT, &[], now)],
             pol,
@@ -821,7 +866,7 @@ mod tests {
         // Drop one signal to fail Strict.
         posture.screen_lock_configured = false;
         let (svc, mut rx) = mk_service(
-            vec![app("wiki", PostureRequirement::Strict, &[])],
+            vec![app("wiki", PostureRequirement::STRICT, &[])],
             vec![device("dev-1", TENANT, posture)],
             vec![user("alice", TENANT, &[], now)],
             policy(TENANT),
@@ -849,7 +894,7 @@ mod tests {
         // second allow must `try_send` and credit the
         // drop counter — without blocking.
         let (svc, _rx) = mk_service(
-            vec![app("wiki", PostureRequirement::None, &[])],
+            vec![app("wiki", PostureRequirement::NONE, &[])],
             vec![device("dev-1", TENANT, pristine_posture(now))],
             vec![user("alice", TENANT, &[], now)],
             policy(TENANT),
@@ -873,7 +918,7 @@ mod tests {
     fn reload_policy_swaps_active_set_and_records_counter() {
         let now = 1_000_000;
         let (svc, mut rx) = mk_service(
-            vec![app("wiki", PostureRequirement::None, &[])],
+            vec![app("wiki", PostureRequirement::NONE, &[])],
             vec![device("dev-1", TENANT, pristine_posture(now))],
             vec![user("alice", "OTHER_TENANT", &[], now)],
             policy(TENANT),
@@ -930,7 +975,10 @@ mod tests {
                 display_name: "Wiki".into(),
                 host_patterns: Vec::new(),
                 required_groups: HashSet::new(),
-                posture_requirement: PostureRequirement::None,
+                posture_requirement: PostureRequirement::NONE,
+                mfa_max_age_override_ms: None,
+                conditions: AccessConditions::default(),
+                tags: std::collections::HashMap::new(),
             }],
             vec![device("dev-1", TENANT, pristine_posture(now))],
             // No groups on the user.
@@ -950,7 +998,7 @@ mod tests {
         // user; see `UserIdentity::mfa_fresh` doc.
         let now = 1_000_000;
         let (svc, _rx) = mk_service(
-            vec![app("wiki", PostureRequirement::None, &[])],
+            vec![app("wiki", PostureRequirement::NONE, &[])],
             vec![device("dev-1", TENANT, pristine_posture(now))],
             vec![user("alice", TENANT, &[], now + 1_000)],
             policy(TENANT),
@@ -969,5 +1017,124 @@ mod tests {
             .evaluate(&req("wiki", "dev-1", "alice", 0))
             .expect_err("default catalog is empty");
         assert!(matches!(err, ZtnaError::UnknownApp { .. }));
+    }
+
+    fn mk_service_with_revocation(
+        apps: Vec<App>,
+        devices: Vec<DeviceTrust>,
+        users: Vec<UserIdentity>,
+        revocation: crate::policy::StaticRevocationList,
+        chan_cap: usize,
+    ) -> (ZtnaService, mpsc::Receiver<TelemetryEvent>) {
+        let (tx, rx) = mpsc::channel(chan_cap);
+        let svc = ZtnaServiceBuilder::new()
+            .with_policy(Arc::new(ZtnaPolicyHolder::new(policy(TENANT))))
+            .with_app_catalog(Arc::new(StaticAppCatalog::new(apps)))
+            .with_device_trust(Arc::new(StaticDeviceTrustProvider::new(devices)))
+            .with_identity(Arc::new(StaticIdentityProvider::new(users)))
+            .with_revocation(Arc::new(revocation))
+            .build(tx);
+        (svc, rx)
+    }
+
+    #[test]
+    fn revoked_device_denied_before_app_resolution() {
+        // The revocation check is step 0: a revoked device
+        // is cut off even when the referenced app does not
+        // exist, so the outcome is a `Revoked` deny — never
+        // `UnknownApp`. This pins the precedence.
+        let now = 1_000_000;
+        let revocation = crate::policy::StaticRevocationList::new(
+            ["dev-1".to_string()].into_iter().collect(),
+            HashSet::new(),
+        );
+        let (svc, mut rx) = mk_service_with_revocation(
+            Vec::new(), // empty catalog
+            Vec::new(),
+            Vec::new(),
+            revocation,
+            4,
+        );
+        let d = svc
+            .evaluate(&req("ghost-app", "dev-1", "alice", now))
+            .expect("revoked device returns Ok(deny), not Err");
+        assert!(!d.allow);
+        assert_eq!(d.reason, ZtnaDecisionReason::Revoked);
+        assert_eq!(d.posture_result, PostureResult::NotEvaluated);
+        // A deny event is emitted and the revoked counter
+        // ticks.
+        let evs = drain(&mut rx);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(ztna_event(&evs[0]).reason, "revoked");
+        assert_eq!(svc.stats.snapshot().deny_revoked, 1);
+    }
+
+    #[test]
+    fn revoked_user_denied_even_with_valid_app_and_device() {
+        let now = 1_000_000;
+        let revocation = crate::policy::StaticRevocationList::new(
+            HashSet::new(),
+            ["alice".to_string()].into_iter().collect(),
+        );
+        let (svc, _rx) = mk_service_with_revocation(
+            vec![app("wiki", PostureRequirement::NONE, &[])],
+            vec![device("dev-1", TENANT, pristine_posture(now))],
+            vec![user("alice", TENANT, &[], now)],
+            revocation,
+            4,
+        );
+        let d = svc.evaluate(&req("wiki", "dev-1", "alice", now)).unwrap();
+        assert!(!d.allow);
+        assert_eq!(d.reason, ZtnaDecisionReason::Revoked);
+    }
+
+    #[test]
+    fn unrevoked_request_allows_normally() {
+        // Backward-compat: a configured-but-empty revocation
+        // provider does not change the allow path.
+        let now = 1_000_000;
+        let (svc, _rx) = mk_service_with_revocation(
+            vec![app("wiki", PostureRequirement::NONE, &[])],
+            vec![device("dev-1", TENANT, pristine_posture(now))],
+            vec![user("alice", TENANT, &[], now)],
+            crate::policy::StaticRevocationList::default(),
+            4,
+        );
+        let d = svc.evaluate(&req("wiki", "dev-1", "alice", now)).unwrap();
+        assert!(d.allow);
+    }
+
+    #[test]
+    fn request_network_context_flows_into_geo_evaluation() {
+        // End-to-end: the network fields set on the request
+        // reach `evaluate_policy` and drive the geo gate.
+        let now = 1_000_000;
+        let mut wiki = app("wiki", PostureRequirement::NONE, &[]);
+        wiki.conditions.blocked_countries =
+            Some(["CN".to_string()].into_iter().collect());
+        let (svc, _rx) = mk_service(
+            vec![wiki],
+            vec![device("dev-1", TENANT, pristine_posture(now))],
+            vec![user("alice", TENANT, &[], now)],
+            policy(TENANT),
+            4,
+        );
+
+        let blocked = AccessRequest::new("wiki", "dev-1", "alice", now).with_network(
+            Some("1.2.3.4".into()),
+            Some("CN".into()),
+            Some(NetworkType::Public),
+        );
+        let d = svc.evaluate(&blocked).unwrap();
+        assert_eq!(d.reason, ZtnaDecisionReason::GeoBlocked);
+        assert_eq!(svc.stats.snapshot().deny_geo_blocked, 1);
+
+        // A request from an unblocked country is allowed.
+        let ok = AccessRequest::new("wiki", "dev-1", "alice", now).with_network(
+            None,
+            Some("US".into()),
+            Some(NetworkType::Corporate),
+        );
+        assert!(svc.evaluate(&ok).unwrap().allow);
     }
 }

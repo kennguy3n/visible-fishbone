@@ -23,6 +23,45 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Classification of the network path the request
+/// arrived on, derived by the proxy from the source IP
+/// (corporate CIDR allow-list, VPN concentrator pool,
+/// everything else public). Used by
+/// [`crate::policy::AccessConditions`] to gate apps to a
+/// network class (e.g. "this app is corporate-network
+/// only").
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkType {
+    /// Source IP is inside a tenant-declared corporate
+    /// CIDR.
+    Corporate,
+    /// Source IP belongs to the VPN concentrator pool.
+    Vpn,
+    /// Any routable address that is neither corporate nor
+    /// VPN.
+    Public,
+    /// The proxy could not classify the source (no
+    /// GeoIP / CIDR match, or the field was absent).
+    Unknown,
+}
+
+impl NetworkType {
+    /// Stable wire string, matching the serde rename so
+    /// non-serde call sites (dashboards, logs) get the
+    /// same label without round-tripping through
+    /// `serde_json`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Corporate => "corporate",
+            Self::Vpn => "vpn",
+            Self::Public => "public",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// One per-application access attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AccessRequest {
@@ -37,10 +76,32 @@ pub struct AccessRequest {
     /// Monotonic millisecond timestamp when the producer
     /// observed the request.
     pub now_ms: u64,
+    /// Caller's source IP as observed by the proxy.
+    /// `None` when the producer did not forward it.
+    /// Carried for telemetry / audit; the evaluator
+    /// gates on [`Self::source_country`] and
+    /// [`Self::network_type`], which the proxy derives
+    /// from this address.
+    #[serde(default)]
+    pub source_ip: Option<String>,
+    /// ISO 3166-1 alpha-2 country the proxy resolved
+    /// from the source IP via GeoIP. `None` when no
+    /// GeoIP lookup was performed or it failed.
+    #[serde(default)]
+    pub source_country: Option<String>,
+    /// Network class the request arrived on. `None`
+    /// when the producer did not classify it (treated
+    /// as [`NetworkType::Unknown`] by the evaluator).
+    #[serde(default)]
+    pub network_type: Option<NetworkType>,
 }
 
 impl AccessRequest {
-    /// Convenience constructor for tests.
+    /// Convenience constructor for tests. The network-
+    /// context fields ([`Self::source_ip`],
+    /// [`Self::source_country`], [`Self::network_type`])
+    /// default to `None`; use [`Self::with_network`] to
+    /// set them.
     #[must_use]
     pub fn new(
         app_id: impl Into<String>,
@@ -53,7 +114,26 @@ impl AccessRequest {
             device_id: device_id.into(),
             user_id: user_id.into(),
             now_ms,
+            source_ip: None,
+            source_country: None,
+            network_type: None,
         }
+    }
+
+    /// Builder-style setter for the network-context
+    /// fields. Returns `self` so it chains off
+    /// [`Self::new`].
+    #[must_use]
+    pub fn with_network(
+        mut self,
+        source_ip: Option<String>,
+        source_country: Option<String>,
+        network_type: Option<NetworkType>,
+    ) -> Self {
+        self.source_ip = source_ip;
+        self.source_country = source_country;
+        self.network_type = network_type;
+        self
     }
 }
 

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"math/bits"
-	"strings"
 
 	"github.com/google/uuid"
 
@@ -83,12 +82,16 @@ func (e *FingerprintEngine) MatchFingerprints(
 	return matches, nil
 }
 
-// SimHash computes a 64-bit SimHash of the content by treating each
-// whitespace-delimited token as a feature. Each token is hashed with
-// SHA-256 (truncated to 64 bits) and the resulting bit-vectors are
-// summed component-wise.
+// SimHash computes a 64-bit SimHash of the content. Tokenization is
+// script-aware (see simhashTokens): whitespace tokens for space-
+// delimited scripts, character bigrams for CJK, and character
+// trigrams for Thai, so locality-sensitive hashing works for scripts
+// that do not delimit words with spaces. Each token is hashed with
+// SHA-256 (truncated to the leading 64 bits) and the bit-vectors are
+// summed component-wise, MSB-first — byte-identical to the Rust
+// `simhash` in crates/sng-dlp/src/classifier.rs.
 func SimHash(content []byte) uint64 {
-	tokens := strings.Fields(string(content))
+	tokens := simhashTokens(string(content))
 	if len(tokens) == 0 {
 		return 0
 	}

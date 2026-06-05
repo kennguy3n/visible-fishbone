@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::policy::PostureRequirement;
+use crate::policy::{AccessConditions, PostureRequirement};
 
 /// One application in the per-tenant catalog.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,10 +42,31 @@ pub struct App {
     pub required_groups: HashSet<String>,
     /// Minimum device posture required to access.
     pub posture_requirement: PostureRequirement,
+    /// Per-app override of the policy-global MFA freshness
+    /// budget (`policy.mfa_max_age_ms`). `None` = use the
+    /// policy default; `Some(ms)` lets a high-risk app
+    /// demand more-frequent MFA (e.g. 30 min) while
+    /// low-risk apps keep the 8-hour default.
+    #[serde(default)]
+    pub mfa_max_age_override_ms: Option<u64>,
+    /// Contextual access conditions (geo / network / time
+    /// / tags). Defaults to an unconstrained
+    /// [`AccessConditions`], so existing catalog entries
+    /// admit any request.
+    #[serde(default)]
+    pub conditions: AccessConditions,
+    /// Free-form tags from the control-plane bundle (e.g.
+    /// `sensitivity=high`). Foundation for attribute-based
+    /// policy; carried for now, not yet gated on directly.
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
 }
 
 impl App {
-    /// Convenience constructor for tests.
+    /// Convenience constructor for tests. New optional
+    /// fields ([`Self::mfa_max_age_override_ms`],
+    /// [`Self::conditions`], [`Self::tags`]) default to
+    /// "unset" so callers get the pre-existing behaviour.
     #[must_use]
     pub fn new(app_id: impl Into<String>, display_name: impl Into<String>) -> Self {
         Self {
@@ -53,7 +74,10 @@ impl App {
             display_name: display_name.into(),
             host_patterns: Vec::new(),
             required_groups: HashSet::new(),
-            posture_requirement: PostureRequirement::None,
+            posture_requirement: PostureRequirement::NONE,
+            mfa_max_age_override_ms: None,
+            conditions: AccessConditions::default(),
+            tags: HashMap::new(),
         }
     }
 }

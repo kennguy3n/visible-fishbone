@@ -20,13 +20,10 @@ const H13_MS: u64 = 13 * 60 * 60 * 1_000; // > 12h posture window
 const H9_MS: u64 = 9 * 60 * 60 * 1_000; // > 8h MFA window
 
 fn app(id: &str, posture: PostureRequirement, groups: &[&str]) -> App {
-    App {
-        app_id: id.into(),
-        display_name: id.into(),
-        host_patterns: Vec::new(),
-        required_groups: groups.iter().map(|s| (*s).to_string()).collect(),
-        posture_requirement: posture,
-    }
+    let mut a = App::new(id, id);
+    a.required_groups = groups.iter().map(|s| (*s).to_string()).collect();
+    a.posture_requirement = posture;
+    a
 }
 
 fn device(id: &str, tenant: &str, posture: DevicePosture) -> DeviceTrust {
@@ -34,6 +31,7 @@ fn device(id: &str, tenant: &str, posture: DevicePosture) -> DeviceTrust {
         device_id: id.into(),
         tenant_id: tenant.into(),
         posture,
+        tags: std::collections::HashMap::new(),
     }
 }
 
@@ -43,6 +41,7 @@ fn user(id: &str, tenant: &str, groups: &[&str], mfa_at_ms: u64) -> UserIdentity
         tenant_id: tenant.into(),
         groups: groups.iter().map(|s| (*s).to_string()).collect(),
         mfa_at_ms,
+        tags: std::collections::HashMap::new(),
     }
 }
 
@@ -60,17 +59,23 @@ pub async fn run() -> FunctionReport {
         attested_at_ms: NOW - H13_MS,
         ..DevicePosture::pristine(NOW)
     };
-    // Fresh attestation but fails the Basic floor (no disk encryption).
+    // Fresh attestation but fails the Basic floor (score 60): only
+    // disk encryption on (25) — well below 60 under the weighted
+    // risk_score model.
     let insufficient = DevicePosture {
-        disk_encrypted: false,
-        ..DevicePosture::pristine(NOW)
+        disk_encrypted: true,
+        os_patched: false,
+        antimalware_running: false,
+        firewall_enabled: false,
+        screen_lock_configured: false,
+        attested_at_ms: NOW,
     };
 
     let apps = vec![
         // High-value app: requires Basic posture + engineering group.
-        app("crm", PostureRequirement::Basic, &["engineering"]),
+        app("crm", PostureRequirement::BASIC, &["engineering"]),
         // Low-risk app: no posture floor, open to eng + sales.
-        app("wiki", PostureRequirement::None, &["engineering", "sales"]),
+        app("wiki", PostureRequirement::NONE, &["engineering", "sales"]),
     ];
 
     let devices = vec![
