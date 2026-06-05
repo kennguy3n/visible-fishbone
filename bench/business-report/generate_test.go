@@ -261,6 +261,164 @@ func TestEndToEndWithDryRunInputs(t *testing.T) {
 	}
 }
 
+func TestSecurityEfficacySection(t *testing.T) {
+	r := &BusinessReport{
+		Efficacy: &EfficacyReport{
+			Suite:          "security-efficacy",
+			Host:           "test-host",
+			OverallVerdict: "PASS",
+			Functions: []*EfficacyFunction{
+				{
+					Function: "firewall", Crate: "sng-fw", Kind: "enforcement", Tested: true,
+					TotalCases: 10, BadCases: 6, GoodCases: 4,
+					TP: 6, FN: 0, TN: 4, FP: 0,
+					CatchRate: 1.0, FalsePosRate: 0.0, Accuracy: 1.0,
+					Verdict: "PASS", Notes: "real engine deny path",
+				},
+				{
+					Function: "ips", Crate: "sng-ips", Kind: "detection", Tested: false,
+					UntestedReason: "suricata binary not found on PATH",
+					Verdict:        "UNTESTED",
+				},
+			},
+		},
+	}
+
+	md := r.ToMarkdown()
+	for _, want := range []string{
+		"## 7. Security Efficacy",
+		"Overall efficacy verdict: PASS",
+		"| firewall | `sng-fw` | block-rate | 6 | 4 | 100.0% | 0.0% | 100.0% | PASS |",
+		"detection-rate", // IPS row uses the detection KPI label
+		"UNTESTED",
+		"suricata binary not found on PATH",
+		"Security efficacy", // executive-summary row
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("efficacy markdown missing %q", want)
+		}
+	}
+
+	// A perfect tested corpus with zero false-positives is a data-backed
+	// strength.
+	if !containsSubstr(r.strengths(), "Security enforcement is correct end-to-end") {
+		t.Error("perfect efficacy corpus should surface as a strength")
+	}
+
+	// A missed known-bad case (false negative) must NOT be claimed as a
+	// strength.
+	r.Efficacy.Functions[0].TP = 5
+	r.Efficacy.Functions[0].FN = 1
+	if containsSubstr(r.strengths(), "Security enforcement is correct end-to-end") {
+		t.Error("efficacy with a false negative must not be claimed as a clean strength")
+	}
+}
+
+func TestSecurityEfficacyMissing(t *testing.T) {
+	r := &BusinessReport{}
+	md := r.ToMarkdown()
+	if !strings.Contains(md, "## 7. Security Efficacy") {
+		t.Error("Section 7 header should render even when no efficacy report is supplied")
+	}
+	if !strings.Contains(md, "No efficacy report supplied") {
+		t.Error("missing efficacy report should render the placeholder note")
+	}
+}
+
+// TestEfficacyJSONContract locks the Go<->Rust wire contract for the
+// efficacy report. The Go structs have no shared schema definition with the
+// Rust `sng-efficacy` harness, so a Rust-side serde rename could silently
+// break deserialization. This test feeds a payload that mirrors the *exact*
+// JSON the Rust harness emits — including the renamed `crate`/`fn` keys and
+// the Rust-only `targets`/`cases` objects Go must ignore — through the real
+// loadEfficacy path and asserts every field the renderer relies on populates.
+// If a future Rust rename drifts from this golden shape, this test fails
+// instead of the report silently rendering empty cells.
+func TestEfficacyJSONContract(t *testing.T) {
+	// Byte-for-byte representative of `bench/efficacy` output: note `crate`
+	// (Rust `crate_name`), `fn` (Rust `fn_`), and the Rust-only `targets`
+	// and `cases` keys that the Go structs deliberately omit.
+	const payload = `{
+  "suite": "security-efficacy",
+  "git_sha": "deadbee",
+  "generated_at": "2026-06-04T00:00:00Z",
+  "host": "ci-runner",
+  "overall_verdict": "PASS",
+  "functions": [
+    {
+      "function": "firewall",
+      "crate": "sng-fw",
+      "kind": "enforcement",
+      "tested": true,
+      "total_cases": 12,
+      "bad_cases": 7,
+      "good_cases": 5,
+      "tp": 7,
+      "fn": 0,
+      "tn": 5,
+      "fp": 0,
+      "catch_rate": 1.0,
+      "false_positive_rate": 0.0,
+      "accuracy": 1.0,
+      "targets": {"catch_pass": 0.99, "catch_warn": 0.9, "fp_pass": 0.02, "fp_warn": 0.05},
+      "verdict": "PASS",
+      "notes": "real engine deny path",
+      "cases": [
+        {"description": "deny tcp/9999", "bad": true, "expected": "deny", "actual": "deny", "correct": true}
+      ]
+    },
+    {
+      "function": "ips",
+      "crate": "sng-ips",
+      "kind": "detection",
+      "tested": false,
+      "untested_reason": "suricata binary not found on PATH",
+      "verdict": "UNTESTED"
+    }
+  ]
+}`
+	path := filepath.Join(t.TempDir(), "efficacy-report.json")
+	if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := loadEfficacy(path)
+	if err != nil {
+		t.Fatalf("loadEfficacy rejected the Rust schema (contract drift?): %v", err)
+	}
+	if r.Suite != "security-efficacy" || r.OverallVerdict != "PASS" || r.Host != "ci-runner" {
+		t.Fatalf("top-level fields not populated: %+v", r)
+	}
+	if len(r.Functions) != 2 {
+		t.Fatalf("want 2 functions, got %d", len(r.Functions))
+	}
+
+	fw := r.Functions[0]
+	// The renamed keys are the fragile part of the contract: `crate`->Crate
+	// and `fn`->FN. Assert them explicitly.
+	if fw.Crate != "sng-fw" {
+		t.Errorf(`"crate" did not map to Crate: got %q`, fw.Crate)
+	}
+	if fw.FN != 0 || fw.TP != 7 || fw.TN != 5 || fw.FP != 0 {
+		t.Errorf("confusion matrix mismatch: tp=%d fn=%d tn=%d fp=%d", fw.TP, fw.FN, fw.TN, fw.FP)
+	}
+	if fw.Function != "firewall" || fw.Kind != "enforcement" || !fw.Tested ||
+		fw.CatchRate != 1.0 || fw.FalsePosRate != 0.0 || fw.Verdict != "PASS" {
+		t.Errorf("firewall function fields mismatch: %+v", fw)
+	}
+
+	ips := r.Functions[1]
+	if ips.Tested || ips.Verdict != "UNTESTED" || ips.UntestedReason != "suricata binary not found on PATH" {
+		t.Errorf("untested IPS function fields mismatch: %+v", ips)
+	}
+
+	// The whole report must still render end-to-end from the deserialized data.
+	md := (&BusinessReport{Efficacy: r}).ToMarkdown()
+	if !strings.Contains(md, "| firewall | `sng-fw` | block-rate | 7 | 5 | 100.0% | 0.0% | 100.0% | PASS |") {
+		t.Errorf("deserialized efficacy did not render the expected firewall row:\n%s", md)
+	}
+}
+
 func writeJSON(t *testing.T, path string, v any) {
 	t.Helper()
 	b, err := json.Marshal(v)

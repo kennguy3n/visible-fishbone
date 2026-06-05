@@ -24,6 +24,49 @@ type BusinessReport struct {
 	Telemetry    []*TelemetryReport  `json:"telemetry,omitempty"`
 	Edge         *EdgeReport         `json:"edge,omitempty"`
 	TestSuite    *TestSuite          `json:"test_suite,omitempty"`
+	// Efficacy holds the security-efficacy harness output (Section 7).
+	// Unlike the throughput sections, these are real enforcement
+	// decisions measured against known-bad/known-good corpora, so their
+	// PASS/WARN/FAIL verdicts stand even in dry-run mode (like the
+	// Criterion policy-eval numbers).
+	Efficacy *EfficacyReport `json:"efficacy,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Security-efficacy report (sng-efficacy harness, bench/efficacy)
+// ---------------------------------------------------------------------------
+
+// EfficacyReport mirrors the JSON emitted by the Rust sng-efficacy
+// harness: one entry per security function (FW/SWG/ZTNA/IPS) with a
+// confusion matrix and catch / false-positive rates.
+type EfficacyReport struct {
+	Suite          string              `json:"suite"`
+	GitSHA         string              `json:"git_sha"`
+	GeneratedAt    string              `json:"generated_at"`
+	Host           string              `json:"host"`
+	OverallVerdict string              `json:"overall_verdict"`
+	Functions      []*EfficacyFunction `json:"functions"`
+}
+
+// EfficacyFunction is the per-function efficacy result.
+type EfficacyFunction struct {
+	Function       string  `json:"function"`
+	Crate          string  `json:"crate"`
+	Kind           string  `json:"kind"` // "enforcement" | "detection"
+	Tested         bool    `json:"tested"`
+	UntestedReason string  `json:"untested_reason,omitempty"`
+	TotalCases     int     `json:"total_cases"`
+	BadCases       int     `json:"bad_cases"`
+	GoodCases      int     `json:"good_cases"`
+	TP             int     `json:"tp"`
+	FN             int     `json:"fn"`
+	TN             int     `json:"tn"`
+	FP             int     `json:"fp"`
+	CatchRate      float64 `json:"catch_rate"`
+	FalsePosRate   float64 `json:"false_positive_rate"`
+	Accuracy       float64 `json:"accuracy"`
+	Verdict        string  `json:"verdict"`
+	Notes          string  `json:"notes,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

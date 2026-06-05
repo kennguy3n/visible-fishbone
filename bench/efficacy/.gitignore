@@ -1,0 +1,8 @@
+# Build output for the standalone efficacy bench workspace. The root
+# .gitignore's `/target/` is anchored to the repo root and does not cover
+# this nested workspace, so ignore it explicitly here.
+/target/
+
+# Suricata work dir / generated EVE logs are written to the OS temp dir at
+# runtime, but ignore any stray local copies just in case.
+/eve.json

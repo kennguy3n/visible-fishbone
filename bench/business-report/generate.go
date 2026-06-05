@@ -38,6 +38,7 @@ func run(args []string) error {
 		telemetryPaths   = fs.String("telemetry", "", "comma-separated telemetry report .json files, or a directory of them (Session 2)")
 		edgePath         = fs.String("edge", "", "path to the Rust edge business-report .json (Session 3)")
 		testReportPath   = fs.String("test-report", "", "path to the Session 4 test-suite-report.md")
+		efficacyPath     = fs.String("efficacy", "", "path to the sng-efficacy harness efficacy-report.json (Section 7: Security Efficacy)")
 		theoreticalPath  = fs.String("theoretical", "bench/business-report/theoretical.json", "path to theoretical.json")
 		competitorsPath  = fs.String("competitors", "bench/business-report/competitors.json", "path to competitors.json")
 		outDir           = fs.String("out-dir", ".", "directory to write business-report.{md,json} into")
@@ -92,6 +93,13 @@ func run(args []string) error {
 			return fmt.Errorf("load test-suite report: %w", err)
 		}
 		rep.TestSuite = ts
+	}
+	if *efficacyPath != "" {
+		eff, err := loadEfficacy(*efficacyPath)
+		if err != nil {
+			return fmt.Errorf("load efficacy report: %w", err)
+		}
+		rep.Efficacy = eff
 	}
 
 	md := rep.ToMarkdown()
