@@ -124,6 +124,16 @@ func (s *Store) NewInlineCASBRuleRepository() *InlineCASBRuleRepository {
 	return &InlineCASBRuleRepository{s: s}
 }
 
+// NewSandboxVerdictRepository binds the Store to repository.SandboxVerdictRepository.
+func (s *Store) NewSandboxVerdictRepository() *SandboxVerdictRepository {
+	return &SandboxVerdictRepository{s: s}
+}
+
+// NewRBISessionRepository binds the Store to repository.RBISessionRepository.
+func (s *Store) NewRBISessionRepository() *RBISessionRepository {
+	return &RBISessionRepository{s: s}
+}
+
 // NewAICorrelationRepository binds the Store to repository.AICorrelationRepository.
 func (s *Store) NewAICorrelationRepository() *AICorrelationRepository {
 	return &AICorrelationRepository{s: s}

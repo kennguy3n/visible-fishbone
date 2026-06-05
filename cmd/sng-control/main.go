@@ -57,6 +57,9 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 	"github.com/kennguy3n/visible-fishbone/internal/service/pop"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
+	"github.com/kennguy3n/visible-fishbone/internal/service/rbi"
+	"github.com/kennguy3n/visible-fishbone/internal/service/sandbox"
+	"github.com/kennguy3n/visible-fishbone/internal/service/sandbox/providers"
 	"github.com/kennguy3n/visible-fishbone/internal/service/site"
 	"github.com/kennguy3n/visible-fishbone/internal/service/telemetry"
 	chwriter "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/clickhouse"
@@ -562,6 +565,8 @@ func buildRouter(
 	casbAppRepo := store.NewCASBDiscoveredAppRepository()
 	casbPostureRepo := store.NewCASBPostureCheckRepository()
 	inlineCASBRuleRepo := store.NewInlineCASBRuleRepository()
+	sandboxVerdictRepo := store.NewSandboxVerdictRepository()
+	rbiSessionRepo := store.NewRBISessionRepository()
 	opsHealthRepo := store.NewOpsHealthSnapshotRepository()
 	aiSuggestionRepo := store.NewAISuggestionRepository()
 
@@ -634,6 +639,37 @@ func buildRouter(
 		auditRepo,
 		logger,
 	)
+	// Sandbox (zero-day file analysis, Gap #7). The provider is
+	// selected from cfg.Sandbox; with none configured the service
+	// still runs and serves persisted verdicts (fail-open). The
+	// SWG malware stage submits unknown files through the handler.
+	sandboxOpts := []sandbox.Option{
+		sandbox.WithAudit(auditRepo),
+		sandbox.WithLogger(logger),
+		sandbox.WithCache(sandbox.NewCache(sandbox.WithCacheTTL(cfg.Sandbox.CacheTTL))),
+	}
+	if p := buildSandboxProvider(cfg.Sandbox); p != nil {
+		sandboxOpts = append(sandboxOpts, sandbox.WithProvider(p))
+		logger.Info("sng-control: sandbox provider configured", slog.String("provider", p.ID()))
+	}
+	sandboxSvc := sandbox.NewService(sandboxVerdictRepo, sandboxOpts...)
+
+	// Remote Browser Isolation (Gap #8). The proxy/policy are
+	// selected from cfg.RBI; with no proxy URL the service still
+	// runs and serves session reads but CreateSession reports
+	// "not configured" so the SWG falls back to allow/block.
+	rbiSvc := rbi.NewService(rbiSessionRepo,
+		rbi.WithAudit(auditRepo),
+		rbi.WithLogger(logger),
+		rbi.WithProxy(rbi.ProxyConfig{BaseURL: cfg.RBI.ProxyBaseURL}),
+		rbi.WithSessionTTL(cfg.RBI.SessionTTL),
+		rbi.WithPolicy(rbi.PolicyConfig{
+			Categories:           cfg.RBI.TriggerCategories,
+			RiskScoreThreshold:   cfg.RBI.RiskScoreThreshold,
+			IsolateUncategorised: cfg.RBI.IsolateUncategorised,
+		}),
+	)
+
 	policySvc := policy.New(
 		policyRepo,
 		auditRepo,
@@ -975,6 +1011,8 @@ func buildRouter(
 		Mobile:       handler.NewMobileHandler(identitySvc),
 		Metering:     meteringHandler,
 		PoP:          popHandler,
+		Sandbox:      handler.NewSandboxHandler(sandboxSvc),
+		RBI:          handler.NewRBIHandler(rbiSvc),
 		APIKeyLookup: apiKeySvc,
 		// Device kill-switch for stateless mobile session JWTs: a
 		// token bound to a suspended/deleted device is refused by the
@@ -1816,6 +1854,36 @@ func runPoPRebalance(ctx context.Context, svc *pop.Service, interval time.Durati
 					slog.Int("moved", moved))
 			}
 		}
+	}
+}
+
+// buildSandboxProvider maps the operator's sandbox config onto a
+// concrete detonation provider, or returns nil when no provider is
+// selected (Provider unset / "none" / unrecognised). A nil result
+// leaves the sandbox service serving persisted verdicts only, which
+// is the documented fail-open default — submissions then report
+// "no provider" rather than detonating.
+func buildSandboxProvider(cfg config.Sandbox) providers.Provider {
+	switch cfg.Provider {
+	case "cuckoo":
+		return providers.NewCuckoo(providers.CuckooConfig{
+			BaseURL:  cfg.CuckooBaseURL,
+			APIToken: cfg.CuckooAPIToken,
+		}, nil)
+	case "cape":
+		return providers.NewCAPE(providers.CAPEConfig{
+			BaseURL:  cfg.CAPEBaseURL,
+			APIToken: cfg.CAPEAPIToken,
+		}, nil)
+	case "generic":
+		return providers.NewGeneric(providers.GenericConfig{
+			SubmitURL:  cfg.GenericSubmitURL,
+			StatusURL:  cfg.GenericStatusURL,
+			AuthHeader: cfg.GenericAuthHeader,
+			AuthValue:  cfg.GenericAuthValue,
+		}, nil)
+	default:
+		return nil
 	}
 }
 

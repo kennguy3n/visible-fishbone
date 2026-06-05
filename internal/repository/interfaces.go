@@ -967,6 +967,30 @@ type InlineCASBRuleRepository interface {
 	Delete(ctx context.Context, tenantID, id uuid.UUID) error
 }
 
+// SandboxVerdictRepository owns the sandbox_verdicts table
+// (migration 042). Tenant-scoped reads/writes flow through
+// `sng.tenant_id` (RLS) on the postgres backend; the memory backend
+// filters on TenantID explicitly. Upsert is keyed on
+// (tenant_id, sha256) so re-submitting the same file updates its
+// row in place rather than accumulating duplicates.
+type SandboxVerdictRepository interface {
+	Upsert(ctx context.Context, tenantID uuid.UUID, v SandboxVerdict) (SandboxVerdict, error)
+	GetBySHA256(ctx context.Context, tenantID uuid.UUID, sha256 string) (SandboxVerdict, error)
+	List(ctx context.Context, tenantID uuid.UUID, limit int) ([]SandboxVerdict, error)
+}
+
+// RBISessionRepository owns the rbi_sessions table (migration 043).
+// Tenant-scoped reads/writes flow through `sng.tenant_id` (RLS) on
+// the postgres backend; the memory backend filters on TenantID
+// explicitly. Sessions are short-lived: the SWG creates one per
+// redirected URL and the proxy closes or expires it.
+type RBISessionRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, s RBISession) (RBISession, error)
+	Get(ctx context.Context, tenantID, id uuid.UUID) (RBISession, error)
+	List(ctx context.Context, tenantID uuid.UUID, limit int) ([]RBISession, error)
+	Close(ctx context.Context, tenantID, id uuid.UUID) error
+}
+
 // --- DLP ------------------------------------------------------------------
 
 // DLPPolicyRepository owns the dlp_policies table. Tenant-scoped

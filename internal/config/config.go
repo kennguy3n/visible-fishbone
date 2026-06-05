@@ -84,6 +84,73 @@ type Config struct {
 	MobileAuth         MobileAuth
 	Metering           Metering
 	PoP                PoP
+	Sandbox            Sandbox
+	RBI                RBI
+}
+
+// RBI carries the runtime knobs for Remote Browser Isolation
+// (internal/service/rbi, Gap #8). When a URL matches the RBI
+// trigger policy the SWG redirects it to the RBI proxy, which
+// renders the page in a disposable headless-Chromium container.
+// All knobs are optional: with ProxyBaseURL unset the RBI service
+// still runs (sessions can be inspected) but CreateSession reports
+// "not configured" so the SWG falls back to a normal allow/block.
+//
+// Parsed leniently (plain RBI_* strings/duration + a CSV category
+// list): a misconfig degrades to "not configured" rather than
+// failing boot.
+type RBI struct {
+	// ProxyBaseURL is the externally-reachable URL of the RBI proxy
+	// (e.g. "https://rbi.example.com"). Empty disables RBI.
+	ProxyBaseURL string
+	// SessionTTL is how long an RBI session stays active. Defaults
+	// to 15m.
+	SessionTTL time.Duration
+	// TriggerCategories lists URL categories that trigger isolation
+	// (comma-separated RBI_TRIGGER_CATEGORIES). Empty disables
+	// category-based triggering.
+	TriggerCategories []string
+	// RiskScoreThreshold (RBI_RISK_SCORE_THRESHOLD), when >0,
+	// triggers RBI for URLs whose risk score meets or exceeds it.
+	// Range [0,100]; 0 disables risk-score triggering. Parsed
+	// leniently — a bad value falls back to 0 (disabled).
+	RiskScoreThreshold int
+	// IsolateUncategorised (RBI_ISOLATE_UNCATEGORISED) triggers RBI
+	// for any URL the categoriser cannot classify.
+	IsolateUncategorised bool
+}
+
+// Sandbox carries the runtime knobs for zero-day file analysis
+// (internal/service/sandbox, Gap #7). When the SWG malware stage
+// sees a file whose hash it has no static verdict for, the control
+// plane submits it to the configured detonation provider and caches
+// the verdict by SHA-256. All knobs are optional: with Provider
+// unset (the default) the sandbox service still runs and serves
+// persisted verdicts, but submissions return "no provider" rather
+// than detonating — so the data-plane integration is fail-open.
+//
+// Parsed leniently (plain SANDBOX_* strings/duration): a misconfig
+// degrades to "no provider" rather than failing boot, matching the
+// fail-open posture of an opportunistic enrichment feature.
+type Sandbox struct {
+	// Provider selects the detonation backend: "" / "none" (disabled),
+	// "cuckoo", "cape", or "generic" (BYO webhook). An unrecognised
+	// value is treated as disabled.
+	Provider string
+	// CacheTTL is how long a resolved verdict stays in the in-memory
+	// hot-path cache in front of Postgres. Defaults to 1h.
+	CacheTTL time.Duration
+	// Cuckoo* configure the Cuckoo Sandbox REST adapter.
+	CuckooBaseURL  string
+	CuckooAPIToken string
+	// CAPE* configure the CAPEv2 REST adapter.
+	CAPEBaseURL  string
+	CAPEAPIToken string
+	// Generic* configure the bring-your-own webhook adapter.
+	GenericSubmitURL  string
+	GenericStatusURL  string
+	GenericAuthHeader string
+	GenericAuthValue  string
 }
 
 // Metering carries the runtime knobs for the cost-metering and
@@ -973,6 +1040,25 @@ func Load() (Config, error) {
 			GeoDNSHostname:      getStr("POP_GEODNS_HOSTNAME", "edge.sng.example.com"),
 			GeoDNSRoutingPolicy: getStr("POP_GEODNS_ROUTING_POLICY", "latency"),
 		},
+		Sandbox: Sandbox{
+			Provider:          strings.ToLower(getStr("SANDBOX_PROVIDER", "")),
+			CacheTTL:          getDuration("SANDBOX_CACHE_TTL", time.Hour),
+			CuckooBaseURL:     getStr("SANDBOX_CUCKOO_BASE_URL", ""),
+			CuckooAPIToken:    getStr("SANDBOX_CUCKOO_API_TOKEN", ""),
+			CAPEBaseURL:       getStr("SANDBOX_CAPE_BASE_URL", ""),
+			CAPEAPIToken:      getStr("SANDBOX_CAPE_API_TOKEN", ""),
+			GenericSubmitURL:  getStr("SANDBOX_GENERIC_SUBMIT_URL", ""),
+			GenericStatusURL:  getStr("SANDBOX_GENERIC_STATUS_URL", ""),
+			GenericAuthHeader: getStr("SANDBOX_GENERIC_AUTH_HEADER", ""),
+			GenericAuthValue:  getStr("SANDBOX_GENERIC_AUTH_VALUE", ""),
+		},
+		RBI: RBI{
+			ProxyBaseURL:         getStr("RBI_PROXY_BASE_URL", ""),
+			SessionTTL:           getDuration("RBI_SESSION_TTL", 15*time.Minute),
+			TriggerCategories:    splitCSV(getStr("RBI_TRIGGER_CATEGORIES", "")),
+			RiskScoreThreshold:   getIntLenient("RBI_RISK_SCORE_THRESHOLD", 0),
+			IsolateUncategorised: getBoolLenient("RBI_ISOLATE_UNCATEGORISED", false),
+		},
 		Telemetry: Telemetry{
 			OTLPEndpoint:   getStr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 			ServiceVersion: getStr("SERVICE_VERSION", ""),
@@ -1636,6 +1722,36 @@ func getStr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// getIntLenient parses an integer env var, falling back to def on
+// unset or malformed input. Use for non-load-bearing knobs where a
+// typo should degrade to the safe default rather than fail boot
+// (load-bearing numerics use getIntStrict via the strict table).
+func getIntLenient(key string, def int) int {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+// getBoolLenient parses a boolean env var, falling back to def on
+// unset or malformed input. Same lenient posture as getIntLenient.
+func getBoolLenient(key string, def bool) bool {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(strings.TrimSpace(v))
+	if err != nil {
+		return def
+	}
+	return b
 }
 
 // getStrAllowEmpty is the peer of `getStr` that distinguishes an

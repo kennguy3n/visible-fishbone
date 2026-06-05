@@ -84,6 +84,12 @@ type Store struct {
 	// Inline-CASB rules — see migration 037.
 	inlineCASBRules map[uuid.UUID]repository.InlineCASBRule
 
+	// Sandbox verdicts — see migration 042.
+	sandboxVerdicts map[uuid.UUID]repository.SandboxVerdict
+
+	// RBI sessions — see migration 043.
+	rbiSessions map[uuid.UUID]repository.RBISession
+
 	// App registry tables — see internal/repository/app_registry.go
 	// and migrations/008_app_registry.up.sql. `appRegistry` is the
 	// global curated catalog (not tenant-scoped); `appOverrides`
@@ -184,6 +190,8 @@ func NewStore() *Store {
 		msps:                  map[uuid.UUID]repository.MSP{},
 		casbConnectors:        map[uuid.UUID]repository.CASBConnector{},
 		inlineCASBRules:       map[uuid.UUID]repository.InlineCASBRule{},
+		sandboxVerdicts:       map[uuid.UUID]repository.SandboxVerdict{},
+		rbiSessions:           map[uuid.UUID]repository.RBISession{},
 		casbDiscoveredApps:    map[uuid.UUID]repository.CASBDiscoveredApp{},
 		casbPostureChecks:     map[uuid.UUID]repository.CASBPostureCheck{},
 		mspTenants:            map[mspTenantKey]repository.MSPTenantBinding{},
