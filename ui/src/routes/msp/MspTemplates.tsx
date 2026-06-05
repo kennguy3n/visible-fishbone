@@ -42,8 +42,15 @@ function load(): Template[] {
   }
 }
 
-function persist(t: Template[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(t));
+// Returns false if the write fails (e.g. localStorage quota exceeded) so the
+// caller can warn the operator instead of silently losing the change.
+function persist(t: Template[]): boolean {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(t));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function MspTemplates() {
@@ -54,22 +61,26 @@ export function MspTemplates() {
   const apply = useBulkApplyPolicyTemplate();
   const [appliedId, setAppliedId] = useState<string | null>(null);
 
+  // Persistence is a side effect, so it runs outside the state updater (which
+  // must stay pure / can run twice under StrictMode). A failed save surfaces
+  // a warning rather than silently dropping the change.
   const upsert = (t: Template) => {
-    setTemplates((prev) => {
-      const next = prev.some((p) => p.id === t.id)
-        ? prev.map((p) => (p.id === t.id ? t : p))
-        : [...prev, t];
-      persist(next);
-      return next;
-    });
+    const next = templates.some((p) => p.id === t.id)
+      ? templates.map((p) => (p.id === t.id ? t : p))
+      : [...templates, t];
+    setTemplates(next);
+    if (!persist(next)) {
+      alert(
+        "Couldn't save the template library: browser storage is full. " +
+          "Delete some templates and try again.",
+      );
+    }
   };
 
   const remove = (id: string) => {
-    setTemplates((prev) => {
-      const next = prev.filter((p) => p.id !== id);
-      persist(next);
-      return next;
-    });
+    const next = templates.filter((p) => p.id !== id);
+    setTemplates(next);
+    persist(next); // a delete frees space, so ignore any write failure
   };
 
   const applyTemplate = (t: Template) => {

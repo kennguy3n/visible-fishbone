@@ -18,13 +18,17 @@ export function Login() {
 
   const onJwtSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
     const trimmed = token.trim();
     if (!trimmed) {
       setError("Paste a bearer token to continue.");
       return;
     }
-    loginWithToken(trimmed);
-    navigate({ to: "/" });
+    // On success the isAuthenticated effect handles the redirect; on failure
+    // we surface feedback instead of bouncing to "/" and silently back.
+    if (!loginWithToken(trimmed)) {
+      setError("That token is invalid or expired. Paste a current bearer token.");
+    }
   };
 
   const onOidc = async () => {

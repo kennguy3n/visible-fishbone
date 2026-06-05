@@ -21,12 +21,18 @@ interface AuthState {
   authMode: "jwt" | "oidc";
   isAuthenticated: boolean;
   claims: JwtClaims | null;
-  /** Dev mode: set the bearer token directly (operator pastes a JWT). */
-  loginWithToken: (token: string) => void;
+  /**
+   * Dev mode: set the bearer token directly (operator pastes a JWT).
+   * Returns false if the token is malformed or expired (no session set).
+   */
+  loginWithToken: (token: string) => boolean;
   /** Prod mode: start the OIDC redirect. */
   loginWithOidc: () => Promise<void>;
-  /** Used by the OIDC callback route after token exchange. */
-  setSession: (token: string) => void;
+  /**
+   * Used by the OIDC callback route after token exchange.
+   * Returns false if the token is malformed or expired.
+   */
+  setSession: (token: string) => boolean;
   logout: () => void;
 }
 
@@ -49,19 +55,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const cfg = runtimeConfig();
   const [claims, setClaims] = useState<JwtClaims | null>(() => deriveClaims());
 
-  const setSession = useCallback((token: string) => {
+  const setSession = useCallback((token: string): boolean => {
     setAccessToken(token);
     // Mirror deriveClaims(): reject a malformed or already-expired token
     // (clearing it from storage) instead of briefly flipping to authenticated
     // and getting kicked out on the first 401. Keeps the paste/OIDC-callback
-    // path consistent with page reload.
+    // path consistent with page reload. The boolean lets callers surface
+    // feedback instead of navigating blindly.
     const next = decodeJwt(token);
     if (!next || isExpired(next)) {
       clearAccessToken();
       setClaims(null);
-      return;
+      return false;
     }
     setClaims(next);
+    return true;
   }, []);
 
   const logout = useCallback(() => {
