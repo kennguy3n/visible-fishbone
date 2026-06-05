@@ -136,6 +136,13 @@ func parseFlags(mode string, args []string) *options {
 	fs.StringVar(&opts.dsn, "dsn", os.Getenv("SNG_BENCH_DSN"), "Postgres DSN")
 	fs.IntVar(&opts.tenants, "tenants", 5000, "tenants to seed (tenant-scale) / model (capacity-plan)")
 	fs.IntVar(&opts.poolSize, "pool-size", 32, "app connection-pool size to probe")
+	// ch-shards / nats-partitions default to 0 as a "leave unset" sentinel
+	// rather than to their effective values: buildCapacityPlan only copies a
+	// flag into the config when it is > 0, otherwise DefaultCapacityPlanConfig
+	// supplies the real default (2 shards / 16 partitions). The usage text
+	// documents those effective defaults, which is what an operator actually
+	// gets; the 0 here just preserves "omitted" vs "explicitly set" so a future
+	// override path could tell them apart.
 	fs.IntVar(&opts.chShards, "ch-shards", 0, "ClickHouse shard count to model (capacity-plan; 0 = default)")
 	fs.IntVar(&opts.natsParts, "nats-partitions", 0, "NATS_PARTITIONS to model (capacity-plan; 0 = default)")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }

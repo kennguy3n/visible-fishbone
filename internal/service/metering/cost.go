@@ -115,6 +115,14 @@ func withCostClock(now func() time.Time) CostOption {
 // NewCostCalculator constructs a CostCalculator. A zero-value UnitCosts
 // is replaced with DefaultUnitCosts so callers can pass UnitCosts{} to
 // accept the defaults.
+//
+// The fallback is all-or-nothing: it triggers only on a wholly-zero
+// struct, so a partial override (e.g. UnitCosts{LLMPer1KTokensUSD: x})
+// keeps every other rate at 0 rather than inheriting the default. Pass
+// UnitCosts{} for the full default set, or specify every rate you need.
+// This applies uniformly to all priced fields (S3PerGBMonthUSD,
+// NATSPerGBMonthUSD, …); when adding a new rate, prefer extending
+// DefaultUnitCosts over relying on partial-construct fallthrough.
 func NewCostCalculator(costs UnitCosts, opts ...CostOption) *CostCalculator {
 	if costs == (UnitCosts{}) {
 		costs = DefaultUnitCosts
@@ -430,6 +438,13 @@ func (c *CostCalculator) AggregateInfraCost(samples []InfraUsageSample) Platform
 		out.S3MonthlyUSD += p.S3MonthlyUSD
 	}
 	out.TenantCount = len(out.Tenants)
+	// Per-tenant driver costs are already cent-rounded by ProjectInfraMonthlyCost,
+	// so the per-driver round2 below is effectively exact. TotalMonthlyUSD is
+	// deliberately derived from the rounded driver subtotals (not the raw grand
+	// total) so the displayed total always equals the sum of the displayed parts.
+	// That rounding-of-rounded total can drift from round2(raw grand total) by at
+	// most a cent — acceptable for an explicitly-approximate projection, and the
+	// same pattern BuildReport uses.
 	out.ClickHouseMonthlyUSD = round2(out.ClickHouseMonthlyUSD)
 	out.NATSMonthlyUSD = round2(out.NATSMonthlyUSD)
 	out.S3MonthlyUSD = round2(out.S3MonthlyUSD)
