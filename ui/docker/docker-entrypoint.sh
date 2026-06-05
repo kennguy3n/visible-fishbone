@@ -104,6 +104,19 @@ fi
 # keywords ('self', 'none', …) need no extra escaping. CSP values never contain
 # a double quote, so wrapping in printf's "%s" is safe.
 CSP_VALUE="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src ${CONNECT_SRC}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+
+# A double quote can only enter via the operator-supplied connect-src overrides
+# (SNG_CSP_CONNECT_SRC / SNG_CSP_CONNECT_EXTRA); a legitimate CSP value never
+# has one. If one slips in it would close the add_header argument early and
+# produce invalid nginx config, so fail fast here with a clear message instead
+# of letting nginx die at boot with a cryptic parse error.
+case "$CSP_VALUE" in
+  *'"'*)
+    echo "sng-ui: refusing to write CSP — connect-src override contains a double quote (would emit invalid nginx config). Check SNG_CSP_CONNECT_SRC / SNG_CSP_CONNECT_EXTRA." >&2
+    exit 1
+    ;;
+esac
+
 printf 'add_header Content-Security-Policy "%s" always;\n' "$CSP_VALUE" > "$CSP_PATH"
 
 echo "sng-ui: wrote CSP to $CSP_PATH (connect-src $CONNECT_SRC)"

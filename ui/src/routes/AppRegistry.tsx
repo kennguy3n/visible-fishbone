@@ -100,7 +100,7 @@ function AppRegistryInner({ tenantId }: { tenantId: string }) {
             <DataTable
               columns={cols}
               rows={d.items ?? []}
-              rowKey={(e) => e.app?.id ?? e.override_id ?? Math.random().toString()}
+              rowKey={(e, i) => e.app?.id ?? e.override_id ?? `row-${i}`}
             />
           )}
         </AsyncBoundary>
