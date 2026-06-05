@@ -80,8 +80,22 @@ async fn alerts_for_pcap(
     work: &Path,
     eve: &Path,
 ) -> Result<usize, String> {
-    // Fresh EVE log per pcap so counts don't accumulate.
-    let _ = tokio::fs::remove_file(eve).await;
+    // Fresh EVE log per pcap so counts don't accumulate. A missing file is
+    // the normal first-iteration case; any other removal error means a stale
+    // EVE could survive and Suricata would *append* to it, folding the
+    // previous pcap's alerts into this one's count and corrupting the
+    // confusion matrix. Treat that as a hard failure (the caller maps Err to
+    // UNTESTED) rather than silently fabricating inflated TP/FP numbers.
+    match tokio::fs::remove_file(eve).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!(
+                "could not clear stale EVE log {}: {e}",
+                eve.display()
+            ));
+        }
+    }
     let status = tokio::process::Command::new("suricata")
         .args(["-c"])
         .arg(yaml)
