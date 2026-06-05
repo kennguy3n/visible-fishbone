@@ -66,26 +66,35 @@ export function MspTemplates() {
   const [appliedId, setAppliedId] = useState<string | null>(null);
   const [lastAppliedId, setLastAppliedId] = useState<string | null>(null);
 
-  // Persistence is a side effect, so it runs outside the state updater (which
-  // must stay pure / can run twice under StrictMode). A failed save surfaces
-  // a warning rather than silently dropping the change.
+  // Edits go through a functional updater so rapid successive upserts compose
+  // off the freshest list rather than a stale closure snapshot. A failed save
+  // surfaces a warning rather than silently dropping the change.
   const upsert = (t: Template) => {
-    const next = templates.some((p) => p.id === t.id)
-      ? templates.map((p) => (p.id === t.id ? t : p))
-      : [...templates, t];
-    setTemplates(next);
-    if (!persist(next)) {
-      alert(
-        "Couldn't save the template library: browser storage is full. " +
-          "Delete some templates and try again.",
-      );
-    }
+    setTemplates((prev) => {
+      const next = prev.some((p) => p.id === t.id)
+        ? prev.map((p) => (p.id === t.id ? t : p))
+        : [...prev, t];
+      // Persisting is a side effect, but it must see the same `next` we're
+      // committing, so it lives inside the functional updater (which derives
+      // `next` from the freshest state). The updater itself stays otherwise
+      // pure; React may double-invoke it under StrictMode, but localStorage
+      // writes are idempotent so a repeat is harmless.
+      if (!persist(next)) {
+        alert(
+          "Couldn't save the template library: browser storage is full. " +
+            "Delete some templates and try again.",
+        );
+      }
+      return next;
+    });
   };
 
   const remove = (id: string) => {
-    const next = templates.filter((p) => p.id !== id);
-    setTemplates(next);
-    persist(next); // a delete frees space, so ignore any write failure
+    setTemplates((prev) => {
+      const next = prev.filter((p) => p.id !== id);
+      persist(next); // a delete frees space, so ignore any write failure
+      return next;
+    });
   };
 
   const applyTemplate = (t: Template) => {

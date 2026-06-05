@@ -2,7 +2,7 @@ import {
   useRunTroubleshootDiagnostics,
   useListTroubleshootKBEntries,
 } from "@/api/generated/endpoints/troubleshoot/troubleshoot";
-import { PageHeader, Card, AsyncBoundary, StatusBadge, Badge } from "@/components/ui";
+import { PageHeader, Card, AsyncBoundary, StatusBadge, Badge, ErrorState } from "@/components/ui";
 import { RequireTenant } from "@/components/RequireTenant";
 import { formatRelative } from "@/lib/format";
 
@@ -37,7 +37,9 @@ function TroubleshootInner({ tenantId }: { tenantId: string }) {
       />
 
       <Card title="Diagnostic checks">
-        {diagnostics.isIdle === false && results.length === 0 && !diagnostics.isPending ? (
+        {diagnostics.isError ? (
+          <ErrorState error={diagnostics.error} />
+        ) : diagnostics.isSuccess && results.length === 0 ? (
           <p className="muted">All checks passed or no checks returned.</p>
         ) : results.length === 0 ? (
           <p className="muted">
