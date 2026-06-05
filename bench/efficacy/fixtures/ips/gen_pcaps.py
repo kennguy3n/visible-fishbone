@@ -31,6 +31,17 @@ def http_to(server, payload, sport=40000, dport=80):
     )
 
 
+def http_from(server, payload, sport=80, dport=40000):
+    """A single server->client TCP segment carrying `payload` (an HTTP
+    response, e.g. a file download)."""
+    return (
+        Ether()
+        / IP(src=server, dst=CLIENT)
+        / TCP(sport=sport, dport=dport, flags="PA", seq=1)
+        / Raw(load=payload)
+    )
+
+
 def dns_query(qname, sport=50000):
     """A benign-looking UDP/53 packet carrying `qname` as raw bytes."""
     return (
@@ -44,8 +55,10 @@ def dns_query(qname, sport=50000):
 # --- known-bad fixtures: MUST trigger an alert -----------------------
 BAD = {
     # EICAR antivirus test string — the industry-standard benign
-    # malware marker that every engine is expected to flag.
-    "bad-eicar.pcap": http_to(
+    # malware marker that every engine is expected to flag. Modelled as a
+    # server->client HTTP response (the EICAR file being downloaded), which
+    # is the realistic direction for a malware delivery.
+    "bad-eicar.pcap": http_from(
         SERVER,
         b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n"
         b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*",
