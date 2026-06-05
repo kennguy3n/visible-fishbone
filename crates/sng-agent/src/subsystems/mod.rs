@@ -22,6 +22,9 @@
 //! - [`pal_capture::PalCaptureSubsystem`] — drives the PAL
 //!   [`sng_pal::TrafficCapture`] backend in a tight loop and
 //!   forwards records into the policy engine + telemetry.
+//! - [`dlp::DlpSubsystem`] — drives the `sng-pal` DLP channel
+//!   interceptors through the `sng-dlp` engine and reports
+//!   verdicts via a [`dlp::DlpVerdictSink`].
 //! - [`pal_posture::PalPostureSubsystem`] — invokes the PAL
 //!   [`sng_pal::PostureCollector`] at the configured cadence
 //!   and fans the resulting [`sng_pal::PostureSnapshot`] out
@@ -31,6 +34,7 @@
 //!   list reconciliation against the policy verdicts).
 
 pub mod comms;
+pub mod dlp;
 pub mod pal_capture;
 pub mod pal_posture;
 pub mod pal_tunnel;
@@ -39,6 +43,7 @@ pub mod telemetry;
 pub mod ztna;
 
 pub use comms::CommsSubsystem;
+pub use dlp::{DlpSubsystem, DlpVerdictSink, TracingDlpSink};
 pub use pal_capture::PalCaptureSubsystem;
 pub use pal_posture::PalPostureSubsystem;
 pub use pal_tunnel::PalTunnelSubsystem;

@@ -2399,6 +2399,7 @@ dependencies = [
  "serde_json",
  "sng-comms",
  "sng-core",
+ "sng-dlp",
  "sng-pal",
  "sng-policy-eval",
  "sng-telemetry",

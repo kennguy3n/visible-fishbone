@@ -35,8 +35,9 @@ use clap::Parser;
 use ipnet::IpNet;
 use rcgen::{CertificateParams, KeyPair, PKCS_ED25519};
 use sng_agent::config::{
-    AgentConfig, CaptureConfig, CommsConfig, IdentityConfig, PolicyConfig, PostureConfig,
-    SupervisorConfig, TelemetryConfig, TunnelConfig as TunnelCadenceConfig, ZtnaConfig,
+    AgentConfig, CaptureConfig, CommsConfig, DlpConfig, IdentityConfig, PolicyConfig,
+    PostureConfig, SupervisorConfig, TelemetryConfig, TunnelConfig as TunnelCadenceConfig,
+    ZtnaConfig,
 };
 use sng_agent::{AgentBuildError, Cli, PalBackend, build_agent};
 use sng_core::ids::{DeviceId, TenantId};
@@ -109,6 +110,7 @@ fn fresh_config() -> (AgentConfig, TempDir) {
             // process for seconds.
             reconcile_interval: Duration::from_millis(20),
         },
+        dlp: DlpConfig::default(),
         supervisor: SupervisorConfig::default(),
     };
     (cfg, dir)

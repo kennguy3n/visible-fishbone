@@ -42,8 +42,8 @@
 use crate::cli::{Cli, PalBackend};
 use crate::config::AgentConfig;
 use crate::subsystems::{
-    CommsSubsystem, PalCaptureSubsystem, PalPostureSubsystem, PalTunnelSubsystem,
-    PolicyEvalSubsystem, TelemetrySubsystem, ZtnaSubsystem,
+    CommsSubsystem, DlpSubsystem, PalCaptureSubsystem, PalPostureSubsystem, PalTunnelSubsystem,
+    PolicyEvalSubsystem, TelemetrySubsystem, TracingDlpSink, ZtnaSubsystem,
     comms::{BundlePublisher, CommsBuildError},
     telemetry::TelemetryBuildError,
 };
@@ -53,6 +53,8 @@ use sng_core::{
     BundleTarget, ShutdownSignal, Supervisor, SupervisorBuilder, SupervisorReport,
     SupervisorRunError,
 };
+use sng_dlp::{ChannelInterceptor, DlpChannel, DlpEngine, DlpPolicy};
+use sng_pal::dlp::SensitiveDirWatcher;
 use sng_pal::posture::{PostureCollector, UnknownPostureCollector};
 use sng_pal::traffic::{InMemoryCapture, TrafficCapture};
 use sng_pal::tunnel::{InMemoryTunnelProvider, TunnelConfig, TunnelProvider};
@@ -107,6 +109,13 @@ pub enum AgentBuildError {
     /// of the subsystems' `start` calls failed during boot).
     #[error("supervisor failed during boot: {0}")]
     SupervisorRun(#[from] SupervisorRunError),
+    /// The endpoint DLP engine rejected its bootstrap policy. The
+    /// agent boots the DLP engine with the empty (fail-open)
+    /// [`DlpPolicy::default`], so this fires only on a build
+    /// regression that makes the default policy invalid, not on
+    /// any operator config.
+    #[error("endpoint DLP engine init failed: {0}")]
+    Dlp(#[from] sng_dlp::DlpError),
 }
 
 /// Composed endpoint agent: the supervisor plus handles to
@@ -132,6 +141,10 @@ pub struct BuiltAgent {
     pub pal_posture: Arc<PalPostureSubsystem>,
     /// PAL tunnel-provider adapter.
     pub pal_tunnel: Arc<PalTunnelSubsystem>,
+    /// Endpoint DLP adapter. `None` when `[dlp] enabled = false`
+    /// (the default) — the subsystem is not registered and the
+    /// agent pays no DLP monitoring cost.
+    pub dlp: Option<Arc<DlpSubsystem>>,
     /// Sender half of the desired-tunnel watch channel.
     /// Held so integration tests can push a desired-set
     /// update without going through the comms subsystem.
@@ -147,7 +160,7 @@ impl std::fmt::Debug for BuiltAgent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuiltAgent")
             .field("supervisor", &"Supervisor { .. }")
-            .field("subsystems", &7_usize)
+            .field("subsystems", &(7_usize + usize::from(self.dlp.is_some())))
             .finish_non_exhaustive()
     }
 }
@@ -332,6 +345,9 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
         desired_tunnels_rx,
     ));
 
+    // 8. Endpoint DLP — opt-in; `None` unless `[dlp] enabled`.
+    let dlp = build_dlp_subsystem(&cfg.dlp)?;
+
     // Register subsystems onto the builder we created above.
     // Boot order matters: telemetry + comms first so producer
     // subsystems have a live channel + bundle source by the
@@ -343,6 +359,9 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
     builder = builder.with_subsystem(Arc::clone(&pal_capture));
     builder = builder.with_subsystem(Arc::clone(&pal_posture));
     builder = builder.with_subsystem(Arc::clone(&pal_tunnel));
+    if let Some(dlp) = &dlp {
+        builder = builder.with_subsystem(Arc::clone(dlp));
+    }
 
     let supervisor = builder.build();
 
@@ -355,8 +374,64 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
         pal_capture,
         pal_posture,
         pal_tunnel,
+        dlp,
         desired_tunnels_tx,
     })
+}
+
+/// Construct the endpoint DLP subsystem from its config section.
+///
+/// The engine boots with an empty [`DlpPolicy`] (fail-open: no
+/// rule matches, every event is `Allow`) so an endpoint with no
+/// authored DLP policy never produces a false positive; the
+/// control plane installs the real policy at runtime.
+///
+/// The interceptor set is built from the portable, dependency-free
+/// [`SensitiveDirWatcher`] over the configured `watch_dirs`, tagged
+/// as [`DlpChannel::FileWrite`]. It is warm-started so the files
+/// already present when the agent boots are recorded as the
+/// watermark rather than re-reported as fresh writes. The
+/// edge-triggered native backends (USN journal / FSEvents /
+/// inotify) and the clipboard / USB / print interceptors documented
+/// in `sng_pal::dlp` attach to the same set behind their per-OS
+/// `cfg` gates without changing this wiring. When `watch_dirs` is
+/// empty the set is empty: the subsystem still registers (so health
+/// reports it) but observes nothing.
+///
+/// Returns `None` (and builds nothing) unless `[dlp] enabled` is
+/// set, so a deployment that hasn't authored endpoint DLP rules
+/// pays no monitoring cost.
+fn build_dlp_subsystem(
+    cfg: &crate::config::DlpConfig,
+) -> Result<Option<Arc<DlpSubsystem>>, AgentBuildError> {
+    if !cfg.enabled {
+        return Ok(None);
+    }
+
+    // `with_limit` over the default policy is infallible today
+    // (an empty rule set always validates); propagate the error
+    // anyway so a future default that can fail surfaces as a clean
+    // boot error rather than a panic.
+    let engine = Arc::new(DlpEngine::with_limit(
+        DlpPolicy::default(),
+        cfg.max_file_bytes,
+    )?);
+
+    let mut interceptors: Vec<Arc<dyn ChannelInterceptor>> = Vec::new();
+    if !cfg.watch_dirs.is_empty() {
+        let watcher = SensitiveDirWatcher::new(DlpChannel::FileWrite, cfg.watch_dirs.clone())
+            .with_max_file_bytes(cfg.max_file_bytes)
+            .with_poll_interval(cfg.poll_interval)
+            .warm_started();
+        interceptors.push(Arc::new(watcher));
+    }
+
+    Ok(Some(Arc::new(DlpSubsystem::new(
+        engine,
+        interceptors,
+        Arc::new(TracingDlpSink),
+        cfg.idle_sleep,
+    ))))
 }
 
 /// Build the agent then drive its supervisor to completion.
@@ -430,6 +505,7 @@ pub async fn run_agent(cli: Cli, cfg: AgentConfig) -> Result<SupervisorReport, A
         pal_capture,
         pal_posture,
         pal_tunnel,
+        dlp,
         desired_tunnels_tx,
     } = built;
     drop(telemetry);
@@ -439,6 +515,7 @@ pub async fn run_agent(cli: Cli, cfg: AgentConfig) -> Result<SupervisorReport, A
     drop(pal_capture);
     drop(pal_posture);
     drop(pal_tunnel);
+    drop(dlp);
     // Do NOT drop `desired_tunnels_tx`. Hold the only
     // `watch::Sender` for the desired-tunnel-set channel
     // alive for the entire `supervisor.run().await` so:
