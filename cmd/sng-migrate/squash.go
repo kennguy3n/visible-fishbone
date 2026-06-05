@@ -39,8 +39,8 @@ type squashFile struct {
 // keep applying the individual files and must never be pointed at
 // the baseline. See docs/migration-consolidation.md.
 func runSquash(stdout, stderr *os.File, args []string) error {
-	fs := newSquashFlags(stderr)
-	if err := fs.parse(args); err != nil {
+	flags := newSquashFlags(stderr)
+	if err := flags.parse(args); err != nil {
 		return err
 	}
 
@@ -56,10 +56,10 @@ func runSquash(stdout, stderr *os.File, args []string) error {
 	downSQL := renderBaseline(downs, maxVersion, "down", true)
 
 	base := fmt.Sprintf("%03d_consolidated_baseline", maxVersion)
-	upPath := filepath.Join(fs.outDir, base+".up.sql")
-	downPath := filepath.Join(fs.outDir, base+".down.sql")
+	upPath := filepath.Join(flags.outDir, base+".up.sql")
+	downPath := filepath.Join(flags.outDir, base+".down.sql")
 
-	if err := ensureWritable(fs.outDir, []string{upPath, downPath}, fs.force); err != nil {
+	if err := ensureWritable(flags.outDir, []string{upPath, downPath}, flags.force); err != nil {
 		return err
 	}
 	if err := os.WriteFile(upPath, []byte(upSQL), 0o600); err != nil {
