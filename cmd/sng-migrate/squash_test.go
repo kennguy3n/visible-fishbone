@@ -58,6 +58,31 @@ func TestCollectSquashFiles_MissingDown(t *testing.T) {
 	}
 }
 
+// TestCollectSquashFiles_RejectsUnrecognizedSQL guards the
+// "never silently drop SQL" invariant: a .sql file whose name does not
+// match the migration pattern (here a hyphen, which the loader regex
+// also rejects) must fail loudly rather than be skipped, since a skip
+// would yield a baseline that silently omits the file.
+func TestCollectSquashFiles_RejectsUnrecognizedSQL(t *testing.T) {
+	fsys := testFS()
+	fsys["011_with-hyphen.up.sql"] = &fstest.MapFile{Data: []byte("SELECT 1;")}
+	fsys["011_with-hyphen.down.sql"] = &fstest.MapFile{Data: []byte("SELECT 1;")}
+	if _, _, _, err := collectSquashFiles(fsys); err == nil ||
+		!strings.Contains(err.Error(), "unrecognized migration filename") {
+		t.Fatalf("expected unrecognized-filename error, got %v", err)
+	}
+}
+
+// TestCollectSquashFiles_SkipsNonSQL confirms a non-.sql entry is not
+// treated as a malformed migration.
+func TestCollectSquashFiles_SkipsNonSQL(t *testing.T) {
+	fsys := testFS()
+	fsys["README.md"] = &fstest.MapFile{Data: []byte("# not a migration")}
+	if _, _, maxV, err := collectSquashFiles(fsys); err != nil || maxV != 10 {
+		t.Fatalf("non-sql entry should be skipped; got maxV=%d err=%v", maxV, err)
+	}
+}
+
 func TestRenderBaseline_UpAscending_DownDescending(t *testing.T) {
 	ups, downs, maxV, err := collectSquashFiles(testFS())
 	if err != nil {

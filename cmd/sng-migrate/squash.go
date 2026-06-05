@@ -134,6 +134,18 @@ func collectSquashFiles(fsys fs.FS) (ups, downs []squashFile, maxVersion uint, e
 		}
 		mm := reSquashName.FindStringSubmatch(e.Name())
 		if mm == nil {
+			// The embedded source is `//go:embed *.sql`, so every file
+			// here is meant to be a migration. A .sql file whose name
+			// does not parse is a malformed or mis-named migration:
+			// fail loudly rather than silently drop it. A silent skip
+			// would emit a baseline that claims to cover 001..maxVersion
+			// yet omits this file — the exact "silently incomplete
+			// baseline" failure this collector exists to prevent. Any
+			// non-.sql entry (none today) is genuinely not a migration
+			// and is skipped.
+			if strings.HasSuffix(e.Name(), ".sql") {
+				return nil, nil, 0, fmt.Errorf("squash: unrecognized migration filename %q (expected <version>_<name>.{up,down}.sql)", e.Name())
+			}
 			continue
 		}
 		v64, perr := strconv.ParseUint(mm[1], 10, 32)
