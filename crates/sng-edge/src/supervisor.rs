@@ -43,7 +43,7 @@
 //!     swap the bank while a sister subsystem is still
 //!     mid-boot.
 
-use crate::cli::{Cli, PalBackend, UpdaterBackend};
+use crate::cli::{Cli, DataPathSelection, PalBackend, UpdaterBackend};
 use crate::config::EdgeConfig;
 use crate::subsystems::{
     CommsSubsystem, DnsSubsystem, FwSubsystem, HaSubsystem, IpsSubsystem, PolicyEvalSubsystem,
@@ -171,6 +171,29 @@ fn bootstrap_bundle_body() -> Vec<u8> {
     sng_policy_eval::deny_all_skeleton_body(BundleTarget::Edge)
 }
 
+/// Resolve a [`DataPathSelection`] into the concrete backend the
+/// firewall subsystem will run. `Auto` consults the XDP
+/// capability probe ([`sng_ebpf::detect_xdp_capable`]); an
+/// explicit `Nftables` / `Ebpf` is returned verbatim so an
+/// operator override is never silently second-guessed.
+///
+/// The returned value is always `Nftables` or `Ebpf` — never
+/// `Auto` — so the subsystem constructor receives a settled
+/// choice.
+#[must_use]
+fn resolve_datapath(selection: DataPathSelection) -> DataPathSelection {
+    match selection {
+        DataPathSelection::Auto => {
+            if sng_ebpf::detect_xdp_capable() {
+                DataPathSelection::Ebpf
+            } else {
+                DataPathSelection::Nftables
+            }
+        }
+        explicit => explicit,
+    }
+}
+
 /// Construct every subsystem adapter, register them with a
 /// fresh [`Supervisor`], and return the composed
 /// [`BuiltEdge`] for the caller to drive.
@@ -283,8 +306,20 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     let telemetry_tx = pipeline_handle_to_telemetry_sender(&telemetry, shutdown_signal_for_bridges);
     let dns = Arc::new(DnsSubsystem::new(&cfg.dns, telemetry_tx.clone()));
 
-    // 5. Firewall.
-    let fw = Arc::new(FwSubsystem::new(&cfg.fw));
+    // 5. Firewall. Resolve the data-path selection — `auto`
+    //    probes the kernel for XDP support and picks the eBPF
+    //    fast path when available, nftables otherwise — before
+    //    constructing the subsystem, so a forced `ebpf`/`nftables`
+    //    is honoured verbatim and `auto` never boot-fails on an
+    //    XDP-incapable box.
+    let datapath = resolve_datapath(cli.datapath);
+    tracing::info!(
+        target: "sng_edge::supervisor",
+        requested = ?cli.datapath,
+        resolved = ?datapath,
+        "firewall data-path backend selected"
+    );
+    let fw = Arc::new(FwSubsystem::new(&cfg.fw, datapath));
 
     // 6. IPS.
     let ips = Arc::new(IpsSubsystem::new(&cfg.ips));

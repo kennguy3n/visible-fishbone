@@ -1,0 +1,56 @@
+[package]
+name = "sng-ebpf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ShieldNet Gateway eBPF/XDP data-path fast path: traffic classification, hot-path L3/L4 firewall offload, TC egress steering, and the userspace control plane that loads, pins, and updates the kernel programs and maps"
+
+[features]
+# `xdp` pulls in the `aya` userspace loader and switches the control
+# plane's program loader from the in-memory [`loader::NoopLoader`] to
+# the real kernel-backed [`loader::AyaLoader`]. It is OFF by default so:
+#
+#   * `cargo build --workspace` / `cargo test --workspace` /
+#     `cargo clippy --workspace` compile the full userspace control
+#     plane, classifier, rule evaluator, and map model on EVERY target
+#     (including macOS / Windows, where the edge binary that depends on
+#     this crate must still link) without an eBPF toolchain or a Linux
+#     kernel present.
+#   * a deployment that ships a built `sng-ebpf.o` object and runs on an
+#     XDP-capable kernel opts in with `--features xdp` to load it.
+#
+# The kernel-space BPF programs themselves are a separate `no_std`
+# compilation unit (built with the `bpfel-unknown-none` target by the
+# appliance image pipeline, not by `cargo build --workspace`); this
+# crate is the userspace half that loads and drives them.
+default = []
+xdp = ["dep:aya"]
+
+[dependencies]
+# Foundation types — `TrafficClass` is the closed six-variant steering
+# tier the classifier maps every flow onto. Re-exported so a caller can
+# inspect classification verdicts without depending on sng-core directly.
+sng-core = { workspace = true }
+
+# IP / CIDR matching for the hot-path L3/L4 rule evaluator and the
+# classification table's longest-prefix lookup.
+ipnet = { workspace = true }
+
+# Error taxonomy — mirrors `sng-fw`'s `FirewallError::code()` so an
+# eBPF failure buckets into the same `sng_core::ErrorCode` namespace.
+thiserror = { workspace = true }
+
+# Real kernel loader (feature `xdp` only). `aya` is the pure-Rust eBPF
+# framework. It is Linux-only in practice and only referenced from
+# `#[cfg(all(feature = "xdp", target_os = "linux"))]` code, so it never
+# enters the default build graph.
+aya = { version = "0.13", optional = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+
+[lints]
+workspace = true

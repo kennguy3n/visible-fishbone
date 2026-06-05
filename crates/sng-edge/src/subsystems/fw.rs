@@ -21,13 +21,18 @@
 //! which the engine's own evaluate path treats as fail-closed
 //! (every packet denied).
 
+use crate::cli::DataPathSelection;
 use crate::config::FwConfig;
 use async_trait::async_trait;
 use sng_core::{
     HealthCheck, HealthStatus, ShutdownSignal, Subsystem, SubsystemError, SubsystemHandle,
     SubsystemHealth,
 };
-use sng_fw::{CompiledRuleSet, FirewallEngine, NftablesBackend, ShellNftables};
+use sng_ebpf::XdpControlPlane;
+use sng_fw::{
+    CompiledRuleSet, DataPathBackend, EbpfDataPath, FirewallEngine, NftablesBackend,
+    NftablesDataPath,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::watch;
@@ -35,7 +40,17 @@ use tokio::task;
 
 /// Edge-tier firewall subsystem.
 pub struct FwSubsystem {
+    /// The firewall engine, used by other subsystems for
+    /// per-packet evaluation. Shared with the data-path backend:
+    /// for the nftables backend it *is* the install target; for
+    /// the eBPF backend it is the nftables fallback the backend
+    /// also installs into, so evaluation always sees the full
+    /// ruleset.
     engine: Arc<FirewallEngine>,
+    /// The selected enforcement substrate. The install loop
+    /// drives [`DataPathBackend::install_rules`] on every bundle
+    /// reload; which backend is live is fixed at construction.
+    datapath: Arc<dyn DataPathBackend>,
     rx: watch::Receiver<Option<Arc<CompiledRuleSet>>>,
     /// Holds the producer half so the subsystem outlives the
     /// last external sender — without this, the watch channel
@@ -62,29 +77,80 @@ impl std::fmt::Debug for FwSubsystem {
 }
 
 impl FwSubsystem {
-    /// Build a subsystem with a [`ShellNftables`] backend
-    /// honouring the operator-supplied `nft` binary override.
-    /// The watch channel starts with `None` (no ruleset
-    /// installed); the policy puller pushes the first ruleset
-    /// once it lands the first bundle.
+    /// Build a subsystem honouring the operator-supplied `nft`
+    /// binary override and data-path selection. `selection` is
+    /// the already-resolved backend (the supervisor turns
+    /// [`DataPathSelection::Auto`] into a concrete choice via the
+    /// XDP capability probe before calling this). The watch
+    /// channel starts with `None` (no ruleset installed); the
+    /// policy puller pushes the first ruleset once it lands the
+    /// first bundle.
     #[must_use]
-    pub fn new(cfg: &FwConfig) -> Self {
-        let backend: Arc<dyn NftablesBackend> = match &cfg.nft_binary {
-            Some(p) => Arc::new(ShellNftables::with_binary(p.to_string_lossy().into_owned())),
-            None => Arc::new(ShellNftables::new()),
+    pub fn new(cfg: &FwConfig, selection: DataPathSelection) -> Self {
+        let nft_binary = cfg
+            .nft_binary
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
+        let (nft_dp, engine) = NftablesDataPath::with_shell(nft_binary.as_deref());
+        let datapath: Arc<dyn DataPathBackend> = match selection {
+            DataPathSelection::Nftables => Arc::new(nft_dp),
+            // `Auto` must be resolved by the caller (the supervisor's
+            // `resolve_datapath` XDP-capability probe runs before this).
+            // Reaching here with `Auto` means a caller bypassed that
+            // resolution; fall back to nftables (the safe default) so the
+            // constructor stays total, but warn so the misuse surfaces in
+            // development rather than as a silent downgrade.
+            DataPathSelection::Auto => {
+                tracing::warn!(
+                    target: "sng_edge::fw",
+                    "data-path selection reached FwSubsystem unresolved (Auto); \
+                     defaulting to nftables — the supervisor should resolve Auto \
+                     via the XDP capability probe before constructing the subsystem"
+                );
+                Arc::new(nft_dp)
+            }
+            DataPathSelection::Ebpf => {
+                let control = Arc::new(XdpControlPlane::in_memory());
+                let ebpf = EbpfDataPath::new(control, nft_dp);
+                // The eBPF path is selected, but the in-memory control plane
+                // (NoopLoader) loads no kernel XDP program — the real
+                // AyaLoader integration ships with the BPF object crate in a
+                // later phase. Surface that so an operator who sees
+                // `datapath=ebpf` is not misled into thinking traffic is being
+                // offloaded; nftables is still carrying all enforcement.
+                if !ebpf.capabilities().kernel_offload {
+                    tracing::warn!(
+                        target: "sng_edge::fw",
+                        "eBPF data path selected but kernel XDP offload is not \
+                         active (in-memory control plane); nftables is carrying \
+                         enforcement"
+                    );
+                }
+                Arc::new(ebpf)
+            }
         };
-        Self::with_backend(backend)
+        Self::from_parts(engine, datapath)
     }
 
-    /// Build with an explicit backend. Used by the integration
-    /// tests so they can drive a [`sng_fw::MockNftables`] (or
-    /// the in-memory test double the FW crate ships).
+    /// Build with an explicit nftables backend. Used by the
+    /// integration tests so they can drive a
+    /// [`sng_fw::MockNftables`] (or the in-memory test double the
+    /// FW crate ships). Always selects the nftables data path.
     #[must_use]
     pub fn with_backend(backend: Arc<dyn NftablesBackend>) -> Self {
-        let (tx, rx) = watch::channel(None);
         let engine = Arc::new(FirewallEngine::new(backend));
+        let datapath: Arc<dyn DataPathBackend> =
+            Arc::new(NftablesDataPath::new(Arc::clone(&engine)));
+        Self::from_parts(engine, datapath)
+    }
+
+    /// Assemble from an engine + a chosen data-path backend.
+    #[must_use]
+    fn from_parts(engine: Arc<FirewallEngine>, datapath: Arc<dyn DataPathBackend>) -> Self {
+        let (tx, rx) = watch::channel(None);
         Self {
             engine,
+            datapath,
             rx,
             tx_anchor: tx,
             installs_total: Arc::new(AtomicU64::new(0)),
@@ -98,6 +164,14 @@ impl FwSubsystem {
     #[must_use]
     pub fn engine(&self) -> &Arc<FirewallEngine> {
         &self.engine
+    }
+
+    /// The name of the live data-path backend (`"nftables"` /
+    /// `"ebpf"`). Surfaced on the health detail line so an
+    /// operator can confirm which path is enforcing.
+    #[must_use]
+    pub fn datapath_name(&self) -> &'static str {
+        self.datapath.name()
     }
 
     /// Producer half of the ruleset channel. Hand the result to
@@ -116,7 +190,7 @@ impl Subsystem for FwSubsystem {
     }
 
     async fn start(&self, shutdown: ShutdownSignal) -> Result<SubsystemHandle, SubsystemError> {
-        let engine = Arc::clone(&self.engine);
+        let datapath = Arc::clone(&self.datapath);
         let mut rx = self.rx.clone();
         let installs_total = Arc::clone(&self.installs_total);
         let install_failures = Arc::clone(&self.install_failures);
@@ -135,8 +209,12 @@ impl Subsystem for FwSubsystem {
                         }
                         let next = rx.borrow_and_update().clone();
                         let Some(ruleset) = next else { continue };
-                        let ruleset = Arc::try_unwrap(ruleset).unwrap_or_else(|arc| (*arc).clone());
-                        match engine.install(ruleset).await {
+                        // The backend installs by reference (the
+                        // nftables path clones internally for its
+                        // memory-first swap; the eBPF path borrows
+                        // to translate the hot-path subset), so no
+                        // unwrap-or-clone of the Arc is needed.
+                        match datapath.install_rules(&ruleset).await {
                             Ok(()) => {
                                 installs_total.fetch_add(1, Ordering::Relaxed);
                                 tracing::info!(
@@ -161,6 +239,26 @@ impl Subsystem for FwSubsystem {
     }
 }
 
+/// Derive the firewall subsystem health from its install counters and
+/// whether the engine currently holds a ruleset.
+///
+/// `Down` is reserved for *no live enforcement*: nothing has ever
+/// installed successfully **and** the engine holds no ruleset. This last
+/// clause matters for the eBPF data path — a failed XDP offload still
+/// commits the authoritative ruleset to the nftables fallback, so
+/// `has_ruleset` is `true` and enforcement is live even though
+/// `install_failures > 0` and `installs_total == 0`. That state is
+/// `Degraded` (fast path lost, slow path enforcing), never `Down`.
+fn fw_health_status(installs: u64, failures: u64, has_ruleset: bool) -> HealthStatus {
+    if failures > 0 && installs == 0 && !has_ruleset {
+        HealthStatus::Down
+    } else if failures > 0 || !has_ruleset {
+        HealthStatus::Degraded
+    } else {
+        HealthStatus::Up
+    }
+}
+
 #[async_trait]
 impl HealthCheck for FwSubsystem {
     fn name(&self) -> &'static str {
@@ -171,18 +269,18 @@ impl HealthCheck for FwSubsystem {
         let installs = self.installs_total.load(Ordering::Relaxed);
         let failures = self.install_failures.load(Ordering::Relaxed);
         let has_ruleset = self.engine.current_ruleset().is_some();
-        let status = if failures > 0 && installs == 0 {
-            HealthStatus::Down
-        } else if failures > 0 || !has_ruleset {
-            HealthStatus::Degraded
-        } else {
-            HealthStatus::Up
-        };
+        // Whether enforcement is genuinely running in the kernel fast path.
+        // For the eBPF backend on the in-memory control plane this is
+        // `false`, so the health line distinguishes "ebpf selected" from
+        // "ebpf actually offloading" — see `FwSubsystem::new`.
+        let kernel_offload = self.datapath.get_stats().is_ok_and(|s| s.kernel_offload);
+        let status = fw_health_status(installs, failures, has_ruleset);
         SubsystemHealth {
             name: <Self as HealthCheck>::name(self).into(),
             status,
             detail: Some(format!(
-                "installs={installs}, failures={failures}, has_ruleset={has_ruleset}"
+                "datapath={}, kernel_offload={kernel_offload}, installs={installs}, failures={failures}, has_ruleset={has_ruleset}",
+                self.datapath.name()
             )),
         }
     }
@@ -216,5 +314,21 @@ mod tests {
         // No ruleset installed yet — degraded (operator's
         // signal that the policy puller hasn't delivered).
         assert_eq!(h.status, HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn health_status_decision_table() {
+        // Fresh start: nothing installed, no ruleset — degraded, not down.
+        assert_eq!(fw_health_status(0, 0, false), HealthStatus::Degraded);
+        // Healthy: a successful install and a live ruleset.
+        assert_eq!(fw_health_status(1, 0, true), HealthStatus::Up);
+        // Total failure, nothing enforcing — the only genuine `Down`.
+        assert_eq!(fw_health_status(0, 1, false), HealthStatus::Down);
+        // eBPF regression case: the XDP offload failed (failures>0,
+        // installs==0) but the nftables fallback committed the ruleset, so
+        // enforcement is live — `Degraded`, never `Down`.
+        assert_eq!(fw_health_status(0, 1, true), HealthStatus::Degraded);
+        // A transient failure after earlier success stays degraded.
+        assert_eq!(fw_health_status(3, 1, true), HealthStatus::Degraded);
     }
 }

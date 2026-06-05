@@ -44,6 +44,7 @@ members = [
     "crates/sng-telemetry",
     "crates/sng-dns",
     "crates/sng-fw",
+    "crates/sng-ebpf",
     "crates/sng-ips",
     "crates/sng-swg",
     "crates/sng-ztna",
@@ -285,6 +286,7 @@ sng-dlp = { path = "crates/sng-dlp" }
 sng-telemetry = { path = "crates/sng-telemetry" }
 sng-dns = { path = "crates/sng-dns" }
 sng-fw = { path = "crates/sng-fw" }
+sng-ebpf = { path = "crates/sng-ebpf" }
 sng-ips = { path = "crates/sng-ips" }
 sng-swg = { path = "crates/sng-swg" }
 sng-ztna = { path = "crates/sng-ztna" }

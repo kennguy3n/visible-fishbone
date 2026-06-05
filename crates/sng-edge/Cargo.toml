@@ -29,6 +29,10 @@ sng-policy-eval = { workspace = true }
 sng-telemetry = { workspace = true }
 sng-dns = { workspace = true }
 sng-fw = { workspace = true }
+# eBPF/XDP fast-path data plane. Used for backend selection
+# (`SNG_EDGE_DATAPATH`) and the XDP capability probe; the default
+# build pulls in only the userspace control-plane model.
+sng-ebpf = { workspace = true }
 sng-ips = { workspace = true }
 sng-swg = { workspace = true }
 sng-ztna = { workspace = true }

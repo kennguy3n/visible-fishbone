@@ -32,6 +32,7 @@
 //! nftables rule set plus the L7 / TLS interception decision
 //! engine the SWG and IPS subsystems consume.
 
+pub mod backend;
 pub mod compile;
 pub mod conntrack;
 pub mod engine;
@@ -43,6 +44,10 @@ pub mod rule;
 pub mod tls_policy;
 pub mod zone;
 
+pub use backend::{
+    DataPathBackend, DataPathCapabilities, DataPathStats, DpdkDataPath, EbpfDataPath,
+    HardwareOffloadDataPath, NftablesDataPath, compile_hot_path,
+};
 pub use compile::{CompiledRuleSet, RuleCompiler};
 pub use conntrack::{ConntrackState, ConntrackTracker, FlowDirection};
 pub use engine::{EvaluationContext, FirewallEngine, FirewallVerdict, FlowKey};

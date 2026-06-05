@@ -32,6 +32,15 @@ path = "src/lib.rs"
 name = "sng-bench"
 path = "src/main.rs"
 
+# Data-path micro-benchmark: nftables slow path vs eBPF/XDP fast path,
+# measured in-process over a synthetic L3/L4 rule set and packet stream.
+# Separate from the AF_PACKET harness above because it needs no root,
+# no NIC, and no running gateway — it compares the two backends' decision
+# throughput directly.
+[[bin]]
+name = "sng-bench-datapath"
+path = "src/bin/datapath_bench.rs"
+
 [dependencies]
 # CLI surface — mirrors the feature set the workspace binaries use
 # (`derive` for the typed config, `env` for env-var fallbacks, and
@@ -62,6 +71,23 @@ libc = "0.2"
 # Deterministic-but-randomized 5-tuple sampling. Pinned to the same
 # major the workspace uses (`rand = "0.8"`).
 rand = "0.8"
+
+# Enforcement-plane crates under benchmark. The data-path comparison
+# (`datapath` module / `sng-bench-datapath` bin) drives the real
+# `sng_fw::FirewallEngine` slow path and the `sng_ebpf` XDP fast-path
+# model in-process, reusing `sng_fw::compile_hot_path` so it measures
+# the exact translation the edge ships. Path deps because this is a
+# standalone workspace; they pull in only the userspace models (no eBPF
+# toolchain — the `xdp` feature stays off).
+sng-fw = { path = "../crates/sng-fw" }
+sng-ebpf = { path = "../crates/sng-ebpf" }
+sng-policy-eval = { path = "../crates/sng-policy-eval" }
+
+# Async runtime — needed only to `block_on` the one-time, async
+# `FirewallEngine::install` during benchmark setup; the measured hot
+# loop (`evaluate`) is synchronous.
+tokio = { version = "1", features = ["rt"] }
+ipnet = "2"
 
 [dev-dependencies]
 # Float-tolerant assertions for the histogram percentile tests.
