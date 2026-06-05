@@ -1,0 +1,12 @@
+dependencies:
+- name: postgresql
+  repository: https://charts.bitnami.com/bitnami
+  version: 18.7.0
+- name: nats
+  repository: https://nats-io.github.io/k8s/helm/charts/
+  version: 2.14.0
+- name: altinity-clickhouse-operator
+  repository: https://docs.altinity.com/clickhouse-operator/
+  version: 0.27.1
+digest: sha256:ad985d09a67328d138fbc0d6f25da0e21cf346492bf55dc312378aa91b919e29
+generated: "2026-06-05T10:10:22.758453723Z"

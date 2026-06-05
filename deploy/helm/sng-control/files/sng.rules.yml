@@ -1,0 +1,115 @@
+# Prometheus alerting rules for the ShieldNet Gateway (SNG) control
+# plane. Load via the `rule_files:` stanza of prometheus.yml, e.g.
+#
+#   rule_files:
+#     - /etc/prometheus/alerts/sng.rules.yml
+#
+# Every expression is written against the `sng` metric namespace
+# emitted by internal/metrics. Thresholds match the Session A spec.
+#
+# Notes on two rules where the spec wording maps onto the available
+# metric set:
+#   * SNGPostgresPoolExhausted — the pool exposes pool_idle and
+#     pool_max gauges (plus a cumulative pool_acquired_total
+#     counter). "Acquired == max" is therefore expressed as
+#     "zero idle connections while at least one connection exists",
+#     i.e. every pooled connection is checked out.
+#   * SNGPolicyCompilationSlow — the policy pipeline's measurable
+#     latency histogram is bundle_sign_duration_seconds (signed
+#     bundle production, the dominant compile-path cost); the p99
+#     alert is computed over it.
+groups:
+  - name: sng-control-plane
+    rules:
+      # 5xx error rate exceeds 1% of all requests for 5 minutes.
+      - alert: SNGHighErrorRate
+        expr: |
+          (
+            sum(rate(sng_http_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(sng_http_requests_total[5m])), 1e-9)
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          service: sng-control
+        annotations:
+          summary: "SNG 5xx error rate above 1%"
+          description: >-
+            {{ $value | humanizePercentage }} of control-plane HTTP
+            requests have returned 5xx over the last 5 minutes
+            (threshold 1%).
+
+      # Any JetStream consumer more than 10k messages behind for 5m.
+      - alert: SNGNATSConsumerLag
+        expr: max by (stream, consumer) (sng_nats_consumer_lag) > 10000
+        for: 5m
+        labels:
+          severity: warning
+          service: sng-control
+        annotations:
+          summary: "JetStream consumer lag above 10k"
+          description: >-
+            Consumer {{ $labels.consumer }} on stream
+            {{ $labels.stream }} is {{ $value }} messages behind
+            (threshold 10000) for 5 minutes.
+
+      # Postgres pool fully checked out (no idle connections) for 2m.
+      - alert: SNGPostgresPoolExhausted
+        expr: (sng_pg_pool_idle == 0) and (sng_pg_pool_max > 0)
+        for: 2m
+        labels:
+          severity: critical
+          service: sng-control
+        annotations:
+          summary: "Postgres connection pool exhausted"
+          description: >-
+            The pgx pool has had zero idle connections for 2 minutes;
+            every pooled connection is checked out and new queries are
+            queuing behind connection acquisition.
+
+      # Dead-letter queue depth strictly increasing for 15 minutes.
+      - alert: SNGDLQGrowing
+        expr: sum by (stream) (increase(sng_nats_dlq_total[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: sng-control
+        annotations:
+          summary: "Dead-letter queue growing"
+          description: >-
+            Stream {{ $labels.stream }} has routed
+            {{ $value }} message(s) to the DLQ over the last 15
+            minutes and the count is still rising.
+
+      # Any ClickHouse (hot-path) write failure for 5 minutes.
+      - alert: SNGClickHouseWriteFailures
+        expr: sum(rate(sng_telemetry_events_written_hot_total{outcome="error"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: sng-control
+        annotations:
+          summary: "ClickHouse hot-path write failures"
+          description: >-
+            The telemetry hot-path writer has reported write errors
+            for 5 minutes; recent telemetry is not landing in
+            ClickHouse.
+
+      # Policy signed-bundle production p99 above 5s for 10 minutes.
+      - alert: SNGPolicyCompilationSlow
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(sng_policy_bundle_sign_duration_seconds_bucket[5m]))
+          ) > 5
+        for: 10m
+        labels:
+          severity: warning
+          service: sng-control
+        annotations:
+          summary: "Policy bundle production p99 above 5s"
+          description: >-
+            The p99 latency of signed policy-bundle production has
+            exceeded 5 seconds for 10 minutes; policy rollouts are
+            degraded.

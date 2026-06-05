@@ -1,0 +1,18 @@
+apiVersion: v2
+name: sng-edge
+description: ShieldNet Gateway (SNG) edge appliance — cloud-PoP / branch-site enforcement node (Rust).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/kennguy3n/visible-fishbone
+sources:
+  - https://github.com/kennguy3n/visible-fishbone
+maintainers:
+  - name: ShieldNet Gateway
+keywords:
+  - ztna
+  - swg
+  - edge
+  - suricata
+  - envoy

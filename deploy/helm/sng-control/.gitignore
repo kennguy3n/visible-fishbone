@@ -1,0 +1,2 @@
+# Resolved Helm subchart payloads. Rebuild with: helm dependency build
+/charts/
