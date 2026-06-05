@@ -17,7 +17,7 @@ use std::sync::{Mutex, PoisonError};
 
 use crate::class::Classifier;
 use crate::error::EbpfError;
-use crate::firewall::XdpRuleSet;
+use crate::firewall::{XdpRuleAction, XdpRuleSet};
 use crate::loader::{NoopLoader, ProgramLoader, XdpMode};
 use crate::tc::EgressSteeringTable;
 
@@ -144,6 +144,34 @@ impl XdpControlPlane {
     /// Propagates rule-validation / map-update failures from the loader.
     pub fn install_rules(&self, rules: XdpRuleSet) -> Result<(), EbpfError> {
         self.run_update(rules, |l, r| l.update_rules(r), |s, r| s.rules = r)
+    }
+
+    /// Flush the hot-path rule set to an empty *pass-through* set — every
+    /// packet falls through to the slow path instead of being matched at
+    /// XDP.
+    ///
+    /// This is the fail-safe the firewall crate's `EbpfDataPath` invokes
+    /// when a rule update fails *after* the authoritative nftables ruleset
+    /// has already committed: rather than leave the fast path enforcing a
+    /// ruleset older than nftables, it drops the fast path to a no-op so
+    /// the two substrates can never disagree. Note the pass-through
+    /// (`XdpRuleAction::Pass` default, no rules) is deliberately *not*
+    /// [`XdpRuleSet::default`], which is fail-*closed* (`Drop`) — flushing
+    /// must defer to the slow path, never silently black-hole traffic.
+    ///
+    /// With the in-memory model there is no kernel program, so this only
+    /// resets the userspace snapshot; once a kernel loader is attached it
+    /// replaces the live stale verdicts with `Pass`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates map-update failures from the loader.
+    pub fn clear_rules(&self) -> Result<(), EbpfError> {
+        self.run_update(
+            XdpRuleSet::new(Vec::new(), XdpRuleAction::Pass),
+            |l, r| l.update_rules(r),
+            |s, r| s.rules = r,
+        )
     }
 
     /// Install the classification table, replacing any previous one.
@@ -300,5 +328,21 @@ mod tests {
         assert_eq!(stats.update_failures, 1);
         // The failed update did not commit a snapshot.
         assert_eq!(stats.rules_active, 0);
+    }
+
+    #[test]
+    fn clear_rules_flushes_to_passthrough() {
+        let cp = XdpControlPlane::in_memory();
+        cp.install_rules(sample_rules()).unwrap();
+        assert_eq!(cp.stats().rules_active, 2);
+
+        cp.clear_rules().unwrap();
+        let stats = cp.stats();
+        // Fast path is now empty: every packet falls through to the slow
+        // path rather than matching a (possibly stale) hot-path rule.
+        assert_eq!(stats.rules_active, 0);
+        // clear is a successful update, not a failure.
+        assert_eq!(stats.updates_total, 2);
+        assert_eq!(stats.update_failures, 0);
     }
 }

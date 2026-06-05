@@ -273,6 +273,25 @@ impl DataPathBackend for EbpfDataPath {
                 Ok(())
             }
             Err(e) => {
+                // The XDP update failed, but nftables already committed the
+                // authoritative ruleset above. Flush the fast path to a
+                // pass-through so it can never enforce a ruleset older than
+                // nftables — without this, once a real kernel loader is
+                // attached a failed map update would leave the kernel XDP
+                // program matching stale verdicts while nftables enforces the
+                // new ones. Best-effort: if the flush itself fails there is no
+                // safe fast-path state to fall back to, so we log loudly and
+                // still surface the original error (nftables stays
+                // authoritative regardless).
+                if let Err(flush_err) = self.control.clear_rules().map_err(map_ebpf_err) {
+                    tracing::error!(
+                        target: "sng_fw::backend",
+                        error = %flush_err,
+                        "failed to flush XDP fast path after a rule-update \
+                         failure; the fast path may hold stale rules until the \
+                         next successful install"
+                    );
+                }
                 self.install_failures.fetch_add(1, Ordering::Relaxed);
                 Err(e)
             }
@@ -723,6 +742,99 @@ mod tests {
         let stats = dp.get_stats().unwrap();
         assert_eq!(stats.installs_total, 0);
         assert_eq!(stats.install_failures, 1);
+    }
+
+    /// A loader whose XDP rule updates fail after the first successful
+    /// non-empty install, while the empty pass-through flush always
+    /// succeeds. Lets us drive `EbpfDataPath` into the "nftables committed,
+    /// XDP update failed" branch and observe the fast-path flush.
+    #[derive(Debug, Default)]
+    struct FlakyXdpLoader {
+        nonempty_updates: AtomicU64,
+    }
+
+    impl sng_ebpf::ProgramLoader for FlakyXdpLoader {
+        fn is_supported(&self) -> bool {
+            false
+        }
+        fn load(&self) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn attach_xdp(&self, _: &str, _: sng_ebpf::XdpMode) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn attach_tc_egress(&self, _: &str) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn pin(&self, _: &std::path::Path) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn update_rules(&self, rules: &XdpRuleSet) -> Result<(), sng_ebpf::EbpfError> {
+            // The pass-through flush (empty rule set) must always succeed —
+            // it is the fail-safe.
+            if rules.is_empty() {
+                return Ok(());
+            }
+            // First real install succeeds; every later one fails, modelling a
+            // map update that fails after a prior good ruleset is live.
+            if self.nonempty_updates.fetch_add(1, Ordering::Relaxed) == 0 {
+                Ok(())
+            } else {
+                Err(sng_ebpf::EbpfError::Map("forced map update failure".into()))
+            }
+        }
+        fn update_classification(
+            &self,
+            _: &sng_ebpf::Classifier,
+        ) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn update_steering(
+            &self,
+            _: &sng_ebpf::EgressSteeringTable,
+        ) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn ebpf_backend_flushes_fast_path_when_xdp_update_fails() {
+        // nftables (the authoritative slow path) succeeds on every install,
+        // but the XDP map update fails on the *second* install. The fast
+        // path must then be flushed to a pass-through so it cannot keep
+        // enforcing the first install's (now stale) rules.
+        let backend: Arc<dyn NftablesBackend> = Arc::new(MockNftables::new());
+        let engine = Arc::new(FirewallEngine::new(backend));
+        let control = Arc::new(XdpControlPlane::new(Box::new(FlakyXdpLoader::default())));
+        let dp = EbpfDataPath::new(Arc::clone(&control), NftablesDataPath::new(engine));
+
+        // First install: nftables + XDP both succeed → one rule offloaded.
+        let rs1 = ruleset(
+            vec![l3l4_rule("a", "203.0.113.0/24", RuleAction::Deny)],
+            RuleAction::Deny,
+        );
+        dp.install_rules(&rs1).await.unwrap();
+        assert_eq!(control.stats().rules_active, 1);
+
+        // Second install: nftables commits, but the XDP update fails. The
+        // backend surfaces the error AND flushes the fast path.
+        let rs2 = ruleset(
+            vec![
+                l3l4_rule("a", "203.0.113.0/24", RuleAction::Deny),
+                l3l4_rule("b", "192.0.2.0/24", RuleAction::Deny),
+            ],
+            RuleAction::Deny,
+        );
+        assert!(dp.install_rules(&rs2).await.is_err());
+
+        // Fast path was flushed to pass-through (no stale rules left), so it
+        // defers entirely to the nftables ruleset that did commit.
+        assert_eq!(control.stats().rules_active, 0);
+        let stats = dp.get_stats().unwrap();
+        assert_eq!(stats.installs_total, 1);
+        assert_eq!(stats.install_failures, 1);
+        // nftables committed both installs — enforcement was never lost.
+        assert_eq!(dp.fallback().get_stats().unwrap().installs_total, 2);
     }
 
     #[tokio::test]
