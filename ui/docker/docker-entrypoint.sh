@@ -8,6 +8,7 @@
 set -eu
 
 CONFIG_PATH="${SNG_CONFIG_PATH:-/usr/share/nginx/html/config.js}"
+CSP_PATH="${SNG_CSP_PATH:-/etc/nginx/snippets/sng-csp.conf}"
 
 # Defaults keep the image bootable without any configuration.
 SNG_API_BASE_URL="${SNG_API_BASE_URL:-/api/v1}"
@@ -52,3 +53,57 @@ json_string() {
 } > "$CONFIG_PATH"
 
 echo "sng-ui: wrote runtime config to $CONFIG_PATH (apiBaseUrl=$SNG_API_BASE_URL authMode=$SNG_AUTH_MODE)"
+
+# --- Content-Security-Policy generation ---------------------------------
+# The CSP `connect-src` must list every origin the SPA legitimately calls
+# (XHR/fetch). Those origins — the API and the OIDC IdP — are only known at
+# deploy time via the same env vars that drive config.js, so we generate the
+# CSP header here instead of baking a permissive `https:` into the image. This
+# narrows the policy from "any HTTPS host" to "self + the configured backends",
+# so a hypothetical script-injection can't exfiltrate to an arbitrary endpoint.
+#
+# Inputs:
+#   SNG_API_BASE_URL      — relative (e.g. /api/v1 => same-origin, needs nothing
+#                           beyond 'self') or absolute (its origin is allowed).
+#   SNG_OIDC_ISSUER       — when set, its origin is allowed (discovery + token).
+#   SNG_CSP_CONNECT_EXTRA — optional space-separated extra sources, e.g. an IdP
+#                           whose token_endpoint lives on a different origin than
+#                           the issuer (the token endpoint comes from discovery
+#                           and can't be derived here).
+#   SNG_CSP_CONNECT_SRC   — optional full override of the connect-src value.
+
+# Echo scheme://host[:port] for an absolute http(s) URL; nothing otherwise (so
+# a relative apiBaseUrl contributes no cross-origin source).
+origin_of() {
+  case "$1" in
+    http://* | https://*)
+      printf '%s' "$1" |
+        sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://[^/]+).*#\1#'
+      ;;
+    *) : ;;
+  esac
+}
+
+if [ -n "${SNG_CSP_CONNECT_SRC:-}" ]; then
+  CONNECT_SRC="$SNG_CSP_CONNECT_SRC"
+else
+  CONNECT_SRC="'self'"
+  for url in "$SNG_API_BASE_URL" "$SNG_OIDC_ISSUER"; do
+    o=$(origin_of "$url")
+    [ -n "$o" ] || continue
+    case " $CONNECT_SRC " in *" $o "*) ;; *) CONNECT_SRC="$CONNECT_SRC $o" ;; esac
+  done
+  # Word-splitting on the extras is intentional (space-separated list).
+  # shellcheck disable=SC2086
+  for extra in ${SNG_CSP_CONNECT_EXTRA:-}; do
+    case " $CONNECT_SRC " in *" $extra "*) ;; *) CONNECT_SRC="$CONNECT_SRC $extra" ;; esac
+  done
+fi
+
+# Single quotes inside the double-quoted shell string are literal, so the CSP
+# keywords ('self', 'none', …) need no extra escaping. CSP values never contain
+# a double quote, so wrapping in printf's "%s" is safe.
+CSP_VALUE="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src ${CONNECT_SRC}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+printf 'add_header Content-Security-Policy "%s" always;\n' "$CSP_VALUE" > "$CSP_PATH"
+
+echo "sng-ui: wrote CSP to $CSP_PATH (connect-src $CONNECT_SRC)"

@@ -90,40 +90,41 @@ export async function completeOidcLogin(
   if (error) throw new Error(`IdP returned error: ${error}`);
   if (!code) throw new Error("Missing authorization code");
 
+  // The state and verifier are single-use: read them, then immediately clear
+  // them from storage before doing anything that can throw. This guarantees no
+  // failure path — state mismatch, missing verifier, or a failed token
+  // exchange — can leave stale PKCE material behind. A retry must restart the
+  // flow via beginOidcLogin(), which mints fresh material. (A plain `finally`
+  // wouldn't cover the validation throws below, since they run before it.)
   const expectedState = sessionStorage.getItem(OIDC_STATE_KEY);
+  const verifier = sessionStorage.getItem(PKCE_VERIFIER_KEY);
+  sessionStorage.removeItem(OIDC_STATE_KEY);
+  sessionStorage.removeItem(PKCE_VERIFIER_KEY);
+
   if (!returnedState || returnedState !== expectedState) {
     throw new Error("OIDC state mismatch — possible CSRF");
   }
-  const verifier = sessionStorage.getItem(PKCE_VERIFIER_KEY);
   if (!verifier) throw new Error("Missing PKCE verifier");
 
-  // The code, state, and verifier are single-use. Clear them in `finally`
-  // so a failed exchange (network error / non-OK response) doesn't leave
-  // stale PKCE material in sessionStorage.
-  try {
-    const doc = await discover(cfg.oidcIssuer);
-    const body = new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri(),
-      client_id: cfg.oidcClientId,
-      code_verifier: verifier,
-    });
-    const res = await fetch(doc.token_endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    });
-    if (!res.ok) {
-      throw new Error(`Token exchange failed (${res.status})`);
-    }
-    const tokens = (await res.json()) as { access_token?: string };
-    if (!tokens.access_token) {
-      throw new Error("Token response missing access_token");
-    }
-    return { accessToken: tokens.access_token };
-  } finally {
-    sessionStorage.removeItem(PKCE_VERIFIER_KEY);
-    sessionStorage.removeItem(OIDC_STATE_KEY);
+  const doc = await discover(cfg.oidcIssuer);
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: redirectUri(),
+    client_id: cfg.oidcClientId,
+    code_verifier: verifier,
+  });
+  const res = await fetch(doc.token_endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  if (!res.ok) {
+    throw new Error(`Token exchange failed (${res.status})`);
   }
+  const tokens = (await res.json()) as { access_token?: string };
+  if (!tokens.access_token) {
+    throw new Error("Token response missing access_token");
+  }
+  return { accessToken: tokens.access_token };
 }

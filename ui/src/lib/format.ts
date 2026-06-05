@@ -75,6 +75,11 @@ export function formatRelative(value?: string | null): string {
   const diffMs = Date.now() - d.getTime();
   const sec = Math.round(diffMs / 1000);
   const abs = Math.abs(sec);
+  // A future timestamp (clock skew between the control plane and the browser,
+  // or a forward-looking field like expires_at) makes `sec` negative. We pick
+  // the unit and compute the magnitude from `abs`, then phrase it as "in 5m"
+  // rather than letting the sign leak into "-5m ago".
+  const future = sec < 0;
   // [exclusive upper bound in seconds, seconds-per-unit, label]. The first
   // step whose bound exceeds the elapsed time wins; the value is rendered in
   // that step's unit. Keeping the divisor and label on the same row avoids
@@ -86,9 +91,13 @@ export function formatRelative(value?: string | null): string {
     [Infinity, 86400, "d"],
   ];
   for (const [bound, perUnit, label] of steps) {
-    if (abs < bound) return `${Math.round(sec / perUnit)}${label} ago`;
+    if (abs < bound) {
+      const n = Math.round(abs / perUnit);
+      return future ? `in ${n}${label}` : `${n}${label} ago`;
+    }
   }
-  return `${Math.round(sec / 86400)}d ago`;
+  const days = Math.round(abs / 86400);
+  return future ? `in ${days}d` : `${days}d ago`;
 }
 
 export function shortId(id?: string | null): string {

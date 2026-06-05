@@ -21,6 +21,9 @@ FROM nginx:1.27-alpine AS runtime
 # hardening-headers snippet that each location block includes.
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY docker/security-headers.conf /etc/nginx/snippets/sng-security-headers.conf
+# Bootable default CSP; the entrypoint regenerates this at start with a
+# connect-src narrowed to the configured backend origins.
+COPY docker/csp.conf /etc/nginx/snippets/sng-csp.conf
 
 # Static assets from the build stage.
 COPY --from=build /app/dist /usr/share/nginx/html

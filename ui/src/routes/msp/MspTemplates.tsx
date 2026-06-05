@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useBulkApplyPolicyTemplate } from "@/api/generated/endpoints/msps/msps";
 import { PageHeader, Card, Badge } from "@/components/ui";
 import { Modal } from "@/components/Modal";
@@ -66,35 +66,38 @@ export function MspTemplates() {
   const [appliedId, setAppliedId] = useState<string | null>(null);
   const [lastAppliedId, setLastAppliedId] = useState<string | null>(null);
 
-  // Edits go through a functional updater so rapid successive upserts compose
-  // off the freshest list rather than a stale closure snapshot. A failed save
-  // surfaces a warning rather than silently dropping the change.
+  // Persisting the library is a side effect, so it lives in an effect rather
+  // than inside the state updaters (which stay pure and are double-invoked
+  // under StrictMode). Updaters use the functional form so rapid successive
+  // edits compose off the freshest list instead of a stale closure snapshot.
+  // The effect writes whatever was committed and warns once if the write fails
+  // (e.g. quota exceeded). We skip the initial mount: that value just came out
+  // of localStorage, so re-writing it is pointless and a spurious quota alert
+  // on load would be confusing.
+  const firstRun = useRef(true);
+  useEffect(() => {
+    if (firstRun.current) {
+      firstRun.current = false;
+      return;
+    }
+    if (!persist(templates)) {
+      alert(
+        "Couldn't save the template library: browser storage is full. " +
+          "Delete some templates and try again.",
+      );
+    }
+  }, [templates]);
+
   const upsert = (t: Template) => {
-    setTemplates((prev) => {
-      const next = prev.some((p) => p.id === t.id)
+    setTemplates((prev) =>
+      prev.some((p) => p.id === t.id)
         ? prev.map((p) => (p.id === t.id ? t : p))
-        : [...prev, t];
-      // Persisting is a side effect, but it must see the same `next` we're
-      // committing, so it lives inside the functional updater (which derives
-      // `next` from the freshest state). The updater itself stays otherwise
-      // pure; React may double-invoke it under StrictMode, but localStorage
-      // writes are idempotent so a repeat is harmless.
-      if (!persist(next)) {
-        alert(
-          "Couldn't save the template library: browser storage is full. " +
-            "Delete some templates and try again.",
-        );
-      }
-      return next;
-    });
+        : [...prev, t],
+    );
   };
 
   const remove = (id: string) => {
-    setTemplates((prev) => {
-      const next = prev.filter((p) => p.id !== id);
-      persist(next); // a delete frees space, so ignore any write failure
-      return next;
-    });
+    setTemplates((prev) => prev.filter((p) => p.id !== id));
   };
 
   const applyTemplate = (t: Template) => {
