@@ -104,6 +104,55 @@ impl Default for Targets {
     }
 }
 
+/// A capability the function under test actually exercises, with a
+/// one-line "how it works" explanation for the RFP datasheet. These are
+/// descriptive (not graded): they let the consolidated business report
+/// answer "what does the DLP/ZTNA engine do, and how" alongside the
+/// catch/false-positive numbers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Feature {
+    /// Short capability name, e.g. "Check-digit validators".
+    pub name: String,
+    /// One-line mechanism description ("how it works").
+    pub how: String,
+    /// What the capability spans, e.g. "13 Asia + GCC national IDs".
+    pub coverage: String,
+}
+
+/// A measured throughput data point for the function's hot path. These
+/// are real microbenchmarks (wall-clock over the actual decision code,
+/// after a warm-up), in the same spirit as the Criterion policy-eval
+/// numbers: they characterise the CPU-bound code path, not line-rate
+/// under a live load generator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThroughputStat {
+    /// What was measured, e.g. "classify" or "evaluate".
+    pub label: String,
+    /// Operation unit, e.g. "scans/s" or "decisions/s".
+    pub unit: String,
+    /// Number of timed iterations (excludes warm-up).
+    pub iterations: u64,
+    /// Mean nanoseconds per operation.
+    pub per_op_ns: f64,
+    /// Operations per second (1e9 / per_op_ns).
+    pub ops_per_sec: f64,
+    /// Payload bytes per operation, when the op consumes a payload
+    /// (DLP scan). `None` for fixed-size ops (a ZTNA decision).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_per_op: Option<u64>,
+    /// Sustained scan bandwidth in **mebibytes/s (MiB/s, 1024² bytes)**,
+    /// derived from bytes_per_op — the same binary-megabyte convention Go's
+    /// `testing.B` uses for its "MB/s". The JSON key stays `mb_per_sec` for
+    /// wire-compat; consumers render it labelled "MiB/s".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mb_per_sec: Option<f64>,
+    /// `true` when measured from a debug (unoptimized) build, where these
+    /// numbers are ~an order of magnitude slower than a release build and
+    /// must NOT be presented as product performance. The consolidator
+    /// surfaces this as a caveat.
+    pub debug_build: bool,
+}
+
 /// Per-function efficacy result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionReport {
@@ -114,6 +163,14 @@ pub struct FunctionReport {
     pub tested: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub untested_reason: Option<String>,
+
+    /// Capabilities the function exercises ("what it does + how"). Empty
+    /// for functions that only report a confusion matrix.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<Feature>,
+    /// Measured hot-path throughput points. Empty when not measured.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub throughput: Vec<ThroughputStat>,
 
     pub total_cases: usize,
     pub bad_cases: usize,
@@ -186,6 +243,8 @@ impl FunctionReport {
             kind,
             tested: true,
             untested_reason: None,
+            features: Vec::new(),
+            throughput: Vec::new(),
             total_cases: total,
             bad_cases,
             good_cases,
@@ -211,6 +270,8 @@ impl FunctionReport {
             kind,
             tested: false,
             untested_reason: Some(reason.into()),
+            features: Vec::new(),
+            throughput: Vec::new(),
             total_cases: 0,
             bad_cases: 0,
             good_cases: 0,
@@ -226,6 +287,72 @@ impl FunctionReport {
             notes: None,
             cases: Vec::new(),
         }
+    }
+
+    /// Attach the capability catalog ("what it does + how"). Chainable.
+    #[must_use]
+    pub fn with_features(mut self, features: Vec<Feature>) -> Self {
+        self.features = features;
+        self
+    }
+
+    /// Attach measured hot-path throughput points. Chainable.
+    #[must_use]
+    pub fn with_throughput(mut self, throughput: Vec<ThroughputStat>) -> Self {
+        self.throughput = throughput;
+        self
+    }
+}
+
+/// Time `op` over the real decision code and return a throughput point.
+///
+/// Runs `iterations / 8` warm-up calls (to amortise first-call cache and
+/// branch-predictor effects) and then `iterations` timed calls. The op is
+/// passed the loop index so callers can vary the input and defeat any
+/// dead-code elimination; its return value is fed to `black_box`.
+///
+/// `bytes_per_op` is the payload size when the op consumes one (DLP scan),
+/// which is used to derive a MiB/s bandwidth (1024² bytes); pass `None` for
+/// fixed-size ops such as a ZTNA decision.
+pub fn measure<T>(
+    label: &str,
+    unit: &str,
+    iterations: u64,
+    bytes_per_op: Option<u64>,
+    mut op: impl FnMut(u64) -> T,
+) -> ThroughputStat {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    let warmup = (iterations / 8).max(1);
+    for i in 0..warmup {
+        black_box(op(i));
+    }
+
+    let start = Instant::now();
+    for i in 0..iterations {
+        black_box(op(i));
+    }
+    let elapsed = start.elapsed();
+
+    let iters = iterations.max(1);
+    let per_op_ns = elapsed.as_nanos() as f64 / iters as f64;
+    let ops_per_sec = if per_op_ns > 0.0 {
+        1e9 / per_op_ns
+    } else {
+        0.0
+    };
+    let mb_per_sec = bytes_per_op.map(|b| (b as f64 * ops_per_sec) / (1024.0 * 1024.0));
+
+    ThroughputStat {
+        label: label.into(),
+        unit: unit.into(),
+        iterations,
+        per_op_ns,
+        ops_per_sec,
+        bytes_per_op,
+        mb_per_sec,
+        debug_build: cfg!(debug_assertions),
     }
 }
 
@@ -372,5 +499,70 @@ mod tests {
         let untested = FunctionReport::untested("b", "c", Kind::Detection, "tool missing");
         let rep = EfficacyReport::new("sha".into(), "host".into(), vec![pass, untested]);
         assert_eq!(rep.overall_verdict, Grade::Untested);
+    }
+
+    #[test]
+    fn features_and_throughput_default_empty_and_are_chainable() {
+        let base = FunctionReport::from_cases(
+            "dlp",
+            "sng-dlp",
+            Kind::Detection,
+            Targets::default(),
+            vec![case(true, true)],
+            None,
+        );
+        // Defaults: a from_cases report carries no features/throughput, so
+        // functions that don't measure them serialize without the keys.
+        assert!(base.features.is_empty());
+        assert!(base.throughput.is_empty());
+
+        let enriched = base
+            .with_features(vec![Feature {
+                name: "Check-digit validators".into(),
+                how: "statutory check digit confirms each match".into(),
+                coverage: "11 detectors".into(),
+            }])
+            .with_throughput(vec![ThroughputStat {
+                label: "classify".into(),
+                unit: "scans/s".into(),
+                iterations: 10,
+                per_op_ns: 100.0,
+                ops_per_sec: 1e7,
+                bytes_per_op: Some(1024),
+                mb_per_sec: Some(9.77),
+                debug_build: false,
+            }]);
+        assert_eq!(enriched.features.len(), 1);
+        assert_eq!(enriched.throughput.len(), 1);
+        // The empty-vec fields are skipped on the wire; the populated ones
+        // round-trip.
+        let json = serde_json::to_string(&enriched).unwrap();
+        assert!(json.contains("\"features\""));
+        assert!(json.contains("\"throughput\""));
+        assert!(json.contains("Check-digit validators"));
+    }
+
+    #[test]
+    fn measure_reports_positive_rates_and_derives_bandwidth() {
+        // 1 KB payload, trivial op. We don't assert absolute speed (machine
+        // dependent) — only that the derived fields are internally consistent.
+        let s = measure("op", "ops/s", 2_000, Some(1024), |i| i.wrapping_mul(3));
+        assert_eq!(s.iterations, 2_000);
+        assert!(s.per_op_ns > 0.0);
+        assert!(s.ops_per_sec > 0.0);
+        // ops_per_sec and per_op_ns are reciprocal (within rounding).
+        assert!((s.ops_per_sec - 1e9 / s.per_op_ns).abs() / s.ops_per_sec < 1e-6);
+        // MiB/s = bytes * ops_per_sec / 2^20.
+        let want_mb = 1024.0 * s.ops_per_sec / (1024.0 * 1024.0);
+        assert!((s.mb_per_sec.unwrap() - want_mb).abs() / want_mb < 1e-9);
+        // Built under cfg(test) => debug assertions on.
+        assert!(s.debug_build);
+    }
+
+    #[test]
+    fn measure_without_payload_has_no_bandwidth() {
+        let s = measure("decide", "decisions/s", 1_000, None, |_| 1u8);
+        assert!(s.bytes_per_op.is_none());
+        assert!(s.mb_per_sec.is_none());
     }
 }

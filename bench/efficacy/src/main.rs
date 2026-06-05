@@ -177,7 +177,29 @@ fn print_summary(report: &EfficacyReport, out: &std::path::Path) {
         );
     }
     println!("overall: {}", report.overall_verdict.as_str());
-    println!("report written to {}", out.display());
+
+    // Throughput points (when measured) — real microbenchmarks over the hot
+    // path. Flag debug builds so a slow unoptimized number is never mistaken
+    // for product performance.
+    let has_thr = report.functions.iter().any(|f| !f.throughput.is_empty());
+    if has_thr {
+        println!("\n--- throughput (hot path) ---");
+        for f in &report.functions {
+            for t in &f.throughput {
+                let bw = t
+                    .mb_per_sec
+                    .map(|m| format!("  {m:.1} MiB/s"))
+                    .unwrap_or_default();
+                let dbg = if t.debug_build { "  [DEBUG build]" } else { "" };
+                println!(
+                    "{:<10} {:<10} {:>14.0} {:<12} {:>10.0} ns/op{}{}",
+                    f.function, t.label, t.ops_per_sec, t.unit, t.per_op_ns, bw, dbg
+                );
+            }
+        }
+    }
+
+    println!("\nreport written to {}", out.display());
 }
 
 fn kind_str(k: report::Kind) -> &'static str {

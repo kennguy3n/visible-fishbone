@@ -314,6 +314,130 @@ func TestSecurityEfficacySection(t *testing.T) {
 	}
 }
 
+func TestSecurityEfficacyCapabilities(t *testing.T) {
+	bytesPerOp := int64(640)
+	mbps := 2.5
+	r := &BusinessReport{
+		Efficacy: &EfficacyReport{
+			Suite: "security-efficacy", Host: "h", OverallVerdict: "PASS",
+			Functions: []*EfficacyFunction{
+				{
+					Function: "dlp", Crate: "sng-dlp", Kind: "detection", Tested: true,
+					TotalCases: 2, BadCases: 1, GoodCases: 1, TP: 1, TN: 1,
+					CatchRate: 1.0, FalsePosRate: 0.0, Accuracy: 1.0, Verdict: "PASS",
+					Features: []EfficacyFeature{{
+						Name:     "Check-digit validators",
+						How:      "statutory check digit confirms each match | suppresses fakes",
+						Coverage: "11 detectors",
+					}},
+					Throughput: []EfficacyThroughput{{
+						Label: "classify", Unit: "scans/s", Iterations: 5000,
+						PerOpNs: 207884, OpsPerSec: 4810,
+						BytesPerOp: &bytesPerOp, MBPerSec: &mbps, DebugBuild: false,
+					}},
+				},
+			},
+		},
+	}
+	md := r.ToMarkdown()
+	for _, want := range []string{
+		"### 7.1 DLP (Data Loss Prevention) — Capabilities & Performance",
+		"**What it does / how it works**",
+		"| Capability | How it works | Coverage |",
+		"| **Check-digit validators** |",
+		// Pipe inside a feature description must be escaped so the row stays intact.
+		"confirms each match \\| suppresses fakes",
+		"**Performance (measured hot path)**",
+		// Thousands separators + µs latency conversion + MiB/s bandwidth.
+		"| `classify` | 4,810 scans/s | 208 µs | 2.5 MiB/s | 5,000 |",
+		"release build",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("capabilities markdown missing %q\n---\n%s", want, md)
+		}
+	}
+	// Release build must NOT carry the debug caveat.
+	if strings.Contains(md, "Debug build.") {
+		t.Error("release-build throughput must not render the debug caveat")
+	}
+
+	// Flip to a debug build: the caveat appears.
+	r.Efficacy.Functions[0].Throughput[0].DebugBuild = true
+	if !strings.Contains(r.ToMarkdown(), "Debug build.") {
+		t.Error("debug-build throughput must render the debug caveat")
+	}
+}
+
+func TestThroughputFormatHelpers(t *testing.T) {
+	for _, tc := range []struct {
+		in   float64
+		want string
+	}{
+		{4810, "4,810"}, {1901606, "1,901,606"}, {526, "526"},
+		{2.5, "2.5"}, {0.2, "0.2"}, {99.9, "99.9"},
+	} {
+		if got := humanFloat(tc.in); got != tc.want {
+			t.Errorf("humanFloat(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		ns   float64
+		want string
+	}{
+		{526, "526 ns"}, {207884, "208 µs"}, {3379422, "3.4 ms"},
+	} {
+		if got := perOpLatency(tc.ns); got != tc.want {
+			t.Errorf("perOpLatency(%v) = %q, want %q", tc.ns, got, tc.want)
+		}
+	}
+	if got := humanInt(50000); got != "50,000" {
+		t.Errorf("humanInt(50000) = %q, want 50,000", got)
+	}
+	if got := mdCell("a|b\nc"); got != "a\\|b c" {
+		t.Errorf("mdCell escaping = %q, want %q", got, "a\\|b c")
+	}
+}
+
+func TestEfficacyTitleFallback(t *testing.T) {
+	for _, tc := range []struct{ fn, want string }{
+		{"dlp", "DLP (Data Loss Prevention)"},
+		{"ztna", "ZTNA (Zero Trust Network Access)"},
+		{"firewall", "Firewall"},
+		// Unknown engine ids must never render a raw lowercase token.
+		{"newengine", "NEWENGINE"},
+	} {
+		if got := efficacyTitle(tc.fn); got != tc.want {
+			t.Errorf("efficacyTitle(%q) = %q, want %q", tc.fn, got, tc.want)
+		}
+	}
+}
+
+// TestEfficacyCapabilitiesNumberedInOrder verifies the sub-section index is
+// assigned by render order (7.1, 7.2 …) and is independent of the function
+// id, so a future engine slots in without renumbering anything by hand.
+func TestEfficacyCapabilitiesNumberedInOrder(t *testing.T) {
+	mk := func(fn string) *EfficacyFunction {
+		return &EfficacyFunction{
+			Function: fn, Crate: "c", Kind: "detection", Tested: true,
+			Features: []EfficacyFeature{{Name: "x", How: "y", Coverage: "z"}},
+		}
+	}
+	r := &BusinessReport{Efficacy: &EfficacyReport{
+		OverallVerdict: "PASS",
+		// ztna first, then dlp: numbering must follow this order.
+		Functions: []*EfficacyFunction{mk("ztna"), mk("dlp")},
+	}}
+	md := r.ToMarkdown()
+	for _, want := range []string{
+		"### 7.1 ZTNA (Zero Trust Network Access) — Capabilities & Performance",
+		"### 7.2 DLP (Data Loss Prevention) — Capabilities & Performance",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("capabilities numbering missing %q\n---\n%s", want, md)
+		}
+	}
+}
+
 func TestSecurityEfficacyMissing(t *testing.T) {
 	r := &BusinessReport{}
 	md := r.ToMarkdown()
@@ -363,6 +487,12 @@ func TestEfficacyJSONContract(t *testing.T) {
       "targets": {"catch_pass": 0.99, "catch_warn": 0.9, "fp_pass": 0.02, "fp_warn": 0.05},
       "verdict": "PASS",
       "notes": "real engine deny path",
+      "features": [
+        {"name": "Check-digit validators", "how": "statutory check digit confirms each match", "coverage": "11 detectors"}
+      ],
+      "throughput": [
+        {"label": "classify", "unit": "scans/s", "iterations": 5000, "per_op_ns": 207884.0, "ops_per_sec": 4810.0, "bytes_per_op": 640, "mb_per_sec": 2.5, "debug_build": false}
+      ],
       "cases": [
         {"description": "deny tcp/9999", "bad": true, "expected": "deny", "actual": "deny", "correct": true}
       ]
@@ -405,6 +535,22 @@ func TestEfficacyJSONContract(t *testing.T) {
 	if fw.Function != "firewall" || fw.Kind != "enforcement" || !fw.Tested ||
 		fw.CatchRate != 1.0 || fw.FalsePosRate != 0.0 || fw.Verdict != "PASS" {
 		t.Errorf("firewall function fields mismatch: %+v", fw)
+	}
+	// New capability/throughput fields are part of the same wire contract.
+	if len(fw.Features) != 1 || fw.Features[0].Name != "Check-digit validators" ||
+		fw.Features[0].Coverage != "11 detectors" {
+		t.Errorf("features did not deserialize: %+v", fw.Features)
+	}
+	if len(fw.Throughput) != 1 {
+		t.Fatalf("throughput did not deserialize: %+v", fw.Throughput)
+	}
+	thr := fw.Throughput[0]
+	if thr.Label != "classify" || thr.Unit != "scans/s" || thr.Iterations != 5000 ||
+		thr.OpsPerSec != 4810.0 || thr.DebugBuild {
+		t.Errorf("throughput scalar fields mismatch: %+v", thr)
+	}
+	if thr.BytesPerOp == nil || *thr.BytesPerOp != 640 || thr.MBPerSec == nil || *thr.MBPerSec != 2.5 {
+		t.Errorf("throughput optional fields mismatch: %+v", thr)
 	}
 
 	ips := r.Functions[1]
