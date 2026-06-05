@@ -4,8 +4,9 @@ import {
   useCreateMSP,
   useListMSPTenants,
   useUpdateMSPStatus,
+  useDeleteMSP,
 } from "@/api/generated/endpoints/msps/msps";
-import { MSPStatus } from "@/api/generated/model";
+import { MSPStatus, MSPCreateStatus } from "@/api/generated/model";
 import type { Msp } from "@/api/generated/model";
 import { PageHeader, Card, AsyncBoundary, StatusBadge, LoadingState } from "@/components/ui";
 import { Modal } from "@/components/Modal";
@@ -44,6 +45,9 @@ export function MspHierarchy() {
                     msp={m}
                     selected={selected === m.id}
                     onSelect={() => setSelected(selected === m.id ? null : m.id)}
+                    onDeleted={(id) =>
+                      setSelected((cur) => (cur === id ? null : cur))
+                    }
                   />
                 ))}
               </div>
@@ -67,12 +71,16 @@ function MspNode({
   msp,
   selected,
   onSelect,
+  onDeleted,
 }: {
   msp: Msp;
   selected: boolean;
   onSelect: () => void;
+  onDeleted: (id: string) => void;
 }) {
   const status = useUpdateMSPStatus();
+  const del = useDeleteMSP();
+  const isDeleted = msp.status === MSPStatus.deleted;
   return (
     <div
       className="tree__node"
@@ -84,19 +92,55 @@ function MspNode({
       </button>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <StatusBadge status={msp.status} />
+        {/* Routine transitions only. `deleted` is a terminal, cascading state
+            (it clears tenants.msp_id across the whole cohort), so it is
+            deliberately NOT offered here — mirroring the API's MSPCreateStatus,
+            which omits it — to stop an operator soft-deleting an MSP with a
+            stray dropdown pick. Deletion goes through the confirm()-gated
+            Delete button, consistent with destructive actions elsewhere. */}
         <select
           value={msp.status}
+          disabled={isDeleted || status.isPending}
           onChange={(e) =>
-            status.mutate({ mspId: msp.id, data: { status: e.target.value as MSPStatus } })
+            status.mutate({
+              mspId: msp.id,
+              data: { status: e.target.value as MSPStatus },
+            })
           }
           style={{ width: 130 }}
         >
-          {Object.values(MSPStatus).map((s) => (
+          {/* Keep a matching (but unselectable) option for a terminal status so
+              the controlled <select> stays consistent. */}
+          {isDeleted && (
+            <option value={msp.status} disabled>
+              {titleCase(msp.status)}
+            </option>
+          )}
+          {Object.values(MSPCreateStatus).map((s) => (
             <option key={s} value={s}>
               {titleCase(s)}
             </option>
           ))}
         </select>
+        <button
+          className="btn btn--danger btn--sm"
+          disabled={isDeleted || del.isPending}
+          onClick={() => {
+            if (
+              confirm(
+                `Delete MSP "${msp.name}"? This soft-deletes the provider and ` +
+                  `unassigns every tenant in its cohort. This cannot be undone.`,
+              )
+            ) {
+              del.mutate(
+                { mspId: msp.id },
+                { onSuccess: () => onDeleted(msp.id) },
+              );
+            }
+          }}
+        >
+          Delete
+        </button>
       </div>
     </div>
   );
