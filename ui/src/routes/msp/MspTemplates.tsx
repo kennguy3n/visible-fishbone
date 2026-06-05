@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useBulkApplyPolicyTemplate } from "@/api/generated/endpoints/msps/msps";
 import { PageHeader, Card, Badge } from "@/components/ui";
 import { Modal } from "@/components/Modal";
@@ -71,13 +71,13 @@ export function MspTemplates() {
   // under StrictMode). Updaters use the functional form so rapid successive
   // edits compose off the freshest list instead of a stale closure snapshot.
   // The effect writes whatever was committed and warns once if the write fails
-  // (e.g. quota exceeded). We skip the initial mount: that value just came out
-  // of localStorage, so re-writing it is pointless and a spurious quota alert
-  // on load would be confusing.
-  const firstRun = useRef(true);
+  // (e.g. quota exceeded). We skip the write when storage already holds this
+  // exact value: that covers both the initial mount (the state came straight
+  // from localStorage) and a value we just adopted from another tab's `storage`
+  // event — without this guard those two tabs would ping-pong setItem calls
+  // (each write fires a `storage` event in the other tab) forever.
   useEffect(() => {
-    if (firstRun.current) {
-      firstRun.current = false;
+    if (localStorage.getItem(STORAGE_KEY) === JSON.stringify(templates)) {
       return;
     }
     if (!persist(templates)) {
@@ -87,6 +87,19 @@ export function MspTemplates() {
       );
     }
   }, [templates]);
+
+  // Keep multiple admin tabs in sync. Without this, a second tab keeps its
+  // stale in-memory list and its next edit persists that stale list, silently
+  // clobbering templates the first tab added (last write wins, no merge). The
+  // `storage` event fires only in the *other* tabs, so we reload the committed
+  // library there; the persist effect above no-ops on the adopted value.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEY || e.key === null) setTemplates(load());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   const upsert = (t: Template) => {
     setTemplates((prev) =>
