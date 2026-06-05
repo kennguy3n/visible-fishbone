@@ -11,6 +11,7 @@
 //	sng-migrate version           # alias of `status`
 //	sng-migrate force <V>         # force-set version (recovery only)
 //	sng-migrate validate [files]  # lint migration SQL for lock safety
+//	sng-migrate squash            # generate a consolidated baseline migration
 //
 // Lock-safety flags (apply to `up`):
 //
@@ -89,6 +90,8 @@ func run(args []string, stdout, stderr *os.File) error {
 		_, _ = fmt.Fprintf(stderr, "  version          alias of status\n")
 		_, _ = fmt.Fprintf(stderr, "  force <V>        forcibly set version (recovery only)\n")
 		_, _ = fmt.Fprintf(stderr, "  validate [files] lint migration SQL for lock safety (no DB needed)\n")
+		_, _ = fmt.Fprintf(stderr, "  squash           generate a consolidated baseline migration (no DB needed)\n")
+		_, _ = fmt.Fprintf(stderr, "                   flags: --out DIR (default migrations/baseline), --force\n")
 	}
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("parse flags: %v", err)
@@ -103,6 +106,13 @@ func run(args []string, stdout, stderr *os.File) error {
 	// connection, so it is handled before any DSN resolution.
 	if rest[0] == "validate" {
 		return runValidate(stdout, stderr, rest[1:])
+	}
+
+	// `squash` only reads the embedded migration SQL and writes the
+	// generated baseline to disk; like `validate` it needs no
+	// database connection, so handle it before DSN resolution.
+	if rest[0] == "squash" {
+		return runSquash(stdout, stderr, rest[1:])
 	}
 
 	dsn := *dsnFlag

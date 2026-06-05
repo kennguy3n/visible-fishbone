@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
@@ -82,7 +81,6 @@ func Auth(cfg *config.Auth, keys APIKeyLookup, opts ...AuthOption) func(http.Han
 	if header == "" {
 		header = "X-SNG-API-Key"
 	}
-	secret := []byte(cfg.JWTSecret)
 	var o authOptions
 	for _, fn := range opts {
 		fn(&o)
@@ -128,19 +126,15 @@ func Auth(cfg *config.Auth, keys APIKeyLookup, opts ...AuthOption) func(http.Han
 				writeAuthError(w, "missing_credentials")
 				return
 			}
-			if len(secret) == 0 {
-				writeAuthError(w, "jwt_not_configured")
-				return
-			}
-			claims := jwt.MapClaims{}
-			tok, err := jwt.ParseWithClaims(raw, claims, func(t *jwt.Token) (any, error) {
-				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-					return nil, errors.New("unexpected signing method")
-				}
-				return secret, nil
-			}, jwt.WithIssuer(cfg.JWTIssuer), jwt.WithAudience(cfg.JWTAudience), jwt.WithValidMethods([]string{"HS256"}))
-			if err != nil || !tok.Valid {
-				writeAuthError(w, "invalid_token")
+			// The symmetric (HMAC) verification path is build-tagged:
+			// the real implementation is compiled only into
+			// non-production builds (auth_hmac.go), while production
+			// builds link a stub (auth_hmac_prod.go) that always
+			// refuses, so a production binary physically cannot verify
+			// an HMAC token. See SECURITY.md and the //go:build guards.
+			claims, errCode, err := verifyBearerJWT(cfg, raw)
+			if err != nil {
+				writeAuthError(w, errCode)
 				return
 			}
 
@@ -202,8 +196,10 @@ func Auth(cfg *config.Auth, keys APIKeyLookup, opts ...AuthOption) func(http.Han
 // extractMobileClaims pulls the device-bound custom claims off a
 // verified mobile session JWT. Returns the zero value when none of
 // the mobile claims are present (operator-console / API-key auth),
-// which the caller treats as "not a mobile session".
-func extractMobileClaims(claims jwt.MapClaims) MobileClaims {
+// which the caller treats as "not a mobile session". It operates on
+// a plain claim map so the call site does not depend on the JWT
+// library (which lives behind the build-tagged verifier).
+func extractMobileClaims(claims map[string]any) MobileClaims {
 	var mc MobileClaims
 	mc.TokenType, _ = claims["token_type"].(string)
 	mc.DeviceKey, _ = claims["device_key"].(string)

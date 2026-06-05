@@ -44,14 +44,15 @@ import (
 type contextKey string
 
 const (
-	keyRequestID    contextKey = "request_id"
-	keyTenantID     contextKey = "tenant_id"
-	keyMSPID        contextKey = "msp_id"
-	keyUserID       contextKey = "user_id"
-	keyAPIKeyID     contextKey = "api_key_id"
-	keyAuthSubject  contextKey = "auth_subject"
-	keyRequestMeta  contextKey = "request_meta"
-	keyMobileClaims contextKey = "mobile_claims"
+	keyRequestID      contextKey = "request_id"
+	keyTenantID       contextKey = "tenant_id"
+	keyMSPID          contextKey = "msp_id"
+	keyUserID         contextKey = "user_id"
+	keyAPIKeyID       contextKey = "api_key_id"
+	keyAuthSubject    contextKey = "auth_subject"
+	keyRequestMeta    contextKey = "request_meta"
+	keyMobileClaims   contextKey = "mobile_claims"
+	keyExpectedTenant contextKey = "expected_rls_tenant"
 )
 
 // MobileClaims carries the device-bound custom claims that the
@@ -252,6 +253,25 @@ func withTenantID(ctx context.Context, id uuid.UUID) context.Context {
 // withMSPID stamps the MSP UUID onto the context.
 func withMSPID(ctx context.Context, id uuid.UUID) context.Context {
 	return context.WithValue(ctx, keyMSPID, id)
+}
+
+// withExpectedTenant records the tenant that downstream data-layer
+// code is expected to scope the RLS GUC (`sng.tenant_id`) to. It is
+// stamped by AssertTenantContext once the request's tenant has been
+// authoritatively resolved, so the repository layer's GUC read-back
+// (see internal/repository/postgres.setTenantGUC) has a single,
+// trusted value to assert the live connection state against.
+func withExpectedTenant(ctx context.Context, id uuid.UUID) context.Context {
+	return context.WithValue(ctx, keyExpectedTenant, id)
+}
+
+// ExpectedRLSTenantFromContext returns the tenant the request was
+// authoritatively resolved to (the value RLS-scoped queries MUST run
+// under), or uuid.Nil if no tenant assertion has run for this
+// request. Populated by AssertTenantContext.
+func ExpectedRLSTenantFromContext(ctx context.Context) uuid.UUID {
+	v, _ := ctx.Value(keyExpectedTenant).(uuid.UUID)
+	return v
 }
 
 // withUserID stamps the user UUID onto the context.

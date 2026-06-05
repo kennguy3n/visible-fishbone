@@ -44,6 +44,14 @@ func RequireTenant(pathParam string) func(http.Handler) http.Handler {
 			// cases we bind the path tenant onto the context so
 			// downstream handlers can scope queries.
 			ctx := withTenantID(r.Context(), pid)
+			// Defense-in-depth: record the path tenant (now proven to
+			// match the JWT claim for tenant-bound credentials) as the
+			// authoritative RLS tenant. The repository layer asserts the
+			// live sng.tenant_id GUC equals this value before running any
+			// tenant-scoped query (see postgres.setTenantGUC), so a
+			// divergence between the resolved tenant and the connection
+			// state fails closed instead of crossing a tenant boundary.
+			ctx = withExpectedTenant(ctx, pid)
 			// Late-bind onto the outer Logging meta too — for
 			// platform_admin requests the JWT had no tenant_id
 			// claim, so Auth left the meta's tenant_id empty;

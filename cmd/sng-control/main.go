@@ -140,10 +140,18 @@ func run() error {
 	// session is reaped and another replica takes over within one
 	// election interval.
 	identity, _ := os.Hostname()
-	elector := leader.New(
-		leader.NewPgSessionOpener(pool.Primary()),
+	electorOpts := []leader.Option{
 		leader.WithIdentity(identity),
 		leader.WithLogger(logger),
+	}
+	// Export sng_leader_transitions_total so election churn /
+	// flapping is observable. No-op when metrics are disabled.
+	if mx != nil {
+		electorOpts = append(electorOpts, leader.WithTransitionsMetric(mx.Registry(), mx.Namespace()))
+	}
+	elector := leader.New(
+		leader.NewPgSessionOpener(pool.Primary()),
+		electorOpts...,
 	)
 	// The elector holds a dedicated primary-pool connection for the
 	// advisory lock's lifetime. Run it under its own cancellable
@@ -209,6 +217,9 @@ func run() error {
 		}
 		return nil
 	}))
+	// Surface leadership state on /readyz (informational only —
+	// followers are still fully ready to serve API traffic).
+	health.SetLeaderReporter(elector.IsLeader)
 
 	// Telemetry pipeline — hot-path ClickHouse writer + cold-path
 	// S3 archive + DLQ replay worker. Wired here so the consumer

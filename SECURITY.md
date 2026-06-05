@@ -120,15 +120,103 @@ relies on lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md) §8:
   by monotonic version check, and the dual-bank install path
   refuses a swap if the new bank fails its health check inside
   the rollback window.
-- Postgres row-level security (RLS) is the **only** tenant
+- Postgres row-level security (RLS) is the **primary** tenant
   isolation boundary on the control plane side; see
-  [`docs/deploy.md`](./docs/deploy.md) for the role / GUC contract.
+  [`docs/deploy.md`](./docs/deploy.md) for the role / GUC contract,
+  and the "Defense-in-depth for tenant isolation" section below for
+  the additional layers that backstop it.
 - All telemetry is metadata-first; payloads are dropped at the
   edge unless the tenant's policy bundle opts in for that flow
   class.
 
 If you find a way to bypass any of these invariants, that is a
 security vulnerability and we want to hear about it.
+
+## Operator authentication: HMAC excluded from production builds
+
+The control plane supports a symmetric **HMAC (HS256)** JWT path for
+operator-console authentication. This path exists purely for local
+and dev workflows: it lets an engineer mint and verify console tokens
+with a shared `AUTH_JWT_SECRET` without standing up an identity
+provider. In `uat` and `prod` (`Environment.IsProduction()`), operator
+identity is terminated at the gateway via **OIDC**; the control plane
+never verifies an HMAC-signed token.
+
+This is enforced by construction, not merely by a runtime flag:
+
+- **The HMAC verification code is compiled out of production
+  binaries.** The verifier in `internal/middleware/auth.go` is split
+  behind a build tag. The real HMAC implementation lives in
+  `auth_hmac.go` (`//go:build !production`); production builds
+  (`-tags production`) instead link the stub in `auth_hmac_prod.go`
+  (`//go:build production`), which always refuses with a
+  `jwt_hmac_disabled` error. A production binary therefore contains no
+  HMAC verification path at all — there is nothing to misconfigure or
+  exploit.
+- **Production refuses to boot with `AUTH_JWT_SECRET` set.** Config
+  validation (`internal/config.validate`) hard-fails when
+  `AUTH_JWT_SECRET` is non-empty in a production environment, so a
+  leftover dev secret cannot create the illusion that HMAC auth is
+  active.
+
+Build production artifacts with `-tags production` (the release
+pipeline does this) so the exclusion is in effect.
+
+## Defense-in-depth for tenant isolation
+
+Postgres RLS is the primary tenant boundary, but a single boundary is
+a single point of failure: an RLS policy that is accidentally dropped,
+a query that runs on a connection whose `sng.tenant_id` GUC was never
+set, or a transport that lets one tenant's agent publish into another
+tenant's subjects would each silently breach isolation. We therefore
+layer several independent checks so that no one mistake crosses a
+tenant boundary on its own.
+
+1. **Request edge — tenant assertion.** Every tenant-scoped route
+   resolves the caller's tenant from the verified JWT `tenant_id`
+   claim. `RequireTenant` rejects (403 `tenant_mismatch`) when a path
+   `{tenant_id}` does not match the claim, and `AssertTenantContext`
+   (`internal/middleware/tenant_assert.go`) fails closed (403
+   `tenant_required`) if a tenant-scoped endpoint is reached with a
+   credential carrying no tenant. Both stamp the resolved tenant as
+   the request's *expected RLS tenant* for the next layer.
+
+2. **Data layer — GUC read-back.** Before any tenant-scoped query, the
+   repository sets the `sng.tenant_id` GUC and, in the same round trip,
+   asserts the value Postgres actually applied equals the intended
+   tenant (`internal/repository/postgres.setTenantGUC`, via
+   `set_config(...)`'s return value). Because every RLS policy reads
+   `current_setting('sng.tenant_id')`, a divergence here means RLS
+   would evaluate against the wrong tenant; the transaction fails
+   closed rather than risk a cross-tenant read or write. This catches
+   a transaction-pooling middlebox that strips/rewrites `SET`, or a
+   refactor that sets the GUC at the wrong scope.
+
+3. **Analytics — ClickHouse query-level filtering.** ClickHouse
+   readers do not rely on partitioning alone: every query carries an
+   explicit `WHERE tenant_id = ?` predicate and refuses a nil tenant,
+   so a mis-targeted partition cannot leak another tenant's telemetry.
+
+4. **Transport — NATS per-tenant subject ACLs.** All control-plane
+   subjects embed the tenant id (`sng.<tenant_id>.…`). The templates in
+   [`deploy/nats/`](./deploy/nats/) fence each tenant's edge/endpoint
+   credential to its own subjects (publish + subscribe), deny the
+   cross-tenant DLQ and JetStream admin subjects, and reserve
+   multi-tenant access for the trusted `sng-control` principal — so a
+   compromised agent credential cannot publish into, or subscribe to,
+   another tenant's streams.
+
+5. **Continuous verification.** A cross-tenant integration sweep
+   (`internal/repository/postgres/tenant_isolation_integration_test.go`,
+   `//go:build integration`) seeds rows under tenant A across a
+   representative set of repositories and asserts tenant B's `List`
+   returns zero rows and `Get` returns `ErrNotFound`. Because every
+   repository routes through the same `withTenant` path, a regression
+   in the isolation mechanism breaks the whole sweep at once.
+
+A breach now requires several independent failures at once, and any
+single one of these layers catches the common mistakes. Bypassing any
+layer is a reportable vulnerability.
 
 ## Hall of fame
 
