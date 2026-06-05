@@ -558,12 +558,16 @@ func (r *BusinessReport) writeSecurityEfficacy(b *strings.Builder) {
 // how do they work, and how fast are they" — distinct from the confusion
 // matrix above, which answers "are the decisions correct".
 func (r *BusinessReport) writeEfficacyCapabilities(b *strings.Builder) {
+	// Sub-section index, assigned in render order so the numbering stays
+	// contiguous (7.1, 7.2, …) no matter which engines populate capabilities.
+	idx := 0
 	for _, f := range r.Efficacy.Functions {
 		if len(f.Features) == 0 && len(f.Throughput) == 0 {
 			continue
 		}
-		fmt.Fprintf(b, "### 7.%s — Capabilities & Performance\n\n",
-			efficacyTitle(f.Function))
+		idx++
+		fmt.Fprintf(b, "### 7.%d %s — Capabilities & Performance\n\n",
+			idx, efficacyTitle(f.Function))
 
 		if len(f.Features) > 0 {
 			b.WriteString("**What it does / how it works**\n\n")
@@ -607,15 +611,24 @@ func (r *BusinessReport) writeEfficacyCapabilities(b *strings.Builder) {
 	}
 }
 
-// efficacyTitle maps a function id to a numbered sub-section label.
+// efficacyTitle maps a function id to a human-friendly engine name (the
+// sub-section number is supplied by the caller). Unknown ids fall back to
+// their upper-cased id, so a future engine that grows a capability catalog
+// still renders a sane heading instead of a raw lowercase token.
 func efficacyTitle(fn string) string {
 	switch fn {
 	case "dlp":
-		return "1 DLP (Data Loss Prevention)"
+		return "DLP (Data Loss Prevention)"
 	case "ztna":
-		return "2 ZTNA (Zero Trust Network Access)"
+		return "ZTNA (Zero Trust Network Access)"
+	case "firewall":
+		return "Firewall"
+	case "swg":
+		return "SWG (Secure Web Gateway)"
+	case "ips":
+		return "IPS (Intrusion Prevention)"
 	default:
-		return fn
+		return strings.ToUpper(fn)
 	}
 }
 

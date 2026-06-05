@@ -398,6 +398,46 @@ func TestThroughputFormatHelpers(t *testing.T) {
 	}
 }
 
+func TestEfficacyTitleFallback(t *testing.T) {
+	for _, tc := range []struct{ fn, want string }{
+		{"dlp", "DLP (Data Loss Prevention)"},
+		{"ztna", "ZTNA (Zero Trust Network Access)"},
+		{"firewall", "Firewall"},
+		// Unknown engine ids must never render a raw lowercase token.
+		{"newengine", "NEWENGINE"},
+	} {
+		if got := efficacyTitle(tc.fn); got != tc.want {
+			t.Errorf("efficacyTitle(%q) = %q, want %q", tc.fn, got, tc.want)
+		}
+	}
+}
+
+// TestEfficacyCapabilitiesNumberedInOrder verifies the sub-section index is
+// assigned by render order (7.1, 7.2 …) and is independent of the function
+// id, so a future engine slots in without renumbering anything by hand.
+func TestEfficacyCapabilitiesNumberedInOrder(t *testing.T) {
+	mk := func(fn string) *EfficacyFunction {
+		return &EfficacyFunction{
+			Function: fn, Crate: "c", Kind: "detection", Tested: true,
+			Features: []EfficacyFeature{{Name: "x", How: "y", Coverage: "z"}},
+		}
+	}
+	r := &BusinessReport{Efficacy: &EfficacyReport{
+		OverallVerdict: "PASS",
+		// ztna first, then dlp: numbering must follow this order.
+		Functions: []*EfficacyFunction{mk("ztna"), mk("dlp")},
+	}}
+	md := r.ToMarkdown()
+	for _, want := range []string{
+		"### 7.1 ZTNA (Zero Trust Network Access) — Capabilities & Performance",
+		"### 7.2 DLP (Data Loss Prevention) — Capabilities & Performance",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("capabilities numbering missing %q\n---\n%s", want, md)
+		}
+	}
+}
+
 func TestSecurityEfficacyMissing(t *testing.T) {
 	r := &BusinessReport{}
 	md := r.ToMarkdown()
