@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 )
 
 // RequireTenant ensures the resolved tenant ID matches the
@@ -51,7 +53,7 @@ func RequireTenant(pathParam string) func(http.Handler) http.Handler {
 			// tenant-scoped query (see postgres.setTenantGUC), so a
 			// divergence between the resolved tenant and the connection
 			// state fails closed instead of crossing a tenant boundary.
-			ctx = withExpectedTenant(ctx, pid)
+			ctx = postgres.WithExpectedTenant(ctx, pid.String())
 			// Late-bind onto the outer Logging meta too — for
 			// platform_admin requests the JWT had no tenant_id
 			// claim, so Auth left the meta's tenant_id empty;

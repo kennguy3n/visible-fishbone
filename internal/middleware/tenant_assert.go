@@ -4,6 +4,8 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 )
 
 // AssertTenantContext is a defense-in-depth tenant-isolation
@@ -21,10 +23,10 @@ import (
 //     tenant bound by Auth, i.e. an unscoped credential trying to use
 //     a tenant-scoped endpoint (fail closed);
 //   - stamps the resolved tenant as the request's "expected RLS
-//     tenant" (ExpectedRLSTenantFromContext) so the data layer's GUC
-//     read-back assertion (internal/repository/postgres.setTenantGUC)
-//     has a single trusted value to verify the live `sng.tenant_id`
-//     connection state against.
+//     tenant" (postgres.WithExpectedTenant) so the data layer's
+//     assertion (internal/repository/postgres.setTenantGUC) has a
+//     single trusted value to verify the tenant every query scopes
+//     to — and the live `sng.tenant_id` GUC — against.
 //
 // Together with that read-back, the full chain is: JWT claim →
 // resolved tenant (asserted here) → repository GUC (asserted there),
@@ -43,7 +45,7 @@ func AssertTenantContext(next http.Handler) http.Handler {
 				"this endpoint requires a tenant-scoped credential")
 			return
 		}
-		ctx := withExpectedTenant(r.Context(), tid)
+		ctx := postgres.WithExpectedTenant(r.Context(), tid.String())
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

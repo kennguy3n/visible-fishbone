@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 )
 
 // TestCrossTenantIsolation_Sweep is the defense-in-depth assertion
@@ -163,5 +164,36 @@ func TestCrossTenantIsolation_Sweep(t *testing.T) {
 				t.Errorf("%s: cross-tenant Get err = %v, want ErrNotFound", tc.name, err)
 			}
 		})
+	}
+}
+
+// TestExpectedTenantGuard_FailsClosed exercises the request-edge →
+// data-layer assertion end-to-end: when the context carries an
+// authoritatively-resolved tenant (postgres.WithExpectedTenant, stamped
+// by the auth/tenant middleware) that diverges from the tenant a
+// repository call is scoped to, the query must fail closed BEFORE
+// touching any row — catching a handler that authorized one tenant but
+// issued a repository call for another. The matching-tenant case must
+// continue to succeed so the guard does not block legitimate traffic.
+func TestExpectedTenantGuard_FailsClosed(t *testing.T) {
+	t.Parallel()
+	store, cleanup := startPostgres(t)
+	t.Cleanup(cleanup)
+
+	tr := store.NewTenantRepository()
+	tntA := mustTenant(t, tr)
+	tntB := mustTenant(t, tr)
+	dr := store.NewDeviceRepository()
+
+	// Divergent: context resolved to tenant B, query scoped to tenant A.
+	mismatchCtx := postgres.WithExpectedTenant(bgCtx(), tntB.ID.String())
+	if _, err := dr.List(mismatchCtx, tntA.ID, repository.DeviceListFilter{}, repository.Page{Limit: 1}); err == nil {
+		t.Error("expected mismatch error when resolved tenant != query tenant, got nil")
+	}
+
+	// Aligned: context resolved to tenant A, query scoped to tenant A.
+	matchCtx := postgres.WithExpectedTenant(bgCtx(), tntA.ID.String())
+	if _, err := dr.List(matchCtx, tntA.ID, repository.DeviceListFilter{}, repository.Page{Limit: 1}); err != nil {
+		t.Errorf("aligned resolved/query tenant should succeed, got %v", err)
 	}
 }

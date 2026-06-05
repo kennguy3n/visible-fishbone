@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 )
 
 func TestAssertTenantContext_RejectsUnscopedCredential(t *testing.T) {
@@ -29,9 +31,10 @@ func TestAssertTenantContext_RejectsUnscopedCredential(t *testing.T) {
 
 func TestAssertTenantContext_StampsExpectedTenant(t *testing.T) {
 	tid := uuid.New()
-	var seen uuid.UUID
+	var seen string
+	var ok bool
 	h := AssertTenantContext(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		seen = ExpectedRLSTenantFromContext(r.Context())
+		seen, ok = postgres.ExpectedTenantFromContext(r.Context())
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/me/policies", nil)
@@ -42,16 +45,17 @@ func TestAssertTenantContext_StampsExpectedTenant(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if seen != tid {
-		t.Errorf("expected RLS tenant = %s, want %s", seen, tid)
+	if !ok || seen != tid.String() {
+		t.Errorf("expected RLS tenant = %q (ok=%v), want %q", seen, ok, tid.String())
 	}
 }
 
 func TestRequireTenant_StampsExpectedTenant(t *testing.T) {
 	tid := uuid.New()
-	var seen uuid.UUID
+	var seen string
+	var ok bool
 	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		seen = ExpectedRLSTenantFromContext(r.Context())
+		seen, ok = postgres.ExpectedTenantFromContext(r.Context())
 	})
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/v1/tenants/{tenant_id}/x", RequireTenant("tenant_id")(inner))
@@ -65,7 +69,7 @@ func TestRequireTenant_StampsExpectedTenant(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if seen != tid {
-		t.Errorf("expected RLS tenant = %s, want %s", seen, tid)
+	if !ok || seen != tid.String() {
+		t.Errorf("expected RLS tenant = %q (ok=%v), want %q", seen, ok, tid.String())
 	}
 }

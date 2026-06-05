@@ -41,7 +41,8 @@ token inside the subject:
   JetStream API subjects (`$JS.API.>`).
 - **The control plane** (`sng-control`) is the only trusted multi-tenant
   principal. It publishes policy/events for any tenant, consumes all
-  telemetry, and owns the DLQ and JetStream management subjects.
+  telemetry, re-publishes telemetry to its origin subject during DLQ
+  replay, and owns the DLQ and JetStream management subjects.
 
 ## Files
 

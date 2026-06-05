@@ -69,6 +69,37 @@ when both run against the same pooler.
 
 ---
 
+## Operator authentication in production
+
+Production (`uat`/`prod`) binaries are built with `-tags production`,
+which **compiles out the HMAC (HS256) JWT path entirely** and makes
+config validation hard-fail if `AUTH_JWT_SECRET` is set (see
+`SECURITY.md`, "Operator authentication: HMAC excluded from production
+builds"). The practical consequence for deployment:
+
+* A production control plane has exactly one in-process auth path:
+  the **API key** presented in the `X-SNG-API-Key` header. Every
+  `Bearer` token — operator-console JWTs and the HMAC-signed
+  device-bound mobile session tokens alike — is verified by the same
+  `verifyBearerJWT` function, whose production stub always refuses
+  (`jwt_hmac_disabled`). The binary contains **no OIDC
+  token-verification code.**
+* **An OIDC gateway in front of the control plane is therefore a hard
+  prerequisite, not an optional pattern.** The gateway terminates the
+  operator's OIDC session and translates it into a credential the
+  control plane accepts — either by injecting a provisioned API key or
+  by asserting a trusted, gateway-set header on the proxied request.
+* Roll out order matters: stand up (or confirm) the gateway and its
+  OIDC↔credential translation **before** deploying the production
+  binary. Deploying the binary first leaves operators with no working
+  console authentication path (Bearer/HMAC tokens return
+  `jwt_hmac_disabled`).
+
+Dev and local builds (no `production` tag) keep the HMAC path and
+`AUTH_JWT_SECRET` for engineers who have not stood up an IdP.
+
+---
+
 ## Initial provisioning
 
 The migration runner refuses to run if `sng_app` is missing.

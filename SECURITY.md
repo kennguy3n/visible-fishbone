@@ -162,6 +162,22 @@ This is enforced by construction, not merely by a runtime flag:
 Build production artifacts with `-tags production` (the release
 pipeline does this) so the exclusion is in effect.
 
+> **Operational prerequisite — an OIDC gateway is mandatory in
+> production.** Because the HMAC path is compiled out, the only
+> in-process authentication path a production control-plane binary has
+> is the tenant/edge **API key** (`X-SNG-API-Key`). Every `Bearer`
+> token — operator-console JWTs *and* the HMAC-signed device-bound
+> mobile session tokens — flows through the same `verifyBearerJWT`
+> verifier, which the production stub refuses with `jwt_hmac_disabled`.
+> There is **no OIDC token-verification code in the control plane** —
+> operator identity must be terminated at the gateway in front of it,
+> which is responsible for translating an authenticated OIDC session
+> into a credential the control plane accepts (a provisioned API key or
+> a trusted, gateway-asserted header). Deploying the production binary
+> without that gateway in place leaves operators with no console auth
+> path, so the gateway must be configured **before** rolling out this
+> build. See `docs/deploy.md` (“Operator authentication in production”).
+
 ## Defense-in-depth for tenant isolation
 
 Postgres RLS is the primary tenant boundary, but a single boundary is
@@ -179,7 +195,9 @@ tenant boundary on its own.
    (`internal/middleware/tenant_assert.go`) fails closed (403
    `tenant_required`) if a tenant-scoped endpoint is reached with a
    credential carrying no tenant. Both stamp the resolved tenant as
-   the request's *expected RLS tenant* for the next layer.
+   the request's *expected RLS tenant*
+   (`postgres.WithExpectedTenant`), which the data layer below
+   consumes to verify the query is scoped to that same tenant.
 
 2. **Data layer — GUC read-back.** Before any tenant-scoped query, the
    repository sets the `sng.tenant_id` GUC and, in the same round trip,
@@ -190,7 +208,14 @@ tenant boundary on its own.
    would evaluate against the wrong tenant; the transaction fails
    closed rather than risk a cross-tenant read or write. This catches
    a transaction-pooling middlebox that strips/rewrites `SET`, or a
-   refactor that sets the GUC at the wrong scope.
+   refactor that sets the GUC at the wrong scope. The same function
+   also closes the request-edge → data-layer loop: when the context
+   carries an *expected RLS tenant* (stamped by the middleware above),
+   it asserts the tenant the query is about to scope to equals that
+   resolved tenant, so a handler that authorized one tenant but issues
+   a repository call for another fails closed instead of trusting the
+   query's own tenant argument. Callers that legitimately span tenants
+   (background jobs, MSP-level reads) simply do not stamp it.
 
 3. **Analytics — ClickHouse query-level filtering.** ClickHouse
    readers do not rely on partitioning alone: every query carries an
