@@ -325,6 +325,100 @@ func TestSecurityEfficacyMissing(t *testing.T) {
 	}
 }
 
+// TestEfficacyJSONContract locks the Go<->Rust wire contract for the
+// efficacy report. The Go structs have no shared schema definition with the
+// Rust `sng-efficacy` harness, so a Rust-side serde rename could silently
+// break deserialization. This test feeds a payload that mirrors the *exact*
+// JSON the Rust harness emits — including the renamed `crate`/`fn` keys and
+// the Rust-only `targets`/`cases` objects Go must ignore — through the real
+// loadEfficacy path and asserts every field the renderer relies on populates.
+// If a future Rust rename drifts from this golden shape, this test fails
+// instead of the report silently rendering empty cells.
+func TestEfficacyJSONContract(t *testing.T) {
+	// Byte-for-byte representative of `bench/efficacy` output: note `crate`
+	// (Rust `crate_name`), `fn` (Rust `fn_`), and the Rust-only `targets`
+	// and `cases` keys that the Go structs deliberately omit.
+	const payload = `{
+  "suite": "security-efficacy",
+  "git_sha": "deadbee",
+  "generated_at": "2026-06-04T00:00:00Z",
+  "host": "ci-runner",
+  "overall_verdict": "PASS",
+  "functions": [
+    {
+      "function": "firewall",
+      "crate": "sng-fw",
+      "kind": "enforcement",
+      "tested": true,
+      "total_cases": 12,
+      "bad_cases": 7,
+      "good_cases": 5,
+      "tp": 7,
+      "fn": 0,
+      "tn": 5,
+      "fp": 0,
+      "catch_rate": 1.0,
+      "false_positive_rate": 0.0,
+      "accuracy": 1.0,
+      "targets": {"catch_pass": 0.99, "catch_warn": 0.9, "fp_pass": 0.02, "fp_warn": 0.05},
+      "verdict": "PASS",
+      "notes": "real engine deny path",
+      "cases": [
+        {"description": "deny tcp/9999", "bad": true, "expected": "deny", "actual": "deny", "correct": true}
+      ]
+    },
+    {
+      "function": "ips",
+      "crate": "sng-ips",
+      "kind": "detection",
+      "tested": false,
+      "untested_reason": "suricata binary not found on PATH",
+      "verdict": "UNTESTED"
+    }
+  ]
+}`
+	path := filepath.Join(t.TempDir(), "efficacy-report.json")
+	if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := loadEfficacy(path)
+	if err != nil {
+		t.Fatalf("loadEfficacy rejected the Rust schema (contract drift?): %v", err)
+	}
+	if r.Suite != "security-efficacy" || r.OverallVerdict != "PASS" || r.Host != "ci-runner" {
+		t.Fatalf("top-level fields not populated: %+v", r)
+	}
+	if len(r.Functions) != 2 {
+		t.Fatalf("want 2 functions, got %d", len(r.Functions))
+	}
+
+	fw := r.Functions[0]
+	// The renamed keys are the fragile part of the contract: `crate`->Crate
+	// and `fn`->FN. Assert them explicitly.
+	if fw.Crate != "sng-fw" {
+		t.Errorf(`"crate" did not map to Crate: got %q`, fw.Crate)
+	}
+	if fw.FN != 0 || fw.TP != 7 || fw.TN != 5 || fw.FP != 0 {
+		t.Errorf("confusion matrix mismatch: tp=%d fn=%d tn=%d fp=%d", fw.TP, fw.FN, fw.TN, fw.FP)
+	}
+	if fw.Function != "firewall" || fw.Kind != "enforcement" || !fw.Tested ||
+		fw.CatchRate != 1.0 || fw.FalsePosRate != 0.0 || fw.Verdict != "PASS" {
+		t.Errorf("firewall function fields mismatch: %+v", fw)
+	}
+
+	ips := r.Functions[1]
+	if ips.Tested || ips.Verdict != "UNTESTED" || ips.UntestedReason != "suricata binary not found on PATH" {
+		t.Errorf("untested IPS function fields mismatch: %+v", ips)
+	}
+
+	// The whole report must still render end-to-end from the deserialized data.
+	md := (&BusinessReport{Efficacy: r}).ToMarkdown()
+	if !strings.Contains(md, "| firewall | `sng-fw` | block-rate | 7 | 5 | 100.0% | 0.0% | 100.0% | PASS |") {
+		t.Errorf("deserialized efficacy did not render the expected firewall row:\n%s", md)
+	}
+}
+
 func writeJSON(t *testing.T, path string, v any) {
 	t.Helper()
 	b, err := json.Marshal(v)
