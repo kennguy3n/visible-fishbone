@@ -1,8 +1,9 @@
-import {
-  useListTenantAppRegistry,
-  useGetTenantAppRegistryStats,
-} from "@/api/generated/endpoints/app-registry/app-registry";
+import { useListTenantAppRegistry } from "@/api/generated/endpoints/app-registry/app-registry";
 import type { EffectiveApp } from "@/api/generated/model";
+import {
+  EffectiveAppEffectiveClass,
+  EffectiveAppSource,
+} from "@/api/generated/model";
 import { PageHeader, Card, AsyncBoundary, Badge, Stat } from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
 import { RequireTenant } from "@/components/RequireTenant";
@@ -16,20 +17,45 @@ export function AppRegistry() {
   );
 }
 
+// effective_class is a traffic class (see EffectiveAppEffectiveClass), not a
+// sanction verdict. The previous allow/deny/sanctioned strings matched none of
+// the real enum values, so every badge rendered neutral.
 function classTone(cls: string) {
-  if (cls === "sanctioned" || cls === "allow") return "ok" as const;
-  if (cls === "blocked" || cls === "deny") return "danger" as const;
-  if (cls === "unsanctioned") return "warn" as const;
+  if (cls === EffectiveAppEffectiveClass.block) return "danger" as const;
+  if (
+    cls === EffectiveAppEffectiveClass.inspect_full ||
+    cls === EffectiveAppEffectiveClass.inspect_lite
+  )
+    return "warn" as const;
+  if (
+    cls === EffectiveAppEffectiveClass.trusted_direct ||
+    cls === EffectiveAppEffectiveClass.trusted_media_bypass
+  )
+    return "ok" as const;
   return "neutral" as const;
 }
 
 function AppRegistryInner({ tenantId }: { tenantId: string }) {
   const list = useListTenantAppRegistry(tenantId);
-  const stats = useGetTenantAppRegistryStats(tenantId, undefined);
 
-  const s = stats.data as
-    | { total?: number; overrides?: number; by_class?: Record<string, number> }
-    | undefined;
+  // Summary cards are derived from the effective-app list itself. The separate
+  // /app-registry/stats endpoint returns per-class *traffic* volume
+  // (events/bytes), not catalog counts, so it can't back these cards — the old
+  // code cast it to an invented {total,overrides,by_class} shape that never
+  // existed, leaving every card stuck on "—".
+  const items = list.data?.items ?? [];
+  const overrideCount = items.filter(
+    (e) => e.source === EffectiveAppSource.override,
+  ).length;
+  const blockedCount = items.filter(
+    (e) => e.effective_class === EffectiveAppEffectiveClass.block,
+  ).length;
+  const inspectedCount = items.filter(
+    (e) =>
+      e.effective_class === EffectiveAppEffectiveClass.inspect_full ||
+      e.effective_class === EffectiveAppEffectiveClass.inspect_lite,
+  ).length;
+  const hasData = list.data !== undefined;
 
   const cols: Column<EffectiveApp>[] = [
     { header: "Application", cell: (e) => e.app?.name ?? e.app?.id ?? "—" },
@@ -57,10 +83,10 @@ function AppRegistryInner({ tenantId }: { tenantId: string }) {
         subtitle="Effective application classifications: global catalog with per-tenant overrides."
       />
       <div className="grid grid--stats">
-        <Stat label="Apps" value={s?.total ?? "—"} />
-        <Stat label="Overrides" value={s?.overrides ?? "—"} />
-        <Stat label="Sanctioned" value={s?.by_class?.sanctioned ?? "—"} />
-        <Stat label="Blocked" value={s?.by_class?.blocked ?? "—"} />
+        <Stat label="Apps" value={hasData ? items.length : "—"} />
+        <Stat label="Overrides" value={hasData ? overrideCount : "—"} />
+        <Stat label="Inspected" value={hasData ? inspectedCount : "—"} />
+        <Stat label="Blocked" value={hasData ? blockedCount : "—"} />
       </div>
       <Card>
         <AsyncBoundary

@@ -59,7 +59,12 @@ export function MspTemplates() {
   const [editing, setEditing] = useState<Template | null>(null);
   const [showEditor, setShowEditor] = useState(false);
   const apply = useBulkApplyPolicyTemplate();
+  // `appliedId` tracks the in-flight apply (for the spinner); `lastAppliedId`
+  // is the template that last succeeded and is NOT cleared on settle, so the
+  // "Applied" badge is scoped to that one card. Using the shared
+  // `apply.isSuccess` flag instead would light up every card in the .map().
   const [appliedId, setAppliedId] = useState<string | null>(null);
+  const [lastAppliedId, setLastAppliedId] = useState<string | null>(null);
 
   // Persistence is a side effect, so it runs outside the state updater (which
   // must stay pure / can run twice under StrictMode). A failed save surfaces
@@ -95,7 +100,10 @@ export function MspTemplates() {
     setAppliedId(t.id);
     apply.mutate(
       { mspId, data: { template: graph } },
-      { onSettled: () => setAppliedId(null) },
+      {
+        onSuccess: () => setLastAppliedId(t.id),
+        onSettled: () => setAppliedId(null),
+      },
     );
   };
 
@@ -160,7 +168,7 @@ export function MspTemplates() {
               >
                 {apply.isPending && appliedId === t.id ? "Applying…" : "Apply to cohort"}
               </button>
-              {apply.isSuccess && appliedId === null && (
+              {lastAppliedId === t.id && appliedId === null && (
                 <Badge tone="ok">Applied</Badge>
               )}
             </div>

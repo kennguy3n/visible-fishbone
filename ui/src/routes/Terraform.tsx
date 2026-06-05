@@ -53,9 +53,10 @@ function TerraformInner({ tenantId }: { tenantId: string }) {
     if (cfg) drift.mutate({ tenantId, data: cfg });
   };
 
-  const driftItems =
-    (drift.data as { drifts?: { resource?: string; field?: string; detail?: string }[] } | undefined)
-      ?.drifts ?? [];
+  // drift.data is typed as DriftReport; use its real field (`entries`) and
+  // sub-fields (resource_type/resource_name/drift_type/details) rather than
+  // casting to an invented shape that never matched the API response.
+  const driftItems = drift.data?.entries ?? [];
 
   return (
     <>
@@ -124,7 +125,8 @@ function TerraformInner({ tenantId }: { tenantId: string }) {
                   <ul className="mono" style={{ fontSize: 12.5 }}>
                     {driftItems.map((d, i) => (
                       <li key={i}>
-                        {d.resource ?? "resource"}.{d.field ?? ""} — {d.detail ?? ""}
+                        {d.resource_type ?? "resource"}/{d.resource_name ?? ""}
+                        {d.drift_type ? ` [${d.drift_type}]` : ""} — {d.details ?? ""}
                       </li>
                     ))}
                   </ul>

@@ -56,18 +56,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [claims, setClaims] = useState<JwtClaims | null>(() => deriveClaims());
 
   const setSession = useCallback((token: string): boolean => {
-    setAccessToken(token);
-    // Mirror deriveClaims(): reject a malformed or already-expired token
-    // (clearing it from storage) instead of briefly flipping to authenticated
-    // and getting kicked out on the first 401. Keeps the paste/OIDC-callback
-    // path consistent with page reload. The boolean lets callers surface
-    // feedback instead of navigating blindly.
+    // Validate BEFORE persisting: a malformed or already-expired token is
+    // rejected (and any prior session cleared) without ever being written to
+    // storage. This mirrors deriveClaims() so the paste/OIDC-callback path
+    // stays consistent with a page reload, avoids briefly flipping to
+    // authenticated only to get kicked out on the first 401, and never parks a
+    // bad token in sessionStorage. The boolean lets callers surface feedback
+    // instead of navigating blindly.
     const next = decodeJwt(token);
     if (!next || isExpired(next)) {
       clearAccessToken();
       setClaims(null);
       return false;
     }
+    setAccessToken(token);
     setClaims(next);
     return true;
   }, []);
