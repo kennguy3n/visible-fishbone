@@ -243,3 +243,58 @@ Regenerate any of these numbers for a different tier or knob set with
 `go run ./bench/controlplane capacity-plan --tenants N [--ch-shards N]
 [--nats-partitions N]`. Cost projections built on the same model live in
 [`docs/cost-model.md`](./cost-model.md).
+
+## 6. Regional cloud PoPs (Session 2B)
+
+The components above scale the *control plane* (one logical region). For
+cloud-only SME tenants the **data plane** is a fleet of regional PoPs,
+each running `sng-edge` multi-tenant. Two independent loops size and
+steer that fleet, implemented in
+[`internal/service/pop`](../internal/service/pop).
+
+### 6.1 Region-biased selection
+
+`AssignPoP` homes a tenant to a PoP using its coarse region marker
+(`repository.Tenant.Region`), normalised through the shared
+[`internal/region`](../internal/region) taxonomy to a **SEA / GCC /
+DACH** group. Selection is a strong *preference*, not a hard pin, with a
+three-tier precedence:
+
+1. in-group **and** in the client's region (closest, residency-aligned);
+2. in-group (residency-aligned);
+3. global least-loaded (availability fallback).
+
+Within any tier the actual pick is **least-loaded**, so a busy primary
+region (e.g. `eu-central-1` for DACH) sheds to its secondary
+(`eu-west-1`) before spilling out of the group. Falling back to global
+rather than failing means a full regional outage never strands a tenant;
+compliance-grade hard residency is a separate explicit operator override,
+never an implicit drop. The group→region preference matches the
+Terraform region roots ([`deploy/terraform/regions`](../deploy/terraform/regions))
+one-for-one.
+
+### 6.2 Tenant-count autoscale planner
+
+`AutoscalePlanner` sizes each region's PoP fleet off the slow-moving
+signal of **connected-tenant count**, one level above the live
+health-beacon rebalancer (which smooths short-term connection spikes).
+Tenant count is the right signal here because a multi-tenant PoP's
+footprint scales with homed tenants (policy bundles, shared-pipeline
+share), so packing tenants within a target band is what keeps per-tenant
+cost inside the SME envelope.
+
+The band is hysteretic to avoid flapping (`DefaultAutoscaleConfig`):
+
+| Bound | Default | Role |
+|-------|--------:|------|
+| `MinTenantsPerPoP`    | 50  | below average → scale **down** |
+| `TargetTenantsPerPoP` | 200 | the packing every scale action sizes to |
+| `MaxTenantsPerPoP`    | 300 | above average → scale **up** |
+
+The planner only acts when a region's average load leaves the
+`[min, max]` band, and when it acts it sizes to `ceil(tenants / target)`
+— landing mid-band with headroom instead of at the bound it just
+crossed. Output is a `ScaleUp` / `ScaleDown` / `ScaleHold` recommendation
+plus a recommended PoP count that feeds the Terraform region module's
+desired count, keeping scaling declarative: the control plane
+recommends, infrastructure-as-code provisions.

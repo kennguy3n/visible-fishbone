@@ -170,3 +170,53 @@ NATS and S3 gauges are sampled from the backends (JetStream stream info,
 S3 archive object listing) at report time. See
 [`docs/metering-dashboard.md`](./metering-dashboard.md) for the UI
 specification that renders these figures.
+
+---
+
+## 7. Cost-anomaly detection & the per-user target band
+
+The hard per-tier budgets ([`budget.go`](../internal/service/metering/budget.go))
+gate a single meter against a fixed ceiling. Session 2B adds two
+read-only cost-control levers on top, in
+[`anomaly.go`](../internal/service/metering/anomaly.go), for the SME
+cost model.
+
+### Per-meter anomaly detector
+
+`CostAnomalyDetector` compares a tenant's **live projected** monthly
+spend for each meter against that meter's own trailing baseline (the
+**median** of the complete trailing months, default 6-month lookback),
+so a sudden shift in traffic mix is caught even while the tenant is
+still under its hard budget. Two rules fire:
+
+- **Ratio**: `projected / baseline ≥ WarnRatio` (default `2.0`) →
+  `warning`, `≥ CriticalRatio` (default `4.0`) → `critical`. Suppressed
+  unless projected spend clears `MinBaselineUSD` ($1) and the baseline
+  has `MinBaselineMonths` (2) of history, so rounding-level meters and
+  cold-start tenants don't generate noise.
+- **New-spend**: a meter with no usable baseline (median 0) that
+  projects above `NewSpendFloorUSD` ($5) — catches a meter switching on
+  mid-month, which the ratio rule cannot (division by zero).
+
+The median (not mean) baseline makes the detector robust to a single
+prior spike: one anomalous month cannot inflate the baseline enough to
+mask the next one.
+
+### Per-user target band
+
+`CostCalculator.AssessPerUserCost(tenantID, monthlyCostUSD, seats)`
+divides a tenant's projected monthly infra cost across its seats and
+classifies it against the **$0.30–$1.20 per-user** envelope
+(`TargetCostPerUserMin/MaxUSD`): `under`, `within`, or `over`. A
+non-positive seat count yields an empty band (per-user cost is undefined
+without seats) rather than a divide-by-zero.
+
+### Endpoint
+
+`GET /api/v1/tenants/{tenant_id}/cost-anomalies` returns the tenant's
+current anomalies. It is mounted tenant-scoped, so the 2A tenant
+middleware enforces that the caller's `tenant_id` JWT claim matches the
+path tenant (mismatch / missing-claim → 403); the only cross-tenant
+caller is an explicitly-authorized platform admin. No new persistence is
+introduced — the detector composes the live cost report and the existing
+usage history.

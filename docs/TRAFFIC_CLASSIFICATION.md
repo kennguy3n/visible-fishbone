@@ -171,6 +171,55 @@ on the control plane (see [`docs/deploy.md`](./deploy.md)). The
 `app_registry` table is intentionally **global** (no RLS) — it
 is the same curated dataset for every tenant.
 
+### 7.1 Region-aware trusted-app lists (Session 2B)
+
+Some trusted apps are only relevant to one geography — Grab and
+the SEA regional banks, Careem and the GCC gov portals, Swiss
+Post and the DACH banks. Shipping them globally would either
+leak one region's trust posture to every tenant or force the
+operator to curate per-tenant overrides by hand. Instead the
+registry carries a **region scope**:
+
+- A global-scope row (`scope = 'global'`) applies to every
+  tenant — the existing behaviour, unchanged.
+- A regional-scope row (`scope = 'regional'`) carries a
+  `regions[]` set and applies **only** to tenants in a matching
+  region group.
+
+Matching normalises every `regions[]` entry and the tenant's own
+region marker through the shared
+[`internal/region`](../internal/region) taxonomy, which maps ISO
+country codes / cities / AWS regions to the **SEA / GCC / DACH**
+groups. Crucially it is **ISO-code-driven**: broad continental
+codes (`APAC`, `EU`, `MENA`) deliberately resolve to *no* group,
+because one broad code spans multiple groups (`EU ⊋ DACH`) and
+mapping it would leak a region's list across borders. So a row
+seeded `{APAC, SG, ID}` matches SEA tenants via `SG`/`ID`; the
+bare `APAC` token matches nothing on its own.
+
+Resolution stays fail-safe and extends the left-fold of §7:
+
+1. A tenant override still wins outright (it is explicit operator
+   intent and is not region-filtered).
+2. A regional global-catalog row is consulted **only** when the
+   tenant's region group is known *and* listed; otherwise the row
+   is skipped, the app falls through to the global baseline, and —
+   absent any other match — lands on `inspect_full`.
+3. When no region resolver is wired, or the tenant's region can't
+   be resolved, **all** regional rows are skipped. The tenant is
+   classified with global apps only — conservative (an
+   unclassifiable app is inspected, not blindly trusted) and never
+   cross-region.
+
+The regional dimension is enforced in `appAppliesToRegion` /
+`filterAppsByRegion` and applied in `ResolveTrafficClass`,
+`NewSteeringSnapshot`, and `ListEffective`, so the edge bundle, the
+live resolver, and the operator-facing effective list all agree.
+The seeds live in `migrations/045_app_registry_regional_seed.up.sql`
+(idempotent, `ON CONFLICT (name) DO NOTHING`), following the
+broad-code-plus-ISO convention established by
+`migrations/009`.
+
 ## 8. Vendor Endpoint Sync
 
 Apps with a `metadata_url` (Microsoft publishes M365 endpoint
