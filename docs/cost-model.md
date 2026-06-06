@@ -191,9 +191,12 @@ still under its hard budget. Two rules fire:
 
 - **Ratio**: `projected / baseline ≥ WarnRatio` (default `2.0`) →
   `warning`, `≥ CriticalRatio` (default `4.0`) → `critical`. Suppressed
-  unless projected spend clears `MinBaselineUSD` ($1) and the baseline
-  has `MinBaselineMonths` (2) of history, so rounding-level meters and
-  cold-start tenants don't generate noise.
+  unless the **baseline** clears `MinBaselineUSD` ($1) and has
+  `MinBaselineMonths` (2) of history, so rounding-level meters and
+  cold-start tenants don't generate noise. (With `WarnRatio > 1` a
+  baseline ≥ $1 that trips the ratio necessarily projects above $1 too,
+  so gating on the baseline also bounds projected spend — no separate
+  projected floor is needed.)
 - **New-spend**: a meter with no usable baseline (median 0) that
   projects above `NewSpendFloorUSD` ($5) — catches a meter switching on
   mid-month, which the ratio rule cannot (division by zero).

@@ -24,6 +24,15 @@ pub struct EdgeConfig {
     pub identity: IdentityConfig,
     /// Control-plane endpoint and authentication material.
     pub comms: CommsConfig,
+    /// Root of the edge's on-disk state — the filesystem that holds
+    /// the policy-bundle cache, telemetry spool, and the per-subsystem
+    /// working dirs (IPS staging, SWG config, …), all of which default
+    /// under it. The commodity-hardware preflight measures this path's
+    /// free space against the documented 8 GiB micro-branch minimum, so
+    /// it must name the data partition rather than any one subsystem's
+    /// subdir. Default: `/var/lib/sng`.
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
     /// Policy bundle pull cadence + cache override.
     #[serde(default)]
     pub policy: PolicyConfig,
@@ -874,6 +883,9 @@ fn default_ips_interface() -> String {
 fn default_ips_rule_file_path() -> PathBuf {
     PathBuf::from("/var/lib/sng/ips/sng.rules")
 }
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("/var/lib/sng")
+}
 fn default_ips_staging_dir() -> PathBuf {
     PathBuf::from("/var/lib/sng/ips/staging")
 }
@@ -1055,6 +1067,9 @@ client_key  = "/etc/sng/client.key"
         assert_eq!(cfg.comms.endpoint, "control.example.com:443");
         assert_eq!(cfg.comms.backoff_initial, Duration::from_millis(250));
         assert_eq!(cfg.comms.backoff_max, Duration::from_secs(30));
+        // The data root defaults to the canonical SNG state dir when no
+        // `data_dir` key is present (the commodity preflight probes it).
+        assert_eq!(cfg.data_dir, PathBuf::from("/var/lib/sng"));
         assert_eq!(cfg.telemetry.event_channel_capacity, 4096);
         assert_eq!(cfg.policy.pull_interval, Duration::from_secs(60));
         assert_eq!(cfg.supervisor.health_interval, Duration::from_secs(2));

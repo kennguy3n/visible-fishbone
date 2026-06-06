@@ -414,8 +414,11 @@ pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, Edg
     let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     // Reuse the data-path the firewall already resolved in
     // build_edge rather than calling resolve_datapath again, which
-    // would re-run the XDP kernel capability probe.
-    let commodity = CommodityProfile::detect(&cfg.ips.staging_dir, workers, built.datapath);
+    // would re-run the XDP kernel capability probe. Probe free space on
+    // `cfg.data_dir` — the edge's data-partition root — not a single
+    // subsystem's working dir, so the 8 GiB minimum is measured against
+    // the filesystem the whole appliance actually spools onto.
+    let commodity = CommodityProfile::detect(&cfg.data_dir, workers, built.datapath);
     match &commodity.assessment {
         SpecAssessment::Pass => tracing::info!(
             target: "sng_edge::commodity",

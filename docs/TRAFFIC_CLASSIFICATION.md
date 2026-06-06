@@ -215,7 +215,7 @@ The regional dimension is enforced in `appAppliesToRegion` /
 `filterAppsByRegion` and applied in `ResolveTrafficClass`,
 `NewSteeringSnapshot`, and `ListEffective`, so the edge bundle, the
 live resolver, and the operator-facing effective list all agree.
-The seeds live in `migrations/045_app_registry_regional_seed.up.sql`
+The seeds live in `migrations/047_app_registry_regional_seed.up.sql`
 (idempotent, `ON CONFLICT (name) DO NOTHING`), following the
 broad-code-plus-ISO convention established by
 `migrations/009`.
