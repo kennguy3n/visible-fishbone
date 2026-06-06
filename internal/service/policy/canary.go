@@ -28,10 +28,12 @@
 // an impossible state.
 //
 // Canary cohort assignment is deterministic: a device is in the
-// canary iff fnv1a64(canary_salt || device_id_bytes) % 100 <
-// canary_percent. The salt is the rollout's UUID, so two
-// rollouts at the same percent select disjoint-ish cohorts (each
-// device is independently sampled) and a re-eval at restart
+// canary iff its bucket (derived from independent hashes of the
+// device id and rollout id, combined through a splitmix64
+// finalizer — see IsCanaryDevice) mod 100 < canary_percent. The
+// rollout id acts as an independent salt, so two rollouts at the
+// same percent sample independently (a device's membership in one
+// says nothing about the other) and a re-eval at restart
 // reproduces the exact same cohort. This matters because a
 // device must NOT flap between "canary" and "non-canary" on a
 // poller restart — flapping would force the agent to re-pull
