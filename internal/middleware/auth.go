@@ -60,6 +60,13 @@ type MobileDeviceStatusResolver interface {
 // authOptions holds the optional, additive behaviours of Auth.
 type authOptions struct {
 	deviceStatus MobileDeviceStatusResolver
+	// iamCore, when set, validates Bearer tokens issued by the upstream
+	// iam-core IdP (Session 2A). Tokens whose `iss` matches its issuer
+	// take this path; all others use the legacy verifier.
+	iamCore IAMCoreValidator
+	// tenantResolver maps an iam-core tenant_id claim onto the SNG
+	// tenant model. Optional; see WithIAMCore.
+	tenantResolver TenantResolver
 }
 
 // AuthOption configures optional Auth behaviour without breaking the
@@ -125,6 +132,22 @@ func Auth(cfg *config.Auth, keys APIKeyLookup, opts ...AuthOption) func(http.Han
 			if raw == "" {
 				writeAuthError(w, "missing_credentials")
 				return
+			}
+			// iam-core path (Session 2A): when the integration is wired
+			// and the token claims the iam-core issuer, validate it
+			// against iam-core's JWKS (asymmetric, fail-closed) instead
+			// of the legacy HMAC verifier. Routing on the UNVERIFIED iss
+			// only selects which verifier runs; the selected verifier
+			// performs the real signature + claim validation. Tokens for
+			// any other issuer fall through to the existing path, so
+			// operator-console / mobile / API-key auth is untouched.
+			if o.iamCore != nil && unverifiedIssuer(raw) == o.iamCore.Issuer() {
+				if ctx, handled := o.authenticateIAMCore(w, r, raw); handled {
+					if ctx != nil {
+						next.ServeHTTP(w, r.WithContext(ctx))
+					}
+					return
+				}
 			}
 			// The symmetric (HMAC) verification path is build-tagged:
 			// the real implementation is compiled only into
