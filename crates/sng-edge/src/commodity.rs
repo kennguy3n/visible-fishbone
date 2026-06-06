@@ -692,6 +692,18 @@ impl fmt::Debug for MmapBufferPool {
 ///
 /// Derefs to the frame's `[u8]` backing bytes. Returns its slot to the
 /// pool when dropped.
+///
+/// # Safety invariant
+///
+/// `Frame` must **never** derive or implement `Clone`/`Copy`. The unsafe
+/// pointer arithmetic in [`Frame::as_slice`] / [`Frame::as_mut_slice`] is
+/// sound only because each live `Frame` exclusively owns its slot
+/// `index` (popped from the pool's free list, returned on drop). A
+/// second `Frame` referencing the same slot would alias the same
+/// `&mut [u8]`, which is undefined behaviour. Exclusive `&mut self` on
+/// `as_mut_slice` and the one-handle-per-slot invariant together provide
+/// the aliasing guarantee; cloning would break it. To get a second
+/// frame, [`MmapBufferPool::acquire`] a distinct slot.
 pub struct Frame {
     pool: Arc<PoolInner>,
     index: usize,
