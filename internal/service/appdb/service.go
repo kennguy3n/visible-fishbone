@@ -659,9 +659,13 @@ func (s *Service) NewSteeringSnapshot(ctx context.Context, tenantID uuid.UUID) (
 	// and are NOT region-filtered (see ResolveTrafficClass), so an
 	// override promoting an out-of-region app must still contribute its
 	// domains/IPs to the steering table. Iterate the full catalog in
-	// its stable order so the merged set stays byte-deterministic.
-	compileApps := make([]repository.AppRegistry, 0, len(regional))
-	seen := make(map[uuid.UUID]struct{}, len(regional))
+	// its stable order so the merged set stays byte-deterministic. Size
+	// for the region-scoped baseline plus every distinct override target
+	// (the exact upper bound), so appending out-of-region override apps
+	// never reallocates.
+	compileCap := len(regional) + len(overrideByApp)
+	compileApps := make([]repository.AppRegistry, 0, compileCap)
+	seen := make(map[uuid.UUID]struct{}, compileCap)
 	for _, app := range regional {
 		compileApps = append(compileApps, app)
 		seen[app.ID] = struct{}{}

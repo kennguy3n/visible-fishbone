@@ -73,6 +73,11 @@ base64 = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt", "macros", "rt-multi-thread", "sync", "time"] }
 pretty_assertions = { workspace = true }
+# Compile-time guard that `commodity::Frame` never gains a Clone/Copy
+# impl (its unsafe slot-aliasing invariant depends on it); see the
+# assert_not_impl_any! in commodity.rs tests. Already vendored
+# transitively, so this adds no new entry to Cargo.lock.
+static_assertions = "1"
 tempfile = { workspace = true }
 rand = { workspace = true }
 rcgen = { workspace = true }

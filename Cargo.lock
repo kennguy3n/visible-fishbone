@@ -2653,6 +2653,7 @@ dependencies = [
  "sng-telemetry",
  "sng-updater",
  "sng-ztna",
+ "static_assertions",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

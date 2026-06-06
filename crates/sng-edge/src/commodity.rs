@@ -710,7 +710,10 @@ impl fmt::Debug for MmapBufferPool {
 /// `&mut [u8]`, which is undefined behaviour. Exclusive `&mut self` on
 /// `as_mut_slice` and the one-handle-per-slot invariant together provide
 /// the aliasing guarantee; cloning would break it. To get a second
-/// frame, [`MmapBufferPool::acquire`] a distinct slot.
+/// frame, [`MmapBufferPool::acquire`] a distinct slot. This invariant is
+/// machine-enforced by an `assert_not_impl_any!(Frame: Clone, Copy)`
+/// compile-time assertion in the test module, so a stray derive fails
+/// the build rather than silently introducing UB.
 pub struct Frame {
     pool: Arc<PoolInner>,
     index: usize,
@@ -900,6 +903,14 @@ impl CommodityProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use static_assertions::assert_not_impl_any;
+
+    // Machine-enforce the `Frame` safety invariant documented above: it
+    // must never become Clone/Copy, or two handles could alias the same
+    // mmap slot and `as_mut_slice` would produce overlapping `&mut [u8]`
+    // (UB). This fails to compile if a future change derives either, so
+    // the invariant is no longer comment-only.
+    assert_not_impl_any!(Frame: Clone, Copy);
 
     #[test]
     fn parse_cpulist_ranges_and_singletons() {
@@ -1079,7 +1090,10 @@ mod tests {
         // zero dimension.
         let err = MmapBufferPool::new(usize::MAX, 2).unwrap_err();
         assert!(matches!(err, BufferPoolError::Overflow));
-        assert_eq!(err.to_string(), "frame_bytes * frame_count exceeds usize::MAX");
+        assert_eq!(
+            err.to_string(),
+            "frame_bytes * frame_count exceeds usize::MAX"
+        );
     }
 
     #[test]
