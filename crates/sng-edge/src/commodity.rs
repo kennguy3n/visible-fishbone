@@ -244,8 +244,15 @@ fn detect_available_storage_bytes(data_dir: &Path) -> u64 {
     loop {
         match nix::sys::statvfs::statvfs(probe) {
             Ok(st) => {
-                let bavail: u64 = st.blocks_available();
-                let frsize: u64 = st.fragment_size();
+                // statvfs field widths differ by platform: fsblkcnt_t is
+                // u32 on macOS but u64 on Linux, and fragment_size is
+                // c_ulong. Cast both to u64 so the multiply is well-typed
+                // everywhere (the cast is a no-op on Linux, hence the
+                // targeted allow so `-D warnings` stays clean there).
+                #[allow(clippy::unnecessary_cast)]
+                let bavail = st.blocks_available() as u64;
+                #[allow(clippy::unnecessary_cast)]
+                let frsize = st.fragment_size() as u64;
                 return bavail.saturating_mul(frsize);
             }
             Err(_) => match probe.parent() {

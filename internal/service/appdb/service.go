@@ -308,11 +308,17 @@ func (s *Service) ListEffective(ctx context.Context, tenantID uuid.UUID) ([]Effe
 	if err != nil {
 		return nil, fmt.Errorf("appdb: list apps: %w", err)
 	}
-	// Only surface regional apps that apply to this tenant's region so
-	// the console's effective view matches what the tenant's bundles
-	// actually steer on.
+	// Region-scope the global baseline so the console's effective view
+	// matches what the tenant's bundles actually steer on. Tenant
+	// overrides, however, win outright and are NOT region-filtered
+	// (see ResolveTrafficClass), so an override targeting an
+	// out-of-region app must still surface here as an override row.
 	group, haveGroup := s.resolveRegionGroup(ctx, tenantID)
-	apps = filterAppsByRegion(apps, group, haveGroup)
+	regionalApps := filterAppsByRegion(apps, group, haveGroup)
+	inRegion := make(map[uuid.UUID]struct{}, len(regionalApps))
+	for _, app := range regionalApps {
+		inRegion[app.ID] = struct{}{}
+	}
 	ovs, err := s.overrides.ListAll(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("appdb: list overrides: %w", err)
@@ -333,12 +339,20 @@ func (s *Service) ListEffective(ctx context.Context, tenantID uuid.UUID) ([]Effe
 
 	out := make([]EffectiveApp, 0, len(apps)+len(customs))
 	for _, app := range apps {
+		ov, overridden := byAppID[app.ID]
+		_, regional := inRegion[app.ID]
+		// An out-of-region app the tenant hasn't explicitly overridden
+		// does not apply to this tenant — skip it. An overridden app is
+		// explicit intent and surfaces regardless of region.
+		if !regional && !overridden {
+			continue
+		}
 		ea := EffectiveApp{
 			App:            app,
 			EffectiveClass: app.TrafficClass,
 			Source:         "global",
 		}
-		if ov, ok := byAppID[app.ID]; ok {
+		if overridden {
 			id := ov.ID
 			ea.EffectiveClass = ov.TrafficClassOverride
 			ea.Source = "override"
@@ -411,14 +425,21 @@ func (s *Service) ResolveTrafficClass(ctx context.Context, tenantID uuid.UUID, d
 	if err != nil {
 		return "", fmt.Errorf("appdb: list apps: %w", err)
 	}
-	// Scope regional trusted-app lists to the tenant's region group so
-	// e.g. the SEA list never classifies traffic for a DACH tenant.
-	group, haveGroup := s.resolveRegionGroup(ctx, tenantID)
-	apps = filterAppsByRegion(apps, group, haveGroup)
+	// Index the FULL catalog by ID for the override pass. An
+	// app-id-bound override is explicit operator intent and is NOT
+	// region-filtered (docs/TRAFFIC_CLASSIFICATION.md §"Resolution"),
+	// so it must be able to find its target app even when that app is
+	// a regional row outside the tenant's group — otherwise the
+	// override silently no-ops as if it pointed at a deleted app.
 	appsByID := make(map[uuid.UUID]repository.AppRegistry, len(apps))
 	for _, app := range apps {
 		appsByID[app.ID] = app
 	}
+	// The global-baseline fallback, by contrast, IS scoped to the
+	// tenant's region group so e.g. the SEA list never classifies
+	// traffic for a DACH tenant.
+	group, haveGroup := s.resolveRegionGroup(ctx, tenantID)
+	regionalApps := filterAppsByRegion(apps, group, haveGroup)
 	now := s.now()
 	// Walk overrides first — tenant intent wins.
 	for _, ov := range ovs {
@@ -456,7 +477,7 @@ func (s *Service) ResolveTrafficClass(ctx context.Context, tenantID uuid.UUID, d
 		isLiteral bool
 	}
 	var best *hit
-	for _, app := range apps {
+	for _, app := range regionalApps {
 		for _, pat := range app.Domains {
 			if !matchesPattern(domain, pat) {
 				continue
@@ -604,11 +625,6 @@ func (s *Service) NewSteeringSnapshot(ctx context.Context, tenantID uuid.UUID) (
 	if err != nil {
 		return nil, fmt.Errorf("appdb: list apps: %w", err)
 	}
-	// Scope regional trusted-app lists to the tenant's region group
-	// before any per-target compile, so a regional app's domains/IPs
-	// only ever land in the steering table of a tenant in that region.
-	group, haveGroup := s.resolveRegionGroup(ctx, tenantID)
-	apps = filterAppsByRegion(apps, group, haveGroup)
 	ovs, err := s.overrides.ListAll(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("appdb: list overrides: %w", err)
@@ -626,8 +642,40 @@ func (s *Service) NewSteeringSnapshot(ctx context.Context, tenantID uuid.UUID) (
 			customs = append(customs, ov)
 		}
 	}
+
+	// Scope regional trusted-app lists to the tenant's region group
+	// before any per-target compile, so a regional app's domains/IPs
+	// only ever land in the steering table of a tenant in that region.
+	group, haveGroup := s.resolveRegionGroup(ctx, tenantID)
+	regional := filterAppsByRegion(apps, group, haveGroup)
+
+	// The effective compile set is the region-scoped baseline PLUS any
+	// app a tenant override explicitly targets: overrides win outright
+	// and are NOT region-filtered (see ResolveTrafficClass), so an
+	// override promoting an out-of-region app must still contribute its
+	// domains/IPs to the steering table. Iterate the full catalog in
+	// its stable order so the merged set stays byte-deterministic.
+	compileApps := make([]repository.AppRegistry, 0, len(regional))
+	seen := make(map[uuid.UUID]struct{}, len(regional))
+	for _, app := range regional {
+		compileApps = append(compileApps, app)
+		seen[app.ID] = struct{}{}
+	}
+	if len(overrideByApp) > 0 {
+		for _, app := range apps {
+			if _, ok := overrideByApp[app.ID]; !ok {
+				continue
+			}
+			if _, dup := seen[app.ID]; dup {
+				continue
+			}
+			compileApps = append(compileApps, app)
+			seen[app.ID] = struct{}{}
+		}
+	}
+
 	return &SteeringSnapshot{
-		apps:          apps,
+		apps:          compileApps,
 		overrideByApp: overrideByApp,
 		customs:       customs,
 	}, nil

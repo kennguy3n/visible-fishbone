@@ -177,6 +177,127 @@ func TestResolveTrafficClass_RealSeedConvention(t *testing.T) {
 	})
 }
 
+// TestResolveTrafficClass_OverrideWinsAcrossRegion guards the
+// documented invariant that a tenant override "wins outright … and is
+// not region-filtered" (docs/TRAFFIC_CLASSIFICATION.md). A DACH tenant
+// that explicitly overrides a SEA-only app must see the override take
+// effect even though the app's region group does not match — the
+// override is explicit operator intent and the region filter only
+// scopes the global baseline, never the override pass.
+func TestResolveTrafficClass_OverrideWinsAcrossRegion(t *testing.T) {
+	svc, tenantID := newTestService(t)
+	svc.SetTenantRegionResolver(fakeRegionResolver{region: "zurich"}) // DACH
+	app := seedRegionalApp(t, svc, "Grab", repository.TrafficClassTrustedDirect, []string{"SEA"}, "*.grab.com")
+
+	// Without an override the SEA app must not classify a DACH tenant.
+	if cls, err := svc.ResolveTrafficClass(context.Background(), tenantID, "api.grab.com"); err != nil {
+		t.Fatalf("resolve baseline: %v", err)
+	} else if cls != repository.TrafficClassInspectFull {
+		t.Fatalf("baseline class = %q, want inspect_full (out-of-region app excluded)", cls)
+	}
+
+	// The tenant explicitly demotes the out-of-region app.
+	if _, err := svc.CreateOverride(context.Background(), tenantID, nil, repository.AppRegistryOverride{
+		AppID:                &app.ID,
+		TrafficClassOverride: repository.TrafficClassBlock,
+		Reason:               "operator blocks Grab for this tenant",
+	}); err != nil {
+		t.Fatalf("override: %v", err)
+	}
+
+	cls, err := svc.ResolveTrafficClass(context.Background(), tenantID, "api.grab.com")
+	if err != nil {
+		t.Fatalf("resolve override: %v", err)
+	}
+	if cls != repository.TrafficClassBlock {
+		t.Fatalf("class = %q, want block (override wins outright, not region-filtered)", cls)
+	}
+}
+
+// TestListEffective_OverrideForOutOfRegionAppSurfaces verifies the
+// console's effective view includes an out-of-region app the tenant has
+// explicitly overridden — the override must not be silently dropped by
+// the region filter.
+func TestListEffective_OverrideForOutOfRegionAppSurfaces(t *testing.T) {
+	svc, tenantID := newTestService(t)
+	svc.SetTenantRegionResolver(fakeRegionResolver{region: "zurich"}) // DACH
+	sea := seedRegionalApp(t, svc, "Grab", repository.TrafficClassTrustedDirect, []string{"SEA"}, "*.grab.com")
+
+	// Baseline: an out-of-region app with no override is not surfaced.
+	eff, err := svc.ListEffective(context.Background(), tenantID)
+	if err != nil {
+		t.Fatalf("list effective baseline: %v", err)
+	}
+	for _, ea := range eff {
+		if ea.App.ID == sea.ID {
+			t.Fatalf("out-of-region app surfaced without an override: %+v", ea)
+		}
+	}
+
+	if _, err := svc.CreateOverride(context.Background(), tenantID, nil, repository.AppRegistryOverride{
+		AppID:                &sea.ID,
+		TrafficClassOverride: repository.TrafficClassBlock,
+		Reason:               "operator blocks Grab for this tenant",
+	}); err != nil {
+		t.Fatalf("override: %v", err)
+	}
+
+	eff, err = svc.ListEffective(context.Background(), tenantID)
+	if err != nil {
+		t.Fatalf("list effective override: %v", err)
+	}
+	var found *appdb.EffectiveApp
+	for i := range eff {
+		if eff[i].App.ID == sea.ID {
+			found = &eff[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("overridden out-of-region app missing from effective view")
+	}
+	if found.Source != "override" || found.EffectiveClass != repository.TrafficClassBlock {
+		t.Fatalf("effective row = %+v, want source=override class=block", *found)
+	}
+}
+
+// TestCompileSteeringRules_OverrideForOutOfRegionAppIncluded verifies an
+// override promoting an out-of-region app still contributes that app's
+// domains to the compiled steering table — otherwise the override would
+// be honoured by ResolveTrafficClass but missing from the bundle.
+func TestCompileSteeringRules_OverrideForOutOfRegionAppIncluded(t *testing.T) {
+	svc, tenantID := newTestService(t)
+	svc.SetTenantRegionResolver(fakeRegionResolver{region: "zurich"}) // DACH
+	sea := seedRegionalApp(t, svc, "Grab", repository.TrafficClassTrustedDirect, []string{"SEA"}, "grab.com")
+
+	if _, err := svc.CreateOverride(context.Background(), tenantID, nil, repository.AppRegistryOverride{
+		AppID:                &sea.ID,
+		TrafficClassOverride: repository.TrafficClassBlock,
+		Reason:               "operator blocks Grab for this tenant",
+	}); err != nil {
+		t.Fatalf("override: %v", err)
+	}
+
+	rs, err := svc.CompileSteeringRules(context.Background(), tenantID, repository.PolicyBundleTargetEdge)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var blocked bool
+	for _, c := range rs.Classes {
+		if c.Class != repository.TrafficClassBlock {
+			continue
+		}
+		for _, d := range c.Domains {
+			if d == "grab.com" {
+				blocked = true
+			}
+		}
+	}
+	if !blocked {
+		t.Fatalf("override for out-of-region app missing from steering table: %+v", rs.Classes)
+	}
+}
+
 func TestCompileSteeringRules_RegionalScoping(t *testing.T) {
 	seaTenantClasses := func(t *testing.T, marker string) map[string]bool {
 		t.Helper()

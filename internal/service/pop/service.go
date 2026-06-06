@@ -435,7 +435,11 @@ func (s *Service) Rebalance(ctx context.Context) (int, error) {
 			if a.Override {
 				continue // operator-pinned — never auto-move
 			}
-			target, err := s.pickBestExcluding(hot.ID)
+			// Bias the move toward the tenant's own region group so a
+			// rebalance off a hot PoP keeps the tenant residency-aligned
+			// (consistent with AssignPoP), rather than landing it on an
+			// arbitrary least-loaded PoP in another region.
+			target, err := s.pickBestExcluding(hot.ID, s.preferredRegionSet(ctx, a.TenantID))
 			if err != nil {
 				// No alternative has capacity; stop trying this round.
 				s.logger.Warn("pop: rebalance found no target",
@@ -455,11 +459,18 @@ func (s *Service) Rebalance(ctx context.Context) (int, error) {
 	return moved, nil
 }
 
-// pickBestExcluding is pickBest with no region bias and one PoP
-// removed from the candidate set (the overloaded source).
-func (s *Service) pickBestExcluding(exclude uuid.UUID) (PoP, error) {
+// pickBestExcluding selects the least-loaded healthy PoP other than
+// `exclude` (the overloaded source), biased to the tenant's region
+// group when groupRegions is non-nil — mirroring pickBest/AssignPoP so
+// a rebalance keeps the tenant residency-aligned. There is no client
+// address on the rebalance path, so the precedence collapses to two
+// tiers: in-group first, then global. When the group is exhausted it
+// falls back to the global least-loaded PoP (and logs it) so shedding a
+// hot PoP never strands a tenant. Returns ErrResourceExhausted when no
+// alternative has capacity.
+func (s *Service) pickBestExcluding(exclude uuid.UUID, groupRegions map[string]bool) (PoP, error) {
 	snap := s.registry.current()
-	var pool []candidate
+	var inGroup, global []candidate
 	for _, p := range snap.pops {
 		if p.ID == exclude || !p.Enabled || !s.registry.isHealthy(snap, p.ID) {
 			continue
@@ -468,18 +479,24 @@ func (s *Service) pickBestExcluding(exclude uuid.UUID) (PoP, error) {
 		if u >= s.highWater {
 			continue
 		}
-		pool = append(pool, candidate{pop: p, util: u})
+		c := candidate{pop: p, util: u}
+		global = append(global, c)
+		if groupRegions != nil && groupRegions[p.Region] {
+			inGroup = append(inGroup, c)
+		}
+	}
+	pool := global
+	if groupRegions != nil {
+		if len(inGroup) > 0 {
+			pool = inGroup
+		} else if len(global) > 0 {
+			s.logger.Warn("pop: rebalance region group exhausted; falling back to global least-loaded PoP")
+		}
 	}
 	if len(pool) == 0 {
 		return PoP{}, fmt.Errorf("%w: no alternative PoP with capacity", repository.ErrResourceExhausted)
 	}
-	sort.Slice(pool, func(i, j int) bool {
-		if pool[i].util != pool[j].util {
-			return pool[i].util < pool[j].util
-		}
-		return pool[i].pop.ID.String() < pool[j].pop.ID.String()
-	})
-	return pool[0].pop, nil
+	return leastLoaded(pool), nil
 }
 
 // --- background loop ---

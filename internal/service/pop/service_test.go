@@ -356,6 +356,64 @@ func TestRebalance_MovesNonOverrideTenants(t *testing.T) {
 	}
 }
 
+// TestRebalance_BiasesToTenantRegionGroup verifies a rebalance moves a
+// tenant to a PoP in its own region group when one has capacity, even
+// if an out-of-group PoP is less loaded — consistent with AssignPoP's
+// region bias. Without the bias the rebalancer would shed a SEA tenant
+// onto the least-loaded DACH PoP, breaking residency alignment.
+func TestRebalance_BiasesToTenantRegionGroup(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(10_000, 0).UTC()
+	store := newFakeStore()
+	hot := seedHealthyPoP(store, "ap-southeast-1", CapacityMedium, now, 49_000) // overloaded SEA
+	coolSEA := seedHealthyPoP(store, "ap-southeast-1", CapacityMedium, now, 9_000)
+	// DACH PoP is *less* loaded, so a purely load-based pick would
+	// choose it; the region bias must keep the SEA tenant in SEA.
+	coolDACH := seedHealthyPoP(store, "eu-central-1", CapacityMedium, now, 10)
+
+	movable := uuid.New()
+	_, _ = store.UpsertAssignment(context.Background(), Assignment{TenantID: movable, PoPID: hot.ID})
+
+	svc := newTestService(t, store, now, WithTenantRegionResolver(fakeRegionResolver{region: "SEA"}))
+	moved, err := svc.Rebalance(context.Background())
+	if err != nil {
+		t.Fatalf("rebalance: %v", err)
+	}
+	if moved != 1 {
+		t.Fatalf("moved = %d, want 1", moved)
+	}
+	a, _ := store.GetAssignment(context.Background(), movable)
+	if a.PoPID != coolSEA.ID {
+		t.Fatalf("rebalanced to %s, want in-group SEA PoP %s (not DACH %s)", a.PoPID, coolSEA.ID, coolDACH.ID)
+	}
+}
+
+// TestRebalance_RegionGroupExhaustedFallsBackGlobal verifies that when
+// no in-group PoP has capacity the rebalancer still sheds the tenant to
+// a global alternative rather than stranding it on the hot PoP.
+func TestRebalance_RegionGroupExhaustedFallsBackGlobal(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(10_000, 0).UTC()
+	store := newFakeStore()
+	hot := seedHealthyPoP(store, "ap-southeast-1", CapacityMedium, now, 49_000) // only SEA PoP, overloaded
+	coolDACH := seedHealthyPoP(store, "eu-central-1", CapacityMedium, now, 10)
+
+	movable := uuid.New()
+	_, _ = store.UpsertAssignment(context.Background(), Assignment{TenantID: movable, PoPID: hot.ID})
+
+	svc := newTestService(t, store, now, WithTenantRegionResolver(fakeRegionResolver{region: "SEA"}))
+	moved, err := svc.Rebalance(context.Background())
+	if err != nil {
+		t.Fatalf("rebalance: %v", err)
+	}
+	if moved != 1 {
+		t.Fatalf("moved = %d, want 1 (availability over residency)", moved)
+	}
+	if a, _ := store.GetAssignment(context.Background(), movable); a.PoPID != coolDACH.ID {
+		t.Fatalf("rebalanced to %s, want global fallback to DACH PoP %s", a.PoPID, coolDACH.ID)
+	}
+}
+
 func TestOverloadedPoPs(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(10_000, 0).UTC()
