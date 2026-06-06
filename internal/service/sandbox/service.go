@@ -340,12 +340,22 @@ func (s *Service) Disposition(ctx context.Context, tenantID uuid.UUID, sha strin
 	if err != nil {
 		return DispositionDeny, Verdict{}, err
 	}
-	v, resolved, err := s.LookupVerdict(ctx, tenantID, sha)
+	// A cached verdict is always a resolved, complete one (only
+	// persistResolved populates the cache), so treat it as complete.
+	if v, ok := s.cache.Get(tenantID, sha); ok {
+		return dispositionFor(StatusComplete, v), v, nil
+	}
+	row, err := s.repo.GetBySHA256(ctx, tenantID, sha)
 	if err != nil {
-		// On a store error we cannot prove the file is clean: deny.
+		if errors.Is(err, repository.ErrNotFound) {
+			// Never submitted: nothing proves the file clean. Deny.
+			return DispositionDeny, Verdict{}, nil
+		}
+		// Store error: cannot prove the file clean, deny fail-closed.
 		return DispositionDeny, Verdict{}, err
 	}
-	return disposition(v, resolved), v, nil
+	v := fromRow(row)
+	return dispositionFor(Status(row.Status), v), v, nil
 }
 
 func (s *Service) persistPending(ctx context.Context, tenantID uuid.UUID, sha, sandboxID string) (repository.SandboxVerdict, error) {

@@ -140,27 +140,32 @@ const (
 // is clean; pending and deny are both not-clean (fail-closed).
 func (d Disposition) Clean() bool { return d == DispositionAllow }
 
-// disposition maps a (verdict, resolved) pair onto the fail-closed
-// ternary decision. resolved reflects whether a *complete* verdict
-// row exists for the digest (as reported by LookupVerdict); an
-// unresolved or missing verdict is never clean.
-func disposition(v Verdict, resolved bool) Disposition {
-	if !resolved {
-		// No resolved verdict: either nothing was ever submitted,
-		// the submission is still pending, or the provider errored.
-		// A pending classification is reported as pending; anything
-		// else (including unknown) is denied fail-closed.
-		if v.Classification == ClassUnknown {
-			return DispositionPending
+// dispositionFor maps a submission row's status and verdict onto the
+// fail-closed ternary decision. Only a *complete*, clean verdict is
+// releasable (DispositionAllow). A still-pending submission yields
+// DispositionPending so the caller holds and re-polls. Every other
+// state — a provider error (terminal: it will never resolve), or a
+// complete suspicious / malicious / timeout / unknown verdict — yields
+// DispositionDeny. An errored row must deny rather than pend: it is
+// terminal, so reporting it pending would make the caller re-poll a
+// verdict that can never resolve.
+func dispositionFor(status Status, v Verdict) Disposition {
+	switch status {
+	case StatusComplete:
+		if v.Classification == ClassClean {
+			return DispositionAllow
 		}
+		// Complete but suspicious / malicious / timeout / unknown:
+		// not clean.
+		return DispositionDeny
+	case StatusPending:
+		// Genuinely in-flight: hold and re-poll. Not clean.
+		return DispositionPending
+	default:
+		// StatusError or any unexpected/empty state is terminal and
+		// not clean; deny fail-closed rather than pend forever.
 		return DispositionDeny
 	}
-	if v.Classification == ClassClean {
-		return DispositionAllow
-	}
-	// Resolved but suspicious / malicious / timeout / anything
-	// unexpected: not clean.
-	return DispositionDeny
 }
 
 // Submission is a request to detonate one file. The bytes are

@@ -149,6 +149,28 @@ func TestDisposition_FailClosed(t *testing.T) {
 			want:  DispositionDeny,
 			clean: false,
 		},
+		{
+			name: "provider error denies, not pending (terminal)",
+			setup: func(t *testing.T) (*Service, uuid.UUID) {
+				// Async submit leaves a pending (unknown) row; a poll
+				// that the provider errors on makes the row terminal
+				// (StatusError) while its classification stays unknown.
+				// It must deny fail-closed, NOT pend — a pending reply
+				// would have the caller re-poll a verdict that can
+				// never resolve.
+				p := &stubProvider{syncResult: false, pollStatus: providers.StatusError}
+				svc, tid := newTestEnv(t, p)
+				if _, err := svc.Submit(context.Background(), Submission{TenantID: tid, SHA256: testSHA256, Content: []byte("x")}, nil); err != nil {
+					t.Fatalf("submit: %v", err)
+				}
+				if _, err := svc.Poll(context.Background(), tid, testSHA256); err != nil {
+					t.Fatalf("poll: %v", err)
+				}
+				return svc, tid
+			},
+			want:  DispositionDeny,
+			clean: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
