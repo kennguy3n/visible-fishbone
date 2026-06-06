@@ -13,6 +13,17 @@ import (
 // non-positive limit, mirroring the Postgres implementation.
 const defaultResidencyListLimit = 100
 
+// validResidencyPlanes mirrors the Postgres CHECK constraint in
+// migration 046 (plane IN ('telemetry','policy_bundle','cold_storage')).
+// Keeping the set here makes the memory store a faithful test double:
+// a Plane value Postgres would reject is rejected here too, so a test
+// can't pass against memory and fail against Postgres.
+var validResidencyPlanes = map[string]struct{}{
+	"telemetry":     {},
+	"policy_bundle": {},
+	"cold_storage":  {},
+}
+
 // ResidencyAuditRepository is the memory-backed implementation of
 // repository.ResidencyAuditRepository. Tenant isolation is enforced by
 // filtering on tenant_id, mirroring the Postgres RLS policy.
@@ -30,6 +41,9 @@ func (r *ResidencyAuditRepository) Record(ctx context.Context, tenantID uuid.UUI
 		return repository.ResidencyAuditEntry{}, err
 	}
 	if tenantID == uuid.Nil || e.Plane == "" || e.DesignatedRegion == "" {
+		return repository.ResidencyAuditEntry{}, repository.ErrInvalidArgument
+	}
+	if _, ok := validResidencyPlanes[e.Plane]; !ok {
 		return repository.ResidencyAuditEntry{}, repository.ErrInvalidArgument
 	}
 	r.s.mu.Lock()

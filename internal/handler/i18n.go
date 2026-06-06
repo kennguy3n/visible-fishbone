@@ -51,9 +51,17 @@ func LocaleMiddleware(next http.Handler) http.Handler {
 // response writer, or a fallback (English) Localizer when the
 // LocaleMiddleware is not installed — so the helpers degrade to the
 // previous English-only behaviour rather than panicking. It walks the
-// standard Unwrap() chain so a middleware that re-wraps the writer
-// (e.g. a status recorder) between LocaleMiddleware and the handler
-// does not hide the carried Localizer.
+// standard Unwrap() http.ResponseWriter chain so a middleware that
+// re-wraps the writer (e.g. a status recorder) between LocaleMiddleware
+// and the handler does not hide the carried Localizer.
+//
+// It intentionally walks only the single-writer Unwrap() variant, not
+// the Unwrap() []http.ResponseWriter fan-out form: no middleware in this
+// service uses multi-unwrap, and LocaleMiddleware is the innermost
+// wrapper so the handler sees the localizedResponseWriter directly. If a
+// multi-unwrap middleware is ever inserted between the two, this would
+// degrade gracefully to English rather than mis-localize; add the
+// []http.ResponseWriter walk here at that point.
 func localizerFromWriter(w http.ResponseWriter) *i18n.Localizer {
 	for {
 		if lw, ok := w.(*localizedResponseWriter); ok && lw.loc != nil {
