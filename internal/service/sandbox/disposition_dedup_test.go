@@ -271,3 +271,21 @@ func TestDisposition_FailClosed(t *testing.T) {
 		})
 	}
 }
+
+// TestDisposition_NeverSubmittedEchoesDigest verifies that a deny for a
+// never-submitted sample still carries the requested digest in the
+// returned Verdict (the disposition response renders v.SHA256, which
+// must not be blank).
+func TestDisposition_NeverSubmittedEchoesDigest(t *testing.T) {
+	svc, tid := newTestEnv(t, nil)
+	d, v, err := svc.Disposition(context.Background(), tid, testSHA256)
+	if err != nil {
+		t.Fatalf("Disposition: %v", err)
+	}
+	if d != DispositionDeny {
+		t.Fatalf("expected deny, got %s", d)
+	}
+	if v.SHA256 != testSHA256 {
+		t.Fatalf("expected verdict to echo digest %q, got %q", testSHA256, v.SHA256)
+	}
+}

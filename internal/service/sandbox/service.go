@@ -31,6 +31,17 @@ var (
 	ErrNoProvider      = errors.New("sandbox: no provider configured")
 )
 
+// submitFlightTimeout is a defense-in-depth ceiling on a single
+// coalesced detonation submission. The detached flight context (see
+// Submit) drops the caller's deadline, so it would otherwise depend
+// entirely on the provider implementing its own client timeout. Bound
+// it here too so a provider that neglects to set one cannot occupy a
+// (tenant, digest) singleflight key forever and wedge every future
+// submission of that sample. It is deliberately well above the
+// bundled providers' 30s http.Client timeout so it never preempts a
+// healthy provider; it only backstops a misbehaving one.
+const submitFlightTimeout = 2 * time.Minute
+
 // Service orchestrates zero-day file analysis: dedup against the
 // persistent verdict store, submission to the configured detonation
 // provider, and verdict caching. It is safe for concurrent use.
@@ -193,9 +204,12 @@ func (s *Service) Submit(ctx context.Context, sub Submission, actorID *uuid.UUID
 		// still be valid. WithoutCancel preserves request-scoped
 		// values (the tenant RLS binding, tracing span) while dropping
 		// the deadline/cancellation; the provider's own http.Client
-		// timeout (30s) bounds the call so the detached context cannot
-		// hang the flight indefinitely.
+		// timeout (30s) bounds the call; submitFlightTimeout adds a
+		// defense-in-depth ceiling so even a provider that neglects
+		// its own timeout cannot hang the flight indefinitely.
 		fctx := context.WithoutCancel(ctx)
+		fctx, cancel := context.WithTimeout(fctx, submitFlightTimeout)
+		defer cancel()
 		v, serr := s.submitOnce(fctx, sub, sha, actorID)
 		return submitResult{verdict: v, err: serr}, nil
 	})
@@ -359,8 +373,11 @@ func (s *Service) Disposition(ctx context.Context, tenantID uuid.UUID, sha strin
 	row, err := s.repo.GetBySHA256(ctx, tenantID, sha)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
-			// Never submitted: nothing proves the file clean. Deny.
-			return DispositionDeny, Verdict{}, nil
+			// Never submitted: nothing proves the file clean. Deny,
+			// but echo the (normalized) digest the caller asked about
+			// so the disposition response identifies the sample rather
+			// than returning a blank sha256.
+			return DispositionDeny, Verdict{SHA256: sha}, nil
 		}
 		// Store error: cannot prove the file clean, deny fail-closed.
 		return DispositionDeny, Verdict{}, err
