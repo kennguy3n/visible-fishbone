@@ -1,8 +1,11 @@
 package ai
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -100,6 +103,21 @@ func TestMultiFeed_DegradesOpenWhenSomeFeedsFail(t *testing.T) {
 	}
 	if len(matches) != 1 {
 		t.Fatalf("healthy feed result should survive, got %d", len(matches))
+	}
+}
+
+func TestMultiFeed_WithLoggerLogsPartialFailure(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	good := NewRegionalFeed(ThreatRegionSEA)
+	bad := errFeed{err: errors.New("gcc feed down")}
+	feed := NewMultiFeed(bad, good).WithLogger(logger)
+
+	if _, err := feed.QueryIOCs(context.Background(), []string{"198.51.100.21"}); err != nil {
+		t.Fatalf("partial failure must still degrade open: %v", err)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "degrading open") || !strings.Contains(logged, "gcc feed down") {
+		t.Fatalf("expected a warn log naming the failed feed, got %q", logged)
 	}
 }
 

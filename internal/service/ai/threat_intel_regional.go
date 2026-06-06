@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -135,6 +136,7 @@ func (f *RegionalFeed) QueryIOCs(_ context.Context, indicators []string) ([]IOCM
 // is not masked as "no threats").
 type MultiFeed struct {
 	providers []ThreatFeedProvider
+	logger    *slog.Logger
 }
 
 // NewMultiFeed groups providers into one. nil providers are dropped.
@@ -146,6 +148,18 @@ func NewMultiFeed(providers ...ThreatFeedProvider) *MultiFeed {
 		}
 	}
 	return &MultiFeed{providers: filtered}
+}
+
+// WithLogger attaches a logger used to surface partial feed failures.
+// Without it, a feed that fails while others succeed is silently
+// degraded-open (the documented behaviour); with it, each such failure
+// is logged at WARN so an operator can notice a regional source that is
+// consistently down. Returns the receiver for chaining. This matters
+// once network-backed feeds (NewRegionalFeedWithData) are wired in; the
+// built-in in-memory feeds never error.
+func (m *MultiFeed) WithLogger(logger *slog.Logger) *MultiFeed {
+	m.logger = logger
+	return m
 }
 
 // NewRegionalFeeds is the default regional wiring: a MultiFeed over
@@ -176,6 +190,10 @@ func (m *MultiFeed) QueryIOCs(ctx context.Context, indicators []string) ([]IOCMa
 		matches, err := p.QueryIOCs(ctx, indicators)
 		if err != nil {
 			errs = append(errs, err)
+			if m.logger != nil {
+				m.logger.WarnContext(ctx, "threat-intel: regional feed query failed; degrading open",
+					"error", err)
+			}
 			continue
 		}
 		ok++

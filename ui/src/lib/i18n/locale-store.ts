@@ -3,7 +3,7 @@
 // (the http-client request interceptor) can read the active locale
 // without importing React or the provider.
 
-import { DEFAULT_LOCALE, type Locale, resolveLocale } from "./locales";
+import { DEFAULT_LOCALE, type Locale, matchLocale, resolveLocale } from "./locales";
 
 const STORAGE_KEY = "sng.locale";
 
@@ -11,10 +11,11 @@ export function getStoredLocale(): Locale | null {
   if (typeof localStorage === "undefined") return null;
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return null;
-  const resolved = resolveLocale(raw);
-  // Only treat it as "stored" if the persisted value resolved to a
-  // real supported locale (guards against a stale/garbage value).
-  return resolved;
+  // Use matchLocale (not resolveLocale): a stale/garbage persisted value
+  // must yield null so detectInitialLocale falls through to browser
+  // language detection, rather than being silently treated as an
+  // explicit "English" choice.
+  return matchLocale(raw);
 }
 
 export function storeLocale(locale: Locale): void {

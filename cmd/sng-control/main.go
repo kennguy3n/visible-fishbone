@@ -1235,8 +1235,9 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	reports := aisvc.NewReportEngine(effectiveLLM)
 	// Regional IOC feeds (SEA, GCC, DACH) back enrichment by default;
 	// a deployment can swap in an external feed by passing a different
-	// ThreatFeedProvider here.
-	threatIntel := aisvc.NewThreatIntelEngine(aisvc.NewRegionalFeeds())
+	// ThreatFeedProvider here. The logger surfaces partial feed failures
+	// (degrade-open) once network-backed feeds are wired in.
+	threatIntel := aisvc.NewThreatIntelEngine(aisvc.NewRegionalFeeds().WithLogger(logger))
 	h.SetEnhancedAI(correlation, nlQuery, reports, threatIntel, guardrails, correlationRepo)
 
 	// Back the read-only GET posture report with real alert counts so

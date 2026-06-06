@@ -57,16 +57,18 @@ export function isLocale(value: string): value is Locale {
   return (LOCALES as readonly string[]).includes(value);
 }
 
-// resolveLocale coerces an arbitrary tag (e.g. from navigator.language
-// or a persisted value) onto a supported Locale, falling back to the
-// default. It honours an exact match first, then a base-language match
-// (so "de-AT" → "de", "zh-Hans-SG" → "zh-Hans", "zh" → "zh-Hans").
-export function resolveLocale(
-  tag: string | null | undefined,
-): Locale {
-  if (!tag) return DEFAULT_LOCALE;
+// matchLocale coerces an arbitrary tag (e.g. from navigator.language or
+// a persisted value) onto a supported Locale, or returns null when the
+// tag does not genuinely correspond to any supported locale. It honours
+// an exact match first, then a base-language match (so "de-AT" → "de",
+// "zh-Hans-SG" → "zh-Hans", "zh" → "zh-Hans"). A garbage tag like "xyz"
+// returns null rather than being silently mapped to the default — this
+// is what lets callers distinguish "user picked English" from "stored
+// value is junk, fall through to browser detection".
+export function matchLocale(tag: string | null | undefined): Locale | null {
+  if (!tag) return null;
   const normalized = tag.trim();
-  if (normalized === "") return DEFAULT_LOCALE;
+  if (normalized === "") return null;
   if (isLocale(normalized)) return normalized;
 
   const lower = normalized.toLowerCase();
@@ -81,5 +83,13 @@ export function resolveLocale(
   const match = (LOCALES as readonly string[]).find(
     (l) => l.toLowerCase() === base,
   );
-  return (match as Locale) ?? DEFAULT_LOCALE;
+  return (match as Locale | undefined) ?? null;
+}
+
+// resolveLocale is matchLocale with a guaranteed result: an unmatched
+// tag falls back to the default locale. Use it where any tag must yield
+// a usable locale (e.g. the IntlProvider); use matchLocale where the
+// absence of a real match is itself meaningful.
+export function resolveLocale(tag: string | null | undefined): Locale {
+  return matchLocale(tag) ?? DEFAULT_LOCALE;
 }
