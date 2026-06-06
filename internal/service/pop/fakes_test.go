@@ -29,6 +29,7 @@ type fakeStore struct {
 	createErr  error
 	upsertErr  error
 	listPoPErr error
+	countErr   error
 }
 
 func newFakeStore() *fakeStore {
@@ -177,6 +178,19 @@ func (f *fakeStore) ListAssignmentsByPoP(_ context.Context, popID uuid.UUID) ([]
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].TenantID.String() < out[j].TenantID.String() })
 	return out, nil
+}
+
+func (f *fakeStore) CountAssignmentsByPoP(_ context.Context) (map[uuid.UUID]int, error) {
+	if f.countErr != nil {
+		return nil, f.countErr
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	counts := make(map[uuid.UUID]int)
+	for _, a := range f.assignments {
+		counts[a.PoPID]++
+	}
+	return counts, nil
 }
 
 // fixedClock returns a clock func pinned to t.

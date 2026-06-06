@@ -89,19 +89,22 @@ type BudgetStore interface {
 // has no "SME" tier names.
 var tierDefaults = map[repository.TenantTier]map[Meter]BudgetLimit{
 	repository.TenantTierStarter: {
-		MeterLLMCalls:      {HardLimit: 1_000, Period: PeriodMonthly},
-		MeterLLMTokensUsed: {HardLimit: 1_000_000, Period: PeriodMonthly},
-		MeterURLCatLookups: {HardLimit: 100_000, Period: PeriodDaily},
+		MeterLLMCalls:          {HardLimit: 1_000, Period: PeriodMonthly},
+		MeterLLMTokensUsed:     {HardLimit: 1_000_000, Period: PeriodMonthly},
+		MeterURLCatLookups:     {HardLimit: 100_000, Period: PeriodDaily},
+		MeterPolicyEvaluations: {HardLimit: 5_000_000, Period: PeriodDaily},
 	},
 	repository.TenantTierProfessional: {
-		MeterLLMCalls:      {HardLimit: 5_000, Period: PeriodMonthly},
-		MeterLLMTokensUsed: {HardLimit: 5_000_000, Period: PeriodMonthly},
-		MeterURLCatLookups: {HardLimit: 500_000, Period: PeriodDaily},
+		MeterLLMCalls:          {HardLimit: 5_000, Period: PeriodMonthly},
+		MeterLLMTokensUsed:     {HardLimit: 5_000_000, Period: PeriodMonthly},
+		MeterURLCatLookups:     {HardLimit: 500_000, Period: PeriodDaily},
+		MeterPolicyEvaluations: {HardLimit: 25_000_000, Period: PeriodDaily},
 	},
 	repository.TenantTierEnterprise: {
-		MeterLLMCalls:      {HardLimit: 20_000, Period: PeriodMonthly},
-		MeterLLMTokensUsed: {HardLimit: 20_000_000, Period: PeriodMonthly},
-		MeterURLCatLookups: {HardLimit: 2_000_000, Period: PeriodDaily},
+		MeterLLMCalls:          {HardLimit: 20_000, Period: PeriodMonthly},
+		MeterLLMTokensUsed:     {HardLimit: 20_000_000, Period: PeriodMonthly},
+		MeterURLCatLookups:     {HardLimit: 2_000_000, Period: PeriodDaily},
+		MeterPolicyEvaluations: {HardLimit: 100_000_000, Period: PeriodDaily},
 	},
 }
 

@@ -90,6 +90,7 @@ fn fresh_config() -> (EdgeConfig, TempDir) {
             backoff_initial: Duration::from_millis(250),
             backoff_max: Duration::from_secs(30),
         },
+        data_dir: dir.path().to_path_buf(),
         policy: PolicyConfig::default(),
         telemetry: TelemetryConfig::default(),
         dns: DnsConfig::default(),

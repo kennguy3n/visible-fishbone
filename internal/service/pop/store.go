@@ -154,6 +154,14 @@ type Store interface {
 	// ListAssignmentsByPoP runs under the system role (cross-tenant);
 	// used only by the capacity rebalancer.
 	ListAssignmentsByPoP(ctx context.Context, popID uuid.UUID) ([]Assignment, error)
+
+	// CountAssignmentsByPoP returns the number of tenant assignments
+	// homed on each PoP, keyed by pop_id, in a single cross-tenant
+	// (system-role) round-trip. PoPs with zero assignments are
+	// absent from the map. The capacity planner uses this instead of
+	// fanning ListAssignmentsByPoP out per PoP (an N+1) when it only
+	// needs the per-PoP tenant counts, not the assignment rows.
+	CountAssignmentsByPoP(ctx context.Context) (map[uuid.UUID]int, error)
 }
 
 // pgStore is the Postgres-backed Store. It builds directly on the
@@ -539,6 +547,33 @@ func (s *pgStore) ListAssignmentsByPoP(ctx context.Context, popID uuid.UUID) ([]
 		return rows.Err()
 	})
 	return out, err
+}
+
+func (s *pgStore) CountAssignmentsByPoP(ctx context.Context) (map[uuid.UUID]int, error) {
+	counts := make(map[uuid.UUID]int)
+	err := s.withSystem(ctx, func(tx pgx.Tx) error {
+		const sql = `SELECT pop_id, COUNT(*) FROM tenant_pop_assignments GROUP BY pop_id`
+		rows, err := tx.Query(ctx, sql)
+		if err != nil {
+			return fmt.Errorf("count assignments: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				popID uuid.UUID
+				n     int
+			)
+			if err := rows.Scan(&popID, &n); err != nil {
+				return fmt.Errorf("scan assignment count: %w", err)
+			}
+			counts[popID] = n
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return counts, nil
 }
 
 // validIP reports whether raw parses as an IP address (IPv4 or IPv6).

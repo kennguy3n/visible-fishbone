@@ -677,6 +677,7 @@ func buildRouter(
 			slog.String("key_id", ks.KeyID()))
 	}
 	appSvc := appdb.New(appRepo, appOverrideRepo, auditRepo, logger)
+	appSvc.SetTenantRegionResolver(tenantRegionResolver{tenants: tenantRepo})
 	appSyncer := appdb.NewSyncer(appSvc, nil)
 	appRegHandler := handler.NewAppRegistryHandler(appSvc, nil, appSyncer)
 	// Inline-CASB service is constructed before the policy service
@@ -928,7 +929,11 @@ func buildRouter(
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering reports: %w", err)
 	}
-	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports, rbacSvc)
+	meteringAnomalies, err := metering.NewCostAnomalyDetector(meteringReports, meteringSvc, costCalc, metering.AnomalyConfig{})
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering anomaly detector: %w", err)
+	}
+	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports, meteringAnomalies, rbacSvc)
 
 	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo,
 		metering.NewGuardrailBudgetGate(budgetEnforcer), metering.NewGuardrailUsageRecorder(meteringSvc), logger)
@@ -1066,6 +1071,7 @@ func buildRouter(
 	popSvc := pop.NewService(popStore, popRegistry,
 		pop.WithLogger(logger),
 		pop.WithHighWaterFraction(cfg.PoP.HighWaterFraction),
+		pop.WithTenantRegionResolver(tenantRegionResolver{tenants: tenantRepo}),
 	)
 	popHandler := handler.NewPoPHandler(popSvc, rbacSvc)
 
@@ -1150,6 +1156,23 @@ func (m meteringTierResolver) TenantTier(ctx context.Context, tenantID uuid.UUID
 		return "", fmt.Errorf("metering: resolve tenant tier: %w", err)
 	}
 	return t.Tier, nil
+}
+
+// tenantRegionResolver adapts the TenantRepository onto the region
+// resolver used by both the PoP service (to bias assignment toward a
+// tenant's region-group cloud fleet) and the appdb service (to scope
+// regional trusted-app lists). The lookup runs in the caller's
+// context, so RLS applies as usual.
+type tenantRegionResolver struct {
+	tenants repository.TenantRepository
+}
+
+func (r tenantRegionResolver) TenantRegion(ctx context.Context, tenantID uuid.UUID) (string, error) {
+	t, err := r.tenants.Get(ctx, tenantID)
+	if err != nil {
+		return "", fmt.Errorf("resolve tenant region: %w", err)
+	}
+	return t.Region, nil
 }
 
 // buildAIHandler constructs the AI handler with an optional LLM

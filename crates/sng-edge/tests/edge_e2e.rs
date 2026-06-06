@@ -542,6 +542,14 @@ fn fresh_config_wired_to(endpoint: &str, pki: &OnDiskPki) -> EdgeConfig {
             backoff_initial: Duration::from_millis(25),
             backoff_max: Duration::from_millis(250),
         },
+        // Reuse the PKI tempdir as the data root so the storage
+        // probe in the commodity preflight measures a real, existing
+        // path rather than the absent default `/var/lib/sng`.
+        data_dir: pki
+            .client_cert
+            .parent()
+            .expect("pki cert has a parent dir")
+            .to_path_buf(),
         policy: PolicyConfig {
             path_override: None,
             pull_interval: Duration::from_millis(50),
@@ -705,6 +713,7 @@ async fn full_stack_boots_pulls_bundle_then_drains_cleanly() {
         sdwan,
         ha,
         updater,
+        datapath: _,
     } = built;
     drop(telemetry);
     drop(comms);
@@ -870,6 +879,7 @@ async fn supervisor_drain_under_continuous_load_within_budget() {
         sdwan,
         ha,
         updater,
+        datapath: _,
     } = built;
     drop(telemetry);
     drop(comms);
@@ -982,6 +992,7 @@ async fn comms_reconnects_after_control_plane_transient_outage() {
         sdwan,
         ha,
         updater,
+        datapath: _,
     } = built;
     drop(telemetry);
     drop(comms);

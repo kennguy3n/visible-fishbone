@@ -27,6 +27,7 @@ type PoPService interface {
 	ListAvailable() []pop.PoP
 	HealthView(ctx context.Context, popID uuid.UUID) (pop.PoPHealthView, error)
 	SetAssignment(ctx context.Context, tenantID, popID uuid.UUID, override bool) (pop.Assignment, error)
+	PlanRegionCapacity(ctx context.Context) ([]pop.RegionCapacityPlan, error)
 }
 
 // PlatformAuthorizer gates the platform-scoped PoP admin routes.
@@ -65,6 +66,7 @@ func (h *PoPHandler) Register(mux *http.ServeMux) {
 	if h.authz != nil {
 		mux.HandleFunc("POST /api/v1/pops", h.register)
 		mux.HandleFunc("GET /api/v1/pops/{pop_id}/health", h.health)
+		mux.HandleFunc("GET /api/v1/pops/capacity-plan", h.capacityPlan)
 	}
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/pop-assignment", h.setAssignment)
 }
@@ -158,6 +160,17 @@ type PoPHealthSnapshot struct {
 	BandwidthMbps     float64 `json:"bandwidth_mbps"`
 }
 
+// RegionCapacityPlanResponse is the JSON projection of one region's
+// autoscale recommendation.
+type RegionCapacityPlanResponse struct {
+	Region           string  `json:"region"`
+	ConnectedTenants int     `json:"connected_tenants"`
+	CurrentPoPs      int     `json:"current_pops"`
+	RecommendedPoPs  int     `json:"recommended_pops"`
+	AvgTenantsPerPoP float64 `json:"avg_tenants_per_pop"`
+	Direction        string  `json:"direction"`
+}
+
 // PoPAssignmentRequest is the body for the override endpoint.
 type PoPAssignmentRequest struct {
 	PoPID string `json:"pop_id"`
@@ -237,6 +250,33 @@ func (h *PoPHandler) health(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	WriteJSON(w, http.StatusOK, resp)
+}
+
+// capacityPlan returns the per-region autoscale recommendation derived
+// from the current connected-tenant distribution. Platform-scoped: a
+// PoP fleet is global infrastructure, and the plan reads assignments
+// cross-tenant, so it requires pops:read at the platform level.
+func (h *PoPHandler) capacityPlan(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatform(w, r, permPoPsRead) {
+		return
+	}
+	plans, err := h.svc.PlanRegionCapacity(r.Context())
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	items := make([]RegionCapacityPlanResponse, 0, len(plans))
+	for _, p := range plans {
+		items = append(items, RegionCapacityPlanResponse{
+			Region:           p.Region,
+			ConnectedTenants: p.ConnectedTenants,
+			CurrentPoPs:      p.CurrentPoPs,
+			RecommendedPoPs:  p.RecommendedPoPs,
+			AvgTenantsPerPoP: p.AvgTenantsPerPoP,
+			Direction:        string(p.Direction),
+		})
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (h *PoPHandler) setAssignment(w http.ResponseWriter, r *http.Request) {

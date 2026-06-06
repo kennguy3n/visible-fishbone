@@ -67,6 +67,16 @@ func (f *fakeReporter) PlatformReport(_ context.Context) (metering.PlatformCostR
 	return f.report, nil
 }
 
+type fakeAnomalyDetector struct {
+	anomalies []metering.CostAnomaly
+	gotTenant uuid.UUID
+}
+
+func (f *fakeAnomalyDetector) TenantAnomalies(_ context.Context, tenantID uuid.UUID) ([]metering.CostAnomaly, error) {
+	f.gotTenant = tenantID
+	return f.anomalies, nil
+}
+
 // --- harness -------------------------------------------------------------
 
 const meteringJWTSecret = "test-jwt-secret-key"
@@ -89,7 +99,22 @@ func newMeteringTestRouterAuthz(usage handler.MeteringUsageReader, budgets handl
 	}
 	return handler.NewRouter(handler.RouterDeps{
 		Config:   cfg,
-		Metering: handler.NewMeteringHandler(usage, budgets, reporter, authz),
+		Metering: handler.NewMeteringHandler(usage, budgets, reporter, nil, authz),
+	})
+}
+
+func newMeteringAnomalyTestRouter(anomalies handler.MeteringAnomalyDetector) http.Handler {
+	cfg := &config.Config{
+		Auth: config.Auth{
+			JWTSecret:    meteringJWTSecret,
+			JWTIssuer:    "sng-control",
+			JWTAudience:  "sng-control",
+			APIKeyHeader: "X-SNG-API-Key",
+		},
+	}
+	return handler.NewRouter(handler.RouterDeps{
+		Config:   cfg,
+		Metering: handler.NewMeteringHandler(fakeUsageReader{}, &fakeBudgetService{}, nil, anomalies, platformAuthz{allow: true}),
 	})
 }
 
@@ -258,5 +283,67 @@ func TestMeteringAdminCostReportDeniesTenantlessWithoutGrant(t *testing.T) {
 	}
 	if reporter.called {
 		t.Fatal("reporter must not run without the platform grant")
+	}
+}
+
+func TestMeteringGetCostAnomalies(t *testing.T) {
+	t.Parallel()
+	tid := uuid.New()
+	det := &fakeAnomalyDetector{anomalies: []metering.CostAnomaly{
+		{
+			TenantID:            tid,
+			Meter:               metering.MeterBandwidthProxiedBytes,
+			Severity:            metering.AnomalyCritical,
+			BaselineMonthlyUSD:  9.0,
+			ProjectedMonthlyUSD: 90.0,
+			Ratio:               10,
+			BaselineMonths:      3,
+		},
+	}}
+	router := newMeteringAnomalyTestRouter(det)
+
+	rec := doJSON(t, router, http.MethodGet,
+		"/api/v1/tenants/"+tid.String()+"/cost-anomalies", meteringToken(t, tid.String()), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Anomalies []struct {
+			Meter               string  `json:"meter"`
+			Severity            string  `json:"severity"`
+			ProjectedMonthlyUSD float64 `json:"projected_monthly_usd"`
+		} `json:"anomalies"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Anomalies) != 1 {
+		t.Fatalf("want 1 anomaly, got %+v", resp.Anomalies)
+	}
+	if resp.Anomalies[0].Meter != string(metering.MeterBandwidthProxiedBytes) || resp.Anomalies[0].Severity != "critical" {
+		t.Fatalf("unexpected anomaly line: %+v", resp.Anomalies[0])
+	}
+	if det.gotTenant != tid {
+		t.Fatalf("detector called with %s, want path tenant %s", det.gotTenant, tid)
+	}
+}
+
+// TestMeteringCostAnomaliesCrossTenantForbidden confirms the
+// cost-anomalies route is tenant-scoped: a tenant-A token cannot read
+// tenant-B's anomalies via the path.
+func TestMeteringCostAnomaliesCrossTenantForbidden(t *testing.T) {
+	t.Parallel()
+	pathTenant := uuid.New()
+	tokenTenant := uuid.New()
+	det := &fakeAnomalyDetector{}
+	router := newMeteringAnomalyTestRouter(det)
+
+	rec := doJSON(t, router, http.MethodGet,
+		"/api/v1/tenants/"+pathTenant.String()+"/cost-anomalies", meteringToken(t, tokenTenant.String()), nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if det.gotTenant != uuid.Nil {
+		t.Fatal("detector must not run on a cross-tenant path")
 	}
 }
