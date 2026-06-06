@@ -44,7 +44,7 @@ var regionalControlCatalog = map[ComplianceFramework][]ControlStatus{
 	FrameworkNDSG: {
 		{ControlID: "nDSG-Art7", Description: "Privacy by Design and by Default (Art. 7 nFADP)", Status: ControlUnmet},
 		{ControlID: "nDSG-Art8", Description: "Data Security — appropriate technical and organisational measures (Art. 8)", Status: ControlUnmet},
-		{ControlID: "nDSG-Art4", Description: "Lawfulness, good faith and proportionality of processing (Art. 6)", Status: ControlUnmet},
+		{ControlID: "nDSG-Art6", Description: "Lawfulness, good faith and proportionality of processing (Art. 6)", Status: ControlUnmet},
 		{ControlID: "nDSG-Art16", Description: "Cross-border disclosure to states with adequate protection (Art. 16)", Status: ControlUnmet},
 		{ControlID: "nDSG-Art19", Description: "Duty to inform on collection of personal data (Art. 19)", Status: ControlUnmet},
 		{ControlID: "nDSG-Art25", Description: "Right of access by the data subject (Art. 25)", Status: ControlUnmet},
@@ -102,7 +102,7 @@ var regionalPolicyMapping = map[string]map[ComplianceFramework][]string{
 	"policy": {
 		FrameworkPDPA:  {"PDPA-Accountability", "PDPA-Retention"},
 		FrameworkNESA:  {"NESA-M1.1.1"},
-		FrameworkNDSG:  {"nDSG-Art4", "nDSG-Art12"},
+		FrameworkNDSG:  {"nDSG-Art6", "nDSG-Art12"},
 		FrameworkBDSG:  {"GDPR-Art5", "GDPR-Art30", "BDSG-§38"},
 		FrameworkCSACE: {"CE-Assets-HW-SW", "CE-Update"},
 	},

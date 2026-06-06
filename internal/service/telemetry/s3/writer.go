@@ -199,6 +199,14 @@ func NewWithAWSConfig(awsCfg aws.Config, cfg Config, logger *slog.Logger) (*Writ
 // trigger. See HotWriter doc on Writer.Write for the same
 // "buffered means queued, not durable yet" caveat.
 func (w *Writer) Archive(ctx context.Context, env schema.Envelope, raw []byte) error {
+	// A cold archive record is meaningless without a tenant to scope it
+	// to, and residency resolution keys off the tenant — reject a nil
+	// tenant up front with a precise error (mirrors HotArchiver.Archive)
+	// rather than letting it surface later as an opaque resolver miss.
+	if env.TenantID == uuid.Nil {
+		return errors.New("s3: tenant_id is required")
+	}
+
 	// Residency gate — fail-closed, before any buffering. The cold
 	// archive must never land a tenant's events in a region other than
 	// its designated residency region.

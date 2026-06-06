@@ -37,7 +37,9 @@ export function detectInitialLocale(): Locale {
 
 // getActiveLocale is the accessor the axios interceptor calls to stamp
 // Accept-Language on every API request, so the API negotiates the same
-// language the operator selected in the UI.
+// language the operator selected in the UI. detectInitialLocale already
+// prefers the stored choice, so this is just a stable, intent-revealing
+// alias for the request layer.
 export function getActiveLocale(): Locale {
-  return getStoredLocale() ?? detectInitialLocale();
+  return detectInitialLocale();
 }

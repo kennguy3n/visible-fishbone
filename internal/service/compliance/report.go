@@ -26,6 +26,12 @@ func NewReportService(repo repository.ComplianceReportRepository, logger *slog.L
 }
 
 // frameworkControlMap defines the controls assessed per framework.
+//
+// Write-once, then read-only: this map (and policyControlMapping below)
+// is populated by this file's literal plus regional.go's init(), and is
+// only ever read afterwards (computeScore). Go runs all package init
+// work before main and before any test, so the regional merge always
+// completes before the first read. Do not mutate either map at runtime.
 var frameworkControlMap = map[ComplianceFramework][]ControlStatus{
 	FrameworkPCIDSS: {
 		{ControlID: "PCI-1.1", Description: "Install and maintain network security controls", Status: ControlUnmet},
