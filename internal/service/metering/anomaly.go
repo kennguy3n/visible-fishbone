@@ -129,10 +129,14 @@ type AnomalyConfig struct {
 	// CriticalRatio is the ratio at or above which the anomaly is
 	// escalated to critical. Must be >= WarnRatio.
 	CriticalRatio float64
-	// MinBaselineUSD is the dollar floor a meter's projected monthly
-	// cost must clear before a ratio anomaly is raised. It suppresses
-	// noise from meters whose absolute spend is rounding-level even when
-	// the ratio looks large (e.g. $0.01 → $0.05).
+	// MinBaselineUSD is the dollar floor a meter's trailing baseline
+	// (the median of its complete-month costs) must clear before a ratio
+	// anomaly is raised. It suppresses noise from meters whose absolute
+	// spend is rounding-level even when the ratio looks large (e.g. a
+	// $0.01 → $0.05 meter has a 5x ratio but is immaterial). Flooring the
+	// baseline is sufficient: with WarnRatio > 1, any meter that clears
+	// the ratio test from a baseline >= this floor necessarily projects
+	// above it too, so a separate projected floor would be redundant.
 	MinBaselineUSD float64
 	// NewSpendFloorUSD is the projected monthly cost above which a meter
 	// with no historical baseline (median 0) is flagged as a new-spend
@@ -273,7 +277,7 @@ func (d *CostAnomalyDetector) detect(tenantID uuid.UUID, report TenantCostReport
 		switch {
 		case baseline >= d.cfg.MinBaselineUSD && len(samples) >= d.cfg.MinBaselineMonths:
 			ratio := projected / baseline
-			if ratio < d.cfg.WarnRatio || projected < d.cfg.MinBaselineUSD {
+			if ratio < d.cfg.WarnRatio {
 				continue
 			}
 			anomaly = CostAnomaly{
