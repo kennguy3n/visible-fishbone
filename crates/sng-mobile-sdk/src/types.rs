@@ -14,7 +14,8 @@
 
 use chrono::{DateTime, Utc};
 use sng_mobile_core::{
-    AgentHealth, AuthState, EnrollmentOutcome, LifecycleState, MobilePostureSnapshot, TunnelStatus,
+    AccessRequest, AgentHealth, AuthState, EnrollmentOutcome, LifecycleState,
+    MobilePostureSnapshot, TunnelStatus, ZtnaDecision,
 };
 
 /// Convert a `chrono` UTC timestamp to epoch milliseconds for the
@@ -208,6 +209,55 @@ impl From<EnrollmentOutcome> for SdkEnrollmentOutcome {
             status: value.status,
             cert_chain_pem: value.cert_chain_pem,
             cert_expires_at_epoch_ms: to_epoch_ms(value.cert_expires_at),
+        }
+    }
+}
+
+/// A ZTNA per-application access attempt, FFI-safe input mirror of
+/// [`sng_ztna::AccessRequest`].
+///
+/// The host supplies the identifiers it already holds; the network
+/// context the on-device evaluator does not see (source IP / GeoIP
+/// country) is intentionally omitted — those are proxy-derived and
+/// gated server-side.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SdkAccessRequest {
+    /// The application the request targets.
+    pub app_id: String,
+    /// The enrolled device making the request.
+    pub device_id: String,
+    /// The user making the request (`sub` claim).
+    pub user_id: String,
+    /// Monotonic millisecond timestamp the host observed the
+    /// request at (used for posture / MFA freshness budgets).
+    pub now_ms: u64,
+}
+
+impl From<SdkAccessRequest> for AccessRequest {
+    fn from(value: SdkAccessRequest) -> Self {
+        Self::new(value.app_id, value.device_id, value.user_id, value.now_ms)
+    }
+}
+
+/// A ZTNA access decision, FFI-safe output mirror of
+/// [`sng_ztna::ZtnaDecision`].
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SdkAccessDecision {
+    /// Whether access is granted.
+    pub allow: bool,
+    /// Stable reason label (e.g. `allow`, `tenant_mismatch`,
+    /// `device_posture_insufficient`).
+    pub reason: String,
+    /// Posture sub-verdict label (`pass` / `fail` / `degraded`).
+    pub posture_result: String,
+}
+
+impl From<ZtnaDecision> for SdkAccessDecision {
+    fn from(value: ZtnaDecision) -> Self {
+        Self {
+            allow: value.allow,
+            reason: value.reason.as_str().to_owned(),
+            posture_result: value.posture_result.as_str().to_owned(),
         }
     }
 }

@@ -137,6 +137,73 @@ pub struct IdTokenClaims {
     /// used for ZTNA entitlement decisions.
     #[serde(default)]
     pub groups: Vec<String>,
+    /// iam-core tenant the subject is scoped to (custom
+    /// `tenant_id` claim). This is the **sole authoritative**
+    /// source of the caller's tenant for tenant-isolation
+    /// decisions — never a client-supplied header. `None` when the
+    /// issuer is not iam-core or the token predates the claim; a
+    /// caller that requires tenant isolation must fail closed on
+    /// `None` rather than defaulting.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    /// Authentication Methods References (RFC 8176): the methods
+    /// the IdP used to authenticate the subject (e.g. `pwd`,
+    /// `otp`, `mfa`, `hwk`). Populated by iam-core's
+    /// universal-login when a tenant requires step-up; used to
+    /// confirm an MFA-satisfied session without a (nonexistent)
+    /// verify endpoint.
+    #[serde(default)]
+    pub amr: Vec<String>,
+    /// Authentication Context Class Reference (`acr`) the IdP
+    /// asserted for this token, when present.
+    #[serde(default)]
+    pub acr: Option<String>,
+    /// Optional explicit boolean MFA claim some deployments emit
+    /// alongside `amr`. Treated as authoritative when present.
+    #[serde(default)]
+    pub mfa: Option<bool>,
+}
+
+/// `amr` factor values (RFC 8176) that, on their own, prove a
+/// second authentication factor was used. A token whose `amr`
+/// contains any of these is considered MFA-satisfied even without
+/// an explicit `mfa` boolean claim. `pwd` / `pin` are deliberately
+/// excluded — they are single-factor knowledge factors.
+const MFA_AMR_FACTORS: &[&str] = &[
+    "mfa", "otp", "totp", "hwk", "swk", "sms", "tel", "face", "fpt",
+];
+
+impl IdTokenClaims {
+    /// The authoritative tenant the subject is scoped to, if the
+    /// token carries a non-empty `tenant_id` claim.
+    ///
+    /// Returns `None` for a missing or blank claim so a caller can
+    /// fail closed (a token with no tenant must never be treated
+    /// as belonging to a default / wildcard tenant).
+    #[must_use]
+    pub fn tenant_id(&self) -> Option<&str> {
+        self.tenant_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+    }
+
+    /// Whether this token proves an MFA-satisfied authentication.
+    ///
+    /// True when the explicit `mfa` claim is `true`, or when `amr`
+    /// carries any recognised second-factor method
+    /// ([`MFA_AMR_FACTORS`]). Used to read MFA state from token
+    /// claims per the iam-core contract; step-up re-auth is only
+    /// needed when this returns `false`.
+    #[must_use]
+    pub fn mfa_satisfied(&self) -> bool {
+        if self.mfa == Some(true) {
+            return true;
+        }
+        self.amr
+            .iter()
+            .any(|m| MFA_AMR_FACTORS.contains(&m.to_ascii_lowercase().as_str()))
+    }
 }
 
 /// ID-token validator bound to one issuer + audience (client id).
@@ -641,5 +708,55 @@ W6hfl/TTkpSnVaa+z8hT842lIfS+Nk+7VWTjBSJSpwn3/rO6yfGu\n\
         }))
         .unwrap();
         assert_eq!(many.aud, vec!["one".to_owned(), "two".to_owned()]);
+    }
+
+    #[test]
+    fn validate_surfaces_tenant_and_mfa_claims() {
+        let mut claims = base_claims(now() + 3600, now());
+        claims["tenant_id"] = serde_json::json!("tenant-7");
+        claims["amr"] = serde_json::json!(["pwd", "otp"]);
+        claims["acr"] = serde_json::json!("urn:iam-core:mfa");
+        let token = sign(&claims);
+        let validator =
+            IdTokenValidator::new("https://idp.example.com", "client-abc").with_nonce("nonce-xyz");
+        let validated = validator
+            .validate_with_jwks(&token, &test_jwks())
+            .expect("token should validate");
+        assert_eq!(validated.tenant_id(), Some("tenant-7"));
+        assert_eq!(validated.acr.as_deref(), Some("urn:iam-core:mfa"));
+        assert!(validated.mfa_satisfied(), "otp in amr proves MFA");
+    }
+
+    #[test]
+    fn tenant_id_accessor_fails_closed_on_missing_or_blank() {
+        let none: IdTokenClaims = serde_json::from_value(serde_json::json!({
+            "iss": "i", "sub": "s", "aud": "a", "exp": 1
+        }))
+        .unwrap();
+        assert_eq!(none.tenant_id(), None);
+
+        let blank: IdTokenClaims = serde_json::from_value(serde_json::json!({
+            "iss": "i", "sub": "s", "aud": "a", "exp": 1, "tenant_id": "   "
+        }))
+        .unwrap();
+        assert_eq!(blank.tenant_id(), None, "a blank claim must not pass");
+    }
+
+    #[test]
+    fn mfa_satisfied_reads_explicit_claim_and_single_factor_amr() {
+        let explicit: IdTokenClaims = serde_json::from_value(serde_json::json!({
+            "iss": "i", "sub": "s", "aud": "a", "exp": 1, "mfa": true, "amr": ["pwd"]
+        }))
+        .unwrap();
+        assert!(explicit.mfa_satisfied(), "explicit mfa=true wins");
+
+        let single_factor: IdTokenClaims = serde_json::from_value(serde_json::json!({
+            "iss": "i", "sub": "s", "aud": "a", "exp": 1, "amr": ["pwd"]
+        }))
+        .unwrap();
+        assert!(
+            !single_factor.mfa_satisfied(),
+            "a password-only amr is not MFA"
+        );
     }
 }

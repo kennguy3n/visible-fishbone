@@ -94,6 +94,28 @@ impl AuthorizationRequest {
         self
     }
 
+    /// Request a specific OIDC `prompt` behaviour (OIDC Core
+    /// §3.1.2.1). For MFA step-up the value is `login`, which
+    /// forces the IdP to re-authenticate the user even if it holds
+    /// a live SSO session, so the resulting token reflects a fresh
+    /// (and, with `acr_values`, MFA-satisfied) authentication
+    /// rather than replaying the existing session's `amr`.
+    #[must_use]
+    pub fn with_prompt(self, prompt: impl Into<String>) -> Self {
+        self.with_param("prompt", prompt)
+    }
+
+    /// Request one or more Authentication Context Class References
+    /// (`acr_values`, OIDC Core §3.1.2.1). iam-core's
+    /// universal-login interprets the MFA acr as "challenge the
+    /// user for a second factor", so combining this with
+    /// [`Self::with_prompt`]`("login")` is how ShieldNet drives an
+    /// MFA step-up without inventing a verify endpoint.
+    #[must_use]
+    pub fn with_acr_values(self, acr_values: impl Into<String>) -> Self {
+        self.with_param("acr_values", acr_values)
+    }
+
     /// Render the absolute authorization URL by appending the
     /// query to `authorization_endpoint`.
     ///

@@ -26,8 +26,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use rustls::pki_types::ServerName;
+use sng_ztna::{AccessRequest, ZtnaDecision};
 use tracing::{debug, warn};
 
 use sng_comms::{
@@ -368,6 +370,35 @@ impl MobileAgent {
         self.ztna.lock().clone()
     }
 
+    /// Evaluate a ZTNA access `request`, feeding the agent's most
+    /// recent posture snapshot into the manager's fail-closed
+    /// posture pre-gate.
+    ///
+    /// This is the production access-check entry point: it binds
+    /// the freshly-collected device posture (from the steady-state
+    /// loop / [`Self::collect_posture`]) to every evaluation, so a
+    /// device that has become compromised or unlocked is cut off
+    /// locally without waiting for its server-side attestation to
+    /// age out. A `None` snapshot (no posture collected yet) is
+    /// itself a fail-closed deny inside the pre-gate.
+    ///
+    /// # Errors
+    ///
+    /// [`MobileError::Lifecycle`] if the post-enrolment runtime has
+    /// not been attached yet (no ZTNA manager), or the manager's
+    /// own [`MobileError`] for a provider miss.
+    pub async fn check_access(
+        &self,
+        request: &AccessRequest,
+        now: DateTime<Utc>,
+    ) -> Result<ZtnaDecision, MobileError> {
+        let ztna = self
+            .ztna()
+            .ok_or_else(|| MobileError::Lifecycle("ZTNA runtime not attached".to_owned()))?;
+        let posture = self.last_posture();
+        ztna.evaluate(request, posture.as_ref(), now).await
+    }
+
     /// Build a control-plane client. `identity` is `None` for the
     /// enrolment dial (server-auth-only TLS; the device has no cert
     /// yet) and `Some` for steady-state mTLS.
@@ -469,6 +500,33 @@ impl MobileAgent {
             .await?;
         debug!(device_id = %outcome.device_id, status = %outcome.status, "device enrolled");
         Ok(outcome)
+    }
+
+    /// Wipe the device's enrolment and move the agent to the
+    /// terminal state.
+    ///
+    /// Deletes the enrolment keypair from the secure store (after
+    /// which the device can no longer mTLS-authenticate, so it is
+    /// de-enrolled) and then transitions to
+    /// [`LifecycleState::Terminated`] so the steady-state loop stops
+    /// and no further work is attempted with the destroyed identity.
+    ///
+    /// This is the device-local half of a leaver / revoke: the
+    /// control-plane-side revocation (ZTNA revocation list) is
+    /// driven separately by the operator workflow. Idempotent — the
+    /// key delete tolerates an absent key and an already-terminated
+    /// agent is the desired end state — so a revoke can be replayed.
+    pub async fn wipe(&self) -> Result<(), MobileError> {
+        self.enroller.wipe(self.deps.key_store.as_ref()).await?;
+        if self.state() != LifecycleState::Terminated {
+            if let Err(e) = self.transition(LifecycleState::Terminated) {
+                warn!(
+                    error = %e,
+                    "wipe destroyed the enrolment key but could not move to Terminated"
+                );
+            }
+        }
+        Ok(())
     }
 
     fn policy_puller(&self) -> Arc<PolicyPuller> {

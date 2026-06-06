@@ -117,10 +117,15 @@ pub(crate) fn assemble(
         surface = Arc::new(HostAuthSurface);
     }
 
+    // Bind the OIDC session to the device's enrolled tenant so
+    // sign-in is fail-closed on the token's `tenant_id` claim: a
+    // user from another tenant can never establish a session on
+    // this device, and there is no `X-Tenant-ID` fallback.
     let auth = Arc::new(OidcAuthSession::new(
         core_config.auth.clone(),
         redirect_uri,
         surface,
+        Some(core_config.tenant_id.to_string()),
     )?);
     let auth_session: Arc<dyn AuthSession> = auth.clone();
 
