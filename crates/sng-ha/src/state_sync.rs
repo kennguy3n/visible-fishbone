@@ -142,10 +142,27 @@ pub enum SyncRecord {
 /// The epoch monotonically increases via [`Self::admit`]; once a
 /// higher epoch is seen, every later record claiming a lower one is
 /// rejected for the life of the process.
+///
+/// The high-water mark and the "have we been primed yet?" flag are
+/// packed into a single [`AtomicU64`] (`stored = epoch + 1`, with `0`
+/// reserved as the unprimed sentinel) so a single load/CAS observes
+/// both atomically. Keeping them in one word closes the TOCTOU window
+/// a separate `current`/`admitted` pair would expose, where a
+/// concurrent caller could see an advanced epoch while the primed flag
+/// still read false and thereby skip the staleness check.
 #[derive(Debug, Default)]
 pub struct FenceState {
-    current: AtomicU64,
-    admitted: AtomicBool,
+    /// `0` = unprimed; otherwise the admitted epoch biased by `+1`.
+    state: AtomicU64,
+}
+
+/// Decode the packed gate word into `(primed, high_water_epoch)`.
+const fn decode_fence(stored: u64) -> (bool, u64) {
+    if stored == 0 {
+        (false, 0)
+    } else {
+        (true, stored - 1)
+    }
 }
 
 impl FenceState {
@@ -160,14 +177,14 @@ impl FenceState {
     /// Highest epoch admitted so far (0 before the first fence).
     #[must_use]
     pub fn current(&self) -> u64 {
-        self.current.load(Ordering::Acquire)
+        decode_fence(self.state.load(Ordering::Acquire)).1
     }
 
     /// True once at least one fence has been admitted, i.e. the
     /// receiver knows which Master generation it is following.
     #[must_use]
     pub fn is_primed(&self) -> bool {
-        self.admitted.load(Ordering::Acquire)
+        decode_fence(self.state.load(Ordering::Acquire)).0
     }
 
     /// Offer an epoch to the gate.
@@ -179,19 +196,27 @@ impl FenceState {
     pub fn admit(&self, epoch: u64) -> bool {
         // Single-writer-per-stream in practice (one reader task per
         // peer connection), but use a CAS loop so the gate is sound
-        // even if shared: never lower the high-water mark.
+        // even if shared. Because primed+epoch live in one word, the
+        // staleness check and the advance are based on one consistent
+        // snapshot — there is no window where a stale epoch slips past
+        // because the primed flag has not caught up yet.
         loop {
-            let cur = self.current.load(Ordering::Acquire);
-            if self.admitted.load(Ordering::Acquire) && epoch < cur {
+            let cur = self.state.load(Ordering::Acquire);
+            let (primed, cur_epoch) = decode_fence(cur);
+            if primed && epoch < cur_epoch {
                 return false;
             }
-            let next = epoch.max(cur);
+            // Bias by +1 so any admitted epoch (including 0) is a
+            // non-zero "primed" word. saturating_add mirrors the
+            // promotion-side epoch mint: at the u64 ceiling the gate
+            // stops distinguishing the top two epochs, which is
+            // astronomically out of reach in practice.
+            let next = epoch.max(cur_epoch).saturating_add(1);
             if self
-                .current
+                .state
                 .compare_exchange(cur, next, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                self.admitted.store(true, Ordering::Release);
                 return true;
             }
         }
@@ -513,8 +538,10 @@ where
 /// records that arrive before the stream has been primed by a fence
 /// are also refused — a peer must identify its generation before it
 /// is allowed to write. Returns the number of flow-state records
-/// applied (fence/lagged markers are still delivered to the applier
-/// as today for the lagged signal, but the fence is not).
+/// applied: the [`SyncRecord::Lagged`] marker is still delivered to
+/// the applier (it carries the lag signal) but is a control marker,
+/// not flow state, so it is excluded from the count, and the fence is
+/// neither applied nor counted.
 ///
 /// # Errors
 ///
@@ -553,8 +580,15 @@ where
                 current: fence.current(),
             });
         }
+        // Lagged is a control marker (it signals an incomplete view),
+        // not flow state: deliver it to the applier but do not count
+        // it among the flow-state records, matching the return-value
+        // contract above.
+        let is_flow_state = !matches!(record, SyncRecord::Lagged);
         applier.apply(record).await?;
-        count += 1;
+        if is_flow_state {
+            count += 1;
+        }
     }
     Ok(count)
 }
@@ -696,12 +730,16 @@ mod tests {
 
         let applier = StaticStateApplier::new();
         let fence = FenceState::new();
-        pump_from_reader(&mut passive, &applier, &fence)
+        let count = pump_from_reader(&mut passive, &applier, &fence)
             .await
             .expect("pump from");
         let records = applier.applied();
         assert_eq!(records.first(), Some(&SyncRecord::Lagged));
         assert_eq!(records.len(), 2);
+        // The Lagged control marker is delivered to the applier but
+        // is NOT counted among the flow-state records: only the one
+        // conntrack entry counts.
+        assert_eq!(count, 1);
     }
 
     #[test]
@@ -757,6 +795,22 @@ mod tests {
         // lower the mark.
         assert!(!f.admit(6));
         assert_eq!(f.current(), 7);
+    }
+
+    #[test]
+    fn fence_admits_zero_epoch_as_baseline() {
+        // Epoch 0 is a legitimate first generation: the packed-word
+        // encoding must treat admitting 0 as priming the gate, not as
+        // "still unprimed".
+        let f = FenceState::new();
+        assert!(f.admit(0));
+        assert!(f.is_primed());
+        assert_eq!(f.current(), 0);
+        // Re-admitting the same epoch 0 is fine; a strictly-older
+        // epoch is impossible below 0, so 0 stays the floor.
+        assert!(f.admit(0));
+        assert!(f.admit(1));
+        assert_eq!(f.current(), 1);
     }
 
     #[tokio::test]
