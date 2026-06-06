@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/sandbox/providers"
@@ -47,6 +48,11 @@ type Service struct {
 	logger   *slog.Logger
 	now      func() time.Time
 	newID    func() uuid.UUID
+	// flight collapses concurrent Submit calls for the same
+	// (tenant, digest) into a single in-flight detonation so the
+	// SWG fleet does not stampede the provider with duplicate
+	// submissions of the same sample. Keyed by "tenant:sha".
+	flight singleflight.Group
 }
 
 // Option configures the Service.
@@ -171,6 +177,33 @@ func (s *Service) Submit(ctx context.Context, sub Submission, actorID *uuid.UUID
 		return Verdict{}, fmt.Errorf("%w: tenant_id is required", ErrInvalidArgument)
 	}
 
+	// Collapse concurrent submissions of the same sample (same
+	// tenant + digest) into a single detonation. Without this the
+	// SWG fleet would submit the same unknown file to the provider
+	// many times in parallel before the first verdict is persisted.
+	// The shared result (verdict + error, including ErrNoProvider)
+	// is delivered to every concurrent caller.
+	key := sub.TenantID.String() + ":" + sha
+	res, _, _ := s.flight.Do(key, func() (any, error) {
+		v, serr := s.submitOnce(ctx, sub, sha, actorID)
+		return submitResult{verdict: v, err: serr}, nil
+	})
+	r := res.(submitResult)
+	return r.verdict, r.err
+}
+
+// submitResult bundles the verdict and error so both can travel
+// through singleflight, which only carries a single value + error
+// and would otherwise drop the verdict that Submit returns alongside
+// the ErrNoProvider sentinel.
+type submitResult struct {
+	verdict Verdict
+	err     error
+}
+
+// submitOnce performs one detonation submission. It is invoked under
+// the singleflight group so at most one runs per (tenant, digest).
+func (s *Service) submitOnce(ctx context.Context, sub Submission, sha string, actorID *uuid.UUID) (Verdict, error) {
 	// Dedup: a resolved verdict short-circuits.
 	if existing, ok, lerr := s.LookupVerdict(ctx, sub.TenantID, sha); lerr == nil && ok {
 		return existing, nil
@@ -292,6 +325,27 @@ func (s *Service) GetVerdict(ctx context.Context, tenantID uuid.UUID, sha string
 		return Verdict{}, err
 	}
 	return fromRow(row), nil
+}
+
+// Disposition resolves the fail-closed allow/deny decision for a
+// file digest. It is the helper the SWG malware stage consults to
+// decide whether a file may be released: only a resolved, clean
+// verdict yields DispositionAllow. A still-pending submission yields
+// DispositionPending; an unknown/never-seen file, a provider error,
+// or a suspicious/malicious/timeout verdict all yield DispositionDeny
+// (treat unknown as not-clean per policy). The Verdict is returned
+// alongside for audit/telemetry.
+func (s *Service) Disposition(ctx context.Context, tenantID uuid.UUID, sha string) (Disposition, Verdict, error) {
+	sha, err := normalizeSHA(sha)
+	if err != nil {
+		return DispositionDeny, Verdict{}, err
+	}
+	v, resolved, err := s.LookupVerdict(ctx, tenantID, sha)
+	if err != nil {
+		// On a store error we cannot prove the file is clean: deny.
+		return DispositionDeny, Verdict{}, err
+	}
+	return disposition(v, resolved), v, nil
 }
 
 func (s *Service) persistPending(ctx context.Context, tenantID uuid.UUID, sha, sandboxID string) (repository.SandboxVerdict, error) {

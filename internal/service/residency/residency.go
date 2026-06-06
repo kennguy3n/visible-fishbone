@@ -40,6 +40,9 @@ const (
 	PlanePolicyBundle Plane = "policy_bundle"
 	// PlaneColdStorage is long-retention archived data (S3 cold tier).
 	PlaneColdStorage Plane = "cold_storage"
+	// PlaneRBIArtifact is artifact-transfer records produced by a
+	// Remote Browser Isolation session (clipboard/file transfers).
+	PlaneRBIArtifact Plane = "rbi_artifact"
 )
 
 var (

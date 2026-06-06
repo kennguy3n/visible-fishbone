@@ -28,6 +28,7 @@ func (h *SandboxHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/sandbox/verdicts", h.listVerdicts)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/sandbox/submit", h.submit)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/sandbox/verdicts/{sha256}", h.getVerdict)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/sandbox/verdicts/{sha256}/disposition", h.getDisposition)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/sandbox/verdicts/{sha256}/poll", h.pollVerdict)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/sandbox/provider", h.providerStatus)
 }
@@ -144,6 +145,26 @@ func (h *SandboxHandler) submit(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusOK
 	}
 	WriteJSON(w, status, toSandboxVerdictResponse(v))
+}
+
+func (h *SandboxHandler) getDisposition(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	d, v, err := h.svc.Disposition(r.Context(), tenantID, r.PathValue("sha256"))
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"sha256":      v.SHA256,
+		"disposition": string(d),
+		// clean is the single fail-closed boolean the data plane acts
+		// on: true only when a resolved, clean verdict exists.
+		"clean":   d.Clean(),
+		"verdict": toSandboxVerdictResponse(v),
+	})
 }
 
 func (h *SandboxHandler) pollVerdict(w http.ResponseWriter, r *http.Request) {

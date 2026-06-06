@@ -144,6 +144,11 @@ func (s *Store) NewRBISessionRepository() *RBISessionRepository {
 	return &RBISessionRepository{s: s}
 }
 
+// NewRBIArtifactRepository binds the Store to repository.RBIArtifactRepository.
+func (s *Store) NewRBIArtifactRepository() *RBIArtifactRepository {
+	return &RBIArtifactRepository{s: s}
+}
+
 // NewAICorrelationRepository binds the Store to repository.AICorrelationRepository.
 func (s *Store) NewAICorrelationRepository() *AICorrelationRepository {
 	return &AICorrelationRepository{s: s}

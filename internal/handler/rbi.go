@@ -29,6 +29,8 @@ func (h *RBIHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/rbi/sessions", h.createSession)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/rbi/sessions/{id}", h.getSession)
 	MountTenantScoped(mux, "DELETE /api/v1/tenants/{tenant_id}/rbi/sessions/{id}", h.closeSession)
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/rbi/sessions/{id}/artifacts", h.listArtifacts)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/rbi/sessions/{id}/artifacts", h.recordArtifact)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/rbi/policy", h.getPolicy)
 }
 
@@ -149,10 +151,111 @@ func (h *RBIHandler) getPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pc := h.svc.PolicyConfig()
+	ap := h.svc.ArtifactPolicy()
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"configured":            h.svc.ProxyConfigured(),
 		"categories":            pc.Categories,
 		"risk_score_threshold":  pc.RiskScoreThreshold,
 		"isolate_uncategorised": pc.IsolateUncategorised,
+		"explicit_isolate":      pc.ExplicitIsolate,
+		"explicit_bypass":       pc.ExplicitBypass,
+		"artifact_policy": map[string]any{
+			"clipboard_inbound":  ap.ClipboardInbound,
+			"clipboard_outbound": ap.ClipboardOutbound,
+			"file_download":      ap.FileDownload,
+			"file_upload":        ap.FileUpload,
+		},
 	})
+}
+
+type rbiArtifactRequest struct {
+	Kind      string `json:"kind"`
+	Direction string `json:"direction"`
+	Filename  string `json:"filename,omitempty"`
+	SHA256    string `json:"sha256,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+}
+
+type rbiArtifactResponse struct {
+	ID        string `json:"id"`
+	SessionID string `json:"session_id"`
+	Kind      string `json:"kind"`
+	Direction string `json:"direction"`
+	Filename  string `json:"filename,omitempty"`
+	SHA256    string `json:"sha256,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+func toRBIArtifactResponse(a rbi.Artifact) rbiArtifactResponse {
+	return rbiArtifactResponse{
+		ID:        a.ID.String(),
+		SessionID: a.SessionID.String(),
+		Kind:      string(a.Kind),
+		Direction: string(a.Direction),
+		Filename:  a.Filename,
+		SHA256:    a.SHA256,
+		SizeBytes: a.SizeBytes,
+		CreatedAt: a.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+func (h *RBIHandler) recordArtifact(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	sessionID, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req rbiArtifactRequest
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	art, err := h.svc.RecordArtifact(r.Context(), tenantID, sessionID, rbi.ArtifactInput{
+		Kind:      rbi.ArtifactKind(req.Kind),
+		Direction: rbi.ArtifactDirection(req.Direction),
+		Filename:  req.Filename,
+		SHA256:    req.SHA256,
+		SizeBytes: req.SizeBytes,
+	}, actorFromCtx(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, rbi.ErrArtifactBlocked):
+			// Policy denied the transfer across the isolation boundary.
+			WriteError(w, http.StatusForbidden, "artifact_blocked", err.Error())
+		case errors.Is(err, rbi.ErrArtifactRepoUnavailable):
+			WriteError(w, http.StatusServiceUnavailable, "rbi_artifacts_unavailable", "RBI artifact persistence is not configured")
+		default:
+			WriteRepositoryError(w, err)
+		}
+		return
+	}
+	WriteJSON(w, http.StatusCreated, toRBIArtifactResponse(art))
+}
+
+func (h *RBIHandler) listArtifacts(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	sessionID, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	arts, err := h.svc.ListArtifacts(r.Context(), tenantID, sessionID, QueryLimit(r))
+	if err != nil {
+		if errors.Is(err, rbi.ErrArtifactRepoUnavailable) {
+			WriteError(w, http.StatusServiceUnavailable, "rbi_artifacts_unavailable", "RBI artifact persistence is not configured")
+			return
+		}
+		WriteRepositoryError(w, err)
+		return
+	}
+	items := make([]rbiArtifactResponse, 0, len(arts))
+	for _, a := range arts {
+		items = append(items, toRBIArtifactResponse(a))
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }

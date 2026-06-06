@@ -110,26 +110,83 @@ impl FwSubsystem {
                 Arc::new(nft_dp)
             }
             DataPathSelection::Ebpf => {
-                let control = Arc::new(XdpControlPlane::in_memory());
+                let control = Self::build_xdp_control_plane(cfg);
                 let ebpf = EbpfDataPath::new(control, nft_dp);
-                // The eBPF path is selected, but the in-memory control plane
-                // (NoopLoader) loads no kernel XDP program — the real
-                // AyaLoader integration ships with the BPF object crate in a
-                // later phase. Surface that so an operator who sees
-                // `datapath=ebpf` is not misled into thinking traffic is being
-                // offloaded; nftables is still carrying all enforcement.
+                // Surface whether the fast path is genuinely offloading.
+                // Without the `xdp` feature (or on a host that could not
+                // accept the programs) the control plane runs the userspace
+                // model and nftables carries all enforcement — an operator
+                // who sees `datapath=ebpf` must not be misled into thinking
+                // traffic is hardware/kernel-accelerated.
                 if !ebpf.capabilities().kernel_offload {
                     tracing::warn!(
                         target: "sng_edge::fw",
                         "eBPF data path selected but kernel XDP offload is not \
-                         active (in-memory control plane); nftables is carrying \
-                         enforcement"
+                         active; nftables is carrying enforcement"
                     );
                 }
                 Arc::new(ebpf)
             }
         };
         Self::from_parts(engine, datapath)
+    }
+
+    /// Build the eBPF control plane for the selected fast path.
+    ///
+    /// With the `xdp` feature on Linux this constructs the real
+    /// `aya`-backed loader from the `SNG_EBPF_OBJECT` environment
+    /// variable and attempts to load + attach the XDP program to the
+    /// configured interface. The attach is **fail-soft**: a host that
+    /// cannot accept the program (older kernel, missing object, busy
+    /// NIC) degrades to the userspace model and the nftables slow path
+    /// keeps enforcing — the edge never fails to boot on a fast-path
+    /// problem. Without the feature (or off Linux) the always-compiled
+    /// in-memory model is returned.
+    #[must_use]
+    fn build_xdp_control_plane(cfg: &FwConfig) -> Arc<XdpControlPlane> {
+        #[cfg(all(feature = "xdp", target_os = "linux"))]
+        {
+            use sng_ebpf::{AttachOutcome, AyaLoader, XdpMode};
+            match AyaLoader::from_env() {
+                Ok(loader) => {
+                    let control = Arc::new(XdpControlPlane::new(Box::new(loader)));
+                    match control.try_load_and_attach(&cfg.xdp_interface, XdpMode::default()) {
+                        AttachOutcome::Attached => {
+                            tracing::info!(
+                                target: "sng_edge::fw",
+                                iface = %cfg.xdp_interface,
+                                "XDP fast path attached to kernel"
+                            );
+                        }
+                        AttachOutcome::Degraded(err) => {
+                            tracing::warn!(
+                                target: "sng_edge::fw",
+                                iface = %cfg.xdp_interface,
+                                error = %err,
+                                "XDP attach failed; degrading to nftables slow path"
+                            );
+                        }
+                    }
+                    control
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "sng_edge::fw",
+                        error = %err,
+                        "no XDP object available (SNG_EBPF_OBJECT unset); \
+                         running userspace data-path model"
+                    );
+                    Arc::new(XdpControlPlane::in_memory())
+                }
+            }
+        }
+        #[cfg(not(all(feature = "xdp", target_os = "linux")))]
+        {
+            // `xdp` feature compiled out (or non-Linux target): the
+            // userspace model is the only available backend.
+            let _ = cfg;
+            Arc::new(XdpControlPlane::in_memory())
+        }
     }
 
     /// Build with an explicit nftables backend. Used by the

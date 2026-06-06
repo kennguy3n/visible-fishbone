@@ -60,6 +60,45 @@ pub struct XdpStats {
     pub kernel_offload: bool,
 }
 
+/// Result of a fail-soft [`XdpControlPlane::try_load_and_attach`].
+///
+/// The fast path is an optimisation layered on top of the always-present
+/// nftables slow path, so a failure to attach must degrade rather than
+/// abort the edge boot.
+#[derive(Debug)]
+pub enum AttachOutcome {
+    /// Programs loaded and attached to the kernel: the fast path is live.
+    Attached,
+    /// The kernel could not accept the programs (no XDP support, older
+    /// kernel, missing object, busy interface, …). The control plane has
+    /// been left detached and the edge runs on the nftables slow path.
+    /// The error is retained for telemetry / operator visibility.
+    Degraded(EbpfError),
+}
+
+impl AttachOutcome {
+    /// True iff the fast path attached to the kernel.
+    #[must_use]
+    pub const fn is_attached(&self) -> bool {
+        matches!(self, Self::Attached)
+    }
+
+    /// True iff the data path degraded to the slow path.
+    #[must_use]
+    pub const fn is_degraded(&self) -> bool {
+        matches!(self, Self::Degraded(_))
+    }
+
+    /// The degrade reason, if any.
+    #[must_use]
+    pub fn degrade_reason(&self) -> Option<&EbpfError> {
+        match self {
+            Self::Attached => None,
+            Self::Degraded(e) => Some(e),
+        }
+    }
+}
+
 /// Snapshot of the userspace-authoritative data-path configuration.
 #[derive(Debug, Default)]
 struct InstalledState {
@@ -124,6 +163,47 @@ impl XdpControlPlane {
         self.loader.attach_xdp(iface, mode)?;
         self.loader.attach_tc_egress(iface)?;
         self.lock().loaded = true;
+        Ok(())
+    }
+
+    /// Attempt to load and attach the data path, degrading to the
+    /// userspace slow path instead of failing when the kernel cannot
+    /// accept the programs.
+    ///
+    /// This is the boot-time entry point the edge supervisor calls: an
+    /// older kernel, a missing BPF object, or a busy interface must NOT
+    /// crash the edge — the nftables slow path still enforces. On any
+    /// load/attach failure the loader is detached to undo a partial
+    /// attach, and the outcome is reported as
+    /// [`AttachOutcome::Degraded`] carrying the underlying error for
+    /// telemetry. A clean kernel attach reports [`AttachOutcome::Attached`].
+    ///
+    /// Map-content installation (`install_rules` etc.) is intentionally
+    /// not part of this call: those failures are surfaced to the caller
+    /// directly so a stale ruleset can be handled by the firewall crate.
+    #[must_use]
+    pub fn try_load_and_attach(&self, iface: &str, mode: XdpMode) -> AttachOutcome {
+        match self.load_and_attach(iface, mode) {
+            Ok(()) => AttachOutcome::Attached,
+            Err(e) => {
+                // Undo any partial attach (e.g. XDP bound but TC egress
+                // failed) so we never leave half the fast path live.
+                let _ = self.loader.detach();
+                self.lock().loaded = false;
+                AttachOutcome::Degraded(e)
+            }
+        }
+    }
+
+    /// Detach all programs, returning the data path to the slow path.
+    /// Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`EbpfError::Attach`] from the loader.
+    pub fn detach(&self) -> Result<(), EbpfError> {
+        self.loader.detach()?;
+        self.lock().loaded = false;
         Ok(())
     }
 
@@ -328,6 +408,75 @@ mod tests {
         assert_eq!(stats.update_failures, 1);
         // The failed update did not commit a snapshot.
         assert_eq!(stats.rules_active, 0);
+    }
+
+    /// A loader whose XDP attach always fails, to exercise the
+    /// fail-soft degrade path without a kernel.
+    #[derive(Debug)]
+    struct FailingAttachLoader;
+
+    impl ProgramLoader for FailingAttachLoader {
+        fn is_supported(&self) -> bool {
+            true
+        }
+        fn load(&self) -> Result<(), EbpfError> {
+            Ok(())
+        }
+        fn attach_xdp(&self, _iface: &str, _mode: XdpMode) -> Result<(), EbpfError> {
+            Err(EbpfError::Attach("simulated: no XDP on this NIC".into()))
+        }
+        fn attach_tc_egress(&self, _iface: &str) -> Result<(), EbpfError> {
+            Ok(())
+        }
+        fn detach(&self) -> Result<(), EbpfError> {
+            Ok(())
+        }
+        fn pin(&self, _base: &Path) -> Result<(), EbpfError> {
+            Ok(())
+        }
+        fn update_rules(&self, _rules: &XdpRuleSet) -> Result<(), EbpfError> {
+            Ok(())
+        }
+        fn update_classification(&self, _c: &Classifier) -> Result<(), EbpfError> {
+            Ok(())
+        }
+        fn update_steering(&self, _s: &EgressSteeringTable) -> Result<(), EbpfError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn try_load_and_attach_reports_attached_in_memory() {
+        let cp = XdpControlPlane::in_memory();
+        let outcome = cp.try_load_and_attach("eth0", XdpMode::Skb);
+        assert!(outcome.is_attached());
+        assert!(cp.is_loaded());
+    }
+
+    #[test]
+    fn try_load_and_attach_degrades_on_attach_failure() {
+        let cp = XdpControlPlane::new(Box::new(FailingAttachLoader));
+        let outcome = cp.try_load_and_attach("eth0", XdpMode::Native);
+        assert!(outcome.is_degraded());
+        // The reason is retained and the control plane is NOT marked
+        // loaded — the edge runs on the slow path.
+        assert!(matches!(
+            outcome.degrade_reason(),
+            Some(EbpfError::Attach(_))
+        ));
+        assert!(!cp.is_loaded());
+    }
+
+    #[test]
+    fn detach_is_idempotent_and_clears_loaded() {
+        let cp = XdpControlPlane::in_memory();
+        cp.load_and_attach("eth0", XdpMode::Skb).unwrap();
+        assert!(cp.is_loaded());
+        cp.detach().unwrap();
+        assert!(!cp.is_loaded());
+        // Second detach is a no-op.
+        cp.detach().unwrap();
+        assert!(!cp.is_loaded());
     }
 
     #[test]

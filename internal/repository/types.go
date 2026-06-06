@@ -1497,6 +1497,32 @@ type RBISession struct {
 	UpdatedAt time.Time
 }
 
+// RBIArtifact is a persisted record of a single artifact transfer that
+// crossed (or was attempted across) the RBI isolation boundary
+// (rbi_session_artifacts, migration 048). The control plane records
+// one row per gated transfer so an operator can audit what data moved
+// between the isolated render container and the endpoint. Persistence
+// of every row flows through the fail-closed data-residency Guard, so
+// a row only exists in a region the tenant is permitted to store in.
+type RBIArtifact struct {
+	ID        uuid.UUID
+	TenantID  uuid.UUID
+	SessionID uuid.UUID
+	// Kind: clipboard | file_download | file_upload.
+	Kind string
+	// Direction: inbound (remote→endpoint) | outbound (endpoint→remote).
+	Direction string
+	// Filename is the artifact filename for file transfers; empty for
+	// clipboard transfers.
+	Filename string
+	// SHA256 is the lowercase hex digest of the artifact bytes when
+	// known; empty when the proxy did not hash it.
+	SHA256 string
+	// SizeBytes is the artifact size in bytes (0 when unknown).
+	SizeBytes int64
+	CreatedAt time.Time
+}
+
 // --- DLP ------------------------------------------------------------------
 
 // DLPAction enumerates the enforcement actions a DLP policy can take

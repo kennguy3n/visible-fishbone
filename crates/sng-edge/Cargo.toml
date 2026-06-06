@@ -70,6 +70,16 @@ rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 base64 = { workspace = true }
 
+[features]
+# `xdp` switches the eBPF data path from the always-compiled userspace
+# control-plane model to the real kernel-backed `aya` loader (Linux
+# only). It forwards to `sng-ebpf/xdp`. OFF by default so the edge
+# binary builds and tests on every target without an eBPF toolchain;
+# the kernel attach is still fail-soft (degrades to the nftables slow
+# path) when the running host cannot accept the programs.
+default = []
+xdp = ["sng-ebpf/xdp"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt", "macros", "rt-multi-thread", "sync", "time"] }
 pretty_assertions = { workspace = true }

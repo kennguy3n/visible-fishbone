@@ -116,6 +116,86 @@ pub enum SyncRecord {
     /// it tells the passive its view is incomplete and it must
     /// do a full-state pull when it next promotes.
     Lagged,
+    /// Fencing marker the active emits at the head of every flush,
+    /// carrying its current Master epoch (a monotonic generation
+    /// number bumped on each promotion). The receiver admits the
+    /// stream only while the epoch is `>=` the highest it has seen;
+    /// a lower epoch identifies a deposed Master and the receiver
+    /// fences (refuses) the rest of that stream. This is what stops
+    /// a stale Master that has not yet realised it lost the
+    /// election from replaying old state over the live table — the
+    /// split-brain write the [`crate::error::HaError::Fenced`]
+    /// variant guards against.
+    Fence {
+        /// The sender's current Master epoch.
+        epoch: u64,
+    },
+}
+
+/// Receiver-side fencing gate.
+///
+/// Tracks the highest Master epoch observed on the sync stream and
+/// admits records only while the announced epoch keeps up with it.
+/// A peer announcing a strictly-older epoch is a deposed Master; its
+/// writes are fenced so they cannot clobber post-failover state.
+///
+/// The epoch monotonically increases via [`Self::admit`]; once a
+/// higher epoch is seen, every later record claiming a lower one is
+/// rejected for the life of the process.
+#[derive(Debug, Default)]
+pub struct FenceState {
+    current: AtomicU64,
+    admitted: AtomicBool,
+}
+
+impl FenceState {
+    /// A fresh gate that has not yet observed any epoch. The first
+    /// [`Fence`](SyncRecord::Fence) seen is always admitted and
+    /// becomes the baseline.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Highest epoch admitted so far (0 before the first fence).
+    #[must_use]
+    pub fn current(&self) -> u64 {
+        self.current.load(Ordering::Acquire)
+    }
+
+    /// True once at least one fence has been admitted, i.e. the
+    /// receiver knows which Master generation it is following.
+    #[must_use]
+    pub fn is_primed(&self) -> bool {
+        self.admitted.load(Ordering::Acquire)
+    }
+
+    /// Offer an epoch to the gate.
+    ///
+    /// Returns `true` and adopts the epoch when it is `>=` the
+    /// current high-water mark (a same-or-newer Master); returns
+    /// `false` without changing state when it is strictly older (a
+    /// stale Master that must be fenced).
+    pub fn admit(&self, epoch: u64) -> bool {
+        // Single-writer-per-stream in practice (one reader task per
+        // peer connection), but use a CAS loop so the gate is sound
+        // even if shared: never lower the high-water mark.
+        loop {
+            let cur = self.current.load(Ordering::Acquire);
+            if self.admitted.load(Ordering::Acquire) && epoch < cur {
+                return false;
+            }
+            let next = epoch.max(cur);
+            if self
+                .current
+                .compare_exchange(cur, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.admitted.store(true, Ordering::Release);
+                return true;
+            }
+        }
+    }
 }
 
 /// Snapshot of [`SyncQueue`] counters for the health detail line.
@@ -355,17 +435,27 @@ impl StateApplier for StaticStateApplier {
     }
 }
 
-/// Drain the queue and write every record to `writer`. Emits a
-/// [`SyncRecord::Lagged`] marker ahead of the batch whenever the
-/// queue has lagged since the last flush so the passive learns
-/// its view is incomplete. Returns the number of records
-/// written.
+/// Drain the queue and write every record to `writer`, stamping the
+/// batch with the active's current Master `epoch`.
+///
+/// A [`SyncRecord::Fence`] carrying `epoch` is emitted at the head of
+/// every non-empty flush so the receiver can fence a deposed Master
+/// (see [`FenceState`]). A [`SyncRecord::Lagged`] marker follows it
+/// whenever the queue has lagged since the last flush, so the passive
+/// also learns its view is incomplete. Returns the number of
+/// flow-state records written (the fence and lagged markers are not
+/// counted).
 ///
 /// # Errors
 ///
 /// Returns [`HaError::Encode`] / [`HaError::Socket`] on a frame
 /// encode or write failure.
-pub async fn pump_to_writer<W>(queue: &SyncQueue, writer: &mut W, batch: usize) -> HaResult<usize>
+pub async fn pump_to_writer<W>(
+    queue: &SyncQueue,
+    writer: &mut W,
+    batch: usize,
+    epoch: u64,
+) -> HaResult<usize>
 where
     W: AsyncWrite + Unpin + Send,
 {
@@ -383,6 +473,13 @@ where
         return Ok(0);
     }
     let mut written = 0;
+    // Fence first: the receiver must learn (and accept) our epoch
+    // before it applies any record in this batch.
+    let fence = encode_frame(&SyncRecord::Fence { epoch })?;
+    writer
+        .write_all(&fence)
+        .await
+        .map_err(|e| HaError::Socket(format!("write fence marker: {e}")))?;
     if lagged {
         let frame = encode_frame(&SyncRecord::Lagged)?;
         writer
@@ -405,20 +502,57 @@ where
     Ok(written)
 }
 
-/// Read frames from `reader` until EOF, applying each to
-/// `applier`. Returns the number of records applied.
+/// Read frames from `reader` until EOF, applying each flow-state
+/// record to `applier` while enforcing the fencing epoch in `fence`.
+///
+/// A [`SyncRecord::Fence`] is consumed by the gate, never handed to
+/// the applier: an admissible epoch (same or newer Master) advances
+/// the high-water mark; a strictly-older epoch fails fast with
+/// [`HaError::Fenced`] so the caller tears down the deposed Master's
+/// session before any of its records reach the table. Flow-state
+/// records that arrive before the stream has been primed by a fence
+/// are also refused — a peer must identify its generation before it
+/// is allowed to write. Returns the number of flow-state records
+/// applied (fence/lagged markers are still delivered to the applier
+/// as today for the lagged signal, but the fence is not).
 ///
 /// # Errors
 ///
-/// Propagates [`read_frame`] errors and any error returned by
-/// the applier.
-pub async fn pump_from_reader<R, A>(reader: &mut R, applier: &A) -> HaResult<usize>
+/// Returns [`HaError::Fenced`] for a stale-Master epoch or an
+/// unprimed stream, and propagates [`read_frame`] errors and any
+/// error returned by the applier.
+pub async fn pump_from_reader<R, A>(
+    reader: &mut R,
+    applier: &A,
+    fence: &FenceState,
+) -> HaResult<usize>
 where
     R: AsyncRead + Unpin + Send,
     A: StateApplier + ?Sized,
 {
     let mut count = 0;
     while let Some(record) = read_frame(reader).await? {
+        if let SyncRecord::Fence { epoch } = record {
+            if !fence.admit(epoch) {
+                return Err(HaError::Fenced {
+                    incoming: epoch,
+                    current: fence.current(),
+                });
+            }
+            // The fence is a control marker, not flow state: it
+            // gates the stream but is never applied.
+            continue;
+        }
+        // Refuse any flow-state record from a peer that has not yet
+        // identified its Master generation with a fence. This closes
+        // the gap where a stale Master could omit the fence entirely
+        // to dodge the epoch check.
+        if !fence.is_primed() {
+            return Err(HaError::Fenced {
+                incoming: 0,
+                current: fence.current(),
+            });
+        }
         applier.apply(record).await?;
         count += 1;
     }
@@ -531,13 +665,14 @@ mod tests {
         q.push(conntrack(3));
 
         let (mut active, mut passive) = tokio::io::duplex(4096);
-        let written = pump_to_writer(&q, &mut active, 16).await.expect("pump");
+        let written = pump_to_writer(&q, &mut active, 16, 1).await.expect("pump");
         assert_eq!(written, 3);
         // Close the writer so the reader sees EOF after the batch.
         active.shutdown().await.expect("shutdown");
 
         let applier = StaticStateApplier::new();
-        let count = pump_from_reader(&mut passive, &applier)
+        let fence = FenceState::new();
+        let count = pump_from_reader(&mut passive, &applier, &fence)
             .await
             .expect("pump from");
         assert_eq!(count, 3);
@@ -554,13 +689,14 @@ mod tests {
         q.push(conntrack(2)); // evicts -> lagged latched, depth 1
 
         let (mut active, mut passive) = tokio::io::duplex(4096);
-        let written = pump_to_writer(&q, &mut active, 16).await.expect("pump");
+        let written = pump_to_writer(&q, &mut active, 16, 1).await.expect("pump");
         assert_eq!(written, 1);
         active.shutdown().await.expect("shutdown");
         assert!(!q.is_lagged(), "marker emission resets the latch");
 
         let applier = StaticStateApplier::new();
-        pump_from_reader(&mut passive, &applier)
+        let fence = FenceState::new();
+        pump_from_reader(&mut passive, &applier, &fence)
             .await
             .expect("pump from");
         let records = applier.applied();
@@ -595,11 +731,105 @@ mod tests {
         assert!(q.is_lagged());
 
         let (mut active, _passive) = tokio::io::duplex(4096);
-        let written = pump_to_writer(&q, &mut active, 16).await.expect("pump");
+        let written = pump_to_writer(&q, &mut active, 16, 1).await.expect("pump");
         assert_eq!(written, 0);
         assert!(
             q.is_lagged(),
             "an undeliverable lag signal must be re-armed, not dropped"
         );
+    }
+
+    #[test]
+    fn fence_admits_monotonic_and_rejects_stale() {
+        let f = FenceState::new();
+        assert!(!f.is_primed());
+        assert_eq!(f.current(), 0);
+        // First fence of any value is the baseline.
+        assert!(f.admit(5));
+        assert!(f.is_primed());
+        assert_eq!(f.current(), 5);
+        // Same epoch is admissible (a re-flush of the live Master).
+        assert!(f.admit(5));
+        // A newer Master advances the high-water mark.
+        assert!(f.admit(7));
+        assert_eq!(f.current(), 7);
+        // A deposed Master (lower epoch) is fenced and does not
+        // lower the mark.
+        assert!(!f.admit(6));
+        assert_eq!(f.current(), 7);
+    }
+
+    #[tokio::test]
+    async fn pump_fences_stale_master_stream() {
+        // The receiver has already followed Master epoch 9.
+        let fence = FenceState::new();
+        assert!(fence.admit(9));
+
+        // A deposed Master (epoch 3) tries to replay flow state.
+        let q = SyncQueue::new(8);
+        q.push(conntrack(1));
+        q.push(conntrack(2));
+        let (mut active, mut passive) = tokio::io::duplex(4096);
+        let written = pump_to_writer(&q, &mut active, 16, 3).await.expect("pump");
+        assert_eq!(written, 2);
+        active.shutdown().await.expect("shutdown");
+
+        let applier = StaticStateApplier::new();
+        let err = pump_from_reader(&mut passive, &applier, &fence)
+            .await
+            .expect_err("stale master must be fenced");
+        assert!(matches!(
+            err,
+            HaError::Fenced {
+                incoming: 3,
+                current: 9
+            }
+        ));
+        // Crucially, NOTHING from the stale Master was applied: the
+        // fence is checked before any record reaches the table.
+        assert!(
+            applier.applied().is_empty(),
+            "fenced stream must not write a single record"
+        );
+    }
+
+    #[tokio::test]
+    async fn pump_refuses_flow_state_before_any_fence() {
+        // Hand-craft a stream that omits the leading fence entirely
+        // (a malformed / hostile peer trying to dodge the epoch
+        // check) and confirm the first flow-state record is refused.
+        let frame = encode_frame(&conntrack(1)).expect("encode");
+        let (mut active, mut passive) = tokio::io::duplex(4096);
+        active.write_all(&frame).await.expect("write");
+        active.shutdown().await.expect("shutdown");
+
+        let applier = StaticStateApplier::new();
+        let fence = FenceState::new();
+        let err = pump_from_reader(&mut passive, &applier, &fence)
+            .await
+            .expect_err("unprimed stream must be fenced");
+        assert!(matches!(err, HaError::Fenced { incoming: 0, .. }));
+        assert!(applier.applied().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pump_admits_newer_master_after_failover() {
+        // Receiver was following epoch 1; the new Master (epoch 2)
+        // takes over and its stream is admitted.
+        let fence = FenceState::new();
+        assert!(fence.admit(1));
+
+        let q = SyncQueue::new(8);
+        q.push(conntrack(1));
+        let (mut active, mut passive) = tokio::io::duplex(4096);
+        pump_to_writer(&q, &mut active, 16, 2).await.expect("pump");
+        active.shutdown().await.expect("shutdown");
+
+        let applier = StaticStateApplier::new();
+        let count = pump_from_reader(&mut passive, &applier, &fence)
+            .await
+            .expect("newer master admitted");
+        assert_eq!(count, 1);
+        assert_eq!(fence.current(), 2);
     }
 }
