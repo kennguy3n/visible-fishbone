@@ -18,6 +18,7 @@ package residency
 import (
 	"errors"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -132,13 +133,16 @@ func RequireSupported(r Region) (Jurisdiction, error) {
 	return j, nil
 }
 
-// SupportedRegions returns the catalogued residency regions in a
-// stable (caller-sortable) form for surfacing in config UIs/APIs.
+// SupportedRegions returns the catalogued residency regions sorted by
+// region identifier, so the order is deterministic across calls (the
+// catalog is a map, whose iteration order is not). Suitable for surfacing
+// directly in config UIs/APIs without the caller re-sorting.
 func SupportedRegions() []Jurisdiction {
 	out := make([]Jurisdiction, 0, len(catalog))
 	for _, j := range catalog {
 		out = append(out, j)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Region < out[j].Region })
 	return out
 }
 

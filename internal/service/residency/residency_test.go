@@ -97,4 +97,11 @@ func TestSupportedRegionsCovered(t *testing.T) {
 			t.Errorf("incomplete jurisdiction: %+v", j)
 		}
 	}
+	// Order must be deterministic (sorted by region), not map-iteration order.
+	for i := 1; i < len(regions); i++ {
+		if regions[i-1].Region >= regions[i].Region {
+			t.Errorf("SupportedRegions not sorted ascending by region: %q before %q",
+				regions[i-1].Region, regions[i].Region)
+		}
+	}
 }
