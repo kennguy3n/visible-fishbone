@@ -580,6 +580,9 @@ unsafe impl Sync for PoolInner {}
 pub enum BufferPoolError {
     /// `frame_bytes` or `frame_count` was zero.
     ZeroSized,
+    /// `frame_bytes * frame_count` overflowed `usize` (both dimensions
+    /// were individually valid but their product is unrepresentable).
+    Overflow,
     /// The anonymous memory map could not be created.
     Map(std::io::Error),
 }
@@ -588,6 +591,7 @@ impl fmt::Display for BufferPoolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroSized => write!(f, "frame_bytes and frame_count must both be non-zero"),
+            Self::Overflow => write!(f, "frame_bytes * frame_count exceeds usize::MAX"),
             Self::Map(e) => write!(f, "anonymous mmap failed: {e}"),
         }
     }
@@ -601,14 +605,16 @@ impl MmapBufferPool {
     /// # Errors
     ///
     /// [`BufferPoolError::ZeroSized`] if either dimension is zero;
-    /// [`BufferPoolError::Map`] if the OS refuses the anonymous map.
+    /// [`BufferPoolError::Overflow`] if `frame_bytes * frame_count`
+    /// overflows `usize`; [`BufferPoolError::Map`] if the OS refuses the
+    /// anonymous map.
     pub fn new(frame_bytes: usize, frame_count: usize) -> Result<Self, BufferPoolError> {
         if frame_bytes == 0 || frame_count == 0 {
             return Err(BufferPoolError::ZeroSized);
         }
         let len = frame_bytes
             .checked_mul(frame_count)
-            .ok_or(BufferPoolError::ZeroSized)?;
+            .ok_or(BufferPoolError::Overflow)?;
         let mut map = memmap2::MmapOptions::new()
             .len(len)
             .map_anon()
@@ -1063,6 +1069,17 @@ mod tests {
             MmapBufferPool::new(2048, 0),
             Err(BufferPoolError::ZeroSized)
         ));
+    }
+
+    #[test]
+    fn buffer_pool_rejects_overflowing_dimensions() {
+        // Both dimensions are individually valid (non-zero) but their
+        // product overflows usize, so the error must be Overflow — not
+        // the misleading ZeroSized — and its message must not claim a
+        // zero dimension.
+        let err = MmapBufferPool::new(usize::MAX, 2).unwrap_err();
+        assert!(matches!(err, BufferPoolError::Overflow));
+        assert_eq!(err.to_string(), "frame_bytes * frame_count exceeds usize::MAX");
     }
 
     #[test]
