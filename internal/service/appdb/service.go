@@ -604,7 +604,12 @@ func targetWantsClass(target repository.PolicyBundleTarget, class repository.Tra
 // operators mutate the registry. The intended lifetime is a single
 // `policy.Service.Compile` call.
 type SteeringSnapshot struct {
-	// apps is the full global catalog at snapshot time.
+	// apps is the tenant-scoped compile set at snapshot time: the
+	// global catalog filtered to the tenant's region group, PLUS any
+	// out-of-region app a tenant override explicitly targets (overrides
+	// are not region-filtered — see NewSteeringSnapshot). It is NOT the
+	// full global catalog, so CompileForTarget must not assume a
+	// cross-region app is present here.
 	apps []repository.AppRegistry
 	// overrideByApp / customs are the tenant overrides
 	// pre-classified and pre-filtered for expiry against the

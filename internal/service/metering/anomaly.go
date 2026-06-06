@@ -110,9 +110,14 @@ type CostAnomaly struct {
 	// ProjectedMonthlyUSD is the current period's projected monthly cost
 	// for this meter (from the live cost report).
 	ProjectedMonthlyUSD float64 `json:"projected_monthly_usd"`
-	// Ratio is ProjectedMonthlyUSD / BaselineMonthlyUSD. It is 0 when
-	// the baseline is zero (a newly-active meter), in which case the
-	// anomaly is reported on the absolute-floor rule instead.
+	// Ratio is ProjectedMonthlyUSD / BaselineMonthlyUSD when the anomaly
+	// is raised on the ratio rule. It is 0 whenever the anomaly comes
+	// from the absolute new-spend floor instead — either because the
+	// baseline is zero (a newly-active meter) or because there is too
+	// little history to trust a ratio (fewer than MinBaselineMonths
+	// complete months). A 0 ratio therefore does not imply zero prior
+	// usage; consult BaselineMonthlyUSD and BaselineMonths to tell a
+	// brand-new meter from one with thin-but-non-zero history.
 	Ratio float64 `json:"ratio"`
 	// BaselineMonths is the number of complete months that fed the
 	// baseline median.
