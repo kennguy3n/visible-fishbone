@@ -270,6 +270,21 @@ type Device struct {
 	UpdatedAt        time.Time
 }
 
+// DeviceIdentityBinding maps an enrolled device to the upstream
+// iam-core identity (user) that owns it. See migration 044. The
+// Ed25519 key is captured at binding time so the binding has a
+// self-contained record of the key the identity was bound to even if
+// the device is later re-keyed.
+type DeviceIdentityBinding struct {
+	ID               uuid.UUID
+	TenantID         uuid.UUID
+	DeviceID         uuid.UUID
+	IAMCoreUserID    string
+	Ed25519PublicKey string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
 // ClaimToken is a short-lived one-time enrollment credential. Only
 // the SHA-256 hash of the plaintext is persisted; callers receive
 // the plaintext exactly once at create-time.

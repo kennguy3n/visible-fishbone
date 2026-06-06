@@ -217,6 +217,28 @@ type DeviceRepository interface {
 	TransitionStatus(ctx context.Context, tenantID, id uuid.UUID, from, to DeviceStatus) (Device, error)
 }
 
+// DeviceIdentityBindingRepository owns the device_identity_bindings
+// table (migration 044): the mapping between an enrolled device and the
+// upstream iam-core user that owns it. All methods are tenant-scoped
+// and enforce RLS via the `sng.tenant_id` GUC.
+type DeviceIdentityBindingRepository interface {
+	// Upsert binds a device to an iam-core user. Re-binding the same
+	// device (same tenant_id, device_id) overwrites the prior binding
+	// (e.g. the device key rotated, or it was re-enrolled by the same
+	// user). Returns the persisted binding.
+	Upsert(ctx context.Context, tenantID uuid.UUID, b DeviceIdentityBinding) (DeviceIdentityBinding, error)
+	// GetByDevice returns the binding for a device. ErrNotFound when
+	// the device has no identity binding.
+	GetByDevice(ctx context.Context, tenantID, deviceID uuid.UUID) (DeviceIdentityBinding, error)
+	// ListByIAMCoreUser returns every device binding owned by an
+	// iam-core user within the tenant (per-user device inventory,
+	// bulk deprovisioning when iam-core blocks/deletes the user).
+	ListByIAMCoreUser(ctx context.Context, tenantID uuid.UUID, iamCoreUserID string) ([]DeviceIdentityBinding, error)
+	// DeleteByDevice removes a device's identity binding. Idempotent:
+	// deleting a non-existent binding is not an error.
+	DeleteByDevice(ctx context.Context, tenantID, deviceID uuid.UUID) error
+}
+
 // --- Role -----------------------------------------------------------------
 
 // RoleRepository owns the roles + user_roles tables.

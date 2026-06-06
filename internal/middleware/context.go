@@ -52,6 +52,7 @@ const (
 	keyAuthSubject  contextKey = "auth_subject"
 	keyRequestMeta  contextKey = "request_meta"
 	keyMobileClaims contextKey = "mobile_claims"
+	keyIAMCoreID    contextKey = "iam_core_identity"
 )
 
 // MobileClaims carries the device-bound custom claims that the

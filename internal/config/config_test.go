@@ -58,6 +58,8 @@ func clearAll(t *testing.T) {
 		"INTEGRATION_WORKER_BACKOFF_BASE", "INTEGRATION_WORKER_BACKOFF_MAX",
 		"INTEGRATION_WORKER_POLL_INTERVAL", "INTEGRATION_WORKER_PROCESSING_TIMEOUT",
 		"AUTH_JWT_SECRET", "AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "AUTH_ACCESS_TOKEN_TTL", "AUTH_CLAIM_TOKEN_TTL", "AUTH_API_KEY_HEADER",
+		"IAM_CORE_ISSUER", "IAM_CORE_JWKS_URL", "IAM_CORE_OIDC_DISCOVERY", "IAM_CORE_CLIENT_ID", "IAM_CORE_CLIENT_SECRET",
+		"IAM_CORE_AUDIENCE", "IAM_CORE_MGMT_BASE_URL", "IAM_CORE_MGMT_AUDIENCE", "IAM_CORE_REDIRECT_URL",
 		"OTEL_EXPORTER_OTLP_ENDPOINT", "SERVICE_VERSION",
 		"METRICS_ENABLED", "METRICS_PORT", "METRICS_NAMESPACE",
 		"POP_REGISTRY_REFRESH_INTERVAL", "POP_HEALTH_TTL", "POP_HIGH_WATER_FRACTION",
@@ -1390,5 +1392,123 @@ func TestTelemetryAnalytics_ProdRequiresClickHouseAuth(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "CLICKHOUSE_USERNAME") {
 		t.Errorf("error should mention CLICKHOUSE_USERNAME: %v", err)
+	}
+}
+
+// TestLoadIAMCore covers the Session 2A iam-core integration config:
+// it is off by default, derives nothing when disabled, loads the
+// IAM_CORE_* contract when enabled, and enforces the cross-field
+// invariants (issuer URL shape, required audience, paired client
+// credentials).
+func TestLoadIAMCore(t *testing.T) {
+	loadIn := func(t *testing.T) (Config, error) {
+		t.Helper()
+		tmp := t.TempDir()
+		wd, _ := os.Getwd()
+		if err := os.Chdir(tmp); err != nil {
+			t.Fatalf("chdir: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(wd) })
+		return Load()
+	}
+
+	t.Run("disabled by default", func(t *testing.T) {
+		clearAll(t)
+		cfg, err := loadIn(t)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.IAMCore.Enabled() {
+			t.Fatal("iam-core should be disabled when IAM_CORE_ISSUER is unset")
+		}
+	})
+
+	t.Run("loads full contract", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("IAM_CORE_ISSUER", "https://iam.example.com/")
+		t.Setenv("IAM_CORE_CLIENT_ID", "sng-gateway")
+		t.Setenv("IAM_CORE_CLIENT_SECRET", "shh")
+		t.Setenv("IAM_CORE_AUDIENCE", "sng-api")
+		t.Setenv("IAM_CORE_REDIRECT_URL", "https://admin.sng.example.com/auth/callback")
+		cfg, err := loadIn(t)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.IAMCore.Enabled() {
+			t.Fatal("iam-core should be enabled")
+		}
+		// Trailing slash is trimmed so the issuer compares exactly to
+		// the JWT `iss`.
+		if cfg.IAMCore.Issuer != "https://iam.example.com" {
+			t.Fatalf("issuer = %q", cfg.IAMCore.Issuer)
+		}
+		if cfg.IAMCore.ClientID != "sng-gateway" || cfg.IAMCore.ClientSecret != "shh" {
+			t.Fatalf("client creds = %q/%q", cfg.IAMCore.ClientID, cfg.IAMCore.ClientSecret)
+		}
+		if cfg.IAMCore.Audience != "sng-api" {
+			t.Fatalf("audience = %q", cfg.IAMCore.Audience)
+		}
+	})
+
+	t.Run("issuer must be absolute URL", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("IAM_CORE_ISSUER", "iam.example.com")
+		t.Setenv("IAM_CORE_AUDIENCE", "sng-api")
+		if _, err := loadIn(t); err == nil {
+			t.Fatal("expected error for non-URL issuer")
+		}
+	})
+
+	t.Run("audience required when enabled", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("IAM_CORE_ISSUER", "https://iam.example.com")
+		if _, err := loadIn(t); err == nil {
+			t.Fatal("expected error for missing audience")
+		}
+	})
+
+	t.Run("client id and secret must be paired", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("IAM_CORE_ISSUER", "https://iam.example.com")
+		t.Setenv("IAM_CORE_AUDIENCE", "sng-api")
+		t.Setenv("IAM_CORE_CLIENT_ID", "sng-gateway")
+		if _, err := loadIn(t); err == nil {
+			t.Fatal("expected error when client secret missing")
+		}
+	})
+}
+
+// TestIAMCoreValidateIssuerScheme covers the environment-sensitive
+// issuer-scheme rule: http:// is allowed in dev/qa (loopback test
+// servers) but rejected in production (uat/prod), while https:// is
+// always allowed. Exercised against IAMCore.validate directly so the
+// production case need not satisfy every other prod-only config knob.
+func TestIAMCoreValidateIssuerScheme(t *testing.T) {
+	base := IAMCore{Audience: "sng-api"}
+	cases := []struct {
+		name    string
+		issuer  string
+		env     Environment
+		wantErr bool
+	}{
+		{"http allowed in dev", "http://127.0.0.1:9000", EnvironmentDev, false},
+		{"http allowed in qa", "http://iam.qa.internal", EnvironmentQA, false},
+		{"http rejected in uat", "http://iam.example.com", EnvironmentUAT, true},
+		{"http rejected in prod", "http://iam.example.com", EnvironmentProd, true},
+		{"https allowed in prod", "https://iam.example.com", EnvironmentProd, false},
+		{"bare host rejected everywhere", "iam.example.com", EnvironmentDev, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base
+			c.Issuer = tc.issuer
+			err := c.validate(tc.env)
+			if tc.wantErr && err == nil {
+				t.Fatalf("validate(%q, %s): expected error, got nil", tc.issuer, tc.env)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("validate(%q, %s): unexpected error: %v", tc.issuer, tc.env, err)
+			}
+		})
 	}
 }

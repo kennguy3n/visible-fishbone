@@ -75,6 +75,7 @@ type Config struct {
 	Webhook            Webhook
 	Integration        Integration
 	Auth               Auth
+	IAMCore            IAMCore
 	Policy             Policy
 	Telemetry          Telemetry
 	Metrics            Metrics
@@ -765,6 +766,97 @@ type Auth struct {
 	APIKeyMaxActivePerTenant int
 }
 
+// IAMCore configures the integration with the upstream uneycom/iam-core
+// OAuth2/OIDC identity provider (Session 2A). It mirrors the canonical
+// IAM_CORE_* environment contract shared by both ShieldNet products.
+//
+// The whole integration is optional and off by default: with Issuer
+// empty the control plane wires neither the iam-core token-validation
+// middleware nor the SCIM/SSO bridges, and existing API-key / mobile /
+// HMAC auth is untouched. When Issuer is set, validate() enforces the
+// minimum required companions (audience, and — for the Management/SSO
+// paths — client credentials).
+//
+// Free-form URL/string knobs are parsed leniently in Load(); they are
+// not load-bearing numerics, so there is no strict-parse table entry.
+type IAMCore struct {
+	// Issuer is the iam-core base URL (hosts /oauth2/* and
+	// /.well-known/*) and the exact `iss` claim expected on every
+	// token. Empty disables the entire integration.
+	Issuer string
+	// JWKSURL is the JWKS endpoint for signature validation. Derived
+	// as ${Issuer}/oauth2/jwks when empty.
+	JWKSURL string
+	// DiscoveryURL is the OIDC discovery document. Derived as
+	// ${Issuer}/.well-known/openid-configuration when empty.
+	DiscoveryURL string
+	// ClientID / ClientSecret identify ShieldNet Gateway as a
+	// confidential OAuth2 client (admin SSO code exchange + the
+	// client_credentials Management token). ClientSecret is secret.
+	ClientID     string
+	ClientSecret string
+	// Audience is the expected `aud` claim on incoming iam-core access
+	// tokens. Required when Issuer is set (a token-validation middleware
+	// with no audience check is a privilege-escalation footgun).
+	Audience string
+	// ManagementBaseURL hosts the /api/v1/management/* endpoints the
+	// SCIM bridge calls. Derived as Issuer when empty.
+	ManagementBaseURL string
+	// ManagementAudience is the audience requested when minting the
+	// client_credentials Management token. Empty requests no explicit
+	// audience.
+	ManagementAudience string
+	// RedirectURL is the admin-console OAuth2 callback URL registered
+	// with iam-core for the SSO authorization-code flow.
+	RedirectURL string
+}
+
+// Enabled reports whether the iam-core integration is configured.
+func (i IAMCore) Enabled() bool {
+	return strings.TrimSpace(i.Issuer) != ""
+}
+
+// validate enforces the cross-field invariants of the iam-core
+// integration. It is a no-op when the integration is disabled (no
+// issuer), so deployments that do not use iam-core are unaffected. env
+// is the deployment stage; production stages additionally require a
+// TLS (https) issuer.
+func (i IAMCore) validate(env Environment) error {
+	if !i.Enabled() {
+		return nil
+	}
+	// The issuer is also the JWT `iss` we pin and the base for the
+	// authorize/token/jwks URLs, so it must be an absolute https(s)
+	// URL — a bare host or a relative value would make every derived
+	// endpoint wrong and silently fail closed at runtime.
+	if !strings.HasPrefix(i.Issuer, "https://") && !strings.HasPrefix(i.Issuer, "http://") {
+		return fmt.Errorf("IAM_CORE_ISSUER must be an absolute http(s) URL, got %q", i.Issuer)
+	}
+	// In production (uat/prod) the issuer carries OAuth2 client secrets
+	// (Basic auth on the token endpoint) and bearer tokens, and its JWKS
+	// is the root of trust for every validated identity. A plaintext
+	// http:// issuer there exposes those to interception and downgrade,
+	// so require TLS. http:// stays allowed in dev/qa/local for loopback
+	// test servers (mirrors the PG_SSLMODE production posture).
+	if env.IsProduction() && strings.HasPrefix(i.Issuer, "http://") {
+		return fmt.Errorf("IAM_CORE_ISSUER must use https:// in production environments, got %q", i.Issuer)
+	}
+	// A token-validation middleware with no expected audience accepts
+	// any iam-core token for any relying party — a privilege-escalation
+	// footgun. Require the audience whenever the integration is on.
+	if strings.TrimSpace(i.Audience) == "" {
+		return errors.New("IAM_CORE_AUDIENCE must be set when IAM_CORE_ISSUER is configured")
+	}
+	// A client secret without its id (or vice versa) is always a
+	// misconfiguration: both halves are needed to authenticate the
+	// confidential client for the SSO code exchange and the
+	// client_credentials Management token.
+	if (i.ClientID == "") != (i.ClientSecret == "") {
+		return errors.New("IAM_CORE_CLIENT_ID and IAM_CORE_CLIENT_SECRET must be set together")
+	}
+	return nil
+}
+
 // Policy carries policy-engine configuration. PR8 adds two
 // production-only knobs: a path to an out-of-band Ed25519 signing
 // key (so prod can boot without DB-backed rotation) and an
@@ -1025,6 +1117,17 @@ func Load() (Config, error) {
 			JWTIssuer:    getStr("AUTH_JWT_ISSUER", "sng-control"),
 			JWTAudience:  getStr("AUTH_JWT_AUDIENCE", "sng-control"),
 			APIKeyHeader: getStr("AUTH_API_KEY_HEADER", "X-SNG-API-Key"),
+		},
+		IAMCore: IAMCore{
+			Issuer:             strings.TrimRight(getStr("IAM_CORE_ISSUER", ""), "/"),
+			JWKSURL:            getStr("IAM_CORE_JWKS_URL", ""),
+			DiscoveryURL:       getStr("IAM_CORE_OIDC_DISCOVERY", ""),
+			ClientID:           getStr("IAM_CORE_CLIENT_ID", ""),
+			ClientSecret:       getStr("IAM_CORE_CLIENT_SECRET", ""),
+			Audience:           getStr("IAM_CORE_AUDIENCE", ""),
+			ManagementBaseURL:  strings.TrimRight(getStr("IAM_CORE_MGMT_BASE_URL", ""), "/"),
+			ManagementAudience: getStr("IAM_CORE_MGMT_AUDIENCE", ""),
+			RedirectURL:        getStr("IAM_CORE_REDIRECT_URL", ""),
 		},
 		Policy: Policy{
 			SigningKeyPath:    getStr("POLICY_SIGNING_KEY_PATH", ""),
@@ -1591,6 +1694,9 @@ func (c Config) validate() error {
 	// the service's 24h default rather than the configured value.
 	if c.MobileAuth.DiscoveryCacheTTL <= 0 {
 		return fmt.Errorf("MOBILE_AUTH_DISCOVERY_CACHE_TTL must be > 0, got %s", c.MobileAuth.DiscoveryCacheTTL)
+	}
+	if err := c.IAMCore.validate(c.Environment); err != nil {
+		return err
 	}
 	if c.Policy.KeyWrapMasterB64 != "" && c.Policy.KeyWrapMasterFile != "" {
 		return errors.New("POLICY_KEY_WRAP_MASTER_B64 and POLICY_KEY_WRAP_MASTER_FILE are mutually exclusive")

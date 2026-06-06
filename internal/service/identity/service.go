@@ -37,11 +37,28 @@ const DefaultTokenTTL = 24 * time.Hour
 
 // Service implements identity + enrollment operations.
 type Service struct {
-	devices repository.DeviceRepository
-	tokens  repository.ClaimTokenRepository
-	audit   repository.AuditLogRepository
-	logger  *slog.Logger
-	nowFunc func() time.Time
+	devices  repository.DeviceRepository
+	tokens   repository.ClaimTokenRepository
+	audit    repository.AuditLogRepository
+	bindings repository.DeviceIdentityBindingRepository
+	logger   *slog.Logger
+	nowFunc  func() time.Time
+}
+
+// Option configures optional Service behaviour without breaking the
+// base constructor signature used across the codebase.
+type Option func(*Service)
+
+// WithDeviceIdentityBindings enables binding enrolled devices to their
+// upstream iam-core user (Session 2A, migration 044). When set, an
+// enrollment performed by an iam-core-authenticated caller records the
+// (iam_core_user_id, device_id, ed25519_public_key) mapping.
+func WithDeviceIdentityBindings(bindings repository.DeviceIdentityBindingRepository) Option {
+	return func(s *Service) {
+		if bindings != nil {
+			s.bindings = bindings
+		}
+	}
 }
 
 // New returns a ready-to-use identity service.
@@ -50,17 +67,22 @@ func New(
 	tokens repository.ClaimTokenRepository,
 	audit repository.AuditLogRepository,
 	logger *slog.Logger,
+	opts ...Option,
 ) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{
+	s := &Service{
 		devices: devices,
 		tokens:  tokens,
 		audit:   audit,
 		logger:  logger,
 		nowFunc: func() time.Time { return time.Now().UTC() },
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // GenerateClaimTokenResult holds both the persisted token record
@@ -149,7 +171,55 @@ func (svc *Service) RedeemClaimToken(
 		return repository.Device{}, err
 	}
 	svc.logAuditErr(svc.appendAudit(ctx, tenantID, nil, "device.enrolled", "device", &dev.ID, nil))
+	// Session 2A: if the enrolling caller is authenticated via
+	// iam-core, bind the freshly enrolled device to that iam-core
+	// user. Binding failures must not fail the enrollment (the device
+	// is already created + audited); they are logged for reconciliation.
+	if err := svc.bindEnrolledDevice(ctx, tenantID, dev); err != nil {
+		svc.logger.Error("identity: failed to bind device to iam-core identity",
+			slog.String("deviceID", dev.ID.String()),
+			slog.Any("error", err))
+	}
 	return dev, nil
+}
+
+// bindEnrolledDevice records the device ↔ iam-core user mapping when
+// the bindings repo is configured AND the request context carries an
+// iam-core identity. It is a no-op otherwise (legacy API-key / mobile
+// / HMAC enrollments are unaffected).
+func (svc *Service) bindEnrolledDevice(ctx context.Context, tenantID uuid.UUID, dev repository.Device) error {
+	if svc.bindings == nil {
+		return nil
+	}
+	ident, ok := middleware.IAMCoreIdentityFromContext(ctx)
+	if !ok || ident.Subject == "" {
+		return nil
+	}
+	return svc.BindDeviceIdentity(ctx, tenantID, ident.Subject, dev.ID, dev.PublicKeyEd25519)
+}
+
+// BindDeviceIdentity records (or updates) the binding between a device
+// and an iam-core user. Exposed for callers that enroll devices
+// outside RedeemClaimToken (e.g. mobile self-enrollment) and want to
+// attach the upstream identity explicitly. Returns nil when the
+// bindings repository is not configured.
+func (svc *Service) BindDeviceIdentity(ctx context.Context, tenantID uuid.UUID, iamCoreUserID string, deviceID uuid.UUID, ed25519PublicKey string) error {
+	if svc.bindings == nil {
+		return nil
+	}
+	if iamCoreUserID == "" || deviceID == uuid.Nil {
+		return fmt.Errorf("iam-core user id and device id are required: %w", repository.ErrInvalidArgument)
+	}
+	b, err := svc.bindings.Upsert(ctx, tenantID, repository.DeviceIdentityBinding{
+		DeviceID:         deviceID,
+		IAMCoreUserID:    iamCoreUserID,
+		Ed25519PublicKey: ed25519PublicKey,
+	})
+	if err != nil {
+		return err
+	}
+	svc.logAuditErr(svc.appendAudit(ctx, tenantID, nil, "device.identity_bound", "device", &b.DeviceID, nil))
+	return nil
 }
 
 // Heartbeat updates the device's last-seen timestamp.
