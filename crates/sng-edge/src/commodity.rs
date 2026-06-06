@@ -690,8 +690,9 @@ impl fmt::Debug for MmapBufferPool {
 
 /// An exclusive handle to one frame of an [`MmapBufferPool`].
 ///
-/// Derefs to the frame's `[u8]` backing bytes. Returns its slot to the
-/// pool when dropped.
+/// Access the frame's `[u8]` backing bytes through [`Frame::as_slice`] /
+/// [`Frame::as_mut_slice`] (there is intentionally no `Deref` impl — see
+/// the safety invariant below). Returns its slot to the pool when dropped.
 ///
 /// # Safety invariant
 ///
