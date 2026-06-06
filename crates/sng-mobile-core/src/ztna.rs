@@ -144,9 +144,9 @@ impl MobileZtnaManager {
     /// the latest decision.
     ///
     /// Before delegating, a fail-closed mobile posture pre-gate
-    /// ([`posture_pre_gate`]) inspects the freshly-collected
-    /// `posture`: when the device cannot be proven healthy the
-    /// request is denied locally without consulting the shared
+    /// inspects the freshly-collected `posture`: when the device
+    /// cannot be proven healthy the request is denied locally
+    /// without consulting the shared
     /// policy engine, recorded as a `device_posture_insufficient`
     /// deny so the wire + per-app state stay consistent with a
     /// policy-side posture deny.

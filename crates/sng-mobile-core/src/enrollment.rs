@@ -72,6 +72,15 @@ pub trait SecureKeyStore: Send + Sync {
     /// Whether a keypair exists under `label`.
     async fn contains(&self, label: &str) -> Result<bool, KeyStoreError>;
     /// Delete the keypair stored under `label` (de-enrolment).
+    ///
+    /// **Idempotent**: implementations MUST return `Ok(())` when no
+    /// key exists under `label`, never [`KeyStoreError::NotFound`].
+    /// The leaver / revoke wipe ([`Enroller::wipe`]) relies on this
+    /// so a revoke can be safely replayed (e.g. retried after a
+    /// crash) without surfacing a spurious error. The existing
+    /// backings already honor this — iOS maps `errSecItemNotFound`
+    /// to success, Android's `KeyStore.deleteEntry` is silent on an
+    /// absent alias, and the in-memory impl uses `HashMap::remove`.
     async fn delete(&self, label: &str) -> Result<(), KeyStoreError>;
 }
 
