@@ -497,34 +497,53 @@ where
         }
         return Ok(0);
     }
-    let mut written = 0;
-    // Fence first: the receiver must learn (and accept) our epoch
-    // before it applies any record in this batch.
-    let fence = encode_frame(&SyncRecord::Fence { epoch })?;
-    writer
-        .write_all(&fence)
-        .await
-        .map_err(|e| HaError::Socket(format!("write fence marker: {e}")))?;
-    if lagged {
-        let frame = encode_frame(&SyncRecord::Lagged)?;
+    // The records are now out of the queue and the lag latch has been
+    // consumed. If any encode/write/flush below fails, this whole
+    // batch is lost — so on error re-arm the lag latch before
+    // propagating, exactly as the empty-flush path does. That way the
+    // next successful flush carries a Lagged marker and the passive
+    // does a full-state pull on promotion instead of silently running
+    // on an incomplete view. (The lost records themselves are not
+    // recoverable, which is fine for best-effort sync; the contract we
+    // must keep is that the passive *knows* it is incomplete.)
+    let result = async {
+        let mut written = 0usize;
+        // Fence first: the receiver must learn (and accept) our epoch
+        // before it applies any record in this batch.
+        let fence = encode_frame(&SyncRecord::Fence { epoch })?;
         writer
-            .write_all(&frame)
+            .write_all(&fence)
             .await
-            .map_err(|e| HaError::Socket(format!("write lagged marker: {e}")))?;
-    }
-    for record in records {
-        let frame = encode_frame(&record)?;
+            .map_err(|e| HaError::Socket(format!("write fence marker: {e}")))?;
+        if lagged {
+            let frame = encode_frame(&SyncRecord::Lagged)?;
+            writer
+                .write_all(&frame)
+                .await
+                .map_err(|e| HaError::Socket(format!("write lagged marker: {e}")))?;
+        }
+        for record in &records {
+            let frame = encode_frame(record)?;
+            writer
+                .write_all(&frame)
+                .await
+                .map_err(|e| HaError::Socket(format!("write record: {e}")))?;
+            written += 1;
+        }
         writer
-            .write_all(&frame)
+            .flush()
             .await
-            .map_err(|e| HaError::Socket(format!("write record: {e}")))?;
-        written += 1;
+            .map_err(|e| HaError::Socket(format!("flush: {e}")))?;
+        Ok::<usize, HaError>(written)
     }
-    writer
-        .flush()
-        .await
-        .map_err(|e| HaError::Socket(format!("flush: {e}")))?;
-    Ok(written)
+    .await;
+    match result {
+        Ok(written) => Ok(written),
+        Err(e) => {
+            queue.mark_lagged();
+            Err(e)
+        }
+    }
 }
 
 /// Read frames from `reader` until EOF, applying each flow-state
@@ -598,6 +617,33 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use std::net::Ipv4Addr;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    /// An [`AsyncWrite`] that fails every write, used to exercise the
+    /// pump's mid-flush failure handling.
+    struct FailingWriter;
+
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "boom",
+            )))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     fn conntrack(port: u16) -> SyncRecord {
         SyncRecord::Conntrack(ConntrackEntry {
@@ -774,6 +820,28 @@ mod tests {
         assert!(
             q.is_lagged(),
             "an undeliverable lag signal must be re-armed, not dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn pump_rearms_lag_when_write_fails_mid_flush() {
+        // A lagged batch is drained (records + latch leave the queue),
+        // but the write fails. The records are lost, but the lag latch
+        // must be re-armed so the next flush still tells the passive
+        // its view is incomplete.
+        let q = SyncQueue::new(1);
+        q.push(conntrack(1));
+        q.push(conntrack(2)); // evicts -> lagged latched, depth 1
+        assert!(q.is_lagged());
+
+        let mut writer = FailingWriter;
+        let err = pump_to_writer(&q, &mut writer, 16, 1)
+            .await
+            .expect_err("write must fail");
+        assert!(matches!(err, HaError::Socket(_)), "got {err:?}");
+        assert!(
+            q.is_lagged(),
+            "a failed flush must re-arm the lag latch so the passive learns it is incomplete"
         );
     }
 
