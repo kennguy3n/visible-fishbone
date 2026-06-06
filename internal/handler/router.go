@@ -41,21 +41,31 @@ type RouterDeps struct {
 	Troubleshoot     *TroubleshootHandler
 	OIDC             *OIDCHandler
 	Mobile           *MobileHandler
-	Metering         *MeteringHandler
-	PoP              *PoPHandler
-	Sandbox          *SandboxHandler
-	RBI              *RBIHandler
-	OpenAPISpec      *OpenAPIHandler
-	APIKeyLookup     middleware.APIKeyLookup
+	// AdminSSO, when set, exposes the public iam-core OAuth2 admin
+	// login + callback endpoints (Session 2A, Task 3).
+	AdminSSO     *AdminSSOHandler
+	Metering     *MeteringHandler
+	PoP          *PoPHandler
+	Sandbox      *SandboxHandler
+	RBI          *RBIHandler
+	OpenAPISpec  *OpenAPIHandler
+	APIKeyLookup middleware.APIKeyLookup
 	// MobileDeviceStatus, when set, enables the auth-middleware
 	// device kill-switch for mobile session JWTs: a token bound to a
 	// suspended/deleted device is refused on every endpoint, not just
 	// the mobile self-service ones.
 	MobileDeviceStatus middleware.MobileDeviceStatusResolver
-	RateLimiter        *middleware.RateLimiter
-	Health             *Health
-	OpsHealth          *OpsHealthHandler
-	BulkDevice         *BulkDeviceHandler
+	// IAMCore, when set, enables validation of upstream iam-core
+	// access tokens in the auth middleware (additive — legacy
+	// API-key / mobile / HMAC auth is unaffected). IAMCoreTenant maps
+	// the iam-core tenant_id claim onto the SNG tenant UUID (and binds
+	// the RLS GUC); nil surfaces the identity without tenant scoping.
+	IAMCore       middleware.IAMCoreValidator
+	IAMCoreTenant middleware.TenantResolver
+	RateLimiter   *middleware.RateLimiter
+	Health        *Health
+	OpsHealth     *OpsHealthHandler
+	BulkDevice    *BulkDeviceHandler
 	// Metrics, when non-nil, installs the Prometheus HTTP
 	// instrumentation middleware (request count / duration /
 	// in-flight) at the top of the chain. Nil disables it (the
@@ -91,6 +101,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.PoP != nil {
 		deps.PoP.RegisterPublic(publicMux)
+	}
+	if deps.AdminSSO != nil {
+		deps.AdminSSO.RegisterPublic(publicMux)
 	}
 
 	apiMux := http.NewServeMux()
@@ -195,6 +208,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.MobileDeviceStatus != nil {
 		authOpts = append(authOpts, middleware.WithMobileDeviceStatus(deps.MobileDeviceStatus))
 	}
+	if deps.IAMCore != nil {
+		authOpts = append(authOpts, middleware.WithIAMCore(deps.IAMCore, deps.IAMCoreTenant))
+	}
 	apiChain := middleware.Chain(
 		middleware.Auth(&deps.Config.Auth, deps.APIKeyLookup, authOpts...),
 	)
@@ -219,6 +235,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// over the catch-all authed /api/v1/ handler below.
 	root.Handle("/api/v1/tenants/{tenant_id}/auth/mobile/token", publicMux)
 	root.Handle("/api/v1/tenants/{tenant_id}/auth/mobile/refresh", publicMux)
+	// Admin SSO bootstrap endpoints are public (the operator has no
+	// SNG session yet); these specific patterns take precedence over
+	// the catch-all authed /api/v1/ handler below.
+	if deps.AdminSSO != nil {
+		root.Handle("GET /api/v1/auth/sso/login", publicMux)
+		root.Handle("GET /api/v1/auth/sso/callback", publicMux)
+	}
 	root.Handle("/api/v1/", authedAPI)
 	root.Handle("/scim/", authedAPI)
 

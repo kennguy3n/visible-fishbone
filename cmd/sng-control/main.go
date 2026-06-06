@@ -34,7 +34,9 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
+	"github.com/kennguy3n/visible-fishbone/internal/iamcore"
 	"github.com/kennguy3n/visible-fishbone/internal/metrics"
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
 	sngotel "github.com/kennguy3n/visible-fishbone/internal/otel"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -583,10 +585,48 @@ func buildRouter(
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
-	identitySvc := identity.New(deviceRepo, claimRepo, auditRepo, logger)
-	enrollmentSvc := identity.NewEnrollmentService(enrollmentRepo, claimRepo, auditRepo, logger)
 	userRepo := store.NewUserRepository()
-	scimSvc := identity.NewSCIMService(userRepo, roleRepo, auditRepo)
+
+	// --- iam-core integration (Session 2A) ---------------------------
+	// When IAM_CORE_ISSUER is configured, build the shared client and
+	// the tenant resolver. The client validates upstream access tokens
+	// (auth middleware), propagates SCIM lifecycle to the Management
+	// API, and drives the admin SSO authorization-code flow. The
+	// resolver maps the iam-core tenant_id claim onto the SNG tenant
+	// (and the inverse, for the SCIM bridge). All of this is additive:
+	// with no issuer configured the control plane behaves as before.
+	var iamCoreClient *iamcore.Client
+	var iamCoreResolver *tenant.IAMCoreTenantResolver
+	// Interface-typed handles for RouterDeps. Kept nil (a true nil
+	// interface, not a typed-nil) when the integration is disabled so
+	// the auth middleware's `deps.IAMCore != nil` guard is correct.
+	var iamCoreValidator middleware.IAMCoreValidator
+	var iamCoreTenantResolver middleware.TenantResolver
+	identityOpts := []identity.Option{}
+	scimOpts := []identity.SCIMOption{}
+	if cfg.IAMCore.Enabled() {
+		iamCoreClient = iamcore.New(iamcore.Config{
+			Issuer:             cfg.IAMCore.Issuer,
+			JWKSURL:            cfg.IAMCore.JWKSURL,
+			DiscoveryURL:       cfg.IAMCore.DiscoveryURL,
+			ClientID:           cfg.IAMCore.ClientID,
+			ClientSecret:       cfg.IAMCore.ClientSecret,
+			Audience:           cfg.IAMCore.Audience,
+			ManagementBaseURL:  cfg.IAMCore.ManagementBaseURL,
+			ManagementAudience: cfg.IAMCore.ManagementAudience,
+		})
+		iamCoreResolver = tenant.NewIAMCoreTenantResolver(tenantRepo)
+		iamCoreValidator = iamCoreClient
+		iamCoreTenantResolver = iamCoreResolver
+		deviceBindingRepo := store.NewDeviceIdentityBindingRepository()
+		identityOpts = append(identityOpts, identity.WithDeviceIdentityBindings(deviceBindingRepo))
+		scimOpts = append(scimOpts, identity.WithIAMCoreBridge(iamCoreClient, iamCoreResolver))
+		logger.Info("sng-control: iam-core integration enabled", slog.String("issuer", cfg.IAMCore.Issuer))
+	}
+
+	identitySvc := identity.New(deviceRepo, claimRepo, auditRepo, logger, identityOpts...)
+	enrollmentSvc := identity.NewEnrollmentService(enrollmentRepo, claimRepo, auditRepo, logger)
+	scimSvc := identity.NewSCIMService(userRepo, roleRepo, auditRepo, scimOpts...)
 	rbacSvc := rbac.New(roleRepo, auditRepo, logger)
 	auditSvc := audit.New(auditRepo)
 	apiKeySvc := apikey.New(apiKeyRepo, auditRepo,
@@ -971,6 +1011,29 @@ func buildRouter(
 	)
 	oidcHandler := handler.NewOIDCHandler(idpConfigRepo, oidcSvc, cfg.MobileAuth.MaxProvidersPerTenant)
 
+	// --- Admin SSO via iam-core (Session 2A, Task 3) -----------------
+	// The control-plane admin login federates to iam-core over the
+	// OAuth2 authorization-code + PKCE flow and mints an SNG session
+	// the standard auth middleware accepts. Only wired when iam-core is
+	// configured AND a callback URL is registered.
+	var adminSSOHandler *handler.AdminSSOHandler
+	if iamCoreClient != nil && cfg.IAMCore.RedirectURL != "" {
+		adminSSOSvc, ssoErr := identity.NewAdminSSOService(
+			iamCoreClient, iamCoreResolver, userRepo, auditRepo,
+			identity.SessionSigner{
+				Secret:   []byte(cfg.Auth.JWTSecret),
+				Issuer:   cfg.Auth.JWTIssuer,
+				Audience: cfg.Auth.JWTAudience,
+			},
+			logger,
+			identity.WithAdminAutoProvision(cfg.MobileAuth.AutoProvisionUsers),
+		)
+		if ssoErr != nil {
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build admin SSO service: %w", ssoErr)
+		}
+		adminSSOHandler = handler.NewAdminSSOHandler(adminSSOSvc, cfg.IAMCore.RedirectURL, []byte(cfg.Auth.JWTSecret), logger)
+	}
+
 	// --- Cloud PoP service (Session F) -------------------------------
 	// The PoP store builds on the same ReadWritePool so its RLS GUC /
 	// app-role semantics match the rest of the control plane. The
@@ -1012,19 +1075,22 @@ func buildRouter(
 			h.SetInlineService(inlineCASBSvc)
 			return h
 		}(),
-		MSP:          handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
-		AI:           aiHandler,
-		SCIM:         handler.NewSCIMHandler(scimSvc),
-		Compliance:   complianceHandler,
-		Playbook:     playbookHandler,
-		Troubleshoot: troubleshootHandler,
-		OIDC:         oidcHandler,
-		Mobile:       handler.NewMobileHandler(identitySvc),
-		Metering:     meteringHandler,
-		PoP:          popHandler,
-		Sandbox:      handler.NewSandboxHandler(sandboxSvc),
-		RBI:          handler.NewRBIHandler(rbiSvc),
-		APIKeyLookup: apiKeySvc,
+		MSP:           handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
+		AI:            aiHandler,
+		SCIM:          handler.NewSCIMHandler(scimSvc),
+		Compliance:    complianceHandler,
+		Playbook:      playbookHandler,
+		Troubleshoot:  troubleshootHandler,
+		OIDC:          oidcHandler,
+		AdminSSO:      adminSSOHandler,
+		IAMCore:       iamCoreValidator,
+		IAMCoreTenant: iamCoreTenantResolver,
+		Mobile:        handler.NewMobileHandler(identitySvc),
+		Metering:      meteringHandler,
+		PoP:           popHandler,
+		Sandbox:       handler.NewSandboxHandler(sandboxSvc),
+		RBI:           handler.NewRBIHandler(rbiSvc),
+		APIKeyLookup:  apiKeySvc,
 		// Device kill-switch for stateless mobile session JWTs: a
 		// token bound to a suspended/deleted device is refused by the
 		// auth middleware on every endpoint, not just self-service.
