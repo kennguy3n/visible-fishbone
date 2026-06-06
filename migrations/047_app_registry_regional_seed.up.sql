@@ -1,4 +1,4 @@
--- 045_app_registry_regional_seed — Regional trusted-app lists
+-- 047_app_registry_regional_seed — Regional trusted-app lists
 -- (Session 2B, Traffic Classification Optimization).
 --
 -- The baseline seed (009) covers globally-ubiquitous SaaS plus a first
