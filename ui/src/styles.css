@@ -168,6 +168,60 @@ a:hover {
   min-width: 210px;
 }
 
+/* --- Language switcher -------------------------------------------------- */
+
+.language-switcher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.language-switcher select {
+  min-width: 140px;
+}
+
+/* --- Internationalization: RTL + CJK ----------------------------------- */
+
+/* RTL flip for Arabic. The app shell is a sidebar + main column; in
+   RTL the sidebar belongs on the right, so swap the flex order and
+   mirror directional spacing. Logical properties handle the rest. */
+[dir="rtl"] .app-shell {
+  flex-direction: row-reverse;
+}
+[dir="rtl"] .topbar__spacer {
+  /* spacer still expands; nothing to flip, but keep the rule explicit
+     so future directional tweaks have a home. */
+  flex: 1;
+}
+[dir="rtl"] .nav-link__icon {
+  margin-right: 0;
+  margin-left: 8px;
+}
+
+/* CJK typography: prepend region-appropriate system CJK font stacks so
+   Han/Kana/Hangul render with correct glyphs and comfortable line
+   metrics rather than falling back to a Latin-first face. Scoped by
+   :lang() so Latin locales are unaffected. */
+:lang(zh-Hans) {
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Noto Sans CJK SC", var(--font);
+  line-height: 1.7;
+}
+:lang(zh-Hant) {
+  font-family: "PingFang TC", "Microsoft JhengHei",
+    "Noto Sans CJK TC", var(--font);
+  line-height: 1.7;
+}
+:lang(ja) {
+  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic",
+    "Noto Sans CJK JP", var(--font);
+  line-height: 1.7;
+}
+:lang(ko) {
+  font-family: "Apple SD Gothic Neo", "Malgun Gothic",
+    "Noto Sans CJK KR", var(--font);
+  line-height: 1.7;
+}
+
 /* --- Page header -------------------------------------------------------- */
 
 .page-header {

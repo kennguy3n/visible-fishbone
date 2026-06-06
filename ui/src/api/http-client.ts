@@ -11,6 +11,7 @@ import axios, {
 } from "axios";
 import { runtimeConfig } from "@/lib/runtime-config";
 import { clearAccessToken, getAccessToken } from "@/auth/token-store";
+import { getActiveLocale } from "@/lib/i18n/locale-store";
 
 const instance = axios.create();
 
@@ -20,6 +21,10 @@ instance.interceptors.request.use((config) => {
   if (token) {
     config.headers.set("Authorization", `Bearer ${token}`);
   }
+  // Negotiate the API response language with the operator's selected
+  // UI locale. The control plane reads Accept-Language (internal/i18n)
+  // and falls back to English, so an unsupported value is harmless.
+  config.headers.set("Accept-Language", getActiveLocale());
   return config;
 });
 

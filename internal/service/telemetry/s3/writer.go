@@ -81,6 +81,11 @@ type Config struct {
 	FlushInterval      time.Duration
 	MaxBytesPerObject  int
 	MaxEventsPerObject int
+	// Residency, when non-nil, gates every Archive call fail-closed:
+	// this bucket lives in one region, so a tenant whose designated
+	// residency region differs has its events dropped from the cold
+	// path rather than written cross-region. Nil disables the check.
+	Residency ResidencyGuard
 }
 
 func (c *Config) fillDefaults() {
@@ -116,9 +121,10 @@ type Writer struct {
 	done        chan struct{}
 	flushSignal chan struct{}
 
-	uploaded    uint64
-	uploadBytes uint64
-	uploadFails uint64
+	uploaded         uint64
+	uploadBytes      uint64
+	uploadFails      uint64
+	residencyRejects uint64
 }
 
 // partitionKey groups events that share a destination object.
@@ -192,7 +198,26 @@ func NewWithAWSConfig(awsCfg aws.Config, cfg Config, logger *slog.Logger) (*Writ
 // flushed by the background goroutine on a size or interval
 // trigger. See HotWriter doc on Writer.Write for the same
 // "buffered means queued, not durable yet" caveat.
-func (w *Writer) Archive(_ context.Context, env schema.Envelope, raw []byte) error {
+func (w *Writer) Archive(ctx context.Context, env schema.Envelope, raw []byte) error {
+	// A cold archive record is meaningless without a tenant to scope it
+	// to, and residency resolution keys off the tenant — reject a nil
+	// tenant up front with a precise error (mirrors HotArchiver.Archive)
+	// rather than letting it surface later as an opaque resolver miss.
+	if env.TenantID == uuid.Nil {
+		return errors.New("s3: tenant_id is required")
+	}
+
+	// Residency gate — fail-closed, before any buffering. The cold
+	// archive must never land a tenant's events in a region other than
+	// its designated residency region.
+	if w.cfg.Residency != nil {
+		if err := w.cfg.Residency.Check(ctx, env.TenantID); err != nil {
+			w.mu.Lock()
+			w.residencyRejects++
+			w.mu.Unlock()
+			return fmt.Errorf("s3: cold archive blocked by residency: %w", err)
+		}
+	}
 	hour := env.Timestamp.UTC().Truncate(time.Hour)
 	key := partitionKey{
 		TenantID:   env.TenantID,
@@ -254,10 +279,11 @@ func (w *Writer) Stop(ctx context.Context) error {
 
 // Stats returns a snapshot of writer counters.
 type Stats struct {
-	OpenPartitions int
-	Uploaded       uint64
-	UploadBytes    uint64
-	UploadFails    uint64
+	OpenPartitions   int
+	Uploaded         uint64
+	UploadBytes      uint64
+	UploadFails      uint64
+	ResidencyRejects uint64
 }
 
 // Stats returns a snapshot of writer counters.
@@ -265,10 +291,11 @@ func (w *Writer) Stats() Stats {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return Stats{
-		OpenPartitions: len(w.partitions),
-		Uploaded:       w.uploaded,
-		UploadBytes:    w.uploadBytes,
-		UploadFails:    w.uploadFails,
+		OpenPartitions:   len(w.partitions),
+		Uploaded:         w.uploaded,
+		UploadBytes:      w.uploadBytes,
+		UploadFails:      w.uploadFails,
+		ResidencyRejects: w.residencyRejects,
 	}
 }
 
