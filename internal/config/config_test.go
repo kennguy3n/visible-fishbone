@@ -1477,3 +1477,38 @@ func TestLoadIAMCore(t *testing.T) {
 		}
 	})
 }
+
+// TestIAMCoreValidateIssuerScheme covers the environment-sensitive
+// issuer-scheme rule: http:// is allowed in dev/qa (loopback test
+// servers) but rejected in production (uat/prod), while https:// is
+// always allowed. Exercised against IAMCore.validate directly so the
+// production case need not satisfy every other prod-only config knob.
+func TestIAMCoreValidateIssuerScheme(t *testing.T) {
+	base := IAMCore{Audience: "sng-api"}
+	cases := []struct {
+		name    string
+		issuer  string
+		env     Environment
+		wantErr bool
+	}{
+		{"http allowed in dev", "http://127.0.0.1:9000", EnvironmentDev, false},
+		{"http allowed in qa", "http://iam.qa.internal", EnvironmentQA, false},
+		{"http rejected in uat", "http://iam.example.com", EnvironmentUAT, true},
+		{"http rejected in prod", "http://iam.example.com", EnvironmentProd, true},
+		{"https allowed in prod", "https://iam.example.com", EnvironmentProd, false},
+		{"bare host rejected everywhere", "iam.example.com", EnvironmentDev, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base
+			c.Issuer = tc.issuer
+			err := c.validate(tc.env)
+			if tc.wantErr && err == nil {
+				t.Fatalf("validate(%q, %s): expected error, got nil", tc.issuer, tc.env)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("validate(%q, %s): unexpected error: %v", tc.issuer, tc.env, err)
+			}
+		})
+	}
+}

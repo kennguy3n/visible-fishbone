@@ -818,8 +818,10 @@ func (i IAMCore) Enabled() bool {
 
 // validate enforces the cross-field invariants of the iam-core
 // integration. It is a no-op when the integration is disabled (no
-// issuer), so deployments that do not use iam-core are unaffected.
-func (i IAMCore) validate() error {
+// issuer), so deployments that do not use iam-core are unaffected. env
+// is the deployment stage; production stages additionally require a
+// TLS (https) issuer.
+func (i IAMCore) validate(env Environment) error {
 	if !i.Enabled() {
 		return nil
 	}
@@ -829,6 +831,15 @@ func (i IAMCore) validate() error {
 	// endpoint wrong and silently fail closed at runtime.
 	if !strings.HasPrefix(i.Issuer, "https://") && !strings.HasPrefix(i.Issuer, "http://") {
 		return fmt.Errorf("IAM_CORE_ISSUER must be an absolute http(s) URL, got %q", i.Issuer)
+	}
+	// In production (uat/prod) the issuer carries OAuth2 client secrets
+	// (Basic auth on the token endpoint) and bearer tokens, and its JWKS
+	// is the root of trust for every validated identity. A plaintext
+	// http:// issuer there exposes those to interception and downgrade,
+	// so require TLS. http:// stays allowed in dev/qa/local for loopback
+	// test servers (mirrors the PG_SSLMODE production posture).
+	if env.IsProduction() && strings.HasPrefix(i.Issuer, "http://") {
+		return fmt.Errorf("IAM_CORE_ISSUER must use https:// in production environments, got %q", i.Issuer)
 	}
 	// A token-validation middleware with no expected audience accepts
 	// any iam-core token for any relying party — a privilege-escalation
@@ -1684,7 +1695,7 @@ func (c Config) validate() error {
 	if c.MobileAuth.DiscoveryCacheTTL <= 0 {
 		return fmt.Errorf("MOBILE_AUTH_DISCOVERY_CACHE_TTL must be > 0, got %s", c.MobileAuth.DiscoveryCacheTTL)
 	}
-	if err := c.IAMCore.validate(); err != nil {
+	if err := c.IAMCore.validate(c.Environment); err != nil {
 		return err
 	}
 	if c.Policy.KeyWrapMasterB64 != "" && c.Policy.KeyWrapMasterFile != "" {

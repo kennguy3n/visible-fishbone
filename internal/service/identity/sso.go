@@ -51,6 +51,12 @@ type AdminSSOService struct {
 	users         repository.UserRepository
 	audit         repository.AuditLogRepository
 	signer        SessionSigner
+	// iamCoreIssuer is the upstream iam-core `iss` the admin
+	// authenticated against. It is recorded on the minted session as
+	// the `oidc_iss` claim so downstream consumers can tell which IdP
+	// vouched for the identity — distinct from the SNG session issuer
+	// (`iss`/signer.Issuer) that merely signs the local session.
+	iamCoreIssuer string
 	logger        *slog.Logger
 	nowFunc       func() time.Time
 	sessionTTL    time.Duration
@@ -76,13 +82,17 @@ func WithAdminAutoProvision(enabled bool) AdminSSOOption {
 }
 
 // NewAdminSSOService constructs the admin SSO flow. client, tenants,
-// users, audit and a signer with a non-empty secret are required.
+// users, audit, a non-empty iamCoreIssuer and a signer with a non-empty
+// secret are required. iamCoreIssuer is the upstream iam-core issuer the
+// admin authenticates against; it is recorded as the session's
+// `oidc_iss` claim (distinct from the SNG session signer's issuer).
 func NewAdminSSOService(
 	client AdminAuthClient,
 	tenants middleware.TenantResolver,
 	users repository.UserRepository,
 	audit repository.AuditLogRepository,
 	signer SessionSigner,
+	iamCoreIssuer string,
 	logger *slog.Logger,
 	opts ...AdminSSOOption,
 ) (*AdminSSOService, error) {
@@ -92,18 +102,22 @@ func NewAdminSSOService(
 	if len(signer.Secret) == 0 {
 		return nil, errors.New("sso: session signer secret not configured")
 	}
+	if strings.TrimSpace(iamCoreIssuer) == "" {
+		return nil, errors.New("sso: iam-core issuer not configured")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 	s := &AdminSSOService{
-		client:     client,
-		tenants:    tenants,
-		users:      users,
-		audit:      audit,
-		signer:     signer,
-		logger:     logger,
-		nowFunc:    func() time.Time { return time.Now().UTC() },
-		sessionTTL: time.Hour,
+		client:        client,
+		tenants:       tenants,
+		users:         users,
+		audit:         audit,
+		signer:        signer,
+		iamCoreIssuer: strings.TrimSpace(iamCoreIssuer),
+		logger:        logger,
+		nowFunc:       func() time.Time { return time.Now().UTC() },
+		sessionTTL:    time.Hour,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -326,7 +340,7 @@ func (s *AdminSSOService) mintAdminSession(tenantID uuid.UUID, user repository.U
 		"nbf":        now.Unix(),
 		"exp":        exp.Unix(),
 		"oidc_sub":   claims.Subject,
-		"oidc_iss":   s.signer.Issuer,
+		"oidc_iss":   s.iamCoreIssuer,
 		"email":      user.Email,
 		"roles":      claims.Roles,
 		"amr":        amr,

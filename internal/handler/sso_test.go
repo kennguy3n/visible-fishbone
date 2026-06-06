@@ -58,7 +58,7 @@ func newSSOHandler(t *testing.T) (*AdminSSOHandler, repository.UserRepository, u
 		Subject: "iam-user", TenantID: "acme", Email: "admin@acme.com", MFASatisfied: true,
 	}}
 	signer := identity.SessionSigner{Secret: []byte("cookie-secret-0123456789"), Issuer: "sng", Audience: "sng-admin"}
-	svc, err := identity.NewAdminSSOService(client, stubResolver{id: tn.ID}, users, memory.NewAuditLogRepository(st), signer, nil,
+	svc, err := identity.NewAdminSSOService(client, stubResolver{id: tn.ID}, users, memory.NewAuditLogRepository(st), signer, "https://iam.example.com", nil,
 		identity.WithAdminAutoProvision(true))
 	if err != nil {
 		t.Fatalf("NewAdminSSOService: %v", err)

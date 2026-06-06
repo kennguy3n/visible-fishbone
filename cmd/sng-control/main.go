@@ -1013,11 +1013,30 @@ func buildRouter(
 
 	// --- Admin SSO via iam-core (Session 2A, Task 3) -----------------
 	// The control-plane admin login federates to iam-core over the
-	// OAuth2 authorization-code + PKCE flow and mints an SNG session
-	// the standard auth middleware accepts. Only wired when iam-core is
-	// configured AND a callback URL is registered.
+	// OAuth2 authorization-code + PKCE flow and mints an SNG admin
+	// session the standard auth middleware accepts.
+	//
+	// The minted session is an HS256 SNG token verified by the symmetric
+	// (HMAC) Bearer path — the same mechanism the mobile-OIDC flow uses.
+	// That path is a deliberate non-production feature: it is compiled
+	// out of production builds and config refuses to boot prod with
+	// AUTH_JWT_SECRET set (see internal/middleware/auth_hmac_prod.go and
+	// internal/config.validate). So admin SSO is only wired when a
+	// usable session signer is configured (AUTH_JWT_SECRET present, i.e.
+	// dev/qa). Wiring it without a signer would either crash boot or —
+	// worse — mint admin tokens signed with an empty key. In production,
+	// admin identity is terminated at the gateway via OIDC rather than
+	// by a self-minted SNG session, so the handler is intentionally left
+	// unwired and a clear notice is logged instead of failing closed at
+	// boot.
 	var adminSSOHandler *handler.AdminSSOHandler
-	if iamCoreClient != nil && cfg.IAMCore.RedirectURL != "" {
+	switch {
+	case iamCoreClient == nil || cfg.IAMCore.RedirectURL == "":
+		// iam-core SSO not requested; nothing to wire.
+	case cfg.Auth.JWTSecret == "":
+		logger.Warn("sng-control: iam-core admin SSO not wired: AUTH_JWT_SECRET is unset, so the HMAC session-signing path required to mint admin sessions is unavailable (it is excluded from production builds). Terminate admin identity at the gateway via OIDC in production; set AUTH_JWT_SECRET in dev/qa to enable the /api/v1/auth/sso endpoints.",
+			slog.String("env", string(cfg.Environment)))
+	default:
 		adminSSOSvc, ssoErr := identity.NewAdminSSOService(
 			iamCoreClient, iamCoreResolver, userRepo, auditRepo,
 			identity.SessionSigner{
@@ -1025,6 +1044,7 @@ func buildRouter(
 				Issuer:   cfg.Auth.JWTIssuer,
 				Audience: cfg.Auth.JWTAudience,
 			},
+			cfg.IAMCore.Issuer,
 			logger,
 			identity.WithAdminAutoProvision(cfg.MobileAuth.AutoProvisionUsers),
 		)

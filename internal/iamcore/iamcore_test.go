@@ -32,6 +32,12 @@ type fakeIAMCore struct {
 	blocked     map[string]bool
 	nextUserID  int32
 	introspectM bool // value reported for mfa in introspection
+
+	// gotClientID/gotClientSecret record the most recent credentials the
+	// token endpoint decoded from the Basic auth header, so a test can
+	// assert they arrive verbatim (no percent-encoding).
+	gotClientID     string
+	gotClientSecret string
 }
 
 func newFakeIAMCore(t *testing.T) *fakeIAMCore {
@@ -79,12 +85,16 @@ func (f *fakeIAMCore) handleJWKS(w http.ResponseWriter, _ *http.Request) {
 func (f *fakeIAMCore) handleToken(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt32(&f.tokenHits, 1)
 	_ = r.ParseForm()
-	// Confidential client auth required.
+	// Confidential client auth required. r.BasicAuth() base64-decodes and
+	// splits on ':' verbatim — no form-decoding — exactly as iam-core's
+	// parseHTTPBasicAuth does, so what we record here is what iam-core
+	// would receive.
 	id, secret, ok := r.BasicAuth()
 	if !ok || id == "" || secret == "" {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+	f.gotClientID, f.gotClientSecret = id, secret
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"access_token": "mgmt-token-" + r.FormValue("grant_type"),
 		"token_type":   "Bearer",
@@ -354,6 +364,31 @@ func TestManagementToken_CachedAndReused(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&f.tokenHits); got != 1 {
 		t.Fatalf("expected management token minted once, got %d", got)
+	}
+}
+
+// TestManagementToken_CredentialsSentVerbatim guards the regression
+// where client credentials were percent-encoded (url.QueryEscape)
+// before HTTP Basic encoding. iam-core decodes the Basic header
+// verbatim (no form-decoding), so any client_id/secret containing
+// characters QueryEscape rewrites (space, '+', '/', '=' ...) would
+// arrive corrupted and authentication would fail. The credentials must
+// reach the server byte-for-byte.
+func TestManagementToken_CredentialsSentVerbatim(t *testing.T) {
+	f := newFakeIAMCore(t)
+	cfg := f.config()
+	cfg.ClientID = "sng gateway+id"
+	cfg.ClientSecret = "p@ss w/ord+=&%"
+	c := New(cfg)
+
+	if _, err := c.CreateUser(context.Background(), "tenant-abc", CreateManagementUser{Email: "a@example.com", Name: "A"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if f.gotClientID != cfg.ClientID {
+		t.Errorf("client_id corrupted in transit: got %q want %q", f.gotClientID, cfg.ClientID)
+	}
+	if f.gotClientSecret != cfg.ClientSecret {
+		t.Errorf("client_secret corrupted in transit: got %q want %q", f.gotClientSecret, cfg.ClientSecret)
 	}
 }
 

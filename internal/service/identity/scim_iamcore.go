@@ -66,7 +66,16 @@ func (b *iamCoreBridge) provisionUpstream(ctx context.Context, sngTenant uuid.UU
 	if err != nil {
 		return "", fmt.Errorf("resolve iam-core tenant: %w", err)
 	}
-	if existing, found, ferr := b.prov.FindUserByEmail(ctx, iamTenant, u.Email); ferr == nil && found {
+	existing, found, ferr := b.prov.FindUserByEmail(ctx, iamTenant, u.Email)
+	if ferr != nil {
+		// A transient lookup failure (network blip, iam-core 5xx) must
+		// NOT fall through to CreateUser: if the identity already exists
+		// upstream, creating again risks a duplicate iam-core user that
+		// no longer round-trips with this email. Fail closed so the SCIM
+		// operation can be retried idempotently once the lookup recovers.
+		return "", fmt.Errorf("lookup iam-core user by email: %w", ferr)
+	}
+	if found {
 		return existing.UserID, nil
 	}
 	created, err := b.prov.CreateUser(ctx, iamTenant, iamcore.CreateManagementUser{
@@ -102,7 +111,14 @@ func (b *iamCoreBridge) syncProfile(ctx context.Context, sngTenant uuid.UUID, us
 	}); err != nil {
 		return fmt.Errorf("update iam-core user: %w", err)
 	}
-	// Mirror the SCIM active flag onto iam-core's block state.
+	// Mirror the SCIM active flag onto iam-core's block state. This is
+	// applied unconditionally (no "only if changed" guard) on purpose: it
+	// is an idempotent reconciliation to the desired state, so it also
+	// self-heals any drift where iam-core's block state diverged from SNG
+	// (e.g. an out-of-band block in the iam-core console). The block /
+	// unblock endpoints are idempotent, so the cost is at most one extra
+	// Management call per SCIM update — cheaper and safer than trusting a
+	// possibly-stale local mirror of iam-core's block state.
 	if active {
 		if err := b.prov.UnblockUser(ctx, iamTenant, userID); err != nil {
 			return fmt.Errorf("unblock iam-core user: %w", err)

@@ -16,6 +16,10 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 )
 
+// testIAMCoreIssuer is the upstream iam-core issuer the fake client
+// stands in for; the minted session must record it as oidc_iss.
+const testIAMCoreIssuer = "https://iam.example.com"
+
 // fakeAuthClient is an in-memory AdminAuthClient: it records the
 // authorize params, returns a canned token on exchange, and yields
 // canned claims on verify.
@@ -90,7 +94,7 @@ func newSSOService(t *testing.T, client AdminAuthClient, resolver fakeResolver, 
 	resolver.id = tn.ID
 	users := memory.NewUserRepository(s)
 	signer := SessionSigner{Secret: []byte("test-secret-0123456789"), Issuer: "sng", Audience: "sng-admin"}
-	svc, err := NewAdminSSOService(client, resolver, users, memory.NewAuditLogRepository(s), signer, nil,
+	svc, err := NewAdminSSOService(client, resolver, users, memory.NewAuditLogRepository(s), signer, testIAMCoreIssuer, nil,
 		WithAdminAutoProvision(autoProvision), WithAdminSessionTTL(30*time.Minute))
 	if err != nil {
 		t.Fatalf("NewAdminSSOService: %v", err)
@@ -193,6 +197,14 @@ func TestAdminSSO_CompleteMintsSession(t *testing.T) {
 	}
 	if mc["oidc_sub"] != "iam-user-1" {
 		t.Errorf("oidc_sub = %v, want iam-user-1", mc["oidc_sub"])
+	}
+	// oidc_iss must identify the upstream iam-core IdP the admin
+	// authenticated against, NOT the local SNG session issuer.
+	if mc["oidc_iss"] != testIAMCoreIssuer {
+		t.Errorf("oidc_iss = %v, want %q (iam-core issuer, not SNG issuer)", mc["oidc_iss"], testIAMCoreIssuer)
+	}
+	if mc["iss"] != "sng" {
+		t.Errorf("iss = %v, want sng (local session issuer)", mc["iss"])
 	}
 }
 

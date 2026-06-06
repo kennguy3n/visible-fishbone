@@ -24,6 +24,7 @@ type fakeProvisioner struct {
 	unblocked  []string
 	deleted    []string
 	failCreate bool
+	failFind   bool
 }
 
 func newFakeProvisioner() *fakeProvisioner {
@@ -34,6 +35,9 @@ func newFakeProvisioner() *fakeProvisioner {
 }
 
 func (f *fakeProvisioner) FindUserByEmail(_ context.Context, iamTenantID, email string) (iamcore.ManagementUser, bool, error) {
+	if f.failFind {
+		return iamcore.ManagementUser{}, false, &iamcore.APIError{Op: "find", StatusCode: http.StatusBadGateway}
+	}
 	id, ok := f.byEmail[email]
 	if !ok {
 		return iamcore.ManagementUser{}, false, nil
@@ -177,6 +181,34 @@ func TestSCIMBridge_CreateFailClosed_NoLocalUser(t *testing.T) {
 	}
 	if len(res.Items) != 0 {
 		t.Errorf("expected 0 local users on fail-closed create, got %d", len(res.Items))
+	}
+}
+
+// TestSCIMBridge_TransientLookupFailsClosed guards against duplicate
+// upstream identities: when FindUserByEmail fails transiently the
+// bridge must NOT fall through to CreateUser (which could create a
+// second iam-core user for an email that already exists). The SCIM op
+// must fail closed with no local user and no upstream create.
+func TestSCIMBridge_TransientLookupFailsClosed(t *testing.T) {
+	t.Parallel()
+	prov := newFakeProvisioner()
+	prov.failFind = true
+	mapper := &fakeTenantMapper{iamTenant: "iam-tenant-1"}
+	svc, users, tid := newBridgedSCIM(t, prov, mapper)
+
+	_, err := svc.CreateUser(context.Background(), tid, SCIMUser{UserName: "flaky@example.com"})
+	if err == nil {
+		t.Fatal("expected error when upstream lookup fails transiently")
+	}
+	if len(prov.created) != 0 {
+		t.Errorf("must not create upstream on transient lookup failure, got %d creates", len(prov.created))
+	}
+	res, lerr := users.List(context.Background(), tid, repository.Page{Limit: 10})
+	if lerr != nil {
+		t.Fatalf("list: %v", lerr)
+	}
+	if len(res.Items) != 0 {
+		t.Errorf("expected 0 local users on fail-closed lookup, got %d", len(res.Items))
 	}
 }
 

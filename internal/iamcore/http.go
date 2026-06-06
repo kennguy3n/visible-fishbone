@@ -52,8 +52,19 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, out any) error {
 
 // postForm issues an application/x-www-form-urlencoded POST (the
 // OAuth2 token/introspect endpoints) and decodes the JSON response.
-// basicID/basicSecret, when non-empty, are sent as HTTP Basic auth
-// (confidential client authentication per RFC 6749 §2.3.1).
+// basicID/basicSecret, when non-empty, are sent as HTTP Basic auth for
+// confidential client authentication.
+//
+// The credentials are passed to SetBasicAuth VERBATIM (no
+// percent-encoding). RFC 6749 §2.3.1 nominally requires
+// application/x-www-form-urlencoded-encoding the client_id/secret
+// before HTTP Basic encoding, but iam-core's token endpoint decodes the
+// Basic header without form-decoding it (it base64-decodes and splits
+// on ':' verbatim — see iam-core internal/server.parseHTTPBasicAuth).
+// Percent-encoding here would therefore corrupt any credential
+// containing characters url.QueryEscape rewrites (space -> '+',
+// '+' -> '%2B', '/', '=' ...). Sending verbatim matches both iam-core's
+// parser and golang.org/x/oauth2's client-credentials behaviour.
 func (c *Client) postForm(ctx context.Context, endpoint string, form url.Values, basicID, basicSecret string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -62,7 +73,7 @@ func (c *Client) postForm(ctx context.Context, endpoint string, form url.Values,
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	if basicID != "" {
-		req.SetBasicAuth(url.QueryEscape(basicID), url.QueryEscape(basicSecret))
+		req.SetBasicAuth(basicID, basicSecret)
 	}
 	return c.do(req, "POST "+endpoint, out)
 }
