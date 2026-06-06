@@ -285,6 +285,21 @@ type DeviceIdentityBinding struct {
 	UpdatedAt        time.Time
 }
 
+// ResidencyAuditEntry is a durable record of a fail-closed
+// data-residency rejection (migration 046): a telemetry / policy /
+// cold-storage write was denied because its target region did not
+// match the tenant's designated residency region. Append-only; the
+// enforcer never updates or deletes rows.
+type ResidencyAuditEntry struct {
+	ID               uuid.UUID
+	TenantID         uuid.UUID
+	Plane            string
+	DesignatedRegion string
+	AttemptedRegion  string
+	Detail           string
+	CreatedAt        time.Time
+}
+
 // ClaimToken is a short-lived one-time enrollment credential. Only
 // the SHA-256 hash of the plaintext is persisted; callers receive
 // the plaintext exactly once at create-time.

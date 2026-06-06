@@ -82,21 +82,31 @@ func WriteError(w http.ResponseWriter, status int, code, msg string, details ...
 }
 
 // WriteRepositoryError maps repository sentinel errors to HTTP
-// status codes and standardised error codes.
+// status codes and standardised error codes. The human-readable
+// message for the fixed-text cases (not_found, conflict, forbidden,
+// internal) is localized to the request locale negotiated by
+// LocaleMiddleware, falling back to English when no locale was
+// negotiated. The error `code` is locale-invariant.
+//
+// invalid_argument and resource_exhausted keep err.Error() verbatim:
+// those carry caller-facing validation detail (e.g. "slug is
+// required") that is generated at the call site, not a fixed catalog
+// string, so localizing them would discard the specific context.
 func WriteRepositoryError(w http.ResponseWriter, err error) {
+	loc := localizerFromWriter(w)
 	switch {
 	case errors.Is(err, repository.ErrNotFound):
-		WriteError(w, http.StatusNotFound, "not_found", "resource not found")
+		WriteError(w, http.StatusNotFound, "not_found", loc.Message("error.not_found"))
 	case errors.Is(err, repository.ErrConflict):
-		WriteError(w, http.StatusConflict, "conflict", "uniqueness constraint violated")
+		WriteError(w, http.StatusConflict, "conflict", loc.Message("error.conflict"))
 	case errors.Is(err, repository.ErrForbidden):
-		WriteError(w, http.StatusForbidden, "forbidden", "operation not permitted")
+		WriteError(w, http.StatusForbidden, "forbidden", loc.Message("error.forbidden"))
 	case errors.Is(err, repository.ErrInvalidArgument):
 		WriteError(w, http.StatusBadRequest, "invalid_argument", err.Error())
 	case errors.Is(err, repository.ErrResourceExhausted):
 		WriteError(w, http.StatusTooManyRequests, "resource_exhausted", err.Error())
 	default:
-		WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		WriteError(w, http.StatusInternalServerError, "internal_error", loc.Message("error.internal"))
 	}
 }
 

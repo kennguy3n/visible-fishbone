@@ -7,6 +7,7 @@ import {
 } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import { AuthProvider } from "@/auth/auth-context";
+import { LocaleProvider } from "@/lib/i18n/locale-context";
 import { router } from "@/router";
 import "@/styles.css";
 
@@ -38,10 +39,12 @@ if (!rootEl) throw new Error("Root element #root not found");
 
 createRoot(rootEl).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <RouterProvider router={router} />
-      </AuthProvider>
-    </QueryClientProvider>
+    <LocaleProvider>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <RouterProvider router={router} />
+        </AuthProvider>
+      </QueryClientProvider>
+    </LocaleProvider>
   </StrictMode>,
 );
