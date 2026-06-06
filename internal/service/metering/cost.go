@@ -45,6 +45,12 @@ type UnitCosts struct {
 	// billed against the stream's point-in-time retained size rather
 	// than a cumulative write counter.
 	NATSPerGBMonthUSD float64
+	// PolicyEvalPer1MUSD is the amortised control-plane compute price
+	// per 1,000,000 policy-engine evaluations. Each evaluation is a
+	// near-free in-memory bundle lookup, so this is a small figure used
+	// to attribute control-plane CPU to a tenant's traffic pattern, not
+	// a feed/egress charge.
+	PolicyEvalPer1MUSD float64
 }
 
 // DefaultUnitCosts are conservative public-cloud list-price estimates.
@@ -59,6 +65,7 @@ var DefaultUnitCosts = UnitCosts{
 	ClickHousePer1MRowsUSD: 0.20,
 	S3PerGBMonthUSD:        0.023,
 	NATSPerGBMonthUSD:      0.10,
+	PolicyEvalPer1MUSD:     0.01,
 }
 
 const (
@@ -160,6 +167,8 @@ func (c *CostCalculator) MeterCostUSD(meter Meter, value int64) float64 {
 		return v / 1_000_000 * c.costs.ClickHousePer1MRowsUSD
 	case MeterS3BytesArchived:
 		return v / bytesPerGB * c.costs.S3PerGBMonthUSD
+	case MeterPolicyEvaluations:
+		return v / 1_000_000 * c.costs.PolicyEvalPer1MUSD
 	default:
 		return 0
 	}

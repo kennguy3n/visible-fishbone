@@ -55,6 +55,7 @@
 //! thin wrapper around [`run_from_args`].
 
 pub mod cli;
+pub mod commodity;
 pub mod config;
 pub mod hardware;
 pub mod pop;
@@ -63,6 +64,11 @@ pub mod supervisor;
 pub mod tracing_init;
 
 pub use cli::{Cli, DataPathSelection, PalBackend, UpdaterBackend};
+pub use commodity::{
+    AffinityError, AffinityPlan, BufferPoolError, COMMODITY_BASELINE, CommodityProfile,
+    DataPathProfile, Frame, HostTopology, MinSpec, MmapBufferPool, NumaNode, SpecAssessment,
+    WorkerAffinity,
+};
 pub use config::{ConfigError, EdgeConfig, EdgeMode, PopConfig};
 pub use hardware::{AttestationReport, HardwareAccelerator, HardwareDescriptor};
 pub use pop::{AtCapacity, CapacityReport, ConnGuard, PoPRouter, RouteError, TenantSelector};

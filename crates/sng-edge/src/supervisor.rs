@@ -44,6 +44,7 @@
 //!     mid-boot.
 
 use crate::cli::{Cli, DataPathSelection, PalBackend, UpdaterBackend};
+use crate::commodity::{CommodityProfile, SpecAssessment};
 use crate::config::EdgeConfig;
 use crate::subsystems::{
     CommsSubsystem, DnsSubsystem, FwSubsystem, HaSubsystem, IpsSubsystem, PolicyEvalSubsystem,
@@ -396,6 +397,39 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
 /// through the returned [`SupervisorReport`]'s `drain_results`.
 pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, EdgeBuildError> {
     let built = build_edge(&cli, &cfg)?;
+
+    // Commodity-hardware preflight. Probe the host, assess it against
+    // the documented minimum spec (2 cores / 2 GiB / 8 GiB), and log a
+    // one-line summary with the NUMA-aware worker affinity plan and the
+    // resolved data-path (eBPF fast-path) profile. The edge is a
+    // software appliance, so an undersized host is logged loudly rather
+    // than refused — operators running below spec get an unambiguous
+    // boot-log signal instead of a silent degradation.
+    let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let commodity = CommodityProfile::detect(
+        &cfg.ips.staging_dir,
+        workers,
+        resolve_datapath(cli.datapath),
+    );
+    match &commodity.assessment {
+        SpecAssessment::Pass => tracing::info!(
+            target: "sng_edge::commodity",
+            summary = %commodity.summary(),
+            "commodity-hardware preflight passed"
+        ),
+        SpecAssessment::Warn(_) => tracing::warn!(
+            target: "sng_edge::commodity",
+            summary = %commodity.summary(),
+            "commodity-hardware preflight raised warnings"
+        ),
+        SpecAssessment::Fail(_) => tracing::error!(
+            target: "sng_edge::commodity",
+            summary = %commodity.summary(),
+            "host is below the commodity-hardware minimum spec; \
+             booting anyway (software appliance) but this configuration is unsupported"
+        ),
+    }
+
     tracing::info!(
         target: "sng_edge::supervisor",
         updater_backend = ?cli.updater_backend,

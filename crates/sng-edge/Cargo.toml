@@ -45,6 +45,12 @@ async-trait = { workspace = true }
 arc-swap = { workspace = true }
 parking_lot = { workspace = true }
 
+# Commodity-hardware optimisation (src/commodity.rs): memmap2 backs the
+# zero-copy packet-buffer pool with an anonymous memory map; nix
+# (`sched`) provides CPU-affinity pinning on Linux.
+memmap2 = { workspace = true }
+nix = { workspace = true }
+
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

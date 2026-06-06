@@ -3,10 +3,11 @@
 //
 //   - GET  /api/v1/tenants/{tenant_id}/usage         — current-period usage by meter
 //   - GET  /api/v1/tenants/{tenant_id}/usage/history — trailing monthly aggregates
+//   - GET  /api/v1/tenants/{tenant_id}/cost-anomalies — per-meter spend anomalies
 //   - PUT  /api/v1/tenants/{tenant_id}/budgets       — set per-tenant budget overrides
 //   - GET  /api/v1/admin/cost-report                 — platform-wide cost report (MSP/admin only)
 //
-// The three tenant-scoped routes inherit RequireTenant via
+// The tenant-scoped routes inherit RequireTenant via
 // MountTenantScoped, so a JWT bound to tenant-A cannot read or mutate
 // tenant-B's budgets by forging the path. The admin cost-report is not
 // tenant-scoped; it is gated on an explicit platform-scoped RBAC grant
@@ -54,6 +55,13 @@ type MeteringPlatformReporter interface {
 	PlatformReport(ctx context.Context) (metering.PlatformCostReport, error)
 }
 
+// MeteringAnomalyDetector is the per-tenant cost-anomaly surface the
+// cost-anomaly endpoint needs (satisfied by
+// *metering.CostAnomalyDetector).
+type MeteringAnomalyDetector interface {
+	TenantAnomalies(ctx context.Context, tenantID uuid.UUID) ([]metering.CostAnomaly, error)
+}
+
 // permMeteringReadPlatformReport is the platform-scoped permission the
 // admin cost-report endpoint requires. It is platform-scoped (the
 // report spans every tenant), so an MSP- or tenant-scoped grant does
@@ -64,10 +72,11 @@ const permMeteringReadPlatformReport = "metering:read_platform_report"
 
 // MeteringHandler exposes the cost-metering REST surface.
 type MeteringHandler struct {
-	usage    MeteringUsageReader
-	budgets  MeteringBudgetService
-	reporter MeteringPlatformReporter
-	authz    PlatformAuthorizer
+	usage     MeteringUsageReader
+	budgets   MeteringBudgetService
+	reporter  MeteringPlatformReporter
+	anomalies MeteringAnomalyDetector
+	authz     PlatformAuthorizer
 }
 
 // NewMeteringHandler wires the handler. Any nil dependency disables the
@@ -76,8 +85,8 @@ type MeteringHandler struct {
 // cost-report route additionally requires authz: a nil authorizer
 // leaves it unregistered (it 404s) rather than serving platform-wide
 // cost data behind a weaker gate.
-func NewMeteringHandler(usage MeteringUsageReader, budgets MeteringBudgetService, reporter MeteringPlatformReporter, authz PlatformAuthorizer) *MeteringHandler {
-	return &MeteringHandler{usage: usage, budgets: budgets, reporter: reporter, authz: authz}
+func NewMeteringHandler(usage MeteringUsageReader, budgets MeteringBudgetService, reporter MeteringPlatformReporter, anomalies MeteringAnomalyDetector, authz PlatformAuthorizer) *MeteringHandler {
+	return &MeteringHandler{usage: usage, budgets: budgets, reporter: reporter, anomalies: anomalies, authz: authz}
 }
 
 // Register attaches the metering routes.
@@ -90,6 +99,9 @@ func (h *MeteringHandler) Register(mux *http.ServeMux) {
 	}
 	if h.usage != nil {
 		MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/usage/history", h.getUsageHistory)
+	}
+	if h.anomalies != nil {
+		MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/cost-anomalies", h.getCostAnomalies)
 	}
 	if h.budgets != nil {
 		MountTenantScoped(mux, "PUT /api/v1/tenants/{tenant_id}/budgets", h.putBudgets)
@@ -137,6 +149,20 @@ type usageHistoryResponse struct {
 	TenantID uuid.UUID          `json:"tenant_id"`
 	Months   int                `json:"months"`
 	Lines    []usageHistoryLine `json:"lines"`
+}
+
+type costAnomalyLine struct {
+	Meter               string  `json:"meter"`
+	Severity            string  `json:"severity"`
+	BaselineMonthlyUSD  float64 `json:"baseline_monthly_usd"`
+	ProjectedMonthlyUSD float64 `json:"projected_monthly_usd"`
+	Ratio               float64 `json:"ratio"`
+	BaselineMonths      int     `json:"baseline_months"`
+}
+
+type costAnomaliesResponse struct {
+	TenantID  uuid.UUID         `json:"tenant_id"`
+	Anomalies []costAnomalyLine `json:"anomalies"`
 }
 
 type budgetOverrideRequest struct {
@@ -260,6 +286,35 @@ func (h *MeteringHandler) getUsageHistory(w http.ResponseWriter, r *http.Request
 		Months:   months,
 		Lines:    lines,
 	})
+}
+
+// getCostAnomalies returns the per-meter cost anomalies for the tenant:
+// meters whose live projected monthly spend diverges from the tenant's
+// own trailing baseline beyond the detector's threshold. Tenant-scoped
+// (the path tenant_id is enforced by MountTenantScoped), so a tenant
+// only sees its own anomalies.
+func (h *MeteringHandler) getCostAnomalies(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	found, err := h.anomalies.TenantAnomalies(r.Context(), tenantID)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	lines := make([]costAnomalyLine, len(found))
+	for i, a := range found {
+		lines[i] = costAnomalyLine{
+			Meter:               string(a.Meter),
+			Severity:            string(a.Severity),
+			BaselineMonthlyUSD:  a.BaselineMonthlyUSD,
+			ProjectedMonthlyUSD: a.ProjectedMonthlyUSD,
+			Ratio:               a.Ratio,
+			BaselineMonths:      a.BaselineMonths,
+		}
+	}
+	WriteJSON(w, http.StatusOK, costAnomaliesResponse{TenantID: tenantID, Anomalies: lines})
 }
 
 // putBudgets applies one or more per-tenant budget overrides, then

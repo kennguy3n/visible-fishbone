@@ -61,6 +61,13 @@ const (
 	// MeterBandwidthProxiedBytes counts bytes proxied through the SWG
 	// data plane (egress cost driver).
 	MeterBandwidthProxiedBytes Meter = "bandwidth_proxied_bytes"
+	// MeterPolicyEvaluations counts policy-engine evaluations (one per
+	// flow classified against the compiled bundle). It carries a
+	// negligible per-unit dollar cost but is metered so a tenant whose
+	// traffic pattern drives a pathological evaluation rate (e.g. a
+	// mis-tuned agent re-classifying every packet) is caught by the
+	// budget guardrails before it loads the control plane.
+	MeterPolicyEvaluations Meter = "policy_evaluations"
 )
 
 // AllMeters is the canonical, ordered list of known meters. Used to
@@ -73,6 +80,7 @@ var AllMeters = []Meter{
 	MeterClickHouseRowsWritten,
 	MeterS3BytesArchived,
 	MeterBandwidthProxiedBytes,
+	MeterPolicyEvaluations,
 }
 
 // Valid reports whether m is a known meter.
@@ -120,11 +128,12 @@ func (p Period) Bounds(at time.Time) (start, end time.Time) {
 type PeriodResolver func(Meter) Period
 
 // DefaultMeterPeriod is the built-in PeriodResolver. URL-cat and
-// malware lookups are high-volume and budgeted daily; everything else
-// is budgeted monthly (matching the tier-default table in budget.go).
+// malware lookups and policy evaluations are high-volume and budgeted
+// daily; everything else is budgeted monthly (matching the tier-default
+// table in budget.go).
 func DefaultMeterPeriod(m Meter) Period {
 	switch m {
-	case MeterURLCatLookups, MeterMalwareScans:
+	case MeterURLCatLookups, MeterMalwareScans, MeterPolicyEvaluations:
 		return PeriodDaily
 	default:
 		return PeriodMonthly

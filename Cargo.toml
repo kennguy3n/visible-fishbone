@@ -166,12 +166,20 @@ toml = "0.8"
 # Linux/macOS where SIGHUP semantics differ from Windows).
 notify = "7"
 
+# Anonymous memory-mapped buffers for the edge commodity-hardware
+# packet buffer pool (zero-copy frame substrate). Cross-platform
+# (anonymous mmap on POSIX, VirtualAlloc on Windows) so the pool and
+# its tests build everywhere.
+memmap2 = "0.9"
+
 # Platform-specific. nix is used for POSIX (Linux + macOS) syscalls
 # that don't have a libstd equivalent (TPROXY, NETLINK, kqueue).
-# windows is used for the Windows-side WFP / TPM hooks. Both are
-# version-pinned here even when only one crate consumes them so
-# they cannot drift between crates.
-nix = { version = "0.30", default-features = false, features = ["fs", "user", "process", "signal", "net", "hostname"] }
+# The `sched` feature adds sched_setaffinity / CpuSet for the edge
+# commodity-hardware CPU-affinity pinning (Linux-only; the calls are
+# cfg-gated at the call site). windows is used for the Windows-side
+# WFP / TPM hooks. Both are version-pinned here even when only one
+# crate consumes them so they cannot drift between crates.
+nix = { version = "0.30", default-features = false, features = ["fs", "user", "process", "signal", "net", "hostname", "sched"] }
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",

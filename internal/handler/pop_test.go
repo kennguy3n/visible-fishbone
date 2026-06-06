@@ -36,6 +36,9 @@ type stubPoPService struct {
 	assignment    pop.Assignment
 	assignmentErr error
 
+	capacityPlans []pop.RegionCapacityPlan
+	capacityErr   error
+
 	gotRegister   pop.PoP
 	gotAssignTen  uuid.UUID
 	gotAssignPoP  uuid.UUID
@@ -56,6 +59,13 @@ func (s *stubPoPService) RegisterPoP(_ context.Context, p pop.PoP) (pop.PoP, err
 }
 
 func (s *stubPoPService) ListAvailable() []pop.PoP { return s.available }
+
+func (s *stubPoPService) PlanRegionCapacity(_ context.Context) ([]pop.RegionCapacityPlan, error) {
+	if s.capacityErr != nil {
+		return nil, s.capacityErr
+	}
+	return s.capacityPlans, nil
+}
 
 func (s *stubPoPService) HealthView(_ context.Context, _ uuid.UUID) (pop.PoPHealthView, error) {
 	if s.healthErr != nil {
@@ -292,5 +302,41 @@ func TestPoPHandler_NilAuthz_DisablesAdminRoutes(t *testing.T) {
 	}
 	if svc.gotRegister.Region != "" {
 		t.Fatal("register handler ran despite nil authorizer")
+	}
+}
+
+func TestPoPHandler_CapacityPlan_OK(t *testing.T) {
+	t.Parallel()
+	svc := &stubPoPService{capacityPlans: []pop.RegionCapacityPlan{
+		{Region: "ap-southeast-1", ConnectedTenants: 700, CurrentPoPs: 2, RecommendedPoPs: 4, AvgTenantsPerPoP: 350, Direction: pop.ScaleUp},
+		{Region: "eu-central-1", ConnectedTenants: 10, CurrentPoPs: 1, RecommendedPoPs: 1, AvgTenantsPerPoP: 10, Direction: pop.ScaleHold},
+	}}
+	mux := popMux(svc, platformAuthz{allow: true})
+	rec := httptest.NewRecorder()
+	req := authedReq(httptest.NewRequest(http.MethodGet, "/api/v1/pops/capacity-plan", nil))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Items []handler.RegionCapacityPlanResponse `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Items) != 2 || body.Items[0].Region != "ap-southeast-1" ||
+		body.Items[0].RecommendedPoPs != 4 || body.Items[0].Direction != "up" {
+		t.Fatalf("items = %+v", body.Items)
+	}
+}
+
+func TestPoPHandler_CapacityPlan_Forbidden(t *testing.T) {
+	t.Parallel()
+	mux := popMux(&stubPoPService{}, platformAuthz{allow: false})
+	rec := httptest.NewRecorder()
+	req := authedReq(httptest.NewRequest(http.MethodGet, "/api/v1/pops/capacity-plan", nil))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
 	}
 }

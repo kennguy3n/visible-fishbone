@@ -53,12 +53,14 @@ type RegionLocator interface {
 // Service is the control-plane PoP manager: registry + health +
 // capacity + tenant assignments.
 type Service struct {
-	store     Store
-	registry  *Registry
-	locator   RegionLocator
-	logger    *slog.Logger
-	highWater float64
-	clock     func() time.Time
+	store         Store
+	registry      *Registry
+	locator       RegionLocator
+	tenantRegions TenantRegionResolver
+	logger        *slog.Logger
+	highWater     float64
+	autoscale     AutoscaleConfig
+	clock         func() time.Time
 }
 
 // Option configures a Service.
@@ -77,6 +79,22 @@ func WithLogger(l *slog.Logger) Option {
 // assignment.
 func WithRegionLocator(loc RegionLocator) Option {
 	return func(s *Service) { s.locator = loc }
+}
+
+// WithTenantRegionResolver wires the resolver that maps a tenant to its
+// coarse region marker, enabling tenant-region-biased PoP selection. A
+// nil resolver (the default) leaves selection on client-IP region and
+// load alone, preserving the pre-2B behaviour.
+func WithTenantRegionResolver(r TenantRegionResolver) Option {
+	return func(s *Service) { s.tenantRegions = r }
+}
+
+// WithAutoscaleConfig overrides the connected-tenant-per-PoP target
+// band used by PlanRegionCapacity. The zero value keeps the package
+// default; band invariants are re-established by withDefaults at plan
+// time, so a partial override is safe.
+func WithAutoscaleConfig(c AutoscaleConfig) Option {
+	return func(s *Service) { s.autoscale = c }
 }
 
 // WithHighWaterFraction overrides the overload threshold. Values
@@ -247,7 +265,7 @@ func (s *Service) AssignPoP(ctx context.Context, tenantID uuid.UUID, clientIP st
 		return PoP{}, err
 	}
 
-	best, err := s.pickBest(clientAddr)
+	best, err := s.pickBest(clientAddr, s.preferredRegionSet(ctx, tenantID))
 	if err != nil {
 		return PoP{}, err
 	}
@@ -264,9 +282,27 @@ type candidate struct {
 }
 
 // pickBest selects the lowest-latency healthy PoP for a client,
-// biased to the client's region when known. Returns
-// repository.ErrResourceExhausted when no PoP can take new load.
-func (s *Service) pickBest(clientAddr netip.Addr) (PoP, error) {
+// biased first to the tenant's region group (when groupRegions is
+// non-nil) and then to the client's region (when a locator resolves
+// one). Returns repository.ErrResourceExhausted when no PoP can take
+// new load.
+//
+// Candidate-pool precedence (first non-empty wins):
+//
+//	with a tenant region group:
+//	  1. in-group AND in client-region   (closest, residency-aligned)
+//	  2. in-group                        (residency-aligned)
+//	  3. global                          (availability fallback)
+//	without a tenant region group (pre-2B behaviour):
+//	  1. in client-region
+//	  2. global
+//
+// The group is a strong preference, not a hard pin: when the tenant's
+// region group is exhausted we fall back to the global least-loaded
+// PoP and log it, so a regional outage degrades latency rather than
+// stranding the tenant. Hard data-residency pinning is an operator
+// override assignment, not this path.
+func (s *Service) pickBest(clientAddr netip.Addr, groupRegions map[string]bool) (PoP, error) {
 	snap := s.registry.current()
 	var preferredRegion string
 	var haveRegion bool
@@ -274,7 +310,7 @@ func (s *Service) pickBest(clientAddr netip.Addr) (PoP, error) {
 		preferredRegion, haveRegion = s.locator.LocateRegion(clientAddr)
 	}
 
-	var inRegion, global []candidate
+	var inGroupInRegion, inGroup, inRegion, global []candidate
 	for _, p := range snap.pops {
 		if !p.Enabled {
 			continue
@@ -289,26 +325,57 @@ func (s *Service) pickBest(clientAddr netip.Addr) (PoP, error) {
 		}
 		c := candidate{pop: p, util: u}
 		global = append(global, c)
-		if haveRegion && p.Region == preferredRegion {
+		clientRegionMatch := haveRegion && p.Region == preferredRegion
+		if clientRegionMatch {
 			inRegion = append(inRegion, c)
+		}
+		if groupRegions != nil && groupRegions[p.Region] {
+			inGroup = append(inGroup, c)
+			if clientRegionMatch {
+				inGroupInRegion = append(inGroupInRegion, c)
+			}
 		}
 	}
 
-	pool := global
-	if len(inRegion) > 0 {
-		pool = inRegion
-	}
+	pool := selectPool(groupRegions != nil, inGroupInRegion, inGroup, inRegion, global)
 	if len(pool) == 0 {
 		return PoP{}, fmt.Errorf("%w: no healthy PoP with available capacity", repository.ErrResourceExhausted)
 	}
-	// Least-loaded first; ties broken by id for determinism.
+	if groupRegions != nil && len(inGroup) == 0 {
+		s.logger.Warn("pop: tenant region group exhausted; falling back to global least-loaded PoP")
+	}
+	return leastLoaded(pool), nil
+}
+
+// selectPool applies the candidate-pool precedence described on
+// pickBest and returns the first non-empty tier.
+func selectPool(haveGroup bool, inGroupInRegion, inGroup, inRegion, global []candidate) []candidate {
+	if haveGroup {
+		switch {
+		case len(inGroupInRegion) > 0:
+			return inGroupInRegion
+		case len(inGroup) > 0:
+			return inGroup
+		default:
+			return global
+		}
+	}
+	if len(inRegion) > 0 {
+		return inRegion
+	}
+	return global
+}
+
+// leastLoaded returns the lowest-utilization candidate, ties broken by
+// id for determinism. The input must be non-empty.
+func leastLoaded(pool []candidate) PoP {
 	sort.Slice(pool, func(i, j int) bool {
 		if pool[i].util != pool[j].util {
 			return pool[i].util < pool[j].util
 		}
 		return pool[i].pop.ID.String() < pool[j].pop.ID.String()
 	})
-	return pool[0].pop, nil
+	return pool[0].pop
 }
 
 // SetAssignment pins tenantID to popID (operator override of the
