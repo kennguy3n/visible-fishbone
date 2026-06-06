@@ -200,9 +200,11 @@ impl IdTokenClaims {
         if self.mfa == Some(true) {
             return true;
         }
+        // Case-insensitive match without allocating a `String` per
+        // `amr` entry (`eq_ignore_ascii_case` folds in place).
         self.amr
             .iter()
-            .any(|m| MFA_AMR_FACTORS.contains(&m.to_ascii_lowercase().as_str()))
+            .any(|m| MFA_AMR_FACTORS.iter().any(|f| m.eq_ignore_ascii_case(f)))
     }
 }
 
