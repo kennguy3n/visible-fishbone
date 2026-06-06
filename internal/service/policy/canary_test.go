@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -285,26 +286,105 @@ func TestIsCanaryDevice_ApproximatesTargetRate(t *testing.T) {
 	}
 }
 
+// detUUID deterministically derives a well-spread UUID from a
+// seed via splitmix64. Tests get pseudo-random-looking IDs that
+// are byte-identical on every run, so statistical assertions over
+// them are reproducible and can never flake.
+func detUUID(seed uint64) uuid.UUID {
+	x := seed
+	next := func() uint64 {
+		x += 0x9E3779B97F4A7C15
+		z := x
+		z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+		z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+		return z ^ (z >> 31)
+	}
+	var u uuid.UUID
+	binary.LittleEndian.PutUint64(u[0:8], next())
+	binary.LittleEndian.PutUint64(u[8:16], next())
+	return u
+}
+
 func TestIsCanaryDevice_RolloutSaltsAreIndependent(t *testing.T) {
 	t.Parallel()
-	// Two distinct rollouts at the same percent should NOT pick
-	// the identical cohort — they're salted by rollout_id.
-	const N = 1000
+	// Two distinct rollouts at the same percent must sample
+	// independently: a device's membership in rollout A tells you
+	// nothing about its membership in rollout B, so the overlap of
+	// two 50% cohorts is Binomial(N, 0.25) — mean N/4, σ≈13.7 at
+	// N=1000. A weakly-salted hash (the old fnv1a(salt||id)%100)
+	// leaves the two cohorts correlated for unlucky rollout pairs,
+	// throwing heavy tails; this asserts every pair stays inside a
+	// tight band AND the mean across many pairs is ~25%.
+	//
+	// Device and rollout IDs are seed-derived (detUUID), so the
+	// result is fully deterministic and can never flake.
+	const (
+		N     = 1000
+		pairs = 200
+		// 6σ band around the Binomial(1000,0.25) mean of 250
+		// (σ≈13.69 -> 6σ≈82). True independence stays well inside.
+		lo = 168
+		hi = 332
+	)
 	deviceIDs := make([]uuid.UUID, N)
 	for i := range deviceIDs {
-		deviceIDs[i] = uuid.New()
+		deviceIDs[i] = detUUID(uint64(i))
 	}
-	rollA, rollB := uuid.New(), uuid.New()
-	overlap := 0
-	for _, d := range deviceIDs {
-		if IsCanaryDevice(rollA, d, 50) && IsCanaryDevice(rollB, d, 50) {
-			overlap++
+	totalOverlap := 0
+	for p := 0; p < pairs; p++ {
+		rollA := detUUID(0x1_0000_0000 + uint64(2*p))
+		rollB := detUUID(0x1_0000_0000 + uint64(2*p+1))
+		overlap := 0
+		for _, d := range deviceIDs {
+			if IsCanaryDevice(rollA, d, 50) && IsCanaryDevice(rollB, d, 50) {
+				overlap++
+			}
+		}
+		totalOverlap += overlap
+		if overlap < lo || overlap > hi {
+			t.Errorf("pair %d overlap %d outside 6σ independence band [%d,%d] (rollouts not independent?)", p, overlap, lo, hi)
 		}
 	}
-	// Independent samples at 50% each should overlap ~25% of
-	// the time. Wide slack so the test isn't flaky.
-	if overlap < N/5 || overlap > N*2/5 {
-		t.Fatalf("overlap %d devices outside 20-40%% of %d (rollouts not independent?)", overlap, N)
+	mean := float64(totalOverlap) / float64(pairs)
+	if mean < 0.24*N || mean > 0.26*N {
+		t.Fatalf("mean overlap %.1f over %d pairs not ~25%% of %d", mean, pairs, N)
+	}
+}
+
+func TestIsCanaryDevice_DeterministicAndMonotonic(t *testing.T) {
+	t.Parallel()
+	// Fixed IDs pin the contract without any statistics, so this
+	// case can never flake: the 0/100 edges are absolute, repeated
+	// calls are stable, and once a device joins the cohort at some
+	// percent it stays in for every higher percent (its bucket is
+	// fixed, so membership is monotonic in canaryPercent).
+	roll := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	dev := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+
+	if IsCanaryDevice(roll, dev, 0) {
+		t.Error("0% must exclude every device")
+	}
+	if !IsCanaryDevice(roll, dev, 100) {
+		t.Error("100% must include every device")
+	}
+	want := IsCanaryDevice(roll, dev, 50)
+	for i := 0; i < 5; i++ {
+		if IsCanaryDevice(roll, dev, 50) != want {
+			t.Fatal("verdict is not deterministic across calls")
+		}
+	}
+	joinedAt := 0
+	for p := 1; p <= 100; p++ {
+		in := IsCanaryDevice(roll, dev, p)
+		switch {
+		case in && joinedAt == 0:
+			joinedAt = p
+		case !in && joinedAt != 0:
+			t.Fatalf("device left cohort at percent %d after joining at %d (non-monotonic)", p, joinedAt)
+		}
+	}
+	if joinedAt == 0 {
+		t.Fatal("device never joined cohort across 1..100")
 	}
 }
 

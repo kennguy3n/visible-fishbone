@@ -460,11 +460,26 @@ func (s *CanaryService) List(ctx context.Context, tenantID uuid.UUID, page repos
 // (rollout_id, device_id) always returns the same answer, so a
 // device cannot flap between cohorts across polls.
 //
-// Algorithm: fnv1a64(rolloutID_bytes || deviceID_bytes) % 100 <
-// canaryPercent. fnv1a was chosen for its uniform distribution
-// at small sample sizes and zero-allocation hot path; we don't
-// need cryptographic strength here — the cohort assignment is
-// an operator-visible administrative selection, not a security
+// Algorithm: hash the device id and the rollout id with fnv1a64
+// independently, then combine them through the splitmix64 mixing
+// finalizer before taking the bucket mod 100; a device is in the
+// canary iff bucket < canaryPercent.
+//
+// The two-hash-then-mix construction is what makes the *rollout*
+// act as a true independent salt. An earlier version fed
+// fnv1a64(rolloutID || deviceID) directly to % 100, but FNV-1a's
+// weak avalanche means two different rollout salts leave the
+// internal state highly correlated, so for unlucky rollout pairs
+// the two cohorts were not independent (sometimes strongly
+// overlapping, sometimes strongly disjoint). That both violated
+// the documented "each device is independently sampled across
+// rollouts" invariant and produced heavy distribution tails.
+// Mixing the rollout hash with the splitmix64 finalizer
+// (multiply + xorshift rounds) gives full avalanche, so two
+// rollouts at the same percent over the same fleet overlap at
+// the expected Binomial(fleet, p²) rate. fnv1a + splitmix64 are
+// non-cryptographic and zero-allocation; cohort assignment is an
+// operator-visible administrative selection, not a security
 // boundary.
 //
 // canaryPercent == 0 returns false for every device (the dry-
@@ -478,13 +493,32 @@ func IsCanaryDevice(rolloutID, deviceID uuid.UUID, canaryPercent int) bool {
 	if canaryPercent >= 100 {
 		return true
 	}
-	h := fnv.New64a()
-	// rolloutID acts as a per-rollout salt so two rollouts at
-	// the same percent over the same fleet do NOT pick the
-	// same cohort — each device is independently sampled
-	// across rollouts, matching operator expectations.
-	_, _ = h.Write(rolloutID[:])
-	_, _ = h.Write(deviceID[:])
-	bucket := h.Sum64() % 100
+	hd := fnv.New64a()
+	_, _ = hd.Write(deviceID[:])
+	hr := fnv.New64a()
+	_, _ = hr.Write(rolloutID[:])
+	bucket := mixCanary(hd.Sum64(), hr.Sum64()) % 100
 	return bucket < uint64(canaryPercent)
+}
+
+// mixCanary combines an independent device hash and rollout hash
+// into a well-distributed bucket source. The rollout hash is run
+// through a splitmix64 increment/multiply step and xor-folded
+// into the device hash, then the whole word is passed through the
+// splitmix64 finalizer so every input bit avalanches across the
+// output. This decorrelates cohorts of distinct rollouts (see
+// IsCanaryDevice) where a plain salted FNV-1a does not.
+func mixCanary(device, rollout uint64) uint64 {
+	const (
+		gamma = 0x9E3779B97F4A7C15
+		m1    = 0xBF58476D1CE4E5B9
+		m2    = 0x94D049BB133111EB
+	)
+	x := device ^ (rollout*gamma + gamma)
+	x ^= x >> 30
+	x *= m1
+	x ^= x >> 27
+	x *= m2
+	x ^= x >> 31
+	return x
 }
