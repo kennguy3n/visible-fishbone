@@ -144,6 +144,11 @@ type Store struct {
 	// IdP federation configs — see migration 034. Tenant-scoped.
 	idpConfigs map[uuid.UUID]repository.IDPConfig
 
+	// Device ↔ iam-core identity bindings — see migration 044.
+	// Keyed by (tenant_id, device_id) to mirror the Postgres unique
+	// index uq_device_identity_bindings_tenant_device.
+	deviceIdentityBindings map[deviceBindingKey]repository.DeviceIdentityBinding
+
 	// clock is injected for deterministic tests. Defaults to
 	// time.Now.UTC.
 	clock func() time.Time
@@ -165,61 +170,69 @@ type mspTenantKey struct {
 	TenantID uuid.UUID
 }
 
+// deviceBindingKey is the composite key for device_identity_bindings.
+// Matches the Postgres unique index (tenant_id, device_id).
+type deviceBindingKey struct {
+	TenantID uuid.UUID
+	DeviceID uuid.UUID
+}
+
 // NewStore constructs an empty Store backed by `time.Now().UTC()`.
 func NewStore() *Store {
 	return &Store{
-		tenants:               map[uuid.UUID]repository.Tenant{},
-		sites:                 map[uuid.UUID]repository.Site{},
-		users:                 map[uuid.UUID]repository.User{},
-		devices:               map[uuid.UUID]repository.Device{},
-		claimTokens:           map[uuid.UUID]repository.ClaimToken{},
-		auditEntries:          map[uuid.UUID]repository.AuditEntry{},
-		policyGraphs:          map[uuid.UUID]repository.PolicyGraph{},
-		policyBundles:         map[uuid.UUID]repository.PolicyBundle{},
-		policySigningKeys:     map[uuid.UUID]repository.PolicySigningKey{},
-		policyRollouts:        map[uuid.UUID]repository.PolicyRollout{},
-		baselineModels:        map[uuid.UUID]repository.BaselineModel{},
-		alerts:                map[uuid.UUID]repository.Alert{},
-		alertSuppressions:     map[uuid.UUID]repository.AlertSuppression{},
-		alertFeedback:         map[uuid.UUID]repository.AlertFeedback{},
-		tenantAPIKeys:         map[uuid.UUID]repository.TenantAPIKey{},
-		webhookEndpoints:      map[uuid.UUID]repository.WebhookEndpoint{},
-		webhookDeliveries:     map[uuid.UUID]repository.WebhookDelivery{},
-		integrationConnectors: map[uuid.UUID]repository.IntegrationConnector{},
-		integrationDeliveries: map[uuid.UUID]repository.IntegrationDelivery{},
-		msps:                  map[uuid.UUID]repository.MSP{},
-		casbConnectors:        map[uuid.UUID]repository.CASBConnector{},
-		inlineCASBRules:       map[uuid.UUID]repository.InlineCASBRule{},
-		sandboxVerdicts:       map[uuid.UUID]repository.SandboxVerdict{},
-		rbiSessions:           map[uuid.UUID]repository.RBISession{},
-		casbDiscoveredApps:    map[uuid.UUID]repository.CASBDiscoveredApp{},
-		casbPostureChecks:     map[uuid.UUID]repository.CASBPostureCheck{},
-		mspTenants:            map[mspTenantKey]repository.MSPTenantBinding{},
-		deviceEnrollments:     map[deviceEnrollmentKey]repository.DeviceEnrollment{},
-		deviceCertificates:    map[uuid.UUID]repository.DeviceCertificate{},
-		appRegistry:           map[uuid.UUID]repository.AppRegistry{},
-		appOverrides:          map[uuid.UUID]repository.AppRegistryOverride{},
-		browserPolicies:       map[uuid.UUID]repository.BrowserPolicy{},
-		dataClassifications:   map[uuid.UUID]repository.DataClassification{},
-		dlpPolicies:           map[uuid.UUID]repository.DLPPolicy{},
-		dlpFingerprints:       map[uuid.UUID]repository.DLPFingerprint{},
-		dlpMatches:            map[uuid.UUID]repository.DLPMatch{},
-		aiSuggestions:         map[uuid.UUID]repository.AISuggestion{},
-		kbEntries:             map[uuid.UUID]repository.KBEntry{},
-		troubleshootSessions:  map[uuid.UUID]repository.TroubleshootSession{},
-		roles:                 map[uuid.UUID]repository.Role{},
-		userRoles:             map[userRoleKey]repository.UserRole{},
-		aiCorrelations:        map[uuid.UUID]repository.AICorrelation{},
-		complianceReports:     map[uuid.UUID]repository.ComplianceReport{},
-		complianceEvidence:    map[uuid.UUID]repository.ComplianceEvidence{},
-		playbooks:             map[uuid.UUID]repository.Playbook{},
-		playbookExecutions:    map[uuid.UUID]repository.PlaybookExecution{},
-		playbookStepResults:   map[uuid.UUID]repository.StepResult{},
-		playbookApprovals:     map[uuid.UUID]repository.PlaybookApproval{},
-		policyReviewSchedules: map[uuid.UUID]repository.PolicyReviewSchedule{},
-		opsHealthSnapshots:    map[uuid.UUID]repository.OpsHealthSnapshot{},
-		idpConfigs:            map[uuid.UUID]repository.IDPConfig{},
-		clock:                 func() time.Time { return time.Now().UTC() },
+		tenants:                map[uuid.UUID]repository.Tenant{},
+		sites:                  map[uuid.UUID]repository.Site{},
+		users:                  map[uuid.UUID]repository.User{},
+		devices:                map[uuid.UUID]repository.Device{},
+		claimTokens:            map[uuid.UUID]repository.ClaimToken{},
+		auditEntries:           map[uuid.UUID]repository.AuditEntry{},
+		policyGraphs:           map[uuid.UUID]repository.PolicyGraph{},
+		policyBundles:          map[uuid.UUID]repository.PolicyBundle{},
+		policySigningKeys:      map[uuid.UUID]repository.PolicySigningKey{},
+		policyRollouts:         map[uuid.UUID]repository.PolicyRollout{},
+		baselineModels:         map[uuid.UUID]repository.BaselineModel{},
+		alerts:                 map[uuid.UUID]repository.Alert{},
+		alertSuppressions:      map[uuid.UUID]repository.AlertSuppression{},
+		alertFeedback:          map[uuid.UUID]repository.AlertFeedback{},
+		tenantAPIKeys:          map[uuid.UUID]repository.TenantAPIKey{},
+		webhookEndpoints:       map[uuid.UUID]repository.WebhookEndpoint{},
+		webhookDeliveries:      map[uuid.UUID]repository.WebhookDelivery{},
+		integrationConnectors:  map[uuid.UUID]repository.IntegrationConnector{},
+		integrationDeliveries:  map[uuid.UUID]repository.IntegrationDelivery{},
+		msps:                   map[uuid.UUID]repository.MSP{},
+		casbConnectors:         map[uuid.UUID]repository.CASBConnector{},
+		inlineCASBRules:        map[uuid.UUID]repository.InlineCASBRule{},
+		sandboxVerdicts:        map[uuid.UUID]repository.SandboxVerdict{},
+		rbiSessions:            map[uuid.UUID]repository.RBISession{},
+		casbDiscoveredApps:     map[uuid.UUID]repository.CASBDiscoveredApp{},
+		casbPostureChecks:      map[uuid.UUID]repository.CASBPostureCheck{},
+		mspTenants:             map[mspTenantKey]repository.MSPTenantBinding{},
+		deviceEnrollments:      map[deviceEnrollmentKey]repository.DeviceEnrollment{},
+		deviceCertificates:     map[uuid.UUID]repository.DeviceCertificate{},
+		appRegistry:            map[uuid.UUID]repository.AppRegistry{},
+		appOverrides:           map[uuid.UUID]repository.AppRegistryOverride{},
+		browserPolicies:        map[uuid.UUID]repository.BrowserPolicy{},
+		dataClassifications:    map[uuid.UUID]repository.DataClassification{},
+		dlpPolicies:            map[uuid.UUID]repository.DLPPolicy{},
+		dlpFingerprints:        map[uuid.UUID]repository.DLPFingerprint{},
+		dlpMatches:             map[uuid.UUID]repository.DLPMatch{},
+		aiSuggestions:          map[uuid.UUID]repository.AISuggestion{},
+		kbEntries:              map[uuid.UUID]repository.KBEntry{},
+		troubleshootSessions:   map[uuid.UUID]repository.TroubleshootSession{},
+		roles:                  map[uuid.UUID]repository.Role{},
+		userRoles:              map[userRoleKey]repository.UserRole{},
+		aiCorrelations:         map[uuid.UUID]repository.AICorrelation{},
+		complianceReports:      map[uuid.UUID]repository.ComplianceReport{},
+		complianceEvidence:     map[uuid.UUID]repository.ComplianceEvidence{},
+		playbooks:              map[uuid.UUID]repository.Playbook{},
+		playbookExecutions:     map[uuid.UUID]repository.PlaybookExecution{},
+		playbookStepResults:    map[uuid.UUID]repository.StepResult{},
+		playbookApprovals:      map[uuid.UUID]repository.PlaybookApproval{},
+		policyReviewSchedules:  map[uuid.UUID]repository.PolicyReviewSchedule{},
+		opsHealthSnapshots:     map[uuid.UUID]repository.OpsHealthSnapshot{},
+		idpConfigs:             map[uuid.UUID]repository.IDPConfig{},
+		deviceIdentityBindings: map[deviceBindingKey]repository.DeviceIdentityBinding{},
+		clock:                  func() time.Time { return time.Now().UTC() },
 	}
 }
 
