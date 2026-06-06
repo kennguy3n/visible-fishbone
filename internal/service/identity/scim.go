@@ -15,25 +15,45 @@ import (
 // SCIMService implements inbound SCIM 2.0 user + group provisioning
 // (RFC 7643 / 7644). All operations are tenant-isolated via the
 // existing tenant context pattern.
+//
+// Session 2A: when an iam-core bridge is configured (WithIAMCoreBridge),
+// SNG remains the SCIM endpoint but user lifecycle (create / profile
+// update / (de)activate / delete) is propagated to the upstream
+// iam-core identity store via its Management API. The iam-core user_id
+// is persisted on the local user's IDPSubject so subsequent updates
+// address the same upstream identity.
 type SCIMService struct {
 	users   repository.UserRepository
 	roles   repository.RoleRepository
 	audit   repository.AuditLogRepository
 	nowFunc func() time.Time
+
+	// bridge is the optional upstream propagation collaborator. Nil
+	// disables propagation (pure local SCIM, unchanged behaviour).
+	bridge *iamCoreBridge
 }
+
+// SCIMOption configures optional SCIMService behaviour without
+// breaking the base constructor signature used across the codebase.
+type SCIMOption func(*SCIMService)
 
 // NewSCIMService returns a ready-to-use SCIM provisioning service.
 func NewSCIMService(
 	users repository.UserRepository,
 	roles repository.RoleRepository,
 	audit repository.AuditLogRepository,
+	opts ...SCIMOption,
 ) *SCIMService {
-	return &SCIMService{
+	s := &SCIMService{
 		users:   users,
 		roles:   roles,
 		audit:   audit,
 		nowFunc: func() time.Time { return time.Now().UTC() },
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // --- User operations ------------------------------------------------------
@@ -67,12 +87,26 @@ func (s *SCIMService) CreateUser(ctx context.Context, tenantID uuid.UUID, su SCI
 			displayName = strings.TrimSpace(su.Name.GivenName + " " + su.Name.FamilyName)
 		}
 	}
-	u, err := s.users.Create(ctx, tenantID, repository.User{
+	newUser := repository.User{
 		Email:      email,
 		Name:       displayName,
 		ExternalID: su.ExternalID,
 		Status:     status,
-	})
+	}
+	// Session 2A: provision (or reuse) the upstream iam-core identity
+	// FIRST so its user_id is stored on the local user at creation
+	// time. iam-core is the identity store; propagating before the
+	// local write means a failure to provision aborts the SCIM create
+	// (the IdP retries) instead of leaving a local user with no
+	// upstream identity.
+	if s.bridge != nil {
+		iamUserID, perr := s.bridge.provisionUpstream(ctx, tenantID, newUser, su)
+		if perr != nil {
+			return SCIMUser{}, fmt.Errorf("iam-core provisioning failed: %w", perr)
+		}
+		newUser.IDPSubject = iamUserID
+	}
+	u, err := s.users.Create(ctx, tenantID, newUser)
 	if err != nil {
 		return SCIMUser{}, err
 	}
@@ -131,6 +165,11 @@ func (s *SCIMService) UpdateUser(ctx context.Context, tenantID uuid.UUID, userID
 	if err != nil {
 		return SCIMUser{}, err
 	}
+	if s.bridge != nil {
+		if serr := s.bridge.syncProfile(ctx, tenantID, updated.IDPSubject, su, active); serr != nil {
+			return SCIMUser{}, fmt.Errorf("iam-core sync failed: %w", serr)
+		}
+	}
 	return userToSCIM(updated), nil
 }
 
@@ -166,16 +205,37 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 	if err != nil {
 		return SCIMUser{}, err
 	}
+	if s.bridge != nil {
+		active := updated.Status == repository.UserStatusActive
+		if serr := s.bridge.syncProfile(ctx, tenantID, updated.IDPSubject, userToSCIM(updated), active); serr != nil {
+			return SCIMUser{}, fmt.Errorf("iam-core sync failed: %w", serr)
+		}
+	}
 	return userToSCIM(updated), nil
 }
 
 // DeleteUser deactivates a SCIM user (SCIM DELETE = set active=false).
 func (s *SCIMService) DeleteUser(ctx context.Context, tenantID uuid.UUID, userID uuid.UUID) error {
-	_, err := s.users.Update(ctx, tenantID, repository.User{
+	// Capture the upstream identity before the local soft-delete so we
+	// can propagate the removal to iam-core.
+	var iamUserID string
+	if s.bridge != nil {
+		if existing, gerr := s.users.Get(ctx, tenantID, userID); gerr == nil {
+			iamUserID = existing.IDPSubject
+		}
+	}
+	if _, err := s.users.Update(ctx, tenantID, repository.User{
 		ID:     userID,
 		Status: repository.UserStatusDeleted,
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	if s.bridge != nil {
+		if derr := s.bridge.deleteUpstream(ctx, tenantID, iamUserID); derr != nil {
+			return fmt.Errorf("iam-core delete failed: %w", derr)
+		}
+	}
+	return nil
 }
 
 // ListUsers returns a SCIM list response for users matching the filter.
