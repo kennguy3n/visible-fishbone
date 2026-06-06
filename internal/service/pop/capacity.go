@@ -120,6 +120,15 @@ func (s *Service) PlanRegionCapacity(ctx context.Context) ([]RegionCapacityPlan,
 		tenants int
 		pops    int
 	}
+	// One cross-tenant round-trip for every PoP's assignment count,
+	// rather than an N+1 fan-out of ListAssignmentsByPoP. The planner
+	// only needs per-PoP tenant counts to size regions, not the
+	// assignment rows themselves.
+	counts, err := s.store.CountAssignmentsByPoP(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pop: capacity plan: count assignments: %w", err)
+	}
+
 	byRegion := make(map[string]*regionAgg)
 	for _, p := range snap.pops {
 		if !p.Enabled {
@@ -131,11 +140,7 @@ func (s *Service) PlanRegionCapacity(ctx context.Context) ([]RegionCapacityPlan,
 			byRegion[p.Region] = agg
 		}
 		agg.pops++
-		assignments, err := s.store.ListAssignmentsByPoP(ctx, p.ID)
-		if err != nil {
-			return nil, fmt.Errorf("pop: capacity plan: list assignments for pop %s: %w", p.ID, err)
-		}
-		agg.tenants += len(assignments)
+		agg.tenants += counts[p.ID]
 	}
 
 	plans := make([]RegionCapacityPlan, 0, len(byRegion))
@@ -212,9 +217,9 @@ func roundTo(v float64, n int) float64 {
 	return math.Round(v*pow) / pow
 }
 
-// assignmentCounter is the cross-tenant assignment-listing surface the
-// planner needs; declared for documentation and to keep the planner's
-// dependency on Store explicit. (Store already satisfies it.)
+// assignmentCounter is the cross-tenant assignment-counting surface
+// the planner needs; declared for documentation and to keep the
+// planner's dependency on Store explicit. (Store already satisfies it.)
 var _ interface {
-	ListAssignmentsByPoP(ctx context.Context, popID uuid.UUID) ([]Assignment, error)
+	CountAssignmentsByPoP(ctx context.Context) (map[uuid.UUID]int, error)
 } = (Store)(nil)

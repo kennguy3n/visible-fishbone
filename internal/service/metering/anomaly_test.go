@@ -245,6 +245,71 @@ func TestNewCostAnomalyDetectorNilDeps(t *testing.T) {
 	}
 }
 
+func TestAnomalyConfigWithDefaultsKeepsBandCoherent(t *testing.T) {
+	cases := []struct {
+		name         string
+		in           AnomalyConfig
+		wantWarn     float64
+		wantCritical float64
+	}{
+		{
+			name:         "zero value uses defaults",
+			in:           AnomalyConfig{},
+			wantWarn:     DefaultAnomalyConfig.WarnRatio,
+			wantCritical: DefaultAnomalyConfig.CriticalRatio,
+		},
+		{
+			// WarnRatio override above the default CriticalRatio (4.0)
+			// must pull CriticalRatio up so the warning tier survives.
+			name:         "warn override above default critical",
+			in:           AnomalyConfig{WarnRatio: 5.0},
+			wantWarn:     5.0,
+			wantCritical: 5.0,
+		},
+		{
+			name:         "both overridden coherently",
+			in:           AnomalyConfig{WarnRatio: 3.0, CriticalRatio: 6.0},
+			wantWarn:     3.0,
+			wantCritical: 6.0,
+		},
+		{
+			// A critical override below the effective warn ratio is
+			// rejected by the `>=` guard, so CriticalRatio keeps the
+			// default (4.0). Since 4.0 >= the overridden warn (3.0)
+			// the band stays coherent without needing the clamp.
+			name:         "sub-warn critical override rejected, keeps default",
+			in:           AnomalyConfig{WarnRatio: 3.0, CriticalRatio: 2.0},
+			wantWarn:     3.0,
+			wantCritical: DefaultAnomalyConfig.CriticalRatio,
+		},
+		{
+			// Warn override above the default critical AND a bad
+			// (sub-warn) critical override: the critical override is
+			// rejected, falling back to the default 4.0, which is now
+			// below the 5.0 warn — so the coherence clamp pulls it up
+			// to 5.0. This is the case the clamp exists for.
+			name:         "high warn with sub-warn critical clamps to warn",
+			in:           AnomalyConfig{WarnRatio: 5.0, CriticalRatio: 2.0},
+			wantWarn:     5.0,
+			wantCritical: 5.0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := tc.in.withDefaults()
+			if !approx(d.WarnRatio, tc.wantWarn) {
+				t.Errorf("WarnRatio = %v, want %v", d.WarnRatio, tc.wantWarn)
+			}
+			if !approx(d.CriticalRatio, tc.wantCritical) {
+				t.Errorf("CriticalRatio = %v, want %v", d.CriticalRatio, tc.wantCritical)
+			}
+			if d.CriticalRatio < d.WarnRatio {
+				t.Errorf("incoherent band: CriticalRatio %v < WarnRatio %v", d.CriticalRatio, d.WarnRatio)
+			}
+		})
+	}
+}
+
 func TestMedian(t *testing.T) {
 	cases := []struct {
 		in   []float64

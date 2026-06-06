@@ -1170,7 +1170,7 @@ type tenantRegionResolver struct {
 func (r tenantRegionResolver) TenantRegion(ctx context.Context, tenantID uuid.UUID) (string, error) {
 	t, err := r.tenants.Get(ctx, tenantID)
 	if err != nil {
-		return "", fmt.Errorf("pop: resolve tenant region: %w", err)
+		return "", fmt.Errorf("resolve tenant region: %w", err)
 	}
 	return t.Region, nil
 }

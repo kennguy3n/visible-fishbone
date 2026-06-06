@@ -145,6 +145,11 @@ pub struct BuiltEdge {
     pub ha: Arc<HaSubsystem>,
     /// Updater adapter.
     pub updater: Arc<UpdaterSubsystem>,
+    /// The resolved data-path backend (`auto` already collapsed to
+    /// `ebpf`/`nftables` via the one-time XDP capability probe).
+    /// Carried here so `run_edge` can size the commodity profile
+    /// without re-probing the kernel.
+    pub datapath: DataPathSelection,
 }
 
 impl std::fmt::Debug for BuiltEdge {
@@ -381,6 +386,7 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
         sdwan,
         ha,
         updater,
+        datapath,
     })
 }
 
@@ -406,11 +412,10 @@ pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, Edg
     // than refused — operators running below spec get an unambiguous
     // boot-log signal instead of a silent degradation.
     let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    let commodity = CommodityProfile::detect(
-        &cfg.ips.staging_dir,
-        workers,
-        resolve_datapath(cli.datapath),
-    );
+    // Reuse the data-path the firewall already resolved in
+    // build_edge rather than calling resolve_datapath again, which
+    // would re-run the XDP kernel capability probe.
+    let commodity = CommodityProfile::detect(&cfg.ips.staging_dir, workers, built.datapath);
     match &commodity.assessment {
         SpecAssessment::Pass => tracing::info!(
             target: "sng_edge::commodity",
@@ -489,6 +494,9 @@ pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, Edg
         sdwan,
         ha,
         updater,
+        // Plain Copy enum, no Arc to release; already consumed by
+        // the commodity preflight above.
+        datapath: _,
     } = built;
     drop(telemetry);
     drop(comms);

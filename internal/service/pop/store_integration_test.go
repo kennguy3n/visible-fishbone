@@ -336,6 +336,18 @@ func TestStore_AssignmentRLSIsolation(t *testing.T) {
 	if !seen[tenantA] || !seen[tenantB] {
 		t.Fatalf("ListAssignmentsByPoP missing a tenant: %+v", byPoP)
 	}
+
+	// The batch count (used by the capacity planner) is likewise a
+	// system-role read: it must aggregate across both tenants in one
+	// query, returning the full 2 for this PoP rather than an
+	// RLS-filtered single-tenant view.
+	counts, err := store.CountAssignmentsByPoP(ctx)
+	if err != nil {
+		t.Fatalf("CountAssignmentsByPoP: %v", err)
+	}
+	if counts[p.ID] != 2 {
+		t.Fatalf("CountAssignmentsByPoP[%s] = %d, want 2 (system role counts all tenants)", p.ID, counts[p.ID])
+	}
 }
 
 func TestStore_UpsertAssignmentReassigns(t *testing.T) {

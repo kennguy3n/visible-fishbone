@@ -705,6 +705,7 @@ async fn full_stack_boots_pulls_bundle_then_drains_cleanly() {
         sdwan,
         ha,
         updater,
+        datapath: _,
     } = built;
     drop(telemetry);
     drop(comms);
@@ -870,6 +871,7 @@ async fn supervisor_drain_under_continuous_load_within_budget() {
         sdwan,
         ha,
         updater,
+        datapath: _,
     } = built;
     drop(telemetry);
     drop(comms);
@@ -982,6 +984,7 @@ async fn comms_reconnects_after_control_plane_transient_outage() {
         sdwan,
         ha,
         updater,
+        datapath: _,
     } = built;
     drop(telemetry);
     drop(comms);

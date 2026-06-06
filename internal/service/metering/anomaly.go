@@ -164,6 +164,14 @@ func (cfg AnomalyConfig) withDefaults() AnomalyConfig {
 	if cfg.CriticalRatio >= d.WarnRatio {
 		d.CriticalRatio = cfg.CriticalRatio
 	}
+	// Keep the band coherent even after partial overrides: a WarnRatio
+	// override that lands above the (default or overridden) CriticalRatio
+	// would otherwise collapse the warning tier, classifying every emitted
+	// anomaly as critical. Pull CriticalRatio up to WarnRatio so warnings
+	// remain reachable.
+	if d.CriticalRatio < d.WarnRatio {
+		d.CriticalRatio = d.WarnRatio
+	}
 	if cfg.MinBaselineUSD > 0 {
 		d.MinBaselineUSD = cfg.MinBaselineUSD
 	}

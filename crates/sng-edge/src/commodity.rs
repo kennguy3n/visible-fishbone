@@ -152,8 +152,18 @@ fn uniform_node(logical_cpus: usize) -> NumaNode {
 fn read_linux_numa_nodes() -> Option<Vec<NumaNode>> {
     let base = Path::new("/sys/devices/system/node");
     let mut nodes = Vec::new();
+    // Per-node errors are skipped, not propagated: one unreadable
+    // node directory or cpulist must not discard the whole topology
+    // and collapse the host to the single-uniform-node fallback. A
+    // partial-but-real NUMA map (the nodes we could read) still pins
+    // workers correctly — AffinityPlan only ever indexes the nodes
+    // present in this list — whereas the uniform fallback loses all
+    // locality. Only a completely unreadable /sys/.../node directory
+    // (read_dir failing) returns None for the uniform fallback.
     for entry in std::fs::read_dir(base).ok()? {
-        let entry = entry.ok()?;
+        let Ok(entry) = entry else {
+            continue;
+        };
         let name = entry.file_name();
         let name = name.to_string_lossy();
         let Some(id_str) = name.strip_prefix("node") else {
@@ -162,7 +172,9 @@ fn read_linux_numa_nodes() -> Option<Vec<NumaNode>> {
         let Ok(id) = id_str.parse::<usize>() else {
             continue;
         };
-        let cpulist = std::fs::read_to_string(entry.path().join("cpulist")).ok()?;
+        let Ok(cpulist) = std::fs::read_to_string(entry.path().join("cpulist")) else {
+            continue;
+        };
         let cpus = parse_cpulist(&cpulist);
         if !cpus.is_empty() {
             nodes.push(NumaNode { id, cpus });
