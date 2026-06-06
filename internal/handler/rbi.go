@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbi"
+	"github.com/kennguy3n/visible-fishbone/internal/service/residency"
 )
 
 // RBIHandler exposes the Remote Browser Isolation REST surface:
@@ -225,6 +226,12 @@ func (h *RBIHandler) recordArtifact(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, rbi.ErrArtifactBlocked):
 			// Policy denied the transfer across the isolation boundary.
 			WriteError(w, http.StatusForbidden, "artifact_blocked", err.Error())
+		case errors.Is(err, residency.ErrResidencyViolation):
+			// The fail-closed residency guard refused to persist this
+			// tenant's data in this region. Surface it as a distinct 403
+			// so an operator can tell a residency misconfiguration apart
+			// from a policy block or a generic 500.
+			WriteError(w, http.StatusForbidden, "residency_violation", err.Error())
 		case errors.Is(err, rbi.ErrArtifactRepoUnavailable):
 			WriteError(w, http.StatusServiceUnavailable, "rbi_artifacts_unavailable", "RBI artifact persistence is not configured")
 		default:

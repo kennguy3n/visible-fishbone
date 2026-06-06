@@ -185,7 +185,18 @@ func (s *Service) Submit(ctx context.Context, sub Submission, actorID *uuid.UUID
 	// is delivered to every concurrent caller.
 	key := sub.TenantID.String() + ":" + sha
 	res, _, _ := s.flight.Do(key, func() (any, error) {
-		v, serr := s.submitOnce(ctx, sub, sha, actorID)
+		// Detach from the winning caller's cancellation. This
+		// detonation is shared by every concurrent caller for the
+		// same (tenant, digest), so it must not be torn down just
+		// because the caller that happened to win the flight had its
+		// request cancelled or timed out — the others' contexts may
+		// still be valid. WithoutCancel preserves request-scoped
+		// values (the tenant RLS binding, tracing span) while dropping
+		// the deadline/cancellation; the provider's own http.Client
+		// timeout (30s) bounds the call so the detached context cannot
+		// hang the flight indefinitely.
+		fctx := context.WithoutCancel(ctx)
+		v, serr := s.submitOnce(fctx, sub, sha, actorID)
 		return submitResult{verdict: v, err: serr}, nil
 	})
 	r := res.(submitResult)

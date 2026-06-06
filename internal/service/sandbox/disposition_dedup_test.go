@@ -81,6 +81,89 @@ func TestSubmit_ConcurrentDedup(t *testing.T) {
 	}
 }
 
+// ctxAwareProvider blocks Submit until released and then honours the
+// context it was given: if that context was cancelled it returns the
+// cancellation error, exactly as the real http.Client-backed
+// providers do. It lets a test prove the singleflight leader's
+// context is detached from any single caller's lifecycle.
+type ctxAwareProvider struct {
+	submitCalls atomic.Int32
+	release     chan struct{}
+}
+
+func (c *ctxAwareProvider) ID() string { return "ctxaware" }
+
+func (c *ctxAwareProvider) Submit(ctx context.Context, _ providers.File) (providers.SubmitResult, error) {
+	c.submitCalls.Add(1)
+	<-c.release
+	if err := ctx.Err(); err != nil {
+		return providers.SubmitResult{}, err
+	}
+	return providers.SubmitResult{
+		SandboxID: "ctx-id",
+		Status:    providers.StatusComplete,
+		Result: providers.PollResult{
+			Status:         providers.StatusComplete,
+			Classification: providers.ClassClean,
+			Confidence:     1.0,
+			AnalyzedAt:     time.Now().UTC(),
+		},
+	}, nil
+}
+
+func (c *ctxAwareProvider) Poll(_ context.Context, _ string) (providers.PollResult, error) {
+	return providers.PollResult{Status: providers.StatusComplete, Classification: providers.ClassClean}, nil
+}
+
+// TestSubmit_LeaderCancelDoesNotFailCoalesced verifies that when the
+// caller that wins the singleflight has its context cancelled, the
+// shared detonation still completes for the other coalesced callers
+// (whose contexts remain valid). Before the WithoutCancel fix the
+// leader's cancellation propagated to everyone.
+func TestSubmit_LeaderCancelDoesNotFailCoalesced(t *testing.T) {
+	p := &ctxAwareProvider{release: make(chan struct{})}
+	svc, tid := newTestEnv(t, p)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	var leaderErr, followerErr error
+	var followerVerdict Verdict
+
+	wg.Add(2)
+	// Leader: enters the flight first and blocks in the provider.
+	go func() {
+		defer wg.Done()
+		_, leaderErr = svc.Submit(leaderCtx, Submission{TenantID: tid, SHA256: testSHA256, Content: []byte("x")}, nil)
+	}()
+	// Give the leader a moment to win the flight before the follower
+	// coalesces onto it.
+	time.Sleep(30 * time.Millisecond)
+	go func() {
+		defer wg.Done()
+		followerVerdict, followerErr = svc.Submit(context.Background(), Submission{TenantID: tid, SHA256: testSHA256, Content: []byte("x")}, nil)
+	}()
+	time.Sleep(30 * time.Millisecond)
+
+	// Cancel the leader's context while the shared submission is still
+	// in flight, then let the provider return.
+	cancelLeader()
+	close(p.release)
+	wg.Wait()
+
+	if got := p.submitCalls.Load(); got != 1 {
+		t.Fatalf("expected provider Submit called exactly once, got %d", got)
+	}
+	if leaderErr != nil {
+		t.Fatalf("leader: detached context should not surface cancellation, got %v", leaderErr)
+	}
+	if followerErr != nil {
+		t.Fatalf("follower: leader cancel must not fail a coalesced caller, got %v", followerErr)
+	}
+	if followerVerdict.Classification != ClassClean {
+		t.Fatalf("follower: expected clean verdict, got %s", followerVerdict.Classification)
+	}
+}
+
 func TestDisposition_FailClosed(t *testing.T) {
 	cases := []struct {
 		name  string
