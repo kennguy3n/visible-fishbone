@@ -239,6 +239,20 @@ type DeviceIdentityBindingRepository interface {
 	DeleteByDevice(ctx context.Context, tenantID, deviceID uuid.UUID) error
 }
 
+// ResidencyAuditRepository owns the residency_audit table (migration
+// 046): the append-only record of fail-closed data-residency
+// rejections. All methods are tenant-scoped and enforce RLS via the
+// `sng.tenant_id` GUC.
+type ResidencyAuditRepository interface {
+	// Record persists one residency rejection. tenant_id and the
+	// designated region are required; the entry's ID/CreatedAt are
+	// assigned by the store when zero.
+	Record(ctx context.Context, tenantID uuid.UUID, e ResidencyAuditEntry) (ResidencyAuditEntry, error)
+	// List returns a tenant's residency rejections, newest first,
+	// bounded by limit (<=0 selects a sane default).
+	List(ctx context.Context, tenantID uuid.UUID, limit int) ([]ResidencyAuditEntry, error)
+}
+
 // --- Role -----------------------------------------------------------------
 
 // RoleRepository owns the roles + user_roles tables.

@@ -146,6 +146,14 @@ type ArchiverConfig struct {
 	FlushInterval      time.Duration
 	MaxBytesPerObject  int
 	MaxEventsPerObject int
+	// Residency, when non-nil, gates every Archive call: the
+	// cold-archive bucket lives in exactly one region, so before
+	// buffering a tenant's events the archiver asks the guard whether
+	// that tenant's data may reside in this bucket's region. A
+	// residency violation is fail-closed — the event is dropped from
+	// the cold path rather than written cross-region. Nil disables the
+	// check (single-region deployments, tests).
+	Residency ResidencyGuard
 }
 
 func (c *ArchiverConfig) fillDefaults() {
@@ -178,6 +186,15 @@ type ArchiverAPI interface {
 	GetObject(ctx context.Context, in *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 }
 
+// ResidencyGuard reports whether a tenant's data may be written to
+// this archiver's (single) bucket region. The s3 package deliberately
+// defines its own one-method interface rather than importing the
+// residency service, so the cold-storage data plane stays free of any
+// residency/repository dependency. *residency.Guard satisfies it.
+type ResidencyGuard interface {
+	Check(ctx context.Context, tenantID uuid.UUID) error
+}
+
 // Archiver is the cold-tier sealed-archive writer.
 type Archiver struct {
 	api     ArchiverAPI
@@ -201,6 +218,7 @@ type ArchiverStats struct {
 	BytesArchivedSealed  atomic.Uint64
 	ObjectsSealed        atomic.Uint64
 	BudgetRejections     atomic.Uint64
+	ResidencyRejections  atomic.Uint64
 	SealFailures         atomic.Uint64
 	IntegrityValidations atomic.Uint64
 }
@@ -213,6 +231,7 @@ func (s *ArchiverStats) Snapshot() ArchiverStatsSnapshot {
 		BytesArchivedSealed:  s.BytesArchivedSealed.Load(),
 		ObjectsSealed:        s.ObjectsSealed.Load(),
 		BudgetRejections:     s.BudgetRejections.Load(),
+		ResidencyRejections:  s.ResidencyRejections.Load(),
 		SealFailures:         s.SealFailures.Load(),
 		IntegrityValidations: s.IntegrityValidations.Load(),
 	}
@@ -225,6 +244,7 @@ type ArchiverStatsSnapshot struct {
 	BytesArchivedSealed  uint64
 	ObjectsSealed        uint64
 	BudgetRejections     uint64
+	ResidencyRejections  uint64
 	SealFailures         uint64
 	IntegrityValidations uint64
 }
@@ -312,6 +332,16 @@ func (a *Archiver) Archive(ctx context.Context, env schema.Envelope, raw []byte)
 
 	if env.TenantID == uuid.Nil {
 		return errors.New("s3: tenant_id is required")
+	}
+
+	// Residency gate — fail-closed, before any buffering or budget
+	// accounting. The cold archive must never land a tenant's events
+	// in a region other than its designated residency region.
+	if a.cfg.Residency != nil {
+		if err := a.cfg.Residency.Check(ctx, env.TenantID); err != nil {
+			a.stats.ResidencyRejections.Add(1)
+			return fmt.Errorf("s3: cold archive blocked by residency: %w", err)
+		}
 	}
 
 	now := a.nowFunc().UTC()

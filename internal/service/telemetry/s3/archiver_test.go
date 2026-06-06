@@ -394,6 +394,73 @@ func TestArchiver_RejectsZeroTenant(t *testing.T) {
 	}
 }
 
+// stubResidencyGuard lets the test drive the residency decision and
+// records the tenant it was asked about.
+type stubResidencyGuard struct {
+	err     error
+	calls   int
+	lastTID uuid.UUID
+}
+
+func (g *stubResidencyGuard) Check(_ context.Context, tenantID uuid.UUID) error {
+	g.calls++
+	g.lastTID = tenantID
+	return g.err
+}
+
+func TestArchiver_ResidencyGateRejectsCrossRegion(t *testing.T) {
+	t.Parallel()
+	api := newArchiverFakeS3()
+	guard := &stubResidencyGuard{err: errors.New("residency: cross-region write rejected")}
+	a, err := NewArchiver(api, ArchiverConfig{
+		Bucket:    "eu-bucket",
+		Residency: guard,
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewArchiver: %v", err)
+	}
+
+	tenant := uuid.New()
+	env, raw := makeEnvelope(t, tenant)
+	if err := a.Archive(context.Background(), env, raw); err == nil {
+		t.Fatal("expected residency rejection, got nil")
+	}
+	if guard.calls != 1 || guard.lastTID != tenant {
+		t.Fatalf("guard not consulted with tenant: calls=%d tid=%s", guard.calls, guard.lastTID)
+	}
+	// Nothing buffered: a later Flush must upload nothing.
+	if err := a.Flush(context.Background()); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if len(api.keys()) != 0 {
+		t.Fatalf("rejected event must not be buffered or uploaded, got %d objects", len(api.keys()))
+	}
+	if got := a.Stats().ResidencyRejections; got != 1 {
+		t.Fatalf("ResidencyRejections = %d, want 1", got)
+	}
+}
+
+func TestArchiver_ResidencyGateAllowsSameRegion(t *testing.T) {
+	t.Parallel()
+	api := newArchiverFakeS3()
+	guard := &stubResidencyGuard{err: nil}
+	a, err := NewArchiver(api, ArchiverConfig{Bucket: "ap-bucket", Residency: guard}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewArchiver: %v", err)
+	}
+	tenant := uuid.New()
+	env, raw := makeEnvelope(t, tenant)
+	if err := a.Archive(context.Background(), env, raw); err != nil {
+		t.Fatalf("permitted write should archive, got %v", err)
+	}
+	if err := a.Flush(context.Background()); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if len(api.keys()) != 2 {
+		t.Fatalf("expected data + manifest upload, got %d", len(api.keys()))
+	}
+}
+
 func TestNewArchiver_ValidatesInputs(t *testing.T) {
 	t.Parallel()
 	if _, err := NewArchiver(nil, ArchiverConfig{Bucket: "b"}, nil, nil); err == nil {

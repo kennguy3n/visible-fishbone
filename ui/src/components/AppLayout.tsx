@@ -1,19 +1,30 @@
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect } from "react";
+import { FormattedMessage, useIntl } from "react-intl";
 import { NAV } from "./nav";
+import { LanguageSwitcher } from "./LanguageSwitcher";
 import { useAuth } from "@/auth/auth-context";
 import { TenantProvider, useTenant } from "@/lib/tenant-context";
 
 function TenantSwitcher() {
   const { tenants, selectedTenantId, setSelectedTenantId, isLoading } =
     useTenant();
-  if (isLoading) return <span className="muted">Loading tenants…</span>;
+  if (isLoading)
+    return (
+      <span className="muted">
+        <FormattedMessage id="topbar.tenant.loading" />
+      </span>
+    );
   if (tenants.length === 0)
-    return <span className="muted">No tenants</span>;
+    return (
+      <span className="muted">
+        <FormattedMessage id="topbar.tenant.none" />
+      </span>
+    );
   return (
     <div className="tenant-switcher">
       <span className="muted" style={{ fontSize: 12 }}>
-        Tenant
+        <FormattedMessage id="topbar.tenant" />
       </span>
       <select
         value={selectedTenantId ?? ""}
@@ -38,7 +49,9 @@ function Sidebar() {
         <span className="sidebar__logo">S</span>
         <span>
           ShieldNet
-          <small>Gateway console</small>
+          <small>
+            <FormattedMessage id="app.subtitle" />
+          </small>
         </span>
       </div>
       <nav>
@@ -70,17 +83,23 @@ function Sidebar() {
 
 function Topbar() {
   const { claims, logout } = useAuth();
+  const intl = useIntl();
   const name = claims?.name || claims?.email || claims?.sub || "Operator";
   return (
     <header className="topbar">
       <TenantSwitcher />
       <div className="topbar__spacer" />
+      <LanguageSwitcher />
       <div className="topbar__user">
         <b>{name}</b>
         <span className="muted">{claims?.iss ?? "shieldnet"}</span>
       </div>
-      <button className="btn btn--ghost btn--sm" onClick={logout}>
-        Sign out
+      <button
+        className="btn btn--ghost btn--sm"
+        onClick={logout}
+        aria-label={intl.formatMessage({ id: "topbar.signOut" })}
+      >
+        <FormattedMessage id="topbar.signOut" />
       </button>
     </header>
   );

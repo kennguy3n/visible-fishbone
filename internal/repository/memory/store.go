@@ -149,6 +149,10 @@ type Store struct {
 	// index uq_device_identity_bindings_tenant_device.
 	deviceIdentityBindings map[deviceBindingKey]repository.DeviceIdentityBinding
 
+	// Residency enforcement audit trail — see migration 046.
+	// Tenant-scoped; append-only record of fail-closed rejections.
+	residencyAudit map[uuid.UUID]repository.ResidencyAuditEntry
+
 	// clock is injected for deterministic tests. Defaults to
 	// time.Now.UTC.
 	clock func() time.Time
@@ -232,6 +236,7 @@ func NewStore() *Store {
 		opsHealthSnapshots:     map[uuid.UUID]repository.OpsHealthSnapshot{},
 		idpConfigs:             map[uuid.UUID]repository.IDPConfig{},
 		deviceIdentityBindings: map[deviceBindingKey]repository.DeviceIdentityBinding{},
+		residencyAudit:         map[uuid.UUID]repository.ResidencyAuditEntry{},
 		clock:                  func() time.Time { return time.Now().UTC() },
 	}
 }

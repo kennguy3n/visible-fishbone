@@ -109,6 +109,11 @@ func (s *Store) NewDeviceIdentityBindingRepository() *DeviceIdentityBindingRepos
 	return &DeviceIdentityBindingRepository{s: s}
 }
 
+// NewResidencyAuditRepository binds the Store to repository.ResidencyAuditRepository.
+func (s *Store) NewResidencyAuditRepository() *ResidencyAuditRepository {
+	return &ResidencyAuditRepository{s: s}
+}
+
 // NewCASBConnectorRepository binds the Store to repository.CASBConnectorRepository.
 func (s *Store) NewCASBConnectorRepository() *CASBConnectorRepository {
 	return &CASBConnectorRepository{s: s}

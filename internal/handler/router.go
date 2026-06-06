@@ -272,6 +272,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 		middleware.Tracing(),
 		middleware.CORS(&deps.Config.CORS),
 		rlmw,
+		// LocaleMiddleware is the innermost middleware so the
+		// localizedResponseWriter it installs is the writer the
+		// handlers (and their Write* helpers) observe directly,
+		// negotiating Accept-Language and stamping Content-Language
+		// on every response.
+		LocaleMiddleware,
 	)
 	return chain(root)
 }

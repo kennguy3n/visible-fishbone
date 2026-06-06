@@ -16,6 +16,7 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/service/residency"
 	"github.com/kennguy3n/visible-fishbone/internal/slug"
 )
 
@@ -61,6 +62,15 @@ func (svc *Service) Create(ctx context.Context, t repository.Tenant) (repository
 	if !slug.IsValid(t.Slug) {
 		return repository.Tenant{}, fmt.Errorf("invalid slug %q: %w", t.Slug, repository.ErrInvalidArgument)
 	}
+	// A tenant's region is its data-residency designation; reject a
+	// malformed token at creation so a bad value can never become the
+	// region residency enforcement compares against. An empty region
+	// (residency unset) is permitted.
+	if t.Region != "" {
+		if err := residency.ValidateRegion(residency.Region(t.Region)); err != nil {
+			return repository.Tenant{}, fmt.Errorf("invalid residency region %q: %w", t.Region, repository.ErrInvalidArgument)
+		}
+	}
 	t.Status = repository.TenantStatusActive
 
 	created, err := svc.tenants.Create(ctx, t)
@@ -95,6 +105,15 @@ func (svc *Service) List(ctx context.Context, page repository.Page) (repository.
 func (svc *Service) Update(ctx context.Context, id uuid.UUID, patch repository.TenantPatch) (repository.Tenant, error) {
 	if id == uuid.Nil {
 		return repository.Tenant{}, fmt.Errorf("tenant ID is required: %w", repository.ErrInvalidArgument)
+	}
+	// Validate a region change the same way Create does. A non-nil,
+	// non-empty patch sets the residency designation, so it must be a
+	// well-formed token; a non-nil empty patch clears residency and is
+	// allowed.
+	if patch.Region != nil && *patch.Region != "" {
+		if err := residency.ValidateRegion(residency.Region(*patch.Region)); err != nil {
+			return repository.Tenant{}, fmt.Errorf("invalid residency region %q: %w", *patch.Region, repository.ErrInvalidArgument)
+		}
 	}
 	updated, err := svc.tenants.Update(ctx, id, patch)
 	if err != nil {

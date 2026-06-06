@@ -1233,9 +1233,10 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	}
 	nlQuery := aisvc.NewNLQueryEngine(effectiveLLM, nlOpts...)
 	reports := aisvc.NewReportEngine(effectiveLLM)
-	// No external threat feed is configured by default; enrichment
-	// returns an empty (non-escalated) context until one is wired.
-	threatIntel := aisvc.NewThreatIntelEngine(nil)
+	// Regional IOC feeds (SEA, GCC, DACH) back enrichment by default;
+	// a deployment can swap in an external feed by passing a different
+	// ThreatFeedProvider here.
+	threatIntel := aisvc.NewThreatIntelEngine(aisvc.NewRegionalFeeds())
 	h.SetEnhancedAI(correlation, nlQuery, reports, threatIntel, guardrails, correlationRepo)
 
 	// Back the read-only GET posture report with real alert counts so
