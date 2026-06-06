@@ -46,11 +46,11 @@ var _ AdminAuthClient = (*iamcore.Client)(nil)
 // The iam-core tokens are never persisted; only the minted SNG session
 // leaves the service.
 type AdminSSOService struct {
-	client        AdminAuthClient
-	tenants       middleware.TenantResolver
-	users         repository.UserRepository
-	audit         repository.AuditLogRepository
-	signer        SessionSigner
+	client  AdminAuthClient
+	tenants middleware.TenantResolver
+	users   repository.UserRepository
+	audit   repository.AuditLogRepository
+	signer  SessionSigner
 	// iamCoreIssuer is the upstream iam-core `iss` the admin
 	// authenticated against. It is recorded on the minted session as
 	// the `oidc_iss` claim so downstream consumers can tell which IdP
