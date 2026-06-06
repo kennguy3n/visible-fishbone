@@ -97,6 +97,44 @@ func TestCreate_RequiresName(t *testing.T) {
 	}
 }
 
+func TestCreate_RejectsMalformedRegion(t *testing.T) {
+	t.Parallel()
+	svc, _ := newSvc(t)
+	_, err := svc.Create(context.Background(), repository.Tenant{Name: "x", Region: "bad region!"})
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Errorf("err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestCreate_NormalizesRegion(t *testing.T) {
+	t.Parallel()
+	svc, _ := newSvc(t)
+	got, err := svc.Create(context.Background(), repository.Tenant{Name: "x", Region: "  AP-Southeast-1 "})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if got.Region != "ap-southeast-1" {
+		t.Errorf("region not canonicalized on store: %q", got.Region)
+	}
+}
+
+func TestUpdate_NormalizesRegion(t *testing.T) {
+	t.Parallel()
+	svc, _ := newSvc(t)
+	created, err := svc.Create(context.Background(), repository.Tenant{Name: "x"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	region := "EU-Central-1"
+	updated, err := svc.Update(context.Background(), created.ID, repository.TenantPatch{Region: &region})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.Region != "eu-central-1" {
+		t.Errorf("region not canonicalized on update: %q", updated.Region)
+	}
+}
+
 func TestSuspendDelete(t *testing.T) {
 	t.Parallel()
 	svc, _ := newSvc(t)

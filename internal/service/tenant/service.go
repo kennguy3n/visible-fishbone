@@ -70,6 +70,10 @@ func (svc *Service) Create(ctx context.Context, t repository.Tenant) (repository
 		if err := residency.ValidateRegion(residency.Region(t.Region)); err != nil {
 			return repository.Tenant{}, fmt.Errorf("invalid residency region %q: %w", t.Region, repository.ErrInvalidArgument)
 		}
+		// Persist the canonical (trimmed, lower-cased) form so the value
+		// stored in tenants.region matches what residency enforcement
+		// compares against and what UIs/logs render — no mixed-case drift.
+		t.Region = string(residency.Normalize(residency.Region(t.Region)))
 	}
 	t.Status = repository.TenantStatusActive
 
@@ -114,6 +118,9 @@ func (svc *Service) Update(ctx context.Context, id uuid.UUID, patch repository.T
 		if err := residency.ValidateRegion(residency.Region(*patch.Region)); err != nil {
 			return repository.Tenant{}, fmt.Errorf("invalid residency region %q: %w", *patch.Region, repository.ErrInvalidArgument)
 		}
+		// Canonicalize before storing, mirroring Create.
+		normalized := string(residency.Normalize(residency.Region(*patch.Region)))
+		patch.Region = &normalized
 	}
 	updated, err := svc.tenants.Update(ctx, id, patch)
 	if err != nil {

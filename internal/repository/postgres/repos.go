@@ -247,4 +247,5 @@ var (
 	_ repository.KBEntryRepository               = (*KBEntryRepository)(nil)
 	_ repository.TroubleshootSessionRepository   = (*TroubleshootSessionRepository)(nil)
 	_ repository.IDPConfigRepository             = (*IDPConfigRepository)(nil)
+	_ repository.ResidencyAuditRepository        = (*ResidencyAuditRepository)(nil)
 )

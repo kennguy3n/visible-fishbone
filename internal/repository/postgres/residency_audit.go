@@ -21,8 +21,6 @@ const defaultResidencyListLimit = 100
 // tenant.
 type ResidencyAuditRepository struct{ s *Store }
 
-var _ repository.ResidencyAuditRepository = (*ResidencyAuditRepository)(nil)
-
 func (r *ResidencyAuditRepository) Record(ctx context.Context, tenantID uuid.UUID, e repository.ResidencyAuditEntry) (repository.ResidencyAuditEntry, error) {
 	if tenantID == uuid.Nil || e.Plane == "" || e.DesignatedRegion == "" {
 		return repository.ResidencyAuditEntry{}, repository.ErrInvalidArgument
