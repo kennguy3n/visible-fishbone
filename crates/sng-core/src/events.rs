@@ -577,6 +577,7 @@ mod tests {
         for forbidden in [
             "device_id",
             "app_id",
+            "posture_result",
             "decision",
             "reason",
             "posture_detail",
