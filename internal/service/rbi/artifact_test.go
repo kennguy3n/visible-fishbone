@@ -148,6 +148,41 @@ func TestRecordArtifact_ClosedSessionRejected(t *testing.T) {
 	}
 }
 
+func TestRecordArtifact_ExpiredSessionRejected(t *testing.T) {
+	// A session that is still Status=="active" but whose TTL has
+	// elapsed (no reaper has run yet) must not accept artifacts:
+	// expiry is fail-closed, just like an explicit close.
+	store := memory.NewStore()
+	tid := seedTenant(t, store)
+	clock := testClock
+	ttl := 10 * time.Minute
+	svc := NewService(memory.NewRBISessionRepository(store),
+		WithProxy(ProxyConfig{BaseURL: "https://rbi.example.com"}),
+		WithSessionTTL(ttl),
+		WithArtifactRepo(memory.NewRBIArtifactRepository(store)),
+		WithArtifactPolicy(ArtifactPolicy{FileDownload: true}),
+		withClock(func() time.Time { return clock }),
+	)
+	sess := mustSession(t, svc, tid)
+
+	// Advance the clock just past the session's TTL: the session is
+	// now expired but its Status is still "active".
+	clock = clock.Add(ttl + time.Second)
+
+	_, err := svc.RecordArtifact(context.Background(), tid, sess.ID, ArtifactInput{
+		Kind:      ArtifactFileDownload,
+		Direction: DirectionInbound,
+		Filename:  "late.pdf",
+	}, nil)
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument for expired session, got %v", err)
+	}
+	got, _ := svc.ListArtifacts(context.Background(), tid, sess.ID, 0)
+	if len(got) != 0 {
+		t.Fatalf("expired-session artifact must not persist, got %d rows", len(got))
+	}
+}
+
 func TestRecordArtifact_TenantIsolation(t *testing.T) {
 	svc, store, tid := newArtifactSvc(t, ArtifactPolicy{FileDownload: true}, nil)
 	sess := mustSession(t, svc, tid)

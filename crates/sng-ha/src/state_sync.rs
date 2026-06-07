@@ -708,6 +708,7 @@ mod tests {
                 observed_at_unix_ms: 999,
             }),
             SyncRecord::Lagged,
+            SyncRecord::Fence { epoch: 42 },
         ];
         for r in records {
             let frame = encode_frame(&r).expect("encode");

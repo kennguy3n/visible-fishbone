@@ -296,6 +296,15 @@ func (s *Service) RecordArtifact(ctx context.Context, tenantID, sessionID uuid.U
 	if sess.Status != "active" {
 		return Artifact{}, fmt.Errorf("%w: session is not active", ErrInvalidArgument)
 	}
+	// Fail-closed on expiry: a session whose TTL has elapsed is
+	// logically closed even if no reaper has flipped its Status yet,
+	// so it must not accept artifacts. Status alone is insufficient
+	// because expiry is time-driven, not write-driven — without this
+	// an expired-but-unreaped session would keep recording transfers
+	// across an isolation boundary that should already be shut.
+	if !sess.ExpiresAt.IsZero() && !s.now().Before(sess.ExpiresAt) {
+		return Artifact{}, fmt.Errorf("%w: session has expired", ErrInvalidArgument)
+	}
 
 	// Policy gate: is this transfer allowed across the boundary at all?
 	allowed, reason := s.artifact.GateArtifact(kind, dir)
