@@ -185,9 +185,26 @@ type ZTNAEvent struct {
 	// `sng_ztna::policy::PostureResult` enum
 	// field-for-field; see that type's wire-form doc for
 	// the full rationale.
-	PostureResult    string `msgpack:"pst"` // pass|fail|not_evaluated
-	Decision         string `msgpack:"dec"` // allow|deny
-	Reason           string `msgpack:"rsn"` // detailed structured reason; see ZtnaDecisionReason in sng-ztna
+	PostureResult string `msgpack:"pst"` // pass|fail|not_evaluated
+	Decision      string `msgpack:"dec"` // allow|deny
+	Reason        string `msgpack:"rsn"` // detailed structured reason; see ZtnaDecisionReason in sng-ztna
+	// PostureDetail is the finer-grained posture-deny cause, set
+	// only on a "device_posture_insufficient" deny so dashboards
+	// can break out *why* posture failed without disturbing the
+	// stable `Reason` bucket. The mobile fail-closed pre-gate
+	// emits "posture_unprovable", "posture_compromised", or
+	// "posture_screen_lock_off"; it is empty on every other
+	// decision and from producers predating the field.
+	//
+	// `omitempty` mirrors the Rust-side
+	// `#[serde(skip_serializing_if = "String::is_empty")]` at
+	// `crates/sng-core/src/events.rs::ZtnaEvent.posture_detail`:
+	// the key is omitted from the wire map when empty and decodes
+	// to "" for a legacy producer, so it is additive and
+	// wire-stable across a rolling deploy. Consumers must NOT
+	// treat an empty value as a deny-bucket label — fall back to
+	// `Reason`.
+	PostureDetail    string `msgpack:"psd,omitempty"`
 	IdentityVerified bool   `msgpack:"iv"`
 }
 

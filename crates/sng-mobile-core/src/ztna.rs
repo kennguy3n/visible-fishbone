@@ -172,6 +172,11 @@ impl MobileZtnaManager {
                 app_id: request.app_id.clone(),
                 allow: false,
                 reason: reason.as_str().to_owned(),
+                // The stable wire reason stays `device_posture_insufficient`
+                // (consistent with a policy-side posture deny); the gate
+                // label rides the additive `posture_detail` field so
+                // dashboards can break out the cause.
+                posture_detail: Some(gate_label.to_owned()),
                 posture_result: decision.posture_result.as_str().to_owned(),
                 identity_verified: false,
             };
@@ -186,6 +191,9 @@ impl MobileZtnaManager {
                     app_id: request.app_id.clone(),
                     allow: decision.allow,
                     reason: reason.to_owned(),
+                    // Shared-policy decisions carry no mobile pre-gate
+                    // cause; the field stays unset.
+                    posture_detail: None,
                     posture_result: decision.posture_result.as_str().to_owned(),
                     identity_verified: true,
                 };
@@ -199,6 +207,9 @@ impl MobileZtnaManager {
                     app_id: request.app_id.clone(),
                     allow: false,
                     reason: reason.to_owned(),
+                    // Provider-miss errors short-circuit before the
+                    // posture check; no pre-gate cause applies.
+                    posture_detail: None,
                     posture_result: "not_evaluated".to_owned(),
                     identity_verified: false,
                 };
@@ -467,5 +478,49 @@ mod tests {
             .unwrap();
         assert!(!decision.allow, "a device with no screen lock is denied");
         assert_eq!(decision.reason.as_str(), "device_posture_insufficient");
+    }
+
+    #[test]
+    fn posture_pre_gate_labels_each_deny_cause() {
+        // No snapshot → unprovable.
+        assert_eq!(posture_pre_gate(None), Some("posture_unprovable"));
+
+        // Healthy device proceeds to the shared policy.
+        assert_eq!(posture_pre_gate(Some(&healthy_posture())), None);
+
+        // Jailbroken → compromised.
+        let compromised = MobilePostureSnapshot {
+            jailbroken: Some(true),
+            passcode_set: Some(true),
+            ..MobilePostureSnapshot::default()
+        };
+        assert_eq!(
+            posture_pre_gate(Some(&compromised)),
+            Some("posture_compromised")
+        );
+
+        // Screen lock off → screen_lock_off.
+        let unlocked = MobilePostureSnapshot {
+            passcode_set: Some(false),
+            jailbroken: Some(false),
+            root_detected: Some(false),
+            ..MobilePostureSnapshot::default()
+        };
+        assert_eq!(
+            posture_pre_gate(Some(&unlocked)),
+            Some("posture_screen_lock_off")
+        );
+
+        // Unknown passcode (older OS) → unprovable, never granted.
+        let unknown_lock = MobilePostureSnapshot {
+            passcode_set: None,
+            jailbroken: Some(false),
+            root_detected: Some(false),
+            ..MobilePostureSnapshot::default()
+        };
+        assert_eq!(
+            posture_pre_gate(Some(&unknown_lock)),
+            Some("posture_unprovable")
+        );
     }
 }

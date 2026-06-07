@@ -542,6 +542,11 @@ fn build_ztna_event(
         posture_result: decision.posture_result.as_str().to_string(),
         decision: if decision.allow { "allow" } else { "deny" }.to_string(),
         reason: decision.reason.as_str().to_string(),
+        // The server-side brain has no mobile fail-closed
+        // pre-gate, so it emits no finer posture-deny cause; the
+        // field stays empty (omitted on the wire) and dashboards
+        // fall back to `reason`. The mobile manager populates it.
+        posture_detail: String::new(),
         identity_verified,
     }
 }

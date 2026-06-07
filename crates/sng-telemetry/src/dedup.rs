@@ -144,6 +144,16 @@ fn hash_ztna(e: &ZtnaEvent, h: &mut DefaultHasher) {
     // and dashboards would lose the per-cause breakdown.
     e.decision.hash(h);
     e.reason.hash(h);
+    // `posture_detail` also participates: the three mobile
+    // posture-deny causes (`posture_unprovable`,
+    // `posture_compromised`, `posture_screen_lock_off`) all share
+    // the same `reason` (`device_posture_insufficient`), so
+    // without it two denies on the same (device, app) for
+    // different posture causes would collapse to one wire event
+    // and dashboards would lose the per-cause breakdown — the same
+    // rationale that keeps `reason` in the key. Empty for every
+    // non-pre-gate decision, so it is a no-op there.
+    e.posture_detail.hash(h);
     e.identity_verified.hash(h);
 }
 
@@ -368,6 +378,39 @@ mod tests {
         // Same reason still dedups.
         let idle2 = agent_with_reason("tunnel_down", "idle");
         assert_eq!(Fingerprint::compute(&idle), Fingerprint::compute(&idle2));
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_ztna_posture_detail() {
+        // Two posture denies on the same (device, app) that share
+        // the stable `reason` (`device_posture_insufficient`) but
+        // differ in the finer posture cause must NOT collapse in
+        // the dedup window — operators would otherwise lose the
+        // per-cause breakdown the `posture_detail` field exists to
+        // provide.
+        let deny = |detail: &str| {
+            TelemetryEvent::Ztna(sng_core::events::ZtnaEvent {
+                device_id: "d1".into(),
+                app_id: "wiki".into(),
+                posture_result: "fail".into(),
+                decision: "deny".into(),
+                reason: "device_posture_insufficient".into(),
+                posture_detail: detail.into(),
+                identity_verified: false,
+            })
+        };
+        let compromised = deny("posture_compromised");
+        let screen_lock = deny("posture_screen_lock_off");
+        assert_ne!(
+            Fingerprint::compute(&compromised),
+            Fingerprint::compute(&screen_lock)
+        );
+        // Same cause still dedups.
+        let compromised2 = deny("posture_compromised");
+        assert_eq!(
+            Fingerprint::compute(&compromised),
+            Fingerprint::compute(&compromised2)
+        );
     }
 
     #[test]

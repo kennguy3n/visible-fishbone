@@ -275,3 +275,65 @@ func TestAgentEvent_ReasonRoundTrip(t *testing.T) {
 		t.Errorf("empty reason must be omitted (omitempty); got map %v", rawEmpty)
 	}
 }
+
+// TestZTNAEvent_PostureDetailRoundTrip locks the additive `psd`
+// posture-deny-cause field's wire contract against the Rust producer
+// at `crates/sng-core/src/events.rs::ZtnaEvent.posture_detail`: it
+// rides the short `psd` tag when set, is omitted when empty
+// (`omitempty` mirrors the Rust `skip_serializing_if`), and an
+// envelope lacking `psd` still decodes to the empty sentinel so a
+// rolling deploy across the two languages is safe.
+func TestZTNAEvent_PostureDetailRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	withDetail := schema.ZTNAEvent{
+		DeviceID:      "d1",
+		AppID:         "wiki",
+		PostureResult: "fail",
+		Decision:      "deny",
+		Reason:        "device_posture_insufficient",
+		PostureDetail: "posture_compromised",
+	}
+	b, err := msgpack.Marshal(&withDetail)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := msgpack.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+	if raw["psd"] != "posture_compromised" {
+		t.Errorf("posture_detail must ride the psd tag; got map %v", raw)
+	}
+	// The stable reason bucket is unchanged.
+	if raw["rsn"] != "device_posture_insufficient" {
+		t.Errorf("reason bucket must stay stable; got map %v", raw)
+	}
+	var back schema.ZTNAEvent
+	if err := msgpack.Unmarshal(b, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.PostureDetail != "posture_compromised" {
+		t.Errorf("posture_detail round trip: got %q", back.PostureDetail)
+	}
+
+	// A non-posture decision leaves the field empty → omitted, so
+	// existing consumers see no new key.
+	empty := schema.ZTNAEvent{
+		DeviceID: "d1",
+		AppID:    "wiki",
+		Decision: "deny",
+		Reason:   "mfa_stale",
+	}
+	eb, err := msgpack.Marshal(&empty)
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	var rawEmpty map[string]any
+	if err := msgpack.Unmarshal(eb, &rawEmpty); err != nil {
+		t.Fatalf("unmarshal empty to map: %v", err)
+	}
+	if _, ok := rawEmpty["psd"]; ok {
+		t.Errorf("empty posture_detail must be omitted (omitempty); got map %v", rawEmpty)
+	}
+}
