@@ -256,9 +256,13 @@ impl MobileSdk {
     /// OIDC session is therefore cleared unconditionally — including
     /// when the secure store rejects the device-key deletion — so a
     /// backend error can never leave usable session tokens behind.
-    /// `sign_out` is infallible; the key-deletion error is still
-    /// surfaced afterwards so the caller retries the (idempotent)
-    /// wipe to destroy the device key too.
+    /// [`OidcAuthSession::wipe`] is infallible; the key-deletion
+    /// error is still surfaced afterwards so the caller retries the
+    /// (idempotent) wipe to destroy the device key too.
+    ///
+    /// The OIDC wipe also *latches* the session terminal, so an
+    /// interactive sign-in / step-up that was already in flight when
+    /// the wipe landed cannot reinstall a session afterwards.
     ///
     /// # Errors
     ///
@@ -266,7 +270,7 @@ impl MobileSdk {
     /// key deletion (the OIDC session is already cleared by then).
     pub async fn wipe(&self) -> Result<(), MobileSdkError> {
         let wipe_result = self.agent.wipe().await;
-        self.auth.sign_out();
+        self.auth.wipe();
         wipe_result.map_err(MobileSdkError::from)
     }
 }

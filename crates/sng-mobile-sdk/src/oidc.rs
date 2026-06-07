@@ -129,8 +129,14 @@ pub struct OidcAuthSession {
     /// Identity facts (tenant + MFA state) from the most recent
     /// successful sign-in's validated ID token, so the agent can
     /// read them without re-parsing the token. Cleared by
-    /// [`Self::sign_out`].
+    /// [`Self::wipe`].
     identity: Mutex<Option<SessionIdentity>>,
+    /// Latched `true` by [`Self::wipe`] (de-enrolment / leaver
+    /// revoke). Once set it is never cleared: the session is
+    /// terminal. [`Self::install_session`] refuses to install after
+    /// it is set, so an interactive sign-in already in flight when
+    /// the wipe lands cannot resurrect a session afterwards.
+    wiped: AtomicBool,
 }
 
 impl OidcAuthSession {
@@ -169,6 +175,7 @@ impl OidcAuthSession {
             session: Mutex::new(None),
             expected_tenant,
             identity: Mutex::new(None),
+            wiped: AtomicBool::new(false),
         })
     }
 
@@ -197,16 +204,30 @@ impl OidcAuthSession {
             .is_some_and(|i| i.mfa_satisfied)
     }
 
-    /// Clear the held session and captured identity (de-enrolment /
-    /// leaver wipe). Idempotent.
-    pub fn sign_out(&self) {
-        *self.session.lock() = None;
-        *self.identity.lock() = None;
+    /// Terminal de-enrolment: clear the held session and captured
+    /// identity and latch the session **wiped** so it can never be
+    /// re-established. Idempotent and infallible — a leaver / revoke
+    /// can replay it freely.
+    ///
+    /// Takes the `session` then `identity` locks (the same order
+    /// [`Self::install_session`] takes them) and flips the `wiped`
+    /// latch inside that critical section. This closes the
+    /// wipe-vs-sign-in race: a sign-in whose flow is mid-flight when
+    /// `wipe` runs either commits its session *before* this clears it
+    /// (so the clear wins), or reaches [`Self::install_session`]
+    /// *after* the latch is set (so the install is refused). Either
+    /// way no session outlives the wipe.
+    pub fn wipe(&self) {
+        let mut session = self.session.lock();
+        let mut identity = self.identity.lock();
+        self.wiped.store(true, Ordering::Release);
+        *session = None;
+        *identity = None;
     }
 
     /// Test-only: install captured identity facts without running an
     /// interactive sign-in (the host build has no [`AuthSurface`]),
-    /// so a test can assert they are cleared by [`Self::sign_out`].
+    /// so a test can assert they are cleared by [`Self::wipe`].
     #[cfg(test)]
     pub(crate) fn install_test_identity(&self, tenant_id: Option<&str>, mfa_satisfied: bool) {
         *self.identity.lock() = Some(SessionIdentity {
@@ -369,15 +390,43 @@ impl OidcAuthSession {
 
         // 9. Install the live session (moves `token_client` in so the
         //    auto-refresh loop reuses the same HTTP client) and record
-        //    the captured identity facts.
+        //    the captured identity facts — unless a wipe latched first.
         let mut config = SessionConfig::new(&meta.token_endpoint, &self.auth.client_id);
         config.refresh_skew = self.auth.refresh_skew;
         let session = OidcSession::start(token_client, config, &tokens, identity.as_ref());
-        *self.session.lock() = Some(Arc::new(session));
-        *self.identity.lock() = Some(SessionIdentity {
-            tenant_id: token_tenant,
-            mfa_satisfied,
-        });
+        self.install_session(
+            session,
+            SessionIdentity {
+                tenant_id: token_tenant,
+                mfa_satisfied,
+            },
+        )
+    }
+
+    /// Commit a freshly-authenticated `session` and its `identity`
+    /// facts, unless the device has been [wiped](Self::wipe).
+    ///
+    /// The `wiped` check and the slot writes happen under the
+    /// `session` then `identity` locks — the same order [`Self::wipe`]
+    /// takes them — so an install that loses the race against a
+    /// concurrent wipe is refused here rather than resurrecting a
+    /// session after de-enrolment. Fails closed: on a latched wipe it
+    /// leaves both slots untouched (already cleared by `wipe`) and
+    /// surfaces a sign-in error.
+    fn install_session(
+        &self,
+        session: OidcSession,
+        identity: SessionIdentity,
+    ) -> Result<(), MobileSdkError> {
+        let mut session_slot = self.session.lock();
+        let mut identity_slot = self.identity.lock();
+        if self.wiped.load(Ordering::Acquire) {
+            return Err(MobileSdkError::sign_in(
+                "device was de-enrolled (wiped) during sign-in; refusing to install a session",
+            ));
+        }
+        *session_slot = Some(Arc::new(session));
+        *identity_slot = Some(identity);
         Ok(())
     }
 
@@ -458,7 +507,97 @@ impl AuthSession for OidcAuthSession {
 
 #[cfg(test)]
 mod tests {
-    use super::enforce_tenant_binding;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use sng_mobile_core::AuthConfig;
+    use sng_oidc::{OidcSession, TokenClient, TokenResponse, session::SessionConfig};
+
+    use super::{OidcAuthSession, SessionIdentity, enforce_tenant_binding};
+    use crate::error::MobileSdkError;
+    use crate::host::HostAuthSurface;
+
+    fn host_auth_session(expected_tenant: Option<&str>) -> OidcAuthSession {
+        let auth = AuthConfig {
+            issuer: "https://idp.example.com".into(),
+            client_id: "client-1".into(),
+            scopes: vec!["openid".into()],
+            refresh_skew: Duration::from_secs(60),
+            refresh_jitter: Duration::from_secs(5),
+        };
+        OidcAuthSession::new(
+            auth,
+            "app://callback".into(),
+            Arc::new(HostAuthSurface),
+            expected_tenant.map(str::to_owned),
+        )
+        .expect("host auth session builds")
+    }
+
+    fn dummy_session() -> OidcSession {
+        let client = TokenClient::new().expect("token client builds");
+        let config = SessionConfig::new("https://idp.example.com/token", "client-1");
+        let tokens = TokenResponse {
+            access_token: "at".into(),
+            token_type: "Bearer".into(),
+            id_token: None,
+            refresh_token: Some("rt".into()),
+            expires_in: Some(3600),
+            scope: None,
+        };
+        OidcSession::start(client, config, &tokens, None)
+    }
+
+    fn bound_identity() -> SessionIdentity {
+        SessionIdentity {
+            tenant_id: Some("tenant-7".into()),
+            mfa_satisfied: true,
+        }
+    }
+
+    #[test]
+    fn install_session_commits_when_not_wiped() {
+        let auth = host_auth_session(Some("tenant-7"));
+        assert!(auth.current().is_none());
+        auth.install_session(dummy_session(), bound_identity())
+            .expect("install succeeds before any wipe");
+        assert!(auth.current().is_some());
+        assert_eq!(auth.tenant_id().as_deref(), Some("tenant-7"));
+        assert!(auth.mfa_satisfied());
+    }
+
+    #[test]
+    fn wipe_latches_terminal_and_refuses_racing_install() {
+        let auth = host_auth_session(Some("tenant-7"));
+        // A session is live, mirroring a device mid-use.
+        auth.install_session(dummy_session(), bound_identity())
+            .expect("initial install");
+
+        // Leaver / revoke wipe lands.
+        auth.wipe();
+        assert!(auth.current().is_none());
+        assert!(auth.tenant_id().is_none());
+        assert!(!auth.mfa_satisfied());
+
+        // A sign-in / step-up that was already in flight when the wipe
+        // landed now reaches its install step. It must be refused
+        // rather than resurrecting a session after de-enrolment.
+        let err = auth
+            .install_session(dummy_session(), bound_identity())
+            .expect_err("post-wipe install must fail closed");
+        assert!(matches!(err, MobileSdkError::SignIn { .. }), "{err:?}");
+        assert!(auth.current().is_none());
+        assert!(auth.tenant_id().is_none());
+        assert!(!auth.mfa_satisfied());
+    }
+
+    #[test]
+    fn wipe_is_idempotent() {
+        let auth = host_auth_session(Some("tenant-7"));
+        auth.wipe();
+        auth.wipe();
+        assert!(auth.current().is_none());
+    }
 
     #[test]
     fn tenant_binding_allows_exact_match() {
