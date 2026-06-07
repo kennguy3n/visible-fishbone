@@ -48,6 +48,51 @@ impl Drop for SignInGate<'_> {
     }
 }
 
+/// `acr_values` sent on an MFA step-up authorization. iam-core's
+/// universal-login maps the `mfa` ACR to a second-factor challenge;
+/// the security guarantee does not rest on this string, though —
+/// step-up is only accepted once the *returned* token's claims
+/// prove MFA ([`IdTokenClaims::mfa_satisfied`]).
+const MFA_ACR_VALUES: &str = "mfa";
+
+/// Secret-free identity facts captured from the validated ID token
+/// of the most recent successful sign-in.
+#[derive(Clone, Debug, Default)]
+struct SessionIdentity {
+    /// The IdP-asserted `tenant_id` claim, when present.
+    tenant_id: Option<String>,
+    /// Whether the token proved an MFA-satisfied authentication.
+    mfa_satisfied: bool,
+}
+
+/// Fail-closed tenant binding applied after ID-token validation.
+///
+/// When the device is enrolled under a tenant (`expected` is
+/// `Some`), the IdP-asserted `tenant_id` claim is the **sole
+/// authoritative** tenant: it must be present and equal to the
+/// enrolled tenant, so a user from another tenant cannot establish
+/// a session on this device and there is no header fallback. When
+/// no tenant is configured (`expected` is `None`) the check is a
+/// no-op (e.g. a non-iam-core IdP with no tenant concept).
+fn enforce_tenant_binding(
+    expected: Option<&str>,
+    token: Option<&str>,
+) -> Result<(), MobileSdkError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    match token {
+        Some(t) if t == expected => Ok(()),
+        Some(_) => Err(MobileSdkError::sign_in(
+            "identity token tenant does not match the device's enrolled tenant",
+        )),
+        None => Err(MobileSdkError::sign_in(
+            "identity token carried no tenant_id claim; refusing to bind a session to the \
+             device's tenant without an authoritative tenant assertion",
+        )),
+    }
+}
+
 /// An [`AuthSession`] backed by `sng-oidc`.
 ///
 /// Holds the platform [`AuthSurface`] (for the interactive browser
@@ -77,6 +122,21 @@ pub struct OidcAuthSession {
     /// `Arc` bump) before any `.await` so the lock is never held
     /// across the network round trip.
     session: Mutex<Option<Arc<OidcSession>>>,
+    /// The tenant this device is enrolled under. When `Some`,
+    /// sign-in is fail-closed on the token's `tenant_id` claim (see
+    /// [`enforce_tenant_binding`]).
+    expected_tenant: Option<String>,
+    /// Identity facts (tenant + MFA state) from the most recent
+    /// successful sign-in's validated ID token, so the agent can
+    /// read them without re-parsing the token. Cleared by
+    /// [`Self::wipe`].
+    identity: Mutex<Option<SessionIdentity>>,
+    /// Latched `true` by [`Self::wipe`] (de-enrolment / leaver
+    /// revoke). Once set it is never cleared: the session is
+    /// terminal. [`Self::install_session`] refuses to install after
+    /// it is set, so an interactive sign-in already in flight when
+    /// the wipe lands cannot resurrect a session afterwards.
+    wiped: AtomicBool,
 }
 
 impl OidcAuthSession {
@@ -95,6 +155,7 @@ impl OidcAuthSession {
         auth: AuthConfig,
         redirect_uri: String,
         surface: Arc<dyn AuthSurface>,
+        expected_tenant: Option<String>,
     ) -> Result<Self, MobileSdkError> {
         let discovery = DiscoveryClient::new().map_err(|e| {
             MobileSdkError::invalid_config(format!(
@@ -112,7 +173,67 @@ impl OidcAuthSession {
             jwks,
             sign_in_active: AtomicBool::new(false),
             session: Mutex::new(None),
+            expected_tenant,
+            identity: Mutex::new(None),
+            wiped: AtomicBool::new(false),
         })
+    }
+
+    /// The IdP-asserted tenant of the held session, if sign-in has
+    /// captured one. This is the authoritative tenant the session
+    /// is bound to (the `tenant_id` claim), never a client-supplied
+    /// value.
+    #[must_use]
+    pub fn tenant_id(&self) -> Option<String> {
+        self.identity
+            .lock()
+            .as_ref()
+            .and_then(|i| i.tenant_id.clone())
+    }
+
+    /// Whether the held session was established with an
+    /// MFA-satisfied authentication (per the token's `amr` / `mfa`
+    /// claims). `false` before sign-in or when only a single factor
+    /// was used — the caller should drive [`Self::step_up`] before
+    /// a sensitive operation in that case.
+    #[must_use]
+    pub fn mfa_satisfied(&self) -> bool {
+        self.identity
+            .lock()
+            .as_ref()
+            .is_some_and(|i| i.mfa_satisfied)
+    }
+
+    /// Terminal de-enrolment: clear the held session and captured
+    /// identity and latch the session **wiped** so it can never be
+    /// re-established. Idempotent and infallible — a leaver / revoke
+    /// can replay it freely.
+    ///
+    /// Takes the `session` then `identity` locks (the same order
+    /// [`Self::install_session`] takes them) and flips the `wiped`
+    /// latch inside that critical section. This closes the
+    /// wipe-vs-sign-in race: a sign-in whose flow is mid-flight when
+    /// `wipe` runs either commits its session *before* this clears it
+    /// (so the clear wins), or reaches [`Self::install_session`]
+    /// *after* the latch is set (so the install is refused). Either
+    /// way no session outlives the wipe.
+    pub fn wipe(&self) {
+        let mut session = self.session.lock();
+        let mut identity = self.identity.lock();
+        self.wiped.store(true, Ordering::Release);
+        *session = None;
+        *identity = None;
+    }
+
+    /// Test-only: install captured identity facts without running an
+    /// interactive sign-in (the host build has no [`AuthSurface`]),
+    /// so a test can assert they are cleared by [`Self::wipe`].
+    #[cfg(test)]
+    pub(crate) fn install_test_identity(&self, tenant_id: Option<&str>, mfa_satisfied: bool) {
+        *self.identity.lock() = Some(SessionIdentity {
+            tenant_id: tenant_id.map(str::to_owned),
+            mfa_satisfied,
+        });
     }
 
     /// Whether sign-in has installed a live session.
@@ -129,6 +250,41 @@ impl OidcAuthSession {
     /// becomes authenticated and [`Self::access_token`] starts
     /// returning live tokens.
     pub async fn sign_in(&self) -> Result<(), MobileSdkError> {
+        self.authorize_and_install(&[], false).await
+    }
+
+    /// Drive an MFA **step-up**: re-run the authorization-code flow
+    /// with `prompt=login` (force a fresh authentication, not an
+    /// SSO replay) and an MFA `acr_values`, then accept the result
+    /// only if the returned token's claims prove MFA. On success
+    /// the stronger session replaces the held one; on failure the
+    /// previously held session is left untouched.
+    ///
+    /// This is the ShieldNet step-up pattern from the iam-core
+    /// contract — drive a fresh OIDC re-auth requesting MFA and
+    /// validate the returned token's MFA claim — rather than
+    /// calling a (nonexistent) `/auth/mfa/verify` endpoint.
+    ///
+    /// # Errors
+    /// [`MobileSdkError::SignIn`] for any failure in the flow, and
+    /// specifically when the re-authenticated token is still not
+    /// MFA-satisfied (fail-closed).
+    pub async fn step_up(&self) -> Result<(), MobileSdkError> {
+        self.authorize_and_install(&[("prompt", "login"), ("acr_values", MFA_ACR_VALUES)], true)
+            .await
+    }
+
+    /// Run the authorization-code + PKCE flow once (with any
+    /// `extra_params` appended to the authorize request) and, on
+    /// success, install the resulting session. When `require_mfa`
+    /// is set the session is installed only if the returned token
+    /// proves MFA; otherwise the call fails closed without
+    /// disturbing any held session.
+    async fn authorize_and_install(
+        &self,
+        extra_params: &[(&str, &str)],
+        require_mfa: bool,
+    ) -> Result<(), MobileSdkError> {
         // 0. Reject a concurrent sign-in. `compare_exchange` claims the
         //    gate atomically; the guard clears it on every exit path.
         if self
@@ -153,7 +309,10 @@ impl OidcAuthSession {
         //    values.
         let pkce = PkceChallenge::generate();
         let scope = self.auth.scopes.join(" ");
-        let authz = AuthorizationRequest::new(&self.auth.client_id, redirect_uri, scope, &pkce);
+        let authz = extra_params.iter().fold(
+            AuthorizationRequest::new(&self.auth.client_id, redirect_uri, scope, &pkce),
+            |req, (key, value)| req.with_param(*key, *value),
+        );
         let state = authz.state.clone();
         let nonce = authz.nonce.clone();
         let url = authz.to_url(&meta.authorization_endpoint)?;
@@ -209,12 +368,65 @@ impl OidcAuthSession {
             )
             .await?;
 
-        // 7. Install the live session (moves `token_client` in so the
-        //    auto-refresh loop reuses the same HTTP client).
+        // 7. Enforce fail-closed tenant binding: the IdP-asserted
+        //    `tenant_id` claim is the sole authoritative tenant and
+        //    must match the device's enrolled tenant. Capture owned
+        //    identity facts before the claims are consumed below.
+        let token_tenant: Option<String> = identity
+            .as_ref()
+            .and_then(|c| c.tenant_id().map(str::to_owned));
+        enforce_tenant_binding(self.expected_tenant.as_deref(), token_tenant.as_deref())?;
+        let mfa_satisfied = identity.as_ref().is_some_and(IdTokenClaims::mfa_satisfied);
+
+        // 8. For a step-up, refuse a token that is still not
+        //    MFA-satisfied rather than silently downgrading — and do
+        //    so before touching the held session, so a failed
+        //    step-up never weakens an existing one.
+        if require_mfa && !mfa_satisfied {
+            return Err(MobileSdkError::sign_in(
+                "step-up re-authentication did not yield an MFA-satisfied token",
+            ));
+        }
+
+        // 9. Install the live session (moves `token_client` in so the
+        //    auto-refresh loop reuses the same HTTP client) and record
+        //    the captured identity facts — unless a wipe latched first.
         let mut config = SessionConfig::new(&meta.token_endpoint, &self.auth.client_id);
         config.refresh_skew = self.auth.refresh_skew;
         let session = OidcSession::start(token_client, config, &tokens, identity.as_ref());
-        *self.session.lock() = Some(Arc::new(session));
+        self.install_session(
+            session,
+            SessionIdentity {
+                tenant_id: token_tenant,
+                mfa_satisfied,
+            },
+        )
+    }
+
+    /// Commit a freshly-authenticated `session` and its `identity`
+    /// facts, unless the device has been [wiped](Self::wipe).
+    ///
+    /// The `wiped` check and the slot writes happen under the
+    /// `session` then `identity` locks — the same order [`Self::wipe`]
+    /// takes them — so an install that loses the race against a
+    /// concurrent wipe is refused here rather than resurrecting a
+    /// session after de-enrolment. Fails closed: on a latched wipe it
+    /// leaves both slots untouched (already cleared by `wipe`) and
+    /// surfaces a sign-in error.
+    fn install_session(
+        &self,
+        session: OidcSession,
+        identity: SessionIdentity,
+    ) -> Result<(), MobileSdkError> {
+        let mut session_slot = self.session.lock();
+        let mut identity_slot = self.identity.lock();
+        if self.wiped.load(Ordering::Acquire) {
+            return Err(MobileSdkError::sign_in(
+                "device was de-enrolled (wiped) during sign-in; refusing to install a session",
+            ));
+        }
+        *session_slot = Some(Arc::new(session));
+        *identity_slot = Some(identity);
         Ok(())
     }
 
@@ -290,5 +502,124 @@ impl AuthSession for OidcAuthSession {
     fn is_authenticated(&self) -> bool {
         self.current()
             .is_some_and(|session| session.expires_at().is_some() && !session.needs_refresh())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use sng_mobile_core::AuthConfig;
+    use sng_oidc::{OidcSession, TokenClient, TokenResponse, session::SessionConfig};
+
+    use super::{OidcAuthSession, SessionIdentity, enforce_tenant_binding};
+    use crate::error::MobileSdkError;
+    use crate::host::HostAuthSurface;
+
+    fn host_auth_session(expected_tenant: Option<&str>) -> OidcAuthSession {
+        let auth = AuthConfig {
+            issuer: "https://idp.example.com".into(),
+            client_id: "client-1".into(),
+            scopes: vec!["openid".into()],
+            refresh_skew: Duration::from_secs(60),
+            refresh_jitter: Duration::from_secs(5),
+        };
+        OidcAuthSession::new(
+            auth,
+            "app://callback".into(),
+            Arc::new(HostAuthSurface),
+            expected_tenant.map(str::to_owned),
+        )
+        .expect("host auth session builds")
+    }
+
+    fn dummy_session() -> OidcSession {
+        let client = TokenClient::new().expect("token client builds");
+        let config = SessionConfig::new("https://idp.example.com/token", "client-1");
+        let tokens = TokenResponse {
+            access_token: "at".into(),
+            token_type: "Bearer".into(),
+            id_token: None,
+            refresh_token: Some("rt".into()),
+            expires_in: Some(3600),
+            scope: None,
+        };
+        OidcSession::start(client, config, &tokens, None)
+    }
+
+    fn bound_identity() -> SessionIdentity {
+        SessionIdentity {
+            tenant_id: Some("tenant-7".into()),
+            mfa_satisfied: true,
+        }
+    }
+
+    #[test]
+    fn install_session_commits_when_not_wiped() {
+        let auth = host_auth_session(Some("tenant-7"));
+        assert!(auth.current().is_none());
+        auth.install_session(dummy_session(), bound_identity())
+            .expect("install succeeds before any wipe");
+        assert!(auth.current().is_some());
+        assert_eq!(auth.tenant_id().as_deref(), Some("tenant-7"));
+        assert!(auth.mfa_satisfied());
+    }
+
+    #[test]
+    fn wipe_latches_terminal_and_refuses_racing_install() {
+        let auth = host_auth_session(Some("tenant-7"));
+        // A session is live, mirroring a device mid-use.
+        auth.install_session(dummy_session(), bound_identity())
+            .expect("initial install");
+
+        // Leaver / revoke wipe lands.
+        auth.wipe();
+        assert!(auth.current().is_none());
+        assert!(auth.tenant_id().is_none());
+        assert!(!auth.mfa_satisfied());
+
+        // A sign-in / step-up that was already in flight when the wipe
+        // landed now reaches its install step. It must be refused
+        // rather than resurrecting a session after de-enrolment.
+        let err = auth
+            .install_session(dummy_session(), bound_identity())
+            .expect_err("post-wipe install must fail closed");
+        assert!(matches!(err, MobileSdkError::SignIn { .. }), "{err:?}");
+        assert!(auth.current().is_none());
+        assert!(auth.tenant_id().is_none());
+        assert!(!auth.mfa_satisfied());
+    }
+
+    #[test]
+    fn wipe_is_idempotent() {
+        let auth = host_auth_session(Some("tenant-7"));
+        auth.wipe();
+        auth.wipe();
+        assert!(auth.current().is_none());
+    }
+
+    #[test]
+    fn tenant_binding_allows_exact_match() {
+        assert!(enforce_tenant_binding(Some("tenant-7"), Some("tenant-7")).is_ok());
+    }
+
+    #[test]
+    fn tenant_binding_is_noop_without_expected_tenant() {
+        // A provider with no tenant concept: nothing to enforce.
+        assert!(enforce_tenant_binding(None, None).is_ok());
+        assert!(enforce_tenant_binding(None, Some("anything")).is_ok());
+    }
+
+    #[test]
+    fn tenant_binding_fails_closed_on_mismatch() {
+        assert!(enforce_tenant_binding(Some("tenant-7"), Some("tenant-8")).is_err());
+    }
+
+    #[test]
+    fn tenant_binding_fails_closed_on_missing_claim() {
+        // The device is enrolled to a tenant but the token asserts
+        // none: refuse rather than trusting an unbound session.
+        assert!(enforce_tenant_binding(Some("tenant-7"), None).is_err());
     }
 }

@@ -208,6 +208,22 @@ pub struct ZtnaEvent {
     /// is ever empty).
     #[serde(rename = "rsn", default)]
     pub reason: String,
+    /// Finer-grained posture-deny cause, populated only on a
+    /// `device_posture_insufficient` deny so dashboards can break
+    /// out *why* posture failed without disturbing the stable
+    /// [`Self::reason`] bucket. The mobile fail-closed pre-gate
+    /// emits `posture_unprovable`, `posture_compromised`, or
+    /// `posture_screen_lock_off`; it is empty on every other
+    /// decision (and from producers predating this field).
+    ///
+    /// `#[serde(default, skip_serializing_if)]` is load-bearing:
+    /// the field is additive and wire-stable — omitted from the
+    /// `to_vec_named` map when empty, and decoding to the empty
+    /// "unspecified" sentinel for any producer/consumer mismatch
+    /// during a rolling deploy. Dashboards treat empty as "no
+    /// finer cause reported" and fall back to [`Self::reason`].
+    #[serde(rename = "psd", default, skip_serializing_if = "String::is_empty")]
+    pub posture_detail: String,
     /// Was the user identity verified (mTLS + IdP).
     #[serde(rename = "iv")]
     pub identity_verified: bool,
@@ -439,6 +455,7 @@ mod tests {
             posture_result: "pass".into(),
             decision: "allow".into(),
             reason: "allow".into(),
+            posture_detail: String::new(),
             identity_verified: true,
         }
     }
@@ -490,13 +507,68 @@ mod tests {
     }
 
     #[test]
+    fn ztna_event_posture_detail_is_additive_and_wire_stable() {
+        // Empty `posture_detail` (the common case) is omitted from
+        // the wire map so existing consumers see no new key.
+        let plain = sample_ztna();
+        let bytes = rmp_serde::to_vec_named(&plain).expect("encode");
+        let map: std::collections::BTreeMap<String, rmpv::Value> =
+            rmp_serde::from_slice(&bytes).expect("decode map");
+        assert!(
+            !map.contains_key("psd"),
+            "empty posture_detail must be omitted: {map:?}"
+        );
+
+        // When populated (a mobile posture-deny), the finer cause
+        // rides the dedicated `psd` key and round-trips.
+        let detailed = ZtnaEvent {
+            decision: "deny".into(),
+            reason: "device_posture_insufficient".into(),
+            posture_detail: "posture_compromised".into(),
+            ..sample_ztna()
+        };
+        let bytes = rmp_serde::to_vec_named(&detailed).expect("encode");
+        let map: std::collections::BTreeMap<String, rmpv::Value> =
+            rmp_serde::from_slice(&bytes).expect("decode map");
+        assert_eq!(
+            map.get("psd").and_then(rmpv::Value::as_str),
+            Some("posture_compromised")
+        );
+        let back: ZtnaEvent = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(detailed, back);
+
+        // A legacy producer without the `psd` key still decodes
+        // (the empty sentinel), so a rolling deploy is safe.
+        let mut legacy = std::collections::BTreeMap::new();
+        legacy.insert("did".to_string(), rmpv::Value::from("device-1"));
+        legacy.insert("app".to_string(), rmpv::Value::from("salesforce"));
+        legacy.insert("pst".to_string(), rmpv::Value::from("fail"));
+        legacy.insert("dec".to_string(), rmpv::Value::from("deny"));
+        legacy.insert(
+            "rsn".to_string(),
+            rmpv::Value::from("device_posture_insufficient"),
+        );
+        legacy.insert("iv".to_string(), rmpv::Value::Boolean(false));
+        let bytes = rmp_serde::to_vec_named(&legacy).expect("encode legacy");
+        let decoded: ZtnaEvent =
+            rmp_serde::from_slice(&bytes).expect("legacy wire without `psd` must decode");
+        assert_eq!(decoded.posture_detail, "");
+    }
+
+    #[test]
     fn ztna_event_msgpack_uses_short_field_tags() {
-        let ev = sample_ztna();
+        // Populate `posture_detail` so its rename (`psd`) is exercised
+        // here too — with the empty default it is skipped, so the
+        // required/forbidden lists below could not otherwise verify it.
+        let ev = ZtnaEvent {
+            posture_detail: "posture_compromised".into(),
+            ..sample_ztna()
+        };
         let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
         let decoded: std::collections::BTreeMap<String, rmpv::Value> =
             rmp_serde::from_slice(&bytes).expect("decode");
         let keys: std::collections::BTreeSet<&str> = decoded.keys().map(String::as_str).collect();
-        for required in ["did", "app", "pst", "dec", "rsn", "iv"] {
+        for required in ["did", "app", "pst", "dec", "rsn", "psd", "iv"] {
             assert!(
                 keys.contains(required),
                 "msgpack key {required} missing; got {keys:?}"
@@ -505,8 +577,10 @@ mod tests {
         for forbidden in [
             "device_id",
             "app_id",
+            "posture_result",
             "decision",
             "reason",
+            "posture_detail",
             "identity_verified",
         ] {
             assert!(

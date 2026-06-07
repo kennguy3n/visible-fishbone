@@ -25,7 +25,8 @@ use crate::deps::{self, Assembled};
 use crate::error::MobileSdkError;
 use crate::oidc::OidcAuthSession;
 use crate::types::{
-    SdkAgentHealth, SdkAuthState, SdkEnrollmentOutcome, SdkLifecycleState, SdkPostureSnapshot,
+    SdkAccessDecision, SdkAccessRequest, SdkAgentHealth, SdkAuthState, SdkEnrollmentOutcome,
+    SdkLifecycleState, SdkPostureSnapshot,
 };
 
 /// The mobile SDK: a foreign-friendly handle to a configured
@@ -94,6 +95,22 @@ impl MobileSdk {
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
         self.auth.is_authenticated()
+    }
+
+    /// The IdP-asserted tenant the held session is bound to (the
+    /// authoritative `tenant_id` claim), or `None` before sign-in.
+    #[must_use]
+    pub fn tenant_id(&self) -> Option<String> {
+        self.auth.tenant_id()
+    }
+
+    /// Whether the held session was established with an
+    /// MFA-satisfied authentication. `false` before sign-in or when
+    /// only a single factor was used; drive [`Self::step_up`]
+    /// before a sensitive operation in that case.
+    #[must_use]
+    pub fn mfa_satisfied(&self) -> bool {
+        self.auth.mfa_satisfied()
     }
 
     /// The most recent posture snapshot collected by the
@@ -190,6 +207,72 @@ impl MobileSdk {
     pub async fn refresh_auth(&self) -> Result<(), MobileSdkError> {
         self.auth.refresh().await.map_err(MobileSdkError::from)
     }
+
+    /// Evaluate a ZTNA access request for an application, feeding
+    /// the agent's most recent device posture into the fail-closed
+    /// posture pre-gate. A device that cannot be proven healthy
+    /// (compromised, no screen lock, or no posture collected yet)
+    /// is denied locally with `device_posture_insufficient` before
+    /// the shared policy engine is consulted.
+    ///
+    /// # Errors
+    ///
+    /// [`MobileSdkError::Lifecycle`] if the post-enrolment runtime
+    /// is not attached yet, or the mapped agent error for a
+    /// provider miss (unknown app / unenrolled device / unknown
+    /// identity).
+    pub async fn check_access(
+        &self,
+        request: SdkAccessRequest,
+    ) -> Result<SdkAccessDecision, MobileSdkError> {
+        let decision = self
+            .agent
+            .check_access(&request.into(), chrono::Utc::now())
+            .await?;
+        Ok(decision.into())
+    }
+
+    /// Drive an OIDC MFA **step-up** re-authentication and, only if
+    /// the returned token proves MFA, replace the held session with
+    /// the stronger one. A failed step-up leaves the existing
+    /// session untouched.
+    ///
+    /// # Errors
+    ///
+    /// [`MobileSdkError::SignIn`] for any failure in the flow, and
+    /// specifically when the re-authenticated token is still not
+    /// MFA-satisfied (fail-closed).
+    pub async fn step_up(&self) -> Result<(), MobileSdkError> {
+        self.auth.step_up().await
+    }
+
+    /// Wipe this device's enrolment: delete the secure-enclave
+    /// device key, clear the OIDC session, and terminate the agent.
+    /// Idempotent — safe to call when already wiped — so a leaver /
+    /// revoke signal can be replayed without error.
+    ///
+    /// A leaver / revoke must revoke **every** piece of local
+    /// credential material it can, even on a partial failure: the
+    /// OIDC session is therefore cleared unconditionally — including
+    /// when the secure store rejects the device-key deletion — so a
+    /// backend error can never leave usable session tokens behind.
+    /// [`OidcAuthSession::wipe`] is infallible; the key-deletion
+    /// error is still surfaced afterwards so the caller retries the
+    /// (idempotent) wipe to destroy the device key too.
+    ///
+    /// The OIDC wipe also *latches* the session terminal, so an
+    /// interactive sign-in / step-up that was already in flight when
+    /// the wipe landed cannot reinstall a session afterwards.
+    ///
+    /// # Errors
+    ///
+    /// [`MobileSdkError::KeyStore`] if the secure store rejects the
+    /// key deletion (the OIDC session is already cleared by then).
+    pub async fn wipe(&self) -> Result<(), MobileSdkError> {
+        let wipe_result = self.agent.wipe().await;
+        self.auth.wipe();
+        wipe_result.map_err(MobileSdkError::from)
+    }
 }
 
 #[cfg(all(test, not(any(target_os = "ios", target_os = "android"))))]
@@ -248,5 +331,56 @@ mod tests {
         // refresh token to use.
         let err = sdk().refresh_auth().await.expect_err("no session");
         assert!(matches!(err, MobileSdkError::Auth { .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn check_access_before_runtime_is_a_lifecycle_error() {
+        // Access checks require the post-enrolment runtime (ZTNA
+        // manager); on a freshly constructed host SDK it is not
+        // attached, so the call fails closed as a lifecycle error
+        // rather than silently allowing.
+        let req = SdkAccessRequest {
+            app_id: "wiki".into(),
+            device_id: "dev-1".into(),
+            user_id: "alice".into(),
+            now_ms: 1_000,
+        };
+        let err = sdk().check_access(req).await.expect_err("no runtime");
+        assert!(matches!(err, MobileSdkError::Lifecycle { .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn wipe_clears_oidc_session_even_when_key_deletion_fails() {
+        // On the host build the secure store has no enclave, so the
+        // agent's key deletion fails with a backend error. A leaver /
+        // revoke must still revoke the local OIDC credential — the
+        // session is cleared unconditionally — and the key-deletion
+        // error must still surface so the caller retries.
+        let sdk = sdk();
+        sdk.auth.install_test_identity(Some("tenant-7"), true);
+        // Precondition: the session identity is present.
+        assert_eq!(sdk.tenant_id().as_deref(), Some("tenant-7"));
+        assert!(sdk.mfa_satisfied());
+
+        let err = sdk.wipe().await.expect_err("host key deletion fails");
+        assert!(matches!(err, MobileSdkError::KeyStore { .. }), "{err:?}");
+
+        // Despite the failed key deletion, the OIDC identity is gone.
+        assert!(sdk.tenant_id().is_none());
+        assert!(!sdk.mfa_satisfied());
+    }
+
+    #[test]
+    fn access_decision_mirror_maps_reason_and_posture_labels() {
+        use sng_mobile_core::{PostureResult, ZtnaDecision, ZtnaDecisionReason};
+        let decision = ZtnaDecision {
+            allow: false,
+            reason: ZtnaDecisionReason::DevicePostureInsufficient,
+            posture_result: PostureResult::Fail,
+        };
+        let sdk: SdkAccessDecision = decision.into();
+        assert!(!sdk.allow);
+        assert_eq!(sdk.reason, "device_posture_insufficient");
+        assert_eq!(sdk.posture_result, "fail");
     }
 }

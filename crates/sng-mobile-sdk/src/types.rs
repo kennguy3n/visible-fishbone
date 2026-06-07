@@ -14,7 +14,8 @@
 
 use chrono::{DateTime, Utc};
 use sng_mobile_core::{
-    AgentHealth, AuthState, EnrollmentOutcome, LifecycleState, MobilePostureSnapshot, TunnelStatus,
+    AccessRequest, AgentHealth, AuthState, EnrollmentOutcome, LifecycleState,
+    MobilePostureSnapshot, TunnelStatus, ZtnaDecision,
 };
 
 /// Convert a `chrono` UTC timestamp to epoch milliseconds for the
@@ -208,6 +209,68 @@ impl From<EnrollmentOutcome> for SdkEnrollmentOutcome {
             status: value.status,
             cert_chain_pem: value.cert_chain_pem,
             cert_expires_at_epoch_ms: to_epoch_ms(value.cert_expires_at),
+        }
+    }
+}
+
+/// A ZTNA per-application access attempt, FFI-safe input mirror of
+/// [`sng_ztna::AccessRequest`].
+///
+/// The host supplies the identifiers it already holds; the network
+/// context the on-device evaluator cannot observe (source IP / GeoIP
+/// country / network type) is intentionally omitted — those are
+/// proxy-derived and gated server-side.
+///
+/// Consequently the on-device gate normalises an absent network type
+/// to `NetworkType::Unknown`, so an app whose policy sets
+/// `allowed_network_types` fails **closed** here (the safe
+/// direction). These network/geo dimensions therefore belong on the
+/// server-side proxy policy — where the context actually exists — not
+/// on the mobile bundle (the agent pulls a separate
+/// `BundleTarget::Mobile` bundle). The on-device check stays a
+/// fail-closed pre-gate; the gateway performs the authoritative
+/// network/geo evaluation.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SdkAccessRequest {
+    /// The application the request targets.
+    pub app_id: String,
+    /// The enrolled device making the request.
+    pub device_id: String,
+    /// The user making the request (`sub` claim).
+    pub user_id: String,
+    /// Monotonic millisecond timestamp the host observed the
+    /// request at (used for posture / MFA freshness budgets).
+    pub now_ms: u64,
+}
+
+impl From<SdkAccessRequest> for AccessRequest {
+    fn from(value: SdkAccessRequest) -> Self {
+        Self::new(value.app_id, value.device_id, value.user_id, value.now_ms)
+    }
+}
+
+/// A ZTNA access decision, FFI-safe output mirror of
+/// [`sng_ztna::ZtnaDecision`].
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SdkAccessDecision {
+    /// Whether access is granted.
+    pub allow: bool,
+    /// Stable reason label (e.g. `allow`, `tenant_mismatch`,
+    /// `device_posture_insufficient`).
+    pub reason: String,
+    /// Posture sub-verdict label, the wire form of
+    /// [`sng_ztna::PostureResult`]: `pass` / `fail` /
+    /// `not_evaluated` (the last when the decision short-circuited
+    /// before the posture check ran).
+    pub posture_result: String,
+}
+
+impl From<ZtnaDecision> for SdkAccessDecision {
+    fn from(value: ZtnaDecision) -> Self {
+        Self {
+            allow: value.allow,
+            reason: value.reason.as_str().to_owned(),
+            posture_result: value.posture_result.as_str().to_owned(),
         }
     }
 }

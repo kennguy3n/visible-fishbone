@@ -115,9 +115,9 @@ pub use device::{
 pub use error::ZtnaError;
 pub use identity::{IdentityProvider, StaticIdentityProvider, UserIdentity};
 pub use policy::{
-    AccessConditions, PostureRequirement, RevocationProvider, StaticRevocationList, TagCondition,
-    TagOp, TimeWindow, ZtnaDecision, ZtnaDecisionReason, ZtnaPolicy, ZtnaPolicyHolder,
-    evaluate_policy,
+    AccessConditions, PostureRequirement, PostureResult, RevocationProvider, StaticRevocationList,
+    TagCondition, TagOp, TimeWindow, ZtnaDecision, ZtnaDecisionReason, ZtnaPolicy,
+    ZtnaPolicyHolder, evaluate_policy,
 };
 pub use request::{AccessRequest, NetworkType};
 pub use service::{ZtnaService, ZtnaServiceBuilder, ZtnaServiceConfig};

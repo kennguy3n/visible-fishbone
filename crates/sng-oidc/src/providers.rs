@@ -38,6 +38,17 @@ pub enum Provider {
         /// The Okta org domain (no scheme, no trailing slash).
         domain: String,
     },
+    /// `uney-iam-core` — the canonical ShieldNet identity provider.
+    /// Unlike the public IdPs above it is self-hosted, so the
+    /// issuer is an admin-configured base URL (`IAM_CORE_ISSUER`)
+    /// that hosts both `/.well-known/*` and the `/oauth2/*`
+    /// endpoints; discovery, authorize, token, and JWKS are all
+    /// resolved from its discovery document.
+    IamCore {
+        /// The iam-core issuer base URL (scheme + host, optional
+        /// base path; no trailing `.well-known` segment).
+        issuer: String,
+    },
 }
 
 impl Provider {
@@ -52,6 +63,7 @@ impl Provider {
             Self::Microsoft365 { tenant } => microsoft_discovery_url(tenant),
             Self::Zoho => "https://accounts.zoho.com/.well-known/openid-configuration".to_owned(),
             Self::Okta { domain } => okta_discovery_url(domain),
+            Self::IamCore { issuer } => iam_core_discovery_url(issuer),
         }
     }
 
@@ -66,7 +78,9 @@ impl Provider {
     pub fn default_scope(&self) -> &'static str {
         match self {
             Self::GoogleWorkspace => "openid email profile",
-            Self::Microsoft365 { .. } | Self::Okta { .. } => "openid email profile offline_access",
+            Self::Microsoft365 { .. } | Self::Okta { .. } | Self::IamCore { .. } => {
+                "openid email profile offline_access"
+            }
             Self::Zoho => "openid email profile AaaServer.profile.READ",
         }
     }
@@ -85,7 +99,9 @@ impl Provider {
         match self {
             Self::GoogleWorkspace => Some("hd"),
             Self::Microsoft365 { .. } => Some("domain_hint"),
-            Self::Zoho | Self::Okta { .. } => None,
+            // iam-core pins the tenant through the issuer URL +
+            // the token's `tenant_id` claim, not a query param.
+            Self::Zoho | Self::Okta { .. } | Self::IamCore { .. } => None,
         }
     }
 
@@ -97,6 +113,7 @@ impl Provider {
             Self::Microsoft365 { .. } => "microsoft_365",
             Self::Zoho => "zoho",
             Self::Okta { .. } => "okta",
+            Self::IamCore { .. } => "iam_core",
         }
     }
 }
@@ -158,6 +175,51 @@ fn okta_discovery_url(domain: &str) -> String {
         // verbatim rather than interpolating `domain` unescaped.
         Err(_) => PLACEHOLDER.to_owned(),
     }
+}
+
+/// Build the iam-core OIDC discovery URL from its issuer base URL.
+///
+/// The issuer is admin-configured (`IAM_CORE_ISSUER`) and may carry
+/// a base path (e.g. `https://id.example.com/iam`), so the
+/// `.well-known/openid-configuration` segments are appended to the
+/// existing path via [`Url::path_segments_mut`] rather than
+/// replacing it — `${issuer}/.well-known/openid-configuration` per
+/// the integration contract. A trailing slash on the issuer is
+/// tolerated (it would otherwise produce an empty path segment).
+/// The value is round-tripped through the `url` crate so any
+/// path-escaping characters in the configured issuer are
+/// percent-encoded into the path and cannot re-point discovery at
+/// another authority. A non-absolute / unparseable issuer keeps an
+/// unreachable `.invalid` placeholder so the downstream
+/// `DiscoveryClient` fails closed instead of silently dropping the
+/// configured host.
+///
+/// Per OIDC Discovery 1.0 §3 an issuer carries no query or fragment;
+/// a configured issuer bearing either is malformed, so it also fails
+/// closed to the placeholder rather than appending the well-known
+/// path onto a query/fragment-bearing base (which would leave a
+/// stray `?…`/`#…` on the discovery request). This mirrors the
+/// bad-input handling in `okta_discovery_url`.
+fn iam_core_discovery_url(issuer: &str) -> String {
+    const PLACEHOLDER: &str = "https://placeholder.invalid/.well-known/openid-configuration";
+    let Ok(mut url) = Url::parse(issuer) else {
+        return PLACEHOLDER.to_owned();
+    };
+    if url.query().is_some() || url.fragment().is_some() {
+        return PLACEHOLDER.to_owned();
+    }
+    {
+        let Ok(mut segments) = url.path_segments_mut() else {
+            return PLACEHOLDER.to_owned();
+        };
+        // `pop_if_empty` drops the empty trailing segment a
+        // trailing-slash issuer would otherwise leave, so we never
+        // emit `…//.well-known/…`.
+        segments
+            .pop_if_empty()
+            .extend([".well-known", "openid-configuration"]);
+    }
+    url.to_string()
 }
 
 impl fmt::Display for Provider {
@@ -259,5 +321,84 @@ mod tests {
         let parsed = Url::parse(&url).expect("discovery url parses");
         assert!(parsed.port().is_none(), "unexpected port in {url}");
         assert_ne!(parsed.host_str(), Some("dev-12345.okta.com"));
+    }
+
+    #[test]
+    fn iam_core_profile_derives_well_known_from_issuer() {
+        let p = Provider::IamCore {
+            issuer: "https://id.example.com".to_owned(),
+        };
+        assert_eq!(
+            p.discovery_url(),
+            "https://id.example.com/.well-known/openid-configuration"
+        );
+        assert!(p.default_scope().contains("offline_access"));
+        assert_eq!(p.domain_restriction_param(), None);
+        assert_eq!(p.label(), "iam_core");
+    }
+
+    #[test]
+    fn iam_core_issuer_base_path_is_preserved() {
+        // A self-hosted iam-core may live under a base path; the
+        // well-known segments append to it rather than replacing it.
+        let p = Provider::IamCore {
+            issuer: "https://id.example.com/iam".to_owned(),
+        };
+        assert_eq!(
+            p.discovery_url(),
+            "https://id.example.com/iam/.well-known/openid-configuration"
+        );
+    }
+
+    #[test]
+    fn iam_core_trailing_slash_issuer_has_no_double_slash() {
+        let p = Provider::IamCore {
+            issuer: "https://id.example.com/".to_owned(),
+        };
+        assert_eq!(
+            p.discovery_url(),
+            "https://id.example.com/.well-known/openid-configuration"
+        );
+    }
+
+    #[test]
+    fn iam_core_unparseable_issuer_fails_closed_to_placeholder() {
+        // A non-absolute issuer cannot re-point discovery at a
+        // real authority; it lands on the unreachable `.invalid`
+        // host so `DiscoveryClient` fails closed.
+        let p = Provider::IamCore {
+            issuer: "not-a-url".to_owned(),
+        };
+        let url = p.discovery_url();
+        let parsed = Url::parse(&url).expect("discovery url parses");
+        assert_eq!(parsed.host_str(), Some("placeholder.invalid"));
+    }
+
+    #[test]
+    fn iam_core_issuer_with_query_or_fragment_fails_closed_to_placeholder() {
+        // An issuer carries no query/fragment per OIDC Discovery §3.
+        // A configured issuer bearing either is malformed and must
+        // fail closed rather than leak a stray `?…`/`#…` onto the
+        // discovery request.
+        for issuer in [
+            "https://id.example.com?evil=1",
+            "https://id.example.com/#frag",
+            "https://id.example.com/base?x=1#y",
+        ] {
+            let p = Provider::IamCore {
+                issuer: issuer.to_owned(),
+            };
+            let parsed = Url::parse(&p.discovery_url()).expect("discovery url parses");
+            assert_eq!(
+                parsed.host_str(),
+                Some("placeholder.invalid"),
+                "issuer {issuer} must fail closed"
+            );
+            assert!(parsed.query().is_none(), "no query leaks for {issuer}");
+            assert!(
+                parsed.fragment().is_none(),
+                "no fragment leaks for {issuer}"
+            );
+        }
     }
 }

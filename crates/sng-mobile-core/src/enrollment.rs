@@ -25,6 +25,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::debug;
 use zeroize::Zeroizing;
 
 use sng_comms::{ControlPlaneConnection, RequestBody, RequestPath};
@@ -71,6 +72,15 @@ pub trait SecureKeyStore: Send + Sync {
     /// Whether a keypair exists under `label`.
     async fn contains(&self, label: &str) -> Result<bool, KeyStoreError>;
     /// Delete the keypair stored under `label` (de-enrolment).
+    ///
+    /// **Idempotent**: implementations MUST return `Ok(())` when no
+    /// key exists under `label`, never [`KeyStoreError::NotFound`].
+    /// The leaver / revoke wipe ([`Enroller::wipe`]) relies on this
+    /// so a revoke can be safely replayed (e.g. retried after a
+    /// crash) without surfacing a spurious error. The existing
+    /// backings already honor this — iOS maps `errSecItemNotFound`
+    /// to success, Android's `KeyStore.deleteEntry` is silent on an
+    /// absent alias, and the in-memory impl uses `HashMap::remove`.
     async fn delete(&self, label: &str) -> Result<(), KeyStoreError>;
 }
 
@@ -278,6 +288,26 @@ impl Enroller {
             .await?;
         parse_response(response.status, &response.body)
     }
+
+    /// Wipe this device's local enrolment identity by deleting the
+    /// enrolment keypair from the secure store.
+    ///
+    /// Used on a leaver / revoke signal: once the device key is
+    /// gone the device can no longer mTLS-authenticate to the
+    /// control plane, so it is effectively de-enrolled even before
+    /// the server-side revocation propagates. Idempotent — deleting
+    /// an absent key is a success — so a revoke can be replayed
+    /// (e.g. retried after a crash) without surfacing an error.
+    ///
+    /// The control-plane-side revocation (adding the device to the
+    /// ZTNA revocation list) is driven separately by the operator
+    /// console / leaver workflow; this is the device-local half
+    /// that destroys the credential material the agent holds.
+    pub async fn wipe(&self, keystore: &dyn SecureKeyStore) -> Result<(), MobileError> {
+        keystore.delete(&self.key_label).await?;
+        debug!(key_label = %self.key_label, "wiped device enrolment key");
+        Ok(())
+    }
 }
 
 /// Parse the control plane's enrolment response into an
@@ -353,6 +383,24 @@ mod tests {
         let store = InMemorySecureKeyStore::new();
         store.generate_keypair("k").await.unwrap();
         store.delete("k").await.unwrap();
+        assert!(!store.contains("k").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn wipe_deletes_key_and_is_idempotent() {
+        let store = InMemorySecureKeyStore::new();
+        let enroller = Enroller::new(TenantId::new_v4(), DeviceId::new_v4(), "k");
+        store.generate_keypair("k").await.unwrap();
+        assert!(store.contains("k").await.unwrap());
+
+        // A leaver / revoke wipes the device key.
+        enroller.wipe(&store).await.unwrap();
+        assert!(!store.contains("k").await.unwrap(), "key must be gone");
+
+        // Replaying the revoke (e.g. retried after a crash) on an
+        // already-absent key is still a success — the wipe is
+        // idempotent so the leaver workflow never wedges.
+        enroller.wipe(&store).await.unwrap();
         assert!(!store.contains("k").await.unwrap());
     }
 

@@ -80,3 +80,8 @@ pub use tunnel::{
     TunnelPrivateKey, TunnelPublicKey, TunnelStatus,
 };
 pub use ztna::{AppAccessState, MobileZtnaManager};
+
+// Re-exported so downstream crates (the SDK / PALs) can name the
+// types that appear in [`MobileAgent::check_access`]'s signature
+// without taking a direct dependency on `sng-ztna`.
+pub use sng_ztna::{AccessRequest, PostureResult, ZtnaDecision, ZtnaDecisionReason};

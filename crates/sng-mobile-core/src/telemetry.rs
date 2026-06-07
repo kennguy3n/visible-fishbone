@@ -50,6 +50,15 @@ pub enum MobileTelemetryEvent {
         /// Structured decision reason
         /// ([`sng_ztna::ZtnaDecisionReason::as_str`]).
         reason: String,
+        /// Finer-grained posture-deny cause for a fail-closed
+        /// pre-gate deny (`posture_unprovable` /
+        /// `posture_compromised` / `posture_screen_lock_off`).
+        /// `None` for every non-pre-gate decision; it rides the
+        /// additive [`sng_core::events::ZtnaEvent::posture_detail`]
+        /// wire field so dashboards can break out *why* posture
+        /// failed while [`Self::reason`] stays the stable
+        /// `device_posture_insufficient` bucket.
+        posture_detail: Option<String>,
         /// Posture-check tri-state
         /// ([`sng_ztna::PostureResult::as_str`]).
         posture_result: String,
@@ -97,6 +106,7 @@ impl MobileTelemetryEvent {
                 app_id,
                 allow,
                 reason,
+                posture_detail,
                 posture_result,
                 identity_verified,
             } => pack_payload(&ZtnaEvent {
@@ -105,6 +115,7 @@ impl MobileTelemetryEvent {
                 posture_result: posture_result.clone(),
                 decision: if *allow { "allow" } else { "deny" }.to_owned(),
                 reason: reason.clone(),
+                posture_detail: posture_detail.clone().unwrap_or_default(),
                 identity_verified: *identity_verified,
             })?,
             Self::Dns {
@@ -259,6 +270,7 @@ mod tests {
             app_id: "wiki".into(),
             allow: false,
             reason: "not_entitled".into(),
+            posture_detail: None,
             posture_result: "not_evaluated".into(),
             identity_verified: true,
         };
@@ -268,7 +280,27 @@ mod tests {
         let payload: ZtnaEvent = unpack_payload(&env.payload).unwrap();
         assert_eq!(payload.decision, "deny");
         assert_eq!(payload.reason, "not_entitled");
+        assert!(payload.posture_detail.is_empty());
         assert!(payload.identity_verified);
+    }
+
+    #[test]
+    fn posture_pre_gate_detail_rides_envelope() {
+        let ctx = ctx();
+        let ev = MobileTelemetryEvent::ZtnaAccess {
+            app_id: "wiki".into(),
+            allow: false,
+            reason: "device_posture_insufficient".into(),
+            posture_detail: Some("posture_compromised".into()),
+            posture_result: "fail".into(),
+            identity_verified: false,
+        };
+        let env = ev.to_envelope(&ctx, Utc::now()).unwrap();
+        let payload: ZtnaEvent = unpack_payload(&env.payload).unwrap();
+        // Stable bucket is unchanged; the finer cause rides the
+        // additive `posture_detail` field.
+        assert_eq!(payload.reason, "device_posture_insufficient");
+        assert_eq!(payload.posture_detail, "posture_compromised");
     }
 
     #[test]
