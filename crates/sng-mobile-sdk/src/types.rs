@@ -217,9 +217,19 @@ impl From<EnrollmentOutcome> for SdkEnrollmentOutcome {
 /// [`sng_ztna::AccessRequest`].
 ///
 /// The host supplies the identifiers it already holds; the network
-/// context the on-device evaluator does not see (source IP / GeoIP
-/// country) is intentionally omitted — those are proxy-derived and
-/// gated server-side.
+/// context the on-device evaluator cannot observe (source IP / GeoIP
+/// country / network type) is intentionally omitted — those are
+/// proxy-derived and gated server-side.
+///
+/// Consequently the on-device gate normalises an absent network type
+/// to `NetworkType::Unknown`, so an app whose policy sets
+/// `allowed_network_types` fails **closed** here (the safe
+/// direction). These network/geo dimensions therefore belong on the
+/// server-side proxy policy — where the context actually exists — not
+/// on the mobile bundle (the agent pulls a separate
+/// `BundleTarget::Mobile` bundle). The on-device check stays a
+/// fail-closed pre-gate; the gateway performs the authoritative
+/// network/geo evaluation.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct SdkAccessRequest {
     /// The application the request targets.
