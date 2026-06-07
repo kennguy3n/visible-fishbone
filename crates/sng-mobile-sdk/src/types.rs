@@ -258,7 +258,10 @@ pub struct SdkAccessDecision {
     /// Stable reason label (e.g. `allow`, `tenant_mismatch`,
     /// `device_posture_insufficient`).
     pub reason: String,
-    /// Posture sub-verdict label (`pass` / `fail` / `degraded`).
+    /// Posture sub-verdict label, the wire form of
+    /// [`sng_ztna::PostureResult`]: `pass` / `fail` /
+    /// `not_evaluated` (the last when the decision short-circuited
+    /// before the posture check ran).
     pub posture_result: String,
 }
 

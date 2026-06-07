@@ -557,12 +557,18 @@ mod tests {
 
     #[test]
     fn ztna_event_msgpack_uses_short_field_tags() {
-        let ev = sample_ztna();
+        // Populate `posture_detail` so its rename (`psd`) is exercised
+        // here too — with the empty default it is skipped, so the
+        // required/forbidden lists below could not otherwise verify it.
+        let ev = ZtnaEvent {
+            posture_detail: "posture_compromised".into(),
+            ..sample_ztna()
+        };
         let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
         let decoded: std::collections::BTreeMap<String, rmpv::Value> =
             rmp_serde::from_slice(&bytes).expect("decode");
         let keys: std::collections::BTreeSet<&str> = decoded.keys().map(String::as_str).collect();
-        for required in ["did", "app", "pst", "dec", "rsn", "iv"] {
+        for required in ["did", "app", "pst", "dec", "rsn", "psd", "iv"] {
             assert!(
                 keys.contains(required),
                 "msgpack key {required} missing; got {keys:?}"
@@ -573,6 +579,7 @@ mod tests {
             "app_id",
             "decision",
             "reason",
+            "posture_detail",
             "identity_verified",
         ] {
             assert!(
