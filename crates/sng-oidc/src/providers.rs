@@ -187,17 +187,27 @@ fn okta_discovery_url(domain: &str) -> String {
 /// the integration contract. A trailing slash on the issuer is
 /// tolerated (it would otherwise produce an empty path segment).
 /// The value is round-tripped through the `url` crate so any
-/// `?`/`#`/path-escaping characters in the configured issuer are
+/// path-escaping characters in the configured issuer are
 /// percent-encoded into the path and cannot re-point discovery at
 /// another authority. A non-absolute / unparseable issuer keeps an
 /// unreachable `.invalid` placeholder so the downstream
 /// `DiscoveryClient` fails closed instead of silently dropping the
 /// configured host.
+///
+/// Per OIDC Discovery 1.0 §3 an issuer carries no query or fragment;
+/// a configured issuer bearing either is malformed, so it also fails
+/// closed to the placeholder rather than appending the well-known
+/// path onto a query/fragment-bearing base (which would leave a
+/// stray `?…`/`#…` on the discovery request). This mirrors the
+/// bad-input handling in `okta_discovery_url`.
 fn iam_core_discovery_url(issuer: &str) -> String {
     const PLACEHOLDER: &str = "https://placeholder.invalid/.well-known/openid-configuration";
     let Ok(mut url) = Url::parse(issuer) else {
         return PLACEHOLDER.to_owned();
     };
+    if url.query().is_some() || url.fragment().is_some() {
+        return PLACEHOLDER.to_owned();
+    }
     {
         let Ok(mut segments) = url.path_segments_mut() else {
             return PLACEHOLDER.to_owned();
@@ -362,5 +372,33 @@ mod tests {
         let url = p.discovery_url();
         let parsed = Url::parse(&url).expect("discovery url parses");
         assert_eq!(parsed.host_str(), Some("placeholder.invalid"));
+    }
+
+    #[test]
+    fn iam_core_issuer_with_query_or_fragment_fails_closed_to_placeholder() {
+        // An issuer carries no query/fragment per OIDC Discovery §3.
+        // A configured issuer bearing either is malformed and must
+        // fail closed rather than leak a stray `?…`/`#…` onto the
+        // discovery request.
+        for issuer in [
+            "https://id.example.com?evil=1",
+            "https://id.example.com/#frag",
+            "https://id.example.com/base?x=1#y",
+        ] {
+            let p = Provider::IamCore {
+                issuer: issuer.to_owned(),
+            };
+            let parsed = Url::parse(&p.discovery_url()).expect("discovery url parses");
+            assert_eq!(
+                parsed.host_str(),
+                Some("placeholder.invalid"),
+                "issuer {issuer} must fail closed"
+            );
+            assert!(parsed.query().is_none(), "no query leaks for {issuer}");
+            assert!(
+                parsed.fragment().is_none(),
+                "no fragment leaks for {issuer}"
+            );
+        }
     }
 }

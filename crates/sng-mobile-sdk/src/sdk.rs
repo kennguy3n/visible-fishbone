@@ -251,14 +251,23 @@ impl MobileSdk {
     /// Idempotent — safe to call when already wiped — so a leaver /
     /// revoke signal can be replayed without error.
     ///
+    /// A leaver / revoke must revoke **every** piece of local
+    /// credential material it can, even on a partial failure: the
+    /// OIDC session is therefore cleared unconditionally — including
+    /// when the secure store rejects the device-key deletion — so a
+    /// backend error can never leave usable session tokens behind.
+    /// `sign_out` is infallible; the key-deletion error is still
+    /// surfaced afterwards so the caller retries the (idempotent)
+    /// wipe to destroy the device key too.
+    ///
     /// # Errors
     ///
     /// [`MobileSdkError::KeyStore`] if the secure store rejects the
-    /// key deletion.
+    /// key deletion (the OIDC session is already cleared by then).
     pub async fn wipe(&self) -> Result<(), MobileSdkError> {
-        self.agent.wipe().await?;
+        let wipe_result = self.agent.wipe().await;
         self.auth.sign_out();
-        Ok(())
+        wipe_result.map_err(MobileSdkError::from)
     }
 }
 
@@ -334,6 +343,27 @@ mod tests {
         };
         let err = sdk().check_access(req).await.expect_err("no runtime");
         assert!(matches!(err, MobileSdkError::Lifecycle { .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn wipe_clears_oidc_session_even_when_key_deletion_fails() {
+        // On the host build the secure store has no enclave, so the
+        // agent's key deletion fails with a backend error. A leaver /
+        // revoke must still revoke the local OIDC credential — the
+        // session is cleared unconditionally — and the key-deletion
+        // error must still surface so the caller retries.
+        let sdk = sdk();
+        sdk.auth.install_test_identity(Some("tenant-7"), true);
+        // Precondition: the session identity is present.
+        assert_eq!(sdk.tenant_id().as_deref(), Some("tenant-7"));
+        assert!(sdk.mfa_satisfied());
+
+        let err = sdk.wipe().await.expect_err("host key deletion fails");
+        assert!(matches!(err, MobileSdkError::KeyStore { .. }), "{err:?}");
+
+        // Despite the failed key deletion, the OIDC identity is gone.
+        assert!(sdk.tenant_id().is_none());
+        assert!(!sdk.mfa_satisfied());
     }
 
     #[test]

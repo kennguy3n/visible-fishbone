@@ -167,10 +167,20 @@ pub struct IdTokenClaims {
 /// `amr` factor values (RFC 8176) that, on their own, prove a
 /// second authentication factor was used. A token whose `amr`
 /// contains any of these is considered MFA-satisfied even without
-/// an explicit `mfa` boolean claim. `pwd` / `pin` are deliberately
-/// excluded — they are single-factor knowledge factors.
+/// an explicit `mfa` boolean claim.
+///
+/// The set covers RFC 8176's possession (`otp`, `totp`, `hwk`,
+/// `swk`, `sms`, `tel`) and biometric (`face`, `fpt`, `iris`,
+/// `retina`, `vbm`) factors plus the generic `mfa` marker.
+/// Single-factor knowledge factors (`pwd`, `pin`, `kba`) are
+/// deliberately excluded, as are signals that do not themselves
+/// prove a second factor (`geo`, `rba`, `user`). Recognising a
+/// factor here only suppresses an unnecessary step-up re-auth; an
+/// unrecognised factor fails *safe* (toward step-up), so the list
+/// is conservative by design. If iam-core begins emitting a new
+/// RFC 8176 factor, add it here.
 const MFA_AMR_FACTORS: &[&str] = &[
-    "mfa", "otp", "totp", "hwk", "swk", "sms", "tel", "face", "fpt",
+    "mfa", "otp", "totp", "hwk", "swk", "sms", "tel", "face", "fpt", "iris", "retina", "vbm",
 ];
 
 impl IdTokenClaims {
@@ -760,5 +770,18 @@ W6hfl/TTkpSnVaa+z8hT842lIfS+Nk+7VWTjBSJSpwn3/rO6yfGu\n\
             !single_factor.mfa_satisfied(),
             "a password-only amr is not MFA"
         );
+
+        // RFC 8176 biometric factors prove a second factor just like
+        // `face`/`fpt`; recognising them avoids a spurious step-up.
+        for factor in ["iris", "RETINA", "vbm"] {
+            let biometric: IdTokenClaims = serde_json::from_value(serde_json::json!({
+                "iss": "i", "sub": "s", "aud": "a", "exp": 1, "amr": ["pwd", factor]
+            }))
+            .unwrap();
+            assert!(
+                biometric.mfa_satisfied(),
+                "biometric amr factor {factor} proves MFA"
+            );
+        }
     }
 }

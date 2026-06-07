@@ -204,6 +204,17 @@ impl OidcAuthSession {
         *self.identity.lock() = None;
     }
 
+    /// Test-only: install captured identity facts without running an
+    /// interactive sign-in (the host build has no [`AuthSurface`]),
+    /// so a test can assert they are cleared by [`Self::sign_out`].
+    #[cfg(test)]
+    pub(crate) fn install_test_identity(&self, tenant_id: Option<&str>, mfa_satisfied: bool) {
+        *self.identity.lock() = Some(SessionIdentity {
+            tenant_id: tenant_id.map(str::to_owned),
+            mfa_satisfied,
+        });
+    }
+
     /// Whether sign-in has installed a live session.
     fn current(&self) -> Option<Arc<OidcSession>> {
         self.session.lock().clone()
