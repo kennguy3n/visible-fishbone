@@ -77,6 +77,17 @@ pub trait ProgramLoader: Send + Sync + std::fmt::Debug {
     /// Returns [`EbpfError::Attach`] on failure.
     fn attach_tc_egress(&self, iface: &str) -> Result<(), EbpfError>;
 
+    /// Detach all programs and release the loaded object, returning the
+    /// loader to the pre-[`load`](ProgramLoader::load) state. Detaching
+    /// an already-detached loader is a no-op (idempotent) so the edge can
+    /// call it unconditionally on shutdown or when degrading to the slow
+    /// path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EbpfError::Attach`] if the kernel detach fails.
+    fn detach(&self) -> Result<(), EbpfError>;
+
     /// Pin the loaded programs and maps under `base` on the bpf
     /// filesystem so they survive the control process restarting.
     ///
@@ -185,6 +196,14 @@ impl ProgramLoader for NoopLoader {
 
     fn attach_tc_egress(&self, iface: &str) -> Result<(), EbpfError> {
         self.lock().tc_attached.push(iface.to_owned());
+        Ok(())
+    }
+
+    fn detach(&self) -> Result<(), EbpfError> {
+        let mut st = self.lock();
+        st.loaded = false;
+        st.xdp_attached.clear();
+        st.tc_attached.clear();
         Ok(())
     }
 
@@ -349,6 +368,16 @@ mod aya_backend {
             program
                 .attach(iface, TcAttachType::Egress)
                 .map_err(|e| EbpfError::Attach(format!("attach tc egress to {iface}: {e}")))?;
+            Ok(())
+        }
+
+        fn detach(&self) -> Result<(), EbpfError> {
+            // Dropping the owned `Ebpf` handle detaches every attached
+            // program (aya detaches non-pinned links on drop) and frees
+            // the loaded object, returning the loader to its pre-load
+            // state. Idempotent: detaching when nothing is loaded is a
+            // no-op.
+            *self.lock() = None;
             Ok(())
         }
 

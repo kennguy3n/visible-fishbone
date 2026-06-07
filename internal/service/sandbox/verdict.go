@@ -113,6 +113,61 @@ func (v Verdict) Blocking() bool {
 	return v.Classification == ClassMalicious
 }
 
+// Disposition is the fail-closed allow/deny decision the data plane
+// acts on for a file. It is deliberately ternary: a file is only
+// released (DispositionAllow) when a sandbox has *resolved* it clean.
+// Anything else — pending analysis, an unknown/never-submitted file,
+// a provider error, or a suspicious/malicious/timeout verdict — is
+// not clean and must not be released on the strength of the sandbox
+// alone.
+type Disposition string
+
+const (
+	// DispositionAllow means a resolved, clean verdict exists: the
+	// file is safe to release as far as the sandbox is concerned.
+	DispositionAllow Disposition = "allow"
+	// DispositionPending means a submission exists but has not
+	// resolved yet; the caller should hold or re-poll. It is treated
+	// as not-clean for any fail-closed posture.
+	DispositionPending Disposition = "pending"
+	// DispositionDeny means the file is not clean: a malicious,
+	// suspicious, timeout, unknown, or errored verdict. Fail-closed
+	// callers block on this.
+	DispositionDeny Disposition = "deny"
+)
+
+// Clean reports whether the file may be released. Only DispositionAllow
+// is clean; pending and deny are both not-clean (fail-closed).
+func (d Disposition) Clean() bool { return d == DispositionAllow }
+
+// dispositionFor maps a submission row's status and verdict onto the
+// fail-closed ternary decision. Only a *complete*, clean verdict is
+// releasable (DispositionAllow). A still-pending submission yields
+// DispositionPending so the caller holds and re-polls. Every other
+// state — a provider error (terminal: it will never resolve), or a
+// complete suspicious / malicious / timeout / unknown verdict — yields
+// DispositionDeny. An errored row must deny rather than pend: it is
+// terminal, so reporting it pending would make the caller re-poll a
+// verdict that can never resolve.
+func dispositionFor(status Status, v Verdict) Disposition {
+	switch status {
+	case StatusComplete:
+		if v.Classification == ClassClean {
+			return DispositionAllow
+		}
+		// Complete but suspicious / malicious / timeout / unknown:
+		// not clean.
+		return DispositionDeny
+	case StatusPending:
+		// Genuinely in-flight: hold and re-poll. Not clean.
+		return DispositionPending
+	default:
+		// StatusError or any unexpected/empty state is terminal and
+		// not clean; deny fail-closed rather than pend forever.
+		return DispositionDeny
+	}
+}
+
 // Submission is a request to detonate one file. The bytes are
 // carried by reference to Content so a large upload is not copied
 // through the service; providers stream it to their API.

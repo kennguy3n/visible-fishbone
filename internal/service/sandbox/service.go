@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/sandbox/providers"
@@ -30,6 +31,17 @@ var (
 	ErrNoProvider      = errors.New("sandbox: no provider configured")
 )
 
+// submitFlightTimeout is a defense-in-depth ceiling on a single
+// coalesced detonation submission. The detached flight context (see
+// Submit) drops the caller's deadline, so it would otherwise depend
+// entirely on the provider implementing its own client timeout. Bound
+// it here too so a provider that neglects to set one cannot occupy a
+// (tenant, digest) singleflight key forever and wedge every future
+// submission of that sample. It is deliberately well above the
+// bundled providers' 30s http.Client timeout so it never preempts a
+// healthy provider; it only backstops a misbehaving one.
+const submitFlightTimeout = 2 * time.Minute
+
 // Service orchestrates zero-day file analysis: dedup against the
 // persistent verdict store, submission to the configured detonation
 // provider, and verdict caching. It is safe for concurrent use.
@@ -47,6 +59,11 @@ type Service struct {
 	logger   *slog.Logger
 	now      func() time.Time
 	newID    func() uuid.UUID
+	// flight collapses concurrent Submit calls for the same
+	// (tenant, digest) into a single in-flight detonation so the
+	// SWG fleet does not stampede the provider with duplicate
+	// submissions of the same sample. Keyed by "tenant:sha".
+	flight singleflight.Group
 }
 
 // Option configures the Service.
@@ -171,6 +188,47 @@ func (s *Service) Submit(ctx context.Context, sub Submission, actorID *uuid.UUID
 		return Verdict{}, fmt.Errorf("%w: tenant_id is required", ErrInvalidArgument)
 	}
 
+	// Collapse concurrent submissions of the same sample (same
+	// tenant + digest) into a single detonation. Without this the
+	// SWG fleet would submit the same unknown file to the provider
+	// many times in parallel before the first verdict is persisted.
+	// The shared result (verdict + error, including ErrNoProvider)
+	// is delivered to every concurrent caller.
+	key := sub.TenantID.String() + ":" + sha
+	res, _, _ := s.flight.Do(key, func() (any, error) {
+		// Detach from the winning caller's cancellation. This
+		// detonation is shared by every concurrent caller for the
+		// same (tenant, digest), so it must not be torn down just
+		// because the caller that happened to win the flight had its
+		// request cancelled or timed out — the others' contexts may
+		// still be valid. WithoutCancel preserves request-scoped
+		// values (the tenant RLS binding, tracing span) while dropping
+		// the deadline/cancellation; the provider's own http.Client
+		// timeout (30s) bounds the call; submitFlightTimeout adds a
+		// defense-in-depth ceiling so even a provider that neglects
+		// its own timeout cannot hang the flight indefinitely.
+		fctx := context.WithoutCancel(ctx)
+		fctx, cancel := context.WithTimeout(fctx, submitFlightTimeout)
+		defer cancel()
+		v, serr := s.submitOnce(fctx, sub, sha, actorID)
+		return submitResult{verdict: v, err: serr}, nil
+	})
+	r := res.(submitResult)
+	return r.verdict, r.err
+}
+
+// submitResult bundles the verdict and error so both can travel
+// through singleflight, which only carries a single value + error
+// and would otherwise drop the verdict that Submit returns alongside
+// the ErrNoProvider sentinel.
+type submitResult struct {
+	verdict Verdict
+	err     error
+}
+
+// submitOnce performs one detonation submission. It is invoked under
+// the singleflight group so at most one runs per (tenant, digest).
+func (s *Service) submitOnce(ctx context.Context, sub Submission, sha string, actorID *uuid.UUID) (Verdict, error) {
 	// Dedup: a resolved verdict short-circuits.
 	if existing, ok, lerr := s.LookupVerdict(ctx, sub.TenantID, sha); lerr == nil && ok {
 		return existing, nil
@@ -292,6 +350,44 @@ func (s *Service) GetVerdict(ctx context.Context, tenantID uuid.UUID, sha string
 		return Verdict{}, err
 	}
 	return fromRow(row), nil
+}
+
+// Disposition resolves the fail-closed allow/deny decision for a
+// file digest. It is the helper the SWG malware stage consults to
+// decide whether a file may be released: only a resolved, clean
+// verdict yields DispositionAllow. A still-pending submission yields
+// DispositionPending; an unknown/never-seen file, a provider error,
+// or a suspicious/malicious/timeout verdict all yield DispositionDeny
+// (treat unknown as not-clean per policy). The Verdict is returned
+// alongside for audit/telemetry.
+func (s *Service) Disposition(ctx context.Context, tenantID uuid.UUID, sha string) (Disposition, Verdict, error) {
+	sha, err := normalizeSHA(sha)
+	if err != nil {
+		return DispositionDeny, Verdict{}, err
+	}
+	// A cached verdict is always a resolved, complete one (only
+	// persistResolved populates the cache), so treat it as complete.
+	if v, ok := s.cache.Get(tenantID, sha); ok {
+		return dispositionFor(StatusComplete, v), v, nil
+	}
+	row, err := s.repo.GetBySHA256(ctx, tenantID, sha)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			// Never submitted: nothing proves the file clean. Deny,
+			// but echo the (normalized) digest the caller asked about
+			// so the disposition response identifies the sample rather
+			// than returning a blank sha256. Carry the explicit
+			// ClassUnknown ("no verdict reached") rather than the empty
+			// zero value, so the rendered verdict's classification is a
+			// valid enum member instead of "" — which Classification.Valid
+			// rejects and which would break enum dispatch in API consumers.
+			return DispositionDeny, Verdict{SHA256: sha, Classification: ClassUnknown}, nil
+		}
+		// Store error: cannot prove the file clean, deny fail-closed.
+		return DispositionDeny, Verdict{}, err
+	}
+	v := fromRow(row)
+	return dispositionFor(Status(row.Status), v), v, nil
 }
 
 func (s *Service) persistPending(ctx context.Context, tenantID uuid.UUID, sha, sandboxID string) (repository.SandboxVerdict, error) {

@@ -90,6 +90,9 @@ type Store struct {
 	// RBI sessions — see migration 043.
 	rbiSessions map[uuid.UUID]repository.RBISession
 
+	// RBI session artifacts — see migration 048.
+	rbiArtifacts map[uuid.UUID]repository.RBIArtifact
+
 	// App registry tables — see internal/repository/app_registry.go
 	// and migrations/008_app_registry.up.sql. `appRegistry` is the
 	// global curated catalog (not tenant-scoped); `appOverrides`
@@ -208,6 +211,7 @@ func NewStore() *Store {
 		inlineCASBRules:        map[uuid.UUID]repository.InlineCASBRule{},
 		sandboxVerdicts:        map[uuid.UUID]repository.SandboxVerdict{},
 		rbiSessions:            map[uuid.UUID]repository.RBISession{},
+		rbiArtifacts:           map[uuid.UUID]repository.RBIArtifact{},
 		casbDiscoveredApps:     map[uuid.UUID]repository.CASBDiscoveredApp{},
 		casbPostureChecks:      map[uuid.UUID]repository.CASBPostureCheck{},
 		mspTenants:             map[mspTenantKey]repository.MSPTenantBinding{},

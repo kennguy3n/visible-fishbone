@@ -208,13 +208,14 @@ impl HealthCheck for HaSubsystem {
         let detail = if self.enabled {
             let snap = self.stats.snapshot();
             format!(
-                "enabled=true, role={}, promotions={}, demotions={}, adv_sent={}, adv_recv={}, health_releases={}",
+                "enabled=true, role={}, promotions={}, demotions={}, adv_sent={}, adv_recv={}, health_releases={}, epoch={}",
                 role_label(snap.role),
                 snap.promotions,
                 snap.demotions,
                 snap.advertisements_sent,
                 snap.advertisements_received,
                 snap.health_releases,
+                snap.master_epoch,
             )
         } else {
             "enabled=false, role=standalone".to_owned()

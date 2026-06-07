@@ -68,7 +68,7 @@ pub mod maps;
 pub mod tc;
 
 pub use class::{ClassRule, ClassVerdict, Classifier, XdpAction, verdict_for};
-pub use control::{XdpCapabilities, XdpControlPlane, XdpStats};
+pub use control::{AttachOutcome, XdpCapabilities, XdpControlPlane, XdpStats};
 pub use error::EbpfError;
 pub use firewall::{PortRange, XdpDecision, XdpRule, XdpRuleAction, XdpRuleSet};
 pub use loader::{NoopLoader, ProgramLoader, XdpMode, detect_xdp_capable};

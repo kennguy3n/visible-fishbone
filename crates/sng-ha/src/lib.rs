@@ -63,7 +63,7 @@ pub use health::{
     StaticHealthProbe,
 };
 pub use state_sync::{
-    ConntrackEntry, SdwanPathScoreState, StateApplier, StaticStateApplier, SyncQueue,
+    ConntrackEntry, FenceState, SdwanPathScoreState, StateApplier, StaticStateApplier, SyncQueue,
     SyncQueueStats, SyncRecord, ZtnaSessionState, pump_from_reader, pump_to_writer,
 };
 pub use vip::{NoopVipManager, ShellVipManager, VipManager, VipSpec};
@@ -139,6 +139,12 @@ pub struct HaStatsSnapshot {
     pub advertisements_received: u64,
     /// Times a mandatory health probe forced a release.
     pub health_releases: u64,
+    /// Current state-sync fencing epoch this node stamps on its
+    /// outbound stream while Master (0 before it has ever promoted).
+    /// Monotonic across failovers: each promotion takes
+    /// `max(observed peer epoch) + 1`, so a deposed Master always
+    /// carries a strictly-lower epoch than its successor.
+    pub master_epoch: u64,
 }
 
 /// Numeric role codes used in [`HaStatsSnapshot::role`].
@@ -175,6 +181,7 @@ pub struct HaStats {
     advertisements_sent: AtomicU64,
     advertisements_received: AtomicU64,
     health_releases: AtomicU64,
+    master_epoch: AtomicU64,
 }
 
 impl HaStats {
@@ -192,6 +199,7 @@ impl HaStats {
             advertisements_sent: self.advertisements_sent.load(Ordering::Relaxed),
             advertisements_received: self.advertisements_received.load(Ordering::Relaxed),
             health_releases: self.health_releases.load(Ordering::Relaxed),
+            master_epoch: self.master_epoch.load(Ordering::Acquire),
         }
     }
 }
@@ -206,6 +214,12 @@ pub struct HaController {
     health: Arc<HealthRegistry>,
     sync_queue: Arc<SyncQueue>,
     stats: Arc<HaStats>,
+    /// Receiver-side fencing gate, shared with the state-sync reader
+    /// task. While Backup the reader advances it from the active's
+    /// stream; on promotion the controller reads its high-water mark
+    /// to mint a strictly-greater Master epoch, so a deposed Master's
+    /// later writes are fenced. See [`FenceState`].
+    fence: Arc<FenceState>,
 }
 
 impl HaController {
@@ -229,6 +243,7 @@ impl HaController {
             health,
             sync_queue,
             stats: Arc::new(HaStats::default()),
+            fence: Arc::new(FenceState::new()),
         })
     }
 
@@ -242,6 +257,26 @@ impl HaController {
     #[must_use]
     pub fn sync_queue(&self) -> Arc<SyncQueue> {
         Arc::clone(&self.sync_queue)
+    }
+
+    /// The shared fencing gate.
+    ///
+    /// The state-sync **reader** task (running while Backup) passes
+    /// this to [`pump_from_reader`] so the epoch the active stamps is
+    /// tracked here and a stale Master is rejected. The controller
+    /// reads its high-water mark on promotion to mint the next epoch.
+    #[must_use]
+    pub fn fence(&self) -> Arc<FenceState> {
+        Arc::clone(&self.fence)
+    }
+
+    /// The fencing epoch this node stamps on its outbound state-sync
+    /// stream. Zero until the first promotion; the state-sync
+    /// **writer** task (running while Master) passes it to
+    /// [`pump_to_writer`]. Monotonic across failovers.
+    #[must_use]
+    pub fn master_epoch(&self) -> u64 {
+        self.stats.master_epoch.load(Ordering::Acquire)
     }
 
     /// Run the failover loop until `is_shutdown()` returns `true`.
@@ -374,6 +409,18 @@ impl HaController {
             match change {
                 RoleChange::Promoted => {
                     self.stats.promotions.fetch_add(1, Ordering::Relaxed);
+                    // Mint a fencing epoch strictly greater than any
+                    // we observed from the previous Master while we
+                    // were Backup. Deriving it from the receiver-side
+                    // high-water mark (rather than a per-node promote
+                    // count) keeps epochs globally monotonic across
+                    // the failover chain, so the node we are taking
+                    // over from always carries a lower epoch and its
+                    // late writes are fenced. Adopt it into our own
+                    // gate too, so we never re-accept our predecessor.
+                    let epoch = self.fence.current().saturating_add(1);
+                    self.fence.admit(epoch);
+                    self.stats.master_epoch.store(epoch, Ordering::Release);
                     self.vip.acquire(&self.settings.vip).await?;
                     // If our view of synced state is incomplete, the
                     // passive-side reconciliation (full-state pull)
@@ -589,6 +636,10 @@ mod tests {
 
         let snap = stats.snapshot();
         assert_eq!(snap.promotions, 1, "should have promoted once");
+        assert_eq!(
+            snap.master_epoch, 1,
+            "first promotion mints fencing epoch 1 (from baseline 0)"
+        );
         assert!(snap.advertisements_sent >= 1, "master should advertise");
         // VIP acquired on promotion, released on shutdown.
         let events = recorder.events();

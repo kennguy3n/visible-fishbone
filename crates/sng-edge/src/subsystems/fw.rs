@@ -110,26 +110,104 @@ impl FwSubsystem {
                 Arc::new(nft_dp)
             }
             DataPathSelection::Ebpf => {
-                let control = Arc::new(XdpControlPlane::in_memory());
+                let control = Self::build_xdp_control_plane(cfg);
                 let ebpf = EbpfDataPath::new(control, nft_dp);
-                // The eBPF path is selected, but the in-memory control plane
-                // (NoopLoader) loads no kernel XDP program — the real
-                // AyaLoader integration ships with the BPF object crate in a
-                // later phase. Surface that so an operator who sees
-                // `datapath=ebpf` is not misled into thinking traffic is being
-                // offloaded; nftables is still carrying all enforcement.
+                // Surface whether the fast path is genuinely offloading.
+                // Without the `xdp` feature (or on a host that could not
+                // accept the programs) the control plane runs the userspace
+                // model and nftables carries all enforcement — an operator
+                // who sees `datapath=ebpf` must not be misled into thinking
+                // traffic is hardware/kernel-accelerated.
                 if !ebpf.capabilities().kernel_offload {
                     tracing::warn!(
                         target: "sng_edge::fw",
                         "eBPF data path selected but kernel XDP offload is not \
-                         active (in-memory control plane); nftables is carrying \
-                         enforcement"
+                         active; nftables is carrying enforcement"
                     );
                 }
                 Arc::new(ebpf)
             }
         };
         Self::from_parts(engine, datapath)
+    }
+
+    /// Build the eBPF control plane for the selected fast path.
+    ///
+    /// With the `xdp` feature on Linux this constructs the real
+    /// `aya`-backed loader from the `SNG_EBPF_OBJECT` environment
+    /// variable and attempts to load + attach the XDP program to the
+    /// configured interface. The attach is **fail-soft**: a host that
+    /// cannot accept the program (older kernel, missing object, busy
+    /// NIC) degrades to the userspace model and the nftables slow path
+    /// keeps enforcing — the edge never fails to boot on a fast-path
+    /// problem. Without the feature (or off Linux) the always-compiled
+    /// in-memory model is returned.
+    #[must_use]
+    fn build_xdp_control_plane(cfg: &FwConfig) -> Arc<XdpControlPlane> {
+        #[cfg(all(feature = "xdp", target_os = "linux"))]
+        {
+            use sng_ebpf::AyaLoader;
+            match AyaLoader::from_env() {
+                Ok(loader) => Self::control_plane_for_loader(Box::new(loader), &cfg.xdp_interface),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "sng_edge::fw",
+                        error = %err,
+                        "no XDP object available (SNG_EBPF_OBJECT unset); \
+                         running userspace data-path model"
+                    );
+                    Arc::new(XdpControlPlane::in_memory())
+                }
+            }
+        }
+        #[cfg(not(all(feature = "xdp", target_os = "linux")))]
+        {
+            // `xdp` feature compiled out (or non-Linux target): the
+            // userspace model is the only available backend.
+            let _ = cfg;
+            Arc::new(XdpControlPlane::in_memory())
+        }
+    }
+
+    /// Load + attach `loader` to `iface`, returning the control plane the
+    /// data path should run on.
+    ///
+    /// A clean attach keeps the real kernel loader. A **degraded** attach
+    /// (older kernel, missing object, busy NIC) discards it for the
+    /// userspace model: a loader whose programs never attached cannot
+    /// service map updates, so keeping it would make every `install_rules`
+    /// fail with `Unsupported` and drag the `EbpfDataPath` flush
+    /// (`clear_rules`) into the same failure on *every* bundle reload —
+    /// turning a one-time attach problem into perpetual install errors even
+    /// though nftables enforcement is fine. Falling back to the in-memory
+    /// model (identical to a missing object) lets the slow path run cleanly.
+    #[cfg(all(feature = "xdp", target_os = "linux"))]
+    #[must_use]
+    fn control_plane_for_loader(
+        loader: Box<dyn sng_ebpf::ProgramLoader>,
+        iface: &str,
+    ) -> Arc<XdpControlPlane> {
+        use sng_ebpf::{AttachOutcome, XdpMode};
+        let control = Arc::new(XdpControlPlane::new(loader));
+        match control.try_load_and_attach(iface, XdpMode::default()) {
+            AttachOutcome::Attached => {
+                tracing::info!(
+                    target: "sng_edge::fw",
+                    iface = %iface,
+                    "XDP fast path attached to kernel"
+                );
+                control
+            }
+            AttachOutcome::Degraded(err) => {
+                tracing::warn!(
+                    target: "sng_edge::fw",
+                    iface = %iface,
+                    error = %err,
+                    "XDP attach failed; degrading to nftables slow path"
+                );
+                Arc::new(XdpControlPlane::in_memory())
+            }
+        }
     }
 
     /// Build with an explicit nftables backend. Used by the
@@ -314,6 +392,84 @@ mod tests {
         // No ruleset installed yet — degraded (operator's
         // signal that the policy puller hasn't delivered).
         assert_eq!(h.status, HealthStatus::Degraded);
+    }
+
+    /// A loader that loads but whose XDP program never attaches (older
+    /// kernel / busy NIC), and which—like the real `AyaLoader` before the
+    /// BPF object crate lands—rejects every map update as `Unsupported`.
+    /// Driving `control_plane_for_loader` with it reproduces the degraded
+    /// attach the fail-soft path must not keep wrapping.
+    #[cfg(all(feature = "xdp", target_os = "linux"))]
+    #[derive(Debug)]
+    struct AttachFailLoader;
+
+    #[cfg(all(feature = "xdp", target_os = "linux"))]
+    impl sng_ebpf::ProgramLoader for AttachFailLoader {
+        fn is_supported(&self) -> bool {
+            true
+        }
+        fn load(&self) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn attach_xdp(&self, _: &str, _: sng_ebpf::XdpMode) -> Result<(), sng_ebpf::EbpfError> {
+            Err(sng_ebpf::EbpfError::Attach("forced attach failure".into()))
+        }
+        fn attach_tc_egress(&self, _: &str) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn detach(&self) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn pin(&self, _: &std::path::Path) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn update_rules(&self, _: &sng_ebpf::XdpRuleSet) -> Result<(), sng_ebpf::EbpfError> {
+            Err(sng_ebpf::EbpfError::Unsupported(
+                "no attached object".into(),
+            ))
+        }
+        fn update_classification(
+            &self,
+            _: &sng_ebpf::Classifier,
+        ) -> Result<(), sng_ebpf::EbpfError> {
+            Err(sng_ebpf::EbpfError::Unsupported(
+                "no attached object".into(),
+            ))
+        }
+        fn update_steering(
+            &self,
+            _: &sng_ebpf::EgressSteeringTable,
+        ) -> Result<(), sng_ebpf::EbpfError> {
+            Err(sng_ebpf::EbpfError::Unsupported(
+                "no attached object".into(),
+            ))
+        }
+    }
+
+    /// Regression: a degraded attach must hand back the userspace model, not
+    /// the unattachable loader. Otherwise every `install_rules` on the
+    /// resulting plane fails (the loader rejects all map updates), turning a
+    /// one-time attach failure into perpetual per-reload errors. Asserting an
+    /// install succeeds proves we fell back to the in-memory model.
+    #[cfg(all(feature = "xdp", target_os = "linux"))]
+    #[test]
+    fn degraded_attach_falls_back_to_userspace_model() {
+        use sng_ebpf::{XdpRule, XdpRuleAction, XdpRuleSet};
+
+        let control = FwSubsystem::control_plane_for_loader(Box::new(AttachFailLoader), "eth0");
+
+        // No kernel offload — the slow path carries enforcement.
+        assert!(!control.capabilities().kernel_offload);
+
+        // The decisive check: install_rules must succeed. With the
+        // unattachable loader still wrapped this returns `Unsupported`.
+        let rules = XdpRuleSet::new(
+            vec![XdpRule::catch_all("a", XdpRuleAction::Pass)],
+            XdpRuleAction::Drop,
+        );
+        control
+            .install_rules(rules)
+            .expect("degraded attach must fall back to a plane that accepts rule installs");
     }
 
     #[test]

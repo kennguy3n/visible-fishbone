@@ -84,6 +84,21 @@ pub enum HaError {
     /// rather than at first failover.
     #[error("invalid config: {0}")]
     InvalidConfig(String),
+
+    /// A state-sync peer announced a fencing epoch older than the
+    /// highest this node has already observed: the sender is a
+    /// deposed Master that has not yet learned it lost the
+    /// election. Its records are refused so a stale Master cannot
+    /// overwrite the live table with state from before the
+    /// failover — the split-brain write this fence exists to
+    /// prevent. The receiver tears the stale session down.
+    #[error("fenced: peer epoch {incoming} is older than current {current}")]
+    Fenced {
+        /// Epoch the (stale) peer stamped on its stream.
+        incoming: u64,
+        /// Highest epoch this node has already admitted.
+        current: u64,
+    },
 }
 
 impl HaError {
@@ -93,7 +108,13 @@ impl HaError {
         match self {
             Self::Socket(_) | Self::Vip(_) => ErrorCode::Io,
             Self::Encode(_) => ErrorCode::WireEncoding,
-            Self::Decode(_) | Self::FrameTooLarge { .. } => ErrorCode::WireSchema,
+            // A stale-Master write attempt (`Fenced`) is, from this
+            // node's perspective, a wire-level protocol violation:
+            // the peer is presenting state it is no longer authorised
+            // to send. It buckets with the other inbound-frame faults.
+            Self::Decode(_) | Self::FrameTooLarge { .. } | Self::Fenced { .. } => {
+                ErrorCode::WireSchema
+            }
             Self::PeerUnreachable(_) => ErrorCode::ControlPlaneUnreachable,
             Self::InvalidConfig(_) => ErrorCode::ConfigInvalid,
         }

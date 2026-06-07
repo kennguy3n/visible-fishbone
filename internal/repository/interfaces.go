@@ -1027,6 +1027,17 @@ type RBISessionRepository interface {
 	Close(ctx context.Context, tenantID, id uuid.UUID) error
 }
 
+// RBIArtifactRepository owns the rbi_session_artifacts table
+// (migration 048). It records artifact transfers that crossed the RBI
+// isolation boundary, tenant-scoped via `sng.tenant_id` (RLS) on the
+// postgres backend; the memory backend filters on TenantID
+// explicitly. Rows are append-only (no update/delete): each transfer
+// is an immutable audit record.
+type RBIArtifactRepository interface {
+	Create(ctx context.Context, tenantID uuid.UUID, a RBIArtifact) (RBIArtifact, error)
+	ListBySession(ctx context.Context, tenantID, sessionID uuid.UUID, limit int) ([]RBIArtifact, error)
+}
+
 // --- DLP ------------------------------------------------------------------
 
 // DLPPolicyRepository owns the dlp_policies table. Tenant-scoped

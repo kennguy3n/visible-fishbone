@@ -15,6 +15,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbi"
+	"github.com/kennguy3n/visible-fishbone/internal/service/residency"
 	"github.com/kennguy3n/visible-fishbone/internal/service/sandbox"
 )
 
@@ -224,5 +225,81 @@ func TestRBIHandler_PolicyProbe(t *testing.T) {
 	}
 	if !probe.Configured {
 		t.Fatal("expected configured=true")
+	}
+}
+
+// denyResidencyGuard is a residency guard that always rejects, used to
+// drive the handler's residency-violation path.
+type denyResidencyGuard struct{}
+
+func (denyResidencyGuard) Check(_ context.Context, _ uuid.UUID) error {
+	return residency.ErrResidencyViolation
+}
+
+// TestRBIHandler_ArtifactResidencyViolation verifies that when the
+// fail-closed residency guard rejects an artifact write, the handler
+// surfaces a distinct 403 residency_violation rather than a generic
+// 500. The artifact policy permits the transfer so the request clears
+// the policy gate and reaches the residency check.
+func TestRBIHandler_ArtifactResidencyViolation(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	tenantID := uuid.New()
+	if _, err := memory.NewTenantRepository(store).Create(context.Background(),
+		repository.Tenant{
+			ID: tenantID, Name: "T", Slug: "t",
+			Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+		}); err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+
+	rbiSvc := rbi.NewService(
+		memory.NewRBISessionRepository(store),
+		rbi.WithProxy(rbi.ProxyConfig{BaseURL: "https://rbi.example.com"}),
+		rbi.WithArtifactRepo(memory.NewRBIArtifactRepository(store)),
+		rbi.WithArtifactPolicy(rbi.ArtifactPolicy{FileUpload: true}),
+		rbi.WithResidencyGuard(denyResidencyGuard{}),
+	)
+
+	// Create an active session directly so the artifact has a parent.
+	sess, err := rbiSvc.CreateSession(context.Background(), tenantID, rbi.CreateSessionInput{TargetURL: "https://x.example"}, nil)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	jwtSecret := "test-jwt-secret-key"
+	router := handler.NewRouter(handler.RouterDeps{
+		Config: &config.Config{Auth: config.Auth{
+			JWTSecret: jwtSecret, JWTIssuer: "sng-control", JWTAudience: "sng-control", APIKeyHeader: "X-SNG-API-Key",
+		}},
+		RBI: handler.NewRBIHandler(rbiSvc),
+	})
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"iss": "sng-control", "aud": "sng-control", "sub": uuid.NewString(),
+		"tenant_id": tenantID.String(),
+		"iat":       time.Now().Unix(), "exp": time.Now().Add(5 * time.Minute).Unix(),
+	})
+	signed, err := token.SignedString([]byte(jwtSecret))
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
+
+	path := "/api/v1/tenants/" + tenantID.String() + "/rbi/sessions/" + sess.ID.String() + "/artifacts"
+	rec := doJSON(t, router, http.MethodPost, path, signed, map[string]any{
+		"kind": "file_upload", "direction": "outbound", "filename": "p.pdf",
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 on residency violation, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error.Code != "residency_violation" {
+		t.Fatalf("expected error code residency_violation, got %q (%s)", body.Error.Code, rec.Body.String())
 	}
 }

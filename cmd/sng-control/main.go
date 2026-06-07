@@ -60,6 +60,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/pop"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbi"
+	"github.com/kennguy3n/visible-fishbone/internal/service/residency"
 	"github.com/kennguy3n/visible-fishbone/internal/service/sandbox"
 	"github.com/kennguy3n/visible-fishbone/internal/service/sandbox/providers"
 	"github.com/kennguy3n/visible-fishbone/internal/service/site"
@@ -580,6 +581,7 @@ func buildRouter(
 	inlineCASBRuleRepo := store.NewInlineCASBRuleRepository()
 	sandboxVerdictRepo := store.NewSandboxVerdictRepository()
 	rbiSessionRepo := store.NewRBISessionRepository()
+	rbiArtifactRepo := store.NewRBIArtifactRepository()
 	opsHealthRepo := store.NewOpsHealthSnapshotRepository()
 	aiSuggestionRepo := store.NewAISuggestionRepository()
 
@@ -710,7 +712,7 @@ func buildRouter(
 	// selected from cfg.RBI; with no proxy URL the service still
 	// runs and serves session reads but CreateSession reports
 	// "not configured" so the SWG falls back to allow/block.
-	rbiSvc := rbi.NewService(rbiSessionRepo,
+	rbiOpts := []rbi.Option{
 		rbi.WithAudit(auditRepo),
 		rbi.WithLogger(logger),
 		rbi.WithProxy(rbi.ProxyConfig{BaseURL: cfg.RBI.ProxyBaseURL}),
@@ -719,8 +721,33 @@ func buildRouter(
 			Categories:           cfg.RBI.TriggerCategories,
 			RiskScoreThreshold:   cfg.RBI.RiskScoreThreshold,
 			IsolateUncategorised: cfg.RBI.IsolateUncategorised,
+			ExplicitIsolate:      cfg.RBI.ExplicitIsolate,
+			ExplicitBypass:       cfg.RBI.ExplicitBypass,
 		}),
-	)
+		rbi.WithArtifactRepo(rbiArtifactRepo),
+		rbi.WithArtifactPolicy(rbi.ArtifactPolicy{
+			ClipboardInbound:  cfg.RBI.ArtifactClipboardInbound,
+			ClipboardOutbound: cfg.RBI.ArtifactClipboardOutbound,
+			FileDownload:      cfg.RBI.ArtifactFileDownload,
+			FileUpload:        cfg.RBI.ArtifactFileUpload,
+		}),
+	}
+	// Gate artifact persistence behind the fail-closed residency Guard
+	// when the operator pins a region for RBI artifact storage. Without
+	// a configured region, residency enforcement is opt-in and the
+	// guard is left unset (matching the residency service's
+	// unconstrained default for tenants with no designated region).
+	if cfg.RBI.ArtifactRegion != "" {
+		residencySvc := residency.NewService(
+			residency.NewTenantRegionResolver(tenantRepo),
+			store.NewResidencyAuditRepository(),
+			logger,
+		)
+		rbiOpts = append(rbiOpts, rbi.WithResidencyGuard(
+			residency.NewGuard(residencySvc, residency.PlaneRBIArtifact, residency.Region(cfg.RBI.ArtifactRegion)),
+		))
+	}
+	rbiSvc := rbi.NewService(rbiSessionRepo, rbiOpts...)
 
 	policySvc := policy.New(
 		policyRepo,

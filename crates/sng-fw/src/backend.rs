@@ -766,6 +766,9 @@ mod tests {
         fn attach_tc_egress(&self, _: &str) -> Result<(), sng_ebpf::EbpfError> {
             Ok(())
         }
+        fn detach(&self) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
         fn pin(&self, _: &std::path::Path) -> Result<(), sng_ebpf::EbpfError> {
             Ok(())
         }

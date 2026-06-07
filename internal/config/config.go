@@ -119,6 +119,31 @@ type RBI struct {
 	// IsolateUncategorised (RBI_ISOLATE_UNCATEGORISED) triggers RBI
 	// for any URL the categoriser cannot classify.
 	IsolateUncategorised bool
+	// ExplicitIsolate (RBI_EXPLICIT_ISOLATE) lists host patterns that
+	// always route to RBI regardless of category/risk (comma-
+	// separated). Highest precedence; deny-wins against ExplicitBypass.
+	ExplicitIsolate []string
+	// ExplicitBypass (RBI_EXPLICIT_BYPASS) lists host patterns that are
+	// never isolated even when a category/risk rule would match
+	// (comma-separated). Overridden by ExplicitIsolate.
+	ExplicitBypass []string
+	// ArtifactRegion (RBI_ARTIFACT_REGION) is the region the control
+	// plane persists RBI artifact records in. When set, artifact
+	// writes are gated by the fail-closed data-residency Guard against
+	// this region; empty disables residency enforcement for artifacts
+	// (opt-in, matching the residency service's unconstrained default).
+	ArtifactRegion string
+	// Artifact transfer gates. Each defaults to false: isolation
+	// defaults to a sealed boundary and an operator opts specific
+	// transfers back in.
+	//   RBI_ARTIFACT_CLIPBOARD_INBOUND  remote→endpoint paste-in
+	//   RBI_ARTIFACT_CLIPBOARD_OUTBOUND endpoint→remote copy-out
+	//   RBI_ARTIFACT_FILE_DOWNLOAD      remote→endpoint download
+	//   RBI_ARTIFACT_FILE_UPLOAD        endpoint→remote upload
+	ArtifactClipboardInbound  bool
+	ArtifactClipboardOutbound bool
+	ArtifactFileDownload      bool
+	ArtifactFileUpload        bool
 }
 
 // Sandbox carries the runtime knobs for zero-day file analysis
@@ -1161,6 +1186,14 @@ func Load() (Config, error) {
 			TriggerCategories:    splitCSV(getStr("RBI_TRIGGER_CATEGORIES", "")),
 			RiskScoreThreshold:   getIntLenient("RBI_RISK_SCORE_THRESHOLD", 0),
 			IsolateUncategorised: getBoolLenient("RBI_ISOLATE_UNCATEGORISED", false),
+			ExplicitIsolate:      splitCSV(getStr("RBI_EXPLICIT_ISOLATE", "")),
+			ExplicitBypass:       splitCSV(getStr("RBI_EXPLICIT_BYPASS", "")),
+			ArtifactRegion:       getStr("RBI_ARTIFACT_REGION", ""),
+
+			ArtifactClipboardInbound:  getBoolLenient("RBI_ARTIFACT_CLIPBOARD_INBOUND", false),
+			ArtifactClipboardOutbound: getBoolLenient("RBI_ARTIFACT_CLIPBOARD_OUTBOUND", false),
+			ArtifactFileDownload:      getBoolLenient("RBI_ARTIFACT_FILE_DOWNLOAD", false),
+			ArtifactFileUpload:        getBoolLenient("RBI_ARTIFACT_FILE_UPLOAD", false),
 		},
 		Telemetry: Telemetry{
 			OTLPEndpoint:   getStr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),

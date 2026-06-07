@@ -319,13 +319,31 @@ impl Default for DnsConfig {
 /// [`sng_fw::ShellNftables`] at boot — no operator-visible
 /// switch here because the edge VM has no other path: the
 /// supervisor refuses to boot if `nft` is not reachable.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FwConfig {
     /// Override the `nft` binary path. Defaults to the system
     /// `nft` on `$PATH` (resolved by `ShellNftables`).
     #[serde(default)]
     pub nft_binary: Option<PathBuf>,
+    /// Ingress NIC the XDP fast-path program attaches to when the
+    /// eBPF data path is selected AND the binary was built with the
+    /// `xdp` feature. Defaults to `eth0` (the canonical first
+    /// data-plane NIC on the shipped edge VM image). Ignored when the
+    /// nftables slow path is selected or when the `xdp` feature is
+    /// compiled out — attach is fail-soft, so an interface mismatch
+    /// degrades to the slow path rather than failing boot.
+    #[serde(default = "default_xdp_interface")]
+    pub xdp_interface: String,
+}
+
+impl Default for FwConfig {
+    fn default() -> Self {
+        Self {
+            nft_binary: None,
+            xdp_interface: default_xdp_interface(),
+        }
+    }
 }
 
 /// IPS subprocess management settings. Mirrors the shape of
@@ -878,6 +896,9 @@ fn default_suricata_eve_log_path() -> PathBuf {
     PathBuf::from("/var/lib/sng/ips/eve.json")
 }
 fn default_ips_interface() -> String {
+    "eth0".into()
+}
+fn default_xdp_interface() -> String {
     "eth0".into()
 }
 fn default_ips_rule_file_path() -> PathBuf {
