@@ -245,6 +245,59 @@ func TestGoogle_getToken_Errors(t *testing.T) {
 	}
 }
 
+func TestValidateGoogleTokenURI(t *testing.T) {
+	cases := []struct {
+		name    string
+		uri     string
+		wantErr string
+	}{
+		{name: "google token endpoint", uri: "https://oauth2.googleapis.com/token"},
+		{name: "google accounts endpoint", uri: "https://accounts.google.com/o/oauth2/token"},
+		{name: "http scheme rejected", uri: "http://oauth2.googleapis.com/token", wantErr: "must use https"},
+		{name: "metadata ssrf rejected", uri: "https://169.254.169.254/latest/meta-data/", wantErr: "untrusted token_uri host"},
+		{name: "internal host rejected", uri: "https://internal-svc.local/token", wantErr: "untrusted token_uri host"},
+		{name: "lookalike host rejected", uri: "https://oauth2.googleapis.com.evil.com/token", wantErr: "untrusted token_uri host"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateGoogleTokenURI(tc.uri)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateGoogleTokenURI(%q) = %v, want nil", tc.uri, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validateGoogleTokenURI(%q) = %v, want substring %q", tc.uri, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestGoogle_getToken_RejectsUntrustedTokenURI(t *testing.T) {
+	fx := newGoogleSAFixture(t)
+	srv := googleServer(t, fx)
+	defer srv.Close()
+	g := newTestGoogle(t, srv)
+
+	// A tenant-supplied key that tries to redirect the assertion POST at an
+	// internal/metadata endpoint must be rejected before any network call.
+	var keyMap map[string]any
+	if err := json.Unmarshal(fx.keyJSON, &keyMap); err != nil {
+		t.Fatalf("unmarshal fixture key: %v", err)
+	}
+	keyMap["token_uri"] = "http://169.254.169.254/latest/meta-data/"
+	malicious, _ := json.Marshal(keyMap)
+
+	cfg, _ := json.Marshal(GoogleConfig{Domain: "co.com", AdminEmail: "admin@co.com"})
+	sec, _ := json.Marshal(GoogleSecret{PrivateKeyJSON: json.RawMessage(malicious)})
+
+	_, err := g.getToken(context.Background(), cfg, sec)
+	if err == nil || !strings.Contains(err.Error(), "token_uri") {
+		t.Fatalf("want token_uri rejection error, got %v", err)
+	}
+}
+
 func TestGoogle_getToken_TokenEndpointError(t *testing.T) {
 	fx := newGoogleSAFixture(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

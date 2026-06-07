@@ -30,6 +30,33 @@ const googleScopes = "https://www.googleapis.com/auth/admin.directory.user.reado
 // jwtBearerGrant is the OAuth2 grant type for a signed-JWT assertion.
 const jwtBearerGrant = "urn:ietf:params:oauth:grant-type:jwt-bearer" //nolint:gosec // G101 false positive: OAuth2 grant-type URN, not a credential.
 
+// googleTrustedTokenHosts is the allowlist of hosts the connector will POST a
+// signed assertion to. A service account key file is tenant-supplied input in
+// a multi-tenant CASB, so its token_uri is untrusted: honoring an arbitrary
+// value would let a malicious key point the control plane at an internal
+// address or cloud-metadata endpoint (SSRF). Genuine Google keys always use
+// oauth2.googleapis.com, so the allowlist costs real deployments nothing.
+var googleTrustedTokenHosts = map[string]bool{
+	"oauth2.googleapis.com": true,
+	"accounts.google.com":   true,
+}
+
+// validateGoogleTokenURI enforces that a key-supplied token_uri is an https
+// Google endpoint before it is used as the assertion audience and POST target.
+func validateGoogleTokenURI(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("google: invalid token_uri in service account key: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("google: token_uri must use https, got scheme %q", u.Scheme)
+	}
+	if !googleTrustedTokenHosts[u.Host] {
+		return fmt.Errorf("google: untrusted token_uri host %q (expected a googleapis.com token endpoint)", u.Host)
+	}
+	return nil
+}
+
 // googleSAKey is the relevant subset of a Google service account key file
 // (the JSON downloaded from the GCP console). Only the fields needed to mint
 // and exchange a signed assertion are decoded.
@@ -320,10 +347,15 @@ func (g *Google) getToken(ctx context.Context, config json.RawMessage, secret []
 	}
 
 	// The audience of the assertion must equal the token endpoint it is
-	// presented to (RFC 7523 §3). Use the key's token_uri when present so a
-	// single code path works for both real keys and test fixtures.
+	// presented to (RFC 7523 §3). A real Google key carries its own
+	// token_uri; honor it only after validating it is an https Google host so
+	// a malicious tenant-supplied key cannot redirect the POST (SSRF). The
+	// default g.tokenURL is operator-controlled and trusted as-is.
 	tokenURL := g.tokenURL
 	if key.TokenURI != "" {
+		if err := validateGoogleTokenURI(key.TokenURI); err != nil {
+			return "", err
+		}
 		tokenURL = key.TokenURI
 	}
 
