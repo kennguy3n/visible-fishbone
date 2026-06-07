@@ -7,11 +7,38 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/casb"
 )
+
+// googleTokenURL is the default Google OAuth2 token endpoint used for the
+// JWT-bearer (service account) grant when the service account key does not
+// carry its own token_uri.
+const googleTokenURL = "https://oauth2.googleapis.com/token" //nolint:gosec // G101 false positive: public OAuth2 endpoint URL, not a credential.
+
+// googleScopes are the OAuth2 scopes requested for the Admin SDK Directory
+// and Reports APIs that this connector reads. They are read-only: the
+// connector never mutates Workspace state.
+const googleScopes = "https://www.googleapis.com/auth/admin.directory.user.readonly " +
+	"https://www.googleapis.com/auth/admin.reports.audit.readonly"
+
+// jwtBearerGrant is the OAuth2 grant type for a signed-JWT assertion.
+const jwtBearerGrant = "urn:ietf:params:oauth:grant-type:jwt-bearer" //nolint:gosec // G101 false positive: OAuth2 grant-type URN, not a credential.
+
+// googleSAKey is the relevant subset of a Google service account key file
+// (the JSON downloaded from the GCP console). Only the fields needed to mint
+// and exchange a signed assertion are decoded.
+type googleSAKey struct {
+	ClientEmail  string `json:"client_email"`
+	PrivateKey   string `json:"private_key"`
+	PrivateKeyID string `json:"private_key_id"`
+	TokenURI     string `json:"token_uri"`
+}
 
 // GoogleConfig holds the non-sensitive connector configuration.
 type GoogleConfig struct {
@@ -32,6 +59,8 @@ type Google struct {
 	client    HTTPDoer
 	userAgent string
 	baseURL   string // overridable for testing; defaults to https://admin.googleapis.com
+	tokenURL  string // overridable for testing; defaults to https://oauth2.googleapis.com/token
+	now       func() time.Time
 }
 
 // NewGoogle constructs a Google Workspace CASB connector.
@@ -46,6 +75,8 @@ func NewGoogle(client HTTPDoer, userAgent string) *Google {
 		client:    client,
 		userAgent: userAgent,
 		baseURL:   "https://admin.googleapis.com",
+		tokenURL:  googleTokenURL,
+		now:       time.Now,
 	}
 }
 
@@ -242,7 +273,12 @@ func (g *Google) AssessPosture(_ context.Context, _ json.RawMessage, _ []byte) (
 	}, nil
 }
 
-func (g *Google) getToken(_ context.Context, config json.RawMessage, secret []byte) (string, error) {
+// getToken performs OAuth2 service-account authentication with domain-wide
+// delegation: it mints an RS256-signed JWT assertion impersonating the
+// configured admin (the `sub` claim) and exchanges it at Google's token
+// endpoint for a short-lived access token scoped to the Admin SDK
+// Directory and Reports APIs.
+func (g *Google) getToken(ctx context.Context, config json.RawMessage, secret []byte) (string, error) {
 	var cfg GoogleConfig
 	if err := json.Unmarshal(config, &cfg); err != nil {
 		return "", fmt.Errorf("google: invalid config: %w", err)
@@ -254,13 +290,89 @@ func (g *Google) getToken(_ context.Context, config json.RawMessage, secret []by
 	if err := json.Unmarshal(secret, &sec); err != nil {
 		return "", fmt.Errorf("google: invalid secret: %w", err)
 	}
-	if len(sec.PrivateKeyJSON) == 0 {
+	// Treat an absent field and an explicit JSON null the same: both mean no
+	// key was supplied. json.RawMessage captures "null" as 4 literal bytes,
+	// so a length check alone is not enough.
+	if trimmed := strings.TrimSpace(string(sec.PrivateKeyJSON)); trimmed == "" || trimmed == "null" {
 		return "", fmt.Errorf("google: service account private_key_json is required")
 	}
-	// In production this would perform JWT-based service account
-	// authentication with domain-wide delegation. For the initial
-	// scaffold the token exchange is represented but the JWT
-	// signing is deferred to a future PR that brings in a proper
-	// JWT library or the Google auth SDK.
-	return "google-sa-token-placeholder", nil
+
+	var key googleSAKey
+	if err := json.Unmarshal(sec.PrivateKeyJSON, &key); err != nil {
+		return "", fmt.Errorf("google: invalid service account key json: %w", err)
+	}
+	// The issuer of the assertion is the service account itself. Prefer the
+	// client_email embedded in the key file; fall back to the explicitly
+	// configured service account address.
+	issuer := key.ClientEmail
+	if issuer == "" {
+		issuer = cfg.ServiceAccount
+	}
+	if issuer == "" {
+		return "", fmt.Errorf("google: service account email missing from key (client_email) and config (service_account_email)")
+	}
+	if strings.TrimSpace(key.PrivateKey) == "" {
+		return "", fmt.Errorf("google: service account key json missing private_key")
+	}
+	rsaKey, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(key.PrivateKey))
+	if err != nil {
+		return "", fmt.Errorf("google: parse service account private key: %w", err)
+	}
+
+	// The audience of the assertion must equal the token endpoint it is
+	// presented to (RFC 7523 §3). Use the key's token_uri when present so a
+	// single code path works for both real keys and test fixtures.
+	tokenURL := g.tokenURL
+	if key.TokenURI != "" {
+		tokenURL = key.TokenURI
+	}
+
+	now := g.now()
+	claims := jwt.MapClaims{
+		"iss":   issuer,
+		"sub":   cfg.AdminEmail, // domain-wide delegation: impersonate the admin
+		"scope": googleScopes,
+		"aud":   tokenURL,
+		"iat":   now.Unix(),
+		"exp":   now.Add(time.Hour).Unix(), // Google caps assertion lifetime at 1h
+	}
+	assertion := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	if key.PrivateKeyID != "" {
+		assertion.Header["kid"] = key.PrivateKeyID
+	}
+	signed, err := assertion.SignedString(rsaKey)
+	if err != nil {
+		return "", fmt.Errorf("google: sign service account assertion: %w", err)
+	}
+
+	form := url.Values{
+		"grant_type": {jwtBearerGrant},
+		"assertion":  {signed},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL,
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", g.userAgent)
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("google: token request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("google: token endpoint returned %d: %s", resp.StatusCode, body)
+	}
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return "", fmt.Errorf("google: decode token: %w", err)
+	}
+	if tokenResp.AccessToken == "" {
+		return "", fmt.Errorf("google: token endpoint returned empty access_token")
+	}
+	return tokenResp.AccessToken, nil
 }
