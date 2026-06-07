@@ -288,4 +288,14 @@ func TestDisposition_NeverSubmittedEchoesDigest(t *testing.T) {
 	if v.SHA256 != testSHA256 {
 		t.Fatalf("expected verdict to echo digest %q, got %q", testSHA256, v.SHA256)
 	}
+	// The classification must be a valid enum member, not the empty
+	// zero value: a never-submitted sample has no verdict, which is
+	// exactly ClassUnknown. An empty string would render an invalid
+	// enum in the API response.
+	if v.Classification != ClassUnknown {
+		t.Fatalf("expected ClassUnknown, got %q", v.Classification)
+	}
+	if !v.Classification.Valid() {
+		t.Fatalf("classification %q is not a valid enum member", v.Classification)
+	}
 }

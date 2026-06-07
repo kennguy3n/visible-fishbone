@@ -376,8 +376,12 @@ func (s *Service) Disposition(ctx context.Context, tenantID uuid.UUID, sha strin
 			// Never submitted: nothing proves the file clean. Deny,
 			// but echo the (normalized) digest the caller asked about
 			// so the disposition response identifies the sample rather
-			// than returning a blank sha256.
-			return DispositionDeny, Verdict{SHA256: sha}, nil
+			// than returning a blank sha256. Carry the explicit
+			// ClassUnknown ("no verdict reached") rather than the empty
+			// zero value, so the rendered verdict's classification is a
+			// valid enum member instead of "" — which Classification.Valid
+			// rejects and which would break enum dispatch in API consumers.
+			return DispositionDeny, Verdict{SHA256: sha, Classification: ClassUnknown}, nil
 		}
 		// Store error: cannot prove the file clean, deny fail-closed.
 		return DispositionDeny, Verdict{}, err
