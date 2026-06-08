@@ -147,10 +147,10 @@ impl XdpRule {
             return false;
         }
         // `None` protocol on the rule is a wildcard.
-        if let Some(proto) = self.protocol {
-            if proto != protocol {
-                return false;
-            }
+        if let Some(proto) = self.protocol
+            && proto != protocol
+        {
+            return false;
         }
         true
     }

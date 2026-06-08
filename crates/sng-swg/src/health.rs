@@ -108,17 +108,17 @@ pub fn evaluate(p: &HealthProbe) -> HealthReport {
             detail: "envoy admin port unreachable".into(),
         };
     }
-    if let Some(idle) = p.since_last_verdict {
-        if idle > p.verdict_staleness_window {
-            return HealthReport {
-                state: HealthState::Degraded,
-                detail: format!(
-                    "no verdict in {idle_s}s (limit {limit_s}s)",
-                    idle_s = idle.as_secs(),
-                    limit_s = p.verdict_staleness_window.as_secs()
-                ),
-            };
-        }
+    if let Some(idle) = p.since_last_verdict
+        && idle > p.verdict_staleness_window
+    {
+        return HealthReport {
+            state: HealthState::Degraded,
+            detail: format!(
+                "no verdict in {idle_s}s (limit {limit_s}s)",
+                idle_s = idle.as_secs(),
+                limit_s = p.verdict_staleness_window.as_secs()
+            ),
+        };
     }
     HealthReport::healthy()
 }

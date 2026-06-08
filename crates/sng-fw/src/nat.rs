@@ -172,13 +172,15 @@ impl NatRule {
         // (rewrite every packet's destination) but are almost
         // always a mistake — emit a soft validation. The compiler
         // can override by setting a non-empty dst_cidrs / dst_ports.
-        if let NatType::Dnat { .. } = &self.nat {
-            if self.dst_cidrs.is_empty() && self.dst_ports.is_empty() && self.iif.is_empty() {
-                return Err(FirewallError::RuleInvalid(format!(
-                    "dnat rule {} has no destination predicate (would rewrite every packet)",
-                    self.id
-                )));
-            }
+        if let NatType::Dnat { .. } = &self.nat
+            && self.dst_cidrs.is_empty()
+            && self.dst_ports.is_empty()
+            && self.iif.is_empty()
+        {
+            return Err(FirewallError::RuleInvalid(format!(
+                "dnat rule {} has no destination predicate (would rewrite every packet)",
+                self.id
+            )));
         }
         for r in &self.dst_ports {
             if r.from > r.to {

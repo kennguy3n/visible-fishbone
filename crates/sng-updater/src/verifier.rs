@@ -186,13 +186,13 @@ impl ManifestVerifier {
                 manifest.schema_version, MAX_KNOWN_MANIFEST_SCHEMA_VERSION
             )));
         }
-        if let Some(expected) = self.expected_target {
-            if manifest.target != expected {
-                return Err(UpdaterError::TargetMismatch {
-                    actual: manifest.target,
-                    expected,
-                });
-            }
+        if let Some(expected) = self.expected_target
+            && manifest.target != expected
+        {
+            return Err(UpdaterError::TargetMismatch {
+                actual: manifest.target,
+                expected,
+            });
         }
         if let Some(current) = current_version {
             match Self::compare_versions(manifest.version, current) {

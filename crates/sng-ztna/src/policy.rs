@@ -250,10 +250,10 @@ impl AccessConditions {
     #[must_use]
     fn country_denied(&self, country: Option<&str>) -> bool {
         let upper = country.map(str::to_ascii_uppercase);
-        if let (Some(blocked), Some(c)) = (self.blocked_countries.as_ref(), upper.as_ref()) {
-            if blocked.iter().any(|b| b.eq_ignore_ascii_case(c)) {
-                return true;
-            }
+        if let (Some(blocked), Some(c)) = (self.blocked_countries.as_ref(), upper.as_ref())
+            && blocked.iter().any(|b| b.eq_ignore_ascii_case(c))
+        {
+            return true;
         }
         if let Some(allowed) = self.allowed_countries.as_ref() {
             match upper.as_ref() {

@@ -596,21 +596,21 @@ impl UpdaterService {
             return Ok(());
         }
         let slot_state = layout.slot_state(target_slot);
-        if let BankSlotState::RolledBack { version } = slot_state {
-            if *version == manifest.version {
-                warn!(
-                    version = %manifest.version,
-                    slot = %target_slot,
-                    "refusing to re-install version that was rolled back from this slot"
-                );
-                self.stats
-                    .install_reinstall_of_rolled_back_rejections
-                    .fetch_add(1, Ordering::Relaxed);
-                return Err(UpdaterError::ReinstallOfRolledBackVersion {
-                    version: manifest.version,
-                    slot: target_slot,
-                });
-            }
+        if let BankSlotState::RolledBack { version } = slot_state
+            && *version == manifest.version
+        {
+            warn!(
+                version = %manifest.version,
+                slot = %target_slot,
+                "refusing to re-install version that was rolled back from this slot"
+            );
+            self.stats
+                .install_reinstall_of_rolled_back_rejections
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(UpdaterError::ReinstallOfRolledBackVersion {
+                version: manifest.version,
+                slot: target_slot,
+            });
         }
         Ok(())
     }

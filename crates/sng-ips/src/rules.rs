@@ -395,13 +395,13 @@ impl RuleStager for FsRuleStager {
         // value we compare against is exactly the one that any
         // *previous* swap committed (the writer updates the cell
         // before releasing `swap_lock`).
-        if let Some(current) = *self.installed.lock() {
-            if claims.version <= current {
-                return Err(IpsError::RuleStale {
-                    incoming: claims.version,
-                    current,
-                });
-            }
+        if let Some(current) = *self.installed.lock()
+            && claims.version <= current
+        {
+            return Err(IpsError::RuleStale {
+                incoming: claims.version,
+                current,
+            });
         }
         tokio::fs::create_dir_all(&self.config.staging_dir)
             .await

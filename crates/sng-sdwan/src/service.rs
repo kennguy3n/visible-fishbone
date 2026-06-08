@@ -620,14 +620,12 @@ impl SdwanService {
         // future change to one branch surfaces a
         // structural asymmetry rather than a silent perf
         // regression.
-        if policy_snap.sticky_window_ms > 0 {
-            if let Some(pinned) = self.sticky_lookup(&request.flow_key, request.now_ms) {
-                if let Some(sticky_decision) =
-                    self.try_sticky(&pinned, &candidates, &policy_snap, request)
-                {
-                    return self.finalise(request, sticky_decision, &policy_snap);
-                }
-            }
+        if policy_snap.sticky_window_ms > 0
+            && let Some(pinned) = self.sticky_lookup(&request.flow_key, request.now_ms)
+            && let Some(sticky_decision) =
+                self.try_sticky(&pinned, &candidates, &policy_snap, request)
+        {
+            return self.finalise(request, sticky_decision, &policy_snap);
         }
 
         // Step 3: score every candidate that has a fresh,
@@ -809,16 +807,16 @@ impl SdwanService {
         // `SdwanServiceConfig::sticky_cache_capacity`
         // doc contract that promises this exact
         // short-circuit on `sticky_window_ms == 0`.
-        if policy.sticky_window_ms > 0 {
-            if let Some(path_id) = &decision.path_id {
-                let pinned_until_ms = request.now_ms.saturating_add(policy.sticky_window_ms);
-                self.sticky_insert(
-                    request.flow_key.clone(),
-                    path_id.clone(),
-                    request.now_ms,
-                    pinned_until_ms,
-                );
-            }
+        if policy.sticky_window_ms > 0
+            && let Some(path_id) = &decision.path_id
+        {
+            let pinned_until_ms = request.now_ms.saturating_add(policy.sticky_window_ms);
+            self.sticky_insert(
+                request.flow_key.clone(),
+                path_id.clone(),
+                request.now_ms,
+                pinned_until_ms,
+            );
         }
         // Build + emit telemetry event.
         let event = build_sdwan_event(&decision, probe.as_ref());

@@ -271,18 +271,18 @@ impl Dedup {
     /// tests so they can drive time deterministically rather than
     /// relying on real-world `Instant::now()`.
     pub fn observe_at(&mut self, fp: Fingerprint, now: Instant) -> bool {
-        if let Some(last) = self.seen.get(&fp).copied() {
-            if now.duration_since(last) < self.window {
-                // Refresh the timestamp so a high-rate duplicate
-                // doesn't fall out of the window between hits and
-                // then immediately get re-admitted on the next
-                // observation. The protocol-level invariant is
-                // "no fingerprint passes inside the rolling
-                // window", which means the window slides with
-                // each duplicate hit.
-                self.seen.insert(fp, now);
-                return false;
-            }
+        if let Some(last) = self.seen.get(&fp).copied()
+            && now.duration_since(last) < self.window
+        {
+            // Refresh the timestamp so a high-rate duplicate
+            // doesn't fall out of the window between hits and
+            // then immediately get re-admitted on the next
+            // observation. The protocol-level invariant is
+            // "no fingerprint passes inside the rolling
+            // window", which means the window slides with
+            // each duplicate hit.
+            self.seen.insert(fp, now);
+            return false;
         }
         if self.seen.len() >= self.max_entries {
             self.prune_at(now);

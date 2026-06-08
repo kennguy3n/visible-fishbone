@@ -679,15 +679,13 @@ async fn tail_eve_log(
     // changes, so post-rotation lines are still observed in full.
     // Tests that pre-populate the EVE file set
     // `eve_tail_seek_to_end = false` to keep the replay behaviour.
-    if seek_to_end {
-        if let Err(e) = file.seek(std::io::SeekFrom::End(0)).await {
-            warn!(
-                target: "sng_ips::manager::eve",
-                path = %eve_path.display(),
-                error = %e,
-                "failed to seek EVE log to end on initial open; falling back to offset 0 (may replay historical alerts)"
-            );
-        }
+    if seek_to_end && let Err(e) = file.seek(std::io::SeekFrom::End(0)).await {
+        warn!(
+            target: "sng_ips::manager::eve",
+            path = %eve_path.display(),
+            error = %e,
+            "failed to seek EVE log to end on initial open; falling back to offset 0 (may replay historical alerts)"
+        );
     }
     // Anchor the cached identity to the *file descriptor we just
     // opened*, not to the path. The previous design read
@@ -1362,8 +1360,8 @@ async fn run_restart_watchdog(
                             "ips restart failed"
                         );
                         backoff = (backoff * 2).min(max_backoff);
-                        if let Some(max) = max_attempts {
-                            if consecutive_failures >= max {
+                        if let Some(max) = max_attempts
+                            && consecutive_failures >= max {
                                 warn!(
                                     target: "sng_ips::manager::watchdog",
                                     consecutive_failures,
@@ -1371,7 +1369,6 @@ async fn run_restart_watchdog(
                                 );
                                 return;
                             }
-                        }
                     }
                 }
             }

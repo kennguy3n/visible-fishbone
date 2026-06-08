@@ -573,16 +573,16 @@ fn render_rule(rule: &FirewallRule, zones: &ZoneTable) -> Result<String, Firewal
             // classify a packet of this family into the zone.
             // (Family-agnostic slots have no zones at all by
             // construction, so the check is skipped.)
-            if let (Some(z), Some(f)) = (from_zone, family) {
-                if !zone_has_family(zones, z, f) {
-                    continue;
-                }
+            if let (Some(z), Some(f)) = (from_zone, family)
+                && !zone_has_family(zones, z, f)
+            {
+                continue;
             }
             for to_zone in &to_slots {
-                if let (Some(z), Some(f)) = (to_zone, family) {
-                    if !zone_has_family(zones, z, f) {
-                        continue;
-                    }
+                if let (Some(z), Some(f)) = (to_zone, family)
+                    && !zone_has_family(zones, z, f)
+                {
+                    continue;
                 }
                 // Filter src/dst cidrs to this family (no-op
                 // for family-agnostic slots, which have no

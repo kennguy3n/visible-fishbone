@@ -249,13 +249,12 @@ fn dispatch(stats: &ControlPlaneStats, request: &Request<()>, bundle_state: &Bun
             .headers()
             .get(http::header::IF_NONE_MATCH)
             .and_then(|v| v.to_str().ok());
-        if let Some(want) = inm {
-            if want == bundle_state.etag
-                && bundle_state.served_at_least_once.load(Ordering::Acquire)
-            {
-                stats.bundle_pulls_304.fetch_add(1, Ordering::Relaxed);
-                return Resp::Bundle304;
-            }
+        if let Some(want) = inm
+            && want == bundle_state.etag
+            && bundle_state.served_at_least_once.load(Ordering::Acquire)
+        {
+            stats.bundle_pulls_304.fetch_add(1, Ordering::Relaxed);
+            return Resp::Bundle304;
         }
         stats.bundle_pulls_200.fetch_add(1, Ordering::Relaxed);
         bundle_state

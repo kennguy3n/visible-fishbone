@@ -217,10 +217,10 @@ impl Config {
     /// validate.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
         let mut figment = Figment::new();
-        if let Some(p) = path {
-            if p.exists() {
-                figment = figment.merge(Toml::file(p));
-            }
+        if let Some(p) = path
+            && p.exists()
+        {
+            figment = figment.merge(Toml::file(p));
         }
         figment = figment.merge(Env::prefixed(Self::ENV_PREFIX).split("__"));
         let mut cfg: Self = figment.extract()?;
@@ -394,7 +394,7 @@ mod humantime_serde {
 
     fn format_duration(d: Duration) -> String {
         let total_ms = d.as_millis();
-        if total_ms % 1_000 == 0 {
+        if total_ms.is_multiple_of(1_000) {
             format!("{}s", total_ms / 1_000)
         } else {
             format!("{total_ms}ms")

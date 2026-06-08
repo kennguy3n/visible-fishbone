@@ -207,10 +207,10 @@ mod linux {
             };
             for entry in entries.flatten() {
                 let uuid_path = entry.path().join("dm/uuid");
-                if let Ok(contents) = fs::read_to_string(&uuid_path) {
-                    if contents.starts_with("CRYPT-LUKS") {
-                        return DiskEncryptionState::Enabled;
-                    }
+                if let Ok(contents) = fs::read_to_string(&uuid_path)
+                    && contents.starts_with("CRYPT-LUKS")
+                {
+                    return DiskEncryptionState::Enabled;
                 }
             }
             DiskEncryptionState::Disabled

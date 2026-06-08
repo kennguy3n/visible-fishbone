@@ -161,10 +161,10 @@ impl AppSignature {
     fn classify(&self, ctx: &RequestContext) -> Option<&PathRule> {
         let path = match_path(&ctx.path);
         self.path_rules.iter().find(|pr| {
-            if let Some(m) = &pr.method {
-                if !ctx.method.eq_ignore_ascii_case(m) {
-                    return false;
-                }
+            if let Some(m) = &pr.method
+                && !ctx.method.eq_ignore_ascii_case(m)
+            {
+                return false;
             }
             path_glob_match(&pr.path_glob, path)
         })

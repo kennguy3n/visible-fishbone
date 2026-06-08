@@ -231,20 +231,20 @@ impl SlaPolicy {
     #[must_use]
     pub fn evaluate(&self, probe: &PathProbe, throughput_mbps: Option<f32>) -> Vec<SlaMetric> {
         let mut breaches = Vec::new();
-        if let Some(cap) = self.max_latency_ms {
-            if !probe.latency_ms.is_finite() || probe.latency_ms > cap {
-                breaches.push(SlaMetric::Latency);
-            }
+        if let Some(cap) = self.max_latency_ms
+            && (!probe.latency_ms.is_finite() || probe.latency_ms > cap)
+        {
+            breaches.push(SlaMetric::Latency);
         }
-        if let Some(cap) = self.max_loss_pct {
-            if !probe.loss_pct.is_finite() || probe.loss_pct > cap {
-                breaches.push(SlaMetric::Loss);
-            }
+        if let Some(cap) = self.max_loss_pct
+            && (!probe.loss_pct.is_finite() || probe.loss_pct > cap)
+        {
+            breaches.push(SlaMetric::Loss);
         }
-        if let Some(cap) = self.max_jitter_ms {
-            if !probe.jitter_ms.is_finite() || probe.jitter_ms > cap {
-                breaches.push(SlaMetric::Jitter);
-            }
+        if let Some(cap) = self.max_jitter_ms
+            && (!probe.jitter_ms.is_finite() || probe.jitter_ms > cap)
+        {
+            breaches.push(SlaMetric::Jitter);
         }
         if let Some(floor) = self.min_throughput_mbps {
             match throughput_mbps {
@@ -257,23 +257,23 @@ impl SlaPolicy {
 }
 
 fn check_non_negative(label: &str, value: Option<f32>) -> Result<(), SdwanError> {
-    if let Some(v) = value {
-        if !v.is_finite() || v < 0.0 {
-            return Err(SdwanError::InvalidPolicy(format!(
-                "{label} must be finite and >= 0"
-            )));
-        }
+    if let Some(v) = value
+        && (!v.is_finite() || v < 0.0)
+    {
+        return Err(SdwanError::InvalidPolicy(format!(
+            "{label} must be finite and >= 0"
+        )));
     }
     Ok(())
 }
 
 fn check_loss(label: &str, value: Option<f32>) -> Result<(), SdwanError> {
-    if let Some(v) = value {
-        if !v.is_finite() || !(0.0..=100.0).contains(&v) {
-            return Err(SdwanError::InvalidPolicy(format!(
-                "{label} must be finite and in [0, 100]"
-            )));
-        }
+    if let Some(v) = value
+        && (!v.is_finite() || !(0.0..=100.0).contains(&v))
+    {
+        return Err(SdwanError::InvalidPolicy(format!(
+            "{label} must be finite and in [0, 100]"
+        )));
     }
     Ok(())
 }

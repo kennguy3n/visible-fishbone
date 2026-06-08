@@ -210,26 +210,26 @@ impl SdwanPolicy {
                 "score weights must not sum to zero — every path would tie".into(),
             ));
         }
-        if let Some(v) = self.max_latency_ms {
-            if !v.is_finite() || v < 0.0 {
-                return Err(SdwanError::InvalidPolicy(
-                    "max_latency_ms must be finite and >= 0".into(),
-                ));
-            }
+        if let Some(v) = self.max_latency_ms
+            && (!v.is_finite() || v < 0.0)
+        {
+            return Err(SdwanError::InvalidPolicy(
+                "max_latency_ms must be finite and >= 0".into(),
+            ));
         }
-        if let Some(v) = self.max_loss_pct {
-            if !v.is_finite() || !(0.0..=100.0).contains(&v) {
-                return Err(SdwanError::InvalidPolicy(
-                    "max_loss_pct must be finite and in [0, 100]".into(),
-                ));
-            }
+        if let Some(v) = self.max_loss_pct
+            && (!v.is_finite() || !(0.0..=100.0).contains(&v))
+        {
+            return Err(SdwanError::InvalidPolicy(
+                "max_loss_pct must be finite and in [0, 100]".into(),
+            ));
         }
-        if let Some(v) = self.max_jitter_ms {
-            if !v.is_finite() || v < 0.0 {
-                return Err(SdwanError::InvalidPolicy(
-                    "max_jitter_ms must be finite and >= 0".into(),
-                ));
-            }
+        if let Some(v) = self.max_jitter_ms
+            && (!v.is_finite() || v < 0.0)
+        {
+            return Err(SdwanError::InvalidPolicy(
+                "max_jitter_ms must be finite and >= 0".into(),
+            ));
         }
         if self.probe_max_age_ms == 0 {
             return Err(SdwanError::InvalidPolicy(

@@ -209,11 +209,11 @@ impl BypassList {
         // `Vec::dedup` call.
         let mut merged: Vec<BypassEntry> = Vec::with_capacity(entries.len());
         for entry in entries {
-            if let Some(last) = merged.last_mut() {
-                if last.suffix == entry.suffix {
-                    *last = entry;
-                    continue;
-                }
+            if let Some(last) = merged.last_mut()
+                && last.suffix == entry.suffix
+            {
+                *last = entry;
+                continue;
             }
             merged.push(entry);
         }

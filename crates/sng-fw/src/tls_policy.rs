@@ -275,23 +275,23 @@ impl TlsPolicy {
             };
         }
         // 2. Industry defaults (skippable per policy).
-        if self.enable_industry_defaults {
-            if let Some((category, suffix)) = match_industry_list(sni) {
-                // 3. Operator allow list overrides the industry default.
-                if let Some(allow_suffix) = match_any_suffix(&self.decrypt_allowlist, sni) {
-                    return TlsVerdict::Decrypt {
-                        reason: TlsDecryptReason::OperatorAllowlist {
-                            suffix: allow_suffix,
-                        },
-                    };
-                }
-                return TlsVerdict::Bypass {
-                    reason: TlsBypassReason::IndustryDefault {
-                        category: category.into(),
-                        suffix: suffix.into(),
+        if self.enable_industry_defaults
+            && let Some((category, suffix)) = match_industry_list(sni)
+        {
+            // 3. Operator allow list overrides the industry default.
+            if let Some(allow_suffix) = match_any_suffix(&self.decrypt_allowlist, sni) {
+                return TlsVerdict::Decrypt {
+                    reason: TlsDecryptReason::OperatorAllowlist {
+                        suffix: allow_suffix,
                     },
                 };
             }
+            return TlsVerdict::Bypass {
+                reason: TlsBypassReason::IndustryDefault {
+                    category: category.into(),
+                    suffix: suffix.into(),
+                },
+            };
         }
         // 4. Operator allow list — explicit decrypt-this opt-in.
         if let Some(suffix) = match_any_suffix(&self.decrypt_allowlist, sni) {
@@ -341,10 +341,10 @@ fn match_any_suffix(suffixes: &BTreeSet<String>, sni: &str) -> Option<String> {
         if sni == *s {
             return Some(s.clone());
         }
-        if let Some(prefix) = sni.strip_suffix(s.as_str()) {
-            if prefix.ends_with('.') {
-                return Some(s.clone());
-            }
+        if let Some(prefix) = sni.strip_suffix(s.as_str())
+            && prefix.ends_with('.')
+        {
+            return Some(s.clone());
         }
     }
     None
@@ -439,10 +439,10 @@ fn match_industry_list(sni: &str) -> Option<(&'static str, &'static str)> {
             if sni == *suffix {
                 return Some((category, suffix));
             }
-            if let Some(prefix) = sni.strip_suffix(*suffix) {
-                if prefix.ends_with('.') {
-                    return Some((category, suffix));
-                }
+            if let Some(prefix) = sni.strip_suffix(*suffix)
+                && prefix.ends_with('.')
+            {
+                return Some((category, suffix));
             }
         }
     }

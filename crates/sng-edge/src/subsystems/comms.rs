@@ -404,10 +404,10 @@ impl IsConnectionFatal for CommsError {
 /// stripping the IPv6 brackets if present. Used as the SNI when
 /// the operator didn't override `server_name`.
 fn host_from_endpoint(ep: &str) -> String {
-    if let Some(rest) = ep.strip_prefix('[') {
-        if let Some(close) = rest.find(']') {
-            return rest[..close].to_owned();
-        }
+    if let Some(rest) = ep.strip_prefix('[')
+        && let Some(close) = rest.find(']')
+    {
+        return rest[..close].to_owned();
     }
     ep.rsplit_once(':')
         .map_or_else(|| ep.to_owned(), |(host, _port)| host.to_owned())
