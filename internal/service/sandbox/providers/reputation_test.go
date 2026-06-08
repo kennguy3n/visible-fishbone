@@ -98,6 +98,33 @@ func TestVirusTotal_CleanAndUnknown(t *testing.T) {
 	}
 }
 
+func TestVirusTotal_NoEngineSignalIsNotClean(t *testing.T) {
+	// Every engine timed out: no detections, no clean coverage. This is
+	// not a clean verdict — it must surface as ClassTimeout so the
+	// strictest-verdict aggregator cannot treat an unscanned file as clean.
+	allTimeout := &stubDoer{status: 200, body: `{"data":{"attributes":{"last_analysis_stats":{"malicious":0,"suspicious":0,"undetected":0,"harmless":0,"timeout":50}}}}`}
+	vt := NewVirusTotal(VirusTotalConfig{APIKey: "k", MinRequestInterval: -1}, allTimeout)
+	res, err := vt.Submit(context.Background(), File{SHA256: "ab"})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if res.Result.Classification != ClassTimeout {
+		t.Fatalf("all-timeout class = %s, want timeout", res.Result.Classification)
+	}
+
+	// Known-but-unanalysed hash (empty stats) is an absence of intel, not
+	// a clean result.
+	empty := &stubDoer{status: 200, body: `{"data":{"attributes":{"last_analysis_stats":{"malicious":0,"suspicious":0,"undetected":0,"harmless":0,"timeout":0}}}}`}
+	vt2 := NewVirusTotal(VirusTotalConfig{APIKey: "k", MinRequestInterval: -1}, empty)
+	res2, err := vt2.Submit(context.Background(), File{SHA256: "cd"})
+	if err != nil {
+		t.Fatalf("submit empty: %v", err)
+	}
+	if res2.Result.Classification != ClassUnknown {
+		t.Fatalf("empty-stats class = %s, want unknown", res2.Result.Classification)
+	}
+}
+
 func TestVirusTotal_Errors(t *testing.T) {
 	// Unconfigured → unavailable.
 	vt := NewVirusTotal(VirusTotalConfig{}, &stubDoer{status: 200})

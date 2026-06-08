@@ -168,9 +168,10 @@ func (v *VirusTotal) lookup(ctx context.Context, sha string) (PollResult, error)
 
 	stats := decoded.Data.Attributes.LastAnalysisStats
 	detections := stats.Malicious + stats.Suspicious
-	total := detections + stats.Undetected + stats.Harmless + stats.Timeout
+	cleanCoverage := stats.Undetected + stats.Harmless
+	total := detections + cleanCoverage + stats.Timeout
 
-	class := v.classify(stats.Malicious, detections)
+	class := v.classify(stats.Malicious, detections, cleanCoverage, stats.Timeout)
 	confidence := 0.0
 	if total > 0 {
 		confidence = NormalizeConfidence(float64(detections) / float64(total))
@@ -178,7 +179,7 @@ func (v *VirusTotal) lookup(ctx context.Context, sha string) (PollResult, error)
 	if class == ClassClean {
 		// Confidence in a clean verdict scales with engine coverage.
 		if total > 0 {
-			confidence = NormalizeConfidence(float64(stats.Harmless+stats.Undetected) / float64(total))
+			confidence = NormalizeConfidence(float64(cleanCoverage) / float64(total))
 		} else {
 			confidence = 0
 		}
@@ -200,13 +201,24 @@ func (v *VirusTotal) lookup(ctx context.Context, sha string) (PollResult, error)
 	}, nil
 }
 
-func (v *VirusTotal) classify(malicious, detections int) Classification {
+// classify maps the VT engine tally to a verdict. A file is only
+// ClassClean when engines positively cleared it (cleanCoverage > 0);
+// the absence of detections is not by itself a clean signal. When the
+// only engine signal was timeouts the verdict is ClassTimeout, and a
+// known-but-unanalysed hash (empty stats) is ClassUnknown — both rank
+// at/above ClassClean's strictness floor so a non-verdict can never
+// masquerade as clean and relax the aggregator's strictest verdict.
+func (v *VirusTotal) classify(malicious, detections, cleanCoverage, timeout int) Classification {
 	switch {
 	case malicious >= v.cfg.MaliciousThreshold:
 		return ClassMalicious
 	case detections >= v.cfg.SuspiciousThreshold:
 		return ClassSuspicious
-	default:
+	case cleanCoverage > 0:
 		return ClassClean
+	case timeout > 0:
+		return ClassTimeout
+	default:
+		return ClassUnknown
 	}
 }
