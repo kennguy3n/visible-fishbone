@@ -23,6 +23,17 @@ pub enum DlpErrorCode {
     /// The policy decoded but violated an invariant (duplicate rule
     /// id, unknown channel, schema version too new).
     PolicyInvalid,
+    /// The ML-NER model binary could not be loaded into the ONNX
+    /// runtime (corrupt graph, unsupported opset, allocation failure).
+    ModelLoadFailed,
+    /// The ML-NER model's Ed25519 signature did not verify against the
+    /// operator-provisioned trust store — the model is unsigned, was
+    /// signed by an untrusted key, or its bytes were tampered with.
+    ModelSignatureInvalid,
+    /// On-device ONNX inference failed at runtime (tensor shape
+    /// mismatch, runtime error). The classifier falls back to its
+    /// regex-only NER path, so this never disarms detection.
+    ModelInferenceFailed,
 }
 
 impl DlpErrorCode {
@@ -34,6 +45,9 @@ impl DlpErrorCode {
             Self::PolicyDecodeFailed => "dlp.policy.decode_failed",
             Self::PolicyTargetMismatch => "dlp.policy.target_mismatch",
             Self::PolicyInvalid => "dlp.policy.invalid",
+            Self::ModelLoadFailed => "dlp.model.load_failed",
+            Self::ModelSignatureInvalid => "dlp.model.signature_invalid",
+            Self::ModelInferenceFailed => "dlp.model.inference_failed",
         }
     }
 }
@@ -67,6 +81,15 @@ pub enum DlpError {
     /// The policy violated a structural invariant.
     #[error("dlp.policy.invalid: {0}")]
     PolicyInvalid(String),
+    /// The ML-NER model binary failed to load into ONNX Runtime.
+    #[error("dlp.model.load_failed: {0}")]
+    ModelLoad(String),
+    /// The ML-NER model's detached Ed25519 signature did not verify.
+    #[error("dlp.model.signature_invalid: {0}")]
+    ModelSignatureInvalid(String),
+    /// On-device ONNX inference failed at runtime.
+    #[error("dlp.model.inference_failed: {0}")]
+    ModelInference(String),
 }
 
 impl DlpError {
@@ -78,6 +101,9 @@ impl DlpError {
             Self::PolicyDecode(_) => DlpErrorCode::PolicyDecodeFailed,
             Self::PolicyTargetMismatch { .. } => DlpErrorCode::PolicyTargetMismatch,
             Self::PolicyInvalid(_) => DlpErrorCode::PolicyInvalid,
+            Self::ModelLoad(_) => DlpErrorCode::ModelLoadFailed,
+            Self::ModelSignatureInvalid(_) => DlpErrorCode::ModelSignatureInvalid,
+            Self::ModelInference(_) => DlpErrorCode::ModelInferenceFailed,
         }
     }
 }

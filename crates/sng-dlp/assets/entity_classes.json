@@ -1,0 +1,11 @@
+{
+  "_comment": "Single source of truth for the NER entity-class wire names shared by the Rust enforcement plane (sng_dlp::ml_classifier::EntityClass) and the Go control plane (internal/service/dlp endpointEntityClasses / validEntityClassCSV). 'classes' is in ONNX model output-column order (columns 1..=6; column 0 is the implicit non-entity 'O'). Adding, removing, or renaming a class requires editing this file AND both implementations: the Rust parity test (crates/sng-dlp/tests/ml_classifier.rs) and the Go parity test (internal/service/dlp/entity_classes_parity_test.go) each fail otherwise, closing the manual-sync gap.",
+  "classes": [
+    "person_name",
+    "address",
+    "phone_number",
+    "bank_account",
+    "medical_record",
+    "legal_document"
+  ]
+}

@@ -30,6 +30,7 @@ func setup(t *testing.T) (*dlp.Service, uuid.UUID) {
 		memory.NewDLPPolicyRepository(store),
 		memory.NewDLPFingerprintRepository(store),
 		memory.NewDLPMatchRepository(store),
+		memory.NewDLPModelRepository(store),
 		nil,
 	)
 	return svc, tenant.ID

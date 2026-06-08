@@ -190,6 +190,13 @@ pub struct FunctionReport {
     pub catch_rate: f64,
     pub false_positive_rate: f64,
     pub accuracy: f64,
+    /// Precision = tp / (tp + fp): of everything flagged, the fraction
+    /// that was a true positive. `None` when nothing was flagged
+    /// (tp + fp == 0), where precision is undefined. Reported alongside
+    /// the catch (recall) rate so detectors can be graded on the
+    /// precision/recall pair the DLP spec sets targets for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub precision: Option<f64>,
 
     pub targets: Targets,
     pub verdict: Grade,
@@ -236,6 +243,11 @@ impl FunctionReport {
         } else {
             (tp + tn) as f64 / total as f64
         };
+        let precision = if tp + fp == 0 {
+            None
+        } else {
+            Some(tp as f64 / (tp + fp) as f64)
+        };
         let verdict = grade(catch_rate, false_positive_rate, targets);
         Self {
             function: function.into(),
@@ -255,6 +267,7 @@ impl FunctionReport {
             catch_rate,
             false_positive_rate,
             accuracy,
+            precision,
             targets,
             verdict,
             notes,
@@ -282,6 +295,7 @@ impl FunctionReport {
             catch_rate: 0.0,
             false_positive_rate: 0.0,
             accuracy: 0.0,
+            precision: None,
             targets: Targets::default(),
             verdict: Grade::Untested,
             notes: None,

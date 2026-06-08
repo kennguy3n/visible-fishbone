@@ -144,6 +144,17 @@ aho-corasick = "1"
 # `golang.org/x/text/unicode/norm`.
 unicode-normalization = "0.1"
 
+# On-device ONNX inference for the endpoint DLP ML-NER classifier
+# (`sng-dlp::ml_classifier`). The NER head is a small multinomial-
+# logistic-regression ONNX graph shipped inside the Ed25519-signed
+# endpoint policy bundle; `ort` (the ONNX Runtime Rust binding) runs
+# it locally with no network call, well under the 50 ms/document
+# budget. Pinned to an exact release-candidate so the inference ABI
+# cannot drift between crates. The classifier degrades to a real
+# regex-only NER fallback when no model is loaded, so this dependency
+# is never on the fail-safe path.
+ort = "=2.0.0-rc.10"
+
 # Utilities.
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
