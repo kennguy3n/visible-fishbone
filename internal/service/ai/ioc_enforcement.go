@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -279,9 +280,25 @@ type DemotionEmitter interface {
 // so every feed refresh demotes any newly-seen malicious domain to
 // inspect_full (the demotion engine de-duplicates against existing
 // overrides, so re-emitting an already-demoted domain is a no-op).
+//
+// Sync is delta-driven: the bridge remembers the LastSeen it last
+// emitted for each domain and skips a domain whose sighting has not
+// advanced. Without this, every refresh of every feed (e.g. 7 feeds
+// hourly) would re-scan the whole merged snapshot and issue a
+// per-domain demotion call — thousands of redundant DB lookups an
+// hour against overrides that already exist. A domain is re-emitted
+// only when its LastSeen moves forward (the feed re-observed it),
+// which re-establishes the override if an operator cleared it in the
+// meantime.
 type DemotionBridge struct {
 	emitter       DemotionEmitter
 	minConfidence float64
+
+	mu sync.Mutex
+	// emitted maps a domain to the LastSeen of the most recent
+	// demotion the bridge issued for it, so a repeated snapshot with
+	// an unchanged sighting is a no-op.
+	emitted map[string]time.Time
 }
 
 // NewDemotionBridge builds a bridge over the given emitter.
@@ -292,26 +309,46 @@ func NewDemotionBridge(emitter DemotionEmitter, opts ...IOCEnforcementOption) *D
 	for _, opt := range opts {
 		opt(tmp)
 	}
-	return &DemotionBridge{emitter: emitter, minConfidence: tmp.minConfidence}
+	return &DemotionBridge{
+		emitter:       emitter,
+		minConfidence: tmp.minConfidence,
+		emitted:       make(map[string]time.Time),
+	}
 }
 
 // Sync emits a demotion for every domain IOC in the snapshot at or
-// above the confidence floor. Errors from individual emits are
-// collected and returned joined so one bad domain does not abort
-// the batch.
+// above the confidence floor whose sighting is new or has advanced
+// since the bridge last emitted it (see DemotionBridge docs for the
+// delta rationale). Errors from individual emits are collected and
+// returned joined so one bad domain does not abort the batch; a
+// domain whose emit fails is NOT recorded as emitted, so the next
+// refresh retries it.
 func (b *DemotionBridge) Sync(ctx context.Context, snap IOCSnapshot) error {
 	if b.emitter == nil {
 		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.emitted == nil {
+		b.emitted = make(map[string]time.Time)
 	}
 	var errs []error
 	for _, ioc := range snap.Domains {
 		if ioc.Confidence < b.minConfidence {
 			continue
 		}
+		// Skip a domain we have already demoted unless the feed has
+		// re-observed it since (LastSeen advanced). A zero LastSeen
+		// is treated as "unchanged" once first emitted.
+		if prev, ok := b.emitted[ioc.Value]; ok && !ioc.LastSeen.After(prev) {
+			continue
+		}
 		reason := iocRuleDescription("demotion", ioc)
 		if err := b.emitter.EmitDomainDemotion(ctx, ioc.Value, reason, ioc.LastSeen); err != nil {
 			errs = append(errs, fmt.Errorf("demote %q: %w", ioc.Value, err))
+			continue
 		}
+		b.emitted[ioc.Value] = ioc.LastSeen
 	}
 	return errors.Join(errs...)
 }

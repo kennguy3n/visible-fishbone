@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -131,4 +132,79 @@ func TestDemotionBridge_EmitsAboveFloorDomains(t *testing.T) {
 	if len(em.domains) != 1 || em.domains[0] != "evil.example.com" {
 		t.Fatalf("bridge emitted: %#v", em.domains)
 	}
+}
+
+// TestDemotionBridge_SkipsUnchangedDomainsAcrossSyncs guards the
+// delta behaviour: re-syncing the same snapshot (as happens when N
+// feeds each fire the OnUpdate hook with the shared merged store)
+// must not re-emit an already-demoted domain, but a domain whose
+// LastSeen advanced (the feed re-observed it) is re-emitted so the
+// override is re-established if it was cleared.
+func TestDemotionBridge_SkipsUnchangedDomainsAcrossSyncs(t *testing.T) {
+	t.Parallel()
+	em := &stubEmitter{}
+	bridge := NewDemotionBridge(em)
+	t0 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	snap := IOCSnapshot{Domains: []IOC{
+		mkIOC(IOCTypeDomain, "evil.example.com", 0.9, func(i *IOC) { i.LastSeen = t0 }),
+	}}
+
+	// First two syncs carry the same sighting → emit once only.
+	for i := 0; i < 2; i++ {
+		if err := bridge.Sync(context.Background(), snap); err != nil {
+			t.Fatalf("sync %d: %v", i, err)
+		}
+	}
+	if len(em.domains) != 1 {
+		t.Fatalf("unchanged re-sync re-emitted: %#v", em.domains)
+	}
+
+	// LastSeen advances (feed re-observed the domain) → re-emit.
+	snap2 := IOCSnapshot{Domains: []IOC{
+		mkIOC(IOCTypeDomain, "evil.example.com", 0.9, func(i *IOC) { i.LastSeen = t0.Add(time.Hour) }),
+	}}
+	if err := bridge.Sync(context.Background(), snap2); err != nil {
+		t.Fatalf("advanced sync: %v", err)
+	}
+	if len(em.domains) != 2 {
+		t.Fatalf("advanced LastSeen should re-emit, got: %#v", em.domains)
+	}
+}
+
+// TestDemotionBridge_RetriesAfterEmitError confirms a domain whose
+// emit fails is not recorded as synced, so the next refresh retries
+// it rather than silently dropping it from enforcement.
+func TestDemotionBridge_RetriesAfterEmitError(t *testing.T) {
+	t.Parallel()
+	em := &flakyEmitter{failFirst: true}
+	bridge := NewDemotionBridge(em)
+	snap := IOCSnapshot{Domains: []IOC{
+		mkIOC(IOCTypeDomain, "evil.example.com", 0.9, func(i *IOC) {
+			i.LastSeen = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+		}),
+	}}
+	if err := bridge.Sync(context.Background(), snap); err == nil {
+		t.Fatal("first sync should surface the emit error")
+	}
+	if err := bridge.Sync(context.Background(), snap); err != nil {
+		t.Fatalf("retry sync: %v", err)
+	}
+	if em.calls != 2 {
+		t.Fatalf("failed domain should be retried, calls = %d", em.calls)
+	}
+}
+
+// flakyEmitter fails its first EmitDomainDemotion call, then
+// succeeds, to exercise the retry path.
+type flakyEmitter struct {
+	failFirst bool
+	calls     int
+}
+
+func (e *flakyEmitter) EmitDomainDemotion(_ context.Context, _, _ string, _ time.Time) error {
+	e.calls++
+	if e.failFirst && e.calls == 1 {
+		return errors.New("emit failed")
+	}
+	return nil
 }

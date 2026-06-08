@@ -257,14 +257,31 @@ func (m *FeedManager) fireUpdate(ctx context.Context) {
 func (m *FeedManager) Start(ctx context.Context) {
 	m.startOnce.Do(func() {
 		m.started.Store(true)
+		// Derive a feed context cancelled when EITHER the parent ctx
+		// is done OR Stop closes stopCh. The loops fetch with this
+		// context, so Stop aborts an in-flight warm-up/scheduled HTTP
+		// fetch promptly instead of blocking on <-doneCh until the
+		// 30s HTTP client timeout. (On the normal shutdown path the
+		// parent ctx is already cancelled; this also covers the
+		// early-return path where the deferred Stop runs while the
+		// parent ctx is still live — see cmd/sng-control/main.go.)
+		runCtx, cancel := context.WithCancel(ctx)
+		go func() {
+			select {
+			case <-ctx.Done():
+			case <-m.stopCh:
+			}
+			cancel()
+		}()
 		for _, feed := range m.feeds {
 			m.wg.Add(1)
-			go m.runFeedLoop(ctx, feed)
+			go m.runFeedLoop(runCtx, feed)
 		}
 		m.wg.Add(1)
-		go m.runSweepLoop(ctx)
+		go m.runSweepLoop(runCtx)
 		go func() {
 			m.wg.Wait()
+			cancel()
 			close(m.doneCh)
 		}()
 	})

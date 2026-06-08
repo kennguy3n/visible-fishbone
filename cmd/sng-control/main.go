@@ -1414,8 +1414,15 @@ func buildThreatFeeds(cfg config.ThreatIntel) []aisvc.Feed {
 	if interval <= 0 {
 		interval = aisvc.DefaultFeedInterval
 	}
+	// One shared http.Client across all feeds (mirrors the
+	// integration connectors at the integrationHTTP site): feeds
+	// refresh on a schedule against a handful of endpoints, so a
+	// single pooled transport lets successive refreshes reuse TCP
+	// connections instead of each HTTPFetcher spinning up a fresh
+	// client/transport per fetch.
+	feedHTTP := &http.Client{Timeout: 30 * time.Second}
 	mkFetcher := func(url string, header http.Header) *aisvc.HTTPFetcher {
-		return &aisvc.HTTPFetcher{URL: url, Header: header}
+		return &aisvc.HTTPFetcher{URL: url, Header: header, Client: feedHTTP}
 	}
 	var feeds []aisvc.Feed
 	add := func(name string, parser aisvc.FeedParser, fetcher aisvc.FeedFetcher) {

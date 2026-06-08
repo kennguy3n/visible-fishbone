@@ -131,6 +131,17 @@ func (i IOC) URLHost() string {
 // "*." wildcard label so "*.evil.com." and "EVIL.com" collapse to
 // "evil.com". Returns ("", false) for an input that cannot be a
 // hostname (empty, contains a scheme, whitespace or a slash).
+//
+// Enforcement note: the IOC enforcement compiler emits exact-match
+// DNS/SWG predicates (the predicate dialect the policy evaluator
+// and the bundle carry has no suffix operator — DomainSuffix is a
+// graph *subject* matcher, not a predicate one), so a "*.evil.com"
+// feed entry compiles to an exact deny on the apex "evil.com", not
+// a tree-wide block of arbitrary subdomains. Tree-wide blocking is
+// the data plane's suffix-matching layer, configured independently
+// of per-indicator feed IOCs; keeping IOCs keyed on a single
+// canonical value is what lets the store dedupe a wildcard and a
+// bare-apex sighting of the same domain into one indicator.
 func normalizeDomain(s string) (string, bool) {
 	d := strings.ToLower(strings.TrimSpace(s))
 	d = strings.TrimSuffix(d, ".")
