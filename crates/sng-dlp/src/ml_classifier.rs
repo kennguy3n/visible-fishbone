@@ -886,7 +886,7 @@ impl RegexNerFallback {
         if numeric && near(&MEDICAL_KW) {
             return Some(EntityClass::MedicalRecord);
         }
-        if (numeric || has_digit_and_sep(t)) && near(&LEGAL_KW) {
+        if numeric && near(&LEGAL_KW) {
             return Some(EntityClass::LegalDocument);
         }
         if salient && (ADDR_KW.contains(lt.as_str()) || near(&ADDR_KW)) {
