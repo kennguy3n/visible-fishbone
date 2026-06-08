@@ -367,9 +367,11 @@ export function Dashboard() {
           title="Estimated monthly cost"
           actions={
             <HelpTooltip title="How this is estimated" align="right">
-              Based on {seats} enrolled device{seats === 1 ? "" : "s"} at the
-              ${PRICE_PER_SEAT}/user list price (published range $5–12). This is
-              an estimate — connect billing for exact, contracted figures.
+              Counts each of your {seats} enrolled device{seats === 1 ? "" : "s"}{" "}
+              as one seat at the ${PRICE_PER_SEAT}/seat list price (published
+              range $5–12). If a person uses more than one device this
+              over-estimates seats — connect billing for exact, contracted
+              figures.
             </HelpTooltip>
           }
         >
@@ -382,7 +384,7 @@ export function Dashboard() {
           </div>
           <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
             {seats > 0
-              ? `${seats} user${seats === 1 ? "" : "s"} × $${PRICE_PER_SEAT}/mo`
+              ? `${seats} device${seats === 1 ? "" : "s"} × $${PRICE_PER_SEAT}/seat/mo`
               : "Enrol devices to project a cost."}
           </div>
           <div style={{ marginTop: 12 }}>

@@ -152,11 +152,14 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
       (state === "all" || a.state === state),
   );
 
-  // Group filtered alerts by AI-correlated incident.
+  // Group filtered alerts by AI-correlated incident. The list endpoint
+  // (useAiListCorrelations -> AiListCorrelations200) returns the correlations
+  // under `items` (each an AICorrelation with id + alert_ids); `clusters`
+  // belongs to the separate analyze endpoint's AICorrelationResult, not here.
   const clusters = correlations.data?.items ?? [];
-  const alertToCluster = new Map<string, string>();
+  const groupedAlertIds = new Set<string>();
   for (const c of clusters) {
-    for (const id of c.alert_ids ?? []) alertToCluster.set(id, c.id);
+    for (const id of c.alert_ids ?? []) groupedAlertIds.add(id);
   }
   const incidents = clusters
     .map((c) => ({
@@ -164,7 +167,7 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
       alerts: filtered.filter((a) => (c.alert_ids ?? []).includes(a.id)),
     }))
     .filter((g) => g.alerts.length > 0);
-  const ungrouped = filtered.filter((a) => !alertToCluster.has(a.id));
+  const ungrouped = filtered.filter((a) => !groupedAlertIds.has(a.id));
 
   const scatterData = all.map((a) => ({
     x: new Date(a.created_at).getTime(),
