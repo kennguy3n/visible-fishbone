@@ -223,3 +223,85 @@ path tenant (mismatch / missing-claim → 403); the only cross-tenant
 caller is an explicitly-authorized platform admin. No new persistence is
 introduced — the detector composes the live cost report and the existing
 usage history.
+
+---
+
+<!-- BEGIN WORKSTREAM 9: AI cost model (additive section) -->
+
+## AI cost model: managed API vs. self-hosted inference
+
+> Added by Workstream 9. This section is **additive** — it models the
+> AI **inference** cost that the per-request `MeterLLMTokensUsed` /
+> `MeterLLMCalls` meters price, and the flat self-hosted alternative.
+> All figures are conservative public-cloud estimates for internal
+> margin analysis, not billed amounts.
+
+SNG's URL-categorisation and content-inspection paths call an LLM. That
+inference can be bought two ways, and the cheaper one flips with volume:
+
+1. **Managed API (per-token).** Pay per token, scales linearly with
+   usage. Reference: **OpenAI GPT-4o-mini** at ~**$0.15 / 1M input
+   tokens** and ~**$0.60 / 1M output tokens**. At fleet scale —
+   **5,000 tenants × 10 AI calls/day × 500 tokens avg** ≈ 25M tokens/day
+   ≈ 750M tokens/month — a representative input/output mix lands around
+   **$600–$900 / month**, and it keeps climbing with adoption.
+2. **Self-hosted (flat monthly).** Run **Ternary-Bonsai-8B** on your own
+   hardware for a fixed monthly cost, *independent of usage*:
+   - **single A10G GPU**: ~**$300/month** (AWS) or ~**$150/month** (bare
+     metal),
+   - **CPU only** (8-core, 32 GB RAM): ~**$80/month**, adequate for
+     **< 50 concurrent requests**.
+
+Because the self-hosted cost is flat, it wins above a **breakeven**
+volume and the managed API wins below it. The crossover for the GPU
+option lands inside the fleet-scale band above, which is why the
+platform must support **both** models simultaneously (different tenants
+/ regions sit on different sides of the line).
+
+### Pricing fields
+
+A new flat-rate unit price sits alongside the existing per-token fields
+in [`metering.DefaultUnitCosts`](../internal/service/metering/cost.go):
+
+| Field | Default | Unit | Model |
+|-------|--------:|------|-------|
+| `LLMPer1KTokensUSD` | $0.002 | per 1,000 tokens | per-token (managed API) |
+| `LLMPerCallUSD` | $0 | per call | per-token overhead (optional) |
+| `LLMSelfHostedPerMonthUSD` | $300 | flat per month | self-hosted (volume-independent) |
+
+`LLMSelfHostedPerMonthUSD` defaults to the conservative **$300/mo**
+public-cloud A10G figure; set it to `150` for bare metal, `80` for
+CPU-only, or `0` to declare "no self-hosted deployment". Like every
+other unit price it is configurable via `NewCostCalculator` without a
+code change.
+
+### CostCalculator API
+
+The calculator supports both models through one dispatch point plus a
+comparison helper (see `cost.go`):
+
+- `LLMPerTokenMonthlyUSD(tokens, calls)` — managed-API cost; scales with
+  the projected volume (per-1K-token charge plus the optional per-call
+  overhead).
+- `LLMSelfHostedMonthlyUSD()` — the flat monthly charge; returns `0`
+  when no deployment is configured (distinct from "$0 to run").
+- `LLMMonthlyCostUSD(model, tokens, calls)` — single entry point that
+  selects the model. `LLMPricingSelfHosted` returns the flat cost
+  regardless of volume; `LLMPricingPerToken` (and any unknown model, the
+  safe default) returns the usage-scaled cost.
+- `CompareLLMPricing(tokens, calls) LLMCostComparison` — computes both
+  costs at a projected volume, reports the `Cheaper` model, the monthly
+  `SavingsUSD`, and the **`BreakevenTokens`** volume where the two meet:
+
+  ```
+  breakevenTokens = (selfHostedMonthlyUSD − calls·LLMPerCallUSD) · 1000 / LLMPer1KTokensUSD
+  ```
+
+  At the defaults ($300/mo flat, $0.002/1K tokens, $0 per call) the
+  breakeven is **150,000,000 tokens/month**: below it the managed API is
+  cheaper, above it self-hosting is. Breakeven is reported as `0`
+  (undefined) when per-token inference is free or no self-hosted
+  deployment is configured. Exact ties resolve to per-token (no infra to
+  operate).
+
+<!-- END WORKSTREAM 9: AI cost model -->

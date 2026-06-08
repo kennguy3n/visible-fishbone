@@ -26,6 +26,16 @@ type UnitCosts struct {
 	// LLMPerCallUSD is an optional fixed per-call overhead (e.g. a
 	// minimum request charge). Usually 0.
 	LLMPerCallUSD float64
+	// LLMSelfHostedPerMonthUSD is the flat monthly cost of operating a
+	// self-hosted inference deployment (e.g. Ternary-Bonsai-8B on a
+	// single A10G GPU) as an alternative to per-token managed-API
+	// pricing. Unlike LLMPer1KTokensUSD it does NOT scale with token
+	// volume — it is a fixed infrastructure charge for the deployment,
+	// amortised across every tenant sharing it. Used by the
+	// self-hosted pricing model (see LLMPricingModel); 0 means
+	// "no self-hosted deployment configured" and disables self-hosted
+	// projections. See docs/cost-model.md for the economics.
+	LLMSelfHostedPerMonthUSD float64
 	// URLCatPer1KLookupsUSD is the price per 1,000 URL-categorisation
 	// feed lookups.
 	URLCatPer1KLookupsUSD float64
@@ -57,15 +67,23 @@ type UnitCosts struct {
 // They are intentionally configurable (CostCalculator takes a
 // UnitCosts) so finance can tune them without a code change.
 var DefaultUnitCosts = UnitCosts{
-	LLMPer1KTokensUSD:      0.002,
-	LLMPerCallUSD:          0,
-	URLCatPer1KLookupsUSD:  0.10,
-	MalwarePerScanUSD:      0.001,
-	EgressPerGBUSD:         0.09,
-	ClickHousePer1MRowsUSD: 0.20,
-	S3PerGBMonthUSD:        0.023,
-	NATSPerGBMonthUSD:      0.10,
-	PolicyEvalPer1MUSD:     0.01,
+	LLMPer1KTokensUSD: 0.002,
+	LLMPerCallUSD:     0,
+	// $300/mo: a single AWS A10G GPU instance (g5.xlarge on-demand
+	// rounds to ~$730/mo, but the inference deployment is sized for a
+	// reserved / committed-use rate and the 8B model leaves headroom
+	// to co-locate, landing the conservative public-cloud figure near
+	// $300). Bare-metal A10G is ~$150/mo and CPU-only ~$80/mo — see
+	// docs/cost-model.md §"AI cost model". Finance can retune via
+	// NewCostCalculator without a code change.
+	LLMSelfHostedPerMonthUSD: 300,
+	URLCatPer1KLookupsUSD:    0.10,
+	MalwarePerScanUSD:        0.001,
+	EgressPerGBUSD:           0.09,
+	ClickHousePer1MRowsUSD:   0.20,
+	S3PerGBMonthUSD:          0.023,
+	NATSPerGBMonthUSD:        0.10,
+	PolicyEvalPer1MUSD:       0.01,
 }
 
 const (
@@ -172,6 +190,152 @@ func (c *CostCalculator) MeterCostUSD(meter Meter, value int64) float64 {
 	default:
 		return 0
 	}
+}
+
+// LLMPricingModel selects how the dollar cost of AI inference is
+// attributed. The two models have fundamentally different cost
+// curves, which is the whole point of the comparison:
+//
+//   - Per-token (managed API, e.g. OpenAI GPT-4o-mini): cost scales
+//     linearly with token volume. Cheap at low usage, unbounded at
+//     high usage.
+//   - Self-hosted (e.g. Ternary-Bonsai-8B on a dedicated GPU/CPU):
+//     a flat monthly infrastructure charge, independent of token
+//     volume. Expensive at low usage, flat (and eventually far
+//     cheaper) at high usage.
+//
+// CostCalculator supports both so finance can decide, at a given
+// projected fleet token volume, which model is cheaper.
+type LLMPricingModel string
+
+const (
+	// LLMPricingPerToken prices inference per 1K tokens via
+	// LLMPer1KTokensUSD plus the optional LLMPerCallUSD per-call
+	// overhead. This is the default model and matches the existing
+	// MeterLLMTokensUsed / MeterLLMCalls meters.
+	LLMPricingPerToken LLMPricingModel = "per_token"
+	// LLMPricingSelfHosted prices inference as the flat
+	// LLMSelfHostedPerMonthUSD monthly charge, independent of token
+	// or call volume.
+	LLMPricingSelfHosted LLMPricingModel = "self_hosted"
+)
+
+// Valid reports whether m is a recognised pricing model.
+func (m LLMPricingModel) Valid() bool {
+	return m == LLMPricingPerToken || m == LLMPricingSelfHosted
+}
+
+// LLMSelfHostedMonthlyUSD returns the flat monthly cost of the
+// configured self-hosted inference deployment, independent of token
+// volume. Returns 0 when no self-hosted deployment is configured
+// (LLMSelfHostedPerMonthUSD == 0).
+func (c *CostCalculator) LLMSelfHostedMonthlyUSD() float64 {
+	if c.costs.LLMSelfHostedPerMonthUSD <= 0 {
+		return 0
+	}
+	return c.costs.LLMSelfHostedPerMonthUSD
+}
+
+// LLMPerTokenMonthlyUSD returns the per-token (managed-API) monthly
+// cost of `tokens` tokens spread across `calls` invocations. The
+// per-call overhead (LLMPerCallUSD, usually 0) is added on top of
+// the per-1K-token charge. Negative inputs are treated as 0.
+func (c *CostCalculator) LLMPerTokenMonthlyUSD(tokens, calls int64) float64 {
+	cost := c.MeterCostUSD(MeterLLMTokensUsed, tokens)
+	cost += c.MeterCostUSD(MeterLLMCalls, calls)
+	return cost
+}
+
+// LLMMonthlyCostUSD returns the projected monthly AI inference cost
+// under the requested pricing model. This is the single entry point
+// that "supports both pricing models": per-token cost scales with
+// the (tokens, calls) projection, self-hosted cost is the flat
+// monthly charge regardless of usage. An unknown model is treated as
+// per-token (the conservative default that never silently hides a
+// usage-driven charge).
+func (c *CostCalculator) LLMMonthlyCostUSD(model LLMPricingModel, tokens, calls int64) float64 {
+	if model == LLMPricingSelfHosted {
+		return round2(c.LLMSelfHostedMonthlyUSD())
+	}
+	return round2(c.LLMPerTokenMonthlyUSD(tokens, calls))
+}
+
+// LLMCostComparison contrasts the two AI inference pricing models at
+// a single projected monthly token/call volume so finance can pick
+// the cheaper one and see the crossover point.
+type LLMCostComparison struct {
+	// ProjectedMonthlyTokens / ProjectedMonthlyCalls are the inputs
+	// the comparison was computed against.
+	ProjectedMonthlyTokens int64 `json:"projected_monthly_tokens"`
+	ProjectedMonthlyCalls  int64 `json:"projected_monthly_calls"`
+	// PerTokenMonthlyUSD is the managed-API cost at this volume.
+	PerTokenMonthlyUSD float64 `json:"per_token_monthly_usd"`
+	// SelfHostedMonthlyUSD is the flat self-hosted cost (volume-
+	// independent). 0 when no self-hosted deployment is configured.
+	SelfHostedMonthlyUSD float64 `json:"self_hosted_monthly_usd"`
+	// Cheaper is the model with the lower projected monthly cost at
+	// this volume. Ties resolve to per-token (no infra to operate).
+	Cheaper LLMPricingModel `json:"cheaper"`
+	// SavingsUSD is the absolute monthly saving of the cheaper model
+	// over the dearer one (always >= 0).
+	SavingsUSD float64 `json:"savings_usd"`
+	// BreakevenTokens is the monthly token volume at which the two
+	// models cost the same, holding the call count fixed. Above it,
+	// self-hosting is cheaper; below it, per-token wins. 0 when the
+	// breakeven is undefined (per-token pricing is free, or no
+	// self-hosted deployment is configured).
+	BreakevenTokens int64 `json:"breakeven_tokens"`
+}
+
+// CompareLLMPricing computes the per-token vs self-hosted comparison
+// for a projected monthly volume. `calls` feeds the per-call
+// overhead (pass 0 when LLMPerCallUSD is 0, the common case).
+//
+// The breakeven is the token volume where per-token cost equals the
+// flat self-hosted cost, holding `calls` fixed:
+//
+//	selfHosted = breakevenTokens/1000 * LLMPer1KTokensUSD + calls*LLMPerCallUSD
+//	=> breakevenTokens = (selfHosted - calls*LLMPerCallUSD) * 1000 / LLMPer1KTokensUSD
+//
+// It is reported as 0 (undefined) when per-token pricing is free
+// (LLMPer1KTokensUSD == 0) or no self-hosted deployment is configured.
+func (c *CostCalculator) CompareLLMPricing(tokens, calls int64) LLMCostComparison {
+	if tokens < 0 {
+		tokens = 0
+	}
+	if calls < 0 {
+		calls = 0
+	}
+	perToken := round2(c.LLMPerTokenMonthlyUSD(tokens, calls))
+	selfHosted := round2(c.LLMSelfHostedMonthlyUSD())
+	cmp := LLMCostComparison{
+		ProjectedMonthlyTokens: tokens,
+		ProjectedMonthlyCalls:  calls,
+		PerTokenMonthlyUSD:     perToken,
+		SelfHostedMonthlyUSD:   selfHosted,
+	}
+	// With no self-hosted deployment configured the only model is
+	// per-token; report it as cheaper with no savings or breakeven.
+	if selfHosted <= 0 {
+		cmp.Cheaper = LLMPricingPerToken
+		return cmp
+	}
+	if perToken <= selfHosted {
+		cmp.Cheaper = LLMPricingPerToken
+		cmp.SavingsUSD = round2(selfHosted - perToken)
+	} else {
+		cmp.Cheaper = LLMPricingSelfHosted
+		cmp.SavingsUSD = round2(perToken - selfHosted)
+	}
+	// Breakeven token volume (undefined when per-token tokens are free).
+	if c.costs.LLMPer1KTokensUSD > 0 {
+		callOverhead := float64(calls) * c.costs.LLMPerCallUSD
+		tokenBudget := selfHosted - callOverhead
+		if tokenBudget > 0 {
+			cmp.BreakevenTokens = int64(math.Round(tokenBudget * 1000 / c.costs.LLMPer1KTokensUSD))
+		}
+	}
+	return cmp
 }
 
 // CostLine is one meter's slice of a TenantCostReport.

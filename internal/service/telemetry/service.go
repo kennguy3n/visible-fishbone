@@ -124,6 +124,7 @@ type Metrics struct {
 	HotWriteFails  atomic.Uint64
 	Acked          atomic.Uint64
 	Nacked         atomic.Uint64
+	Sampled        atomic.Uint64 // events dropped by adaptive sampling (Ack'd, not written)
 	DLQPublished   atomic.Uint64 // bad payloads successfully routed to DLQ
 	DLQPublishFail atomic.Uint64 // DLQ publish itself failed (data preserved by Nak retry)
 }
@@ -139,6 +140,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		HotWriteFails:  m.HotWriteFails.Load(),
 		Acked:          m.Acked.Load(),
 		Nacked:         m.Nacked.Load(),
+		Sampled:        m.Sampled.Load(),
 		DLQPublished:   m.DLQPublished.Load(),
 		DLQPublishFail: m.DLQPublishFail.Load(),
 	}
@@ -154,6 +156,7 @@ type MetricsSnapshot struct {
 	HotWriteFails  uint64
 	Acked          uint64
 	Nacked         uint64
+	Sampled        uint64
 	DLQPublished   uint64
 	DLQPublishFail uint64
 }
@@ -241,6 +244,15 @@ type Service struct {
 	// fetch cycle.
 	nakBackoff time.Duration
 
+	// sampler applies adaptive per-tenant load shedding. nil means
+	// "no sampling" — every decoded event is dispatched at full
+	// fidelity (the prior behaviour). When configured, a tenant whose
+	// arrival rate exceeds their tier budget has a deterministic,
+	// representative fraction of events dropped (Ack'd, not
+	// redelivered) and the kept events stamped with their sampling
+	// rate for analytics de-bias. Set via WithSampler.
+	sampler *AdaptiveSampler
+
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -260,6 +272,7 @@ type worker struct {
 	limiter           *PerTenantLimiter
 	limiterWaitBudget time.Duration
 	nakBackoff        time.Duration
+	sampler           *AdaptiveSampler
 	dedup             *dedupRing
 }
 
@@ -301,6 +314,21 @@ func (s *Service) WithNakBackoff(d time.Duration) *Service {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nakBackoff = d
+	return s
+}
+
+// WithSampler wires an AdaptiveSampler onto the service. Once set,
+// dispatch consults the sampler immediately after decode: events the
+// sampler drops are Ack'd (never redelivered) and counted as
+// Sampled, while kept events are stamped with their sampling rate
+// before the limiter / dedup / writer stages run. Pass nil to remove
+// sampling. Additive and optional — wiring paths that pre-date the
+// sampler keep their prior full-fidelity behaviour. Returns the
+// receiver for fluent wiring.
+func (s *Service) WithSampler(sampler *AdaptiveSampler) *Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sampler = sampler
 	return s
 }
 
@@ -431,6 +459,7 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			limiter:           s.limiter,
 			limiterWaitBudget: s.limiterWaitBudget,
 			nakBackoff:        s.nakBackoff,
+			sampler:           s.sampler,
 			dedup:             s.dedup,
 		}}, nil
 	}
@@ -466,6 +495,7 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			limiter:           s.limiter.ForPartition(),
 			limiterWaitBudget: s.limiterWaitBudget,
 			nakBackoff:        s.nakBackoff,
+			sampler:           s.sampler.ForPartition(),
 			dedup:             newDedupRing(s.cfg.DedupRingSize),
 		})
 	}
@@ -555,6 +585,38 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 		return
 	}
 	s.metrics.Decoded.Add(1)
+
+	// Adaptive per-tenant sampling gate. Runs first, before the
+	// rate-limit gate, so the sampler observes the tenant's true
+	// arrival rate (every decoded event) and so dropped events shed
+	// load from every downstream stage (limiter, dedup, writers).
+	// A dropped event is Ack'd — not Nak'd — because it was
+	// intentionally not written; redelivery would only re-drop it
+	// (the hash decision is deterministic for the window's rate) and
+	// waste a delivery. A kept event is stamped with its sampling
+	// rate so the hot-path writer can promote it to a ClickHouse
+	// column and analytics can de-bias by 1/SampleRate. A nil
+	// sampler keeps everything at rate 1.0 (prior behaviour).
+	if w.sampler != nil {
+		keep, sampleRate := w.sampler.Decide(ctx, env.TenantID, env.EventID)
+		if !keep {
+			s.metrics.Sampled.Add(1)
+			if ackErr := msg.Ack(); ackErr != nil {
+				s.logger.Warn("telemetry: ack after sampling-drop failed",
+					slog.Any("error", ackErr),
+					slog.String("event_id", env.EventID.String()))
+				return
+			}
+			s.metrics.Acked.Add(1)
+			return
+		}
+		// Only stamp a non-trivial rate; leaving SampleRate at its
+		// zero value (interpreted downstream as 1.0) keeps the field
+		// off the wire via omitempty for fully-sampled events.
+		if sampleRate < 1.0 {
+			env.SampleRate = sampleRate
+		}
+	}
 
 	// Per-tenant rate-limit gate. Sits between decode and the
 	// dedup check so a swamped tenant cannot push past their
