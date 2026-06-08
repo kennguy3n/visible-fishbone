@@ -155,7 +155,15 @@ impl TokenBucket {
         }
         let added = u64::try_from(added).unwrap_or(u64::MAX);
         self.tokens = self.tokens.saturating_add(added).min(limit.capacity);
-        // Advance the clock only by the time we actually accounted for.
+        // Advance the clock by the span that produced the `added` whole
+        // tokens — NOT by the full `elapsed`. This is the remainder-
+        // preserving guarantee: the sub-token tail of `elapsed` (the part
+        // that did not yet amount to a whole token) is left uncredited on
+        // the clock so it accumulates into the next refill instead of
+        // being floored away. The capacity clamp above is independent: if
+        // the bucket saturates, the surplus tokens are intentionally
+        // dropped (a full bucket cannot bank time), which is standard
+        // token-bucket behaviour.
         let consumed_ns = u128::from(added) * NANOS_PER_SEC / rate;
         let consumed_ns = u64::try_from(consumed_ns).unwrap_or(u64::MAX);
         self.last_refill_ns = self.last_refill_ns.saturating_add(consumed_ns);
