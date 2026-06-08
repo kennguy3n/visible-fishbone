@@ -231,6 +231,14 @@ func (l *TenantRateLimiter) resolveTier(ctx context.Context, tenantID uuid.UUID,
 	}
 	l.mu.Unlock()
 
+	// Deliberately call the resolver WITHOUT holding the mutex: it does a
+	// DB round-trip, and holding the lock across it would serialize every
+	// tenant's rate-limit check behind one tenant's lookup — a far worse
+	// failure mode on a 5K-tenant fleet than the alternative. The cost is
+	// that the first concurrent burst for a cold (or TTL-expired) tenant
+	// may issue a few redundant lookups before one goroutine caches the
+	// tier; since ResolveTier is a read-only, idempotent Get that is an
+	// acceptable trade for low lock contention.
 	tier, err := l.resolver.ResolveTier(ctx, tenantID)
 	if err != nil {
 		if l.logger != nil {
