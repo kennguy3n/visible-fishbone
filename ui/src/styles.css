@@ -1793,7 +1793,7 @@ label.field > span {
   .sidebar {
     overflow: visible;
   }
-  .sidebar__brand small,
+  .sidebar__brand > span:not(.sidebar__logo),
   .nav-group__label,
   .nav-link span:not(.nav-link__icon) {
     display: none;
@@ -1809,6 +1809,12 @@ label.field > span {
   }
   .nav-link__icon {
     font-size: 17px;
+  }
+  /* Reclaim horizontal room on tablet: the verbose operator identity
+     block crowds the tenant/language switchers and pushes Sign out off
+     the edge. It returns at >=1025px where there is space. */
+  .topbar__user {
+    display: none;
   }
 }
 
@@ -1846,12 +1852,18 @@ label.field > span {
     gap: 10px 12px;
     padding: 10px 14px;
   }
+  .topbar__spacer {
+    display: none;
+  }
   .tenant-switcher,
-  .tenant-switcher select {
+  .language-switcher {
+    flex: 1 1 100%;
     min-width: 0;
   }
-  .tenant-switcher {
+  .tenant-switcher select,
+  .language-switcher select {
     flex: 1;
+    min-width: 0;
   }
   .topbar__user {
     display: none;
