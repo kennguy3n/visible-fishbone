@@ -65,6 +65,8 @@ func clearAll(t *testing.T) {
 		"POP_REGISTRY_REFRESH_INTERVAL", "POP_HEALTH_TTL", "POP_HIGH_WATER_FRACTION",
 		"POP_GEODNS_HOSTNAME", "POP_GEODNS_ROUTING_POLICY", "POP_GEODNS_TTL",
 		"POP_GEODNS_PUBLISH_INTERVAL", "POP_REBALANCE_ENABLED", "POP_REBALANCE_INTERVAL",
+		"AI_LLM_ENDPOINT", "AI_LLM_API_KEY", "AI_LLM_MODEL", "AI_LLM_MODEL_FAMILY", "AI_LLM_TIMEOUT",
+		"AI_GUARDRAIL_MAX_REQUESTS_PER_MINUTE", "AI_GUARDRAIL_MAX_TOKENS_PER_DAY",
 	}
 	for _, k := range keys {
 		k := k
@@ -520,6 +522,38 @@ func TestInvalidNATSStorage(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected validation error for invalid NATS_STORAGE")
+	}
+}
+
+func TestInvalidAILLMModelFamily(t *testing.T) {
+	clearAll(t)
+	withEnv(t, map[string]string{
+		"ENVIRONMENT":         "local",
+		"AI_LLM_MODEL_FAMILY": "ternary-bonasi", // typo
+	})
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected validation error for invalid AI_LLM_MODEL_FAMILY")
+	}
+	if !strings.Contains(err.Error(), "AI_LLM_MODEL_FAMILY") {
+		t.Errorf("error should mention AI_LLM_MODEL_FAMILY: %v", err)
+	}
+}
+
+func TestValidAILLMModelFamilyValues(t *testing.T) {
+	for _, family := range []string{"", "auto", "ternary-bonsai", "openai-compat"} {
+		family := family
+		t.Run(family, func(t *testing.T) {
+			clearAll(t)
+			env := map[string]string{"ENVIRONMENT": "local"}
+			if family != "" {
+				env["AI_LLM_MODEL_FAMILY"] = family
+			}
+			withEnv(t, env)
+			if _, err := Load(); err != nil {
+				t.Fatalf("did not expect error for model family %q: %v", family, err)
+			}
+		})
 	}
 }
 

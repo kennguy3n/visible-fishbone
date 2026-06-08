@@ -332,7 +332,12 @@ type AI struct {
 	Endpoint string
 	APIKey   string
 	Model    string
-	Timeout  time.Duration
+	// ModelFamily tunes the LLM system prompt to the configured
+	// model's strengths. Recognised values: "ternary-bonsai",
+	// "openai-compat", or "auto" (infer from the model name).
+	// Defaults to "auto".
+	ModelFamily string
+	Timeout     time.Duration
 	// GuardrailMaxRequestsPerMinute is the per-tenant request rate
 	// limit applied to every LLM-backed AI call. Defaults to 60.
 	GuardrailMaxRequestsPerMinute int
@@ -1409,9 +1414,10 @@ func Load() (Config, error) {
 			ReplayDurable:       getStr("TELEMETRY_REPLAY_DURABLE", ""),
 		},
 		AI: AI{
-			Endpoint: getStr("AI_LLM_ENDPOINT", ""),
-			APIKey:   getStr("AI_LLM_API_KEY", ""),
-			Model:    getStr("AI_LLM_MODEL", ""),
+			Endpoint:    getStr("AI_LLM_ENDPOINT", ""),
+			APIKey:      getStr("AI_LLM_API_KEY", ""),
+			Model:       getStr("AI_LLM_MODEL", ""),
+			ModelFamily: getStr("AI_LLM_MODEL_FAMILY", "auto"),
 		},
 		ThreatIntel: ThreatIntel{
 			RefreshInterval:      getDuration("THREATINTEL_REFRESH_INTERVAL", time.Hour),
@@ -1543,7 +1549,9 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_FLUSH_INTERVAL", 2 * time.Second, &cfg.TelemetryAnalytics.ClickHouseFlushInterval},
 		{"S3_TELEMETRY_FLUSH_INTERVAL", 30 * time.Second, &cfg.TelemetryAnalytics.S3FlushInterval},
 		{"APP_REGISTRY_SYNC_INTERVAL", 24 * time.Hour, &cfg.AppRegistry.SyncInterval},
-		{"AI_LLM_TIMEOUT", 10 * time.Second, &cfg.AI.Timeout},
+		// 15s default: local quantized (Ternary-Bonsai-8B) inference is
+		// slower than a hosted API call. Matches ai.defaultTimeout.
+		{"AI_LLM_TIMEOUT", 15 * time.Second, &cfg.AI.Timeout},
 		// Mobile IdP-federation session + discovery-cache lifetimes.
 		{"MOBILE_AUTH_SESSION_TOKEN_TTL", time.Hour, &cfg.MobileAuth.SessionTokenTTL},
 		{"MOBILE_AUTH_DISCOVERY_CACHE_TTL", 24 * time.Hour, &cfg.MobileAuth.DiscoveryCacheTTL},
@@ -1803,6 +1811,16 @@ func (c Config) validate() error {
 	case "file", "memory":
 	default:
 		return fmt.Errorf("NATS_STORAGE: invalid value %q (expected file|memory)", c.NATS.Storage)
+	}
+	// AI_LLM_MODEL_FAMILY selects the model-tuned system prompt. "" and
+	// "auto" infer the family from the model name; the explicit families
+	// are validated here (mirroring PG_SSLMODE/NATS_STORAGE) so an operator
+	// typo fails fast at boot instead of silently degrading to the
+	// general-purpose prompt at request time.
+	switch c.AI.ModelFamily {
+	case "", "auto", "ternary-bonsai", "openai-compat":
+	default:
+		return fmt.Errorf("AI_LLM_MODEL_FAMILY: invalid value %q (expected auto|ternary-bonsai|openai-compat)", c.AI.ModelFamily)
 	}
 	// NATS_PARTITIONS is the telemetry stream cell count. 1 keeps
 	// the historical single-stream layout; >1 fans out into N cells

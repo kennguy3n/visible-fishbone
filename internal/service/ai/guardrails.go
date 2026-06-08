@@ -285,7 +285,10 @@ func estimateLLMTokens(req LLMRequest) int64 {
 	promptTokens := int64(len(req.Prompt)/4) + 1
 	completion := int64(req.MaxTokens)
 	if completion <= 0 {
-		completion = 256
+		// Matches the provider's unset-MaxTokens default
+		// (defaultMaxResponseTokens) so the budget pre-check does not
+		// under-estimate the worst-case completion size.
+		completion = defaultMaxResponseTokens
 	}
 	return promptTokens + completion
 }
