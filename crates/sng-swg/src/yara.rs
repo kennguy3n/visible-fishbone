@@ -514,13 +514,13 @@ impl YaraEngine {
         // set (version `None`) is always superseded. Reading the
         // version under the install lock guarantees it is exactly
         // the revision a previous install committed.
-        if let Some(current) = self.inner.load().version {
-            if claims.version <= current {
-                return Err(SwgError::YaraBundleStale {
-                    incoming: claims.version,
-                    current,
-                });
-            }
+        if let Some(current) = self.inner.load().version
+            && claims.version <= current
+        {
+            return Err(SwgError::YaraBundleStale {
+                incoming: claims.version,
+                current,
+            });
         }
         let rules = Self::compile_with_builtins(&claims.rules_text)?;
         self.inner.store(Arc::new(CompiledRuleSet {

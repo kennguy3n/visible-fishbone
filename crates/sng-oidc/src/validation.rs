@@ -338,10 +338,10 @@ impl IdTokenValidator {
     }
 
     fn check_nonce(&self, claims: &IdTokenClaims) -> Result<()> {
-        if let Some(expected) = &self.expected_nonce {
-            if claims.nonce.as_deref() != Some(expected.as_str()) {
-                return Err(OidcError::Validation("nonce mismatch".to_owned()));
-            }
+        if let Some(expected) = &self.expected_nonce
+            && claims.nonce.as_deref() != Some(expected.as_str())
+        {
+            return Err(OidcError::Validation("nonce mismatch".to_owned()));
         }
         Ok(())
     }
@@ -367,12 +367,12 @@ impl IdTokenValidator {
                 "multiple audiences but azp is absent".to_owned(),
             ));
         }
-        if let Some(azp) = &claims.azp {
-            if azp != &self.audience {
-                return Err(OidcError::Validation(
-                    "azp does not match client id".to_owned(),
-                ));
-            }
+        if let Some(azp) = &claims.azp
+            && azp != &self.audience
+        {
+            return Err(OidcError::Validation(
+                "azp does not match client id".to_owned(),
+            ));
         }
         Ok(())
     }

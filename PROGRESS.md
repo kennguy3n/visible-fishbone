@@ -92,7 +92,7 @@ phase depends on. All Phase 1 surfaces are on `main`.
 ### Enforcement plane (Rust)
 
 - [x] Cargo workspace — `#![forbid(unsafe_code)]` at the workspace
-      level, `1.85` MSRV pin, workspace-pedantic clippy profile
+      level, `1.91` MSRV pin, workspace-pedantic clippy profile
       (`Cargo.toml`, `crates/*/Cargo.toml`)
 - [x] `sng-core` — shared types, identifier newtypes, MessagePack
       envelope, signed-bundle verification, error taxonomy,

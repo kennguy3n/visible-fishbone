@@ -63,10 +63,8 @@ pub fn init(cli: &crate::Cli) -> Result<()> {
                 .try_init();
         }
     });
-    if !already {
-        if let Some(msg) = filter_str_err {
-            return Err(anyhow::anyhow!(msg)).context("tracing init");
-        }
+    if !already && let Some(msg) = filter_str_err {
+        return Err(anyhow::anyhow!(msg)).context("tracing init");
     }
     Ok(())
 }
@@ -75,10 +73,10 @@ fn pick_filter_directive(cli: &crate::Cli) -> String {
     if let Some(custom) = cli.log_filter.as_deref() {
         return custom.into();
     }
-    if let Ok(env) = std::env::var("RUST_LOG") {
-        if !env.is_empty() {
-            return env;
-        }
+    if let Ok(env) = std::env::var("RUST_LOG")
+        && !env.is_empty()
+    {
+        return env;
     }
     "info,sng_edge=info".into()
 }

@@ -518,13 +518,13 @@ impl MobileAgent {
     /// agent is the desired end state — so a revoke can be replayed.
     pub async fn wipe(&self) -> Result<(), MobileError> {
         self.enroller.wipe(self.deps.key_store.as_ref()).await?;
-        if self.state() != LifecycleState::Terminated {
-            if let Err(e) = self.transition(LifecycleState::Terminated) {
-                warn!(
-                    error = %e,
-                    "wipe destroyed the enrolment key but could not move to Terminated"
-                );
-            }
+        if self.state() != LifecycleState::Terminated
+            && let Err(e) = self.transition(LifecycleState::Terminated)
+        {
+            warn!(
+                error = %e,
+                "wipe destroyed the enrolment key but could not move to Terminated"
+            );
         }
         Ok(())
     }

@@ -157,7 +157,7 @@ Android classpath (UniFFI's Kotlin runtime dependency).
 ## Local verification
 
 ```sh
-cargo +1.85 test   -p sng-mobile-sdk --all-targets
-cargo +1.85 clippy -p sng-mobile-sdk --all-targets -- -D warnings
-cargo +1.85 fmt    --all -- --check
+cargo +1.91 test   -p sng-mobile-sdk --all-targets
+cargo +1.91 clippy -p sng-mobile-sdk --all-targets -- -D warnings
+cargo +1.91 fmt    --all -- --check
 ```

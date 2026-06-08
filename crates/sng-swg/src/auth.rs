@@ -731,10 +731,10 @@ impl ExtAuthzHandler {
             .casb
             .as_ref()
             .and_then(|insp| insp.inspect(ctx, signals));
-        if let Some(v) = &casb_verdict {
-            if v.action == Action::Deny {
-                return v.clone();
-            }
+        if let Some(v) = &casb_verdict
+            && v.action == Action::Deny
+        {
+            return v.clone();
         }
 
         // 4. Categorise + apply deny list.
@@ -764,10 +764,10 @@ impl ExtAuthzHandler {
             .categorize(&ctx.host, &ctx.path)
             .await
             .map(|c| c.0.to_ascii_lowercase());
-        if let Some(cat) = &category_canonical {
-            if self.inner.deny_categories.binary_search(cat).is_ok() {
-                return Verdict::deny_categorized(cat.clone());
-            }
+        if let Some(cat) = &category_canonical
+            && self.inner.deny_categories.binary_search(cat).is_ok()
+        {
+            return Verdict::deny_categorized(cat.clone());
         }
 
         // 5. Malware verdict on response body hash. Only kicks
@@ -813,20 +813,18 @@ impl ExtAuthzHandler {
         //    block legitimate downloads by default). The category
         //    carries the matching family so the malware dashboard
         //    can group YARA hits the same way it groups hash hits.
-        if let (Some(engine), Some(body)) = (self.inner.yara.as_ref(), scan_body) {
-            if let Some(m) = engine.worst_match(body) {
-                let family = m.family.as_deref().unwrap_or(&m.rule);
-                match m.severity {
-                    YaraSeverity::Malicious => {
-                        return Verdict::deny_categorized(format!("malware.yara.{family}"));
-                    }
-                    YaraSeverity::Suspicious if self.inner.elevated_risk_mode => {
-                        return Verdict::deny_categorized(format!(
-                            "malware.yara.suspicious.{family}"
-                        ));
-                    }
-                    YaraSeverity::Suspicious => {}
+        if let (Some(engine), Some(body)) = (self.inner.yara.as_ref(), scan_body)
+            && let Some(m) = engine.worst_match(body)
+        {
+            let family = m.family.as_deref().unwrap_or(&m.rule);
+            match m.severity {
+                YaraSeverity::Malicious => {
+                    return Verdict::deny_categorized(format!("malware.yara.{family}"));
                 }
+                YaraSeverity::Suspicious if self.inner.elevated_risk_mode => {
+                    return Verdict::deny_categorized(format!("malware.yara.suspicious.{family}"));
+                }
+                YaraSeverity::Suspicious => {}
             }
         }
 

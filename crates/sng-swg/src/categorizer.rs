@@ -260,11 +260,12 @@ impl LocalCategoryDb {
         });
         let mut merged: Vec<CategoryEntry> = Vec::with_capacity(entries.len());
         for entry in entries {
-            if let Some(last) = merged.last_mut() {
-                if last.host == entry.host && last.path_prefix == entry.path_prefix {
-                    *last = entry;
-                    continue;
-                }
+            if let Some(last) = merged.last_mut()
+                && last.host == entry.host
+                && last.path_prefix == entry.path_prefix
+            {
+                *last = entry;
+                continue;
             }
             merged.push(entry);
         }
@@ -321,10 +322,10 @@ impl LocalCategoryDb {
             if !host_matches(&entry.host, host) {
                 continue;
             }
-            if let Some(prefix) = entry.path_prefix.as_deref() {
-                if !path.starts_with(prefix) {
-                    continue;
-                }
+            if let Some(prefix) = entry.path_prefix.as_deref()
+                && !path.starts_with(prefix)
+            {
+                continue;
             }
             return Some(entry.category.clone());
         }

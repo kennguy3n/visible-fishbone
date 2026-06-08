@@ -105,11 +105,11 @@ impl AndroidAuthSurface {
     /// Pass `None` if the user dismissed the tab. A no-op if no
     /// authorization is in flight.
     pub fn complete(&self, callback_url: Option<String>) {
-        if let Ok(mut guard) = self.pending.lock() {
-            if let Some(tx) = guard.take() {
-                // Receiver gone (timed out / dropped) is fine.
-                let _ = tx.send(callback_url);
-            }
+        if let Ok(mut guard) = self.pending.lock()
+            && let Some(tx) = guard.take()
+        {
+            // Receiver gone (timed out / dropped) is fine.
+            let _ = tx.send(callback_url);
         }
     }
 }

@@ -270,15 +270,15 @@ impl CachedBundle {
     /// against this cached bundle.
     pub fn conditional_request_headers(&self) -> HeaderMap {
         let mut hdrs = HeaderMap::new();
-        if let Some(etag) = self.headers.etag.as_ref() {
-            if let Ok(value) = HeaderValue::from_str(&etag.to_header_value()) {
-                hdrs.insert(IF_NONE_MATCH, value);
-            }
+        if let Some(etag) = self.headers.etag.as_ref()
+            && let Ok(value) = HeaderValue::from_str(&etag.to_header_value())
+        {
+            hdrs.insert(IF_NONE_MATCH, value);
         }
-        if let Some(lm) = self.headers.last_modified.as_deref() {
-            if let Ok(value) = HeaderValue::from_str(lm) {
-                hdrs.insert(IF_MODIFIED_SINCE, value);
-            }
+        if let Some(lm) = self.headers.last_modified.as_deref()
+            && let Ok(value) = HeaderValue::from_str(lm)
+        {
+            hdrs.insert(IF_MODIFIED_SINCE, value);
         }
         hdrs
     }

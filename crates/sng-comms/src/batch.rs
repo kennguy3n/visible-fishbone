@@ -422,11 +422,11 @@ pub(crate) fn write_msgpack_array_header(out: &mut Vec<u8>, len: usize) {
     // fixarray: 0x90 ..= 0x9F (length 0..=15)
     // array16:  0xDC + u16 big-endian (length 16..=65535)
     // array32:  0xDD + u32 big-endian (length ≥ 65536)
-    if let Ok(l) = u8::try_from(len) {
-        if l <= 0xF {
-            out.push(0x90 | l);
-            return;
-        }
+    if let Ok(l) = u8::try_from(len)
+        && l <= 0xF
+    {
+        out.push(0x90 | l);
+        return;
     }
     if let Ok(l) = u16::try_from(len) {
         out.push(0xDC);

@@ -472,10 +472,10 @@ fn classify_image(content: &[u8], kind: ImageKind) -> DocumentClassification {
     let mut c = base(DocumentType::Image(kind), 0.1);
     match kind {
         ImageKind::Png => {
-            if let Some((w, h)) = png_dimensions(content) {
-                if is_screen_resolution(w, h) {
-                    c.push_signal(DocSignal::Screenshot, 0.2);
-                }
+            if let Some((w, h)) = png_dimensions(content)
+                && is_screen_resolution(w, h)
+            {
+                c.push_signal(DocSignal::Screenshot, 0.2);
             }
         }
         ImageKind::Jpeg => {

@@ -61,7 +61,7 @@ bundle-build time.
 ## Local verification
 
 ```sh
-cargo +1.85 test  -p sng-sdwan
-cargo +1.85 clippy -p sng-sdwan --all-targets -- -D warnings
-cargo +1.85 fmt    --all -- --check
+cargo +1.91 test  -p sng-sdwan
+cargo +1.91 clippy -p sng-sdwan --all-targets -- -D warnings
+cargo +1.91 fmt    --all -- --check
 ```

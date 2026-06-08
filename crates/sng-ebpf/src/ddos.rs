@@ -454,12 +454,12 @@ impl DdosConfig {
     /// Returns [`EbpfError::RuleInvalid`] describing the first violation.
     pub fn validate(&self) -> Result<(), EbpfError> {
         for (name, lim) in [("syn", self.syn), ("udp", self.udp)] {
-            if let Some(lim) = lim {
-                if lim.capacity == 0 {
-                    return Err(EbpfError::RuleInvalid(format!(
-                        "ddos {name} rate limit capacity must be > 0"
-                    )));
-                }
+            if let Some(lim) = lim
+                && lim.capacity == 0
+            {
+                return Err(EbpfError::RuleInvalid(format!(
+                    "ddos {name} rate limit capacity must be > 0"
+                )));
             }
         }
         if !self.blocklist.is_empty() && self.geoip.is_empty() {
@@ -658,42 +658,39 @@ impl DdosMitigator {
     /// continues to classification / firewall.
     pub fn evaluate(&mut self, meta: &PacketMeta, now_ns: u64) -> DdosVerdict {
         // 1. GeoIP — drop before spending any per-source state.
-        if !self.blocklist.is_empty() {
-            if let Some(country) = self.geoip.lookup(meta.src_ip) {
-                if self.blocklist.is_blocked(country) {
-                    self.stats.geo_dropped = self.stats.geo_dropped.saturating_add(1);
-                    return DdosVerdict {
-                        action: XdpAction::Drop,
-                        reason: DropReason::GeoBlocked,
-                    };
-                }
-            }
+        if !self.blocklist.is_empty()
+            && let Some(country) = self.geoip.lookup(meta.src_ip)
+            && self.blocklist.is_blocked(country)
+        {
+            self.stats.geo_dropped = self.stats.geo_dropped.saturating_add(1);
+            return DdosVerdict {
+                action: XdpAction::Drop,
+                reason: DropReason::GeoBlocked,
+            };
         }
 
         // 2. SYN flood — only the initial SYN of a TCP handshake.
-        if meta.is_tcp_syn() {
-            if let Some(limiter) = self.syn.as_mut() {
-                if !limiter.admit(meta.src_ip, now_ns) {
-                    self.stats.syn_dropped = self.stats.syn_dropped.saturating_add(1);
-                    return DdosVerdict {
-                        action: XdpAction::Drop,
-                        reason: DropReason::SynFlood,
-                    };
-                }
-            }
+        if meta.is_tcp_syn()
+            && let Some(limiter) = self.syn.as_mut()
+            && !limiter.admit(meta.src_ip, now_ns)
+        {
+            self.stats.syn_dropped = self.stats.syn_dropped.saturating_add(1);
+            return DdosVerdict {
+                action: XdpAction::Drop,
+                reason: DropReason::SynFlood,
+            };
         }
 
         // 3. UDP flood.
-        if meta.is_udp() {
-            if let Some(limiter) = self.udp.as_mut() {
-                if !limiter.admit(meta.src_ip, now_ns) {
-                    self.stats.udp_dropped = self.stats.udp_dropped.saturating_add(1);
-                    return DdosVerdict {
-                        action: XdpAction::Drop,
-                        reason: DropReason::UdpFlood,
-                    };
-                }
-            }
+        if meta.is_udp()
+            && let Some(limiter) = self.udp.as_mut()
+            && !limiter.admit(meta.src_ip, now_ns)
+        {
+            self.stats.udp_dropped = self.stats.udp_dropped.saturating_add(1);
+            return DdosVerdict {
+                action: XdpAction::Drop,
+                reason: DropReason::UdpFlood,
+            };
         }
 
         self.stats.passed = self.stats.passed.saturating_add(1);

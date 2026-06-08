@@ -275,14 +275,12 @@ impl AppSteeringTable {
         let mut pins = self.pins.lock();
 
         // 1. Sticky hit: pinned path still healthy + fresh.
-        if let Some(pin) = pins.get(app_id) {
-            if pin.pinned_until_ms > now_ms {
-                if let Some(path) = rule.preferred_paths.get(pin.path_idx) {
-                    if healthy.contains(path) {
-                        return SteerOutcome::Sticky(path.clone());
-                    }
-                }
-            }
+        if let Some(pin) = pins.get(app_id)
+            && pin.pinned_until_ms > now_ms
+            && let Some(path) = rule.preferred_paths.get(pin.path_idx)
+            && healthy.contains(path)
+        {
+            return SteerOutcome::Sticky(path.clone());
         }
 
         // 2. Fresh select: first preferred path that is

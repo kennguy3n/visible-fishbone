@@ -50,7 +50,7 @@ env:
   # Cargo.toml. Bumping here without bumping Cargo.toml will cause
   # the workspace to refuse the toolchain at build time, which is
   # the desired forcing function.
-  RUST_TOOLCHAIN: "1.85"
+  RUST_TOOLCHAIN: "1.91"
   # cargo-deny pin: must match the version used by `make lint-rust`
   # locally so a contributor sees the same gate output in CI and
   # at their workstation. Bumping here propagates through every

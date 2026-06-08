@@ -48,7 +48,7 @@ concurrency:
 
 env:
   # Must match `rust-version` in the bench workspace Cargo.toml.
-  RUST_TOOLCHAIN: "1.85"
+  RUST_TOOLCHAIN: "1.91"
   CARGO_TERM_COLOR: always
   # Per-mode wall-clock. Kept small for the hosted dry-run sweep; raise it
   # on a dedicated runner where you want a statistically stable sample.

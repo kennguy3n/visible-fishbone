@@ -19,7 +19,7 @@
 name = "sng-efficacy"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.91"
 license = "LicenseRef-Proprietary"
 authors = ["ShieldNet Gateway Contributors"]
 repository = "https://github.com/kennguy3n/visible-fishbone"

@@ -276,10 +276,10 @@ impl ZoneTable {
     /// `String` allocation per call.
     #[must_use]
     pub fn lookup(&self, from: &str, to: &str) -> ZonePolicy {
-        if let Some(inner) = self.policy.get(from) {
-            if let Some(p) = inner.get(to) {
-                return *p;
-            }
+        if let Some(inner) = self.policy.get(from)
+            && let Some(p) = inner.get(to)
+        {
+            return *p;
         }
         if from == to {
             self.default_intra

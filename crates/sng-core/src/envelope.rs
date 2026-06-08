@@ -495,26 +495,23 @@ pub(crate) mod msgpack_timestamp {
         // non-negative `u32`. Use `try_from` rather than `as` to
         // keep clippy's cast-truncation lint quiet and to make
         // the bounds explicit at the call site.
-        if nanos == 0 {
-            if let Ok(secs_u32) = u32::try_from(secs) {
-                return secs_u32.to_be_bytes().to_vec();
-            }
+        if nanos == 0
+            && let Ok(secs_u32) = u32::try_from(secs)
+        {
+            return secs_u32.to_be_bytes().to_vec();
         }
         // timestamp 64 fits when seconds is a non-negative value
         // that fits in 34 bits and nanos < 1e9. The shift up by 34
         // packs nanos into the high 30 bits of a 64-bit unsigned
-        // word; the spec guarantees the result is < 2^64. Written
-        // as nested `if let` rather than the (newer) let-chain
-        // sugar so the `rust-version = "1.85"` MSRV holds — the
-        // workspace's CI pins toolchain 1.85, and let-chains only
-        // stabilised in 1.88. `u64::try_from` only fails on
-        // negative inputs, which the `(0..)` range already
-        // excludes downstream.
-        if (0..SECS_TIMESTAMP_64_MAX).contains(&secs) && nanos < 1_000_000_000 {
-            if let Ok(secs_u64) = u64::try_from(secs) {
-                let data = (u64::from(nanos) << 34) | secs_u64;
-                return data.to_be_bytes().to_vec();
-            }
+        // word; the spec guarantees the result is < 2^64.
+        // `u64::try_from` only fails on negative inputs, which the
+        // `(0..)` range already excludes downstream.
+        if (0..SECS_TIMESTAMP_64_MAX).contains(&secs)
+            && nanos < 1_000_000_000
+            && let Ok(secs_u64) = u64::try_from(secs)
+        {
+            let data = (u64::from(nanos) << 34) | secs_u64;
+            return data.to_be_bytes().to_vec();
         }
         // timestamp 96: 4-byte BE nanos, 8-byte BE i64 seconds.
         let mut buf = vec![0u8; 12];

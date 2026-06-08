@@ -131,10 +131,10 @@ fn detect_logical_cpus() -> usize {
 fn detect_numa_nodes(logical_cpus: usize) -> Vec<NumaNode> {
     #[cfg(target_os = "linux")]
     {
-        if let Some(nodes) = read_linux_numa_nodes() {
-            if !nodes.is_empty() {
-                return nodes;
-            }
+        if let Some(nodes) = read_linux_numa_nodes()
+            && !nodes.is_empty()
+        {
+            return nodes;
         }
     }
     vec![uniform_node(logical_cpus)]

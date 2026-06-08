@@ -251,10 +251,10 @@ impl SwgManager {
                 return Ok(InstallOutcome::Busy { digest });
             }
         };
-        if let Some(prev) = self.state.installed.load().digest.as_ref() {
-            if prev == &digest {
-                return Ok(InstallOutcome::NoOp { digest });
-            }
+        if let Some(prev) = self.state.installed.load().digest.as_ref()
+            && prev == &digest
+        {
+            return Ok(InstallOutcome::NoOp { digest });
         }
         // Write-validate-rename: stage the new bytes alongside
         // the live config, validate the staged file, and only

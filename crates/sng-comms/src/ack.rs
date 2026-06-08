@@ -186,15 +186,15 @@ impl SequenceTracker {
                 kind: RegressionKind::AheadOfEmitted,
             });
         }
-        if let Some(prev) = guard.acked_high_water {
-            if observed < prev {
-                return Err(SequenceRegression {
-                    stream: self.stream.clone(),
-                    highest_emitted,
-                    observed,
-                    kind: RegressionKind::BelowHighWater,
-                });
-            }
+        if let Some(prev) = guard.acked_high_water
+            && observed < prev
+        {
+            return Err(SequenceRegression {
+                stream: self.stream.clone(),
+                highest_emitted,
+                observed,
+                kind: RegressionKind::BelowHighWater,
+            });
         }
         let prev = guard.acked_high_water.replace(observed);
         Ok(prev)
