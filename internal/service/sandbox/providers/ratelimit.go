@@ -54,7 +54,8 @@ func (r *rateLimiter) acquire(ctx context.Context) error {
 	if slot.Before(now) {
 		slot = now
 	}
-	r.next = slot.Add(r.interval)
+	reserved := slot.Add(r.interval)
+	r.next = reserved
 	r.mu.Unlock()
 
 	wait := slot.Sub(now)
@@ -67,10 +68,18 @@ func (r *rateLimiter) acquire(ctx context.Context) error {
 		}
 	}
 	if err := r.sleep(ctx, wait); err != nil {
-		// Caller is abandoning its slot; pull `next` back so the
-		// reserved-but-unused slot does not permanently skew pacing.
+		// Caller is abandoning its slot. Reclaim it so the gap does not
+		// permanently skew pacing — but ONLY if we still hold the tail
+		// (`next` is exactly the slot we reserved). If another caller
+		// has already reserved past us, blindly rewinding `next` by one
+		// interval would hand that caller's slot to the next arrival and
+		// admit two requests within one interval — the very 429 this
+		// gate exists to prevent. In that case we leave `next` alone and
+		// let our slot stand vacant (a one-interval gap, never overlap).
 		r.mu.Lock()
-		r.next = r.next.Add(-r.interval)
+		if r.next.Equal(reserved) {
+			r.next = slot
+		}
 		r.mu.Unlock()
 		return err
 	}

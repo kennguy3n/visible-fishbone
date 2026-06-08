@@ -269,6 +269,76 @@ func TestRateLimiter_ContextCancel(t *testing.T) {
 	}
 }
 
+func TestRateLimiter_TailCancellationReclaimsSlot(t *testing.T) {
+	t0 := time.Unix(0, 0).UTC()
+	interval := time.Minute
+	rl := newRateLimiter(interval)
+	rl.now = func() time.Time { return t0 } // frozen clock
+
+	// A consumes the first (immediate) slot; next == t0+interval.
+	if err := rl.acquire(context.Background()); err != nil {
+		t.Fatalf("A acquire: %v", err)
+	}
+	// B reserves t0+interval then abandons mid-sleep. Since B holds the
+	// tail, its slot must be reclaimed so `next` rewinds to that slot
+	// (t0+interval) — the abandoned slot becomes reusable by the next
+	// arrival rather than the gate skewing pacing forward to t0+2*interval.
+	rl.sleep = func(context.Context, time.Duration) error { return context.Canceled }
+	if err := rl.acquire(context.Background()); err == nil {
+		t.Fatalf("B acquire: expected cancellation error")
+	}
+	rl.mu.Lock()
+	got := rl.next
+	rl.mu.Unlock()
+	if want := t0.Add(interval); !got.Equal(want) {
+		t.Fatalf("tail cancellation did not reclaim slot: next=%v want %v", got, want)
+	}
+}
+
+func TestRateLimiter_NonTailCancellationDoesNotOverlap(t *testing.T) {
+	t0 := time.Unix(0, 0).UTC()
+	interval := time.Minute
+	rl := newRateLimiter(interval)
+	rl.now = func() time.Time { return t0 } // frozen clock
+
+	// A consumes the first (immediate) slot; next == t0+interval.
+	if err := rl.acquire(context.Background()); err != nil {
+		t.Fatalf("A acquire: %v", err)
+	}
+
+	// B reserves t0+interval. While B is "sleeping", C reserves the slot
+	// after B (t0+2*interval) and is admitted; THEN B's context is
+	// cancelled. B must not rewind `next` into C's reserved slot.
+	var tailAfterC time.Time
+	rl.sleep = func(ctx context.Context, d time.Duration) error {
+		prev := rl.sleep
+		rl.sleep = func(context.Context, time.Duration) error { return nil } // C admitted
+		if err := rl.acquire(context.Background()); err != nil {
+			t.Fatalf("C acquire: %v", err)
+		}
+		rl.sleep = prev
+		rl.mu.Lock()
+		tailAfterC = rl.next
+		rl.mu.Unlock()
+		return context.Canceled // B abandons
+	}
+	if err := rl.acquire(context.Background()); err == nil {
+		t.Fatalf("B acquire: expected cancellation error")
+	}
+
+	// C reserved t0+3*interval as the tail; B's bail-out must leave it
+	// untouched so the next arrival cannot collide with C's slot.
+	if want := t0.Add(3 * interval); !tailAfterC.Equal(want) {
+		t.Fatalf("C tail = %v, want %v", tailAfterC, want)
+	}
+	rl.mu.Lock()
+	got := rl.next
+	rl.mu.Unlock()
+	if !got.Equal(tailAfterC) {
+		t.Fatalf("non-tail cancellation corrupted pacing: next=%v want %v (overlap with C)", got, tailAfterC)
+	}
+}
+
 func TestRateLimiter_DisabledIsImmediate(t *testing.T) {
 	rl := newRateLimiter(0)
 	start := time.Now()
