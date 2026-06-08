@@ -50,6 +50,8 @@
 //!
 //! * [`class`] — the six [`TrafficClass`] steering tiers and the XDP
 //!   classifier that assigns them.
+//! * [`ddos`] — XDP-level DDoS mitigation: per-source SYN/UDP flood
+//!   token-bucket rate limiting and GeoIP country blocking.
 //! * [`firewall`] — the hot-path L3/L4 rule set the XDP program walks.
 //! * [`maps`] — `#[repr(C)]` map key/value layouts and the TTL verdict
 //!   cache.
@@ -61,6 +63,7 @@
 
 pub mod class;
 pub mod control;
+pub mod ddos;
 pub mod error;
 pub mod firewall;
 pub mod loader;
@@ -69,6 +72,10 @@ pub mod tc;
 
 pub use class::{ClassRule, ClassVerdict, Classifier, XdpAction, verdict_for};
 pub use control::{AttachOutcome, XdpCapabilities, XdpControlPlane, XdpStats};
+pub use ddos::{
+    CountryCode, DdosConfig, DdosMitigator, DdosStats, DdosVerdict, DropReason, GeoIpBlocklist,
+    GeoIpEntry, GeoIpTable, PacketMeta, RateLimit, SourceRateLimiter, TokenBucket,
+};
 pub use error::EbpfError;
 pub use firewall::{PortRange, XdpDecision, XdpRule, XdpRuleAction, XdpRuleSet};
 pub use loader::{NoopLoader, ProgramLoader, XdpMode, detect_xdp_capable};

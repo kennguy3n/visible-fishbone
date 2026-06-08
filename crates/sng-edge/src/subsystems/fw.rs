@@ -444,6 +444,11 @@ mod tests {
                 "no attached object".into(),
             ))
         }
+        fn update_ddos(&self, _: &sng_ebpf::DdosConfig) -> Result<(), sng_ebpf::EbpfError> {
+            Err(sng_ebpf::EbpfError::Unsupported(
+                "no attached object".into(),
+            ))
+        }
     }
 
     /// Regression: a degraded attach must hand back the userspace model, not

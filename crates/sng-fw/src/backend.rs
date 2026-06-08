@@ -798,6 +798,9 @@ mod tests {
         ) -> Result<(), sng_ebpf::EbpfError> {
             Ok(())
         }
+        fn update_ddos(&self, _: &sng_ebpf::DdosConfig) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
     }
 
     #[tokio::test]

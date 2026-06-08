@@ -21,6 +21,7 @@ use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
 use crate::class::Classifier;
+use crate::ddos::DdosConfig;
 use crate::error::EbpfError;
 use crate::firewall::XdpRuleSet;
 use crate::tc::EgressSteeringTable;
@@ -117,6 +118,16 @@ pub trait ProgramLoader: Send + Sync + std::fmt::Debug {
     ///
     /// Returns [`EbpfError::Map`] if the map update fails.
     fn update_steering(&self, steering: &EgressSteeringTable) -> Result<(), EbpfError>;
+
+    /// Push the DDoS-mitigation configuration — the SYN/UDP flood
+    /// rate-limit budgets, the GeoIP database, and the per-tenant
+    /// blocked-country set — into their respective maps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EbpfError::RuleInvalid`] if the config fails validation,
+    /// or [`EbpfError::Map`] if a map update fails.
+    fn update_ddos(&self, config: &DdosConfig) -> Result<(), EbpfError>;
 }
 
 /// In-memory loader state — what a no-op loader records so the control
@@ -130,6 +141,9 @@ struct NoopState {
     rule_count: usize,
     classification_count: usize,
     steering_set: bool,
+    ddos_set: bool,
+    geoip_entries: usize,
+    blocked_countries: usize,
 }
 
 /// The default, always-compiled loader. Models every map in userspace
@@ -168,6 +182,18 @@ impl NoopLoader {
     #[must_use]
     pub fn xdp_attachments(&self) -> Vec<(String, XdpMode)> {
         self.lock().xdp_attached.clone()
+    }
+
+    /// Number of GeoIP database entries last pushed.
+    #[must_use]
+    pub fn geoip_entries(&self) -> usize {
+        self.lock().geoip_entries
+    }
+
+    /// Number of blocked country codes last pushed.
+    #[must_use]
+    pub fn blocked_countries(&self) -> usize {
+        self.lock().blocked_countries
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, NoopState> {
@@ -227,6 +253,15 @@ impl ProgramLoader for NoopLoader {
         self.lock().steering_set = true;
         Ok(())
     }
+
+    fn update_ddos(&self, config: &DdosConfig) -> Result<(), EbpfError> {
+        config.validate()?;
+        let mut st = self.lock();
+        st.ddos_set = true;
+        st.geoip_entries = config.geoip.len();
+        st.blocked_countries = config.blocklist.len();
+        Ok(())
+    }
 }
 
 /// Probe whether this host can attach XDP programs.
@@ -260,6 +295,7 @@ pub use aya_backend::AyaLoader;
 mod aya_backend {
     use super::{EbpfError, ProgramLoader, XdpMode};
     use crate::class::Classifier;
+    use crate::ddos::DdosConfig;
     use crate::firewall::XdpRuleSet;
     use crate::tc::EgressSteeringTable;
     use aya::Ebpf;
@@ -408,6 +444,13 @@ mod aya_backend {
                 "kernel steering-map marshalling lands with the BPF object crate".into(),
             ))
         }
+
+        fn update_ddos(&self, config: &DdosConfig) -> Result<(), EbpfError> {
+            config.validate()?;
+            Err(EbpfError::Unsupported(
+                "kernel ddos-map marshalling lands with the BPF object crate".into(),
+            ))
+        }
     }
 }
 
@@ -463,6 +506,37 @@ mod tests {
             XdpRuleAction::Drop,
         );
         let err = loader.update_rules(&bad).unwrap_err();
+        assert!(matches!(err, EbpfError::RuleInvalid(_)));
+    }
+
+    #[test]
+    fn noop_loader_records_ddos_config() {
+        use crate::ddos::{DdosConfig, GeoIpBlocklist, GeoIpEntry, GeoIpTable, RateLimit};
+        let loader = NoopLoader::new();
+        let cfg = DdosConfig {
+            syn: Some(RateLimit::new(100, 50).unwrap()),
+            udp: Some(RateLimit::new(1000, 500).unwrap()),
+            geoip: GeoIpTable::new(vec![
+                GeoIpEntry::new("1.0.0.0/8".parse().unwrap(), *b"CN"),
+                GeoIpEntry::new("2.0.0.0/8".parse().unwrap(), *b"RU"),
+            ]),
+            blocklist: GeoIpBlocklist::new([*b"CN"]),
+        };
+        loader.update_ddos(&cfg).unwrap();
+        assert_eq!(loader.geoip_entries(), 2);
+        assert_eq!(loader.blocked_countries(), 1);
+    }
+
+    #[test]
+    fn noop_loader_rejects_invalid_ddos_config() {
+        use crate::ddos::{DdosConfig, GeoIpBlocklist};
+        let loader = NoopLoader::new();
+        // Blocklist with no GeoIP database to resolve against.
+        let cfg = DdosConfig {
+            blocklist: GeoIpBlocklist::new([*b"CN"]),
+            ..DdosConfig::default()
+        };
+        let err = loader.update_ddos(&cfg).unwrap_err();
         assert!(matches!(err, EbpfError::RuleInvalid(_)));
     }
 
