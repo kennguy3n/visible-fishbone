@@ -179,20 +179,28 @@ impl FlowState {
     /// Updates the last-seen timestamp and the packet / byte counters,
     /// and — the protocol-anomaly check — sets
     /// [`anomaly::PROTOCOL_CHANGE`] if this packet's protocol differs
-    /// from the one the flow was created with. The first observation on a
-    /// default-constructed entry (protocol `0`) records the protocol
-    /// rather than flagging it, so a flow created via [`Default`] adopts
-    /// its first packet's protocol as the baseline.
+    /// from the one the flow was created with.
+    ///
+    /// A pristine, default-constructed map slot carries no protocol
+    /// baseline (`l4_protocol == 0`); its first observation adopts that
+    /// packet's protocol and creation time as the flow baseline instead
+    /// of flagging a spurious anomaly, so a flow created via [`Default`]
+    /// (e.g. a freshly-zeroed kernel map value) folds its first packet's
+    /// metadata in cleanly. A slot built with [`Self::new`] always carries
+    /// a non-zero protocol, so this branch never rewrites its
+    /// `first_seen_ns` — the baseline no longer keys off a zero timestamp
+    /// as a sentinel, which previously collided with `new(0, _)`.
     ///
     /// Counters saturate rather than wrap, and `last_seen_ns` never moves
     /// backwards, so a non-monotonic clock reading cannot corrupt the
     /// duration computation.
     pub fn observe(&mut self, now_ns: u64, bytes: u64, protocol: u8) {
-        if self.packets == 0 && self.first_seen_ns == 0 {
-            self.first_seen_ns = now_ns;
-        }
         if self.l4_protocol == 0 {
+            // Pristine slot: adopt this packet as the flow's baseline.
             self.l4_protocol = protocol;
+            if self.packets == 0 {
+                self.first_seen_ns = now_ns;
+            }
         } else if protocol != 0 && protocol != self.l4_protocol {
             self.anomaly_flags |= anomaly::PROTOCOL_CHANGE;
         }
@@ -495,6 +503,24 @@ mod tests {
         // The baseline protocol is retained; the change is recorded via
         // the flag, not by overwriting `l4_protocol`.
         assert_eq!(fs.l4_protocol, 6);
+    }
+
+    #[test]
+    fn flow_state_new_at_epoch_zero_keeps_creation_time() {
+        // Regression: a flow created at timestamp 0 (a degenerate but
+        // representable epoch) carries a real protocol, so a later
+        // observation must NOT rewrite first_seen_ns. The baseline keys
+        // off the zero protocol of a pristine slot, not a zero timestamp,
+        // so new(0, _) is unambiguous.
+        let mut fs = FlowState::new(0, 6);
+        assert_eq!(fs.first_seen_ns, 0);
+        fs.observe(1_000, 100, 6);
+        fs.observe(2_000, 100, 6);
+        // first_seen stays at the creation time (0), not the first observe.
+        assert_eq!(fs.first_seen_ns, 0);
+        assert_eq!(fs.last_seen_ns, 2_000);
+        assert_eq!(fs.duration_ns(), 2_000);
+        assert!(!fs.has_anomaly());
     }
 
     #[test]

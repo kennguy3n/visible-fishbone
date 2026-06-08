@@ -542,8 +542,25 @@ impl DdosMitigator {
 
     /// Build a mitigator from `config` with an explicit per-limiter
     /// source-table bound.
+    ///
+    /// `config` is expected to satisfy [`DdosConfig::validate`]. Because
+    /// [`RateLimit`] is `#[repr(C)]` for byte-compatibility with the
+    /// kernel map value its fields are public, so a caller *can* bypass
+    /// [`RateLimit::new`] and hand-build an invalid limit (e.g. zero
+    /// capacity, which would drop every packet). Production construction
+    /// always flows through the control plane, which validates before
+    /// install; this constructor adds a debug-build assertion so such a
+    /// misconfiguration trips loudly in tests rather than silently
+    /// black-holing traffic. The assertion compiles out of release
+    /// builds, so it costs nothing on the fast path.
     #[must_use]
     pub fn with_capacity(config: DdosConfig, max_tracked: usize) -> Self {
+        debug_assert!(
+            config.validate().is_ok(),
+            "DdosMitigator built from an invalid DdosConfig; \
+             construct rate limits via RateLimit::new and call \
+             DdosConfig::validate before installing"
+        );
         Self {
             geoip: config.geoip,
             blocklist: config.blocklist,

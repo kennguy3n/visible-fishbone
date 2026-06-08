@@ -352,8 +352,9 @@ pub fn bench_syn_flood_drop_rate(packet_count: usize) -> DdosBenchResult {
     // Small per-source budget so the warm-up drains it cheaply; GeoIP is
     // empty (no country block) so the measured cost is purely the
     // per-source token-bucket lookup + drop.
+    const SYN_BURST: u64 = 64;
     let config = DdosConfig {
-        syn: Some(RateLimit::new(64, 64).expect("valid syn budget")),
+        syn: Some(RateLimit::new(SYN_BURST, SYN_BURST).expect("valid syn budget")),
         ..DdosConfig::default()
     };
     let mut mitigator = DdosMitigator::with_capacity(config, FLOOD_SOURCES * 2);
@@ -363,10 +364,19 @@ pub fn bench_syn_flood_drop_rate(packet_count: usize) -> DdosBenchResult {
         .map(|i| syn_packet(flood_source(i % FLOOD_SOURCES)))
         .collect();
 
-    // Warm-up: saturate every source's bucket at t=0 so the measured pass
-    // sees empty buckets and drops every packet.
-    for p in &packets {
-        let _ = mitigator.evaluate(p, 0);
+    // Warm-up: fully drain EVERY source's bucket at t=0 by spending its
+    // entire burst budget, independent of `packet_count`. Draining via the
+    // measured stream would leave buckets partially full whenever
+    // `packet_count` is small relative to `FLOOD_SOURCES * SYN_BURST`
+    // (e.g. a quick 100-packet smoke run), so the measured pass would see
+    // admits and under-report the drop rate. Draining per source makes the
+    // measured pass observe empty buckets and drop every packet regardless
+    // of how many packets are measured.
+    for slot in 0..FLOOD_SOURCES {
+        let warmup = syn_packet(flood_source(slot));
+        for _ in 0..SYN_BURST {
+            let _ = mitigator.evaluate(&warmup, 0);
+        }
     }
 
     let start = Instant::now();
@@ -464,14 +474,32 @@ mod tests {
 
     #[test]
     fn syn_flood_bench_drops_saturated_sources() {
-        // Each of FLOOD_SOURCES sees 100 SYNs in the warm-up; the 64-token
-        // budget drains, so the measured pass at t=0 drops every packet.
+        // The warm-up spends every source's full burst budget, so the
+        // measured pass at t=0 sees empty buckets and drops every packet.
         let pkts = FLOOD_SOURCES * 100;
         let r = bench_syn_flood_drop_rate(pkts);
         assert_eq!(r.packets, pkts as u64);
         assert_eq!(r.dropped, r.packets, "all post-warm-up SYNs are dropped");
         assert!((r.drop_ratio() - 1.0).abs() < f64::EPSILON);
         assert!(r.packets_per_sec() > 0.0);
+    }
+
+    #[test]
+    fn syn_flood_bench_drops_all_even_for_small_packet_count() {
+        // Regression: with a small packet_count (far fewer than
+        // FLOOD_SOURCES * burst), the old stream-driven warm-up left most
+        // buckets full and the measured pass under-reported the drop rate.
+        // The per-source warm-up drains every bucket regardless, so even a
+        // 100-packet smoke run drops 100%.
+        for pkts in [1usize, 100, FLOOD_SOURCES] {
+            let r = bench_syn_flood_drop_rate(pkts);
+            assert_eq!(r.packets, pkts as u64);
+            assert_eq!(
+                r.dropped, r.packets,
+                "every measured SYN is dropped for packet_count = {pkts}"
+            );
+            assert!((r.drop_ratio() - 1.0).abs() < f64::EPSILON);
+        }
     }
 
     #[test]
