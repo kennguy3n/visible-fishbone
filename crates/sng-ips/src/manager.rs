@@ -1361,14 +1361,15 @@ async fn run_restart_watchdog(
                         );
                         backoff = (backoff * 2).min(max_backoff);
                         if let Some(max) = max_attempts
-                            && consecutive_failures >= max {
-                                warn!(
-                                    target: "sng_ips::manager::watchdog",
-                                    consecutive_failures,
-                                    "ips restart attempts exhausted; watchdog exiting"
-                                );
-                                return;
-                            }
+                            && consecutive_failures >= max
+                        {
+                            warn!(
+                                target: "sng_ips::manager::watchdog",
+                                consecutive_failures,
+                                "ips restart attempts exhausted; watchdog exiting"
+                            );
+                            return;
+                        }
                     }
                 }
             }
