@@ -240,10 +240,21 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, popSvc, evidenceScheduler, feedMgr, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
+	rc, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
+	router := rc.Router
+	webhookWorker := rc.WebhookWorker
+	integrationWorker := rc.IntegrationWorker
+	appRegHandler := rc.AppRegistry
+	appSyncer := rc.AppSyncer
+	policySimHandler := rc.PolicySim
+	aiSvc := rc.AI
+	meteringSvc := rc.Metering
+	popSvc := rc.PoP
+	evidenceScheduler := rc.EvidenceScheduler
+	feedMgr := rc.FeedManager
 
 	// Start the cost-metering flush loop. It batch-upserts the
 	// accumulated per-tenant usage deltas into tenant_usage every
@@ -549,9 +560,33 @@ func run() error {
 	return nil
 }
 
+// routerComponents bundles the composed HTTP handler together with the
+// long-lived background workers and services buildRouter wires up, so
+// main() can start and stop them alongside the HTTP server.
+//
+// It is returned as a struct rather than a long positional tuple on
+// purpose: adding a new dependency is then a single field add, which
+// cannot silently desync this constructor's many error-path returns
+// from its success return. The previous tuple form did exactly that —
+// widening the return arity left the error paths returning too few
+// values and broke the build only after an unrelated merge.
+type routerComponents struct {
+	Router            http.Handler
+	WebhookWorker     *webhook.DeliveryWorker
+	IntegrationWorker *integration.DeliveryWorker
+	AppRegistry       *handler.AppRegistryHandler
+	AppSyncer         *appdb.Syncer
+	PolicySim         *handler.PolicySimulationHandler
+	AI                *aisvc.Service
+	Metering          *metering.MeteringService
+	PoP               *pop.Service
+	EvidenceScheduler *compliance.Scheduler
+	FeedManager       *aisvc.FeedManager
+}
+
 // buildRouter wires every repository / service / handler against
 // the Postgres pool and returns the composed HTTP handler plus the
-// webhook delivery worker (so main can start/stop it alongside the
+// background workers (so main can start/stop them alongside the
 // HTTP server). Kept in one place so the dependency graph is
 // readable; production wiring + tests share the same factory.
 //
@@ -566,7 +601,7 @@ func buildRouter(
 	replay *telreplay.Worker,
 	telPub *sngnats.Publisher,
 	mx *metrics.Metrics,
-) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, *aisvc.Service, *metering.MeteringService, *pop.Service, *compliance.Scheduler, *aisvc.FeedManager, error) {
+) (routerComponents, error) {
 	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
@@ -677,11 +712,11 @@ func buildRouter(
 	// the same in all cases.
 	keyOpts := []policy.KeyOption{}
 	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
+		return routerComponents{}, fmt.Errorf("policy key-wrap master: %w", err)
 	} else if len(master) > 0 {
 		w, err := policy.NewAESGCMWrapper(master)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
+			return routerComponents{}, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
 		}
 		keyOpts = append(keyOpts, policy.WithKeyWrapper(w))
 		logger.Info("policy: AES-256-GCM at-rest wrap enabled for signing seeds")
@@ -692,7 +727,7 @@ func buildRouter(
 	if cfg.Policy.SigningKeyPath != "" {
 		ks, err := policy.LoadKeySignerFromFile(cfg.Policy.SigningKeyPath)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
+			return routerComponents{}, fmt.Errorf("policy signing key: %w", err)
 		}
 		policySigner = ks
 		fileSigner = ks
@@ -880,7 +915,7 @@ func buildRouter(
 	canarySvc, err := policy.NewCanaryService(policySvc, policyRolloutRepo,
 		policy.WithCanaryLogger(logger))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
+		return routerComponents{}, fmt.Errorf("control: build canary service: %w", err)
 	}
 	policySimHandler := handler.NewPolicySimulationHandler(
 		policySvc, canarySvc, nil, policyRepo, logger)
@@ -998,27 +1033,27 @@ func buildRouter(
 	// sync/atomic counters and is flushed by main() via meteringSvc.Run.
 	meteringStore, err := metering.NewPostgresStore(pool.Primary(), cfg.Postgres.AppRole, cfg.Postgres.PgBouncerMode)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering store: %w", err)
+		return routerComponents{}, fmt.Errorf("control: metering store: %w", err)
 	}
 	meteringSvc, err := metering.NewMeteringService(meteringStore, logger,
 		metering.WithFlushInterval(cfg.Metering.FlushInterval))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering service: %w", err)
+		return routerComponents{}, fmt.Errorf("control: metering service: %w", err)
 	}
 	meteringTiers := meteringTierResolver{tenants: tenantRepo}
 	budgetEnforcer, err := metering.NewBudgetEnforcer(meteringSvc, meteringStore, meteringTiers, logger,
 		metering.WithGlobalDefaults(cfg.Metering.DefaultBudgets))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: budget enforcer: %w", err)
+		return routerComponents{}, fmt.Errorf("control: budget enforcer: %w", err)
 	}
 	costCalc := metering.NewCostCalculator(metering.DefaultUnitCosts)
 	meteringReports, err := metering.NewReports(meteringSvc, budgetEnforcer, meteringStore, meteringTiers, costCalc)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering reports: %w", err)
+		return routerComponents{}, fmt.Errorf("control: metering reports: %w", err)
 	}
 	meteringAnomalies, err := metering.NewCostAnomalyDetector(meteringReports, meteringSvc, costCalc, metering.AnomalyConfig{})
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering anomaly detector: %w", err)
+		return routerComponents{}, fmt.Errorf("control: metering anomaly detector: %w", err)
 	}
 	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports, meteringAnomalies, rbacSvc)
 
@@ -1044,7 +1079,7 @@ func buildRouter(
 	// unchanged; the scheduler's leader loop is launched by run().
 	evidenceSvc, evidenceScheduler, err := buildEvidenceAutomation(cfg, store, logger)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("compliance evidence automation: %w", err)
+		return routerComponents{}, fmt.Errorf("compliance evidence automation: %w", err)
 	}
 	complianceHandler := handler.NewComplianceHandler(
 		compliance.NewReportService(store.NewComplianceReportRepository(), logger),
@@ -1141,7 +1176,7 @@ func buildRouter(
 			identity.WithAdminAutoProvision(cfg.MobileAuth.AutoProvisionUsers),
 		)
 		if ssoErr != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build admin SSO service: %w", ssoErr)
+			return routerComponents{}, fmt.Errorf("build admin SSO service: %w", ssoErr)
 		}
 		adminSSOHandler = handler.NewAdminSSOHandler(adminSSOSvc, cfg.IAMCore.RedirectURL, []byte(cfg.Auth.JWTSecret), logger)
 	}
@@ -1195,7 +1230,7 @@ func buildRouter(
 			if tenantRateLimiter != nil {
 				tenantRateLimiter.Close()
 			}
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build auth brute-force guard: %w", err)
+			return routerComponents{}, fmt.Errorf("build auth brute-force guard: %w", err)
 		}
 		enrollBruteForce, err = middleware.NewAttemptLimiter(middleware.AttemptLimiterConfig{
 			MaxFailures:     cfg.BruteForce.EnrollMaxFailures,
@@ -1211,7 +1246,7 @@ func buildRouter(
 			if tenantRateLimiter != nil {
 				tenantRateLimiter.Close()
 			}
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build enroll brute-force guard: %w", err)
+			return routerComponents{}, fmt.Errorf("build enroll brute-force guard: %w", err)
 		}
 	}
 
@@ -1297,7 +1332,19 @@ func buildRouter(
 	// admin `POST /admin/app-registry/sync` endpoint is the only
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
-	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, popSvc, evidenceScheduler, feedMgr, nil
+	return routerComponents{
+		Router:            router,
+		WebhookWorker:     webhookWorker,
+		IntegrationWorker: integrationWorker,
+		AppRegistry:       appRegHandler,
+		AppSyncer:         appSyncer,
+		PolicySim:         policySimHandler,
+		AI:                aiSvc,
+		Metering:          meteringSvc,
+		PoP:               popSvc,
+		EvidenceScheduler: evidenceScheduler,
+		FeedManager:       feedMgr,
+	}, nil
 }
 
 // meteringTierResolver adapts the TenantRepository onto the metering
