@@ -136,6 +136,17 @@ config:
   # Metering.
   METERING_FLUSH_INTERVAL: 60s
 
+  # AI assistant (LLM). Empty endpoint => deterministic template-only
+  # mode (no LLM calls). Recommended: self-host Ternary-Bonsai-8B via
+  # Ollama/llama.cpp and point AI_LLM_ENDPOINT at it. See
+  # docs/ai-model-setup.md and deploy/ollama/.
+  AI_LLM_ENDPOINT: ""
+  AI_LLM_MODEL: Ternary-Bonsai-8B
+  # Prompt-tuning family: "ternary-bonsai", "openai-compat", or "auto".
+  AI_LLM_MODEL_FAMILY: auto
+  # Per-call timeout; local quantized inference is slower than a hosted API.
+  AI_LLM_TIMEOUT: 15s
+
 # Secret-valued environment variables. Rendered into a Secret unless
 # `existingSecret` is set, in which case the chart references that Secret
 # (by env var name -> key) and ignores these inline values. NEVER commit

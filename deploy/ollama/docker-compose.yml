@@ -1,0 +1,44 @@
+services:
+  # Self-hosted, OpenAI-compatible LLM for the ShieldNet AI assistant.
+  # Serves Ternary-Bonsai-8B via Ollama. sng-control and access-ai-agent
+  # both point at http://ollama:11434/v1/chat/completions.
+  ollama:
+    image: ollama/ollama:0.6.8
+    container_name: sng-ollama
+    # Bind to loopback so the model server is not exposed on the LAN.
+    # In production this runs on an internal network; expose it only to
+    # the control plane.
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - sng-ollama-models:/root/.ollama
+    healthcheck:
+      # Ollama serves an OpenAI-compatible API; /api/tags is a cheap
+      # readiness probe that returns the locally available models.
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # One-shot init container that pulls Ternary-Bonsai-8B into the shared
+  # model volume on first boot, then exits. Idempotent: `ollama pull` is
+  # a no-op when the model is already present.
+  ollama-pull:
+    image: ollama/ollama:0.6.8
+    container_name: sng-ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      # Override to pin a different quantization/tag if desired.
+      SNG_LLM_MODEL: "${SNG_LLM_MODEL:-prism-ml/Ternary-Bonsai-8B-gguf}"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'ollama pull "$$SNG_LLM_MODEL"'
+    restart: "no"
+
+volumes:
+  sng-ollama-models:

@@ -191,7 +191,8 @@ func (e *CorrelationEngine) llmSummarize(ctx context.Context, cluster Correlatio
 	prompt := fmt.Sprintf(
 		"You are a ShieldNet Gateway security analyst. "+
 			"Summarize the following alert cluster into a concise incident narrative. "+
-			"Do not invent data.\n\n"+
+			"Do not invent data. "+
+			"Respond with 2-4 sentences of plain prose only — no headings, bullet points, or preamble.\n\n"+
 			"Cluster: %d alerts, severity=%s, dimensions=%v\n"+
 			"Template summary: %s",
 		len(cluster.AlertIDs), cluster.Severity, cluster.Dimensions, cluster.Summary)

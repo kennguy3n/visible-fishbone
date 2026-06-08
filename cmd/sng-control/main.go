@@ -1208,15 +1208,26 @@ func (r tenantRegionResolver) TenantRegion(ctx context.Context, tenantID uuid.UU
 func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, alertRepo repository.AlertRepository, auditSvc *audit.Service, aiSuggestionRepo repository.AISuggestionRepository, budgetGate aisvc.BudgetGate, usageRecorder aisvc.UsageRecorder, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
 	var llm aisvc.LLMProvider
 	if cfg.AI.Endpoint != "" {
+		// When an endpoint is set but no model is named, default to the
+		// self-hosted Ternary-Bonsai-8B so a minimal deployment
+		// (endpoint only) targets the recommended local model rather
+		// than silently sending an empty model name.
+		model := cfg.AI.Model
+		if model == "" {
+			model = aisvc.DefaultModel
+		}
 		llm = &aisvc.HTTPProvider{
-			Endpoint: cfg.AI.Endpoint,
-			APIKey:   cfg.AI.APIKey,
-			Model:    cfg.AI.Model,
-			Timeout:  cfg.AI.Timeout,
+			Endpoint:    cfg.AI.Endpoint,
+			APIKey:      cfg.AI.APIKey,
+			Model:       model,
+			ModelFamily: cfg.AI.ModelFamily,
+			Timeout:     cfg.AI.Timeout,
 		}
 		logger.Info("ai: LLM provider configured",
 			slog.String("endpoint", cfg.AI.Endpoint),
-			slog.String("model", cfg.AI.Model))
+			slog.String("model", model),
+			slog.String("model_family", cfg.AI.ModelFamily),
+			slog.Duration("timeout", cfg.AI.Timeout))
 	} else {
 		logger.Info("ai: no LLM endpoint configured; template-only mode")
 	}

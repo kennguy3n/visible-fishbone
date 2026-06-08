@@ -1,0 +1,28 @@
+# Bakes Ternary-Bonsai-8B into an Ollama image for air-gapped
+# deployments. Build on a machine with network access, push to your
+# private registry, then run it anywhere without pulling the model at
+# runtime.
+#
+#   docker build -f deploy/ollama/Dockerfile.ollama \
+#     --build-arg SNG_LLM_MODEL=prism-ml/Ternary-Bonsai-8B-gguf \
+#     -t your-registry/sng-ollama-bonsai:8b .
+#
+# The built image already contains the model layer, so a fresh
+# container serves it immediately with no egress.
+FROM ollama/ollama:0.6.8
+
+ARG SNG_LLM_MODEL=prism-ml/Ternary-Bonsai-8B-gguf
+ENV SNG_LLM_MODEL=${SNG_LLM_MODEL}
+
+# Start the server, wait for readiness, pull the model into the image
+# layer, then stop the server. The model is now baked into the image.
+RUN nohup ollama serve >/tmp/ollama.log 2>&1 & \
+    for i in $(seq 1 60); do \
+      ollama list >/dev/null 2>&1 && break; \
+      sleep 1; \
+    done; \
+    ollama pull "${SNG_LLM_MODEL}" && \
+    ollama list
+
+EXPOSE 11434
+# Inherit the base image entrypoint (`ollama serve`).

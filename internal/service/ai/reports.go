@@ -182,7 +182,8 @@ func (e *ReportEngine) polishWithLLM(ctx context.Context, report PostureReport) 
 	prompt := fmt.Sprintf(
 		"You are a ShieldNet Gateway security analyst. "+
 			"Polish the following security posture data into a professional executive briefing. "+
-			"Do not invent data — only rephrase the evidence provided.\n\n"+
+			"Do not invent data — only rephrase the evidence provided. "+
+			"Respond with a single short paragraph (3-5 sentences) of plain prose — no headings or lists.\n\n"+
 			"Total alerts: %d, Trend: %s, Period: %s",
 		report.Overview.TotalAlerts, report.Overview.Trend, report.Period.Label)
 

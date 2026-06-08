@@ -135,6 +135,7 @@ func buildSummarizerPrompt(templateText string) string {
 	return "You are a ShieldNet Gateway security analyst. " +
 		"Polish the following template summary into a concise, professional narrative. " +
 		"Do not invent data — only rephrase the evidence provided. " +
-		"Preserve all key findings and recommended actions.\n\n" +
+		"Preserve all key findings and recommended actions. " +
+		"Respond with plain prose only — no headings or bullet points.\n\n" +
 		"Template summary:\n" + templateText
 }
