@@ -208,10 +208,35 @@ func (s *Service) CompileDryRun(
 		)
 	}
 
+	// Fold the threat-intel IOC deny rules and malware-hash set into
+	// the shadow bundle exactly as Compile does for the live bundle,
+	// so the dry-run verdict stream reflects what the live bundle
+	// would enforce. Without this a dry-run comparison surfaces
+	// phantom diffs — verdicts that the live bundle denies via an IOC
+	// rule (or a malware hash) would appear allowed in the shadow.
+	// Both planes come from one store snapshot (see
+	// compileIOCEnforcement) so they stay mutually consistent.
+	iocRules, malwareHashes, err := s.compileIOCEnforcement(ctx, tenantID)
+	if err != nil {
+		return DryRunResult{}, err
+	}
+	if len(iocRules) > 0 {
+		if typed != nil {
+			typed.Rules = append(typed.Rules, iocRules...)
+		} else {
+			s.logger.Warn("policy.dryrun: threat-intel IOC rules skipped for tenant on legacy verbatim-rules path (re-publish the policy graph to enable IOC enforcement)",
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("graph_id", proposed.ID.String()),
+				slog.String("simulation_id", simulationID.String()),
+				slog.Int("ioc_rules", len(iocRules)),
+			)
+		}
+	}
+
 	subject := DryRunSubject(tenantID, simulationID)
 	bundles := make([]repository.PolicyBundle, 0, len(targets))
 	for _, target := range targets {
-		payload, err := encodeDryRunBundle(target, proposed, typed, simulationID, subject, compiledAt)
+		payload, err := encodeDryRunBundle(target, proposed, typed, malwareForTarget(target, malwareHashes), simulationID, subject, compiledAt)
 		if err != nil {
 			return DryRunResult{}, fmt.Errorf("encode dryrun %s: %w", target, err)
 		}
@@ -282,21 +307,32 @@ type dryRunBundlePayload struct {
 	DefaultAction string          `msgpack:"d"`
 	Rules         json.RawMessage `msgpack:"r"`
 	Steering      json.RawMessage `msgpack:"st,omitempty"`
-	CompiledAt    string          `msgpack:"ts"`
-	Kind          string          `msgpack:"k"`
-	SimulationID  string          `msgpack:"sim"`
-	Subject       string          `msgpack:"sub"`
+	// Malware mirrors bundlePayload.Malware: the threat-intel
+	// malicious file-hash set for the SWG inspector, JSON-encoded and
+	// emitted only for edge/cloud targets (via malwareForTarget) so a
+	// shadow comparison reflects the live malware verdicts. Omitted
+	// when empty.
+	Malware      json.RawMessage `msgpack:"mw,omitempty"`
+	CompiledAt   string          `msgpack:"ts"`
+	Kind         string          `msgpack:"k"`
+	SimulationID string          `msgpack:"sim"`
+	Subject      string          `msgpack:"sub"`
 }
 
 func encodeDryRunBundle(
 	target repository.PolicyBundleTarget,
 	g repository.PolicyGraph,
 	typed *Graph,
+	malware []MalwareHashEntry,
 	simulationID uuid.UUID,
 	subject string,
 	compiledAt time.Time,
 ) ([]byte, error) {
 	rules, defaultAction := perTargetRulesFromParsed(target, g.Graph, typed)
+	malwareJSON, err := encodeMalwareHashes(malware)
+	if err != nil {
+		return nil, fmt.Errorf("encode malware hashes: %w", err)
+	}
 	p := dryRunBundlePayload{
 		SchemaVersion: 1,
 		Target:        string(target),
@@ -306,6 +342,7 @@ func encodeDryRunBundle(
 		DefaultAction: defaultAction,
 		Rules:         rules,
 		Steering:      nil, // dry-run focuses on enforcement; steering replay is a separate concern (Task 24).
+		Malware:       malwareJSON,
 		CompiledAt:    compiledAt.Format(time.RFC3339Nano),
 		Kind:          "dry_run",
 		SimulationID:  simulationID.String(),

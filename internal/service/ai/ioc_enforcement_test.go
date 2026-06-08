@@ -351,3 +351,52 @@ func TestDemotionBridge_ConcurrentSyncNoRace(t *testing.T) {
 		t.Fatalf("emitted map = %d entries, want %d (%#v)", len(bridge.emitted), len(domains), bridge.emitted)
 	}
 }
+
+// TestIOCEnforcementCompiler_SnapshotIOCSharesOneSnapshot verifies
+// that SnapshotIOC captures the store exactly once and that both
+// CompileIOCRules and CompileMalwareHashes on the returned view
+// derive from that single capture — the cross-plane consistency
+// guarantee policy.Service.compileIOCEnforcement relies on. The
+// snapshot func mutates its output after the first call, so a second
+// capture would yield empty planes and fail the assertions.
+func TestIOCEnforcementCompiler_SnapshotIOCSharesOneSnapshot(t *testing.T) {
+	t.Parallel()
+	var calls int
+	snapFn := func() IOCSnapshot {
+		calls++
+		if calls == 1 {
+			return IOCSnapshot{
+				IPs:    []IOC{mkIOC(IOCTypeIP, "203.0.113.10", 0.9)},
+				Hashes: []IOC{mkIOC(IOCTypeHash, "a1b2c3d4e5f6071829304a5b6c7d8e9f00112233445566778899aabbccddeeff", 0.97)},
+			}
+		}
+		return IOCSnapshot{} // a second capture would surface as empty planes
+	}
+	c := newIOCEnforcementCompilerFromSnapshot(snapFn)
+
+	view, err := c.SnapshotIOC(context.Background(), uuid.Nil)
+	if err != nil {
+		t.Fatalf("snapshot ioc: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("SnapshotIOC took %d snapshots, want 1", calls)
+	}
+
+	rules, err := view.CompileIOCRules()
+	if err != nil {
+		t.Fatalf("compile rules: %v", err)
+	}
+	hashes, err := view.CompileMalwareHashes()
+	if err != nil {
+		t.Fatalf("compile malware: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("compiling the two planes re-snapshotted the store: calls=%d, want 1", calls)
+	}
+	if len(rules) != 1 {
+		t.Errorf("want 1 IP deny rule from the captured snapshot, got %d (%#v)", len(rules), rules)
+	}
+	if len(hashes) != 1 {
+		t.Errorf("want 1 malware hash from the captured snapshot, got %d (%#v)", len(hashes), hashes)
+	}
+}
