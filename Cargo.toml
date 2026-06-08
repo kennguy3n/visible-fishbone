@@ -170,7 +170,25 @@ unicode-normalization = "0.1"
 # cannot drift between crates. The classifier degrades to a real
 # regex-only NER fallback when no model is loaded, so this dependency
 # is never on the fail-safe path.
-ort = "=2.0.0-rc.10"
+#
+# We deliberately use `load-dynamic` (dlopen the ONNX Runtime shared
+# library at first use) and DISABLE the default `download-binaries`
+# feature. `download-binaries` pulls `ureq` as a build-dependency with
+# its `native-tls` feature hard-wired on, which drags `native-tls` →
+# `openssl` / `openssl-sys` into the build graph — all three are
+# explicitly banned in `deny.toml` (the platform standard is rustls, no
+# OpenSSL FFI). `load-dynamic` resolves the runtime library from
+# `ORT_DYLIB_PATH` (or the system loader path), so the ONNX Runtime
+# binary is provisioned by the environment / packaging rather than
+# fetched over TLS at build time. See `deny.toml` and the environment
+# blueprint for how `libonnxruntime` (v1.22, matching this pin's
+# `ORT_API_VERSION`) is supplied.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+    "std",
+    "ndarray",
+    "tracing",
+    "load-dynamic",
+] }
 
 # Utilities.
 bytes = "1"
