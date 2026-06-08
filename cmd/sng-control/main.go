@@ -347,8 +347,18 @@ func run() error {
 	// re-pulls plus a TTL sweeper, all tied to rootCtx. With no
 	// THREATINTEL_* feeds configured only the sweeper runs (a no-op
 	// over an empty store), so this is safe to start unconditionally.
-	// Stopped explicitly during graceful shutdown below.
 	feedMgr.Start(rootCtx)
+	// Safety net for the early-return paths between here and the
+	// explicit Stop in the graceful-shutdown block: if any subsequent
+	// setup step (startTelemetry, etc.) fails and run() returns early,
+	// this deferred Stop still joins the feed/sweeper goroutines.
+	// Registered after the line-131 `defer pool.Close()`, so it runs
+	// *before* it (defers are LIFO) — the warm-up's demotion-engine DB
+	// writes finish before the pool closes, closing the race the
+	// goroutines would otherwise have with pool.Close(). Stop() is
+	// idempotent (sync.Once + an already-closed doneCh), so the explicit
+	// Stop on the normal shutdown path makes this defer a no-op.
+	defer feedMgr.Stop()
 	// The capacity rebalancer is a singleton: only the leader scans
 	// for overloaded PoPs and moves non-override tenants off them, so
 	// a multi-replica deployment performs one coordinated rebalance

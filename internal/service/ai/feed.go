@@ -89,9 +89,19 @@ func (f *HTTPFetcher) Fetch(ctx context.Context) ([]byte, error) {
 	if limit <= 0 {
 		limit = defaultMaxFeedBytes
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	// Read one byte past the limit so an oversized body is reported as
+	// an explicit error rather than silently truncated. A bare
+	// LimitReader(limit) would hand a parser a body cut off mid-record,
+	// surfacing as a misleading "parse error" (or, for CSV, a quietly
+	// dropped final row) instead of "response too large" — and a
+	// half-ingested feed is worse than a skipped refresh, which simply
+	// retries on the next interval.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("ai/feed: read body %s: %w", f.URL, err)
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("ai/feed: fetch %s: response exceeds %d-byte limit", f.URL, limit)
 	}
 	return body, nil
 }
