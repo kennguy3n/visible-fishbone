@@ -382,6 +382,24 @@ type ThreatIntel struct {
 	// in CSV (indicator-per-row) or JSON (array-of-objects) form.
 	CSVURL  string
 	JSONURL string
+	// AutoRecompile, when true (the default), schedules a policy
+	// recompile after every feed update so freshly-ingested IP / URL
+	// / hash IOCs reach enforcement bundles without waiting for an
+	// operator-triggered Compile. Set THREATINTEL_AUTO_RECOMPILE=false
+	// to keep the prior pull-only behaviour.
+	AutoRecompile bool
+	// RecompileMinInterval is the minimum spacing between two
+	// feed-driven recompiles; bursts of feed updates coalesce into at
+	// most one recompile per window. Defaults to 5m.
+	RecompileMinInterval time.Duration
+	// StaleFactor multiplies a feed's refresh interval to derive its
+	// staleness window: a feed that has not refreshed successfully
+	// within StaleFactor x its interval is reported stale (metric +
+	// log). Defaults to 3.
+	StaleFactor float64
+	// HealthInterval is how often per-feed staleness and store-size
+	// telemetry is evaluated and published. Defaults to 1m.
+	HealthInterval time.Duration
 }
 
 // Log carries structured-logging configuration.
@@ -1382,18 +1400,22 @@ func Load() (Config, error) {
 			Model:    getStr("AI_LLM_MODEL", ""),
 		},
 		ThreatIntel: ThreatIntel{
-			RefreshInterval:  getDuration("THREATINTEL_REFRESH_INTERVAL", time.Hour),
-			DefaultTTL:       getDuration("THREATINTEL_DEFAULT_TTL", 0),
-			MinConfidence:    getFloatLenient("THREATINTEL_MIN_CONFIDENCE", 0),
-			TAXIIURL:         getStr("THREATINTEL_TAXII_URL", ""),
-			TAXIIToken:       getStr("THREATINTEL_TAXII_TOKEN", ""),
-			OTXURL:           getStr("THREATINTEL_OTX_URL", ""),
-			OTXAPIKey:        getStr("THREATINTEL_OTX_API_KEY", ""),
-			URLhausURL:       getStr("THREATINTEL_URLHAUS_URL", ""),
-			MalwareBazaarURL: getStr("THREATINTEL_MALWAREBAZAAR_URL", ""),
-			FeodoTrackerURL:  getStr("THREATINTEL_FEODOTRACKER_URL", ""),
-			CSVURL:           getStr("THREATINTEL_CSV_URL", ""),
-			JSONURL:          getStr("THREATINTEL_JSON_URL", ""),
+			RefreshInterval:      getDuration("THREATINTEL_REFRESH_INTERVAL", time.Hour),
+			DefaultTTL:           getDuration("THREATINTEL_DEFAULT_TTL", 0),
+			MinConfidence:        getFloatLenient("THREATINTEL_MIN_CONFIDENCE", 0),
+			TAXIIURL:             getStr("THREATINTEL_TAXII_URL", ""),
+			TAXIIToken:           getStr("THREATINTEL_TAXII_TOKEN", ""),
+			OTXURL:               getStr("THREATINTEL_OTX_URL", ""),
+			OTXAPIKey:            getStr("THREATINTEL_OTX_API_KEY", ""),
+			URLhausURL:           getStr("THREATINTEL_URLHAUS_URL", ""),
+			MalwareBazaarURL:     getStr("THREATINTEL_MALWAREBAZAAR_URL", ""),
+			FeodoTrackerURL:      getStr("THREATINTEL_FEODOTRACKER_URL", ""),
+			CSVURL:               getStr("THREATINTEL_CSV_URL", ""),
+			JSONURL:              getStr("THREATINTEL_JSON_URL", ""),
+			AutoRecompile:        getBoolLenient("THREATINTEL_AUTO_RECOMPILE", true),
+			RecompileMinInterval: getDuration("THREATINTEL_RECOMPILE_MIN_INTERVAL", 5*time.Minute),
+			StaleFactor:          getFloatLenient("THREATINTEL_STALE_FACTOR", 3),
+			HealthInterval:       getDuration("THREATINTEL_HEALTH_INTERVAL", time.Minute),
 		},
 	}
 

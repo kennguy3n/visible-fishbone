@@ -65,6 +65,16 @@ var (
 	deliveryLatencyBuckets = []float64{
 		0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30,
 	}
+	// recompileLatencyBuckets covers feed-driven policy recompiles,
+	// which fan out across ALL active tenants (per-tenant DB read,
+	// graph parse, IOC compilation, Ed25519 bundle signing). A fleet
+	// with hundreds of tenants can take minutes, so the buckets run
+	// from sub-second (a near-empty deployment) up to 10 minutes,
+	// keeping percentile / SLO calculations meaningful instead of
+	// collapsing everything past 30s into +Inf.
+	recompileLatencyBuckets = []float64{
+		0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600,
+	}
 )
 
 // Metrics owns the control-plane Prometheus registry and every
@@ -111,6 +121,15 @@ type Metrics struct {
 	AILLMLatency          *prometheus.HistogramVec
 	AILLMTokensUsed       *prometheus.CounterVec
 	AIGuardrailRejections *prometheus.CounterVec
+
+	// --- Threat intel / IOC feeds -------------------------------
+	ThreatFeedRefreshTotal       *prometheus.CounterVec
+	ThreatFeedIngestedTotal      *prometheus.CounterVec
+	ThreatFeedLastSuccessTS      *prometheus.GaugeVec
+	ThreatFeedStale              *prometheus.GaugeVec
+	ThreatIntelStoreIOCs         *prometheus.GaugeVec
+	ThreatIntelRecompileTotal    *prometheus.CounterVec
+	ThreatIntelRecompileDuration prometheus.Histogram
 
 	// --- Webhook / integration ----------------------------------
 	WebhookDeliveries      *prometheus.CounterVec
@@ -323,6 +342,51 @@ func New(cfg config.Metrics) *Metrics {
 		Name:      "guardrail_rejections_total",
 		Help:      "Total AI requests rejected by a guardrail, by reason.",
 	}, []string{"reason"})
+
+	// --- Threat intel / IOC feeds -----------------------------------
+	m.ThreatFeedRefreshTotal = f.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns,
+		Subsystem: "threatintel",
+		Name:      "feed_refresh_total",
+		Help:      "Total threat-feed refresh attempts, by feed and result (success|error).",
+	}, []string{"feed", "result"})
+	m.ThreatFeedIngestedTotal = f.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns,
+		Subsystem: "threatintel",
+		Name:      "feed_ingested_total",
+		Help:      "Total indicators added or updated in the IOC store, by feed.",
+	}, []string{"feed"})
+	m.ThreatFeedLastSuccessTS = f.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: ns,
+		Subsystem: "threatintel",
+		Name:      "feed_last_success_timestamp_seconds",
+		Help:      "Unix timestamp of the last successful refresh, by feed (0 if never).",
+	}, []string{"feed"})
+	m.ThreatFeedStale = f.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: ns,
+		Subsystem: "threatintel",
+		Name:      "feed_stale",
+		Help:      "1 if a feed has not refreshed successfully within its staleness window, else 0, by feed.",
+	}, []string{"feed"})
+	m.ThreatIntelStoreIOCs = f.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: ns,
+		Subsystem: "threatintel",
+		Name:      "store_iocs",
+		Help:      "Active (non-expired) indicators in the shared IOC store, by type (domain|ip|url|hash).",
+	}, []string{"type"})
+	m.ThreatIntelRecompileTotal = f.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns,
+		Subsystem: "threatintel",
+		Name:      "recompile_total",
+		Help:      "Total feed-driven policy recompiles, by outcome (success|error).",
+	}, []string{"outcome"})
+	m.ThreatIntelRecompileDuration = f.NewHistogram(prometheus.HistogramOpts{
+		Namespace: ns,
+		Subsystem: "threatintel",
+		Name:      "recompile_duration_seconds",
+		Help:      "Latency of feed-driven policy recompiles across all tenants.",
+		Buckets:   recompileLatencyBuckets,
+	})
 
 	// --- Webhook / integration --------------------------------------
 	m.WebhookDeliveries = f.NewCounterVec(prometheus.CounterOpts{

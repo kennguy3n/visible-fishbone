@@ -30,10 +30,23 @@ type FeedManager struct {
 	logger   *slog.Logger
 	now      func() time.Time
 	onUpdate func(context.Context, IOCSnapshot)
+	observer FeedObserver
 
 	// sweepInterval controls how often expired IOCs are reaped.
 	// Zero applies defaultSweepInterval.
 	sweepInterval time.Duration
+	// healthInterval controls how often per-feed staleness/health
+	// is evaluated and published. Zero applies defaultHealthInterval.
+	healthInterval time.Duration
+	// staleFactor multiplies a feed's refresh interval to derive the
+	// staleness threshold (a feed is stale if it has not refreshed
+	// successfully within staleFactor x its interval). Zero applies
+	// defaultStaleFactor.
+	staleFactor float64
+	// startedAt is the manager's construction time, used as the
+	// staleness baseline for feeds that have never refreshed yet so a
+	// feed that never comes up is eventually reported stale.
+	startedAt time.Time
 
 	metrics   feedMetrics
 	stopCh    chan struct{}
@@ -44,7 +57,36 @@ type FeedManager struct {
 	started   atomic.Bool
 }
 
-const defaultSweepInterval = 10 * time.Minute
+const (
+	defaultSweepInterval  = 10 * time.Minute
+	defaultHealthInterval = time.Minute
+	// defaultStaleFactor flags a feed stale once it has gone three
+	// refresh intervals without a successful refresh — long enough to
+	// ride out a single transient fetch failure (feeds degrade open),
+	// short enough that a feed wedged by an auth expiry or endpoint
+	// change surfaces within a few intervals rather than silently.
+	defaultStaleFactor = 3.0
+)
+
+// FeedObserver receives feed-ingest and feed-health telemetry so a
+// metrics backend (or a test) can observe the manager without the
+// ai package importing it. Implementations must be safe for
+// concurrent use: ObserveRefresh fires from each feed goroutine,
+// while ObserveStale / ObserveStoreSize fire from the single health
+// loop.
+type FeedObserver interface {
+	// ObserveRefresh is called after every feed refresh attempt with
+	// the upsert tally (zero on failure) and the refresh error (nil
+	// on success).
+	ObserveRefresh(feed string, res UpsertResult, err error, at time.Time)
+	// ObserveStale is called once per feed on each health tick with
+	// the feed's current staleness and the time of its last
+	// successful refresh (zero if it has never succeeded).
+	ObserveStale(feed string, stale bool, lastSuccess time.Time, at time.Time)
+	// ObserveStoreSize is called once per health tick with the active
+	// indicator cardinality of the shared store.
+	ObserveStoreSize(counts IOCCounts)
+}
 
 // FeedManagerOption configures a FeedManager.
 type FeedManagerOption func(*FeedManager)
@@ -75,6 +117,33 @@ func WithSweepInterval(d time.Duration) FeedManagerOption {
 	}
 }
 
+// WithFeedObserver registers a telemetry observer for feed ingest
+// and health. When nil (the default) the manager keeps its internal
+// counters only.
+func WithFeedObserver(obs FeedObserver) FeedManagerOption {
+	return func(m *FeedManager) { m.observer = obs }
+}
+
+// WithHealthInterval overrides how often per-feed staleness/health
+// is evaluated and published.
+func WithHealthInterval(d time.Duration) FeedManagerOption {
+	return func(m *FeedManager) {
+		if d > 0 {
+			m.healthInterval = d
+		}
+	}
+}
+
+// WithStaleFactor overrides the multiple of a feed's refresh
+// interval after which it is reported stale.
+func WithStaleFactor(factor float64) FeedManagerOption {
+	return func(m *FeedManager) {
+		if factor > 0 {
+			m.staleFactor = factor
+		}
+	}
+}
+
 // withManagerClock overrides the clock (tests).
 func withManagerClock(now func() time.Time) FeedManagerOption {
 	return func(m *FeedManager) {
@@ -88,17 +157,20 @@ func withManagerClock(now func() time.Time) FeedManagerOption {
 // feeds.
 func NewFeedManager(store *IOCStore, feeds []Feed, opts ...FeedManagerOption) *FeedManager {
 	m := &FeedManager{
-		feeds:         feeds,
-		store:         store,
-		logger:        slog.Default(),
-		now:           time.Now,
-		sweepInterval: defaultSweepInterval,
-		stopCh:        make(chan struct{}),
-		doneCh:        make(chan struct{}),
+		feeds:          feeds,
+		store:          store,
+		logger:         slog.Default(),
+		now:            time.Now,
+		sweepInterval:  defaultSweepInterval,
+		healthInterval: defaultHealthInterval,
+		staleFactor:    defaultStaleFactor,
+		stopCh:         make(chan struct{}),
+		doneCh:         make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(m)
 	}
+	m.startedAt = m.now().UTC()
 	return m
 }
 
@@ -114,13 +186,14 @@ type feedMetrics struct {
 
 // FeedStat is the public per-feed telemetry snapshot.
 type FeedStat struct {
-	Runs      int64
-	Errors    int64
-	Added     int64
-	Updated   int64
-	Skipped   int64
-	LastRunAt time.Time
-	LastErr   string
+	Runs          int64
+	Errors        int64
+	Added         int64
+	Updated       int64
+	Skipped       int64
+	LastRunAt     time.Time
+	LastSuccessAt time.Time
+	LastErr       string
 }
 
 func (fm *feedMetrics) record(feed string, res UpsertResult, err error, at time.Time) {
@@ -145,6 +218,7 @@ func (fm *feedMetrics) record(feed string, res UpsertResult, err error, at time.
 		return
 	}
 	st.LastErr = ""
+	st.LastSuccessAt = at
 	st.Added += int64(res.Added)
 	st.Updated += int64(res.Updated)
 	st.Skipped += int64(res.Skipped)
@@ -162,6 +236,58 @@ func (m *FeedManager) Stats() map[string]FeedStat {
 	return out
 }
 
+// FeedHealth is a per-feed staleness/health view as of a given
+// instant.
+type FeedHealth struct {
+	Name          string
+	Stale         bool
+	LastSuccessAt time.Time
+	LastRunAt     time.Time
+	Threshold     time.Duration
+	Runs          int64
+	Errors        int64
+}
+
+// Health evaluates each configured feed's staleness as of now. A
+// feed is stale when it has not refreshed successfully within
+// staleFactor x its refresh interval. A feed that has never
+// succeeded is measured from the manager's construction time, so a
+// feed that never comes up is reported stale once the threshold
+// elapses rather than staying silently "healthy" forever.
+func (m *FeedManager) Health(now time.Time) []FeedHealth {
+	now = now.UTC()
+	stats := m.Stats()
+	out := make([]FeedHealth, 0, len(m.feeds))
+	for _, feed := range m.feeds {
+		threshold := m.stalenessThreshold(feed)
+		st := stats[feed.Name]
+		baseline := st.LastSuccessAt
+		if baseline.IsZero() {
+			baseline = m.startedAt
+		}
+		out = append(out, FeedHealth{
+			Name:          feed.Name,
+			Stale:         now.Sub(baseline) > threshold,
+			LastSuccessAt: st.LastSuccessAt,
+			LastRunAt:     st.LastRunAt,
+			Threshold:     threshold,
+			Runs:          st.Runs,
+			Errors:        st.Errors,
+		})
+	}
+	return out
+}
+
+// stalenessThreshold is staleFactor x the feed's effective refresh
+// interval.
+func (m *FeedManager) stalenessThreshold(feed Feed) time.Duration {
+	factor := m.staleFactor
+	if factor <= 0 {
+		factor = defaultStaleFactor
+	}
+	return time.Duration(float64(feed.effectiveInterval()) * factor)
+}
+
 // RunFeedOnce performs a single synchronous refresh of one feed:
 // fetch -> parse -> normalize TTL/confidence -> upsert. It returns
 // the upsert tally and any fetch/parse error. A parse that yields
@@ -170,22 +296,33 @@ func (m *FeedManager) Stats() map[string]FeedStat {
 // RunOnce, which fires it once after refreshing all feeds).
 func (m *FeedManager) RunFeedOnce(ctx context.Context, feed Feed) (UpsertResult, error) {
 	at := m.now().UTC()
+	res, err := m.refreshOnce(ctx, feed, at)
+	// Record + observe at exactly one point so every refresh outcome
+	// (fetch error, parse error, success) updates the internal
+	// counters and any external observer identically.
+	m.metrics.record(feed.Name, res, err, at)
+	if m.observer != nil {
+		m.observer.ObserveRefresh(feed.Name, res, err, at)
+	}
+	return res, err
+}
+
+// refreshOnce performs the fetch -> parse -> normalize -> upsert
+// pipeline for one feed, returning the upsert tally and any
+// fetch/parse error. It does no telemetry; RunFeedOnce owns the
+// single record/observe call so the two error paths and the success
+// path can't drift.
+func (m *FeedManager) refreshOnce(ctx context.Context, feed Feed, at time.Time) (UpsertResult, error) {
 	raw, err := feed.Fetcher.Fetch(ctx)
 	if err != nil {
-		wrapped := fmt.Errorf("feed %q fetch: %w", feed.Name, err)
-		m.metrics.record(feed.Name, UpsertResult{}, wrapped, at)
-		return UpsertResult{}, wrapped
+		return UpsertResult{}, fmt.Errorf("feed %q fetch: %w", feed.Name, err)
 	}
 	iocs, err := feed.Parser.Parse(raw)
 	if err != nil {
-		wrapped := fmt.Errorf("feed %q parse: %w", feed.Name, err)
-		m.metrics.record(feed.Name, UpsertResult{}, wrapped, at)
-		return UpsertResult{}, wrapped
+		return UpsertResult{}, fmt.Errorf("feed %q parse: %w", feed.Name, err)
 	}
 	m.applyFeedDefaults(feed, iocs, at)
-	res := m.store.Upsert(iocs...)
-	m.metrics.record(feed.Name, res, nil, at)
-	return res, nil
+	return m.store.Upsert(iocs...), nil
 }
 
 // applyFeedDefaults stamps per-feed Source / TTL defaults and
@@ -279,6 +416,13 @@ func (m *FeedManager) Start(ctx context.Context) {
 		}
 		m.wg.Add(1)
 		go m.runSweepLoop(runCtx)
+		// Only run the health loop when there is something to observe
+		// it (a logger to warn through or an observer to publish to)
+		// and at least one feed to evaluate.
+		if len(m.feeds) > 0 && (m.observer != nil || m.logger != nil) {
+			m.wg.Add(1)
+			go m.runHealthLoop(runCtx)
+		}
 		go func() {
 			m.wg.Wait()
 			cancel()
@@ -339,6 +483,50 @@ func (m *FeedManager) runSweepLoop(ctx context.Context) {
 				m.fireUpdate(ctx)
 			}
 		}
+	}
+}
+
+func (m *FeedManager) runHealthLoop(ctx context.Context) {
+	defer m.wg.Done()
+	interval := m.healthInterval
+	if interval <= 0 {
+		interval = defaultHealthInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	// Publish an initial reading so a feed that fails its warm-up is
+	// reflected promptly rather than only after the first tick.
+	m.reportHealth(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			m.reportHealth(ctx)
+		}
+	}
+}
+
+// reportHealth evaluates per-feed staleness and the store size and
+// publishes both to the logger (stale feeds warn) and the observer.
+func (m *FeedManager) reportHealth(ctx context.Context) {
+	now := m.now().UTC()
+	for _, h := range m.Health(now) {
+		if h.Stale && m.logger != nil {
+			m.logger.WarnContext(ctx, "threat-intel: feed is stale",
+				"feed", h.Name,
+				"last_success", h.LastSuccessAt,
+				"threshold", h.Threshold,
+				"errors", h.Errors)
+		}
+		if m.observer != nil {
+			m.observer.ObserveStale(h.Name, h.Stale, h.LastSuccessAt, now)
+		}
+	}
+	if m.observer != nil {
+		m.observer.ObserveStoreSize(m.store.SizeByType())
 	}
 }
 

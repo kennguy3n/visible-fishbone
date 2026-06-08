@@ -181,6 +181,44 @@ func (s *IOCStore) Len() int {
 	return n
 }
 
+// IOCCounts is the active indicator cardinality partitioned by
+// enforcement type, plus the total.
+type IOCCounts struct {
+	Domains int
+	IPs     int
+	URLs    int
+	Hashes  int
+	Total   int
+}
+
+// SizeByType returns the active (non-expired) indicator counts
+// partitioned by type. It is a lighter-weight alternative to
+// Snapshot for telemetry: it counts under the read lock without
+// materialising or sorting the per-type slices.
+func (s *IOCStore) SizeByType() IOCCounts {
+	now := s.now().UTC()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var c IOCCounts
+	for _, ioc := range s.byKey {
+		if ioc.Expired(now) {
+			continue
+		}
+		switch ioc.Type {
+		case IOCTypeDomain:
+			c.Domains++
+		case IOCTypeIP:
+			c.IPs++
+		case IOCTypeURL:
+			c.URLs++
+		case IOCTypeHash:
+			c.Hashes++
+		}
+		c.Total++
+	}
+	return c
+}
+
 // Snapshot returns the active indicators grouped by type, each
 // group sorted by descending confidence then value so downstream
 // rule compilation is byte-deterministic. Expired indicators are

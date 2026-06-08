@@ -255,6 +255,7 @@ func run() error {
 	popSvc := rc.PoP
 	evidenceScheduler := rc.EvidenceScheduler
 	feedMgr := rc.FeedManager
+	recompiler := rc.Recompiler
 
 	// Start the cost-metering flush loop. It batch-upserts the
 	// accumulated per-tenant usage deltas into tenant_usage every
@@ -370,6 +371,15 @@ func run() error {
 	// idempotent (sync.Once + an already-closed doneCh), so the explicit
 	// Stop on the normal shutdown path makes this defer a no-op.
 	defer feedMgr.Stop()
+	// The feed-driven auto-recompile worker drains feed updates into
+	// coalesced policy recompiles. Nil when auto-recompile is disabled;
+	// Start/Stop are no-ops in that case. Started after feedMgr so the
+	// OnUpdate triggers it has a running worker to receive them, and
+	// deferred Stop joins it on early-return paths (idempotent).
+	if recompiler != nil {
+		recompiler.Start(rootCtx)
+		defer recompiler.Stop()
+	}
 	// The capacity rebalancer is a singleton: only the leader scans
 	// for overloaded PoPs and moves non-override tenants off them, so
 	// a multi-replica deployment performs one coordinated rebalance
@@ -549,7 +559,12 @@ func run() error {
 	// Stop the threat-intel aggregator: signals the feed/sweeper
 	// loops to exit and waits for them (bounded — the loops return
 	// promptly on the stop signal). rootCtx is already cancelled by
-	// this point, so this mainly joins the goroutines cleanly.
+	// this point, so this mainly joins the goroutines cleanly. Stop
+	// the recompiler first so an in-flight Compile triggered by a
+	// final feed update drains before the feed loops join.
+	if recompiler != nil {
+		recompiler.Stop()
+	}
 	feedMgr.Stop()
 
 	if err := telShutdown(shutdownCtx); err != nil {
@@ -582,6 +597,9 @@ type routerComponents struct {
 	PoP               *pop.Service
 	EvidenceScheduler *compliance.Scheduler
 	FeedManager       *aisvc.FeedManager
+	// Recompiler is the feed-driven auto-recompile worker. Nil when
+	// THREATINTEL_AUTO_RECOMPILE=false (the prior pull-only behaviour).
+	Recompiler *aisvc.Recompiler
 }
 
 // buildRouter wires every repository / service / handler against
@@ -845,13 +863,33 @@ func buildRouter(
 	// signed bundle, so enforcement does not depend on the live push.
 	threatDemotionEngine := appdb.NewDemotionEngine(appSvc, tenantRepo, appdb.NoopPublisher{}, appdb.DefaultDemotionPolicy())
 	demotionBridge := aisvc.NewDemotionBridge(threatFeedDemotionEmitter{engine: threatDemotionEngine})
+	// recompiler is wired after policySvc exists (it needs it to
+	// recompile bundles). The OnUpdate closure captures it by
+	// reference; it only fires once feedMgr.Start runs in run(), by
+	// which point recompiler is assigned (or stays nil when
+	// auto-recompile is disabled, in which case Trigger is a no-op
+	// because it is never reached).
+	var recompiler *aisvc.Recompiler
+	var feedObs aisvc.FeedObserver
+	if mx != nil {
+		feedObs = metricsFeedObserver{m: mx}
+	}
 	feedMgr := aisvc.NewFeedManager(
 		iocStore,
 		buildThreatFeeds(cfg.ThreatIntel),
 		aisvc.WithFeedLogger(logger),
+		aisvc.WithFeedObserver(feedObs),
+		aisvc.WithHealthInterval(cfg.ThreatIntel.HealthInterval),
+		aisvc.WithStaleFactor(cfg.ThreatIntel.StaleFactor),
 		aisvc.WithOnUpdate(func(ctx context.Context, snap aisvc.IOCSnapshot) {
 			if err := demotionBridge.Sync(ctx, snap); err != nil {
 				logger.WarnContext(ctx, "threat-intel: demotion bridge sync failed", slog.Any("error", err))
+			}
+			// Domain IOCs enforce immediately via the demotion bridge
+			// above; IP/URL/hash IOCs only reach bundles at a Compile,
+			// so coalesce a feed-driven recompile to close that gap.
+			if recompiler != nil {
+				recompiler.Trigger()
 			}
 		}),
 	)
@@ -866,6 +904,30 @@ func buildRouter(
 		policy.WithIOCCompiler(iocCompiler),
 		policy.WithMalwareHashCompiler(iocCompiler),
 	)
+
+	// Feed-driven auto-recompile: turn the FeedManager's frequent
+	// per-feed updates into a coalesced, rate-limited stream of policy
+	// recompiles so freshly-ingested IP/URL/hash indicators reach
+	// enforcement bundles without waiting for an operator Compile.
+	// Disabled via THREATINTEL_AUTO_RECOMPILE=false.
+	if cfg.ThreatIntel.AutoRecompile {
+		recompilerOpts := []aisvc.RecompilerOption{
+			aisvc.WithRecompileLogger(logger),
+			aisvc.WithRecompileMinInterval(cfg.ThreatIntel.RecompileMinInterval),
+		}
+		if mx != nil {
+			recompilerOpts = append(recompilerOpts, aisvc.WithRecompileObserver(func(outcome string, d time.Duration) {
+				mx.ThreatIntelRecompileTotal.WithLabelValues(outcome).Inc()
+				mx.ThreatIntelRecompileDuration.Observe(d.Seconds())
+			}))
+		}
+		recompiler = aisvc.NewRecompiler(
+			func(ctx context.Context) error {
+				return recompileAllTenants(ctx, policySvc, tenantRepo, logger)
+			},
+			recompilerOpts...,
+		)
+	}
 
 	// When the file-backed signer is active, expose its public key
 	// through the existing /signing-keys/{kid}/public-key endpoint
@@ -1358,6 +1420,7 @@ func buildRouter(
 		PoP:               popSvc,
 		EvidenceScheduler: evidenceScheduler,
 		FeedManager:       feedMgr,
+		Recompiler:        recompiler,
 	}, nil
 }
 
@@ -1531,6 +1594,88 @@ func (e threatFeedDemotionEmitter) EmitDomainDemotion(ctx context.Context, domai
 		ObservedAt: observedAt,
 	})
 	return err
+}
+
+// metricsFeedObserver adapts the Prometheus registry to the
+// aisvc.FeedObserver interface so the FeedManager's ingest / health
+// telemetry lands as metrics without the ai package importing
+// internal/metrics. Constructed only when metrics are enabled (mx !=
+// nil), so every method can dereference o.m unconditionally.
+type metricsFeedObserver struct {
+	m *metrics.Metrics
+}
+
+func (o metricsFeedObserver) ObserveRefresh(feed string, res aisvc.UpsertResult, err error, at time.Time) {
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	o.m.ThreatFeedRefreshTotal.WithLabelValues(feed, result).Inc()
+	if err == nil {
+		o.m.ThreatFeedIngestedTotal.WithLabelValues(feed).Add(float64(res.Added + res.Updated))
+		o.m.ThreatFeedLastSuccessTS.WithLabelValues(feed).Set(float64(at.Unix()))
+	}
+}
+
+func (o metricsFeedObserver) ObserveStale(feed string, stale bool, _ time.Time, _ time.Time) {
+	v := 0.0
+	if stale {
+		v = 1
+	}
+	o.m.ThreatFeedStale.WithLabelValues(feed).Set(v)
+}
+
+func (o metricsFeedObserver) ObserveStoreSize(c aisvc.IOCCounts) {
+	o.m.ThreatIntelStoreIOCs.WithLabelValues("domain").Set(float64(c.Domains))
+	o.m.ThreatIntelStoreIOCs.WithLabelValues("ip").Set(float64(c.IPs))
+	o.m.ThreatIntelStoreIOCs.WithLabelValues("url").Set(float64(c.URLs))
+	o.m.ThreatIntelStoreIOCs.WithLabelValues("hash").Set(float64(c.Hashes))
+}
+
+// recompileAllTenants recompiles every active tenant's policy bundle.
+// It is the unit of work the feed-driven Recompiler performs after IOC
+// updates so freshly-ingested IP/URL/hash indicators reach enforcement
+// bundles without an operator-triggered Compile. It walks the full
+// tenant list with an empty cursor (mirroring the demotion engine's
+// fan-out enumeration); a per-tenant Compile failure is logged and
+// joined into the returned error but does not abort the remaining
+// tenants, so one tenant's bad graph can't starve the rest of an IOC
+// refresh.
+func recompileAllTenants(ctx context.Context, policySvc *policy.Service, tenants repository.TenantRepository, logger *slog.Logger) error {
+	var (
+		errs []error
+		page repository.Page
+	)
+	for {
+		res, err := tenants.List(ctx, page)
+		if err != nil {
+			return fmt.Errorf("list tenants: %w", err)
+		}
+		for _, t := range res.Items {
+			// Bail out promptly on shutdown rather than paging through
+			// every remaining tenant issuing Compile calls that would
+			// only fail with context.Canceled — the Recompiler's Stop()
+			// waits on this function, so a snappy return shortens the
+			// drain window.
+			if err := ctx.Err(); err != nil {
+				errs = append(errs, err)
+				return errors.Join(errs...)
+			}
+			if t.Status != repository.TenantStatusActive {
+				continue
+			}
+			if _, err := policySvc.Compile(ctx, t.ID, nil); err != nil {
+				errs = append(errs, fmt.Errorf("tenant %s: %w", t.ID, err))
+				logger.WarnContext(ctx, "threat-intel: auto-recompile tenant failed",
+					slog.String("tenant", t.ID.String()), slog.Any("error", err))
+			}
+		}
+		if res.NextCursor == "" {
+			break
+		}
+		page.After = res.NextCursor
+	}
+	return errors.Join(errs...)
 }
 
 // buildThreatFeeds assembles the WORKSTREAM 8 feed set from config.
