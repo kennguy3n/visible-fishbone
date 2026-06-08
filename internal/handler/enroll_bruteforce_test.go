@@ -6,8 +6,10 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,5 +141,52 @@ func TestEnrollBruteForce_MalformedRequestNotCounted(t *testing.T) {
 	// The guard should report this IP as never blocked.
 	if _, blocked := guard.Blocked("203.0.113.83"); blocked {
 		t.Fatal("IP locked out by malformed (uncounted) requests")
+	}
+}
+
+// TestEnrollFailure_LogsClientIP_WhenGuardDisabled covers the
+// observability path when BruteForce.Enabled is false: the guard is nil
+// but failures are still audited, and source_ip must be the real client
+// derived with the same trusted-proxy logic the guard would use — not
+// the load balancer's address. Mirrors the auth-side WithTrustedProxies
+// behaviour so logs are identical whether or not lockout is enabled.
+func TestEnrollFailure_LogsClientIP_WhenGuardDisabled(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	svc := identity.New(
+		memory.NewDeviceRepository(s),
+		memory.NewClaimTokenRepository(s),
+		memory.NewAuditLogRepository(s),
+		nil,
+	)
+	h := NewDeviceHandler(svc, memory.NewDeviceRepository(s), 0)
+	h.SetEnrollmentService(identity.NewEnrollmentService(
+		memory.NewDeviceEnrollmentRepository(s),
+		memory.NewClaimTokenRepository(s),
+		memory.NewAuditLogRepository(s),
+		nil,
+	))
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	// Guard disabled (nil) but logging on — the production guard-off case.
+	h.SetBruteForceGuard(nil, logger)
+	// Trust the proxy CIDR so XFF is honoured; proves the deriver
+	// resolves the real client rather than the proxy hop.
+	deriver, err := middleware.NewClientIPDeriver("10.0.0.0/8")
+	if err != nil {
+		t.Fatalf("NewClientIPDeriver: %v", err)
+	}
+	h.SetClientIPDeriver(deriver)
+
+	req := enrollReq(t, "10.1.2.3:4444") // trusted proxy address
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	rec := httptest.NewRecorder()
+	h.enrollDevice(rec, req)
+
+	if rec.Code == http.StatusCreated || rec.Code == http.StatusOK {
+		t.Fatalf("expected enrollment failure, got %d", rec.Code)
+	}
+	if got := buf.String(); !strings.Contains(got, `"source_ip":"203.0.113.9"`) {
+		t.Fatalf("failure log should carry the real client source_ip 203.0.113.9; got: %s", got)
 	}
 }

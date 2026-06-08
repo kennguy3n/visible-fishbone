@@ -49,6 +49,12 @@ type DeviceHandler struct {
 	// logger, when set, records failed enrolment attempts (source IP,
 	// tenant, device, reason). Nil suppresses the log.
 	logger *slog.Logger
+	// clientIP derives the real source IP for failure logging when the
+	// brute-force guard is disabled (enrollGuard nil) but the logger is
+	// set. When the guard is present it already derives the IP from its
+	// own trusted-proxy list, so this is only consulted on the
+	// guard-disabled path. Nil falls back to no IP in the log line.
+	clientIP func(*http.Request) string
 }
 
 // NewDeviceHandler wires the handler.
@@ -70,6 +76,15 @@ func (h *DeviceHandler) SetEnrollmentService(es *identity.EnrollmentService) {
 func (h *DeviceHandler) SetBruteForceGuard(guard *middleware.AttemptLimiter, logger *slog.Logger) {
 	h.enrollGuard = guard
 	h.logger = logger
+}
+
+// SetClientIPDeriver supplies the trusted-proxy-aware client-IP
+// function used to stamp source_ip on failed-enrolment logs when the
+// brute-force guard is disabled. Pass the same list the guard uses
+// (config BRUTEFORCE_TRUSTED_PROXIES) so the logged IP is the real
+// client regardless of whether lockout is enabled. May be nil.
+func (h *DeviceHandler) SetClientIPDeriver(fn func(*http.Request) string) {
+	h.clientIP = fn
 }
 
 // Register attaches routes.
@@ -355,6 +370,11 @@ func (h *DeviceHandler) enrollDevice(w http.ResponseWriter, r *http.Request) {
 				"too many failed enrollment attempts; try again later")
 			return
 		}
+	} else if h.clientIP != nil {
+		// Guard disabled, but we still audit failures: derive the real
+		// client IP with the same trusted-proxy logic the guard would
+		// use, so source_ip in the log is the client and not the proxy.
+		ip = h.clientIP(r)
 	}
 	var req EnrollDeviceRequest
 	if !DecodeJSON(w, r, &req) {

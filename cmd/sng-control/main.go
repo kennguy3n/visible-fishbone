@@ -1166,6 +1166,19 @@ func buildRouter(
 			// Brute-force protection + audit logging on the public
 			// device-enrolment endpoint (Workstream 10).
 			h.SetBruteForceGuard(enrollBruteForce, logger)
+			// Give the failure-logging path the same trusted-proxy list
+			// the guard uses so source_ip is the real client (not the
+			// load balancer) even when the guard is disabled. A bad CIDR
+			// list is logged once and falls back to raw RemoteAddr.
+			if deriver, derr := middleware.NewClientIPDeriver(cfg.BruteForce.TrustedProxies); derr == nil {
+				h.SetClientIPDeriver(deriver)
+			} else {
+				logger.Warn("invalid BRUTEFORCE_TRUSTED_PROXIES; enroll failure logs will use raw RemoteAddr",
+					slog.String("error", derr.Error()))
+				if fallback, ferr := middleware.NewClientIPDeriver(""); ferr == nil {
+					h.SetClientIPDeriver(fallback)
+				}
+			}
 			return h
 		}(),
 		RBAC:             handler.NewRBACHandler(rbacSvc),
