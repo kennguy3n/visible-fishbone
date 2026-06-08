@@ -34,7 +34,7 @@
 //! that produced it.
 
 use crate::channels::DlpChannel;
-use crate::doc_classifier::{classify_document, DocumentClassification};
+use crate::doc_classifier::{DocumentClassification, classify_document};
 use crate::error::{DlpError, DlpResult};
 use crate::ml_classifier::{EntityClass, MlNerDetector};
 use crate::rules::{DlpRule, PatternType, RuleAction, Severity};
@@ -947,9 +947,8 @@ fn parse_entity_classes(pattern_data: &str) -> Result<Vec<EntityClass>, String> 
         if name.is_empty() {
             continue;
         }
-        let class = EntityClass::from_wire(name).ok_or_else(|| {
-            format!("ml_ner pattern_data lists unknown entity class {name:?}")
-        })?;
+        let class = EntityClass::from_wire(name)
+            .ok_or_else(|| format!("ml_ner pattern_data lists unknown entity class {name:?}"))?;
         if !out.contains(&class) {
             out.push(class);
         }

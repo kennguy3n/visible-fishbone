@@ -31,11 +31,11 @@
 //!    and rejects tampering / untrusted keys.
 
 use ed25519_dalek::{Signer, SigningKey};
-use sng_dlp::ml_classifier::{
-    featurize_token, EntityClass, ModelVerifier, NerModel, RegexNerFallback, SignedModel, Token,
-    FEATURE_DIM,
-};
 use sng_core::ids::PolicySigningKeyId;
+use sng_dlp::ml_classifier::{
+    EntityClass, FEATURE_DIM, ModelVerifier, NerModel, RegexNerFallback, SignedModel, Token,
+    featurize_token,
+};
 
 /// The committed, signed-bundle NER model and its parity fixture.
 const MODEL_BYTES: &[u8] = include_bytes!("../assets/ner_v1.onnx");

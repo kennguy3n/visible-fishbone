@@ -71,7 +71,7 @@ from onnx import TensorProto, helper, numpy_helper
 # loudly if the two implementations ever drift.
 # ---------------------------------------------------------------------------
 
-FEATURE_DIM = 16
+FEATURE_DIM = 17
 NUM_CLASSES = 7
 
 CLASS_NAMES = [
@@ -88,6 +88,27 @@ NAME_TITLES = {
     "mr", "mrs", "ms", "miss", "dr", "prof", "sir", "madam", "name",
     "patient", "attn",
 }
+# A small common-given-name + surname gazetteer. A title-cased token that
+# is (or whose neighbour is) a common personal name is a strong person
+# signal even with no "Mr/Dr/name" cue, so an untitled "Robert Williams"
+# is detected while a capitalised place / project word ("London",
+# "Apollo") is not. This is a classic NER gazetteer feature, not a
+# corpus-specific lookup: the list is the common-name head, not the test
+# strings.
+NAME_GAZ = {
+    # common given names
+    "john", "james", "robert", "michael", "william", "david", "richard",
+    "joseph", "thomas", "charles", "daniel", "matthew", "anthony", "mark",
+    "paul", "steven", "andrew", "joshua", "kevin", "brian", "george",
+    "edward", "ronald", "peter", "mary", "patricia", "jennifer", "linda",
+    "elizabeth", "barbara", "susan", "jessica", "sarah", "karen", "nancy",
+    "lisa", "margaret", "betty", "sandra", "emily", "maria", "priya",
+    "wei", "ahmed", "ali", "omar", "fatima", "chen", "li", "kim",
+    # common surnames
+    "smith", "johnson", "williams", "brown", "jones", "garcia", "miller",
+    "davis", "rodriguez", "martinez", "hernandez", "lopez", "wilson",
+    "anderson", "patel", "hassan", "khan", "carter", "nguyen", "kumar",
+}
 ADDR_KW = {
     "street", "st", "avenue", "ave", "road", "rd", "lane", "ln",
     "boulevard", "blvd", "drive", "suite", "apt", "apartment", "floor",
@@ -99,12 +120,14 @@ PHONE_KW = {
 }
 BANK_KW = {
     "account", "acct", "iban", "routing", "swift", "bank", "a/c",
-    "sort", "aba", "bic",
+    "sort", "aba", "bic", "payment", "remit", "remittance", "transfer",
+    "wire", "settle", "beneficiary", "funds", "deposit",
 }
 MEDICAL_KW = {
     "patient", "diagnosis", "diagnosed", "mrn", "icd", "prescription",
-    "prescribed", "medical", "record", "hospital", "clinic", "chart",
-    "treatment", "physician",
+    "prescribed", "medical", "record", "records", "hospital", "clinic",
+    "chart", "treatment", "physician", "lab", "labs", "results",
+    "admission", "intake", "ward", "specimen", "nurse", "attending",
 }
 LEGAL_KW = {
     "plaintiff", "defendant", "contract", "agreement", "whereas",
@@ -212,6 +235,7 @@ def featurize_token(tokens, i: int):
     f[13] = 1.0 if (neighbor_in(LEGAL_KW) or lt in LEGAL_KW) else 0.0
     f[14] = 1.0 if neighbor_title() else 0.0
     f[15] = 1.0 if _has_digit_and_sep(t) else 0.0
+    f[16] = 1.0 if (lt in NAME_GAZ or neighbor_in(NAME_GAZ)) else 0.0
     return f
 
 
@@ -235,6 +259,19 @@ def labelled_sentences():
                   (last, "person_name"), ("was", O), ("admitted", O)])
         S.append([("Contact", O), (first, "person_name"), (last, "person_name"),
                   ("for", O), ("details", O)])
+    # untitled person names: no "Mr/Dr/name" cue, recognised via the
+    # common-name gazetteer (f[16]) plus title-case. Placed in subject and
+    # object positions, and next to a bank cue, so the model learns that a
+    # gazetteer name is a person even when a sibling cue (account) is near.
+    for first, last in [("Robert", "Williams"), ("Sarah", "Johnson"),
+                        ("Emily", "Carter"), ("Michael", "Brown"),
+                        ("Jennifer", "Davis"), ("Daniel", "Wilson")]:
+        S.append([(first, "person_name"), (last, "person_name"),
+                  ("approved", O), ("the", O), ("budget", O)])
+        S.append([("the", O), ("account", O), ("belongs", O), ("to", O),
+                  (first, "person_name"), (last, "person_name")])
+        S.append([("sent", O), ("by", O), (first, "person_name"),
+                  (last, "person_name"), ("yesterday", O)])
     # addresses
     for num, street, suff in [("742", "Evergreen", "Terrace"),
                               ("221", "Baker", "Street"),
@@ -244,29 +281,48 @@ def labelled_sentences():
                   (street, "address"), (suff, "address"), ("near", O)])
         S.append([("Ship", O), ("to", O), (num, "address"),
                   (street, "address"), (suff, "address")])
-    # phone numbers
+    # phone numbers (single-token hyphen/paren/dotted forms — the shape the
+    # per-token phone_shape feature is designed for)
     for ph in ["+1-202-555-0173", "+44-20-7946-0958", "+65-6123-4567",
-               "202-555-0147", "+971-50-123-4567"]:
+               "202-555-0147", "+971-50-123-4567", "(415)555-2671",
+               "+61-2-5550-1234", "+81-3-1234-5678", "1-800-555-0199"]:
         S.append([("Call", O), ("phone", O), (ph, "phone_number"),
                   ("today", O)])
         S.append([("mobile", O), (ph, "phone_number"), ("for", O),
                   ("support", O)])
-    # bank accounts
-    for acct in ["GB29NWBK60161331926819", "DE89370400440532013000",
-                 "FR1420041010050500013M02606"]:
-        S.append([("IBAN", O), (acct, "bank_account"), ("at", O),
-                  ("the", O), ("bank", O)])
+        S.append([("reach", O), ("me", O), ("on", O), (ph, "phone_number"),
+                  ("after", O), ("lunch", O)])
+    # bank accounts: IBANs + domestic numbers across the expanded bank
+    # vocabulary (wire/transfer/remit/settle), so the alnum-account shape
+    # is detected without requiring the literal word "IBAN" adjacent.
+    ibans = ["GB29NWBK60161331926819", "DE89370400440532013000",
+             "FR1420041010050500013M02606", "NL91ABNA0417164300",
+             "ES9121000418450200051332"]
+    bank_cues = [("IBAN", "at"), ("Wire", "funds"), ("Transfer", "to"),
+                 ("Remit", "payment"), ("Settle", "via")]
+    for k, acct in enumerate(ibans):
+        cue, tail = bank_cues[k % len(bank_cues)]
+        S.append([(cue, O), (tail, O), (acct, "bank_account"), ("now", O)])
+        S.append([("the", O), ("vendor", O), ("account", O),
+                  (acct, "bank_account"), ("on", O), ("file", O)])
     for acct in ["123456789012", "9876543210"]:
         S.append([("account", O), ("number", O), (acct, "bank_account"),
                   ("balance", O)])
-    # medical records
-    for code in ["MRN8472910", "A12-3456", "78451236"]:
-        S.append([("Patient", O), ("MRN", O), (code, "medical_record"),
-                  ("diagnosis", O), ("pending", O)])
+    # medical records across the expanded clinical vocabulary
+    # (lab/results/admission/intake/ward), not only "record"/"chart".
+    med_codes = ["MRN8472910", "A12-3456", "78451236", "MRN3391045",
+                 "MRN7782134"]
+    med_cues = [("Patient", "diagnosis"), ("Chart", "updated"),
+                ("Lab", "results"), ("Admission", "note"), ("ward", "intake")]
+    for k, code in enumerate(med_codes):
+        lead, trail = med_cues[k % len(med_cues)]
+        S.append([(lead, O), (code, "medical_record"), (trail, O),
+                  ("pending", O)])
         S.append([("medical", O), ("record", O), (code, "medical_record"),
                   ("on", O), ("chart", O)])
     # legal documents (case numbers / docket ids)
-    for code in ["1:21-cv-04567", "CR-2020-118822", "2019-CA-003344"]:
+    for code in ["1:21-cv-04567", "CR-2020-118822", "2019-CA-003344",
+                 "3:19-cr-00321", "2:20-cv-09981"]:
         S.append([("Case", O), ("No", O), (code, "legal_document"),
                   ("filed", O), ("in", O), ("court", O)])
         S.append([("docket", O), (code, "legal_document"), ("plaintiff", O),
@@ -291,6 +347,21 @@ def labelled_sentences():
     S.append([("London", O), ("and", O), ("Paris", O), ("offices", O),
               ("are", O), ("open", O)])
     S.append([("Project", O), ("Apollo", O), ("launches", O), ("Monday", O)])
+    # Capitalised non-name pairs (places, products, teams): title-case
+    # adjacency must NOT alone read as a person name now that the
+    # gazetteer feature exists, so these hard negatives anchor precision.
+    S.append([("New", O), ("York", O), ("and", O), ("Hong", O), ("Kong", O),
+              ("are", O), ("hubs", O)])
+    S.append([("Golden", O), ("Gate", O), ("Bridge", O), ("reopened", O),
+              ("today", O)])
+    S.append([("Microsoft", O), ("Azure", O), ("had", O), ("an", O),
+              ("outage", O)])
+    S.append([("Black", O), ("Friday", O), ("sales", O), ("start", O),
+              ("Monday", O)])
+    S.append([("United", O), ("Nations", O), ("met", O), ("in", O),
+              ("Geneva", O)])
+    S.append([("Quarterly", O), ("Business", O), ("Review", O), ("is", O),
+              ("Friday", O)])
     return S
 
 
@@ -374,6 +445,10 @@ def write_featurecheck(path):
         (["Case", "No", "1:21-cv-04567", "filed", "court"], 2),
         (["The", "quarterly", "report"], 0),
         (["Order", "48210", "shipped"], 1),
+        # Untitled gazetteer name: exercises f[16] (token in NAME_GAZ) for
+        # both the given name and, via the neighbour window, the surname.
+        (["Robert", "Williams", "approved", "the", "budget"], 0),
+        (["Robert", "Williams", "approved", "the", "budget"], 1),
     ]
     out = []
     for toks, idx in samples:

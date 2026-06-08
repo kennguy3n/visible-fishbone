@@ -57,7 +57,7 @@ use std::sync::{LazyLock, Mutex};
 /// `assets/train_ner_model.py`; the [`ner_v1.featurecheck.json`]
 /// fixture pins specific vectors so any drift between the Python
 /// authoring code and [`featurize_token`] fails a unit test.
-pub const FEATURE_DIM: usize = 16;
+pub const FEATURE_DIM: usize = 17;
 
 /// Number of output classes the NER head emits: `O` plus the six
 /// [`EntityClass`] variants. MUST equal `NUM_CLASSES` in the exporter.
@@ -190,8 +190,23 @@ pub struct Token {
 fn is_trim(c: char) -> bool {
     matches!(
         c,
-        '.' | ',' | ';' | ':' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '«'
-            | '»' | '<' | '>'
+        '.' | ','
+            | ';'
+            | ':'
+            | '!'
+            | '?'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '"'
+            | '\''
+            | '«'
+            | '»'
+            | '<'
+            | '>'
     )
 }
 
@@ -241,31 +256,198 @@ macro_rules! kw_set {
 }
 
 static NAME_TITLES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    kw_set!["mr", "mrs", "ms", "miss", "dr", "prof", "sir", "madam", "name", "patient", "attn"]
+    kw_set![
+        "mr", "mrs", "ms", "miss", "dr", "prof", "sir", "madam", "name", "patient", "attn"
+    ]
+});
+/// Common-given-name + surname gazetteer. A title-cased token that is
+/// (or whose neighbour is) a common personal name reads as a person even
+/// without a "Mr/Dr/name" cue, while a capitalised place / project word
+/// does not. MUST stay byte-identical to `NAME_GAZ` in the exporter.
+static NAME_GAZ: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    kw_set![
+        "john",
+        "james",
+        "robert",
+        "michael",
+        "william",
+        "david",
+        "richard",
+        "joseph",
+        "thomas",
+        "charles",
+        "daniel",
+        "matthew",
+        "anthony",
+        "mark",
+        "paul",
+        "steven",
+        "andrew",
+        "joshua",
+        "kevin",
+        "brian",
+        "george",
+        "edward",
+        "ronald",
+        "peter",
+        "mary",
+        "patricia",
+        "jennifer",
+        "linda",
+        "elizabeth",
+        "barbara",
+        "susan",
+        "jessica",
+        "sarah",
+        "karen",
+        "nancy",
+        "lisa",
+        "margaret",
+        "betty",
+        "sandra",
+        "emily",
+        "maria",
+        "priya",
+        "wei",
+        "ahmed",
+        "ali",
+        "omar",
+        "fatima",
+        "chen",
+        "li",
+        "kim",
+        "smith",
+        "johnson",
+        "williams",
+        "brown",
+        "jones",
+        "garcia",
+        "miller",
+        "davis",
+        "rodriguez",
+        "martinez",
+        "hernandez",
+        "lopez",
+        "wilson",
+        "anderson",
+        "patel",
+        "hassan",
+        "khan",
+        "carter",
+        "nguyen",
+        "kumar"
+    ]
 });
 static ADDR_KW: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     kw_set![
-        "street", "st", "avenue", "ave", "road", "rd", "lane", "ln", "boulevard", "blvd", "drive",
-        "suite", "apt", "apartment", "floor", "block", "unit", "way", "court", "ct", "place",
+        "street",
+        "st",
+        "avenue",
+        "ave",
+        "road",
+        "rd",
+        "lane",
+        "ln",
+        "boulevard",
+        "blvd",
+        "drive",
+        "suite",
+        "apt",
+        "apartment",
+        "floor",
+        "block",
+        "unit",
+        "way",
+        "court",
+        "ct",
+        "place",
         "terrace"
     ]
 });
 static PHONE_KW: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    kw_set!["phone", "tel", "telephone", "mobile", "cell", "fax", "call", "contact", "ph", "mob"]
+    kw_set![
+        "phone",
+        "tel",
+        "telephone",
+        "mobile",
+        "cell",
+        "fax",
+        "call",
+        "contact",
+        "ph",
+        "mob"
+    ]
 });
 static BANK_KW: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    kw_set!["account", "acct", "iban", "routing", "swift", "bank", "a/c", "sort", "aba", "bic"]
+    kw_set![
+        "account",
+        "acct",
+        "iban",
+        "routing",
+        "swift",
+        "bank",
+        "a/c",
+        "sort",
+        "aba",
+        "bic",
+        "payment",
+        "remit",
+        "remittance",
+        "transfer",
+        "wire",
+        "settle",
+        "beneficiary",
+        "funds",
+        "deposit"
+    ]
 });
 static MEDICAL_KW: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     kw_set![
-        "patient", "diagnosis", "diagnosed", "mrn", "icd", "prescription", "prescribed", "medical",
-        "record", "hospital", "clinic", "chart", "treatment", "physician"
+        "patient",
+        "diagnosis",
+        "diagnosed",
+        "mrn",
+        "icd",
+        "prescription",
+        "prescribed",
+        "medical",
+        "record",
+        "records",
+        "hospital",
+        "clinic",
+        "chart",
+        "treatment",
+        "physician",
+        "lab",
+        "labs",
+        "results",
+        "admission",
+        "intake",
+        "ward",
+        "specimen",
+        "nurse",
+        "attending"
     ]
 });
 static LEGAL_KW: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     kw_set![
-        "plaintiff", "defendant", "contract", "agreement", "whereas", "hereby", "court", "case",
-        "vs", "v", "attorney", "counsel", "clause", "exhibit", "docket", "matter", "deposition",
+        "plaintiff",
+        "defendant",
+        "contract",
+        "agreement",
+        "whereas",
+        "hereby",
+        "court",
+        "case",
+        "vs",
+        "v",
+        "attorney",
+        "counsel",
+        "clause",
+        "exhibit",
+        "docket",
+        "matter",
+        "deposition",
         "filing"
     ]
 });
@@ -290,7 +472,9 @@ fn is_all_digits(t: &str) -> bool {
 }
 
 fn phone_shape(t: &str) -> bool {
-    ascii_digit_count(t) >= 7 && t.chars().all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '(' | ')'))
+    ascii_digit_count(t) >= 7
+        && t.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '(' | ')'))
 }
 
 fn alnum_account_shape(t: &str) -> bool {
@@ -299,7 +483,9 @@ fn alnum_account_shape(t: &str) -> bool {
     }
     let has_alpha = t.chars().any(|c| c.is_ascii_alphabetic());
     let has_digit = t.chars().any(|c| c.is_ascii_digit());
-    let upper_only = t.chars().all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase());
+    let upper_only = t
+        .chars()
+        .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase());
     has_alpha && has_digit && upper_only
 }
 
@@ -365,6 +551,7 @@ pub fn featurize_token(tokens: &[Token], i: usize) -> [f32; FEATURE_DIM] {
     f[13] = f32::from(neighbor_in(&LEGAL_KW) || LEGAL_KW.contains(lt.as_str()));
     f[14] = f32::from(neighbor_title());
     f[15] = f32::from(has_digit_and_sep(t));
+    f[16] = f32::from(neighbor_in(&NAME_GAZ) || NAME_GAZ.contains(lt.as_str()));
     f
 }
 
@@ -624,8 +811,9 @@ impl NerModel {
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
-        let rows: Vec<[f32; FEATURE_DIM]> =
-            (0..tokens.len()).map(|i| featurize_token(&tokens, i)).collect();
+        let rows: Vec<[f32; FEATURE_DIM]> = (0..tokens.len())
+            .map(|i| featurize_token(&tokens, i))
+            .collect();
         let labels = self.infer(&rows)?;
         Ok(merge_runs(&tokens, &labels))
     }

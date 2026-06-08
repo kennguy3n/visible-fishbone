@@ -197,11 +197,7 @@ impl DlpEngine {
     /// [`crate::error::DlpError::RuleCompile`] if recompilation fails.
     /// In every error case the previously-active model and classifier
     /// are preserved.
-    pub fn install_model(
-        &self,
-        signed: &SignedModel,
-        verifier: &ModelVerifier,
-    ) -> DlpResult<()> {
+    pub fn install_model(&self, signed: &SignedModel, verifier: &ModelVerifier) -> DlpResult<()> {
         let model = NerModel::load_signed(signed, verifier)?;
         let detector = MlNerDetector::with_model(Arc::new(model));
         self.recompile_with_model(detector)
@@ -533,7 +529,10 @@ mod tests {
             b"call +1-202-555-0173 now",
             &ContentMetadata::default(),
         );
-        assert!(v.is_blocking(), "fallback NER should detect the phone number");
+        assert!(
+            v.is_blocking(),
+            "fallback NER should detect the phone number"
+        );
 
         // Install the real signed model and confirm detection persists
         // through the hot-swap (now via on-device ONNX inference).
@@ -557,7 +556,10 @@ mod tests {
             b"call +1-202-555-0173 now",
             &ContentMetadata::default(),
         );
-        assert!(v.is_blocking(), "loaded ONNX model should detect the phone number");
+        assert!(
+            v.is_blocking(),
+            "loaded ONNX model should detect the phone number"
+        );
 
         // Reverting to the fallback keeps DLP armed.
         e.clear_model().expect("clear model");

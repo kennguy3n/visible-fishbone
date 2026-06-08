@@ -316,6 +316,7 @@ impl SensitiveDirWatcher {
                 .and_then(|p| p.to_str())
                 .map(ToOwned::to_owned),
             mip_labels: Vec::new(),
+            ..ContentMetadata::default()
         };
         Some(ContentEvent {
             channel: self.channel,
@@ -379,6 +380,7 @@ impl BrowserUploadBridge {
             content_type,
             source: Some("browser_upload".to_owned()),
             mip_labels: Vec::new(),
+            ..ContentMetadata::default()
         };
         lock(&self.buffer).push_back(ContentEvent {
             channel: DlpChannel::BrowserUpload,
@@ -802,6 +804,7 @@ mod linux {
                 content_type: Some("text/plain".to_owned()),
                 source: Some("clipboard".to_owned()),
                 mip_labels: Vec::new(),
+                ..ContentMetadata::default()
             };
             Ok(Some(ContentEvent {
                 channel: DlpChannel::Clipboard,
@@ -938,6 +941,7 @@ mod macos {
                 content_type: Some("text/plain".to_owned()),
                 source: Some("clipboard".to_owned()),
                 mip_labels: Vec::new(),
+                ..ContentMetadata::default()
             };
             Ok(Some(ContentEvent {
                 channel: DlpChannel::Clipboard,
@@ -1051,6 +1055,7 @@ mod windows_impl {
                 content_type: Some("text/plain".to_owned()),
                 source: Some("clipboard".to_owned()),
                 mip_labels: Vec::new(),
+                ..ContentMetadata::default()
             };
             Ok(Some(ContentEvent {
                 channel: DlpChannel::Clipboard,
