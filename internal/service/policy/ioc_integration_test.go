@@ -296,3 +296,120 @@ func httpEnvelope(t *testing.T, tenantID uuid.UUID, host string) schema.Envelope
 	env.Payload = payload
 	return env
 }
+
+// TestIOCToDryRunBundle_Integration is the dry-run analogue of
+// TestIOCToBundleToBlock_Integration: it proves the shadow bundle a
+// dry-run produces carries the SAME threat-intel enforcement
+// artefacts as a live bundle (folded IOC deny rules + the malware
+// section on edge/cloud), so an operator comparing the live vs
+// shadow verdict streams doesn't see phantom diffs caused by IOC
+// rules being absent from the dry-run.
+func TestIOCToDryRunBundle_Integration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	store := seedStore(t)
+	compiler := ai.NewIOCEnforcementCompiler(store)
+
+	s := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(s)
+	tnt, err := tenantRepo.Create(ctx, repository.Tenant{
+		Name: "t", Slug: "t", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	policyRepo := memory.NewPolicyRepository(s)
+	keyRepo := memory.NewPolicySigningKeyRepository(s)
+	auditRepo := memory.NewAuditLogRepository(s)
+	keys := policy.NewKeyService(keyRepo, auditRepo)
+
+	svc := policy.New(policyRepo, auditRepo, keys,
+		policy.WithIOCCompiler(compiler),
+		policy.WithMalwareHashCompiler(compiler),
+	)
+
+	// The proposed graph is a minimal allow-by-default graph (as in
+	// the live test), so every deny in the shadow bundle must come
+	// from the folded-in IOC rules.
+	graph := map[string]any{
+		"default_action": "allow",
+		"rules":          []map[string]any{},
+	}
+	raw, _ := json.Marshal(graph)
+	proposed := repository.PolicyGraph{ID: uuid.New(), Version: 1, Graph: raw}
+
+	res, err := svc.CompileDryRun(ctx, tnt.ID, proposed, policy.DryRunOptions{})
+	if err != nil {
+		t.Fatalf("compile dry-run: %v", err)
+	}
+
+	var edge, endpoint decodedBundle
+	for _, b := range res.Bundles {
+		switch b.TargetType {
+		case repository.PolicyBundleTargetEdge:
+			if err := msgpack.Unmarshal(b.Bundle, &edge); err != nil {
+				t.Fatalf("unmarshal edge dry-run bundle: %v", err)
+			}
+		case repository.PolicyBundleTargetEndpoint:
+			if err := msgpack.Unmarshal(b.Bundle, &endpoint); err != nil {
+				t.Fatalf("unmarshal endpoint dry-run bundle: %v", err)
+			}
+		}
+	}
+	if edge.Target != string(repository.PolicyBundleTargetEdge) {
+		t.Fatalf("edge dry-run bundle not found in result")
+	}
+
+	// IOC deny rules are folded into the shadow bundle exactly as the
+	// live path folds them.
+	ruleIDs, ruleByID := decodeRules(t, edge.RawRules)
+	for _, want := range []string{
+		"ti-ngfw-" + iocIP,
+		"ti-dns-" + iocDomain,
+		"ti-swg-" + iocHost,
+	} {
+		if !ruleIDs[want] {
+			t.Errorf("dry-run edge bundle missing IOC rule %q; have %v", want, ruleIDs)
+		}
+		if r, ok := ruleByID[want]; ok && r.Verb != "deny" {
+			t.Errorf("dry-run IOC rule %q is not a deny: verb=%q", want, r.Verb)
+		}
+	}
+
+	// The malware section rides edge/cloud only, matching the live
+	// path (malwareForTarget).
+	if len(edge.Malware) == 0 {
+		t.Fatal("dry-run edge bundle missing malware (mw) section")
+	}
+	var mw []policy.MalwareHashEntry
+	if err := json.Unmarshal(edge.Malware, &mw); err != nil {
+		t.Fatalf("decode dry-run malware section: %v", err)
+	}
+	foundHash := false
+	for _, e := range mw {
+		if e.Hash == iocHash {
+			foundHash = true
+			if e.Verdict != "malicious" {
+				t.Errorf("dry-run hash verdict: got %q want malicious", e.Verdict)
+			}
+		}
+	}
+	if !foundHash {
+		t.Errorf("dry-run malware section missing seeded hash %q: %#v", iocHash, mw)
+	}
+
+	// A non-SWG target (endpoint) carries no malware section, same as
+	// the live bundle.
+	if endpoint.Target == string(repository.PolicyBundleTargetEndpoint) && len(endpoint.Malware) != 0 {
+		t.Errorf("endpoint dry-run bundle should not carry a malware section, got %s", endpoint.Malware)
+	}
+
+	// Replaying the shadow rules through the simulator's evaluator
+	// shows the dry-run would block the same traffic the live bundle
+	// does — the whole point of dry-run fidelity.
+	eval := evaluatorFromBundleRules(t, edge.RawRules)
+	assertVerdict(t, eval, flowEnvelope(t, tnt.ID, iocIP), schema.VerdictDeny, "dry-run flow to malicious IP")
+	assertVerdict(t, eval, dnsEnvelope(t, tnt.ID, iocDomain), schema.VerdictDeny, "dry-run DNS query for sinkholed domain")
+	assertVerdict(t, eval, httpEnvelope(t, tnt.ID, iocHost), schema.VerdictDeny, "dry-run HTTP request to SWG-denied host")
+}

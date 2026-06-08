@@ -149,6 +149,36 @@ type MalwareHashCompiler interface {
 	CompileMalwareHashes(ctx context.Context, tenantID uuid.UUID) ([]MalwareHashEntry, error)
 }
 
+// IOCSnapshot is a single point-in-time view of the IOC store from
+// which BOTH the threat-intel deny-rule slice and the malware-hash
+// set are derived, so a concurrent feed refresh cannot make the two
+// planes disagree within one compile. The IOC rules (IP/domain/URL
+// denies) and the malware section take separate sub-views of the
+// store; without a shared snapshot a feed update landing between the
+// two compiler calls could put a hash in the malware section whose
+// matching URL deny is absent from the rule slice (or vice versa).
+// Single-use, mirroring SteeringSnapshot: callers must not retain it
+// across compiles because the underlying store drifts as feeds
+// refresh.
+type IOCSnapshot interface {
+	CompileIOCRules() ([]Rule, error)
+	CompileMalwareHashes() ([]MalwareHashEntry, error)
+}
+
+// IOCSnapshotCompiler is the optional capability the policy compiler
+// prefers when present: capture one store snapshot and derive both
+// the rule slice and the malware set from it. Satisfied by the ai
+// IOC enforcement compiler. When the installed IOCCompiler also
+// implements this interface (and the malware compiler, if wired, is
+// the same instance), Compile and CompileDryRun take a single
+// snapshot per call instead of two independent ones. A compiler that
+// does not implement it (e.g. a test fake wiring the two interfaces
+// separately) falls back to the independent IOCCompiler /
+// MalwareHashCompiler calls.
+type IOCSnapshotCompiler interface {
+	SnapshotIOC(ctx context.Context, tenantID uuid.UUID) (IOCSnapshot, error)
+}
+
 // Service is the policy service.
 type Service struct {
 	repo        repository.PolicyRepository
@@ -480,36 +510,30 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 	// — the operator stays in control of automated feed blocks (e.g.
 	// a known false-positive host) without muting the feed. See
 	// docs/THREAT_INTEL.md "Evaluation precedence".
-	if s.ioc != nil {
-		iocRules, iocErr := s.ioc.CompileIOCRules(ctx, tenantID)
-		if iocErr != nil {
-			return CompileResult{}, fmt.Errorf("compile threat-intel ioc rules: %w", iocErr)
-		}
-		if len(iocRules) > 0 {
-			if typed != nil {
-				typed.Rules = append(typed.Rules, iocRules...)
-			} else {
-				s.logger.Warn("policy: threat-intel IOC rules skipped for tenant on legacy verbatim-rules path (re-publish the policy graph to enable IOC enforcement)",
-					slog.String("tenant_id", tenantID.String()),
-					slog.String("graph_id", graph.ID.String()),
-					slog.Int("ioc_rules", len(iocRules)),
-				)
-			}
+	//
+	// The IOC rules and the malicious file-hash set (compiled just
+	// below for the SWG malware inspector) are derived from a single
+	// store snapshot when the compiler supports it, so the two
+	// enforcement planes can't diverge across a concurrent feed
+	// refresh mid-compile.
+	iocRules, malwareHashes, iocErr := s.compileIOCEnforcement(ctx, tenantID)
+	if iocErr != nil {
+		return CompileResult{}, iocErr
+	}
+	if len(iocRules) > 0 {
+		if typed != nil {
+			typed.Rules = append(typed.Rules, iocRules...)
+		} else {
+			s.logger.Warn("policy: threat-intel IOC rules skipped for tenant on legacy verbatim-rules path (re-publish the policy graph to enable IOC enforcement)",
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("graph_id", graph.ID.String()),
+				slog.Int("ioc_rules", len(iocRules)),
+			)
 		}
 	}
-	// Compile the malicious file-hash set once per Compile. It is
-	// the same for every target; encodeBundlePayloadFor includes
-	// it only in the targets that run the SWG malware inspector
-	// (edge + cloud). A nil compiler yields no entries and the
-	// section is omitted.
-	var malwareHashes []MalwareHashEntry
-	if s.malwareHash != nil {
-		mh, mhErr := s.malwareHash.CompileMalwareHashes(ctx, tenantID)
-		if mhErr != nil {
-			return CompileResult{}, fmt.Errorf("compile malware hashes: %w", mhErr)
-		}
-		malwareHashes = mh
-	}
+	// malwareHashes is the same for every target; encodeBundlePayloadFor
+	// includes it only in the targets that run the SWG malware
+	// inspector (edge + cloud) via malwareForTarget.
 	// Snapshot the appdb catalog + tenant overrides once per
 	// Compile so the per-target steering build below doesn't
 	// re-issue the same pair of ListAll reads for every bundle
@@ -594,6 +618,72 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 		GraphID: graph.ID, Bundles: bundles,
 		Targets: allTargets, Compiled: compiledAt,
 	}, nil
+}
+
+// compileIOCEnforcement returns the threat-intel deny rules and the
+// malicious file-hash set for the tenant, shared by Compile and
+// CompileDryRun so both produce the same enforcement artefacts.
+//
+// When the installed IOC compiler can snapshot the store
+// (IOCSnapshotCompiler), both planes are derived from ONE
+// point-in-time snapshot so a concurrent feed refresh can't make the
+// rule slice and the malware set disagree within a single compile.
+// Otherwise it falls back to the two independent compiler calls used
+// by fakes that wire the IOCCompiler and MalwareHashCompiler
+// interfaces separately.
+func (s *Service) compileIOCEnforcement(ctx context.Context, tenantID uuid.UUID) ([]Rule, []MalwareHashEntry, error) {
+	if snapper, ok := s.sharedIOCSnapshot(); ok {
+		snap, err := snapper.SnapshotIOC(ctx, tenantID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("snapshot threat-intel iocs: %w", err)
+		}
+		if snap == nil {
+			return nil, nil, nil
+		}
+		rules, err := snap.CompileIOCRules()
+		if err != nil {
+			return nil, nil, fmt.Errorf("compile threat-intel ioc rules: %w", err)
+		}
+		mh, err := snap.CompileMalwareHashes()
+		if err != nil {
+			return nil, nil, fmt.Errorf("compile malware hashes: %w", err)
+		}
+		return rules, mh, nil
+	}
+
+	var rules []Rule
+	if s.ioc != nil {
+		r, err := s.ioc.CompileIOCRules(ctx, tenantID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("compile threat-intel ioc rules: %w", err)
+		}
+		rules = r
+	}
+	var mh []MalwareHashEntry
+	if s.malwareHash != nil {
+		m, err := s.malwareHash.CompileMalwareHashes(ctx, tenantID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("compile malware hashes: %w", err)
+		}
+		mh = m
+	}
+	return rules, mh, nil
+}
+
+// sharedIOCSnapshot reports whether the installed IOC compiler can
+// derive both the rule slice and the malware set from one snapshot.
+// It is only safe to use the shared snapshot when the malware
+// compiler is the same instance (or unset); if a *different* malware
+// compiler is wired we fall back so it isn't silently bypassed.
+func (s *Service) sharedIOCSnapshot() (IOCSnapshotCompiler, bool) {
+	snapper, ok := s.ioc.(IOCSnapshotCompiler)
+	if !ok {
+		return nil, false
+	}
+	if s.malwareHash != nil && any(s.malwareHash) != any(s.ioc) {
+		return nil, false
+	}
+	return snapper, true
 }
 
 // GetLatestBundle returns the most recent bundle for a given target.
