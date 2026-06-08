@@ -21,6 +21,13 @@ export function HelpTooltip({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
+  // Tracks whether the focus about to land on the trigger came from a pointer
+  // press. A mouse click fires `pointerdown` -> `focus` -> `click`; without
+  // this guard `onFocus` would open the popover and `onClick` would
+  // immediately toggle it shut (React 18 batches both into one task), so the
+  // first click never opened it. Keyboard focus has no preceding pointerdown,
+  // so it still opens on Tab.
+  const pointerFocus = useRef(false);
   const popoverId = useId();
 
   useEffect(() => {
@@ -54,8 +61,16 @@ export function HelpTooltip({
         aria-label={title ? `Help: ${title}` : "Help"}
         aria-expanded={open}
         aria-describedby={open ? popoverId : undefined}
+        onPointerDown={() => {
+          pointerFocus.current = true;
+        }}
         onClick={() => setOpen((v) => !v)}
-        onFocus={() => setOpen(true)}
+        onFocus={() => {
+          // Only open from focus when it wasn't a pointer press (i.e. keyboard
+          // Tab); the click handler owns the toggle for mouse interactions.
+          if (!pointerFocus.current) setOpen(true);
+          pointerFocus.current = false;
+        }}
         onBlur={() => setOpen(false)}
       >
         ?

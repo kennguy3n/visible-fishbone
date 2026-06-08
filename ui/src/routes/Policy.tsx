@@ -425,16 +425,40 @@ function SimpleRules({
 
   const [rows, setRows] = useState<Row[]>(initial);
   const [dragKey, setDragKey] = useState<string | null>(null);
-  // Keep the latest `sim.reset` in a ref so the reset effect depends only on
-  // `initial` and never re-fires from an identity change in the mutation
-  // method (which would otherwise risk a reset -> render -> reset loop).
+  // Keep the latest `sim.reset` and `initial` in refs so the reset effect can
+  // depend only on the content signature below (refs never re-fire effects).
   const resetSim = useRef(sim.reset);
   resetSim.current = sim.reset;
-  // Reset local edits whenever the upstream graph changes (e.g. after save).
+  const initialRef = useRef(initial);
+  initialRef.current = initial;
+  // A stable signature of the upstream rule *content* (not array identity).
+  // The global MutationCache invalidates every query after any successful
+  // mutation, so the policy-graph query refetches and `graph`/`initial` get
+  // new object identities even when the rules are unchanged. Keying the reset
+  // on content means an unrelated mutation (e.g. acking an alert) no longer
+  // wipes the operator's in-progress reordering/removals; a genuine upstream
+  // change still resets, as it should.
+  const signature = useMemo(
+    () =>
+      JSON.stringify({
+        d: graph.default_action ?? null,
+        r: (graph.rules ?? []).map((rule, i) => [
+          rule.id || `rule-${i}`,
+          rule.verb ?? null,
+          rule.domain ?? null,
+          rule.subject_refs ?? null,
+          rule.predicate_refs ?? null,
+          rule.subjects ?? null,
+          rule.predicates ?? null,
+        ]),
+      }),
+    [graph],
+  );
+  // Reset local edits only when the upstream rule content actually changes.
   useEffect(() => {
-    setRows(initial);
+    setRows(initialRef.current);
     resetSim.current();
-  }, [initial]);
+  }, [signature]);
 
   const removedKeys = new Set(
     rows.filter((r) => r.status === "removed").map((r) => r.key),
@@ -465,6 +489,10 @@ function SimpleRules({
       const from = next.findIndex((r) => r.key === dragKey);
       const to = next.findIndex((r) => r.key === targetKey);
       if (from < 0 || to < 0) return prev;
+      // Don't reposition relative to a removed row — only active rows define
+      // the meaningful order, so dropping onto a removed row is a no-op that
+      // keeps the visible active sequence unambiguous.
+      if (next[to].status === "removed") return prev;
       const [moved] = next.splice(from, 1);
       next.splice(to, 0, moved);
       return next;

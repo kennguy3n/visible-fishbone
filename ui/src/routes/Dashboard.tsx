@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { Link } from "@tanstack/react-router";
 import {
   Area,
@@ -170,30 +171,33 @@ export function Dashboard() {
       : [];
 
   // --- Activity (last 24h): bucket the real alert stream into hourly slots by
-  // severity for a stacked area chart.
-  const now = Date.now();
-  const HOUR = 3_600_000;
-  const buckets = Array.from({ length: 24 }, (_, i) => {
-    const start = now - (23 - i) * HOUR;
-    return {
-      label: new Date(start).toLocaleTimeString(undefined, { hour: "2-digit" }),
-      info: 0,
-      warning: 0,
-      critical: 0,
-    };
-  });
-  for (const a of allAlerts) {
-    const t = new Date(a.created_at).getTime();
-    const idx = 23 - Math.floor((now - t) / HOUR);
-    if (idx >= 0 && idx < 24) {
-      const sev = a.severity as "info" | "warning" | "critical";
-      if (sev in buckets[idx]) buckets[idx][sev] += 1;
+  // severity for a stacked area chart. Memoized on the alert list and `now`
+  // rounded to the minute, so unrelated re-renders don't recompute the buckets
+  // (or shift alerts across hour boundaries) on every render.
+  const { buckets, activityTotal } = useMemo(() => {
+    const HOUR = 3_600_000;
+    const now = Math.floor(Date.now() / 60_000) * 60_000;
+    const slots = Array.from({ length: 24 }, (_, i) => {
+      const start = now - (23 - i) * HOUR;
+      return {
+        label: new Date(start).toLocaleTimeString(undefined, { hour: "2-digit" }),
+        info: 0,
+        warning: 0,
+        critical: 0,
+      };
+    });
+    for (const a of allAlerts) {
+      const t = new Date(a.created_at).getTime();
+      const idx = 23 - Math.floor((now - t) / HOUR);
+      if (idx >= 0 && idx < 24) {
+        const sev = a.severity as "info" | "warning" | "critical";
+        if (sev in slots[idx]) slots[idx][sev] += 1;
+      }
     }
-  }
-  const activityTotal = buckets.reduce(
-    (s, b) => s + b.info + b.warning + b.critical,
-    0,
-  );
+    const total = slots.reduce((s, b) => s + b.info + b.warning + b.critical, 0);
+    return { buckets: slots, activityTotal: total };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [alerts.data?.items]);
 
   // --- Policy coverage: real coverage % from the posture report, plus the
   // per-component operational scores from ops-health rendered as meters.

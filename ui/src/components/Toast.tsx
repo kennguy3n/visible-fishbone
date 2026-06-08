@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -40,6 +41,17 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const idRef = useRef(0);
   const timers = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
+
+  // Clear any outstanding auto-dismiss/exit timers if the provider unmounts so
+  // they can't fire setState on an unmounted tree (e.g. in tests, or if the
+  // provider is ever conditionally rendered).
+  useEffect(() => {
+    const pending = timers.current;
+    return () => {
+      pending.forEach(clearTimeout);
+      pending.clear();
+    };
+  }, []);
 
   const remove = useCallback((id: number) => {
     // Cancel any pending timer (the auto-dismiss timer, or a prior exit

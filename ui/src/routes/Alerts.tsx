@@ -67,11 +67,16 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
   const [state, setState] = useState<string>("all");
 
   // Optimistic state transition shared by acknowledge + resolve: patch the
-  // cached list immediately, roll back on error.
+  // cached list immediately, roll back on error. Rollback is scoped to the one
+  // alert that failed (by restoring its prior `state`) rather than restoring a
+  // whole-list snapshot, so a failed action can't clobber other alerts'
+  // in-flight optimistic updates when several are actioned in quick succession.
   const optimistic = (next: typeof AlertState[keyof typeof AlertState]) => ({
     onMutate: async ({ alertId }: { alertId: string }) => {
       await qc.cancelQueries({ queryKey: listKey });
-      const prev = qc.getQueryData<ListAlerts200>(listKey);
+      const prevState = qc
+        .getQueryData<ListAlerts200>(listKey)
+        ?.items?.find((a) => a.id === alertId)?.state;
       qc.setQueryData<ListAlerts200>(listKey, (old) =>
         old
           ? {
@@ -82,14 +87,25 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
             }
           : old,
       );
-      return { prev };
+      return { prevState };
     },
     onError: (
       _e: unknown,
-      _v: { tenantId: string; alertId: string },
-      ctx: { prev?: ListAlerts200 } | undefined,
+      { alertId }: { tenantId: string; alertId: string },
+      ctx: { prevState?: Alert["state"] } | undefined,
     ) => {
-      if (ctx?.prev) qc.setQueryData(listKey, ctx.prev);
+      if (ctx?.prevState !== undefined) {
+        qc.setQueryData<ListAlerts200>(listKey, (old) =>
+          old
+            ? {
+                ...old,
+                items: (old.items ?? []).map((a) =>
+                  a.id === alertId ? { ...a, state: ctx.prevState! } : a,
+                ),
+              }
+            : old,
+        );
+      }
       toast.error("Action failed", "The alert could not be updated.");
     },
     onSettled: () => qc.invalidateQueries({ queryKey: listKey }),
