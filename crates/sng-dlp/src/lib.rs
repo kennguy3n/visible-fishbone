@@ -61,6 +61,7 @@
 
 pub mod channels;
 pub mod classifier;
+pub mod doc_classifier;
 pub mod engine;
 pub mod error;
 pub mod ml_classifier;
@@ -75,6 +76,10 @@ pub use classifier::{
     ClassificationResult, ContentClassifier, ContentMetadata, DEFAULT_MAX_SCAN_BYTES,
     FINGERPRINT_SIMILARITY_THRESHOLD, RuleMatch, builtin_pattern, hamming_similarity, luhn_valid,
     parse_simhash_hex, simhash,
+};
+pub use doc_classifier::{
+    classify_document, ArchiveKind, DocSignal, DocumentClassification, DocumentType, ImageKind,
+    OoxmlKind, RiskLevel,
 };
 pub use ml_classifier::{
     DetectedEntity, EntityClass, MlNerDetector, ModelVerifier, NerModel, RegexNerFallback,

@@ -1,3 +1,19 @@
+// Integration-test crate: relax the unwrap/expect/panic + float and
+// cast lints that are idiomatic in fixture assertions, mirroring the
+// `#![cfg_attr(test, ...)]` block in `crates/sng-dlp/src/lib.rs`.
+// Attributes do not cross crate boundaries, so it is repeated here.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_lossless,
+    clippy::float_cmp
+)]
+
 //! Integration tests for the on-device ML-NER classifier
 //! (`sng_dlp::ml_classifier`), Workstream 4 Step 1.
 //!
@@ -193,9 +209,9 @@ fn signed_model_rejected_when_bytes_tampered() {
 
 #[test]
 fn signed_model_rejected_for_untrusted_key() {
-    let signer = fixed_key();
+    let real_key = fixed_key();
     let kid = PolicySigningKeyId::new("dlp-model-test-key").expect("kid");
-    let sig = signer.sign(MODEL_BYTES);
+    let sig = real_key.sign(MODEL_BYTES);
     let signed = SignedModel {
         model: MODEL_BYTES.to_vec(),
         signature: sig.to_bytes(),
