@@ -293,11 +293,21 @@ func (m *FeedManager) fireUpdate(ctx context.Context) {
 // unconditionally. Run it before Start so enforcement reflects the
 // last persisted snapshot immediately, rather than being empty
 // until the first feed warm-up completes.
+//
+// A successful restore fires the OnUpdate hook (same as a feed
+// refresh), so demotion-driven enforcement is re-synced from the
+// restored snapshot at once instead of waiting for the first feed
+// warm-up — which is exactly the window that can be slow when an
+// upstream is unreachable, the scenario this snapshot guards.
 func (m *FeedManager) Restore(ctx context.Context) (UpsertResult, error) {
 	if m.persister == nil {
 		return UpsertResult{}, nil
 	}
-	return m.store.Restore(ctx, m.persister)
+	res, err := m.store.Restore(ctx, m.persister)
+	if res.Added > 0 {
+		m.fireUpdate(ctx)
+	}
+	return res, err
 }
 
 // Start launches one ticker goroutine per feed plus a sweeper.

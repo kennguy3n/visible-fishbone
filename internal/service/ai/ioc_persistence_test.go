@@ -183,6 +183,69 @@ func TestFeedManager_PersistsOnShutdown(t *testing.T) {
 	}
 }
 
+func TestFeedManager_RestoreFiresOnUpdate(t *testing.T) {
+	t.Parallel()
+	// Persister already holds a snapshot (as after a restart).
+	fp := &fakePersister{stored: []IOC{
+		mkIOC(IOCTypeDomain, "evil.example.com", 0.9),
+		mkIOC(IOCTypeIP, "203.0.113.10", 0.8),
+	}}
+
+	var (
+		mu       sync.Mutex
+		hookSnap IOCSnapshot
+		hookHits int
+	)
+	store := NewIOCStore()
+	mgr := NewFeedManager(store, nil,
+		WithPersister(fp, time.Hour),
+		WithOnUpdate(func(_ context.Context, snap IOCSnapshot) {
+			mu.Lock()
+			defer mu.Unlock()
+			hookHits++
+			hookSnap = snap
+		}),
+	)
+
+	res, err := mgr.Restore(context.Background())
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if res.Added != 2 {
+		t.Fatalf("restored Added=%d, want 2", res.Added)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hookHits != 1 {
+		t.Fatalf("OnUpdate fired %d times after restore, want 1", hookHits)
+	}
+	// The hook must observe the restored indicators, not an empty
+	// snapshot — that is what lets demotion enforcement re-sync at
+	// once instead of waiting for the first feed warm-up.
+	if len(hookSnap.Domains) != 1 || len(hookSnap.IPs) != 1 {
+		t.Fatalf("OnUpdate saw %d domains / %d IPs, want 1 / 1",
+			len(hookSnap.Domains), len(hookSnap.IPs))
+	}
+}
+
+func TestFeedManager_RestoreNoHookWhenEmpty(t *testing.T) {
+	t.Parallel()
+	// Empty persister (cold start, nothing persisted yet) must not
+	// fire the hook: there is nothing to enforce.
+	fp := &fakePersister{}
+	var hits int
+	mgr := NewFeedManager(NewIOCStore(), nil,
+		WithPersister(fp, time.Hour),
+		WithOnUpdate(func(context.Context, IOCSnapshot) { hits++ }),
+	)
+	if _, err := mgr.Restore(context.Background()); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if hits != 0 {
+		t.Fatalf("OnUpdate fired %d times on empty restore, want 0", hits)
+	}
+}
+
 // assertSameSnapshot compares two snapshots by (type,value) identity
 // and the enforcement-relevant fields, independent of slice order.
 func assertSameSnapshot(t *testing.T, a, b IOCSnapshot) {
