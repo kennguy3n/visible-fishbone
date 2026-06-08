@@ -175,6 +175,14 @@ type IOCSnapshot interface {
 // does not implement it (e.g. a test fake wiring the two interfaces
 // separately) falls back to the independent IOCCompiler /
 // MalwareHashCompiler calls.
+//
+// The same-instance requirement is by identity (see sharedIOCSnapshot):
+// a decorator (logging, metrics) that wraps only one of the two
+// interfaces changes its dynamic type and disables the shared path,
+// falling back to independent calls. To keep the optimisation while
+// decorating, wrap a single value that implements IOCSnapshotCompiler
+// and pass that same value to both WithIOCCompiler and
+// WithMalwareHashCompiler.
 type IOCSnapshotCompiler interface {
 	SnapshotIOC(ctx context.Context, tenantID uuid.UUID) (IOCSnapshot, error)
 }
