@@ -36,11 +36,20 @@ size is the bucket capacity; the sustained rate is `refill_per_sec`.
 ### Per-source tracking & eviction
 
 [`SourceRateLimiter`] bounds memory by tracking at most `max_tracked`
-sources (mirroring the kernel `LRU_HASH`). Under insert pressure it
-evicts a *fully-refilled* (idle) source; if every tracked source is
-active it **fails open** — a new source is admitted rather than
-mis-attributed to another source's bucket. Monotonic-clock anomalies are
-clamped (timestamps never move backwards).
+sources, faithfully mirroring the kernel `LRU_HASH`. Under insert
+pressure it first prunes *fully-refilled* (idle) sources; if every
+tracked source is still active it evicts the **least-recently-used**
+entry. The table is therefore always bounded and the limiter keeps
+enforcing under a high-source-diversity flood — it never fails open
+(which would let an attacker rotating spoofed source IPs past
+`max_tracked` bypass rate limiting). An evicted source reappears as a
+fresh bucket on its next packet — at most one extra burst, exactly as the
+kernel map behaves. The userspace eviction is an `O(n)` scan (the kernel
+keeps an intrusive LRU list for `O(1)`); because recency ordering lives
+in the map's metadata, the LRU timestamp is held in a userspace-only
+wrapper so the `#[repr(C)]` [`TokenBucket`] layout shared with the kernel
+is unchanged. Monotonic-clock anomalies are clamped (timestamps never
+move backwards).
 
 ## Connection tracking ([`maps.rs`](../crates/sng-ebpf/src/maps.rs))
 

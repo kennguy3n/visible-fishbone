@@ -189,19 +189,39 @@ impl TokenBucket {
     }
 }
 
+/// A tracked per-source entry: the kernel-compatible [`TokenBucket`] plus
+/// the userspace-only last-access timestamp that orders LRU eviction.
+///
+/// A kernel `LRU_HASH` keeps recency ordering in the map's own internal
+/// metadata, not in the stored value, so `last_seen_ns` lives here in a
+/// userspace-only wrapper rather than inside [`TokenBucket`] — the
+/// `#[repr(C)]` byte layout shared with the kernel map value is therefore
+/// left unchanged.
+#[derive(Copy, Clone, Debug)]
+struct TrackedBucket {
+    bucket: TokenBucket,
+    /// Monotonic timestamp of the most recent `admit` that touched this
+    /// entry; the LRU key for on-pressure eviction.
+    last_seen_ns: u64,
+}
+
 /// Per-source-IP token-bucket rate limiter — the userspace model of a
 /// kernel `LRU_HASH<src_ip, TokenBucket>`.
 ///
-/// Bounded by `max_tracked`: when the table is full and a new source
-/// arrives, idle (fully-refilled) buckets are pruned first; if every
-/// tracked source is actively spending tokens the new packet is admitted
-/// without a tracking slot (fail-open for that single packet) rather than
-/// dropping a possibly-legitimate new source. This mirrors a kernel
-/// `LRU_HASH`, which evicts the least-recently-used entry on insert
-/// pressure.
+/// Bounded by `max_tracked`, and faithful to the kernel `LRU_HASH` it
+/// models: when the table is full and a new source arrives, genuinely
+/// idle (fully-refilled) sources are pruned first — the cheap, common
+/// case — and if every tracked source is still active the single
+/// least-recently-used entry is evicted to make room. The table is thus
+/// always bounded and the limiter keeps enforcing under a
+/// high-source-diversity flood, instead of failing open (which would let
+/// an attacker rotating spoofed source IPs past `max_tracked` bypass rate
+/// limiting entirely). An evicted source simply reappears as a fresh full
+/// bucket on its next packet — at most one extra burst, exactly as the
+/// kernel map behaves.
 #[derive(Debug)]
 pub struct SourceRateLimiter {
-    buckets: HashMap<IpAddr, TokenBucket>,
+    buckets: HashMap<IpAddr, TrackedBucket>,
     limit: RateLimit,
     max_tracked: usize,
 }
@@ -233,34 +253,65 @@ impl SourceRateLimiter {
     /// Admit (or drop) one packet from `src` at `now_ns`. `true` =
     /// within budget (XDP passes), `false` = over budget (XDP drops).
     pub fn admit(&mut self, src: IpAddr, now_ns: u64) -> bool {
-        if let Some(bucket) = self.buckets.get_mut(&src) {
-            return bucket.try_consume(self.limit, now_ns);
+        if let Some(entry) = self.buckets.get_mut(&src) {
+            // Touch the LRU timestamp (monotonically) and account the packet.
+            entry.last_seen_ns = entry.last_seen_ns.max(now_ns);
+            return entry.bucket.try_consume(self.limit, now_ns);
         }
-        // New source. Bound the table before inserting.
+        // New source. Bound the table before inserting so it can never
+        // exceed `max_tracked`: prune idle sources first, and if every
+        // tracked source is still active evict the least-recently-used
+        // one. This always frees a slot, so the limiter keeps enforcing
+        // rather than failing open.
         if self.buckets.len() >= self.max_tracked && !self.prune_idle(now_ns) {
-            // Table full of active sources — admit this packet untracked
-            // rather than dropping a new (possibly legitimate) source.
-            return true;
+            self.evict_lru();
         }
         // First packet from a fresh source: a full bucket, minus this one.
         let mut bucket = TokenBucket::full(self.limit, now_ns);
         let admitted = bucket.try_consume(self.limit, now_ns);
-        self.buckets.insert(src, bucket);
+        self.buckets.insert(
+            src,
+            TrackedBucket {
+                bucket,
+                last_seen_ns: now_ns,
+            },
+        );
         admitted
     }
 
     /// Drop every tracked source that has refilled to full as of
     /// `now_ns` (idle senders). Returns `true` if at least one entry was
-    /// freed. Used both as the on-pressure eviction and as an explicit
-    /// maintenance sweep.
+    /// freed. Used both as the cheap first stage of on-pressure eviction
+    /// and as an explicit maintenance sweep.
     pub fn prune_idle(&mut self, now_ns: u64) -> bool {
         let limit = self.limit;
         let before = self.buckets.len();
-        self.buckets.retain(|_, b| {
-            b.refill(limit, now_ns);
-            !b.is_full(limit)
+        self.buckets.retain(|_, e| {
+            e.bucket.refill(limit, now_ns);
+            !e.bucket.is_full(limit)
         });
         self.buckets.len() < before
+    }
+
+    /// Evict the single least-recently-used source (smallest
+    /// `last_seen_ns`), guaranteeing a free slot when no idle source can
+    /// be pruned. A no-op on an empty table.
+    ///
+    /// `O(n)` scan, like [`Self::prune_idle`]: the kernel `LRU_HASH`
+    /// maintains an intrusive LRU list for `O(1)` eviction, but the
+    /// userspace mirror — which is not the production hot path — trades
+    /// that for simplicity. The eviction faithfully matches the kernel:
+    /// the stalest source is dropped and reappears as a fresh bucket if it
+    /// sends again.
+    fn evict_lru(&mut self) {
+        if let Some(victim) = self
+            .buckets
+            .iter()
+            .min_by_key(|(_, e)| e.last_seen_ns)
+            .map(|(&ip, _)| ip)
+        {
+            self.buckets.remove(&victim);
+        }
     }
 
     /// Drop all tracked state. Used on a policy reconfigure.
@@ -797,15 +848,65 @@ mod tests {
     }
 
     #[test]
-    fn source_limiter_fails_open_when_all_sources_active() {
-        // max_tracked = 1, no refill so the tracked source never goes
-        // idle. A new source cannot get a slot but must not be dropped.
-        let mut rl = SourceRateLimiter::new(RateLimit::new(5, 0).unwrap(), 1);
+    fn source_limiter_evicts_lru_instead_of_failing_open() {
+        // Zero refill so no tracked source ever goes idle — the exact case
+        // the old code failed open on. max_tracked = 2, both slots active.
+        let mut rl = SourceRateLimiter::new(RateLimit::new(5, 0).unwrap(), 2);
         let a = v4(1, 1, 1, 1);
         let b = v4(2, 2, 2, 2);
-        assert!(rl.admit(a, 0)); // tracks A (still has tokens → active)
-        assert!(rl.admit(b, 0)); // no slot, A active → admit untracked
-        assert_eq!(rl.tracked(), 1);
+        let c = v4(3, 3, 3, 3);
+        assert!(rl.admit(a, 1)); // A active, last_seen = 1
+        assert!(rl.admit(b, 2)); // B active, last_seen = 2
+        assert_eq!(rl.tracked(), 2);
+        // C arrives at t = 3. No idle source to prune, so the LRU entry
+        // (A, last_seen = 1) is evicted — NOT fail-open. The table stays
+        // bounded and C is tracked.
+        assert!(rl.admit(c, 3));
+        assert_eq!(rl.tracked(), 2);
+        // B was untouched and is still tracked with its drained-by-one
+        // budget, so the limiter keeps enforcing it: 4 tokens remain, then
+        // the 5th packet is dropped (no fail-open leak).
+        assert!(rl.admit(b, 4));
+        assert!(rl.admit(b, 5));
+        assert!(rl.admit(b, 6));
+        assert!(rl.admit(b, 7));
+        assert!(!rl.admit(b, 8));
+        assert_eq!(rl.tracked(), 2);
+    }
+
+    #[test]
+    fn source_limiter_stays_bounded_and_enforcing_under_zero_refill_flood() {
+        // Pure hard cap (no refill), tiny table. Several distinct sources
+        // each send a 4-packet burst. The table must stay bounded at
+        // max_tracked and every source must stay capped at its 2-token
+        // burst — the old fail-open path admitted all 4 of a "new"
+        // source's packets untracked once the table saturated.
+        let mut rl = SourceRateLimiter::new(RateLimit::new(2, 0).unwrap(), 2);
+        let srcs = [
+            v4(1, 1, 1, 1),
+            v4(2, 2, 2, 2),
+            v4(3, 3, 3, 3),
+            v4(4, 4, 4, 4),
+        ];
+        let mut now = 0u64;
+        for &s in &srcs {
+            let mut admitted = 0;
+            for _ in 0..4 {
+                now += 1;
+                if rl.admit(s, now) {
+                    admitted += 1;
+                }
+            }
+            // A source stays the most-recently-used entry while it is being
+            // hammered, so it is never evicted mid-burst and is capped at
+            // exactly its 2-token budget — never the 4 the old fail-open
+            // path would have leaked.
+            assert_eq!(
+                admitted, 2,
+                "source must stay rate-limited under saturation"
+            );
+            assert!(rl.tracked() <= 2, "table must stay bounded at max_tracked");
+        }
     }
 
     // --- GeoIP ------------------------------------------------------------
