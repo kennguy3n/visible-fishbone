@@ -138,6 +138,19 @@ type Envelope struct {
 	// never disagree.
 	BytesIn  uint64 `msgpack:"bi,omitempty"`
 	BytesOut uint64 `msgpack:"bo,omitempty"`
+	// SampleRate is the deterministic adaptive-sampling keep
+	// probability that was applied to this event by the telemetry
+	// consumer, in the half-open range (0,1]. It is NOT set by
+	// producers — they emit at full fidelity — but stamped on the
+	// envelope by the consumer's AdaptiveSampler before the hot-path
+	// writer promotes it to a ClickHouse column. Analytics multiply
+	// per-event aggregates by 1/SampleRate to de-bias a tenant's
+	// sampled stream back to its true volume. A zero value (the
+	// omitempty default for un-sampled events) is interpreted as 1.0
+	// — fully sampled, no de-bias required. Carried on the envelope
+	// rather than in the payload so the same de-bias dimension is
+	// available for every event class without decoding the payload.
+	SampleRate float64 `msgpack:"sr,omitempty"`
 	// Payload is the MessagePack-encoded class-specific payload.
 	// Stored as opaque bytes so decoders can sniff EventClass
 	// first and dispatch to the right type without round-tripping
@@ -182,6 +195,15 @@ func (e Envelope) Validate() error {
 	// dependency-free.
 	if e.TrafficClass != "" && !isValidTrafficClass(e.TrafficClass) {
 		return fmt.Errorf("traffic_class %q is invalid: %w", e.TrafficClass, ErrInvalid)
+	}
+	// SampleRate is a probability. The accepted set is [0,1]: 0 is the
+	// legitimate "un-sampled" default (omitempty, interpreted as 1.0
+	// downstream), and any stamped value falls in the meaningful (0,1]
+	// range. A value outside [0,1] would silently corrupt the
+	// 1/SampleRate de-bias weight, so the validator rejects it at the
+	// transport boundary.
+	if e.SampleRate < 0 || e.SampleRate > 1 {
+		return fmt.Errorf("sample_rate %v out of range [0,1] (0 == unsampled): %w", e.SampleRate, ErrInvalid)
 	}
 	if len(e.Payload) == 0 {
 		return fmt.Errorf("payload is required: %w", ErrInvalid)

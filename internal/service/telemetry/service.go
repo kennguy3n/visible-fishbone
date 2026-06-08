@@ -124,6 +124,7 @@ type Metrics struct {
 	HotWriteFails  atomic.Uint64
 	Acked          atomic.Uint64
 	Nacked         atomic.Uint64
+	Sampled        atomic.Uint64 // events dropped by adaptive sampling (Ack'd, not written)
 	DLQPublished   atomic.Uint64 // bad payloads successfully routed to DLQ
 	DLQPublishFail atomic.Uint64 // DLQ publish itself failed (data preserved by Nak retry)
 }
@@ -139,6 +140,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		HotWriteFails:  m.HotWriteFails.Load(),
 		Acked:          m.Acked.Load(),
 		Nacked:         m.Nacked.Load(),
+		Sampled:        m.Sampled.Load(),
 		DLQPublished:   m.DLQPublished.Load(),
 		DLQPublishFail: m.DLQPublishFail.Load(),
 	}
@@ -154,6 +156,7 @@ type MetricsSnapshot struct {
 	HotWriteFails  uint64
 	Acked          uint64
 	Nacked         uint64
+	Sampled        uint64
 	DLQPublished   uint64
 	DLQPublishFail uint64
 }
@@ -241,6 +244,15 @@ type Service struct {
 	// fetch cycle.
 	nakBackoff time.Duration
 
+	// sampler applies adaptive per-tenant load shedding. nil means
+	// "no sampling" — every decoded event is dispatched at full
+	// fidelity (the prior behaviour). When configured, a tenant whose
+	// arrival rate exceeds their tier budget has a deterministic,
+	// representative fraction of events dropped (Ack'd, not
+	// redelivered) and the kept events stamped with their sampling
+	// rate for analytics de-bias. Set via WithSampler.
+	sampler *AdaptiveSampler
+
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -260,6 +272,7 @@ type worker struct {
 	limiter           *PerTenantLimiter
 	limiterWaitBudget time.Duration
 	nakBackoff        time.Duration
+	sampler           *AdaptiveSampler
 	dedup             *dedupRing
 }
 
@@ -301,6 +314,21 @@ func (s *Service) WithNakBackoff(d time.Duration) *Service {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nakBackoff = d
+	return s
+}
+
+// WithSampler wires an AdaptiveSampler onto the service. Once set,
+// dispatch consults the sampler immediately after decode: events the
+// sampler drops are Ack'd (never redelivered) and counted as
+// Sampled, while kept events are stamped with their sampling rate
+// before the limiter / dedup / writer stages run. Pass nil to remove
+// sampling. Additive and optional — wiring paths that pre-date the
+// sampler keep their prior full-fidelity behaviour. Returns the
+// receiver for fluent wiring.
+func (s *Service) WithSampler(sampler *AdaptiveSampler) *Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sampler = sampler
 	return s
 }
 
@@ -431,6 +459,7 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			limiter:           s.limiter,
 			limiterWaitBudget: s.limiterWaitBudget,
 			nakBackoff:        s.nakBackoff,
+			sampler:           s.sampler,
 			dedup:             s.dedup,
 		}}, nil
 	}
@@ -466,6 +495,7 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			limiter:           s.limiter.ForPartition(),
 			limiterWaitBudget: s.limiterWaitBudget,
 			nakBackoff:        s.nakBackoff,
+			sampler:           s.sampler.ForPartition(),
 			dedup:             newDedupRing(s.cfg.DedupRingSize),
 		})
 	}
@@ -555,6 +585,72 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 		return
 	}
 	s.metrics.Decoded.Add(1)
+
+	// Adaptive per-tenant sampling gate. Runs first, before the
+	// rate-limit gate, so the sampler observes the tenant's true
+	// arrival rate (every decoded event) and so dropped events shed
+	// load from every downstream stage (limiter, dedup, writers).
+	// A dropped event is Ack'd — not Nak'd — because it was
+	// intentionally not written; redelivery would only re-drop it
+	// (the hash decision is deterministic for the window's rate) and
+	// waste a delivery. A kept event is stamped with its sampling
+	// rate so the hot-path writer can promote it to a ClickHouse
+	// column and analytics can de-bias by 1/SampleRate. A nil
+	// sampler keeps everything at rate 1.0 (prior behaviour).
+	//
+	// CRITICAL: the keep/drop decision is made on the FIRST delivery
+	// only. A drop is Ack'd and never redelivered, so any redelivery
+	// (NumDelivered > 1) is an event the sampler already *admitted* on
+	// an earlier delivery and that is now being retried after a
+	// transient downstream failure (e.g. a hot-write error Nak'd
+	// below, before the dedup ring records it). Re-running the
+	// keep/drop decision on that retry would re-evaluate it against
+	// the *current* keep probability, which can be lower if the
+	// tenant's rate rose in the interim — so the already-admitted
+	// event could fall below the new threshold and be silently
+	// dropped, never written at all (the dedup ring only catches
+	// events that reached a successful hot write, so it cannot save
+	// it). Deciding once, on first delivery, makes keep/drop stable
+	// for the lifetime of the message.
+	if w.sampler != nil {
+		if isRedelivery(msg) {
+			// Always keep a redelivery (decided above). But its de-bias
+			// rate must still reach the writer: the first delivery
+			// stamped env.SampleRate in memory only, and this copy was
+			// re-decoded from the producer's wire bytes, which never
+			// carry SampleRate — so the stamp was lost. Recover it via a
+			// read-only lookup of the tenant's current keep probability.
+			// The lookup records NO arrival (a redelivery is the same
+			// event, not new load, so it must not inflate the rate
+			// estimate). Windows are short and a redelivery follows its
+			// failed write within seconds, so this is the same window's
+			// rate in the common case and at most one window stale
+			// otherwise — within the window granularity the de-bias
+			// scheme already operates at.
+			if sr := w.sampler.SampleRateFor(env.TenantID); sr < 1.0 {
+				env.SampleRate = sr
+			}
+		} else {
+			keep, sampleRate := w.sampler.Decide(ctx, env.TenantID, env.EventID)
+			if !keep {
+				s.metrics.Sampled.Add(1)
+				if ackErr := msg.Ack(); ackErr != nil {
+					s.logger.Warn("telemetry: ack after sampling-drop failed",
+						slog.Any("error", ackErr),
+						slog.String("event_id", env.EventID.String()))
+					return
+				}
+				s.metrics.Acked.Add(1)
+				return
+			}
+			// Only stamp a non-trivial rate; leaving SampleRate at its
+			// zero value (interpreted downstream as 1.0) keeps the field
+			// off the wire via omitempty for fully-sampled events.
+			if sampleRate < 1.0 {
+				env.SampleRate = sampleRate
+			}
+		}
+	}
 
 	// Per-tenant rate-limit gate. Sits between decode and the
 	// dedup check so a swamped tenant cannot push past their
@@ -713,6 +809,24 @@ func (s *Service) deliveryExhausted(msg jetstream.Msg) bool {
 		return false
 	}
 	return md.NumDelivered >= hotPathMaxDeliver
+}
+
+// isRedelivery reports whether this is a redelivery (a second or
+// later delivery attempt) of the message. NumDelivered is 1-based,
+// so the first delivery is 1 and any value above 1 is a redelivery.
+//
+// Used by the sampling gate to sample only first deliveries: an
+// event the sampler already admitted must not be re-evaluated (and
+// possibly dropped) on a retry. A message without metadata
+// (synthetic test message, or a client that strips metadata) is
+// treated as a first delivery so sampling still applies — matching
+// deliveryExhausted's "no metadata = safer default" convention.
+func isRedelivery(msg jetstream.Msg) bool {
+	md, err := msg.Metadata()
+	if err != nil || md == nil {
+		return false
+	}
+	return md.NumDelivered > 1
 }
 
 // routeHotWriteFailureToDLQ publishes a hot-write-exhausted message

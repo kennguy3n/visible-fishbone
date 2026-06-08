@@ -65,6 +65,31 @@ func TestEnvelope_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestEnvelope_SampleRateRoundTrip(t *testing.T) {
+	t.Parallel()
+	env := sampleEnvelope(t)
+	env.SampleRate = 0.25 // a kept-but-sampled event
+	b, err := schema.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got, err := schema.Unmarshal(b)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.SampleRate != 0.25 {
+		t.Errorf("SampleRate round-trip = %v, want 0.25", got.SampleRate)
+	}
+
+	// SampleRate == 1.0 is the boundary of the valid (0,1] range and
+	// must be accepted (a fully-sampled event explicitly stamped).
+	full := sampleEnvelope(t)
+	full.SampleRate = 1.0
+	if _, err := schema.Marshal(full); err != nil {
+		t.Errorf("SampleRate 1.0 should be valid, got %v", err)
+	}
+}
+
 func TestEnvelope_ValidateRejects(t *testing.T) {
 	t.Parallel()
 	base := sampleEnvelope(t)
@@ -78,6 +103,8 @@ func TestEnvelope_ValidateRejects(t *testing.T) {
 		"bad platform":  func(e *schema.Envelope) { e.Platform = "bogus" },
 		"bad tc":        func(e *schema.Envelope) { e.TrafficClass = "bogus" },
 		"empty payload": func(e *schema.Envelope) { e.Payload = nil },
+		"sample > 1":    func(e *schema.Envelope) { e.SampleRate = 1.5 },
+		"sample < 0":    func(e *schema.Envelope) { e.SampleRate = -0.1 },
 	}
 	for name, mutate := range mutations {
 		e := base
