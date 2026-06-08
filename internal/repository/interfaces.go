@@ -160,12 +160,58 @@ type SiteRepository interface {
 
 // --- User -----------------------------------------------------------------
 
+// TextMatchOp enumerates the case-insensitive string match operators
+// an attribute search filter can use. They mirror the SCIM eq/co/sw
+// operators (RFC 7644 §3.4.2.2) but are intentionally backend-agnostic
+// so non-SCIM callers can reuse them.
+type TextMatchOp string
+
+const (
+	// TextMatchEquals matches when the column equals the value.
+	TextMatchEquals TextMatchOp = "eq"
+	// TextMatchContains matches when the column contains the value
+	// as a substring.
+	TextMatchContains TextMatchOp = "co"
+	// TextMatchPrefix matches when the column starts with the value.
+	TextMatchPrefix TextMatchOp = "sw"
+)
+
+// UserSearchField names the user column a UserSearchFilter matches
+// against. The zero value (empty string) means "no field filter" — the
+// filter then matches every row regardless of Op/Value.
+type UserSearchField string
+
+const (
+	UserSearchFieldEmail      UserSearchField = "email"
+	UserSearchFieldName       UserSearchField = "name"
+	UserSearchFieldExternalID UserSearchField = "external_id"
+)
+
+// UserSearchFilter narrows SearchUsers to rows whose Field matches
+// Value under Op, evaluated case-insensitively. A zero filter (empty
+// Field) matches every row.
+type UserSearchFilter struct {
+	Field UserSearchField
+	Op    TextMatchOp
+	Value string
+}
+
 // UserRepository owns the users table.
 type UserRepository interface {
 	Create(ctx context.Context, tenantID uuid.UUID, u User) (User, error)
 	Get(ctx context.Context, tenantID, id uuid.UUID) (User, error)
 	GetByEmail(ctx context.Context, tenantID uuid.UUID, email string) (User, error)
 	List(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[User], error)
+	// SearchUsers returns the tenant's users matching filter, ordered
+	// by (created_at DESC, id DESC), windowed to [offset, offset+limit),
+	// together with the total number of matches independent of the
+	// window. The total backs SCIM's totalResults; the window is the
+	// RFC 7644 §3.4.2 startIndex/count page. A negative offset is
+	// treated as 0 and a non-positive limit returns no rows while still
+	// computing total. Filtering, the page window, and the count all
+	// execute in the backend so callers never materialise the full
+	// tenant user set to paginate or filter it.
+	SearchUsers(ctx context.Context, tenantID uuid.UUID, filter UserSearchFilter, offset, limit int) (items []User, total int, err error)
 	Update(ctx context.Context, tenantID uuid.UUID, u User) (User, error)
 	// ClearExternalID sets the external_id column to NULL/empty.
 	// This is separate from Update because the sparse-update
