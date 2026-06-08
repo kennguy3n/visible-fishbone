@@ -106,7 +106,15 @@ func newIOCEnforcementCompilerFromSnapshot(snap func() IOCSnapshot, opts ...IOCE
 // rule id for byte-deterministic bundle output. Hash IOCs are not
 // rules — they ride the malware section (CompileMalwareHashes).
 func (c *IOCEnforcementCompiler) CompileIOCRules(_ context.Context, _ uuid.UUID) ([]policy.Rule, error) {
-	snap := c.snapshot()
+	return c.compileIOCRules(c.snapshot())
+}
+
+// compileIOCRules is the snapshot-bound core of CompileIOCRules. It
+// takes the snapshot as an argument so SnapshotIOC can derive the
+// rule slice and the malware set from the SAME point-in-time view
+// (see policy.IOCSnapshot), rather than each interface method
+// re-snapshotting the store independently.
+func (c *IOCEnforcementCompiler) compileIOCRules(snap IOCSnapshot) ([]policy.Rule, error) {
 	rules := make([]policy.Rule, 0, len(snap.IPs)+len(snap.Domains)+len(snap.URLs))
 
 	for _, ioc := range snap.IPs {
@@ -188,7 +196,13 @@ func (c *IOCEnforcementCompiler) CompileIOCRules(_ context.Context, _ uuid.UUID)
 // verdict; those between minConfidence and the threshold compile
 // to "suspicious". Entries below minConfidence are dropped.
 func (c *IOCEnforcementCompiler) CompileMalwareHashes(_ context.Context, _ uuid.UUID) ([]policy.MalwareHashEntry, error) {
-	snap := c.snapshot()
+	return c.compileMalwareHashes(c.snapshot())
+}
+
+// compileMalwareHashes is the snapshot-bound core of
+// CompileMalwareHashes (see compileIOCRules for why the snapshot is
+// an argument).
+func (c *IOCEnforcementCompiler) compileMalwareHashes(snap IOCSnapshot) ([]policy.MalwareHashEntry, error) {
 	out := make([]policy.MalwareHashEntry, 0, len(snap.Hashes))
 	for _, ioc := range snap.Hashes {
 		if ioc.Confidence < c.minConfidence {
@@ -204,6 +218,32 @@ func (c *IOCEnforcementCompiler) CompileMalwareHashes(_ context.Context, _ uuid.
 	// here too so the compiler's own output is stable for tests.
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Hash < out[j].Hash })
 	return out, nil
+}
+
+// SnapshotIOC implements policy.IOCSnapshotCompiler. It captures one
+// IOCStore snapshot and returns a view that derives both the deny
+// rules and the malware-hash set from it, so the policy compiler
+// gets a consistent point-in-time pair instead of two independent
+// store reads. tenantID is ignored (threat-feed indicators are
+// global) but kept to satisfy the interface.
+func (c *IOCEnforcementCompiler) SnapshotIOC(_ context.Context, _ uuid.UUID) (policy.IOCSnapshot, error) {
+	return &iocSnapshotView{compiler: c, snap: c.snapshot()}, nil
+}
+
+// iocSnapshotView binds a captured IOCSnapshot to the compiler so
+// both planes compile from the same view. It is single-use, matching
+// the policy.IOCSnapshot contract.
+type iocSnapshotView struct {
+	compiler *IOCEnforcementCompiler
+	snap     IOCSnapshot
+}
+
+func (v *iocSnapshotView) CompileIOCRules() ([]policy.Rule, error) {
+	return v.compiler.compileIOCRules(v.snap)
+}
+
+func (v *iocSnapshotView) CompileMalwareHashes() ([]policy.MalwareHashEntry, error) {
+	return v.compiler.compileMalwareHashes(v.snap)
 }
 
 // iocRuleDescription builds a human-readable, operator-facing rule
@@ -260,6 +300,8 @@ func inlinePredicate(name string, match map[string]string) (policy.Predicate, er
 var (
 	_ policy.IOCCompiler         = (*IOCEnforcementCompiler)(nil)
 	_ policy.MalwareHashCompiler = (*IOCEnforcementCompiler)(nil)
+	_ policy.IOCSnapshotCompiler = (*IOCEnforcementCompiler)(nil)
+	_ policy.IOCSnapshot         = (*iocSnapshotView)(nil)
 )
 
 // DemotionEmitter is the seam the domain-IOC demotion bridge uses
