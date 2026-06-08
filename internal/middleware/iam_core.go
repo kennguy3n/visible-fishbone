@@ -113,28 +113,53 @@ func WithIAMCore(v IAMCoreValidator, resolver TenantResolver) AuthOption {
 	}
 }
 
+// iamCoreOutcome classifies the result of authenticateIAMCore for the
+// caller's brute-force accounting. Only a credential rejection (a token
+// that fails cryptographic verification) is a brute-force signal; an
+// authorization rejection (a verified token that is not allowed to act
+// on the requested tenant) must NOT count toward the IP cooldown, or a
+// tenant-mapping misconfiguration would lock out a legitimate user.
+type iamCoreOutcome int
+
+const (
+	// iamCoreOK: the token verified and is authorized; the returned
+	// context is non-nil and carries the iam-core identity.
+	iamCoreOK iamCoreOutcome = iota
+	// iamCoreCredentialRejected: the token failed cryptographic
+	// verification (a 401). Count it toward the brute-force cooldown.
+	iamCoreCredentialRejected
+	// iamCoreAuthzRejected: the token VERIFIED but is not authorized
+	// for the requested tenant (X-Tenant-ID mismatch or no SNG tenant
+	// mapped — a 403). Audit it, but do not count it toward the cooldown.
+	iamCoreAuthzRejected
+)
+
 // authenticateIAMCore validates an iam-core Bearer token and, on
 // success, returns the request context enriched with the iam-core
 // identity (and the resolved SNG tenant + RLS GUC). It fully owns the
 // HTTP response on failure (writing the appropriate 401/403) and
-// reports handled=true so the caller stops processing.
-func (o *authOptions) authenticateIAMCore(w http.ResponseWriter, r *http.Request, raw string) (context.Context, bool) {
+// returns an iamCoreOutcome classifying the result so the caller can
+// decide whether the failure counts toward the brute-force cooldown.
+func (o *authOptions) authenticateIAMCore(w http.ResponseWriter, r *http.Request, raw string) (context.Context, iamCoreOutcome) {
 	claims, err := o.iamCore.VerifyAccessToken(r.Context(), raw)
 	if err != nil {
 		// Fail-closed: any verification problem is a 401. We do not
 		// fall back to the HMAC path — the token claimed the iam-core
 		// issuer, so accepting it any other way would be a downgrade.
+		// This is a genuine credential rejection → brute-force signal.
 		writeAuthError(w, "invalid_token")
-		return nil, true
+		return nil, iamCoreCredentialRejected
 	}
 
 	// Tenant binding (Task 2). The `tenant_id` claim is authoritative;
 	// when an X-Tenant-ID header is also present it MUST match, else
 	// 403 — a token minted for tenant A must never act on tenant B.
+	// The token is cryptographically valid, so this is an authorization
+	// failure, not a credential guess.
 	if hdr := strings.TrimSpace(r.Header.Get("X-Tenant-ID")); hdr != "" && hdr != claims.TenantID {
 		writeAuthErrorStatus(w, http.StatusForbidden, "tenant_mismatch",
 			"X-Tenant-ID header does not match token tenant")
-		return nil, true
+		return nil, iamCoreAuthzRejected
 	}
 
 	ctx := r.Context()
@@ -153,9 +178,12 @@ func (o *authOptions) authenticateIAMCore(w http.ResponseWriter, r *http.Request
 	if o.tenantResolver != nil {
 		sngTenant, resolveErr := o.tenantResolver.ResolveTenant(ctx, claims.TenantID)
 		if resolveErr != nil || sngTenant == uuid.Nil {
+			// Verified token, but no SNG tenant is mapped to its
+			// iam-core tenant — an authorization/config failure, not a
+			// credential guess.
 			writeAuthErrorStatus(w, http.StatusForbidden, "tenant_not_mapped",
 				"no ShieldNet tenant is mapped to the token's iam-core tenant")
-			return nil, true
+			return nil, iamCoreAuthzRejected
 		}
 		identity.SNGTenantID = sngTenant
 		ctx = withTenantID(ctx, sngTenant)
@@ -172,7 +200,7 @@ func (o *authOptions) authenticateIAMCore(w http.ResponseWriter, r *http.Request
 		ctx = withAuthSubject(ctx, claims.Subject)
 	}
 	ctx = withIAMCoreIdentity(ctx, identity)
-	return ctx, true
+	return ctx, iamCoreOK
 }
 
 // unverifiedIssuer extracts the `iss` claim from a JWT WITHOUT

@@ -99,18 +99,48 @@ func (rl *RateLimiter) allow(key string) bool {
 // clientIP returns the source IP, honouring X-Forwarded-For only if
 // r.RemoteAddr falls inside a configured trusted-proxy CIDR.
 func (rl *RateLimiter) clientIP(r *http.Request) string {
+	return clientIP(r, rl.trustedProxies)
+}
+
+// NewClientIPDeriver parses a comma-separated trusted-proxy CIDR list
+// and returns a function that extracts the real client IP from a
+// request using the exact same trusted-proxy logic as the per-IP rate
+// limiter and the brute-force guard. It is exported so callers outside
+// this package (e.g. the enroll handler, when it must log a failed
+// enrolment's source_ip while its brute-force guard is disabled) derive
+// the IP identically — otherwise, behind a load balancer, a
+// guard-disabled deployment would log the proxy's address instead of
+// the real client's. A malformed CIDR list returns an error; callers
+// should surface it once at startup and fall back to NewClientIPDeriver("")
+// (raw RemoteAddr, XFF ignored — never trust a spoofable header).
+func NewClientIPDeriver(raw string) (func(*http.Request) string, error) {
+	proxies, err := parseProxyCIDRs(raw)
+	if err != nil {
+		return nil, err
+	}
+	return func(r *http.Request) string { return clientIP(r, proxies) }, nil
+}
+
+// clientIP returns the source IP for r, honouring X-Forwarded-For
+// only when r.RemoteAddr falls inside one of the supplied
+// trusted-proxy CIDRs. With no trusted proxies the raw RemoteAddr
+// host is returned and any client-supplied XFF is ignored — so a
+// caller cannot spoof its IP to evade a per-IP limit or brute-force
+// lockout. Shared by the per-IP rate limiter and the brute-force
+// guard so both derive the keying IP identically.
+func clientIP(r *http.Request, trustedProxies []*net.IPNet) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if len(rl.trustedProxies) == 0 {
+	if len(trustedProxies) == 0 {
 		return host
 	}
 	remote := net.ParseIP(host)
 	if remote == nil {
 		return host
 	}
-	if !ipInAny(remote, rl.trustedProxies) {
+	if !ipInAny(remote, trustedProxies) {
 		return host
 	}
 	// Pick the right-most non-trusted entry from XFF — that's the
@@ -129,7 +159,7 @@ func (rl *RateLimiter) clientIP(r *http.Request) string {
 		if ip == nil {
 			continue
 		}
-		if !ipInAny(ip, rl.trustedProxies) {
+		if !ipInAny(ip, trustedProxies) {
 			return p
 		}
 	}

@@ -63,9 +63,19 @@ type RouterDeps struct {
 	IAMCore       middleware.IAMCoreValidator
 	IAMCoreTenant middleware.TenantResolver
 	RateLimiter   *middleware.RateLimiter
-	Health        *Health
-	OpsHealth     *OpsHealthHandler
-	BulkDevice    *BulkDeviceHandler
+	// TenantRateLimiter, when set, enforces a per-tenant token-bucket
+	// request budget AFTER authentication (so the resolved tenant is in
+	// context). Nil disables it (the chain degrades to a pass-through),
+	// leaving only the outer per-IP RateLimiter in place.
+	TenantRateLimiter *middleware.TenantRateLimiter
+	// AuthBruteForce, when set, throttles credential-validation
+	// failures per source IP in the auth middleware: after a threshold
+	// of failures one IP is locked out for a cooldown. Nil disables the
+	// lockout (failed attempts are still logged when Logger is set).
+	AuthBruteForce *middleware.AttemptLimiter
+	Health         *Health
+	OpsHealth      *OpsHealthHandler
+	BulkDevice     *BulkDeviceHandler
 	// Metrics, when non-nil, installs the Prometheus HTTP
 	// instrumentation middleware (request count / duration /
 	// in-flight) at the top of the chain. Nil disables it (the
@@ -211,9 +221,30 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.IAMCore != nil {
 		authOpts = append(authOpts, middleware.WithIAMCore(deps.IAMCore, deps.IAMCoreTenant))
 	}
-	apiChain := middleware.Chain(
+	// Brute-force protection + failed-auth logging. The guard may be
+	// nil (lockout disabled) while Logger is set (still audit every
+	// failure), or both set; WithBruteForceGuard handles either.
+	if deps.AuthBruteForce != nil || deps.Logger != nil {
+		authOpts = append(authOpts,
+			middleware.WithBruteForceGuard(deps.AuthBruteForce, deps.Logger),
+			// Give the failure-logging path the same trusted-proxy list
+			// the guard uses so the logged source_ip is the real client
+			// (not the load balancer) even when the guard is disabled.
+			middleware.WithTrustedProxies(deps.Config.BruteForce.TrustedProxies),
+		)
+	}
+	// Per-tenant rate limiting runs immediately AFTER Auth so the
+	// tenant identity Auth resolves (from the API-key / JWT claim) is in
+	// context when the limiter keys on it. Placed before the per-route
+	// RequireTenant so a flooding tenant is shed before any handler
+	// work. When unset it degrades to a transparent pass-through.
+	apiMWs := []func(http.Handler) http.Handler{
 		middleware.Auth(&deps.Config.Auth, deps.APIKeyLookup, authOpts...),
-	)
+	}
+	if deps.TenantRateLimiter != nil {
+		apiMWs = append(apiMWs, deps.TenantRateLimiter.Middleware())
+	}
+	apiChain := middleware.Chain(apiMWs...)
 	authedAPI := apiChain(apiMux)
 
 	root := http.NewServeMux()

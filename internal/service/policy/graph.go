@@ -128,6 +128,14 @@ type Predicate struct {
 	Match json.RawMessage `json:"match,omitempty"`
 }
 
+// MaxRuleBytes bounds the serialised size of a single policy rule.
+// A legitimate enforcement rule (refs, inline matchers, description)
+// is well under this; the limit exists so a tenant cannot embed a
+// large blob in a rule — most plausibly via the Extra passthrough
+// map — that would then be re-emitted into every compiled bundle
+// pushed to all enforcement nodes.
+const MaxRuleBytes = 10 * 1024 // 10 KiB
+
 // Rule is one enforcement edge. References to named Subject /
 // Predicate vertices are stored in `SubjectRefs` / `PredicateRefs`;
 // inline matchers can be embedded directly via `Subjects` /
@@ -298,6 +306,18 @@ func (g Graph) Validate() error {
 			if !isValidTarget(t) {
 				return fmt.Errorf("rules[%d].targets[%d] %q: %w", i, j, t, repository.ErrInvalidArgument)
 			}
+		}
+		// Bound the serialised size of each rule. A single enforcement
+		// rule fits comfortably within MaxRuleBytes; the cap stops a
+		// tenant from smuggling a large blob through the Extra
+		// passthrough map, which would otherwise be re-emitted verbatim
+		// into every compiled bundle shipped to all enforcement nodes.
+		enc, err := encodeRule(r)
+		if err != nil {
+			return fmt.Errorf("rules[%d]: encode for size check: %w: %w", i, err, repository.ErrInvalidArgument)
+		}
+		if len(enc) > MaxRuleBytes {
+			return fmt.Errorf("rules[%d]: %d bytes exceeds the %d-byte per-rule limit: %w", i, len(enc), MaxRuleBytes, repository.ErrInvalidArgument)
 		}
 	}
 	return nil

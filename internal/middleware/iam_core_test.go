@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -205,6 +206,90 @@ func TestAuth_IAMCore_UnmappedTenant_403(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+}
+
+// TestAuth_IAMCore_AuthzFailureDoesNotCountTowardBruteForce asserts a
+// VERIFIED iam-core token that is merely unauthorized for the requested
+// tenant (here: no SNG tenant mapped → 403) never trips the brute-force
+// cooldown, even far beyond MaxFailures. A tenant-mapping misconfig
+// must not lock out a legitimate, correctly-credentialed user.
+func TestAuth_IAMCore_AuthzFailureDoesNotCountTowardBruteForce(t *testing.T) {
+	token := makeJWT(t, iamIssuer)
+	validator := &fakeValidator{
+		issuer: iamIssuer,
+		claims: map[string]iamcore.Claims{token: {Subject: "u", TenantID: "tenant-unknown"}},
+	}
+	// Resolver only maps "tenant-abc"; the token's "tenant-unknown" never
+	// resolves → tenant_not_mapped (403) on every request.
+	resolver := &fakeResolver{want: "tenant-abc", uuid: uuid.New()}
+	guard, err := NewAttemptLimiter(AttemptLimiterConfig{
+		MaxFailures:     2,
+		Cooldown:        time.Minute,
+		CleanupInterval: time.Hour,
+		IdleTTL:         10 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewAttemptLimiter: %v", err)
+	}
+	defer guard.Close()
+
+	cfg := &config.Auth{APIKeyHeader: "X-SNG-API-Key"}
+	h := Chain(Logging(nil), Auth(cfg, nil, WithIAMCore(validator, resolver), WithBruteForceGuard(guard, nil)))(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+	)
+	send := func() int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/things", nil)
+		req.RemoteAddr = "198.51.100.7:5555"
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	for i := 0; i < 5; i++ { // well past MaxFailures=2
+		if code := send(); code != http.StatusForbidden {
+			t.Fatalf("attempt %d: status = %d, want 403 (authz failure must never trip the cooldown)", i+1, code)
+		}
+	}
+}
+
+// TestAuth_IAMCore_CredentialFailureCountsTowardBruteForce is the
+// counterpart: a token that FAILS cryptographic verification is a
+// genuine credential rejection and MUST still lock the IP out after
+// MaxFailures, so the fix above doesn't disarm brute-force protection.
+func TestAuth_IAMCore_CredentialFailureCountsTowardBruteForce(t *testing.T) {
+	validator := &fakeValidator{issuer: iamIssuer, claims: map[string]iamcore.Claims{}} // every token invalid
+	guard, err := NewAttemptLimiter(AttemptLimiterConfig{
+		MaxFailures:     2,
+		Cooldown:        time.Minute,
+		CleanupInterval: time.Hour,
+		IdleTTL:         10 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewAttemptLimiter: %v", err)
+	}
+	defer guard.Close()
+
+	cfg := &config.Auth{APIKeyHeader: "X-SNG-API-Key"}
+	h := Chain(Logging(nil), Auth(cfg, nil, WithIAMCore(validator, nil), WithBruteForceGuard(guard, nil)))(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+	)
+	send := func() int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/things", nil)
+		req.RemoteAddr = "198.51.100.8:6666"
+		req.Header.Set("Authorization", "Bearer "+makeJWT(t, iamIssuer))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	// Two credential failures (401), then the IP is locked out (429).
+	for i := 0; i < 2; i++ {
+		if code := send(); code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d, want 401", i+1, code)
+		}
+	}
+	if code := send(); code != http.StatusTooManyRequests {
+		t.Fatalf("post-threshold: status = %d, want 429 (credential failures must still lock out)", code)
 	}
 }
 

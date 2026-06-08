@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -11,6 +12,16 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
+
+// DefaultMaxJSONBody bounds the size of a JSON request body accepted
+// by the common DecodeJSON path. It is generous for the control
+// plane's JSON payloads — the largest legitimate string field (a
+// policy rule) is capped at 10 KiB elsewhere — while preventing an
+// unbounded or hostile body from exhausting server memory before the
+// JSON decoder ever runs. The handful of endpoints that legitimately
+// accept larger bodies (bulk CSV import, Terraform state) bound their
+// raw body explicitly with their own, larger http.MaxBytesReader.
+const DefaultMaxJSONBody int64 = 1 << 20 // 1 MiB
 
 // actorFromCtx returns the authenticated user's ID as a
 // *uuid.UUID for audit-actor parameters on service methods, or nil
@@ -110,13 +121,39 @@ func WriteRepositoryError(w http.ResponseWriter, err error) {
 	}
 }
 
-// DecodeJSON deserializes the request body into dst. Returns a
-// rendered 400 if the body is malformed.
+// DecodeJSON deserializes the request body into dst, bounding it to
+// DefaultMaxJSONBody. Returns a rendered 400 if the body is malformed
+// (or carries trailing data) and a 413 if it exceeds the limit. On any
+// error it renders the response and returns false.
 func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	return DecodeJSONLimit(w, r, dst, DefaultMaxJSONBody)
+}
+
+// DecodeJSONLimit is DecodeJSON with an explicit maximum body size, for
+// the few endpoints whose legitimate payloads are larger (or smaller)
+// than the default. It wraps the body in http.MaxBytesReader BEFORE
+// decoding so an oversized body is rejected as it streams in, never
+// fully buffered, and rejects any trailing bytes after the first JSON
+// value (defence against accidental concatenation / smuggling).
+func DecodeJSONLimit(w http.ResponseWriter, r *http.Request, dst any, maxBytes int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			WriteError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+				fmt.Sprintf("request body exceeds the %d-byte limit", maxBytes))
+			return false
+		}
 		WriteError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return false
+	}
+	// A well-formed request carries exactly one JSON value; anything
+	// after it is rejected so a client cannot smuggle a second document
+	// past the decoder.
+	if dec.More() {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "unexpected trailing data after JSON value")
 		return false
 	}
 	return true
