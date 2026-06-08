@@ -17,7 +17,8 @@ export type MessageKey =
   | "topbar.tenant.loading"
   | "topbar.tenant.none"
   | "topbar.signOut"
-  | "topbar.language";
+  | "topbar.language"
+  | "topbar.menu";
 
 type Catalog = Record<MessageKey, string>;
 
@@ -28,6 +29,7 @@ const en: Catalog = {
   "topbar.tenant.none": "No tenants",
   "topbar.signOut": "Sign out",
   "topbar.language": "Language",
+  "topbar.menu": "Open navigation menu",
 };
 
 const zhHans: Catalog = {
@@ -37,6 +39,7 @@ const zhHans: Catalog = {
   "topbar.tenant.none": "无租户",
   "topbar.signOut": "退出登录",
   "topbar.language": "语言",
+  "topbar.menu": "打开导航菜单",
 };
 
 const zhHant: Catalog = {
@@ -46,6 +49,7 @@ const zhHant: Catalog = {
   "topbar.tenant.none": "沒有租戶",
   "topbar.signOut": "登出",
   "topbar.language": "語言",
+  "topbar.menu": "開啟導覽選單",
 };
 
 const ms: Catalog = {
@@ -55,6 +59,7 @@ const ms: Catalog = {
   "topbar.tenant.none": "Tiada penyewa",
   "topbar.signOut": "Log keluar",
   "topbar.language": "Bahasa",
+  "topbar.menu": "Buka menu navigasi",
 };
 
 const id: Catalog = {
@@ -64,6 +69,7 @@ const id: Catalog = {
   "topbar.tenant.none": "Tidak ada tenant",
   "topbar.signOut": "Keluar",
   "topbar.language": "Bahasa",
+  "topbar.menu": "Buka menu navigasi",
 };
 
 const th: Catalog = {
@@ -73,6 +79,7 @@ const th: Catalog = {
   "topbar.tenant.none": "ไม่มีผู้เช่า",
   "topbar.signOut": "ออกจากระบบ",
   "topbar.language": "ภาษา",
+  "topbar.menu": "เปิดเมนูนำทาง",
 };
 
 const vi: Catalog = {
@@ -82,6 +89,7 @@ const vi: Catalog = {
   "topbar.tenant.none": "Không có người thuê",
   "topbar.signOut": "Đăng xuất",
   "topbar.language": "Ngôn ngữ",
+  "topbar.menu": "Mở menu điều hướng",
 };
 
 const ja: Catalog = {
@@ -91,6 +99,7 @@ const ja: Catalog = {
   "topbar.tenant.none": "テナントがありません",
   "topbar.signOut": "サインアウト",
   "topbar.language": "言語",
+  "topbar.menu": "ナビゲーションメニューを開く",
 };
 
 const ko: Catalog = {
@@ -100,6 +109,7 @@ const ko: Catalog = {
   "topbar.tenant.none": "테넌트 없음",
   "topbar.signOut": "로그아웃",
   "topbar.language": "언어",
+  "topbar.menu": "탐색 메뉴 열기",
 };
 
 const ar: Catalog = {
@@ -109,6 +119,7 @@ const ar: Catalog = {
   "topbar.tenant.none": "لا يوجد مستأجرون",
   "topbar.signOut": "تسجيل الخروج",
   "topbar.language": "اللغة",
+  "topbar.menu": "فتح قائمة التنقل",
 };
 
 const de: Catalog = {
@@ -118,6 +129,7 @@ const de: Catalog = {
   "topbar.tenant.none": "Keine Mandanten",
   "topbar.signOut": "Abmelden",
   "topbar.language": "Sprache",
+  "topbar.menu": "Navigationsmenü öffnen",
 };
 
 const fr: Catalog = {
@@ -127,6 +139,7 @@ const fr: Catalog = {
   "topbar.tenant.none": "Aucun locataire",
   "topbar.signOut": "Se déconnecter",
   "topbar.language": "Langue",
+  "topbar.menu": "Ouvrir le menu de navigation",
 };
 
 export const MESSAGES: Record<Locale, Catalog> = {

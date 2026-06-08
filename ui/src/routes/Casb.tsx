@@ -5,7 +5,16 @@ import {
   useCreateCasbConnector,
   useSyncCasbConnector,
 } from "@/api/manual/hooks";
-import { PageHeader, Card, AsyncBoundary, StatusBadge, Badge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  StatusBadge,
+  Badge,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
+import { HelpTooltip } from "@/components/HelpTooltip";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Modal } from "@/components/Modal";
 import { RequireTenant } from "@/components/RequireTenant";
@@ -68,25 +77,46 @@ function CasbInner({ tenantId }: { tenantId: string }) {
         }
       />
 
-      <Card title="Shadow IT — discovered applications" className="">
+      <Card
+        title="Shadow IT — discovered applications"
+        actions={
+          <HelpTooltip title="What is Shadow IT?" align="right">
+            Shadow IT is SaaS apps your staff use that haven't been formally
+            approved. We discover them from traffic and connector inventory so
+            you can sanction or block them.
+          </HelpTooltip>
+        }
+      >
         <AsyncBoundary
           isLoading={apps.isLoading}
           error={apps.error}
           data={apps.data}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
-          empty={<p className="muted">No applications discovered yet — connect a source.</p>}
+          empty={
+            <EmptyState
+              illustration={<EmptyIllustration kind="search" />}
+              title="No applications discovered yet"
+              description="Connect a CASB source and we'll start inventorying the SaaS apps in use."
+            />
+          }
         >
           {(d) => <DataTable columns={appCols} rows={d.items ?? []} rowKey={(a) => a.id} />}
         </AsyncBoundary>
       </Card>
 
-      <Card title="Inline connectors" className="" >
+      <Card title="Inline connectors">
         <AsyncBoundary
           isLoading={connectors.isLoading}
           error={connectors.error}
           data={connectors.data}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
-          empty={<p className="muted">No connectors configured.</p>}
+          empty={
+            <EmptyState
+              illustration={<EmptyIllustration kind="inbox" />}
+              title="No connectors configured"
+              description="Add an inline CASB connector to inspect SaaS uploads, shares and downloads in real time."
+            />
+          }
         >
           {(d) => <DataTable columns={connCols} rows={d.items ?? []} rowKey={(c) => c.id} />}
         </AsyncBoundary>

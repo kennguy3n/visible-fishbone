@@ -1,5 +1,8 @@
 import type { ReactNode } from "react";
 import { statusTone, titleCase, type Tone } from "@/lib/format";
+import { EmptyState } from "./EmptyState";
+
+export { EmptyState, EmptyIllustration } from "./EmptyState";
 
 export function PageHeader({
   title,
@@ -90,28 +93,7 @@ export function LoadingState({ label = "Loading…" }: { label?: string }) {
   );
 }
 
-export function EmptyState({
-  icon = "∅",
-  title,
-  hint,
-  action,
-}: {
-  icon?: string;
-  title: string;
-  hint?: string;
-  action?: ReactNode;
-}) {
-  return (
-    <div className="state">
-      <div className="state__icon">{icon}</div>
-      <p style={{ fontWeight: 600, color: "var(--text)" }}>{title}</p>
-      {hint && <p style={{ maxWidth: "50ch" }}>{hint}</p>}
-      {action && <div style={{ marginTop: 12 }}>{action}</div>}
-    </div>
-  );
-}
-
-export function ErrorState({ error }: { error: unknown }) {
+export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   const message =
     error instanceof Error
       ? error.message
@@ -123,6 +105,61 @@ export function ErrorState({ error }: { error: unknown }) {
       <div className="state__icon">⚠</div>
       <p style={{ fontWeight: 600 }}>Could not load data</p>
       <p>{message}</p>
+      {onRetry && (
+        <div style={{ marginTop: 12 }}>
+          <button className="btn btn--sm" onClick={onRetry}>
+            Try again
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Shimmer placeholder for a data table while its query is loading. */
+export function SkeletonTable({
+  rows = 5,
+  cols = 4,
+}: {
+  rows?: number;
+  cols?: number;
+}) {
+  return (
+    <div
+      className="table-wrap skeleton-rows"
+      style={{ padding: 14, border: "1px solid var(--border-soft)" }}
+      aria-busy="true"
+      aria-label="Loading"
+    >
+      {Array.from({ length: rows }).map((_, r) => (
+        <div
+          key={r}
+          className="skeleton-row"
+          style={{ ["--skeleton-cols" as string]: `repeat(${cols}, 1fr)` }}
+        >
+          {Array.from({ length: cols }).map((__, c) => (
+            <div key={c} className="skeleton skeleton--text" />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Shimmer placeholder for a card body. */
+export function SkeletonCard({ lines = 3 }: { lines?: number }) {
+  return (
+    <div className="card" aria-busy="true" aria-label="Loading">
+      <div className="skeleton skeleton--title" />
+      {Array.from({ length: lines }).map((_, i) => (
+        <div
+          key={i}
+          className="skeleton skeleton--text"
+          // Taper each line, but never below a readable minimum so larger
+          // `lines` counts can't produce invalid (negative) widths.
+          style={{ width: `${Math.max(30, 90 - i * 12)}%` }}
+        />
+      ))}
     </div>
   );
 }
@@ -137,6 +174,8 @@ export function AsyncBoundary<T>({
   data,
   isEmpty,
   empty,
+  loading,
+  onRetry,
   children,
 }: {
   isLoading: boolean;
@@ -144,11 +183,16 @@ export function AsyncBoundary<T>({
   data: T | undefined;
   isEmpty?: (data: T) => boolean;
   empty?: ReactNode;
+  /** Custom loading placeholder (defaults to a skeleton table). */
+  loading?: ReactNode;
+  /** When provided, the error state shows a "Try again" button. */
+  onRetry?: () => void;
   children: (data: T) => ReactNode;
 }) {
-  if (isLoading) return <LoadingState />;
-  if (error) return <ErrorState error={error} />;
-  if (data === undefined) return <ErrorState error="No data returned" />;
+  if (isLoading) return <>{loading ?? <SkeletonTable />}</>;
+  if (error) return <ErrorState error={error} onRetry={onRetry} />;
+  if (data === undefined)
+    return <ErrorState error="No data returned" onRetry={onRetry} />;
   if (isEmpty?.(data)) {
     return <>{empty ?? <EmptyState title="Nothing here yet" />}</>;
   }

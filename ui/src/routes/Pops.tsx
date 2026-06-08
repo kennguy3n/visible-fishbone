@@ -1,6 +1,13 @@
 import { useListPoPs, useGetPoPHealth } from "@/api/generated/endpoints/pops/pops";
 import type { PoP } from "@/api/generated/model";
-import { PageHeader, Card, AsyncBoundary, StatusBadge, Badge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  StatusBadge,
+  Badge,
+  EmptyState,
+} from "@/components/ui";
 import { titleCase } from "@/lib/format";
 
 export function Pops() {
@@ -18,7 +25,12 @@ export function Pops() {
           error={list.error}
           data={list.data}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
-          empty={<p className="muted">No PoPs registered.</p>}
+          empty={
+            <EmptyState
+              title="No PoPs registered"
+              description="Edge points of presence will appear here once they're provisioned."
+            />
+          }
         >
           {(d) => (
             <table className="data">

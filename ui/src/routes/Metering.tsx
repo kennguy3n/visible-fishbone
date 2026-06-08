@@ -11,7 +11,13 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { useUsage, useUsageHistory } from "@/api/manual/hooks";
-import { PageHeader, Card, AsyncBoundary, StatusBadge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  StatusBadge,
+  EmptyState,
+} from "@/components/ui";
 import { RequireTenant } from "@/components/RequireTenant";
 import { formatNumber, titleCase } from "@/lib/format";
 
@@ -64,7 +70,12 @@ function MeteringInner({ tenantId }: { tenantId: string }) {
           error={usage.error}
           data={usage.data}
           isEmpty={() => usageData.length === 0}
-          empty={<p className="muted">No usage recorded.</p>}
+          empty={
+            <EmptyState
+              title="No usage recorded"
+              description="Usage meters populate once devices start sending telemetry."
+            />
+          }
         >
           {() => (
             <div style={{ height: 280 }}>
@@ -88,7 +99,7 @@ function MeteringInner({ tenantId }: { tenantId: string }) {
       <div className="grid grid--2" style={{ marginTop: 16 }}>
         <Card title="Meters">
           {lines.length === 0 ? (
-            <p className="muted">No meters.</p>
+            <EmptyState title="No meters" description="No metered dimensions for this period yet." />
           ) : (
             <table className="data">
               <thead>
@@ -127,7 +138,7 @@ function MeteringInner({ tenantId }: { tenantId: string }) {
 
         <Card title="Historical usage">
           {historyData.length === 0 ? (
-            <p className="muted">No history available.</p>
+            <EmptyState title="No history available" description="Historical usage appears after the first billing period." />
           ) : (
             <div style={{ height: 240 }}>
               <ResponsiveContainer width="100%" height="100%">

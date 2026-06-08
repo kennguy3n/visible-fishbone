@@ -1,7 +1,14 @@
 import { useState } from "react";
 import { useListAuditLog } from "@/api/generated/endpoints/audit/audit";
 import type { AuditEntry } from "@/api/generated/model";
-import { PageHeader, Card, AsyncBoundary, Badge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  Badge,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
 import { RequireTenant } from "@/components/RequireTenant";
 import { formatDateTime } from "@/lib/format";
@@ -56,7 +63,13 @@ function AuditInner({ tenantId }: { tenantId: string }) {
           error={list.error}
           data={list.data}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
-          empty={<p className="muted">No audit entries match the filter.</p>}
+          empty={
+            <EmptyState
+              illustration={<EmptyIllustration kind="search" />}
+              title="No matching audit entries"
+              description="Try widening the filter or clearing it to see all activity."
+            />
+          }
         >
           {(d) => <DataTable columns={cols} rows={d.items ?? []} rowKey={(e) => e.id} />}
         </AsyncBoundary>

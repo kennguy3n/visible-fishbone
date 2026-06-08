@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { runtimeConfig } from "@/lib/runtime-config";
-import { PageHeader, Card, Badge, Spinner } from "@/components/ui";
+import { PageHeader, Card, Badge, Spinner, EmptyState } from "@/components/ui";
 
 async function fetchDiscovery(issuer: string): Promise<Record<string, unknown>> {
   const base = issuer.replace(/\/+$/, "");
@@ -76,7 +76,10 @@ export function Idp() {
               <dd className="mono">{String(discovery.userinfo_endpoint ?? "—")}</dd>
             </dl>
           ) : (
-            <p className="muted">No issuer configured.</p>
+            <EmptyState
+              title="No issuer configured"
+              description="Configure an OIDC issuer to enable single sign-on for this tenant."
+            />
           )}
         </Card>
       </div>

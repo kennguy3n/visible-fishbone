@@ -5,7 +5,14 @@ import {
   useDeleteApiKey,
 } from "@/api/generated/endpoints/api-keys/api-keys";
 import type { APIKey } from "@/api/generated/model";
-import { PageHeader, Card, AsyncBoundary, StatusBadge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  StatusBadge,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Modal } from "@/components/Modal";
 import { RequireTenant } from "@/components/RequireTenant";
@@ -62,7 +69,13 @@ function ApiKeysInner({ tenantId }: { tenantId: string }) {
           error={list.error}
           data={list.data}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
-          empty={<p className="muted">No API keys issued.</p>}
+          empty={
+            <EmptyState
+              illustration={<EmptyIllustration kind="shield" />}
+              title="No API keys yet"
+              description="Issue an API key so machines and scripts can authenticate to the control plane."
+            />
+          }
         >
           {(d) => <DataTable columns={cols} rows={d.items ?? []} rowKey={(k) => k.id} />}
         </AsyncBoundary>

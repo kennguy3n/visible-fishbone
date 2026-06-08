@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -14,8 +14,17 @@ import {
 } from "@/api/generated/endpoints/policy/policy";
 import { useRunSimulation } from "@/api/manual/hooks";
 import type { SimulationResponse } from "@/api/manual/types";
-import { PageHeader, Card, LoadingState, ErrorState, Badge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  LoadingState,
+  ErrorState,
+  Badge,
+  EmptyState,
+} from "@/components/ui";
+import { HelpTooltip } from "@/components/HelpTooltip";
 import { RequireTenant } from "@/components/RequireTenant";
+import { useToast } from "@/components/Toast";
 
 export function Policy() {
   return (
@@ -28,6 +37,12 @@ interface RawGraph {
   edges?: { source?: string; from?: string; target?: string; to?: string }[];
   [k: string]: unknown;
 }
+
+// Stable empty-graph fallback. Using one frozen module-level value (instead of
+// an inline `?? {}`) means children that receive the graph as a prop keep a
+// stable reference while the query is errored/empty, so e.g. SimpleRules'
+// content-signature memo isn't recomputed against a fresh object every render.
+const EMPTY_GRAPH = Object.freeze({});
 
 function toFlow(graph: RawGraph): { nodes: Node[]; edges: Edge[] } {
   const rawNodes = Array.isArray(graph.nodes) ? graph.nodes : [];
@@ -60,6 +75,7 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
   const graphQuery = useGetPolicyGraph(tenantId, { query: { retry: false } });
   const update = useUpdatePolicyGraph();
   const compile = useCompilePolicyBundles();
+  const [mode, setMode] = useState<"simple" | "advanced">("simple");
   const [tab, setTab] = useState<"graph" | "json" | "simulate">("graph");
   const [draft, setDraft] = useState<string | null>(null);
   const [saveErr, setSaveErr] = useState<string | null>(null);
@@ -114,6 +130,35 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
         }
       />
 
+      <div className="mode-toggle">
+        <button
+          className={mode === "simple" ? "active" : ""}
+          onClick={() => setMode("simple")}
+        >
+          Simple
+        </button>
+        <button
+          className={mode === "advanced" ? "active" : ""}
+          onClick={() => setMode("advanced")}
+        >
+          Advanced
+        </button>
+        <HelpTooltip title="Simple vs Advanced">
+          <b>Simple</b> shows your rules as a plain "who → can do what → to
+          where" list you can reorder and trim. <b>Advanced</b> exposes the raw
+          policy graph, JSON and the full change simulator.
+        </HelpTooltip>
+      </div>
+
+      {mode === "simple" && (
+        <SimpleRules
+          tenantId={tenantId}
+          graph={(graphQuery.data?.graph ?? EMPTY_GRAPH) as GraphDoc}
+          isError={graphQuery.isError}
+        />
+      )}
+
+      {mode === "advanced" && (
       <div className="pill-tabs">
         <button className={tab === "graph" ? "active" : ""} onClick={() => setTab("graph")}>
           Graph
@@ -128,8 +173,9 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
           Change simulation
         </button>
       </div>
+      )}
 
-      {graphQuery.isError && (
+      {mode === "advanced" && graphQuery.isError && (
         <Card>
           <p className="muted">
             No policy graph exists for this tenant yet. Use the JSON tab to
@@ -138,7 +184,7 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
         </Card>
       )}
 
-      {tab === "graph" && (
+      {mode === "advanced" && tab === "graph" && (
         <Card title="Policy graph">
           {flow.nodes.length === 0 ? (
             <p className="muted">
@@ -156,7 +202,7 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
         </Card>
       )}
 
-      {tab === "json" && (
+      {mode === "advanced" && tab === "json" && (
         <Card title="Raw policy document">
           <textarea
             style={{ minHeight: 360 }}
@@ -188,8 +234,8 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
         </Card>
       )}
 
-      {tab === "simulate" && (
-        <SimulationPanel tenantId={tenantId} baseGraph={graphQuery.data?.graph ?? {}} />
+      {mode === "advanced" && tab === "simulate" && (
+        <SimulationPanel tenantId={tenantId} baseGraph={graphQuery.data?.graph ?? EMPTY_GRAPH} />
       )}
     </>
   );
@@ -302,6 +348,386 @@ function SimulationResult({ report }: { report: SimulationResponse }) {
             ))}
           </tbody>
         </table>
+      )}
+    </>
+  );
+}
+
+// --- Simple mode ---------------------------------------------------------
+
+interface GraphRule {
+  id?: string;
+  domain?: string;
+  verb?: string;
+  description?: string;
+  subject_refs?: string[];
+  predicate_refs?: string[];
+  subjects?: { name?: string; kind?: string }[];
+  predicates?: { name?: string }[];
+  [k: string]: unknown;
+}
+
+interface GraphDoc {
+  default_action?: string;
+  rules?: GraphRule[];
+  [k: string]: unknown;
+}
+
+const VERB_TONE: Record<string, "ok" | "warn" | "danger" | "neutral" | "info"> = {
+  allow: "ok",
+  deny: "danger",
+  inspect: "info",
+  decrypt: "info",
+  steer: "info",
+  log: "neutral",
+  suggest_only: "warn",
+};
+
+function describeSource(r: GraphRule): string {
+  const refs = r.subject_refs ?? [];
+  const inline = (r.subjects ?? []).map((s) =>
+    s.kind ? `${s.kind}:${s.name ?? "?"}` : (s.name ?? "?"),
+  );
+  const all = [...refs, ...inline];
+  return all.length ? all.join(", ") : "Anyone";
+}
+
+function describeDest(r: GraphRule): string {
+  const refs = r.predicate_refs ?? [];
+  const inline = (r.predicates ?? []).map((p) => p.name ?? "?");
+  const all = [...refs, ...inline];
+  if (all.length) return all.join(", ");
+  return r.domain ? `all ${r.domain.toUpperCase()} traffic` : "anything";
+}
+
+interface Row {
+  rule: GraphRule;
+  status: "active" | "removed";
+  key: string;
+}
+
+function SimpleRules({
+  tenantId,
+  graph,
+  isError,
+}: {
+  tenantId: string;
+  graph: GraphDoc;
+  isError: boolean;
+}) {
+  const update = useUpdatePolicyGraph();
+  const sim = useRunSimulation(tenantId);
+  const toast = useToast();
+
+  const initial = useMemo<Row[]>(
+    () =>
+      (graph.rules ?? []).map((rule, i) => ({
+        rule,
+        status: "active" as const,
+        key: rule.id || `rule-${i}`,
+      })),
+    [graph.rules],
+  );
+
+  const [rows, setRows] = useState<Row[]>(initial);
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  // Keep the latest `sim.reset` and `initial` in refs so the reset effect can
+  // depend only on the content signature below (refs never re-fire effects).
+  const resetSim = useRef(sim.reset);
+  resetSim.current = sim.reset;
+  const initialRef = useRef(initial);
+  initialRef.current = initial;
+  // A stable signature of the upstream rule *content* (not array identity).
+  // The global MutationCache invalidates every query after any successful
+  // mutation, so the policy-graph query refetches and `graph`/`initial` get
+  // new object identities even when the rules are unchanged. Keying the reset
+  // on content means an unrelated mutation (e.g. acking an alert) no longer
+  // wipes the operator's in-progress reordering/removals; a genuine upstream
+  // change still resets, as it should.
+  const signature = useMemo(
+    () =>
+      JSON.stringify({
+        d: graph.default_action ?? null,
+        r: (graph.rules ?? []).map((rule, i) => [
+          rule.id || `rule-${i}`,
+          rule.verb ?? null,
+          rule.domain ?? null,
+          rule.subject_refs ?? null,
+          rule.predicate_refs ?? null,
+          rule.subjects ?? null,
+          rule.predicates ?? null,
+        ]),
+      }),
+    [graph],
+  );
+  // Reset local edits only when the upstream rule content actually changes.
+  useEffect(() => {
+    setRows(initialRef.current);
+    resetSim.current();
+  }, [signature]);
+
+  const removedKeys = new Set(
+    rows.filter((r) => r.status === "removed").map((r) => r.key),
+  );
+  const activeKeys = rows
+    .filter((r) => r.status === "active")
+    .map((r) => r.key);
+  // Expected order = original order with the removed rules filtered out, so a
+  // removal alone doesn't count as a reorder.
+  const expectedKeys = initial
+    .filter((r) => !removedKeys.has(r.key))
+    .map((r) => r.key);
+  const activeOrder = activeKeys.join("|");
+  const expectedOrder = expectedKeys.join("|");
+  const removedCount = removedKeys.size;
+  const reordered = activeOrder !== expectedOrder;
+  const dirty = removedCount > 0 || reordered;
+  // Per-row "moved" flag, compared within the *active* sequence only. A row is
+  // moved iff its position among the active rows differs from where it sits in
+  // the expected (removal-only) sequence. Comparing like-for-like coordinates
+  // means a row that merely slid up because a row above it was marked for
+  // removal is NOT flagged — only rows the operator actually reordered are.
+  const movedKeys = new Set(
+    reordered ? activeKeys.filter((k, idx) => expectedKeys[idx] !== k) : [],
+  );
+
+  const proposed = (): GraphDoc => ({
+    ...graph,
+    rules: rows.filter((r) => r.status === "active").map((r) => r.rule),
+  });
+
+  const onDrop = (targetKey: string) => {
+    if (!dragKey || dragKey === targetKey) return;
+    setRows((prev) => {
+      const next = [...prev];
+      const from = next.findIndex((r) => r.key === dragKey);
+      const to = next.findIndex((r) => r.key === targetKey);
+      if (from < 0 || to < 0) return prev;
+      // Don't reposition relative to a removed row — only active rows define
+      // the meaningful order, so dropping onto a removed row is a no-op that
+      // keeps the visible active sequence unambiguous.
+      if (next[to].status === "removed") return prev;
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+    setDragKey(null);
+  };
+
+  const test = () => {
+    sim.mutate({ proposed: proposed() });
+  };
+
+  const apply = () => {
+    update.mutate(
+      { tenantId, data: proposed() as Record<string, unknown> },
+      {
+        onSuccess: () => toast.success("Policy updated", "Your changes are live."),
+        onError: (e) =>
+          toast.error(
+            "Could not save policy",
+            e instanceof Error ? e.message : undefined,
+          ),
+      },
+    );
+  };
+
+  if (isError || rows.length === 0) {
+    return (
+      <Card title="Rules">
+        <EmptyState
+          title="No rules yet"
+          description="This tenant's policy has no rules. Switch to Advanced to author the policy graph, then come back here to manage rules in plain English."
+        />
+      </Card>
+    );
+  }
+
+  return (
+    <>
+      <Card
+        title="Rules — who can do what, to where"
+        actions={
+          <HelpTooltip title="Reordering rules" align="right">
+            Rules are evaluated top to bottom; the first match wins. Drag the ⠿
+            handle to reorder. Mark a rule for removal to preview deleting it,
+            then test the change before saving.
+          </HelpTooltip>
+        }
+      >
+        <div className="rule-table" role="table" aria-label="Policy rules">
+          <div className="rule-row rule-row--head" role="row">
+            <span />
+            <span>Source</span>
+            <span>Action</span>
+            <span>Destination</span>
+            <span>Domain</span>
+            <span />
+          </div>
+          {rows.map((row, i) => {
+            const r = row.rule;
+            const verb = (r.verb ?? "").toLowerCase();
+            const moved = row.status === "active" && movedKeys.has(row.key);
+            const variant =
+              row.status === "removed" ? "remove" : moved ? "draft" : "active";
+            return (
+              <div
+                key={row.key}
+                className={`rule-row rule-row--${variant}`}
+                role="row"
+                draggable={row.status === "active"}
+                onDragStart={() => setDragKey(row.key)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={() => onDrop(row.key)}
+              >
+                <span
+                  className="rule-row__handle"
+                  title="Drag to reorder"
+                  aria-hidden
+                >
+                  ⠿
+                </span>
+                <span className="rule-row__src" title={describeSource(r)}>
+                  <b>{i + 1}.</b> {describeSource(r)}
+                  {r.description && (
+                    <span className="rule-row__desc">{r.description}</span>
+                  )}
+                </span>
+                <span>
+                  <Badge tone={VERB_TONE[verb] ?? "neutral"}>
+                    {r.verb ?? "—"}
+                  </Badge>
+                </span>
+                <span title={describeDest(r)}>{describeDest(r)}</span>
+                <span className="muted">{r.domain ?? "—"}</span>
+                <span>
+                  {row.status === "active" ? (
+                    <button
+                      className="btn btn--sm btn--danger"
+                      onClick={() =>
+                        setRows((prev) =>
+                          prev.map((x) =>
+                            x.key === row.key ? { ...x, status: "removed" } : x,
+                          ),
+                        )
+                      }
+                    >
+                      Remove
+                    </button>
+                  ) : (
+                    <button
+                      className="btn btn--sm"
+                      onClick={() =>
+                        setRows((prev) =>
+                          prev.map((x) =>
+                            x.key === row.key ? { ...x, status: "active" } : x,
+                          ),
+                        )
+                      }
+                    >
+                      Undo
+                    </button>
+                  )}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="rule-legend">
+          <span><i className="dot dot--ok" /> Active</span>
+          <span><i className="dot dot--warn" /> Reordered (draft)</span>
+          <span><i className="dot dot--danger" /> Will be removed</span>
+        </div>
+
+        <div className="rule-actions">
+          <button
+            className="btn"
+            onClick={test}
+            disabled={sim.isPending || !dirty}
+          >
+            {sim.isPending ? "Testing…" : "Test this change"}
+          </button>
+          <button
+            className="btn btn--primary"
+            onClick={apply}
+            disabled={update.isPending || !dirty}
+          >
+            {update.isPending ? "Saving…" : "Save changes"}
+          </button>
+          {dirty && (
+            <button
+              className="btn"
+              onClick={() => {
+                setRows(initial);
+                sim.reset();
+              }}
+            >
+              Discard
+            </button>
+          )}
+        </div>
+      </Card>
+
+      {(sim.isPending || sim.data || sim.isError) && (
+        <Card title="Impact of this change">
+          {sim.isError ? (
+            <ErrorState error={sim.error} />
+          ) : sim.isPending ? (
+            <p className="muted">Replaying recent traffic…</p>
+          ) : sim.data ? (
+            <ImpactSummary report={sim.data} removed={removedCount} reordered={reordered} />
+          ) : null}
+        </Card>
+      )}
+    </>
+  );
+}
+
+function ImpactSummary({
+  report,
+  removed,
+  reordered,
+}: {
+  report: SimulationResponse;
+  removed: number;
+  reordered: boolean;
+}) {
+  const edits: string[] = [];
+  if (removed > 0) edits.push(`${removed} rule${removed === 1 ? "" : "s"} removed`);
+  if (reordered) edits.push("rules reordered");
+
+  return (
+    <>
+      <p>
+        {edits.length > 0 && <b>{edits.join(", ")}. </b>}
+        {report.changed === 0 ? (
+          <>
+            Replaying the last {report.total} request
+            {report.total === 1 ? "" : "s"}, <b>nothing changes</b> — this edit
+            looks safe to apply.
+          </>
+        ) : (
+          <>
+            Of the last {report.total} request{report.total === 1 ? "" : "s"},{" "}
+            <b>{report.changed}</b> would get a different outcome, affecting{" "}
+            <b>{report.affected_devices.length}</b> device
+            {report.affected_devices.length === 1 ? "" : "s"}.
+          </>
+        )}
+      </p>
+      {report.transitions.length > 0 && (
+        <ul className="impact-list">
+          {report.transitions.map((t, i) => (
+            <li key={i}>
+              <Badge tone="neutral">{t.prev_verdict}</Badge> →{" "}
+              <Badge tone={t.next_verdict === "deny" ? "danger" : "ok"}>
+                {t.next_verdict}
+              </Badge>{" "}
+              for <b>{t.count}</b> request{t.count === 1 ? "" : "s"}
+            </li>
+          ))}
+        </ul>
       )}
     </>
   );

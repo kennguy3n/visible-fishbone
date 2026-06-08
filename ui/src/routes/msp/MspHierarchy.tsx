@@ -8,7 +8,15 @@ import {
 } from "@/api/generated/endpoints/msps/msps";
 import { MSPStatus, MSPCreateStatus } from "@/api/generated/model";
 import type { Msp } from "@/api/generated/model";
-import { PageHeader, Card, AsyncBoundary, StatusBadge, LoadingState } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  StatusBadge,
+  LoadingState,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
 import { Modal } from "@/components/Modal";
 import { titleCase } from "@/lib/format";
 
@@ -35,7 +43,13 @@ export function MspHierarchy() {
             error={list.error}
             data={list.data}
             isEmpty={(d) => (d.items?.length ?? 0) === 0}
-            empty={<p className="muted">No MSPs registered.</p>}
+            empty={
+              <EmptyState
+                illustration={<EmptyIllustration kind="inbox" />}
+                title="No providers registered"
+                description="Managed service providers will appear here once registered."
+              />
+            }
           >
             {(d) => (
               <div className="tree">
@@ -150,7 +164,13 @@ function MspTenants({ mspId }: { mspId: string }) {
   const tenants = useListMSPTenants(mspId, undefined);
   if (tenants.isLoading) return <LoadingState />;
   const items = tenants.data?.items ?? [];
-  if (items.length === 0) return <p className="muted">No tenants assigned.</p>;
+  if (items.length === 0)
+    return (
+      <EmptyState
+        title="No tenants assigned"
+        description="This provider has no tenants assigned yet."
+      />
+    );
   return (
     <ul className="tree tree--child">
       {items.map((b) => (

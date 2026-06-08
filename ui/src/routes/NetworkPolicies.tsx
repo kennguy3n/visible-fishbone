@@ -1,6 +1,13 @@
 import { useState } from "react";
 import { useGetPolicyGraph } from "@/api/generated/endpoints/policy/policy";
-import { PageHeader, Card, LoadingState, Badge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  LoadingState,
+  Badge,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
 import { RequireTenant } from "@/components/RequireTenant";
 
 const DOMAINS = [
@@ -77,12 +84,17 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
           {activeMeta.blurb}
         </p>
         {graph.isError ? (
-          <p className="muted">No policy graph compiled for this tenant yet.</p>
+          <EmptyState
+            illustration={<EmptyIllustration kind="policy" />}
+            title="No policy graph yet"
+            description="No policy graph has been compiled for this tenant. Author one in the Policy editor."
+          />
         ) : domainNodes.length === 0 ? (
-          <p className="muted">
-            No {activeMeta.label} rules found in the current graph (version{" "}
-            {graph.data?.version ?? "—"}). Author rules in the Policy editor.
-          </p>
+          <EmptyState
+            illustration={<EmptyIllustration kind="policy" />}
+            title={`No ${activeMeta.label} rules`}
+            description={`The current graph (version ${graph.data?.version ?? "—"}) has no ${activeMeta.label} rules. Author rules in the Policy editor.`}
+          />
         ) : (
           <table className="data">
             <thead>

@@ -6,7 +6,15 @@ import {
   useCreatePlaybook,
   useDecideApproval,
 } from "@/api/manual/hooks";
-import { PageHeader, Card, AsyncBoundary, StatusBadge, Badge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  StatusBadge,
+  Badge,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Modal } from "@/components/Modal";
 import { RequireTenant } from "@/components/RequireTenant";
@@ -57,7 +65,13 @@ function PlaybooksInner({ tenantId }: { tenantId: string }) {
           error={approvals.error}
           data={approvals.data}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
-          empty={<p className="muted">No approvals waiting.</p>}
+          empty={
+            <EmptyState
+              illustration={<EmptyIllustration kind="inbox" />}
+              title="No approvals waiting"
+              description="Playbook runs that need sign-off will appear here."
+            />
+          }
         >
           {(d) => (
             <div className="grid" style={{ gap: 10 }}>
@@ -106,7 +120,13 @@ function PlaybooksInner({ tenantId }: { tenantId: string }) {
             error={playbooks.error}
             data={playbooks.data}
             isEmpty={(d) => (d.items?.length ?? 0) === 0}
-            empty={<p className="muted">No playbooks defined.</p>}
+            empty={
+              <EmptyState
+                illustration={<EmptyIllustration kind="policy" />}
+                title="No playbooks yet"
+                description="Define an automated response playbook to remediate incidents with one click."
+              />
+            }
           >
             {(d) => <DataTable columns={pbCols} rows={d.items ?? []} rowKey={(p) => p.id} />}
           </AsyncBoundary>
@@ -118,7 +138,13 @@ function PlaybooksInner({ tenantId }: { tenantId: string }) {
             error={executions.error}
             data={executions.data}
             isEmpty={(d) => (d.items?.length ?? 0) === 0}
-            empty={<p className="muted">No executions yet.</p>}
+            empty={
+              <EmptyState
+                illustration={<EmptyIllustration kind="inbox" />}
+                title="No executions yet"
+                description="Playbook runs and their outcomes will be listed here."
+              />
+            }
           >
             {(d) => <DataTable columns={exCols} rows={d.items ?? []} rowKey={(e) => e.id} />}
           </AsyncBoundary>

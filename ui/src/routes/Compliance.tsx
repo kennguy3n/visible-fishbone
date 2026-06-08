@@ -4,7 +4,14 @@ import {
   useGenerateComplianceReport,
 } from "@/api/manual/hooks";
 import { sngRequest } from "@/api/http-client";
-import { PageHeader, Card, AsyncBoundary, Badge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  Badge,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
 import { Modal } from "@/components/Modal";
 import { RequireTenant } from "@/components/RequireTenant";
 import { formatDateTime } from "@/lib/format";
@@ -65,7 +72,15 @@ function ComplianceInner({ tenantId }: { tenantId: string }) {
         error={reports.error}
         data={reports.data}
         isEmpty={(d) => (d.items?.length ?? 0) === 0}
-        empty={<Card><p className="muted">No reports generated yet.</p></Card>}
+        empty={
+          <Card>
+            <EmptyState
+              illustration={<EmptyIllustration kind="policy" />}
+              title="No compliance reports yet"
+              description="Generate a report to evaluate this tenant against a compliance framework."
+            />
+          </Card>
+        }
       >
         {(d) => (
           <div className="grid grid--2">
