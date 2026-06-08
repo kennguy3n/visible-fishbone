@@ -240,7 +240,7 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	rc, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
+	rc, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx, elector.IsLeader)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -616,6 +616,9 @@ func buildRouter(
 	replay *telreplay.Worker,
 	telPub *sngnats.Publisher,
 	mx *metrics.Metrics,
+	// isLeader gates the fleet-wide threat-intel snapshot write so only
+	// the elected leader flushes it (the loop still runs everywhere).
+	isLeader func() bool,
 ) (routerComponents, error) {
 	store := postgres.NewStoreWithPool(pool)
 
@@ -868,6 +871,7 @@ func buildRouter(
 			}
 		}),
 		aisvc.WithPersister(iocPersister, cfg.ThreatIntel.PersistInterval),
+		aisvc.WithLeaderCheck(isLeader),
 	)
 
 	policySvc := policy.New(

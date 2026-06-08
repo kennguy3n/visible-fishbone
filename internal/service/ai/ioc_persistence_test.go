@@ -246,6 +246,48 @@ func TestFeedManager_RestoreNoHookWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestFeedManager_PersistGatedByLeader(t *testing.T) {
+	t.Parallel()
+	// A follower (leader check returns false) must NOT write, even on
+	// the shutdown flush. Restore (a read) is unaffected and is not
+	// exercised here.
+	store := NewIOCStore()
+	store.Upsert(mkIOC(IOCTypeDomain, "evil.example.com", 0.9))
+	fp := &fakePersister{}
+	mgr := NewFeedManager(store, nil,
+		WithPersister(fp, time.Hour), // large interval: only shutdown flush
+		WithLeaderCheck(func() bool { return false }),
+	)
+	mgr.Start(context.Background())
+	mgr.Stop()
+
+	if _, calls := fp.snapshot(); calls != 0 {
+		t.Fatalf("follower persisted %d times, want 0 (leader-gated)", calls)
+	}
+}
+
+func TestFeedManager_PersistRunsWhenLeader(t *testing.T) {
+	t.Parallel()
+	// A leader (predicate true) flushes on shutdown as usual.
+	store := NewIOCStore()
+	store.Upsert(mkIOC(IOCTypeDomain, "evil.example.com", 0.9))
+	fp := &fakePersister{}
+	mgr := NewFeedManager(store, nil,
+		WithPersister(fp, time.Hour),
+		WithLeaderCheck(func() bool { return true }),
+	)
+	mgr.Start(context.Background())
+	mgr.Stop()
+
+	stored, calls := fp.snapshot()
+	if calls < 1 {
+		t.Fatalf("leader persisted %d times, want >=1", calls)
+	}
+	if len(stored) != 1 || stored[0].Value != "evil.example.com" {
+		t.Fatalf("leader shutdown flush stored %#v, want the single domain", stored)
+	}
+}
+
 // assertSameSnapshot compares two snapshots by (type,value) identity
 // and the enforcement-relevant fields, independent of slice order.
 func assertSameSnapshot(t *testing.T, a, b IOCSnapshot) {

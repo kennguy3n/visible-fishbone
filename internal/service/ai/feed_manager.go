@@ -40,6 +40,11 @@ type FeedManager struct {
 	// is the flush cadence; a final flush also runs on shutdown.
 	persister       IOCPersister
 	persistInterval time.Duration
+	// isLeader, when set, gates the persist write so only the
+	// elected leader flushes the shared snapshot table in a
+	// multi-replica deployment. Nil means persist from every
+	// replica. Restore (a read) is never gated.
+	isLeader func() bool
 
 	metrics   feedMetrics
 	stopCh    chan struct{}
@@ -109,6 +114,20 @@ func WithPersister(p IOCPersister, interval time.Duration) FeedManagerOption {
 			m.persistInterval = defaultPersistInterval
 		}
 	}
+}
+
+// WithLeaderCheck gates the persist *write* behind a leadership
+// predicate so that, in a multi-replica deployment, only the elected
+// leader flushes the shared threat_intel_iocs snapshot table —
+// matching the singleton-workload pattern used for the other periodic
+// DB writers (app-registry sync, pop rebalance, compliance evidence).
+// Restore is unaffected: every replica still hydrates its own
+// in-memory store on boot. A nil predicate (the default) persists from
+// every replica, which is safe (each ReplaceAll is an atomic
+// last-writer-wins swap) but multiplies write traffic by replica
+// count. Has no effect unless a persister is also configured.
+func WithLeaderCheck(isLeader func() bool) FeedManagerOption {
+	return func(m *FeedManager) { m.isLeader = isLeader }
 }
 
 // withManagerClock overrides the clock (tests).
@@ -438,6 +457,18 @@ func (m *FeedManager) runPersistLoop(ctx context.Context) {
 // slow database.
 func (m *FeedManager) flushPersist(ctx context.Context, reason string) {
 	if m.persister == nil {
+		return
+	}
+	// Leader-only write: the snapshot table is fleet-wide, so in a
+	// multi-replica deployment only the leader flushes it. Followers
+	// still run the loop (and restore on boot); they just skip the
+	// redundant write. Re-checked on every flush so leadership
+	// changes are honoured without restarting the loop.
+	if m.isLeader != nil && !m.isLeader() {
+		if m.logger != nil {
+			m.logger.DebugContext(ctx, "threat-intel: skipping IOC store persist (not leader)",
+				"reason", reason)
+		}
 		return
 	}
 	if reason == "shutdown" {
