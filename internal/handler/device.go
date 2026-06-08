@@ -147,6 +147,13 @@ func (h *DeviceHandler) createClaimToken(w http.ResponseWriter, r *http.Request)
 				WriteError(w, http.StatusBadRequest, "invalid_body", err.Error())
 				return
 			}
+		} else if dec.More() {
+			// A well-formed body carries exactly one JSON value; reject
+			// trailing bytes after it, matching DecodeJSONLimit's
+			// anti-smuggling guard so this bespoke optional-body path
+			// stays consistent with the common decoder.
+			WriteError(w, http.StatusBadRequest, "invalid_body", "unexpected trailing data after JSON value")
+			return
 		}
 	}
 	ttl := h.claimTokenTTL

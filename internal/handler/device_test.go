@@ -230,6 +230,24 @@ func TestCreateClaimTokenRejectsOversizedBody(t *testing.T) {
 	}
 }
 
+// TestCreateClaimTokenRejectsTrailingData verifies the optional-body
+// path rejects a second JSON value after the first, matching
+// DecodeJSONLimit's anti-smuggling guard so the bespoke decoder here
+// can't silently ignore concatenated documents.
+func TestCreateClaimTokenRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+	h, tenantID := newTestDeviceHandler(t)
+
+	rec := httptest.NewRecorder()
+	h.createClaimToken(rec, reqWithTenant(t, http.MethodPost, `{"ttl_seconds":120}{"ttl_seconds":999}`, tenantID))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "trailing data") {
+		t.Errorf("error should mention trailing data, got: %s", rec.Body.String())
+	}
+}
+
 // TestCreateClaimTokenStampsAuthenticatedActor is the regression
 // test for the PR6 round-4 Devin Review finding: createClaimToken
 // hardcoded `nil` as the audited actor instead of resolving the
