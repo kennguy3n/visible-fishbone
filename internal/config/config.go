@@ -82,6 +82,7 @@ type Config struct {
 	TelemetryAnalytics TelemetryAnalytics
 	AppRegistry        AppRegistry
 	AI                 AI
+	ThreatIntel        ThreatIntel
 	MobileAuth         MobileAuth
 	Metering           Metering
 	PoP                PoP
@@ -321,6 +322,49 @@ type AI struct {
 	// GuardrailMaxTokensPerDay is the per-tenant daily token budget
 	// for LLM-backed AI calls (cost control). Defaults to 100000.
 	GuardrailMaxTokensPerDay int
+}
+
+// ThreatIntel carries the runtime knobs for the WORKSTREAM 8 threat
+// feed aggregator (internal/service/ai feed_*.go). Each upstream is
+// gated behind its URL: with no URLs set the aggregator still runs
+// (the in-memory IOC store + expiry sweeper) but pulls nothing, so
+// the IOC->enforcement path is a safe no-op until an operator points
+// it at real feeds. Network calls happen only for configured feeds,
+// honouring the "gate real network calls behind config" rule.
+//
+// Parsed leniently (plain THREATINTEL_* strings/durations): a
+// misconfig degrades to "feed disabled" rather than failing boot,
+// matching the fail-open posture of the other enrichment features.
+type ThreatIntel struct {
+	// RefreshInterval is the default per-feed refresh cadence.
+	// Defaults to 1h (the workstream's mandated hourly default).
+	RefreshInterval time.Duration
+	// DefaultTTL ages out indicators a feed did not date itself.
+	// Zero leaves them permanent (matching the demotion engine's
+	// threat_feed TTL).
+	DefaultTTL time.Duration
+	// MinConfidence is the store-wide confidence floor in [0,1];
+	// indicators below it are dropped at ingest. Defaults to 0.
+	MinConfidence float64
+	// TAXIIURL / TAXIIToken configure a STIX/TAXII 2.1 collection
+	// endpoint. The token, when set, is sent as a Bearer
+	// Authorization header.
+	TAXIIURL   string
+	TAXIIToken string
+	// OTXURL / OTXAPIKey configure the AlienVault OTX subscribed-
+	// pulses API. The key is sent as the X-OTX-API-KEY header.
+	OTXURL    string
+	OTXAPIKey string
+	// URLhausURL / MalwareBazaarURL / FeodoTrackerURL configure the
+	// three abuse.ch community feeds (malware URLs, malware hashes,
+	// C2 IPs respectively).
+	URLhausURL       string
+	MalwareBazaarURL string
+	FeodoTrackerURL  string
+	// CSVURL / JSONURL configure a generic CERT/ISAC flat-file feed
+	// in CSV (indicator-per-row) or JSON (array-of-objects) form.
+	CSVURL  string
+	JSONURL string
 }
 
 // Log carries structured-logging configuration.
@@ -1226,6 +1270,20 @@ func Load() (Config, error) {
 			APIKey:   getStr("AI_LLM_API_KEY", ""),
 			Model:    getStr("AI_LLM_MODEL", ""),
 		},
+		ThreatIntel: ThreatIntel{
+			RefreshInterval:  getDuration("THREATINTEL_REFRESH_INTERVAL", time.Hour),
+			DefaultTTL:       getDuration("THREATINTEL_DEFAULT_TTL", 0),
+			MinConfidence:    getFloatLenient("THREATINTEL_MIN_CONFIDENCE", 0),
+			TAXIIURL:         getStr("THREATINTEL_TAXII_URL", ""),
+			TAXIIToken:       getStr("THREATINTEL_TAXII_TOKEN", ""),
+			OTXURL:           getStr("THREATINTEL_OTX_URL", ""),
+			OTXAPIKey:        getStr("THREATINTEL_OTX_API_KEY", ""),
+			URLhausURL:       getStr("THREATINTEL_URLHAUS_URL", ""),
+			MalwareBazaarURL: getStr("THREATINTEL_MALWAREBAZAAR_URL", ""),
+			FeodoTrackerURL:  getStr("THREATINTEL_FEODOTRACKER_URL", ""),
+			CSVURL:           getStr("THREATINTEL_CSV_URL", ""),
+			JSONURL:          getStr("THREATINTEL_JSON_URL", ""),
+		},
 	}
 
 	// Critical numeric settings: re-parse with the strict helpers
@@ -1887,6 +1945,23 @@ func getIntLenient(key string, def int) int {
 		return def
 	}
 	return n
+}
+
+// getFloatLenient parses a float env var, falling back to def on
+// unset or malformed input. Same lenient posture as getIntLenient —
+// used for opportunistic enrichment knobs (e.g. the threat-intel
+// confidence floor) where a typo should degrade to the default
+// rather than fail boot.
+func getFloatLenient(key string, def float64) float64 {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil {
+		return def
+	}
+	return f
 }
 
 // getBoolLenient parses a boolean env var, falling back to def on

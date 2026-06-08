@@ -116,14 +116,49 @@ type InlineCASBCompiler interface {
 	CompileRules(ctx context.Context, tenantID uuid.UUID) ([]Rule, error)
 }
 
+// IOCCompiler produces the threat-intel deny rules for a tenant as
+// policy.Rule entries, for the compiler to fold into the typed
+// graph before per-target slicing — the same mechanism as
+// InlineCASBCompiler. The rules carry the standard enforcement
+// domains (DomainNGFW for IP IOCs, DomainDNS for domain IOCs,
+// DomainSWG for URL IOCs) so they route to the right targets via
+// domainTargets and ride the same per-target slicing, signing and
+// versioning as every operator-authored rule.
+//
+// Threat-feed indicators are global (they apply to every tenant —
+// see the demotion engine's threat_feed signal), so a typical
+// implementation ignores tenantID and returns the same deny set
+// for all tenants; the parameter is kept for symmetry and to allow
+// a future per-tenant allow-list carve-out. A nil compiler leaves
+// the threat-intel rules out of every bundle.
+type IOCCompiler interface {
+	CompileIOCRules(ctx context.Context, tenantID uuid.UUID) ([]Rule, error)
+}
+
+// MalwareHashCompiler produces the malicious file-hash verdicts a
+// bundle ships to the SWG malware inspector (the StaticMalwareList
+// in crates/sng-swg). Hash IOCs cannot be expressed as a graph
+// rule — the SWG matches a response body's SHA-256 against an
+// in-memory table, not a flow/DNS/HTTP predicate — so they ride a
+// dedicated bundle section instead of the rule slice. The section
+// is emitted only for targets that run the SWG ext-authz malware
+// path (edge + cloud, matching domainTargets(DomainSWG)). A nil
+// compiler omits the section, leaving the receiver's malware list
+// empty (every hash resolves to Unknown).
+type MalwareHashCompiler interface {
+	CompileMalwareHashes(ctx context.Context, tenantID uuid.UUID) ([]MalwareHashEntry, error)
+}
+
 // Service is the policy service.
 type Service struct {
-	repo       repository.PolicyRepository
-	audit      repository.AuditLogRepository
-	signer     Signer
-	logger     *slog.Logger
-	steering   SteeringCompiler
-	inlineCASB InlineCASBCompiler
+	repo        repository.PolicyRepository
+	audit       repository.AuditLogRepository
+	signer      Signer
+	logger      *slog.Logger
+	steering    SteeringCompiler
+	inlineCASB  InlineCASBCompiler
+	ioc         IOCCompiler
+	malwareHash MalwareHashCompiler
 }
 
 // ServiceOption configures New.
@@ -168,6 +203,30 @@ func WithSteeringCompiler(c SteeringCompiler) ServiceOption {
 func WithInlineCASBCompiler(c InlineCASBCompiler) ServiceOption {
 	return func(s *Service) {
 		s.inlineCASB = c
+	}
+}
+
+// WithIOCCompiler installs the threat-intel IOC rule compiler.
+// When supplied, Compile folds the current threat-feed deny rules
+// (IP -> NGFW deny, domain -> DNS deny/sinkhole, URL -> SWG deny)
+// into the typed graph before per-target slicing, so they ship in
+// the relevant target bundles. When nil, bundles carry no
+// threat-intel rules. Production callers pass the IOC enforcement
+// compiler built over the feed aggregator's IOCStore.
+func WithIOCCompiler(c IOCCompiler) ServiceOption {
+	return func(s *Service) {
+		s.ioc = c
+	}
+}
+
+// WithMalwareHashCompiler installs the malware file-hash compiler.
+// When supplied, Compile embeds the current malicious-hash set into
+// the edge + cloud bundles' malware section, which the SWG malware
+// inspector installs into its StaticMalwareList. When nil, the
+// section is omitted.
+func WithMalwareHashCompiler(c MalwareHashCompiler) ServiceOption {
+	return func(s *Service) {
+		s.malwareHash = c
 	}
 }
 
@@ -406,6 +465,43 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 			}
 		}
 	}
+	// Fold the threat-intel IOC deny rules into the typed graph
+	// alongside inline-CASB, so IP/domain/URL indicators ride the
+	// same per-target slicing, signing and versioning as every
+	// other rule. They route by Domain (NGFW/DNS/SWG) through
+	// domainTargets. As with inline-CASB, a legacy verbatim-rules
+	// graph (typed == nil) cannot absorb them — warn rather than
+	// drop silently so an operator can re-publish to opt in.
+	if s.ioc != nil {
+		iocRules, iocErr := s.ioc.CompileIOCRules(ctx, tenantID)
+		if iocErr != nil {
+			return CompileResult{}, fmt.Errorf("compile threat-intel ioc rules: %w", iocErr)
+		}
+		if len(iocRules) > 0 {
+			if typed != nil {
+				typed.Rules = append(typed.Rules, iocRules...)
+			} else {
+				s.logger.Warn("policy: threat-intel IOC rules skipped for tenant on legacy verbatim-rules path (re-publish the policy graph to enable IOC enforcement)",
+					slog.String("tenant_id", tenantID.String()),
+					slog.String("graph_id", graph.ID.String()),
+					slog.Int("ioc_rules", len(iocRules)),
+				)
+			}
+		}
+	}
+	// Compile the malicious file-hash set once per Compile. It is
+	// the same for every target; encodeBundlePayloadFor includes
+	// it only in the targets that run the SWG malware inspector
+	// (edge + cloud). A nil compiler yields no entries and the
+	// section is omitted.
+	var malwareHashes []MalwareHashEntry
+	if s.malwareHash != nil {
+		mh, mhErr := s.malwareHash.CompileMalwareHashes(ctx, tenantID)
+		if mhErr != nil {
+			return CompileResult{}, fmt.Errorf("compile malware hashes: %w", mhErr)
+		}
+		malwareHashes = mh
+	}
 	// Snapshot the appdb catalog + tenant overrides once per
 	// Compile so the per-target steering build below doesn't
 	// re-issue the same pair of ListAll reads for every bundle
@@ -446,7 +542,7 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 			}
 			steeringJSON = encoded
 		}
-		payload, err := encodeBundlePayloadFor(target, graph, typed, steeringJSON, compiledAt)
+		payload, err := encodeBundlePayloadFor(target, graph, typed, steeringJSON, malwareForTarget(target, malwareHashes), compiledAt)
 		if err != nil {
 			return CompileResult{}, fmt.Errorf("encode %s bundle: %w", target, err)
 		}
@@ -526,8 +622,61 @@ type bundlePayload struct {
 	// bundle remains deterministic byte-for-byte (the appdb
 	// compiler sorts every set into canonical order). Omitted when
 	// no steering compiler is wired.
-	Steering   json.RawMessage `msgpack:"st,omitempty"`
+	Steering json.RawMessage `msgpack:"st,omitempty"`
+	// Malware is the threat-intel malicious file-hash set the SWG
+	// installs into its StaticMalwareList. JSON-encoded for the
+	// same byte-determinism reason as Rules/Steering. Omitted when
+	// no malware-hash compiler is wired or the target does not run
+	// the SWG malware inspector (only edge + cloud do).
+	Malware    json.RawMessage `msgpack:"mw,omitempty"`
 	CompiledAt string          `msgpack:"ts"`
+}
+
+// MalwareHashEntry is one hash -> verdict mapping in a bundle's
+// malware section. Hash is lowercase hex (the canonical IOC form);
+// Verdict is the SWG verdict string ("malicious" / "suspicious" /
+// "clean") the Rust StaticMalwareList parses. The JSON keys are
+// terse ("h"/"v") to keep the bundle compact since the malware set
+// can be large.
+type MalwareHashEntry struct {
+	Hash    string `json:"h"`
+	Verdict string `json:"v"`
+}
+
+// malwareForTarget returns the malware-hash set for a target,
+// limited to the targets that run the SWG malware inspector (edge
+// + cloud, matching domainTargets(DomainSWG)). Other targets get
+// nil so the section is omitted from their bundle.
+func malwareForTarget(target repository.PolicyBundleTarget, all []MalwareHashEntry) []MalwareHashEntry {
+	if len(all) == 0 {
+		return nil
+	}
+	switch target {
+	case repository.PolicyBundleTargetEdge, repository.PolicyBundleTargetCloud:
+		return all
+	default:
+		return nil
+	}
+}
+
+// encodeMalwareHashes canonicalises the malware-hash set for the
+// bundle: entries are sorted by hash so two compilations of the
+// same set produce byte-identical output, matching the determinism
+// guarantee the rest of the bundle upholds. Returns nil for an
+// empty set so the section is omitted.
+func encodeMalwareHashes(entries []MalwareHashEntry) (json.RawMessage, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	sorted := make([]MalwareHashEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Hash != sorted[j].Hash {
+			return sorted[i].Hash < sorted[j].Hash
+		}
+		return sorted[i].Verdict < sorted[j].Verdict
+	})
+	return json.Marshal(sorted)
 }
 
 // encodeBundlePayload renders a deterministic, MessagePack-encoded
@@ -553,7 +702,7 @@ func encodeBundlePayload(target repository.PolicyBundleTarget, g repository.Poli
 	if parsed, err := ParseGraph(g.Graph); err == nil {
 		typed = &parsed
 	}
-	return encodeBundlePayloadFor(target, g, typed, nil, compiledAt)
+	return encodeBundlePayloadFor(target, g, typed, nil, nil, compiledAt)
 }
 
 // encodeBundlePayloadFor renders a deterministic, MessagePack-encoded
@@ -567,8 +716,16 @@ func encodeBundlePayload(target repository.PolicyBundleTarget, g repository.Poli
 // traffic-classification rule set (see internal/service/appdb.
 // SteeringRuleSet). nil means "no steering compiler was wired"; the
 // bundle omits the section in that case.
-func encodeBundlePayloadFor(target repository.PolicyBundleTarget, g repository.PolicyGraph, typed *Graph, steeringJSON json.RawMessage, compiledAt time.Time) ([]byte, error) {
+//
+// malware is the malicious file-hash set for this target (already
+// filtered to edge/cloud by malwareForTarget). nil/empty omits the
+// malware section.
+func encodeBundlePayloadFor(target repository.PolicyBundleTarget, g repository.PolicyGraph, typed *Graph, steeringJSON json.RawMessage, malware []MalwareHashEntry, compiledAt time.Time) ([]byte, error) {
 	rules, defaultAction := perTargetRulesFromParsed(target, g.Graph, typed)
+	malwareJSON, err := encodeMalwareHashes(malware)
+	if err != nil {
+		return nil, fmt.Errorf("encode malware hashes: %w", err)
+	}
 	p := bundlePayload{
 		SchemaVersion: 1,
 		Target:        string(target),
@@ -578,6 +735,7 @@ func encodeBundlePayloadFor(target repository.PolicyBundleTarget, g repository.P
 		DefaultAction: defaultAction,
 		Rules:         rules,
 		Steering:      steeringJSON,
+		Malware:       malwareJSON,
 		CompiledAt:    compiledAt.Format(time.RFC3339Nano),
 	}
 	enc := msgpack.GetEncoder()

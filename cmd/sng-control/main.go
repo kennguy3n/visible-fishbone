@@ -240,7 +240,7 @@ func run() error {
 	telReplay := telreplay.New(js, telPublisher, cfg.NATS.StreamPrefix,
 		cfg.TelemetryAnalytics.ReplayDurable, logger)
 
-	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, popSvc, evidenceScheduler, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
+	router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, popSvc, evidenceScheduler, feedMgr, err := buildRouter(&cfg, logger, pool, health, telReplay, telPublisher, mx)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -342,6 +342,13 @@ func run() error {
 		}
 	}()
 	go popSvc.Run(rootCtx, cfg.PoP.RegistryRefreshInterval)
+	// WORKSTREAM 8 threat-intel aggregator: one warm-up refresh per
+	// configured feed on start, then scheduled (default hourly)
+	// re-pulls plus a TTL sweeper, all tied to rootCtx. With no
+	// THREATINTEL_* feeds configured only the sweeper runs (a no-op
+	// over an empty store), so this is safe to start unconditionally.
+	// Stopped explicitly during graceful shutdown below.
+	feedMgr.Start(rootCtx)
 	// The capacity rebalancer is a singleton: only the leader scans
 	// for overloaded PoPs and moves non-override tenants off them, so
 	// a multi-replica deployment performs one coordinated rebalance
@@ -518,6 +525,11 @@ func run() error {
 	if err := integrationWorker.Stop(shutdownCtx); err != nil {
 		logger.Warn("sng-control: integration worker shutdown error", slog.Any("error", err))
 	}
+	// Stop the threat-intel aggregator: signals the feed/sweeper
+	// loops to exit and waits for them (bounded — the loops return
+	// promptly on the stop signal). rootCtx is already cancelled by
+	// this point, so this mainly joins the goroutines cleanly.
+	feedMgr.Stop()
 
 	if err := telShutdown(shutdownCtx); err != nil {
 		logger.Warn("sng-control: telemetry shutdown error", slog.Any("error", err))
@@ -544,7 +556,7 @@ func buildRouter(
 	replay *telreplay.Worker,
 	telPub *sngnats.Publisher,
 	mx *metrics.Metrics,
-) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, *aisvc.Service, *metering.MeteringService, *pop.Service, *compliance.Scheduler, error) {
+) (http.Handler, *webhook.DeliveryWorker, *integration.DeliveryWorker, *handler.AppRegistryHandler, *appdb.Syncer, *handler.PolicySimulationHandler, *aisvc.Service, *metering.MeteringService, *pop.Service, *compliance.Scheduler, *aisvc.FeedManager, error) {
 	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
@@ -655,11 +667,11 @@ func buildRouter(
 	// the same in all cases.
 	keyOpts := []policy.KeyOption{}
 	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap master: %w", err)
 	} else if len(master) > 0 {
 		w, err := policy.NewAESGCMWrapper(master)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy key-wrap aes-gcm: %w", err)
 		}
 		keyOpts = append(keyOpts, policy.WithKeyWrapper(w))
 		logger.Info("policy: AES-256-GCM at-rest wrap enabled for signing seeds")
@@ -670,7 +682,7 @@ func buildRouter(
 	if cfg.Policy.SigningKeyPath != "" {
 		ks, err := policy.LoadKeySignerFromFile(cfg.Policy.SigningKeyPath)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("policy signing key: %w", err)
 		}
 		policySigner = ks
 		fileSigner = ks
@@ -749,6 +761,33 @@ func buildRouter(
 	}
 	rbiSvc := rbi.NewService(rbiSessionRepo, rbiOpts...)
 
+	// --- WORKSTREAM 8: threat-intel feed aggregator + IOC enforcement -
+	// The IOC store is the shared spine: feed parsers Upsert into it,
+	// the live-traffic matcher reads it (folded into the
+	// ThreatIntelEngine alongside the regional catalogs in
+	// buildAIHandler), and the enforcement compiler reads a point-in-
+	// time snapshot to fold IP/domain/URL indicators into the next
+	// signed policy bundle and to publish the malicious file-hash set
+	// (consumed by the sng-swg StaticMalwareList). Domain indicators
+	// additionally flow through the demotion bridge into the appdb
+	// demotion engine (DNS sinkhole + app-registry demotion) on every
+	// feed refresh. With no THREATINTEL_* feeds configured the store
+	// stays empty, so every consumer is a safe no-op.
+	iocStore := aisvc.NewIOCStore(aisvc.WithMinConfidence(cfg.ThreatIntel.MinConfidence))
+	iocCompiler := aisvc.NewIOCEnforcementCompiler(iocStore)
+	threatDemotionEngine := appdb.NewDemotionEngine(appSvc, tenantRepo, appdb.NoopPublisher{}, appdb.DemotionPolicy{})
+	demotionBridge := aisvc.NewDemotionBridge(threatFeedDemotionEmitter{engine: threatDemotionEngine})
+	feedMgr := aisvc.NewFeedManager(
+		iocStore,
+		buildThreatFeeds(cfg.ThreatIntel),
+		aisvc.WithFeedLogger(logger),
+		aisvc.WithOnUpdate(func(ctx context.Context, snap aisvc.IOCSnapshot) {
+			if err := demotionBridge.Sync(ctx, snap); err != nil {
+				logger.WarnContext(ctx, "threat-intel: demotion bridge sync failed", slog.Any("error", err))
+			}
+		}),
+	)
+
 	policySvc := policy.New(
 		policyRepo,
 		auditRepo,
@@ -756,6 +795,8 @@ func buildRouter(
 		policy.WithLogger(logger),
 		policy.WithSteeringCompiler(appdb.PolicySteeringAdapter{Svc: appSvc}),
 		policy.WithInlineCASBCompiler(inlineCASBSvc),
+		policy.WithIOCCompiler(iocCompiler),
+		policy.WithMalwareHashCompiler(iocCompiler),
 	)
 
 	// When the file-backed signer is active, expose its public key
@@ -820,7 +861,7 @@ func buildRouter(
 	canarySvc, err := policy.NewCanaryService(policySvc, policyRolloutRepo,
 		policy.WithCanaryLogger(logger))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: build canary service: %w", err)
 	}
 	policySimHandler := handler.NewPolicySimulationHandler(
 		policySvc, canarySvc, nil, policyRepo, logger)
@@ -938,32 +979,32 @@ func buildRouter(
 	// sync/atomic counters and is flushed by main() via meteringSvc.Run.
 	meteringStore, err := metering.NewPostgresStore(pool.Primary(), cfg.Postgres.AppRole, cfg.Postgres.PgBouncerMode)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering store: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering store: %w", err)
 	}
 	meteringSvc, err := metering.NewMeteringService(meteringStore, logger,
 		metering.WithFlushInterval(cfg.Metering.FlushInterval))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering service: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering service: %w", err)
 	}
 	meteringTiers := meteringTierResolver{tenants: tenantRepo}
 	budgetEnforcer, err := metering.NewBudgetEnforcer(meteringSvc, meteringStore, meteringTiers, logger,
 		metering.WithGlobalDefaults(cfg.Metering.DefaultBudgets))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: budget enforcer: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: budget enforcer: %w", err)
 	}
 	costCalc := metering.NewCostCalculator(metering.DefaultUnitCosts)
 	meteringReports, err := metering.NewReports(meteringSvc, budgetEnforcer, meteringStore, meteringTiers, costCalc)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering reports: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering reports: %w", err)
 	}
 	meteringAnomalies, err := metering.NewCostAnomalyDetector(meteringReports, meteringSvc, costCalc, metering.AnomalyConfig{})
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering anomaly detector: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("control: metering anomaly detector: %w", err)
 	}
 	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports, meteringAnomalies, rbacSvc)
 
 	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo,
-		metering.NewGuardrailBudgetGate(budgetEnforcer), metering.NewGuardrailUsageRecorder(meteringSvc), logger)
+		metering.NewGuardrailBudgetGate(budgetEnforcer), metering.NewGuardrailUsageRecorder(meteringSvc), iocStore, logger)
 
 	// --- Operational automation wiring (Session 5) --------------------
 	// Bulk device operations reuse the existing device / claim-token /
@@ -984,7 +1025,7 @@ func buildRouter(
 	// unchanged; the scheduler's leader loop is launched by run().
 	evidenceSvc, evidenceScheduler, err := buildEvidenceAutomation(cfg, store, logger)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("compliance evidence automation: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("compliance evidence automation: %w", err)
 	}
 	complianceHandler := handler.NewComplianceHandler(
 		compliance.NewReportService(store.NewComplianceReportRepository(), logger),
@@ -1081,7 +1122,7 @@ func buildRouter(
 			identity.WithAdminAutoProvision(cfg.MobileAuth.AutoProvisionUsers),
 		)
 		if ssoErr != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build admin SSO service: %w", ssoErr)
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build admin SSO service: %w", ssoErr)
 		}
 		adminSSOHandler = handler.NewAdminSSOHandler(adminSSOSvc, cfg.IAMCore.RedirectURL, []byte(cfg.Auth.JWTSecret), logger)
 	}
@@ -1166,7 +1207,7 @@ func buildRouter(
 	// admin `POST /admin/app-registry/sync` endpoint is the only
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
-	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, popSvc, evidenceScheduler, nil
+	return router, webhookWorker, integrationWorker, appRegHandler, appSyncer, policySimHandler, aiSvc, meteringSvc, popSvc, evidenceScheduler, feedMgr, nil
 }
 
 // meteringTierResolver adapts the TenantRepository onto the metering
@@ -1205,7 +1246,7 @@ func (r tenantRegionResolver) TenantRegion(ctx context.Context, tenantID uuid.UU
 // buildAIHandler constructs the AI handler with an optional LLM
 // provider. When AI_LLM_ENDPOINT is not set, the service runs in
 // template-only mode and suggest-policy / troubleshoot return 503.
-func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, alertRepo repository.AlertRepository, auditSvc *audit.Service, aiSuggestionRepo repository.AISuggestionRepository, budgetGate aisvc.BudgetGate, usageRecorder aisvc.UsageRecorder, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
+func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, alertRepo repository.AlertRepository, auditSvc *audit.Service, aiSuggestionRepo repository.AISuggestionRepository, budgetGate aisvc.BudgetGate, usageRecorder aisvc.UsageRecorder, iocFeed aisvc.ThreatFeedProvider, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
 	var llm aisvc.LLMProvider
 	if cfg.AI.Endpoint != "" {
 		llm = &aisvc.HTTPProvider{
@@ -1284,10 +1325,15 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	nlQuery := aisvc.NewNLQueryEngine(effectiveLLM, nlOpts...)
 	reports := aisvc.NewReportEngine(effectiveLLM)
 	// Regional IOC feeds (SEA, GCC, DACH) back enrichment by default;
-	// a deployment can swap in an external feed by passing a different
-	// ThreatFeedProvider here. The logger surfaces partial feed failures
-	// (degrade-open) once network-backed feeds are wired in.
-	threatIntel := aisvc.NewThreatIntelEngine(aisvc.NewRegionalFeeds().WithLogger(logger))
+	// the WORKSTREAM 8 aggregator's IOC store is folded in alongside
+	// them (when wired) so indicators pulled from TAXII/OTX/abuse.ch/
+	// CERT feeds participate in live-traffic matching with the same
+	// max-confidence escalation. A nil iocFeed is dropped by
+	// NewMultiFeed, leaving the regional-only behaviour. The logger
+	// surfaces partial feed failures (degrade-open).
+	threatIntel := aisvc.NewThreatIntelEngine(
+		aisvc.NewMultiFeed(aisvc.NewRegionalFeeds(), iocFeed).WithLogger(logger),
+	)
 	h.SetEnhancedAI(correlation, nlQuery, reports, threatIntel, guardrails, correlationRepo)
 
 	// Back the read-only GET posture report with real alert counts so
@@ -1313,6 +1359,86 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	h.SetTighteningService(aisvc.NewTighteningService(effectiveLLM, logger))
 
 	return h, svc
+}
+
+// threatFeedDemotionEmitter adapts *appdb.DemotionEngine onto the
+// ai.DemotionEmitter seam so the domain-IOC demotion bridge can push
+// malicious domains into the demotion engine without the ai package
+// importing appdb (the bridge stays unit-testable and import-cycle
+// free). Every emit maps to a threat_feed-signalled DemotionEvent,
+// which the engine fans out globally (DNS sinkhole + app-registry
+// demotion to inspect_full) per DefaultDemotionPolicy.
+type threatFeedDemotionEmitter struct {
+	engine *appdb.DemotionEngine
+}
+
+func (e threatFeedDemotionEmitter) EmitDomainDemotion(ctx context.Context, domain, reason string, observedAt time.Time) error {
+	_, err := e.engine.Apply(ctx, appdb.DemotionEvent{
+		Domain:     domain,
+		Signal:     appdb.SignalThreatFeed,
+		Reason:     reason,
+		ObservedAt: observedAt,
+	})
+	return err
+}
+
+// buildThreatFeeds assembles the WORKSTREAM 8 feed set from config.
+// Each feed is gated behind its URL: an unset URL contributes no
+// feed, so a deployment that configures only abuse.ch pulls only
+// abuse.ch. Network IO lives entirely in the HTTPFetcher; the
+// parsers are pure (and unit-tested against realistic payloads).
+// The shared RefreshInterval / DefaultTTL come from cfg; per-feed
+// confidence defaults live in the parsers (e.g. abuse.ch is curated
+// and high-trust, so it defaults to 0.9).
+func buildThreatFeeds(cfg config.ThreatIntel) []aisvc.Feed {
+	interval := cfg.RefreshInterval
+	if interval <= 0 {
+		interval = aisvc.DefaultFeedInterval
+	}
+	mkFetcher := func(url string, header http.Header) *aisvc.HTTPFetcher {
+		return &aisvc.HTTPFetcher{URL: url, Header: header}
+	}
+	var feeds []aisvc.Feed
+	add := func(name string, parser aisvc.FeedParser, fetcher aisvc.FeedFetcher) {
+		feeds = append(feeds, aisvc.Feed{
+			Name:       name,
+			Parser:     parser,
+			Fetcher:    fetcher,
+			Interval:   interval,
+			DefaultTTL: cfg.DefaultTTL,
+		})
+	}
+
+	if cfg.TAXIIURL != "" {
+		h := http.Header{"Accept": []string{"application/taxii+json;version=2.1"}}
+		if cfg.TAXIIToken != "" {
+			h.Set("Authorization", "Bearer "+cfg.TAXIIToken)
+		}
+		add("stix-taxii", aisvc.STIXTAXIIParser{Source: "taxii", DefaultConfidence: 0.5}, mkFetcher(cfg.TAXIIURL, h))
+	}
+	if cfg.OTXURL != "" {
+		h := http.Header{}
+		if cfg.OTXAPIKey != "" {
+			h.Set("X-OTX-API-KEY", cfg.OTXAPIKey)
+		}
+		add("otx", aisvc.OTXParser{Source: "otx", DefaultConfidence: 0.5}, mkFetcher(cfg.OTXURL, h))
+	}
+	if cfg.URLhausURL != "" {
+		add("abuse.ch:urlhaus", aisvc.AbuseCHParser{Product: aisvc.AbuseCHURLhaus}, mkFetcher(cfg.URLhausURL, nil))
+	}
+	if cfg.MalwareBazaarURL != "" {
+		add("abuse.ch:malwarebazaar", aisvc.AbuseCHParser{Product: aisvc.AbuseCHMalwareBazaar}, mkFetcher(cfg.MalwareBazaarURL, nil))
+	}
+	if cfg.FeodoTrackerURL != "" {
+		add("abuse.ch:feodotracker", aisvc.AbuseCHParser{Product: aisvc.AbuseCHFeodoTracker}, mkFetcher(cfg.FeodoTrackerURL, nil))
+	}
+	if cfg.CSVURL != "" {
+		add("cert-csv", aisvc.CSVParser{Source: "cert-csv", IndicatorColumn: "indicator", TypeColumn: "type", ConfidenceColumn: "confidence", HasHeader: true, DefaultConfidence: 0.5}, mkFetcher(cfg.CSVURL, nil))
+	}
+	if cfg.JSONURL != "" {
+		add("cert-json", aisvc.JSONParser{Source: "cert-json", DefaultConfidence: 0.5}, mkFetcher(cfg.JSONURL, nil))
+	}
+	return feeds
 }
 
 // alertPostureDataSource adapts the AlertRepository to the handler's

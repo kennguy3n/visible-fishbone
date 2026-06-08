@@ -1,0 +1,320 @@
+package ai
+
+import (
+	"net"
+	"net/url"
+	"strings"
+	"time"
+)
+
+// IOCType is the indicator-of-compromise category. The four
+// categories map one-to-one onto the four enforcement sinks the
+// IOC pipeline drives (see ioc_enforcement.go):
+//
+//   - IOCTypeDomain -> DNS sinkhole rule + app-registry demotion
+//   - IOCTypeIP     -> NGFW firewall-deny rule
+//   - IOCTypeURL    -> SWG deny-list rule
+//   - IOCTypeHash   -> malware-verdict provider (StaticMalwareList)
+//
+// The string values match the ThreatType field already used by
+// IOCMatch / RegionalFeed ("ip", "domain", "hash", "url") so the
+// aggregated store plugs into the existing ThreatFeedProvider
+// surface without a translation layer.
+type IOCType string
+
+const (
+	// IOCTypeDomain is a DNS name (fully-qualified, no scheme).
+	IOCTypeDomain IOCType = "domain"
+	// IOCTypeIP is an IPv4 or IPv6 address (no CIDR).
+	IOCTypeIP IOCType = "ip"
+	// IOCTypeURL is an absolute http/https URL.
+	IOCTypeURL IOCType = "url"
+	// IOCTypeHash is a file hash (MD5, SHA-1 or SHA-256), hex.
+	IOCTypeHash IOCType = "hash"
+)
+
+// Valid reports whether t is one of the four known IOC types.
+func (t IOCType) Valid() bool {
+	switch t {
+	case IOCTypeDomain, IOCTypeIP, IOCTypeURL, IOCTypeHash:
+		return true
+	}
+	return false
+}
+
+// HashAlgo identifies the digest algorithm of an IOCTypeHash
+// indicator, inferred from the hex length. The malware verdict
+// provider does not care which algorithm produced a hash (it
+// matches the response-body digest the SWG computes), but
+// carrying it lets feeds that mix algorithms round-trip the
+// distinction for telemetry and de-duplication.
+type HashAlgo string
+
+const (
+	// HashAlgoMD5 is a 128-bit MD5 digest (32 hex chars).
+	HashAlgoMD5 HashAlgo = "md5"
+	// HashAlgoSHA1 is a 160-bit SHA-1 digest (40 hex chars).
+	HashAlgoSHA1 HashAlgo = "sha1"
+	// HashAlgoSHA256 is a 256-bit SHA-256 digest (64 hex chars).
+	HashAlgoSHA256 HashAlgo = "sha256"
+)
+
+// IOC is a single normalized indicator of compromise carried
+// through the aggregation pipeline. Values are stored
+// already-normalized (see NewIOC / normalization helpers) so the
+// store, de-duplication and enforcement layers can compare them
+// byte-for-byte without re-canonicalizing.
+type IOC struct {
+	// Type is the indicator category.
+	Type IOCType
+	// Value is the normalized indicator (lowercase domain,
+	// canonical IP, normalized URL, lowercase-hex hash).
+	Value string
+	// HashAlgo is set only when Type == IOCTypeHash.
+	HashAlgo HashAlgo
+	// Source is the feed that produced this indicator
+	// (e.g. "abuse.ch:urlhaus", "otx", "taxii:mitre").
+	Source string
+	// ThreatActor / Campaign are optional attribution carried
+	// from the feed when available.
+	ThreatActor string
+	Campaign    string
+	// Confidence is the feed-supplied confidence in [0,1].
+	Confidence float64
+	// FirstSeen / LastSeen bound the indicator's observation
+	// window. LastSeen drives recency-based de-duplication.
+	FirstSeen time.Time
+	LastSeen  time.Time
+	// ExpiresAt is the TTL boundary. A zero value means the
+	// indicator never expires on its own — matching the
+	// demotion engine's threat_feed TTL of 0 ("permanent until
+	// an operator clears it"). The store drops an IOC once
+	// now >= ExpiresAt.
+	ExpiresAt time.Time
+}
+
+// Expired reports whether the IOC's TTL has elapsed as of now. A
+// zero ExpiresAt never expires.
+func (i IOC) Expired(now time.Time) bool {
+	if i.ExpiresAt.IsZero() {
+		return false
+	}
+	return !i.ExpiresAt.After(now)
+}
+
+// Key is the de-duplication identity of an indicator: (type,
+// value). Two IOCs with the same Key from different feeds are the
+// same indicator and are merged by the store (keeping the higher
+// confidence and the more-recent LastSeen / later ExpiresAt).
+func (i IOC) Key() string {
+	return string(i.Type) + "\x00" + i.Value
+}
+
+// URLHost returns the host[:port] component of an IOCTypeURL
+// indicator, used to build the SWG host-match predicate (the
+// policy evaluator and the SWG match on Host, not the full URL).
+// Returns "" for non-URL types or an unparseable URL.
+func (i IOC) URLHost() string {
+	if i.Type != IOCTypeURL {
+		return ""
+	}
+	u, err := url.Parse(i.Value)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
+// normalizeDomain canonicalizes a DNS name: lowercase, trim
+// whitespace, strip a trailing root dot and an optional leading
+// "*." wildcard label so "*.evil.com." and "EVIL.com" collapse to
+// "evil.com". Returns ("", false) for an input that cannot be a
+// hostname (empty, contains a scheme, whitespace or a slash).
+func normalizeDomain(s string) (string, bool) {
+	d := strings.ToLower(strings.TrimSpace(s))
+	d = strings.TrimSuffix(d, ".")
+	d = strings.TrimPrefix(d, "*.")
+	if d == "" {
+		return "", false
+	}
+	// A bare hostname has no scheme, path, whitespace or port.
+	if strings.ContainsAny(d, " \t/\\:") {
+		return "", false
+	}
+	if !strings.Contains(d, ".") {
+		return "", false
+	}
+	return d, true
+}
+
+// normalizeIP canonicalizes an IP literal via net.ParseIP, which
+// collapses equivalent forms (e.g. "::ffff:1.2.3.4", uppercase
+// IPv6) to a single representation. CIDR ranges are rejected —
+// the firewall-deny path keys on single addresses. Returns ("",
+// false) for anything that is not a single valid IP.
+func normalizeIP(s string) (string, bool) {
+	t := strings.TrimSpace(s)
+	ip := net.ParseIP(t)
+	if ip == nil {
+		return "", false
+	}
+	return ip.String(), true
+}
+
+// normalizeURL canonicalizes an absolute http/https URL: trims
+// whitespace, lowercases the scheme and host, and requires a
+// host. Returns ("", false) for relative URLs, unsupported
+// schemes or unparseable input.
+func normalizeURL(s string) (string, bool) {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return "", false
+	}
+	u, err := url.Parse(t)
+	if err != nil {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", false
+	}
+	if u.Host == "" {
+		return "", false
+	}
+	u.Scheme = scheme
+	u.Host = strings.ToLower(u.Host)
+	return u.String(), true
+}
+
+// normalizeHash validates and lowercases a hex file hash,
+// inferring the algorithm from its length (MD5=32, SHA-1=40,
+// SHA-256=64). Returns ("", "", false) for a non-hex string or an
+// unrecognised length.
+func normalizeHash(s string) (string, HashAlgo, bool) {
+	h := strings.ToLower(strings.TrimSpace(s))
+	if !isHex(h) {
+		return "", "", false
+	}
+	switch len(h) {
+	case 32:
+		return h, HashAlgoMD5, true
+	case 40:
+		return h, HashAlgoSHA1, true
+	case 64:
+		return h, HashAlgoSHA256, true
+	}
+	return "", "", false
+}
+
+func isHex(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// NewIOC builds a normalized IOC of the given type from a raw
+// indicator value, applying the per-type canonicalization above.
+// It returns (IOC{}, false) when the value is not a valid
+// indicator of that type, so feed parsers can skip malformed rows
+// without aborting a whole batch. Confidence is clamped to [0,1].
+func NewIOC(t IOCType, rawValue string, opts IOCMeta) (IOC, bool) {
+	ioc := IOC{
+		Type:        t,
+		Source:      opts.Source,
+		ThreatActor: opts.ThreatActor,
+		Campaign:    opts.Campaign,
+		Confidence:  clampConfidence(opts.Confidence),
+		FirstSeen:   opts.FirstSeen,
+		LastSeen:    opts.LastSeen,
+		ExpiresAt:   opts.ExpiresAt,
+	}
+	switch t {
+	case IOCTypeDomain:
+		v, ok := normalizeDomain(rawValue)
+		if !ok {
+			return IOC{}, false
+		}
+		ioc.Value = v
+	case IOCTypeIP:
+		v, ok := normalizeIP(rawValue)
+		if !ok {
+			return IOC{}, false
+		}
+		ioc.Value = v
+	case IOCTypeURL:
+		v, ok := normalizeURL(rawValue)
+		if !ok {
+			return IOC{}, false
+		}
+		ioc.Value = v
+	case IOCTypeHash:
+		v, algo, ok := normalizeHash(rawValue)
+		if !ok {
+			return IOC{}, false
+		}
+		ioc.Value = v
+		ioc.HashAlgo = algo
+	default:
+		return IOC{}, false
+	}
+	return ioc, true
+}
+
+// IOCMeta carries the optional attribution / scoring / lifetime
+// fields shared by NewIOC callers. Splitting it out of NewIOC's
+// positional args keeps feed parsers readable as the field set
+// grows.
+type IOCMeta struct {
+	Source      string
+	ThreatActor string
+	Campaign    string
+	Confidence  float64
+	FirstSeen   time.Time
+	LastSeen    time.Time
+	ExpiresAt   time.Time
+}
+
+func clampConfidence(c float64) float64 {
+	switch {
+	case c < 0:
+		return 0
+	case c > 1:
+		return 1
+	}
+	return c
+}
+
+// classifyIndicator infers the IOC type of a bare indicator
+// string when a feed does not label it (common in flat CSV feeds
+// that ship a single "indicator" column). The order matters: URLs
+// are tested before domains (a URL contains a host that would
+// also parse as a domain), and IPs before domains. Hashes are
+// detected by hex shape. Returns ("", false) when no type fits.
+func classifyIndicator(raw string) (IOCType, bool) {
+	t := strings.TrimSpace(raw)
+	if t == "" {
+		return "", false
+	}
+	if _, ok := normalizeURL(t); ok {
+		return IOCTypeURL, true
+	}
+	if _, ok := normalizeIP(t); ok {
+		return IOCTypeIP, true
+	}
+	if _, _, ok := normalizeHash(t); ok {
+		return IOCTypeHash, true
+	}
+	if _, ok := normalizeDomain(t); ok {
+		return IOCTypeDomain, true
+	}
+	return "", false
+}
