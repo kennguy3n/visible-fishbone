@@ -38,6 +38,12 @@ interface RawGraph {
   [k: string]: unknown;
 }
 
+// Stable empty-graph fallback. Using one frozen module-level value (instead of
+// an inline `?? {}`) means children that receive the graph as a prop keep a
+// stable reference while the query is errored/empty, so e.g. SimpleRules'
+// content-signature memo isn't recomputed against a fresh object every render.
+const EMPTY_GRAPH = Object.freeze({});
+
 function toFlow(graph: RawGraph): { nodes: Node[]; edges: Edge[] } {
   const rawNodes = Array.isArray(graph.nodes) ? graph.nodes : [];
   const rawEdges = Array.isArray(graph.edges) ? graph.edges : [];
@@ -147,7 +153,7 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
       {mode === "simple" && (
         <SimpleRules
           tenantId={tenantId}
-          graph={(graphQuery.data?.graph ?? {}) as GraphDoc}
+          graph={(graphQuery.data?.graph ?? EMPTY_GRAPH) as GraphDoc}
           isError={graphQuery.isError}
         />
       )}
@@ -229,7 +235,7 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
       )}
 
       {mode === "advanced" && tab === "simulate" && (
-        <SimulationPanel tenantId={tenantId} baseGraph={graphQuery.data?.graph ?? {}} />
+        <SimulationPanel tenantId={tenantId} baseGraph={graphQuery.data?.graph ?? EMPTY_GRAPH} />
       )}
     </>
   );

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useListSites, useCreateSite } from "@/api/generated/endpoints/sites/sites";
 import {
@@ -336,6 +336,16 @@ function StepDevice({
   const toast = useToast();
   const [token, setToken] = useState<ClaimToken | null>(null);
   const [copied, setCopied] = useState(false);
+  // Track the "Copied" reset timer so we can clear it before re-arming (rapid
+  // re-clicks) and on unmount, mirroring the async-cleanup discipline used in
+  // QrCode rather than leaving a stray timer to fire setState after unmount.
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+    },
+    [],
+  );
 
   const enrolled = devices.data?.items?.length ?? 0;
 
@@ -359,7 +369,8 @@ function StepDevice({
       await navigator.clipboard.writeText(token.token);
       setCopied(true);
       toast.success("Copied", "Claim token copied to your clipboard.");
-      setTimeout(() => setCopied(false), 2000);
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopied(false), 2000);
     } catch {
       toast.error("Copy failed", "Select the token and copy it manually.");
     }
