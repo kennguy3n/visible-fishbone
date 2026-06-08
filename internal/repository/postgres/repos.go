@@ -139,6 +139,11 @@ func (s *Store) NewSandboxVerdictRepository() *SandboxVerdictRepository {
 	return &SandboxVerdictRepository{s: s}
 }
 
+// NewIPSRuleCategoryRepository binds the Store to repository.IPSRuleCategoryRepository.
+func (s *Store) NewIPSRuleCategoryRepository() *IPSRuleCategoryRepository {
+	return &IPSRuleCategoryRepository{s: s}
+}
+
 // NewRBISessionRepository binds the Store to repository.RBISessionRepository.
 func (s *Store) NewRBISessionRepository() *RBISessionRepository {
 	return &RBISessionRepository{s: s}

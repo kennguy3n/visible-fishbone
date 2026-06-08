@@ -599,9 +599,7 @@ impl ExtAuthzHandler {
         let signals = req.signals();
         let scan_body = req.scan_body()?;
         let ctx = req.into_context()?;
-        let verdict = self
-            .evaluate(&ctx, &signals, scan_body.as_deref())
-            .await;
+        let verdict = self.evaluate(&ctx, &signals, scan_body.as_deref()).await;
         let resp = ExtAuthzResponse::from_verdict(&verdict);
         self.inner
             .telemetry
@@ -823,7 +821,9 @@ impl ExtAuthzHandler {
                         return Verdict::deny_categorized(format!("malware.yara.{family}"));
                     }
                     YaraSeverity::Suspicious if self.inner.elevated_risk_mode => {
-                        return Verdict::deny_categorized(format!("malware.yara.suspicious.{family}"));
+                        return Verdict::deny_categorized(format!(
+                            "malware.yara.suspicious.{family}"
+                        ));
                     }
                     YaraSeverity::Suspicious => {}
                 }
@@ -998,7 +998,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.action, "deny");
-        assert_eq!(resp.category.as_deref(), Some("malware.yara.suspicious.elf"));
+        assert_eq!(
+            resp.category.as_deref(),
+            Some("malware.yara.suspicious.elf")
+        );
     }
 
     #[tokio::test]

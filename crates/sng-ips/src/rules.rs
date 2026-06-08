@@ -21,14 +21,16 @@
 //! tests can drive the swap-and-validate dance against an
 //! in-memory fake without spawning `suricata -T`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::error::IpsError;
@@ -110,6 +112,15 @@ pub struct IpsRuleBundleClaims {
     /// Held inline so the bundle is self-contained.
     #[serde(rename = "rules")]
     pub rules_text: String,
+    /// Provenance of this bundle's rules (Emerging Threats,
+    /// Suricata-Update, custom org feed). Defaults to
+    /// [`RuleSource::CustomOrg`] when the field is absent so an
+    /// older control plane that signs bundles without it still
+    /// decodes — the field is purely for telemetry / per-source
+    /// stats and is not security relevant (the signature covers
+    /// the body either way).
+    #[serde(rename = "src", default)]
+    pub source: RuleSource,
 }
 
 impl IpsRuleBundleClaims {
@@ -448,6 +459,700 @@ impl RuleStager for FsRuleStager {
     }
 }
 
+// ===========================================================================
+// Multi-source rule management: provenance, threat categorisation, per-tenant
+// category enablement, and automatic feed-update scheduling.
+//
+// The control plane re-signs rule sets it pulls from upstream feeds (Emerging
+// Threats, Suricata-Update) alongside operator-authored custom rules, all under
+// the one Ed25519 trust store above. This section adds the vocabulary and the
+// pure transforms the edge applies on top of a verified bundle:
+//
+//   * [`RuleSource`]  — where a bundle's rules came from (telemetry / stats).
+//   * [`RuleCategory`] — the threat class a single rule belongs to, derived
+//     from its Suricata `classtype:` / `msg:` so dashboards and per-tenant
+//     enablement can group rules without a hand-maintained sid→category map.
+//   * [`CategorySelection`] — the set of enabled categories. The Go control
+//     plane stores one per tenant and compiles a tenant-specific bundle; the
+//     edge applies an org-global selection to drop categories wholesale.
+//   * [`filter_rules_by_category`] / [`rule_stats`] — the pure transforms that
+//     enforce a selection and produce per-category counts.
+//   * [`RuleFeed`] / [`RuleFeedFetcher`] / [`RuleUpdateScheduler`] — the daily
+//     pull → verify → merge → filter → stage → reload lifecycle, with the
+//     network transport injected behind a trait so it is unit-testable.
+// ===========================================================================
+
+/// Provenance of a Suricata rule set.
+///
+/// Bundles are signed by the control plane regardless of source, so this is
+/// not a trust signal — it drives per-source telemetry / stats and lets the
+/// merge step in [`RuleUpdateScheduler`] order feeds deterministically.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleSource {
+    /// Proofpoint Emerging Threats OPEN ruleset.
+    EmergingThreats,
+    /// `suricata-update` managed index (Talos OPEN + others).
+    SuricataUpdate,
+    /// Operator-authored rules specific to one org.
+    #[default]
+    CustomOrg,
+}
+
+impl RuleSource {
+    /// Stable lowercase identifier used on telemetry and stats.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EmergingThreats => "emerging_threats",
+            Self::SuricataUpdate => "suricata_update",
+            Self::CustomOrg => "custom_org",
+        }
+    }
+
+    /// Every source, in a stable order. Used by callers that need
+    /// to enumerate sources (e.g. seeding per-source counters).
+    #[must_use]
+    pub fn all() -> [Self; 3] {
+        [Self::EmergingThreats, Self::SuricataUpdate, Self::CustomOrg]
+    }
+}
+
+/// The threat class a single Suricata rule belongs to.
+///
+/// Derived from the rule's `classtype:` (and `msg:` keywords as a fallback,
+/// since Suricata's stock classtypes do not distinguish lateral movement or
+/// exfiltration). Used for per-category enablement and hit stats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleCategory {
+    /// Trojans, droppers, coin-miners, ransomware payload delivery.
+    Malware,
+    /// Exploitation of a software vulnerability (exploit kits,
+    /// shellcode, web-application attacks, admin/user privilege
+    /// escalation attempts).
+    Exploit,
+    /// Internal-to-internal movement (SMB/RDP/WinRM/PsExec abuse).
+    LateralMovement,
+    /// Command-and-control beacons and check-ins.
+    C2,
+    /// Data exfiltration / theft channels.
+    Exfiltration,
+    /// Denial-of-service / volumetric attacks.
+    Dos,
+    /// Anything that does not fit a more specific class.
+    Other,
+}
+
+impl RuleCategory {
+    /// Stable lowercase identifier. Matches the `serde` rename so
+    /// the on-wire string and the telemetry string never diverge.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Malware => "malware",
+            Self::Exploit => "exploit",
+            Self::LateralMovement => "lateral_movement",
+            Self::C2 => "c2",
+            Self::Exfiltration => "exfiltration",
+            Self::Dos => "dos",
+            Self::Other => "other",
+        }
+    }
+
+    /// Parse a category from its stable string id. Returns `None`
+    /// for an unknown string so a caller (e.g. the Go API decoding
+    /// a per-tenant selection) can reject it explicitly rather than
+    /// silently coercing to `Other`.
+    #[must_use]
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "malware" => Some(Self::Malware),
+            "exploit" => Some(Self::Exploit),
+            "lateral_movement" => Some(Self::LateralMovement),
+            "c2" => Some(Self::C2),
+            "exfiltration" => Some(Self::Exfiltration),
+            "dos" => Some(Self::Dos),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+
+    /// Every category an operator can enable/disable, in a stable
+    /// order. `Other` is included so a selection can choose to drop
+    /// uncategorised rules too.
+    #[must_use]
+    pub fn all() -> [Self; 7] {
+        [
+            Self::Malware,
+            Self::Exploit,
+            Self::LateralMovement,
+            Self::C2,
+            Self::Exfiltration,
+            Self::Dos,
+            Self::Other,
+        ]
+    }
+
+    /// Classify a single Suricata rule line.
+    ///
+    /// Precedence is deliberate: `msg:` keywords that name a tactic Suricata's
+    /// stock `classtype` vocabulary cannot express (lateral movement,
+    /// exfiltration, explicit C2) win first, because feed authors encode that
+    /// intent in the message text (e.g. `ET LATERAL ...`, `ET EXFIL ...`). Only
+    /// then do we fall back to the `classtype:` mapping, and finally to a
+    /// keyword sweep over the whole line. A line we cannot place is `Other`,
+    /// never silently dropped.
+    #[must_use]
+    pub fn classify(rule_line: &str) -> Self {
+        let lower = rule_line.to_ascii_lowercase();
+        let msg = extract_rule_option(&lower, "msg").unwrap_or_default();
+        let classtype = extract_rule_option(&lower, "classtype").unwrap_or_default();
+
+        // 1. msg-encoded tactics that classtype cannot express.
+        if msg.contains("exfil") || msg.contains("data theft") || msg.contains("data leak") {
+            return Self::Exfiltration;
+        }
+        if msg.contains("lateral") {
+            return Self::LateralMovement;
+        }
+        if msg.contains(" c2") || msg.contains("command and control") || msg.contains("cnc ") {
+            return Self::C2;
+        }
+
+        // 2. classtype mapping — the primary signal.
+        match classtype.as_str() {
+            "command-and-control" => return Self::C2,
+            "trojan-activity" | "malware-cnc" | "coin-mining" | "domain-c2" => {
+                // trojan-activity is overwhelmingly C2 beaconing in the ET
+                // ruleset; but coin-mining/malware payloads also use it.
+                // Bias to Malware unless the msg already named C2 (handled
+                // above), since "is this malware?" is the coarser, safer
+                // grouping for the default deny posture.
+                return Self::Malware;
+            }
+            "denial-of-service" | "attempted-dos" => return Self::Dos,
+            "web-application-attack"
+            | "attempted-admin"
+            | "attempted-user"
+            | "shellcode-detect"
+            | "exploit-kit"
+            | "attempted-recon" => return Self::Exploit,
+            _ => {}
+        }
+
+        // 3. whole-line keyword fallback.
+        if lower.contains("ransomware") || lower.contains("trojan") || lower.contains("malware") {
+            return Self::Malware;
+        }
+        if lower.contains("exploit") || lower.contains("cve-") {
+            return Self::Exploit;
+        }
+        Self::Other
+    }
+}
+
+/// Extract the value of a Suricata rule option (`key:value;`) from an
+/// already-lowercased rule line. Handles the quoted form Suricata uses for
+/// `msg:"..."` by stripping the surrounding quotes. Returns `None` when the
+/// option is absent. Pure + allocation-light (one `String` for the value).
+fn extract_rule_option(lower_line: &str, key: &str) -> Option<String> {
+    // Options live inside the trailing `( ... )`. Search for `key:`
+    // preceded by a boundary (start, `(`, `;`, or whitespace) so a
+    // substring like `xclasstype:` does not match `classtype:`.
+    let needle = format!("{key}:");
+    let mut search_from = 0;
+    while let Some(rel) = lower_line[search_from..].find(&needle) {
+        let at = search_from + rel;
+        let boundary_ok =
+            at == 0 || matches!(lower_line.as_bytes()[at - 1], b'(' | b';' | b' ' | b'\t');
+        if boundary_ok {
+            let rest = &lower_line[at + needle.len()..];
+            let rest = rest.trim_start();
+            let value = if let Some(stripped) = rest.strip_prefix('"') {
+                // Quoted: read to the closing quote.
+                stripped.split('"').next().unwrap_or("")
+            } else {
+                // Unquoted: read to the option terminator `;`.
+                rest.split(';').next().unwrap_or("").trim()
+            };
+            return Some(value.to_string());
+        }
+        search_from = at + needle.len();
+    }
+    None
+}
+
+/// Whether a line is an actual Suricata rule (vs a comment or blank).
+/// Suricata rule actions are a fixed set; anything else (a `#` comment,
+/// a blank line, a `%YAML` directive) is preserved verbatim by the
+/// category filter but never counted in [`rule_stats`].
+fn is_rule_line(line: &str) -> bool {
+    let t = line.trim_start();
+    if t.is_empty() || t.starts_with('#') {
+        return false;
+    }
+    let action = t.split_whitespace().next().unwrap_or("");
+    matches!(
+        action,
+        "alert" | "drop" | "reject" | "rejectsrc" | "rejectdst" | "pass" | "log"
+    )
+}
+
+/// The set of [`RuleCategory`] values currently enabled.
+///
+/// The Go control plane persists one selection per tenant (migration
+/// `049_ips_rule_categories`) and compiles a tenant-specific bundle by passing
+/// the selection to [`filter_rules_by_category`]; the edge can additionally
+/// hold an org-global selection to drop a category fleet-wide. Defaults to
+/// every category enabled (fail-open: a fresh tenant gets full coverage).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CategorySelection {
+    enabled: BTreeSet<RuleCategory>,
+}
+
+impl Default for CategorySelection {
+    fn default() -> Self {
+        Self::all_enabled()
+    }
+}
+
+impl CategorySelection {
+    /// Every category enabled — the safe default.
+    #[must_use]
+    pub fn all_enabled() -> Self {
+        Self {
+            enabled: RuleCategory::all().into_iter().collect(),
+        }
+    }
+
+    /// No category enabled. Mainly useful as a base to `.enable()` onto.
+    #[must_use]
+    pub fn none_enabled() -> Self {
+        Self {
+            enabled: BTreeSet::new(),
+        }
+    }
+
+    /// Build from an explicit set of enabled categories.
+    #[must_use]
+    pub fn from_enabled<I: IntoIterator<Item = RuleCategory>>(iter: I) -> Self {
+        Self {
+            enabled: iter.into_iter().collect(),
+        }
+    }
+
+    /// Enable a category. Idempotent.
+    pub fn enable(&mut self, c: RuleCategory) {
+        self.enabled.insert(c);
+    }
+
+    /// Disable a category. Idempotent.
+    pub fn disable(&mut self, c: RuleCategory) {
+        self.enabled.remove(&c);
+    }
+
+    /// Whether a category is enabled.
+    #[must_use]
+    pub fn is_enabled(&self, c: RuleCategory) -> bool {
+        self.enabled.contains(&c)
+    }
+
+    /// The enabled categories, sorted.
+    #[must_use]
+    pub fn enabled_categories(&self) -> Vec<RuleCategory> {
+        self.enabled.iter().copied().collect()
+    }
+}
+
+/// Per-category rule counts for a rule set. Drives the operator
+/// "rules by category" view and the stats the Go API surfaces.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuleStats {
+    /// Count of rule lines per category (categories with zero
+    /// rules are omitted).
+    pub per_category: BTreeMap<RuleCategory, usize>,
+    /// Total rule lines (sum of `per_category`). Excludes comments
+    /// and blank lines.
+    pub total: usize,
+}
+
+impl RuleStats {
+    /// Count for one category (0 when absent).
+    #[must_use]
+    pub fn count(&self, c: RuleCategory) -> usize {
+        self.per_category.get(&c).copied().unwrap_or(0)
+    }
+}
+
+/// Compute per-category counts for a Suricata rule set. Comments
+/// and blank lines are ignored; every rule line is classified.
+#[must_use]
+pub fn rule_stats(rules_text: &str) -> RuleStats {
+    let mut stats = RuleStats::default();
+    for line in rules_text.lines() {
+        if !is_rule_line(line) {
+            continue;
+        }
+        let cat = RuleCategory::classify(line);
+        *stats.per_category.entry(cat).or_insert(0) += 1;
+        stats.total += 1;
+    }
+    stats
+}
+
+/// Drop every rule whose category is not enabled by `selection`,
+/// preserving comments, blank lines, and the relative order of the
+/// surviving rules. Returns the filtered rule text and the stats of
+/// what was *kept*.
+///
+/// This is the single enforcement point for per-tenant / per-org
+/// category enablement: the Go control plane calls the equivalent
+/// logic at compile time, and the edge applies it again on a hot
+/// swap, so the two never drift.
+#[must_use]
+pub fn filter_rules_by_category(
+    rules_text: &str,
+    selection: &CategorySelection,
+) -> (String, RuleStats) {
+    let mut kept = String::with_capacity(rules_text.len());
+    let mut stats = RuleStats::default();
+    for line in rules_text.lines() {
+        if !is_rule_line(line) {
+            // Preserve comments / blanks verbatim so the staged file
+            // stays human-diffable against the upstream feed.
+            kept.push_str(line);
+            kept.push('\n');
+            continue;
+        }
+        let cat = RuleCategory::classify(line);
+        if selection.is_enabled(cat) {
+            kept.push_str(line);
+            kept.push('\n');
+            *stats.per_category.entry(cat).or_insert(0) += 1;
+            stats.total += 1;
+        }
+    }
+    (kept, stats)
+}
+
+/// A configured upstream rule feed the scheduler pulls on a timer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleFeed {
+    /// Operator-facing feed name (`"et-open"`, `"talos"`, `"org-custom"`).
+    pub name: String,
+    /// URL the [`RuleFeedFetcher`] pulls the signed bundle from.
+    pub url: String,
+    /// Provenance recorded on the resulting rules.
+    pub source: RuleSource,
+    /// Trust-store key id the fetched bundle must be signed with.
+    pub signing_key_id: IpsSigningKeyId,
+}
+
+/// Fetches a signed rule bundle for a feed.
+///
+/// The HTTP (or file, or `sng-comms`) transport lives behind this trait so the
+/// scheduler — and its merge/verify/stage logic — is unit-testable without a
+/// network. Production wires a concrete implementation at the agent's I/O edge;
+/// this crate intentionally does not pull in an HTTP client (matching the
+/// existing boundary where rule pulls arrive over `sng-comms`).
+#[async_trait]
+pub trait RuleFeedFetcher: Send + Sync + std::fmt::Debug {
+    /// Fetch the current signed bundle for `feed`. Returns
+    /// [`IpsError::RuleFeedFetch`] on a transport failure so the
+    /// scheduler can record a per-feed miss and continue.
+    async fn fetch(&self, feed: &RuleFeed) -> Result<IpsRuleBundle, IpsError>;
+}
+
+/// Outcome of pulling one feed during a scheduler run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeedOutcome {
+    /// The feed name this outcome is for.
+    pub feed: String,
+    /// `Ok(version)` when the feed was fetched + verified; `Err`
+    /// message when it failed (fetch error, bad signature, decode).
+    pub result: Result<u64, String>,
+}
+
+/// Summary of one [`RuleUpdateScheduler::run_once`] pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleUpdateReport {
+    /// Per-feed fetch/verify outcomes, in feed-config order.
+    pub feeds: Vec<FeedOutcome>,
+    /// Whether the merged rule set changed and was staged this run.
+    /// `false` means every reachable feed was byte-identical to the
+    /// installed set (no swap, no Suricata reload).
+    pub installed: bool,
+    /// The merged revision that is now staged (the scheduler's own
+    /// monotonic counter, independent of any single feed version).
+    /// `None` when nothing has ever been installed.
+    pub revision: Option<u64>,
+    /// Per-category counts of the merged + filtered rule set that is
+    /// now live (empty when nothing was installed this run).
+    pub stats: RuleStats,
+}
+
+/// Drives the daily pull → verify → merge → filter → stage → reload
+/// lifecycle across all configured feeds.
+///
+/// ## Merge + revision model
+///
+/// A single Suricata instance reads one rule file, so the scheduler merges all
+/// feeds into one set (feeds applied in config order; exact-duplicate rule
+/// lines de-duplicated, first occurrence wins). The merged set is then filtered
+/// through the org-global [`CategorySelection`].
+///
+/// The staleness guard on [`RuleStager`] is keyed on a single monotonic
+/// version, but per-feed versions can move independently, so the scheduler does
+/// **not** forward a feed version to the stager. Instead it hashes the merged +
+/// filtered text and keeps its own `revision` counter: the counter increments
+/// (and a swap happens) only when the merged content actually changes. This
+/// means a bump in *any* feed triggers exactly one reload, and a run where
+/// nothing changed is a cheap no-op — neither of which a max-of-feed-versions
+/// scheme gets right.
+///
+/// ## Failure isolation
+///
+/// One unreachable or badly-signed feed does not abort the run: its
+/// [`FeedOutcome`] records the error and the merge proceeds with the feeds that
+/// did verify. A run where *every* feed failed makes no change (the installed
+/// set is retained), matching the fail-static posture the rest of the IPS
+/// subsystem uses.
+#[derive(Clone)]
+pub struct RuleUpdateScheduler {
+    feeds: Vec<RuleFeed>,
+    fetcher: Arc<dyn RuleFeedFetcher>,
+    verifier: IpsRuleVerifier,
+    stager: Arc<dyn RuleStager>,
+    selection: Arc<arc_swap::ArcSwap<CategorySelection>>,
+    interval: Duration,
+    // The merged-content fingerprint of the last successful install,
+    // and the scheduler's own monotonic revision. Guarded together
+    // so a reader never sees a revision that does not match the hash.
+    state: Arc<Mutex<MergeState>>,
+}
+
+#[derive(Debug, Default)]
+struct MergeState {
+    last_hash: Option<[u8; 32]>,
+    revision: u64,
+}
+
+impl std::fmt::Debug for RuleUpdateScheduler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuleUpdateScheduler")
+            .field("feeds", &self.feeds.len())
+            .field("interval", &self.interval)
+            .field("revision", &self.state.lock().revision)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuleUpdateScheduler {
+    /// Build a scheduler. `interval` is the pull cadence the
+    /// [`Self::run_forever`] loop uses (typically 24h); `run_once`
+    /// ignores it so tests drive pulls directly.
+    #[must_use]
+    pub fn new(
+        feeds: Vec<RuleFeed>,
+        fetcher: Arc<dyn RuleFeedFetcher>,
+        verifier: IpsRuleVerifier,
+        stager: Arc<dyn RuleStager>,
+        selection: CategorySelection,
+        interval: Duration,
+    ) -> Self {
+        Self {
+            feeds,
+            fetcher,
+            verifier,
+            stager,
+            selection: Arc::new(arc_swap::ArcSwap::from_pointee(selection)),
+            interval,
+            state: Arc::new(Mutex::new(MergeState::default())),
+        }
+    }
+
+    /// Hot-swap the org-global category selection. The next
+    /// [`Self::run_once`] re-filters the merged set against it; if the
+    /// filtered text changes, the new set is staged and reloaded.
+    pub fn set_selection(&self, selection: CategorySelection) {
+        self.selection.store(Arc::new(selection));
+    }
+
+    /// The scheduler's current merged revision (0 before the first
+    /// successful install).
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.state.lock().revision
+    }
+
+    /// Pull every feed once, merge + verify + filter, and stage the
+    /// result if it changed. Returns a [`RuleUpdateReport`].
+    ///
+    /// Never errors at the top level: transport / signature failures are
+    /// captured per-feed in the report. A hard error is only returned if the
+    /// stager itself fails to swap a set that *did* change (validation failure,
+    /// disk error) — that is a real install failure the caller must surface.
+    pub async fn run_once(&self) -> Result<RuleUpdateReport, IpsError> {
+        let mut outcomes = Vec::with_capacity(self.feeds.len());
+        // (source-config-order index, rule text) for feeds that verified.
+        let mut verified: Vec<String> = Vec::new();
+
+        for feed in &self.feeds {
+            match self.fetch_and_verify(feed).await {
+                Ok(claims) => {
+                    outcomes.push(FeedOutcome {
+                        feed: feed.name.clone(),
+                        result: Ok(claims.version),
+                    });
+                    verified.push(claims.rules_text);
+                }
+                Err(e) => {
+                    outcomes.push(FeedOutcome {
+                        feed: feed.name.clone(),
+                        result: Err(e.to_string()),
+                    });
+                }
+            }
+        }
+
+        // Nothing verified → keep the installed set untouched.
+        if verified.is_empty() {
+            return Ok(RuleUpdateReport {
+                feeds: outcomes,
+                installed: false,
+                revision: self.installed_revision(),
+                stats: RuleStats::default(),
+            });
+        }
+
+        let merged = merge_rule_texts(&verified);
+        let selection = self.selection.load();
+        let (filtered, stats) = filter_rules_by_category(&merged, &selection);
+        let hash = sha256_bytes(filtered.as_bytes());
+
+        // Unchanged merged content → no swap, no reload.
+        {
+            let guard = self.state.lock();
+            if guard.last_hash == Some(hash) {
+                return Ok(RuleUpdateReport {
+                    feeds: outcomes,
+                    installed: false,
+                    revision: Some(guard.revision),
+                    stats,
+                });
+            }
+        }
+
+        // Content changed: pick the next revision, stage it, and only
+        // commit the hash + revision once the swap succeeds. We hold
+        // the next revision as `current + 1`; the stager's own
+        // staleness guard then accepts it monotonically.
+        let next_rev = self.state.lock().revision + 1;
+        let claims = IpsRuleBundleClaims {
+            schema_version: 1,
+            version: next_rev,
+            compiler: "sng-ips/rule-update-scheduler".to_string(),
+            rules_text: filtered,
+            source: RuleSource::CustomOrg,
+        };
+        let installed_rev = self.stager.stage_and_swap(&claims).await?;
+        {
+            let mut guard = self.state.lock();
+            guard.last_hash = Some(hash);
+            guard.revision = installed_rev;
+        }
+        Ok(RuleUpdateReport {
+            feeds: outcomes,
+            installed: true,
+            revision: Some(installed_rev),
+            stats,
+        })
+    }
+
+    /// Run [`Self::run_once`] immediately, then every `interval`
+    /// thereafter until `shutdown` resolves. Install errors from a
+    /// single pass are logged and the loop continues — a transient
+    /// disk/validation failure must not kill the daily updater.
+    ///
+    /// The loop is `select!`-driven so a shutdown signal is honoured
+    /// promptly even mid-interval.
+    pub async fn run_forever(self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+        let mut ticker = tokio::time::interval(self.interval);
+        // Skip missed ticks rather than bursting after a long pause.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if let Err(e) = self.run_once().await {
+                        tracing::warn!(error = %e, "ips rule update pass failed");
+                    }
+                }
+                res = shutdown.changed() => {
+                    // Sender dropped or signalled true → stop.
+                    if res.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fetch one feed and verify its signature + decode its claims,
+    /// asserting the signing key id matches what the feed config
+    /// pins (a feed must not be able to ship a bundle signed by a
+    /// different — though still trusted — key than the operator
+    /// configured for it).
+    async fn fetch_and_verify(&self, feed: &RuleFeed) -> Result<IpsRuleBundleClaims, IpsError> {
+        let bundle = self.fetcher.fetch(feed).await?;
+        if bundle.signing_key_id != feed.signing_key_id {
+            return Err(IpsError::RuleSignatureUnknownKey(format!(
+                "feed {} expected key {}, bundle signed with {}",
+                feed.name,
+                feed.signing_key_id.as_str(),
+                bundle.signing_key_id.as_str()
+            )));
+        }
+        self.verifier.verify_and_decode(&bundle)
+    }
+
+    fn installed_revision(&self) -> Option<u64> {
+        let r = self.state.lock().revision;
+        if r == 0 { None } else { Some(r) }
+    }
+}
+
+/// Merge rule texts from multiple feeds: concatenate in order,
+/// dropping exact-duplicate rule lines (first occurrence wins) so two
+/// feeds shipping the same community rule do not double-load it.
+/// Comments and blank lines are preserved per source.
+fn merge_rule_texts(texts: &[String]) -> String {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut out = String::new();
+    for text in texts {
+        for line in text.lines() {
+            if is_rule_line(line) {
+                let key = line.trim().to_string();
+                if !seen.insert(key) {
+                    continue; // duplicate rule line
+                }
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// SHA-256 of a byte slice as a fixed 32-byte array.
+fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +1174,7 @@ mod tests {
             compiler: "sng-test/0".into(),
             rules_text: r#"alert tcp any any -> any 80 (msg:"http traffic"; sid:1000001; rev:1;)"#
                 .into(),
+            source: RuleSource::CustomOrg,
         }
     }
 
@@ -789,5 +1495,525 @@ mod tests {
             }
             other => panic!("expected RuleValidate, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Step 2: multi-source / categorisation / scheduler tests.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn rule_source_strings_and_serde_default() {
+        assert_eq!(RuleSource::EmergingThreats.as_str(), "emerging_threats");
+        assert_eq!(RuleSource::SuricataUpdate.as_str(), "suricata_update");
+        assert_eq!(RuleSource::CustomOrg.as_str(), "custom_org");
+        assert_eq!(RuleSource::default(), RuleSource::CustomOrg);
+    }
+
+    #[test]
+    fn claims_decode_defaults_source_when_absent() {
+        // A bundle body written by an older control plane that has no
+        // `src` key must still decode, defaulting to CustomOrg. We
+        // build such a body by serializing a struct that omits the
+        // field via a serde_json round-trip into msgpack of the older
+        // shape is awkward; instead assert the serde default attribute
+        // by decoding a map missing the key.
+        #[derive(Serialize)]
+        struct OldClaims {
+            #[serde(rename = "v")]
+            schema_version: u8,
+            #[serde(rename = "rev")]
+            version: u64,
+            #[serde(rename = "comp")]
+            compiler: String,
+            #[serde(rename = "rules")]
+            rules_text: String,
+        }
+        let old = OldClaims {
+            schema_version: 1,
+            version: 7,
+            compiler: "old/0".into(),
+            rules_text: "# empty\n".into(),
+        };
+        let body = rmp_serde::to_vec_named(&old).unwrap();
+        let decoded = IpsRuleBundleClaims::from_body(&body).unwrap();
+        assert_eq!(decoded.version, 7);
+        assert_eq!(decoded.source, RuleSource::CustomOrg);
+    }
+
+    #[test]
+    fn claims_roundtrip_preserves_source() {
+        let mut c = sample_claims(3);
+        c.source = RuleSource::EmergingThreats;
+        let body = c.encode().unwrap();
+        let back = IpsRuleBundleClaims::from_body(&body).unwrap();
+        assert_eq!(back.source, RuleSource::EmergingThreats);
+    }
+
+    #[test]
+    fn extract_option_handles_quoted_and_unquoted() {
+        let line = r#"alert tcp any any -> any 80 (msg:"ET MALWARE bad"; classtype:trojan-activity; sid:1; rev:2;)"#
+            .to_ascii_lowercase();
+        assert_eq!(
+            extract_rule_option(&line, "msg").as_deref(),
+            Some("et malware bad")
+        );
+        assert_eq!(
+            extract_rule_option(&line, "classtype").as_deref(),
+            Some("trojan-activity")
+        );
+        assert_eq!(extract_rule_option(&line, "sid").as_deref(), Some("1"));
+        assert_eq!(extract_rule_option(&line, "nope"), None);
+    }
+
+    #[test]
+    fn extract_option_respects_token_boundary() {
+        // `xclasstype:` must not satisfy a search for `classtype:`.
+        let line = "alert ip any any -> any any (xclasstype:foo; sid:9;)".to_ascii_lowercase();
+        assert_eq!(extract_rule_option(&line, "classtype"), None);
+    }
+
+    #[test]
+    fn classify_covers_every_category() {
+        let cases = [
+            (
+                r#"alert http any any -> any any (msg:"ET MALWARE Win32/Trojan"; classtype:trojan-activity; sid:1;)"#,
+                RuleCategory::Malware,
+            ),
+            (
+                r#"alert tcp any any -> any any (msg:"ET EXPLOIT Apache Struts RCE CVE-2017-5638"; classtype:web-application-attack; sid:2;)"#,
+                RuleCategory::Exploit,
+            ),
+            (
+                r#"alert smb any any -> any any (msg:"ET LATERAL PsExec service install"; sid:3;)"#,
+                RuleCategory::LateralMovement,
+            ),
+            (
+                r#"alert dns any any -> any any (msg:"ET CNC beacon"; classtype:command-and-control; sid:4;)"#,
+                RuleCategory::C2,
+            ),
+            (
+                r#"alert tls any any -> any any (msg:"ET EXFIL data theft over TLS"; sid:5;)"#,
+                RuleCategory::Exfiltration,
+            ),
+            (
+                r#"alert udp any any -> any any (msg:"ET DOS amplification"; classtype:attempted-dos; sid:6;)"#,
+                RuleCategory::Dos,
+            ),
+            (
+                r#"alert tcp any any -> any any (msg:"benign traffic note"; classtype:not-suspicious; sid:7;)"#,
+                RuleCategory::Other,
+            ),
+        ];
+        for (line, want) in cases {
+            assert_eq!(RuleCategory::classify(line), want, "misclassified: {line}");
+        }
+    }
+
+    #[test]
+    fn category_from_str_roundtrips() {
+        for c in RuleCategory::all() {
+            assert_eq!(RuleCategory::from_str_opt(c.as_str()), Some(c));
+        }
+        assert_eq!(RuleCategory::from_str_opt("bogus"), None);
+    }
+
+    #[test]
+    fn category_selection_enable_disable() {
+        let mut sel = CategorySelection::all_enabled();
+        assert!(sel.is_enabled(RuleCategory::Malware));
+        sel.disable(RuleCategory::Dos);
+        assert!(!sel.is_enabled(RuleCategory::Dos));
+        sel.enable(RuleCategory::Dos);
+        assert!(sel.is_enabled(RuleCategory::Dos));
+
+        let none = CategorySelection::none_enabled();
+        assert!(RuleCategory::all().iter().all(|c| !none.is_enabled(*c)));
+
+        let some = CategorySelection::from_enabled([RuleCategory::C2, RuleCategory::Malware]);
+        assert_eq!(
+            some.enabled_categories(),
+            vec![RuleCategory::Malware, RuleCategory::C2]
+        );
+    }
+
+    const SAMPLE_RULES: &str = r#"# header comment
+alert http any any -> any any (msg:"ET MALWARE trojan"; classtype:trojan-activity; sid:1;)
+alert tcp any any -> any any (msg:"ET EXPLOIT CVE-2021-44228 log4j"; classtype:attempted-admin; sid:2;)
+alert dns any any -> any any (msg:"ET CNC check-in"; classtype:command-and-control; sid:3;)
+
+alert udp any any -> any any (msg:"ET DOS flood"; classtype:attempted-dos; sid:4;)
+"#;
+
+    #[test]
+    fn rule_stats_counts_by_category_ignoring_comments() {
+        let stats = rule_stats(SAMPLE_RULES);
+        assert_eq!(stats.total, 4);
+        assert_eq!(stats.count(RuleCategory::Malware), 1);
+        assert_eq!(stats.count(RuleCategory::Exploit), 1);
+        assert_eq!(stats.count(RuleCategory::C2), 1);
+        assert_eq!(stats.count(RuleCategory::Dos), 1);
+        assert_eq!(stats.count(RuleCategory::Other), 0);
+    }
+
+    #[test]
+    fn filter_drops_disabled_categories_keeps_comments() {
+        let mut sel = CategorySelection::all_enabled();
+        sel.disable(RuleCategory::Dos);
+        sel.disable(RuleCategory::C2);
+        let (filtered, stats) = filter_rules_by_category(SAMPLE_RULES, &sel);
+        assert_eq!(stats.total, 2);
+        assert!(filtered.contains("# header comment"));
+        assert!(filtered.contains("sid:1;")); // malware kept
+        assert!(filtered.contains("sid:2;")); // exploit kept
+        assert!(!filtered.contains("sid:3;")); // c2 dropped
+        assert!(!filtered.contains("sid:4;")); // dos dropped
+    }
+
+    #[test]
+    fn merge_dedups_identical_rule_lines() {
+        let a = "alert tcp any any -> any 1 (msg:\"x\"; sid:1;)\n".to_string();
+        let b = "alert tcp any any -> any 1 (msg:\"x\"; sid:1;)\nalert tcp any any -> any 2 (msg:\"y\"; sid:2;)\n".to_string();
+        let merged = merge_rule_texts(&[a, b]);
+        assert_eq!(merged.matches("sid:1;").count(), 1);
+        assert_eq!(merged.matches("sid:2;").count(), 1);
+    }
+
+    // ---- Scheduler tests ----
+
+    #[derive(Debug)]
+    struct MapFetcher {
+        bundles: Mutex<HashMap<String, IpsRuleBundle>>,
+        fail: Mutex<BTreeSet<String>>,
+    }
+
+    impl MapFetcher {
+        fn new() -> Self {
+            Self {
+                bundles: Mutex::new(HashMap::new()),
+                fail: Mutex::new(BTreeSet::new()),
+            }
+        }
+        fn set(&self, feed: &str, bundle: IpsRuleBundle) {
+            self.bundles.lock().insert(feed.to_string(), bundle);
+        }
+        fn set_failing(&self, feed: &str) {
+            self.fail.lock().insert(feed.to_string());
+        }
+    }
+
+    #[async_trait]
+    impl RuleFeedFetcher for MapFetcher {
+        async fn fetch(&self, feed: &RuleFeed) -> Result<IpsRuleBundle, IpsError> {
+            if self.fail.lock().contains(&feed.name) {
+                return Err(IpsError::RuleFeedFetch(format!("{} down", feed.name)));
+            }
+            self.bundles
+                .lock()
+                .get(&feed.name)
+                .cloned()
+                .ok_or_else(|| IpsError::RuleFeedFetch(format!("{} has no bundle", feed.name)))
+        }
+    }
+
+    fn signed_bundle(
+        version: u64,
+        rules_text: &str,
+        source: RuleSource,
+        signing: &SigningKey,
+        id: IpsSigningKeyId,
+    ) -> IpsRuleBundle {
+        let claims = IpsRuleBundleClaims {
+            schema_version: 1,
+            version,
+            compiler: "feed/0".into(),
+            rules_text: rules_text.into(),
+            source,
+        };
+        let body = claims.encode().unwrap();
+        let sig = signing.sign(&body);
+        IpsRuleBundle {
+            body,
+            signature: IpsRuleSignature {
+                bytes: sig.to_bytes(),
+            },
+            signing_key_id: id,
+        }
+    }
+
+    fn scheduler_harness(
+        feeds: Vec<RuleFeed>,
+        fetcher: Arc<MapFetcher>,
+        verifier: IpsRuleVerifier,
+        selection: CategorySelection,
+        tmp: &tempfile::TempDir,
+    ) -> RuleUpdateScheduler {
+        let cfg = RuleStagerConfig {
+            final_path: tmp.path().join("sng.rules"),
+            staging_dir: tmp.path().join("staging"),
+            config_path: tmp.path().join("suricata.yaml"),
+        };
+        let stager = Arc::new(FsRuleStager::new(cfg, Arc::new(AlwaysValidValidator)));
+        RuleUpdateScheduler::new(
+            feeds,
+            fetcher,
+            verifier,
+            stager,
+            selection,
+            Duration::from_secs(86_400),
+        )
+    }
+
+    #[tokio::test]
+    async fn scheduler_pulls_merges_and_installs() {
+        let (signing, id) = deterministic_keypair();
+        let mut verifier = IpsRuleVerifier::new();
+        verifier
+            .add_key(id.clone(), &signing.verifying_key().to_bytes())
+            .unwrap();
+        let fetcher = Arc::new(MapFetcher::new());
+        fetcher.set(
+            "et",
+            signed_bundle(
+                10,
+                "alert http any any -> any any (msg:\"ET MALWARE x\"; classtype:trojan-activity; sid:1;)\n",
+                RuleSource::EmergingThreats,
+                &signing,
+                id.clone(),
+            ),
+        );
+        fetcher.set(
+            "org",
+            signed_bundle(
+                3,
+                "alert udp any any -> any any (msg:\"ET DOS y\"; classtype:attempted-dos; sid:2;)\n",
+                RuleSource::CustomOrg,
+                &signing,
+                id.clone(),
+            ),
+        );
+        let feeds = vec![
+            RuleFeed {
+                name: "et".into(),
+                url: "https://feeds.example/et".into(),
+                source: RuleSource::EmergingThreats,
+                signing_key_id: id.clone(),
+            },
+            RuleFeed {
+                name: "org".into(),
+                url: "https://feeds.example/org".into(),
+                source: RuleSource::CustomOrg,
+                signing_key_id: id.clone(),
+            },
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = scheduler_harness(
+            feeds,
+            fetcher.clone(),
+            verifier,
+            CategorySelection::all_enabled(),
+            &tmp,
+        );
+
+        let report = sched.run_once().await.unwrap();
+        assert!(report.installed);
+        assert_eq!(report.revision, Some(1));
+        assert_eq!(report.stats.total, 2);
+        assert!(report.feeds.iter().all(|f| f.result.is_ok()));
+        let on_disk = tokio::fs::read_to_string(tmp.path().join("sng.rules"))
+            .await
+            .unwrap();
+        assert!(on_disk.contains("sid:1;") && on_disk.contains("sid:2;"));
+
+        // Second identical run: no change → no install, same revision.
+        let report2 = sched.run_once().await.unwrap();
+        assert!(!report2.installed);
+        assert_eq!(report2.revision, Some(1));
+    }
+
+    #[tokio::test]
+    async fn scheduler_reinstalls_when_a_feed_bumps() {
+        let (signing, id) = deterministic_keypair();
+        let mut verifier = IpsRuleVerifier::new();
+        verifier
+            .add_key(id.clone(), &signing.verifying_key().to_bytes())
+            .unwrap();
+        let fetcher = Arc::new(MapFetcher::new());
+        fetcher.set(
+            "et",
+            signed_bundle(
+                10,
+                "alert http any any -> any any (msg:\"a\"; sid:1;)\n",
+                RuleSource::EmergingThreats,
+                &signing,
+                id.clone(),
+            ),
+        );
+        let feeds = vec![RuleFeed {
+            name: "et".into(),
+            url: "u".into(),
+            source: RuleSource::EmergingThreats,
+            signing_key_id: id.clone(),
+        }];
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = scheduler_harness(
+            feeds,
+            fetcher.clone(),
+            verifier,
+            CategorySelection::all_enabled(),
+            &tmp,
+        );
+        assert!(sched.run_once().await.unwrap().installed);
+        assert_eq!(sched.revision(), 1);
+
+        // Feed ships new content → merged hash changes → reinstall.
+        fetcher.set(
+            "et",
+            signed_bundle(
+                11,
+                "alert http any any -> any any (msg:\"a\"; sid:1;)\nalert http any any -> any any (msg:\"b\"; sid:2;)\n",
+                RuleSource::EmergingThreats,
+                &signing,
+                id.clone(),
+            ),
+        );
+        let report = sched.run_once().await.unwrap();
+        assert!(report.installed);
+        assert_eq!(report.revision, Some(2));
+    }
+
+    #[tokio::test]
+    async fn scheduler_isolates_a_failing_feed() {
+        let (signing, id) = deterministic_keypair();
+        let mut verifier = IpsRuleVerifier::new();
+        verifier
+            .add_key(id.clone(), &signing.verifying_key().to_bytes())
+            .unwrap();
+        let fetcher = Arc::new(MapFetcher::new());
+        fetcher.set(
+            "ok",
+            signed_bundle(
+                1,
+                "alert http any any -> any any (msg:\"a\"; sid:1;)\n",
+                RuleSource::EmergingThreats,
+                &signing,
+                id.clone(),
+            ),
+        );
+        fetcher.set_failing("down");
+        let feeds = vec![
+            RuleFeed {
+                name: "ok".into(),
+                url: "u".into(),
+                source: RuleSource::EmergingThreats,
+                signing_key_id: id.clone(),
+            },
+            RuleFeed {
+                name: "down".into(),
+                url: "u".into(),
+                source: RuleSource::SuricataUpdate,
+                signing_key_id: id.clone(),
+            },
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = scheduler_harness(
+            feeds,
+            fetcher,
+            verifier,
+            CategorySelection::all_enabled(),
+            &tmp,
+        );
+        let report = sched.run_once().await.unwrap();
+        // The good feed still installed; the bad feed is recorded as an error.
+        assert!(report.installed);
+        let down = report.feeds.iter().find(|f| f.feed == "down").unwrap();
+        assert!(down.result.is_err());
+        let ok = report.feeds.iter().find(|f| f.feed == "ok").unwrap();
+        assert!(ok.result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn scheduler_rejects_feed_key_mismatch() {
+        let (signing, id) = deterministic_keypair();
+        let mut verifier = IpsRuleVerifier::new();
+        verifier
+            .add_key(id.clone(), &signing.verifying_key().to_bytes())
+            .unwrap();
+        let other_id = IpsSigningKeyId::new("ffffffffffffffff").unwrap();
+        let fetcher = Arc::new(MapFetcher::new());
+        // Bundle signed key id differs from the feed's pinned key id.
+        fetcher.set(
+            "et",
+            signed_bundle(
+                1,
+                "alert http any any -> any any (msg:\"a\"; sid:1;)\n",
+                RuleSource::EmergingThreats,
+                &signing,
+                other_id,
+            ),
+        );
+        let feeds = vec![RuleFeed {
+            name: "et".into(),
+            url: "u".into(),
+            source: RuleSource::EmergingThreats,
+            signing_key_id: id.clone(),
+        }];
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = scheduler_harness(
+            feeds,
+            fetcher,
+            verifier,
+            CategorySelection::all_enabled(),
+            &tmp,
+        );
+        let report = sched.run_once().await.unwrap();
+        assert!(!report.installed);
+        assert!(report.feeds[0].result.is_err());
+    }
+
+    #[tokio::test]
+    async fn scheduler_applies_selection_change_on_next_run() {
+        let (signing, id) = deterministic_keypair();
+        let mut verifier = IpsRuleVerifier::new();
+        verifier
+            .add_key(id.clone(), &signing.verifying_key().to_bytes())
+            .unwrap();
+        let fetcher = Arc::new(MapFetcher::new());
+        fetcher.set(
+            "et",
+            signed_bundle(
+                1,
+                "alert http any any -> any any (msg:\"ET MALWARE x\"; classtype:trojan-activity; sid:1;)\nalert udp any any -> any any (msg:\"ET DOS y\"; classtype:attempted-dos; sid:2;)\n",
+                RuleSource::EmergingThreats,
+                &signing,
+                id.clone(),
+            ),
+        );
+        let feeds = vec![RuleFeed {
+            name: "et".into(),
+            url: "u".into(),
+            source: RuleSource::EmergingThreats,
+            signing_key_id: id.clone(),
+        }];
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = scheduler_harness(
+            feeds,
+            fetcher,
+            verifier,
+            CategorySelection::all_enabled(),
+            &tmp,
+        );
+        assert_eq!(sched.run_once().await.unwrap().stats.total, 2);
+
+        // Disable DoS → next run re-filters, drops sid:2, reinstalls.
+        let mut sel = CategorySelection::all_enabled();
+        sel.disable(RuleCategory::Dos);
+        sched.set_selection(sel);
+        let report = sched.run_once().await.unwrap();
+        assert!(report.installed);
+        assert_eq!(report.stats.total, 1);
+        let on_disk = tokio::fs::read_to_string(tmp.path().join("sng.rules"))
+            .await
+            .unwrap();
+        assert!(on_disk.contains("sid:1;") && !on_disk.contains("sid:2;"));
     }
 }

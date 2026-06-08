@@ -1003,6 +1003,24 @@ type InlineCASBRuleRepository interface {
 	Delete(ctx context.Context, tenantID, id uuid.UUID) error
 }
 
+// IPSRuleCategoryRepository owns the ips_rule_categories and
+// ips_rule_category_stats tables (migration 049). Tenant-scoped
+// reads/writes flow through `sng.tenant_id` (RLS) on the postgres
+// backend; the memory backend filters on TenantID explicitly.
+//
+// ListSelections returns only the explicit overrides (rows that
+// exist); the service layer overlays them onto the default-enabled
+// baseline. SetEnabled upserts one (tenant, category) override.
+// AddHits increments the daily counter for a (tenant, category,
+// day) and StatsSince reads the per-category daily series the
+// management API renders.
+type IPSRuleCategoryRepository interface {
+	ListSelections(ctx context.Context, tenantID uuid.UUID) ([]IPSRuleCategorySelection, error)
+	SetEnabled(ctx context.Context, tenantID uuid.UUID, category string, enabled bool) (IPSRuleCategorySelection, error)
+	AddHits(ctx context.Context, tenantID uuid.UUID, category string, day time.Time, delta int64) error
+	StatsSince(ctx context.Context, tenantID uuid.UUID, since time.Time) ([]IPSRuleCategoryDailyStat, error)
+}
+
 // SandboxVerdictRepository owns the sandbox_verdicts table
 // (migration 042). Tenant-scoped reads/writes flow through
 // `sng.tenant_id` (RLS) on the postgres backend; the memory backend

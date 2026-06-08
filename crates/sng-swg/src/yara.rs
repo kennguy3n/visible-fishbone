@@ -542,9 +542,7 @@ impl YaraEngine {
     /// multi-rule scan into a single verdict.
     #[must_use]
     pub fn worst_match(&self, content: &[u8]) -> Option<YaraMatch> {
-        self.scan(content)
-            .into_iter()
-            .max_by_key(|m| m.severity)
+        self.scan(content).into_iter().max_by_key(|m| m.severity)
     }
 }
 

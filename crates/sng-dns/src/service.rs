@@ -40,6 +40,7 @@ use crate::filter::{ChainOutcome, FilterChain};
 use crate::qtype::RCode;
 use crate::query::{DnsQuery, DnsResponse};
 use crate::resolver::Resolver;
+use crate::tunneling::{TracingTunnelingSink, TunnelingDetector, TunnelingSink};
 
 /// One-shot per-query outcome. Returned by
 /// [`DnsService::handle_query`] so the listener can use the
@@ -75,6 +76,13 @@ pub struct DnsService<R: Resolver> {
     chain: Arc<FilterChain>,
     resolver: Arc<R>,
     tx: tokio::sync::mpsc::Sender<TelemetryEvent>,
+    /// Optional DNS tunneling detector. When present, every handled
+    /// query is observed and any resulting alerts are forwarded to
+    /// `tunneling_sink`. Kept off the per-query DnsEvent path so the
+    /// "exactly one DnsEvent per query" invariant holds — tunneling
+    /// signals are out-of-band security alerts, not query verdicts.
+    tunneling: Option<Arc<TunnelingDetector>>,
+    tunneling_sink: Arc<dyn TunnelingSink>,
 }
 
 impl<R: Resolver> std::fmt::Debug for DnsService<R> {
@@ -89,6 +97,11 @@ impl<R: Resolver> std::fmt::Debug for DnsService<R> {
             .field("chain", &*self.chain)
             .field("resolver", &std::any::type_name::<R>())
             .field("tx_capacity", &self.tx.capacity())
+            .field("tunneling", &self.tunneling.is_some())
+            // `tunneling_sink` is a `dyn` trait object without a
+            // `Debug` bound; surface only whether a non-default sink
+            // could be attached, not its type.
+            .field("tunneling_sink", &"<dyn TunnelingSink>")
             .finish()
     }
 }
@@ -107,6 +120,43 @@ impl<R: Resolver> DnsService<R> {
             chain,
             resolver,
             tx,
+            tunneling: None,
+            tunneling_sink: Arc::new(TracingTunnelingSink),
+        }
+    }
+
+    /// Attach a DNS tunneling detector. Queries handled by the
+    /// service are observed by the detector and any alerts are
+    /// forwarded to the default [`TracingTunnelingSink`]. Returns
+    /// `self` for builder-style wiring.
+    #[must_use]
+    pub fn with_tunneling(mut self, detector: Arc<TunnelingDetector>) -> Self {
+        self.tunneling = Some(detector);
+        self
+    }
+
+    /// Attach a tunneling detector together with a custom alert sink
+    /// (e.g. one that forwards into the alert router).
+    #[must_use]
+    pub fn with_tunneling_sink(
+        mut self,
+        detector: Arc<TunnelingDetector>,
+        sink: Arc<dyn TunnelingSink>,
+    ) -> Self {
+        self.tunneling = Some(detector);
+        self.tunneling_sink = sink;
+        self
+    }
+
+    /// Run the tunneling detector (if attached) for one query and
+    /// forward any alerts to the sink. Cheap no-op when no detector
+    /// is configured.
+    fn observe_tunneling(&self, query: &DnsQuery) {
+        if let Some(detector) = &self.tunneling {
+            for alert in detector.observe(query, Instant::now()) {
+                self.tunneling_sink
+                    .record(&alert, query.client_id.as_deref());
+            }
         }
     }
 
@@ -114,6 +164,7 @@ impl<R: Resolver> DnsService<R> {
     /// resolves upstream if needed, and emits exactly one
     /// [`TelemetryEvent::Dns`] for the listener.
     pub async fn handle_query(&self, query: &DnsQuery) -> HandledQuery {
+        self.observe_tunneling(query);
         match self.chain.evaluate(query).await {
             ChainOutcome::ShortCircuit {
                 verdict,
@@ -426,5 +477,69 @@ mod tests {
         // Channel only carried the first event.
         let events = drain(&mut rx);
         assert_eq!(events.len(), 1);
+    }
+
+    /// Test sink that records alerts into a shared vector so the
+    /// integration test can assert the detector fired through the
+    /// service without depending on tracing output.
+    #[derive(Default)]
+    struct CapturingSink {
+        alerts: parking_lot::Mutex<Vec<crate::tunneling::TunnelingAlert>>,
+    }
+
+    impl TunnelingSink for CapturingSink {
+        fn record(&self, alert: &crate::tunneling::TunnelingAlert, _client_id: Option<&str>) {
+            self.alerts.lock().push(alert.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn tunneling_detector_fires_through_service_without_extra_events() {
+        // No filter matches the encoded name, so it resolves upstream
+        // and emits exactly one DnsEvent — the tunneling alert is
+        // out-of-band via the sink, not a second telemetry event.
+        let chain = Arc::new(FilterChain::new(vec![]));
+        let resolver = Arc::new(StaticResolver::new("up"));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+        let detector = Arc::new(TunnelingDetector::with_defaults());
+        let sink = Arc::new(CapturingSink::default());
+        let svc = DnsService::new(chain, resolver, tx)
+            .with_tunneling_sink(detector, sink.clone() as Arc<dyn TunnelingSink>);
+
+        // ~60-char high-entropy payload subdomain → encoded-qname alert.
+        let payload = "mfrggzdfmztwq2lknnwg23tpobyxe43uov3homfrggzdfmztwq2lk";
+        let name = format!("{payload}.tunnel.evil.example");
+        let q = DnsQuery::new(&name, QType::A).with_client("tenant-a");
+        let _ = svc.handle_query(&q).await;
+
+        // Exactly one DnsEvent (the invariant holds).
+        let events = drain(&mut rx);
+        assert_eq!(events.len(), 1, "tunneling must not add DnsEvents");
+
+        // The tunneling alert was routed to the sink.
+        let captured = sink.alerts.lock();
+        assert!(
+            captured
+                .iter()
+                .any(|a| a.kind == crate::tunneling::TunnelingKind::EncodedQname),
+            "expected an encoded-qname alert via the sink, got {captured:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_tunneling_detector_is_noop() {
+        // Default service (no detector) must behave exactly as before.
+        let chain = Arc::new(FilterChain::new(vec![Arc::new(Reputation::new([
+            "z.example".to_string(),
+        ]))]));
+        let resolver = Arc::new(StaticResolver::new("up"));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let svc = DnsService::new(chain, resolver, tx);
+
+        let q = DnsQuery::new("z.example", QType::A);
+        let out = svc.handle_query(&q).await;
+        assert!(out.short_circuited);
+        assert_eq!(drain(&mut rx).len(), 1);
     }
 }

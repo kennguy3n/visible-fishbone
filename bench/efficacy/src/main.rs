@@ -6,8 +6,10 @@
 //! human-readable summary to stdout.
 
 mod dlp;
+mod dns;
 mod firewall;
 mod ips;
+mod malware;
 mod report;
 mod swg;
 mod ztna;
@@ -47,18 +49,33 @@ struct Cli {
     /// Run only the DLP driver.
     #[arg(long)]
     dlp: bool,
+    /// Run only the malware (YARA) driver.
+    #[arg(long)]
+    malware: bool,
+    /// Run only the DNS threat-intel driver.
+    #[arg(long)]
+    dns: bool,
 }
 
 impl Cli {
     /// When no per-function flag is set, run every driver.
     fn selected(&self) -> Selected {
-        if self.firewall || self.swg || self.ztna || self.ips || self.dlp {
+        if self.firewall
+            || self.swg
+            || self.ztna
+            || self.ips
+            || self.dlp
+            || self.malware
+            || self.dns
+        {
             Selected {
                 firewall: self.firewall,
                 swg: self.swg,
                 ztna: self.ztna,
                 ips: self.ips,
                 dlp: self.dlp,
+                malware: self.malware,
+                dns: self.dns,
             }
         } else {
             Selected {
@@ -67,6 +84,8 @@ impl Cli {
                 ztna: true,
                 ips: true,
                 dlp: true,
+                malware: true,
+                dns: true,
             }
         }
     }
@@ -88,6 +107,8 @@ struct Selected {
     ztna: bool,
     ips: bool,
     dlp: bool,
+    malware: bool,
+    dns: bool,
 }
 
 #[tokio::main]
@@ -111,6 +132,14 @@ async fn main() {
     if sel.dlp {
         eprintln!("running DLP efficacy (sng-dlp)...");
         functions.push(dlp::run().await);
+    }
+    if sel.malware {
+        eprintln!("running malware efficacy (sng-swg YARA)...");
+        functions.push(malware::run().await);
+    }
+    if sel.dns {
+        eprintln!("running DNS threat-intel efficacy (sng-dns)...");
+        functions.push(dns::run().await);
     }
     if sel.ips {
         eprintln!("running IPS efficacy (sng-ips + suricata)...");

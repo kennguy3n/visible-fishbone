@@ -1386,7 +1386,7 @@ mod tests {
     use crate::process::MockSuricata;
     use crate::rules::{
         AlwaysValidValidator, FsRuleStager, IpsRuleBundleClaims, IpsRuleSignature, IpsRuleVerifier,
-        RuleStagerConfig,
+        RuleSource, RuleStagerConfig,
     };
     use crate::telemetry::IpsEventSource;
     use ed25519_dalek::{Signer, SigningKey};
@@ -1582,6 +1582,7 @@ mod tests {
             version: 100,
             compiler: "sng-test/1".into(),
             rules_text: "alert tcp any any -> any 80 (msg:\"x\"; sid:1; rev:1;)".into(),
+            source: RuleSource::CustomOrg,
         };
         let body = claims.encode().unwrap();
         let sig = signing.sign(&body);
@@ -1614,6 +1615,7 @@ mod tests {
             version: 1,
             compiler: "sng-test/1".into(),
             rules_text: "alert tcp any any -> any 80 (msg:\"x\"; sid:1; rev:1;)".into(),
+            source: RuleSource::CustomOrg,
         };
         let body = claims.encode().unwrap();
         let bundle = IpsRuleBundle {

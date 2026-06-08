@@ -131,6 +131,12 @@ pub enum ErrorCode {
     /// supervisor logs and continues so a single malformed line
     /// does not stop the tail reader.
     IpsEveDecode,
+    /// An automatic rule-feed pull (Emerging Threats, Suricata-Update,
+    /// custom org feed) failed to fetch the signed bundle from its
+    /// configured URL. The scheduler records the failure and keeps
+    /// the previously installed rule set; one unreachable feed does
+    /// not stall the others.
+    IpsRuleFeedFetch,
     /// Envoy supervisor failed to spawn, signal, or wait on the
     /// child process. Mirrors [`Self::IpsProcessFailure`] but for
     /// the SWG plane so dashboards can break out per-subsystem.
@@ -352,6 +358,7 @@ impl ErrorCode {
             Self::IpsRuleBodyEncode => "ips.rule.body.encode",
             Self::IpsRuleValidate => "ips.rule.validate",
             Self::IpsEveDecode => "ips.eve.decode",
+            Self::IpsRuleFeedFetch => "ips.rule.feed.fetch",
             Self::SwgProcessFailure => "swg.process.failure",
             Self::SwgConfigInvalid => "swg.config.invalid",
             Self::SwgCategoryBundleSignatureInvalid => "swg.category.bundle.signature.invalid",
@@ -514,6 +521,7 @@ mod tests {
             (ErrorCode::IpsRuleBodyEncode, "ips.rule.body.encode"),
             (ErrorCode::IpsRuleValidate, "ips.rule.validate"),
             (ErrorCode::IpsEveDecode, "ips.eve.decode"),
+            (ErrorCode::IpsRuleFeedFetch, "ips.rule.feed.fetch"),
             (ErrorCode::SwgProcessFailure, "swg.process.failure"),
             (ErrorCode::SwgConfigInvalid, "swg.config.invalid"),
             (
