@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"math"
 	"net"
 	"net/url"
 	"strings"
@@ -285,7 +286,13 @@ type IOCMeta struct {
 
 func clampConfidence(c float64) float64 {
 	switch {
-	case c < 0:
+	// NaN/Inf are non-comparable garbage (a NaN floor would make
+	// every `confidence < floor` test false, silently disabling the
+	// filter; a NaN confidence would never clear any floor). Collapse
+	// them to the conservative bound so the value stays a well-ordered
+	// number: NaN -> 0 (treated as "no confidence"/floor disabled, the
+	// documented default), +Inf -> 1, -Inf -> 0.
+	case math.IsNaN(c), c < 0:
 		return 0
 	case c > 1:
 		return 1

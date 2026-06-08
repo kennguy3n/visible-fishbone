@@ -775,7 +775,16 @@ func buildRouter(
 	// stays empty, so every consumer is a safe no-op.
 	iocStore := aisvc.NewIOCStore(aisvc.WithMinConfidence(cfg.ThreatIntel.MinConfidence))
 	iocCompiler := aisvc.NewIOCEnforcementCompiler(iocStore)
-	threatDemotionEngine := appdb.NewDemotionEngine(appSvc, tenantRepo, appdb.NoopPublisher{}, appdb.DemotionPolicy{})
+	// DefaultDemotionPolicy makes threat_feed a global signal (applied
+	// to every tenant) with a permanent TTL — a domain that lit up on a
+	// TI feed stays demoted until an operator clears it. Passed
+	// explicitly (rather than a zero DemotionPolicy{}, which
+	// NewDemotionEngine would merge into the same defaults anyway) so
+	// the intent is self-documenting. NoopPublisher is the only
+	// DemotionPublisher implementation today; the demotion still
+	// persists as an app_registry_overrides row and folds into the next
+	// signed bundle, so enforcement does not depend on the live push.
+	threatDemotionEngine := appdb.NewDemotionEngine(appSvc, tenantRepo, appdb.NoopPublisher{}, appdb.DefaultDemotionPolicy())
 	demotionBridge := aisvc.NewDemotionBridge(threatFeedDemotionEmitter{engine: threatDemotionEngine})
 	feedMgr := aisvc.NewFeedManager(
 		iocStore,

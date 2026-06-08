@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 )
@@ -65,6 +66,40 @@ func TestIOCStore_MinConfidenceFloorDropsNoise(t *testing.T) {
 	)
 	if res.Added != 1 || res.Skipped != 1 {
 		t.Fatalf("floor tally: %#v", res)
+	}
+}
+
+// TestConfidenceNaNInfNormalized guards the clampConfidence hardening:
+// a NaN confidence (or a NaN floor from a misconfigured
+// THREATINTEL_MIN_CONFIDENCE) must collapse to a well-ordered number
+// rather than poisoning every `confidence < floor` comparison (all
+// comparisons against NaN are false in IEEE 754). NaN -> 0, +Inf -> 1.
+func TestConfidenceNaNInfNormalized(t *testing.T) {
+	t.Parallel()
+	nan := math.NaN()
+	if got := clampConfidence(nan); got != 0 {
+		t.Errorf("clampConfidence(NaN) = %v, want 0", got)
+	}
+	if got := clampConfidence(math.Inf(1)); got != 1 {
+		t.Errorf("clampConfidence(+Inf) = %v, want 1", got)
+	}
+	if got := clampConfidence(math.Inf(-1)); got != 0 {
+		t.Errorf("clampConfidence(-Inf) = %v, want 0", got)
+	}
+
+	// A NaN store floor must not silently admit everything: it
+	// degrades to 0 (the documented default), so an indicator with
+	// real confidence is still admitted and a NaN-confidence
+	// indicator is normalized to 0 (and dropped by any positive
+	// floor).
+	store := NewIOCStore(WithMinConfidence(nan))
+	res := store.Upsert(mkIOC(IOCTypeIP, "203.0.113.9", 0.7))
+	if res.Added != 1 {
+		t.Fatalf("NaN floor should degrade to 0 and admit real IOCs: %#v", res)
+	}
+	ioc := mkIOC(IOCTypeIP, "203.0.113.10", nan)
+	if ioc.Confidence != 0 {
+		t.Errorf("NaN confidence not normalized: %v", ioc.Confidence)
 	}
 }
 
