@@ -35,6 +35,7 @@
 
 use crate::channels::DlpChannel;
 use crate::error::{DlpError, DlpResult};
+use crate::ml_classifier::{EntityClass, MlNerDetector};
 use crate::rules::{DlpRule, PatternType, RuleAction, Severity};
 use crate::validators;
 use aho_corasick::AhoCorasick;
@@ -333,6 +334,15 @@ struct MipEntry {
     label: String,
 }
 
+/// A compiled `MlNer` rule: the entity classes it fires on. The NER
+/// model runs once per content event ([`ContentClassifier::scan_ml`]);
+/// each `MlEntry` then claims the detected spans whose class is in its
+/// target set.
+struct MlEntry {
+    meta: RuleMeta,
+    targets: Vec<EntityClass>,
+}
+
 /// Compiled content classifier. Construct once with
 /// [`ContentClassifier::compile`]; cheap to call [`Self::classify`]
 /// repeatedly. The struct is immutable after construction — the
@@ -346,6 +356,8 @@ pub struct ContentClassifier {
     keyword_metas: Vec<RuleMeta>,
     fingerprint_entries: Vec<FingerprintEntry>,
     mip_entries: Vec<MipEntry>,
+    ml_entries: Vec<MlEntry>,
+    ml_detector: MlNerDetector,
     max_scan_bytes: usize,
 }
 
@@ -356,6 +368,8 @@ impl std::fmt::Debug for ContentClassifier {
             .field("keyword_patterns", &self.keyword_pat_to_rule.len())
             .field("fingerprint_rules", &self.fingerprint_entries.len())
             .field("mip_rules", &self.mip_entries.len())
+            .field("ml_rules", &self.ml_entries.len())
+            .field("ml_model_loaded", &self.ml_detector.has_model())
             .field("max_scan_bytes", &self.max_scan_bytes)
             .finish_non_exhaustive()
     }
@@ -374,11 +388,39 @@ impl ContentClassifier {
         Self::compile_with_limit(rules, DEFAULT_MAX_SCAN_BYTES)
     }
 
-    /// Compile `rules` with an explicit scan ceiling.
+    /// Compile `rules` with an explicit scan ceiling. `MlNer` rules
+    /// use the fail-safe regex NER fallback (no ONNX model loaded);
+    /// use [`Self::compile_with_model`] to attach a signed model.
     ///
     /// # Errors
     /// See [`Self::compile`].
     pub fn compile_with_limit(rules: &[DlpRule], max_scan_bytes: usize) -> DlpResult<Self> {
+        Self::compile_with_model(rules, max_scan_bytes, MlNerDetector::fallback_only())
+    }
+
+    /// Compile `rules` with an explicit scan ceiling and a specific
+    /// [`MlNerDetector`] (either model-backed or fallback-only). The
+    /// engine threads its currently-installed model through here on
+    /// every policy rotation so the ONNX model and the rule set are
+    /// swapped atomically together.
+    ///
+    /// # Errors
+    /// Returns [`DlpError::RuleCompile`] if a regex rule's pattern
+    /// fails to compile, a keyword rule has an empty dictionary, a
+    /// fingerprint rule's `pattern_data` is not valid 16-char hex, or
+    /// an `MlNer` rule lists no / unknown entity classes.
+    // Allow `clippy::too_many_lines`: this is a single linear dispatch
+    // that builds every detector's rule table in one pass over
+    // `rules`. Splitting the per-pattern arms into separate helpers
+    // would scatter the shared accumulators (the regex pattern list,
+    // keyword dictionary, and metas) across functions and obscure that
+    // they are populated together, for no real readability gain.
+    #[allow(clippy::too_many_lines)]
+    pub fn compile_with_model(
+        rules: &[DlpRule],
+        max_scan_bytes: usize,
+        ml_detector: MlNerDetector,
+    ) -> DlpResult<Self> {
         let mut regex_entries = Vec::new();
         let mut regex_patterns = Vec::new();
         let mut keyword_patterns: Vec<String> = Vec::new();
@@ -386,6 +428,7 @@ impl ContentClassifier {
         let mut keyword_metas = Vec::new();
         let mut fingerprint_entries = Vec::new();
         let mut mip_entries = Vec::new();
+        let mut ml_entries = Vec::new();
 
         for rule in rules {
             let meta = RuleMeta::from_rule(rule);
@@ -457,6 +500,15 @@ impl ContentClassifier {
                         label: rule.pattern_data.clone(),
                     });
                 }
+                PatternType::MlNer => {
+                    let targets = parse_entity_classes(&rule.pattern_data).map_err(|reason| {
+                        DlpError::RuleCompile {
+                            rule_id: rule.id.clone(),
+                            reason,
+                        }
+                    })?;
+                    ml_entries.push(MlEntry { meta, targets });
+                }
             }
         }
 
@@ -489,6 +541,8 @@ impl ContentClassifier {
             keyword_metas,
             fingerprint_entries,
             mip_entries,
+            ml_entries,
+            ml_detector,
             max_scan_bytes,
         })
     }
@@ -500,6 +554,13 @@ impl ContentClassifier {
             + self.keyword_metas.len()
             + self.fingerprint_entries.len()
             + self.mip_entries.len()
+            + self.ml_entries.len()
+    }
+
+    /// Whether an ONNX NER model is loaded (vs. the regex fallback).
+    #[must_use]
+    pub fn has_ml_model(&self) -> bool {
+        self.ml_detector.has_model()
     }
 
     /// Classify `content` observed on `channel`. Only rules scoped
@@ -539,6 +600,7 @@ impl ContentClassifier {
         self.scan_keywords(channel, &text, &mut matches);
         self.scan_fingerprints(channel, content, &mut matches);
         self.scan_mip_labels(channel, metadata, &mut matches);
+        self.scan_ml(channel, &text, &mut matches);
 
         ClassificationResult { matches }
     }
@@ -672,6 +734,70 @@ impl ContentClassifier {
             }
         }
     }
+
+    /// Run the ML-NER detector once over `text` and attribute each
+    /// detected entity span to every `MlNer` rule (scoped to `channel`)
+    /// whose target class set contains the entity's class.
+    ///
+    /// The model (or regex fallback) runs a single time per content
+    /// event regardless of how many `MlNer` rules are configured — the
+    /// detection is shared, then fanned out to the matching rules, the
+    /// same one-pass discipline `scan_regex` uses with its `RegexSet`.
+    fn scan_ml(&self, channel: DlpChannel, text: &str, out: &mut Vec<RuleMatch>) {
+        if self.ml_entries.is_empty() {
+            return;
+        }
+        let entities = self.ml_detector.detect(text);
+        if entities.is_empty() {
+            return;
+        }
+        for entry in &self.ml_entries {
+            if !entry.meta.applies_to(channel) {
+                continue;
+            }
+            for ent in &entities {
+                if entry.targets.contains(&ent.class) {
+                    out.push(RuleMatch {
+                        rule_id: entry.meta.id.clone(),
+                        pattern_type: PatternType::MlNer,
+                        severity: entry.meta.severity,
+                        action: entry.meta.action,
+                        confidence: ent.confidence,
+                        offset: Some(ent.offset),
+                        length: Some(ent.length),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Parse an `MlNer` rule's `pattern_data` (a comma-separated list of
+/// entity-class wire names) into a de-duplicated, order-preserving set
+/// of [`EntityClass`]. Returns a human-readable reason on an empty
+/// list or an unknown class name so the caller can wrap it in a
+/// [`DlpError::RuleCompile`].
+fn parse_entity_classes(pattern_data: &str) -> Result<Vec<EntityClass>, String> {
+    let mut out: Vec<EntityClass> = Vec::new();
+    for raw in pattern_data.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let class = EntityClass::from_wire(name).ok_or_else(|| {
+            format!("ml_ner pattern_data lists unknown entity class {name:?}")
+        })?;
+        if !out.contains(&class) {
+            out.push(class);
+        }
+    }
+    if out.is_empty() {
+        return Err(
+            "ml_ner pattern_data must list at least one entity class (e.g. \"person_name,bank_account\")"
+                .to_owned(),
+        );
+    }
+    Ok(out)
 }
 
 /// Resolve a builtin PII pattern name to its regular expression.

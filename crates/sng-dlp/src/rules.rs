@@ -30,6 +30,15 @@ pub enum PatternType {
     /// `pattern_data` is the label id to match against the content
     /// metadata's declared labels.
     MipLabel,
+    /// An on-device ML Named-Entity-Recognition detector —
+    /// `pattern_data` is a comma-separated list of entity classes to
+    /// detect (`person_name`, `address`, `phone_number`,
+    /// `bank_account`, `medical_record`, `legal_document`; see
+    /// [`crate::ml_classifier::EntityClass`]). The classifier runs the
+    /// signed-bundle ONNX NER model (falling back to a regex NER when
+    /// no model is installed) and fires the rule for any detected span
+    /// whose class is in the list.
+    MlNer,
 }
 
 impl PatternType {
@@ -41,6 +50,7 @@ impl PatternType {
             Self::Keyword => "keyword",
             Self::Fingerprint => "fingerprint",
             Self::MipLabel => "mip_label",
+            Self::MlNer => "ml_ner",
         }
     }
 }
@@ -117,6 +127,8 @@ pub struct DlpRule {
     /// * `Keyword` — a comma-separated keyword dictionary.
     /// * `Fingerprint` — 16-char hex of the 64-bit SimHash.
     /// * `MipLabel` — the sensitivity label id.
+    /// * `MlNer` — comma-separated entity classes to detect
+    ///   (`person_name`, `address`, …).
     pub pattern_data: String,
     /// Severity classification.
     pub severity: Severity,

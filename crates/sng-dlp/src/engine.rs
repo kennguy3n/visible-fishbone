@@ -12,6 +12,7 @@
 use crate::channels::{ContentEvent, DlpChannel};
 use crate::classifier::{ClassificationResult, ContentClassifier, ContentMetadata, RuleMatch};
 use crate::error::DlpResult;
+use crate::ml_classifier::{MlNerDetector, ModelVerifier, NerModel, SignedModel};
 use crate::policy::DlpPolicy;
 use crate::rules::{RuleAction, Severity};
 use arc_swap::ArcSwap;
@@ -114,9 +115,21 @@ struct EngineState {
 }
 
 /// The endpoint DLP engine.
+///
+/// Two atomically-swappable cells share the lock-free hot-swap
+/// discipline: [`Self::state`] holds the active (policy + compiled
+/// classifier) pair, and [`Self::model`] holds the currently-installed
+/// ML-NER detector. The detector is held separately because the ONNX
+/// model and the policy rotate on independent schedules (a model is a
+/// large, slowly-changing asset; policies churn far more often). Both
+/// [`Self::install`] and [`Self::install_model`] recompile the
+/// classifier from these two inputs and publish the result in a single
+/// `store`, so a reader in [`Self::evaluate`] always sees a consistent
+/// (policy, classifier, model) triple.
 #[derive(Debug)]
 pub struct DlpEngine {
     state: ArcSwap<EngineState>,
+    model: ArcSwap<MlNerDetector>,
 }
 
 impl DlpEngine {
@@ -127,14 +140,7 @@ impl DlpEngine {
     /// Propagates [`crate::error::DlpError::RuleCompile`] if any
     /// rule fails to compile.
     pub fn new(policy: DlpPolicy) -> DlpResult<Self> {
-        let classifier = ContentClassifier::compile(policy.rules())?;
-        Ok(Self {
-            state: ArcSwap::from_pointee(EngineState {
-                policy,
-                classifier,
-                max_scan_bytes: crate::classifier::DEFAULT_MAX_SCAN_BYTES,
-            }),
-        })
+        Self::with_limit(policy, crate::classifier::DEFAULT_MAX_SCAN_BYTES)
     }
 
     /// Build an engine with an explicit per-event scan ceiling.
@@ -142,13 +148,16 @@ impl DlpEngine {
     /// # Errors
     /// See [`Self::new`].
     pub fn with_limit(policy: DlpPolicy, max_scan_bytes: usize) -> DlpResult<Self> {
-        let classifier = ContentClassifier::compile_with_limit(policy.rules(), max_scan_bytes)?;
+        let model = MlNerDetector::fallback_only();
+        let classifier =
+            ContentClassifier::compile_with_model(policy.rules(), max_scan_bytes, model.clone())?;
         Ok(Self {
             state: ArcSwap::from_pointee(EngineState {
                 policy,
                 classifier,
                 max_scan_bytes,
             }),
+            model: ArcSwap::from_pointee(model),
         })
     }
 
@@ -162,7 +171,74 @@ impl DlpEngine {
     /// rule in `policy` fails to compile. The engine is unchanged.
     pub fn install(&self, policy: DlpPolicy) -> DlpResult<()> {
         let max_scan_bytes = self.state.load().max_scan_bytes;
-        let classifier = ContentClassifier::compile_with_limit(policy.rules(), max_scan_bytes)?;
+        let model = self.model.load().as_ref().clone();
+        let classifier =
+            ContentClassifier::compile_with_model(policy.rules(), max_scan_bytes, model)?;
+        self.state.store(Arc::new(EngineState {
+            policy,
+            classifier,
+            max_scan_bytes,
+        }));
+        Ok(())
+    }
+
+    /// Atomically install a verified ML-NER model, recompiling the
+    /// active policy's classifier so its `MlNer` rules switch from the
+    /// regex fallback to on-device ONNX inference. The model bytes are
+    /// verified against `verifier` (the same Ed25519 trust store the
+    /// policy bundle uses) *before* they are loaded — an unsigned,
+    /// untrusted, or tampered model is rejected and the engine is left
+    /// untouched (fail-closed).
+    ///
+    /// # Errors
+    /// Propagates [`crate::error::DlpError::ModelSignatureInvalid`] if
+    /// verification fails, [`crate::error::DlpError::ModelLoad`] if the
+    /// verified bytes are not a loadable ONNX graph, or
+    /// [`crate::error::DlpError::RuleCompile`] if recompilation fails.
+    /// In every error case the previously-active model and classifier
+    /// are preserved.
+    pub fn install_model(
+        &self,
+        signed: &SignedModel,
+        verifier: &ModelVerifier,
+    ) -> DlpResult<()> {
+        let model = NerModel::load_signed(signed, verifier)?;
+        let detector = MlNerDetector::with_model(Arc::new(model));
+        self.recompile_with_model(detector)
+    }
+
+    /// Atomically revert to the regex-only NER fallback, recompiling
+    /// the active policy's classifier. Used when an operator unassigns
+    /// a model from a tenant; DLP keeps detecting (fail-safe).
+    ///
+    /// # Errors
+    /// Propagates [`crate::error::DlpError::RuleCompile`] if
+    /// recompilation fails; the engine is unchanged on error.
+    pub fn clear_model(&self) -> DlpResult<()> {
+        self.recompile_with_model(MlNerDetector::fallback_only())
+    }
+
+    /// Whether an ONNX model is currently installed (vs. the regex
+    /// fallback).
+    #[must_use]
+    pub fn has_ml_model(&self) -> bool {
+        self.model.load().has_model()
+    }
+
+    /// Recompile the active policy with `detector`, then publish the
+    /// new detector and engine state. The detector is stored only
+    /// after a successful recompile so a compile failure cannot leave
+    /// the stored model out of sync with the active classifier.
+    fn recompile_with_model(&self, detector: MlNerDetector) -> DlpResult<()> {
+        let current = self.state.load();
+        let classifier = ContentClassifier::compile_with_model(
+            current.policy.rules(),
+            current.max_scan_bytes,
+            detector.clone(),
+        )?;
+        let policy = current.policy.clone();
+        let max_scan_bytes = current.max_scan_bytes;
+        self.model.store(Arc::new(detector));
         self.state.store(Arc::new(EngineState {
             policy,
             classifier,
@@ -428,5 +504,97 @@ mod tests {
         let json = serde_json::to_string(&v).expect("encode");
         assert!(json.contains("\"verdict\":\"block\""));
         assert!(json.contains("\"rule_id\":\"k\""));
+    }
+
+    fn ml_rule(id: &str, classes: &str, action: RuleAction, sev: Severity) -> DlpRule {
+        DlpRule {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            pattern_type: PatternType::MlNer,
+            pattern_data: classes.to_owned(),
+            severity: sev,
+            action,
+            channels: vec![],
+        }
+    }
+
+    #[test]
+    fn ml_ner_rule_blocks_via_fallback_then_via_loaded_model() {
+        let e = engine_with(vec![ml_rule(
+            "phone",
+            "phone_number",
+            RuleAction::Block,
+            Severity::High,
+        )]);
+        // No model installed: the fail-safe regex NER still detects.
+        assert!(!e.has_ml_model());
+        let v = e.evaluate(
+            DlpChannel::Clipboard,
+            b"call +1-202-555-0173 now",
+            &ContentMetadata::default(),
+        );
+        assert!(v.is_blocking(), "fallback NER should detect the phone number");
+
+        // Install the real signed model and confirm detection persists
+        // through the hot-swap (now via on-device ONNX inference).
+        let key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let kid = sng_core::ids::PolicySigningKeyId::new("engine-model-key").expect("kid");
+        let model_bytes = include_bytes!("../assets/ner_v1.onnx");
+        let sig = ed25519_dalek::Signer::sign(&key, model_bytes.as_slice());
+        let signed = SignedModel {
+            model: model_bytes.to_vec(),
+            signature: sig.to_bytes(),
+            signing_key_id: kid.clone(),
+        };
+        let mut verifier = ModelVerifier::new();
+        verifier
+            .add_key(kid, &key.verifying_key().to_bytes())
+            .expect("trust key");
+        e.install_model(&signed, &verifier).expect("install model");
+        assert!(e.has_ml_model());
+        let v = e.evaluate(
+            DlpChannel::Clipboard,
+            b"call +1-202-555-0173 now",
+            &ContentMetadata::default(),
+        );
+        assert!(v.is_blocking(), "loaded ONNX model should detect the phone number");
+
+        // Reverting to the fallback keeps DLP armed.
+        e.clear_model().expect("clear model");
+        assert!(!e.has_ml_model());
+    }
+
+    #[test]
+    fn install_model_failure_leaves_engine_on_fallback() {
+        let e = engine_with(vec![ml_rule(
+            "phone",
+            "phone_number",
+            RuleAction::Block,
+            Severity::High,
+        )]);
+        // A model whose signature does not verify must be rejected and
+        // leave the engine on its (working) fallback detector.
+        let key = ed25519_dalek::SigningKey::from_bytes(&[4u8; 32]);
+        let kid = sng_core::ids::PolicySigningKeyId::new("bad-model-key").expect("kid");
+        let signed = SignedModel {
+            model: include_bytes!("../assets/ner_v1.onnx").to_vec(),
+            signature: [0u8; 64], // not a valid signature
+            signing_key_id: kid.clone(),
+        };
+        let mut verifier = ModelVerifier::new();
+        verifier
+            .add_key(kid, &key.verifying_key().to_bytes())
+            .expect("trust key");
+        assert!(e.install_model(&signed, &verifier).is_err());
+        assert!(!e.has_ml_model());
+        // Detection still works via the fallback.
+        assert!(
+            e.evaluate(
+                DlpChannel::Clipboard,
+                b"call +1-202-555-0173 now",
+                &ContentMetadata::default()
+            )
+            .is_blocking()
+        );
     }
 }
