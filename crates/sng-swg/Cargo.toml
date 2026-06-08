@@ -55,6 +55,23 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 
+# Signed YARA rule bundles reuse the same Ed25519 + MessagePack
+# envelope the IPS / policy bundles use, so one operator trust store
+# verifies all three. `ed25519-dalek` verifies the bundle signature,
+# `rmp-serde` decodes the signed body, and `serde` derives the claims
+# shape (matching the Go control plane's `msgpack/v5` map encoding).
+ed25519-dalek = { workspace = true }
+rmp-serde = { workspace = true }
+
+# YARA signature engine for the response-body malware scan that runs
+# in the ext-authz verdict pipeline after the hash-based check.
+yara-x = { workspace = true }
+
+# The ext-authz wire body carries the (optional) response body as a
+# base64 string so Envoy can forward raw bytes through the JSON
+# envelope without a binary side-channel.
+base64 = { workspace = true }
+
 # Note: the rate limiter's `SystemClock` anchor uses
 # `std::sync::LazyLock<Instant>` (stabilised in Rust 1.80) so we
 # do not need `once_cell` for the monotonic-clock epoch. If a

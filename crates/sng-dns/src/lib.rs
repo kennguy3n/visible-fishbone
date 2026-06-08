@@ -17,6 +17,9 @@
 //! - [`reputation`]: exact-match reputation feed → NXDOMAIN
 //! - [`category`]: per-tenant per-category Allow / Log / Block
 //! - [`sinkhole`]: suffix-match list → synthetic A / AAAA
+//! - [`threatintel`]: Bloom-filter known-bad feed → synthetic
+//!   sinkhole answer, with an authoritative allowlist override
+//! - [`tunneling`]: entropy / volume / TXT-abuse tunneling detector
 //! - [`resolver`]: async [`Resolver`] trait + UDP / static impls
 //! - [`service`]: end-to-end orchestrator emitting [`DnsEvent`]
 //!   into the [`sng_telemetry`] pipeline
@@ -56,6 +59,8 @@ pub mod reputation;
 pub mod resolver;
 pub mod service;
 pub mod sinkhole;
+pub mod threatintel;
+pub mod tunneling;
 pub mod wire;
 
 pub use category::{Category, CategoryAction, CategoryDb};
@@ -67,6 +72,11 @@ pub use reputation::Reputation;
 pub use resolver::{Resolver, StaticResolver, UdpResolver};
 pub use service::{DnsService, HandledQuery};
 pub use sinkhole::Sinkhole;
+pub use threatintel::{BloomFilter, ThreatIntelSinkhole};
+pub use tunneling::{
+    TracingTunnelingSink, TunnelingAlert, TunnelingConfig, TunnelingDetector, TunnelingKind,
+    TunnelingSink, registrable_domain, shannon_entropy_bits,
+};
 pub use wire::{
     CLASS_IN, Header, Record, encode_query, parse_header, parse_question, parse_records,
 };

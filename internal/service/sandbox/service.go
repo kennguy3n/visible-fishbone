@@ -244,10 +244,16 @@ func (s *Service) submitOnce(ctx context.Context, sub Submission, sha string, ac
 		return fromRow(row), ErrNoProvider
 	}
 
+	// Detect the file type from magic bytes before submission so the
+	// provider gets a typed hint (detonation backends route by type;
+	// reputation backends ignore it) and the disposition is recorded
+	// for triage.
+	fileType := providers.DetectFileType(sub.Content)
 	res, err := s.provider.Submit(ctx, providers.File{
 		SHA256:   sha,
 		Filename: sub.Filename,
 		Content:  sub.Content,
+		Type:     fileType,
 	})
 	if err != nil {
 		if errors.Is(err, providers.ErrProviderUnavailable) {
@@ -431,6 +437,12 @@ func (s *Service) verdictFromPoll(sha, sandboxID string, res providers.PollResul
 	provider := ""
 	if s.provider != nil {
 		provider = s.provider.ID()
+	}
+	// A multi-provider aggregator reports the winning child via
+	// res.Provider so the persisted verdict + per-provider cache TTL
+	// attribute to the concrete backend, not the aggregator wrapper.
+	if res.Provider != "" {
+		provider = res.Provider
 	}
 	v := Verdict{
 		SHA256:         sha,

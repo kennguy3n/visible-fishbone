@@ -37,6 +37,9 @@ use crate::malware::{MalwareVerdict, MalwareVerdictProvider};
 use crate::rate_limit::RateLimiter;
 use crate::telemetry::{TelemetryEmitter, VerdictEvent};
 use crate::verdict::{Action, RequestContext, Verdict};
+use crate::yara::{YaraEngine, YaraRuleBundle, YaraRuleVerifier, YaraSeverity};
+
+use base64::Engine as _;
 
 /// Header carrying an upstream-applied sensitivity label (e.g. a
 /// Microsoft Purview / MIP label id). Read into
@@ -89,6 +92,18 @@ pub struct ExtAuthzRequest {
     /// present the handler queries the malware provider; when
     /// absent the handler skips the malware lookup entirely.
     pub body_sha256: Option<String>,
+    /// Optional response body bytes, base64-encoded (standard
+    /// alphabet, with padding). Envoy forwards the (size-capped)
+    /// response body through the JSON envelope as base64 so the
+    /// raw bytes survive the JSON transport without a binary
+    /// side-channel; the handler base64-decodes it and runs the
+    /// YARA signature scan over the bytes. `None` (the default,
+    /// and the only value an older Envoy filter sends) skips the
+    /// YARA stage — exactly like a missing `body_sha256` skips the
+    /// hash check. The hash check and the YARA scan are
+    /// independent: a deployment can run either, both, or neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_b64: Option<String>,
 }
 
 impl ExtAuthzRequest {
@@ -151,6 +166,29 @@ impl ExtAuthzRequest {
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .map(str::to_string),
+        }
+    }
+
+    /// Decode the optional base64 response body the YARA scan runs
+    /// over. Borrows `self` so the caller can decode before
+    /// [`Self::into_context`] consumes the request.
+    ///
+    /// * `Ok(None)` — no body was forwarded (the common case; the
+    ///   YARA stage is skipped, mirroring a missing `body_sha256`).
+    /// * `Ok(Some(bytes))` — the decoded response body.
+    /// * `Err(ExtAuthzDecode)` — the field was present but not
+    ///   valid base64. A malformed body field is a request-shaping
+    ///   bug in the Envoy filter, not attacker-controlled framing
+    ///   we should silently ignore, so it surfaces as a decode
+    ///   error (handled as a 400, the same as any other malformed
+    ///   envelope field) rather than masking a misconfiguration.
+    pub fn scan_body(&self) -> Result<Option<Vec<u8>>, SwgError> {
+        match self.body_b64.as_deref() {
+            None => Ok(None),
+            Some(b64) => base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map(Some)
+                .map_err(|e| SwgError::ExtAuthzDecode(format!("body_b64 not valid base64: {e}"))),
         }
     }
 }
@@ -289,6 +327,21 @@ struct HandlerInner {
     /// leaves the pipeline exactly as it was before inline CASB
     /// existed.
     casb: Option<Arc<InlineCasbInspector>>,
+    /// Optional YARA signature engine. When set, the verdict
+    /// pipeline runs a content scan over the (base64-decoded)
+    /// response body *after* the hash-based malware check — so a
+    /// hash hit on a known-bad file still short-circuits without
+    /// paying for a scan, and the YARA stage adds signature
+    /// coverage for novel samples the hash list has not seen. A
+    /// [`YaraSeverity::Malicious`] match denies unconditionally; a
+    /// [`YaraSeverity::Suspicious`] match denies only under
+    /// [`Self::elevated_risk_mode`] — the same two-tier gate the
+    /// hash provider's `Suspicious` verdict uses. `None` leaves the
+    /// pipeline unchanged. The engine is shared (`Arc`) and
+    /// hot-swaps its own rule set internally, so the control plane
+    /// can install a new signed bundle without rebuilding the
+    /// handler.
+    yara: Option<Arc<YaraEngine>>,
 }
 
 impl std::fmt::Debug for ExtAuthzHandler {
@@ -318,6 +371,7 @@ pub struct ExtAuthzHandlerBuilder {
     deny_categories: Vec<String>,
     elevated_risk_mode: bool,
     casb: Option<Arc<InlineCasbInspector>>,
+    yara: Option<Arc<YaraEngine>>,
 }
 
 impl std::fmt::Debug for ExtAuthzHandlerBuilder {
@@ -331,6 +385,7 @@ impl std::fmt::Debug for ExtAuthzHandlerBuilder {
             .field("deny_categories", &self.deny_categories)
             .field("elevated_risk_mode", &self.elevated_risk_mode)
             .field("casb_set", &self.casb.is_some())
+            .field("yara_set", &self.yara.is_some())
             .finish()
     }
 }
@@ -350,6 +405,7 @@ impl ExtAuthzHandlerBuilder {
             deny_categories: Vec::new(),
             elevated_risk_mode: false,
             casb: None,
+            yara: None,
         }
     }
 
@@ -422,6 +478,20 @@ impl ExtAuthzHandlerBuilder {
         self
     }
 
+    /// Install a YARA signature engine. Optional: a handler built
+    /// without one runs the verdict pipeline with no content scan
+    /// (hash-based malware detection only). The engine's rule set
+    /// is hot-swappable post-build via
+    /// [`ExtAuthzHandler::install_yara_bundle`], so a handler can be
+    /// built with the built-in rule set and have an operator bundle
+    /// installed later from the first signed YARA bundle the
+    /// control plane publishes — exactly like the CASB rule set.
+    #[must_use]
+    pub fn with_yara_engine(mut self, engine: Arc<YaraEngine>) -> Self {
+        self.yara = Some(engine);
+        self
+    }
+
     /// Build the handler. Returns an error when any required
     /// dep was not set.
     pub fn build(mut self) -> Result<ExtAuthzHandler, SwgError> {
@@ -454,6 +524,7 @@ impl ExtAuthzHandlerBuilder {
                 deny_categories: self.deny_categories,
                 elevated_risk_mode: self.elevated_risk_mode,
                 casb: self.casb,
+                yara: self.yara,
             }),
         })
     }
@@ -486,14 +557,49 @@ impl ExtAuthzHandler {
         }
     }
 
+    /// Verify and hot-swap a signed YARA rule bundle into the
+    /// engine. Mirrors [`Self::install_casb_rules`]: the control
+    /// plane calls this on every signed YARA bundle it publishes.
+    ///
+    /// Returns:
+    /// * `Ok(Some(rev))` — the installed bundle revision.
+    /// * `Ok(None)` — the handler was built without a YARA engine,
+    ///   so there is nothing to install (no-op, not an error, so a
+    ///   YARA-less deployment can run the same bundle-install code
+    ///   path without special-casing).
+    /// * `Err(_)` — signature / staleness / compile failure from
+    ///   [`YaraEngine::install_bundle`]; the live rule set is left
+    ///   untouched.
+    pub fn install_yara_bundle(
+        &self,
+        verifier: &YaraRuleVerifier,
+        bundle: &YaraRuleBundle,
+    ) -> Result<Option<u64>, SwgError> {
+        match &self.inner.yara {
+            Some(engine) => engine.install_bundle(verifier, bundle).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The installed YARA bundle revision, or `None` when no engine
+    /// is wired or only the built-in rule set is live. Exposed for
+    /// boot diagnostics / operator status endpoints.
+    #[must_use]
+    pub fn yara_version(&self) -> Option<u64> {
+        self.inner.yara.as_ref().and_then(|e| e.version())
+    }
+
     /// Convenience: process a decoded JSON request envelope.
     /// Returns the response envelope ready for serialisation.
     pub async fn handle_request(&self, req: ExtAuthzRequest) -> Result<ExtAuthzResponse, SwgError> {
-        // Build the out-of-band CASB signals before `into_context`
-        // consumes the request envelope.
+        // Build the out-of-band CASB signals and decode the YARA
+        // scan body before `into_context` consumes the request
+        // envelope. A malformed `body_b64` surfaces as an
+        // `ExtAuthzDecode` (400) rather than being silently dropped.
         let signals = req.signals();
+        let scan_body = req.scan_body()?;
         let ctx = req.into_context()?;
-        let verdict = self.evaluate(&ctx, &signals).await;
+        let verdict = self.evaluate(&ctx, &signals, scan_body.as_deref()).await;
         let resp = ExtAuthzResponse::from_verdict(&verdict);
         self.inner
             .telemetry
@@ -553,14 +659,24 @@ impl ExtAuthzHandler {
     ///    forward so a later deny still wins
     /// 4. URL categorisation — operator deny-list wins; default allow
     /// 5. Malware verdict on the response body hash (when supplied)
+    /// 6. YARA content scan on the response body (when supplied and
+    ///    an engine is wired) — runs after the hash check so a known
+    ///    hash hit short-circuits without a scan
     ///
     /// `signals` carries the out-of-band inline-CASB inputs (content
     /// length, sensitivity label) extracted from the request by
     /// [`ExtAuthzRequest::signals`]. They are ignored when no CASB
-    /// inspector is wired, so the verdict stays a pure function of
-    /// `(ctx, signals)` over the configured trait + inspector
-    /// snapshot.
-    pub async fn evaluate(&self, ctx: &RequestContext, signals: &RequestSignals) -> Verdict {
+    /// inspector is wired. `scan_body` is the (already base64-decoded)
+    /// response body the YARA stage scans; `None` skips the scan
+    /// (mirroring a missing file hash). The verdict stays a pure
+    /// function of `(ctx, signals, scan_body)` over the configured
+    /// trait + inspector + engine snapshot.
+    pub async fn evaluate(
+        &self,
+        ctx: &RequestContext,
+        signals: &RequestSignals,
+        scan_body: Option<&[u8]>,
+    ) -> Verdict {
         // 1. TLS bypass — we *only* short-circuit when SNI
         //    matches a bypass entry. Other paths see the full
         //    pipeline. Pulling a clone of the Arc out of the
@@ -678,6 +794,42 @@ impl ExtAuthzHandler {
                 MalwareVerdict::Suspicious | MalwareVerdict::Clean | MalwareVerdict::Unknown => {}
             }
         }
+
+        // 6. YARA content scan on the response body. Runs only when
+        //    an engine is wired AND Envoy forwarded a body, and
+        //    only after the hash check above — so a known-bad hash
+        //    short-circuits to Deny without paying for a scan, and
+        //    the scan adds signature coverage for files the hash
+        //    list has not seen. The scan itself is pure
+        //    (immutable rule snapshot, no I/O) and fails open on a
+        //    scanner error, so a YARA fault degrades to the same
+        //    coverage the pipeline had before this stage rather
+        //    than wedging the verdict.
+        //
+        //    Severity mirrors the hash provider's two-tier gate:
+        //    a `Malicious` rule denies unconditionally; a
+        //    `Suspicious` rule denies only under elevated-risk
+        //    mode (heuristic-only matches must not false-positive
+        //    block legitimate downloads by default). The category
+        //    carries the matching family so the malware dashboard
+        //    can group YARA hits the same way it groups hash hits.
+        if let (Some(engine), Some(body)) = (self.inner.yara.as_ref(), scan_body) {
+            if let Some(m) = engine.worst_match(body) {
+                let family = m.family.as_deref().unwrap_or(&m.rule);
+                match m.severity {
+                    YaraSeverity::Malicious => {
+                        return Verdict::deny_categorized(format!("malware.yara.{family}"));
+                    }
+                    YaraSeverity::Suspicious if self.inner.elevated_risk_mode => {
+                        return Verdict::deny_categorized(format!(
+                            "malware.yara.suspicious.{family}"
+                        ));
+                    }
+                    YaraSeverity::Suspicious => {}
+                }
+            }
+        }
+
         // Allow path. A carried-forward CASB `log` / `allow`
         // verdict wins over the categoriser's allow: it is the
         // higher-signal decision (a specific SaaS action the
@@ -761,6 +913,145 @@ mod tests {
         (h, cap)
     }
 
+    /// Handler with a YARA engine wired (built-in rule set) and a
+    /// generous rate-limit budget so multi-request tests don't trip
+    /// the limiter. `elevated` toggles the elevated-risk posture
+    /// that promotes a `suspicious` YARA match to Deny.
+    fn make_yara_handler(elevated: bool) -> ExtAuthzHandler {
+        let cap = Arc::new(CapturingEmitter::default());
+        let bypass = Arc::new(BypassList::new(vec![]));
+        let cats = LocalCategoryDb::new(vec![CategoryEntry {
+            host: "biz.example".into(),
+            path_prefix: None,
+            category: Category("business.saas".into()),
+        }]);
+        // Hash list flags this specific hash so we can assert the
+        // hash check short-circuits before the YARA stage.
+        let mal = Arc::new(StaticMalwareList::new(vec![(
+            "a".repeat(64),
+            MalwareVerdict::Malicious,
+        )]));
+        let clock = Arc::new(TestClock::new());
+        let rl = RateLimiter::new(100.0, 1.0, clock);
+        let yara = Arc::new(YaraEngine::with_builtin_rules().unwrap());
+        ExtAuthzHandlerBuilder::new()
+            .with_categorizer(Arc::new(cats))
+            .with_malware(mal)
+            .with_bypass(bypass)
+            .with_rate_limiter(rl)
+            .with_telemetry(cap as Arc<dyn TelemetryEmitter>)
+            .with_elevated_risk_mode(elevated)
+            .with_yara_engine(yara)
+            .build()
+            .unwrap()
+    }
+
+    /// EICAR test string, assembled at runtime so this source file
+    /// is not itself flagged by a host scanner.
+    fn eicar_bytes() -> Vec<u8> {
+        format!(
+            "X5O!P%@AP[4\\PZX54(P^)7CC)7}}${}!$H+H*",
+            "EICAR-STANDARD-ANTIVIRUS-TEST-FILE"
+        )
+        .into_bytes()
+    }
+
+    /// Build a request carrying a base64-encoded response body for
+    /// the YARA scan stage.
+    fn req_with_body(host: &str, body: &[u8]) -> ExtAuthzRequest {
+        let mut r = req(host, "/download", None, None);
+        r.body_b64 = Some(base64::engine::general_purpose::STANDARD.encode(body));
+        r
+    }
+
+    #[tokio::test]
+    async fn yara_malicious_body_triggers_deny() {
+        let h = make_yara_handler(false);
+        let resp = h
+            .handle_request(req_with_body("biz.example", &eicar_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.status, Some(403));
+        assert_eq!(resp.category.as_deref(), Some("malware.yara.eicar"));
+    }
+
+    #[tokio::test]
+    async fn yara_suspicious_body_allows_by_default() {
+        // A bare ELF executable is `suspicious`, not `malicious`,
+        // so the default posture allows it.
+        let h = make_yara_handler(false);
+        let elf = b"\x7fELF\x02\x01\x01\x00not-really-a-binary";
+        let resp = h
+            .handle_request(req_with_body("biz.example", elf))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+    }
+
+    #[tokio::test]
+    async fn yara_suspicious_body_denies_under_elevated_risk() {
+        let h = make_yara_handler(true);
+        let elf = b"\x7fELF\x02\x01\x01\x00not-really-a-binary";
+        let resp = h
+            .handle_request(req_with_body("biz.example", elf))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(
+            resp.category.as_deref(),
+            Some("malware.yara.suspicious.elf")
+        );
+    }
+
+    #[tokio::test]
+    async fn yara_benign_body_allows() {
+        let h = make_yara_handler(true);
+        let resp = h
+            .handle_request(req_with_body("biz.example", b"just a normal text file"))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+    }
+
+    #[tokio::test]
+    async fn hash_deny_short_circuits_before_yara() {
+        // The request carries BOTH a known-bad hash and a benign
+        // body. The hash check (step 5) must win, proving YARA runs
+        // strictly after — and the deny reason is the hash
+        // category, not a YARA one.
+        let h = make_yara_handler(false);
+        let mut r = req_with_body("biz.example", b"benign content");
+        r.body_sha256 = Some("a".repeat(64));
+        let resp = h.handle_request(r).await.unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.category.as_deref(), Some("malware.detected"));
+    }
+
+    #[tokio::test]
+    async fn malformed_body_b64_returns_400() {
+        let h = make_yara_handler(false);
+        let mut r = req("biz.example", "/download", None, None);
+        r.body_b64 = Some("not valid base64 !!!".into());
+        let body = serde_json::to_vec(&r).unwrap();
+        let out = h.handle_json_bytes(&body).await;
+        let resp: ExtAuthzResponse = serde_json::from_slice(&out).unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.status, Some(400));
+    }
+
+    #[tokio::test]
+    async fn yara_stage_skipped_when_no_engine_wired() {
+        // The default make_handler has no YARA engine; a request
+        // with an EICAR body is allowed (no content scan runs).
+        let (h, _cap) = make_handler(vec![]);
+        let resp = h
+            .handle_request(req_with_body("biz.example", &eicar_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+    }
+
     fn req(host: &str, path: &str, sni: Option<&str>, file_hash: Option<&str>) -> ExtAuthzRequest {
         let mut headers = vec![
             (":method".into(), "GET".into()),
@@ -776,6 +1067,7 @@ mod tests {
         ExtAuthzRequest {
             headers,
             body_sha256: file_hash.map(Into::into),
+            body_b64: None,
         }
     }
 
@@ -924,6 +1216,7 @@ mod tests {
                 ("x-sng-principal".into(), "principal-1".into()),
             ],
             body_sha256: None,
+            body_b64: None,
         })
         .unwrap();
         let raw = h.handle_json_bytes(&body).await;
@@ -970,6 +1263,7 @@ mod tests {
                 ("x-sng-principal".into(), "p".into()),
             ],
             body_sha256: None,
+            body_b64: None,
         })
         .unwrap();
         let out = h.handle_json_bytes(&bad).await;
@@ -1021,6 +1315,7 @@ mod tests {
                 ("x-sng-sni".into(), "EXAMPLE.com".into()),
             ],
             body_sha256: None,
+            body_b64: None,
         };
         let ctx = r.into_context().unwrap();
         assert_eq!(ctx.method, "get");
@@ -1052,6 +1347,7 @@ mod tests {
                 ("x-sng-principal".into(), "p".into()),
             ],
             body_sha256: None,
+            body_b64: None,
         };
         let ctx = r.into_context().unwrap();
         assert_eq!(ctx.path, "/oauth/callback");
@@ -1074,6 +1370,7 @@ mod tests {
                 ("x-sng-principal".into(), "p".into()),
             ],
             body_sha256: None,
+            body_b64: None,
         };
         let err = r.into_context().expect_err("must reject empty tenant");
         match err {
@@ -1329,6 +1626,7 @@ mod tests {
         ExtAuthzRequest {
             headers,
             body_sha256: None,
+            body_b64: None,
         }
     }
 
@@ -1441,6 +1739,7 @@ mod tests {
                 ("x-sng-principal".into(), "principal-1".into()),
             ],
             body_sha256: Some("a".repeat(64)),
+            body_b64: None,
         };
         let resp = h.handle_request(r).await.unwrap();
         assert_eq!(resp.action, "deny");

@@ -140,128 +140,48 @@ func (d *Detector) ObserveAndScore(
 	if kind == "" {
 		kind = "baseline.zscore_exceeded"
 	}
-	// The load-score-fold-upsert sequence runs inside an
-	// optimistic-lock retry loop matching Service.Observe.
-	// Without the retry, a concurrent Observe / ObserveAndScore
-	// that bumps the baseline's Version between our Get and
-	// Upsert would surface ErrConflict to the caller and the
-	// observation would be lost — silently dropping data is
-	// worse than scoring against a slightly more recent state
-	// (the rescored value reflects the latest mean/EWMA, which
-	// is what we want anyway).
-	//
-	// Each retry re-loads the baseline so the score is computed
-	// against the pre-update state that we are about to fold
-	// into; this preserves the "score against what we have
-	// learned SO FAR" semantics documented at the package head.
-	//
-	// See Service.Observe (engine.go) for the canonical pattern;
-	// the only difference here is we also stash zW / zE / maxZ
-	// across the loop so the alert emit at the bottom uses the
-	// values that match the successfully-persisted baseline.
-	var (
-		cur     repository.BaselineModel
-		saved   repository.BaselineModel
-		zW      float64
-		zE      float64
-		maxZ    float64
-		lastErr error
-	)
-	loaded := false
-	for attempt := 0; attempt < d.svc.maxRetry; attempt++ {
-		// 1. Load (or materialise cold-start) the current Baseline.
-		got, err := d.svc.repo.GetForDimension(ctx, tenantID, dimension, windowSeconds)
-		if errors.Is(err, repository.ErrNotFound) {
-			got = repository.BaselineModel{
-				TenantID:      tenantID,
-				Dimension:     dimension,
-				WindowSeconds: windowSeconds,
-				Alpha:         DefaultAlpha,
-				// Cold-start default — once persisted, the
-				// operator + feedback tuning loop own this
-				// value via UpdateThreshold. See
-				// DetectorOptions.WarningZScore doc.
-				ZThreshold: d.opts.WarningZScore,
-			}
-		} else if err != nil {
-			return repository.BaselineModel{}, nil, fmt.Errorf("anomaly load baseline: %w", err)
-		}
-		cur = got
-		loaded = true
-
-		// 2. Score the observation against the PRE-update state.
-		zW, zE = d.svc.engine.Score(cur, obs)
-		maxZ = MaxAbsZ(zW, zE)
-
-		// 3. Fold into the Baseline + persist.
-		folded := d.svc.engine.Fold(cur, obs)
-		var err2 error
-		saved, err2 = d.svc.repo.Upsert(ctx, tenantID, folded)
-		if err2 == nil {
-			lastErr = nil
-			break
-		}
-		if errors.Is(err2, repository.ErrConflict) {
-			// Another writer raced us; re-load and re-score.
-			lastErr = err2
-			continue
-		}
-		return repository.BaselineModel{}, nil, fmt.Errorf("anomaly upsert baseline: %w", err2)
-	}
-	if !loaded {
-		// d.svc.maxRetry <= 0 should be unreachable (NewService
-		// fills the default), but guard anyway so callers don't
-		// observe a zero BaselineModel paired with nil err.
-		return repository.BaselineModel{}, nil, fmt.Errorf("anomaly: invalid maxRetry configuration")
-	}
-	if lastErr != nil {
-		return repository.BaselineModel{}, nil, fmt.Errorf("anomaly upsert baseline: %w", lastErr)
+	res, err := d.observeFoldScore(ctx, tenantID, dimension, windowSeconds, obs)
+	if err != nil {
+		return repository.BaselineModel{}, nil, err
 	}
 
-	// 4. Emit gate. Warmup AND score-above-threshold both required.
-	//
-	// We honour cur.ZThreshold verbatim. Pre-round-7 this took
-	// max(cur.ZThreshold, d.opts.WarningZScore) which silently
-	// overrode operator + feedback-tuned thresholds below the
-	// default 3.0σ. WarningZScore is now only the cold-start
-	// default applied above when no row exists. See PR #40
-	// round-7 BUG_0001 and the BaselineModel.ZThreshold doc.
-	threshold := cur.ZThreshold
-	if cur.Samples < d.opts.MinWarmupSamples || maxZ < threshold {
-		return saved, nil, nil
+	// Emit gate. Warmup AND score-above-threshold both required.
+	if !res.Warm || !res.AboveThreshold {
+		return res.Baseline, nil, nil
 	}
 	if d.emit == nil {
 		// Useful for tests that only want to exercise the
 		// scoring path without an emit stub.
-		return saved, nil, nil
+		return res.Baseline, nil, nil
 	}
 
 	severity := repository.AlertSeverityWarning
 	// 1.5x threshold escalates to critical — a 4.5σ event
 	// on the default 3.0σ threshold is single-tenant
 	// outage territory.
-	if maxZ >= threshold*1.5 {
+	if res.MaxAbsZ >= res.Threshold*1.5 {
 		severity = repository.AlertSeverityCritical
 	}
 
+	cur := res.Pre
 	now := d.now()
 	evidence, _ := json.Marshal(map[string]any{
-		"z_welford":          zW,
-		"z_ewma":             zE,
-		"max_abs_z":          maxZ,
+		"z_welford":          res.ZWelford,
+		"z_ewma":             res.ZEWMA,
+		"max_abs_z":          res.MaxAbsZ,
 		"alpha":              cur.Alpha,
 		"window_seconds":     windowSeconds,
 		"baseline_samples":   cur.Samples,
 		"baseline_ewma":      cur.EWMA,
 		"baseline_ewma_var":  cur.EWMAVar,
 		"observed_value":     obs.Value,
-		"threshold_z":        threshold,
+		"threshold_z":        res.Threshold,
 		"min_warmup_samples": d.opts.MinWarmupSamples,
 	})
 
 	summary := fmt.Sprintf(
 		"%s on %s: observed=%.3f mean=%.3f stddev=%.3f z=%.2fσ (warning ≥ %.2fσ)",
-		kind, dimension, obs.Value, cur.Mean, cur.StdDev(), maxZ, threshold,
+		kind, dimension, obs.Value, cur.Mean, cur.StdDev(), res.MaxAbsZ, res.Threshold,
 	)
 
 	stddev := cur.StdDev()
@@ -277,7 +197,7 @@ func (d *Detector) ObserveAndScore(
 		ObservedValue:  obs.Value,
 		BaselineMean:   cur.Mean,
 		BaselineStdDev: stddev,
-		ZScore:         maxZ,
+		ZScore:         res.MaxAbsZ,
 		WindowStart:    now.Add(-time.Duration(windowSeconds) * time.Second),
 		WindowEnd:      now,
 		WindowSeconds:  windowSeconds,
@@ -287,7 +207,122 @@ func (d *Detector) ObserveAndScore(
 	}
 	emitted, err := d.emit.Emit(ctx, tenantID, a)
 	if err != nil {
-		return saved, nil, fmt.Errorf("anomaly emit: %w", err)
+		return res.Baseline, nil, fmt.Errorf("anomaly emit: %w", err)
 	}
-	return saved, &emitted, nil
+	return res.Baseline, &emitted, nil
+}
+
+// ScoreResult is the outcome of folding one observation into a
+// baseline WITHOUT emitting an alert. It exposes both the
+// pre-update baseline (the state the observation was scored
+// against) and the persisted post-fold baseline, plus the
+// emit-gate decision. The network detectors (network.go) compose
+// it to build entity-rich typed alerts while still reusing the
+// Welford/EWMA estimator AND the per-tenant feedback-tuned
+// ZThreshold that the alert.Feedback loop maintains.
+type ScoreResult struct {
+	// Baseline is the persisted, post-fold model.
+	Baseline repository.BaselineModel
+	// Pre is the pre-fold model the observation was scored
+	// against (carries Mean / StdDev / Samples / ZThreshold).
+	Pre repository.BaselineModel
+	// ZWelford / ZEWMA are the two component z-scores.
+	ZWelford float64
+	ZEWMA    float64
+	// MaxAbsZ is max(|ZWelford|, |ZEWMA|) — the deviation score.
+	MaxAbsZ float64
+	// Threshold is the pre-fold model's ZThreshold (operator /
+	// feedback-tuned), honoured verbatim.
+	Threshold float64
+	// Warm is true once the estimator has folded enough samples
+	// (>= DetectorOptions.MinWarmupSamples) to score reliably.
+	Warm bool
+	// AboveThreshold is MaxAbsZ >= Threshold.
+	AboveThreshold bool
+}
+
+// observeFoldScore runs the load-score-fold-upsert optimistic-lock
+// retry loop and returns the score WITHOUT emitting. It is the
+// shared core of ObserveAndScore (which emits the generic z-score
+// alert) and NetworkDetector (which builds its own typed,
+// entity-rich alert from the same score).
+//
+// The load-score-fold-upsert sequence runs inside an
+// optimistic-lock retry loop matching Service.Observe: a
+// concurrent writer that bumps the baseline's Version between our
+// Get and Upsert is retried rather than surfaced as a lost
+// observation. Each retry re-loads + re-scores so the score is
+// always computed against the pre-update state we are about to
+// fold into — the "score against what we have learned SO FAR"
+// semantics documented at the package head.
+func (d *Detector) observeFoldScore(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	dimension string,
+	windowSeconds int,
+	obs Observation,
+) (ScoreResult, error) {
+	var (
+		res     ScoreResult
+		lastErr error
+	)
+	loaded := false
+	for attempt := 0; attempt < d.svc.maxRetry; attempt++ {
+		// 1. Load (or materialise cold-start) the current Baseline.
+		cur, err := d.svc.repo.GetForDimension(ctx, tenantID, dimension, windowSeconds)
+		if errors.Is(err, repository.ErrNotFound) {
+			cur = repository.BaselineModel{
+				TenantID:      tenantID,
+				Dimension:     dimension,
+				WindowSeconds: windowSeconds,
+				Alpha:         DefaultAlpha,
+				// Cold-start default — once persisted, the
+				// operator + feedback tuning loop own this
+				// value via UpdateThreshold. See
+				// DetectorOptions.WarningZScore doc.
+				ZThreshold: d.opts.WarningZScore,
+			}
+		} else if err != nil {
+			return ScoreResult{}, fmt.Errorf("anomaly load baseline: %w", err)
+		}
+
+		// 2. Score the observation against the PRE-update state.
+		zW, zE := d.svc.engine.Score(cur, obs)
+		maxZ := MaxAbsZ(zW, zE)
+
+		// 3. Fold into the Baseline + persist.
+		folded := d.svc.engine.Fold(cur, obs)
+		saved, err2 := d.svc.repo.Upsert(ctx, tenantID, folded)
+		if err2 == nil {
+			res = ScoreResult{
+				Baseline:       saved,
+				Pre:            cur,
+				ZWelford:       zW,
+				ZEWMA:          zE,
+				MaxAbsZ:        maxZ,
+				Threshold:      cur.ZThreshold,
+				Warm:           cur.Samples >= d.opts.MinWarmupSamples,
+				AboveThreshold: maxZ >= cur.ZThreshold,
+			}
+			loaded = true
+			lastErr = nil
+			break
+		}
+		if errors.Is(err2, repository.ErrConflict) {
+			// Another writer raced us; re-load and re-score.
+			lastErr = err2
+			continue
+		}
+		return ScoreResult{}, fmt.Errorf("anomaly upsert baseline: %w", err2)
+	}
+	if !loaded {
+		if lastErr != nil {
+			return ScoreResult{}, fmt.Errorf("anomaly upsert baseline: %w", lastErr)
+		}
+		// d.svc.maxRetry <= 0 should be unreachable (NewService
+		// fills the default), but guard anyway so callers don't
+		// observe a zero ScoreResult paired with nil err.
+		return ScoreResult{}, fmt.Errorf("anomaly: invalid maxRetry configuration")
+	}
+	return res, nil
 }

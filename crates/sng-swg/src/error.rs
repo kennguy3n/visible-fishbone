@@ -70,6 +70,30 @@ pub enum SwgError {
     #[error("ext_authz request decode error: {0}")]
     ExtAuthzDecode(String),
 
+    /// YARA rule bundle failed Ed25519 signature verification.
+    #[error("yara rule bundle signature invalid")]
+    YaraBundleSignatureInvalid,
+
+    /// YARA rule bundle was signed with a key id the operator
+    /// trust store does not know about.
+    #[error("yara rule bundle signed with unknown key: {0}")]
+    YaraBundleUnknownKey(String),
+
+    /// YARA rule bundle version is older than or equal to the
+    /// installed bundle. Downgrade protection — a stale bundle
+    /// would silently drop signature coverage.
+    #[error("yara rule bundle is stale: incoming version {incoming} <= current {current}")]
+    YaraBundleStale { incoming: u64, current: u64 },
+
+    /// YARA rule bundle body failed to decode from MessagePack.
+    #[error("yara rule bundle body decode failed: {0}")]
+    YaraBundleBodyDecode(String),
+
+    /// YARA rule text failed to compile. The live rule set is left
+    /// untouched; the staged bundle is rejected.
+    #[error("yara rule compile failed: {0}")]
+    YaraRuleCompile(String),
+
     /// [`crate::manager::SwgManager::stop`] could not acquire
     /// the internal `install_lock` within the
     /// [`crate::manager::SwgManagerConfig::install_lock_timeout`]
@@ -99,6 +123,11 @@ impl SwgError {
             Self::CategoryBundleStale { .. } => ErrorCode::SwgCategoryBundleStale,
             Self::CategoryBundleBodyDecode(_) => ErrorCode::SwgCategoryBundleBodyDecode,
             Self::ExtAuthzDecode(_) => ErrorCode::SwgExtAuthzDecode,
+            Self::YaraBundleSignatureInvalid => ErrorCode::SwgYaraBundleSignatureInvalid,
+            Self::YaraBundleUnknownKey(_) => ErrorCode::SwgYaraBundleSigningKeyUnknown,
+            Self::YaraBundleStale { .. } => ErrorCode::SwgYaraBundleStale,
+            Self::YaraBundleBodyDecode(_) => ErrorCode::SwgYaraBundleBodyDecode,
+            Self::YaraRuleCompile(_) => ErrorCode::SwgYaraRuleCompile,
             // `InstallBusy` is a backpressure signal — operator
             // response (lower install rate, extend timeout, wait
             // for in-flight install) differs from a process
@@ -140,6 +169,14 @@ mod tests {
             },
             SwgError::CategoryBundleBodyDecode("x".into()),
             SwgError::ExtAuthzDecode("x".into()),
+            SwgError::YaraBundleSignatureInvalid,
+            SwgError::YaraBundleUnknownKey("x".into()),
+            SwgError::YaraBundleStale {
+                incoming: 1,
+                current: 2,
+            },
+            SwgError::YaraBundleBodyDecode("x".into()),
+            SwgError::YaraRuleCompile("x".into()),
             SwgError::InstallBusy,
         ];
         for err in cases {

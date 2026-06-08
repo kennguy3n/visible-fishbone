@@ -671,6 +671,63 @@ func TestPostgres_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("IPSRuleCategory_Overrides_Stats_RLS", func(t *testing.T) {
+		tr := store.NewTenantRepository()
+		ir := store.NewIPSRuleCategoryRepository()
+		t1 := mustTenant(t, tr)
+		t2 := mustTenant(t, tr)
+
+		// No overrides initially.
+		if sel, err := ir.ListSelections(bgCtx(), t1.ID); err != nil || len(sel) != 0 {
+			t.Fatalf("initial selections: len=%d err=%v", len(sel), err)
+		}
+
+		// Upsert an override, then flip it (ON CONFLICT path).
+		if _, err := ir.SetEnabled(bgCtx(), t1.ID, "dos", false); err != nil {
+			t.Fatalf("set dos=false: %v", err)
+		}
+		got, err := ir.SetEnabled(bgCtx(), t1.ID, "dos", true)
+		if err != nil {
+			t.Fatalf("set dos=true: %v", err)
+		}
+		if !got.Enabled {
+			t.Errorf("override not flipped to enabled: %+v", got)
+		}
+		// Invalid category -> CHECK violation -> ErrInvalidArgument.
+		if _, err := ir.SetEnabled(bgCtx(), t1.ID, "bogus", false); !errors.Is(err, repository.ErrInvalidArgument) {
+			t.Errorf("bad category: want ErrInvalidArgument got %v", err)
+		}
+
+		// RLS: t2 sees none of t1's overrides.
+		if sel, _ := ir.ListSelections(bgCtx(), t2.ID); len(sel) != 0 {
+			t.Errorf("cross-tenant selections = %d, want 0", len(sel))
+		}
+
+		// Hit accumulation on (tenant, category, day).
+		day := time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
+		if err := ir.AddHits(bgCtx(), t1.ID, "malware", day, 3); err != nil {
+			t.Fatalf("add hits: %v", err)
+		}
+		if err := ir.AddHits(bgCtx(), t1.ID, "malware", day.Add(6*time.Hour), 4); err != nil {
+			t.Fatalf("add hits same day: %v", err)
+		}
+		stats, err := ir.StatsSince(bgCtx(), t1.ID, day.AddDate(0, 0, -1))
+		if err != nil {
+			t.Fatalf("stats: %v", err)
+		}
+		if len(stats) != 1 || stats[0].Hits != 7 {
+			t.Fatalf("want one row with 7 hits, got %+v", stats)
+		}
+		// Negative delta rejected.
+		if err := ir.AddHits(bgCtx(), t1.ID, "malware", day, -1); !errors.Is(err, repository.ErrInvalidArgument) {
+			t.Errorf("negative delta: want ErrInvalidArgument got %v", err)
+		}
+		// RLS: t2 sees no stats.
+		if s2, _ := ir.StatsSince(bgCtx(), t2.ID, day.AddDate(0, 0, -7)); len(s2) != 0 {
+			t.Errorf("cross-tenant stats = %d, want 0", len(s2))
+		}
+	})
+
 	t.Run("Webhook_Endpoint_Delivery_RLS", func(t *testing.T) {
 		tr := store.NewTenantRepository()
 		er := store.NewWebhookEndpointRepository()

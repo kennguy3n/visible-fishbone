@@ -27,6 +27,12 @@ type Cache struct {
 	ttl        time.Duration
 	maxEntries int
 	now        func() time.Time
+	// providerTTL overrides the default ttl per producing provider
+	// (verdict.Provider). A reputation provider whose intel ages
+	// quickly (e.g. VirusTotal, where engines re-score) can be given
+	// a shorter TTL than a deterministic detonation backend. A
+	// provider absent from the map uses the default ttl.
+	providerTTL map[string]time.Duration
 }
 
 type cacheEntry struct {
@@ -56,6 +62,20 @@ func WithCacheCapacity(n int) CacheOption {
 	}
 }
 
+// WithCacheProviderTTL sets per-provider TTL overrides keyed by
+// provider id (the verdict's Provider field). Entries with a
+// non-positive duration are ignored; providers not listed fall back
+// to the default TTL.
+func WithCacheProviderTTL(ttls map[string]time.Duration) CacheOption {
+	return func(c *Cache) {
+		for id, d := range ttls {
+			if d > 0 {
+				c.providerTTL[id] = d
+			}
+		}
+	}
+}
+
 // withCacheClock injects a clock for deterministic tests.
 func withCacheClock(now func() time.Time) CacheOption {
 	return func(c *Cache) {
@@ -68,10 +88,11 @@ func withCacheClock(now func() time.Time) CacheOption {
 // NewCache builds a verdict cache. Defaults: 1h TTL, 4096 entries.
 func NewCache(opts ...CacheOption) *Cache {
 	c := &Cache{
-		entries:    make(map[string]cacheEntry),
-		ttl:        time.Hour,
-		maxEntries: 4096,
-		now:        func() time.Time { return time.Now().UTC() },
+		entries:     make(map[string]cacheEntry),
+		ttl:         time.Hour,
+		maxEntries:  4096,
+		now:         func() time.Time { return time.Now().UTC() },
+		providerTTL: make(map[string]time.Duration),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -113,6 +134,10 @@ func (c *Cache) Put(tenantID uuid.UUID, v Verdict) {
 		return
 	}
 	now := c.now()
+	ttl := c.ttl
+	if d, ok := c.providerTTL[v.Provider]; ok && d > 0 {
+		ttl = d
+	}
 	key := cacheKey(tenantID, v.SHA256)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -125,7 +150,7 @@ func (c *Cache) Put(tenantID uuid.UUID, v Verdict) {
 	}
 	c.entries[key] = cacheEntry{
 		verdict:   v,
-		expiresAt: now.Add(c.ttl),
+		expiresAt: now.Add(ttl),
 		inserted:  now,
 	}
 }

@@ -169,6 +169,21 @@ fn corpus() -> Vec<PcapCase> {
             desc: "known C2 beacon marker",
         },
         PcapCase {
+            file: "bad-ransomware.pcap",
+            bad: true,
+            desc: "ransomware ransom-note delivery",
+        },
+        PcapCase {
+            file: "bad-lateral-smb.pcap",
+            bad: true,
+            desc: "SMB PsExec lateral movement (east-west)",
+        },
+        PcapCase {
+            file: "bad-dns-tunnel.pcap",
+            bad: true,
+            desc: "DNS tunneling long encoded label",
+        },
+        PcapCase {
             file: "good-https-get.pcap",
             bad: false,
             desc: "benign HTTP GET /index.html",
@@ -187,6 +202,16 @@ fn corpus() -> Vec<PcapCase> {
             file: "good-health.pcap",
             bad: false,
             desc: "benign load-balancer health check",
+        },
+        PcapCase {
+            file: "good-smb.pcap",
+            bad: false,
+            desc: "benign internal SMB file access",
+        },
+        PcapCase {
+            file: "good-dns-txt.pcap",
+            bad: false,
+            desc: "benign DNS TXT (SPF) lookup",
         },
     ]
 }
