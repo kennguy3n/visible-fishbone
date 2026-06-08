@@ -82,6 +82,11 @@ func (g *Generic) Submit(ctx context.Context, f File) (SubmitResult, error) {
 	if err := mw.WriteField("sha256", f.SHA256); err != nil {
 		return SubmitResult{}, fmt.Errorf("generic: write sha256: %w", err)
 	}
+	// Forward the magic-byte-detected file type so the BYO sandbox
+	// can route the sample to the right analysis environment.
+	if err := mw.WriteField("filetype", string(f.DetectedType())); err != nil {
+		return SubmitResult{}, fmt.Errorf("generic: write filetype: %w", err)
+	}
 	if err := mw.Close(); err != nil {
 		return SubmitResult{}, fmt.Errorf("generic: close writer: %w", err)
 	}

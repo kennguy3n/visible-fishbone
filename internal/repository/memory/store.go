@@ -87,6 +87,12 @@ type Store struct {
 	// Sandbox verdicts — see migration 042.
 	sandboxVerdicts map[uuid.UUID]repository.SandboxVerdict
 
+	// IPS per-tenant rule category overrides + daily hit stats —
+	// see migration 050. Keyed by (tenant, category) and
+	// (tenant, category, yyyy-mm-dd) respectively.
+	ipsRuleCategories    map[string]repository.IPSRuleCategorySelection
+	ipsRuleCategoryStats map[string]repository.IPSRuleCategoryDailyStat
+
 	// RBI sessions — see migration 043.
 	rbiSessions map[uuid.UUID]repository.RBISession
 
@@ -214,6 +220,8 @@ func NewStore() *Store {
 		casbConnectors:         map[uuid.UUID]repository.CASBConnector{},
 		inlineCASBRules:        map[uuid.UUID]repository.InlineCASBRule{},
 		sandboxVerdicts:        map[uuid.UUID]repository.SandboxVerdict{},
+		ipsRuleCategories:      map[string]repository.IPSRuleCategorySelection{},
+		ipsRuleCategoryStats:   map[string]repository.IPSRuleCategoryDailyStat{},
 		rbiSessions:            map[uuid.UUID]repository.RBISession{},
 		rbiArtifacts:           map[uuid.UUID]repository.RBIArtifact{},
 		casbDiscoveredApps:     map[uuid.UUID]repository.CASBDiscoveredApp{},

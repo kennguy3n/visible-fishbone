@@ -754,10 +754,24 @@ func buildRouter(
 	// selected from cfg.Sandbox; with none configured the service
 	// still runs and serves persisted verdicts (fail-open). The
 	// SWG malware stage submits unknown files through the handler.
+	// Per-provider verdict cache TTL overrides: reputation feeds
+	// (VirusTotal, Hybrid Analysis) re-score over time, so an
+	// operator can age their verdicts out faster than a
+	// deterministic detonation backend's.
+	providerTTL := map[string]time.Duration{}
+	if cfg.Sandbox.VirusTotalCacheTTL > 0 {
+		providerTTL["virustotal"] = cfg.Sandbox.VirusTotalCacheTTL
+	}
+	if cfg.Sandbox.HybridAnalysisCacheTTL > 0 {
+		providerTTL["hybrid_analysis"] = cfg.Sandbox.HybridAnalysisCacheTTL
+	}
 	sandboxOpts := []sandbox.Option{
 		sandbox.WithAudit(auditRepo),
 		sandbox.WithLogger(logger),
-		sandbox.WithCache(sandbox.NewCache(sandbox.WithCacheTTL(cfg.Sandbox.CacheTTL))),
+		sandbox.WithCache(sandbox.NewCache(
+			sandbox.WithCacheTTL(cfg.Sandbox.CacheTTL),
+			sandbox.WithCacheProviderTTL(providerTTL),
+		)),
 	}
 	if p := buildSandboxProvider(cfg.Sandbox); p != nil {
 		sandboxOpts = append(sandboxOpts, sandbox.WithProvider(p))
@@ -2301,6 +2315,27 @@ func buildSandboxProvider(cfg config.Sandbox) providers.Provider {
 			AuthHeader: cfg.GenericAuthHeader,
 			AuthValue:  cfg.GenericAuthValue,
 		}, nil)
+	case "reputation":
+		// Multi-provider hash-lookup aggregator: VirusTotal +
+		// Hybrid Analysis, strictest verdict wins. Only the
+		// providers with a configured API key are included; an
+		// aggregator over zero providers reports itself unavailable,
+		// so the service degrades to "no verdict" cleanly.
+		var ps []providers.Provider
+		if cfg.VirusTotalAPIKey != "" {
+			ps = append(ps, providers.NewVirusTotal(providers.VirusTotalConfig{
+				APIKey: cfg.VirusTotalAPIKey,
+			}, nil))
+		}
+		if cfg.HybridAnalysisAPIKey != "" {
+			ps = append(ps, providers.NewHybridAnalysis(providers.HybridAnalysisConfig{
+				APIKey: cfg.HybridAnalysisAPIKey,
+			}, nil))
+		}
+		if len(ps) == 0 {
+			return nil
+		}
+		return providers.NewAggregator("reputation", ps...)
 	default:
 		return nil
 	}

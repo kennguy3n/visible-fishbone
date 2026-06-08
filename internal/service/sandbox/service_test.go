@@ -355,6 +355,31 @@ func TestCache_TTLExpiry(t *testing.T) {
 	}
 }
 
+func TestCache_PerProviderTTL(t *testing.T) {
+	now := time.Now().UTC()
+	c := NewCache(
+		WithCacheTTL(time.Hour),
+		WithCacheProviderTTL(map[string]time.Duration{"virustotal": time.Minute}),
+		withCacheClock(func() time.Time { return now }),
+	)
+	tid := uuid.New()
+	vtSHA := "00000000000000000000000000000000000000000000000000000000000000aa"
+	capeSHA := "00000000000000000000000000000000000000000000000000000000000000bb"
+
+	c.Put(tid, Verdict{SHA256: vtSHA, Classification: ClassMalicious, Provider: "virustotal"})
+	c.Put(tid, Verdict{SHA256: capeSHA, Classification: ClassMalicious, Provider: "cape"})
+
+	// At +2min the VT entry (1min TTL) has expired; the cape entry
+	// (default 1h TTL) is still live.
+	now = now.Add(2 * time.Minute)
+	if _, ok := c.Get(tid, vtSHA); ok {
+		t.Fatal("virustotal entry should expire under its 1m provider TTL")
+	}
+	if _, ok := c.Get(tid, capeSHA); !ok {
+		t.Fatal("cape entry should still be live under the default 1h TTL")
+	}
+}
+
 func TestCache_IgnoresPending(t *testing.T) {
 	c := NewCache()
 	tid := uuid.New()

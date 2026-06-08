@@ -163,8 +163,10 @@ type RBI struct {
 // fail-open posture of an opportunistic enrichment feature.
 type Sandbox struct {
 	// Provider selects the detonation backend: "" / "none" (disabled),
-	// "cuckoo", "cape", or "generic" (BYO webhook). An unrecognised
-	// value is treated as disabled.
+	// "cuckoo", "cape", "generic" (BYO webhook), or "reputation"
+	// (multi-provider hash-lookup aggregator over VirusTotal +
+	// Hybrid Analysis — see VirusTotalAPIKey / HybridAnalysisAPIKey).
+	// An unrecognised value is treated as disabled.
 	Provider string
 	// CacheTTL is how long a resolved verdict stays in the in-memory
 	// hot-path cache in front of Postgres. Defaults to 1h.
@@ -180,6 +182,19 @@ type Sandbox struct {
 	GenericStatusURL  string
 	GenericAuthHeader string
 	GenericAuthValue  string
+	// VirusTotalAPIKey enables the VirusTotal v3 hash-reputation
+	// provider when Provider is "reputation". Empty leaves it out of
+	// the aggregator.
+	VirusTotalAPIKey string
+	// VirusTotalCacheTTL overrides the verdict cache TTL for
+	// VirusTotal-sourced verdicts. Defaults to CacheTTL when unset.
+	VirusTotalCacheTTL time.Duration
+	// HybridAnalysisAPIKey enables the Hybrid Analysis hash-reputation
+	// provider when Provider is "reputation". Empty leaves it out.
+	HybridAnalysisAPIKey string
+	// HybridAnalysisCacheTTL overrides the verdict cache TTL for
+	// Hybrid-Analysis-sourced verdicts. Defaults to CacheTTL.
+	HybridAnalysisCacheTTL time.Duration
 }
 
 // Metering carries the runtime knobs for the cost-metering and
@@ -1314,6 +1329,11 @@ func Load() (Config, error) {
 			GenericStatusURL:  getStr("SANDBOX_GENERIC_STATUS_URL", ""),
 			GenericAuthHeader: getStr("SANDBOX_GENERIC_AUTH_HEADER", ""),
 			GenericAuthValue:  getStr("SANDBOX_GENERIC_AUTH_VALUE", ""),
+
+			VirusTotalAPIKey:       getStr("SANDBOX_VIRUSTOTAL_API_KEY", ""),
+			VirusTotalCacheTTL:     getDuration("SANDBOX_VIRUSTOTAL_CACHE_TTL", 0),
+			HybridAnalysisAPIKey:   getStr("SANDBOX_HYBRID_ANALYSIS_API_KEY", ""),
+			HybridAnalysisCacheTTL: getDuration("SANDBOX_HYBRID_ANALYSIS_CACHE_TTL", 0),
 		},
 		RBI: RBI{
 			ProxyBaseURL:         getStr("RBI_PROXY_BASE_URL", ""),

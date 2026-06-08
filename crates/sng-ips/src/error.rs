@@ -72,6 +72,14 @@ pub enum IpsError {
     /// raw line for the parser test fixtures.
     #[error("eve decode error: {0}")]
     EveDecode(String),
+
+    /// An automatic rule-feed pull failed to fetch the signed
+    /// bundle from its configured URL. Distinct from [`Self::Io`]
+    /// so the update scheduler can record a per-feed fetch failure
+    /// (and keep the other feeds + the installed rule set intact)
+    /// without conflating it with a local filesystem error.
+    #[error("rule feed fetch failed: {0}")]
+    RuleFeedFetch(String),
 }
 
 impl IpsError {
@@ -90,6 +98,7 @@ impl IpsError {
             Self::RuleBodyEncode(_) => ErrorCode::IpsRuleBodyEncode,
             Self::RuleValidate(_) => ErrorCode::IpsRuleValidate,
             Self::EveDecode(_) => ErrorCode::IpsEveDecode,
+            Self::RuleFeedFetch(_) => ErrorCode::IpsRuleFeedFetch,
         }
     }
 }
@@ -118,6 +127,7 @@ mod tests {
             IpsError::RuleBodyEncode("x".into()),
             IpsError::RuleValidate("x".into()),
             IpsError::EveDecode("x".into()),
+            IpsError::RuleFeedFetch("x".into()),
         ];
         for e in cases {
             let code = e.code().as_str();

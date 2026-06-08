@@ -108,6 +108,7 @@ pub mod process;
 pub mod rate_limit;
 pub mod telemetry;
 pub mod verdict;
+pub mod yara;
 
 pub use auth::{ExtAuthzHandler, ExtAuthzRequest, ExtAuthzResponse};
 pub use bypass::{BypassDecision, BypassList, BypassReason};
@@ -133,3 +134,7 @@ pub use rate_limit::{
 };
 pub use telemetry::{TelemetryEmitter, VerdictEvent};
 pub use verdict::{Action, RequestContext, Verdict};
+pub use yara::{
+    YaraEngine, YaraMatch, YaraRuleBundle, YaraRuleBundleClaims, YaraRuleSignature,
+    YaraRuleVerifier, YaraSeverity, YaraSigningKeyId,
+};

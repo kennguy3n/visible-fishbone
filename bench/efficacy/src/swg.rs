@@ -162,8 +162,11 @@ pub async fn run() -> FunctionReport {
     for u in corpus {
         // This corpus exercises only URL-category verdicts; no CASB
         // size/label signals are relevant, so pass the defaults.
+        // No response body in this URL-category corpus, so the YARA
+        // body-scan stage is given nothing to scan (None); the verdict
+        // is driven purely by the categorize -> deny-list path.
         let v = handler
-            .evaluate(&ctx(u.host, u.path), &RequestSignals::default())
+            .evaluate(&ctx(u.host, u.path), &RequestSignals::default(), None)
             .await;
         let denied = v.action == Action::Deny;
         let correct = if u.bad { denied } else { !denied };

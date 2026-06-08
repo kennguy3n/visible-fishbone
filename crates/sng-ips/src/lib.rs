@@ -104,7 +104,9 @@ pub use process::{
     MockSuricata, ProcessStatus, ShellSuricata, SuricataProcess, SuricataSignal, SuricataStats,
 };
 pub use rules::{
-    AlwaysValidValidator, FsRuleStager, IpsRuleBundle, IpsRuleBundleClaims, IpsRuleVerifier,
-    RuleStager, RuleStagerConfig, RuleValidator, SuricataValidator,
+    AlwaysValidValidator, CategorySelection, FeedOutcome, FsRuleStager, IpsRuleBundle,
+    IpsRuleBundleClaims, IpsRuleVerifier, RuleCategory, RuleFeed, RuleFeedFetcher, RuleSource,
+    RuleStager, RuleStagerConfig, RuleStats, RuleUpdateReport, RuleUpdateScheduler, RuleValidator,
+    SuricataValidator, filter_rules_by_category, rule_stats,
 };
 pub use telemetry::{IpsEventSink, IpsEventSource, SinkSendError};

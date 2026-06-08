@@ -10,3 +10,6 @@ alert tcp any any -> any any (msg:"SNG-EFFICACY EICAR test string detected"; con
 alert tcp any any -> any any (msg:"SNG-EFFICACY directory traversal attempt"; content:"/../../../../etc/passwd"; sid:1000002; rev:1;)
 alert tcp any any -> any any (msg:"SNG-EFFICACY SQL injection UNION SELECT"; content:"UNION%20SELECT"; nocase; sid:1000003; rev:1;)
 alert tcp any any -> any any (msg:"SNG-EFFICACY known C2 beacon user-agent"; content:"SNG-EFFICACY-C2-BEACON"; sid:1000004; rev:1;)
+alert tcp any any -> any any (msg:"SNG-EFFICACY ransomware ransom-note marker"; content:"YOUR FILES HAVE BEEN ENCRYPTED"; nocase; sid:1000005; rev:1;)
+alert tcp any any -> any any (msg:"SNG-EFFICACY SMB lateral-movement PsExec service"; content:"PSEXESVC"; nocase; sid:1000006; rev:1;)
+alert udp any any -> any 53 (msg:"SNG-EFFICACY DNS tunneling long encoded label"; content:"k7n2p9q4r8s3t6v1w5x0y2z8a4b7c9d3e6f1g5h0"; sid:1000007; rev:1;)

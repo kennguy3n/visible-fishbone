@@ -60,6 +60,13 @@ type PollResult struct {
 	Confidence     float64
 	Summary        string
 	AnalyzedAt     time.Time
+	// Provider, when non-empty, names the concrete backend that
+	// produced this result. Single providers leave it empty (the
+	// service falls back to the wired provider's ID); the
+	// multi-provider Aggregator sets it to the child that supplied
+	// the winning (strictest) verdict so the persisted verdict and
+	// per-provider cache TTL attribute to the right backend.
+	Provider string
 }
 
 // File is the file to detonate, passed to Submit.
@@ -67,6 +74,21 @@ type File struct {
 	SHA256   string
 	Filename string
 	Content  []byte
+	// Type is the magic-byte-detected file type. The service fills
+	// it in before Submit (see DetectFileType) so a detonation
+	// provider can forward it as a hint and a reputation provider
+	// can ignore it. Zero value (FileTypeUnknown) when undetected.
+	Type FileType
+}
+
+// DetectedType returns f.Type when already set, otherwise detects it
+// from f.Content. A detonation adapter calls this to label the
+// upload without forcing the service to pre-populate Type.
+func (f File) DetectedType() FileType {
+	if f.Type != FileTypeUnknown && f.Type != "" {
+		return f.Type
+	}
+	return DetectFileType(f.Content)
 }
 
 // Provider is the detonation-sandbox backend contract.
