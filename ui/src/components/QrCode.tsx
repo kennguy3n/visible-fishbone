@@ -14,6 +14,8 @@ export function QrCode({ value, size = 160 }: { value: string; size?: number }) 
   useEffect(() => {
     let active = true;
     setFailed(false);
+    // Clear the previous code so a stale QR can't render for the new value.
+    setSrc(null);
     QRCode.toDataURL(value, {
       width: size,
       margin: 1,

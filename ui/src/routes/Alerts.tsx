@@ -34,6 +34,7 @@ import {
   EmptyState,
   EmptyIllustration,
   SkeletonCard,
+  ErrorState,
 } from "@/components/ui";
 import { HelpTooltip } from "@/components/HelpTooltip";
 import { RequireTenant } from "@/components/RequireTenant";
@@ -284,6 +285,10 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
 
       {list.isLoading ? (
         <SkeletonCard lines={4} />
+      ) : list.error ? (
+        <Card>
+          <ErrorState error={list.error} onRetry={() => list.refetch()} />
+        </Card>
       ) : filtered.length === 0 ? (
         <Card>
           <EmptyState

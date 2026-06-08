@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -425,12 +425,16 @@ function SimpleRules({
 
   const [rows, setRows] = useState<Row[]>(initial);
   const [dragKey, setDragKey] = useState<string | null>(null);
-  const simRef = sim.reset;
+  // Keep the latest `sim.reset` in a ref so the reset effect depends only on
+  // `initial` and never re-fires from an identity change in the mutation
+  // method (which would otherwise risk a reset -> render -> reset loop).
+  const resetSim = useRef(sim.reset);
+  resetSim.current = sim.reset;
   // Reset local edits whenever the upstream graph changes (e.g. after save).
   useEffect(() => {
     setRows(initial);
-    simRef();
-  }, [initial, simRef]);
+    resetSim.current();
+  }, [initial]);
 
   const removedKeys = new Set(
     rows.filter((r) => r.status === "removed").map((r) => r.key),
