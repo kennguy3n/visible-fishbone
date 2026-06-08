@@ -48,6 +48,10 @@ const defaultMaxResponseTokens = 512
 const (
 	defaultMaxRetries = 1
 	defaultRetryDelay = 2 * time.Second
+	// maxBackoffShift caps the exponential-backoff left-shift so a large
+	// MaxRetries cannot overflow the int64 time.Duration. 2s << 16 ≈ 36h,
+	// already past any realistic request deadline.
+	maxBackoffShift = 16
 )
 
 // Recognised model families. The family selects a built-in system
@@ -227,7 +231,17 @@ func (p *HTTPProvider) Complete(ctx context.Context, req LLMRequest) (LLMRespons
 			// is already done so we never sleep past a deadline. Use an
 			// explicit timer so it can be stopped on the cancel path
 			// rather than leaking until expiry (time.After cannot).
-			wait := delay << (attempt - 1)
+			//
+			// Cap the shift so a large MaxRetries can't overflow the
+			// int64 Duration (which would wrap negative and fire the
+			// timer immediately). At shift 16 the delay is already
+			// ~2s<<16 ≈ 36h — far beyond any sane request deadline — so
+			// clamping here changes nothing for realistic configs.
+			shift := attempt - 1
+			if shift > maxBackoffShift {
+				shift = maxBackoffShift
+			}
+			wait := delay << shift
 			timer := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
