@@ -42,6 +42,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const timers = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
 
   const remove = useCallback((id: number) => {
+    // Cancel any pending timer (the auto-dismiss timer, or a prior exit
+    // timer) before starting the exit animation, so a stale timer can't
+    // fire remove() again on an already-dismissed toast.
+    const pending = timers.current.get(id);
+    if (pending) clearTimeout(pending);
     // Animate out, then drop from state after the exit transition.
     setToasts((prev) =>
       prev.map((t) => (t.id === id ? { ...t, leaving: true } : t)),

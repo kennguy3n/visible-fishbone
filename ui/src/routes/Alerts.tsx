@@ -294,6 +294,12 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
         </Card>
       ) : (
         <>
+          {correlations.isError && (
+            <p className="muted" style={{ marginTop: 0 }}>
+              Incident grouping is temporarily unavailable — alerts are shown
+              individually below.
+            </p>
+          )}
           {incidents.map(({ cluster, alerts }) => (
             <Card
               key={cluster.id || cluster.summary}

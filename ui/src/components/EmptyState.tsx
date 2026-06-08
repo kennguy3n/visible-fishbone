@@ -28,12 +28,15 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   const body = description ?? hint;
+  // An SVG illustration (explicit or the default fallback) needs the sized
+  // 96x96 `state__illustration` box; a bare glyph/emoji uses `state__icon`.
+  const art = illustration ?? (icon == null ? <EmptyIllustration kind="inbox" /> : null);
   return (
     <div className="state">
-      {illustration ? (
-        <div className="state__illustration">{illustration}</div>
+      {art ? (
+        <div className="state__illustration">{art}</div>
       ) : (
-        <div className="state__icon">{icon ?? <EmptyIllustration kind="inbox" />}</div>
+        <div className="state__icon">{icon}</div>
       )}
       <p style={{ fontWeight: 600, color: "var(--text)" }}>{title}</p>
       {body && <p style={{ maxWidth: "50ch" }}>{body}</p>}

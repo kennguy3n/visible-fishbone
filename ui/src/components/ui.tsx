@@ -155,7 +155,9 @@ export function SkeletonCard({ lines = 3 }: { lines?: number }) {
         <div
           key={i}
           className="skeleton skeleton--text"
-          style={{ width: `${90 - i * 12}%` }}
+          // Taper each line, but never below a readable minimum so larger
+          // `lines` counts can't produce invalid (negative) widths.
+          style={{ width: `${Math.max(30, 90 - i * 12)}%` }}
         />
       ))}
     </div>
