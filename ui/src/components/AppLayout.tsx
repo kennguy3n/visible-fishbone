@@ -85,6 +85,12 @@ function Topbar({ onToggleNav }: { onToggleNav: () => void }) {
   const { claims, logout } = useAuth();
   const intl = useIntl();
   const name = claims?.name || claims?.email || claims?.sub || "Operator";
+  const issuer = claims?.iss ?? "shieldnet";
+  // The dedicated identity block is hidden on the tablet icon-rail to reclaim
+  // horizontal room, so surface the same "who am I signed in as" on the Sign
+  // out button's tooltip/accessible name. This keeps the operator identity
+  // reachable at every breakpoint (it's data, not translatable copy).
+  const identity = `${name} · ${issuer}`;
   return (
     <header className="topbar">
       <button
@@ -99,12 +105,13 @@ function Topbar({ onToggleNav }: { onToggleNav: () => void }) {
       <LanguageSwitcher />
       <div className="topbar__user">
         <b>{name}</b>
-        <span className="muted">{claims?.iss ?? "shieldnet"}</span>
+        <span className="muted">{issuer}</span>
       </div>
       <button
         className="btn btn--ghost btn--sm"
         onClick={logout}
-        aria-label={intl.formatMessage({ id: "topbar.signOut" })}
+        title={`${intl.formatMessage({ id: "topbar.signOut" })} — ${identity}`}
+        aria-label={`${intl.formatMessage({ id: "topbar.signOut" })} — ${identity}`}
       >
         <FormattedMessage id="topbar.signOut" />
       </button>

@@ -1812,7 +1812,8 @@ label.field > span {
   }
   /* Reclaim horizontal room on tablet: the verbose operator identity
      block crowds the tenant/language switchers and pushes Sign out off
-     the edge. It returns at >=1025px where there is space. */
+     the edge. It returns at >=1025px where there is space. The identity
+     stays reachable here via the Sign out button's tooltip/aria-label. */
   .topbar__user {
     display: none;
   }
@@ -1865,8 +1866,12 @@ label.field > span {
     flex: 1;
     min-width: 0;
   }
+  /* The topbar wraps on mobile, so the identity gets its own room on the
+     final row beside Sign out rather than being hidden — the operator can
+     always see who they're signed in as. */
   .topbar__user {
-    display: none;
+    flex: 1 1 auto;
+    text-align: left;
   }
   .content {
     padding: 16px 14px;
