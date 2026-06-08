@@ -95,7 +95,9 @@ function Topbar({ onToggleNav }: { onToggleNav: () => void }) {
     const trimmed = name.trim();
     const parts = trimmed.split(/\s+/).filter(Boolean);
     if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-    return trimmed.slice(0, 2).toUpperCase();
+    // Fall back to a non-empty monogram so a blank/whitespace-only display
+    // name never renders an empty avatar circle.
+    return (trimmed.slice(0, 2) || "OP").toUpperCase();
   })();
   // The dedicated identity block is hidden on the tablet icon-rail to reclaim
   // horizontal room, so surface the same "who am I signed in as" on the Sign
