@@ -137,6 +137,94 @@ func (r *UserRepository) List(ctx context.Context, tenantID uuid.UUID, page repo
 	return res, err
 }
 
+// userSearchWhere renders the WHERE predicate for a UserSearchFilter
+// and its bound argument, with positional parameters starting at
+// argStart. The column name is selected from a fixed whitelist (never
+// caller input) so it is safe to interpolate; the match value is always
+// bound. COALESCE(col, ”) makes a NULL column behave like the empty
+// string, matching the memory backend. Contains/prefix use strpos
+// rather than LIKE so wildcard characters in the value are treated
+// literally (no LIKE-pattern injection).
+func userSearchWhere(filter repository.UserSearchFilter, argStart int) (string, []any) {
+	if filter.Field == "" {
+		return "TRUE", nil
+	}
+	var col string
+	switch filter.Field {
+	case repository.UserSearchFieldEmail:
+		col = "email"
+	case repository.UserSearchFieldName:
+		col = "name"
+	case repository.UserSearchFieldExternalID:
+		col = "external_id"
+	default:
+		// Unknown field matches nothing, mirroring the memory backend.
+		return "FALSE", nil
+	}
+	expr := fmt.Sprintf("COALESCE(%s, '')", col)
+	switch filter.Op {
+	case repository.TextMatchEquals:
+		return fmt.Sprintf("lower(%s) = lower($%d)", expr, argStart), []any{filter.Value}
+	case repository.TextMatchContains:
+		return fmt.Sprintf("strpos(lower(%s), lower($%d)) > 0", expr, argStart), []any{filter.Value}
+	case repository.TextMatchPrefix:
+		return fmt.Sprintf("strpos(lower(%s), lower($%d)) = 1", expr, argStart), []any{filter.Value}
+	default:
+		return "FALSE", nil
+	}
+}
+
+func (r *UserRepository) SearchUsers(ctx context.Context, tenantID uuid.UUID, filter repository.UserSearchFilter, offset, limit int) ([]repository.User, int, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	where, whereArgs := userSearchWhere(filter, 1)
+	var (
+		items []repository.User
+		total int
+	)
+	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		// Total matches independent of the page window — backs SCIM
+		// totalResults. Runs in the same RO tx as the page query so
+		// both observe a consistent snapshot under the tenant RLS GUC.
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM users WHERE `+where, whereArgs...).Scan(&total); err != nil {
+			return fmt.Errorf("count users: %w", err)
+		}
+		if limit <= 0 || offset >= total {
+			items = []repository.User{}
+			return nil
+		}
+		args := make([]any, 0, len(whereArgs)+2)
+		args = append(args, whereArgs...)
+		args = append(args, limit, offset)
+		q := fmt.Sprintf(
+			`SELECT %s FROM users WHERE %s ORDER BY created_at DESC, id DESC LIMIT $%d OFFSET $%d`,
+			userSelectColumns, where, len(whereArgs)+1, len(whereArgs)+2,
+		)
+		rows, err := tx.Query(ctx, q, args...)
+		if err != nil {
+			return fmt.Errorf("search users: %w", err)
+		}
+		defer rows.Close()
+		items = make([]repository.User, 0, limit)
+		for rows.Next() {
+			u, err := scanUser(rows)
+			if err != nil {
+				return fmt.Errorf("scan user: %w", err)
+			}
+			items = append(items, u)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate users: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
 func (r *UserRepository) Update(ctx context.Context, tenantID uuid.UUID, u repository.User) (repository.User, error) {
 	if tenantID == uuid.Nil || u.ID == uuid.Nil {
 		return repository.User{}, repository.ErrInvalidArgument

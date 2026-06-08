@@ -290,51 +290,103 @@ func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter 
 		}, nil
 	}
 
-	// General path: paginate through all users, applying filter
-	// in-memory. This handles co/sw filters and unfiltered lists.
-	var allUsers []repository.User
-	after := ""
-	for {
-		page := repository.Page{Limit: repository.MaxPageLimit, After: after}
-		res, err := s.users.List(ctx, tenantID, page)
-		if err != nil {
-			return SCIMListResponse{}, err
-		}
-		allUsers = append(allUsers, res.Items...)
-		if res.NextCursor == "" || len(res.Items) == 0 {
-			break
-		}
-		after = res.NextCursor
+	// General path (co/sw filters and unfiltered lists): push the
+	// filter, the RFC 7644 §3.4.2 pagination window, and the total
+	// count down to the repository. This avoids materialising the
+	// entire tenant user set in memory — a 100K-user tenant would
+	// otherwise allocate every row on each page request just to filter
+	// and slice it.
+	searchFilter, matchable := scimUserSearchFilter(parsed)
+	if !matchable {
+		// The filter targets an attribute with no backing user column
+		// and does not degenerate to matching every row, so nothing can
+		// match. Return an empty page without touching the store.
+		return SCIMListResponse{
+			Schemas:      []string{SCIMSchemaList},
+			TotalResults: 0,
+			StartIndex:   startIndex,
+			ItemsPerPage: 0,
+			Resources:    []any{},
+		}, nil
 	}
 
-	allMatching := make([]any, 0, len(allUsers))
-	for _, u := range allUsers {
-		su := userToSCIM(u)
-		if parsed != nil && !parsed.MatchUser(su) {
-			continue
-		}
-		allMatching = append(allMatching, su)
+	users, totalResults, err := s.users.SearchUsers(ctx, tenantID, searchFilter, startIndex-1, count)
+	if err != nil {
+		return SCIMListResponse{}, err
 	}
-
-	// Apply RFC 7644 §3.4.2 pagination window.
-	totalResults := len(allMatching)
-	start := startIndex - 1 // SCIM startIndex is 1-based
-	if start > totalResults {
-		start = totalResults
+	resources := make([]any, 0, len(users))
+	for _, u := range users {
+		resources = append(resources, userToSCIM(u))
 	}
-	end := start + count
-	if end > totalResults {
-		end = totalResults
-	}
-	page := allMatching[start:end]
 
 	return SCIMListResponse{
 		Schemas:      []string{SCIMSchemaList},
 		TotalResults: totalResults,
 		StartIndex:   startIndex,
-		ItemsPerPage: len(page),
-		Resources:    page,
+		ItemsPerPage: len(resources),
+		Resources:    resources,
 	}, nil
+}
+
+// scimUserSearchFilter translates a parsed SCIM filter into a
+// repository.UserSearchFilter for pushdown. The bool reports whether
+// any row can match: a nil filter (unfiltered list) and filters on a
+// backed attribute (userName/email, displayName, externalId) are always
+// matchable. A filter on an unbacked attribute is matchable only when an
+// empty field value would satisfy the operator (e.g. `foo eq ""`),
+// reproducing the old in-memory matcher's all-or-nothing behaviour
+// without scanning the table.
+func scimUserSearchFilter(parsed *SCIMFilter) (repository.UserSearchFilter, bool) {
+	if parsed == nil {
+		return repository.UserSearchFilter{}, true
+	}
+	op, ok := scimOpToTextMatch(parsed.Op)
+	if !ok {
+		return repository.UserSearchFilter{}, false
+	}
+	field, known := scimAttrToUserField(parsed.Attribute)
+	if !known {
+		if matchOp(parsed.Op, "", parsed.Value) {
+			// Degenerates to match-all; an empty Field matches everyone.
+			return repository.UserSearchFilter{}, true
+		}
+		return repository.UserSearchFilter{}, false
+	}
+	return repository.UserSearchFilter{Field: field, Op: op, Value: parsed.Value}, true
+}
+
+// scimAttrToUserField maps a SCIM filter attribute to the user column
+// that backs it. It mirrors SCIMFilter.MatchUser: userName and the
+// e-mail attributes both resolve to the e-mail column (a user's primary
+// e-mail is its userName), displayName to name, externalId to
+// external_id. The bool is false for any other attribute.
+func scimAttrToUserField(attr string) (repository.UserSearchField, bool) {
+	switch strings.ToLower(attr) {
+	case "username", "email", "emails.value":
+		return repository.UserSearchFieldEmail, true
+	case "displayname":
+		return repository.UserSearchFieldName, true
+	case "externalid":
+		return repository.UserSearchFieldExternalID, true
+	default:
+		return "", false
+	}
+}
+
+// scimOpToTextMatch maps the SCIM eq/co/sw operators to their repository
+// equivalents. ParseSCIMFilter only ever produces these three, so the
+// false case is defensive.
+func scimOpToTextMatch(op SCIMFilterOp) (repository.TextMatchOp, bool) {
+	switch op {
+	case SCIMFilterEq:
+		return repository.TextMatchEquals, true
+	case SCIMFilterCo:
+		return repository.TextMatchContains, true
+	case SCIMFilterSw:
+		return repository.TextMatchPrefix, true
+	default:
+		return "", false
+	}
 }
 
 // --- Group operations -----------------------------------------------------

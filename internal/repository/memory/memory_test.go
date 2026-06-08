@@ -319,6 +319,100 @@ func TestUserRepository_CRUDAndConflict(t *testing.T) {
 	}
 }
 
+func TestUserRepository_SearchUsers(t *testing.T) {
+	s := newStore(t)
+	tr := memory.NewTenantRepository(s)
+	ur := memory.NewUserRepository(s)
+	t1, _ := tr.Create(ctx(), repository.Tenant{Name: "A", Slug: "a", Tier: repository.TenantTierStarter})
+	t2, _ := tr.Create(ctx(), repository.Tenant{Name: "B", Slug: "b", Tier: repository.TenantTierStarter})
+
+	seed := []repository.User{
+		{Email: "alice@example.com", Name: "Alice Smith", ExternalID: "ext-1"},
+		{Email: "alfred@example.com", Name: "Alfred Jones", ExternalID: "ext-2"},
+		{Email: "bob@example.com", Name: "Bob Smith"},
+	}
+	for _, u := range seed {
+		if _, err := ur.Create(ctx(), t1.ID, u); err != nil {
+			t.Fatalf("seed %s: %v", u.Email, err)
+		}
+	}
+	// Other-tenant row must never appear in t1 results.
+	if _, err := ur.Create(ctx(), t2.ID, repository.User{Email: "alice@other.com", Name: "Alice Other"}); err != nil {
+		t.Fatalf("seed t2: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		filter    repository.UserSearchFilter
+		wantTotal int
+	}{
+		{"no filter matches all", repository.UserSearchFilter{}, 3},
+		{"email eq", repository.UserSearchFilter{Field: repository.UserSearchFieldEmail, Op: repository.TextMatchEquals, Value: "ALICE@example.com"}, 1},
+		{"email contains", repository.UserSearchFilter{Field: repository.UserSearchFieldEmail, Op: repository.TextMatchContains, Value: "al"}, 2},
+		{"email prefix", repository.UserSearchFilter{Field: repository.UserSearchFieldEmail, Op: repository.TextMatchPrefix, Value: "alf"}, 1},
+		{"name contains case-insensitive", repository.UserSearchFilter{Field: repository.UserSearchFieldName, Op: repository.TextMatchContains, Value: "smith"}, 2},
+		{"external id eq", repository.UserSearchFilter{Field: repository.UserSearchFieldExternalID, Op: repository.TextMatchEquals, Value: "ext-2"}, 1},
+		{"no match", repository.UserSearchFilter{Field: repository.UserSearchFieldEmail, Op: repository.TextMatchEquals, Value: "nobody@example.com"}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			items, total, err := ur.SearchUsers(ctx(), t1.ID, tc.filter, 0, 100)
+			if err != nil {
+				t.Fatalf("SearchUsers: %v", err)
+			}
+			if total != tc.wantTotal {
+				t.Errorf("total=%d, want %d", total, tc.wantTotal)
+			}
+			if len(items) != tc.wantTotal {
+				t.Errorf("len(items)=%d, want %d", len(items), tc.wantTotal)
+			}
+			for _, u := range items {
+				if u.TenantID != t1.ID {
+					t.Errorf("cross-tenant leak: got user from tenant %s", u.TenantID)
+				}
+			}
+		})
+	}
+
+	// Window semantics: total is independent of offset/limit, and the
+	// page is sliced from a deterministic (created_at DESC, id DESC)
+	// order so consecutive windows do not overlap.
+	first, total, err := ur.SearchUsers(ctx(), t1.ID, repository.UserSearchFilter{}, 0, 2)
+	if err != nil {
+		t.Fatalf("SearchUsers window: %v", err)
+	}
+	if total != 3 || len(first) != 2 {
+		t.Fatalf("first window: total=%d len=%d, want 3/2", total, len(first))
+	}
+	second, _, err := ur.SearchUsers(ctx(), t1.ID, repository.UserSearchFilter{}, 2, 2)
+	if err != nil {
+		t.Fatalf("SearchUsers window 2: %v", err)
+	}
+	if len(second) != 1 {
+		t.Fatalf("second window len=%d, want 1", len(second))
+	}
+	if first[0].ID == second[0].ID || first[1].ID == second[0].ID {
+		t.Errorf("windows overlap: %v then %v", []uuid.UUID{first[0].ID, first[1].ID}, second[0].ID)
+	}
+
+	// limit <= 0 returns no rows but still reports the total; offset
+	// past the end returns an empty (non-nil) slice.
+	none, total, err := ur.SearchUsers(ctx(), t1.ID, repository.UserSearchFilter{}, 0, 0)
+	if err != nil {
+		t.Fatalf("SearchUsers limit0: %v", err)
+	}
+	if total != 3 || len(none) != 0 {
+		t.Errorf("limit0: total=%d len=%d, want 3/0", total, len(none))
+	}
+	past, _, err := ur.SearchUsers(ctx(), t1.ID, repository.UserSearchFilter{}, 99, 10)
+	if err != nil {
+		t.Fatalf("SearchUsers offset-past-end: %v", err)
+	}
+	if past == nil || len(past) != 0 {
+		t.Errorf("offset past end: want empty non-nil slice, got %v", past)
+	}
+}
+
 // --- Device ---------------------------------------------------------------
 
 func TestDeviceRepository_PostureAndStatus(t *testing.T) {

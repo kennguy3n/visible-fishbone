@@ -1195,7 +1195,7 @@ func buildRouter(
 			if tenantRateLimiter != nil {
 				tenantRateLimiter.Close()
 			}
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build auth brute-force guard: %w", err)
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build auth brute-force guard: %w", err)
 		}
 		enrollBruteForce, err = middleware.NewAttemptLimiter(middleware.AttemptLimiterConfig{
 			MaxFailures:     cfg.BruteForce.EnrollMaxFailures,
@@ -1211,7 +1211,7 @@ func buildRouter(
 			if tenantRateLimiter != nil {
 				tenantRateLimiter.Close()
 			}
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build enroll brute-force guard: %w", err)
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build enroll brute-force guard: %w", err)
 		}
 	}
 

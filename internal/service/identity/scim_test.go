@@ -516,3 +516,134 @@ func TestSCIMListGroupsClampsCount(t *testing.T) {
 		t.Errorf("ItemsPerPage = %d, want <= %d (count not clamped)", list.ItemsPerPage, repository.MaxPageLimit)
 	}
 }
+
+func TestSCIMListUsersFilterContainsAndPrefix(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	ctx := context.Background()
+	for _, email := range []string{"alice@example.com", "alfred@example.com", "bob@example.com"} {
+		if _, err := svc.CreateUser(ctx, tid, SCIMUser{UserName: email}); err != nil {
+			t.Fatalf("CreateUser(%s): %v", email, err)
+		}
+	}
+
+	// `co` (contains) and `sw` (prefix) take the general (pushdown)
+	// path — only `eq` short-circuits via GetByEmail.
+	co, err := svc.ListUsers(ctx, tid, `userName co "al"`, 1, 100)
+	if err != nil {
+		t.Fatalf("ListUsers co: %v", err)
+	}
+	if co.TotalResults != 2 || co.ItemsPerPage != 2 {
+		t.Errorf("co: TotalResults=%d ItemsPerPage=%d, want 2/2 (alice, alfred)", co.TotalResults, co.ItemsPerPage)
+	}
+
+	sw, err := svc.ListUsers(ctx, tid, `userName sw "alf"`, 1, 100)
+	if err != nil {
+		t.Fatalf("ListUsers sw: %v", err)
+	}
+	if sw.TotalResults != 1 || sw.ItemsPerPage != 1 {
+		t.Errorf("sw: TotalResults=%d ItemsPerPage=%d, want 1/1 (alfred)", sw.TotalResults, sw.ItemsPerPage)
+	}
+}
+
+func TestSCIMListUsersFilterDisplayName(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	ctx := context.Background()
+	if _, err := svc.CreateUser(ctx, tid, SCIMUser{UserName: "a@example.com", DisplayName: "Alice Smith"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if _, err := svc.CreateUser(ctx, tid, SCIMUser{UserName: "b@example.com", DisplayName: "Bob Jones"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	list, err := svc.ListUsers(ctx, tid, `displayName co "smith"`, 1, 100)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if list.TotalResults != 1 || list.ItemsPerPage != 1 {
+		t.Errorf("TotalResults=%d ItemsPerPage=%d, want 1/1 (case-insensitive displayName co)", list.TotalResults, list.ItemsPerPage)
+	}
+}
+
+func TestSCIMListUsersPaginationWindow(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	ctx := context.Background()
+	const total = 5
+	for i := 0; i < total; i++ {
+		if _, err := svc.CreateUser(ctx, tid, SCIMUser{UserName: fmt.Sprintf("u%02d@example.com", i)}); err != nil {
+			t.Fatalf("seed user %d: %v", i, err)
+		}
+	}
+	// Page through the unfiltered list 2 at a time and confirm every
+	// user is returned exactly once with a stable totalResults.
+	seen := map[string]bool{}
+	for start := 1; start <= total; start += 2 {
+		page, err := svc.ListUsers(ctx, tid, "", start, 2)
+		if err != nil {
+			t.Fatalf("ListUsers(start=%d): %v", start, err)
+		}
+		if page.TotalResults != total {
+			t.Errorf("start=%d: TotalResults=%d, want %d", start, page.TotalResults, total)
+		}
+		if page.StartIndex != start {
+			t.Errorf("start=%d: StartIndex=%d, want %d", start, page.StartIndex, start)
+		}
+		for _, r := range page.Resources {
+			su, ok := r.(SCIMUser)
+			if !ok {
+				t.Fatalf("resource is %T, want SCIMUser", r)
+			}
+			if seen[su.ID] {
+				t.Errorf("user %s returned on more than one page", su.ID)
+			}
+			seen[su.ID] = true
+		}
+	}
+	if len(seen) != total {
+		t.Errorf("paged through %d distinct users, want %d", len(seen), total)
+	}
+}
+
+func TestSCIMListUsersTotalCountedBeyondPage(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	ctx := context.Background()
+	const seeded = repository.MaxPageLimit + 25
+	for i := 0; i < seeded; i++ {
+		if _, err := svc.CreateUser(ctx, tid, SCIMUser{UserName: fmt.Sprintf("user-%04d@example.com", i)}); err != nil {
+			t.Fatalf("seed user %d: %v", i, err)
+		}
+	}
+	// A small page must still report the full match count: the total is
+	// computed by the repository independent of the page window, so it
+	// is not capped by the page size.
+	list, err := svc.ListUsers(ctx, tid, `userName co "user-"`, 1, 10)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if list.TotalResults != seeded {
+		t.Errorf("TotalResults=%d, want %d (count must span beyond the page)", list.TotalResults, seeded)
+	}
+	if list.ItemsPerPage != 10 || len(list.Resources) != 10 {
+		t.Errorf("ItemsPerPage=%d len(Resources)=%d, want 10/10", list.ItemsPerPage, len(list.Resources))
+	}
+}
+
+func TestSCIMListUsersUnknownAttributeMatchesNothing(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	ctx := context.Background()
+	if _, err := svc.CreateUser(ctx, tid, SCIMUser{UserName: "a@example.com"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	// An attribute with no backing column and a non-empty value can
+	// never match — the service short-circuits to an empty page.
+	list, err := svc.ListUsers(ctx, tid, `nickName eq "ace"`, 1, 100)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if list.TotalResults != 0 || list.ItemsPerPage != 0 {
+		t.Errorf("TotalResults=%d ItemsPerPage=%d, want 0/0 for unbacked attribute", list.TotalResults, list.ItemsPerPage)
+	}
+}
