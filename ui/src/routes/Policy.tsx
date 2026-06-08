@@ -469,19 +469,27 @@ function SimpleRules({
   const removedKeys = new Set(
     rows.filter((r) => r.status === "removed").map((r) => r.key),
   );
-  const activeOrder = rows
+  const activeKeys = rows
     .filter((r) => r.status === "active")
-    .map((r) => r.key)
-    .join("|");
+    .map((r) => r.key);
   // Expected order = original order with the removed rules filtered out, so a
   // removal alone doesn't count as a reorder.
-  const expectedOrder = initial
+  const expectedKeys = initial
     .filter((r) => !removedKeys.has(r.key))
-    .map((r) => r.key)
-    .join("|");
+    .map((r) => r.key);
+  const activeOrder = activeKeys.join("|");
+  const expectedOrder = expectedKeys.join("|");
   const removedCount = removedKeys.size;
   const reordered = activeOrder !== expectedOrder;
   const dirty = removedCount > 0 || reordered;
+  // Per-row "moved" flag, compared within the *active* sequence only. A row is
+  // moved iff its position among the active rows differs from where it sits in
+  // the expected (removal-only) sequence. Comparing like-for-like coordinates
+  // means a row that merely slid up because a row above it was marked for
+  // removal is NOT flagged — only rows the operator actually reordered are.
+  const movedKeys = new Set(
+    reordered ? activeKeys.filter((k, idx) => expectedKeys[idx] !== k) : [],
+  );
 
   const proposed = (): GraphDoc => ({
     ...graph,
@@ -559,9 +567,7 @@ function SimpleRules({
           {rows.map((row, i) => {
             const r = row.rule;
             const verb = (r.verb ?? "").toLowerCase();
-            const originalIndex = initial.findIndex((x) => x.key === row.key);
-            const moved =
-              row.status === "active" && reordered && originalIndex !== i;
+            const moved = row.status === "active" && movedKeys.has(row.key);
             const variant =
               row.status === "removed" ? "remove" : moved ? "draft" : "active";
             return (
