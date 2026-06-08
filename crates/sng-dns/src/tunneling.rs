@@ -31,6 +31,7 @@
 //! feedback loop can tune sensitivity without code changes.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -129,6 +130,15 @@ pub struct TunnelingConfig {
     /// TXT-query count to one registrable domain within `window`
     /// that trips the TXT-abuse alarm.
     pub max_txt_per_window: u32,
+    /// Observations between automatic sweeps of expired domain
+    /// windows. The detector is driven purely by `observe`, so it
+    /// self-maintains: every `auto_gc_interval` queries it reaps
+    /// windows that fell fully outside `window`, bounding memory
+    /// under a unique-domain flood (a tunnel mints a fresh subdomain
+    /// per packet) without depending on an external periodic caller.
+    /// `0` disables the automatic sweep (callers must then drive
+    /// [`TunnelingDetector::gc`] themselves).
+    pub auto_gc_interval: u32,
 }
 
 impl Default for TunnelingConfig {
@@ -139,6 +149,7 @@ impl Default for TunnelingConfig {
             min_entropy_bits: 3.5,
             max_queries_per_window: 100,
             max_txt_per_window: 40,
+            auto_gc_interval: 4096,
         }
     }
 }
@@ -183,6 +194,12 @@ impl DomainWindow {
 pub struct TunnelingDetector {
     config: TunnelingConfig,
     windows: Mutex<HashMap<String, DomainWindow>>,
+    /// Observations since the last automatic sweep. Drives the
+    /// amortized GC in [`Self::observe`] so the map cannot grow
+    /// unbounded under an adversarial unique-domain flood. Relaxed
+    /// ordering is sufficient: this only gates an approximate,
+    /// idempotent maintenance sweep, never correctness.
+    ops_since_sweep: AtomicU32,
 }
 
 impl TunnelingDetector {
@@ -192,6 +209,7 @@ impl TunnelingDetector {
         Self {
             config,
             windows: Mutex::new(HashMap::new()),
+            ops_since_sweep: AtomicU32::new(0),
         }
     }
 
@@ -248,7 +266,34 @@ impl TunnelingDetector {
                 score: ratio_score(txtcount, self.config.max_txt_per_window),
             });
         }
+
+        // Amortized self-maintenance: every `auto_gc_interval`
+        // observations, reap windows that fell fully outside the
+        // sliding window. `observe` only evicts the entry it touches,
+        // so without this a flood of unique registrable domains would
+        // grow `windows` without bound. The sweep is O(tracked) once
+        // per interval — negligible per-query — and uses the caller's
+        // `now` so it stays deterministic under test.
+        self.maybe_auto_gc(now);
         alerts
+    }
+
+    /// Run an automatic expired-window sweep once per
+    /// `config.auto_gc_interval` observations. A `0` interval opts
+    /// out (the caller drives [`Self::gc`] explicitly).
+    fn maybe_auto_gc(&self, now: Instant) {
+        let interval = self.config.auto_gc_interval;
+        if interval == 0 {
+            return;
+        }
+        // `fetch_add` returns the value *before* the increment, so the
+        // sweep fires on the observation that brings the count up to
+        // `interval`. Reset to 0 afterwards so the cadence is steady.
+        let prior = self.ops_since_sweep.fetch_add(1, Ordering::Relaxed);
+        if prior + 1 >= interval {
+            self.ops_since_sweep.store(0, Ordering::Relaxed);
+            self.gc(now);
+        }
     }
 
     fn check_encoded_qname(&self, name: &str) -> Option<TunnelingAlert> {
@@ -484,6 +529,51 @@ mod tests {
             }
         }
         assert!(fired, "TXT abuse should alert");
+    }
+
+    #[test]
+    fn auto_gc_bounds_map_under_unique_domain_flood() {
+        // A small interval so the test triggers the sweep quickly.
+        let cfg = TunnelingConfig {
+            auto_gc_interval: 8,
+            ..TunnelingConfig::default()
+        };
+        let d = TunnelingDetector::new(cfg);
+        let base = Instant::now();
+        // Each query is a brand-new registrable domain observed far
+        // enough apart that earlier windows have fully expired by the
+        // time the periodic sweep runs. Without auto-gc the map would
+        // grow to 64 entries; with it, the sweep reaps the expired
+        // ones so the tracked set stays tiny.
+        for i in 0u32..64 {
+            let q = DnsQuery::new(&format!("flood{i}.evil{i}.com"), QType::A);
+            d.observe(&q, at(base, u64::from(i) * 100));
+        }
+        assert!(
+            d.tracked_domains() <= 8,
+            "auto-gc should bound the map under a unique-domain flood, \
+             tracked={}",
+            d.tracked_domains()
+        );
+    }
+
+    #[test]
+    fn auto_gc_disabled_keeps_all_domains() {
+        let cfg = TunnelingConfig {
+            auto_gc_interval: 0,
+            ..TunnelingConfig::default()
+        };
+        let d = TunnelingDetector::new(cfg);
+        let base = Instant::now();
+        for i in 0u32..20 {
+            let q = DnsQuery::new(&format!("keep{i}.evil{i}.com"), QType::A);
+            d.observe(&q, at(base, u64::from(i) * 100));
+        }
+        assert_eq!(
+            d.tracked_domains(),
+            20,
+            "auto_gc_interval=0 must not sweep; caller drives gc()"
+        );
     }
 
     #[test]

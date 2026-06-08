@@ -612,13 +612,26 @@ impl RuleCategory {
         let classtype = extract_rule_option(&lower, "classtype").unwrap_or_default();
 
         // 1. msg-encoded tactics that classtype cannot express.
-        if msg.contains("exfil") || msg.contains("data theft") || msg.contains("data leak") {
+        // Single-token signals are matched on whole words (see
+        // `msg_has_word`) so a tactic keyword embedded in an unrelated
+        // word does not misclassify the rule: "lateral" must not fire
+        // on "collateral"/"bilateral", and "c2" must not fire on a
+        // cipher name like "rc2". Multi-word phrases stay substring
+        // matches since they are already specific.
+        if msg_has_word(&msg, "exfil")
+            || msg_has_word(&msg, "exfiltration")
+            || msg.contains("data theft")
+            || msg.contains("data leak")
+        {
             return Self::Exfiltration;
         }
-        if msg.contains("lateral") {
+        if msg_has_word(&msg, "lateral") {
             return Self::LateralMovement;
         }
-        if msg.contains(" c2") || msg.contains("command and control") || msg.contains("cnc ") {
+        if msg_has_word(&msg, "c2")
+            || msg_has_word(&msg, "cnc")
+            || msg.contains("command and control")
+        {
             return Self::C2;
         }
 
@@ -683,6 +696,19 @@ fn extract_rule_option(lower_line: &str, key: &str) -> Option<String> {
         search_from = at + needle.len();
     }
     None
+}
+
+/// Whether `msg` contains `word` as a complete token, where token
+/// boundaries are any non-alphanumeric character (space, slash,
+/// punctuation). This keeps the tactic keywords in
+/// [`RuleCategory::classify`] precise: `"lateral"` matches
+/// `"ET LATERAL PsExec"` but not `"collateral"`, and `"c2"` matches
+/// `"Win32 C2 checkin"` but not the cipher name `"rc2"`. `msg` is
+/// expected to already be lowercased (as `classify` produces it);
+/// `word` must be lowercase alphanumeric.
+fn msg_has_word(msg: &str, word: &str) -> bool {
+    msg.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|tok| tok == word)
 }
 
 /// Whether a line is an actual Suricata rule (vs a comment or blank).
@@ -1602,6 +1628,37 @@ mod tests {
             (
                 r#"alert tcp any any -> any any (msg:"benign traffic note"; classtype:not-suspicious; sid:7;)"#,
                 RuleCategory::Other,
+            ),
+        ];
+        for (line, want) in cases {
+            assert_eq!(RuleCategory::classify(line), want, "misclassified: {line}");
+        }
+    }
+
+    #[test]
+    fn classify_msg_keywords_match_whole_words_only() {
+        // A tactic keyword embedded in an unrelated word must NOT
+        // trip the msg-tactic precedence; the rule should fall through
+        // to its classtype / fallback instead.
+        let cases = [
+            // "collateral" must not be read as "lateral".
+            (
+                r#"alert tcp any any -> any any (msg:"ET POLICY collateral data observed"; classtype:trojan-activity; sid:10;)"#,
+                RuleCategory::Malware,
+            ),
+            // "rc2" (a cipher) must not be read as "c2".
+            (
+                r#"alert tls any any -> any any (msg:"ET POLICY weak RC2 cipher negotiated"; classtype:not-suspicious; sid:11;)"#,
+                RuleCategory::Other,
+            ),
+            // Genuine whole-word tactics still classify as before.
+            (
+                r#"alert smb any any -> any any (msg:"ET LATERAL PsExec service install"; classtype:trojan-activity; sid:12;)"#,
+                RuleCategory::LateralMovement,
+            ),
+            (
+                r#"alert dns any any -> any any (msg:"ET MALWARE Win32 C2 checkin"; sid:13;)"#,
+                RuleCategory::C2,
             ),
         ];
         for (line, want) in cases {

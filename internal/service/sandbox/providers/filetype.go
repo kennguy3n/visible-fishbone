@@ -36,6 +36,10 @@ const (
 	// FileTypeScript is a text file beginning with a shebang
 	// ("#!"), i.e. a shell/interpreter script.
 	FileTypeScript FileType = "script"
+	// FileTypeJava is a compiled Java class file. It shares the
+	// 0xCAFEBABE magic with Mach-O fat binaries and is disambiguated
+	// by the class-version field (see DetectFileType).
+	FileTypeJava FileType = "java"
 )
 
 // Executable reports whether the type is a natively-executable
@@ -62,13 +66,26 @@ func (f FileType) Document() bool {
 }
 
 // Mach-O magic numbers (little- and big-endian, 32- and 64-bit) plus
-// the fat/universal-binary magics.
+// the 64-bit fat/universal-binary magic. The 32-bit fat magic
+// (0xCAFEBABE) is handled separately in DetectFileType because it
+// collides with the Java class-file magic.
 var machoMagics = map[uint32]struct{}{
 	0xFEEDFACE: {}, // 32-bit
 	0xFEEDFACF: {}, // 64-bit
-	0xCAFEBABE: {}, // fat/universal (big-endian)
 	0xCAFEBABF: {}, // fat/universal 64 (big-endian)
 }
+
+// machoFatMagic is the 32-bit Mach-O fat/universal-binary magic.
+// Java .class files begin with the identical four bytes, so a match
+// is disambiguated by the bytes that follow (see DetectFileType).
+const machoFatMagic uint32 = 0xCAFEBABE
+
+// javaMinClassVersion is the smallest major class-file version (JDK
+// 1.1 = 45). A Mach-O fat header instead stores nfat_arch — a small
+// architecture count (realistically < 20) — in the same position, so
+// a big-endian uint32 at offset 4 at or above this floor identifies a
+// Java class file rather than a fat binary.
+const javaMinClassVersion uint32 = 45
 
 // oleMagic is the OLE2 compound-file header (D0 CF 11 E0 A1 B1 1A E1).
 var oleMagic = []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
@@ -97,6 +114,18 @@ func DetectFileType(content []byte) FileType {
 	// Mach-O: 4-byte magic (either endianness).
 	be := binary.BigEndian.Uint32(content[:4])
 	le := binary.LittleEndian.Uint32(content[:4])
+	// 0xCAFEBABE is shared by Mach-O 32-bit fat binaries and Java
+	// .class files. A fat header stores nfat_arch (a small
+	// architecture count) as a big-endian uint32 at offset 4, while a
+	// class file stores minor_version/major_version there with
+	// major >= 45 (JDK 1.1+). A value at/above the Java version floor
+	// is therefore a class file, not a fat binary.
+	if be == machoFatMagic {
+		if len(content) >= 8 && binary.BigEndian.Uint32(content[4:8]) >= javaMinClassVersion {
+			return FileTypeJava
+		}
+		return FileTypeMachO
+	}
 	if _, ok := machoMagics[be]; ok {
 		return FileTypeMachO
 	}

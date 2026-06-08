@@ -417,6 +417,42 @@ impl YaraEngine {
         yara_x::compile(source).map_err(|e| SwgError::YaraRuleCompile(e.to_string()))
     }
 
+    /// Namespace the built-in baseline rules live in once a signed
+    /// operator bundle is installed. Operator rules go in
+    /// [`Self::OPERATOR_NAMESPACE`]; isolating the two means rule
+    /// identifiers can never collide across the sources.
+    const BUILTIN_NAMESPACE: &'static str = "default";
+    /// Namespace operator-supplied bundle rules are compiled into.
+    const OPERATOR_NAMESPACE: &'static str = "operator";
+
+    /// Compile the built-in baseline rules together with an
+    /// operator-supplied `operator_source`, each in its own
+    /// namespace.
+    ///
+    /// A signed bundle *augments* the compiled-in baseline; it does
+    /// not replace it. Compiling [`BUILTIN_RULES`] alongside the
+    /// bundle guarantees the baseline coverage (EICAR, PE/ELF,
+    /// JS-obfuscation, Office-macro, ransomware) stays live even when
+    /// an operator ships a minimal custom-only bundle — otherwise a
+    /// thin bundle would silently regress detection. The two sources
+    /// occupy separate namespaces so an operator rule may reuse a
+    /// built-in identifier without a compile-time collision.
+    fn compile_with_builtins(operator_source: &str) -> Result<yara_x::Rules, SwgError> {
+        let mut compiler = yara_x::Compiler::new();
+        // Built-ins first, in the default namespace — identical to the
+        // namespace `with_builtin_rules` assigns them.
+        compiler.new_namespace(Self::BUILTIN_NAMESPACE);
+        compiler
+            .add_source(BUILTIN_RULES)
+            .map_err(|e| SwgError::YaraRuleCompile(e.to_string()))?;
+        // Operator rules in their own namespace.
+        compiler.new_namespace(Self::OPERATOR_NAMESPACE);
+        compiler
+            .add_source(operator_source)
+            .map_err(|e| SwgError::YaraRuleCompile(e.to_string()))?;
+        Ok(compiler.build())
+    }
+
     /// Build an engine seeded with the compiled-in [`BUILTIN_RULES`].
     pub fn with_builtin_rules() -> Result<Self, SwgError> {
         let rules = Self::compile(BUILTIN_RULES)?;
@@ -454,8 +490,11 @@ impl YaraEngine {
     /// 2. Reject a revision `<=` the installed one (downgrade
     ///    protection — a stale bundle must never silently drop
     ///    coverage, the same guard IPS / category bundles apply).
-    /// 3. Compile the rule text; a syntax error leaves the live
-    ///    rules untouched.
+    /// 3. Compile the rule text *together with* the built-in
+    ///    baseline (see [`Self::compile_with_builtins`]); a syntax
+    ///    error leaves the live rules untouched. The baseline is
+    ///    always retained so a minimal bundle cannot regress
+    ///    detection coverage.
     /// 4. ArcSwap the new set in.
     ///
     /// Returns the now-installed revision.
@@ -483,7 +522,7 @@ impl YaraEngine {
                 });
             }
         }
-        let rules = Self::compile(&claims.rules_text)?;
+        let rules = Self::compile_with_builtins(&claims.rules_text)?;
         self.inner.store(Arc::new(CompiledRuleSet {
             rules,
             version: Some(claims.version),
@@ -689,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn install_signed_bundle_swaps_rules() {
+    fn install_signed_bundle_augments_builtins() {
         let (signing, id) = deterministic_keypair();
         let mut verifier = YaraRuleVerifier::new();
         verifier
@@ -715,13 +754,20 @@ rule org_secret_marker {
         assert_eq!(installed, 5);
         assert_eq!(engine.version(), Some(5));
 
+        // The operator rule is now live.
         let hit = b"...ORG-CONFIDENTIAL-EXFIL-MARKER...";
         let m = engine.worst_match(hit).expect("custom rule match");
         assert_eq!(m.rule, "org_secret_marker");
         assert_eq!(m.severity, YaraSeverity::Malicious);
 
-        // The builtin EICAR rule was replaced by the bundle.
-        assert!(engine.scan(&eicar_bytes()).is_empty());
+        // ...and the built-in baseline is RETAINED: a minimal bundle
+        // must not silently drop EICAR (or any other) built-in
+        // coverage. The match comes from the built-in namespace.
+        let eicar = engine
+            .worst_match(&eicar_bytes())
+            .expect("builtin EICAR still live");
+        assert_eq!(eicar.namespace, YaraEngine::BUILTIN_NAMESPACE);
+        assert_eq!(eicar.severity, YaraSeverity::Malicious);
     }
 
     #[test]

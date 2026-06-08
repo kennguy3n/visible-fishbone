@@ -113,7 +113,10 @@ BAD = {
     # DNS tunneling: an abnormally long, high-entropy encoded label in a
     # UDP/53 query — data exfiltration over DNS.
     "bad-dns-tunnel.pcap": dns_query(
-        b"\x3ck7n2p9q4r8s3t6v1w5x0y2z8a4b7c9d3e6f1g5h0j2k4m7n9p3q6"
+        # 0x34 = 52: the DNS label length prefix MUST equal the number
+        # of bytes in the encoded label that follows (52 here), or the
+        # query is malformed wire-format.
+        b"\x34k7n2p9q4r8s3t6v1w5x0y2z8a4b7c9d3e6f1g5h0j2k4m7n9p3q6"
         b"\x06tunnel\x07example\x00",
     ),
 }
