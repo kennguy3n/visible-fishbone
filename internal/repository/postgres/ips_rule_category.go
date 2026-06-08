@@ -12,7 +12,7 @@ import (
 
 // IPSRuleCategoryRepository is the Postgres-backed implementation of
 // repository.IPSRuleCategoryRepository against the ips_rule_categories
-// and ips_rule_category_stats tables (migration 049). Every operation
+// and ips_rule_category_stats tables (migration 050). Every operation
 // runs through withTenant / withTenantRO so the tables' RLS policies
 // (sng.tenant_id) enforce isolation; the explicit tenant_id passed on
 // writes satisfies the NOT NULL column and the WITH CHECK clause.

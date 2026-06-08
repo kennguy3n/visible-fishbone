@@ -1452,7 +1452,7 @@ type InlineCASBRule struct {
 }
 
 // IPSRuleCategorySelection is a persisted per-tenant IPS rule
-// category enablement row (ips_rule_categories, migration 049).
+// category enablement row (ips_rule_categories, migration 050).
 // A row exists only when an operator has explicitly overridden the
 // default for a category; the absence of a row means the category
 // is enabled (fail-open). The Category string is one of the seven
@@ -1466,7 +1466,7 @@ type IPSRuleCategorySelection struct {
 }
 
 // IPSRuleCategoryDailyStat is a persisted per-tenant per-category
-// daily hit count (ips_rule_category_stats, migration 049). The IPS
+// daily hit count (ips_rule_category_stats, migration 050). The IPS
 // alert ingestion path increments Hits as Suricata alerts are
 // normalised so the management API can render a per-category
 // "hits/day" view without scanning the full alert table.

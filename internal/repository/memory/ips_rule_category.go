@@ -12,7 +12,7 @@ import (
 
 // IPSRuleCategoryRepository is the in-memory implementation of
 // repository.IPSRuleCategoryRepository (ips_rule_categories +
-// ips_rule_category_stats, migration 049). It mirrors the Postgres
+// ips_rule_category_stats, migration 050). It mirrors the Postgres
 // store's tenant scoping, (tenant, category) override upsert, and
 // (tenant, category, day) hit accumulation so service/handler tests
 // behave identically against either backend.

@@ -88,7 +88,7 @@ type Store struct {
 	sandboxVerdicts map[uuid.UUID]repository.SandboxVerdict
 
 	// IPS per-tenant rule category overrides + daily hit stats —
-	// see migration 049. Keyed by (tenant, category) and
+	// see migration 050. Keyed by (tenant, category) and
 	// (tenant, category, yyyy-mm-dd) respectively.
 	ipsRuleCategories    map[string]repository.IPSRuleCategorySelection
 	ipsRuleCategoryStats map[string]repository.IPSRuleCategoryDailyStat

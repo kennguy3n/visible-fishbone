@@ -40,7 +40,8 @@ const ALLOW_DOMAINS: &[&str] = &["safe.example"];
 /// A long, high-entropy QNAME label (base32-ish encoded payload) that
 /// should trip the encoded-QNAME signal: >= 52 chars, >= 3.5 bits/char.
 fn encoded_qname() -> String {
-    // 60 chars of mixed-case + digits → high per-char entropy.
+    // 52-char label of mixed-case + digits → high per-char entropy
+    // (>= the encoded-QNAME min-label threshold).
     format!(
         "{}.{}",
         "k7n2p9q4r8s3t6v1w5x0y2z8a4b7c9d3e6f1g5h0j2k4m7n9p3q6", "tunnel.example"

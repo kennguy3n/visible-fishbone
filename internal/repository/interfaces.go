@@ -1004,7 +1004,7 @@ type InlineCASBRuleRepository interface {
 }
 
 // IPSRuleCategoryRepository owns the ips_rule_categories and
-// ips_rule_category_stats tables (migration 049). Tenant-scoped
+// ips_rule_category_stats tables (migration 050). Tenant-scoped
 // reads/writes flow through `sng.tenant_id` (RLS) on the postgres
 // backend; the memory backend filters on TenantID explicitly.
 //

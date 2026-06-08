@@ -730,7 +730,7 @@ fn is_rule_line(line: &str) -> bool {
 /// The set of [`RuleCategory`] values currently enabled.
 ///
 /// The Go control plane persists one selection per tenant (migration
-/// `049_ips_rule_categories`) and compiles a tenant-specific bundle by passing
+/// `050_ips_rule_categories`) and compiles a tenant-specific bundle by passing
 /// the selection to [`filter_rules_by_category`]; the edge can additionally
 /// hold an org-global selection to drop a category fleet-wide. Defaults to
 /// every category enabled (fail-open: a fresh tenant gets full coverage).

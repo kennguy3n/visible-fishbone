@@ -34,7 +34,7 @@ import (
 
 // IPSRuleCategory is a Suricata rule threat class. The string values
 // are wire-identical to the edge's sng_ips::rules::RuleCategory serde
-// ids and to the CHECK constraint in migration 049.
+// ids and to the CHECK constraint in migration 050.
 type IPSRuleCategory string
 
 const (
