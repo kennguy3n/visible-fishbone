@@ -194,6 +194,39 @@ func TestDemotionBridge_RetriesAfterEmitError(t *testing.T) {
 	}
 }
 
+// TestDemotionBridge_PrunesDepartedDomains guards the unbounded-map
+// concern: a domain that leaves the store (TTL sweep) is dropped
+// from the bridge's tracking, and if it later returns it is
+// re-emitted rather than silently skipped.
+func TestDemotionBridge_PrunesDepartedDomains(t *testing.T) {
+	t.Parallel()
+	em := &stubEmitter{}
+	bridge := NewDemotionBridge(em)
+	t0 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	with := IOCSnapshot{Domains: []IOC{
+		mkIOC(IOCTypeDomain, "evil.example.com", 0.9, func(i *IOC) { i.LastSeen = t0 }),
+	}}
+
+	if err := bridge.Sync(context.Background(), with); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	// Domain expired out of the store → empty snapshot prunes it.
+	if err := bridge.Sync(context.Background(), IOCSnapshot{}); err != nil {
+		t.Fatalf("empty sync: %v", err)
+	}
+	if len(bridge.emitted) != 0 {
+		t.Fatalf("departed domain not pruned: %#v", bridge.emitted)
+	}
+	// Same domain, same LastSeen returns → must re-emit (override may
+	// have been cleared while it was gone), not be skipped as stale.
+	if err := bridge.Sync(context.Background(), with); err != nil {
+		t.Fatalf("re-add sync: %v", err)
+	}
+	if len(em.domains) != 2 {
+		t.Fatalf("returning domain should re-emit, got: %#v", em.domains)
+	}
+}
+
 // flakyEmitter fails its first EmitDomainDemotion call, then
 // succeeds, to exercise the retry path.
 type flakyEmitter struct {

@@ -332,8 +332,10 @@ func (b *DemotionBridge) Sync(ctx context.Context, snap IOCSnapshot) error {
 	if b.emitted == nil {
 		b.emitted = make(map[string]time.Time)
 	}
+	present := make(map[string]struct{}, len(snap.Domains))
 	var errs []error
 	for _, ioc := range snap.Domains {
+		present[ioc.Value] = struct{}{}
 		if ioc.Confidence < b.minConfidence {
 			continue
 		}
@@ -349,6 +351,18 @@ func (b *DemotionBridge) Sync(ctx context.Context, snap IOCSnapshot) error {
 			continue
 		}
 		b.emitted[ioc.Value] = ioc.LastSeen
+	}
+	// Drop tracking for domains that have left the store (TTL sweep /
+	// expiry), bounding the map to the live snapshot rather than every
+	// domain ever ingested. If such a domain is later re-observed it is
+	// re-emitted, re-establishing the override — the same self-healing
+	// behaviour as a LastSeen advance.
+	if len(b.emitted) > len(present) {
+		for d := range b.emitted {
+			if _, ok := present[d]; !ok {
+				delete(b.emitted, d)
+			}
+		}
 	}
 	return errors.Join(errs...)
 }
