@@ -73,6 +73,11 @@ func (s *Store) NewBaselineModelRepository() *BaselineModelRepository {
 	return &BaselineModelRepository{s: s}
 }
 
+// NewThreatIOCRepository binds the Store to repository.ThreatIOCRepository.
+func (s *Store) NewThreatIOCRepository() *ThreatIOCRepository {
+	return &ThreatIOCRepository{s: s}
+}
+
 // NewAlertRepository binds the Store to repository.AlertRepository.
 func (s *Store) NewAlertRepository() *AlertRepository { return &AlertRepository{s: s} }
 
@@ -253,4 +258,5 @@ var (
 	_ repository.TroubleshootSessionRepository   = (*TroubleshootSessionRepository)(nil)
 	_ repository.IDPConfigRepository             = (*IDPConfigRepository)(nil)
 	_ repository.ResidencyAuditRepository        = (*ResidencyAuditRepository)(nil)
+	_ repository.ThreatIOCRepository             = (*ThreatIOCRepository)(nil)
 )

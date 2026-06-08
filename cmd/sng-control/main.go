@@ -358,6 +358,21 @@ func run() error {
 	// re-pulls plus a TTL sweeper, all tied to rootCtx. With no
 	// THREATINTEL_* feeds configured only the sweeper runs (a no-op
 	// over an empty store), so this is safe to start unconditionally.
+	//
+	// Restore the persisted IOC snapshot first (no-op when
+	// persistence is disabled) so the store is warm before the first
+	// feed tick — a restart re-warms enforcement immediately rather
+	// than starting empty. A restore failure is non-fatal: feeds
+	// re-populate the store on warm-up regardless, so we log and
+	// continue (fail-open, matching the rest of the threat-intel
+	// path).
+	if res, err := feedMgr.Restore(rootCtx); err != nil {
+		logger.Warn("sng-control: threat-intel IOC store restore failed; continuing with feed warm-up",
+			slog.Any("error", err))
+	} else if res.Added > 0 {
+		logger.Info("sng-control: restored threat-intel IOC store from snapshot",
+			slog.Int("restored", res.Added))
+	}
 	feedMgr.Start(rootCtx)
 	// Safety net for the early-return paths between here and the
 	// explicit Stop in the graceful-shutdown block: if any subsequent
@@ -820,6 +835,18 @@ func buildRouter(
 	// stays empty, so every consumer is a safe no-op.
 	iocStore := aisvc.NewIOCStore(aisvc.WithMinConfidence(cfg.ThreatIntel.MinConfidence))
 	iocCompiler := aisvc.NewIOCEnforcementCompiler(iocStore)
+	// Durability: snapshot the aggregated IOC store to Postgres and
+	// restore it on boot so a control-plane restart re-warms
+	// enforcement immediately instead of starting empty and waiting
+	// for every feed to re-fetch (with hourly feeds and a slow or
+	// briefly-unreachable upstream, that warm-up gap can be long).
+	// The store remains the runtime source of truth; the table is
+	// just a boot cache, refreshed by the next feed warm-up. Disable
+	// with THREATINTEL_PERSISTENCE=false.
+	var iocPersister aisvc.IOCPersister
+	if cfg.ThreatIntel.Persistence {
+		iocPersister = aisvc.NewRepositoryPersister(store.NewThreatIOCRepository())
+	}
 	// DefaultDemotionPolicy makes threat_feed a global signal (applied
 	// to every tenant) with a permanent TTL — a domain that lit up on a
 	// TI feed stays demoted until an operator clears it. Passed
@@ -840,6 +867,7 @@ func buildRouter(
 				logger.WarnContext(ctx, "threat-intel: demotion bridge sync failed", slog.Any("error", err))
 			}
 		}),
+		aisvc.WithPersister(iocPersister, cfg.ThreatIntel.PersistInterval),
 	)
 
 	policySvc := policy.New(

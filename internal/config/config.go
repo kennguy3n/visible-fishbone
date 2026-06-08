@@ -367,6 +367,20 @@ type ThreatIntel struct {
 	// in CSV (indicator-per-row) or JSON (array-of-objects) form.
 	CSVURL  string
 	JSONURL string
+	// Persistence snapshots the in-memory IOC store to Postgres and
+	// restores it on boot, so a control-plane restart does not open
+	// an enforcement gap until every feed re-fetches during warm-up
+	// (which, with hourly feeds and a slow/unreachable upstream, can
+	// be a long window). Defaults to true; disable with
+	// THREATINTEL_PERSISTENCE=false. Parsed leniently, matching the
+	// rest of this section.
+	Persistence bool
+	// PersistInterval is how often the active indicator set is
+	// flushed to durable storage while running; a final flush also
+	// runs on graceful shutdown so the freshest snapshot survives a
+	// restart. Defaults to 5m. Only meaningful when Persistence is
+	// enabled.
+	PersistInterval time.Duration
 }
 
 // Log carries structured-logging configuration.
@@ -1374,6 +1388,8 @@ func Load() (Config, error) {
 			FeodoTrackerURL:  getStr("THREATINTEL_FEODOTRACKER_URL", ""),
 			CSVURL:           getStr("THREATINTEL_CSV_URL", ""),
 			JSONURL:          getStr("THREATINTEL_JSON_URL", ""),
+			Persistence:      getBoolLenient("THREATINTEL_PERSISTENCE", true),
+			PersistInterval:  getDuration("THREATINTEL_PERSIST_INTERVAL", 5*time.Minute),
 		},
 	}
 

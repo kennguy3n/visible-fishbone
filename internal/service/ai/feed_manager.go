@@ -35,6 +35,12 @@ type FeedManager struct {
 	// Zero applies defaultSweepInterval.
 	sweepInterval time.Duration
 
+	// persister, when set, durably snapshots the active IOC set so
+	// a restart does not start from an empty store. persistInterval
+	// is the flush cadence; a final flush also runs on shutdown.
+	persister       IOCPersister
+	persistInterval time.Duration
+
 	metrics   feedMetrics
 	stopCh    chan struct{}
 	doneCh    chan struct{}
@@ -44,7 +50,16 @@ type FeedManager struct {
 	started   atomic.Bool
 }
 
-const defaultSweepInterval = 10 * time.Minute
+const (
+	defaultSweepInterval = 10 * time.Minute
+	// defaultPersistInterval is the IOC-store flush cadence when a
+	// persister is configured without an explicit interval.
+	defaultPersistInterval = 5 * time.Minute
+	// persistFlushTimeout bounds the final shutdown flush, which
+	// runs on a fresh context because the parent is already
+	// cancelled by the time the loops drain.
+	persistFlushTimeout = 10 * time.Second
+)
 
 // FeedManagerOption configures a FeedManager.
 type FeedManagerOption func(*FeedManager)
@@ -71,6 +86,27 @@ func WithSweepInterval(d time.Duration) FeedManagerOption {
 	return func(m *FeedManager) {
 		if d > 0 {
 			m.sweepInterval = d
+		}
+	}
+}
+
+// WithPersister enables IOC-store durability: the active set is
+// flushed to the persister every interval (defaulting to
+// defaultPersistInterval when interval <= 0) and once more on
+// graceful shutdown. A nil persister disables persistence, leaving
+// the manager's behaviour unchanged. Restore-on-boot is driven by
+// the caller (before Start) so the store is warm before the first
+// feed tick — see IOCStore.Restore.
+func WithPersister(p IOCPersister, interval time.Duration) FeedManagerOption {
+	return func(m *FeedManager) {
+		if p == nil {
+			return
+		}
+		m.persister = p
+		if interval > 0 {
+			m.persistInterval = interval
+		} else {
+			m.persistInterval = defaultPersistInterval
 		}
 	}
 }
@@ -251,6 +287,19 @@ func (m *FeedManager) fireUpdate(ctx context.Context) {
 	m.onUpdate(ctx, m.store.Snapshot())
 }
 
+// Restore re-warms the IOC store from the configured persister
+// before the feeds start. It is a no-op (zero result, nil error)
+// when no persister is set, so callers can invoke it
+// unconditionally. Run it before Start so enforcement reflects the
+// last persisted snapshot immediately, rather than being empty
+// until the first feed warm-up completes.
+func (m *FeedManager) Restore(ctx context.Context) (UpsertResult, error) {
+	if m.persister == nil {
+		return UpsertResult{}, nil
+	}
+	return m.store.Restore(ctx, m.persister)
+}
+
 // Start launches one ticker goroutine per feed plus a sweeper.
 // Non-blocking and idempotent. Each feed refreshes immediately on
 // start (warm-up) and then on its configured interval.
@@ -279,6 +328,10 @@ func (m *FeedManager) Start(ctx context.Context) {
 		}
 		m.wg.Add(1)
 		go m.runSweepLoop(runCtx)
+		if m.persister != nil {
+			m.wg.Add(1)
+			go m.runPersistLoop(runCtx)
+		}
 		go func() {
 			m.wg.Wait()
 			cancel()
@@ -339,6 +392,60 @@ func (m *FeedManager) runSweepLoop(ctx context.Context) {
 				m.fireUpdate(ctx)
 			}
 		}
+	}
+}
+
+// runPersistLoop periodically flushes the active IOC set to the
+// configured persister and performs one final flush when the loop
+// is told to stop, so the freshest snapshot survives a restart.
+//
+// The shutdown flush runs on a fresh, time-bounded context because
+// the loop's parent ctx is already cancelled by the time Stop
+// fires (the cancel bridge in Start cancels runCtx on stopCh); a
+// cancelled context would otherwise abort the very flush meant to
+// capture the latest state.
+func (m *FeedManager) runPersistLoop(ctx context.Context) {
+	defer m.wg.Done()
+	ticker := time.NewTicker(m.persistInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			m.flushPersist(context.Background(), "shutdown")
+			return
+		case <-m.stopCh:
+			m.flushPersist(context.Background(), "shutdown")
+			return
+		case <-ticker.C:
+			m.flushPersist(ctx, "interval")
+		}
+	}
+}
+
+// flushPersist writes the active set once. On the shutdown path the
+// supplied ctx is the still-live background context, so the flush
+// is wrapped in a bounded timeout to avoid hanging shutdown on a
+// slow database.
+func (m *FeedManager) flushPersist(ctx context.Context, reason string) {
+	if m.persister == nil {
+		return
+	}
+	if reason == "shutdown" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, persistFlushTimeout)
+		defer cancel()
+	}
+	n, err := m.store.Persist(ctx, m.persister)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.WarnContext(ctx, "threat-intel: IOC store persist failed",
+				"reason", reason, "error", err)
+		}
+		return
+	}
+	if m.logger != nil {
+		m.logger.DebugContext(ctx, "threat-intel: persisted IOC store snapshot",
+			"reason", reason, "count", n)
 	}
 }
 
