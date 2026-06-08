@@ -74,3 +74,18 @@ The IOC store is the shared spine: the live-traffic matcher reads it
 alongside the regional catalogs, the enforcement compiler reads a
 point-in-time snapshot at bundle-compile time, and the demotion bridge
 fires on every feed refresh via the manager's `OnUpdate` hook.
+
+## Evaluation precedence
+
+The IOC deny rules are appended to the typed policy graph **after** the
+operator's own rules and the inline-CASB rules, and the policy
+evaluator is first-match-wins (`Graph.CompileTarget`). IOC rules are
+therefore the **lowest-priority** rules in a bundle: an explicit
+operator *allow* for a domain/IP/URL shadows a threat-intel *deny* for
+the same indicator. This is intentional and mirrors the inline-CASB
+ordering — an operator's deliberate allow-list entry (e.g. a known
+false-positive or a sanctioned-but-flagged host) is a stronger signal
+than an automated feed, so the operator stays in control of automated
+blocks without having to mute the feed. The malware-hash (`mw`) set is
+a separate verdict plane (SWG malware inspector), not a graph rule, so
+it is not subject to this rule ordering.

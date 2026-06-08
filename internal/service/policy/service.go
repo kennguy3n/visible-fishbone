@@ -472,6 +472,14 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 	// domainTargets. As with inline-CASB, a legacy verbatim-rules
 	// graph (typed == nil) cannot absorb them — warn rather than
 	// drop silently so an operator can re-publish to opt in.
+	//
+	// IOC rules are appended LAST (after the operator graph and
+	// inline-CASB), so under the evaluator's first-match-wins
+	// semantics they are lowest-priority: an explicit operator allow
+	// shadows an IOC deny for the same indicator. This is intentional
+	// — the operator stays in control of automated feed blocks (e.g.
+	// a known false-positive host) without muting the feed. See
+	// docs/THREAT_INTEL.md "Evaluation precedence".
 	if s.ioc != nil {
 		iocRules, iocErr := s.ioc.CompileIOCRules(ctx, tenantID)
 		if iocErr != nil {
