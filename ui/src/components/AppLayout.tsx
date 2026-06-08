@@ -92,9 +92,10 @@ function Topbar({ onToggleNav }: { onToggleNav: () => void }) {
   // Two-letter monogram for the identity avatar: initials of a display
   // name ("Ada Lovelace" -> "AL"), or the first two characters otherwise.
   const initials = (() => {
-    const parts = name.trim().split(/\s+/).filter(Boolean);
+    const trimmed = name.trim();
+    const parts = trimmed.split(/\s+/).filter(Boolean);
     if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-    return name.slice(0, 2).toUpperCase();
+    return trimmed.slice(0, 2).toUpperCase();
   })();
   // The dedicated identity block is hidden on the tablet icon-rail to reclaim
   // horizontal room, so surface the same "who am I signed in as" on the Sign

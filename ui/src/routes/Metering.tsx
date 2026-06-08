@@ -20,13 +20,10 @@ import {
 } from "@/components/ui";
 import { RequireTenant } from "@/components/RequireTenant";
 import { formatNumber, titleCase } from "@/lib/format";
+import { CHART, CHART_TOOLTIP } from "@/lib/chart-theme";
 
-const AXIS = { fill: "#9fb0cc", fontSize: 11 };
-const TOOLTIP = {
-  background: "#111a2e",
-  border: "1px solid #243352",
-  borderRadius: 8,
-};
+const AXIS = { fill: CHART.axis, fontSize: 11 };
+const TOOLTIP = CHART_TOOLTIP;
 
 export function Metering() {
   return (
@@ -55,7 +52,13 @@ function MeteringInner({ tenantId }: { tenantId: string }) {
     String(a.period).localeCompare(String(b.period)),
   );
   const meters = [...new Set((history.data?.lines ?? []).map((l) => l.meter))];
-  const palette = ["#3b82f6", "#22d3ee", "#a78bfa", "#f59e0b", "#34d399"];
+  const palette = [
+    CHART.brand,
+    CHART.accent,
+    CHART.violet,
+    CHART.warnAlt,
+    CHART.ok,
+  ];
 
   return (
     <>
@@ -81,14 +84,14 @@ function MeteringInner({ tenantId }: { tenantId: string }) {
             <div style={{ height: 280 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={usageData}>
-                  <CartesianGrid stroke="#243352" />
+                  <CartesianGrid stroke={CHART.border} />
                   <XAxis dataKey="meter" tick={AXIS} />
                   <YAxis tick={AXIS} />
                   <Tooltip contentStyle={TOOLTIP} />
                   <Legend />
-                  <Bar dataKey="used" fill="#3b82f6" name="Used" />
-                  <Bar dataKey="soft" fill="#f59e0b" name="Soft limit" fillOpacity={0.5} />
-                  <Bar dataKey="hard" fill="#f87171" name="Hard limit" fillOpacity={0.4} />
+                  <Bar dataKey="used" fill={CHART.brand} name="Used" />
+                  <Bar dataKey="soft" fill={CHART.warnAlt} name="Soft limit" fillOpacity={0.5} />
+                  <Bar dataKey="hard" fill={CHART.danger} name="Hard limit" fillOpacity={0.4} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -143,7 +146,7 @@ function MeteringInner({ tenantId }: { tenantId: string }) {
             <div style={{ height: 240 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={historyData}>
-                  <CartesianGrid stroke="#243352" />
+                  <CartesianGrid stroke={CHART.border} />
                   <XAxis dataKey="period" tick={AXIS} />
                   <YAxis tick={AXIS} />
                   <Tooltip contentStyle={TOOLTIP} />

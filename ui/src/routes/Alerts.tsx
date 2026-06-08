@@ -12,6 +12,7 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from "recharts";
+import { CHART, CHART_TOOLTIP } from "@/lib/chart-theme";
 import {
   useListAlerts,
   useAcknowledgeAlert,
@@ -261,33 +262,29 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
           <div style={{ height: 260 }}>
             <ResponsiveContainer width="100%" height="100%">
               <ScatterChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
-                <CartesianGrid stroke="#243352" />
+                <CartesianGrid stroke={CHART.border} />
                 <XAxis
                   type="number"
                   dataKey="x"
                   domain={["dataMin", "dataMax"]}
                   tickFormatter={(v) => new Date(v).toLocaleDateString()}
-                  tick={{ fill: "#9fb0cc", fontSize: 11 }}
+                  tick={{ fill: CHART.axis, fontSize: 11 }}
                 />
                 <YAxis
                   type="number"
                   dataKey="y"
-                  tick={{ fill: "#9fb0cc", fontSize: 11 }}
-                  label={{ value: "z-score", angle: -90, fill: "#9fb0cc", fontSize: 11 }}
+                  tick={{ fill: CHART.axis, fontSize: 11 }}
+                  label={{ value: "z-score", angle: -90, fill: CHART.axis, fontSize: 11 }}
                 />
                 <ZAxis type="number" dataKey="z" range={[40, 400]} />
-                <ReferenceLine y={3} stroke="#f87171" strokeDasharray="4 4" />
-                <ReferenceLine y={-3} stroke="#f87171" strokeDasharray="4 4" />
+                <ReferenceLine y={3} stroke={CHART.danger} strokeDasharray="4 4" />
+                <ReferenceLine y={-3} stroke={CHART.danger} strokeDasharray="4 4" />
                 <Tooltip
                   cursor={{ strokeDasharray: "3 3" }}
-                  contentStyle={{
-                    background: "#111a2e",
-                    border: "1px solid #243352",
-                    borderRadius: 8,
-                  }}
+                  contentStyle={CHART_TOOLTIP}
                   labelFormatter={(v) => new Date(v).toLocaleString()}
                 />
-                <Scatter data={scatterData} fill="#22d3ee" fillOpacity={0.7} />
+                <Scatter data={scatterData} fill={CHART.accent} fillOpacity={0.7} />
               </ScatterChart>
             </ResponsiveContainer>
           </div>

@@ -7,6 +7,7 @@ import {
   type Edge,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { CHART } from "@/lib/chart-theme";
 import {
   useGetPolicyGraph,
   useUpdatePolicyGraph,
@@ -53,9 +54,9 @@ function toFlow(graph: RawGraph): { nodes: Node[]; edges: Edge[] } {
     data: { label: String(n.label ?? n.name ?? n.id ?? i) },
     position: { x: (i % perRow) * 200, y: Math.floor(i / perRow) * 120 },
     style: {
-      background: "#15203a",
-      color: "#e6ecf7",
-      border: "1px solid #3b82f6",
+      background: CHART.surface,
+      color: CHART.text,
+      border: `1px solid ${CHART.brand}`,
       borderRadius: 8,
       fontSize: 12,
       padding: 8,
@@ -66,7 +67,7 @@ function toFlow(graph: RawGraph): { nodes: Node[]; edges: Edge[] } {
     source: String(e.source ?? e.from ?? ""),
     target: String(e.target ?? e.to ?? ""),
     animated: true,
-    style: { stroke: "#3b82f6" },
+    style: { stroke: CHART.brand },
   }));
   return { nodes, edges };
 }
@@ -194,7 +195,7 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
           ) : (
             <div className="graph-canvas">
               <ReactFlow nodes={flow.nodes} edges={flow.edges} fitView>
-                <Background color="#243352" />
+                <Background color={CHART.border} />
                 <Controls />
               </ReactFlow>
             </div>
