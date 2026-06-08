@@ -19,17 +19,23 @@ type Service struct {
 	policies     repository.DLPPolicyRepository
 	fingerprints repository.DLPFingerprintRepository
 	matches      repository.DLPMatchRepository
+	models       repository.DLPModelRepository
 	regex        *engine.RegexEngine
 	mip          *engine.MIPReader
 	fp           *engine.FingerprintEngine
 	logger       *slog.Logger
 }
 
-// New constructs a DLP service.
+// New constructs a DLP service. A nil models repository disables ML
+// model management: model CRUD/assignment calls return
+// ErrModelsUnavailable and endpoint bundles compile without a model
+// descriptor (the agent runs regex-only NER, the documented
+// fail-safe).
 func New(
 	policies repository.DLPPolicyRepository,
 	fingerprints repository.DLPFingerprintRepository,
 	matches repository.DLPMatchRepository,
+	models repository.DLPModelRepository,
 	logger *slog.Logger,
 ) *Service {
 	if logger == nil {
@@ -39,6 +45,7 @@ func New(
 		policies:     policies,
 		fingerprints: fingerprints,
 		matches:      matches,
+		models:       models,
 		regex:        engine.NewRegexEngine(),
 		mip:          engine.NewMIPReader(),
 		fp:           engine.NewFingerprintEngine(fingerprints),
@@ -192,6 +199,12 @@ func (s *Service) evaluatePolicy(ctx context.Context, tenantID uuid.UUID, p repo
 			}
 		case repository.DLPRuleTypeFingerprint:
 			hasFingerprint = true
+		case repository.DLPRuleTypeMLNER:
+			// ML NER inference runs on-device (sng-dlp's ONNX
+			// classifier), not in the inline control-plane Classify
+			// path — there is no server-side model. The rule is still
+			// valid and is projected into the endpoint bundle by
+			// compileEndpointRules; here it is a no-op.
 		}
 	}
 
@@ -259,7 +272,8 @@ func validAction(a repository.DLPAction) bool {
 func validRuleType(t repository.DLPRuleType) bool {
 	switch t {
 	case repository.DLPRuleTypeRegex, repository.DLPRuleTypeMIPLabel,
-		repository.DLPRuleTypeFingerprint, repository.DLPRuleTypeKeyword:
+		repository.DLPRuleTypeFingerprint, repository.DLPRuleTypeKeyword,
+		repository.DLPRuleTypeMLNER:
 		return true
 	}
 	return false

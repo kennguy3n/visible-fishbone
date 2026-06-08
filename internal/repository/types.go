@@ -1545,6 +1545,13 @@ const (
 	DLPRuleTypeMIPLabel    DLPRuleType = "mip_label"
 	DLPRuleTypeFingerprint DLPRuleType = "fingerprint"
 	DLPRuleTypeKeyword     DLPRuleType = "keyword"
+	// DLPRuleTypeMLNER runs the on-device ONNX NER classifier
+	// instead of a literal pattern. Its `pattern` payload is a
+	// comma-separated list of entity classes to surface (e.g.
+	// "person_name,bank_account"); wire-identical to sng-dlp's
+	// `PatternType::MlNer`. ML NER is enforced on the endpoint
+	// (sng-dlp), not in the inline control-plane classifier.
+	DLPRuleTypeMLNER DLPRuleType = "ml_ner"
 )
 
 // DLPRule is one detection rule inside a DLPPolicy.
@@ -1597,6 +1604,70 @@ type DLPMatch struct {
 	Source    string
 	MatchedAt time.Time
 	Details   json.RawMessage
+}
+
+// DLPModelStatus is the lifecycle state of an on-device ML NER model
+// version.
+type DLPModelStatus string
+
+const (
+	// DLPModelStatusDraft is a newly-registered version whose
+	// artifact has not yet been validated. It cannot be assigned.
+	DLPModelStatusDraft DLPModelStatus = "draft"
+	// DLPModelStatusValidated is a version that passed validation
+	// (artifact digest + Ed25519 signature verified). It is eligible
+	// for per-tenant assignment.
+	DLPModelStatusValidated DLPModelStatus = "validated"
+	// DLPModelStatusRetired is a withdrawn version. It cannot be
+	// assigned, and clearing it from a tenant falls the endpoint
+	// back to regex-only NER.
+	DLPModelStatusRetired DLPModelStatus = "retired"
+)
+
+// DLPModel is a versioned on-device NER model artifact. The ONNX
+// binary itself lives in object storage (S3, like cold archives);
+// this row holds only the metadata plus the trust-chain material the
+// bundle-signing pipeline needs to distribute and the agent needs to
+// verify it (same Ed25519 chain as the policy bundle).
+type DLPModel struct {
+	ID       uuid.UUID
+	TenantID uuid.UUID
+	// Name groups successive versions of the same logical model
+	// (e.g. "pii-ner"); (tenant_id, name, version) is unique.
+	Name    string
+	Version int
+	Status  DLPModelStatus
+	// EntityClasses is the set of entity types this model emits,
+	// wire-identical to sng-dlp's `EntityClass` snake_case names.
+	EntityClasses []string
+	// ObjectKey is the storage key (S3) of the ONNX artifact.
+	ObjectKey string
+	// SizeBytes is the ONNX artifact size in bytes.
+	SizeBytes int64
+	// SHA256 is the lowercase-hex SHA-256 of the ONNX bytes,
+	// re-verified after download and before signing into a bundle.
+	SHA256 string
+	// Signature is the hex-encoded Ed25519 signature over the ONNX
+	// bytes; verified on-device by sng-dlp's `ModelVerifier`.
+	Signature string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// DLPModelPatch is the sparse-PATCH input for
+// DLPModelRepository.UpdateModel. nil fields are left unchanged.
+type DLPModelPatch struct {
+	Status        *DLPModelStatus
+	Signature     *string
+	EntityClasses *[]string
+}
+
+// DLPModelAssignment binds a tenant to the single model version that
+// should be compiled into its endpoint bundle.
+type DLPModelAssignment struct {
+	TenantID   uuid.UUID
+	ModelID    uuid.UUID
+	AssignedAt time.Time
 }
 
 // --- Device enrollment ----------------------------------------------------

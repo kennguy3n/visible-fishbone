@@ -111,6 +111,10 @@ type Store struct {
 	dlpPolicies     map[uuid.UUID]repository.DLPPolicy
 	dlpFingerprints map[uuid.UUID]repository.DLPFingerprint
 	dlpMatches      map[uuid.UUID]repository.DLPMatch
+	// DLP ML model registry — see migration 049. dlpModelAssign maps
+	// a tenant to its single active model version.
+	dlpModels      map[uuid.UUID]repository.DLPModel
+	dlpModelAssign map[uuid.UUID]uuid.UUID
 
 	// AI suggestion tables — see migration 026.
 	aiSuggestions map[uuid.UUID]repository.AISuggestion
@@ -224,6 +228,8 @@ func NewStore() *Store {
 		dlpPolicies:            map[uuid.UUID]repository.DLPPolicy{},
 		dlpFingerprints:        map[uuid.UUID]repository.DLPFingerprint{},
 		dlpMatches:             map[uuid.UUID]repository.DLPMatch{},
+		dlpModels:              map[uuid.UUID]repository.DLPModel{},
+		dlpModelAssign:         map[uuid.UUID]uuid.UUID{},
 		aiSuggestions:          map[uuid.UUID]repository.AISuggestion{},
 		kbEntries:              map[uuid.UUID]repository.KBEntry{},
 		troubleshootSessions:   map[uuid.UUID]repository.TroubleshootSession{},

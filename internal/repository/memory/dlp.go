@@ -356,6 +356,206 @@ func (r *DLPMatchRepository) List(
 	}), nil
 }
 
+// --- DLPModelRepository ---------------------------------------------------
+
+// DLPModelRepository is the memory-backed DLP ML model registry.
+type DLPModelRepository struct{ s *Store }
+
+// NewDLPModelRepository binds a Store.
+func NewDLPModelRepository(s *Store) *DLPModelRepository {
+	return &DLPModelRepository{s: s}
+}
+
+var _ repository.DLPModelRepository = (*DLPModelRepository)(nil)
+
+func (r *DLPModelRepository) CreateModel(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	m repository.DLPModel,
+) (repository.DLPModel, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.DLPModel{}, err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if tenantID == uuid.Nil {
+		return repository.DLPModel{}, repository.ErrInvalidArgument
+	}
+	if _, ok := r.s.tenants[tenantID]; !ok {
+		return repository.DLPModel{}, repository.ErrNotFound
+	}
+	if m.Name == "" {
+		return repository.DLPModel{}, repository.ErrInvalidArgument
+	}
+	// (tenant, name, version) is unique.
+	for _, e := range r.s.dlpModels {
+		if e.TenantID == tenantID && e.Name == m.Name && e.Version == m.Version {
+			return repository.DLPModel{}, repository.ErrConflict
+		}
+	}
+	if m.ID == uuid.Nil {
+		m.ID = uuid.New()
+	}
+	m.TenantID = tenantID
+	now := r.s.clock()
+	m.CreatedAt = now
+	m.UpdatedAt = now
+	m.EntityClasses = cloneStrings(m.EntityClasses)
+	r.s.dlpModels[m.ID] = m
+	return cloneDLPModel(m), nil
+}
+
+func (r *DLPModelRepository) GetModel(
+	ctx context.Context,
+	tenantID, id uuid.UUID,
+) (repository.DLPModel, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.DLPModel{}, err
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	m, ok := r.s.dlpModels[id]
+	if !ok || m.TenantID != tenantID {
+		return repository.DLPModel{}, repository.ErrNotFound
+	}
+	return cloneDLPModel(m), nil
+}
+
+func (r *DLPModelRepository) ListModels(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	page repository.Page,
+) (repository.PageResult[repository.DLPModel], error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.PageResult[repository.DLPModel]{}, err
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	var items []repository.DLPModel
+	for _, m := range r.s.dlpModels {
+		if m.TenantID == tenantID {
+			items = append(items, cloneDLPModel(m))
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return orderBefore(
+			cursor{CreatedAt: items[i].CreatedAt, ID: items[i].ID},
+			cursor{CreatedAt: items[j].CreatedAt, ID: items[j].ID},
+			page.Normalize().Order,
+		)
+	})
+	return paginate(items, page, func(m repository.DLPModel) cursor {
+		return cursor{CreatedAt: m.CreatedAt, ID: m.ID}
+	}), nil
+}
+
+func (r *DLPModelRepository) UpdateModel(
+	ctx context.Context,
+	tenantID, id uuid.UUID,
+	patch repository.DLPModelPatch,
+) (repository.DLPModel, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.DLPModel{}, err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	m, ok := r.s.dlpModels[id]
+	if !ok || m.TenantID != tenantID {
+		return repository.DLPModel{}, repository.ErrNotFound
+	}
+	if patch.Status != nil {
+		m.Status = *patch.Status
+	}
+	if patch.Signature != nil {
+		m.Signature = *patch.Signature
+	}
+	if patch.EntityClasses != nil {
+		m.EntityClasses = cloneStrings(*patch.EntityClasses)
+	}
+	m.UpdatedAt = r.s.clock()
+	r.s.dlpModels[id] = m
+	return cloneDLPModel(m), nil
+}
+
+func (r *DLPModelRepository) DeleteModel(
+	ctx context.Context,
+	tenantID, id uuid.UUID,
+) error {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	m, ok := r.s.dlpModels[id]
+	if !ok || m.TenantID != tenantID {
+		return repository.ErrNotFound
+	}
+	// A model that is the tenant's active assignment cannot be
+	// deleted out from under the endpoint bundle; clear it first.
+	if assigned, ok := r.s.dlpModelAssign[tenantID]; ok && assigned == id {
+		return repository.ErrConflict
+	}
+	delete(r.s.dlpModels, id)
+	return nil
+}
+
+func (r *DLPModelRepository) AssignModel(
+	ctx context.Context,
+	tenantID, modelID uuid.UUID,
+) (repository.DLPModelAssignment, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.DLPModelAssignment{}, err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if tenantID == uuid.Nil {
+		return repository.DLPModelAssignment{}, repository.ErrInvalidArgument
+	}
+	m, ok := r.s.dlpModels[modelID]
+	if !ok || m.TenantID != tenantID {
+		return repository.DLPModelAssignment{}, repository.ErrNotFound
+	}
+	r.s.dlpModelAssign[tenantID] = modelID
+	return repository.DLPModelAssignment{
+		TenantID:   tenantID,
+		ModelID:    modelID,
+		AssignedAt: r.s.clock(),
+	}, nil
+}
+
+func (r *DLPModelRepository) ClearAssignment(
+	ctx context.Context,
+	tenantID uuid.UUID,
+) error {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	delete(r.s.dlpModelAssign, tenantID)
+	return nil
+}
+
+func (r *DLPModelRepository) GetAssignedModel(
+	ctx context.Context,
+	tenantID uuid.UUID,
+) (repository.DLPModel, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.DLPModel{}, err
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	id, ok := r.s.dlpModelAssign[tenantID]
+	if !ok {
+		return repository.DLPModel{}, repository.ErrNotFound
+	}
+	m, ok := r.s.dlpModels[id]
+	if !ok || m.TenantID != tenantID {
+		return repository.DLPModel{}, repository.ErrNotFound
+	}
+	return cloneDLPModel(m), nil
+}
+
 // --- clone helpers --------------------------------------------------------
 
 func cloneDLPRules(in []repository.DLPRule) []repository.DLPRule {
@@ -375,6 +575,11 @@ func cloneDLPPolicy(p repository.DLPPolicy) repository.DLPPolicy {
 func cloneDLPFingerprint(f repository.DLPFingerprint) repository.DLPFingerprint {
 	f.Hash = cloneBytes(f.Hash)
 	return f
+}
+
+func cloneDLPModel(m repository.DLPModel) repository.DLPModel {
+	m.EntityClasses = cloneStrings(m.EntityClasses)
+	return m
 }
 
 func cloneDLPMatch(m repository.DLPMatch) repository.DLPMatch {

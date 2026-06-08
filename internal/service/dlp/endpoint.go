@@ -3,8 +3,10 @@ package dlp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -92,14 +94,36 @@ type EndpointChannelConfig struct {
 	ActionOverride *EndpointDLPAction `json:"action_override,omitempty"`
 }
 
+// EndpointDLPModel is the on-device ML NER model descriptor carried
+// in the endpoint bundle. It is emitted only when the tenant has an
+// assigned, validated model AND the compiled rule set contains at
+// least one `ml_ner` rule (shipping a model no rule references would
+// be dead weight). The agent fetches the ONNX bytes by ObjectKey
+// from the bundle distribution channel, verifies them against SHA256
+// and Signature (sng-dlp's `ModelVerifier`, the same Ed25519 trust
+// chain as the policy bundle), and hot-swaps the classifier; a
+// missing/failed model leaves the agent on regex-only NER.
+type EndpointDLPModel struct {
+	Version       int      `json:"version"`
+	EntityClasses []string `json:"entity_classes"`
+	ObjectKey     string   `json:"object_key"`
+	SizeBytes     int64    `json:"size_bytes"`
+	SHA256        string   `json:"sha256"`
+	Signature     string   `json:"signature"`
+}
+
 // EndpointDLPPolicy is the endpoint-bundle DLP-domain payload. It is
-// the document sng-dlp's `DlpPolicy::from_bundle_json` decodes.
+// the document sng-dlp's `DlpPolicy::from_bundle_json` decodes. The
+// optional `model` field is forward-compatible: sng-dlp's decoder
+// does not set `deny_unknown_fields`, so agents that predate ML NER
+// ignore it.
 type EndpointDLPPolicy struct {
 	SchemaVersion int                                          `json:"schema_version"`
 	Target        repository.PolicyBundleTarget                `json:"target"`
 	Domain        string                                       `json:"domain"`
 	Rules         []EndpointDLPRule                            `json:"rules"`
 	Channels      map[EndpointDLPChannel]EndpointChannelConfig `json:"channels,omitempty"`
+	Model         *EndpointDLPModel                            `json:"model,omitempty"`
 }
 
 // DefaultEndpointChannelConfig returns the default channel map: every
@@ -141,17 +165,72 @@ func (s *Service) CompileEndpointBundle(
 	if channels == nil {
 		channels = DefaultEndpointChannelConfig()
 	}
+	rules := compileEndpointRules(policies)
+	model, err := s.endpointModel(ctx, tenantID, rules)
+	if err != nil {
+		return nil, err
+	}
 	policy := EndpointDLPPolicy{
 		SchemaVersion: EndpointSchemaVersion,
 		Target:        repository.PolicyBundleTargetEndpoint,
 		Domain:        endpointDomain,
-		Rules:         compileEndpointRules(policies),
+		Rules:         rules,
 		Channels:      channels,
+		Model:         model,
 	}
 	if err := ValidateEndpointPolicy(policy); err != nil {
 		return nil, err
 	}
 	return json.Marshal(policy)
+}
+
+// endpointModel returns the ML NER model descriptor to embed in the
+// tenant's endpoint bundle, or nil when none should be embedded. A
+// model is embedded only when (a) the model registry is wired, (b)
+// the compiled rule set contains at least one ml_ner rule, and (c)
+// the tenant has an assigned model that is in the validated state.
+// Any other case (no assignment, a draft/retired assignment, or no
+// ml_ner rule) returns nil: the agent runs regex-only NER, the
+// documented fail-safe. A genuine repository error (not ErrNotFound)
+// is propagated so a flaky datastore does not silently strip a
+// model.
+func (s *Service) endpointModel(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	rules []EndpointDLPRule,
+) (*EndpointDLPModel, error) {
+	if s.models == nil || !rulesContainMLNER(rules) {
+		return nil, nil
+	}
+	m, err := s.models.GetAssignedModel(ctx, tenantID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if m.Status != repository.DLPModelStatusValidated {
+		return nil, nil
+	}
+	return &EndpointDLPModel{
+		Version:       m.Version,
+		EntityClasses: m.EntityClasses,
+		ObjectKey:     m.ObjectKey,
+		SizeBytes:     m.SizeBytes,
+		SHA256:        m.SHA256,
+		Signature:     m.Signature,
+	}, nil
+}
+
+// rulesContainMLNER reports whether any compiled endpoint rule uses
+// the ml_ner pattern type.
+func rulesContainMLNER(rules []EndpointDLPRule) bool {
+	for _, r := range rules {
+		if r.PatternType == repository.DLPRuleTypeMLNER {
+			return true
+		}
+	}
+	return false
 }
 
 // compileEndpointRules flattens a set of policies into endpoint
@@ -256,17 +335,59 @@ func validEndpointPatternData(t repository.DLPRuleType, data string) bool {
 	if data == "" {
 		return false
 	}
-	if t == repository.DLPRuleTypeFingerprint {
+	switch t {
+	case repository.DLPRuleTypeFingerprint:
 		return isHex16(data)
+	case repository.DLPRuleTypeMLNER:
+		return validEntityClassCSV(data)
+	default:
+		return true
 	}
-	return true
+}
+
+// endpointEntityClasses is the set of NER entity-class wire names an
+// ml_ner rule may target. Wire-identical to sng-dlp's `EntityClass`.
+var endpointEntityClasses = map[string]struct{}{
+	"person_name":    {},
+	"address":        {},
+	"phone_number":   {},
+	"bank_account":   {},
+	"medical_record": {},
+	"legal_document": {},
+}
+
+// validEntityClassCSV reports whether data is a comma-separated list
+// resolving to at least one known entity-class wire name. It mirrors
+// sng-dlp's `parse_entity_classes`: entries are trimmed, empty
+// entries are skipped, an unknown name is rejected, and the
+// effective list must be non-empty. Keeping this in lock-step means
+// the control plane rejects a poison ml_ner payload here rather than
+// letting the agent fail the whole-bundle compile.
+func validEntityClassCSV(data string) bool {
+	found := false
+	for _, raw := range strings.Split(data, ",") {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if _, ok := endpointEntityClasses[name]; !ok {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 // isHex16 reports whether s is exactly 16 hexadecimal digits (the
 // hex encoding of an 8-byte big-endian SimHash, as produced by
 // engine.RegisterFingerprint and decoded by sng-dlp's parse_simhash_hex).
 func isHex16(s string) bool {
-	if len(s) != 16 {
+	return isHexLen(s, 16)
+}
+
+// isHexLen reports whether s is exactly n hexadecimal digits.
+func isHexLen(s string, n int) bool {
+	if len(s) != n {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
