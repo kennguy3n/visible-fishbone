@@ -280,6 +280,18 @@ const WORK_HOURS: std::ops::Range<u8> = 8..19;
 /// and the final confidence is clamped to `0.0..=1.0`. The scorer only
 /// ever raises confidence, so it can never mask a strong hit; a hit
 /// that was already fully confident stays at `1.0`.
+///
+/// Interaction with the [`ProximityAnalyzer`] counter-context penalty
+/// is deliberate: a hit that proximity sank because an "example"/"test"
+/// keyword sits next to it can be lifted again by a risky event context
+/// (e.g. a USB transfer from an unmanaged device after-hours). This is
+/// intentional and is the *secure* default for an enforcement product —
+/// counter-context is a precision hint, not a hard veto, so it must not
+/// become an evasion lever (an exfiltrator sprinkling the word "test"
+/// next to real identifiers could otherwise suppress detection
+/// outright). Operators who need illustrative text to stay suppressed
+/// regardless of channel risk should rely on the action threshold, not
+/// on counter-context as a guaranteed ceiling.
 #[derive(Clone, Copy, Debug)]
 pub struct ContextualScorer {
     channel: DlpChannel,

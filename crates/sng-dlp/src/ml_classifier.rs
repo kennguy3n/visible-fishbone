@@ -477,6 +477,14 @@ fn phone_shape(t: &str) -> bool {
             .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '(' | ')'))
 }
 
+/// Whether a phone-shaped token carries telephone punctuation
+/// (`+`, `-`, or parentheses) rather than being a bare digit run. A
+/// bare digit run is ambiguous, so [`RegexNerFallback`] requires a
+/// nearby phone keyword before treating it as a phone number.
+fn has_phone_punct(t: &str) -> bool {
+    t.chars().any(|c| matches!(c, '+' | '-' | '(' | ')'))
+}
+
 fn alnum_account_shape(t: &str) -> bool {
     if t.chars().count() < 10 || !t.chars().all(|c| c.is_ascii_alphanumeric()) {
         return false;
@@ -849,8 +857,16 @@ impl RegexNerFallback {
             set.contains(lt.as_str())
         };
 
-        // Strong shape signals first (independent of context).
-        if phone_shape(t) {
+        // Shape signals first. A phone-shaped token carrying telephone
+        // punctuation (+, -, parentheses) is unambiguous and stands on
+        // its own; a *bare* run of digits (an order id, ticket number,
+        // etc.) is ambiguous, so it is only called a phone number when
+        // a phone keyword sits in its ±2 window — the same PHONE_KW
+        // context cue the ONNX model weighs. This keeps the fallback
+        // from labelling every long number a phone. An alphanumeric
+        // account code (mixed letters+digits) remains a strong
+        // standalone signal.
+        if phone_shape(t) && (has_phone_punct(t) || near(&PHONE_KW)) {
             return Some(EntityClass::PhoneNumber);
         }
         if alnum_account_shape(t) {

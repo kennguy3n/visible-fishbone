@@ -17,7 +17,7 @@ use crate::policy::DlpPolicy;
 use crate::rules::{RuleAction, Severity};
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// The metadata attached to an enforcing verdict. Carries the
 /// matched-rule provenance for the audit trail — and, per the
@@ -106,30 +106,41 @@ impl DlpVerdict {
     }
 }
 
-/// The atomically-swappable (policy + classifier) pair.
+/// The atomically-swappable engine snapshot: the active policy, its
+/// compiled classifier (which already has the ML-NER detector baked
+/// in), the scan ceiling, and the currently-installed detector. All
+/// four are published together in one [`ArcSwap`] store, so a reader
+/// in [`DlpEngine::evaluate`] always sees a consistent
+/// (policy, classifier, model) snapshot.
 #[derive(Debug)]
 struct EngineState {
     policy: DlpPolicy,
     classifier: ContentClassifier,
     max_scan_bytes: usize,
+    model: MlNerDetector,
 }
 
 /// The endpoint DLP engine.
 ///
-/// Two atomically-swappable cells share the lock-free hot-swap
-/// discipline: [`Self::state`] holds the active (policy + compiled
-/// classifier) pair, and [`Self::model`] holds the currently-installed
-/// ML-NER detector. The detector is held separately because the ONNX
-/// model and the policy rotate on independent schedules (a model is a
-/// large, slowly-changing asset; policies churn far more often). Both
-/// [`Self::install`] and [`Self::install_model`] recompile the
-/// classifier from these two inputs and publish the result in a single
-/// `store`, so a reader in [`Self::evaluate`] always sees a consistent
-/// (policy, classifier, model) triple.
+/// The active (policy + compiled classifier + installed ML-NER
+/// detector) snapshot lives behind a single [`arc_swap::ArcSwap`]
+/// ([`Self::state`]) so the evaluation hot path ([`Self::evaluate`])
+/// never takes a lock and always observes a consistent triple. Every
+/// mutator ([`Self::install`], [`Self::install_model`],
+/// [`Self::clear_model`]) recompiles the classifier and publishes the
+/// result in one atomic `store`.
+///
+/// Those mutators are read-modify-write (read the live snapshot,
+/// recompile, store), so two running concurrently could otherwise
+/// clobber one another's update — e.g. an `install` racing an
+/// `install_model` could drop the new policy or the new model.
+/// [`Self::write_lock`] serialises all mutators; it is taken only by
+/// the (rare) rotation paths and never by [`Self::evaluate`], so the
+/// hot path stays lock-free.
 #[derive(Debug)]
 pub struct DlpEngine {
     state: ArcSwap<EngineState>,
-    model: ArcSwap<MlNerDetector>,
+    write_lock: Mutex<()>,
 }
 
 impl DlpEngine {
@@ -156,8 +167,9 @@ impl DlpEngine {
                 policy,
                 classifier,
                 max_scan_bytes,
+                model,
             }),
-            model: ArcSwap::from_pointee(model),
+            write_lock: Mutex::new(()),
         })
     }
 
@@ -170,14 +182,17 @@ impl DlpEngine {
     /// Propagates [`crate::error::DlpError::RuleCompile`] if any
     /// rule in `policy` fails to compile. The engine is unchanged.
     pub fn install(&self, policy: DlpPolicy) -> DlpResult<()> {
-        let max_scan_bytes = self.state.load().max_scan_bytes;
-        let model = self.model.load().as_ref().clone();
+        let _guard = self.write_guard();
+        let current = self.state.load();
+        let max_scan_bytes = current.max_scan_bytes;
+        let model = current.model.clone();
         let classifier =
-            ContentClassifier::compile_with_model(policy.rules(), max_scan_bytes, model)?;
+            ContentClassifier::compile_with_model(policy.rules(), max_scan_bytes, model.clone())?;
         self.state.store(Arc::new(EngineState {
             policy,
             classifier,
             max_scan_bytes,
+            model,
         }));
         Ok(())
     }
@@ -218,14 +233,17 @@ impl DlpEngine {
     /// fallback).
     #[must_use]
     pub fn has_ml_model(&self) -> bool {
-        self.model.load().has_model()
+        self.state.load().model.has_model()
     }
 
-    /// Recompile the active policy with `detector`, then publish the
-    /// new detector and engine state. The detector is stored only
-    /// after a successful recompile so a compile failure cannot leave
-    /// the stored model out of sync with the active classifier.
+    /// Recompile the active policy with `detector` and publish the new
+    /// (policy + classifier + detector) snapshot in one atomic store.
+    /// On a compile failure nothing is published, so a bad model can
+    /// never leave the active classifier out of sync with the recorded
+    /// detector. Serialised against the other mutators by
+    /// [`Self::write_guard`].
     fn recompile_with_model(&self, detector: MlNerDetector) -> DlpResult<()> {
+        let _guard = self.write_guard();
         let current = self.state.load();
         let classifier = ContentClassifier::compile_with_model(
             current.policy.rules(),
@@ -234,13 +252,25 @@ impl DlpEngine {
         )?;
         let policy = current.policy.clone();
         let max_scan_bytes = current.max_scan_bytes;
-        self.model.store(Arc::new(detector));
         self.state.store(Arc::new(EngineState {
             policy,
             classifier,
             max_scan_bytes,
+            model: detector,
         }));
         Ok(())
+    }
+
+    /// Acquire the mutation lock that serialises the read-modify-write
+    /// rotation paths ([`Self::install`], [`Self::install_model`],
+    /// [`Self::clear_model`]). The guarded data is `()`, so a poisoned
+    /// lock carries no corrupt state and is simply recovered — a
+    /// mutator that panicked mid-recompile left the published
+    /// [`EngineState`] untouched, since the `store` is its last step.
+    fn write_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// A snapshot of the currently-active policy.
@@ -597,6 +627,66 @@ mod tests {
                 &ContentMetadata::default()
             )
             .is_blocking()
+        );
+    }
+
+    #[test]
+    fn install_preserves_active_model_and_swaps_policy() {
+        // Regression guard for the single-snapshot engine state: a
+        // policy rotation (`install`) must keep the currently-installed
+        // ONNX model (it reads the model from the live snapshot), and
+        // the swap must apply the new policy. Neither mutator may
+        // clobber the other half of the (policy, model) pair.
+        let e = engine_with(vec![ml_rule(
+            "phone",
+            "phone_number",
+            RuleAction::Block,
+            Severity::High,
+        )]);
+
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let kid = sng_core::ids::PolicySigningKeyId::new("preserve-model-key").expect("kid");
+        let model_bytes = include_bytes!("../assets/ner_v1.onnx");
+        let sig = ed25519_dalek::Signer::sign(&key, model_bytes.as_slice());
+        let signed = SignedModel {
+            model: model_bytes.to_vec(),
+            signature: sig.to_bytes(),
+            signing_key_id: kid.clone(),
+        };
+        let mut verifier = ModelVerifier::new();
+        verifier
+            .add_key(kid, &key.verifying_key().to_bytes())
+            .expect("trust key");
+        e.install_model(&signed, &verifier).expect("install model");
+        assert!(e.has_ml_model());
+
+        // Rotate to a new policy: the installed model must survive.
+        e.install(DlpPolicy {
+            rules: vec![ml_rule(
+                "phone2",
+                "phone_number",
+                RuleAction::Block,
+                Severity::High,
+            )],
+            ..DlpPolicy::default()
+        })
+        .expect("install policy");
+        assert!(
+            e.has_ml_model(),
+            "policy rotation must not drop the installed model"
+        );
+        assert_eq!(e.current_policy().rules.len(), 1);
+        assert_eq!(e.current_policy().rules[0].id, "phone2");
+
+        // Detection still runs through the loaded model after the swap.
+        assert!(
+            e.evaluate(
+                DlpChannel::Clipboard,
+                b"call +1-202-555-0173 now",
+                &ContentMetadata::default(),
+            )
+            .is_blocking(),
+            "model must still detect after policy swap"
         );
     }
 }

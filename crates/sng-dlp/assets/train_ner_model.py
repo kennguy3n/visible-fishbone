@@ -10,7 +10,7 @@ endpoint DLP engine runs on-device (`crates/sng-dlp/src/ml_classifier.rs`).
 
 The model is a **multinomial logistic-regression NER head**: a single
 dense layer (``logits = softmax(X · W + b)``) over a fixed, hand-specified
-16-dimensional feature vector extracted per token. There is no embedding
+17-dimensional feature vector extracted per token. There is no embedding
 table and no learned tokenizer — feature extraction is deterministic code
 (re-implemented byte-for-byte in `ml_classifier::featurize`), so the model
 is small (a few KB), fast (well under the 50 ms/document budget), and fully
@@ -198,7 +198,7 @@ def _has_digit_and_sep(t: str) -> bool:
 
 
 def featurize_token(tokens, i: int):
-    """Return the 16-dim feature vector for token ``i`` of ``tokens`` (list of
+    """Return the 17-dim feature vector for token ``i`` of ``tokens`` (list of
     surface strings). Pure function of the token and a +/-2 window."""
     t = tokens[i]
     lt = _lower(t)
@@ -421,7 +421,7 @@ def export_onnx(W, b, path):
     graph = helper.make_graph(
         nodes, "sng_dlp_ner_v1", [x], [y], initializer=[Wt, bt],
         doc_string="ShieldNet Gateway endpoint DLP NER head (WS4). "
-                   "Multinomial logistic regression over a 16-dim "
+                   "Multinomial logistic regression over a 17-dim "
                    "deterministic token feature vector. See "
                    "train_ner_model.py for provenance.")
     model = helper.make_model(

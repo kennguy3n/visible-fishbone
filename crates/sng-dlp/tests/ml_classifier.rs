@@ -40,6 +40,47 @@ use sng_dlp::ml_classifier::{
 /// The committed, signed-bundle NER model and its parity fixture.
 const MODEL_BYTES: &[u8] = include_bytes!("../assets/ner_v1.onnx");
 const FEATURECHECK: &str = include_str!("../assets/ner_v1.featurecheck.json");
+/// The cross-language entity-class contract shared with the Go control
+/// plane (internal/service/dlp/entity_classes_parity_test.go).
+const ENTITY_CLASSES: &str = include_str!("../assets/entity_classes.json");
+
+/// The wire names of [`EntityClass`] must match the shared contract
+/// file exactly and in order. The Go control plane's
+/// `endpointEntityClasses` is tested against the same file, so a class
+/// added, removed, or renamed on either side without updating the
+/// contract fails one of the two parity tests — the manual Go/Rust
+/// sync flagged in review is now enforced at test time.
+#[test]
+fn entity_classes_match_shared_contract() {
+    let contract: serde_json::Value =
+        serde_json::from_str(ENTITY_CLASSES).expect("entity_classes.json");
+    let listed: Vec<&str> = contract["classes"]
+        .as_array()
+        .expect("classes array")
+        .iter()
+        .map(|c| c.as_str().expect("class name is a string"))
+        .collect();
+
+    let actual: Vec<&str> = EntityClass::all().iter().map(|c| c.as_wire()).collect();
+    assert_eq!(
+        listed, actual,
+        "EntityClass wire names drifted from the shared entity-class contract"
+    );
+
+    // Every contract name must round-trip through `from_wire`, and an
+    // unknown name must be rejected — the accept/reject contract the
+    // Go validEntityClassCSV mirrors.
+    for name in &listed {
+        assert!(
+            EntityClass::from_wire(name).is_some(),
+            "contract class {name:?} is not recognised by from_wire"
+        );
+    }
+    assert!(
+        EntityClass::from_wire("not_a_real_class").is_none(),
+        "from_wire accepted an unknown entity class"
+    );
+}
 
 fn load_model() -> NerModel {
     NerModel::load_from_bytes(MODEL_BYTES).expect("ner_v1.onnx loads into ONNX Runtime")
@@ -157,6 +198,38 @@ fn regex_fallback_detects_entities_without_a_model() {
     let classes: Vec<EntityClass> = ents.iter().map(|e| e.class).collect();
     assert!(classes.contains(&EntityClass::PhoneNumber));
     assert!(classes.contains(&EntityClass::BankAccount));
+}
+
+/// A bare run of digits (an order id, ticket number, etc.) with no
+/// phone keyword nearby must NOT be classified as a phone number by the
+/// fallback — only punctuated phone tokens, or bare numbers in a phone
+/// context, are phones. Guards the fallback precision fix.
+#[test]
+fn regex_fallback_does_not_treat_bare_digit_run_as_phone() {
+    let f = RegexNerFallback;
+
+    // Bare 10-digit order id, no phone cue → not a phone (and not any
+    // other entity, since it sits in no keyword context).
+    let ents = f.detect("Your order 1234567890 has shipped today");
+    assert!(
+        ents.iter().all(|e| e.class != EntityClass::PhoneNumber),
+        "bare order id misclassified as phone: {ents:?}"
+    );
+
+    // The same bare number IS a phone when a phone keyword is nearby —
+    // recall is preserved for genuinely phone-like context.
+    let ents = f.detect("Call the phone 1234567890 now");
+    assert!(
+        ents.iter().any(|e| e.class == EntityClass::PhoneNumber),
+        "bare number near a phone keyword should classify as phone: {ents:?}"
+    );
+
+    // A punctuated phone token still stands on its own (no keyword).
+    let ents = f.detect("Reach me at +1-202-555-0173 anytime");
+    assert!(
+        ents.iter().any(|e| e.class == EntityClass::PhoneNumber),
+        "punctuated phone token should classify standalone: {ents:?}"
+    );
 }
 
 fn fixed_key() -> SigningKey {
