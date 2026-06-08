@@ -150,6 +150,56 @@ func mergeIOC(existing, incoming IOC) IOC {
 	return out
 }
 
+// Restore re-warms the store from a persisted snapshot. Loaded
+// indicators are filtered for expiry against the store clock (a
+// snapshot taken before a long downtime may contain entries whose
+// TTL has since elapsed) and folded in via the normal Upsert path,
+// so the confidence floor and merge semantics apply exactly as
+// they do for a live feed ingest. Returns the per-batch tally.
+//
+// Intended to run once at boot, before the feed manager starts, so
+// enforcement (live-traffic matching, demotion sync) is warm
+// immediately rather than empty until the first feed warm-up
+// completes.
+func (s *IOCStore) Restore(ctx context.Context, p IOCPersister) (UpsertResult, error) {
+	if p == nil {
+		return UpsertResult{}, nil
+	}
+	loaded, err := p.LoadIOCs(ctx)
+	if err != nil {
+		return UpsertResult{}, err
+	}
+	now := s.now().UTC()
+	live := make([]IOC, 0, len(loaded))
+	for _, ioc := range loaded {
+		if ioc.Expired(now) {
+			continue
+		}
+		live = append(live, ioc)
+	}
+	return s.Upsert(live...), nil
+}
+
+// Persist writes the current active (non-expired) indicator set to
+// durable storage via the persister, using whole-set snapshot
+// semantics so the persisted table tracks expiry-driven removals.
+// Returns the number of indicators written.
+func (s *IOCStore) Persist(ctx context.Context, p IOCPersister) (int, error) {
+	if p == nil {
+		return 0, nil
+	}
+	snap := s.Snapshot()
+	all := make([]IOC, 0, len(snap.Domains)+len(snap.IPs)+len(snap.URLs)+len(snap.Hashes))
+	all = append(all, snap.Domains...)
+	all = append(all, snap.IPs...)
+	all = append(all, snap.URLs...)
+	all = append(all, snap.Hashes...)
+	if err := p.SaveIOCs(ctx, all); err != nil {
+		return 0, err
+	}
+	return len(all), nil
+}
+
 // Sweep removes expired indicators and returns the number
 // dropped. Called periodically by the feed manager so the store
 // does not accumulate stale entries between feed refreshes.

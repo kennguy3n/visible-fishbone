@@ -48,6 +48,18 @@ type FeedManager struct {
 	// feed that never comes up is eventually reported stale.
 	startedAt time.Time
 
+	// persister, when set, durably snapshots the active IOC set so
+	// a restart does not start from an empty store. persistInterval
+	// is the flush cadence; a final flush also runs on shutdown.
+	persister       IOCPersister
+	persistInterval time.Duration
+	// isLeader, when set, gates the PERIODIC persist write so only
+	// the elected leader flushes the shared snapshot table in a
+	// multi-replica deployment. Nil means persist from every
+	// replica. Restore (a read) and the shutdown flush are never
+	// gated.
+	isLeader func() bool
+
 	metrics   feedMetrics
 	stopCh    chan struct{}
 	doneCh    chan struct{}
@@ -66,6 +78,13 @@ const (
 	// short enough that a feed wedged by an auth expiry or endpoint
 	// change surfaces within a few intervals rather than silently.
 	defaultStaleFactor = 3.0
+	// defaultPersistInterval is the IOC-store flush cadence when a
+	// persister is configured without an explicit interval.
+	defaultPersistInterval = 5 * time.Minute
+	// persistFlushTimeout bounds the final shutdown flush, which
+	// runs on a fresh context because the parent is already
+	// cancelled by the time the loops drain.
+	persistFlushTimeout = 10 * time.Second
 )
 
 // FeedObserver receives feed-ingest and feed-health telemetry so a
@@ -115,6 +134,44 @@ func WithSweepInterval(d time.Duration) FeedManagerOption {
 			m.sweepInterval = d
 		}
 	}
+}
+
+// WithPersister enables IOC-store durability: the active set is
+// flushed to the persister every interval (defaulting to
+// defaultPersistInterval when interval <= 0) and once more on
+// graceful shutdown. A nil persister disables persistence, leaving
+// the manager's behaviour unchanged. Restore-on-boot is driven by
+// the caller (before Start) so the store is warm before the first
+// feed tick — see IOCStore.Restore.
+func WithPersister(p IOCPersister, interval time.Duration) FeedManagerOption {
+	return func(m *FeedManager) {
+		if p == nil {
+			return
+		}
+		m.persister = p
+		if interval > 0 {
+			m.persistInterval = interval
+		} else {
+			m.persistInterval = defaultPersistInterval
+		}
+	}
+}
+
+// WithLeaderCheck gates the persist *write* behind a leadership
+// predicate so that, in a multi-replica deployment, only the elected
+// leader flushes the shared threat_intel_iocs snapshot table —
+// matching the singleton-workload pattern used for the other periodic
+// DB writers (app-registry sync, pop rebalance, compliance evidence).
+// Only the periodic flush is gated: Restore (a read, every replica
+// hydrates its own store on boot) and the final shutdown flush are
+// always allowed — the shutdown flush must not be lost to the
+// elector-relinquish race (see flushPersist). A nil predicate (the
+// default) persists from every replica, which is safe (each
+// ReplaceAll is an atomic last-writer-wins swap) but multiplies
+// periodic write traffic by replica count. Has no effect unless a
+// persister is also configured.
+func WithLeaderCheck(isLeader func() bool) FeedManagerOption {
+	return func(m *FeedManager) { m.isLeader = isLeader }
 }
 
 // WithFeedObserver registers a telemetry observer for feed ingest
@@ -388,6 +445,29 @@ func (m *FeedManager) fireUpdate(ctx context.Context) {
 	m.onUpdate(ctx, m.store.Snapshot())
 }
 
+// Restore re-warms the IOC store from the configured persister
+// before the feeds start. It is a no-op (zero result, nil error)
+// when no persister is set, so callers can invoke it
+// unconditionally. Run it before Start so enforcement reflects the
+// last persisted snapshot immediately, rather than being empty
+// until the first feed warm-up completes.
+//
+// A successful restore fires the OnUpdate hook (same as a feed
+// refresh), so demotion-driven enforcement is re-synced from the
+// restored snapshot at once instead of waiting for the first feed
+// warm-up — which is exactly the window that can be slow when an
+// upstream is unreachable, the scenario this snapshot guards.
+func (m *FeedManager) Restore(ctx context.Context) (UpsertResult, error) {
+	if m.persister == nil {
+		return UpsertResult{}, nil
+	}
+	res, err := m.store.Restore(ctx, m.persister)
+	if res.Added > 0 {
+		m.fireUpdate(ctx)
+	}
+	return res, err
+}
+
 // Start launches one ticker goroutine per feed plus a sweeper.
 // Non-blocking and idempotent. Each feed refreshes immediately on
 // start (warm-up) and then on its configured interval.
@@ -416,6 +496,10 @@ func (m *FeedManager) Start(ctx context.Context) {
 		}
 		m.wg.Add(1)
 		go m.runSweepLoop(runCtx)
+		if m.persister != nil {
+			m.wg.Add(1)
+			go m.runPersistLoop(runCtx)
+		}
 		// Only run the health loop when there is something to observe
 		// it (a logger to warn through or an observer to publish to)
 		// and at least one feed to evaluate.
@@ -483,6 +567,84 @@ func (m *FeedManager) runSweepLoop(ctx context.Context) {
 				m.fireUpdate(ctx)
 			}
 		}
+	}
+}
+
+// runPersistLoop periodically flushes the active IOC set to the
+// configured persister and performs one final flush when the loop
+// is told to stop, so the freshest snapshot survives a restart.
+//
+// The shutdown flush runs on a fresh, time-bounded context because
+// the loop's parent ctx is already cancelled by the time Stop
+// fires (the cancel bridge in Start cancels runCtx on stopCh); a
+// cancelled context would otherwise abort the very flush meant to
+// capture the latest state.
+func (m *FeedManager) runPersistLoop(ctx context.Context) {
+	defer m.wg.Done()
+	ticker := time.NewTicker(m.persistInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			m.flushPersist(context.Background(), "shutdown")
+			return
+		case <-m.stopCh:
+			m.flushPersist(context.Background(), "shutdown")
+			return
+		case <-ticker.C:
+			m.flushPersist(ctx, "interval")
+		}
+	}
+}
+
+// flushPersist writes the active set once. On the shutdown path the
+// supplied ctx is the still-live background context, so the flush
+// is wrapped in a bounded timeout to avoid hanging shutdown on a
+// slow database.
+func (m *FeedManager) flushPersist(ctx context.Context, reason string) {
+	if m.persister == nil {
+		return
+	}
+	// Leader-only PERIODIC write: the snapshot table is fleet-wide, so
+	// in a multi-replica deployment only the leader flushes on the
+	// interval. Followers still run the loop (and restore on boot);
+	// they just skip the redundant periodic write. Re-checked on every
+	// tick so leadership changes are honoured without restarting the
+	// loop.
+	//
+	// The shutdown flush is deliberately EXEMPT from this gate. On
+	// graceful shutdown the elector relinquishes leadership off the
+	// same rootCtx cancellation that stops this loop (electorCtx is a
+	// child of rootCtx), so by the time the shutdown flush runs the
+	// leader may have already stepped down — gating it would silently
+	// drop the very flush meant to capture the freshest pre-restart
+	// state. A shutdown flush happens at most once per replica, so the
+	// worst case (every replica flushing on a rolling restart) is a
+	// handful of bounded, atomic last-writer-wins swaps — negligible
+	// versus losing the final snapshot.
+	if reason != "shutdown" && m.isLeader != nil && !m.isLeader() {
+		if m.logger != nil {
+			m.logger.DebugContext(ctx, "threat-intel: skipping periodic IOC store persist (not leader)",
+				"reason", reason)
+		}
+		return
+	}
+	if reason == "shutdown" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, persistFlushTimeout)
+		defer cancel()
+	}
+	n, err := m.store.Persist(ctx, m.persister)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.WarnContext(ctx, "threat-intel: IOC store persist failed",
+				"reason", reason, "error", err)
+		}
+		return
+	}
+	if m.logger != nil {
+		m.logger.DebugContext(ctx, "threat-intel: persisted IOC store snapshot",
+			"reason", reason, "count", n)
 	}
 }
 
