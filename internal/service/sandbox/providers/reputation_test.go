@@ -172,6 +172,37 @@ func TestHybridAnalysis_VerdictAndScore(t *testing.T) {
 	}
 }
 
+// TestHybridAnalysis_NoVerdictIsNotClean asserts that HA's "no verdict"
+// non-determination is never treated as a positive clean result: it
+// falls through to the numeric threat_score (so a high score still
+// classifies malicious) and yields ClassUnknown when no score is
+// present. Mirrors the VirusTotal no-engine-signal guarantee so an
+// absent determination can never relax the strictest-verdict aggregate.
+func TestHybridAnalysis_NoVerdictIsNotClean(t *testing.T) {
+	// "no verdict" carrying a malicious score must NOT short-circuit to
+	// clean — the score governs.
+	hot := &stubDoer{status: 200, body: `[{"verdict":"no verdict","threat_score":90}]`}
+	ha := NewHybridAnalysis(HybridAnalysisConfig{APIKey: "k", MinRequestInterval: -1}, hot)
+	res, err := ha.Submit(context.Background(), File{SHA256: "ab"})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if res.Result.Classification != ClassMalicious {
+		t.Fatalf("no-verdict+score90 class = %s, want malicious", res.Result.Classification)
+	}
+
+	// "no verdict" with no score is an absence of intel, not clean.
+	bare := &stubDoer{status: 200, body: `[{"verdict":"no verdict"}]`}
+	ha2 := NewHybridAnalysis(HybridAnalysisConfig{APIKey: "k", MinRequestInterval: -1}, bare)
+	res2, err := ha2.Submit(context.Background(), File{SHA256: "cd"})
+	if err != nil {
+		t.Fatalf("submit bare: %v", err)
+	}
+	if res2.Result.Classification != ClassUnknown {
+		t.Fatalf("no-verdict+noscore class = %s, want unknown", res2.Result.Classification)
+	}
+}
+
 // fakeProvider is a Provider returning a fixed synchronous verdict
 // or error, for aggregator tests.
 type fakeProvider struct {

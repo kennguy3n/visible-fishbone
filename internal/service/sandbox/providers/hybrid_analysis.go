@@ -186,9 +186,19 @@ func (h *HybridAnalysis) lookup(ctx context.Context, sha string) (PollResult, er
 }
 
 // classifyReport maps one HA report onto a Classification and its
-// threat_score. The explicit verdict string is authoritative when
-// present; otherwise the numeric threat_score is bucketed against
-// the configured thresholds.
+// threat_score. An explicit positive verdict string (malicious /
+// suspicious / a clean determination) is authoritative; otherwise —
+// including HA's "no verdict" non-determination — the numeric
+// threat_score is bucketed against the configured thresholds.
+//
+// "no verdict" is deliberately NOT treated as clean: it means HA
+// reached no determination, not that the file was cleared. Mapping it
+// to ClassClean would let a "no verdict" report carrying a high
+// threat_score short-circuit the score check and surface as clean,
+// the wrong direction for a security control (same hazard as a VT
+// all-timeout response). It therefore falls through to the score: a
+// reported score still classifies, and a missing score yields
+// ClassUnknown — never a clean verdict from an absent determination.
 func (h *HybridAnalysis) classifyReport(r haReport) (Classification, int) {
 	score := -1
 	if r.ThreatScore != nil {
@@ -199,7 +209,7 @@ func (h *HybridAnalysis) classifyReport(r haReport) (Classification, int) {
 		return ClassMalicious, score
 	case "suspicious":
 		return ClassSuspicious, score
-	case "whitelisted", "no specific threat", "no verdict", "clean":
+	case "whitelisted", "no specific threat", "clean":
 		return ClassClean, score
 	}
 	// No usable verdict string — fall back to the numeric score.
