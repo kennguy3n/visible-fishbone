@@ -34,6 +34,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 use ipnet::IpNet;
+use sng_ebpf::ddos::{PROTO_TCP, tcp_flags};
+use sng_ebpf::{DdosConfig, DdosMitigator, DropReason, PacketMeta, RateLimit};
 use sng_fw::compile::CompiledRuleSet;
 use sng_fw::conntrack::FlowDirection;
 use sng_fw::engine::{EvaluationContext, FirewallEngine, FlowKey};
@@ -273,6 +275,120 @@ pub fn compare(rule_count: usize, packet_count: usize) -> DataPathComparison {
     }
 }
 
+/// Measured result of an XDP DDoS-mitigation scenario.
+#[derive(Clone, Copy, Debug)]
+pub struct DdosBenchResult {
+    /// Packets pushed through [`DdosMitigator::evaluate`].
+    pub packets: u64,
+    /// Packets the mitigation dropped.
+    pub dropped: u64,
+    /// Wall-clock time spent in the measured evaluate loop.
+    pub elapsed: Duration,
+}
+
+impl DdosBenchResult {
+    /// Packets evaluated per second — the XDP drop-decision throughput.
+    /// `0.0` for a zero-duration measurement so a degenerate run never
+    /// divides by zero.
+    #[must_use]
+    pub fn packets_per_sec(&self) -> f64 {
+        let secs = self.elapsed.as_secs_f64();
+        if secs <= 0.0 {
+            0.0
+        } else {
+            self.packets as f64 / secs
+        }
+    }
+
+    /// Fraction of evaluated packets that were dropped, in `0.0..=1.0`.
+    #[must_use]
+    pub fn drop_ratio(&self) -> f64 {
+        if self.packets == 0 {
+            0.0
+        } else {
+            self.dropped as f64 / self.packets as f64
+        }
+    }
+}
+
+/// Number of distinct spoofed sources a synthetic SYN flood cycles
+/// through. Real volumetric floods spray randomised/spoofed source IPs;
+/// cycling a bounded pool keeps the per-source token buckets at a
+/// realistic steady-state population instead of inflating the tracking
+/// map without bound.
+pub const FLOOD_SOURCES: usize = 4096;
+
+fn flood_source(slot: usize) -> IpAddr {
+    // 100.64.0.0/10 (CGNAT space) gives 4 M addresses without colliding
+    // with the benchmark's other fixtures.
+    let slot = u32::try_from(slot & 0x003f_ffff).unwrap_or(0);
+    let base = u32::from(Ipv4Addr::new(100, 64, 0, 0));
+    IpAddr::V4(Ipv4Addr::from(base + slot))
+}
+
+fn syn_packet(src: IpAddr) -> PacketMeta {
+    PacketMeta {
+        src_ip: src,
+        dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        src_port: 40000,
+        dst_port: 443,
+        protocol: PROTO_TCP,
+        tcp_flags: tcp_flags::SYN,
+        len: 64,
+    }
+}
+
+/// Benchmark the XDP SYN-flood drop rate: stream `packet_count` SYNs from
+/// a [`FLOOD_SOURCES`]-wide spoofed-source pool through a
+/// [`DdosMitigator`] whose per-source budget has already been saturated,
+/// so the loop measures the steady-state cost of the *drop* decision —
+/// the number the Step-3 target (`> 10M pps`) is about.
+///
+/// The buckets are pre-drained with a warm-up pass at `t=0`; the measured
+/// pass also runs at `t=0` so no refill credits accrue and every measured
+/// packet exercises the drop path.
+#[must_use]
+pub fn bench_syn_flood_drop_rate(packet_count: usize) -> DdosBenchResult {
+    // Small per-source budget so the warm-up drains it cheaply; GeoIP is
+    // empty (no country block) so the measured cost is purely the
+    // per-source token-bucket lookup + drop.
+    let config = DdosConfig {
+        syn: Some(RateLimit::new(64, 64).expect("valid syn budget")),
+        ..DdosConfig::default()
+    };
+    let mut mitigator = DdosMitigator::with_capacity(config, FLOOD_SOURCES * 2);
+
+    // Pre-build the packet stream so address construction is not timed.
+    let packets: Vec<PacketMeta> = (0..packet_count)
+        .map(|i| syn_packet(flood_source(i % FLOOD_SOURCES)))
+        .collect();
+
+    // Warm-up: saturate every source's bucket at t=0 so the measured pass
+    // sees empty buckets and drops every packet.
+    for p in &packets {
+        let _ = mitigator.evaluate(p, 0);
+    }
+
+    let start = Instant::now();
+    let mut dropped = 0u64;
+    let mut sink = 0u64;
+    for p in &packets {
+        let verdict = mitigator.evaluate(p, 0);
+        if verdict.reason == DropReason::SynFlood {
+            dropped += 1;
+        }
+        sink = sink.wrapping_add(verdict.action as u64);
+    }
+    let elapsed = start.elapsed();
+    std::hint::black_box(sink);
+
+    DdosBenchResult {
+        packets: packets.len() as u64,
+        dropped,
+        elapsed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +460,28 @@ mod tests {
         let speedup = cmp.speedup();
         assert!(speedup.is_finite());
         assert!(speedup > 0.0);
+    }
+
+    #[test]
+    fn syn_flood_bench_drops_saturated_sources() {
+        // Each of FLOOD_SOURCES sees 100 SYNs in the warm-up; the 64-token
+        // budget drains, so the measured pass at t=0 drops every packet.
+        let pkts = FLOOD_SOURCES * 100;
+        let r = bench_syn_flood_drop_rate(pkts);
+        assert_eq!(r.packets, pkts as u64);
+        assert_eq!(r.dropped, r.packets, "all post-warm-up SYNs are dropped");
+        assert!((r.drop_ratio() - 1.0).abs() < f64::EPSILON);
+        assert!(r.packets_per_sec() > 0.0);
+    }
+
+    #[test]
+    fn syn_flood_bench_drop_ratio_is_zero_for_empty_run() {
+        let r = DdosBenchResult {
+            packets: 0,
+            dropped: 0,
+            elapsed: Duration::from_millis(1),
+        };
+        assert!(r.drop_ratio() <= 0.0);
     }
 
     #[test]

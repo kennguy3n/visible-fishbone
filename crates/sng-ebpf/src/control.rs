@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::class::Classifier;
+use crate::ddos::DdosConfig;
 use crate::error::EbpfError;
 use crate::firewall::{XdpRuleAction, XdpRuleSet};
 use crate::loader::{NoopLoader, ProgramLoader, XdpMode};
@@ -58,6 +59,10 @@ pub struct XdpStats {
     pub loaded: bool,
     /// True iff a real kernel loader backs this control plane.
     pub kernel_offload: bool,
+    /// True iff a DDoS-mitigation config has been installed.
+    pub ddos_installed: bool,
+    /// GeoIP database entries currently installed.
+    pub geoip_entries: u64,
 }
 
 /// Result of a fail-soft [`XdpControlPlane::try_load_and_attach`].
@@ -105,6 +110,7 @@ struct InstalledState {
     rules: XdpRuleSet,
     classifier: Classifier,
     steering: EgressSteeringTable,
+    ddos: Option<DdosConfig>,
     loaded: bool,
 }
 
@@ -254,6 +260,18 @@ impl XdpControlPlane {
         )
     }
 
+    /// Install the DDoS-mitigation configuration (SYN/UDP flood budgets,
+    /// GeoIP database, per-tenant blocked-country set), replacing any
+    /// previous one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EbpfError::RuleInvalid`] if the config fails validation,
+    /// or propagates map-update failures from the loader.
+    pub fn install_ddos(&self, config: DdosConfig) -> Result<(), EbpfError> {
+        self.run_update(config, |l, c| l.update_ddos(c), |s, c| s.ddos = Some(c))
+    }
+
     /// Install the classification table, replacing any previous one.
     ///
     /// # Errors
@@ -319,6 +337,10 @@ impl XdpControlPlane {
     #[must_use]
     pub fn stats(&self) -> XdpStats {
         let state = self.lock();
+        let geoip_entries = state
+            .ddos
+            .as_ref()
+            .map_or(0, |c| u64::try_from(c.geoip.len()).unwrap_or(u64::MAX));
         XdpStats {
             rules_active: u64::try_from(state.rules.len()).unwrap_or(u64::MAX),
             classification_entries: u64::try_from(state.classifier.len()).unwrap_or(u64::MAX),
@@ -326,6 +348,8 @@ impl XdpControlPlane {
             update_failures: self.update_failures.load(Ordering::Relaxed),
             loaded: state.loaded,
             kernel_offload: self.loader.is_supported(),
+            ddos_installed: state.ddos.is_some(),
+            geoip_entries,
         }
     }
 
@@ -386,6 +410,46 @@ mod tests {
     }
 
     #[test]
+    fn install_ddos_commits_config_and_reports_stats() {
+        use crate::ddos::{DdosConfig, GeoIpBlocklist, GeoIpEntry, GeoIpTable, RateLimit};
+        let cp = XdpControlPlane::in_memory();
+        assert!(!cp.stats().ddos_installed);
+
+        let cfg = DdosConfig {
+            syn: Some(RateLimit::new(1000, 500).unwrap()),
+            udp: Some(RateLimit::new(5000, 2000).unwrap()),
+            geoip: GeoIpTable::new(vec![
+                GeoIpEntry::new("1.0.0.0/8".parse().unwrap(), *b"CN"),
+                GeoIpEntry::new("2.0.0.0/8".parse().unwrap(), *b"RU"),
+            ]),
+            blocklist: GeoIpBlocklist::new([*b"CN", *b"RU"]),
+        };
+        cp.install_ddos(cfg).unwrap();
+
+        let stats = cp.stats();
+        assert!(stats.ddos_installed);
+        assert_eq!(stats.geoip_entries, 2);
+        assert_eq!(stats.updates_total, 1);
+        assert_eq!(stats.update_failures, 0);
+    }
+
+    #[test]
+    fn install_ddos_rejects_invalid_config() {
+        use crate::ddos::{DdosConfig, GeoIpBlocklist};
+        let cp = XdpControlPlane::in_memory();
+        // Blocklist with no GeoIP database — invalid.
+        let cfg = DdosConfig {
+            blocklist: GeoIpBlocklist::new([*b"CN"]),
+            ..DdosConfig::default()
+        };
+        assert!(cp.install_ddos(cfg).is_err());
+        let stats = cp.stats();
+        assert!(!stats.ddos_installed);
+        assert_eq!(stats.update_failures, 1);
+        assert_eq!(stats.updates_total, 0);
+    }
+
+    #[test]
     fn capabilities_report_userspace_model() {
         let cp = XdpControlPlane::in_memory();
         let caps = cp.capabilities();
@@ -441,6 +505,9 @@ mod tests {
             Ok(())
         }
         fn update_steering(&self, _s: &EgressSteeringTable) -> Result<(), EbpfError> {
+            Ok(())
+        }
+        fn update_ddos(&self, _c: &DdosConfig) -> Result<(), EbpfError> {
             Ok(())
         }
     }

@@ -16,7 +16,7 @@
 
 use std::process::ExitCode;
 
-use sng_bench::datapath::{self, DataPathComparison};
+use sng_bench::datapath::{self, DataPathComparison, DdosBenchResult};
 
 const DEFAULT_RULES: usize = 256;
 const DEFAULT_PACKETS: usize = 500_000;
@@ -40,6 +40,9 @@ fn main() -> ExitCode {
 
     let cmp = datapath::compare(rules, packets);
     print_report(&cmp);
+
+    let ddos = datapath::bench_syn_flood_drop_rate(packets);
+    print_ddos_report(&ddos);
     ExitCode::SUCCESS
 }
 
@@ -82,5 +85,33 @@ fn print_report(cmp: &DataPathComparison) {
         nft,
         ebpf,
         cmp.speedup()
+    );
+}
+
+fn print_ddos_report(ddos: &DdosBenchResult) {
+    let pps = ddos.packets_per_sec();
+    println!();
+    println!("ShieldNet Gateway XDP SYN-flood mitigation drop rate");
+    println!("  packets         : {}", ddos.packets);
+    println!(
+        "  dropped         : {} ({:.1}%)",
+        ddos.dropped,
+        ddos.drop_ratio() * 100.0
+    );
+    println!(
+        "  drop decision   : {:>14.0} pkt/s   ({:?})",
+        pps, ddos.elapsed
+    );
+    println!(
+        "  vs 10M pps target: {}",
+        if pps >= 10_000_000.0 { "MET" } else { "below" }
+    );
+    // Machine-readable line for CI capture.
+    println!(
+        "{{\"ddos_packets\":{},\"ddos_dropped\":{},\"ddos_drop_pps\":{:.3},\"ddos_drop_ratio\":{:.3}}}",
+        ddos.packets,
+        ddos.dropped,
+        pps,
+        ddos.drop_ratio()
     );
 }

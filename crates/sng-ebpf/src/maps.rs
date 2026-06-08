@@ -104,25 +104,143 @@ fn addr_bytes(ip: IpAddr) -> ([u8; 16], u8) {
     }
 }
 
+/// Per-flow anomaly flags carried in [`FlowState::anomaly_flags`].
+///
+/// A bitset rather than an enum so a single flow can accumulate more
+/// than one anomaly across its lifetime; the kernel side sets a bit with
+/// a `|=` on the per-flow map value, which is a single-instruction update
+/// in BPF.
+pub mod anomaly {
+    /// No anomaly observed.
+    pub const NONE: u8 = 0;
+    /// The flow's L4 protocol changed after the entry was created — a
+    /// packet arrived on the same 5-tuple slot carrying a different IANA
+    /// protocol number than the one the flow was first seen with. Set by
+    /// [`super::FlowState::observe`]; surfaced to the slow path so it can
+    /// punt the flow for re-evaluation instead of trusting a cached
+    /// verdict that was computed for the original protocol.
+    pub const PROTOCOL_CHANGE: u8 = 1 << 0;
+}
+
 /// Per-flow state value — the kernel updates this on every packet of an
-/// active flow; userspace reads it for telemetry.
+/// active flow; userspace reads it for telemetry, bandwidth monitoring,
+/// long-lived-connection detection, and protocol-anomaly flagging.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct FlowState {
     /// Monotonic nanosecond timestamp of the last packet seen on this
     /// flow (kernel `bpf_ktime_get_ns`). Userspace uses it to age flows.
     pub last_seen_ns: u64,
+    /// Monotonic nanosecond timestamp of the first packet seen on this
+    /// flow (when the entry was created). Combined with `last_seen_ns`
+    /// it yields the flow's duration for long-lived-connection
+    /// detection.
+    pub first_seen_ns: u64,
     /// Packets observed on this flow since the entry was created.
     pub packets: u64,
-    /// Bytes observed on this flow since the entry was created.
+    /// Bytes observed on this flow since the entry was created — the
+    /// per-flow byte counter that backs bandwidth monitoring.
     pub bytes: u64,
     /// Cached [`crate::class::XdpAction`] discriminant applied to this
     /// flow (so a repeat packet does not re-run the rule walk).
     pub action: u8,
     /// Cached [`sng_core::TrafficClass`] discriminant for this flow.
     pub traffic_class: u8,
-    /// Explicit padding. Always zero.
-    pad: [u8; 6],
+    /// IANA L4 protocol number this flow was first observed with (6 =
+    /// TCP, 17 = UDP, …). Zero until the first [`Self::observe`] sets it.
+    pub l4_protocol: u8,
+    /// Accumulated [`anomaly`] flags for this flow.
+    pub anomaly_flags: u8,
+    /// Explicit padding to an 8-byte boundary. Always zero.
+    pad: [u8; 4],
+}
+
+impl FlowState {
+    /// Create the per-flow state for the first packet of a flow seen at
+    /// `now_ns` carrying L4 `protocol`, with zeroed counters.
+    #[must_use]
+    pub fn new(now_ns: u64, protocol: u8) -> Self {
+        Self {
+            last_seen_ns: now_ns,
+            first_seen_ns: now_ns,
+            packets: 0,
+            bytes: 0,
+            action: 0,
+            traffic_class: 0,
+            l4_protocol: protocol,
+            anomaly_flags: anomaly::NONE,
+            pad: [0; 4],
+        }
+    }
+
+    /// Account a packet of `bytes` bytes carrying L4 `protocol`, observed
+    /// at `now_ns`.
+    ///
+    /// Updates the last-seen timestamp and the packet / byte counters,
+    /// and — the protocol-anomaly check — sets
+    /// [`anomaly::PROTOCOL_CHANGE`] if this packet's protocol differs
+    /// from the one the flow was created with. The first observation on a
+    /// default-constructed entry (protocol `0`) records the protocol
+    /// rather than flagging it, so a flow created via [`Default`] adopts
+    /// its first packet's protocol as the baseline.
+    ///
+    /// Counters saturate rather than wrap, and `last_seen_ns` never moves
+    /// backwards, so a non-monotonic clock reading cannot corrupt the
+    /// duration computation.
+    pub fn observe(&mut self, now_ns: u64, bytes: u64, protocol: u8) {
+        if self.packets == 0 && self.first_seen_ns == 0 {
+            self.first_seen_ns = now_ns;
+        }
+        if self.l4_protocol == 0 {
+            self.l4_protocol = protocol;
+        } else if protocol != 0 && protocol != self.l4_protocol {
+            self.anomaly_flags |= anomaly::PROTOCOL_CHANGE;
+        }
+        self.last_seen_ns = self.last_seen_ns.max(now_ns);
+        self.packets = self.packets.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes);
+    }
+
+    /// Flow duration in nanoseconds (`last_seen_ns - first_seen_ns`).
+    /// Saturating, so a clock anomaly yields `0` rather than a wrapped
+    /// value.
+    #[must_use]
+    pub const fn duration_ns(&self) -> u64 {
+        self.last_seen_ns.saturating_sub(self.first_seen_ns)
+    }
+
+    /// True iff the flow has been alive for at least `threshold_ns` —
+    /// the long-lived-connection signal.
+    #[must_use]
+    pub const fn is_long_lived(&self, threshold_ns: u64) -> bool {
+        self.duration_ns() >= threshold_ns
+    }
+
+    /// Mean throughput in bytes per second over the flow's lifetime, for
+    /// bandwidth monitoring. Returns `0` for a zero-duration flow (a
+    /// single packet, or sub-nanosecond span) rather than dividing by
+    /// zero. Integer math throughout — BPF has no floating point.
+    #[must_use]
+    pub fn bytes_per_sec(&self) -> u64 {
+        let dur = self.duration_ns();
+        if dur == 0 {
+            return 0;
+        }
+        let bps = u128::from(self.bytes) * 1_000_000_000 / u128::from(dur);
+        u64::try_from(bps).unwrap_or(u64::MAX)
+    }
+
+    /// True iff any anomaly flag is set on this flow.
+    #[must_use]
+    pub const fn has_anomaly(&self) -> bool {
+        self.anomaly_flags != anomaly::NONE
+    }
+
+    /// True iff the protocol-change anomaly is flagged on this flow.
+    #[must_use]
+    pub const fn has_protocol_change(&self) -> bool {
+        self.anomaly_flags & anomaly::PROTOCOL_CHANGE != 0
+    }
 }
 
 /// XDP-side connection-tracking state. Deliberately coarser than the
@@ -336,6 +454,81 @@ mod tests {
         let mapped = IpAddr::V6(Ipv4Addr::new(1, 2, 3, 4).to_ipv6_mapped());
         let v6_key = FlowKey::new(mapped, mapped, 1, 2, 6);
         assert_ne!(v4_key, v6_key);
+    }
+
+    #[test]
+    fn flow_state_observe_counts_bytes_packets_and_duration() {
+        let mut fs = FlowState::new(1_000, 6);
+        assert_eq!(fs.packets, 0);
+        assert_eq!(fs.l4_protocol, 6);
+
+        fs.observe(2_000, 100, 6);
+        fs.observe(3_000, 200, 6);
+        assert_eq!(fs.packets, 2);
+        assert_eq!(fs.bytes, 300);
+        // first_seen at construction, last_seen advanced by the latest packet.
+        assert_eq!(fs.first_seen_ns, 1_000);
+        assert_eq!(fs.last_seen_ns, 3_000);
+        assert_eq!(fs.duration_ns(), 2_000);
+        assert!(!fs.has_anomaly());
+    }
+
+    #[test]
+    fn flow_state_default_adopts_first_observed_protocol() {
+        // A default-constructed entry has protocol 0; the first observe
+        // records the protocol rather than flagging an anomaly.
+        let mut fs = FlowState::default();
+        fs.observe(500, 64, 17);
+        assert_eq!(fs.l4_protocol, 17);
+        assert_eq!(fs.first_seen_ns, 500);
+        assert!(!fs.has_anomaly());
+    }
+
+    #[test]
+    fn flow_state_flags_protocol_change_mid_stream() {
+        let mut fs = FlowState::new(0, 6);
+        fs.observe(10, 40, 6); // same protocol — fine
+        assert!(!fs.has_protocol_change());
+        fs.observe(20, 40, 17); // TCP flow suddenly carrying UDP
+        assert!(fs.has_anomaly());
+        assert!(fs.has_protocol_change());
+        // The baseline protocol is retained; the change is recorded via
+        // the flag, not by overwriting `l4_protocol`.
+        assert_eq!(fs.l4_protocol, 6);
+    }
+
+    #[test]
+    fn flow_state_long_lived_detection_and_bandwidth() {
+        // Anchor at a realistic monotonic epoch (bpf_ktime_get_ns is
+        // nanoseconds since boot, never zero at runtime).
+        let t0 = 1_000_000_000;
+        let mut fs = FlowState::new(t0, 6);
+        // 10 MB over 2 seconds → 5 MB/s.
+        fs.observe(t0 + 2_000_000_000, 10_000_000, 6);
+        assert_eq!(fs.duration_ns(), 2_000_000_000);
+        assert!(fs.is_long_lived(1_000_000_000));
+        assert!(!fs.is_long_lived(3_000_000_000));
+        assert_eq!(fs.bytes_per_sec(), 5_000_000);
+    }
+
+    #[test]
+    fn flow_state_bandwidth_zero_for_single_packet() {
+        let mut fs = FlowState::new(42, 6);
+        fs.observe(42, 1_500, 6);
+        assert_eq!(fs.duration_ns(), 0);
+        // Zero-duration flow reports 0 rather than dividing by zero.
+        assert_eq!(fs.bytes_per_sec(), 0);
+    }
+
+    #[test]
+    fn flow_state_last_seen_never_moves_backwards() {
+        let mut fs = FlowState::new(1_000, 6);
+        fs.observe(5_000, 10, 6);
+        // A stale / reordered packet timestamped earlier must not rewind
+        // last_seen and corrupt the duration.
+        fs.observe(2_000, 10, 6);
+        assert_eq!(fs.last_seen_ns, 5_000);
+        assert_eq!(fs.duration_ns(), 4_000);
     }
 
     #[test]
