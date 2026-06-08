@@ -73,9 +73,9 @@ pub use channels::{
     ChannelConfig, ChannelError, ChannelInterceptor, ContentEvent, DlpChannel, InMemoryInterceptor,
 };
 pub use classifier::{
-    ClassificationResult, ContentClassifier, ContentMetadata, DEFAULT_MAX_SCAN_BYTES,
-    FINGERPRINT_SIMILARITY_THRESHOLD, RuleMatch, builtin_pattern, hamming_similarity, luhn_valid,
-    parse_simhash_hex, simhash,
+    ClassificationResult, ContentClassifier, ContentMetadata, ContextualScorer, DevicePosture,
+    DEFAULT_MAX_SCAN_BYTES, FINGERPRINT_SIMILARITY_THRESHOLD, RuleMatch, builtin_pattern,
+    hamming_similarity, luhn_valid, parse_simhash_hex, simhash,
 };
 pub use doc_classifier::{
     classify_document, ArchiveKind, DocSignal, DocumentClassification, DocumentType, ImageKind,

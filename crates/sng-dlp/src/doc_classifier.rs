@@ -148,6 +148,19 @@ pub struct DocumentClassification {
     pub signals: Vec<DocSignal>,
 }
 
+impl Default for DocumentClassification {
+    /// An unknown, zero-risk document — the result for an empty or
+    /// unrecognised buffer, and the neutral value the classifier uses
+    /// before any content is inspected.
+    fn default() -> Self {
+        Self {
+            doc_type: DocumentType::Unknown,
+            risk: 0.0,
+            signals: Vec::new(),
+        }
+    }
+}
+
 impl DocumentClassification {
     /// The coarse [`RiskLevel`] band for [`Self::risk`].
     #[must_use]
@@ -537,8 +550,72 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+/// Test-only helpers shared with other modules' unit tests (e.g. the
+/// `ContextualScorer` tests in `classifier`). Compiled only under
+/// `cfg(test)` and never part of the shipped crate.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    /// Build a minimal ZIP whose central directory is well-formed
+    /// enough for [`super::parse_zip_central_directory`]: local file
+    /// headers with empty stored data, a central directory, and an
+    /// EOCD. `entries` is `(name, encrypted)`.
+    pub(crate) fn build_zip(entries: &[(&str, bool)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        let mut offsets = Vec::new();
+        for (name, encrypted) in entries {
+            offsets.push(out.len() as u32);
+            let flags: u16 = u16::from(*encrypted);
+            out.extend_from_slice(&0x0403_4b50u32.to_le_bytes()); // local sig
+            out.extend_from_slice(&20u16.to_le_bytes()); // version
+            out.extend_from_slice(&flags.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // method
+            out.extend_from_slice(&0u32.to_le_bytes()); // time/date
+            out.extend_from_slice(&0u32.to_le_bytes()); // crc
+            out.extend_from_slice(&0u32.to_le_bytes()); // comp size
+            out.extend_from_slice(&0u32.to_le_bytes()); // uncomp size
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            out.extend_from_slice(name.as_bytes());
+        }
+        for ((name, encrypted), off) in entries.iter().zip(offsets.iter()) {
+            let flags: u16 = u16::from(*encrypted);
+            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes()); // central sig
+            central.extend_from_slice(&20u16.to_le_bytes()); // version made by
+            central.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            central.extend_from_slice(&flags.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes()); // method
+            central.extend_from_slice(&0u32.to_le_bytes()); // time/date
+            central.extend_from_slice(&0u32.to_le_bytes()); // crc
+            central.extend_from_slice(&0u32.to_le_bytes()); // comp size
+            central.extend_from_slice(&0u32.to_le_bytes()); // uncomp size
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            central.extend_from_slice(&0u16.to_le_bytes()); // comment len
+            central.extend_from_slice(&0u16.to_le_bytes()); // disk start
+            central.extend_from_slice(&0u16.to_le_bytes()); // int attrs
+            central.extend_from_slice(&0u32.to_le_bytes()); // ext attrs
+            central.extend_from_slice(&off.to_le_bytes()); // local offset
+            central.extend_from_slice(name.as_bytes());
+        }
+        let cd_offset = out.len() as u32;
+        let cd_size = central.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes()); // EOCD sig
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk
+        out.extend_from_slice(&0u16.to_le_bytes()); // cd disk
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // disk entries
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // total entries
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::tests_support::build_zip;
     use super::*;
 
     #[test]
@@ -671,9 +748,6 @@ mod tests {
         assert_eq!(low.risk_level(), RiskLevel::Low);
     }
 
-    // --- Minimal ZIP writer for tests (central directory only needs
-    // to be well-formed enough for `parse_zip_central_directory`). ---
-
     fn make_png(w: u32, h: u32) -> Vec<u8> {
         let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
         v.extend_from_slice(&[0, 0, 0, 13]); // IHDR length
@@ -682,60 +756,5 @@ mod tests {
         v.extend_from_slice(&h.to_be_bytes());
         v.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth, colour, etc.
         v
-    }
-
-    fn build_zip(entries: &[(&str, bool)]) -> Vec<u8> {
-        // Local file headers (empty stored data) followed by a central
-        // directory and an EOCD. Good enough for metadata parsing.
-        let mut out = Vec::new();
-        let mut central = Vec::new();
-        let mut offsets = Vec::new();
-        for (name, encrypted) in entries {
-            offsets.push(out.len() as u32);
-            let flags: u16 = u16::from(*encrypted);
-            out.extend_from_slice(&0x0403_4b50u32.to_le_bytes()); // local sig
-            out.extend_from_slice(&20u16.to_le_bytes()); // version
-            out.extend_from_slice(&flags.to_le_bytes());
-            out.extend_from_slice(&0u16.to_le_bytes()); // method
-            out.extend_from_slice(&0u32.to_le_bytes()); // time/date
-            out.extend_from_slice(&0u32.to_le_bytes()); // crc
-            out.extend_from_slice(&0u32.to_le_bytes()); // comp size
-            out.extend_from_slice(&0u32.to_le_bytes()); // uncomp size
-            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            out.extend_from_slice(&0u16.to_le_bytes()); // extra len
-            out.extend_from_slice(name.as_bytes());
-        }
-        for ((name, encrypted), off) in entries.iter().zip(offsets.iter()) {
-            let flags: u16 = u16::from(*encrypted);
-            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes()); // central sig
-            central.extend_from_slice(&20u16.to_le_bytes()); // version made by
-            central.extend_from_slice(&20u16.to_le_bytes()); // version needed
-            central.extend_from_slice(&flags.to_le_bytes());
-            central.extend_from_slice(&0u16.to_le_bytes()); // method
-            central.extend_from_slice(&0u32.to_le_bytes()); // time/date
-            central.extend_from_slice(&0u32.to_le_bytes()); // crc
-            central.extend_from_slice(&0u32.to_le_bytes()); // comp size
-            central.extend_from_slice(&0u32.to_le_bytes()); // uncomp size
-            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            central.extend_from_slice(&0u16.to_le_bytes()); // extra len
-            central.extend_from_slice(&0u16.to_le_bytes()); // comment len
-            central.extend_from_slice(&0u16.to_le_bytes()); // disk start
-            central.extend_from_slice(&0u16.to_le_bytes()); // int attrs
-            central.extend_from_slice(&0u32.to_le_bytes()); // ext attrs
-            central.extend_from_slice(&off.to_le_bytes()); // local offset
-            central.extend_from_slice(name.as_bytes());
-        }
-        let cd_offset = out.len() as u32;
-        let cd_size = central.len() as u32;
-        out.extend_from_slice(&central);
-        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes()); // EOCD sig
-        out.extend_from_slice(&0u16.to_le_bytes()); // disk
-        out.extend_from_slice(&0u16.to_le_bytes()); // cd disk
-        out.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // disk entries
-        out.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // total entries
-        out.extend_from_slice(&cd_size.to_le_bytes());
-        out.extend_from_slice(&cd_offset.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes()); // comment len
-        out
     }
 }

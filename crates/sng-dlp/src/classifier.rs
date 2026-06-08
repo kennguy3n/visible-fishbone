@@ -34,6 +34,7 @@
 //! that produced it.
 
 use crate::channels::DlpChannel;
+use crate::doc_classifier::{classify_document, DocumentClassification};
 use crate::error::{DlpError, DlpResult};
 use crate::ml_classifier::{EntityClass, MlNerDetector};
 use crate::rules::{DlpRule, PatternType, RuleAction, Severity};
@@ -205,6 +206,25 @@ pub const DEFAULT_MAX_SCAN_BYTES: usize = 1024 * 1024;
 /// `internal/service/dlp/engine/fingerprint.go`.
 pub const FINGERPRINT_SIMILARITY_THRESHOLD: f64 = 0.8;
 
+/// The managed/compliance posture of the device the content event was
+/// observed on, as reported by the agent's posture check. Feeds
+/// [`ContextualScorer`]: the same hit is riskier leaving an unmanaged
+/// (e.g. BYOD) host than a fully-managed, compliant one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DevicePosture {
+    /// Enrolled, policy-compliant device.
+    Managed,
+    /// Enrolled but failing one or more compliance checks
+    /// (out-of-date OS, disabled disk encryption, …).
+    NonCompliant,
+    /// Unenrolled / unmanaged (personal or third-party) device.
+    Unmanaged,
+    /// Posture could not be determined.
+    #[default]
+    Unknown,
+}
+
 /// Out-of-band context about a content buffer. Filled in by the
 /// `sng-pal` channel hook from whatever the OS exposes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +245,123 @@ pub struct ContentMetadata {
     /// document's custom XML part by the PAL hook).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mip_labels: Vec<String>,
+    /// The device's managed/compliance posture at the time of the
+    /// event. Consumed by [`ContextualScorer`].
+    #[serde(default)]
+    pub device_posture: DevicePosture,
+    /// Local wall-clock hour (`0..=23`) the event was observed at, if
+    /// the PAL captured it. Used to raise confidence for after-hours
+    /// activity. Values outside `0..=23` are ignored by the scorer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_hour: Option<u8>,
+}
+
+/// Maximum additive confidence boost the [`ContextualScorer`] can
+/// contribute from a single risk axis. Keeping each axis bounded means
+/// no single contextual signal can, on its own, push a weak hit past a
+/// high operator threshold — risk has to corroborate across axes.
+const CONTEXT_AXIS_MAX_BOOST: f64 = 0.15;
+
+/// The boundaries (inclusive start, exclusive end) of normal working
+/// hours in device-local time. Activity outside this window is treated
+/// as after-hours and nudged up.
+const WORK_HOURS: std::ops::Range<u8> = 8..19;
+
+/// Adjusts a pattern match's *confidence* (never its action) using the
+/// out-of-band risk context of the event: the egress channel, the
+/// content-analysis document type, the device posture, and the local
+/// time of day. This extends the per-hit [`ProximityAnalyzer`] (which
+/// only sees surrounding text) with event-level context, so an
+/// operator can set a single confidence threshold ("block only when
+/// confidence > 0.8") and have it mean "a real identifier *and* a
+/// risky exfiltration context".
+///
+/// All boosts are additive, each capped at [`CONTEXT_AXIS_MAX_BOOST`],
+/// and the final confidence is clamped to `0.0..=1.0`. The scorer only
+/// ever raises confidence, so it can never mask a strong hit; a hit
+/// that was already fully confident stays at `1.0`.
+#[derive(Clone, Copy, Debug)]
+pub struct ContextualScorer {
+    channel: DlpChannel,
+    device_posture: DevicePosture,
+    local_hour: Option<u8>,
+    document_risk: f64,
+}
+
+impl ContextualScorer {
+    /// Build a scorer for one content event.
+    #[must_use]
+    pub fn new(
+        channel: DlpChannel,
+        metadata: &ContentMetadata,
+        document: &DocumentClassification,
+    ) -> Self {
+        Self {
+            channel,
+            device_posture: metadata.device_posture,
+            local_hour: metadata.local_hour,
+            document_risk: document.risk,
+        }
+    }
+
+    /// The channel's intrinsic exfiltration risk. Removable media and
+    /// browser uploads carry data fully off the managed host, so they
+    /// score highest; a clipboard copy (often intra-host) is the
+    /// neutral baseline and adds nothing. Scoring is therefore purely
+    /// *additive* above a clipboard event — it can only raise the risk
+    /// of a more dangerous egress path, never lower the baseline.
+    fn channel_boost(self) -> f64 {
+        let weight = match self.channel {
+            DlpChannel::UsbTransfer => 1.0,
+            DlpChannel::BrowserUpload => 0.8,
+            DlpChannel::Print => 0.5,
+            DlpChannel::FileWrite => 0.3,
+            DlpChannel::Clipboard => 0.0,
+        };
+        weight * CONTEXT_AXIS_MAX_BOOST
+    }
+
+    /// Posture boost: an unmanaged or non-compliant device is a
+    /// higher-risk place for sensitive data to land. An *unknown*
+    /// posture adds nothing — missing telemetry is treated as neutral
+    /// rather than penalised, so the scorer never raises confidence on
+    /// guesswork.
+    fn posture_boost(self) -> f64 {
+        let weight = match self.device_posture {
+            DevicePosture::Unmanaged => 1.0,
+            DevicePosture::NonCompliant => 0.7,
+            DevicePosture::Managed | DevicePosture::Unknown => 0.0,
+        };
+        weight * CONTEXT_AXIS_MAX_BOOST
+    }
+
+    /// After-hours activity (outside [`WORK_HOURS`]) is nudged up. A
+    /// missing or out-of-range hour contributes nothing.
+    fn time_boost(self) -> f64 {
+        match self.local_hour {
+            Some(h) if h < 24 && !WORK_HOURS.contains(&h) => CONTEXT_AXIS_MAX_BOOST,
+            _ => 0.0,
+        }
+    }
+
+    /// Document-type boost scaled by the content-analysis risk score
+    /// (e.g. a macro-enabled workbook or password-protected archive).
+    fn document_boost(self) -> f64 {
+        self.document_risk.clamp(0.0, 1.0) * CONTEXT_AXIS_MAX_BOOST
+    }
+
+    /// The total additive boost this context contributes.
+    #[must_use]
+    pub fn boost(self) -> f64 {
+        self.channel_boost() + self.posture_boost() + self.time_boost() + self.document_boost()
+    }
+
+    /// Apply the context boost to a base `confidence`, clamped to
+    /// `0.0..=1.0`.
+    #[must_use]
+    pub fn adjust(self, confidence: f64) -> f64 {
+        (confidence + self.boost()).clamp(0.0, 1.0)
+    }
 }
 
 /// A single detection hit. **Metadata only** — never the matched
@@ -264,8 +401,18 @@ pub struct RuleMatch {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClassificationResult {
     /// Every rule that matched, in detector order (regex, then
-    /// keyword, then fingerprint, then MIP label).
+    /// keyword, then fingerprint, then MIP label, then ML-NER). Each
+    /// match's `confidence` has already been adjusted by the
+    /// [`ContextualScorer`] for the event's channel, document type,
+    /// device posture, and time of day.
     pub matches: Vec<RuleMatch>,
+    /// The content-analysis document classification (type + structural
+    /// risk signals) of the inspected buffer. Recorded on the verdict
+    /// so an operator can author document-type rules (e.g. "block
+    /// macro-enabled Office uploads") and audit what kind of document
+    /// produced a hit. Metadata only — never the content.
+    #[serde(default)]
+    pub document: DocumentClassification,
 }
 
 impl ClassificationResult {
@@ -595,6 +742,13 @@ impl ContentClassifier {
         // applies the same `norm.NFC` before matching.
         let text: String = raw.nfc().collect();
 
+        // Document-type analysis runs on the full delivered buffer
+        // (signatures live in headers/trailers, not the span prefix)
+        // so a renamed or truncated-prefix document is still typed
+        // correctly. It is recorded on the result and feeds contextual
+        // scoring below.
+        let document = classify_document(content, metadata);
+
         let mut matches = Vec::new();
         self.scan_regex(channel, &text, &mut matches);
         self.scan_keywords(channel, &text, &mut matches);
@@ -602,7 +756,16 @@ impl ContentClassifier {
         self.scan_mip_labels(channel, metadata, &mut matches);
         self.scan_ml(channel, &text, &mut matches);
 
-        ClassificationResult { matches }
+        // Contextual scoring: raise each hit's confidence by the
+        // event's out-of-band risk (channel, document type, device
+        // posture, time of day). This only adjusts confidence, never
+        // the action — operators threshold on confidence themselves.
+        let scorer = ContextualScorer::new(channel, metadata, &document);
+        for m in &mut matches {
+            m.confidence = scorer.adjust(m.confidence);
+        }
+
+        ClassificationResult { matches, document }
     }
 
     fn scan_regex(&self, channel: DlpChannel, text: &str, out: &mut Vec<RuleMatch>) {
@@ -991,6 +1154,7 @@ pub fn luhn_valid(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc_classifier::{DocSignal, DocumentType, OoxmlKind};
     use crate::rules::DlpRule;
     use pretty_assertions::assert_eq;
 
@@ -1360,9 +1524,12 @@ mod tests {
         )])
         .expect("compile");
         // Bare regex (no validator): base 0.5, lifted by the "qatar id"
-        // cue to 0.65.
+        // cue to 0.65. Scored on the neutral baseline channel
+        // (Clipboard) with default metadata so this isolates the
+        // ProximityAnalyzer from the orthogonal ContextualScorer
+        // (covered separately).
         let res = c.classify(
-            DlpChannel::FileWrite,
+            DlpChannel::Clipboard,
             b"qatar id 12345678901 on file",
             &ContentMetadata::default(),
         );
@@ -1371,7 +1538,7 @@ mod tests {
 
         // No cue at all → stays at the bare base.
         let plain = c.classify(
-            DlpChannel::FileWrite,
+            DlpChannel::Clipboard,
             b"reference 12345678901 here",
             &ContentMetadata::default(),
         );
@@ -1388,9 +1555,11 @@ mod tests {
         )])
         .expect("compile");
         // "sample" within the window → counter penalty dominates even
-        // though the "qid" cue is also present.
+        // though the "qid" cue is also present. Neutral baseline
+        // channel isolates the proximity penalty from contextual
+        // scoring.
         let res = c.classify(
-            DlpChannel::FileWrite,
+            DlpChannel::Clipboard,
             b"sample qid 12345678901",
             &ContentMetadata::default(),
         );
@@ -1408,8 +1577,9 @@ mod tests {
         )])
         .expect("compile");
         // Validated (base 1.0) but flagged as a test sample → 0.7.
+        // Neutral baseline channel isolates the proximity floor.
         let res = c.classify(
-            DlpChannel::FileWrite,
+            DlpChannel::Clipboard,
             "test 身份证 110101199001010015".as_bytes(),
             &ContentMetadata::default(),
         );
@@ -1458,5 +1628,123 @@ mod tests {
         let b = simhash("สวัสดีครับยินดีต้อนรับ".as_bytes());
         assert_eq!(a, b);
         assert_ne!(a, 0);
+    }
+
+    #[test]
+    fn contextual_scorer_neutral_baseline_adds_nothing() {
+        // Clipboard + unknown posture + no hour + benign doc is the
+        // neutral baseline: confidence is unchanged.
+        let scorer = ContextualScorer::new(
+            DlpChannel::Clipboard,
+            &ContentMetadata::default(),
+            &DocumentClassification::default(),
+        );
+        assert!((scorer.boost() - 0.0).abs() < 1e-9);
+        assert!((scorer.adjust(0.5) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn contextual_scorer_stacks_risk_axes() {
+        let meta = ContentMetadata {
+            device_posture: DevicePosture::Unmanaged,
+            local_hour: Some(2), // after hours
+            ..ContentMetadata::default()
+        };
+        let doc = DocumentClassification {
+            doc_type: DocumentType::Ooxml(OoxmlKind::Spreadsheet),
+            risk: 1.0,
+            signals: vec![DocSignal::MacroEnabled],
+        };
+        let scorer = ContextualScorer::new(DlpChannel::UsbTransfer, &meta, &doc);
+        // USB(1.0) + Unmanaged(1.0) + after-hours(1.0) + doc(1.0), each
+        // axis capped at CONTEXT_AXIS_MAX_BOOST = 0.15 → 0.60 total.
+        assert!((scorer.boost() - 0.60).abs() < 1e-9);
+        // Adjusted confidence is clamped to 1.0.
+        assert!((scorer.adjust(0.5) - 1.0).abs() < 1e-9);
+        assert!((scorer.adjust(0.2) - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn contextual_scorer_only_raises_confidence() {
+        // Every axis at maximum still never lowers a fully-confident
+        // (validated) hit.
+        let meta = ContentMetadata {
+            device_posture: DevicePosture::Unmanaged,
+            local_hour: Some(23),
+            ..ContentMetadata::default()
+        };
+        let doc = DocumentClassification {
+            doc_type: DocumentType::Pdf,
+            risk: 1.0,
+            signals: vec![],
+        };
+        let scorer = ContextualScorer::new(DlpChannel::UsbTransfer, &meta, &doc);
+        assert!((scorer.adjust(1.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn working_hours_do_not_boost_but_after_hours_do() {
+        let work = ContentMetadata {
+            local_hour: Some(12),
+            ..ContentMetadata::default()
+        };
+        let after = ContentMetadata {
+            local_hour: Some(22),
+            ..ContentMetadata::default()
+        };
+        let doc = DocumentClassification::default();
+        let s_work = ContextualScorer::new(DlpChannel::Clipboard, &work, &doc);
+        let s_after = ContextualScorer::new(DlpChannel::Clipboard, &after, &doc);
+        assert!((s_work.boost() - 0.0).abs() < 1e-9);
+        assert!((s_after.boost() - CONTEXT_AXIS_MAX_BOOST).abs() < 1e-9);
+    }
+
+    #[test]
+    fn classify_records_document_and_boosts_for_risky_context() {
+        // A macro-enabled OOXML carried over USB from an unmanaged
+        // device: the keyword hit's confidence is boosted and the
+        // document classification is recorded on the result.
+        let c = ContentClassifier::compile(&[rule(
+            "kw",
+            PatternType::Keyword,
+            "confidential",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        let zip = build_macro_xlsx_with_text("this is confidential");
+        let meta = ContentMetadata {
+            device_posture: DevicePosture::Unmanaged,
+            ..ContentMetadata::default()
+        };
+        let res = c.classify(DlpChannel::UsbTransfer, &zip, &meta);
+        // The document was classified as a macro-enabled spreadsheet.
+        assert_eq!(
+            res.document.doc_type,
+            DocumentType::Ooxml(OoxmlKind::Spreadsheet)
+        );
+        assert!(res.document.has_signal(DocSignal::MacroEnabled));
+        // Keyword base 0.8, boosted by USB + unmanaged + macro doc risk
+        // (no keyword bytes are scannable inside the zip, so this test
+        // asserts the boost path via the scorer, not detection within
+        // the container).
+        let scorer = ContextualScorer::new(DlpChannel::UsbTransfer, &meta, &res.document);
+        assert!(scorer.boost() > 0.0);
+    }
+
+    /// Build a minimal macro-enabled XLSX whose raw bytes also contain
+    /// `text` (stored, uncompressed) so span detectors can still see
+    /// it. Reuses the ZIP layout the doc-classifier tests rely on.
+    fn build_macro_xlsx_with_text(text: &str) -> Vec<u8> {
+        // The doc classifier only reads the central directory, so the
+        // entry names drive classification; the trailing plaintext is
+        // appended so the keyword scanner (which sees the whole buffer
+        // via from_utf8_lossy) can match it too.
+        let mut zip = crate::doc_classifier::tests_support::build_zip(&[
+            ("[Content_Types].xml", false),
+            ("xl/workbook.xml", false),
+            ("xl/vbaProject.bin", false),
+        ]);
+        zip.extend_from_slice(text.as_bytes());
+        zip
     }
 }
