@@ -166,7 +166,7 @@ type Store struct {
 	// Tenant-scoped; append-only record of fail-closed rejections.
 	residencyAudit map[uuid.UUID]repository.ResidencyAuditEntry
 
-	// Threat-intel IOC snapshot — see migration 050. A single
+	// Threat-intel IOC snapshot — see migration 051. A single
 	// global whole-set snapshot (not tenant-scoped), so it is held
 	// as a flat slice replaced atomically by ReplaceAll.
 	threatIOCs []repository.ThreatIOC

@@ -246,29 +246,39 @@ func TestFeedManager_RestoreNoHookWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestFeedManager_PersistGatedByLeader(t *testing.T) {
+func TestFeedManager_PeriodicPersistGatedByLeader(t *testing.T) {
 	t.Parallel()
-	// A follower (leader check returns false) must NOT write, even on
-	// the shutdown flush. Restore (a read) is unaffected and is not
-	// exercised here.
+	// A follower (leader check false) skips the PERIODIC flush but
+	// must STILL perform the shutdown flush: on graceful shutdown the
+	// elector relinquishes off the same context cancellation, so the
+	// node may no longer report leader by the time the final flush
+	// runs — gating it would silently drop the freshest snapshot.
 	store := NewIOCStore()
 	store.Upsert(mkIOC(IOCTypeDomain, "evil.example.com", 0.9))
 	fp := &fakePersister{}
 	mgr := NewFeedManager(store, nil,
-		WithPersister(fp, time.Hour), // large interval: only shutdown flush
+		WithPersister(fp, time.Hour),
 		WithLeaderCheck(func() bool { return false }),
 	)
-	mgr.Start(context.Background())
-	mgr.Stop()
 
+	mgr.flushPersist(context.Background(), "interval")
 	if _, calls := fp.snapshot(); calls != 0 {
-		t.Fatalf("follower persisted %d times, want 0 (leader-gated)", calls)
+		t.Fatalf("follower periodic flush calls=%d, want 0 (leader-gated)", calls)
+	}
+
+	mgr.flushPersist(context.Background(), "shutdown")
+	stored, calls := fp.snapshot()
+	if calls != 1 {
+		t.Fatalf("follower shutdown flush calls=%d, want 1 (exempt from leader gate)", calls)
+	}
+	if len(stored) != 1 || stored[0].Value != "evil.example.com" {
+		t.Fatalf("follower shutdown flush stored %#v, want the single domain", stored)
 	}
 }
 
-func TestFeedManager_PersistRunsWhenLeader(t *testing.T) {
+func TestFeedManager_PeriodicPersistRunsWhenLeader(t *testing.T) {
 	t.Parallel()
-	// A leader (predicate true) flushes on shutdown as usual.
+	// A leader (predicate true) flushes on the interval as well.
 	store := NewIOCStore()
 	store.Upsert(mkIOC(IOCTypeDomain, "evil.example.com", 0.9))
 	fp := &fakePersister{}
@@ -276,15 +286,14 @@ func TestFeedManager_PersistRunsWhenLeader(t *testing.T) {
 		WithPersister(fp, time.Hour),
 		WithLeaderCheck(func() bool { return true }),
 	)
-	mgr.Start(context.Background())
-	mgr.Stop()
 
+	mgr.flushPersist(context.Background(), "interval")
 	stored, calls := fp.snapshot()
-	if calls < 1 {
-		t.Fatalf("leader persisted %d times, want >=1", calls)
+	if calls != 1 {
+		t.Fatalf("leader periodic flush calls=%d, want 1", calls)
 	}
 	if len(stored) != 1 || stored[0].Value != "evil.example.com" {
-		t.Fatalf("leader shutdown flush stored %#v, want the single domain", stored)
+		t.Fatalf("leader flush stored %#v, want the single domain", stored)
 	}
 }
 

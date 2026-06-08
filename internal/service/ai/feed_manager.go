@@ -40,10 +40,11 @@ type FeedManager struct {
 	// is the flush cadence; a final flush also runs on shutdown.
 	persister       IOCPersister
 	persistInterval time.Duration
-	// isLeader, when set, gates the persist write so only the
-	// elected leader flushes the shared snapshot table in a
+	// isLeader, when set, gates the PERIODIC persist write so only
+	// the elected leader flushes the shared snapshot table in a
 	// multi-replica deployment. Nil means persist from every
-	// replica. Restore (a read) is never gated.
+	// replica. Restore (a read) and the shutdown flush are never
+	// gated.
 	isLeader func() bool
 
 	metrics   feedMetrics
@@ -121,11 +122,14 @@ func WithPersister(p IOCPersister, interval time.Duration) FeedManagerOption {
 // leader flushes the shared threat_intel_iocs snapshot table —
 // matching the singleton-workload pattern used for the other periodic
 // DB writers (app-registry sync, pop rebalance, compliance evidence).
-// Restore is unaffected: every replica still hydrates its own
-// in-memory store on boot. A nil predicate (the default) persists from
-// every replica, which is safe (each ReplaceAll is an atomic
-// last-writer-wins swap) but multiplies write traffic by replica
-// count. Has no effect unless a persister is also configured.
+// Only the periodic flush is gated: Restore (a read, every replica
+// hydrates its own store on boot) and the final shutdown flush are
+// always allowed — the shutdown flush must not be lost to the
+// elector-relinquish race (see flushPersist). A nil predicate (the
+// default) persists from every replica, which is safe (each
+// ReplaceAll is an atomic last-writer-wins swap) but multiplies
+// periodic write traffic by replica count. Has no effect unless a
+// persister is also configured.
 func WithLeaderCheck(isLeader func() bool) FeedManagerOption {
 	return func(m *FeedManager) { m.isLeader = isLeader }
 }
@@ -459,14 +463,26 @@ func (m *FeedManager) flushPersist(ctx context.Context, reason string) {
 	if m.persister == nil {
 		return
 	}
-	// Leader-only write: the snapshot table is fleet-wide, so in a
-	// multi-replica deployment only the leader flushes it. Followers
-	// still run the loop (and restore on boot); they just skip the
-	// redundant write. Re-checked on every flush so leadership
-	// changes are honoured without restarting the loop.
-	if m.isLeader != nil && !m.isLeader() {
+	// Leader-only PERIODIC write: the snapshot table is fleet-wide, so
+	// in a multi-replica deployment only the leader flushes on the
+	// interval. Followers still run the loop (and restore on boot);
+	// they just skip the redundant periodic write. Re-checked on every
+	// tick so leadership changes are honoured without restarting the
+	// loop.
+	//
+	// The shutdown flush is deliberately EXEMPT from this gate. On
+	// graceful shutdown the elector relinquishes leadership off the
+	// same rootCtx cancellation that stops this loop (electorCtx is a
+	// child of rootCtx), so by the time the shutdown flush runs the
+	// leader may have already stepped down — gating it would silently
+	// drop the very flush meant to capture the freshest pre-restart
+	// state. A shutdown flush happens at most once per replica, so the
+	// worst case (every replica flushing on a rolling restart) is a
+	// handful of bounded, atomic last-writer-wins swaps — negligible
+	// versus losing the final snapshot.
+	if reason != "shutdown" && m.isLeader != nil && !m.isLeader() {
 		if m.logger != nil {
-			m.logger.DebugContext(ctx, "threat-intel: skipping IOC store persist (not leader)",
+			m.logger.DebugContext(ctx, "threat-intel: skipping periodic IOC store persist (not leader)",
 				"reason", reason)
 		}
 		return
