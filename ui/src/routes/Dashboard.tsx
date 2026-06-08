@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { Link } from "@tanstack/react-router";
+import { Icon } from "@/components/Icon";
 import {
   Area,
   AreaChart,
@@ -249,7 +250,7 @@ export function Dashboard() {
       {isEmptyTenant && (
         <div className="banner">
           <div className="score-ring" style={{ ["--ring-size" as string]: "56px" }}>
-            <span style={{ fontSize: 28 }}>🚀</span>
+            <Icon name="rocket" size={26} />
           </div>
           <div className="banner__body">
             <div className="banner__title">Let's get you protected</div>
@@ -389,7 +390,25 @@ export function Dashboard() {
           </div>
           <div style={{ marginTop: 12 }}>
             <span className={`trend trend--${trend}`}>
-              {trend === "up" ? "▲" : trend === "down" ? "▼" : "▬"}{" "}
+              <svg
+                width="11"
+                height="11"
+                viewBox="0 0 12 12"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                {trend === "up" ? (
+                  <path d="M2 9l4-5 4 5" />
+                ) : trend === "down" ? (
+                  <path d="M2 3l4 5 4-5" />
+                ) : (
+                  <path d="M2 6h8" />
+                )}
+              </svg>{" "}
               {trend === "up"
                 ? "Usage trending up"
                 : trend === "down"

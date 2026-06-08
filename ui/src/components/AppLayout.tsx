@@ -2,6 +2,7 @@ import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-route
 import { useEffect, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { NAV } from "./nav";
+import { Icon } from "./Icon";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { useAuth } from "@/auth/auth-context";
 import { TenantProvider, useTenant } from "@/lib/tenant-context";
@@ -69,7 +70,9 @@ function Sidebar() {
                   to={item.to}
                   className={`nav-link${active ? " active" : ""}`}
                 >
-                  <span className="nav-link__icon">{item.icon}</span>
+                  <span className="nav-link__icon">
+                    <Icon name={item.icon} size={17} />
+                  </span>
                   <span>{item.label}</span>
                 </Link>
               );
@@ -86,6 +89,13 @@ function Topbar({ onToggleNav }: { onToggleNav: () => void }) {
   const intl = useIntl();
   const name = claims?.name || claims?.email || claims?.sub || "Operator";
   const issuer = claims?.iss ?? "shieldnet";
+  // Two-letter monogram for the identity avatar: initials of a display
+  // name ("Ada Lovelace" -> "AL"), or the first two characters otherwise.
+  const initials = (() => {
+    const parts = name.trim().split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+    return name.slice(0, 2).toUpperCase();
+  })();
   // The dedicated identity block is hidden on the tablet icon-rail to reclaim
   // horizontal room, so surface the same "who am I signed in as" on the Sign
   // out button's tooltip/accessible name. This keeps the operator identity
@@ -98,14 +108,19 @@ function Topbar({ onToggleNav }: { onToggleNav: () => void }) {
         onClick={onToggleNav}
         aria-label={intl.formatMessage({ id: "topbar.menu" })}
       >
-        ☰
+        <Icon name="menu" size={18} />
       </button>
       <TenantSwitcher />
       <div className="topbar__spacer" />
       <LanguageSwitcher />
       <div className="topbar__user">
-        <b>{name}</b>
-        <span className="muted">{issuer}</span>
+        <span className="avatar" aria-hidden>
+          {initials}
+        </span>
+        <span className="topbar__identity">
+          <b>{name}</b>
+          <span className="muted">{issuer}</span>
+        </span>
       </div>
       <button
         className="btn btn--ghost btn--sm"
@@ -113,6 +128,7 @@ function Topbar({ onToggleNav }: { onToggleNav: () => void }) {
         title={`${intl.formatMessage({ id: "topbar.signOut" })} — ${identity}`}
         aria-label={`${intl.formatMessage({ id: "topbar.signOut" })} — ${identity}`}
       >
+        <Icon name="logout" size={15} />
         <FormattedMessage id="topbar.signOut" />
       </button>
     </header>
