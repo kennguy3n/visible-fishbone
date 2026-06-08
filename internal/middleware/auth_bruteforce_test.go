@@ -1,7 +1,9 @@
 package middleware_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -138,6 +140,40 @@ func TestAuthBruteForce_SuccessResetsCounter(t *testing.T) {
 		if rec := bad(); rec.Code != http.StatusUnauthorized {
 			t.Fatalf("post-reset failure %d: status = %d, want 401", i+1, rec.Code)
 		}
+	}
+}
+
+// TestAuthFailureLog_UsesTrustedProxiesWhenGuardDisabled verifies that
+// with the brute-force guard disabled but failure logging enabled
+// (WithBruteForceGuard(nil, logger) + WithTrustedProxies), the logged
+// source_ip is the real client from X-Forwarded-For — not the trusted
+// load balancer's address — so forensics stay accurate behind a proxy.
+func TestAuthFailureLog_UsesTrustedProxiesWhenGuardDisabled(t *testing.T) {
+	t.Parallel()
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	keys := stubAPIKeys{err: middleware.ErrAPIKeyNotFound}
+	cfg := &config.Auth{APIKeyHeader: "X-SNG-API-Key"}
+	h := middleware.Auth(cfg, keys,
+		middleware.WithBruteForceGuard(nil, logger), // lockout disabled, logging on
+		middleware.WithTrustedProxies("10.0.0.0/8"),
+	)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/things", nil)
+	req.RemoteAddr = "10.1.2.3:443" // trusted reverse proxy
+	req.Header.Set("X-Forwarded-For", "203.0.113.20")
+	req.Header.Set("X-SNG-API-Key", "wrong-key")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("source_ip=203.0.113.20")) {
+		t.Errorf("log should record real client IP via XFF, got: %s", buf.String())
+	}
+	if bytes.Contains(buf.Bytes(), []byte("source_ip=10.1.2.3")) {
+		t.Errorf("log recorded the proxy IP instead of the real client, got: %s", buf.String())
 	}
 }
 

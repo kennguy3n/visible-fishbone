@@ -225,7 +225,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// nil (lockout disabled) while Logger is set (still audit every
 	// failure), or both set; WithBruteForceGuard handles either.
 	if deps.AuthBruteForce != nil || deps.Logger != nil {
-		authOpts = append(authOpts, middleware.WithBruteForceGuard(deps.AuthBruteForce, deps.Logger))
+		authOpts = append(authOpts,
+			middleware.WithBruteForceGuard(deps.AuthBruteForce, deps.Logger),
+			// Give the failure-logging path the same trusted-proxy list
+			// the guard uses so the logged source_ip is the real client
+			// (not the load balancer) even when the guard is disabled.
+			middleware.WithTrustedProxies(deps.Config.BruteForce.TrustedProxies),
+		)
 	}
 	// Per-tenant rate limiting runs immediately AFTER Auth so the
 	// tenant identity Auth resolves (from the API-key / JWT claim) is in

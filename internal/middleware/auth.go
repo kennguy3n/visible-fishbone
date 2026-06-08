@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -77,6 +78,17 @@ type authOptions struct {
 	// auth attempt (source IP, reason, resolved tenant when known).
 	// Optional; nil suppresses the failure log.
 	logger *slog.Logger
+	// trustedProxies is the parsed reverse-proxy CIDR allow-list used to
+	// derive the real client IP for failure logging when the brute-force
+	// guard is disabled. When the guard is present it owns this
+	// derivation via its own identical list; this mirror keeps the
+	// logged source_ip correct behind a load balancer even with lockout
+	// turned off. See WithTrustedProxies.
+	trustedProxies []*net.IPNet
+	// trustedProxiesErr captures a parse failure from WithTrustedProxies
+	// so Auth can surface it once at startup instead of silently
+	// degrading.
+	trustedProxiesErr error
 }
 
 // AuthOption configures optional Auth behaviour without breaking the
@@ -115,6 +127,28 @@ func WithBruteForceGuard(guard *AttemptLimiter, logger *slog.Logger) AuthOption 
 	}
 }
 
+// WithTrustedProxies supplies the reverse-proxy CIDR allow-list used to
+// derive the real client IP when LOGGING failed auth attempts while the
+// brute-force guard is disabled (guard nil but logger set). Pass the
+// same list the guard uses (config BRUTEFORCE_TRUSTED_PROXIES) so the
+// logged source_ip is identical whether or not lockout is enabled —
+// otherwise, behind a load balancer, a guard-disabled deployment would
+// log the proxy's IP instead of the real client's, crippling forensics.
+// When the guard is present it already derives the IP from its own copy
+// of this list, so this option only changes behaviour on the
+// guard-disabled path. A malformed list is recorded and surfaced once
+// by Auth at startup rather than failing the option.
+func WithTrustedProxies(raw string) AuthOption {
+	return func(o *authOptions) {
+		proxies, err := parseProxyCIDRs(raw)
+		if err != nil {
+			o.trustedProxiesErr = err
+			return
+		}
+		o.trustedProxies = proxies
+	}
+}
+
 // recordAuthFailure feeds a credential-validation failure to the
 // brute-force guard (when configured) and logs it. Only call this for
 // genuine credential rejections that should count toward the IP
@@ -136,7 +170,11 @@ func (o *authOptions) logAuthFailure(r *http.Request, ip, reason string) {
 	}
 	src := ip
 	if src == "" {
-		src = clientIP(r, nil)
+		// The guard is disabled (it would otherwise have supplied a
+		// proxy-aware ip). Derive the client IP using the same
+		// trusted-proxy list the guard would have used, so the logged
+		// source_ip is the real client and not the load balancer.
+		src = clientIP(r, o.trustedProxies)
 	}
 	attrs := []any{
 		slog.String("event", "auth_failed"),
@@ -170,6 +208,13 @@ func Auth(cfg *config.Auth, keys APIKeyLookup, opts ...AuthOption) func(http.Han
 	var o authOptions
 	for _, fn := range opts {
 		fn(&o)
+	}
+	// Surface a malformed trusted-proxy list once at construction rather
+	// than silently logging proxy IPs forever. Failure logging then
+	// degrades to the raw RemoteAddr (clientIP with a nil list).
+	if o.trustedProxiesErr != nil && o.logger != nil {
+		o.logger.Warn("auth: ignoring malformed trusted-proxy CIDR list for failure logging",
+			slog.String("error", o.trustedProxiesErr.Error()))
 	}
 
 	return func(next http.Handler) http.Handler {
