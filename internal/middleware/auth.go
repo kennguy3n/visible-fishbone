@@ -290,18 +290,26 @@ func Auth(cfg *config.Auth, keys APIKeyLookup, opts ...AuthOption) func(http.Han
 			// any other issuer fall through to the existing path, so
 			// operator-console / mobile / API-key auth is untouched.
 			if o.iamCore != nil && unverifiedIssuer(raw) == o.iamCore.Issuer() {
-				if ctx, handled := o.authenticateIAMCore(w, r, raw); handled {
-					if ctx != nil {
-						o.recordAuthSuccess(ip)
-						next.ServeHTTP(w, r.WithContext(ctx))
-					} else {
-						// authenticateIAMCore wrote a 401/403: a
-						// rejected iam-core token is a credential
-						// failure, count it toward the IP cooldown.
-						o.recordAuthFailure(r, ip, "invalid_iam_core_token")
-					}
-					return
+				ctx, outcome := o.authenticateIAMCore(w, r, raw)
+				switch outcome {
+				case iamCoreOK:
+					o.recordAuthSuccess(ip)
+					next.ServeHTTP(w, r.WithContext(ctx))
+				case iamCoreCredentialRejected:
+					// Token failed cryptographic verification — a genuine
+					// credential rejection. Count it toward the IP cooldown.
+					o.recordAuthFailure(r, ip, "invalid_iam_core_token")
+				default: // iamCoreAuthzRejected
+					// Token VERIFIED but is not authorized for the
+					// requested tenant (X-Tenant-ID mismatch or no SNG
+					// tenant mapped). That is an authorization/config
+					// failure, not a credential guess, so audit it but do
+					// NOT count it toward the cooldown — otherwise a
+					// tenant-mapping misconfig would lock out a legitimate
+					// user after AuthMaxFailures requests.
+					o.logAuthFailure(r, ip, "iam_core_tenant_unauthorized")
 				}
+				return
 			}
 			// The symmetric (HMAC) verification path is build-tagged:
 			// the real implementation is compiled only into

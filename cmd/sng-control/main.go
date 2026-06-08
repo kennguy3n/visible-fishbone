@@ -1129,6 +1129,12 @@ func buildRouter(
 			TrustedProxies:  cfg.BruteForce.TrustedProxies,
 		})
 		if err != nil {
+			// Close the limiter already started above so its janitor
+			// goroutine doesn't outlive this failed build (matters if
+			// buildRouter is ever retried, e.g. a test harness).
+			if tenantRateLimiter != nil {
+				tenantRateLimiter.Close()
+			}
 			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build auth brute-force guard: %w", err)
 		}
 		enrollBruteForce, err = middleware.NewAttemptLimiter(middleware.AttemptLimiterConfig{
@@ -1139,6 +1145,12 @@ func buildRouter(
 			TrustedProxies:  cfg.BruteForce.TrustedProxies,
 		})
 		if err != nil {
+			// Same here: tear down the two singletons already running
+			// (auth guard + tenant limiter) before bailing out.
+			authBruteForce.Close()
+			if tenantRateLimiter != nil {
+				tenantRateLimiter.Close()
+			}
 			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build enroll brute-force guard: %w", err)
 		}
 	}
