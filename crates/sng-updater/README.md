@@ -80,7 +80,7 @@ reason.
 ## Local verification
 
 ```sh
-cargo +1.85 test  -p sng-updater
-cargo +1.85 clippy -p sng-updater --all-targets -- -D warnings
-cargo +1.85 fmt    --all -- --check
+cargo +1.91 test  -p sng-updater
+cargo +1.91 clippy -p sng-updater --all-targets -- -D warnings
+cargo +1.91 fmt    --all -- --check
 ```

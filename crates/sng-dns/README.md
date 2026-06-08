@@ -50,7 +50,7 @@ rather than an off-the-shelf parser so the subsystem can:
 ## Local verification
 
 ```sh
-cargo +1.85 test  -p sng-dns
-cargo +1.85 clippy -p sng-dns --all-targets -- -D warnings
-cargo +1.85 fmt    --all -- --check
+cargo +1.91 test  -p sng-dns
+cargo +1.91 clippy -p sng-dns --all-targets -- -D warnings
+cargo +1.91 fmt    --all -- --check
 ```

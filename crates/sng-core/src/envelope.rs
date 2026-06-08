@@ -503,13 +503,9 @@ pub(crate) mod msgpack_timestamp {
         // timestamp 64 fits when seconds is a non-negative value
         // that fits in 34 bits and nanos < 1e9. The shift up by 34
         // packs nanos into the high 30 bits of a 64-bit unsigned
-        // word; the spec guarantees the result is < 2^64. Written
-        // as nested `if let` rather than the (newer) let-chain
-        // sugar so the `rust-version = "1.85"` MSRV holds — the
-        // workspace's CI pins toolchain 1.85, and let-chains only
-        // stabilised in 1.88. `u64::try_from` only fails on
-        // negative inputs, which the `(0..)` range already
-        // excludes downstream.
+        // word; the spec guarantees the result is < 2^64.
+        // `u64::try_from` only fails on negative inputs, which the
+        // `(0..)` range already excludes downstream.
         if (0..SECS_TIMESTAMP_64_MAX).contains(&secs)
             && nanos < 1_000_000_000
             && let Ok(secs_u64) = u64::try_from(secs)
