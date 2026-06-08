@@ -75,6 +75,13 @@ func (r *AuditLogRepository) AppendGlobal(ctx context.Context, e repository.Audi
 }
 
 func (r *AuditLogRepository) List(ctx context.Context, tenantID uuid.UUID, filter repository.AuditFilter, page repository.Page) (repository.PageResult[repository.AuditEntry], error) {
+	// Mirror Postgres RLS semantics: a nil-tenant session sees nothing
+	// (SQL: tenant_id = '0000…'::uuid never matches NULL rows). The
+	// global rows written by AppendGlobal are only reachable via
+	// ListGlobal.
+	if tenantID == uuid.Nil {
+		return repository.PageResult[repository.AuditEntry]{}, nil
+	}
 	return r.list(ctx, tenantID, filter, page)
 }
 
