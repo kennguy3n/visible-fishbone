@@ -125,9 +125,11 @@ func (l *AttemptLimiter) Blocked(ip string) (retryAfter int, blocked bool) {
 }
 
 // RecordFailure increments ip's failure counter. When the counter
-// reaches MaxFailures the IP enters Cooldown and the counter resets, so
-// the next burst must again accumulate MaxFailures to re-trip. Returns
-// true when this failure tripped (or extended) the cooldown.
+// reaches MaxFailures the IP enters Cooldown for a fixed duration and
+// the counter resets, so the next burst must again accumulate
+// MaxFailures to re-trip. Returns true when the IP is (now or already)
+// locked out; further failures during the cooldown neither extend the
+// window nor advance the counter.
 func (l *AttemptLimiter) RecordFailure(ip string) (tripped bool) {
 	now := l.now()
 	l.mu.Lock()
@@ -138,11 +140,13 @@ func (l *AttemptLimiter) RecordFailure(ip string) (tripped bool) {
 		l.entries[ip] = e
 	}
 	e.lastSeen = now
-	// Already cooling down: keep it locked (extend from now) without
-	// further accounting, so a flood during cooldown can't race the
-	// counter.
+	// Already cooling down: report still-locked but do NOT extend the
+	// window or touch the counter. The cooldown is a fixed duration from
+	// the moment it tripped, so a flood during lockout can neither race
+	// the counter nor push the unlock time out indefinitely — a client
+	// that keeps retrying (e.g. a buggy app behind a shared NAT) is
+	// released on the original schedule rather than being locked forever.
 	if now.Before(e.cooldownUntil) {
-		e.cooldownUntil = now.Add(l.cooldown)
 		return true
 	}
 	e.failures++

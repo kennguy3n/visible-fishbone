@@ -208,6 +208,28 @@ func TestCreateClaimTokenChunkedEmptyBody(t *testing.T) {
 	}
 }
 
+// TestCreateClaimTokenRejectsOversizedBody verifies the optional
+// claim-token body is bounded by an http.MaxBytesReader (consistent
+// with DecodeJSON elsewhere): a body past the cap is rejected with a
+// 413 rather than being buffered in full.
+func TestCreateClaimTokenRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+	h, tenantID := newTestDeviceHandler(t)
+
+	// A valid body preceded by a giant run of insignificant whitespace
+	// (valid JSON) pushes the stream past the cap, so the reader trips on
+	// size rather than on a syntax or unknown-field error.
+	oversized := strings.Repeat(" ", int(claimTokenMaxBodyBytes)+1) + `{"ttl_seconds":120}`
+	rec := httptest.NewRecorder()
+	h.createClaimToken(rec, reqWithTenant(t, http.MethodPost, oversized, tenantID))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "request_too_large") {
+		t.Errorf("error code should be request_too_large, got: %s", rec.Body.String())
+	}
+}
+
 // TestCreateClaimTokenStampsAuthenticatedActor is the regression
 // test for the PR6 round-4 Devin Review finding: createClaimToken
 // hardcoded `nil` as the audited actor instead of resolving the

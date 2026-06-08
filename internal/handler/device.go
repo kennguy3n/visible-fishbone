@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -23,6 +24,12 @@ import (
 // previous handler accepted any positive value, silently violating
 // the published contract.
 const claimTokenMinTTLSeconds = 60
+
+// claimTokenMaxBodyBytes bounds the optional claim-token-create body.
+// Its only field is a small integer, so a few KiB is generous; the cap
+// exists so this endpoint's bespoke (optional/chunked-aware) decode is
+// still protected by an http.MaxBytesReader like the rest of the API.
+const claimTokenMaxBodyBytes int64 = 4 << 10 // 4 KiB
 
 // DeviceHandler exposes the device enrolment and listing endpoints.
 type DeviceHandler struct {
@@ -120,13 +127,23 @@ func (h *DeviceHandler) createClaimToken(w http.ResponseWriter, r *http.Request)
 	// "client sent no body" rather than as a 400 malformed-body
 	// error (which would break the "body is optional" contract).
 	if r.ContentLength != 0 {
+		// Bound the body before decoding so an oversized (or unbounded
+		// chunked) payload is rejected as it streams in, consistent with
+		// DecodeJSON elsewhere. The legitimate body is a single small int.
+		r.Body = http.MaxBytesReader(w, r.Body, claimTokenMaxBodyBytes)
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&req); err != nil {
-			if errors.Is(err, io.EOF) {
+			var mbe *http.MaxBytesError
+			switch {
+			case errors.Is(err, io.EOF):
 				// chunked transfer with zero bytes — treat as
 				// "no body", apply server defaults.
-			} else {
+			case errors.As(err, &mbe):
+				WriteError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+					fmt.Sprintf("request body exceeds the %d-byte limit", claimTokenMaxBodyBytes))
+				return
+			default:
 				WriteError(w, http.StatusBadRequest, "invalid_body", err.Error())
 				return
 			}

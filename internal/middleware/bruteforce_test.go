@@ -115,24 +115,28 @@ func TestAttemptLimiter_PerIPIsolation(t *testing.T) {
 	}
 }
 
-func TestAttemptLimiter_FloodDuringCooldownStaysLocked(t *testing.T) {
+func TestAttemptLimiter_FloodDuringCooldownIsFixedWindow(t *testing.T) {
 	t.Parallel()
 	l, advance := newTestAttemptLimiter(t, AttemptLimiterConfig{MaxFailures: 2, Cooldown: 30 * time.Second})
 	defer l.Close()
 
 	const ip = "203.0.113.10"
 	l.RecordFailure(ip)
-	l.RecordFailure(ip) // trips: cooldownUntil = now+30s
+	l.RecordFailure(ip) // trips: cooldownUntil = t0+30s
+	// A failure mid-cooldown still reports locked but must NOT push the
+	// unlock time out — the window is fixed from when it tripped.
 	advance(10 * time.Second)
-	// A failure during cooldown extends it from now (+30s = now+30s).
 	if tripped := l.RecordFailure(ip); !tripped {
-		t.Fatal("failure during cooldown should report tripped")
+		t.Fatal("failure during cooldown should report tripped/locked")
 	}
-	// 25s after the extension the IP is still locked (extension pushed
-	// expiry to t=10+30=40s; we are at t=10+25=35s).
-	advance(25 * time.Second)
 	if _, blocked := l.Blocked(ip); !blocked {
-		t.Fatal("cooldown was not extended by a flood during lockout")
+		t.Fatal("IP should still be locked 10s into a 30s cooldown")
+	}
+	// Past the original 30s window (t=10+25=35s > 30s) the IP is released
+	// despite the flood — a persistent retrier is not locked out forever.
+	advance(25 * time.Second)
+	if _, blocked := l.Blocked(ip); blocked {
+		t.Fatal("cooldown should expire on its fixed schedule, not be extended by a flood")
 	}
 }
 
