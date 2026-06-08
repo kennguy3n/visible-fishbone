@@ -672,15 +672,23 @@ func (s *Service) compileIOCEnforcement(ctx context.Context, tenantID uuid.UUID)
 
 // sharedIOCSnapshot reports whether the installed IOC compiler can
 // derive both the rule slice and the malware set from one snapshot.
-// It is only safe to use the shared snapshot when the malware
-// compiler is the same instance (or unset); if a *different* malware
-// compiler is wired we fall back so it isn't silently bypassed.
+// It is only safe to take the shared path when the SAME instance
+// backs both planes:
+//   - A nil malware compiler must leave the malware section out
+//     (the WithMalwareHashCompiler contract). The shared path
+//     unconditionally compiles the malware set from the snapshot, so
+//     taking it with s.malwareHash == nil would wrongly emit a
+//     malware section. We fall back instead, where a nil
+//     s.malwareHash yields no malware (rules still compile from one
+//     snapshot — atomicity is moot with only one plane).
+//   - A *different* malware compiler must not be silently bypassed,
+//     so a non-nil instance that isn't s.ioc also falls back.
 func (s *Service) sharedIOCSnapshot() (IOCSnapshotCompiler, bool) {
 	snapper, ok := s.ioc.(IOCSnapshotCompiler)
 	if !ok {
 		return nil, false
 	}
-	if s.malwareHash != nil && any(s.malwareHash) != any(s.ioc) {
+	if s.malwareHash == nil || any(s.malwareHash) != any(s.ioc) {
 		return nil, false
 	}
 	return snapper, true

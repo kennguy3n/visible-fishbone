@@ -413,3 +413,86 @@ func TestIOCToDryRunBundle_Integration(t *testing.T) {
 	assertVerdict(t, eval, dnsEnvelope(t, tnt.ID, iocDomain), schema.VerdictDeny, "dry-run DNS query for sinkholed domain")
 	assertVerdict(t, eval, httpEnvelope(t, tnt.ID, iocHost), schema.VerdictDeny, "dry-run HTTP request to SWG-denied host")
 }
+
+// TestIOCCompileWithoutMalwareCompiler_OmitsMalwareSection locks in
+// the WithMalwareHashCompiler contract ("When nil, the section is
+// omitted") against the shared-snapshot optimisation. The ai
+// IOCEnforcementCompiler implements IOCSnapshotCompiler, so wiring it
+// via WithIOCCompiler ALONE (no WithMalwareHashCompiler) must still
+// fold the IOC deny rules but must NOT emit a malware section — the
+// shared snapshot is only taken when the same instance also backs the
+// malware plane. Before the sharedIOCSnapshot guard required a
+// non-nil malware compiler, this path wrongly produced a malware
+// section from the snapshot even though the operator opted out of it.
+func TestIOCCompileWithoutMalwareCompiler_OmitsMalwareSection(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	store := seedStore(t)
+	compiler := ai.NewIOCEnforcementCompiler(store)
+
+	s := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(s)
+	tnt, err := tenantRepo.Create(ctx, repository.Tenant{
+		Name: "t", Slug: "t", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	policyRepo := memory.NewPolicyRepository(s)
+	keyRepo := memory.NewPolicySigningKeyRepository(s)
+	auditRepo := memory.NewAuditLogRepository(s)
+	keys := policy.NewKeyService(keyRepo, auditRepo)
+
+	// Only the IOC rule compiler is wired; the malware compiler is
+	// deliberately left nil.
+	svc := policy.New(policyRepo, auditRepo, keys,
+		policy.WithIOCCompiler(compiler),
+	)
+
+	graph := map[string]any{
+		"default_action": "allow",
+		"rules":          []map[string]any{},
+	}
+	raw, _ := json.Marshal(graph)
+	if _, err := svc.PutGraph(ctx, tnt.ID, nil, raw); err != nil {
+		t.Fatalf("put graph: %v", err)
+	}
+
+	res, err := svc.Compile(ctx, tnt.ID, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	var edge decodedBundle
+	for _, b := range res.Bundles {
+		if b.TargetType == repository.PolicyBundleTargetEdge {
+			if err := msgpack.Unmarshal(b.Bundle, &edge); err != nil {
+				t.Fatalf("unmarshal edge bundle: %v", err)
+			}
+		}
+	}
+	if edge.Target != string(repository.PolicyBundleTargetEdge) {
+		t.Fatalf("edge bundle not found in compile result")
+	}
+
+	// IOC deny rules are still folded in — only the malware plane is
+	// opted out.
+	ruleIDs, _ := decodeRules(t, edge.RawRules)
+	for _, want := range []string{
+		"ti-ngfw-" + iocIP,
+		"ti-dns-" + iocDomain,
+		"ti-swg-" + iocHost,
+	} {
+		if !ruleIDs[want] {
+			t.Errorf("compiled edge bundle missing IOC rule %q; have %v", want, ruleIDs)
+		}
+	}
+
+	// With no malware compiler wired, the malware section must be
+	// omitted even though the IOC compiler could have produced it
+	// from the shared snapshot.
+	if len(edge.Malware) != 0 {
+		t.Errorf("edge bundle carries a malware section despite nil malware compiler: %s", edge.Malware)
+	}
+}
