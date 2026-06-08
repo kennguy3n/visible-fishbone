@@ -227,6 +227,44 @@ func TestDemotionBridge_PrunesDepartedDomains(t *testing.T) {
 	}
 }
 
+// TestDemotionBridge_PrunesDepartedDomainOnChurn covers the
+// equal-size churn case: one domain expires as another arrives, so
+// len(emitted) == len(present) yet a departed entry must still be
+// pruned (a size-comparison guard would wrongly skip it).
+func TestDemotionBridge_PrunesDepartedDomainOnChurn(t *testing.T) {
+	t.Parallel()
+	em := &stubEmitter{}
+	bridge := NewDemotionBridge(em)
+	t0 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	mk := func(v string) IOC {
+		return mkIOC(IOCTypeDomain, v, 0.9, func(i *IOC) { i.LastSeen = t0 })
+	}
+
+	// Seed A + B.
+	if err := bridge.Sync(context.Background(), IOCSnapshot{Domains: []IOC{mk("a.example.com"), mk("b.example.com")}}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// A expires, C arrives → present={B,C}, emitted was {A,B}: equal size.
+	if err := bridge.Sync(context.Background(), IOCSnapshot{Domains: []IOC{mk("b.example.com"), mk("c.example.com")}}); err != nil {
+		t.Fatalf("churn: %v", err)
+	}
+	if _, stale := bridge.emitted["a.example.com"]; stale {
+		t.Fatalf("departed domain A not pruned on equal-size churn: %#v", bridge.emitted)
+	}
+	// A returns with the same LastSeen → must re-emit (not blocked by a
+	// stale entry).
+	if err := bridge.Sync(context.Background(), IOCSnapshot{Domains: []IOC{mk("a.example.com")}}); err != nil {
+		t.Fatalf("return: %v", err)
+	}
+	got := map[string]int{}
+	for _, d := range em.domains {
+		got[d]++
+	}
+	if got["a.example.com"] != 2 {
+		t.Fatalf("returning domain A should re-emit, emits=%#v", em.domains)
+	}
+}
+
 // flakyEmitter fails its first EmitDomainDemotion call, then
 // succeeds, to exercise the retry path.
 type flakyEmitter struct {

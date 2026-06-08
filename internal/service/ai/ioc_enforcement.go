@@ -356,12 +356,14 @@ func (b *DemotionBridge) Sync(ctx context.Context, snap IOCSnapshot) error {
 	// expiry), bounding the map to the live snapshot rather than every
 	// domain ever ingested. If such a domain is later re-observed it is
 	// re-emitted, re-establishing the override — the same self-healing
-	// behaviour as a LastSeen advance.
-	if len(b.emitted) > len(present) {
-		for d := range b.emitted {
-			if _, ok := present[d]; !ok {
-				delete(b.emitted, d)
-			}
+	// behaviour as a LastSeen advance. The loop runs unconditionally: a
+	// size comparison (len(emitted) > len(present)) is NOT a safe guard
+	// because churn can leave the sizes equal while still holding a
+	// departed entry (e.g. A expires as C arrives: present={B,C},
+	// emitted={A,B}).
+	for d := range b.emitted {
+		if _, ok := present[d]; !ok {
+			delete(b.emitted, d)
 		}
 	}
 	return errors.Join(errs...)
