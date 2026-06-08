@@ -306,8 +306,14 @@ func (c *CostCalculator) CompareLLMPricing(tokens, calls int64) LLMCostCompariso
 	if calls < 0 {
 		calls = 0
 	}
+	// Keep the raw (unrounded) self-hosted cost for the breakeven
+	// math below; the displayed figures are cent-rounded. Rounding
+	// the cost before dividing by the per-1K-token rate would push
+	// the crossover volume off by up to ~half a cent's worth of
+	// tokens, so the breakeven is derived from the exact cost.
+	rawSelfHosted := c.LLMSelfHostedMonthlyUSD()
 	perToken := round2(c.LLMPerTokenMonthlyUSD(tokens, calls))
-	selfHosted := round2(c.LLMSelfHostedMonthlyUSD())
+	selfHosted := round2(rawSelfHosted)
 	cmp := LLMCostComparison{
 		ProjectedMonthlyTokens: tokens,
 		ProjectedMonthlyCalls:  calls,
@@ -330,7 +336,7 @@ func (c *CostCalculator) CompareLLMPricing(tokens, calls int64) LLMCostCompariso
 	// Breakeven token volume (undefined when per-token tokens are free).
 	if c.costs.LLMPer1KTokensUSD > 0 {
 		callOverhead := float64(calls) * c.costs.LLMPerCallUSD
-		tokenBudget := selfHosted - callOverhead
+		tokenBudget := rawSelfHosted - callOverhead
 		if tokenBudget > 0 {
 			cmp.BreakevenTokens = int64(math.Round(tokenBudget * 1000 / c.costs.LLMPer1KTokensUSD))
 		}

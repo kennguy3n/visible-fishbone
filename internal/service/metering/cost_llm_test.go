@@ -158,6 +158,32 @@ func TestCompareLLMPricingFreeTokens(t *testing.T) {
 	}
 }
 
+// TestCompareLLMPricingBreakevenUsesRawCost pins the breakeven to the
+// *unrounded* self-hosted cost. With a sub-cent monthly cost the
+// displayed figure is cent-rounded, but the crossover token volume
+// must be derived from the exact cost — otherwise it drifts by up to
+// ~half a cent's worth of tokens. Here $300.336/mo at $0.002/1K
+// tokens breaks even at 150,168,000 tokens; using the rounded $300.34
+// would wrongly report 150,170,000.
+func TestCompareLLMPricingBreakevenUsesRawCost(t *testing.T) {
+	costs := DefaultUnitCosts
+	costs.LLMSelfHostedPerMonthUSD = 300.336
+	c := NewCostCalculator(costs)
+
+	cmp := c.CompareLLMPricing(150_000_000, 0)
+
+	// Displayed cost is cent-rounded.
+	if !approx(cmp.SelfHostedMonthlyUSD, 300.34) {
+		t.Errorf("self-hosted displayed = %v, want 300.34", cmp.SelfHostedMonthlyUSD)
+	}
+	// Breakeven is computed from the raw 300.336, not the rounded 300.34.
+	const wantBreakeven = 150_168_000
+	if cmp.BreakevenTokens != wantBreakeven {
+		t.Errorf("breakeven = %d, want %d (must use raw self-hosted cost, not cent-rounded)",
+			cmp.BreakevenTokens, wantBreakeven)
+	}
+}
+
 // TestLLMPricingModelValid covers the small Valid helper.
 func TestLLMPricingModelValid(t *testing.T) {
 	for _, m := range []LLMPricingModel{LLMPricingPerToken, LLMPricingSelfHosted} {

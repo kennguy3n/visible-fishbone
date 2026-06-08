@@ -597,7 +597,21 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 	// rate so the hot-path writer can promote it to a ClickHouse
 	// column and analytics can de-bias by 1/SampleRate. A nil
 	// sampler keeps everything at rate 1.0 (prior behaviour).
-	if w.sampler != nil {
+	//
+	// CRITICAL: only first deliveries are sampled. A drop is Ack'd
+	// and never redelivered, so any redelivery (NumDelivered > 1) is
+	// an event the sampler already *admitted* on an earlier delivery
+	// and that is now being retried after a transient downstream
+	// failure (e.g. a hot-write error Nak'd below, before the dedup
+	// ring records it). Re-running the sampler on that retry would
+	// re-evaluate it against the *current* keep probability, which
+	// can be lower if the tenant's rate rose in the interim — so the
+	// already-admitted event could fall below the new threshold and
+	// be silently dropped, never written at all (the dedup ring only
+	// catches events that reached a successful hot write, so it
+	// cannot save it). Sampling once, on first delivery, makes the
+	// keep/drop decision stable for the lifetime of the message.
+	if w.sampler != nil && !isRedelivery(msg) {
 		keep, sampleRate := w.sampler.Decide(ctx, env.TenantID, env.EventID)
 		if !keep {
 			s.metrics.Sampled.Add(1)
@@ -775,6 +789,24 @@ func (s *Service) deliveryExhausted(msg jetstream.Msg) bool {
 		return false
 	}
 	return md.NumDelivered >= hotPathMaxDeliver
+}
+
+// isRedelivery reports whether this is a redelivery (a second or
+// later delivery attempt) of the message. NumDelivered is 1-based,
+// so the first delivery is 1 and any value above 1 is a redelivery.
+//
+// Used by the sampling gate to sample only first deliveries: an
+// event the sampler already admitted must not be re-evaluated (and
+// possibly dropped) on a retry. A message without metadata
+// (synthetic test message, or a client that strips metadata) is
+// treated as a first delivery so sampling still applies — matching
+// deliveryExhausted's "no metadata = safer default" convention.
+func isRedelivery(msg jetstream.Msg) bool {
+	md, err := msg.Metadata()
+	if err != nil || md == nil {
+		return false
+	}
+	return md.NumDelivered > 1
 }
 
 // routeHotWriteFailureToDLQ publishes a hot-write-exhausted message
