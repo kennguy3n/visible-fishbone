@@ -55,7 +55,6 @@ const RECOMMENDED: Record<string, string> = {
 
 function AlertsInner({ tenantId }: { tenantId: string }) {
   const qc = useQueryClient();
-  const listKey = getListAlertsQueryKey(tenantId, undefined);
   const list = useListAlerts(tenantId, undefined);
   const correlations = useAiListCorrelations(tenantId, undefined, {
     query: { retry: false },
@@ -71,13 +70,27 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
   // alert that failed (by restoring its prior `state`) rather than restoring a
   // whole-list snapshot, so a failed action can't clobber other alerts'
   // in-flight optimistic updates when several are actioned in quick succession.
+  //
+  // The cache key is derived from each callback's own `tenantId` variable
+  // rather than a render-closure constant: hook-level mutation callbacks run
+  // with the latest render's closure, so if the operator switched tenant while
+  // an action was in flight, a closure key would patch/roll back/invalidate the
+  // wrong tenant's cache. Keying off the variable the mutation was fired with
+  // keeps every step pinned to the tenant the action actually targeted.
   const optimistic = (next: typeof AlertState[keyof typeof AlertState]) => ({
-    onMutate: async ({ alertId }: { alertId: string }) => {
-      await qc.cancelQueries({ queryKey: listKey });
+    onMutate: async ({
+      tenantId,
+      alertId,
+    }: {
+      tenantId: string;
+      alertId: string;
+    }) => {
+      const key = getListAlertsQueryKey(tenantId, undefined);
+      await qc.cancelQueries({ queryKey: key });
       const prevState = qc
-        .getQueryData<ListAlerts200>(listKey)
+        .getQueryData<ListAlerts200>(key)
         ?.items?.find((a) => a.id === alertId)?.state;
-      qc.setQueryData<ListAlerts200>(listKey, (old) =>
+      qc.setQueryData<ListAlerts200>(key, (old) =>
         old
           ? {
               ...old,
@@ -91,11 +104,12 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
     },
     onError: (
       _e: unknown,
-      { alertId }: { tenantId: string; alertId: string },
+      { tenantId, alertId }: { tenantId: string; alertId: string },
       ctx: { prevState?: Alert["state"] } | undefined,
     ) => {
       if (ctx?.prevState !== undefined) {
-        qc.setQueryData<ListAlerts200>(listKey, (old) =>
+        const key = getListAlertsQueryKey(tenantId, undefined);
+        qc.setQueryData<ListAlerts200>(key, (old) =>
           old
             ? {
                 ...old,
@@ -108,7 +122,14 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
       }
       toast.error("Action failed", "The alert could not be updated.");
     },
-    onSettled: () => qc.invalidateQueries({ queryKey: listKey }),
+    onSettled: (
+      _d: unknown,
+      _e: unknown,
+      { tenantId }: { tenantId: string; alertId: string },
+    ) =>
+      qc.invalidateQueries({
+        queryKey: getListAlertsQueryKey(tenantId, undefined),
+      }),
   });
 
   const ack = useAcknowledgeAlert({
