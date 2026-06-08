@@ -47,7 +47,44 @@ func (r *AuditLogRepository) Append(ctx context.Context, tenantID uuid.UUID, e r
 	return out, nil
 }
 
+// AppendGlobal records a platform-scoped audit row (TenantID =
+// uuid.Nil). It mirrors the Postgres impl: the row is persisted but
+// is never returned by the per-tenant List (which filters on a
+// matching, non-nil TenantID) — only ListGlobal returns it.
+func (r *AuditLogRepository) AppendGlobal(ctx context.Context, e repository.AuditEntry) (repository.AuditEntry, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.AuditEntry{}, err
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if strings.TrimSpace(e.Action) == "" || strings.TrimSpace(e.ResourceType) == "" {
+		return repository.AuditEntry{}, repository.ErrInvalidArgument
+	}
+	if e.ID == uuid.Nil {
+		e.ID = uuid.New()
+	}
+	e.TenantID = uuid.Nil
+	if e.CreatedAt.IsZero() {
+		e.CreatedAt = r.s.clock()
+	}
+	e.Details = cloneJSON(e.Details)
+	r.s.auditEntries[e.ID] = e
+	out := e
+	out.Details = cloneJSON(e.Details)
+	return out, nil
+}
+
 func (r *AuditLogRepository) List(ctx context.Context, tenantID uuid.UUID, filter repository.AuditFilter, page repository.Page) (repository.PageResult[repository.AuditEntry], error) {
+	return r.list(ctx, tenantID, filter, page)
+}
+
+// ListGlobal returns the platform-scoped (TenantID == uuid.Nil) rows
+// written by AppendGlobal.
+func (r *AuditLogRepository) ListGlobal(ctx context.Context, filter repository.AuditFilter, page repository.Page) (repository.PageResult[repository.AuditEntry], error) {
+	return r.list(ctx, uuid.Nil, filter, page)
+}
+
+func (r *AuditLogRepository) list(ctx context.Context, tenantID uuid.UUID, filter repository.AuditFilter, page repository.Page) (repository.PageResult[repository.AuditEntry], error) {
 	if err := errCtxIfNeeded(ctx); err != nil {
 		return repository.PageResult[repository.AuditEntry]{}, err
 	}

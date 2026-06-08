@@ -379,15 +379,12 @@ func TestDemotionEngine_GlobalSignal(t *testing.T) {
 	}
 }
 
-// captureAudit is a test-only AuditLogRepository that records
-// every Append call, including the ones the Postgres + memory
-// audit_log impls reject because they enforce a NOT-NULL
-// tenant_id. Global app-catalog mutations (CreateApp,
-// UpdateApp, SyncUpdateApp, DeleteApp) write with tenantID =
-// uuid.Nil; we use this capture in tests so the audit-emission
-// invariant is verifiable without depending on the schema
-// extension that would let global audit rows land in the real
-// audit_log table.
+// captureAudit is a test-only AuditLogRepository that records every
+// Append and AppendGlobal call. Global app-catalog mutations
+// (CreateApp, UpdateApp, SyncUpdateApp, DeleteApp) go through
+// AppendGlobal (tenant_id IS NULL in the real impls); capturing both
+// paths here lets the audit-emission invariants be verified without a
+// live Postgres.
 type captureAudit struct {
 	entries []repository.AuditEntry
 }
@@ -401,7 +398,20 @@ func (c *captureAudit) Append(_ context.Context, tenantID uuid.UUID, e repositor
 	return e, nil
 }
 
+func (c *captureAudit) AppendGlobal(_ context.Context, e repository.AuditEntry) (repository.AuditEntry, error) {
+	e.TenantID = uuid.Nil
+	if e.ID == uuid.Nil {
+		e.ID = uuid.New()
+	}
+	c.entries = append(c.entries, e)
+	return e, nil
+}
+
 func (c *captureAudit) List(context.Context, uuid.UUID, repository.AuditFilter, repository.Page) (repository.PageResult[repository.AuditEntry], error) {
+	return repository.PageResult[repository.AuditEntry]{Items: c.entries}, nil
+}
+
+func (c *captureAudit) ListGlobal(context.Context, repository.AuditFilter, repository.Page) (repository.PageResult[repository.AuditEntry], error) {
 	return repository.PageResult[repository.AuditEntry]{Items: c.entries}, nil
 }
 

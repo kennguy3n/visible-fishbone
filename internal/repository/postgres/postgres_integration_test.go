@@ -540,6 +540,60 @@ func TestPostgres_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("Audit_GlobalRows", func(t *testing.T) {
+		tr := store.NewTenantRepository()
+		ar := store.NewAuditLogRepository()
+		tnt := mustTenant(t, tr)
+
+		// A global (tenant-less) row, e.g. an app_registry catalog sync.
+		g, err := ar.AppendGlobal(bgCtx(), repository.AuditEntry{
+			Action: "app.synced", ResourceType: "app_registry",
+			Details: json.RawMessage(`{"source":"endpoints.office.com"}`),
+		})
+		if err != nil {
+			t.Fatalf("append global: %v", err)
+		}
+		if g.TenantID != uuid.Nil {
+			t.Errorf("global row TenantID = %s, want uuid.Nil", g.TenantID)
+		}
+
+		// A tenant-scoped row for the same tenant.
+		if _, err := ar.Append(bgCtx(), tnt.ID, repository.AuditEntry{
+			Action: "app_registry.override_created", ResourceType: "app_registry",
+		}); err != nil {
+			t.Fatalf("append tenant: %v", err)
+		}
+
+		// ListGlobal sees the global row but never the tenant row.
+		gl, err := ar.ListGlobal(bgCtx(), repository.AuditFilter{ResourceType: "app_registry"}, repository.Page{Limit: 100})
+		if err != nil {
+			t.Fatalf("list global: %v", err)
+		}
+		if len(gl.Items) != 1 || gl.Items[0].ID != g.ID {
+			t.Fatalf("ListGlobal = %d rows, want exactly the global row %s", len(gl.Items), g.ID)
+		}
+		for _, e := range gl.Items {
+			if e.TenantID != uuid.Nil {
+				t.Errorf("ListGlobal returned tenant-scoped row %s (tenant %s)", e.ID, e.TenantID)
+			}
+		}
+
+		// The tenant's List sees its own row but NOT the global row —
+		// RLS confines NULL-tenant rows to system-role sessions.
+		tl, err := ar.List(bgCtx(), tnt.ID, repository.AuditFilter{ResourceType: "app_registry"}, repository.Page{Limit: 100})
+		if err != nil {
+			t.Fatalf("list tenant: %v", err)
+		}
+		for _, e := range tl.Items {
+			if e.ID == g.ID {
+				t.Fatalf("tenant List leaked global row %s", g.ID)
+			}
+			if e.TenantID != tnt.ID {
+				t.Errorf("tenant List returned foreign row %s (tenant %s)", e.ID, e.TenantID)
+			}
+		}
+	})
+
 	t.Run("Policy_Graph_Bundle", func(t *testing.T) {
 		tr := store.NewTenantRepository()
 		pr := store.NewPolicyRepository()
