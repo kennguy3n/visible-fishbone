@@ -1102,6 +1102,47 @@ func buildRouter(
 	)
 	popHandler := handler.NewPoPHandler(popSvc, rbacSvc)
 
+	// Workstream 10 — per-tenant rate limiter: a fair per-tenant
+	// request budget enforced AFTER auth so one noisy tenant cannot
+	// exhaust shared control-plane capacity for the rest of the fleet.
+	// It is a process-lifetime singleton; its idle-bucket janitor lives
+	// as long as the router, so there is no separate Close hook.
+	var tenantRateLimiter *middleware.TenantRateLimiter
+	if cfg.TenantRateLimit.Enabled {
+		tenantRateLimiter = middleware.NewTenantRateLimiter(
+			cfg.TenantRateLimit,
+			tenant.NewTierResolver(tenantRepo),
+			logger,
+		)
+	}
+	// Workstream 10 — brute-force guards: IP-keyed cooldowns on
+	// repeated credential-validation failures (auth) and failed device
+	// enrolments. Like the limiter above these are process-lifetime
+	// singletons.
+	var authBruteForce, enrollBruteForce *middleware.AttemptLimiter
+	if cfg.BruteForce.Enabled {
+		authBruteForce, err = middleware.NewAttemptLimiter(middleware.AttemptLimiterConfig{
+			MaxFailures:     cfg.BruteForce.AuthMaxFailures,
+			Cooldown:        cfg.BruteForce.AuthCooldown,
+			CleanupInterval: cfg.BruteForce.CleanupInterval,
+			IdleTTL:         cfg.BruteForce.IdleTTL,
+			TrustedProxies:  cfg.BruteForce.TrustedProxies,
+		})
+		if err != nil {
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build auth brute-force guard: %w", err)
+		}
+		enrollBruteForce, err = middleware.NewAttemptLimiter(middleware.AttemptLimiterConfig{
+			MaxFailures:     cfg.BruteForce.EnrollMaxFailures,
+			Cooldown:        cfg.BruteForce.EnrollCooldown,
+			CleanupInterval: cfg.BruteForce.CleanupInterval,
+			IdleTTL:         cfg.BruteForce.IdleTTL,
+			TrustedProxies:  cfg.BruteForce.TrustedProxies,
+		})
+		if err != nil {
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build enroll brute-force guard: %w", err)
+		}
+	}
+
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:  cfg,
 		Logger:  logger,
@@ -1110,6 +1151,9 @@ func buildRouter(
 		Devices: func() *handler.DeviceHandler {
 			h := handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL)
 			h.SetEnrollmentService(enrollmentSvc)
+			// Brute-force protection + audit logging on the public
+			// device-enrolment endpoint (Workstream 10).
+			h.SetBruteForceGuard(enrollBruteForce, logger)
 			return h
 		}(),
 		RBAC:             handler.NewRBACHandler(rbacSvc),
@@ -1128,22 +1172,24 @@ func buildRouter(
 			h.SetInlineService(inlineCASBSvc)
 			return h
 		}(),
-		MSP:           handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
-		AI:            aiHandler,
-		SCIM:          handler.NewSCIMHandler(scimSvc),
-		Compliance:    complianceHandler,
-		Playbook:      playbookHandler,
-		Troubleshoot:  troubleshootHandler,
-		OIDC:          oidcHandler,
-		AdminSSO:      adminSSOHandler,
-		IAMCore:       iamCoreValidator,
-		IAMCoreTenant: iamCoreTenantResolver,
-		Mobile:        handler.NewMobileHandler(identitySvc),
-		Metering:      meteringHandler,
-		PoP:           popHandler,
-		Sandbox:       handler.NewSandboxHandler(sandboxSvc),
-		RBI:           handler.NewRBIHandler(rbiSvc),
-		APIKeyLookup:  apiKeySvc,
+		MSP:               handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
+		AI:                aiHandler,
+		SCIM:              handler.NewSCIMHandler(scimSvc),
+		Compliance:        complianceHandler,
+		Playbook:          playbookHandler,
+		Troubleshoot:      troubleshootHandler,
+		OIDC:              oidcHandler,
+		AdminSSO:          adminSSOHandler,
+		IAMCore:           iamCoreValidator,
+		IAMCoreTenant:     iamCoreTenantResolver,
+		TenantRateLimiter: tenantRateLimiter,
+		AuthBruteForce:    authBruteForce,
+		Mobile:            handler.NewMobileHandler(identitySvc),
+		Metering:          meteringHandler,
+		PoP:               popHandler,
+		Sandbox:           handler.NewSandboxHandler(sandboxSvc),
+		RBI:               handler.NewRBIHandler(rbiSvc),
+		APIKeyLookup:      apiKeySvc,
 		// Device kill-switch for stateless mobile session JWTs: a
 		// token bound to a suspended/deleted device is refused by the
 		// auth middleware on every endpoint, not just self-service.

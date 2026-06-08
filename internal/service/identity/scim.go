@@ -246,6 +246,13 @@ func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter 
 	if count <= 0 {
 		count = repository.DefaultPageLimit
 	}
+	// Cap the client-requested page size to the platform maximum so a
+	// caller cannot request an unbounded page (RFC 7644 §3.4.2 permits
+	// the server to constrain count); keeps SCIM consistent with the
+	// rest of the API's MaxPageLimit ceiling.
+	if count > repository.MaxPageLimit {
+		count = repository.MaxPageLimit
+	}
 
 	var parsed *SCIMFilter
 	if filter != "" {
@@ -494,6 +501,11 @@ func (s *SCIMService) ListGroups(ctx context.Context, tenantID uuid.UUID, filter
 	}
 	if count <= 0 {
 		count = repository.DefaultPageLimit
+	}
+	// Cap the client-requested page size to the platform maximum (see
+	// ListUsers).
+	if count > repository.MaxPageLimit {
+		count = repository.MaxPageLimit
 	}
 
 	allMatching := make([]any, 0, len(roles))

@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 )
@@ -30,6 +33,15 @@ type DeviceHandler struct {
 	// claimTokenTTL is the default lifetime of a claim token when
 	// the request body omits it.
 	claimTokenTTL time.Duration
+
+	// enrollGuard, when set, throttles failed device enrolments per
+	// source IP on the public POST /api/v1/enroll endpoint: after a
+	// threshold of failed claim-token redemptions one IP is locked out
+	// for a cooldown. Nil disables the lockout.
+	enrollGuard *middleware.AttemptLimiter
+	// logger, when set, records failed enrolment attempts (source IP,
+	// tenant, device, reason). Nil suppresses the log.
+	logger *slog.Logger
 }
 
 // NewDeviceHandler wires the handler.
@@ -43,6 +55,14 @@ func NewDeviceHandler(identitySvc *identity.Service, devices repository.DeviceRe
 // SetEnrollmentService attaches the enrollment service.
 func (h *DeviceHandler) SetEnrollmentService(es *identity.EnrollmentService) {
 	h.enrollment = es
+}
+
+// SetBruteForceGuard attaches the IP-keyed brute-force guard and
+// logger used to throttle and audit failed device enrolments on the
+// public enroll endpoint. Either argument may be nil.
+func (h *DeviceHandler) SetBruteForceGuard(guard *middleware.AttemptLimiter, logger *slog.Logger) {
+	h.enrollGuard = guard
+	h.logger = logger
 }
 
 // Register attaches routes.
@@ -298,6 +318,20 @@ func (h *DeviceHandler) enrollDevice(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusNotImplemented, "not_implemented", "enrollment service not configured")
 		return
 	}
+	// Brute-force gate: a flood of failed claim-token redemptions from
+	// one IP (e.g. guessing claim tokens) trips a cooldown before any
+	// crypto runs. Malformed requests below are NOT counted — only a
+	// failed redemption, which is the actual credential check.
+	var ip string
+	if h.enrollGuard != nil {
+		ip = h.enrollGuard.ClientIP(r)
+		if retryAfter, blocked := h.enrollGuard.Blocked(ip); blocked {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			WriteError(w, http.StatusTooManyRequests, "too_many_failed_enrollments",
+				"too many failed enrollment attempts; try again later")
+			return
+		}
+	}
 	var req EnrollDeviceRequest
 	if !DecodeJSON(w, r, &req) {
 		return
@@ -324,8 +358,12 @@ func (h *DeviceHandler) enrollDevice(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.enrollment.RedeemClaimToken(r.Context(), tenantID, deviceID, req.ClaimToken, pubKeyBytes)
 	if err != nil {
+		h.recordEnrollFailure(ip, tenantID, deviceID, err)
 		WriteRepositoryError(w, err)
 		return
+	}
+	if h.enrollGuard != nil && ip != "" {
+		h.enrollGuard.RecordSuccess(ip)
 	}
 	WriteJSON(w, http.StatusCreated, EnrollDeviceResponse{
 		DeviceID:  result.Enrollment.DeviceID.String(),
@@ -334,6 +372,31 @@ func (h *DeviceHandler) enrollDevice(w http.ResponseWriter, r *http.Request) {
 		CertPEM:   result.Certificate.CertPEM,
 		ExpiresAt: result.Certificate.ExpiresAt.Format(time.RFC3339Nano),
 	})
+}
+
+// recordEnrollFailure feeds a failed claim-token redemption to the
+// brute-force guard (when configured) and logs it. Only genuine
+// redemption failures reach here — malformed requests are rejected
+// earlier and never counted, so a client sending bad JSON cannot lock
+// out its own IP.
+func (h *DeviceHandler) recordEnrollFailure(ip string, tenantID, deviceID uuid.UUID, cause error) {
+	if h.enrollGuard != nil && ip != "" {
+		h.enrollGuard.RecordFailure(ip)
+	}
+	if h.logger != nil {
+		attrs := []any{
+			slog.String("event", "enroll_failed"),
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("device_id", deviceID.String()),
+		}
+		if ip != "" {
+			attrs = append(attrs, slog.String("source_ip", ip))
+		}
+		if cause != nil {
+			attrs = append(attrs, slog.String("reason", cause.Error()))
+		}
+		h.logger.Warn("device enrollment failed", attrs...)
+	}
 }
 
 // RefreshCertResponse is the JSON response for cert refresh.

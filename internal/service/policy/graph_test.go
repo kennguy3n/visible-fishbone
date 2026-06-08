@@ -218,3 +218,43 @@ func TestEncodeRules_Empty(t *testing.T) {
 		t.Errorf("nil → %s, want []", out)
 	}
 }
+
+func TestValidate_RejectsOversizedRule(t *testing.T) {
+	t.Parallel()
+	// A rule whose Extra passthrough embeds a blob larger than the
+	// per-rule cap must be rejected, so a tenant cannot smuggle a large
+	// payload that would be re-emitted into every compiled bundle.
+	blob := strings.Repeat("x", MaxRuleBytes+1)
+	huge, err := json.Marshal(blob) // a JSON string > MaxRuleBytes
+	if err != nil {
+		t.Fatalf("marshal blob: %v", err)
+	}
+	g := Graph{
+		DefaultAction: VerbDeny,
+		Rules: []Rule{{
+			ID: "huge", Domain: DomainNGFW, Verb: VerbDeny,
+			Extra: map[string]json.RawMessage{"blob": json.RawMessage(huge)},
+		}},
+	}
+	verr := g.Validate()
+	if verr == nil {
+		t.Fatal("oversized rule accepted; want rejection")
+	}
+	if !errors.Is(verr, repository.ErrInvalidArgument) {
+		t.Errorf("error = %v, want ErrInvalidArgument", verr)
+	}
+}
+
+func TestValidate_AllowsNormalSizedRule(t *testing.T) {
+	t.Parallel()
+	g := Graph{
+		DefaultAction: VerbDeny,
+		Rules: []Rule{{
+			ID: "ok", Domain: DomainNGFW, Verb: VerbDeny,
+			Description: "a perfectly ordinary enforcement rule",
+		}},
+	}
+	if err := g.Validate(); err != nil {
+		t.Fatalf("normal rule rejected: %v", err)
+	}
+}

@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -468,4 +469,50 @@ func TestSCIMServiceProviderConfig(t *testing.T) {
 	// Just test it doesn't panic — handler test is more comprehensive.
 	svc, _ := newSCIMService(t)
 	_ = svc
+}
+
+func TestSCIMListUsersClampsCount(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	ctx := context.Background()
+	// Seed more than MaxPageLimit users so an unbounded count would
+	// otherwise return them all in one page.
+	for i := 0; i < repository.MaxPageLimit+5; i++ {
+		if _, err := svc.CreateUser(ctx, tid, SCIMUser{
+			UserName: fmt.Sprintf("user-%03d@example.com", i),
+		}); err != nil {
+			t.Fatalf("seed user %d: %v", i, err)
+		}
+	}
+	// Request a hostile page size; the service must clamp to MaxPageLimit.
+	list, err := svc.ListUsers(ctx, tid, "", 1, 1_000_000)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if list.ItemsPerPage > repository.MaxPageLimit {
+		t.Errorf("ItemsPerPage = %d, want <= %d (count not clamped)", list.ItemsPerPage, repository.MaxPageLimit)
+	}
+	if len(list.Resources) > repository.MaxPageLimit {
+		t.Errorf("len(Resources) = %d, want <= %d", len(list.Resources), repository.MaxPageLimit)
+	}
+}
+
+func TestSCIMListGroupsClampsCount(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	ctx := context.Background()
+	for i := 0; i < repository.MaxPageLimit+5; i++ {
+		if _, err := svc.CreateGroup(ctx, tid, SCIMGroup{
+			DisplayName: fmt.Sprintf("group-%03d", i),
+		}); err != nil {
+			t.Fatalf("seed group %d: %v", i, err)
+		}
+	}
+	list, err := svc.ListGroups(ctx, tid, "", 1, 1_000_000)
+	if err != nil {
+		t.Fatalf("ListGroups: %v", err)
+	}
+	if list.ItemsPerPage > repository.MaxPageLimit {
+		t.Errorf("ItemsPerPage = %d, want <= %d (count not clamped)", list.ItemsPerPage, repository.MaxPageLimit)
+	}
 }

@@ -286,6 +286,15 @@ func WithUserIDForTest(ctx context.Context, id uuid.UUID) context.Context {
 	return withUserID(ctx, id)
 }
 
+// WithTenantIDForTest stamps the tenant UUID onto the context for
+// tests that need to simulate a tenant-scoped request without
+// spinning up the full Auth / RequireTenant middleware. Production
+// code goes through those (which call the unexported withTenantID),
+// not through this helper.
+func WithTenantIDForTest(ctx context.Context, id uuid.UUID) context.Context {
+	return withTenantID(ctx, id)
+}
+
 // withAuthSubject stamps the auth subject (JWT sub or key name).
 func withAuthSubject(ctx context.Context, sub string) context.Context {
 	return context.WithValue(ctx, keyAuthSubject, sub)

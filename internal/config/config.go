@@ -71,6 +71,8 @@ type Config struct {
 	NATS               NATS
 	Postgres           Postgres
 	RateLimit          RateLimit
+	TenantRateLimit    TenantRateLimit
+	BruteForce         BruteForce
 	CORS               CORS
 	Webhook            Webhook
 	Integration        Integration
@@ -649,6 +651,77 @@ type RateLimit struct {
 	TrustedProxies string
 }
 
+// TenantRateLimit configures the per-TENANT API rate limiter that
+// runs after authentication (so the resolved tenant identity is in
+// context). It is distinct from the per-IP RateLimit above: that one
+// sheds raw network-level floods before any crypto runs, this one
+// enforces a fair per-tenant request budget that scales with the
+// tenant's billing tier, so one noisy tenant cannot exhaust shared
+// control-plane capacity for the other 5K tenants.
+//
+// The limiter is a per-tenant token bucket whose capacity is the
+// tier's per-minute allowance and whose refill rate is that
+// allowance spread evenly across the minute. Every response carries
+// the standard X-RateLimit-Limit / X-RateLimit-Remaining /
+// X-RateLimit-Reset headers; a request that drains the bucket gets a
+// 429 with a Retry-After.
+type TenantRateLimit struct {
+	// Enabled gates the middleware. When false it is a pass-through.
+	Enabled bool
+	// StandardPerMinute is the request budget (requests/minute) for
+	// the standard tier (TenantTierStarter). Default 100.
+	StandardPerMinute int
+	// PremiumPerMinute is the request budget (requests/minute) for the
+	// premium tiers (TenantTierProfessional, TenantTierEnterprise).
+	// Default 500.
+	PremiumPerMinute int
+	// TierTTL is how long a tenant's resolved tier is cached on its
+	// bucket before being re-resolved, so a tier upgrade/downgrade
+	// takes effect without a per-request tenant lookup. Default 1m.
+	TierTTL time.Duration
+	// CleanupInterval is the period of the idle-bucket eviction loop.
+	// Default 1m.
+	CleanupInterval time.Duration
+	// IdleTTL is how long an idle tenant bucket is retained before
+	// eviction, bounding the map under a churn of one-shot tenants.
+	// Default 10m.
+	IdleTTL time.Duration
+}
+
+// BruteForce configures the IP-keyed brute-force protection applied
+// to credential-validation failures (the auth middleware) and to
+// failed device enrolments (the public enrolment endpoint). After a
+// threshold of failures from one source IP, that IP is put into a
+// fixed cooldown during which further attempts are rejected with 429
+// + Retry-After. A successful attempt clears the IP's counter.
+type BruteForce struct {
+	// Enabled gates both guards. When false they are pass-throughs.
+	Enabled bool
+	// AuthMaxFailures is the number of credential-validation failures
+	// from one IP that trips the auth cooldown. Default 5.
+	AuthMaxFailures int
+	// AuthCooldown is how long an IP is locked out after tripping the
+	// auth threshold. Default 30s.
+	AuthCooldown time.Duration
+	// EnrollMaxFailures is the number of failed device enrolments from
+	// one IP that trips the enrolment cooldown. Default 10.
+	EnrollMaxFailures int
+	// EnrollCooldown is how long an IP is locked out after tripping the
+	// enrolment threshold. Default 5m.
+	EnrollCooldown time.Duration
+	// CleanupInterval is the period of the idle-entry eviction loop.
+	// Default 1m.
+	CleanupInterval time.Duration
+	// IdleTTL is how long an idle IP entry is retained before eviction.
+	// Default 10m.
+	IdleTTL time.Duration
+	// TrustedProxies mirrors RateLimit.TrustedProxies: the
+	// comma-separated reverse-proxy CIDR list used to derive the real
+	// client IP from X-Forwarded-For. When empty, r.RemoteAddr is used
+	// verbatim. Defaults to the same value as RATE_LIMIT_TRUSTED_PROXIES.
+	TrustedProxies string
+}
+
 // CORS configures the cross-origin policy applied to every HTTP route.
 //
 // AllowedOrigins is read from the CORS_ALLOWED_ORIGINS environment
@@ -1128,6 +1201,24 @@ func Load() (Config, error) {
 			TrustedProxies:  getStr("RATE_LIMIT_TRUSTED_PROXIES", ""),
 			// Enabled is populated by the strictBools table below.
 		},
+		TenantRateLimit: TenantRateLimit{
+			TierTTL:         getDuration("TENANT_RATE_LIMIT_TIER_TTL", time.Minute),
+			CleanupInterval: getDuration("TENANT_RATE_LIMIT_CLEANUP_INTERVAL", time.Minute),
+			IdleTTL:         getDuration("TENANT_RATE_LIMIT_IDLE_TTL", 10*time.Minute),
+			// Enabled / StandardPerMinute / PremiumPerMinute are
+			// populated by the strict tables below so a typo fails
+			// boot rather than silently weakening the limit.
+		},
+		BruteForce: BruteForce{
+			CleanupInterval: getDuration("BRUTEFORCE_CLEANUP_INTERVAL", time.Minute),
+			IdleTTL:         getDuration("BRUTEFORCE_IDLE_TTL", 10*time.Minute),
+			// TrustedProxies defaults to the per-IP limiter's list so
+			// both derive the client IP identically without a second
+			// env var, but can be overridden independently.
+			TrustedProxies: getStr("BRUTEFORCE_TRUSTED_PROXIES", getStr("RATE_LIMIT_TRUSTED_PROXIES", "")),
+			// Enabled / *MaxFailures / *Cooldown are populated by the
+			// strict tables below.
+		},
 		CORS: CORS{
 			AllowedOrigins: parseCSV(getStr("CORS_ALLOWED_ORIGINS", "")),
 			AllowedMethods: parseCSV(getStr("CORS_ALLOWED_METHODS", "GET,POST,PUT,PATCH,DELETE,OPTIONS")),
@@ -1256,6 +1347,15 @@ func Load() (Config, error) {
 		{"NATS_FETCH_BATCH_SIZE", 50, &cfg.NATS.FetchBatchSize},
 		{"NATS_PUBLISH_RETRY_ATTEMPTS", 3, &cfg.NATS.PublishRetryAttempts},
 		{"RATE_LIMIT_BURST", 60, &cfg.RateLimit.Burst},
+		// Per-tenant API rate-limit budgets (requests/minute). Parsed
+		// strictly because a typo silently reverting to the default
+		// would weaken a load-bearing fairness/availability control.
+		{"TENANT_RATE_LIMIT_STANDARD_PER_MIN", 100, &cfg.TenantRateLimit.StandardPerMinute},
+		{"TENANT_RATE_LIMIT_PREMIUM_PER_MIN", 500, &cfg.TenantRateLimit.PremiumPerMinute},
+		// Brute-force thresholds. Parsed strictly so a typo cannot
+		// silently disable (revert) the lockout protections.
+		{"BRUTEFORCE_AUTH_MAX_FAILURES", 5, &cfg.BruteForce.AuthMaxFailures},
+		{"BRUTEFORCE_ENROLL_MAX_FAILURES", 10, &cfg.BruteForce.EnrollMaxFailures},
 		{"WEBHOOK_MAX_ATTEMPTS", 6, &cfg.Webhook.MaxAttempts},
 		{"WEBHOOK_BATCH_SIZE", 32, &cfg.Webhook.BatchSize},
 		// Round-4 of Devin Review on PR #41 (PR D): wire the
@@ -1320,6 +1420,10 @@ func Load() (Config, error) {
 		{"INTEGRATION_WORKER_PROCESSING_TIMEOUT", 5 * time.Minute, &cfg.Integration.ProcessingTimeout},
 		{"AUTH_ACCESS_TOKEN_TTL", time.Hour, &cfg.Auth.AccessTokenTTL},
 		{"AUTH_CLAIM_TOKEN_TTL", 24 * time.Hour, &cfg.Auth.ClaimTokenTTL},
+		// Brute-force cooldown windows. Parsed strictly so a typo
+		// cannot silently shorten (or zero) the lockout.
+		{"BRUTEFORCE_AUTH_COOLDOWN", 30 * time.Second, &cfg.BruteForce.AuthCooldown},
+		{"BRUTEFORCE_ENROLL_COOLDOWN", 5 * time.Minute, &cfg.BruteForce.EnrollCooldown},
 		{"CLICKHOUSE_FLUSH_INTERVAL", 2 * time.Second, &cfg.TelemetryAnalytics.ClickHouseFlushInterval},
 		{"S3_TELEMETRY_FLUSH_INTERVAL", 30 * time.Second, &cfg.TelemetryAnalytics.S3FlushInterval},
 		{"APP_REGISTRY_SYNC_INTERVAL", 24 * time.Hour, &cfg.AppRegistry.SyncInterval},
@@ -1373,6 +1477,8 @@ func Load() (Config, error) {
 		{"NATS_TLS_INSECURE", false, &cfg.NATS.TLSInsecure},
 		{"PG_PGBOUNCER_MODE", false, &cfg.Postgres.PgBouncerMode},
 		{"RATE_LIMIT_ENABLED", true, &cfg.RateLimit.Enabled},
+		{"TENANT_RATE_LIMIT_ENABLED", true, &cfg.TenantRateLimit.Enabled},
+		{"BRUTEFORCE_ENABLED", true, &cfg.BruteForce.Enabled},
 		{"CLICKHOUSE_TLS", false, &cfg.TelemetryAnalytics.ClickHouseTLS},
 		{"CLICKHOUSE_ENSURE_SCHEMA", true, &cfg.TelemetryAnalytics.ClickHouseEnsureSchema},
 		{"CLICKHOUSE_SHARDING", false, &cfg.TelemetryAnalytics.ClickHouseSharding},
@@ -1597,6 +1703,31 @@ func (c Config) validate() error {
 		}
 		if c.RateLimit.Burst <= 0 {
 			return fmt.Errorf("RATE_LIMIT_BURST must be > 0 when enabled, got %d", c.RateLimit.Burst)
+		}
+	}
+	if c.TenantRateLimit.Enabled {
+		if c.TenantRateLimit.StandardPerMinute <= 0 {
+			return fmt.Errorf("TENANT_RATE_LIMIT_STANDARD_PER_MIN must be > 0 when enabled, got %d", c.TenantRateLimit.StandardPerMinute)
+		}
+		if c.TenantRateLimit.PremiumPerMinute <= 0 {
+			return fmt.Errorf("TENANT_RATE_LIMIT_PREMIUM_PER_MIN must be > 0 when enabled, got %d", c.TenantRateLimit.PremiumPerMinute)
+		}
+		if c.TenantRateLimit.TierTTL <= 0 {
+			return fmt.Errorf("TENANT_RATE_LIMIT_TIER_TTL must be > 0 when enabled, got %v", c.TenantRateLimit.TierTTL)
+		}
+	}
+	if c.BruteForce.Enabled {
+		if c.BruteForce.AuthMaxFailures <= 0 {
+			return fmt.Errorf("BRUTEFORCE_AUTH_MAX_FAILURES must be > 0 when enabled, got %d", c.BruteForce.AuthMaxFailures)
+		}
+		if c.BruteForce.AuthCooldown <= 0 {
+			return fmt.Errorf("BRUTEFORCE_AUTH_COOLDOWN must be > 0 when enabled, got %v", c.BruteForce.AuthCooldown)
+		}
+		if c.BruteForce.EnrollMaxFailures <= 0 {
+			return fmt.Errorf("BRUTEFORCE_ENROLL_MAX_FAILURES must be > 0 when enabled, got %d", c.BruteForce.EnrollMaxFailures)
+		}
+		if c.BruteForce.EnrollCooldown <= 0 {
+			return fmt.Errorf("BRUTEFORCE_ENROLL_COOLDOWN must be > 0 when enabled, got %v", c.BruteForce.EnrollCooldown)
 		}
 	}
 	// WEBHOOK_MAX_ATTEMPTS is the total delivery-attempt budget
