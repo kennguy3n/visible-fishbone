@@ -137,6 +137,23 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 regex = "1"
 aho-corasick = "1"
 
+# YARA signature scanning for the SWG response-body malware engine
+# (`sng-swg::yara`). `yara-x` is VirusTotal's pure-Rust YARA
+# implementation; it is selected over the C `libyara` bindings so the
+# edge VM build stays free of a non-Rust toolchain dependency (the
+# same "no OpenSSL-FFI" posture cargo-deny enforces) and so the crate
+# cross-compiles cleanly for every target in the support matrix.
+# Default features are disabled to keep the dependency surface lean —
+# the built-in rules rely on raw string/hex/regex patterns plus the
+# pure-Rust `math` (entropy) and `hash` modules, none of which pull a
+# C dependency (`magic-module` would link libmagic and is left off).
+yara-x = { version = "1", default-features = false, features = [
+    "constant-folding",
+    "fast-regexp",
+    "math-module",
+    "hash-module",
+] }
+
 # Unicode NFC normalization for the DLP classifier: incoming content
 # is canonicalised before regex/keyword scanning so Arabic diacritics
 # and CJK full-/half-width variants compare equal to the patterns the

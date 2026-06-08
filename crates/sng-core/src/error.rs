@@ -158,6 +158,19 @@ pub enum ErrorCode {
     /// malformed body). The handler returns a 400 to Envoy and
     /// the request is denied via the proxy's failure-mode.
     SwgExtAuthzDecode,
+    /// YARA rule bundle failed Ed25519 signature verification.
+    SwgYaraBundleSignatureInvalid,
+    /// YARA rule bundle was signed with a key id the operator
+    /// trust store does not know about.
+    SwgYaraBundleSigningKeyUnknown,
+    /// YARA rule bundle version is older than or equal to the
+    /// installed bundle. Downgrade protection.
+    SwgYaraBundleStale,
+    /// YARA rule bundle body failed to decode.
+    SwgYaraBundleBodyDecode,
+    /// YARA rule text failed to compile; the staged bundle is
+    /// rejected and the live rule set is left untouched.
+    SwgYaraRuleCompile,
     /// Operator-issued `install` or `stop` on the SWG supervisor
     /// could not acquire the install serialisation lock within
     /// the configured `install_lock_timeout`. Distinct from
@@ -347,6 +360,11 @@ impl ErrorCode {
             Self::SwgCategoryBundleBodyDecode => "swg.category.bundle.body.decode",
             Self::SwgConfigValidate => "swg.config.validate",
             Self::SwgExtAuthzDecode => "swg.ext_authz.decode",
+            Self::SwgYaraBundleSignatureInvalid => "swg.yara.bundle.signature.invalid",
+            Self::SwgYaraBundleSigningKeyUnknown => "swg.yara.bundle.signing_key.unknown",
+            Self::SwgYaraBundleStale => "swg.yara.bundle.stale",
+            Self::SwgYaraBundleBodyDecode => "swg.yara.bundle.body.decode",
+            Self::SwgYaraRuleCompile => "swg.yara.rule.compile",
             Self::SwgInstallBusy => "swg.install.busy",
             Self::UpdaterManifestBodyDecode => "updater.manifest.body.decode",
             Self::UpdaterManifestSignatureInvalid => "updater.manifest.signature.invalid",
@@ -516,6 +534,20 @@ mod tests {
             ),
             (ErrorCode::SwgConfigValidate, "swg.config.validate"),
             (ErrorCode::SwgExtAuthzDecode, "swg.ext_authz.decode"),
+            (
+                ErrorCode::SwgYaraBundleSignatureInvalid,
+                "swg.yara.bundle.signature.invalid",
+            ),
+            (
+                ErrorCode::SwgYaraBundleSigningKeyUnknown,
+                "swg.yara.bundle.signing_key.unknown",
+            ),
+            (ErrorCode::SwgYaraBundleStale, "swg.yara.bundle.stale"),
+            (
+                ErrorCode::SwgYaraBundleBodyDecode,
+                "swg.yara.bundle.body.decode",
+            ),
+            (ErrorCode::SwgYaraRuleCompile, "swg.yara.rule.compile"),
             (ErrorCode::SwgInstallBusy, "swg.install.busy"),
             (
                 ErrorCode::UpdaterManifestBodyDecode,
