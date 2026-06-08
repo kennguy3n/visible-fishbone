@@ -173,6 +173,16 @@ func (l *TenantRateLimiter) consult(ctx context.Context, tenantID uuid.UUID) rat
 	// Refill rate: a full minute's budget spread evenly across 60s.
 	b.refill = b.capacity / 60.0
 
+	// A tier downgrade can leave more tokens banked than the new, smaller
+	// capacity allows. Clamp unconditionally — independent of elapsed time
+	// — so the X-RateLimit-Remaining <= X-RateLimit-Limit header invariant
+	// always holds, including when two consults for the same tenant land on
+	// the exact same clock tick (elapsed == 0) and the refill clamp below
+	// would otherwise be skipped.
+	if b.tokens > b.capacity {
+		b.tokens = b.capacity
+	}
+
 	// Refill based on elapsed wall-clock time, then clamp to capacity.
 	elapsed := now.Sub(b.last).Seconds()
 	if elapsed > 0 {
@@ -241,13 +251,29 @@ func (l *TenantRateLimiter) resolveTier(ctx context.Context, tenantID uuid.UUID,
 	// acceptable trade for low lock contention.
 	tier, err := l.resolver.ResolveTier(ctx, tenantID)
 	if err != nil {
+		// On a transient lookup failure (DB timeout, cancelled request
+		// context, etc.) prefer the tenant's last known tier over a blind
+		// downgrade. Re-throttling a paying Professional/Enterprise tenant
+		// to the Starter budget for a full TierTTL window because of a
+		// momentary blip is a worse outcome than briefly serving a slightly
+		// stale-but-correct tier. We only fall back to the Starter budget
+		// when we have no prior knowledge of this tenant (its first-ever
+		// request), which is the genuine fail-safe case — never grant a
+		// larger budget than we can justify.
+		fallback := repository.TenantTierStarter
+		l.mu.Lock()
+		if b, ok := l.buckets[tenantID]; ok {
+			fallback = b.tier
+		}
+		l.mu.Unlock()
 		if l.logger != nil {
-			l.logger.Warn("tenant tier resolve failed; using standard budget",
+			l.logger.Warn("tenant tier resolve failed; using last known tier",
 				slog.String("tenant_id", tenantID.String()),
+				slog.String("fallback_tier", string(fallback)),
 				slog.String("error", err.Error()),
 			)
 		}
-		return repository.TenantTierStarter
+		return fallback
 	}
 	return tier
 }

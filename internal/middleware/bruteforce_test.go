@@ -24,6 +24,34 @@ func newTestAttemptLimiter(t *testing.T, cfg AttemptLimiterConfig) (*AttemptLimi
 	return l, advance
 }
 
+// TestNewAttemptLimiter_RejectsNonPositiveConfig asserts the guard is
+// self-validating: a non-positive MaxFailures (would trip on the first
+// attempt) or Cooldown (would never lock out) is rejected at
+// construction rather than silently defeating the control.
+func TestNewAttemptLimiter_RejectsNonPositiveConfig(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		cfg  AttemptLimiterConfig
+	}{
+		{"zero max failures", AttemptLimiterConfig{MaxFailures: 0, Cooldown: time.Second}},
+		{"negative max failures", AttemptLimiterConfig{MaxFailures: -1, Cooldown: time.Second}},
+		{"zero cooldown", AttemptLimiterConfig{MaxFailures: 5, Cooldown: 0}},
+		{"negative cooldown", AttemptLimiterConfig{MaxFailures: 5, Cooldown: -time.Second}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			l, err := NewAttemptLimiter(tc.cfg)
+			if err == nil {
+				l.Close()
+				t.Fatalf("NewAttemptLimiter(%+v) = nil error, want validation error", tc.cfg)
+			}
+		})
+	}
+}
+
 func TestAttemptLimiter_LocksOutAfterThreshold(t *testing.T) {
 	t.Parallel()
 	l, _ := newTestAttemptLimiter(t, AttemptLimiterConfig{MaxFailures: 5, Cooldown: 30 * time.Second})

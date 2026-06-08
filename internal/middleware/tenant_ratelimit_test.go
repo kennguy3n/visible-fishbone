@@ -315,6 +315,46 @@ func TestTenantRateLimiter_ResolverErrorFallsBackToStandard(t *testing.T) {
 	}
 }
 
+// TestTenantRateLimiter_ResolverErrorKeepsLastKnownTier verifies that a
+// transient resolver failure does NOT downgrade a tenant that was
+// previously resolved at a higher tier: a momentary DB blip must not
+// re-throttle a paying Enterprise tenant to the Starter budget.
+func TestTenantRateLimiter_ResolverErrorKeepsLastKnownTier(t *testing.T) {
+	t.Parallel()
+	cfg := testTenantRLConfig()
+	cfg.StandardPerMinute = 2
+	cfg.PremiumPerMinute = 500
+	clock, advance := newTestClock(time.Unix(1_700_000_000, 0))
+
+	resolver := &fakeTierResolver{tier: repository.TenantTierEnterprise}
+	l := NewTenantRateLimiter(cfg, resolver, nil)
+	l.now = clock
+	defer l.Close()
+
+	tid := uuid.New()
+	h := l.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// First request resolves Enterprise → premium budget cached.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, tenantReq(tid))
+	if got := rec.Header().Get("X-RateLimit-Limit"); got != "500" {
+		t.Fatalf("initial X-RateLimit-Limit = %q, want 500 (premium)", got)
+	}
+
+	// Force a re-resolve past the TTL, but now the resolver errors.
+	advance(cfg.TierTTL + time.Second)
+	resolver.err = context.DeadlineExceeded
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, tenantReq(tid))
+	if got := rec.Header().Get("X-RateLimit-Limit"); got != "500" {
+		t.Fatalf("after resolver error X-RateLimit-Limit = %q, want 500 "+
+			"(last known premium tier kept, not downgraded)", got)
+	}
+}
+
 func TestTenantRateLimiter_EvictIdle(t *testing.T) {
 	t.Parallel()
 	cfg := testTenantRLConfig()

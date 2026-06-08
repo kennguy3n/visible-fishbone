@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -59,6 +60,19 @@ type attemptEntry struct {
 // NewAttemptLimiter constructs a guard and starts its cleanup
 // goroutine. Caller is responsible for invoking Close on shutdown.
 func NewAttemptLimiter(cfg AttemptLimiterConfig) (*AttemptLimiter, error) {
+	// Make the guard self-validating rather than relying solely on the
+	// config layer: a non-positive MaxFailures would trip the cooldown on
+	// the very first attempt (1 >= 0), turning the guard into a blanket
+	// lockout, and a non-positive Cooldown would never actually lock an IP
+	// out — both silently defeat the control, so reject them at
+	// construction (this also guards direct construction in tests/future
+	// callers that bypass config validation).
+	if cfg.MaxFailures <= 0 {
+		return nil, fmt.Errorf("attempt limiter: MaxFailures must be > 0, got %d", cfg.MaxFailures)
+	}
+	if cfg.Cooldown <= 0 {
+		return nil, fmt.Errorf("attempt limiter: Cooldown must be > 0, got %s", cfg.Cooldown)
+	}
 	proxies, err := parseProxyCIDRs(cfg.TrustedProxies)
 	if err != nil {
 		return nil, err
