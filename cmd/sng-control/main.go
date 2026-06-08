@@ -1351,7 +1351,7 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	// NewMultiFeed, leaving the regional-only behaviour. The logger
 	// surfaces partial feed failures (degrade-open).
 	threatIntel := aisvc.NewThreatIntelEngine(
-		aisvc.NewMultiFeed(aisvc.NewRegionalFeeds(), iocFeed).WithLogger(logger),
+		aisvc.NewMultiFeed(aisvc.NewRegionalFeeds().WithLogger(logger), iocFeed).WithLogger(logger),
 	)
 	h.SetEnhancedAI(correlation, nlQuery, reports, threatIntel, guardrails, correlationRepo)
 

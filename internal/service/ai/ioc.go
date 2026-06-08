@@ -156,6 +156,15 @@ func normalizeDomain(s string) (string, bool) {
 	if !strings.Contains(d, ".") {
 		return "", false
 	}
+	// Reject IP literals: a dotted-quad like "203.0.113.10" otherwise
+	// passes every check above and would be canonicalized as a domain.
+	// It is already covered by the IP key, so accepting it here only
+	// produces a phantom domain-key lookup in candidateKeys (and lets
+	// NewIOC mis-store an IP under a domain key). IPv6 literals are
+	// already rejected by the ':' check above.
+	if net.ParseIP(d) != nil {
+		return "", false
+	}
 	return d, true
 }
 

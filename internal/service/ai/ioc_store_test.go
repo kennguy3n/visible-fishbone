@@ -154,3 +154,42 @@ func TestIOCStore_ImplementsThreatFeedProvider(t *testing.T) {
 	t.Parallel()
 	var _ ThreatFeedProvider = NewIOCStore()
 }
+
+// TestNormalizeDomainRejectsIPLiterals guards that an IP literal is
+// not canonicalized as a domain (which would add a phantom domain
+// key in candidateKeys and let NewIOC mis-store an IP under a domain
+// key), while real hostnames and wildcard/trailing-dot forms still
+// normalize.
+func TestNormalizeDomainRejectsIPLiterals(t *testing.T) {
+	t.Parallel()
+	rejects := []string{
+		"203.0.113.10",        // IPv4 dotted-quad
+		"::ffff:203.0.113.10", // IPv6 (also has ':')
+		"2001:db8::1",         // IPv6
+		"255.255.255.255",     // IPv4 broadcast
+	}
+	for _, in := range rejects {
+		if got, ok := normalizeDomain(in); ok {
+			t.Errorf("normalizeDomain(%q) = (%q, true), want rejected", in, got)
+		}
+	}
+	accepts := map[string]string{
+		"EVIL.com":      "evil.com",
+		"*.evil.com.":   "evil.com",
+		"a.b.example":   "a.b.example",
+		"1.2.3.example": "1.2.3.example", // numeric labels but not an IP
+	}
+	for in, want := range accepts {
+		got, ok := normalizeDomain(in)
+		if !ok || got != want {
+			t.Errorf("normalizeDomain(%q) = (%q, %v), want (%q, true)", in, got, ok, want)
+		}
+	}
+
+	// candidateKeys for an IP must yield the IP key only, no domain key.
+	for _, k := range candidateKeys("203.0.113.10") {
+		if k == string(IOCTypeDomain)+"\x00203.0.113.10" {
+			t.Errorf("candidateKeys produced a phantom domain key for an IP: %q", k)
+		}
+	}
+}
