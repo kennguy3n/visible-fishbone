@@ -202,6 +202,37 @@ func (s *AdaptiveSampler) Decide(ctx context.Context, tenantID, eventID uuid.UUI
 	return false, p
 }
 
+// SampleRateFor returns the keep probability currently in effect for
+// the tenant WITHOUT recording an arrival or rolling the window. It is
+// a read-only companion to Decide, used to recover the de-bias rate
+// for a redelivered event: the keep/drop verdict was already made on
+// the first delivery (and must not be re-made), but the SampleRate
+// stamped then lived only on the in-memory envelope and is lost when
+// the redelivery is re-decoded from the producer's wire bytes.
+//
+// It returns the tenant's last-computed keep probability rather than
+// rolling to a fresh window, because the value of interest is the rate
+// that was in effect when the event was admitted, not a recomputed
+// one. Returns 1.0 for a nil sampler or a tenant with no state yet
+// (e.g. admitted at the full default rate, so no de-bias is needed).
+func (s *AdaptiveSampler) SampleRateFor(tenantID uuid.UUID) float64 {
+	if s == nil {
+		return 1.0
+	}
+	s.mu.RLock()
+	st, ok := s.tenants[tenantID]
+	s.mu.RUnlock()
+	if !ok {
+		return 1.0
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.windowStart.IsZero() || st.keepProb <= 0 {
+		return 1.0
+	}
+	return st.keepProb
+}
+
 // keepProb returns the keep probability for the tenant's current
 // window, rolling the window and recomputing the probability from the
 // just-closed window's arrival rate when the window has elapsed. It

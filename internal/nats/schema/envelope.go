@@ -196,13 +196,14 @@ func (e Envelope) Validate() error {
 	if e.TrafficClass != "" && !isValidTrafficClass(e.TrafficClass) {
 		return fmt.Errorf("traffic_class %q is invalid: %w", e.TrafficClass, ErrInvalid)
 	}
-	// SampleRate is a probability: 0 is the legitimate "un-sampled"
-	// default (omitempty, interpreted as 1.0 downstream), and any
-	// non-zero value must fall in (0,1]. A value outside that range
-	// would silently corrupt the 1/SampleRate de-bias weight, so the
-	// validator rejects it at the transport boundary.
+	// SampleRate is a probability. The accepted set is [0,1]: 0 is the
+	// legitimate "un-sampled" default (omitempty, interpreted as 1.0
+	// downstream), and any stamped value falls in the meaningful (0,1]
+	// range. A value outside [0,1] would silently corrupt the
+	// 1/SampleRate de-bias weight, so the validator rejects it at the
+	// transport boundary.
 	if e.SampleRate < 0 || e.SampleRate > 1 {
-		return fmt.Errorf("sample_rate %v out of range (0,1]: %w", e.SampleRate, ErrInvalid)
+		return fmt.Errorf("sample_rate %v out of range [0,1] (0 == unsampled): %w", e.SampleRate, ErrInvalid)
 	}
 	if len(e.Payload) == 0 {
 		return fmt.Errorf("payload is required: %w", ErrInvalid)

@@ -268,3 +268,121 @@ func TestService_SamplingDoesNotDropRedeliveredEvent(t *testing.T) {
 		t.Errorf("redelivered event SampleRate = %v, want 0 (admitted at full rate)", written[0].SampleRate)
 	}
 }
+
+// TestService_RedeliveryPreservesSubUnitySampleRate is the companion
+// regression test to the one above: when an event is admitted at a
+// keep probability < 1.0 on its first delivery, the SampleRate stamped
+// then lives only on the in-memory envelope. If the hot write fails
+// and the event is redelivered, the redelivered copy is re-decoded
+// from the producer's wire bytes (which never carry SampleRate), so a
+// redelivery path that merely skips the sampler would write the event
+// with SampleRate 0 — interpreted downstream as 1.0 — silently
+// dropping the 1/rate de-bias weight and under-counting the tenant's
+// true volume. The fix re-stamps the tenant's current keep probability
+// on redelivery (read-only, recording no arrival). This test pins the
+// tenant to keepProb 0.5, admits a kept event, fails its first write,
+// and asserts the redelivered event is written carrying SampleRate
+// 0.5 rather than 0.
+func TestService_RedeliveryPreservesSubUnitySampleRate(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{failNTH: 1} // first write fails → Nak → redeliver
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	const (
+		budget = rate.Limit(1000)
+		window = time.Second
+		prime  = 2000 // arrivals/window → keepProb = 1000/2000 = 0.5
+	)
+	clk := &e2eClock{t: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)}
+	sampler := telemetry.NewAdaptiveSampler(telemetry.SamplerConfig{
+		Resolver: telemetry.StaticLimitResolver{Limit: telemetry.TenantLimit{Rate: budget, Burst: int(budget)}},
+		Window:   window,
+		NowFunc:  clk.now,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	// Pick an event ID that a decision at keepProb 0.5 KEEPS (admitted
+	// on first delivery). hashFraction is pure, so an independent probe
+	// sampler pinned to 0.5 classifies exactly as the real sampler will.
+	probeClk := &e2eClock{t: clk.now()}
+	probe := telemetry.NewAdaptiveSampler(telemetry.SamplerConfig{
+		Resolver: telemetry.StaticLimitResolver{Limit: telemetry.TenantLimit{Rate: budget, Burst: int(budget)}},
+		Window:   window,
+		NowFunc:  probeClk.now,
+	})
+	probeTenant := uuid.New()
+	for i := 0; i < prime; i++ {
+		probe.Decide(ctx, probeTenant, uuid.New())
+	}
+	probeClk.advance(window) // next Decide rolls into the 0.5-keepProb window
+	tenant := uuid.New()
+	var event schema.Envelope
+	for {
+		id := uuid.New()
+		if keep, sr := probe.Decide(ctx, probeTenant, id); keep && sr == 0.5 {
+			event = schema.Envelope{
+				SchemaVersion: schema.SchemaVersion, EventID: id,
+				TenantID: tenant, DeviceID: uuid.New(),
+				Timestamp:  time.Now().UTC(),
+				EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
+				Payload: newPayload(t),
+			}
+			break
+		}
+	}
+
+	// Pin the real tenant to keepProb 0.5 the same way: feed window-1
+	// arrivals then advance one window, so the consumer's first Decide
+	// rolls and computes 0.5. The clock then stays put, so the rate
+	// recovered on redelivery is exactly 0.5.
+	for i := 0; i < prime; i++ {
+		sampler.Decide(ctx, tenant, uuid.New())
+	}
+	clk.advance(window)
+
+	svc, err := telemetry.New(js, cfg,
+		telemetry.Config{Durable: "tlm-sample-sr-redeliver", DedupRingSize: 16},
+		hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	svc.WithSampler(sampler)
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	if err := pub.PublishEnvelope(ctx, event, sngnats.PublishOptions{}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// First delivery: keepProb 0.5, the event is kept and stamped 0.5,
+	// then the hot write fails and the message is Nak'd. Redelivery
+	// (NumDelivered=2) bypasses the keep/drop decision but must re-stamp
+	// the 0.5 rate before the (now succeeding) write.
+	writeDeadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(writeDeadline) {
+		if len(hot.Snapshot()) == 1 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	_ = svc.Stop(stopCtx)
+
+	written := hot.Snapshot()
+	if len(written) != 1 {
+		t.Fatalf("expected the redelivered event to be written exactly once, got %d", len(written))
+	}
+	if m := svc.MetricsSnapshot(); m.Sampled != 0 {
+		t.Errorf("redelivered event must not be counted as a sampling drop, Sampled=%d", m.Sampled)
+	}
+	if written[0].SampleRate != 0.5 {
+		t.Errorf("redelivered event SampleRate = %v, want 0.5 (de-bias weight must survive redelivery)",
+			written[0].SampleRate)
+	}
+}

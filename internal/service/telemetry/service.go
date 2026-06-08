@@ -598,37 +598,57 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 	// column and analytics can de-bias by 1/SampleRate. A nil
 	// sampler keeps everything at rate 1.0 (prior behaviour).
 	//
-	// CRITICAL: only first deliveries are sampled. A drop is Ack'd
-	// and never redelivered, so any redelivery (NumDelivered > 1) is
-	// an event the sampler already *admitted* on an earlier delivery
-	// and that is now being retried after a transient downstream
-	// failure (e.g. a hot-write error Nak'd below, before the dedup
-	// ring records it). Re-running the sampler on that retry would
-	// re-evaluate it against the *current* keep probability, which
-	// can be lower if the tenant's rate rose in the interim — so the
-	// already-admitted event could fall below the new threshold and
-	// be silently dropped, never written at all (the dedup ring only
-	// catches events that reached a successful hot write, so it
-	// cannot save it). Sampling once, on first delivery, makes the
-	// keep/drop decision stable for the lifetime of the message.
-	if w.sampler != nil && !isRedelivery(msg) {
-		keep, sampleRate := w.sampler.Decide(ctx, env.TenantID, env.EventID)
-		if !keep {
-			s.metrics.Sampled.Add(1)
-			if ackErr := msg.Ack(); ackErr != nil {
-				s.logger.Warn("telemetry: ack after sampling-drop failed",
-					slog.Any("error", ackErr),
-					slog.String("event_id", env.EventID.String()))
+	// CRITICAL: the keep/drop decision is made on the FIRST delivery
+	// only. A drop is Ack'd and never redelivered, so any redelivery
+	// (NumDelivered > 1) is an event the sampler already *admitted* on
+	// an earlier delivery and that is now being retried after a
+	// transient downstream failure (e.g. a hot-write error Nak'd
+	// below, before the dedup ring records it). Re-running the
+	// keep/drop decision on that retry would re-evaluate it against
+	// the *current* keep probability, which can be lower if the
+	// tenant's rate rose in the interim — so the already-admitted
+	// event could fall below the new threshold and be silently
+	// dropped, never written at all (the dedup ring only catches
+	// events that reached a successful hot write, so it cannot save
+	// it). Deciding once, on first delivery, makes keep/drop stable
+	// for the lifetime of the message.
+	if w.sampler != nil {
+		if isRedelivery(msg) {
+			// Always keep a redelivery (decided above). But its de-bias
+			// rate must still reach the writer: the first delivery
+			// stamped env.SampleRate in memory only, and this copy was
+			// re-decoded from the producer's wire bytes, which never
+			// carry SampleRate — so the stamp was lost. Recover it via a
+			// read-only lookup of the tenant's current keep probability.
+			// The lookup records NO arrival (a redelivery is the same
+			// event, not new load, so it must not inflate the rate
+			// estimate). Windows are short and a redelivery follows its
+			// failed write within seconds, so this is the same window's
+			// rate in the common case and at most one window stale
+			// otherwise — within the window granularity the de-bias
+			// scheme already operates at.
+			if sr := w.sampler.SampleRateFor(env.TenantID); sr < 1.0 {
+				env.SampleRate = sr
+			}
+		} else {
+			keep, sampleRate := w.sampler.Decide(ctx, env.TenantID, env.EventID)
+			if !keep {
+				s.metrics.Sampled.Add(1)
+				if ackErr := msg.Ack(); ackErr != nil {
+					s.logger.Warn("telemetry: ack after sampling-drop failed",
+						slog.Any("error", ackErr),
+						slog.String("event_id", env.EventID.String()))
+					return
+				}
+				s.metrics.Acked.Add(1)
 				return
 			}
-			s.metrics.Acked.Add(1)
-			return
-		}
-		// Only stamp a non-trivial rate; leaving SampleRate at its
-		// zero value (interpreted downstream as 1.0) keeps the field
-		// off the wire via omitempty for fully-sampled events.
-		if sampleRate < 1.0 {
-			env.SampleRate = sampleRate
+			// Only stamp a non-trivial rate; leaving SampleRate at its
+			// zero value (interpreted downstream as 1.0) keeps the field
+			// off the wire via omitempty for fully-sampled events.
+			if sampleRate < 1.0 {
+				env.SampleRate = sampleRate
+			}
 		}
 	}
 
