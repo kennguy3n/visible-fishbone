@@ -65,6 +65,16 @@ var (
 	deliveryLatencyBuckets = []float64{
 		0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30,
 	}
+	// recompileLatencyBuckets covers feed-driven policy recompiles,
+	// which fan out across ALL active tenants (per-tenant DB read,
+	// graph parse, IOC compilation, Ed25519 bundle signing). A fleet
+	// with hundreds of tenants can take minutes, so the buckets run
+	// from sub-second (a near-empty deployment) up to 10 minutes,
+	// keeping percentile / SLO calculations meaningful instead of
+	// collapsing everything past 30s into +Inf.
+	recompileLatencyBuckets = []float64{
+		0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600,
+	}
 )
 
 // Metrics owns the control-plane Prometheus registry and every
@@ -375,7 +385,7 @@ func New(cfg config.Metrics) *Metrics {
 		Subsystem: "threatintel",
 		Name:      "recompile_duration_seconds",
 		Help:      "Latency of feed-driven policy recompiles across all tenants.",
-		Buckets:   deliveryLatencyBuckets,
+		Buckets:   recompileLatencyBuckets,
 	})
 
 	// --- Webhook / integration --------------------------------------

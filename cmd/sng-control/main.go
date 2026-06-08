@@ -1638,6 +1638,15 @@ func recompileAllTenants(ctx context.Context, policySvc *policy.Service, tenants
 			return fmt.Errorf("list tenants: %w", err)
 		}
 		for _, t := range res.Items {
+			// Bail out promptly on shutdown rather than paging through
+			// every remaining tenant issuing Compile calls that would
+			// only fail with context.Canceled — the Recompiler's Stop()
+			// waits on this function, so a snappy return shortens the
+			// drain window.
+			if err := ctx.Err(); err != nil {
+				errs = append(errs, err)
+				return errors.Join(errs...)
+			}
 			if t.Status != repository.TenantStatusActive {
 				continue
 			}
