@@ -323,17 +323,30 @@ func NewDemotionBridge(emitter DemotionEmitter, opts ...IOCEnforcementOption) *D
 // returned joined so one bad domain does not abort the batch; a
 // domain whose emit fails is NOT recorded as emitted, so the next
 // refresh retries it.
+//
+// The emitter (a demotion-engine DB call) is invoked OUTSIDE the
+// mutex: every feed goroutine calls Sync after a refresh, so holding
+// b.mu across the per-domain DB calls would serialize all feeds
+// behind the slowest batch. Instead Sync runs in three phases —
+// (1) under the lock, compute the delta to emit and prune departed
+// domains; (2) emit outside the lock; (3) re-acquire the lock to
+// record successes. The demotion engine de-duplicates against
+// existing overrides, so if two concurrent Syncs both decide to emit
+// the same domain the duplicate call is a harmless no-op.
 func (b *DemotionBridge) Sync(ctx context.Context, snap IOCSnapshot) error {
 	if b.emitter == nil {
 		return nil
 	}
+
+	// Phase 1: compute the emit set and prune under the lock. No
+	// emitter call happens here, so the lock is held only for the
+	// in-memory map work.
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.emitted == nil {
 		b.emitted = make(map[string]time.Time)
 	}
 	present := make(map[string]struct{}, len(snap.Domains))
-	var errs []error
+	todo := make([]IOC, 0, len(snap.Domains))
 	for _, ioc := range snap.Domains {
 		present[ioc.Value] = struct{}{}
 		if ioc.Confidence < b.minConfidence {
@@ -345,12 +358,7 @@ func (b *DemotionBridge) Sync(ctx context.Context, snap IOCSnapshot) error {
 		if prev, ok := b.emitted[ioc.Value]; ok && !ioc.LastSeen.After(prev) {
 			continue
 		}
-		reason := iocRuleDescription("demotion", ioc)
-		if err := b.emitter.EmitDomainDemotion(ctx, ioc.Value, reason, ioc.LastSeen); err != nil {
-			errs = append(errs, fmt.Errorf("demote %q: %w", ioc.Value, err))
-			continue
-		}
-		b.emitted[ioc.Value] = ioc.LastSeen
+		todo = append(todo, ioc)
 	}
 	// Drop tracking for domains that have left the store (TTL sweep /
 	// expiry), bounding the map to the live snapshot rather than every
@@ -365,6 +373,46 @@ func (b *DemotionBridge) Sync(ctx context.Context, snap IOCSnapshot) error {
 		if _, ok := present[d]; !ok {
 			delete(b.emitted, d)
 		}
+	}
+	b.mu.Unlock()
+
+	if len(todo) == 0 {
+		return nil
+	}
+
+	// Phase 2: emit outside the lock. A failed emit is not recorded
+	// (left out of succeeded), so the next refresh retries it.
+	var errs []error
+	succeeded := make(map[string]time.Time, len(todo))
+	for _, ioc := range todo {
+		reason := iocRuleDescription("demotion", ioc)
+		if err := b.emitter.EmitDomainDemotion(ctx, ioc.Value, reason, ioc.LastSeen); err != nil {
+			errs = append(errs, fmt.Errorf("demote %q: %w", ioc.Value, err))
+			continue
+		}
+		succeeded[ioc.Value] = ioc.LastSeen
+	}
+
+	// Phase 3: record successes under the lock. Only advance a
+	// domain's recorded LastSeen, never move it backwards: a
+	// concurrent Sync may have recorded a newer sighting while we were
+	// emitting, and a prune may have dropped the domain (re-adding it
+	// here is correct — we did just demote it). Skip a domain that is
+	// no longer present so a TTL sweep that fired mid-emit still wins.
+	if len(succeeded) > 0 {
+		b.mu.Lock()
+		if b.emitted == nil {
+			b.emitted = make(map[string]time.Time)
+		}
+		for d, ls := range succeeded {
+			if _, live := present[d]; !live {
+				continue
+			}
+			if prev, ok := b.emitted[d]; !ok || ls.After(prev) {
+				b.emitted[d] = ls
+			}
+		}
+		b.mu.Unlock()
 	}
 	return errors.Join(errs...)
 }

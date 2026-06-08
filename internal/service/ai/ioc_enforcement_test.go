@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -278,4 +279,75 @@ func (e *flakyEmitter) EmitDomainDemotion(_ context.Context, _, _ string, _ time
 		return errors.New("emit failed")
 	}
 	return nil
+}
+
+// countingEmitter is a thread-safe emitter that records how many
+// times each domain was demoted. It is used by the concurrency test
+// since the bridge now calls the emitter outside its own mutex.
+type countingEmitter struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func newCountingEmitter() *countingEmitter {
+	return &countingEmitter{counts: make(map[string]int)}
+}
+
+func (e *countingEmitter) EmitDomainDemotion(_ context.Context, domain, _ string, _ time.Time) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.counts[domain]++
+	return nil
+}
+
+// TestDemotionBridge_ConcurrentSyncNoRace runs many feed goroutines
+// calling Sync concurrently against the same bridge (mirroring the
+// FeedManager fan-out). It guards the emit-outside-the-lock refactor:
+// the run must be race-free (go test -race) and, because the sighting
+// never advances after the first emit, every domain must be demoted
+// at least once and the emitted map must converge to exactly the live
+// domain set.
+func TestDemotionBridge_ConcurrentSyncNoRace(t *testing.T) {
+	t.Parallel()
+	em := newCountingEmitter()
+	bridge := NewDemotionBridge(em)
+
+	seen := time.Now()
+	domains := []IOC{
+		mkIOC(IOCTypeDomain, "a.example.com", 0.9, func(i *IOC) { i.LastSeen = seen }),
+		mkIOC(IOCTypeDomain, "b.example.com", 0.9, func(i *IOC) { i.LastSeen = seen }),
+		mkIOC(IOCTypeDomain, "c.example.com", 0.9, func(i *IOC) { i.LastSeen = seen }),
+	}
+	snap := IOCSnapshot{Domains: domains}
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				if err := bridge.Sync(context.Background(), snap); err != nil {
+					t.Errorf("sync: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	em.mu.Lock()
+	defer em.mu.Unlock()
+	for _, ioc := range domains {
+		if em.counts[ioc.Value] < 1 {
+			t.Errorf("domain %q never demoted under concurrency", ioc.Value)
+		}
+	}
+	// The emitted map must hold exactly the three live domains: the
+	// delta guard collapses repeats and the unconditional prune drops
+	// nothing here (all three stay present).
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if len(bridge.emitted) != len(domains) {
+		t.Fatalf("emitted map = %d entries, want %d (%#v)", len(bridge.emitted), len(domains), bridge.emitted)
+	}
 }
