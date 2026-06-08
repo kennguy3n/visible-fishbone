@@ -163,6 +163,30 @@ def tokenize(text: str):
     return tokens
 
 
+# Shape predicates below are ASCII-only by construction so they match the
+# Rust enforcement-plane featurizer (`ml_classifier::featurize_token`, which
+# uses `char::is_ascii_digit` / `is_ascii_alphanumeric` / ...) byte-for-byte.
+# Python's `str.isdigit()`/`isalnum()` are Unicode-aware (e.g. superscript
+# ²³ or Arabic-Indic ٠-٩ count as digits), so using them here would silently
+# diverge from Rust on non-ASCII input. `_is_title_case` is intentionally left
+# Unicode-aware because the Rust side mirrors it with Unicode `is_alphabetic`/
+# `is_uppercase`/`is_lowercase`.
+def _is_ascii_digit(c: str) -> bool:
+    return "0" <= c <= "9"
+
+
+def _is_ascii_alpha(c: str) -> bool:
+    return ("a" <= c <= "z") or ("A" <= c <= "Z")
+
+
+def _is_ascii_alnum(c: str) -> bool:
+    return _is_ascii_digit(c) or _is_ascii_alpha(c)
+
+
+def _is_ascii_upper(c: str) -> bool:
+    return "A" <= c <= "Z"
+
+
 def _is_title_case(t: str) -> bool:
     if len(t) < 2 or not t[0].isalpha() or not t[0].isupper():
         return False
@@ -170,31 +194,31 @@ def _is_title_case(t: str) -> bool:
 
 
 def _digit_count(t: str) -> int:
-    return sum(1 for c in t if c.isdigit())
+    return sum(1 for c in t if _is_ascii_digit(c))
 
 
 def _phone_shape(t: str) -> bool:
     dc = _digit_count(t)
     if dc < 7:
         return False
-    return all(c.isdigit() or c in "+-()" for c in t)
+    return all(_is_ascii_digit(c) or c in "+-()" for c in t)
 
 
 def _alnum_account_shape(t: str) -> bool:
     if len(t) < 10:
         return False
-    if not all(c.isalnum() for c in t):
+    if not all(_is_ascii_alnum(c) for c in t):
         return False
-    has_alpha = any(c.isalpha() for c in t)
-    has_digit = any(c.isdigit() for c in t)
-    upper_only = all((not c.isalpha()) or c.isupper() for c in t)
+    has_alpha = any(_is_ascii_alpha(c) for c in t)
+    has_digit = any(_is_ascii_digit(c) for c in t)
+    upper_only = all((not _is_ascii_alpha(c)) or _is_ascii_upper(c) for c in t)
     return has_alpha and has_digit and upper_only
 
 
 def _has_digit_and_sep(t: str) -> bool:
     if len(t) < 5:
         return False
-    return any(c.isdigit() for c in t) and any(c in "-/" for c in t)
+    return any(_is_ascii_digit(c) for c in t) and any(c in "-/" for c in t)
 
 
 def featurize_token(tokens, i: int):
@@ -221,7 +245,7 @@ def featurize_token(tokens, i: int):
     f = [0.0] * FEATURE_DIM
     f[0] = 1.0
     f[1] = 1.0 if _is_title_case(t) else 0.0
-    f[2] = 1.0 if (length > 0 and t.isdigit()) else 0.0
+    f[2] = 1.0 if (length > 0 and all(_is_ascii_digit(c) for c in t)) else 0.0
     f[3] = (dc / length) if length else 0.0
     f[4] = min(length, 20) / 20.0
     f[5] = 1.0 if ("@" in t and "." in t) else 0.0
@@ -449,6 +473,14 @@ def write_featurecheck(path):
         # both the given name and, via the neighbour window, the surname.
         (["Robert", "Williams", "approved", "the", "budget"], 0),
         (["Robert", "Williams", "approved", "the", "budget"], 1),
+        # Non-ASCII digit tokens: pin the ASCII/Unicode parity boundary so any
+        # future drift back to Unicode `isdigit()`/`isalnum()` on either the
+        # Python exporter or the Rust featurizer fails this fixture. Python's
+        # Unicode `isdigit()` would treat superscripts (\u00b2\u00b3) and Arabic-Indic
+        # digits (\u0660-\u0669) as digits; the ASCII-only predicates here do not, matching
+        # `char::is_ascii_digit` on the Rust side -> f[2]/f[3]/f[6] stay 0.
+        (["balance", "\u00b2\u00b3", "owed"], 1),
+        (["acct", "\u0664\u0665\u0666\u0667\u0668\u0669\u0660\u0661", "now"], 1),
     ]
     out = []
     for toks, idx in samples:
