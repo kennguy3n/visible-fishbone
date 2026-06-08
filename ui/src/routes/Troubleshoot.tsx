@@ -2,7 +2,16 @@ import {
   useRunTroubleshootDiagnostics,
   useListTroubleshootKBEntries,
 } from "@/api/generated/endpoints/troubleshoot/troubleshoot";
-import { PageHeader, Card, AsyncBoundary, StatusBadge, Badge, ErrorState } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  StatusBadge,
+  Badge,
+  ErrorState,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
 import { RequireTenant } from "@/components/RequireTenant";
 import { formatRelative } from "@/lib/format";
 
@@ -78,7 +87,13 @@ function TroubleshootInner({ tenantId }: { tenantId: string }) {
           error={kb.error}
           data={kb.data}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
-          empty={<p className="muted">No knowledge base entries.</p>}
+          empty={
+            <EmptyState
+              illustration={<EmptyIllustration kind="search" />}
+              title="No knowledge base entries"
+              description="Troubleshooting articles and remediation guides will appear here."
+            />
+          }
         >
           {(d) => (
             <div className="grid" style={{ gap: 10 }}>

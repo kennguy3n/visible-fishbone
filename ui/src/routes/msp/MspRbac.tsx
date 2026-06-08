@@ -81,7 +81,12 @@ function MspRbacInner({ tenantId }: { tenantId: string }) {
           error={list.error}
           data={list.data}
           isEmpty={() => mspRoles.length === 0}
-          empty={<p className="muted">No MSP- or platform-scoped roles defined.</p>}
+          empty={
+            <EmptyState
+              title="No MSP roles defined"
+              description="Create an MSP- or platform-scoped role to delegate cross-tenant administration."
+            />
+          }
         >
           {() => <DataTable columns={cols} rows={mspRoles} rowKey={(r) => r.id} />}
         </AsyncBoundary>

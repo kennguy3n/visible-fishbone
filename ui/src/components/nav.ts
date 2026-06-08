@@ -19,6 +19,7 @@ export const NAV: NavGroup[] = [
     label: "Overview",
     items: [
       { label: "Dashboard", to: "/", icon: "▦" },
+      { label: "Get started", to: "/onboarding", icon: "✸" },
       { label: "Tenants", to: "/tenants", icon: "◳" },
       { label: "Sites", to: "/sites", icon: "⌂" },
       { label: "Devices", to: "/devices", icon: "▢" },

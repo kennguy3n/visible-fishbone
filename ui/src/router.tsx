@@ -8,6 +8,7 @@ import { AppLayout } from "@/components/AppLayout";
 import { Login } from "@/routes/Login";
 import { OidcCallback } from "@/routes/OidcCallback";
 import { Dashboard } from "@/routes/Dashboard";
+import { Onboarding } from "@/routes/Onboarding";
 import { Tenants } from "@/routes/Tenants";
 import { Sites } from "@/routes/Sites";
 import { Devices } from "@/routes/Devices";
@@ -64,6 +65,7 @@ const page = <P extends string>(path: P, component: () => JSX.Element) =>
 
 const appRoutes = [
   page("/", Dashboard),
+  page("/onboarding", Onboarding),
   page("/tenants", Tenants),
   page("/sites", Sites),
   page("/devices", Devices),

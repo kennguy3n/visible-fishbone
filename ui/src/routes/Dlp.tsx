@@ -5,7 +5,16 @@ import {
   useApplyDlpTemplate,
   useClassifyText,
 } from "@/api/manual/hooks";
-import { PageHeader, Card, AsyncBoundary, StatusBadge, Badge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  StatusBadge,
+  Badge,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
+import { HelpTooltip } from "@/components/HelpTooltip";
 import { DataTable, type Column } from "@/components/DataTable";
 import { RequireTenant } from "@/components/RequireTenant";
 import { formatDateTime } from "@/lib/format";
@@ -38,13 +47,27 @@ function DlpInner({ tenantId }: { tenantId: string }) {
       />
 
       <div className="grid grid--2" style={{ marginBottom: 16 }}>
-        <Card title="Classification taxonomy templates">
+        <Card
+          title="Classification taxonomy templates"
+          actions={
+            <HelpTooltip title="What is a DLP template?" align="right">
+              A template is a ready-made set of data classifiers (e.g. credit
+              cards, health records). Applying one creates DLP policies tuned
+              for that data type so you don't have to build detectors by hand.
+            </HelpTooltip>
+          }
+        >
           <AsyncBoundary
             isLoading={templates.isLoading}
             error={templates.error}
             data={templates.data}
             isEmpty={(d) => (d.items?.length ?? 0) === 0}
-            empty={<p className="muted">No templates available.</p>}
+            empty={
+              <EmptyState
+                title="No templates available"
+                description="DLP taxonomy templates will appear here when available."
+              />
+            }
           >
             {(d) => (
               <div className="grid" style={{ gap: 10 }}>
@@ -113,7 +136,13 @@ function DlpInner({ tenantId }: { tenantId: string }) {
           error={policies.error}
           data={policies.data}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
-          empty={<p className="muted">No DLP policies. Apply a template to get started.</p>}
+          empty={
+            <EmptyState
+              illustration={<EmptyIllustration kind="shield" />}
+              title="No DLP policies yet"
+              description="Apply a classification template above to start protecting sensitive data."
+            />
+          }
         >
           {(d) => <DataTable columns={policyCols} rows={d.items ?? []} rowKey={(p) => p.id} />}
         </AsyncBoundary>

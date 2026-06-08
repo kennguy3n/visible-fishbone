@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { Link } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ScatterChart,
   Scatter,
@@ -14,13 +16,29 @@ import {
   useListAlerts,
   useAcknowledgeAlert,
   useResolveAlert,
+  getListAlertsQueryKey,
 } from "@/api/generated/endpoints/alert/alert";
+import { useAiListCorrelations } from "@/api/generated/endpoints/ai/ai";
 import { useListBaselineModels } from "@/api/generated/endpoints/baseline/baseline";
-import { AlertSeverity, type Alert } from "@/api/generated/model";
-import { PageHeader, Card, AsyncBoundary, StatusBadge } from "@/components/ui";
-import { DataTable, type Column } from "@/components/DataTable";
+import {
+  AlertSeverity,
+  AlertState,
+  type Alert,
+  type ListAlerts200,
+} from "@/api/generated/model";
+import {
+  PageHeader,
+  Card,
+  StatusBadge,
+  Badge,
+  EmptyState,
+  EmptyIllustration,
+  SkeletonCard,
+} from "@/components/ui";
+import { HelpTooltip } from "@/components/HelpTooltip";
 import { RequireTenant } from "@/components/RequireTenant";
-import { formatRelative } from "@/lib/format";
+import { useToast } from "@/components/Toast";
+import { formatRelative, titleCase } from "@/lib/format";
 
 export function Alerts() {
   return (
@@ -28,20 +46,87 @@ export function Alerts() {
   );
 }
 
-function AlertsInner({ tenantId }: { tenantId: string }) {
-  const list = useListAlerts(tenantId, undefined);
-  const baselines = useListBaselineModels(tenantId, undefined);
-  const ack = useAcknowledgeAlert();
-  const resolve = useResolveAlert();
-  const [severity, setSeverity] = useState<string>("all");
+const RECOMMENDED: Record<string, string> = {
+  critical: "Investigate now and consider auto-remediation — this deviates far from the learned baseline.",
+  warning: "Review the affected resource and acknowledge once you've triaged it.",
+  info: "Informational. No action is usually required, but you can resolve it to clear the queue.",
+};
 
-  // Derive the filter options from the generated enum so they can never drift
-  // from the API contract (the previous hard-coded high/medium/low values
-  // matched nothing and omitted "warning").
-  const severityOptions = ["all", ...Object.values(AlertSeverity)];
+function AlertsInner({ tenantId }: { tenantId: string }) {
+  const qc = useQueryClient();
+  const listKey = getListAlertsQueryKey(tenantId, undefined);
+  const list = useListAlerts(tenantId, undefined);
+  const correlations = useAiListCorrelations(tenantId, undefined, {
+    query: { retry: false },
+  });
+  const baselines = useListBaselineModels(tenantId, undefined);
+  const toast = useToast();
+
+  const [severity, setSeverity] = useState<string>("all");
+  const [state, setState] = useState<string>("all");
+
+  // Optimistic state transition shared by acknowledge + resolve: patch the
+  // cached list immediately, roll back on error.
+  const optimistic = (next: typeof AlertState[keyof typeof AlertState]) => ({
+    onMutate: async ({ alertId }: { alertId: string }) => {
+      await qc.cancelQueries({ queryKey: listKey });
+      const prev = qc.getQueryData<ListAlerts200>(listKey);
+      qc.setQueryData<ListAlerts200>(listKey, (old) =>
+        old
+          ? {
+              ...old,
+              items: (old.items ?? []).map((a) =>
+                a.id === alertId ? { ...a, state: next } : a,
+              ),
+            }
+          : old,
+      );
+      return { prev };
+    },
+    onError: (
+      _e: unknown,
+      _v: { tenantId: string; alertId: string },
+      ctx: { prev?: ListAlerts200 } | undefined,
+    ) => {
+      if (ctx?.prev) qc.setQueryData(listKey, ctx.prev);
+      toast.error("Action failed", "The alert could not be updated.");
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: listKey }),
+  });
+
+  const ack = useAcknowledgeAlert({
+    mutation: {
+      ...optimistic(AlertState.acknowledged),
+      onSuccess: () => toast.success("Acknowledged", "Alert marked as acknowledged."),
+    },
+  });
+  const resolve = useResolveAlert({
+    mutation: {
+      ...optimistic(AlertState.resolved),
+      onSuccess: () => toast.success("Resolved", "Alert marked as resolved."),
+    },
+  });
 
   const all = list.data?.items ?? [];
-  const filtered = severity === "all" ? all : all.filter((a) => a.severity === severity);
+  const filtered = all.filter(
+    (a) =>
+      (severity === "all" || a.severity === severity) &&
+      (state === "all" || a.state === state),
+  );
+
+  // Group filtered alerts by AI-correlated incident.
+  const clusters = correlations.data?.items ?? [];
+  const alertToCluster = new Map<string, string>();
+  for (const c of clusters) {
+    for (const id of c.alert_ids ?? []) alertToCluster.set(id, c.id);
+  }
+  const incidents = clusters
+    .map((c) => ({
+      cluster: c,
+      alerts: filtered.filter((a) => (c.alert_ids ?? []).includes(a.id)),
+    }))
+    .filter((g) => g.alerts.length > 0);
+  const ungrouped = filtered.filter((a) => !alertToCluster.has(a.id));
 
   const scatterData = all.map((a) => ({
     x: new Date(a.created_at).getTime(),
@@ -50,62 +135,87 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
     kind: a.kind,
   }));
 
-  const columns: Column<Alert>[] = [
-    { header: "Severity", cell: (a) => <StatusBadge status={a.severity} /> },
-    { header: "Kind", cell: (a) => <span className="mono">{a.kind}</span> },
-    { header: "Dimension", cell: (a) => a.dimension },
-    {
-      header: "Observed / baseline",
-      cell: (a) => (
+  const severityOptions = ["all", ...Object.values(AlertSeverity)];
+  const stateOptions = ["all", ...Object.values(AlertState)];
+
+  const renderCard = (a: Alert) => (
+    <div key={a.id} className={`alert-card alert-card--${a.severity}`}>
+      <div className="alert-card__head">
+        <StatusBadge status={a.severity} />
+        <span className="mono alert-card__kind">{a.kind}</span>
+        <StatusBadge status={a.state} />
+        <span className="alert-card__when muted">{formatRelative(a.created_at)}</span>
+      </div>
+      <div className="alert-card__desc">
+        {a.summary || `Anomaly on ${a.dimension}.`}
+      </div>
+      <div className="alert-card__meta">
+        <span>
+          <span className="muted">Affected:</span> {a.dimension}
+        </span>
         <span className="mono">
           {a.observed_value?.toFixed(1)} vs {a.baseline_mean?.toFixed(1)}±
-          {a.baseline_stddev?.toFixed(1)}
+          {a.baseline_stddev?.toFixed(1)} (z {a.z_score?.toFixed(2)})
         </span>
-      ),
-    },
-    {
-      header: "Z",
-      cell: (a) => (
-        <b style={{ color: Math.abs(a.z_score) > 3 ? "var(--danger)" : "var(--warn)" }}>
-          {a.z_score?.toFixed(2)}
-        </b>
-      ),
-    },
-    { header: "State", cell: (a) => <StatusBadge status={a.state} /> },
-    { header: "When", cell: (a) => formatRelative(a.created_at) },
-    {
-      header: "",
-      cell: (a) => (
-        <div style={{ display: "flex", gap: 6 }}>
-          <button
-            className="btn btn--sm"
-            disabled={a.state !== "open" || ack.isPending}
-            onClick={() => ack.mutate({ tenantId, alertId: a.id })}
-          >
-            Ack
-          </button>
-          <button
-            className="btn btn--sm"
-            disabled={a.state === "resolved" || resolve.isPending}
-            onClick={() => resolve.mutate({ tenantId, alertId: a.id })}
-          >
-            Resolve
-          </button>
-        </div>
-      ),
-    },
-  ];
+      </div>
+      <div className="alert-card__rec">
+        <span className="muted">Recommended:</span>{" "}
+        {RECOMMENDED[a.severity] ?? RECOMMENDED.info}
+      </div>
+      <div className="alert-card__actions">
+        <button
+          className="btn btn--sm"
+          disabled={a.state !== "open" || ack.isPending}
+          onClick={() => ack.mutate({ tenantId, alertId: a.id })}
+        >
+          Acknowledge
+        </button>
+        <button
+          className="btn btn--sm btn--primary"
+          disabled={a.state === "resolved" || resolve.isPending}
+          onClick={() => resolve.mutate({ tenantId, alertId: a.id })}
+        >
+          Resolve
+        </button>
+        <Link
+          to="/troubleshoot"
+          className="btn btn--sm"
+          title="Open troubleshooting tools"
+        >
+          Investigate
+        </Link>
+        <Link
+          to="/playbooks"
+          className="btn btn--sm"
+          title="Trigger an automated response playbook"
+        >
+          Auto-remediate
+        </Link>
+      </div>
+    </div>
+  );
 
   return (
     <>
       <PageHeader
         title="Alerts"
-        subtitle="Baseline anomaly detections with statistical context."
+        subtitle="Baseline anomaly detections, grouped into incidents with recommended actions."
+        actions={
+          <HelpTooltip title="How alerts work" align="right">
+            ShieldNet learns what's normal for your traffic, then flags
+            statistically significant deviations (z-score). Related anomalies
+            are grouped into a single incident by the AI correlation engine.
+          </HelpTooltip>
+        }
       />
 
-      <Card title="Anomaly scatter — deviation (z-score) over time" className="">
+      <Card title="Anomaly scatter — deviation (z-score) over time">
         {scatterData.length === 0 ? (
-          <p className="muted">No anomalies recorded.</p>
+          <EmptyState
+            illustration={<EmptyIllustration kind="alert" />}
+            title="No anomalies recorded"
+            description="Deviation telemetry will plot here once anomalies are detected."
+          />
         ) : (
           <div style={{ height: 260 }}>
             <ResponsiveContainer width="100%" height="100%">
@@ -143,38 +253,76 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
         )}
       </Card>
 
-      <div className="toolbar" style={{ marginTop: 16 }}>
-        <label className="muted" style={{ fontSize: 12 }}>
-          Severity
-        </label>
-        <select
-          style={{ width: 160 }}
-          value={severity}
-          onChange={(e) => setSeverity(e.target.value)}
-        >
+      <div className="filter-bar" style={{ marginTop: 16 }}>
+        <div className="pill-tabs">
           {severityOptions.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
+            <button
+              key={s}
+              className={severity === s ? "active" : ""}
+              onClick={() => setSeverity(s)}
+            >
+              {titleCase(s)}
+            </button>
           ))}
-        </select>
+        </div>
+        <div className="pill-tabs">
+          {stateOptions.map((s) => (
+            <button
+              key={s}
+              className={state === s ? "active" : ""}
+              onClick={() => setState(s)}
+            >
+              {titleCase(s)}
+            </button>
+          ))}
+        </div>
         <div className="toolbar__spacer" />
         <span className="muted">
           {baselines.data?.items?.length ?? 0} baseline models trained
         </span>
       </div>
 
-      <Card>
-        <AsyncBoundary
-          isLoading={list.isLoading}
-          error={list.error}
-          data={list.data}
-          isEmpty={() => filtered.length === 0}
-          empty={<p className="muted" style={{ padding: 12 }}>No alerts match the filter.</p>}
-        >
-          {() => <DataTable columns={columns} rows={filtered} rowKey={(a) => a.id} />}
-        </AsyncBoundary>
-      </Card>
+      {list.isLoading ? (
+        <SkeletonCard lines={4} />
+      ) : filtered.length === 0 ? (
+        <Card>
+          <EmptyState
+            illustration={<EmptyIllustration kind="alert" />}
+            title="No matching alerts"
+            description="Nothing matches the current filters. Try widening severity or state."
+          />
+        </Card>
+      ) : (
+        <>
+          {incidents.map(({ cluster, alerts }) => (
+            <Card
+              key={cluster.id || cluster.summary}
+              title={`Incident · ${alerts.length} correlated alert${alerts.length === 1 ? "" : "s"}`}
+              actions={
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  {cluster.severity && <StatusBadge status={cluster.severity} />}
+                  {cluster.status && <Badge tone="info">{titleCase(cluster.status)}</Badge>}
+                </div>
+              }
+            >
+              {cluster.summary && (
+                <p className="muted" style={{ marginTop: 0 }}>
+                  {cluster.summary}
+                </p>
+              )}
+              <div className="alert-cards">{alerts.map(renderCard)}</div>
+            </Card>
+          ))}
+
+          <Card title={incidents.length > 0 ? "Other alerts" : "Alerts"}>
+            {ungrouped.length === 0 ? (
+              <p className="muted">All matching alerts are part of an incident above.</p>
+            ) : (
+              <div className="alert-cards">{ungrouped.map(renderCard)}</div>
+            )}
+          </Card>
+        </>
+      )}
     </>
   );
 }

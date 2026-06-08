@@ -1,5 +1,5 @@
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { NAV } from "./nav";
 import { LanguageSwitcher } from "./LanguageSwitcher";
@@ -70,7 +70,7 @@ function Sidebar() {
                   className={`nav-link${active ? " active" : ""}`}
                 >
                   <span className="nav-link__icon">{item.icon}</span>
-                  {item.label}
+                  <span>{item.label}</span>
                 </Link>
               );
             })}
@@ -81,12 +81,19 @@ function Sidebar() {
   );
 }
 
-function Topbar() {
+function Topbar({ onToggleNav }: { onToggleNav: () => void }) {
   const { claims, logout } = useAuth();
   const intl = useIntl();
   const name = claims?.name || claims?.email || claims?.sub || "Operator";
   return (
     <header className="topbar">
+      <button
+        className="icon-btn"
+        onClick={onToggleNav}
+        aria-label={intl.formatMessage({ id: "topbar.menu" })}
+      >
+        ☰
+      </button>
       <TenantSwitcher />
       <div className="topbar__spacer" />
       <LanguageSwitcher />
@@ -108,6 +115,8 @@ function Topbar() {
 export function AppLayout() {
   const { isAuthenticated } = useAuth();
   const navigate = useNavigate();
+  const { location } = useRouterState();
+  const [navOpen, setNavOpen] = useState(false);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -115,14 +124,24 @@ export function AppLayout() {
     }
   }, [isAuthenticated, navigate]);
 
+  // Close the mobile nav drawer whenever the route changes.
+  useEffect(() => {
+    setNavOpen(false);
+  }, [location.pathname]);
+
   if (!isAuthenticated) return null;
 
   return (
     <TenantProvider>
-      <div className="app-shell">
+      <div className={`app-shell${navOpen ? " nav-open" : ""}`}>
+        <div
+          className="sidebar__scrim"
+          onClick={() => setNavOpen(false)}
+          aria-hidden
+        />
         <Sidebar />
         <div className="main">
-          <Topbar />
+          <Topbar onToggleNav={() => setNavOpen((v) => !v)} />
           <div className="content">
             <Outlet />
           </div>

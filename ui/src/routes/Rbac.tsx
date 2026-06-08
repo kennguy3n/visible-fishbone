@@ -5,7 +5,14 @@ import {
 } from "@/api/generated/endpoints/rbac/rbac";
 import { RoleCreateRequestScope } from "@/api/generated/model";
 import type { Role } from "@/api/generated/model";
-import { PageHeader, Card, AsyncBoundary, Badge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  Badge,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Modal } from "@/components/Modal";
 import { RequireTenant } from "@/components/RequireTenant";
@@ -66,7 +73,13 @@ function RbacInner({ tenantId }: { tenantId: string }) {
           error={list.error}
           data={list.data}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
-          empty={<p className="muted">No roles defined.</p>}
+          empty={
+            <EmptyState
+              illustration={<EmptyIllustration kind="shield" />}
+              title="No roles defined"
+              description="Create a role to grant scoped permissions to your team."
+            />
+          }
         >
           {(d) => <DataTable columns={cols} rows={d.items ?? []} rowKey={(r) => r.id} />}
         </AsyncBoundary>

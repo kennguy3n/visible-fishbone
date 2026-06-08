@@ -5,7 +5,15 @@ import {
   useDeleteWebhook,
 } from "@/api/generated/endpoints/webhooks/webhooks";
 import type { WebhookEndpoint } from "@/api/generated/model";
-import { PageHeader, Card, AsyncBoundary, StatusBadge, Badge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  StatusBadge,
+  Badge,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Modal } from "@/components/Modal";
 import { RequireTenant } from "@/components/RequireTenant";
@@ -81,7 +89,13 @@ function WebhooksInner({ tenantId }: { tenantId: string }) {
           error={list.error}
           data={list.data}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
-          empty={<p className="muted">No webhooks configured.</p>}
+          empty={
+            <EmptyState
+              illustration={<EmptyIllustration kind="inbox" />}
+              title="No webhooks configured"
+              description="Add a webhook to push events to your own endpoints in real time."
+            />
+          }
         >
           {(d) => <DataTable columns={cols} rows={d.items ?? []} rowKey={(w) => w.id} />}
         </AsyncBoundary>
