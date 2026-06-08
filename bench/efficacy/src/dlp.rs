@@ -16,10 +16,17 @@
 //! them, so the test is not circular.
 
 use sng_dlp::{
-    ContentClassifier, ContentMetadata, DlpChannel, DlpRule, PatternType, RuleAction, Severity,
+    ContentClassifier, ContentMetadata, DlpChannel, DlpRule, EntityClass, NerModel, PatternType,
+    RuleAction, Severity,
 };
 
 use crate::report::{measure, Case, Feature, FunctionReport, Kind, Targets};
+
+/// The exact on-device NER model asset the endpoint runs (`ner_v1.onnx`),
+/// authored by `crates/sng-dlp/assets/train_ner_model.py`. Embedding it
+/// keeps this harness measuring the *real* inference path over the real
+/// shipped weights — not a re-trained or stubbed model.
+const NER_MODEL_BYTES: &[u8] = include_bytes!("../../../crates/sng-dlp/assets/ner_v1.onnx");
 
 /// Timed iterations for the scan-throughput microbenchmark. Large enough
 /// to amortise warm-up and produce a stable per-scan mean.
@@ -514,4 +521,266 @@ fn sample_document() -> String {
          The record is stored under the regional retention policy and replicated to the \
          in-region archive tier only."
     )
+}
+
+// ---------------------------------------------------------------------------
+// ML NER efficacy (Workstream 4, Step 5): drive the real on-device ONNX
+// model over a labelled PII corpus and report precision/recall.
+// ---------------------------------------------------------------------------
+
+/// A labelled PII example: `text` plus the entity class it contains, or
+/// `None` for a benign control that must produce no detection.
+struct NerExample {
+    text: &'static str,
+    expect: Option<EntityClass>,
+}
+
+const fn pii(text: &'static str, expect: EntityClass) -> NerExample {
+    NerExample {
+        text,
+        expect: Some(expect),
+    }
+}
+
+const fn benign(text: &'static str) -> NerExample {
+    NerExample { text, expect: None }
+}
+
+/// Labelled corpus spanning all six entity classes plus benign controls.
+/// Mixes the surface forms the per-token NER is designed for (titled and
+/// untitled gazetteer names, single-token phone/IBAN/MRN/case shapes with
+/// natural context) and includes hard negatives (capitalised place and
+/// product pairs, bare reference numbers) so precision is measured, not
+/// assumed.
+fn ner_corpus() -> Vec<NerExample> {
+    use EntityClass::{
+        Address, BankAccount, LegalDocument, MedicalRecord, PersonName, PhoneNumber,
+    };
+    vec![
+        pii(
+            "Please ask Dr Susan Miller to countersign the form",
+            PersonName,
+        ),
+        pii(
+            "The account belongs to Robert Williams of the east office",
+            PersonName,
+        ),
+        pii(
+            "Maria Garcia approved the quarterly travel budget",
+            PersonName,
+        ),
+        pii("Forward the file to Karen Lopez before noon", PersonName),
+        pii(
+            "Mr David Johnson joined the call from the branch",
+            PersonName,
+        ),
+        pii("She lives at 742 Evergreen Terrace near the park", Address),
+        pii(
+            "Ship the parcel to 1600 Pennsylvania Avenue Washington",
+            Address,
+        ),
+        pii(
+            "Deliver the documents to 10 Downing Street tomorrow",
+            Address,
+        ),
+        pii(
+            "Call the office at +1-202-555-0173 tomorrow morning",
+            PhoneNumber,
+        ),
+        pii(
+            "You can reach me on +44-20-7946-0958 after lunch",
+            PhoneNumber,
+        ),
+        pii(
+            "Dial the support line +1-800-555-0199 for help",
+            PhoneNumber,
+        ),
+        pii(
+            "Ring the front desk at +49-30-1234-5678 if delayed",
+            PhoneNumber,
+        ),
+        pii(
+            "Wire the funds to IBAN GB29NWBK60161331926819 today",
+            BankAccount,
+        ),
+        pii(
+            "Transfer to account DE89370400440532013000 by Friday",
+            BankAccount,
+        ),
+        pii("Remit payment to NL91ABNA0417164300 next week", BankAccount),
+        pii(
+            "Settle the invoice via ES9121000418450200051332 promptly",
+            BankAccount,
+        ),
+        pii(
+            "The patient record MRN8472910 shows a follow-up",
+            MedicalRecord,
+        ),
+        pii(
+            "Lab results for MRN3391045 are now available",
+            MedicalRecord,
+        ),
+        pii(
+            "Admission note references MRN7782134 from intake",
+            MedicalRecord,
+        ),
+        pii("Pull the chart for MRN9981002 from the ward", MedicalRecord),
+        pii(
+            "The court filed case 1:21-cv-04567 last week",
+            LegalDocument,
+        ),
+        pii(
+            "Review docket 3:19-cr-00321 before the hearing",
+            LegalDocument,
+        ),
+        pii(
+            "Counsel cited case 4:18-cv-00245 in the brief",
+            LegalDocument,
+        ),
+        benign("The quarterly report is ready and revenue grew this year"),
+        benign("Our team shipped the new dashboard feature on schedule"),
+        benign("New York and Hong Kong remain our largest markets"),
+        benign("Project Apollo ships in the third quarter"),
+        benign("Order 48210 was shipped to the warehouse yesterday"),
+        benign("Version 12345 of the firmware is now available"),
+        benign("Please review the agenda before the staff meeting"),
+        benign("Sales trends improved after the product relaunch"),
+    ]
+}
+
+pub async fn run_ml_ner() -> FunctionReport {
+    let model = match NerModel::load_from_bytes(NER_MODEL_BYTES) {
+        Ok(m) => m,
+        Err(e) => {
+            return FunctionReport::untested(
+                "dlp_ml_ner",
+                "sng-dlp",
+                Kind::Detection,
+                &format!("ner_v1.onnx failed to load: {e}"),
+            );
+        }
+    };
+
+    let corpus = ner_corpus();
+    let mut cases = Vec::new();
+    for ex in &corpus {
+        let detected: Vec<EntityClass> = model
+            .detect(ex.text)
+            .expect("ONNX inference")
+            .into_iter()
+            .map(|d| d.class)
+            .collect();
+        match ex.expect {
+            // Known-bad: the labelled entity class MUST be detected.
+            // Any *other* class detected in a single-entity sentence is a
+            // spurious positive, recorded as its own false-positive case
+            // so it lowers precision.
+            Some(want) => {
+                let hit = detected.contains(&want);
+                cases.push(Case {
+                    description: format!("{}: {}", want.as_wire(), ex.text),
+                    bad: true,
+                    expected: "detect".into(),
+                    actual: if hit { "detect" } else { "pass" }.into(),
+                    correct: hit,
+                });
+                for spurious in detected.iter().filter(|&&c| c != want) {
+                    cases.push(Case {
+                        description: format!("spurious {} in: {}", spurious.as_wire(), ex.text),
+                        bad: false,
+                        expected: "pass".into(),
+                        actual: "detect".into(),
+                        correct: false,
+                    });
+                }
+            }
+            // Benign control: no entity of any class may be detected.
+            None => {
+                let clean = detected.is_empty();
+                cases.push(Case {
+                    description: format!("benign: {}", ex.text),
+                    bad: false,
+                    expected: "pass".into(),
+                    actual: if clean { "pass" } else { "detect" }.into(),
+                    correct: clean,
+                });
+            }
+        }
+    }
+
+    // Throughput: time the real detect() hot path (tokenize + featurize +
+    // ONNX matmul) over a representative multi-entity document.
+    let doc = "Patient Robert Williams, MRN8472910, can be reached at \
+               +1-202-555-0173; remit the refund to IBAN GB29NWBK60161331926819. \
+               See case 1:21-cv-04567 for the prior dispute.";
+    let throughput = vec![measure(
+        "ner_detect",
+        "scans/s",
+        THROUGHPUT_ITERS,
+        Some(doc.len() as u64),
+        |_| model.detect(doc).expect("inference").len(),
+    )];
+
+    FunctionReport::from_cases(
+        "dlp_ml_ner",
+        "sng-dlp",
+        Kind::Detection,
+        // The DLP spec sets ML NER targets of precision > 0.90 and
+        // recall > 0.85. catch_rate is recall; precision is the reported
+        // precision field. fp_pass ≤ 0.10 keeps precision ≥ 0.90 when
+        // positives dominate.
+        Targets {
+            catch_pass: 0.85,
+            catch_warn: 0.80,
+            fp_pass: 0.10,
+            fp_warn: 0.20,
+        },
+        cases,
+        Some(
+            "Real on-device ONNX NER (ner_v1.onnx) over a labelled PII corpus \
+             across all six entity classes, with benign and capitalised-non-name \
+             controls. catch_rate is recall; the precision field is tp/(tp+fp). \
+             Spec targets: precision > 0.90, recall > 0.85."
+                .into(),
+        ),
+    )
+    .with_features(ml_ner_features())
+    .with_throughput(throughput)
+}
+
+/// Capability catalog for the ML NER detector (business-report section).
+fn ml_ner_features() -> Vec<Feature> {
+    fn f(name: &str, how: &str, coverage: &str) -> Feature {
+        Feature {
+            name: name.into(),
+            how: how.into(),
+            coverage: coverage.into(),
+        }
+    }
+    vec![
+        f(
+            "On-device ONNX NER inference",
+            "A multinomial logistic-regression head (MatMul → Add → Softmax) runs per \
+             token over a 16+ dimensional deterministic feature vector via the ort \
+             (ONNX Runtime) crate; argmax above a 0.60 confidence threshold labels the \
+             token and consecutive same-class tokens merge into one entity span.",
+            "person_name, address, phone_number, bank_account, medical_record, legal_document",
+        ),
+        f(
+            "Deterministic feature extraction",
+            "Token shape (title-case, digit ratio, phone/account/code shapes), a ±2 \
+             context-keyword window (name titles, address/phone/bank/medical/legal cues), \
+             and a common-name gazetteer; the Rust featurizer is pinned byte-for-byte to \
+             the Python exporter by a featurecheck fixture.",
+            "16+ feature dimensions, no embedding table — fully explainable",
+        ),
+        f(
+            "Signed-model trust chain + regex fail-safe",
+            "The model ships inside the Ed25519-signed endpoint policy bundle and is \
+             re-verified against the operator trust store before load; when no model is \
+             installed the engine falls back to a real regex+context NER so detection \
+             degrades safely rather than failing open.",
+            "ModelVerifier (same trust root as the policy) + RegexNerFallback",
+        ),
+    ]
 }

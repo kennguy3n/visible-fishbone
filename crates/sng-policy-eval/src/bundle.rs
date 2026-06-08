@@ -79,8 +79,35 @@ struct RawBundle {
         skip_serializing_if = "Vec::is_empty"
     )]
     steering_json: Vec<u8>,
+    /// JSON-encoded `Vec<MalwareEntry>` — the threat-intel
+    /// malicious file-hash set the SWG installs into its
+    /// `StaticMalwareList`. Optional: the Go side emits it
+    /// (`omitempty`) only for the edge / cloud targets that run
+    /// the malware inspector and only when a malware-hash
+    /// compiler is wired.
+    #[serde(
+        rename = "mw",
+        with = "serde_bytes",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    malware_json: Vec<u8>,
     #[serde(rename = "ts")]
     compiled_at: DateTime<Utc>,
+}
+
+/// One malicious file-hash verdict carried in a bundle's malware
+/// section. Mirrors the Go `policy.MalwareHashEntry` (terse JSON
+/// keys `h`/`v`). `hash` is lowercase hex; `verdict` is the SWG
+/// verdict string (`malicious` / `suspicious` / `clean`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MalwareEntry {
+    /// Lowercase-hex file hash (MD5 / SHA-1 / SHA-256).
+    #[serde(rename = "h")]
+    pub hash: String,
+    /// SWG verdict string for the hash.
+    #[serde(rename = "v")]
+    pub verdict: String,
 }
 
 /// Immutable, fully-decoded policy bundle. Held inside
@@ -118,6 +145,11 @@ pub struct LoadedBundle {
     /// Raw steering rule set — kept for round-tripping the
     /// bundle through telemetry without re-encoding loss.
     pub steering_raw: Option<Arc<SteeringRuleSet>>,
+    /// Threat-intel malicious file-hash set. Empty when the
+    /// bundle carried no `mw` section (non-SWG targets, or no
+    /// malware-hash compiler wired). The SWG subsystem installs
+    /// these into its `StaticMalwareList` on bundle apply.
+    pub malware: Arc<[MalwareEntry]>,
     /// Wall-clock compile time.
     pub compiled_at: DateTime<Utc>,
     /// Pre-built lookup map for named subjects referenced via
@@ -182,6 +214,15 @@ impl LoadedBundle {
             let table = SteeringTable::from_rule_set(&rs);
             (table, Some(Arc::new(rs)))
         };
+        // Decode the malware-hash set. Optional — omitted on
+        // targets that do not run the SWG malware inspector and
+        // when no malware-hash compiler is wired.
+        let malware: Vec<MalwareEntry> = if raw.malware_json.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_slice(&raw.malware_json)
+                .map_err(|e| PolicyEvalError::MalwareDecode(format!("decode malware table: {e}")))?
+        };
         let default_verb = parse_default_verb(&raw.default_action);
         // Every `suggest_only` rule must carry a `suggested_verb`
         // (the would-be enforcement verb the operator UI surfaces).
@@ -214,6 +255,7 @@ impl LoadedBundle {
             rules: Arc::from(rules.into_boxed_slice()),
             steering: Arc::new(steering_table),
             steering_raw,
+            malware: Arc::from(malware.into_boxed_slice()),
             compiled_at: raw.compiled_at,
             named_subjects,
             named_predicates,
@@ -317,6 +359,7 @@ pub fn deny_all_skeleton_body(target: BundleTarget) -> Vec<u8> {
         default_action: "deny".into(),
         rules_json: b"[]".to_vec(),
         steering_json: Vec::new(),
+        malware_json: Vec::new(),
         compiled_at: Utc::now(),
     };
     // Infallible for the fully-populated RawBundle above.
@@ -364,6 +407,7 @@ mod tests {
             default_action: "deny".into(),
             rules_json: b"[]".to_vec(),
             steering_json: vec![],
+            malware_json: vec![],
             compiled_at: Utc::now(),
         };
         encode_msgpack_named(&raw)
@@ -431,6 +475,7 @@ mod tests {
             default_action: "deny".into(),
             rules_json: b"[]".to_vec(),
             steering_json: vec![],
+            malware_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -458,11 +503,90 @@ mod tests {
             default_action: "deny".into(),
             rules_json: b"{not valid json".to_vec(),
             steering_json: vec![],
+            malware_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
         let err = LoadedBundle::from_body(&body, BundleTarget::Edge).unwrap_err();
         assert!(matches!(err, PolicyEvalError::RulesDecode(_)));
+    }
+
+    #[test]
+    fn malware_section_decodes_into_loaded_bundle() {
+        // The Go control plane emits the `mw` section as a
+        // JSON-encoded array of {h,v} objects for edge/cloud
+        // targets. Verify it round-trips into LoadedBundle.malware.
+        let malware_json = serde_json::to_vec(&vec![
+            MalwareEntry {
+                hash: "deadbeef".into(),
+                verdict: "malicious".into(),
+            },
+            MalwareEntry {
+                hash: "cafebabe".into(),
+                verdict: "suspicious".into(),
+            },
+        ])
+        .unwrap();
+        let raw = RawBundle {
+            schema_version: 1,
+            target: BundleTarget::Edge,
+            graph_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            graph_version: 1,
+            compiler: "test".into(),
+            default_action: "deny".into(),
+            rules_json: b"[]".to_vec(),
+            steering_json: vec![],
+            malware_json,
+            compiled_at: Utc::now(),
+        };
+        let body = encode_msgpack_named(&raw);
+        let bundle = LoadedBundle::from_body(&body, BundleTarget::Edge).unwrap();
+        assert_eq!(bundle.malware.len(), 2);
+        assert_eq!(bundle.malware[0].hash, "deadbeef");
+        assert_eq!(bundle.malware[0].verdict, "malicious");
+        assert_eq!(bundle.malware[1].hash, "cafebabe");
+        assert_eq!(bundle.malware[1].verdict, "suspicious");
+    }
+
+    #[test]
+    fn absent_malware_section_decodes_to_empty() {
+        // Non-SWG targets (and bundles compiled without a
+        // malware-hash compiler) omit `mw`; the decoder must
+        // treat that as an empty set, not an error.
+        let raw = RawBundle {
+            schema_version: 1,
+            target: BundleTarget::Edge,
+            graph_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            graph_version: 1,
+            compiler: "test".into(),
+            default_action: "deny".into(),
+            rules_json: b"[]".to_vec(),
+            steering_json: vec![],
+            malware_json: vec![],
+            compiled_at: Utc::now(),
+        };
+        let body = encode_msgpack_named(&raw);
+        let bundle = LoadedBundle::from_body(&body, BundleTarget::Edge).unwrap();
+        assert!(bundle.malware.is_empty());
+    }
+
+    #[test]
+    fn malformed_malware_json_returns_malware_decode() {
+        let raw = RawBundle {
+            schema_version: 1,
+            target: BundleTarget::Edge,
+            graph_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            graph_version: 1,
+            compiler: "test".into(),
+            default_action: "deny".into(),
+            rules_json: b"[]".to_vec(),
+            steering_json: vec![],
+            malware_json: b"{not valid json".to_vec(),
+            compiled_at: Utc::now(),
+        };
+        let body = encode_msgpack_named(&raw);
+        let err = LoadedBundle::from_body(&body, BundleTarget::Edge).unwrap_err();
+        assert!(matches!(err, PolicyEvalError::MalwareDecode(_)));
     }
 
     #[test]
@@ -476,6 +600,7 @@ mod tests {
             default_action: "deny".into(),
             rules_json: b"[]".to_vec(),
             steering_json: b"{not valid json".to_vec(),
+            malware_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -512,6 +637,7 @@ mod tests {
             default_action: "deny".into(),
             rules_json,
             steering_json: vec![],
+            malware_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -567,6 +693,7 @@ mod tests {
             default_action: "deny".into(),
             rules_json,
             steering_json: vec![],
+            malware_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -601,6 +728,7 @@ mod tests {
             default_action: "deny".into(),
             rules_json,
             steering_json: vec![],
+            malware_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -622,6 +750,7 @@ mod tests {
             default_action: "suggest_only".into(),
             rules_json: vec![],
             steering_json: vec![],
+            malware_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -657,6 +786,7 @@ mod tests {
             default_action: "deny".into(),
             rules_json,
             steering_json: vec![],
+            malware_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);

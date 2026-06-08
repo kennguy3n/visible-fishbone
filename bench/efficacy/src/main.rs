@@ -132,6 +132,8 @@ async fn main() {
     if sel.dlp {
         eprintln!("running DLP efficacy (sng-dlp)...");
         functions.push(dlp::run().await);
+        eprintln!("running DLP ML NER efficacy (sng-dlp)...");
+        functions.push(dlp::run_ml_ner().await);
     }
     if sel.malware {
         eprintln!("running malware efficacy (sng-swg YARA)...");

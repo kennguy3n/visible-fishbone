@@ -57,6 +57,24 @@ aho-corasick = { workspace = true }
 # control plane's `norm.NFC`.
 unicode-normalization = { workspace = true }
 
+# On-device ONNX inference for the ML-NER classifier
+# (`ml_classifier`). The signed policy bundle ships a small ONNX NER
+# head; `ort` runs it locally (no network) inside the inspection hot
+# path. When no model is installed the classifier falls back to a
+# real regex-only NER, so `ort` is never on the fail-safe path. See
+# the workspace manifest for the version-pin rationale.
+ort = { workspace = true }
+
+# Ed25519 verification for the ML model trust chain. The NER model
+# binary ships inside the Ed25519-signed endpoint policy bundle and
+# carries its own detached signature over the model bytes;
+# `ml_classifier::ModelVerifier` checks it against the same
+# operator-provisioned trust store the policy bundle uses
+# (`sng_core::policy::PolicyVerifier`) before the model is ever loaded
+# into ONNX Runtime — an unsigned or tampered model is rejected, never
+# executed.
+ed25519-dalek = { workspace = true }
+
 # Local crate dependencies: sng-core supplies the strongly-typed
 # identifier newtypes + the `BundleTarget` enum the policy loader
 # binds against; sng-policy-eval supplies the `EnforcementDomain`

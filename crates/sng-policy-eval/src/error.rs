@@ -33,6 +33,10 @@ pub enum PolicyEvalError {
     #[error("decode steering table: {0}")]
     SteeringDecode(String),
 
+    /// The JSON-encoded `mw` malware-hash sub-document is malformed.
+    #[error("decode malware table: {0}")]
+    MalwareDecode(String),
+
     /// The bundle's `v` schema version is newer than this
     /// engine supports. Receivers refuse rather than guessing —
     /// a future-versioned bundle could embed semantics this
@@ -100,6 +104,7 @@ impl PolicyEvalError {
             Self::EnvelopeDecode(_)
             | Self::RulesDecode(_)
             | Self::SteeringDecode(_)
+            | Self::MalwareDecode(_)
             | Self::SchemaVersionTooNew { .. }
             | Self::SuggestOnlyMissingSuggestion { .. } => ErrorCode::BundleRejected,
             Self::TargetMismatch { .. } => ErrorCode::PolicyBundleTargetMismatch,

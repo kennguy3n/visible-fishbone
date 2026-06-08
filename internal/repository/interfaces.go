@@ -1090,6 +1090,34 @@ type DLPMatchRepository interface {
 	List(ctx context.Context, tenantID uuid.UUID, policyID *uuid.UUID, page Page) (PageResult[DLPMatch], error)
 }
 
+// DLPModelRepository owns the dlp_ml_models and
+// dlp_ml_model_assignments tables. All operations are tenant-scoped
+// and isolated through the same `sng.tenant_id` RLS pattern.
+type DLPModelRepository interface {
+	// CreateModel registers a new model version. Returns ErrConflict
+	// if (tenant_id, name, version) already exists.
+	CreateModel(ctx context.Context, tenantID uuid.UUID, m DLPModel) (DLPModel, error)
+	// GetModel returns a single model version.
+	GetModel(ctx context.Context, tenantID, id uuid.UUID) (DLPModel, error)
+	// ListModels returns paginated model versions for the tenant,
+	// newest first.
+	ListModels(ctx context.Context, tenantID uuid.UUID, page Page) (PageResult[DLPModel], error)
+	// UpdateModel applies a sparse patch (status/signature/classes).
+	UpdateModel(ctx context.Context, tenantID, id uuid.UUID, patch DLPModelPatch) (DLPModel, error)
+	// DeleteModel removes a model version. Returns ErrConflict if the
+	// version is currently assigned to the tenant.
+	DeleteModel(ctx context.Context, tenantID, id uuid.UUID) error
+	// AssignModel sets the tenant's active model version (upsert of
+	// the single per-tenant assignment row).
+	AssignModel(ctx context.Context, tenantID, modelID uuid.UUID) (DLPModelAssignment, error)
+	// ClearAssignment removes the tenant's active assignment.
+	// Idempotent: clearing an absent assignment is a no-op.
+	ClearAssignment(ctx context.Context, tenantID uuid.UUID) error
+	// GetAssignedModel returns the tenant's currently assigned model
+	// version, or ErrNotFound if none is assigned.
+	GetAssignedModel(ctx context.Context, tenantID uuid.UUID) (DLPModel, error)
+}
+
 // --- Device enrollment ----------------------------------------------------
 
 // DeviceEnrollmentRepository owns the device_enrollments and

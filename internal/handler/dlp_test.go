@@ -34,6 +34,7 @@ func newDLPTestRouter(t *testing.T) (http.Handler, uuid.UUID, string) {
 		memory.NewDLPPolicyRepository(store),
 		memory.NewDLPFingerprintRepository(store),
 		memory.NewDLPMatchRepository(store),
+		memory.NewDLPModelRepository(store),
 		nil,
 	)
 
