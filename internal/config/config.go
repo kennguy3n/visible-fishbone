@@ -1590,6 +1590,16 @@ func (c Config) validate() error {
 	default:
 		return fmt.Errorf("NATS_STORAGE: invalid value %q (expected file|memory)", c.NATS.Storage)
 	}
+	// AI_LLM_MODEL_FAMILY selects the model-tuned system prompt. "" and
+	// "auto" infer the family from the model name; the explicit families
+	// are validated here (mirroring PG_SSLMODE/NATS_STORAGE) so an operator
+	// typo fails fast at boot instead of silently degrading to the
+	// general-purpose prompt at request time.
+	switch c.AI.ModelFamily {
+	case "", "auto", "ternary-bonsai", "openai-compat":
+	default:
+		return fmt.Errorf("AI_LLM_MODEL_FAMILY: invalid value %q (expected auto|ternary-bonsai|openai-compat)", c.AI.ModelFamily)
+	}
 	// NATS_PARTITIONS is the telemetry stream cell count. 1 keeps
 	// the historical single-stream layout; >1 fans out into N cells
 	// (SNG_TELEMETRY_0…). Reject 0/negative (which would leave the

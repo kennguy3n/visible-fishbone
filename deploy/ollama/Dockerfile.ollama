@@ -16,11 +16,20 @@ ENV SNG_LLM_MODEL=${SNG_LLM_MODEL}
 
 # Start the server, wait for readiness, pull the model into the image
 # layer, then stop the server. The model is now baked into the image.
+# If the server never becomes ready within 60s, fail the build with a
+# clear message (and dump the server log) instead of falling through to
+# an opaque `ollama pull` connection error.
 RUN nohup ollama serve >/tmp/ollama.log 2>&1 & \
+    ready=""; \
     for i in $(seq 1 60); do \
-      ollama list >/dev/null 2>&1 && break; \
+      if ollama list >/dev/null 2>&1; then ready=1; break; fi; \
       sleep 1; \
     done; \
+    if [ -z "$ready" ]; then \
+      echo "ERROR: ollama server did not become ready within 60s" >&2; \
+      cat /tmp/ollama.log >&2 || true; \
+      exit 1; \
+    fi; \
     ollama pull "${SNG_LLM_MODEL}" && \
     ollama list
 

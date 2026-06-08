@@ -224,12 +224,16 @@ func (p *HTTPProvider) Complete(ctx context.Context, req LLMRequest) (LLMRespons
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			// Exponential backoff; abort early if the caller's context
-			// is already done so we never sleep past a deadline.
+			// is already done so we never sleep past a deadline. Use an
+			// explicit timer so it can be stopped on the cancel path
+			// rather than leaking until expiry (time.After cannot).
 			wait := delay << (attempt - 1)
+			timer := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return LLMResponse{}, ctx.Err()
-			case <-time.After(wait):
+			case <-timer.C:
 			}
 		}
 		resp, retryable, callErr := p.doRequest(ctx, payload)
