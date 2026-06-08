@@ -11,7 +11,7 @@
 //! Detection runs a genuine ONNX compute graph through ONNX Runtime
 //! (the [`ort`] crate). The graph is a multinomial-logistic-regression
 //! NER head — `softmax(features · W + b)` — over a fixed,
-//! deterministic 16-dimensional feature vector extracted per token by
+//! deterministic 17-dimensional feature vector extracted per token by
 //! [`featurize_token`]. The model is tiny (sub-KB) and inference is a
 //! single batched matmul, so a whole document classifies in well under
 //! the 50 ms budget with zero network calls. The model is authored /
