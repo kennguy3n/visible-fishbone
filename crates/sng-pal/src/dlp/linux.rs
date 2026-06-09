@@ -985,14 +985,44 @@ impl WaylandClipboardMonitor {
 
     fn read_selection() -> Result<Vec<u8>, ChannelError> {
         match Command::new("wl-paste").arg("--no-newline").output() {
-            Ok(out) if out.status.success() => Ok(out.stdout),
-            Ok(out) => Err(ChannelError::Init(format!(
-                "wl-paste exited with status {}",
-                out.status
-            ))),
+            Ok(out) => Self::classify_wl_paste(&out.status, out.stdout, &out.stderr),
             Err(e) => Err(ChannelError::Unavailable(format!(
                 "wl-paste unavailable: {e}"
             ))),
+        }
+    }
+
+    /// Map a completed `wl-paste` invocation to a selection or an error.
+    ///
+    /// `wl-paste` exits **non-zero with `Nothing is copied` on stderr**
+    /// when the clipboard is simply empty — the common idle case, not a
+    /// backend failure. It is mapped to an empty selection so
+    /// [`Self::next_event`] parks on its dedup backoff and re-polls,
+    /// rather than surfacing a [`ChannelError`] that the agent's channel
+    /// worker treats as terminal (it logs once and exits the worker).
+    /// Were the empty clipboard reported as an error, Wayland clipboard
+    /// DLP would shut itself down the first time the clipboard happened
+    /// to be empty, and the error path would be the only exit for the
+    /// idle case — so this classification is also what keeps `wl-paste`
+    /// from being re-spawned in a tight loop. Genuine failures (no
+    /// compositor, protocol error) stay terminal for graceful
+    /// degradation.
+    fn classify_wl_paste(
+        status: &std::process::ExitStatus,
+        stdout: Vec<u8>,
+        stderr: &[u8],
+    ) -> Result<Vec<u8>, ChannelError> {
+        if status.success() {
+            return Ok(stdout);
+        }
+        let stderr = String::from_utf8_lossy(stderr);
+        if stderr.to_ascii_lowercase().contains("nothing is copied") {
+            Ok(Vec::new())
+        } else {
+            Err(ChannelError::Init(format!(
+                "wl-paste exited with status {status}: {}",
+                stderr.trim()
+            )))
         }
     }
 }
@@ -1296,5 +1326,46 @@ mod x11 {
             return None;
         }
         Some(reply.value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    /// An empty Wayland clipboard makes `wl-paste` exit non-zero with
+    /// "Nothing is copied" — it must classify as an empty selection, not
+    /// a terminal error, so the channel worker is not torn down on a
+    /// perfectly normal idle clipboard.
+    #[test]
+    fn wl_paste_empty_clipboard_is_not_terminal() {
+        // exit code 1 (status = 1 << 8 on unix).
+        let status = ExitStatus::from_raw(1 << 8);
+        let out =
+            WaylandClipboardMonitor::classify_wl_paste(&status, Vec::new(), b"Nothing is copied");
+        assert_eq!(out.expect("empty clipboard is Ok"), Vec::<u8>::new());
+    }
+
+    /// A genuine failure (no compositor, protocol error) stays terminal
+    /// so the agent gracefully degrades the channel.
+    #[test]
+    fn wl_paste_real_failure_is_terminal() {
+        let status = ExitStatus::from_raw(1 << 8);
+        let out = WaylandClipboardMonitor::classify_wl_paste(
+            &status,
+            Vec::new(),
+            b"failed to connect to a Wayland server",
+        );
+        assert!(matches!(out, Err(ChannelError::Init(_))));
+    }
+
+    /// A successful read returns stdout verbatim (the selection bytes).
+    #[test]
+    fn wl_paste_success_returns_selection() {
+        let status = ExitStatus::from_raw(0);
+        let out = WaylandClipboardMonitor::classify_wl_paste(&status, b"sensitive".to_vec(), b"");
+        assert_eq!(out.expect("success is Ok"), b"sensitive".to_vec());
     }
 }

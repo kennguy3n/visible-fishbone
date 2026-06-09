@@ -71,6 +71,15 @@ use windows::core::{PCWSTR, w};
 /// event surfaces and how responsive shutdown is.
 const DRAIN_TICK: Duration = Duration::from_millis(100);
 
+/// Poll cadence for the USB-transfer channel when the WMI volume-arrival
+/// subscription is unavailable. Without the native pulse the monitor has
+/// no edge to react to, so it rescans the removable-drive set on this
+/// idle cadence rather than the 100 ms drain tick — matching the Linux
+/// USB poll fallback (`USB_IDLE_FALLBACK`) and keeping a locked-down
+/// enterprise image (no WMI) from paying a tight `GetLogicalDrives` +
+/// directory-walk loop ten times a second.
+const USB_IDLE_FALLBACK: Duration = Duration::from_secs(5);
+
 /// Size of the `ReadDirectoryChangesW` notification buffer. Large
 /// enough to absorb a burst of writes without overflow yet bounded so
 /// the per-watch resident cost stays small.
@@ -237,16 +246,28 @@ impl Drop for RdcWatch {
     fn drop(&mut self) {
         self.shared.closed.store(true, Ordering::SeqCst);
         let handle = HANDLE(self.handle as *mut std::ffi::c_void);
+        // Order matters: cancel the in-flight `ReadDirectoryChangesW`,
+        // *join the worker so it has fully exited*, and only then close
+        // the handle. Closing before the join would leave a window in
+        // which the worker — between its `is_closed()` check and the
+        // next `ReadDirectoryChangesW` — could issue the call on a
+        // freed handle (harmless `ERROR_INVALID_HANDLE`, but also a
+        // theoretical handle-reuse race if the OS recycled the value).
+        // Joining first removes that window entirely.
         // SAFETY: `handle` is the directory handle opened in `start`.
-        // Cancelling unblocks the worker's ReadDirectoryChangesW; the
-        // worker no longer touches the handle afterwards, so closing it
-        // here (once) is sound.
+        // `CancelIoEx` only unblocks the worker's pending I/O; it does
+        // not invalidate the handle, so the worker can safely observe
+        // the cancellation and exit before we close.
         unsafe {
             let _ = CancelIoEx(handle, None);
-            let _ = CloseHandle(handle);
         }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
+        }
+        // SAFETY: the worker has exited (joined above), so nothing can
+        // touch `handle` anymore; closing it here exactly once is sound.
+        unsafe {
+            let _ = CloseHandle(handle);
         }
     }
 }
@@ -557,7 +578,16 @@ impl ChannelInterceptor for WindowsUsbTransferMonitor {
                     return Ok(Some(e));
                 }
             }
-            tokio::time::sleep(DRAIN_TICK).await;
+            // In native mode an arrival pulse is what unparks a scan, so
+            // the short drain tick only bounds how quickly a queued event
+            // surfaces. In the polling fallback every tick *is* a scan, so
+            // park on the slower idle cadence to avoid a tight rescan loop.
+            let idle = if self.native {
+                DRAIN_TICK
+            } else {
+                USB_IDLE_FALLBACK
+            };
+            tokio::time::sleep(idle).await;
         }
     }
 }
@@ -934,7 +964,15 @@ impl ChannelInterceptor for WindowsClipboardMonitor {
                 if self.fallback_closed.load(Ordering::SeqCst) {
                     return Ok(None);
                 }
-                if let Some(bytes) = read_get_clipboard() {
+                // `powershell.exe Get-Clipboard` spawns a subprocess that
+                // loads the .NET runtime (~100-300 ms); run it on a
+                // blocking thread so the tokio runtime worker is never
+                // parked on it, matching the Wayland `wl-paste` and macOS
+                // `pbpaste` fallbacks.
+                let bytes = tokio::task::spawn_blocking(read_get_clipboard)
+                    .await
+                    .map_err(|e| ChannelError::Init(format!("Get-Clipboard task panicked: {e}")))?;
+                if let Some(bytes) = bytes {
                     return Ok(Some(ContentEvent {
                         channel: DlpChannel::Clipboard,
                         content: bytes,
@@ -962,7 +1000,7 @@ fn clipboard_worker(shared: &Arc<ChannelBuffer>, tx: &std::sync::mpsc::Sender<is
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetMessageW, HWND_MESSAGE,
-        MSG, RegisterClassW, SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+        IsWindow, MSG, RegisterClassW, SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
     };
 
     use windows::Win32::Foundation::HINSTANCE;
@@ -1040,7 +1078,14 @@ fn clipboard_worker(shared: &Arc<ChannelBuffer>, tx: &std::sync::mpsc::Sender<is
     // SAFETY: leave the chain, destroy the window, reclaim the state.
     unsafe {
         let _ = RemoveClipboardFormatListener(hwnd);
-        let _ = DestroyWindow(hwnd);
+        // A `WM_CLOSE`-driven shutdown lets `DefWindowProcW` destroy the
+        // window already, whereas the `shared.is_closed()` break path
+        // leaves it alive. Guard with `IsWindow` so the teardown is
+        // idempotent and only one `DestroyWindow` ever runs, instead of
+        // relying on a benign double-destroy returning `ERROR_INVALID_*`.
+        if IsWindow(Some(hwnd)).as_bool() {
+            let _ = DestroyWindow(hwnd);
+        }
         drop(Box::from_raw(state));
     }
 }

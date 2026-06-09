@@ -467,6 +467,29 @@ fn validate(cfg: &AgentConfig) -> Result<(), String> {
     if cfg.telemetry.event_channel_capacity == 0 {
         return Err("telemetry.event_channel_capacity must be > 0".into());
     }
+    // DLP cross-field checks. Only the enabled subsystem starts the
+    // portable fallback watchers, so these are gated on `enabled` — a
+    // disabled subsystem never reads the fields.
+    if cfg.dlp.enabled {
+        // A zero poll cadence would spin the portable directory/USB
+        // fallback watchers in a tight loop, pegging a core. The native
+        // edge-triggered hooks don't poll, but the fallbacks always can,
+        // so reject it the same way the other interval fields are.
+        if cfg.dlp.poll_interval.is_zero() {
+            return Err("dlp.poll_interval must be > 0 when dlp.enabled".into());
+        }
+        // An enabled subsystem with every channel toggled off and no
+        // watch directories registers with the supervisor and reports
+        // healthy yet observes nothing. The empty-watch_dirs file-write
+        // idle is documented and legitimate, so this is a startup warning
+        // (an almost-certain operator mistake) rather than a hard error.
+        if !cfg.dlp.clipboard && !cfg.dlp.usb && !cfg.dlp.print && cfg.dlp.watch_dirs.is_empty() {
+            tracing::warn!(
+                target: "sng_agent::config",
+                "dlp.enabled = true but clipboard/usb/print are all off and watch_dirs is empty; the DLP subsystem will register and report healthy yet observe nothing"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -752,5 +775,66 @@ event_channel_capacity = 0
             message.contains("telemetry.event_channel_capacity"),
             "message did not name the bad field: {message}"
         );
+    }
+
+    /// A zero `dlp.poll_interval` would spin the portable fallback
+    /// watcher in a tight loop once the subsystem is enabled. The
+    /// validator must reject it at load time (matching the other
+    /// zero-duration interval checks).
+    #[test]
+    fn validate_rejects_zero_dlp_poll_interval_when_enabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[dlp]
+enabled       = true
+poll_interval = "0s"
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("dlp.poll_interval"),
+            "message did not name the bad field: {message}"
+        );
+    }
+
+    /// The same zero `dlp.poll_interval` is harmless when the subsystem
+    /// is disabled (the field is never read), so it must not be rejected.
+    #[test]
+    fn validate_allows_zero_dlp_poll_interval_when_disabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[dlp]
+enabled       = false
+poll_interval = "0s"
+"#,
+        )
+        .unwrap();
+        assert!(load_from_path(f.path()).is_ok());
     }
 }
