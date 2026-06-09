@@ -62,6 +62,7 @@ pub mod pop;
 pub mod subsystems;
 pub mod supervisor;
 pub mod tracing_init;
+pub mod watchdog;
 
 pub use cli::{Cli, DataPathSelection, PalBackend, UpdaterBackend};
 pub use commodity::{
@@ -73,6 +74,10 @@ pub use config::{ConfigError, EdgeConfig, EdgeMode, PopConfig};
 pub use hardware::{AttestationReport, HardwareAccelerator, HardwareDescriptor};
 pub use pop::{AtCapacity, CapacityReport, ConnGuard, PoPRouter, RouteError, TenantSelector};
 pub use supervisor::{BuiltEdge, EdgeBuildError, build_edge, run_edge};
+pub use watchdog::{
+    EdgeController, HealthSource, PipelineRestartSink, ShutdownEdgeController, SubsystemRestarter,
+    SupervisorHealthSource, WATCHDOG_NAME, Watchdog, WatchdogConfig, WatchdogError,
+};
 
 use anyhow::Result;
 use std::ffi::OsString;

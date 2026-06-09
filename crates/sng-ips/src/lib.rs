@@ -98,7 +98,10 @@ pub mod telemetry;
 pub use config::{ConfigGenerator, IpsConfigInput, IpsRuntime, SuricataConfig};
 pub use error::IpsError;
 pub use eve::{EveAlert, EveAnomaly, EveDns, EveFileinfo, EveFlow, EveHttp, EveRecord, EveTls};
-pub use health::{FailMode, HealthState, HealthTransition};
+pub use health::{
+    FailMode, HealthMonitor, HealthProbe, HealthState, HealthSupervisor, HealthSupervisorConfig,
+    HealthThresholds, HealthTransition, SUBSYSTEM_NAME,
+};
 pub use manager::{IpsManager, IpsManagerConfig, IpsManagerStatus, SupervisorHandles};
 pub use process::{
     MockSuricata, ProcessStatus, ShellSuricata, SuricataProcess, SuricataSignal, SuricataStats,

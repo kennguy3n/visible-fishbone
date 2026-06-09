@@ -94,6 +94,7 @@ pub mod events;
 pub mod ids;
 pub mod lifecycle;
 pub mod policy;
+pub mod restart;
 pub mod supervisor;
 pub mod traffic_class;
 
@@ -103,7 +104,10 @@ pub use envelope::{
     unpack_payload, wrap_flow_event,
 };
 pub use error::{ErrorCode, SngError, SngResult};
-pub use events::{AgentEvent, DnsEvent, FlowEvent, HttpEvent, IpsEvent, SdwanEvent, ZtnaEvent};
+pub use events::{
+    AgentEvent, DnsEvent, FlowEvent, HttpEvent, IpsEvent, SdwanEvent, SubsystemRestart,
+    SubsystemRestartOutcome, SubsystemRestartReason, ZtnaEvent,
+};
 pub use ids::{
     ClaimTokenId, DeviceId, EventId, InvalidPolicySigningKeyId, PolicyBundleId, PolicyGraphId,
     PolicySigningKeyId, SiteId, TenantId,
@@ -112,6 +116,7 @@ pub use lifecycle::{
     DrainTimeout, Health, HealthCheck, HealthStatus, ShutdownSignal, ShutdownTrigger,
     SubsystemHealth,
 };
+pub use restart::{NoopRestartSink, SubsystemRestartSink};
 pub use policy::{
     AddKeyError, BundleSignature, BundleTarget, PolicyBundle, PolicyBundleClaims, PolicyVerifier,
     UnknownBundleTarget, VerificationError,

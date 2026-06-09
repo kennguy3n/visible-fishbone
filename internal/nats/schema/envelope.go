@@ -43,6 +43,10 @@ const (
 	EventClassSDWAN   EventClass = "sdwan"
 	EventClassAgent   EventClass = "agent"
 	EventClassPosture EventClass = "posture"
+	// EventClassSystem carries edge-internal control-plane signals
+	// (self-healing supervisor restarts), not endpoint traffic. Its
+	// payload is a SubsystemRestart.
+	EventClassSystem EventClass = "system"
 )
 
 // IsValid reports whether c is a known event class.
@@ -50,7 +54,7 @@ func (c EventClass) IsValid() bool {
 	switch c {
 	case EventClassFlow, EventClassDNS, EventClassHTTP,
 		EventClassIPS, EventClassZTNA, EventClassSDWAN,
-		EventClassAgent, EventClassPosture:
+		EventClassAgent, EventClassPosture, EventClassSystem:
 		return true
 	}
 	return false

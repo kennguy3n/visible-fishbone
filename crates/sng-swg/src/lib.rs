@@ -100,6 +100,7 @@ pub mod casb;
 pub mod casb_rules;
 pub mod categorizer;
 pub mod config;
+pub mod envoy_supervisor;
 pub mod error;
 pub mod health;
 pub mod malware;
@@ -123,8 +124,12 @@ pub use config::{
     DEFAULT_ADMIN_PORT, DEFAULT_EXT_AUTHZ_TIMEOUT_MS, EnvoyConfig, ListenerConfig,
     render_envoy_yaml,
 };
+pub use envoy_supervisor::{
+    EnvoyReadiness, EnvoySupervisor, EnvoySupervisorConfig, HttpReadiness,
+    SUBSYSTEM_NAME as SWG_SUBSYSTEM_NAME,
+};
 pub use error::SwgError;
-pub use health::{HealthReport, HealthState, ManagerHealth};
+pub use health::{FailMode, HealthProbe, HealthReport, HealthState, ManagerHealth};
 pub use malware::{MalwareVerdict, MalwareVerdictProvider, StaticMalwareList};
 pub use manager::{SwgManager, SwgSnapshot};
 pub use process::{EnvoyProcess, MockEnvoy, ShellEnvoy};

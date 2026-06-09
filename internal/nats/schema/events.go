@@ -284,3 +284,106 @@ func (a AgentEvent) Validate() error {
 	}
 	return nil
 }
+
+// SubsystemRestartReason enumerates why a self-healing supervisor
+// restarted (or attempted to restart) a subsystem. Mirrors the Rust
+// `sng_core::events::SubsystemRestartReason` snake_case wire forms.
+type SubsystemRestartReason string
+
+const (
+	// SubsystemRestartLivenessLost — the supervised process was
+	// observed dead / unreachable.
+	SubsystemRestartLivenessLost SubsystemRestartReason = "liveness_lost"
+	// SubsystemRestartUnresponsive — the process is alive but its
+	// control surface (Suricata stats socket, Envoy /ready) stopped
+	// answering.
+	SubsystemRestartUnresponsive SubsystemRestartReason = "unresponsive"
+	// SubsystemRestartHealthFailed — the composite health state
+	// machine reached its terminal Failed state.
+	SubsystemRestartHealthFailed SubsystemRestartReason = "health_failed"
+	// SubsystemRestartEscalated — a lower tier exhausted its restart
+	// budget and the top-level watchdog escalated.
+	SubsystemRestartEscalated SubsystemRestartReason = "escalated"
+)
+
+// IsValid reports whether r is a known restart reason.
+func (r SubsystemRestartReason) IsValid() bool {
+	switch r {
+	case SubsystemRestartLivenessLost, SubsystemRestartUnresponsive,
+		SubsystemRestartHealthFailed, SubsystemRestartEscalated:
+		return true
+	}
+	return false
+}
+
+// SubsystemRestartOutcome enumerates the result of a restart
+// attempt. Mirrors the Rust `sng_core::events::SubsystemRestartOutcome`.
+type SubsystemRestartOutcome string
+
+const (
+	// SubsystemRestartRecovered — the attempt was issued and the
+	// subsystem returned to a serving state.
+	SubsystemRestartRecovered SubsystemRestartOutcome = "recovered"
+	// SubsystemRestartFailed — the attempt was issued but the
+	// subsystem did not recover; the supervisor will retry.
+	SubsystemRestartFailed SubsystemRestartOutcome = "failed"
+	// SubsystemRestartExhausted — the supervisor exhausted its
+	// restart budget and is handing off to the next tier.
+	SubsystemRestartExhausted SubsystemRestartOutcome = "exhausted"
+)
+
+// IsValid reports whether o is a known restart outcome.
+func (o SubsystemRestartOutcome) IsValid() bool {
+	switch o {
+	case SubsystemRestartRecovered, SubsystemRestartFailed, SubsystemRestartExhausted:
+		return true
+	}
+	return false
+}
+
+// SubsystemRestart is the wire form of a WS2 self-healing supervisor
+// restart event — the "alert control plane" leg of the watchdog
+// escalation chain (subsystem restart → edge restart → control-plane
+// alert). The operator dashboard renders one per attempt so a
+// flapping subsystem is visible fleet-wide.
+//
+// Mirrors the Rust `sng_core::events::SubsystemRestart` field-for-field
+// with identical msgpack tags.
+type SubsystemRestart struct {
+	// Subsystem is the stable subsystem name (ips|swg|edge), matching
+	// the affected subsystem's lifecycle name.
+	Subsystem string `msgpack:"sub"`
+	// Reason is why the restart was triggered.
+	Reason SubsystemRestartReason `msgpack:"rsn"`
+	// Outcome is the result of this attempt.
+	Outcome SubsystemRestartOutcome `msgpack:"out"`
+	// Attempt is the 1-based attempt counter within the current
+	// failure episode; it resets once the subsystem recovers.
+	Attempt uint32 `msgpack:"att"`
+	// FailOpen is the posture in effect: true for fail-open (traffic
+	// keeps flowing without coverage), false for fail-closed. Not
+	// omitempty — false is meaningful posture state.
+	FailOpen bool `msgpack:"fo"`
+	// RolledBackConfig is true when the restart discarded the config
+	// that was live at failure and reverted to last-known-good.
+	RolledBackConfig bool `msgpack:"rbc,omitempty"`
+	// BackoffMs is the backoff applied before this attempt.
+	BackoffMs uint64 `msgpack:"boff"`
+	// Detail is an optional operator-readable diagnostic (e.g. the
+	// underlying start error). Empty on the common success path.
+	Detail string `msgpack:"det,omitempty"`
+}
+
+// Validate enforces required-field invariants for SubsystemRestart.
+func (s SubsystemRestart) Validate() error {
+	if s.Subsystem == "" {
+		return fmt.Errorf("system.subsystem is required: %w", ErrInvalid)
+	}
+	if !s.Reason.IsValid() {
+		return fmt.Errorf("system.reason %q invalid: %w", s.Reason, ErrInvalid)
+	}
+	if !s.Outcome.IsValid() {
+		return fmt.Errorf("system.outcome %q invalid: %w", s.Outcome, ErrInvalid)
+	}
+	return nil
+}
