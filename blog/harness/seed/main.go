@@ -263,6 +263,8 @@ func seedTenant(tid string, t tenantSpec) map[string]any {
 	}
 	res["integrations"] = intg
 
+	res["policy_rules"] = seedPolicyGraph(tid)
+
 	if recordOpsHealth(tid, t.health, t.components) {
 		res["ops_health"] = t.health
 	}
@@ -451,6 +453,143 @@ func createIntegration(tid string, ig integrationSpec) bool {
 func recordOpsHealth(tid string, score int, components map[string]int) bool {
 	body := map[string]any{"health_score": score, "component_scores": components}
 	return doJSON("POST", fmt.Sprintf("/api/v1/tenants/%s/ops/health", tid), body, nil)
+}
+
+// scenarioPolicyGraph is the unified policy graph published for every
+// tenant. It is the centrepiece of the "one typed policy graph lights
+// up NGFW + SWG + DNS + ZTNA + SD-WAN + DLP + inline-CASB" scenario:
+// a single document the compiler fans out into per-target bundles.
+//
+// It carries three things:
+//   - `rules`: the ordered, typed enforcement rules the compiler and
+//     the Simple-mode "who → can do what → to where" list consume.
+//     Two rules are `suggest_only` — proposed-but-not-enforcing
+//     ("dormant") deltas, so coverage is intentionally < 100%.
+//   - `subjects`/`predicates`: named vertices the rules reference.
+//   - `nodes`/`edges`: a presentation projection the React-Flow graph
+//     view renders. The Go validator ignores these extra top-level
+//     fields and PutGraph preserves them verbatim.
+func scenarioPolicyGraph() map[string]any {
+	return map[string]any{
+		"default_action": "deny",
+		"subjects": []map[string]any{
+			{"name": "corp-users", "kind": "user"},
+			{"name": "managed-devices", "kind": "device"},
+			{"name": "private-apps", "kind": "app"},
+			{"name": "branch-sites", "kind": "site"},
+			{"name": "guest-net", "kind": "network"},
+		},
+		"predicates": []map[string]any{
+			{"name": "cat-malware"},
+			{"name": "cat-gambling"},
+			{"name": "geo-sanctioned"},
+			{"name": "business-hours"},
+			{"name": "saas-m365"},
+		},
+		"rules": []map[string]any{
+			{"id": "ngfw-allow-corp-apps", "domain": "ngfw", "verb": "allow",
+				"subject_refs": []string{"corp-users", "private-apps"}, "predicate_refs": []string{"business-hours"},
+				"description": "Corp users reach private apps during business hours"},
+			{"id": "ngfw-deny-guest-apps", "domain": "ngfw", "verb": "deny",
+				"subject_refs": []string{"guest-net", "private-apps"},
+				"description": "Guest network is denied all private-app access"},
+			{"id": "swg-decrypt-corp", "domain": "swg", "verb": "decrypt",
+				"subject_refs": []string{"corp-users"},
+				"description": "TLS-inspect corp web traffic"},
+			{"id": "swg-deny-gambling", "domain": "swg", "verb": "deny",
+				"predicate_refs": []string{"cat-gambling"},
+				"description": "Block the gambling URL category"},
+			{"id": "dns-deny-malware", "domain": "dns", "verb": "deny",
+				"predicate_refs": []string{"cat-malware"},
+				"description": "Sinkhole known-malware domains via DNS"},
+			{"id": "ztna-allow-posture", "domain": "ztna", "verb": "allow",
+				"subject_refs": []string{"corp-users", "managed-devices", "private-apps"},
+				"description": "ZTNA: posture-checked corp devices reach private apps"},
+			{"id": "ztna-deny-geo", "domain": "ztna", "verb": "deny",
+				"predicate_refs": []string{"geo-sanctioned"},
+				"description": "Deny access from sanctioned geographies"},
+			{"id": "sdwan-steer-saas", "domain": "sdwan", "verb": "steer",
+				"predicate_refs": []string{"saas-m365"},
+				"description": "Steer M365 SaaS onto the interactive class"},
+			{"id": "dlp-inspect-uploads", "domain": "dlp", "verb": "inspect",
+				"subject_refs": []string{"managed-devices"},
+				"description": "Inspect uploads from managed devices for regulated data"},
+			{"id": "casb-inspect-m365", "domain": "inline_casb", "verb": "inspect",
+				"predicate_refs": []string{"saas-m365"},
+				"description": "Inline-CASB inspection of M365 share/upload actions"},
+			// Two dormant (suggest_only) deltas — proposed but not yet
+			// enforcing, so the coverage meter reads < 100%.
+			{"id": "ngfw-suggest-tls10", "domain": "ngfw", "verb": "suggest_only",
+				"subject_refs": []string{"corp-users"},
+				"description": "Proposed: block legacy TLS 1.0 egress"},
+			{"id": "dns-suggest-nrd", "domain": "dns", "verb": "suggest_only",
+				"description": "Proposed: block newly-registered domains (<30d)"},
+		},
+		// Presentation projection for the React-Flow graph view.
+		"nodes": []map[string]any{
+			{"id": "corp-users", "label": "Corp users"},
+			{"id": "managed-devices", "label": "Managed devices"},
+			{"id": "guest-net", "label": "Guest network"},
+			{"id": "private-apps", "label": "Private apps"},
+			{"id": "saas-m365", "label": "M365 SaaS"},
+			{"id": "ngfw", "label": "NGFW"},
+			{"id": "swg", "label": "Secure Web Gateway"},
+			{"id": "dns", "label": "DNS security"},
+			{"id": "ztna", "label": "ZTNA broker"},
+			{"id": "sdwan", "label": "SD-WAN steering"},
+			{"id": "dlp", "label": "DLP"},
+			{"id": "inline_casb", "label": "Inline CASB"},
+		},
+		"edges": []map[string]any{
+			{"source": "corp-users", "target": "ngfw"},
+			{"source": "corp-users", "target": "swg"},
+			{"source": "corp-users", "target": "dns"},
+			{"source": "corp-users", "target": "ztna"},
+			{"source": "managed-devices", "target": "ztna"},
+			{"source": "managed-devices", "target": "dlp"},
+			{"source": "guest-net", "target": "ngfw"},
+			{"source": "ztna", "target": "private-apps"},
+			{"source": "saas-m365", "target": "inline_casb"},
+			{"source": "saas-m365", "target": "sdwan"},
+		},
+	}
+}
+
+// seedPolicyGraph publishes the scenario policy graph and compiles it
+// into signed per-target bundles. Idempotent: if the tenant already
+// has a published graph with the expected rule count, it neither
+// re-publishes (which would bump the version every run) nor recompiles.
+// Returns the number of rules in the tenant's current published graph.
+func seedPolicyGraph(tid string) int {
+	desired := scenarioPolicyGraph()
+	wantRules := len(desired["rules"].([]map[string]any))
+	if have := policyGraphRuleCount(tid); have == wantRules {
+		if *verbose {
+			logf("EXISTS policy graph (%d rules) for %s", have, tid)
+		}
+		return have
+	}
+	if !doJSON("PUT", fmt.Sprintf("/api/v1/tenants/%s/policy", tid), desired, nil) {
+		return policyGraphRuleCount(tid)
+	}
+	// Compile the freshly published graph into signed bundles so the
+	// policy is live end-to-end (S2 evidence: real compiler output).
+	doJSON("POST", fmt.Sprintf("/api/v1/tenants/%s/policy/compile", tid), map[string]any{}, nil)
+	return policyGraphRuleCount(tid)
+}
+
+// policyGraphRuleCount returns the number of rules in the tenant's
+// current published policy graph (0 if none / unparseable).
+func policyGraphRuleCount(tid string) int {
+	var pg struct {
+		Graph struct {
+			Rules []map[string]any `json:"rules"`
+		} `json:"graph"`
+	}
+	if doJSON("GET", fmt.Sprintf("/api/v1/tenants/%s/policy", tid), nil, &pg) {
+		return len(pg.Graph.Rules)
+	}
+	return 0
 }
 
 func createAPIKey(tid, name, subject string) {
