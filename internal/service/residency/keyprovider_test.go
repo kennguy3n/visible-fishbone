@@ -60,6 +60,11 @@ func TestTenantKeyRefValidate(t *testing.T) {
 		{"azure managed hsm", residency.TenantKeyRef{
 			TenantID: tid, Kind: residency.ProviderAzureKV, Region: "eu-central-1",
 			KeyURI: "https://sng-hsm.managedhsm.azure.net/keys/tenant-cmk"}, false},
+		{"azure mixed-case host", residency.TenantKeyRef{
+			// DNS labels are case-insensitive; a portal-copied mixed-case
+			// vault name names the same vault and must validate.
+			TenantID: tid, Kind: residency.ProviderAzureKV, Region: "eu-central-1",
+			KeyURI: "https://SNG-Vault.Vault.Azure.Net/keys/tenant-cmk"}, false},
 		{"azure leading hyphen vault", residency.TenantKeyRef{
 			TenantID: tid, Kind: residency.ProviderAzureKV, Region: "eu-central-1",
 			KeyURI: "https://-vault.vault.azure.net/keys/tenant-cmk"}, true},
