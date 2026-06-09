@@ -846,11 +846,15 @@ type CommunityIngestResult struct {
 // lines, and malformed hosts are dropped.
 //
 // Decompression is bounded both per member (communityFeedMemberLimit)
-// and in aggregate across all members (communityFeedTotalLimit) so a
-// crafted archive — one oversized member, or thousands of small ones —
-// cannot exhaust memory. Hitting either bound is a distinct, clearly
-// labelled error rather than a silent truncation that would later
-// surface as a confusing gzip/tar decode failure.
+// and in aggregate across every regular member (communityFeedTotalLimit)
+// so a crafted archive — one oversized member, or thousands of small
+// ones — cannot exhaust memory or CPU. The aggregate bound is charged
+// against *all* regular members, including ones we discard, because
+// advancing tar.Reader still decompresses a skipped member's bytes;
+// counting only retained members would leave the discarded-member
+// decompression work unbounded. Hitting either bound is a distinct,
+// clearly labelled error rather than a silent truncation that would
+// later surface as a confusing gzip/tar decode failure.
 func ParseCommunityCategoryFeed(body []byte) (map[string][]string, error) {
 	return parseCommunityCategoryFeed(body, communityFeedMemberLimit, communityFeedTotalLimit)
 }
@@ -881,6 +885,25 @@ func parseCommunityCategoryFeed(body []byte, memberLimit, totalLimit int64) (map
 			continue
 		}
 		name := path.Clean(hdr.Name)
+		// Charge the member's declared decompressed size against both
+		// bounds up front, before deciding whether to keep it: even a
+		// member we skip below is decompressed by tar.Reader when it
+		// advances to the next header, so the work it costs must count
+		// toward the limits. hdr.Size is the authoritative decompressed
+		// length tar enforces while reading/skipping the member.
+		if hdr.Size > memberLimit {
+			return nil, fmt.Errorf(
+				"community feed: member %q exceeds per-member limit of %d bytes",
+				name, memberLimit,
+			)
+		}
+		total += hdr.Size
+		if total > totalLimit {
+			return nil, fmt.Errorf(
+				"community feed: total decompressed size exceeds limit of %d bytes",
+				totalLimit,
+			)
+		}
 		if path.Base(name) != "domains" {
 			continue
 		}
@@ -888,10 +911,9 @@ func parseCommunityCategoryFeed(body []byte, memberLimit, totalLimit int64) (map
 		if category == "" || category == "." || category == "/" {
 			continue
 		}
-		// Read one byte past the per-member limit so an over-limit
-		// member is detected explicitly instead of being silently
-		// truncated by io.LimitReader (which just returns EOF at the
-		// bound).
+		// Read one byte past the per-member limit so a member whose
+		// header under-declared its size is still detected explicitly
+		// rather than silently truncated by io.LimitReader.
 		data, err := io.ReadAll(io.LimitReader(tr, memberLimit+1))
 		if err != nil {
 			return nil, fmt.Errorf("community feed: read %q: %w", name, err)
@@ -900,13 +922,6 @@ func parseCommunityCategoryFeed(body []byte, memberLimit, totalLimit int64) (map
 			return nil, fmt.Errorf(
 				"community feed: member %q exceeds per-member limit of %d bytes",
 				name, memberLimit,
-			)
-		}
-		total += int64(len(data))
-		if total > totalLimit {
-			return nil, fmt.Errorf(
-				"community feed: total decompressed size exceeds limit of %d bytes",
-				totalLimit,
 			)
 		}
 		for _, line := range strings.Split(string(data), "\n") {
@@ -980,6 +995,15 @@ func sanitizeCategoryToken(in string) string {
 // single category failure; per-category outcomes are returned for the
 // operator. The results are ordered by canonical category for stable
 // output.
+//
+// Concurrency: this is the low-level building block and does NOT
+// acquire syncSem itself — it writes the global app_registry through
+// the GetByName -> CreateApp / SyncUpdateApp path, so it must not run
+// concurrently with SyncAll or another registry writer (two callers
+// could both miss the same row on GetByName and both CreateApp, which
+// a unique-name constraint rejects). The safe entry point is
+// SyncCommunityFeeds, which holds syncSem for the whole batch; a
+// direct caller is responsible for its own serialisation.
 func (s *Syncer) IngestCommunityFeed(ctx context.Context, feed string, body []byte) ([]CommunityIngestResult, error) {
 	feed = strings.ToLower(strings.TrimSpace(feed))
 	if !isCommunityFeedVendor(feed) {
@@ -1136,14 +1160,19 @@ func (s *Syncer) fetchFeed(ctx context.Context, rawURL string) ([]byte, error) {
 		return nil, fmt.Errorf("http: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// Check the status before draining the body: a non-200 (e.g. a
+	// verbose 403/500 HTML page) only needs a short snippet for the
+	// error message, so reading just a few KiB here avoids pulling up
+	// to communityFeedDownloadLimit bytes of error content we discard.
+	if resp.StatusCode != http.StatusOK {
+		snip, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, snippet(snip))
+	}
 	// Read one byte past the limit so an over-limit body is detected
 	// explicitly instead of being silently truncated at the bound.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, communityFeedDownloadLimit+1))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, snippet(body))
 	}
 	if int64(len(body)) > communityFeedDownloadLimit {
 		return nil, fmt.Errorf(

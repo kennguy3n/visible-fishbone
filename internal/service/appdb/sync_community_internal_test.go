@@ -149,6 +149,19 @@ func TestParseCommunityCategoryFeedEnforcesSizeLimits(t *testing.T) {
 		t.Fatalf("total limit: got err=%v, want total-size error", err)
 	}
 
+	// A large *non-domains* member (which the parser discards) still
+	// counts toward the aggregate cap, because advancing the tar
+	// reader decompresses it regardless. Here the only retained file
+	// is tiny but the skipped urls file pushes the total over.
+	withSkipped := buildFeedArchive(t, map[string]string{
+		"BL/adv/urls":    strings.Repeat("x.example.com/p\n", 64), // skipped
+		"BL/adv/domains": "a.example.com\n",                       // retained, tiny
+	})
+	if _, err := parseCommunityCategoryFeed(withSkipped, 1<<20, 64); err == nil ||
+		!strings.Contains(err.Error(), "total decompressed size") {
+		t.Fatalf("skipped-member accounting: got err=%v, want total-size error", err)
+	}
+
 	// Generous limits parse the same archive cleanly.
 	got, err := parseCommunityCategoryFeed(many, 1<<20, 1<<20)
 	if err != nil {

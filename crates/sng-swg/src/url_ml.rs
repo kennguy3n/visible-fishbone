@@ -474,11 +474,21 @@ impl LinearModel {
         // Canonicalise class labels to lowercase so the emitted
         // category matches the deny-list / dashboard convention the
         // rest of the SWG uses (see `LocalCategoryDb::install`).
-        let classes = claims
+        let classes: Vec<String> = claims
             .classes
             .into_iter()
             .map(|c| c.trim().to_ascii_lowercase())
             .collect();
+        // Reject a model whose class label is empty (or whitespace
+        // only) after canonicalisation: such a class would let the
+        // classifier emit `Category("")`, an unnamed verdict no
+        // deny-list or dashboard can match. The non-empty class set is
+        // already checked above; this guards each individual label.
+        if classes.iter().any(String::is_empty) {
+            return Err(SwgError::UrlModelInvalid(
+                "model has an empty class label after canonicalisation".to_owned(),
+            ));
+        }
         Ok(Self {
             version: claims.version,
             classes,
@@ -1139,6 +1149,23 @@ mod tests {
         let verifier = verifier_with(&signing, &id);
         let mut claims = sample_claims(1);
         claims.bias.push(0.0); // 3 biases for 2 classes
+        let clf = UrlMlClassifier::new();
+        assert!(matches!(
+            clf.install_model(&verifier, &make_bundle(&claims, &signing, id)),
+            Err(SwgError::UrlModelInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn classifier_rejects_whitespace_only_class_label() {
+        // A class label that canonicalises to the empty string would
+        // let the model emit an unnamed `Category("")`; the load path
+        // must reject it even though the model is otherwise valid and
+        // correctly signed.
+        let (signing, id) = deterministic_keypair();
+        let verifier = verifier_with(&signing, &id);
+        let mut claims = sample_claims(1);
+        claims.classes[1] = "   ".to_owned();
         let clf = UrlMlClassifier::new();
         assert!(matches!(
             clf.install_model(&verifier, &make_bundle(&claims, &signing, id)),
