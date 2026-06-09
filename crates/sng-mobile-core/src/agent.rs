@@ -137,6 +137,53 @@ pub enum ScheduledTask {
 
 const SCHEDULE_SLOTS: usize = 3;
 
+/// Factor by which every periodic interval is stretched while the
+/// device reports [`PowerState::LowPower`].
+///
+/// On low power the agent quarters its wakeup rate — each of the
+/// coalesced policy-pull / telemetry-flush / posture timers fires a
+/// quarter as often — so the effective heartbeat is 4× longer. This
+/// is the single biggest idle-battery lever the agent has: radio
+/// wakeups dominate the mobile power budget, and the coalescing
+/// [`Scheduler`] already folds the three timers into one wakeup, so
+/// scaling all three intervals by the same factor cleanly stretches
+/// that one wakeup rather than skewing the tasks relative to each
+/// other.
+pub const LOW_POWER_INTERVAL_MULTIPLIER: u32 = 4;
+
+/// Device power state the [`Scheduler`] adapts its cadence to.
+///
+/// This is a *push* signal: the host app feeds it from the
+/// platform's own power-state notification (iOS
+/// `NSProcessInfoPowerStateDidChange` /
+/// `ProcessInfo.isLowPowerModeEnabled`, Android
+/// `PowerManager.ACTION_POWER_SAVE_MODE_CHANGED` /
+/// `isPowerSaveMode`) via [`MobileAgent::set_power_state`]. The agent
+/// never polls a battery API itself — polling would itself cost
+/// wakeups — so an idle device in low-power mode incurs zero extra
+/// work beyond the (now rarer) coalesced timer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PowerState {
+    /// Normal power: the configured intervals are used as-is.
+    #[default]
+    Normal,
+    /// Low power (battery saver / iOS Low Power Mode): every
+    /// periodic interval is stretched by
+    /// [`LOW_POWER_INTERVAL_MULTIPLIER`].
+    LowPower,
+}
+
+impl PowerState {
+    /// The interval multiplier this power state applies.
+    #[must_use]
+    pub const fn interval_multiplier(self, low_power_multiplier: u32) -> u32 {
+        match self {
+            Self::Normal => 1,
+            Self::LowPower => low_power_multiplier,
+        }
+    }
+}
+
 /// Coalescing timer for the three periodic subsystem tasks.
 ///
 /// Rather than arm three independent `tokio` intervals (and pay
@@ -145,16 +192,29 @@ const SCHEDULE_SLOTS: usize = 3;
 /// come due at that instant. Time is modelled as a monotonic
 /// [`Duration`] offset so the logic is deterministic and fully
 /// unit-testable without a clock.
+///
+/// The scheduler is **power-aware**: while the device reports
+/// [`PowerState::LowPower`] every interval is stretched by
+/// [`LOW_POWER_INTERVAL_MULTIPLIER`], so the single coalesced wakeup
+/// fires a quarter as often. The base (normal-power) intervals are
+/// retained so returning to [`PowerState::Normal`] restores the
+/// original cadence exactly, with no drift.
 #[derive(Clone, Copy, Debug)]
 pub struct Scheduler {
     tasks: [ScheduledTask; SCHEDULE_SLOTS],
-    intervals: [Duration; SCHEDULE_SLOTS],
+    /// The configured normal-power intervals; the effective interval
+    /// is this scaled by the current [`PowerState`].
+    base_intervals: [Duration; SCHEDULE_SLOTS],
     next: [Duration; SCHEDULE_SLOTS],
+    power: PowerState,
+    low_power_multiplier: u32,
 }
 
 impl Scheduler {
     /// Build a scheduler whose first fire of each task is one
-    /// interval after `now`.
+    /// (normal-power) interval after `now`. Starts in
+    /// [`PowerState::Normal`] with the default
+    /// [`LOW_POWER_INTERVAL_MULTIPLIER`].
     #[must_use]
     pub fn new(
         poll_interval: Duration,
@@ -167,7 +227,7 @@ impl Scheduler {
             ScheduledTask::PushTelemetry,
             ScheduledTask::CollectPosture,
         ];
-        let intervals = [poll_interval, telemetry_interval, posture_interval];
+        let base_intervals = [poll_interval, telemetry_interval, posture_interval];
         let next = [
             now.saturating_add(poll_interval),
             now.saturating_add(telemetry_interval),
@@ -175,9 +235,62 @@ impl Scheduler {
         ];
         Self {
             tasks,
-            intervals,
+            base_intervals,
             next,
+            power: PowerState::Normal,
+            low_power_multiplier: LOW_POWER_INTERVAL_MULTIPLIER,
         }
+    }
+
+    /// Override the low-power interval multiplier (the factor every
+    /// interval is stretched by under [`PowerState::LowPower`]),
+    /// returning `self` for chaining off [`Self::new`].
+    ///
+    /// Clamped to a floor of `1` so a misconfigured `0` cannot zero
+    /// out the intervals and spin the coalesced loop; `1` simply
+    /// disables stretching (low power then paces like normal).
+    #[must_use]
+    pub fn with_low_power_multiplier(mut self, multiplier: u32) -> Self {
+        self.low_power_multiplier = multiplier.max(1);
+        self
+    }
+
+    /// The effective interval of slot `i` under the current power
+    /// state: the base interval scaled by the active multiplier.
+    fn effective_interval(&self, i: usize) -> Duration {
+        self.base_intervals[i]
+            .saturating_mul(self.power.interval_multiplier(self.low_power_multiplier))
+    }
+
+    /// The current device power state.
+    #[must_use]
+    pub fn power_state(&self) -> PowerState {
+        self.power
+    }
+
+    /// Apply a new device power `state` as of `now`, returning
+    /// whether the state actually changed.
+    ///
+    /// On a real change every slot's next fire is recomputed
+    /// `now + effective_interval`, so entering low power immediately
+    /// pushes the next wakeup out to the stretched cadence (the
+    /// battery win lands at once, not after the in-flight short
+    /// interval elapses) and returning to normal pulls it back in.
+    /// Rescheduling relative to `now` — rather than the already-armed
+    /// deadline — is the same burst-free philosophy [`Self::pop_due`]
+    /// documents: it never fires a catch-up burst on the transition.
+    /// An unchanged state is a no-op (the armed deadlines are left
+    /// untouched), so a host that re-asserts the same power state on
+    /// every platform notification cannot perturb the cadence.
+    pub fn set_power_state(&mut self, now: Duration, state: PowerState) -> bool {
+        if state == self.power {
+            return false;
+        }
+        self.power = state;
+        for i in 0..SCHEDULE_SLOTS {
+            self.next[i] = now.saturating_add(self.effective_interval(i));
+        }
+        true
     }
 
     /// Delay from `now` until the earliest next-due task
@@ -209,7 +322,7 @@ impl Scheduler {
             }
         }
         let i = chosen?;
-        self.next[i] = now.saturating_add(self.intervals[i]);
+        self.next[i] = now.saturating_add(self.effective_interval(i));
         Some(self.tasks[i])
     }
 }
@@ -247,6 +360,10 @@ pub struct AgentHealth {
     pub authenticated: bool,
     /// Number of apps currently in the allowed state.
     pub allowed_apps: usize,
+    /// Device power state the steady-state loop is pacing itself to;
+    /// [`PowerState::LowPower`] means the heartbeat is stretched by
+    /// [`LOW_POWER_INTERVAL_MULTIPLIER`].
+    pub power: PowerState,
 }
 
 /// The mobile agent core.
@@ -266,8 +383,14 @@ pub struct MobileAgent {
     /// Wakes the steady-state [`Self::run`] loop the instant the
     /// lifecycle leaves `Connected`, so a `suspend`/`terminate` stops
     /// work (and radio wakeups) immediately instead of after the
-    /// pending coalesced sleep elapses.
+    /// pending coalesced sleep elapses. Also re-armed on a power-state
+    /// change so the new cadence takes effect at once.
     wake: tokio::sync::Notify,
+    /// Latest device power state pushed by the host. Read by the
+    /// steady-state loop each cycle to pace the [`Scheduler`]; under
+    /// [`PowerState::LowPower`] the heartbeat is stretched by
+    /// [`LOW_POWER_INTERVAL_MULTIPLIER`].
+    power: Mutex<PowerState>,
 }
 
 impl fmt::Debug for MobileAgent {
@@ -297,6 +420,7 @@ impl MobileAgent {
             policy_puller: Mutex::new(None),
             last_posture: Mutex::new(None),
             wake: tokio::sync::Notify::new(),
+            power: Mutex::new(PowerState::Normal),
         })
     }
 
@@ -318,6 +442,48 @@ impl MobileAgent {
             lifecycle: self.state(),
             authenticated: self.deps.auth.is_authenticated(),
             allowed_apps,
+            power: self.power_state(),
+        }
+    }
+
+    /// The device power state the agent is currently pacing itself
+    /// to.
+    #[must_use]
+    pub fn power_state(&self) -> PowerState {
+        *self.power.lock()
+    }
+
+    /// Push a new device power `state` from the host.
+    ///
+    /// The host wires this to the platform's power-state notification
+    /// (iOS `NSProcessInfoPowerStateDidChange` /
+    /// `ProcessInfo.isLowPowerModeEnabled`; Android
+    /// `PowerManager.ACTION_POWER_SAVE_MODE_CHANGED` /
+    /// `isPowerSaveMode`). The steady-state [`Self::run`] loop applies
+    /// it to its [`Scheduler`] each cycle; setting it while the agent
+    /// is `Connected` also wakes the sleeping loop so the new cadence
+    /// takes effect immediately rather than after the in-flight
+    /// coalesced sleep. Safe to call in any lifecycle state — it is a
+    /// no-op on the cadence until the agent is `Connected` and running.
+    pub fn set_power_state(&self, state: PowerState) {
+        let changed = {
+            let mut guard = self.power.lock();
+            let changed = *guard != state;
+            *guard = state;
+            changed
+        };
+        // Only wake a loop that is actually parked on the coalesced
+        // sleep, i.e. when the agent is `Connected` and `run` is live.
+        // In any other state the loop is not waiting on `wake`, so
+        // storing a permit would just make the next `run` burn one
+        // no-op iteration — the same stale-permit discipline
+        // [`Self::transition`] follows by gating on its `Suspended` /
+        // `Terminated` targets. A change applied while not `Connected`
+        // is not lost: `run` re-reads [`Self::power_state`] every cycle,
+        // so it is picked up the moment the loop next paces the
+        // scheduler.
+        if changed && self.state() == LifecycleState::Connected {
+            self.wake.notify_one();
         }
     }
 
@@ -636,18 +802,25 @@ impl MobileAgent {
             self.config.telemetry_interval,
             self.config.posture_interval,
             Duration::ZERO,
-        );
+        )
+        .with_low_power_multiplier(self.config.low_power_multiplier);
         while self.state() == LifecycleState::Connected {
             let now = start.elapsed();
+            // Pace the coalesced timer to the latest pushed power
+            // state before arming this cycle's sleep. A no-op while the
+            // state is unchanged; on a transition it re-arms every slot
+            // to the stretched / normal cadence as of `now`.
+            scheduler.set_power_state(now, self.power_state());
             let sleep_for = scheduler.time_until_next(now);
             tokio::select! {
                 () = tokio::time::sleep(sleep_for) => {}
                 () = self.wake.notified() => {
-                    // A lifecycle transition (suspend / terminate)
-                    // landed: re-check the loop condition immediately
-                    // and skip this cycle's task drain, so the agent
-                    // stops touching the network the moment the host
-                    // parks it rather than firing one last burst.
+                    // A lifecycle transition (suspend / terminate) or a
+                    // power-state change landed: re-check the loop
+                    // condition and re-pace the scheduler immediately,
+                    // skipping this cycle's task drain. On suspend /
+                    // terminate the loop then exits; on a power change
+                    // it re-arms the cadence without firing a burst.
                     continue;
                 }
             }
@@ -767,5 +940,129 @@ mod tests {
                 ScheduledTask::CollectPosture
             ]
         );
+    }
+
+    #[test]
+    fn scheduler_starts_in_normal_power() {
+        let s = Scheduler::new(
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+            Duration::from_secs(30),
+            Duration::ZERO,
+        );
+        assert_eq!(s.power_state(), PowerState::Normal);
+    }
+
+    #[test]
+    fn low_power_stretches_every_interval_by_the_multiplier() {
+        let mut s = Scheduler::new(
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+            Duration::from_secs(30),
+            Duration::ZERO,
+        );
+        // Enter low power at t=0: each slot re-arms to 4× its base.
+        assert!(s.set_power_state(Duration::ZERO, PowerState::LowPower));
+        assert_eq!(s.power_state(), PowerState::LowPower);
+        // Earliest is now the policy pull at 4×10s = 40s, not 10s.
+        assert_eq!(s.time_until_next(Duration::ZERO), Duration::from_secs(40));
+        // Nothing fires at the old 10s deadline.
+        assert_eq!(s.pop_due(Duration::from_secs(10)), None);
+        // Policy pull fires at 40s and re-arms a further 40s out.
+        assert_eq!(
+            s.pop_due(Duration::from_secs(40)),
+            Some(ScheduledTask::PullPolicy)
+        );
+        assert_eq!(s.pop_due(Duration::from_secs(40)), None);
+        assert_eq!(
+            s.pop_due(Duration::from_secs(80)),
+            Some(ScheduledTask::PullPolicy)
+        );
+    }
+
+    #[test]
+    fn with_low_power_multiplier_overrides_the_default_stretch() {
+        // A deployment-configured multiplier (here 2×) replaces the
+        // default 4× while leaving the normal cadence untouched.
+        let mut s = Scheduler::new(
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+            Duration::from_secs(30),
+            Duration::ZERO,
+        )
+        .with_low_power_multiplier(2);
+        assert_eq!(s.time_until_next(Duration::ZERO), Duration::from_secs(10));
+        assert!(s.set_power_state(Duration::ZERO, PowerState::LowPower));
+        // Policy pull now stretches to 2×10s = 20s, not the default 40s.
+        assert_eq!(s.time_until_next(Duration::ZERO), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn with_low_power_multiplier_clamps_zero_to_one() {
+        // A degenerate 0 must not zero out the intervals (which would
+        // spin the coalesced loop); it clamps to 1, i.e. no stretch.
+        let mut s = Scheduler::new(
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+            Duration::from_secs(30),
+            Duration::ZERO,
+        )
+        .with_low_power_multiplier(0);
+        assert!(s.set_power_state(Duration::ZERO, PowerState::LowPower));
+        assert_eq!(s.time_until_next(Duration::ZERO), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn set_power_state_is_noop_when_unchanged() {
+        let mut s = Scheduler::new(
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+            Duration::from_secs(30),
+            Duration::ZERO,
+        );
+        // Re-asserting Normal must not perturb the armed deadlines.
+        assert!(!s.set_power_state(Duration::from_secs(5), PowerState::Normal));
+        assert_eq!(s.time_until_next(Duration::ZERO), Duration::from_secs(10));
+        // First low-power assert changes state; a second identical one
+        // is a no-op that leaves the stretched deadlines untouched.
+        assert!(s.set_power_state(Duration::ZERO, PowerState::LowPower));
+        assert!(!s.set_power_state(Duration::from_secs(7), PowerState::LowPower));
+        assert_eq!(s.time_until_next(Duration::ZERO), Duration::from_secs(40));
+    }
+
+    #[test]
+    fn returning_to_normal_restores_base_cadence_without_drift() {
+        let mut s = Scheduler::new(
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+            Duration::from_secs(30),
+            Duration::ZERO,
+        );
+        s.set_power_state(Duration::ZERO, PowerState::LowPower);
+        assert_eq!(s.time_until_next(Duration::ZERO), Duration::from_secs(40));
+        // Back to normal at t=100s: every slot re-arms to base+100.
+        assert!(s.set_power_state(Duration::from_secs(100), PowerState::Normal));
+        assert_eq!(s.power_state(), PowerState::Normal);
+        // Earliest is the 10s base interval from t=100 → 110s.
+        assert_eq!(
+            s.time_until_next(Duration::from_secs(100)),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            s.pop_due(Duration::from_secs(110)),
+            Some(ScheduledTask::PullPolicy)
+        );
+        // And it keeps the base 10s cadence thereafter.
+        assert_eq!(
+            s.pop_due(Duration::from_secs(120)),
+            Some(ScheduledTask::PullPolicy)
+        );
+    }
+
+    #[test]
+    fn power_state_multiplier_mapping() {
+        assert_eq!(PowerState::Normal.interval_multiplier(4), 1);
+        assert_eq!(PowerState::LowPower.interval_multiplier(4), 4);
+        assert_eq!(LOW_POWER_INTERVAL_MULTIPLIER, 4);
     }
 }
