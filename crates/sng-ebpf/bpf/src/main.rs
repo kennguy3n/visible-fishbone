@@ -77,6 +77,7 @@ static SNG_UDP_BUCKETS: LruHashMap<[u8; 16], TokenBucketState> =
 /// plane on a policy change is the primary invalidation; this TTL bounds
 /// staleness if a flush is ever missed.
 const VERDICT_TTL_NS: u64 = 5_000_000_000;
+const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 /// `BPF_ANY` — insert-or-update for map writes.
 const BPF_ANY: u64 = 0;
@@ -212,6 +213,12 @@ fn rate_limit_admits(cfg: &WireDdosConfig, parsed: &Parsed, now: u64) -> bool {
 /// Token-bucket admission for one source. Mirrors the userspace
 /// `ddos::TokenBucket` (scaled-integer, no floating point); the clock only
 /// advances on a whole-token refill so sub-token time is not lost.
+//
+// The refill block is gated on `refill_per_sec > 0`, so the subsequent
+// `NANOS_PER_SEC / refill_per_sec` can never divide by zero. `checked_div`
+// (as clippy suggests) would force an `Option` and an extra branch on a
+// path that is provably safe, so the explicit guard is kept deliberately.
+#[allow(clippy::manual_checked_ops)]
 fn bucket_admit(
     map: &LruHashMap<[u8; 16], TokenBucketState>,
     src: &[u8; 16],
@@ -231,17 +238,31 @@ fn bucket_admit(
     };
 
     if refill_per_sec > 0 {
+        // Nanoseconds of elapsed time that accrue one token. Crucially this
+        // divides the *constant* numerator by the *runtime* `refill_per_sec`,
+        // which the BPF backend lowers to a native 64-bit divide. Dividing
+        // by a compile-time constant (e.g. `elapsed / 1_000_000_000`) would
+        // instead be optimised into a 64×64→128 magic-number multiply that
+        // calls the unsupported `__multi3` libcall and fails to link.
+        // `refill_per_sec >= 1`, so the quotient is in `[1, 1e9]`.
+        let ns_per_token = NANOS_PER_SEC / refill_per_sec;
+        let ns_per_token = if ns_per_token == 0 { 1 } else { ns_per_token };
+
         let elapsed = now.saturating_sub(bucket.last_refill_ns);
-        let secs = elapsed / 1_000_000_000;
-        let rem = elapsed % 1_000_000_000;
-        // Split the multiply across whole/fractional seconds to keep the
-        // intermediate products inside u64.
-        let added = secs
-            .saturating_mul(refill_per_sec)
-            .saturating_add(rem.saturating_mul(refill_per_sec) / 1_000_000_000);
+        // runtime / runtime -> native BPF divide.
+        let added = elapsed / ns_per_token;
         if added > 0 {
             bucket.tokens = min_u64(bucket.tokens.saturating_add(added), capacity);
-            bucket.last_refill_ns = now;
+            // Advance the clock only by the time actually consumed by the
+            // whole tokens we granted, so sub-token remainder carries over.
+            // `added == elapsed / ns_per_token`, so `added * ns_per_token`
+            // is always `<= elapsed` and cannot overflow — a plain 64-bit
+            // multiply (native BPF). We must NOT add an overflow guard such
+            // as `a > u64::MAX / b`: LLVM's InstCombine rewrites that idiom
+            // into a `umul.with.overflow` that lowers to the unsupported
+            // 128-bit `__multi3` libcall.
+            let consumed = added * ns_per_token;
+            bucket.last_refill_ns = bucket.last_refill_ns.saturating_add(consumed);
         }
     } else if now > bucket.last_refill_ns {
         bucket.last_refill_ns = now;

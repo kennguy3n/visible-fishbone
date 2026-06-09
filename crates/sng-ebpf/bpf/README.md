@@ -37,12 +37,23 @@ without updating `loader.rs`.
 
 ```sh
 rustup toolchain install nightly --component rust-src
-cargo install bpf-linker            # needs LLVM 19+
+cargo install bpf-linker            # links via rustc's bundled LLVM
+                                    # (aya-rustc-llvm-proxy); no separate
+                                    # system LLVM install is required
 
 cd crates/sng-ebpf/bpf
 cargo +nightly build --release
 # -> target/bpfel-unknown-none/release/sng-ebpf-bpf
 ```
+
+The object is a real BPF ELF: `sng_xdp_classify` lands in the `xdp`
+section and `sng_tc_egress` in the `classifier` section, with the shared
+map definitions in `maps`. None of the data-path arithmetic may use
+128-bit math: the BPF target cannot provide `__multi3`, so overflow-checked
+or widening 64-bit multiplies (`u64::checked/saturating_mul`, the
+`a > u64::MAX / b` overflow idiom, and divide-by-*constant* — which LLVM
+lowers to a 64×64→128 magic-number multiply) must be avoided. Divide only
+by runtime values (see `bucket_admit`).
 
 The resulting object is published into the appliance image. At runtime the
 userspace loader locates it via the `SNG_EBPF_OBJECT` environment variable
