@@ -1,0 +1,515 @@
+{
+  "items": [
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T01:08:35.158652Z",
+      "details": {
+        "action": "share",
+        "app_id": "google_workspace",
+        "verdict": "log"
+      },
+      "id": "62cdb9ac-3e69-4fbb-8655-2e3334138d11",
+      "resource_id": "ef2f8e28-6174-41b7-a471-0d71d930174b",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T01:08:35.15457Z",
+      "details": {
+        "action": "download",
+        "app_id": "salesforce",
+        "verdict": "block"
+      },
+      "id": "de650db8-dfe5-4570-b98e-dbd15442092d",
+      "resource_id": "916ec1c9-29ad-40f0-80b9-610d496a5813",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T01:08:35.150434Z",
+      "details": {
+        "action": "upload",
+        "app_id": "m365",
+        "verdict": "log"
+      },
+      "id": "0f4cb41a-6a87-4424-ac73-dea6a4c94e01",
+      "resource_id": "d0968d0d-67fb-4330-83c3-9dab3c87e77a",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T01:08:35.145687Z",
+      "details": {
+        "action": "share",
+        "app_id": "m365",
+        "verdict": "block"
+      },
+      "id": "2081a15f-ff25-4401-9288-17d863589dfb",
+      "resource_id": "b38784c0-6a3d-4691-a790-5bc240ebf336",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "policy.compiled",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:47:26.998668Z",
+      "details": {
+        "graph_id": "f5f9fdbb-a67f-47c7-991b-ada245cbf954",
+        "graph_version": 1,
+        "targets": [
+          "edge",
+          "endpoint",
+          "cloud",
+          "mobile"
+        ]
+      },
+      "id": "f97ada50-5962-4447-b2a2-aa66b93a5e51",
+      "resource_id": "f5f9fdbb-a67f-47c7-991b-ada245cbf954",
+      "resource_type": "policy_graph",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "policy.signing_key_created",
+      "created_at": "2026-06-09T00:47:26.868884Z",
+      "details": {
+        "algorithm": "ed25519",
+        "key_id": "371ac03d0c53481d",
+        "public_key": "58e3d0c0c36b684d61dc41d6b65a2b6671a85c5b15cbeee32f6f018fcc8c0672",
+        "status": "active"
+      },
+      "id": "d34d7520-604c-4d19-9f99-8fcdd1d3833b",
+      "resource_id": "fdc80b5a-aed8-407d-9bc3-38ba95643ae6",
+      "resource_type": "policy_signing_key",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "policy.graph_updated",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:47:26.85868Z",
+      "details": {},
+      "id": "0ae4cbac-24da-4750-b26c-deaffe6a2edc",
+      "resource_id": "f5f9fdbb-a67f-47c7-991b-ada245cbf954",
+      "resource_type": "policy_graph",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "webhook.endpoint_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:24:14.766393Z",
+      "details": {
+        "events": [
+          "alert.created",
+          "device.enrolled",
+          "dlp.violation"
+        ],
+        "url": "https://hooks.example.com/sng/acme-retail"
+      },
+      "id": "bc8d108b-a0d0-4e8d-8a41-4f381d0c9b20",
+      "resource_id": "fd6b9223-47f2-4929-aa68-e3b0493d5a24",
+      "resource_type": "webhook_endpoint",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "apikey.create",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:24:14.760731Z",
+      "details": {
+        "name": "edge-bootstrap",
+        "subject": "svc:edge"
+      },
+      "id": "c8485843-70ca-4ba6-9055-be3819dae385",
+      "resource_id": "07ba82f9-3388-415f-8e18-7515de19b5eb",
+      "resource_type": "tenant_api_key",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "device.enrolled",
+      "created_at": "2026-06-09T00:24:14.733111Z",
+      "details": {},
+      "id": "54e1e0e3-1f99-45b0-bf30-b9c020577554",
+      "resource_id": "f8e2a82c-9e2f-4300-9866-d1a495d453d0",
+      "resource_type": "device",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "claim_token.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:24:14.726928Z",
+      "details": {},
+      "id": "84eafaa9-2082-47e6-83ea-03d70427a9c5",
+      "resource_id": "e4c1550f-5412-4669-a8ce-7f62018f8fa8",
+      "resource_type": "claim_token",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "device.enrolled",
+      "created_at": "2026-06-09T00:24:14.722214Z",
+      "details": {},
+      "id": "d8287316-d1f1-4bc9-a19d-658a2a5e2557",
+      "resource_id": "c20a0f46-6ccf-4569-b371-207009c80e5e",
+      "resource_type": "device",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "claim_token.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:24:14.715163Z",
+      "details": {},
+      "id": "25c35aad-1f57-4cbd-8b3f-46f277846822",
+      "resource_id": "41ef043b-f960-4c46-9151-3cd955d04633",
+      "resource_type": "claim_token",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "device.enrolled",
+      "created_at": "2026-06-09T00:24:14.710147Z",
+      "details": {},
+      "id": "63b6239c-280e-4569-b510-bacae880c26b",
+      "resource_id": "b62830f5-cf91-4a8e-b969-ad0778295b64",
+      "resource_type": "device",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "claim_token.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:24:14.703753Z",
+      "details": {},
+      "id": "728d1542-9362-4644-a402-367c705538b4",
+      "resource_id": "1f9900a1-e6f1-4a8a-b346-523d499bcadc",
+      "resource_type": "claim_token",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "device.enrolled",
+      "created_at": "2026-06-09T00:24:14.699199Z",
+      "details": {},
+      "id": "14f45989-50e3-42b3-9cd9-466b6e606a0c",
+      "resource_id": "58e936c2-3194-4f42-92b9-acbd7aa8277c",
+      "resource_type": "device",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "claim_token.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:24:14.687925Z",
+      "details": {},
+      "id": "e9634ac9-9760-4daa-90b6-8ecac8934604",
+      "resource_id": "7698a8af-d9c7-441b-bf42-091cddbd7244",
+      "resource_type": "claim_token",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "webhook.endpoint_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:22:35.461613Z",
+      "details": {
+        "events": [
+          "alert.created",
+          "device.enrolled",
+          "dlp.violation"
+        ],
+        "url": "https://hooks.example.com/sng/acme-retail"
+      },
+      "id": "ead3125a-810a-4a07-a437-4b4e7cc33335",
+      "resource_id": "fa65be35-5279-4baa-bdc2-2f0ea7631c74",
+      "resource_type": "webhook_endpoint",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "apikey.create",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:22:35.456423Z",
+      "details": {
+        "name": "edge-bootstrap",
+        "subject": "svc:edge"
+      },
+      "id": "521f2d5e-adc1-4ad0-af2a-866bf893272b",
+      "resource_id": "4c9885d4-c454-4a2f-9a7b-bddc770dfc85",
+      "resource_type": "tenant_api_key",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "integration.connector_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:22:35.445323Z",
+      "details": {
+        "events": null,
+        "name": "Acme Splunk HEC",
+        "type": "siem_webhook"
+      },
+      "id": "346664fc-6356-4997-9645-367bf4ac8895",
+      "resource_id": "7bb82c8d-b9e3-4bf3-80cc-dd2f25d09bdb",
+      "resource_type": "integration_connector",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "device.enrolled",
+      "created_at": "2026-06-09T00:22:35.424842Z",
+      "details": {},
+      "id": "40ccf68d-685d-4d71-8e2a-edc45e022f49",
+      "resource_id": "82102d29-4a83-457a-afe0-1b4499965183",
+      "resource_type": "device",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "claim_token.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:22:35.418569Z",
+      "details": {},
+      "id": "459fecc7-0799-4c36-af5e-fbd68662f291",
+      "resource_id": "35d9b8c7-671c-4031-a6e7-4b7d8d1b9958",
+      "resource_type": "claim_token",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "device.enrolled",
+      "created_at": "2026-06-09T00:22:35.414961Z",
+      "details": {},
+      "id": "26055362-ac18-4732-acfa-f1100c6939b8",
+      "resource_id": "2789cc6f-a8af-42a8-a99d-a1e00b5a4d04",
+      "resource_type": "device",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "claim_token.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:22:35.41004Z",
+      "details": {},
+      "id": "cd26c04f-6189-453f-888f-24703db027ce",
+      "resource_id": "4542c40c-fa1a-47b5-bd81-83bc8eee72a8",
+      "resource_type": "claim_token",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "device.enrolled",
+      "created_at": "2026-06-09T00:22:35.406416Z",
+      "details": {},
+      "id": "80507261-c9d3-40e5-81c9-364cf132f4a7",
+      "resource_id": "328a8a1a-ba9b-4b83-8114-a552236f6463",
+      "resource_type": "device",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "claim_token.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:22:35.400793Z",
+      "details": {},
+      "id": "c08312b5-fc9d-4068-bb13-7581786a091f",
+      "resource_id": "1be86b27-e0bf-4afc-85d2-7af8cbf5eb8d",
+      "resource_type": "claim_token",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "device.enrolled",
+      "created_at": "2026-06-09T00:22:35.396677Z",
+      "details": {},
+      "id": "fdfe4d49-2a52-424b-9a86-532319164fa6",
+      "resource_id": "c83b37eb-3131-479d-a079-d745f3b6382a",
+      "resource_type": "device",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "claim_token.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:22:35.385584Z",
+      "details": {},
+      "id": "41af3070-10be-4077-8aec-aa3fbe0911af",
+      "resource_id": "332221f8-71d8-4501-be7d-5683e2292cb0",
+      "resource_type": "claim_token",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "webhook.endpoint_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.902547Z",
+      "details": {
+        "events": [
+          "alert.created",
+          "device.enrolled",
+          "dlp.violation"
+        ],
+        "url": "https://hooks.example.com/sng/acme-retail"
+      },
+      "id": "09aeb42b-5457-4b2c-b3d2-256dabc47ce4",
+      "resource_id": "a963c5b4-0bd3-4d10-b91a-6eebee274329",
+      "resource_type": "webhook_endpoint",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "apikey.create",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.897903Z",
+      "details": {
+        "name": "edge-bootstrap",
+        "subject": "svc:edge"
+      },
+      "id": "f82fe2bf-526d-413a-a097-7feaa0d088f1",
+      "resource_id": "52bc4813-9a61-46e7-8c0e-cfc2e19f270a",
+      "resource_type": "tenant_api_key",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.connector_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.88394Z",
+      "details": {
+        "name": "Acme Slack",
+        "type": "slack"
+      },
+      "id": "9d96ff67-85a8-4dff-b292-7d5b5371826b",
+      "resource_id": "d532d90e-48cb-4a1c-a717-2bb0c75c9fdc",
+      "resource_type": "casb_connector",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.connector_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.879761Z",
+      "details": {
+        "name": "Acme Microsoft 365",
+        "type": "m365"
+      },
+      "id": "58d8ca5f-f41e-4ba6-8a39-ffdb7caabc59",
+      "resource_id": "cdb5e659-f1bb-40ea-a59a-816cc237ddb0",
+      "resource_type": "casb_connector",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "browser_policy.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.874267Z",
+      "details": {},
+      "id": "47211bfd-4436-4177-b2db-a556af435c3f",
+      "resource_id": "6a2ccf9a-860d-4ae5-b092-dd1a62e25296",
+      "resource_type": "browser_policy",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "browser_policy.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.870116Z",
+      "details": {},
+      "id": "e83b3ffe-b374-4e80-a511-030f9f81b2b4",
+      "resource_id": "43fcc000-374e-423c-95a2-002234281b9b",
+      "resource_type": "browser_policy",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "claim_token.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.861025Z",
+      "details": {},
+      "id": "b3a2a6a2-3072-4c50-876c-86fa3dcbc8a3",
+      "resource_id": "95ec16b6-5887-4372-889a-2b3a064fa66b",
+      "resource_type": "claim_token",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "claim_token.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.856413Z",
+      "details": {},
+      "id": "04471167-4013-4bd5-aece-f4ea0f4bd6d4",
+      "resource_id": "3d528fd8-ea39-4898-8174-ab9184276ef9",
+      "resource_type": "claim_token",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "claim_token.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.852023Z",
+      "details": {},
+      "id": "115901d4-952c-47b2-bbbc-83543869dbf6",
+      "resource_id": "09eda641-39c8-4d8f-92b3-5b3fe93f4ac8",
+      "resource_type": "claim_token",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "claim_token.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.846278Z",
+      "details": {},
+      "id": "e9f2cd67-07de-4a6a-a133-0a69330fc055",
+      "resource_id": "42d4905f-c074-426d-9056-e8f8c665770a",
+      "resource_type": "claim_token",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "site.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.841194Z",
+      "details": {},
+      "id": "480eeae1-e116-42ca-8fa0-c080b0b66602",
+      "resource_id": "bebea5ba-6088-4455-a4d8-812522d9ecb4",
+      "resource_type": "site",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "site.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.837154Z",
+      "details": {},
+      "id": "520a65ce-e86b-4bb4-a20f-67c9935f7d27",
+      "resource_id": "d2e9c00a-9ffa-4454-ba2b-587659eb058c",
+      "resource_type": "site",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "site.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.833229Z",
+      "details": {},
+      "id": "ac45df1a-95c3-4f81-bbb7-b218560ae825",
+      "resource_id": "4983b089-b5fb-4e8f-89a1-c1f565613c9c",
+      "resource_type": "site",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "site.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.829304Z",
+      "details": {},
+      "id": "3a224ad6-4f92-4859-abb5-b807c448d220",
+      "resource_id": "459e4c84-98af-4ec5-87da-3f99c9213818",
+      "resource_type": "site",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "site.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.825423Z",
+      "details": {},
+      "id": "cc90311c-cdad-4724-a42e-e9515458458d",
+      "resource_id": "12f00329-f492-4ef3-9a2b-50d8eceab621",
+      "resource_type": "site",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "site.created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-09T00:18:24.819906Z",
+      "details": {},
+      "id": "dd7ff715-1b88-4abd-b0ed-f97a9246205a",
+      "resource_id": "a6fa8ba6-1921-4aec-839c-b4328d0aa85c",
+      "resource_type": "site",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "tenant.created",
+      "created_at": "2026-06-09T00:12:37.103035Z",
+      "details": {},
+      "id": "554cb474-99c4-4f3b-8852-fbb0b82d916a",
+      "resource_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "resource_type": "tenant",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    }
+  ],
+  "next_cursor": ""
+}

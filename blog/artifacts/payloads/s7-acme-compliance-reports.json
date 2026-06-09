@@ -1,0 +1,178 @@
+{
+  "items": [
+    {
+      "controls": [
+        {
+          "control_id": "SOC2-CC6.1",
+          "description": "Logical and physical access controls",
+          "evidence": [
+            "Enforced via SNG policy engine"
+          ],
+          "status": "met"
+        },
+        {
+          "control_id": "SOC2-CC6.2",
+          "description": "System access registration and authorization",
+          "evidence": [
+            "Enforced via SNG policy engine"
+          ],
+          "status": "met"
+        },
+        {
+          "control_id": "SOC2-CC6.3",
+          "description": "Role-based access and least privilege",
+          "evidence": [
+            "Enforced via SNG policy engine"
+          ],
+          "status": "met"
+        },
+        {
+          "control_id": "SOC2-CC7.1",
+          "description": "Detection of unauthorized changes",
+          "evidence": [
+            "Enforced via SNG policy engine"
+          ],
+          "status": "met"
+        },
+        {
+          "control_id": "SOC2-CC7.2",
+          "description": "Monitoring of system components",
+          "evidence": [
+            "Enforced via SNG policy engine"
+          ],
+          "status": "met"
+        },
+        {
+          "control_id": "SOC2-CC8.1",
+          "description": "Change management controls",
+          "evidence": [
+            "Enforced via SNG policy engine"
+          ],
+          "status": "met"
+        },
+        {
+          "control_id": "SOC2-CC9.1",
+          "description": "Risk mitigation activities",
+          "evidence": [
+            "Enforced via SNG policy engine"
+          ],
+          "status": "met"
+        },
+        {
+          "control_id": "SOC2-A1.1",
+          "description": "Availability - system recovery",
+          "evidence": [
+            "Enforced via SNG policy engine"
+          ],
+          "status": "met"
+        }
+      ],
+      "created_at": "2026-06-09T01:08:35.163728Z",
+      "evidence_pack": {
+        "controls": [
+          {
+            "control_id": "SOC2-CC6.1",
+            "description": "Logical and physical access controls",
+            "evidence": [
+              "Enforced via SNG policy engine"
+            ],
+            "status": "met"
+          },
+          {
+            "control_id": "SOC2-CC6.2",
+            "description": "System access registration and authorization",
+            "evidence": [
+              "Enforced via SNG policy engine"
+            ],
+            "status": "met"
+          },
+          {
+            "control_id": "SOC2-CC6.3",
+            "description": "Role-based access and least privilege",
+            "evidence": [
+              "Enforced via SNG policy engine"
+            ],
+            "status": "met"
+          },
+          {
+            "control_id": "SOC2-CC7.1",
+            "description": "Detection of unauthorized changes",
+            "evidence": [
+              "Enforced via SNG policy engine"
+            ],
+            "status": "met"
+          },
+          {
+            "control_id": "SOC2-CC7.2",
+            "description": "Monitoring of system components",
+            "evidence": [
+              "Enforced via SNG policy engine"
+            ],
+            "status": "met"
+          },
+          {
+            "control_id": "SOC2-CC8.1",
+            "description": "Change management controls",
+            "evidence": [
+              "Enforced via SNG policy engine"
+            ],
+            "status": "met"
+          },
+          {
+            "control_id": "SOC2-CC9.1",
+            "description": "Risk mitigation activities",
+            "evidence": [
+              "Enforced via SNG policy engine"
+            ],
+            "status": "met"
+          },
+          {
+            "control_id": "SOC2-A1.1",
+            "description": "Availability - system recovery",
+            "evidence": [
+              "Enforced via SNG policy engine"
+            ],
+            "status": "met"
+          }
+        ],
+        "framework": "SOC2",
+        "generated_at": "2026-06-09T01:08:35.163498122Z",
+        "policies": [
+          {
+            "enforced": true,
+            "name": "Data Loss Prevention",
+            "type": "dlp"
+          },
+          {
+            "enforced": true,
+            "name": "Browser Protection",
+            "type": "browser"
+          },
+          {
+            "enforced": true,
+            "name": "CASB Discovery",
+            "type": "casb"
+          },
+          {
+            "enforced": true,
+            "name": "Network Policy",
+            "type": "policy"
+          },
+          {
+            "enforced": true,
+            "name": "Access Control",
+            "type": "access_control"
+          }
+        ],
+        "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+      },
+      "framework": "SOC2",
+      "generated_at": "2026-06-09T01:08:35.163498Z",
+      "id": "6ba1cee1-d837-489a-ace8-9e038f23b059",
+      "max_score": 8,
+      "score": 8,
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    }
+  ],
+  "next_cursor": ""
+}

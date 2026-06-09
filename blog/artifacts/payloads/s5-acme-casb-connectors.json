@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "config": {},
+      "created_at": "2026-06-09T00:18:24Z",
+      "id": "d532d90e-48cb-4a1c-a717-2bb0c75c9fdc",
+      "name": "Acme Slack",
+      "secret_set": false,
+      "status": "configuring",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "type": "slack",
+      "updated_at": "2026-06-09T00:18:24Z"
+    },
+    {
+      "config": {},
+      "created_at": "2026-06-09T00:18:24Z",
+      "id": "cdb5e659-f1bb-40ea-a59a-816cc237ddb0",
+      "name": "Acme Microsoft 365",
+      "secret_set": false,
+      "status": "configuring",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "type": "m365",
+      "updated_at": "2026-06-09T00:18:24Z"
+    }
+  ]
+}

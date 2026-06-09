@@ -1,0 +1,70 @@
+{
+  "generated_at": "2026-06-09T01:09:22.650442972Z",
+  "lines": [
+    {
+      "hard_exceeded": false,
+      "hard_limit": 20000000,
+      "meter": "llm_tokens_used",
+      "period": "monthly",
+      "soft_exceeded": false,
+      "soft_limit": 16000000,
+      "used": 0
+    },
+    {
+      "hard_exceeded": false,
+      "hard_limit": 20000,
+      "meter": "llm_calls",
+      "period": "monthly",
+      "soft_exceeded": false,
+      "soft_limit": 16000,
+      "used": 0
+    },
+    {
+      "hard_exceeded": false,
+      "hard_limit": 2000000,
+      "meter": "url_cat_lookups",
+      "period": "daily",
+      "soft_exceeded": false,
+      "soft_limit": 1600000,
+      "used": 0
+    },
+    {
+      "hard_exceeded": false,
+      "meter": "malware_scans",
+      "period": "daily",
+      "soft_exceeded": false,
+      "used": 0
+    },
+    {
+      "hard_exceeded": false,
+      "meter": "clickhouse_rows_written",
+      "period": "monthly",
+      "soft_exceeded": false,
+      "used": 0
+    },
+    {
+      "hard_exceeded": false,
+      "meter": "s3_bytes_archived",
+      "period": "monthly",
+      "soft_exceeded": false,
+      "used": 0
+    },
+    {
+      "hard_exceeded": false,
+      "meter": "bandwidth_proxied_bytes",
+      "period": "monthly",
+      "soft_exceeded": false,
+      "used": 0
+    },
+    {
+      "hard_exceeded": false,
+      "hard_limit": 100000000,
+      "meter": "policy_evaluations",
+      "period": "daily",
+      "soft_exceeded": false,
+      "soft_limit": 80000000,
+      "used": 0
+    }
+  ],
+  "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+}

@@ -1,0 +1,32 @@
+{
+  "ai_generated": false,
+  "generated_at": "2026-06-09T01:09:22.647190335Z",
+  "overview": {
+    "alerts_by_severity": {
+      "critical": 1,
+      "warning": 3
+    },
+    "total_alerts": 4,
+    "trend": "degrading"
+  },
+  "period": {
+    "end": "2026-06-09T01:09:22.644255949Z",
+    "label": "weekly",
+    "start": "2026-06-02T01:09:22.644255949Z"
+  },
+  "policy_health": {
+    "active_policies": 10,
+    "coverage_pct": 83.33333333333334,
+    "total_policies": 12
+  },
+  "recommendations": [
+    "Investigate 1 critical alert(s) immediately.",
+    "Alert volume is increasing; review detection thresholds.",
+    "4 alert(s) remain open; prioritise triage."
+  ],
+  "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+  "threats": {
+    "new_threat_types": 0,
+    "top_kinds": []
+  }
+}

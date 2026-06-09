@@ -1,0 +1,255 @@
+{
+  "created_at": "2026-06-09T00:47:26.854015Z",
+  "graph": {
+    "default_action": "deny",
+    "edges": [
+      {
+        "source": "corp-users",
+        "target": "ngfw"
+      },
+      {
+        "source": "corp-users",
+        "target": "swg"
+      },
+      {
+        "source": "corp-users",
+        "target": "dns"
+      },
+      {
+        "source": "corp-users",
+        "target": "ztna"
+      },
+      {
+        "source": "managed-devices",
+        "target": "ztna"
+      },
+      {
+        "source": "managed-devices",
+        "target": "dlp"
+      },
+      {
+        "source": "guest-net",
+        "target": "ngfw"
+      },
+      {
+        "source": "ztna",
+        "target": "private-apps"
+      },
+      {
+        "source": "saas-m365",
+        "target": "inline_casb"
+      },
+      {
+        "source": "saas-m365",
+        "target": "sdwan"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "corp-users",
+        "label": "Corp users"
+      },
+      {
+        "id": "managed-devices",
+        "label": "Managed devices"
+      },
+      {
+        "id": "guest-net",
+        "label": "Guest network"
+      },
+      {
+        "id": "private-apps",
+        "label": "Private apps"
+      },
+      {
+        "id": "saas-m365",
+        "label": "M365 SaaS"
+      },
+      {
+        "id": "ngfw",
+        "label": "NGFW"
+      },
+      {
+        "id": "swg",
+        "label": "Secure Web Gateway"
+      },
+      {
+        "id": "dns",
+        "label": "DNS security"
+      },
+      {
+        "id": "ztna",
+        "label": "ZTNA broker"
+      },
+      {
+        "id": "sdwan",
+        "label": "SD-WAN steering"
+      },
+      {
+        "id": "dlp",
+        "label": "DLP"
+      },
+      {
+        "id": "inline_casb",
+        "label": "Inline CASB"
+      }
+    ],
+    "predicates": [
+      {
+        "name": "cat-malware"
+      },
+      {
+        "name": "cat-gambling"
+      },
+      {
+        "name": "geo-sanctioned"
+      },
+      {
+        "name": "business-hours"
+      },
+      {
+        "name": "saas-m365"
+      }
+    ],
+    "rules": [
+      {
+        "description": "Corp users reach private apps during business hours",
+        "domain": "ngfw",
+        "id": "ngfw-allow-corp-apps",
+        "predicate_refs": [
+          "business-hours"
+        ],
+        "subject_refs": [
+          "corp-users",
+          "private-apps"
+        ],
+        "verb": "allow"
+      },
+      {
+        "description": "Guest network is denied all private-app access",
+        "domain": "ngfw",
+        "id": "ngfw-deny-guest-apps",
+        "subject_refs": [
+          "guest-net",
+          "private-apps"
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "TLS-inspect corp web traffic",
+        "domain": "swg",
+        "id": "swg-decrypt-corp",
+        "subject_refs": [
+          "corp-users"
+        ],
+        "verb": "decrypt"
+      },
+      {
+        "description": "Block the gambling URL category",
+        "domain": "swg",
+        "id": "swg-deny-gambling",
+        "predicate_refs": [
+          "cat-gambling"
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "Sinkhole known-malware domains via DNS",
+        "domain": "dns",
+        "id": "dns-deny-malware",
+        "predicate_refs": [
+          "cat-malware"
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "ZTNA: posture-checked corp devices reach private apps",
+        "domain": "ztna",
+        "id": "ztna-allow-posture",
+        "subject_refs": [
+          "corp-users",
+          "managed-devices",
+          "private-apps"
+        ],
+        "verb": "allow"
+      },
+      {
+        "description": "Deny access from sanctioned geographies",
+        "domain": "ztna",
+        "id": "ztna-deny-geo",
+        "predicate_refs": [
+          "geo-sanctioned"
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "Steer M365 SaaS onto the interactive class",
+        "domain": "sdwan",
+        "id": "sdwan-steer-saas",
+        "predicate_refs": [
+          "saas-m365"
+        ],
+        "verb": "steer"
+      },
+      {
+        "description": "Inspect uploads from managed devices for regulated data",
+        "domain": "dlp",
+        "id": "dlp-inspect-uploads",
+        "subject_refs": [
+          "managed-devices"
+        ],
+        "verb": "inspect"
+      },
+      {
+        "description": "Inline-CASB inspection of M365 share/upload actions",
+        "domain": "inline_casb",
+        "id": "casb-inspect-m365",
+        "predicate_refs": [
+          "saas-m365"
+        ],
+        "verb": "inspect"
+      },
+      {
+        "description": "Proposed: block legacy TLS 1.0 egress",
+        "domain": "ngfw",
+        "id": "ngfw-suggest-tls10",
+        "subject_refs": [
+          "corp-users"
+        ],
+        "verb": "suggest_only"
+      },
+      {
+        "description": "Proposed: block newly-registered domains (<30d)",
+        "domain": "dns",
+        "id": "dns-suggest-nrd",
+        "verb": "suggest_only"
+      }
+    ],
+    "subjects": [
+      {
+        "kind": "user",
+        "name": "corp-users"
+      },
+      {
+        "kind": "device",
+        "name": "managed-devices"
+      },
+      {
+        "kind": "app",
+        "name": "private-apps"
+      },
+      {
+        "kind": "site",
+        "name": "branch-sites"
+      },
+      {
+        "kind": "network",
+        "name": "guest-net"
+      }
+    ]
+  },
+  "id": "f5f9fdbb-a67f-47c7-991b-ada245cbf954",
+  "is_draft": false,
+  "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+  "version": 1
+}

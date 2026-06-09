@@ -264,6 +264,8 @@ func seedTenant(tid string, t tenantSpec) map[string]any {
 	res["integrations"] = intg
 
 	res["policy_rules"] = seedPolicyGraph(tid)
+	res["casb_inline_rules"] = seedInlineCASBRules(tid)
+	res["compliance_reports"] = seedComplianceReport(tid)
 
 	if recordOpsHealth(tid, t.health, t.components) {
 		res["ops_health"] = t.health
@@ -453,6 +455,71 @@ func createIntegration(tid string, ig integrationSpec) bool {
 func recordOpsHealth(tid string, score int, components map[string]int) bool {
 	body := map[string]any{"health_score": score, "component_scores": components}
 	return doJSON("POST", fmt.Sprintf("/api/v1/tenants/%s/ops/health", tid), body, nil)
+}
+
+// inlineCASBRule is one seeded inline-CASB rule. app_id must be one of
+// the service's knownApps (m365, google_workspace, slack, salesforce,
+// or "any"); action ∈ {upload,download,share,delete}; verdict ∈
+// {allow,block,log}.
+type inlineCASBRule struct {
+	appID      string
+	action     string
+	verdict    string
+	priority   int32
+	conditions map[string]any
+}
+
+// seedInlineCASBRules publishes a small inline-CASB ruleset (real
+// SaaS-tenant DLP-at-the-edge controls) for the tenant. Idempotent: a
+// rerun that finds rules already present creates none. Returns the
+// authoritative server-side count.
+func seedInlineCASBRules(tid string) int {
+	rules := []inlineCASBRule{
+		{"m365", "share", "block", 10, map[string]any{"label_match": "confidential"}},
+		{"m365", "upload", "log", 20, map[string]any{"size_threshold": 10_000_000}},
+		{"salesforce", "download", "block", 30, map[string]any{"file_type": "csv"}},
+		{"google_workspace", "share", "log", 40, map[string]any{}},
+	}
+	if listCount(tid, "casb/inline-rules") == 0 {
+		for _, r := range rules {
+			enabled := true
+			body := map[string]any{
+				"app_id":     r.appID,
+				"action":     r.action,
+				"verdict":    r.verdict,
+				"priority":   r.priority,
+				"enabled":    &enabled,
+				"conditions": r.conditions,
+			}
+			doJSON("POST", fmt.Sprintf("/api/v1/tenants/%s/casb/inline-rules", tid), body, nil)
+		}
+	}
+	return listCount(tid, "casb/inline-rules")
+}
+
+// seedComplianceReport generates one SOC2 compliance report spanning
+// every control surface (DLP, browser, CASB, policy, access control) so
+// the S7 "prove the posture to the board" scenario has a real,
+// evidence-linked report to show. Idempotent: skips when a report
+// already exists. Returns the authoritative server-side count.
+func seedComplianceReport(tid string) int {
+	var existing struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	doJSON("GET", fmt.Sprintf("/api/v1/tenants/%s/compliance/reports", tid), nil, &existing)
+	if len(existing.Items) == 0 {
+		body := map[string]any{
+			"framework":      "SOC2",
+			"dlp":            true,
+			"browser":        true,
+			"casb":           true,
+			"policy":         true,
+			"access_control": true,
+		}
+		doJSON("POST", fmt.Sprintf("/api/v1/tenants/%s/compliance/reports/generate", tid), body, nil)
+		doJSON("GET", fmt.Sprintf("/api/v1/tenants/%s/compliance/reports", tid), nil, &existing)
+	}
+	return len(existing.Items)
 }
 
 // scenarioPolicyGraph is the unified policy graph published for every
