@@ -1973,6 +1973,71 @@ label.field > span {
   line-height: 1.55;
 }
 
+/* --- Network policy editor (guided, domain-segmented) ------------------ */
+.net-rule {
+  display: grid;
+  grid-template-columns: 1.5fr 130px 1.5fr auto;
+  gap: 10px 12px;
+  align-items: start;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--ok);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+}
+/* A rule the operator just added but hasn't saved yet — amber rail mirrors
+   the "draft" cue used by the Policy rule table. */
+.net-rule--new {
+  border-left-color: var(--warn);
+}
+.net-rule__label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+.net-rule input,
+.net-rule select {
+  width: 100%;
+}
+.net-rule__desc {
+  grid-column: 1 / -1;
+}
+.net-rule__acts {
+  display: flex;
+  gap: 6px;
+  align-self: center;
+}
+/* Gate notice shown when a draft must be dry-run (or re-run) before it can be
+   applied — this is the test-before-rollout guardrail for network policy. */
+.net-gate {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  background: var(--bg-elev-2);
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.net-gate--blocked {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.net-gate--ready {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+@media (max-width: 720px) {
+  .net-rule {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* --- Simple/Advanced mode toggle --------------------------------------- */
 .mode-toggle {
   display: inline-flex;
