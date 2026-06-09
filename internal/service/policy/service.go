@@ -294,6 +294,91 @@ func (s *Service) GetCurrentGraph(ctx context.Context, tenantID uuid.UUID) (repo
 	return s.repo.GetCurrentGraph(ctx, tenantID)
 }
 
+// PolicyCounts reports the tenant's current published policy-rule
+// totals: the total number of rules and the subset that is actively
+// enforcing. "Active" excludes suggest_only rules, which are
+// proposed-but-not-enforcing (e.g. AI-suggested deltas awaiting
+// operator approval) — these are exactly the "dormant" policies the
+// dashboard prompts operators to activate.
+//
+// Returns (0, 0, nil) when the tenant has no published graph yet so
+// callers render an honest empty coverage state rather than an error.
+//
+// A stored graph that fails the typed-schema parse (a legacy graph
+// written before PutGraph validated against the typed schema) does not
+// fail the call: it mirrors Compile's verbatim-rules fallback (Devin
+// Review #3312847384) by counting the raw `rules` array and logging a
+// warning, so the dashboard's coverage meter keeps working for those
+// tenants exactly as Compile keeps producing bundles for them. Only a
+// genuinely unparseable graph (not even valid JSON with a rules array)
+// yields the honest 0/0 empty state.
+func (s *Service) PolicyCounts(ctx context.Context, tenantID uuid.UUID) (total, active int, err error) {
+	pg, err := s.repo.GetCurrentGraph(ctx, tenantID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+	rules, ok := s.countableRules(tenantID, pg)
+	if !ok {
+		return 0, 0, nil
+	}
+	for _, v := range rules {
+		total++
+		if v != VerbSuggestOnly {
+			active++
+		}
+	}
+	return total, active, nil
+}
+
+// countableRules returns the verbs of the graph's rules for coverage
+// counting. It prefers the typed parse; on a typed-schema parse failure
+// it falls back to a lightweight decode of the verbatim `rules` array
+// (mirroring Compile's legacy-graph path) and logs a warning. ok is
+// false only when the graph can't be decoded at all, in which case the
+// caller reports an honest 0/0 rather than an error.
+func (s *Service) countableRules(tenantID uuid.UUID, pg repository.PolicyGraph) (verbs []Verb, ok bool) {
+	if g, perr := ParseGraph(pg.Graph); perr == nil {
+		verbs = make([]Verb, 0, len(g.Rules))
+		for _, r := range g.Rules {
+			verbs = append(verbs, r.Verb)
+		}
+		return verbs, true
+	} else {
+		var legacy struct {
+			Rules []struct {
+				Verb Verb `json:"verb"`
+			} `json:"rules"`
+		}
+		if jerr := json.Unmarshal(pg.Graph, &legacy); jerr != nil {
+			// Log jerr (the JSON-decode failure that actually
+			// triggered this branch), not perr: perr is the typed
+			// ParseGraph error, but here even the lightweight
+			// verbatim decode failed, so jerr is the diagnostic
+			// that explains why the graph is wholly unparseable.
+			s.logger.Warn("policy: stored graph is unparseable; reporting empty coverage",
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("graph_id", pg.ID.String()),
+				slog.Any("error", jerr),
+			)
+			return nil, false
+		}
+		s.logger.Warn("policy: typed-graph parse failed; counting verbatim rules for coverage (legacy graph — re-publish to opt back into the typed path)",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("graph_id", pg.ID.String()),
+			slog.Int("graph_version", pg.Version),
+			slog.Any("error", perr),
+		)
+		verbs = make([]Verb, 0, len(legacy.Rules))
+		for _, r := range legacy.Rules {
+			verbs = append(verbs, r.Verb)
+		}
+		return verbs, true
+	}
+}
+
 // PutGraph stores a new policy graph version for the tenant. The
 // version number is auto-incremented by the repository if zero.
 //

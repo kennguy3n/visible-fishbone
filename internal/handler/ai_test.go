@@ -388,6 +388,58 @@ func TestAIHandler_PostureReport_200(t *testing.T) {
 	if report.Overview.AlertsBySeverity["critical"] != 2 {
 		t.Fatalf("critical = %d, want 2", report.Overview.AlertsBySeverity["critical"])
 	}
+	// Without a PolicyCountSource the coverage section is an honest
+	// 0/0 — never fabricated.
+	if report.PolicyHealth.TotalPolicies != 0 || report.PolicyHealth.CoveragePct != 0 {
+		t.Fatalf("policy_health = %+v, want zero coverage when no source", report.PolicyHealth)
+	}
+}
+
+func TestAIHandler_PostureReport_PolicyCoverage(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, nil, ai.NewReportEngine(nil), nil, nil, nil)
+	h.SetPostureDataSource(stubPostureData{counts: map[string]int{"warning": 1}})
+	// 8 of 10 published rules actively enforcing → 80% coverage. The
+	// dashboard meter reads this directly; before this source was wired
+	// the report always returned 0/0 regardless of the policy graph.
+	h.SetPolicyCountSource(stubPolicyCounts{total: 10, active: 8})
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/reports/posture", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.getPostureReport(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var report ai.PostureReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if report.PolicyHealth.TotalPolicies != 10 || report.PolicyHealth.ActivePolicies != 8 {
+		t.Fatalf("policy counts = %+v, want 10/8", report.PolicyHealth)
+	}
+	if report.PolicyHealth.CoveragePct != 80 {
+		t.Fatalf("coverage_pct = %v, want 80", report.PolicyHealth.CoveragePct)
+	}
+}
+
+func TestAIHandler_PostureReport_PolicyCountErr500(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, nil, ai.NewReportEngine(nil), nil, nil, nil)
+	h.SetPostureDataSource(stubPostureData{counts: map[string]int{"warning": 1}})
+	h.SetPolicyCountSource(stubPolicyCounts{err: errStubPostureData})
+	tenantID := uuid.New().String()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/tenants/"+tenantID+"/ai/reports/posture", nil)
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.getPostureReport(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestAIHandler_PostureReport_TrendUsesPreviousPeriod(t *testing.T) {
@@ -969,4 +1021,18 @@ func (s trendPostureData) AlertCountsBySeverity(_ context.Context, _ uuid.UUID, 
 		return s.current, nil
 	}
 	return s.prev, nil
+}
+
+// stubPolicyCounts is a test double for the PolicyCountSource.
+type stubPolicyCounts struct {
+	total  int
+	active int
+	err    error
+}
+
+func (s stubPolicyCounts) PolicyCounts(_ context.Context, _ uuid.UUID) (int, int, error) {
+	if s.err != nil {
+		return 0, 0, s.err
+	}
+	return s.total, s.active, nil
 }
