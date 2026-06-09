@@ -238,8 +238,12 @@ func (l *ClickHouseRowLimiter) bucketFor(id uuid.UUID, desired RowLimit) *rowBuc
 	b.mu.Lock()
 	if b.cur != desired {
 		b.cur = desired
-		b.bucket.SetLimitAt(l.now(), desired.Rate)
-		b.bucket.SetBurstAt(l.now(), desired.Burst)
+		// Single clock read so the rate and burst updates share one
+		// instant — the token math stays consistent regardless of the
+		// clock source.
+		now := l.now()
+		b.bucket.SetLimitAt(now, desired.Rate)
+		b.bucket.SetBurstAt(now, desired.Burst)
 	}
 	b.mu.Unlock()
 	return b

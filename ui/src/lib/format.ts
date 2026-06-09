@@ -127,8 +127,9 @@ export function formatPct(ratio?: number | null, digits = 0): string {
   return `${(ratio * 100).toFixed(digits)}%`;
 }
 
-/** Convert a byte count to gibibytes for display (÷ 1e9 per the cost
- *  model, which prices on decimal GB). */
+/** Convert a byte count to decimal gigabytes for display (÷ 1e9, i.e.
+ *  SI GB — matching the cost model and cloud-provider $/GB pricing, not
+ *  binary GiB / 2^30). */
 export function bytesToGB(bytes?: number | null): number {
   if (!bytes) return 0;
   return bytes / 1e9;
