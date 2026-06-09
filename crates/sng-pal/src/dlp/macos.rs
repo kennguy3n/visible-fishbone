@@ -310,9 +310,9 @@ extern "C" fn fsevents_callback(
         // length of both parallel arrays.
         let flags = unsafe { *event_flags.add(i) };
         let is_file = flags & ffi::FLAG_ITEM_IS_FILE != 0;
-        let touched =
-            flags & (ffi::FLAG_ITEM_CREATED | ffi::FLAG_ITEM_MODIFIED | ffi::FLAG_ITEM_RENAMED)
-                != 0;
+        let touched = flags
+            & (ffi::FLAG_ITEM_CREATED | ffi::FLAG_ITEM_MODIFIED | ffi::FLAG_ITEM_RENAMED)
+            != 0;
         if !is_file || !touched {
             continue;
         }
@@ -334,8 +334,16 @@ impl FsEventsWatcher {
     /// Start an FSEvents stream over `roots`. Returns `Err` if no root
     /// is usable or the stream/queue cannot be created, so the caller
     /// can fall back to the portable poll watcher.
-    fn start(channel: DlpChannel, roots: &[PathBuf], max_file_bytes: usize) -> Result<Self, String> {
-        let roots: Vec<&Path> = roots.iter().filter(|p| p.exists()).map(PathBuf::as_path).collect();
+    fn start(
+        channel: DlpChannel,
+        roots: &[PathBuf],
+        max_file_bytes: usize,
+    ) -> Result<Self, String> {
+        let roots: Vec<&Path> = roots
+            .iter()
+            .filter(|p| p.exists())
+            .map(PathBuf::as_path)
+            .collect();
         if roots.is_empty() {
             return Err("no watchable root".to_owned());
         }
@@ -464,16 +472,18 @@ impl Drop for FsEventsWatcher {
             ffi::FSEventStreamInvalidate(stream);
             ffi::FSEventStreamRelease(stream);
             // Reclaim the Arc reference handed to the context `info`.
-            drop(Arc::from_raw(
-                Arc::as_ptr(&self.shared).cast::<FsShared>(),
-            ));
+            drop(Arc::from_raw(Arc::as_ptr(&self.shared).cast::<FsShared>()));
         }
     }
 }
 
 /// Read up to `max_file_bytes` of `path` into a content event, or
 /// `None` if the file vanished / is unreadable / is not a regular file.
-fn read_file_event(path: &Path, channel: DlpChannel, max_file_bytes: usize) -> Option<ContentEvent> {
+fn read_file_event(
+    path: &Path,
+    channel: DlpChannel,
+    max_file_bytes: usize,
+) -> Option<ContentEvent> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() {
         return None;
@@ -485,9 +495,15 @@ fn read_file_event(path: &Path, channel: DlpChannel, max_file_bytes: usize) -> O
         return None;
     }
     let metadata = ContentMetadata {
-        filename: path.file_name().and_then(|n| n.to_str()).map(ToOwned::to_owned),
+        filename: path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(ToOwned::to_owned),
         content_type: mime_for_path(path).map(ToOwned::to_owned),
-        source: path.parent().and_then(|p| p.to_str()).map(ToOwned::to_owned),
+        source: path
+            .parent()
+            .and_then(|p| p.to_str())
+            .map(ToOwned::to_owned),
         mip_labels: Vec::new(),
         ..ContentMetadata::default()
     };
@@ -557,7 +573,11 @@ impl MacFileWriteMonitor {
     /// Watch `dirs` (empty → the default sensitive set).
     #[must_use]
     pub fn new(dirs: Vec<PathBuf>) -> Self {
-        let dirs = if dirs.is_empty() { default_sensitive_dirs() } else { dirs };
+        let dirs = if dirs.is_empty() {
+            default_sensitive_dirs()
+        } else {
+            dirs
+        };
         Self {
             inner: DirInner::start(DlpChannel::FileWrite, dirs, true),
         }
@@ -634,7 +654,11 @@ impl MacUsbTransferMonitor {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: DirInner::start(DlpChannel::UsbTransfer, vec![PathBuf::from("/Volumes")], true),
+            inner: DirInner::start(
+                DlpChannel::UsbTransfer,
+                vec![PathBuf::from("/Volumes")],
+                true,
+            ),
         }
     }
 
@@ -824,7 +848,9 @@ fn read_pasteboard_utf8(pb: ffi::PasteboardRef) -> Option<Vec<u8>> {
 
 /// Fallback pasteboard read via `/usr/bin/pbpaste`.
 fn read_pbpaste() -> Option<Vec<u8>> {
-    let output = std::process::Command::new("/usr/bin/pbpaste").output().ok()?;
+    let output = std::process::Command::new("/usr/bin/pbpaste")
+        .output()
+        .ok()?;
     if output.status.success() {
         Some(output.stdout)
     } else {

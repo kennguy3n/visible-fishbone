@@ -42,7 +42,10 @@
 // interface is released on the owning type's `Drop`.
 #![allow(unsafe_code)]
 
-use super::{DEFAULT_MAX_FILE_BYTES, SensitiveDirWatcher, clipboard_metadata, content_hash, lock, mime_for_path};
+use super::{
+    DEFAULT_MAX_FILE_BYTES, SensitiveDirWatcher, clipboard_metadata, content_hash, lock,
+    mime_for_path,
+};
 use async_trait::async_trait;
 use sng_dlp::{ChannelError, ChannelInterceptor, ContentEvent, ContentMetadata, DlpChannel};
 use std::collections::VecDeque;
@@ -92,7 +95,10 @@ fn default_sensitive_dirs() -> Vec<PathBuf> {
 
 /// Encode `s` as a NUL-terminated UTF-16 buffer for the wide Win32 API.
 fn wide(s: &Path) -> Vec<u16> {
-    s.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    s.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// State shared between a native worker thread and the async consumer.
@@ -141,9 +147,15 @@ fn read_file_event(path: &Path, channel: DlpChannel) -> Option<ContentEvent> {
         return None;
     }
     let metadata = ContentMetadata {
-        filename: path.file_name().and_then(|n| n.to_str()).map(ToOwned::to_owned),
+        filename: path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(ToOwned::to_owned),
         content_type: mime_for_path(path).map(ToOwned::to_owned),
-        source: path.parent().and_then(|p| p.to_str()).map(ToOwned::to_owned),
+        source: path
+            .parent()
+            .and_then(|p| p.to_str())
+            .map(ToOwned::to_owned),
         mip_labels: Vec::new(),
         ..ContentMetadata::default()
     };
@@ -194,7 +206,14 @@ impl RdcWatch {
         let raw = handle.0 as isize;
         let worker = std::thread::Builder::new()
             .name("sng-dlp-rdc".to_owned())
-            .spawn(move || rdc_worker(HANDLE(raw as *mut std::ffi::c_void), &root, channel, &shared_w))
+            .spawn(move || {
+                rdc_worker(
+                    HANDLE(raw as *mut std::ffi::c_void),
+                    &root,
+                    channel,
+                    &shared_w,
+                )
+            })
             .map_err(|e| format!("spawn rdc worker: {e}"))?;
 
         Ok(Self {
@@ -262,9 +281,8 @@ fn rdc_worker(handle: HANDLE, root: &Path, channel: DlpChannel, shared: &Channel
         // SAFETY: reinterpret the populated prefix as bytes; `buf` is a
         // single allocation of `RDC_BUFFER_BYTES`, so the byte view is
         // in-bounds and the 4-byte alignment is preserved.
-        let bytes = unsafe {
-            std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), RDC_BUFFER_BYTES)
-        };
+        let bytes =
+            unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), RDC_BUFFER_BYTES) };
         for name in parse_notify_buffer(&bytes[..returned as usize]) {
             let path = root.join(&name);
             if let Some(event) = read_file_event(&path, channel) {
@@ -297,9 +315,7 @@ fn parse_notify_buffer(buf: &[u8]) -> Vec<OsString> {
             let name_len = info.FileNameLength as usize / 2;
             // SAFETY: the name is `name_len` UTF-16 units immediately
             // after the fixed header, within the record.
-            let name = unsafe {
-                std::slice::from_raw_parts(info.FileName.as_ptr(), name_len)
-            };
+            let name = unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), name_len) };
             out.push(OsString::from_wide(name));
         }
         let next = info.NextEntryOffset as usize;
@@ -382,7 +398,11 @@ impl WindowsFileWriteMonitor {
     /// Watch `dirs` (empty → the default sensitive set).
     #[must_use]
     pub fn new(dirs: Vec<PathBuf>) -> Self {
-        let dirs = if dirs.is_empty() { default_sensitive_dirs() } else { dirs };
+        let dirs = if dirs.is_empty() {
+            default_sensitive_dirs()
+        } else {
+            dirs
+        };
         Self {
             inner: DirInner::start(DlpChannel::FileWrite, dirs, true),
         }
@@ -714,7 +734,8 @@ impl ChannelInterceptor for WindowsPrintMonitor {
 
 /// Default spooler directory.
 fn default_spool_dir() -> PathBuf {
-    let root = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from);
+    let root =
+        std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from);
     root.join("System32").join("spool").join("PRINTERS")
 }
 
@@ -739,12 +760,13 @@ fn spooler_worker(shared: &ChannelBuffer) {
     // SAFETY: arm the add-job notification on the opened server handle;
     // `FindFirstPrinterChangeNotification` returns the change handle
     // directly (an invalid handle signals failure).
-    let change = unsafe {
-        FindFirstPrinterChangeNotification(printer, PRINTER_CHANGE_ADD_JOB, 0, None)
-    };
+    let change =
+        unsafe { FindFirstPrinterChangeNotification(printer, PRINTER_CHANGE_ADD_JOB, 0, None) };
     if change.is_invalid() {
         // SAFETY: `printer` is a valid handle opened above.
-        unsafe { let _ = ClosePrinter(printer); };
+        unsafe {
+            let _ = ClosePrinter(printer);
+        };
         return;
     }
     while !shared.is_closed() {
@@ -1058,12 +1080,16 @@ fn read_clipboard_unicode(hwnd: HWND) -> Option<Vec<u8>> {
         let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
         let text = String::from_utf16_lossy(slice);
         // SAFETY: balance the lock.
-        unsafe { let _ = GlobalUnlock(hglobal); };
+        unsafe {
+            let _ = GlobalUnlock(hglobal);
+        };
         let _ = FHANDLE::default;
         Some(text.into_bytes())
     })();
     // SAFETY: always close the clipboard we opened.
-    unsafe { let _ = CloseClipboard(); };
+    unsafe {
+        let _ = CloseClipboard();
+    };
     result
 }
 
@@ -1131,7 +1157,8 @@ impl WindowsWfpEgressGuard {
         // Stable, well-known sublayer key for the agent's egress layer so
         // it is recognisable across restarts (the dynamic session still
         // tears it down on handle close).
-        let sublayer_key = windows::core::GUID::from_u128(0x9f2b_1c34_5d6e_47a8_b9c0_1234_5678_90ab);
+        let sublayer_key =
+            windows::core::GUID::from_u128(0x9f2b_1c34_5d6e_47a8_b9c0_1234_5678_90ab);
         let name: Vec<u16> = "SNG DLP egress\0".encode_utf16().collect();
         let mut sublayer = FWPM_SUBLAYER0 {
             subLayerKey: sublayer_key,
@@ -1145,7 +1172,10 @@ impl WindowsWfpEgressGuard {
         if rc != 0 {
             // SAFETY: close the engine we just opened before erroring.
             unsafe {
-                let _ = windows::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmEngineClose0(engine);
+                let _ =
+                    windows::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmEngineClose0(
+                        engine,
+                    );
             }
             return Err(format!("FwpmSubLayerAdd0 failed: {rc:#x}"));
         }

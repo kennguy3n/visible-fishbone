@@ -513,16 +513,14 @@ pub use linux::{
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{
-    MacClipboardMonitor, MacFileWriteMonitor, MacPrintMonitor, MacUsbTransferMonitor,
-};
+pub use macos::{MacClipboardMonitor, MacFileWriteMonitor, MacPrintMonitor, MacUsbTransferMonitor};
 
 #[cfg(target_os = "windows")]
 mod windows_impl;
 #[cfg(target_os = "windows")]
 pub use windows_impl::{
-    WindowsClipboardMonitor, WindowsFileWriteMonitor, WindowsPrintMonitor, WindowsUsbTransferMonitor,
-    WindowsWfpEgressGuard,
+    WindowsClipboardMonitor, WindowsFileWriteMonitor, WindowsPrintMonitor,
+    WindowsUsbTransferMonitor, WindowsWfpEgressGuard,
 };
 
 /// Lock a mutex, recovering from poisoning (a panic in a previous
@@ -534,7 +532,10 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Build the metadata stamped on a clipboard content event. Shared by
 /// every per-OS clipboard backend so the engine sees an identical
 /// `source`/`content_type` regardless of platform.
-#[cfg_attr(not(any(target_os = "linux", target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+    allow(dead_code)
+)]
 pub(crate) fn clipboard_metadata() -> ContentMetadata {
     ContentMetadata {
         filename: None,
@@ -548,7 +549,10 @@ pub(crate) fn clipboard_metadata() -> ContentMetadata {
 /// FNV-1a hash for clipboard-selection dedup. Not cryptographic; only
 /// used to detect "the selection changed since we last read it" so a
 /// backend does not re-emit an unchanged clipboard.
-#[cfg_attr(not(any(target_os = "linux", target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+    allow(dead_code)
+)]
 pub(crate) fn content_hash(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for &b in bytes {
@@ -885,8 +889,8 @@ tmpfs /run tmpfs rw 0 0
         use x11rb::connection::Connection;
         use x11rb::protocol::Event;
         use x11rb::protocol::xproto::{
-            ConnectionExt, CreateWindowAux, EventMask, PropMode, SelectionNotifyEvent,
-            WindowClass, SELECTION_NOTIFY_EVENT,
+            ConnectionExt, CreateWindowAux, EventMask, PropMode, SELECTION_NOTIFY_EVENT,
+            SelectionNotifyEvent, WindowClass,
         };
         use x11rb::wrapper::ConnectionExt as _;
 
@@ -905,13 +909,33 @@ tmpfs /run tmpfs rw 0 0
             let root = conn.setup().roots[screen_num].root;
             let win = conn.generate_id().unwrap();
             conn.create_window(
-                0, win, root, 0, 0, 1, 1, 0, WindowClass::INPUT_OUTPUT, 0,
+                0,
+                win,
+                root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
                 &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
             )
             .unwrap();
-            let clipboard = conn.intern_atom(false, b"CLIPBOARD").unwrap().reply().unwrap().atom;
-            let utf8 = conn.intern_atom(false, b"UTF8_STRING").unwrap().reply().unwrap().atom;
-            conn.set_selection_owner(win, clipboard, x11rb::CURRENT_TIME).unwrap();
+            let clipboard = conn
+                .intern_atom(false, b"CLIPBOARD")
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom;
+            let utf8 = conn
+                .intern_atom(false, b"UTF8_STRING")
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom;
+            conn.set_selection_owner(win, clipboard, x11rb::CURRENT_TIME)
+                .unwrap();
             conn.flush().unwrap();
             // Serve conversion requests until the monitor has read once.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -919,7 +943,11 @@ tmpfs /run tmpfs rw 0 0
                 match conn.poll_for_event() {
                     Ok(Some(Event::SelectionRequest(req))) if req.target == utf8 => {
                         conn.change_property8(
-                            PropMode::REPLACE, req.requestor, req.property, utf8, SECRET,
+                            PropMode::REPLACE,
+                            req.requestor,
+                            req.property,
+                            utf8,
+                            SECRET,
                         )
                         .unwrap();
                         let notify = SelectionNotifyEvent {
@@ -931,7 +959,8 @@ tmpfs /run tmpfs rw 0 0
                             target: req.target,
                             property: req.property,
                         };
-                        conn.send_event(false, req.requestor, EventMask::NO_EVENT, notify).unwrap();
+                        conn.send_event(false, req.requestor, EventMask::NO_EVENT, notify)
+                            .unwrap();
                         conn.flush().unwrap();
                     }
                     Ok(Some(_)) => {}

@@ -283,6 +283,11 @@ impl Default for TunnelConfig {
 /// the engine evaluates every event as `Allow`, so a deployment
 /// that hasn't authored endpoint DLP rules pays no monitoring cost
 /// until an operator opts in.
+// The bool fields are independent operator on/off toggles for distinct
+// DLP channels (subsystem master switch + clipboard / USB / print), not
+// a state machine, so the `struct_excessive_bools` "use an enum"
+// suggestion does not apply.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DlpConfig {
@@ -306,6 +311,20 @@ pub struct DlpConfig {
     /// fully torn-down interceptor set doesn't spin. Default: 1s.
     #[serde(default = "default_dlp_idle_sleep", with = "humantime_serde")]
     pub idle_sleep: Duration,
+    /// Monitor the clipboard channel (native edge-triggered hook with a
+    /// portable fallback). Default: true once DLP is enabled.
+    #[serde(default = "default_true")]
+    pub clipboard: bool,
+    /// Monitor removable-storage (USB) writes. Default: true.
+    #[serde(default = "default_true")]
+    pub usb: bool,
+    /// Monitor the print channel (local spooler). Default: true.
+    #[serde(default = "default_true")]
+    pub print: bool,
+    /// Print-spool directory override. `None` (the default) uses the
+    /// per-OS standard location (e.g. `/var/spool/cups`).
+    #[serde(default)]
+    pub print_spool_dir: Option<PathBuf>,
 }
 
 impl Default for DlpConfig {
@@ -316,6 +335,10 @@ impl Default for DlpConfig {
             poll_interval: default_dlp_poll_interval(),
             max_file_bytes: default_dlp_max_file_bytes(),
             idle_sleep: default_dlp_idle_sleep(),
+            clipboard: true,
+            usb: true,
+            print: true,
+            print_spool_dir: None,
         }
     }
 }
@@ -499,6 +522,9 @@ const fn default_dlp_max_file_bytes() -> usize {
 }
 const fn default_dlp_idle_sleep() -> Duration {
     Duration::from_secs(1)
+}
+const fn default_true() -> bool {
+    true
 }
 const fn default_health_interval() -> Duration {
     Duration::from_secs(2)

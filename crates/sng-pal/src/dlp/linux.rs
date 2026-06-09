@@ -78,9 +78,8 @@ const SHUTDOWN_POLL: Duration = Duration::from_millis(500);
 /// timeouts are sub-second, well inside the representable range; an
 /// out-of-range value falls back to the shutdown tick.
 fn poll_timeout(d: Duration) -> PollTimeout {
-    PollTimeout::try_from(d).unwrap_or_else(|_| {
-        PollTimeout::try_from(SHUTDOWN_POLL).unwrap_or(PollTimeout::NONE)
-    })
+    PollTimeout::try_from(d)
+        .unwrap_or_else(|_| PollTimeout::try_from(SHUTDOWN_POLL).unwrap_or(PollTimeout::NONE))
 }
 
 /// Default directories an endpoint watches for sensitive-file writes
@@ -150,7 +149,9 @@ impl InotifyWatcher {
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::Builder::new()
             .name(format!("sng-dlp-inotify-{}", channel.as_str()))
-            .spawn(move || inotify_worker(inotify, wd_paths, channel, max_file_bytes, &worker_shared))
+            .spawn(move || {
+                inotify_worker(inotify, wd_paths, channel, max_file_bytes, &worker_shared);
+            })
             .map_err(|e| format!("spawn inotify worker: {e}"))?;
 
         Ok(Self {
@@ -188,7 +189,8 @@ impl ChannelInterceptor for InotifyWatcher {
             if let Some(event) = lock(&self.shared.buffer).pop_front() {
                 return Ok(Some(event));
             }
-            if self.shared.closed.load(Ordering::SeqCst) || self.shared.drained.load(Ordering::SeqCst)
+            if self.shared.closed.load(Ordering::SeqCst)
+                || self.shared.drained.load(Ordering::SeqCst)
             {
                 // Drain any final events the worker queued before exit,
                 // then report the clean close.
@@ -269,7 +271,7 @@ fn inotify_worker(
         match nix::poll::poll(&mut fds, poll_timeout(SHUTDOWN_POLL)) {
             // timeout (re-check shutdown) or interrupted syscall: loop.
             Ok(0) | Err(nix::errno::Errno::EINTR) => continue,
-            Ok(_) => {} // readable
+            Ok(_) => {}      // readable
             Err(_) => break, // fd is wedged; stop the worker
         }
         let events = match inotify.read_events() {
@@ -312,7 +314,11 @@ fn inotify_worker(
 
 /// Read up to `max_file_bytes` of `path` into a content event, or
 /// `None` if the file vanished / is unreadable / is not a regular file.
-fn read_file_event(path: &Path, channel: DlpChannel, max_file_bytes: usize) -> Option<ContentEvent> {
+fn read_file_event(
+    path: &Path,
+    channel: DlpChannel,
+    max_file_bytes: usize,
+) -> Option<ContentEvent> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() {
         return None;
@@ -1068,7 +1074,8 @@ mod x11 {
             conn.xfixes_query_version(5, 0)
                 .map_err(|e| format!("xfixes query: {e}"))?;
 
-            let clipboard = intern(&conn, b"CLIPBOARD").map_err(|e| format!("intern CLIPBOARD: {e}"))?;
+            let clipboard =
+                intern(&conn, b"CLIPBOARD").map_err(|e| format!("intern CLIPBOARD: {e}"))?;
             let utf8 = intern(&conn, b"UTF8_STRING").map_err(|e| format!("intern UTF8: {e}"))?;
             let target_prop =
                 intern(&conn, b"SNG_DLP_CLIP").map_err(|e| format!("intern prop: {e}"))?;
