@@ -53,8 +53,7 @@ use sng_core::{
     BundleTarget, ShutdownSignal, Supervisor, SupervisorBuilder, SupervisorReport,
     SupervisorRunError,
 };
-use sng_dlp::{ChannelInterceptor, DlpChannel, DlpEngine, DlpPolicy};
-use sng_pal::dlp::SensitiveDirWatcher;
+use sng_dlp::{ChannelInterceptor, DlpEngine, DlpPolicy};
 use sng_pal::posture::{PostureCollector, UnknownPostureCollector};
 use sng_pal::traffic::{InMemoryCapture, TrafficCapture};
 use sng_pal::tunnel::{InMemoryTunnelProvider, TunnelConfig, TunnelProvider};
@@ -418,13 +417,16 @@ fn build_dlp_subsystem(
     )?);
 
     let mut interceptors: Vec<Arc<dyn ChannelInterceptor>> = Vec::new();
+    // File-write channel: native edge-triggered watcher over the
+    // configured sensitive directories (each per-OS backend falls back
+    // to the portable poll watcher when its native hook is unavailable).
+    // An empty `watch_dirs` leaves the file-write channel idle.
     if !cfg.watch_dirs.is_empty() {
-        let watcher = SensitiveDirWatcher::new(DlpChannel::FileWrite, cfg.watch_dirs.clone())
-            .with_max_file_bytes(cfg.max_file_bytes)
-            .with_poll_interval(cfg.poll_interval)
-            .warm_started();
-        interceptors.push(Arc::new(watcher));
+        interceptors.push(file_write_interceptor(cfg));
     }
+    // Clipboard / USB / print: per-OS native backends, each gated by its
+    // own config flag so an operator can pare the channel set down.
+    push_native_interceptors(cfg, &mut interceptors);
 
     Ok(Some(Arc::new(DlpSubsystem::new(
         engine,
@@ -432,6 +434,145 @@ fn build_dlp_subsystem(
         Arc::new(TracingDlpSink),
         cfg.idle_sleep,
     ))))
+}
+
+/// Build the file-write interceptor for the host OS. On the three
+/// desktop platforms this is the native edge-triggered watcher
+/// (inotify / FSEvents / `ReadDirectoryChangesW`), each of which
+/// transparently falls back to the portable [`SensitiveDirWatcher`]
+/// when its kernel hook cannot be initialised. On any other target the
+/// portable watcher is used directly.
+fn file_write_interceptor(cfg: &crate::config::DlpConfig) -> Arc<dyn ChannelInterceptor> {
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    let opts = sng_pal::dlp::FileWatchOptions {
+        max_file_bytes: cfg.max_file_bytes,
+        poll_interval: cfg.poll_interval,
+    };
+    #[cfg(target_os = "linux")]
+    {
+        Arc::new(sng_pal::dlp::LinuxFileWriteMonitor::with_options(
+            cfg.watch_dirs.clone(),
+            opts,
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Arc::new(sng_pal::dlp::MacFileWriteMonitor::with_options(
+            cfg.watch_dirs.clone(),
+            opts,
+        ))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Arc::new(sng_pal::dlp::WindowsFileWriteMonitor::with_options(
+            cfg.watch_dirs.clone(),
+            opts,
+        ))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        use sng_dlp::DlpChannel;
+        use sng_pal::dlp::SensitiveDirWatcher;
+        Arc::new(
+            SensitiveDirWatcher::new(DlpChannel::FileWrite, cfg.watch_dirs.clone())
+                .with_max_file_bytes(cfg.max_file_bytes)
+                .with_poll_interval(cfg.poll_interval)
+                .warm_started(),
+        )
+    }
+}
+
+/// Register the clipboard / USB / print interceptors for the host OS.
+/// Each channel is gated by its own [`crate::config::DlpConfig`] flag.
+/// On a non-desktop target none of the native backends exist, so the
+/// set is left unchanged (the file-write poll watcher still runs).
+#[cfg(target_os = "linux")]
+fn push_native_interceptors(
+    cfg: &crate::config::DlpConfig,
+    interceptors: &mut Vec<Arc<dyn ChannelInterceptor>>,
+) {
+    use sng_pal::dlp::{
+        FileWatchOptions, LinuxClipboardMonitor, LinuxPrintMonitor, LinuxRemovableStorageMonitor,
+        LinuxUsbTransferMonitor,
+    };
+    let opts = FileWatchOptions {
+        max_file_bytes: cfg.max_file_bytes,
+        poll_interval: cfg.poll_interval,
+    };
+    if cfg.clipboard {
+        interceptors.push(Arc::new(LinuxClipboardMonitor::new()));
+    }
+    if cfg.usb {
+        interceptors.push(Arc::new(LinuxUsbTransferMonitor::new(
+            LinuxRemovableStorageMonitor::default(),
+            opts,
+        )));
+    }
+    if cfg.print {
+        interceptors.push(Arc::new(LinuxPrintMonitor::new(
+            cfg.print_spool_dir.clone(),
+            opts,
+        )));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn push_native_interceptors(
+    cfg: &crate::config::DlpConfig,
+    interceptors: &mut Vec<Arc<dyn ChannelInterceptor>>,
+) {
+    use sng_pal::dlp::{
+        FileWatchOptions, MacClipboardMonitor, MacPrintMonitor, MacUsbTransferMonitor,
+    };
+    let opts = FileWatchOptions {
+        max_file_bytes: cfg.max_file_bytes,
+        poll_interval: cfg.poll_interval,
+    };
+    if cfg.clipboard {
+        interceptors.push(Arc::new(MacClipboardMonitor::new()));
+    }
+    if cfg.usb {
+        interceptors.push(Arc::new(MacUsbTransferMonitor::new(opts)));
+    }
+    if cfg.print {
+        interceptors.push(Arc::new(MacPrintMonitor::new(
+            cfg.print_spool_dir.clone(),
+            opts,
+        )));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn push_native_interceptors(
+    cfg: &crate::config::DlpConfig,
+    interceptors: &mut Vec<Arc<dyn ChannelInterceptor>>,
+) {
+    use sng_pal::dlp::{
+        FileWatchOptions, WindowsClipboardMonitor, WindowsPrintMonitor, WindowsUsbTransferMonitor,
+    };
+    let opts = FileWatchOptions {
+        max_file_bytes: cfg.max_file_bytes,
+        poll_interval: cfg.poll_interval,
+    };
+    if cfg.clipboard {
+        interceptors.push(Arc::new(WindowsClipboardMonitor::new()));
+    }
+    if cfg.usb {
+        interceptors.push(Arc::new(WindowsUsbTransferMonitor::new(opts)));
+    }
+    if cfg.print {
+        interceptors.push(Arc::new(WindowsPrintMonitor::new(
+            cfg.print_spool_dir.clone(),
+            opts,
+        )));
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn push_native_interceptors(
+    _cfg: &crate::config::DlpConfig,
+    _interceptors: &mut Vec<Arc<dyn ChannelInterceptor>>,
+) {
 }
 
 /// Build the agent then drive its supervisor to completion.
