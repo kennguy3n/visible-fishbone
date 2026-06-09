@@ -1,17 +1,23 @@
 package appdb
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
+	"path"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
 // Syncer pulls vendor-published endpoint lists and updates the
@@ -619,6 +625,462 @@ func parseGenericJSON(body []byte, _ []string) ([]string, []netip.Prefix, error)
 		ranges = append(ranges, p)
 	}
 	return doc.Domains, ranges, nil
+}
+
+// --- URL-categorisation training feedback --------------------------------
+//
+// The first-party URL categoriser (crates/sng-swg/src/url_ml.rs) ships
+// an Ed25519-signed ML model whose Tier 3 classifier is trained
+// offline on labelled (domain, category) examples. The control plane
+// is the authoritative source of those labels: every curated
+// app_registry row that carries a Category is an operator-confirmed
+// example, and the community-feed ingestion below adds bulk labels at
+// a lower trust weight. AggregateCategoryFeedback turns the live
+// catalog into the deduplicated, weighted corpus the offline trainer
+// consumes — no tenant data, no per-user URLs, no request logs ever
+// enter the corpus, so the privacy surface is the same as the
+// already-global catalog.
+
+const (
+	// categoryLabelWeightOperator is the training weight of a label
+	// sourced from an operator-curated registry row. Operator labels
+	// are scarce and high-trust, so they outrank bulk community
+	// labels when the same domain is labelled by both.
+	categoryLabelWeightOperator = 1.0
+	// categoryLabelWeightCommunity is the training weight of a label
+	// sourced from an ingested community feed (Shallalist, UT1).
+	// Community feeds are large but noisier and occasionally stale,
+	// so they contribute at a quarter of an operator label's weight.
+	categoryLabelWeightCommunity = 0.25
+)
+
+// CategoryLabel is one labelled training example: a canonical domain,
+// the category assigned to it, the source that assigned it, and the
+// trust weight the trainer should give the example.
+type CategoryLabel struct {
+	Domain   string  `json:"domain"`
+	Category string  `json:"category"`
+	Source   string  `json:"source"`
+	Weight   float64 `json:"weight"`
+}
+
+// CategoryTrainingCorpus is the aggregated, deduplicated set of
+// labelled examples exported for offline model training. Exactly one
+// label is kept per domain (see preferLabel for the conflict rule) so
+// the trainer never sees a domain with two contradictory categories.
+type CategoryTrainingCorpus struct {
+	// Labels is the per-domain corpus, sorted by domain for stable,
+	// reproducible training inputs.
+	Labels []CategoryLabel `json:"labels"`
+	// PerCategory / PerSource are histograms over the chosen labels,
+	// letting an operator spot class imbalance or a feed that is
+	// dominating the corpus before a training run.
+	PerCategory map[string]int `json:"per_category"`
+	PerSource   map[string]int `json:"per_source"`
+	GeneratedAt time.Time      `json:"generated_at"`
+}
+
+// AggregateCategoryFeedback walks the global app_registry and builds
+// the labelled training corpus for the URL-categorisation model. Each
+// row with a non-empty Category contributes one (domain, category)
+// label per domain; operator-curated rows weigh more than
+// community-feed rows. When two rows label the same domain with
+// different categories the higher-weight label wins, with a
+// deterministic category tie-break so the corpus is byte-stable across
+// runs regardless of repository iteration order.
+func (s *Syncer) AggregateCategoryFeedback(ctx context.Context) (CategoryTrainingCorpus, error) {
+	apps, err := s.svc.apps.ListAll(ctx)
+	if err != nil {
+		return CategoryTrainingCorpus{}, fmt.Errorf("aggregate category feedback: list apps: %w", err)
+	}
+	best := make(map[string]CategoryLabel)
+	for _, app := range apps {
+		category := strings.ToLower(strings.TrimSpace(app.Category))
+		if category == "" {
+			// An uncategorised row carries no supervised signal.
+			continue
+		}
+		weight := categoryLabelWeightOperator
+		if isCommunityFeedVendor(app.Vendor) {
+			weight = categoryLabelWeightCommunity
+		}
+		source := strings.ToLower(strings.TrimSpace(app.Vendor))
+		if source == "" {
+			source = "operator"
+		}
+		for _, raw := range app.Domains {
+			domain := canonicalCategoryDomain(raw)
+			if domain == "" {
+				continue
+			}
+			cand := CategoryLabel{
+				Domain:   domain,
+				Category: category,
+				Source:   source,
+				Weight:   weight,
+			}
+			if cur, ok := best[domain]; ok && !preferLabel(cand, cur) {
+				continue
+			}
+			best[domain] = cand
+		}
+	}
+
+	corpus := CategoryTrainingCorpus{
+		Labels:      make([]CategoryLabel, 0, len(best)),
+		PerCategory: make(map[string]int),
+		PerSource:   make(map[string]int),
+		GeneratedAt: s.now(),
+	}
+	for _, label := range best {
+		corpus.Labels = append(corpus.Labels, label)
+		corpus.PerCategory[label.Category]++
+		corpus.PerSource[label.Source]++
+	}
+	sort.Slice(corpus.Labels, func(i, j int) bool {
+		return corpus.Labels[i].Domain < corpus.Labels[j].Domain
+	})
+	return corpus, nil
+}
+
+// preferLabel reports whether candidate should replace incumbent as
+// the single label kept for a domain. Higher weight wins so an
+// operator label always beats a community label; equal weights break
+// on the lexicographically smaller category so the result is
+// independent of map iteration order.
+func preferLabel(cand, cur CategoryLabel) bool {
+	if cand.Weight != cur.Weight {
+		return cand.Weight > cur.Weight
+	}
+	return cand.Category < cur.Category
+}
+
+// canonicalCategoryDomain normalises a registry or feed hostname into
+// the token the categorisation tokenizer expects: lowercased,
+// trimmed, with a leading "*." suffix-match marker removed (the model
+// trains on concrete hostnames, not match patterns). It returns "" for
+// blanks, comment lines, and tokens that do not look like a bare
+// hostname (carrying a scheme, path, port, or whitespace) so URL and
+// comment lines in a community feed never leak in as fake hostnames.
+func canonicalCategoryDomain(raw string) string {
+	h := strings.ToLower(strings.TrimSpace(raw))
+	if h == "" || strings.HasPrefix(h, "#") || strings.HasPrefix(h, ";") {
+		return ""
+	}
+	h = strings.TrimPrefix(h, "*.")
+	if strings.ContainsAny(h, " \t\r/?:@") {
+		return ""
+	}
+	if !strings.Contains(h, ".") {
+		return ""
+	}
+	return h
+}
+
+// --- Community category-feed ingestion ------------------------------------
+//
+// Shallalist and the Université Toulouse UT1 blacklists publish
+// gzip-compressed tar archives laid out as a tree of per-category
+// directories, each holding a `domains` file of one hostname per
+// line. We ingest each category into the app_registry as a global
+// inspect_full row named "community:<feed>:<category>" so the domains
+// flow down to the agents through the existing bundle path and feed
+// the categorisation corpus above. inspect_full is deliberate: these
+// feeds are risk blocklists (ads, adult, malware), so the fail-safe
+// steering tier is full inspection — never a trusted bypass.
+
+const (
+	// CommunityFeedShallalist / CommunityFeedUT1 are the recognised
+	// community feed identifiers. They double as the Vendor stamped
+	// on the rows the ingestion creates.
+	CommunityFeedShallalist = "shallalist"
+	CommunityFeedUT1        = "ut1"
+
+	// communityFeedDownloadLimit bounds a feed archive download.
+	// Shallalist/UT1 archives are tens of MB; 256 MiB leaves ample
+	// headroom while still capping a hostile or runaway response.
+	communityFeedDownloadLimit = 256 << 20
+	// communityFeedMemberLimit bounds a single decompressed tar
+	// member so a zip-bomb member cannot exhaust memory.
+	communityFeedMemberLimit = 64 << 20
+)
+
+// isCommunityFeedVendor reports whether a registry row's Vendor marks
+// it as community-ingested (and therefore a lower-weight training
+// source).
+func isCommunityFeedVendor(vendor string) bool {
+	switch strings.ToLower(strings.TrimSpace(vendor)) {
+	case CommunityFeedShallalist, CommunityFeedUT1:
+		return true
+	}
+	return false
+}
+
+// CommunityIngestResult is the per-category outcome of ingesting a
+// community feed.
+type CommunityIngestResult struct {
+	Feed          string `json:"feed"`
+	Category      string `json:"category"`
+	AppName       string `json:"app_name"`
+	DomainsBefore int    `json:"domains_before"`
+	DomainsAfter  int    `json:"domains_after"`
+	Created       bool   `json:"created"`
+	Updated       bool   `json:"updated"`
+	Err           string `json:"error,omitempty"`
+}
+
+// ParseCommunityCategoryFeed parses a Shallalist/UT1-style category
+// blacklist archive (a gzip-compressed tar) into per-feed-category
+// domain sets keyed by the feed's own category name (the directory
+// immediately containing each `domains` file). Comment lines, URL
+// lines, and malformed hosts are dropped. The reader is bounded per
+// member so a malicious archive cannot exhaust memory.
+func ParseCommunityCategoryFeed(body []byte) (map[string][]string, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("community feed: gzip: %w", err)
+	}
+	defer func() { _ = gz.Close() }()
+
+	tr := tar.NewReader(gz)
+	out := map[string][]string{}
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("community feed: tar: %w", err)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		name := path.Clean(hdr.Name)
+		if path.Base(name) != "domains" {
+			continue
+		}
+		category := strings.ToLower(path.Base(path.Dir(name)))
+		if category == "" || category == "." || category == "/" {
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(tr, communityFeedMemberLimit))
+		if err != nil {
+			return nil, fmt.Errorf("community feed: read %q: %w", name, err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if host := canonicalCategoryDomain(line); host != "" {
+				out[category] = append(out[category], host)
+			}
+		}
+	}
+	return out, nil
+}
+
+// mapCommunityCategory maps a feed's own category name into the
+// operator dotted-category namespace shared across the DNS, firewall
+// and SWG planes (see crates/sng-swg/src/categorizer.rs). Unknown feed
+// categories pass through under a sanitised "community." prefix so a
+// new upstream category is still ingested (and visibly namespaced)
+// rather than silently dropped.
+func mapCommunityCategory(feedCategory string) string {
+	switch feedCategory {
+	case "adv", "ads", "tracker", "trackers", "tracking":
+		return "advertising"
+	case "porn", "adult", "sex", "sexuality":
+		return "adult.content"
+	case "gamble", "gambling", "gamblings":
+		return "gambling"
+	case "spyware", "malware", "phishing", "fraud", "trojan", "warez":
+		return "security.threat"
+	case "hacking", "hacker", "remotecontrol":
+		return "security.hacking"
+	case "socialnet", "social", "socialnetworking":
+		return "social.media"
+	case "webmail", "mail", "email":
+		return "webmail"
+	case "violence", "weapons", "weapon":
+		return "violence"
+	case "drugs", "drug":
+		return "drugs"
+	case "anonvpn", "anonymizer", "anon", "proxy":
+		return "anonymizer"
+	default:
+		return "community." + sanitizeCategoryToken(feedCategory)
+	}
+}
+
+// sanitizeCategoryToken reduces an arbitrary feed category name to the
+// [a-z0-9] alphabet (other runes collapse to "_") so a passthrough
+// category is a safe, stable dotted-namespace token.
+func sanitizeCategoryToken(in string) string {
+	var b strings.Builder
+	b.Grow(len(in))
+	for _, r := range strings.ToLower(in) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "uncategorised"
+	}
+	return out
+}
+
+// IngestCommunityFeed parses a community category-feed archive and
+// upserts the per-category domain sets into the app_registry. One row
+// per canonical category, named "community:<feed>:<category>", with
+// domains merged additively (the same monotonic-growth contract as the
+// vendor sync — see mergeDomains). Like SyncAll it never aborts on a
+// single category failure; per-category outcomes are returned for the
+// operator. The results are ordered by canonical category for stable
+// output.
+func (s *Syncer) IngestCommunityFeed(ctx context.Context, feed string, body []byte) ([]CommunityIngestResult, error) {
+	feed = strings.ToLower(strings.TrimSpace(feed))
+	if !isCommunityFeedVendor(feed) {
+		return nil, fmt.Errorf("ingest community feed: unknown feed %q", feed)
+	}
+	byFeedCategory, err := ParseCommunityCategoryFeed(body)
+	if err != nil {
+		return nil, fmt.Errorf("ingest community feed %q: %w", feed, err)
+	}
+	// Collapse feed categories into the canonical namespace, unioning
+	// domains where several feed categories map to the same canonical
+	// category (e.g. "porn" and "adult" both -> "adult.content").
+	byCanonical := map[string][]string{}
+	for feedCategory, domains := range byFeedCategory {
+		canonical := mapCommunityCategory(feedCategory)
+		byCanonical[canonical] = append(byCanonical[canonical], domains...)
+	}
+	canonicals := make([]string, 0, len(byCanonical))
+	for canonical := range byCanonical {
+		canonicals = append(canonicals, canonical)
+	}
+	sort.Strings(canonicals)
+
+	results := make([]CommunityIngestResult, 0, len(canonicals))
+	for _, canonical := range canonicals {
+		results = append(results, s.ingestCommunityCategory(ctx, feed, canonical, byCanonical[canonical]))
+	}
+	return results, nil
+}
+
+// ingestCommunityCategory upserts a single canonical category's domain
+// set as one app_registry row. A new category is created; an existing
+// one is merged additively and updated only when the merge changes the
+// stored set (so a re-ingest of unchanged data is a no-op that emits
+// no audit churn).
+func (s *Syncer) ingestCommunityCategory(ctx context.Context, feed, canonical string, rawDomains []string) CommunityIngestResult {
+	name := fmt.Sprintf("community:%s:%s", feed, canonical)
+	res := CommunityIngestResult{Feed: feed, Category: canonical, AppName: name}
+
+	incoming := mergeDomains(rawDomains, nil)
+	if len(incoming) == 0 {
+		res.Err = "no valid domains in category"
+		return res
+	}
+
+	existing, err := s.svc.apps.GetByName(ctx, name)
+	switch {
+	case errors.Is(err, repository.ErrNotFound):
+		created, cerr := s.svc.CreateApp(ctx, repository.AppRegistry{
+			Name:         name,
+			Vendor:       feed,
+			TrafficClass: repository.TrafficClassInspectFull,
+			Scope:        repository.AppRegistryScopeGlobal,
+			Domains:      incoming,
+			Category:     canonical,
+			IsSystem:     true,
+		})
+		if cerr != nil {
+			res.Err = fmt.Sprintf("create: %v", cerr)
+			return res
+		}
+		res.Created = true
+		res.DomainsAfter = len(created.Domains)
+		return res
+	case err != nil:
+		res.Err = fmt.Sprintf("lookup: %v", err)
+		return res
+	}
+
+	before := mergeDomains(existing.Domains, nil)
+	after := mergeDomains(existing.Domains, incoming)
+	res.DomainsBefore = len(before)
+	res.DomainsAfter = len(after)
+	if equalStringSlices(before, after) {
+		return res
+	}
+	existing.Domains = after
+	existing.Category = canonical
+	existing.UpdatedAt = s.now()
+	meta := SyncAppMetadata{
+		Source:        "community:" + feed,
+		DomainsBefore: len(before),
+		DomainsAfter:  len(after),
+	}
+	if _, uerr := s.svc.SyncUpdateApp(ctx, existing, meta); uerr != nil {
+		res.Err = fmt.Sprintf("update: %v", uerr)
+		return res
+	}
+	res.Updated = true
+	return res
+}
+
+// SyncCommunityFeeds fetches and ingests every configured community
+// feed, keyed by feed name -> archive URL. Like SyncAll it never
+// aborts on a single feed failure: a fetch or ingest error is captured
+// in a per-feed result and the next feed is attempted. Feeds are
+// processed in name order for deterministic output.
+func (s *Syncer) SyncCommunityFeeds(ctx context.Context, sources map[string]string) ([]CommunityIngestResult, error) {
+	feeds := make([]string, 0, len(sources))
+	for feed := range sources {
+		feeds = append(feeds, feed)
+	}
+	sort.Strings(feeds)
+
+	var all []CommunityIngestResult
+	for _, feed := range feeds {
+		body, err := s.fetchFeed(ctx, sources[feed])
+		if err != nil {
+			all = append(all, CommunityIngestResult{Feed: feed, Err: err.Error()})
+			continue
+		}
+		results, err := s.IngestCommunityFeed(ctx, feed, body)
+		if err != nil {
+			all = append(all, CommunityIngestResult{Feed: feed, Err: err.Error()})
+			continue
+		}
+		all = append(all, results...)
+	}
+	return all, nil
+}
+
+// fetchFeed performs the bounded GET shared by the community-feed
+// sync. The body is read under communityFeedDownloadLimit so a hostile
+// or runaway response cannot exhaust memory.
+func (s *Syncer) fetchFeed(ctx context.Context, rawURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("User-Agent", "shieldnet-gateway-appdb-sync/1.0")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, communityFeedDownloadLimit))
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, snippet(body))
+	}
+	return body, nil
 }
 
 // --- Set-merge helpers ----------------------------------------------------

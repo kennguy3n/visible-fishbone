@@ -106,6 +106,34 @@ pub enum SwgError {
     /// never produces `InstallBusy`.
     #[error("install/stop is busy: install_lock_timeout elapsed before lock was acquired")]
     InstallBusy,
+
+    /// URL categorisation ML model bundle failed Ed25519 signature
+    /// verification.
+    #[error("url model bundle signature invalid")]
+    UrlModelSignatureInvalid,
+
+    /// URL categorisation ML model bundle was signed with a key id
+    /// the operator trust store does not know about.
+    #[error("url model bundle signed with unknown key: {0}")]
+    UrlModelUnknownKey(String),
+
+    /// URL categorisation ML model bundle version is older than or
+    /// equal to the installed model. Downgrade protection — a stale
+    /// model must never silently regress categorisation accuracy.
+    #[error("url model bundle is stale: incoming version {incoming} <= current {current}")]
+    UrlModelStale { incoming: u64, current: u64 },
+
+    /// URL categorisation ML model bundle body failed to decode
+    /// from MessagePack.
+    #[error("url model bundle body decode failed: {0}")]
+    UrlModelBodyDecode(String),
+
+    /// URL categorisation ML model decoded but failed structural
+    /// validation (dimension mismatch, out-of-range vocabulary
+    /// index, empty class set). The staged model is rejected and the
+    /// live model is left untouched.
+    #[error("url model is structurally invalid: {0}")]
+    UrlModelInvalid(String),
 }
 
 impl SwgError {
@@ -135,6 +163,11 @@ impl SwgError {
             // supervisor) so it gets its own dedicated
             // dashboard-visible code.
             Self::InstallBusy => ErrorCode::SwgInstallBusy,
+            Self::UrlModelSignatureInvalid => ErrorCode::SwgUrlModelSignatureInvalid,
+            Self::UrlModelUnknownKey(_) => ErrorCode::SwgUrlModelSigningKeyUnknown,
+            Self::UrlModelStale { .. } => ErrorCode::SwgUrlModelStale,
+            Self::UrlModelBodyDecode(_) => ErrorCode::SwgUrlModelBodyDecode,
+            Self::UrlModelInvalid(_) => ErrorCode::SwgUrlModelInvalid,
         }
     }
 }
@@ -178,6 +211,14 @@ mod tests {
             SwgError::YaraBundleBodyDecode("x".into()),
             SwgError::YaraRuleCompile("x".into()),
             SwgError::InstallBusy,
+            SwgError::UrlModelSignatureInvalid,
+            SwgError::UrlModelUnknownKey("x".into()),
+            SwgError::UrlModelStale {
+                incoming: 1,
+                current: 2,
+            },
+            SwgError::UrlModelBodyDecode("x".into()),
+            SwgError::UrlModelInvalid("x".into()),
         ];
         for err in cases {
             let s = err.code().as_str();
