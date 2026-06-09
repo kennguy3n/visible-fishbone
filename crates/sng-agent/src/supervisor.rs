@@ -501,11 +501,13 @@ fn push_native_interceptors(
     if cfg.usb {
         interceptors.push(Arc::new(LinuxUsbTransferMonitor::new(
             LinuxRemovableStorageMonitor::default(),
+            cfg.max_file_bytes,
         )));
     }
     if cfg.print {
         interceptors.push(Arc::new(LinuxPrintMonitor::new(
             cfg.print_spool_dir.clone(),
+            cfg.max_file_bytes,
         )));
     }
 }
@@ -520,10 +522,13 @@ fn push_native_interceptors(
         interceptors.push(Arc::new(MacClipboardMonitor::new()));
     }
     if cfg.usb {
-        interceptors.push(Arc::new(MacUsbTransferMonitor::new()));
+        interceptors.push(Arc::new(MacUsbTransferMonitor::new(cfg.max_file_bytes)));
     }
     if cfg.print {
-        interceptors.push(Arc::new(MacPrintMonitor::new(cfg.print_spool_dir.clone())));
+        interceptors.push(Arc::new(MacPrintMonitor::new(
+            cfg.print_spool_dir.clone(),
+            cfg.max_file_bytes,
+        )));
     }
 }
 
@@ -537,11 +542,12 @@ fn push_native_interceptors(
         interceptors.push(Arc::new(WindowsClipboardMonitor::new()));
     }
     if cfg.usb {
-        interceptors.push(Arc::new(WindowsUsbTransferMonitor::new()));
+        interceptors.push(Arc::new(WindowsUsbTransferMonitor::new(cfg.max_file_bytes)));
     }
     if cfg.print {
         interceptors.push(Arc::new(WindowsPrintMonitor::new(
             cfg.print_spool_dir.clone(),
+            cfg.max_file_bytes,
         )));
     }
 }

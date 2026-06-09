@@ -48,7 +48,7 @@
 // `Arc::into_raw` that is reclaimed in `Drop`.
 #![allow(unsafe_code)]
 
-use super::{FileWatchOptions, SensitiveDirWatcher, lock, mime_for_path};
+use super::{DEFAULT_MAX_FILE_BYTES, FileWatchOptions, SensitiveDirWatcher, lock, mime_for_path};
 use async_trait::async_trait;
 use sng_dlp::{ChannelError, ChannelInterceptor, ContentEvent, ContentMetadata, DlpChannel};
 use std::collections::VecDeque;
@@ -624,16 +624,21 @@ pub struct MacPrintMonitor {
 }
 
 impl MacPrintMonitor {
-    /// Watch `spool_dir` (default `/private/var/spool/cups`).
+    /// Watch `spool_dir` (default `/private/var/spool/cups`), reading at
+    /// most `max_file_bytes` of each spooled job so the operator's
+    /// per-event ceiling is honoured on the print channel too.
     #[must_use]
-    pub fn new(spool_dir: Option<PathBuf>) -> Self {
+    pub fn new(spool_dir: Option<PathBuf>, max_file_bytes: usize) -> Self {
         let dir = spool_dir.unwrap_or_else(|| PathBuf::from("/private/var/spool/cups"));
         Self {
             inner: DirInner::start(
                 DlpChannel::Print,
                 vec![dir],
                 false,
-                FileWatchOptions::default(),
+                FileWatchOptions {
+                    max_file_bytes,
+                    ..FileWatchOptions::default()
+                },
             ),
         }
     }
@@ -668,20 +673,25 @@ pub struct MacUsbTransferMonitor {
 
 impl Default for MacUsbTransferMonitor {
     fn default() -> Self {
-        Self::new()
+        Self::new(DEFAULT_MAX_FILE_BYTES)
     }
 }
 
 impl MacUsbTransferMonitor {
-    /// Watch `/Volumes` for writes onto mounted external media.
+    /// Watch `/Volumes` for writes onto mounted external media, reading
+    /// at most `max_file_bytes` of each file so the operator's per-event
+    /// ceiling is honoured on the USB-transfer channel too.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(max_file_bytes: usize) -> Self {
         Self {
             inner: DirInner::start(
                 DlpChannel::UsbTransfer,
                 vec![PathBuf::from("/Volumes")],
                 true,
-                FileWatchOptions::default(),
+                FileWatchOptions {
+                    max_file_bytes,
+                    ..FileWatchOptions::default()
+                },
             ),
         }
     }

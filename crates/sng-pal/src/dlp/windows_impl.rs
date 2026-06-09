@@ -43,7 +43,8 @@
 #![allow(unsafe_code)]
 
 use super::{
-    FileWatchOptions, SensitiveDirWatcher, clipboard_metadata, content_hash, lock, mime_for_path,
+    DEFAULT_MAX_FILE_BYTES, FileWatchOptions, SensitiveDirWatcher, clipboard_metadata, content_hash,
+    lock, mime_for_path,
 };
 use async_trait::async_trait;
 use sng_dlp::{ChannelError, ChannelInterceptor, ContentEvent, ContentMetadata, DlpChannel};
@@ -84,6 +85,15 @@ const USB_IDLE_FALLBACK: Duration = Duration::from_secs(5);
 /// enough to absorb a burst of writes without overflow yet bounded so
 /// the per-watch resident cost stays small.
 const RDC_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Sentinel initial value for the USB monitor's `last_seen_arrivals`
+/// that cannot equal the WMI worker's zero-initialised arrival counter,
+/// so the first `next_event` iteration always runs one scan in native
+/// mode — picking up removable volumes already mounted when the agent
+/// started (the Linux backend gets this for free by scanning every
+/// tick). After that initial scan `last_seen_arrivals` tracks the real
+/// counter, so further native-mode scans fire only on an arrival pulse.
+const ARRIVALS_UNSCANNED: u64 = u64::MAX;
 
 /// Default directories watched for sensitive-file writes when policy
 /// does not override them.
@@ -306,9 +316,21 @@ fn rdc_worker(
                 None,
             )
         };
-        if ok.is_err() || returned == 0 {
-            // Handle closed (shutdown) or a transient error: re-check
-            // the shutdown flag and either exit or retry.
+        if ok.is_err() {
+            // A synchronous `ReadDirectoryChangesW` error is fatal: on
+            // shutdown the handle is cancelled/closed (surfacing here),
+            // and otherwise the watched directory handle is no longer
+            // usable (e.g. the directory was deleted). Either way, exit
+            // the worker rather than re-issuing the call in a tight,
+            // CPU-pegging loop — mirroring the Linux inotify worker,
+            // which breaks out on a fatal read error.
+            return;
+        }
+        if returned == 0 {
+            // Buffer overflow: the kernel signalled more changes than the
+            // notification buffer could hold and discarded the details (a
+            // documented `ReadDirectoryChangesW` outcome). Nothing to
+            // parse; re-arm the watch after re-checking the shutdown flag.
             if shared.is_closed() {
                 return;
             }
@@ -494,14 +516,16 @@ pub struct WindowsUsbTransferMonitor {
 
 impl Default for WindowsUsbTransferMonitor {
     fn default() -> Self {
-        Self::new()
+        Self::new(DEFAULT_MAX_FILE_BYTES)
     }
 }
 
 impl WindowsUsbTransferMonitor {
-    /// Build a monitor, attempting the WMI arrival subscription.
+    /// Build a monitor, attempting the WMI arrival subscription. Files
+    /// copied onto a removable drive are read up to `max_file_bytes` so
+    /// the operator's per-event ceiling is honoured on this channel too.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(max_file_bytes: usize) -> Self {
         let shared = ChannelBuffer::new();
         let arrivals = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let arrivals_w = Arc::clone(&arrivals);
@@ -515,8 +539,9 @@ impl WindowsUsbTransferMonitor {
             shared,
             arrivals,
             worker: Mutex::new(worker),
-            last_seen_arrivals: Mutex::new(0),
-            watcher: SensitiveDirWatcher::new(DlpChannel::UsbTransfer, Vec::new()),
+            last_seen_arrivals: Mutex::new(ARRIVALS_UNSCANNED),
+            watcher: SensitiveDirWatcher::new(DlpChannel::UsbTransfer, Vec::new())
+                .with_max_file_bytes(max_file_bytes),
             native,
         }
     }
@@ -721,15 +746,17 @@ pub struct WindowsPrintMonitor {
 
 impl Default for WindowsPrintMonitor {
     fn default() -> Self {
-        Self::new(None)
+        Self::new(None, DEFAULT_MAX_FILE_BYTES)
     }
 }
 
 impl WindowsPrintMonitor {
     /// Watch the print spooler. `spool_dir` overrides the fallback
-    /// directory (default `%SystemRoot%\System32\spool\PRINTERS`).
+    /// directory (default `%SystemRoot%\System32\spool\PRINTERS`); the
+    /// fallback reads at most `max_file_bytes` of each spooled job so the
+    /// operator's per-event ceiling is honoured on the print channel too.
     #[must_use]
-    pub fn new(spool_dir: Option<PathBuf>) -> Self {
+    pub fn new(spool_dir: Option<PathBuf>, max_file_bytes: usize) -> Self {
         let shared = ChannelBuffer::new();
         let shared_w = Arc::clone(&shared);
         let worker = std::thread::Builder::new()
@@ -744,7 +771,10 @@ impl WindowsPrintMonitor {
                 DlpChannel::Print,
                 vec![dir],
                 false,
-                FileWatchOptions::default(),
+                FileWatchOptions {
+                    max_file_bytes,
+                    ..FileWatchOptions::default()
+                },
             ))
         };
         Self {

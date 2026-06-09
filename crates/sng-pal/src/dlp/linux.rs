@@ -38,7 +38,7 @@
 //!   [`ChannelError::Unavailable`].
 
 use super::{
-    DEFAULT_MAX_FILE_BYTES, FileWatchOptions, MountEntry, RemovableMount, SensitiveDirWatcher,
+    FileWatchOptions, MountEntry, RemovableMount, SensitiveDirWatcher,
     clipboard_metadata, content_hash, mime_for_path,
 };
 use async_trait::async_trait;
@@ -453,12 +453,14 @@ pub struct LinuxPrintMonitor {
 }
 
 impl LinuxPrintMonitor {
-    /// Watch `spool_dir` (default `/var/spool/cups`).
+    /// Watch `spool_dir` (default `/var/spool/cups`), reading at most
+    /// `max_file_bytes` of each spooled job so the operator-configured
+    /// per-event ceiling is honoured on the print channel too.
     #[must_use]
-    pub fn new(spool_dir: Option<PathBuf>) -> Self {
+    pub fn new(spool_dir: Option<PathBuf>, max_file_bytes: usize) -> Self {
         let dir = spool_dir.unwrap_or_else(|| PathBuf::from("/var/spool/cups"));
         let dirs = vec![dir];
-        match InotifyWatcher::start(DlpChannel::Print, &dirs, DEFAULT_MAX_FILE_BYTES) {
+        match InotifyWatcher::start(DlpChannel::Print, &dirs, max_file_bytes) {
             Ok(watcher) => Self {
                 inner: FileWriteInner::Inotify(watcher),
             },
@@ -469,7 +471,10 @@ impl LinuxPrintMonitor {
                     "inotify unavailable for print channel; falling back to poll watcher"
                 );
                 Self {
-                    inner: FileWriteInner::Poll(SensitiveDirWatcher::new(DlpChannel::Print, dirs)),
+                    inner: FileWriteInner::Poll(
+                        SensitiveDirWatcher::new(DlpChannel::Print, dirs)
+                            .with_max_file_bytes(max_file_bytes),
+                    ),
                 }
             }
         }
@@ -743,7 +748,7 @@ impl LinuxUsbTransferMonitor {
     /// thread owns the socket and pulses [`Self::wake`] on each
     /// removable-partition `add`; the async side never blocks on it.
     #[must_use]
-    pub fn new(detector: LinuxRemovableStorageMonitor) -> Self {
+    pub fn new(detector: LinuxRemovableStorageMonitor, max_file_bytes: usize) -> Self {
         let wake = Arc::new(tokio::sync::Notify::new());
         let closed = Arc::new(AtomicBool::new(false));
         let (worker, edge_triggered) = match UdevMonitor::open() {
@@ -754,7 +759,13 @@ impl LinuxUsbTransferMonitor {
                     .name("sng-dlp-udev".to_owned())
                     .spawn(move || udev_worker(&udev, &wake_w, &closed_w))
                     .ok();
-                (handle, true)
+                // Only run edge-triggered if the worker thread actually
+                // spawned: if `spawn` failed there is nothing to pulse
+                // `wake`, so `next_event` must fall back to the polling
+                // cadence rather than parking up to `USB_EDGE_PARK_CEILING`
+                // for an arrival notification that will never arrive.
+                let edge = handle.is_some();
+                (handle, edge)
             }
             Err(e) => {
                 tracing::info!(
@@ -767,7 +778,8 @@ impl LinuxUsbTransferMonitor {
         };
         Self {
             detector,
-            watcher: SensitiveDirWatcher::new(DlpChannel::UsbTransfer, Vec::new()),
+            watcher: SensitiveDirWatcher::new(DlpChannel::UsbTransfer, Vec::new())
+                .with_max_file_bytes(max_file_bytes),
             wake,
             closed,
             worker: Mutex::new(worker),

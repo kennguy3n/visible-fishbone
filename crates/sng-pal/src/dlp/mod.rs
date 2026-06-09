@@ -815,7 +815,7 @@ tmpfs /run tmpfs rw 0 0
         assert_eq!(removable.len(), 1);
         assert_eq!(removable[0].device, "/dev/sdb1");
 
-        let monitor = LinuxUsbTransferMonitor::new(detector);
+        let monitor = LinuxUsbTransferMonitor::new(detector, DEFAULT_MAX_FILE_BYTES);
         let event = monitor.next_event().await.expect("ok").expect("some");
         assert_eq!(event.channel, DlpChannel::UsbTransfer);
         assert_eq!(event.content, b"exfiltrated");
