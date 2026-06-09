@@ -425,8 +425,17 @@ impl LinearModel {
     fn from_claims(claims: UrlModelClaims) -> Result<Self, SwgError> {
         let vocab_len = claims.idf.len();
         let num_classes = claims.classes.len();
-        if num_classes == 0 {
-            return Err(SwgError::UrlModelInvalid("model has no classes".to_owned()));
+        // A categoriser is inherently multi-class: it emits the argmax
+        // class and gates on the top-two margin. A single-class model
+        // degenerates — softmax is always 1.0 and the runner-up stays
+        // at -inf, so margin == confidence == 1.0 and both gates pass
+        // unconditionally, labelling every in-vocabulary URL into that
+        // one class. A binary "is/!is category" model must encode both
+        // outcomes as two classes, so require >= 2.
+        if num_classes < 2 {
+            return Err(SwgError::UrlModelInvalid(format!(
+                "model needs at least 2 classes, got {num_classes}"
+            )));
         }
         if vocab_len == 0 {
             return Err(SwgError::UrlModelInvalid(
@@ -438,11 +447,18 @@ impl LinearModel {
                 "model has an empty vocabulary".to_owned(),
             ));
         }
-        if claims.weights.len() != num_classes * vocab_len {
+        // checked_mul so a hostile bundle declaring enormous class /
+        // feature counts cannot wrap the expected length on 64-bit and
+        // slip past the dimension check into out-of-bounds scoring.
+        let expected_weights = num_classes.checked_mul(vocab_len).ok_or_else(|| {
+            SwgError::UrlModelInvalid(format!(
+                "model dimensions overflow: num_classes ({num_classes}) * vocab ({vocab_len})"
+            ))
+        })?;
+        if claims.weights.len() != expected_weights {
             return Err(SwgError::UrlModelInvalid(format!(
-                "weight matrix has {} entries, expected num_classes ({num_classes}) * vocab ({vocab_len}) = {}",
+                "weight matrix has {} entries, expected num_classes ({num_classes}) * vocab ({vocab_len}) = {expected_weights}",
                 claims.weights.len(),
-                num_classes * vocab_len
             )));
         }
         if claims.bias.len() != num_classes {
@@ -1149,6 +1165,26 @@ mod tests {
         let verifier = verifier_with(&signing, &id);
         let mut claims = sample_claims(1);
         claims.bias.push(0.0); // 3 biases for 2 classes
+        let clf = UrlMlClassifier::new();
+        assert!(matches!(
+            clf.install_model(&verifier, &make_bundle(&claims, &signing, id)),
+            Err(SwgError::UrlModelInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn classifier_rejects_single_class_model() {
+        // A one-class model degenerates: softmax is always 1.0 and the
+        // margin gate can never suppress, so it would label every
+        // in-vocabulary URL into that class. The load path must reject
+        // it even though it is otherwise well-formed and signed.
+        let (signing, id) = deterministic_keypair();
+        let verifier = verifier_with(&signing, &id);
+        let mut claims = sample_claims(1);
+        claims.classes = vec!["gambling".to_owned()];
+        claims.bias = vec![0.0];
+        // weights must stay num_classes * vocab = 1 * 2 = 2.
+        claims.weights = vec![1.0, -1.0];
         let clf = UrlMlClassifier::new();
         assert!(matches!(
             clf.install_model(&verifier, &make_bundle(&claims, &signing, id)),

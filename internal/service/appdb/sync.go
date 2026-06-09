@@ -891,6 +891,17 @@ func parseCommunityCategoryFeed(body []byte, memberLimit, totalLimit int64) (map
 		// advances to the next header, so the work it costs must count
 		// toward the limits. hdr.Size is the authoritative decompressed
 		// length tar enforces while reading/skipping the member.
+		//
+		// Reject a negative declared size before the arithmetic: Go's
+		// tar reader already errors on one, but charging a negative
+		// size would *lower* the running total and could let later
+		// members slip past the aggregate cap, so guard explicitly.
+		if hdr.Size < 0 {
+			return nil, fmt.Errorf(
+				"community feed: member %q has negative declared size %d",
+				name, hdr.Size,
+			)
+		}
 		if hdr.Size > memberLimit {
 			return nil, fmt.Errorf(
 				"community feed: member %q exceeds per-member limit of %d bytes",
