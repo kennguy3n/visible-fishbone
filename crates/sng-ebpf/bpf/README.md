@@ -68,3 +68,8 @@ cd crates/sng-ebpf/bpf
 cargo +nightly check        # compiles for bpfel-unknown-none, no link step
 cargo +nightly clippy
 ```
+
+The `rust-ebpf` CI job (`.github/workflows/ci.yml`) runs exactly these two
+commands plus the `--features xdp` lint/test of the userspace loader, so a
+type/layout drift in the kernel object or the feature-gated loader is caught
+on every PR even though this crate is excluded from the host workspace.
