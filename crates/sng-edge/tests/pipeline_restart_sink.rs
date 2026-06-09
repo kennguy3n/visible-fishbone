@@ -18,9 +18,7 @@ use std::sync::Arc;
 
 use sng_comms::{TelemetryClient, TelemetryClientConfig};
 use sng_core::envelope::Platform;
-use sng_core::events::{
-    SubsystemRestart, SubsystemRestartOutcome, SubsystemRestartReason,
-};
+use sng_core::events::{SubsystemRestart, SubsystemRestartOutcome, SubsystemRestartReason};
 use sng_core::ids::{DeviceId, SiteId, TenantId};
 use sng_core::restart::SubsystemRestartSink;
 use sng_core::traffic_class::TrafficClass;
@@ -49,7 +47,9 @@ fn mk_egress(spool_cap: usize) -> Arc<TelemetryClient> {
     Arc::new(TelemetryClient::new(cfg))
 }
 
-fn mk_pipeline(egress: Arc<TelemetryClient>) -> (Pipeline<SystemTime>, sng_telemetry::PipelineHandle) {
+fn mk_pipeline(
+    egress: Arc<TelemetryClient>,
+) -> (Pipeline<SystemTime>, sng_telemetry::PipelineHandle) {
     let pcap = Arc::new(PcapRing::new(PcapRingConfig::default()));
     Pipeline::new(
         PipelineConfig::default(),

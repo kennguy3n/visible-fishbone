@@ -462,7 +462,8 @@ impl HealthSupervisor {
                 HealthState::Healthy => {
                     // Promote the active config to last-known-good and
                     // close out any in-flight failure episode.
-                    self.last_known_good.store(Some(self.active_config.load_full()));
+                    self.last_known_good
+                        .store(Some(self.active_config.load_full()));
                     backoff = self.config.restart_initial_backoff;
                     episode_attempts = 0;
                 }

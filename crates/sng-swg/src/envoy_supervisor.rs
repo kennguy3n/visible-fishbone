@@ -135,9 +135,7 @@ impl HttpReadiness {
         // response and `read_to_end` terminates without us parsing
         // Content-Length / chunked framing.
         stream
-            .write_all(
-                b"GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-            )
+            .write_all(b"GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .await?;
         stream.flush().await?;
         let mut buf = Vec::with_capacity(128);
@@ -351,7 +349,8 @@ impl EnvoySupervisor {
             let report = evaluate(&probe);
 
             if report.state == HealthState::Healthy {
-                self.last_known_good.store(Some(self.active_config.load_full()));
+                self.last_known_good
+                    .store(Some(self.active_config.load_full()));
                 backoff = self.config.restart_initial_backoff;
                 consecutive_unhealthy = 0;
                 episode_attempts = 0;

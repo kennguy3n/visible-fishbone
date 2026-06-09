@@ -546,7 +546,9 @@ impl Watchdog {
                         SubsystemRestartOutcome::Failed,
                         attempt,
                         backoff_ms,
-                        format!("subsystem restart budget exhausted; escalating to edge restart: {e}"),
+                        format!(
+                            "subsystem restart budget exhausted; escalating to edge restart: {e}"
+                        ),
                     )
                     .await;
                 } else {

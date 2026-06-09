@@ -30,7 +30,7 @@ use parking_lot::Mutex;
 use sng_core::events::{SubsystemRestart, SubsystemRestartOutcome, SubsystemRestartReason};
 use sng_core::lifecycle::{Health, HealthStatus, SubsystemHealth};
 use sng_core::restart::SubsystemRestartSink;
-use sng_core::{ShutdownTrigger, ShutdownSignal};
+use sng_core::{ShutdownSignal, ShutdownTrigger};
 use sng_edge::{
     EdgeController, HealthSource, SubsystemRestarter, Watchdog, WatchdogConfig, WatchdogError,
 };
@@ -177,7 +177,11 @@ fn fast_config() -> WatchdogConfig {
     }
 }
 
-async fn wait_for_events(sink: &RecordingSink, n: usize, within: Duration) -> Vec<SubsystemRestart> {
+async fn wait_for_events(
+    sink: &RecordingSink,
+    n: usize,
+    within: Duration,
+) -> Vec<SubsystemRestart> {
     let deadline = Instant::now() + within;
     loop {
         if sink.len() >= n {
@@ -240,8 +244,13 @@ async fn sustained_down_is_restarted_in_place_then_recovers() {
     let edge = ScriptedEdge::new(true);
     let sink = Arc::new(RecordingSink::default());
     let wd = Arc::new(
-        Watchdog::new(health.clone(), restarter.clone(), edge.clone(), fast_config())
-            .with_sink(sink.clone()),
+        Watchdog::new(
+            health.clone(),
+            restarter.clone(),
+            edge.clone(),
+            fast_config(),
+        )
+        .with_sink(sink.clone()),
     );
 
     let (trigger, signal) = ShutdownTrigger::new();
@@ -302,18 +311,25 @@ async fn exhausted_in_place_restarts_bounce_the_edge_and_stop() {
     let health = ScriptedHealth::new(HealthStatus::Down);
     // Every in-place restart fails; never recovers.
     let restarter = ScriptedRestarter::new(
-        std::iter::repeat_with(|| Err(WatchdogError::SubsystemRestart {
-            subsystem: SUBSYS.to_owned(),
-            detail: "still dead".to_owned(),
-        }))
+        std::iter::repeat_with(|| {
+            Err(WatchdogError::SubsystemRestart {
+                subsystem: SUBSYS.to_owned(),
+                detail: "still dead".to_owned(),
+            })
+        })
         .take(8),
         None,
     );
     let edge = ScriptedEdge::new(true);
     let sink = Arc::new(RecordingSink::default());
     let wd = Arc::new(
-        Watchdog::new(health.clone(), restarter.clone(), edge.clone(), fast_config())
-            .with_sink(sink.clone()),
+        Watchdog::new(
+            health.clone(),
+            restarter.clone(),
+            edge.clone(),
+            fast_config(),
+        )
+        .with_sink(sink.clone()),
     );
 
     let (_trigger, signal) = ShutdownTrigger::new();
@@ -337,7 +353,11 @@ async fn exhausted_in_place_restarts_bounce_the_edge_and_stop() {
             SubsystemRestartOutcome::Exhausted,
         ]
     );
-    assert!(events.iter().all(|e| e.reason == SubsystemRestartReason::Escalated));
+    assert!(
+        events
+            .iter()
+            .all(|e| e.reason == SubsystemRestartReason::Escalated)
+    );
     assert_eq!(restarter.calls(), 2, "tier-1 budget = 2 attempts");
 }
 
@@ -345,10 +365,12 @@ async fn exhausted_in_place_restarts_bounce_the_edge_and_stop() {
 async fn failed_edge_bounce_alerts_control_plane_once() {
     let health = ScriptedHealth::new(HealthStatus::Down);
     let restarter = ScriptedRestarter::new(
-        std::iter::repeat_with(|| Err(WatchdogError::SubsystemRestart {
-            subsystem: SUBSYS.to_owned(),
-            detail: "still dead".to_owned(),
-        }))
+        std::iter::repeat_with(|| {
+            Err(WatchdogError::SubsystemRestart {
+                subsystem: SUBSYS.to_owned(),
+                detail: "still dead".to_owned(),
+            })
+        })
         .take(8),
         None,
     );
@@ -356,8 +378,13 @@ async fn failed_edge_bounce_alerts_control_plane_once() {
     let edge = ScriptedEdge::new(false);
     let sink = Arc::new(RecordingSink::default());
     let wd = Arc::new(
-        Watchdog::new(health.clone(), restarter.clone(), edge.clone(), fast_config())
-            .with_sink(sink.clone()),
+        Watchdog::new(
+            health.clone(),
+            restarter.clone(),
+            edge.clone(),
+            fast_config(),
+        )
+        .with_sink(sink.clone()),
     );
 
     let (trigger, signal) = ShutdownTrigger::new();

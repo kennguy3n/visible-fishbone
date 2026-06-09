@@ -90,7 +90,11 @@ impl EnvoyReadiness for SwitchableReadiness {
     }
 }
 
-async fn wait_for_events(sink: &RecordingSink, n: usize, within: Duration) -> Vec<SubsystemRestart> {
+async fn wait_for_events(
+    sink: &RecordingSink,
+    n: usize,
+    within: Duration,
+) -> Vec<SubsystemRestart> {
     let deadline = Instant::now() + within;
     loop {
         if sink.len() >= n {
@@ -139,8 +143,13 @@ async fn crash_is_detected_and_hot_restarted_with_recovered_event() {
     let readiness = SwitchableReadiness::new(true);
     let sink = Arc::new(RecordingSink::default());
     let sup = Arc::new(
-        EnvoySupervisor::new(mock.clone(), readiness.clone(), "/etc/sng/envoy.yaml", fast_config())
-            .with_sink(sink.clone()),
+        EnvoySupervisor::new(
+            mock.clone(),
+            readiness.clone(),
+            "/etc/sng/envoy.yaml",
+            fast_config(),
+        )
+        .with_sink(sink.clone()),
     );
 
     let (trigger, signal) = ShutdownTrigger::new();
@@ -149,7 +158,11 @@ async fn crash_is_detected_and_hot_restarted_with_recovered_event() {
 
     // Observe at least one healthy probe so the active config is
     // promoted to last-known-good.
-    wait_until(|| sup.state() == HealthState::Healthy, Duration::from_secs(2)).await;
+    wait_until(
+        || sup.state() == HealthState::Healthy,
+        Duration::from_secs(2),
+    )
+    .await;
 
     let starts_before = mock.start_count();
     mock.mark_crashed();
@@ -184,15 +197,24 @@ async fn alive_but_not_ready_triggers_unresponsive_restart() {
     let readiness = SwitchableReadiness::new(true);
     let sink = Arc::new(RecordingSink::default());
     let sup = Arc::new(
-        EnvoySupervisor::new(mock.clone(), readiness.clone(), "/etc/sng/envoy.yaml", fast_config())
-            .with_sink(sink.clone()),
+        EnvoySupervisor::new(
+            mock.clone(),
+            readiness.clone(),
+            "/etc/sng/envoy.yaml",
+            fast_config(),
+        )
+        .with_sink(sink.clone()),
     );
 
     let (trigger, signal) = ShutdownTrigger::new();
     let driver = sup.clone();
     let handle = tokio::spawn(async move { driver.run(signal).await });
 
-    wait_until(|| sup.state() == HealthState::Healthy, Duration::from_secs(2)).await;
+    wait_until(
+        || sup.state() == HealthState::Healthy,
+        Duration::from_secs(2),
+    )
+    .await;
 
     // PID stays alive, but /ready stops returning LIVE — the wedged
     // listener case. Once the restart relaunches the process, mark it
@@ -262,8 +284,13 @@ async fn repeated_failures_back_off_then_exhaust_and_hand_off() {
         ..fast_config()
     };
     let sup = Arc::new(
-        EnvoySupervisor::new(mock.clone(), readiness.clone(), "/etc/sng/envoy.yaml", config)
-            .with_sink(sink.clone()),
+        EnvoySupervisor::new(
+            mock.clone(),
+            readiness.clone(),
+            "/etc/sng/envoy.yaml",
+            config,
+        )
+        .with_sink(sink.clone()),
     );
 
     // Every restart attempt fails to relaunch.
@@ -283,7 +310,11 @@ async fn repeated_failures_back_off_then_exhaust_and_hand_off() {
     let attempts: Vec<u32> = events.iter().map(|e| e.attempt).collect();
     assert_eq!(attempts, vec![1, 2, 3]);
     let backoffs: Vec<u64> = events.iter().map(|e| e.backoff_ms).collect();
-    assert_eq!(backoffs, vec![10, 20, 40], "exponential backoff, capped at 40ms");
+    assert_eq!(
+        backoffs,
+        vec![10, 20, 40],
+        "exponential backoff, capped at 40ms"
+    );
     let outcomes: Vec<SubsystemRestartOutcome> = events.iter().map(|e| e.outcome).collect();
     assert_eq!(
         outcomes,
@@ -295,7 +326,11 @@ async fn repeated_failures_back_off_then_exhaust_and_hand_off() {
     );
     // Epochs increment strictly across attempts even when each fails.
     assert_eq!(mock.hot_restart_epochs(), vec![1, 2, 3]);
-    assert!(events.iter().all(|e| e.reason == SubsystemRestartReason::LivenessLost));
+    assert!(
+        events
+            .iter()
+            .all(|e| e.reason == SubsystemRestartReason::LivenessLost)
+    );
 
     tokio::time::timeout(Duration::from_secs(2), handle)
         .await
@@ -314,8 +349,13 @@ async fn fail_closed_posture_is_reflected_on_telemetry() {
         ..fast_config()
     };
     let sup = Arc::new(
-        EnvoySupervisor::new(mock.clone(), readiness.clone(), "/etc/sng/envoy.yaml", config)
-            .with_sink(sink.clone()),
+        EnvoySupervisor::new(
+            mock.clone(),
+            readiness.clone(),
+            "/etc/sng/envoy.yaml",
+            config,
+        )
+        .with_sink(sink.clone()),
     );
 
     let (trigger, signal) = ShutdownTrigger::new();
@@ -344,21 +384,38 @@ async fn single_readiness_blip_below_threshold_does_not_restart() {
         ..fast_config()
     };
     let sup = Arc::new(
-        EnvoySupervisor::new(mock.clone(), readiness.clone(), "/etc/sng/envoy.yaml", config)
-            .with_sink(sink.clone()),
+        EnvoySupervisor::new(
+            mock.clone(),
+            readiness.clone(),
+            "/etc/sng/envoy.yaml",
+            config,
+        )
+        .with_sink(sink.clone()),
     );
 
     let (trigger, signal) = ShutdownTrigger::new();
     let driver = sup.clone();
     let handle = tokio::spawn(async move { driver.run(signal).await });
 
-    wait_until(|| sup.state() == HealthState::Healthy, Duration::from_secs(2)).await;
+    wait_until(
+        || sup.state() == HealthState::Healthy,
+        Duration::from_secs(2),
+    )
+    .await;
 
     // A single not-ready blip, then immediately ready again.
     readiness.set(false);
-    wait_until(|| sup.state() == HealthState::Degraded, Duration::from_secs(2)).await;
+    wait_until(
+        || sup.state() == HealthState::Degraded,
+        Duration::from_secs(2),
+    )
+    .await;
     readiness.set(true);
-    wait_until(|| sup.state() == HealthState::Healthy, Duration::from_secs(2)).await;
+    wait_until(
+        || sup.state() == HealthState::Healthy,
+        Duration::from_secs(2),
+    )
+    .await;
 
     assert_eq!(sink.len(), 0, "a single blip must not trigger a restart");
 

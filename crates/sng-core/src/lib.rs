@@ -116,11 +116,11 @@ pub use lifecycle::{
     DrainTimeout, Health, HealthCheck, HealthStatus, ShutdownSignal, ShutdownTrigger,
     SubsystemHealth,
 };
-pub use restart::{NoopRestartSink, SubsystemRestartSink};
 pub use policy::{
     AddKeyError, BundleSignature, BundleTarget, PolicyBundle, PolicyBundleClaims, PolicyVerifier,
     UnknownBundleTarget, VerificationError,
 };
+pub use restart::{NoopRestartSink, SubsystemRestartSink};
 pub use supervisor::{
     DEFAULT_DRAIN_BUDGET, DEFAULT_HEALTH_INTERVAL, DEFAULT_HEALTH_PROBE_BUDGET, DrainOutcome,
     DrainResult, Subsystem, SubsystemError, SubsystemHandle, Supervisor, SupervisorBuilder,

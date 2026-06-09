@@ -69,7 +69,11 @@ impl SubsystemRestartSink for RecordingSink {
 /// deadline elapses. Returns the recorded events; panics on timeout so
 /// the failure points at the missing transition rather than a later
 /// assertion.
-async fn wait_for_events(sink: &RecordingSink, n: usize, within: Duration) -> Vec<SubsystemRestart> {
+async fn wait_for_events(
+    sink: &RecordingSink,
+    n: usize,
+    within: Duration,
+) -> Vec<SubsystemRestart> {
     let deadline = Instant::now() + within;
     loop {
         if sink.len() >= n {
@@ -141,7 +145,11 @@ async fn crash_is_detected_and_restarted_with_recovered_event() {
 
     // Let the supervisor observe at least one healthy probe so the
     // active config is promoted to last-known-good.
-    wait_until(|| sup.state() == HealthState::Healthy, Duration::from_secs(2)).await;
+    wait_until(
+        || sup.state() == HealthState::Healthy,
+        Duration::from_secs(2),
+    )
+    .await;
 
     let starts_before = mock.start_count();
     mock.mark_crashed();
@@ -153,7 +161,10 @@ async fn crash_is_detected_and_restarted_with_recovered_event() {
     assert_eq!(ev.outcome, SubsystemRestartOutcome::Recovered);
     assert_eq!(ev.attempt, 1);
     assert!(ev.fail_open, "default posture is fail-open");
-    assert!(!ev.rolled_back_config, "config was unchanged across the crash");
+    assert!(
+        !ev.rolled_back_config,
+        "config was unchanged across the crash"
+    );
     assert!(
         mock.start_count() > starts_before,
         "supervisor issued a fresh start()"
@@ -169,9 +180,8 @@ async fn restart_rolls_back_to_last_known_good_config() {
     let sink = Arc::new(RecordingSink::default());
     let good = "/etc/sng/suricata.good.yaml";
     let bad = "/etc/sng/suricata.bad.yaml";
-    let sup = Arc::new(
-        HealthSupervisor::new(mock.clone(), good, fast_config()).with_sink(sink.clone()),
-    );
+    let sup =
+        Arc::new(HealthSupervisor::new(mock.clone(), good, fast_config()).with_sink(sink.clone()));
 
     let (trigger, signal) = ShutdownTrigger::new();
     let driver = sup.clone();
@@ -238,7 +248,11 @@ async fn repeated_failures_back_off_then_exhaust_and_hand_off() {
     let attempts: Vec<u32> = events.iter().map(|e| e.attempt).collect();
     assert_eq!(attempts, vec![1, 2, 3]);
     let backoffs: Vec<u64> = events.iter().map(|e| e.backoff_ms).collect();
-    assert_eq!(backoffs, vec![10, 20, 40], "exponential backoff, capped at 40ms");
+    assert_eq!(
+        backoffs,
+        vec![10, 20, 40],
+        "exponential backoff, capped at 40ms"
+    );
     let outcomes: Vec<SubsystemRestartOutcome> = events.iter().map(|e| e.outcome).collect();
     assert_eq!(
         outcomes,
@@ -248,8 +262,15 @@ async fn repeated_failures_back_off_then_exhaust_and_hand_off() {
             SubsystemRestartOutcome::Exhausted,
         ]
     );
-    assert!(events.iter().all(|e| e.reason == SubsystemRestartReason::LivenessLost));
-    assert!(events.iter().all(|e| !e.detail.is_empty()), "failures carry detail");
+    assert!(
+        events
+            .iter()
+            .all(|e| e.reason == SubsystemRestartReason::LivenessLost)
+    );
+    assert!(
+        events.iter().all(|e| !e.detail.is_empty()),
+        "failures carry detail"
+    );
 
     // After exhaustion the supervisor returns on its own — the
     // hand-off to the top-level watchdog. No shutdown fire needed.
