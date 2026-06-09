@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/nats/schema"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
@@ -479,6 +480,66 @@ func TestSyncUpdateApp_EmitsAuditEntry(t *testing.T) {
 	}
 	if d := details["ip_ranges_after"].(float64); d != 3 {
 		t.Fatalf("audit ip_ranges_after = %v, want 3", d)
+	}
+}
+
+// TestAuditedGlobal_AttributesActorFromContext verifies that an
+// operator-initiated global catalog mutation records the
+// authenticated user as the audit actor, while the same mutation with
+// no user bound (e.g. the vendor-feed sync worker) leaves actor_id
+// nil rather than fabricating one.
+func TestAuditedGlobal_AttributesActorFromContext(t *testing.T) {
+	newSvc := func(audit *captureAudit) *appdb.Service {
+		s := memory.NewStore()
+		return appdb.New(
+			memory.NewAppRegistryRepository(s),
+			memory.NewAppRegistryOverrideRepository(s),
+			audit,
+			nil,
+		)
+	}
+	mkApp := func(name string) repository.AppRegistry {
+		return repository.AppRegistry{
+			Name:         name,
+			TrafficClass: repository.TrafficClassTrustedDirect,
+			Scope:        repository.AppRegistryScopeGlobal,
+			Domains:      []string{"*." + name + ".com"},
+		}
+	}
+
+	// 1. Authenticated operator → actor attributed.
+	operator := uuid.New()
+	audit := &captureAudit{}
+	svc := newSvc(audit)
+	ctx := middleware.WithUserIDForTest(context.Background(), operator)
+	if _, err := svc.CreateApp(ctx, mkApp("acme")); err != nil {
+		t.Fatalf("create app (operator): %v", err)
+	}
+	if len(audit.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(audit.entries))
+	}
+	got := audit.entries[0]
+	if got.Action != "app_registry.created" {
+		t.Fatalf("action = %q, want app_registry.created", got.Action)
+	}
+	if got.TenantID != uuid.Nil {
+		t.Fatalf("global audit row tenant_id = %s, want nil", got.TenantID)
+	}
+	if got.ActorID == nil || *got.ActorID != operator {
+		t.Fatalf("actor_id = %v, want %s", got.ActorID, operator)
+	}
+
+	// 2. No user bound (background sync) → actor left nil.
+	audit2 := &captureAudit{}
+	svc2 := newSvc(audit2)
+	if _, err := svc2.CreateApp(context.Background(), mkApp("globex")); err != nil {
+		t.Fatalf("create app (no user): %v", err)
+	}
+	if len(audit2.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(audit2.entries))
+	}
+	if a := audit2.entries[0].ActorID; a != nil {
+		t.Fatalf("actor_id = %s, want nil for unattributed mutation", *a)
 	}
 }
 

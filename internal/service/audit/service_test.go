@@ -100,6 +100,72 @@ func TestListFilters(t *testing.T) {
 	}
 }
 
+func TestListGlobal(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tn, err := memory.NewTenantRepository(s).Create(context.Background(), repository.Tenant{
+		Name: "T", Slug: "t", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	repo := memory.NewAuditLogRepository(s)
+	svc := audit.New(repo)
+	ctx := context.Background()
+
+	// Two tenant-scoped rows via the service...
+	for i := 0; i < 2; i++ {
+		if _, err := svc.Append(ctx, audit.Entry{
+			TenantID: tn.ID, Action: "tenant.thing", ResourceType: "thing",
+		}); err != nil {
+			t.Fatalf("append tenant: %v", err)
+		}
+	}
+	// ...and three platform-scoped rows seeded directly through the
+	// repo (AppendGlobal is the appdb write path, not exposed on the
+	// service surface).
+	actor := uuid.New()
+	for i := 0; i < 3; i++ {
+		if _, err := repo.AppendGlobal(ctx, repository.AuditEntry{
+			ActorID: &actor, Action: "app_registry.created", ResourceType: "app_registry",
+		}); err != nil {
+			t.Fatalf("append global: %v", err)
+		}
+	}
+
+	global, err := svc.ListGlobal(ctx, audit.ListFilter{}, repository.Page{Limit: 10})
+	if err != nil {
+		t.Fatalf("list global: %v", err)
+	}
+	if len(global.Items) != 3 {
+		t.Fatalf("ListGlobal len = %d, want 3", len(global.Items))
+	}
+	for _, e := range global.Items {
+		if e.TenantID != uuid.Nil {
+			t.Errorf("global row has tenant_id %s, want nil", e.TenantID)
+		}
+	}
+
+	// The global rows must be invisible to a tenant-scoped list, and
+	// the tenant rows invisible to ListGlobal.
+	tenant, err := svc.List(ctx, tn.ID, audit.ListFilter{}, repository.Page{Limit: 10})
+	if err != nil {
+		t.Fatalf("list tenant: %v", err)
+	}
+	if len(tenant.Items) != 2 {
+		t.Errorf("tenant List len = %d, want 2 (global rows must not leak)", len(tenant.Items))
+	}
+
+	// Filters apply to the global read path too.
+	filtered, err := svc.ListGlobal(ctx, audit.ListFilter{Action: "nope"}, repository.Page{Limit: 10})
+	if err != nil {
+		t.Fatalf("list global filtered: %v", err)
+	}
+	if len(filtered.Items) != 0 {
+		t.Errorf("action filter on ListGlobal len = %d, want 0", len(filtered.Items))
+	}
+}
+
 func TestEmptyDetailsDefaults(t *testing.T) {
 	t.Parallel()
 	svc, tenantID := newSvc(t)

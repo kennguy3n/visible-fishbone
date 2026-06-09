@@ -1,7 +1,8 @@
 // Package audit implements the append-only audit log service.
-// Only Append + List operations are exposed; the no-update /
-// no-delete invariant is enforced at the service layer (the
-// repository layer mirrors the same rule).
+// Only append + list operations are exposed (Append/List for
+// tenant-scoped rows, ListGlobal for platform-scoped rows); the
+// no-update / no-delete invariant is enforced at the service layer
+// (the repository layer mirrors the same rule).
 package audit
 
 import (
@@ -76,6 +77,25 @@ func (svc *Service) List(
 	page repository.Page,
 ) (repository.PageResult[repository.AuditEntry], error) {
 	return svc.log.List(ctx, tenantID, repository.AuditFilter{
+		ActorID:      filter.ActorID,
+		ResourceType: filter.ResourceType,
+		Action:       filter.Action,
+		From:         filter.From,
+		To:           filter.To,
+	}, page)
+}
+
+// ListGlobal returns a cursor-paginated list of platform-scoped
+// (tenant_id IS NULL) audit entries — the rows written by
+// AppendGlobal for global catalog mutations and vendor syncs that
+// have no owning tenant. These are invisible to the tenant-scoped
+// List, so the admin surface needs this dedicated read path.
+func (svc *Service) ListGlobal(
+	ctx context.Context,
+	filter ListFilter,
+	page repository.Page,
+) (repository.PageResult[repository.AuditEntry], error) {
+	return svc.log.ListGlobal(ctx, repository.AuditFilter{
 		ActorID:      filter.ActorID,
 		ResourceType: filter.ResourceType,
 		Action:       filter.Action,

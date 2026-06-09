@@ -766,6 +766,46 @@ paths:
           description: conflicting_window — both since and window_hours supplied
         "503":
           description: telemetry pipeline disabled
+  /admin/audit-log:
+    get:
+      tags: [admin, audit]
+      operationId: adminListGlobalAuditLog
+      summary: List platform-scoped (tenant-less) audit entries
+      description: >
+        Returns append-only audit rows that have no owning tenant
+        (tenant_id is null) — e.g. global app-registry catalog
+        mutations and vendor-feed syncs. These are invisible to the
+        tenant-scoped audit-log endpoint.
+      parameters:
+        - in: query
+          name: resource_type
+          schema: { type: string }
+        - in: query
+          name: action
+          schema: { type: string }
+        - in: query
+          name: actor_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: page of platform-scoped audit entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEntry" }
+                  next_cursor: { type: string }
   /admin/app-registry:
     get:
       tags: [admin, app-registry]
@@ -3684,7 +3724,14 @@ components:
       required: [id, tenant_id, action, resource_type, created_at]
       properties:
         id: { type: string, format: uuid }
-        tenant_id: { type: string, format: uuid }
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >
+            Owning tenant, or null for platform-scoped rows returned by
+            the admin audit-log endpoint (global catalog mutations and
+            vendor syncs have no owning tenant).
         actor_id: { type: string, format: uuid }
         action: { type: string }
         resource_type: { type: string }
