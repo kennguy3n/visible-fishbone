@@ -509,9 +509,14 @@ impl HealthSupervisor {
                         SubsystemRestartOutcome::Recovered => {
                             // Counters reset across a restart; drop the
                             // pre-restart snapshot so the next delta is
-                            // computed from the fresh baseline.
+                            // computed from the fresh baseline. The
+                            // episode is over, so reset its attempt count
+                            // too — otherwise a stale count from this
+                            // episode would carry into the next one and
+                            // could exhaust the restart budget early.
                             prev_stats = None;
                             backoff = self.config.restart_initial_backoff;
+                            episode_attempts = 0;
                         }
                         SubsystemRestartOutcome::Failed => {
                             backoff = (backoff * 2).min(self.config.restart_max_backoff);

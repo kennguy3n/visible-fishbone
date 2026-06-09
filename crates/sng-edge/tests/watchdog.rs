@@ -18,6 +18,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -172,6 +173,7 @@ fn fast_config() -> WatchdogConfig {
         subsystem_restart_attempts: 2,
         restart_initial_backoff: Duration::from_millis(5),
         restart_max_backoff: Duration::from_millis(20),
+        subsystem_fail_open: HashMap::new(),
     }
 }
 
@@ -253,6 +255,43 @@ async fn sustained_down_is_restarted_in_place_then_recovers() {
     assert_eq!(recovered.attempt, 1);
     assert_eq!(restarter.calls(), 1, "exactly one in-place restart");
     assert_eq!(edge.bounces(), 0, "recovery means no edge bounce");
+
+    trigger.fire();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn escalation_event_reports_configured_fail_closed_posture() {
+    let health = ScriptedHealth::new(HealthStatus::Down);
+    let restarter = ScriptedRestarter::new([Ok(())], Some(health.clone()));
+    let edge = ScriptedEdge::new(true);
+    let sink = Arc::new(RecordingSink::default());
+    // Declare the subsystem fail-closed: while it is down, traffic is
+    // dropped, so the escalation telemetry must report fail_open=false
+    // rather than the optimistic default.
+    let mut fail_open = HashMap::new();
+    fail_open.insert(SUBSYS.to_owned(), false);
+    let wd = Arc::new(
+        Watchdog::new(
+            health.clone(),
+            restarter.clone(),
+            edge.clone(),
+            WatchdogConfig {
+                subsystem_fail_open: fail_open,
+                ..fast_config()
+            },
+        )
+        .with_sink(sink.clone()),
+    );
+
+    let (trigger, signal) = ShutdownTrigger::new();
+    let handle = spawn(wd, signal);
+
+    let events = wait_for_events(&sink, 1, Duration::from_secs(2)).await;
+    assert!(
+        !events[0].fail_open,
+        "fail-closed subsystem must report fail_open=false in escalation telemetry"
+    );
 
     trigger.fire();
     handle.await.unwrap();

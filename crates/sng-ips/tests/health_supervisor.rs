@@ -289,6 +289,71 @@ async fn fail_closed_posture_is_reflected_on_telemetry() {
 }
 
 #[tokio::test]
+async fn episode_attempts_reset_after_recovery_prevents_premature_exhaustion() {
+    // Regression: a recovered restart must reset the per-episode
+    // attempt counter, otherwise a fresh failure episode inherits the
+    // previous episode's count and exhausts the restart budget early,
+    // handing off to the watchdog one episode too soon. The Healthy
+    // observation arm also resets the counter, so the bug only bites in
+    // the window between a confirmed-alive restart and the next healthy
+    // poll — a wide poll interval makes that window deterministic, and
+    // the test reacts on the emitted Recovered event (which precedes
+    // that next poll) to inject the second crash inside it.
+    let mock = running_mock().await;
+    let sink = Arc::new(RecordingSink::default());
+    let config = HealthSupervisorConfig {
+        // Wide poll window so the second crash lands before the next
+        // healthy poll; tiny backoff keeps restart latency negligible.
+        poll_interval: Duration::from_millis(150),
+        failed_consecutive_required: 1,
+        restart_initial_backoff: Duration::from_millis(1),
+        restart_max_backoff: Duration::from_millis(1),
+        restart_max_attempts: Some(2),
+        ..fast_config()
+    };
+    let sup = Arc::new(
+        HealthSupervisor::new(mock.clone(), "/etc/sng/suricata.yaml", config)
+            .with_sink(sink.clone()),
+    );
+
+    let (trigger, signal) = ShutdownTrigger::new();
+    let driver = sup.clone();
+    let handle = tokio::spawn(async move { driver.run(signal).await });
+
+    // Episode 1: a single crash; the first restart succeeds, so the
+    // episode closes at attempt 1 with Recovered.
+    mock.mark_crashed();
+    let first = wait_for_events(&sink, 1, Duration::from_secs(2)).await;
+    assert_eq!(first[0].outcome, SubsystemRestartOutcome::Recovered);
+    assert_eq!(first[0].attempt, 1);
+
+    // Episode 2, opened inside the post-recovery window: queue one
+    // launch failure, then crash again before the next healthy poll.
+    mock.fail_next_start(IpsError::Process("episode 2 launch failure".into()));
+    mock.mark_crashed();
+
+    let events = wait_for_events(&sink, 2, Duration::from_secs(2)).await;
+    // With the counter reset, episode 2's first attempt is numbered 1
+    // and reports Failed (retry). Without it, the inherited count makes
+    // this attempt 2 — equal to the budget — and reports Exhausted.
+    assert_eq!(
+        events[1].attempt, 1,
+        "the new episode must start its attempt count at 1"
+    );
+    assert_eq!(
+        events[1].outcome,
+        SubsystemRestartOutcome::Failed,
+        "first failure of a new episode must retry, not exhaust the budget"
+    );
+
+    trigger.fire();
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("supervisor still running; did not exhaust prematurely")
+        .unwrap();
+}
+
+#[tokio::test]
 async fn alive_but_unresponsive_stats_socket_triggers_unresponsive_restart() {
     let mock = running_mock().await;
     // PID stays alive across the whole test; only the stats socket

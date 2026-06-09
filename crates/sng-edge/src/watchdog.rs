@@ -253,6 +253,17 @@ pub struct WatchdogConfig {
     pub restart_initial_backoff: Duration,
     /// Ceiling for the tier-1 exponential backoff.
     pub restart_max_backoff: Duration,
+    /// Per-subsystem data-path fail posture, keyed by the subsystem
+    /// name the [`HealthSource`] reports. `true` is fail-open (traffic
+    /// keeps flowing without that subsystem's coverage while it is
+    /// down); `false` is fail-closed (traffic is dropped until it
+    /// recovers). Supplied at wiring time from the same `FailMode` the
+    /// per-subsystem supervisors use, so the watchdog's escalation
+    /// telemetry reports the tenant's true exposure during an outage
+    /// rather than an optimistic default. A subsystem absent from this
+    /// map is treated as fail-open — the conservative "traffic
+    /// preserved" assumption.
+    pub subsystem_fail_open: HashMap<String, bool>,
 }
 
 impl Default for WatchdogConfig {
@@ -263,6 +274,7 @@ impl Default for WatchdogConfig {
             subsystem_restart_attempts: 2,
             restart_initial_backoff: Duration::from_secs(2),
             restart_max_backoff: Duration::from_secs(30),
+            subsystem_fail_open: HashMap::new(),
         }
     }
 }
@@ -612,15 +624,28 @@ impl Watchdog {
                 reason,
                 outcome,
                 attempt,
-                // The watchdog tier does not itself choose a data-path
-                // posture; that is the per-subsystem supervisor's
-                // concern. Report fail-open (traffic preserved) since
-                // an edge bounce preserves no inspection mid-restart.
-                fail_open: true,
+                // The watchdog does not choose a subsystem's data-path
+                // posture, but it knows it (supplied at wiring time) and
+                // reports it so the dashboard sees the tenant's real
+                // exposure while the subsystem is down: fail-open =
+                // traffic flowing without coverage, fail-closed =
+                // traffic dropped until recovery.
+                fail_open: self.fail_open_for(subsystem),
                 rolled_back_config: false,
                 backoff_ms,
                 detail,
             })
             .await;
+    }
+
+    /// Resolve the data-path fail posture to report for `subsystem`.
+    /// Defaults to fail-open (traffic preserved) for any subsystem the
+    /// wiring did not declare a posture for.
+    fn fail_open_for(&self, subsystem: &str) -> bool {
+        self.config
+            .subsystem_fail_open
+            .get(subsystem)
+            .copied()
+            .unwrap_or(true)
     }
 }
