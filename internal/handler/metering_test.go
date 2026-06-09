@@ -179,6 +179,85 @@ func TestMeteringGetUsage(t *testing.T) {
 	}
 }
 
+// TestMeteringGetUsageProjection pins the projected end-of-period
+// fields: the handler must extrapolate mid-period usage to the period
+// end and flag a *projected* breach even when the raw accumulator is
+// still under the limit. Assertions are wall-clock-robust (they re-use
+// the exported projection and only assert invariants), so the test is
+// stable on any day of the month.
+func TestMeteringGetUsageProjection(t *testing.T) {
+	t.Parallel()
+	tid := uuid.New()
+	// A monthly meter consuming 600 against a 800 soft / 1000 hard
+	// budget. Whatever the date, the projection extrapolates upward.
+	const used, soft, hard = 600, 800, 1000
+	usage := fakeUsageReader{current: []metering.UsageRecord{
+		{Meter: metering.MeterLLMCalls, Value: used},
+	}}
+	budgets := &fakeBudgetService{limits: map[metering.Meter]metering.BudgetLimit{
+		metering.MeterLLMCalls: {Meter: metering.MeterLLMCalls, SoftLimit: soft, HardLimit: hard, Period: metering.PeriodMonthly},
+	}}
+	router := newMeteringTestRouter(usage, budgets, nil)
+
+	rec := doJSON(t, router, http.MethodGet,
+		"/api/v1/tenants/"+tid.String()+"/usage", meteringToken(t, tid.String()), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Lines []struct {
+			Meter                 string `json:"meter"`
+			Used                  int64  `json:"used"`
+			SoftLimit             int64  `json:"soft_limit"`
+			HardLimit             int64  `json:"hard_limit"`
+			SoftExceeded          bool   `json:"soft_exceeded"`
+			Projected             int64  `json:"projected"`
+			ProjectedSoftExceeded bool   `json:"projected_soft_exceeded"`
+			ProjectedHardExceeded bool   `json:"projected_hard_exceeded"`
+		} `json:"lines"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var seen bool
+	for _, l := range resp.Lines {
+		if l.Meter != string(metering.MeterLLMCalls) {
+			continue
+		}
+		seen = true
+		// Invariant 1: projection never understates the accumulator.
+		if l.Projected < l.Used {
+			t.Fatalf("projected %d < used %d", l.Projected, l.Used)
+		}
+		// Invariant 2: it matches the exported projection model.
+		want := metering.ProjectToPeriodEnd(l.Used, metering.PeriodMonthly, time.Now().UTC())
+		if l.Projected != want {
+			// Allow a 1-unit drift from the ceil at a period-second
+			// boundary between handler and test clocks.
+			if diff := l.Projected - want; diff < -1 || diff > 1 {
+				t.Fatalf("projected = %d, want ~%d", l.Projected, want)
+			}
+		}
+		// Invariant 3: the projected-breach flags are consistent with
+		// the projected value and the limits.
+		if (l.Projected > l.SoftLimit) != l.ProjectedSoftExceeded {
+			t.Fatalf("projected_soft_exceeded=%v but projected=%d soft=%d", l.ProjectedSoftExceeded, l.Projected, l.SoftLimit)
+		}
+		if (l.Projected > l.HardLimit) != l.ProjectedHardExceeded {
+			t.Fatalf("projected_hard_exceeded=%v but projected=%d hard=%d", l.ProjectedHardExceeded, l.Projected, l.HardLimit)
+		}
+		// The raw accumulator is below soft, so the *current* breach
+		// flag must be false — the projection is what carries the early
+		// warning.
+		if l.SoftExceeded {
+			t.Fatalf("soft_exceeded should be false for used=%d soft=%d", l.Used, l.SoftLimit)
+		}
+	}
+	if !seen {
+		t.Fatal("expected llm_calls line in usage response")
+	}
+}
+
 func TestMeteringGetUsageHistoryInvalidMonths(t *testing.T) {
 	t.Parallel()
 	tid := uuid.New()
