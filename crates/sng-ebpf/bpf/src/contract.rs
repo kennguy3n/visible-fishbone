@@ -190,17 +190,24 @@ pub struct FlowKey {
 }
 
 /// Per-flow state (mirror `crate::maps::FlowState`).
+///
+/// `packets`/`bytes` are `u64` and a trailing `pad` rounds the struct to
+/// its 8-byte alignment, so the layout is byte-for-byte the userspace
+/// definition (40 bytes). `u32` counters would both shrink the struct to
+/// 32 bytes — garbling every field userspace reads past the counters —
+/// and saturate at ~4 GB / ~4 G packets on a long-lived flow.
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct FlowState {
     pub last_seen_ns: u64,
     pub first_seen_ns: u64,
-    pub packets: u32,
-    pub bytes: u32,
+    pub packets: u64,
+    pub bytes: u64,
     pub action: u8,
     pub traffic_class: u8,
     pub l4_protocol: u8,
     pub anomaly_flags: u8,
+    pub pad: [u8; 4],
 }
 
 /// Cached policy verdict (mirror `crate::maps::VerdictCacheEntry`).

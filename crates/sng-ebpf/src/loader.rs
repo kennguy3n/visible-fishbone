@@ -614,7 +614,15 @@ mod aya_backend {
                 replace_country_hash(ebpf, &blocked)?;
                 // Publish the scalar config last so the data path only
                 // enables a limiter once its backing tables are in place.
-                write_singleton(ebpf, wire::MAP_DDOS_CONFIG, wire_config)
+                write_singleton(ebpf, wire::MAP_DDOS_CONFIG, wire_config)?;
+                // A tightened rate-limit budget or a freshly blocked
+                // country must take effect now, not after the verdict-cache
+                // TTL: the XDP fast path short-circuits the whole pipeline
+                // (GeoIP + rate limit included) on a cached verdict, so a
+                // flow cached as PASS would keep bypassing the new DDoS
+                // policy for up to VERDICT_TTL_NS. Flush as update_rules and
+                // update_classification do.
+                flush_verdict_cache(ebpf)
             })
         }
     }

@@ -664,6 +664,15 @@ mod tests {
         assert_eq!(size_of::<WireSteeringTarget>(), 12);
         assert_eq!(size_of::<WireDdosConfig>(), 40);
         assert_eq!(size_of::<WireCountry>(), 4);
+        // The largest and most complex wire type; pin it so a stray field
+        // or padding change is caught (the kernel re-declares it identically).
+        assert_eq!(size_of::<WireRule>(), 392);
+        // `FlowState` and `VerdictCacheEntry` are read back from the kernel
+        // maps verbatim, so their layout is part of the same contract and the
+        // kernel mirror (`bpf/src/contract.rs`) must match byte-for-byte.
+        assert_eq!(size_of::<crate::maps::FlowState>(), 40);
+        assert_eq!(size_of::<crate::maps::VerdictCacheEntry>(), 16);
+        assert_eq!(size_of::<crate::maps::FlowKey>(), 40);
     }
 
     #[test]

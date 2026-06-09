@@ -167,7 +167,7 @@ fn account_flow(key: &FlowKey, bytes: u32, action: u8, class: u8, now: u64) {
         let mut updated = *state;
         updated.last_seen_ns = now;
         updated.packets = updated.packets.saturating_add(1);
-        updated.bytes = updated.bytes.saturating_add(bytes);
+        updated.bytes = updated.bytes.saturating_add(u64::from(bytes));
         updated.action = action;
         updated.traffic_class = class;
         let _ = SNG_FLOW_STATE.insert(key, &updated, BPF_ANY);
@@ -176,11 +176,12 @@ fn account_flow(key: &FlowKey, bytes: u32, action: u8, class: u8, now: u64) {
             last_seen_ns: now,
             first_seen_ns: now,
             packets: 1,
-            bytes,
+            bytes: u64::from(bytes),
             action,
             traffic_class: class,
             l4_protocol: key.protocol,
             anomaly_flags: 0,
+            pad: [0; 4],
         };
         let _ = SNG_FLOW_STATE.insert(key, &state, BPF_ANY);
     }
@@ -550,7 +551,19 @@ fn parse_flow(data: usize, data_end: usize) -> Option<Parsed> {
         key.family = FAMILY_V4;
         let proto = unsafe { (*ip).proto };
         let total = u16::from_be_bytes(unsafe { (*ip).tot_len });
-        (EthHdr::LEN + Ipv4Hdr::LEN, proto, u32::from(total))
+        // Honour the IHL field rather than assuming the 20-byte minimum:
+        // an IPv4 header carries up to 40 bytes of options (IHL 5..=15, in
+        // 32-bit words). Reading L4 at a fixed offset would pull garbage
+        // ports / SYN flags out of an options-bearing packet — an evasion
+        // vector against port-keyed rules. A header below the 20-byte
+        // minimum is malformed; fail open to the kernel stack. `l4_off`
+        // stays bounded (<= 14 + 60) and every L4 read is range-checked by
+        // `ptr_at`.
+        let ihl_bytes = unsafe { (*ip).ihl() } as usize * 4;
+        if ihl_bytes < Ipv4Hdr::LEN {
+            return None;
+        }
+        (EthHdr::LEN + ihl_bytes, proto, u32::from(total))
     } else if ether_type == EtherType::Ipv6 as u16 {
         let ip: *const Ipv6Hdr = ptr_at(data, data_end, EthHdr::LEN)?;
         key.src = unsafe { (*ip).src_addr };
