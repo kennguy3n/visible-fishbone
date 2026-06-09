@@ -283,6 +283,11 @@ impl Default for TunnelConfig {
 /// the engine evaluates every event as `Allow`, so a deployment
 /// that hasn't authored endpoint DLP rules pays no monitoring cost
 /// until an operator opts in.
+// The bool fields are independent operator on/off toggles for distinct
+// DLP channels (subsystem master switch + clipboard / USB / print), not
+// a state machine, so the `struct_excessive_bools` "use an enum"
+// suggestion does not apply.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DlpConfig {
@@ -306,6 +311,20 @@ pub struct DlpConfig {
     /// fully torn-down interceptor set doesn't spin. Default: 1s.
     #[serde(default = "default_dlp_idle_sleep", with = "humantime_serde")]
     pub idle_sleep: Duration,
+    /// Monitor the clipboard channel (native edge-triggered hook with a
+    /// portable fallback). Default: true once DLP is enabled.
+    #[serde(default = "default_true")]
+    pub clipboard: bool,
+    /// Monitor removable-storage (USB) writes. Default: true.
+    #[serde(default = "default_true")]
+    pub usb: bool,
+    /// Monitor the print channel (local spooler). Default: true.
+    #[serde(default = "default_true")]
+    pub print: bool,
+    /// Print-spool directory override. `None` (the default) uses the
+    /// per-OS standard location (e.g. `/var/spool/cups`).
+    #[serde(default)]
+    pub print_spool_dir: Option<PathBuf>,
 }
 
 impl Default for DlpConfig {
@@ -316,6 +335,10 @@ impl Default for DlpConfig {
             poll_interval: default_dlp_poll_interval(),
             max_file_bytes: default_dlp_max_file_bytes(),
             idle_sleep: default_dlp_idle_sleep(),
+            clipboard: true,
+            usb: true,
+            print: true,
+            print_spool_dir: None,
         }
     }
 }
@@ -444,6 +467,38 @@ fn validate(cfg: &AgentConfig) -> Result<(), String> {
     if cfg.telemetry.event_channel_capacity == 0 {
         return Err("telemetry.event_channel_capacity must be > 0".into());
     }
+    // DLP cross-field checks. Only the enabled subsystem starts the
+    // portable fallback watchers, so these are gated on `enabled` — a
+    // disabled subsystem never reads the fields.
+    if cfg.dlp.enabled {
+        // A zero poll cadence would spin the portable directory/USB
+        // fallback watchers in a tight loop, pegging a core. The native
+        // edge-triggered hooks don't poll, but the fallbacks always can,
+        // so reject it the same way the other interval fields are.
+        if cfg.dlp.poll_interval.is_zero() {
+            return Err("dlp.poll_interval must be > 0 when dlp.enabled".into());
+        }
+        // A zero read ceiling makes every backend read `file.take(0)` —
+        // an empty buffer — so the classifier sees no content and every
+        // verdict is `Allow`: the subsystem registers and reports healthy
+        // yet inspects nothing, a silent DLP bypass. Reject it at load
+        // time (the same class of operator typo as a zero poll cadence)
+        // rather than letting it disable content inspection unnoticed.
+        if cfg.dlp.max_file_bytes == 0 {
+            return Err("dlp.max_file_bytes must be > 0 when dlp.enabled".into());
+        }
+        // An enabled subsystem with every channel toggled off and no
+        // watch directories registers with the supervisor and reports
+        // healthy yet observes nothing. The empty-watch_dirs file-write
+        // idle is documented and legitimate, so this is a startup warning
+        // (an almost-certain operator mistake) rather than a hard error.
+        if !cfg.dlp.clipboard && !cfg.dlp.usb && !cfg.dlp.print && cfg.dlp.watch_dirs.is_empty() {
+            tracing::warn!(
+                target: "sng_agent::config",
+                "dlp.enabled = true but clipboard/usb/print are all off and watch_dirs is empty; the DLP subsystem will register and report healthy yet observe nothing"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -499,6 +554,9 @@ const fn default_dlp_max_file_bytes() -> usize {
 }
 const fn default_dlp_idle_sleep() -> Duration {
     Duration::from_secs(1)
+}
+const fn default_true() -> bool {
+    true
 }
 const fn default_health_interval() -> Duration {
     Duration::from_secs(2)
@@ -726,5 +784,127 @@ event_channel_capacity = 0
             message.contains("telemetry.event_channel_capacity"),
             "message did not name the bad field: {message}"
         );
+    }
+
+    /// A zero `dlp.poll_interval` would spin the portable fallback
+    /// watcher in a tight loop once the subsystem is enabled. The
+    /// validator must reject it at load time (matching the other
+    /// zero-duration interval checks).
+    #[test]
+    fn validate_rejects_zero_dlp_poll_interval_when_enabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[dlp]
+enabled       = true
+poll_interval = "0s"
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("dlp.poll_interval"),
+            "message did not name the bad field: {message}"
+        );
+    }
+
+    /// The same zero `dlp.poll_interval` is harmless when the subsystem
+    /// is disabled (the field is never read), so it must not be rejected.
+    #[test]
+    fn validate_allows_zero_dlp_poll_interval_when_disabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[dlp]
+enabled       = false
+poll_interval = "0s"
+"#,
+        )
+        .unwrap();
+        assert!(load_from_path(f.path()).is_ok());
+    }
+
+    /// A zero `dlp.max_file_bytes` makes every backend read an empty
+    /// buffer (`file.take(0)`), so the classifier sees no content and
+    /// every verdict is `Allow` — a silent DLP bypass. The validator must
+    /// reject it at load time when the subsystem is enabled.
+    #[test]
+    fn validate_rejects_zero_dlp_max_file_bytes_when_enabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[dlp]
+enabled        = true
+max_file_bytes = 0
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("dlp.max_file_bytes"),
+            "message did not name the bad field: {message}"
+        );
+    }
+
+    /// The same zero `dlp.max_file_bytes` is harmless when the subsystem
+    /// is disabled (the field is never read), so it must not be rejected.
+    #[test]
+    fn validate_allows_zero_dlp_max_file_bytes_when_disabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[dlp]
+enabled        = false
+max_file_bytes = 0
+"#,
+        )
+        .unwrap();
+        assert!(load_from_path(f.path()).is_ok());
     }
 }

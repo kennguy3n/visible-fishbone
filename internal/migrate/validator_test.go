@@ -202,16 +202,55 @@ func TestValidator_EscapeStringQuotes(t *testing.T) {
 }
 
 // TestValidator_LineNumbers checks that the reported line points at
-// the offending statement.
+// the offending statement. The index targets a pre-existing table
+// (`hot`, not created in this migration) so it is flagged; an index
+// on a table created in the same migration is exempt — see
+// TestValidator_NewTableIndexExempt.
 func TestValidator_LineNumbers(t *testing.T) {
 	mv := NewMigrationValidator(nil)
-	sql := "CREATE TABLE ok (id int);\n\nCREATE INDEX idx ON ok (id);\n"
+	sql := "CREATE TABLE ok (id int);\n\nCREATE INDEX idx ON hot (id);\n"
 	vs := mv.ValidateContent("x.up.sql", sql)
 	if len(vs) != 1 {
 		t.Fatalf("want 1 violation, got %d (%v)", len(vs), rules(vs))
 	}
 	if vs[0].Line != 3 {
 		t.Errorf("want line 3, got %d", vs[0].Line)
+	}
+}
+
+// TestValidator_NewTableIndexExempt verifies that a non-concurrent
+// CREATE INDEX on a table created earlier in the SAME migration is
+// not flagged (the table is brand-new and empty so the build takes no
+// meaningful lock), while an index on a pre-existing table still is.
+func TestValidator_NewTableIndexExempt(t *testing.T) {
+	mv := NewMigrationValidator(nil)
+
+	// Index on a just-created table -> exempt.
+	newTable := "CREATE TABLE widgets (id uuid, tenant_id uuid);\n" +
+		"CREATE INDEX idx_widgets_tenant ON widgets (tenant_id);\n"
+	if vs := mv.ValidateContent("042_new.up.sql", newTable); hasRule(vs, RuleIndexNotConcurrent) {
+		t.Errorf("index on a same-migration table must be exempt, got %v", rules(vs))
+	}
+
+	// UNIQUE / IF NOT EXISTS / quoted name variants on a new table.
+	variants := "CREATE TABLE \"Gadgets\" (id uuid, sku text);\n" +
+		"CREATE UNIQUE INDEX IF NOT EXISTS uq_gadgets_sku ON \"Gadgets\" (sku);\n"
+	if vs := mv.ValidateContent("043_new.up.sql", variants); hasRule(vs, RuleIndexNotConcurrent) {
+		t.Errorf("unique/if-not-exists index on a same-migration table must be exempt, got %v", rules(vs))
+	}
+
+	// Index on a pre-existing (not created here) table -> still flagged.
+	existing := "CREATE INDEX idx_audit_tenant ON audit_log (tenant_id);\n"
+	if vs := mv.ValidateContent("044_existing.up.sql", existing); !hasRule(vs, RuleIndexNotConcurrent) {
+		t.Errorf("index on a pre-existing table must be flagged, got %v", rules(vs))
+	}
+
+	// Ordering matters: an index that precedes its table's creation is
+	// NOT exempt (it cannot be operating on the new table yet).
+	wrongOrder := "CREATE INDEX idx_late ON late (a);\n" +
+		"CREATE TABLE late (a int);\n"
+	if vs := mv.ValidateContent("045_order.up.sql", wrongOrder); !hasRule(vs, RuleIndexNotConcurrent) {
+		t.Errorf("index before its table's CREATE must still be flagged, got %v", rules(vs))
 	}
 }
 

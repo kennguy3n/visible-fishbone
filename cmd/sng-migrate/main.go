@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
@@ -89,9 +90,9 @@ func run(args []string, stdout, stderr *os.File) error {
 		_, _ = fmt.Fprintf(stderr, "  status           print current schema version + dirty flag\n")
 		_, _ = fmt.Fprintf(stderr, "  version          alias of status\n")
 		_, _ = fmt.Fprintf(stderr, "  force <V>        forcibly set version (recovery only)\n")
-		_, _ = fmt.Fprintf(stderr, "  validate [files] lint migration SQL for lock safety (no DB needed)\n")
+		_, _ = fmt.Fprintf(stderr, "  validate [--strict] [files] lint migration SQL for lock safety (no DB needed)\n")
 		_, _ = fmt.Fprintf(stderr, "  squash           generate a consolidated baseline migration (no DB needed)\n")
-		_, _ = fmt.Fprintf(stderr, "                   flags: --out DIR (default migrations/baseline), --force\n")
+		_, _ = fmt.Fprintf(stderr, "                   flags: --out DIR (default migrations/baseline), --through V, --force\n")
 	}
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("parse flags: %v", err)
@@ -198,13 +199,47 @@ func run(args []string, stdout, stderr *os.File) error {
 // migrations a PR adds). With no arguments it validates every
 // embedded migration except the grandfathered baseline, so the
 // command is also useful as a local pre-flight.
-func runValidate(stdout, stderr *os.File, files []string) error {
-	mv := migrate.NewMigrationValidator(migrate.DefaultBaseline())
+//
+// The --strict flag drops the frozen lint baseline so EVERY file is
+// fully analysed with no grandfathering. It is the whole-tree /
+// release gate used to prove a specific set of migrations is
+// lock-safe without relying on the historical exemption (e.g.
+// `sng-migrate validate --strict migrations/042_*.up.sql ...`). The
+// new-table exemption — an index on a table created in the same
+// migration — is a correctness rule, not grandfathering, so it
+// still applies under --strict.
+func runValidate(stdout, stderr *os.File, args []string) error {
+	strict := false
+	var files []string
+	for _, a := range args {
+		switch a {
+		case "--strict", "-strict":
+			strict = true
+		default:
+			if strings.HasPrefix(a, "-") {
+				return newUsageError("validate: unknown flag %q", a)
+			}
+			files = append(files, a)
+		}
+	}
+
+	baseline := migrate.DefaultBaseline()
+	if strict {
+		// No grandfathering: validate every file on its own merits.
+		baseline = nil
+	}
+	mv := migrate.NewMigrationValidator(baseline)
+
+	mode := "validate"
+	if strict {
+		mode = "validate --strict"
+	}
 
 	if len(files) == 0 {
-		// No paths given: validate every embedded migration. The frozen
-		// baseline shields pre-existing files, so this stays green until
-		// a NEW migration is added that is not on the baseline.
+		// No paths given: validate every embedded migration. Without
+		// --strict the frozen baseline shields pre-existing files, so
+		// this stays green until a NEW migration is added that is not on
+		// the baseline; with --strict the whole tree is held to the bar.
 		all, err := migrate.BaselineFromFS(migrate.SourceFS())
 		if err != nil {
 			return fmt.Errorf("list embedded migrations: %w", err)
@@ -213,7 +248,7 @@ func runValidate(stdout, stderr *os.File, files []string) error {
 			_, _ = fmt.Fprintln(stderr, err.Error())
 			return err
 		}
-		_, _ = fmt.Fprintln(stdout, "sng-migrate: validate ok — no lock-safety violations")
+		_, _ = fmt.Fprintf(stdout, "sng-migrate: %s ok — no lock-safety violations\n", mode)
 		return nil
 	}
 
@@ -222,7 +257,7 @@ func runValidate(stdout, stderr *os.File, files []string) error {
 		_, _ = fmt.Fprintln(stderr, err.Error())
 		return err
 	}
-	_, _ = fmt.Fprintf(stdout, "sng-migrate: validate ok — %d file(s) clean\n", len(files))
+	_, _ = fmt.Fprintf(stdout, "sng-migrate: %s ok — %d file(s) clean\n", mode, len(files))
 	return nil
 }
 

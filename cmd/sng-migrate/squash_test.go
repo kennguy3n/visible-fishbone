@@ -22,7 +22,7 @@ func testFS() fstest.MapFS {
 }
 
 func TestCollectSquashFiles_OrdersAndMaxVersion(t *testing.T) {
-	ups, downs, maxV, err := collectSquashFiles(testFS())
+	ups, downs, maxV, err := collectSquashFiles(testFS(), 0)
 	if err != nil {
 		t.Fatalf("collectSquashFiles: %v", err)
 	}
@@ -40,10 +40,63 @@ func TestCollectSquashFiles_OrdersAndMaxVersion(t *testing.T) {
 	}
 }
 
+// TestCollectSquashFiles_Through verifies the --through cut: only
+// migrations with version <= through are consolidated, the rest are
+// left to apply on top of the baseline, and maxVersion reflects the
+// cut rather than the highest embedded migration.
+func TestCollectSquashFiles_Through(t *testing.T) {
+	ups, downs, maxV, err := collectSquashFiles(testFS(), 2)
+	if err != nil {
+		t.Fatalf("collectSquashFiles: %v", err)
+	}
+	if maxV != 2 {
+		t.Errorf("maxVersion = %d, want 2 (cut at --through 2)", maxV)
+	}
+	if len(ups) != 2 || len(downs) != 2 {
+		t.Fatalf("got %d ups / %d downs, want 2 each (010 excluded by cut)", len(ups), len(downs))
+	}
+	for _, u := range ups {
+		if u.version > 2 {
+			t.Errorf("version %d past the cut should not be consolidated", u.version)
+		}
+	}
+}
+
+// TestSquashFlags_Through covers parsing of the --through flag in its
+// space, --through=, and -through= forms, plus rejection of invalid
+// values.
+func TestSquashFlags_Through(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want uint
+	}{
+		{[]string{"--out", "x", "--through", "41"}, 41},
+		{[]string{"--out", "x", "--through=7"}, 7},
+		{[]string{"--out", "x", "-through=3"}, 3},
+	} {
+		f := newSquashFlags(os.Stderr)
+		if err := f.parse(tc.args); err != nil {
+			t.Fatalf("parse(%v): %v", tc.args, err)
+		}
+		if f.through != tc.want {
+			t.Errorf("parse(%v): through=%d, want %d", tc.args, f.through, tc.want)
+		}
+	}
+	for _, bad := range [][]string{
+		{"--out", "x", "--through"},      // missing value
+		{"--out", "x", "--through", "0"}, // must be >= 1
+		{"--out", "x", "--through=abc"},  // not an integer
+	} {
+		if err := newSquashFlags(os.Stderr).parse(bad); err == nil {
+			t.Errorf("parse(%v): expected error, got nil", bad)
+		}
+	}
+}
+
 func TestCollectSquashFiles_DuplicateVersion(t *testing.T) {
 	fsys := testFS()
 	fsys["002_dup.up.sql"] = &fstest.MapFile{Data: []byte("SELECT 1;")}
-	if _, _, _, err := collectSquashFiles(fsys); err == nil ||
+	if _, _, _, err := collectSquashFiles(fsys, 0); err == nil ||
 		!strings.Contains(err.Error(), "duplicate up version 2") {
 		t.Fatalf("expected duplicate-version error, got %v", err)
 	}
@@ -52,7 +105,7 @@ func TestCollectSquashFiles_DuplicateVersion(t *testing.T) {
 func TestCollectSquashFiles_MissingDown(t *testing.T) {
 	fsys := testFS()
 	delete(fsys, "002_b.down.sql")
-	if _, _, _, err := collectSquashFiles(fsys); err == nil ||
+	if _, _, _, err := collectSquashFiles(fsys, 0); err == nil ||
 		!strings.Contains(err.Error(), "no matching .down.sql") {
 		t.Fatalf("expected missing-down error, got %v", err)
 	}
@@ -67,7 +120,7 @@ func TestCollectSquashFiles_RejectsUnrecognizedSQL(t *testing.T) {
 	fsys := testFS()
 	fsys["011_with-hyphen.up.sql"] = &fstest.MapFile{Data: []byte("SELECT 1;")}
 	fsys["011_with-hyphen.down.sql"] = &fstest.MapFile{Data: []byte("SELECT 1;")}
-	if _, _, _, err := collectSquashFiles(fsys); err == nil ||
+	if _, _, _, err := collectSquashFiles(fsys, 0); err == nil ||
 		!strings.Contains(err.Error(), "unrecognized migration filename") {
 		t.Fatalf("expected unrecognized-filename error, got %v", err)
 	}
@@ -78,13 +131,13 @@ func TestCollectSquashFiles_RejectsUnrecognizedSQL(t *testing.T) {
 func TestCollectSquashFiles_SkipsNonSQL(t *testing.T) {
 	fsys := testFS()
 	fsys["README.md"] = &fstest.MapFile{Data: []byte("# not a migration")}
-	if _, _, maxV, err := collectSquashFiles(fsys); err != nil || maxV != 10 {
+	if _, _, maxV, err := collectSquashFiles(fsys, 0); err != nil || maxV != 10 {
 		t.Fatalf("non-sql entry should be skipped; got maxV=%d err=%v", maxV, err)
 	}
 }
 
 func TestRenderBaseline_UpAscending_DownDescending(t *testing.T) {
-	ups, downs, maxV, err := collectSquashFiles(testFS())
+	ups, downs, maxV, err := collectSquashFiles(testFS(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +179,7 @@ func TestRunSquash_WritesAndRefusesClobber(t *testing.T) {
 		t.Fatalf("runSquash: %v", err)
 	}
 	// The baseline version tracks the real embedded migration set.
-	_, _, maxV, err := collectSquashFiles(migrate.SourceFS())
+	_, _, maxV, err := collectSquashFiles(migrate.SourceFS(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

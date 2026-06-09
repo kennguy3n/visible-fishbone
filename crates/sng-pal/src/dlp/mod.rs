@@ -52,6 +52,36 @@ pub const DEFAULT_MAX_FILE_BYTES: usize = 1024 * 1024;
 /// Default poll cadence for [`SensitiveDirWatcher`].
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Operator-tunable knobs shared by the native file-write monitors
+/// (the inotify / FSEvents / `ReadDirectoryChangesW` backends).
+///
+/// `max_file_bytes` bounds how much of each written file the monitor
+/// reads — it applies to both the native edge-triggered backend and the
+/// portable poll fallback. `poll_interval` is consulted only on the
+/// fallback path: the native inotify / FSEvents / `ReadDirectoryChangesW`
+/// backends are edge-triggered and never poll, but when a host cannot
+/// initialise its kernel hook the monitor reverts to the portable
+/// [`SensitiveDirWatcher`]. Surfacing the cadence here keeps the
+/// operator's `[dlp] poll_interval` honoured regardless of which backend
+/// a given host ends up using.
+#[derive(Debug, Clone, Copy)]
+pub struct FileWatchOptions {
+    /// Maximum bytes read from any single file write.
+    pub max_file_bytes: usize,
+    /// Poll cadence applied when the native backend falls back to the
+    /// portable [`SensitiveDirWatcher`].
+    pub poll_interval: Duration,
+}
+
+impl Default for FileWatchOptions {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            poll_interval: DEFAULT_POLL_INTERVAL,
+        }
+    }
+}
+
 /// Maximum directory depth [`SensitiveDirWatcher::scan`] descends.
 const MAX_WALK_DEPTH: usize = 8;
 
@@ -489,587 +519,77 @@ fn decode_octal(field: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+// ---------------------------------------------------------------------------
+// Per-OS ChannelInterceptor backends
+// ---------------------------------------------------------------------------
+//
+// Each desktop OS exposes its own kernel facility for the five DLP
+// channels; the backends live in a per-OS file module behind a
+// `cfg(target_os)` gate and are re-exported here so callers refer to
+// them as `sng_pal::dlp::<Backend>` regardless of platform. The
+// portable `SensitiveDirWatcher` above remains the fail-safe fallback
+// each file-write / print backend falls back to when its native hook
+// cannot be initialised (e.g. an inotify-instance ceiling is hit, or
+// the host denies the netlink bind).
+
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
     LinuxClipboardMonitor, LinuxFileWriteMonitor, LinuxPrintMonitor, LinuxRemovableStorageMonitor,
-    LinuxUsbTransferMonitor,
+    LinuxUsbTransferMonitor, UdevEvent, UdevMonitor, parse_uevent,
 };
 
-#[cfg(target_os = "linux")]
-mod linux {
-    //! Linux DLP backends.
-    //!
-    //! * **File write** — [`LinuxFileWriteMonitor`] watches the
-    //!   configured sensitive directories. The production upgrade is
-    //!   `inotify` (`IN_CLOSE_WRITE`) for edge-triggered delivery;
-    //!   the portable [`SensitiveDirWatcher`] poll implementation is
-    //!   used here so the agent has no libinotify build dependency.
-    //! * **USB transfer** — [`LinuxRemovableStorageMonitor`] reads
-    //!   `/proc/mounts` and `/sys/block/<dev>/removable` (the same
-    //!   read-only procfs / sysfs surface `udev` consumes) to find
-    //!   removable volumes, and [`LinuxUsbTransferMonitor`] scans the
-    //!   files copied onto them.
-    //! * **Print** — [`LinuxPrintMonitor`] watches the CUPS spool
-    //!   directory (`/var/spool/cups`) for queued job data.
-    //! * **Clipboard** — [`LinuxClipboardMonitor`] reads the
-    //!   selection via `wl-paste` (Wayland) or `xclip` (X11); on a
-    //!   headless host with no display it reports
-    //!   [`ChannelError::Unavailable`].
-
-    use super::{DEFAULT_POLL_INTERVAL, MountEntry, RemovableMount, SensitiveDirWatcher};
-    use async_trait::async_trait;
-    use sng_dlp::{ChannelError, ChannelInterceptor, ContentEvent, ContentMetadata, DlpChannel};
-    use std::path::PathBuf;
-    use std::process::Command;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    /// Default directories an endpoint watches for sensitive-file
-    /// writes when the policy does not override them.
-    fn default_sensitive_dirs() -> Vec<PathBuf> {
-        let mut dirs = Vec::new();
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = PathBuf::from(home);
-            dirs.push(home.join("Documents"));
-            dirs.push(home.join("Downloads"));
-            dirs.push(home.join("Desktop"));
-        }
-        dirs.push(PathBuf::from("/tmp"));
-        dirs
-    }
-
-    /// Linux file-write monitor. Newtype over [`SensitiveDirWatcher`]
-    /// fixed to [`DlpChannel::FileWrite`].
-    #[derive(Debug)]
-    pub struct LinuxFileWriteMonitor {
-        watcher: SensitiveDirWatcher,
-    }
-
-    impl LinuxFileWriteMonitor {
-        /// Watch `dirs` (empty → the default sensitive set).
-        #[must_use]
-        pub fn new(dirs: Vec<PathBuf>) -> Self {
-            let dirs = if dirs.is_empty() {
-                default_sensitive_dirs()
-            } else {
-                dirs
-            };
-            Self {
-                // Warm-start: don't re-report files that predate the
-                // agent; only writes after start-up are sensitive here.
-                watcher: SensitiveDirWatcher::new(DlpChannel::FileWrite, dirs).warm_started(),
-            }
-        }
-
-        /// The underlying watcher (for poll-interval / byte-ceiling
-        /// tuning).
-        #[must_use]
-        pub fn watcher(&self) -> &SensitiveDirWatcher {
-            &self.watcher
-        }
-    }
-
-    #[async_trait]
-    impl ChannelInterceptor for LinuxFileWriteMonitor {
-        fn channel(&self) -> DlpChannel {
-            DlpChannel::FileWrite
-        }
-        async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
-            self.watcher.next_event().await
-        }
-    }
-
-    /// Linux print monitor — watches the CUPS spool directory.
-    #[derive(Debug)]
-    pub struct LinuxPrintMonitor {
-        watcher: SensitiveDirWatcher,
-    }
-
-    impl LinuxPrintMonitor {
-        /// Watch `spool_dir` (default `/var/spool/cups`).
-        #[must_use]
-        pub fn new(spool_dir: Option<PathBuf>) -> Self {
-            let dir = spool_dir.unwrap_or_else(|| PathBuf::from("/var/spool/cups"));
-            Self {
-                watcher: SensitiveDirWatcher::new(DlpChannel::Print, vec![dir]),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ChannelInterceptor for LinuxPrintMonitor {
-        fn channel(&self) -> DlpChannel {
-            DlpChannel::Print
-        }
-        async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
-            self.watcher.next_event().await
-        }
-    }
-
-    /// Detects removable volumes from `/proc/mounts` +
-    /// `/sys/block/<dev>/removable`.
-    #[derive(Clone, Debug)]
-    pub struct LinuxRemovableStorageMonitor {
-        proc_mounts: PathBuf,
-        sys_block: PathBuf,
-    }
-
-    impl Default for LinuxRemovableStorageMonitor {
-        fn default() -> Self {
-            Self {
-                proc_mounts: PathBuf::from("/proc/mounts"),
-                sys_block: PathBuf::from("/sys/block"),
-            }
-        }
-    }
-
-    impl LinuxRemovableStorageMonitor {
-        /// Test constructor with injected procfs / sysfs roots.
-        #[must_use]
-        pub fn with_roots(proc_mounts: PathBuf, sys_block: PathBuf) -> Self {
-            Self {
-                proc_mounts,
-                sys_block,
-            }
-        }
-
-        /// Currently-mounted removable volumes.
-        #[must_use]
-        pub fn removable_mounts(&self) -> Vec<RemovableMount> {
-            let contents = std::fs::read_to_string(&self.proc_mounts).unwrap_or_default();
-            super::parse_proc_mounts(&contents)
-                .into_iter()
-                .filter(|m: &MountEntry| m.device.starts_with("/dev/"))
-                .filter(|m| self.is_removable(&m.device))
-                .map(|m| RemovableMount {
-                    device: m.device,
-                    mount_point: m.mount_point,
-                })
-                .collect()
-        }
-
-        /// Whether `device`'s backing disk is flagged removable.
-        fn is_removable(&self, device: &str) -> bool {
-            let name = device.trim_start_matches("/dev/");
-            let disk = self.disk_of(name);
-            let flag = self.sys_block.join(&disk).join("removable");
-            std::fs::read_to_string(flag).is_ok_and(|s| s.trim() == "1")
-        }
-
-        /// Resolve a partition node name to its parent disk name
-        /// (`sdb1` → `sdb`, `nvme0n1p2` → `nvme0n1`).
-        fn disk_of(&self, part: &str) -> String {
-            let mut cand = part.to_owned();
-            for _ in 0..4 {
-                if self.sys_block.join(&cand).exists() {
-                    return cand;
-                }
-                let mut stripped: String = cand
-                    .trim_end_matches(|c: char| c.is_ascii_digit())
-                    .to_owned();
-                if stripped.ends_with('p') {
-                    stripped.pop();
-                }
-                if stripped.is_empty() || stripped == cand {
-                    break;
-                }
-                cand = stripped;
-            }
-            cand
-        }
-    }
-
-    /// Watches removable volumes and scans files copied onto them,
-    /// emitting [`DlpChannel::UsbTransfer`] events.
-    #[derive(Debug)]
-    pub struct LinuxUsbTransferMonitor {
-        detector: LinuxRemovableStorageMonitor,
-        watcher: SensitiveDirWatcher,
-        closed: AtomicBool,
-    }
-
-    impl LinuxUsbTransferMonitor {
-        /// Build a monitor over `detector`.
-        #[must_use]
-        pub fn new(detector: LinuxRemovableStorageMonitor) -> Self {
-            Self {
-                detector,
-                watcher: SensitiveDirWatcher::new(DlpChannel::UsbTransfer, Vec::new()),
-                closed: AtomicBool::new(false),
-            }
-        }
-
-        /// Stop the monitor.
-        pub fn shutdown(&self) {
-            self.closed.store(true, Ordering::SeqCst);
-            self.watcher.shutdown();
-        }
-
-        /// Refresh the watcher's roots to the current removable
-        /// mounts and run one scan pass. Returns the events queued.
-        fn refresh_and_scan(&self) -> usize {
-            let mounts = self.detector.removable_mounts();
-            let dirs: Vec<PathBuf> = mounts.into_iter().map(|m| m.mount_point).collect();
-            self.watcher.set_dirs(dirs);
-            self.watcher.scan()
-        }
-    }
-
-    #[async_trait]
-    impl ChannelInterceptor for LinuxUsbTransferMonitor {
-        fn channel(&self) -> DlpChannel {
-            DlpChannel::UsbTransfer
-        }
-        async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
-            loop {
-                if let Some(event) = self.watcher.try_pop() {
-                    return Ok(Some(event));
-                }
-                if self.closed.load(Ordering::SeqCst) {
-                    return Ok(None);
-                }
-                if self.refresh_and_scan() == 0 {
-                    if self.closed.load(Ordering::SeqCst) {
-                        return Ok(None);
-                    }
-                    tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
-                }
-            }
-        }
-    }
-
-    /// Reads the desktop clipboard selection.
-    ///
-    /// The selection is read on demand each [`next_event`]; the agent
-    /// drives this from its display-server change signal rather than
-    /// the monitor self-polling. [`shutdown`](Self::shutdown) lets a
-    /// consumer that loops to end-of-stream observe the
-    /// [`ChannelInterceptor`] contract's `Ok(None)` termination.
-    #[derive(Clone, Debug, Default)]
-    pub struct LinuxClipboardMonitor {
-        closed: Arc<AtomicBool>,
-    }
-
-    impl LinuxClipboardMonitor {
-        /// A new, open clipboard monitor.
-        #[must_use]
-        pub fn new() -> Self {
-            Self::default()
-        }
-
-        /// Tear the monitor down; the next [`next_event`] returns
-        /// `Ok(None)` per the [`ChannelInterceptor`] contract.
-        pub fn shutdown(&self) {
-            self.closed.store(true, Ordering::SeqCst);
-        }
-
-        /// Read the current clipboard selection, if a display server
-        /// and a reader tool are available.
-        fn read_selection() -> Result<Vec<u8>, ChannelError> {
-            let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-            let x11 = std::env::var_os("DISPLAY").is_some();
-            if !wayland && !x11 {
-                return Err(ChannelError::Unavailable(
-                    "no Wayland or X11 display".to_owned(),
-                ));
-            }
-            let (bin, args): (&str, &[&str]) = if wayland {
-                ("wl-paste", &["--no-newline"])
-            } else {
-                ("xclip", &["-selection", "clipboard", "-o"])
-            };
-            match Command::new(bin).args(args).output() {
-                Ok(out) if out.status.success() => Ok(out.stdout),
-                Ok(out) => Err(ChannelError::Init(format!(
-                    "{bin} exited with status {}",
-                    out.status
-                ))),
-                Err(e) => Err(ChannelError::Unavailable(format!("{bin} unavailable: {e}"))),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ChannelInterceptor for LinuxClipboardMonitor {
-        fn channel(&self) -> DlpChannel {
-            DlpChannel::Clipboard
-        }
-        async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
-            if self.closed.load(Ordering::SeqCst) {
-                return Ok(None);
-            }
-            let content = Self::read_selection()?;
-            let metadata = ContentMetadata {
-                filename: None,
-                content_type: Some("text/plain".to_owned()),
-                source: Some("clipboard".to_owned()),
-                mip_labels: Vec::new(),
-                ..ContentMetadata::default()
-            };
-            Ok(Some(ContentEvent {
-                channel: DlpChannel::Clipboard,
-                content,
-                metadata,
-            }))
-        }
-    }
-}
-
 #[cfg(target_os = "macos")]
-pub use macos::{MacClipboardMonitor, MacFileWriteMonitor, MacPrintMonitor};
-
+mod macos;
 #[cfg(target_os = "macos")]
-mod macos {
-    //! macOS DLP backends.
-    //!
-    //! * **File write** — [`MacFileWriteMonitor`] watches the
-    //!   configured directories. The production upgrade is the
-    //!   FSEvents API (`FSEventStreamCreate`); the portable
-    //!   [`SensitiveDirWatcher`] poll implementation is used here.
-    //! * **Clipboard** — [`MacClipboardMonitor`] reads
-    //!   `NSPasteboard` via `/usr/bin/pbpaste`.
-    //! * **Print** — [`MacPrintMonitor`] watches the CUPS spool
-    //!   directory.
-
-    use super::SensitiveDirWatcher;
-    use async_trait::async_trait;
-    use sng_dlp::{ChannelError, ChannelInterceptor, ContentEvent, ContentMetadata, DlpChannel};
-    use std::path::PathBuf;
-    use std::process::Command;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    /// macOS file-write monitor.
-    #[derive(Debug)]
-    pub struct MacFileWriteMonitor {
-        watcher: SensitiveDirWatcher,
-    }
-
-    impl MacFileWriteMonitor {
-        /// Watch `dirs`.
-        #[must_use]
-        pub fn new(dirs: Vec<PathBuf>) -> Self {
-            Self {
-                // Warm-start: don't re-report files that predate the
-                // agent; only writes after start-up are sensitive here.
-                watcher: SensitiveDirWatcher::new(DlpChannel::FileWrite, dirs).warm_started(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ChannelInterceptor for MacFileWriteMonitor {
-        fn channel(&self) -> DlpChannel {
-            DlpChannel::FileWrite
-        }
-        async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
-            self.watcher.next_event().await
-        }
-    }
-
-    /// macOS print monitor — watches the CUPS spool directory.
-    #[derive(Debug)]
-    pub struct MacPrintMonitor {
-        watcher: SensitiveDirWatcher,
-    }
-
-    impl MacPrintMonitor {
-        /// Watch `spool_dir` (default `/var/spool/cups`).
-        #[must_use]
-        pub fn new(spool_dir: Option<PathBuf>) -> Self {
-            let dir = spool_dir.unwrap_or_else(|| PathBuf::from("/var/spool/cups"));
-            Self {
-                watcher: SensitiveDirWatcher::new(DlpChannel::Print, vec![dir]),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ChannelInterceptor for MacPrintMonitor {
-        fn channel(&self) -> DlpChannel {
-            DlpChannel::Print
-        }
-        async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
-            self.watcher.next_event().await
-        }
-    }
-
-    /// macOS clipboard monitor — reads `NSPasteboard` via `pbpaste`.
-    ///
-    /// Read on demand each [`next_event`]; [`shutdown`](Self::shutdown)
-    /// makes a subsequent call return `Ok(None)` per the
-    /// [`ChannelInterceptor`] contract.
-    #[derive(Clone, Debug, Default)]
-    pub struct MacClipboardMonitor {
-        closed: Arc<AtomicBool>,
-    }
-
-    impl MacClipboardMonitor {
-        /// A new, open clipboard monitor.
-        #[must_use]
-        pub fn new() -> Self {
-            Self::default()
-        }
-
-        /// Tear the monitor down; the next [`next_event`] returns
-        /// `Ok(None)`.
-        pub fn shutdown(&self) {
-            self.closed.store(true, Ordering::SeqCst);
-        }
-    }
-
-    #[async_trait]
-    impl ChannelInterceptor for MacClipboardMonitor {
-        fn channel(&self) -> DlpChannel {
-            DlpChannel::Clipboard
-        }
-        async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
-            if self.closed.load(Ordering::SeqCst) {
-                return Ok(None);
-            }
-            let output = Command::new("/usr/bin/pbpaste")
-                .output()
-                .map_err(|e| ChannelError::Unavailable(format!("pbpaste unavailable: {e}")))?;
-            if !output.status.success() {
-                return Err(ChannelError::Init(format!(
-                    "pbpaste exited with status {}",
-                    output.status
-                )));
-            }
-            let metadata = ContentMetadata {
-                filename: None,
-                content_type: Some("text/plain".to_owned()),
-                source: Some("clipboard".to_owned()),
-                mip_labels: Vec::new(),
-                ..ContentMetadata::default()
-            };
-            Ok(Some(ContentEvent {
-                channel: DlpChannel::Clipboard,
-                content: output.stdout,
-                metadata,
-            }))
-        }
-    }
-}
+pub use macos::{MacClipboardMonitor, MacFileWriteMonitor, MacPrintMonitor, MacUsbTransferMonitor};
 
 #[cfg(target_os = "windows")]
-pub use windows_impl::{WindowsClipboardMonitor, WindowsFileWriteMonitor};
-
+mod windows_impl;
 #[cfg(target_os = "windows")]
-mod windows_impl {
-    //! Windows DLP backends.
-    //!
-    //! * **File write** — [`WindowsFileWriteMonitor`] watches the
-    //!   configured directories. The production upgrade is the USN
-    //!   change journal (`FSCTL_QUERY_USN_JOURNAL` +
-    //!   `FSCTL_READ_USN_JOURNAL`); the portable
-    //!   [`SensitiveDirWatcher`] poll implementation is used here.
-    //! * **Clipboard** — [`WindowsClipboardMonitor`] reads the
-    //!   clipboard via `Get-Clipboard`; the production upgrade is a
-    //!   WMI `Win32_ClipboardData` listener.
-
-    use super::SensitiveDirWatcher;
-    use async_trait::async_trait;
-    use sng_dlp::{ChannelError, ChannelInterceptor, ContentEvent, ContentMetadata, DlpChannel};
-    use std::path::PathBuf;
-    use std::process::Command;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    /// Windows file-write monitor.
-    #[derive(Debug)]
-    pub struct WindowsFileWriteMonitor {
-        watcher: SensitiveDirWatcher,
-    }
-
-    impl WindowsFileWriteMonitor {
-        /// Watch `dirs`.
-        #[must_use]
-        pub fn new(dirs: Vec<PathBuf>) -> Self {
-            Self {
-                // Warm-start: don't re-report files that predate the
-                // agent; only writes after start-up are sensitive here.
-                watcher: SensitiveDirWatcher::new(DlpChannel::FileWrite, dirs).warm_started(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ChannelInterceptor for WindowsFileWriteMonitor {
-        fn channel(&self) -> DlpChannel {
-            DlpChannel::FileWrite
-        }
-        async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
-            self.watcher.next_event().await
-        }
-    }
-
-    /// Windows clipboard monitor — reads via PowerShell
-    /// `Get-Clipboard`.
-    ///
-    /// Read on demand each [`next_event`]; [`shutdown`](Self::shutdown)
-    /// makes a subsequent call return `Ok(None)` per the
-    /// [`ChannelInterceptor`] contract.
-    #[derive(Clone, Debug, Default)]
-    pub struct WindowsClipboardMonitor {
-        closed: Arc<AtomicBool>,
-    }
-
-    impl WindowsClipboardMonitor {
-        /// A new, open clipboard monitor.
-        #[must_use]
-        pub fn new() -> Self {
-            Self::default()
-        }
-
-        /// Tear the monitor down; the next [`next_event`] returns
-        /// `Ok(None)`.
-        pub fn shutdown(&self) {
-            self.closed.store(true, Ordering::SeqCst);
-        }
-    }
-
-    #[async_trait]
-    impl ChannelInterceptor for WindowsClipboardMonitor {
-        fn channel(&self) -> DlpChannel {
-            DlpChannel::Clipboard
-        }
-        async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
-            if self.closed.load(Ordering::SeqCst) {
-                return Ok(None);
-            }
-            let output = Command::new("powershell")
-                .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
-                .output()
-                .map_err(|e| {
-                    ChannelError::Unavailable(format!("Get-Clipboard unavailable: {e}"))
-                })?;
-            if !output.status.success() {
-                return Err(ChannelError::Init(format!(
-                    "Get-Clipboard exited with status {}",
-                    output.status
-                )));
-            }
-            let metadata = ContentMetadata {
-                filename: None,
-                content_type: Some("text/plain".to_owned()),
-                source: Some("clipboard".to_owned()),
-                mip_labels: Vec::new(),
-                ..ContentMetadata::default()
-            };
-            Ok(Some(ContentEvent {
-                channel: DlpChannel::Clipboard,
-                content: output.stdout,
-                metadata,
-            }))
-        }
-    }
-}
+pub use windows_impl::{
+    WindowsClipboardMonitor, WindowsFileWriteMonitor, WindowsPrintMonitor,
+    WindowsUsbTransferMonitor, WindowsWfpEgressGuard,
+};
 
 /// Lock a mutex, recovering from poisoning (a panic in a previous
 /// holder must not wedge the DLP source).
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Build the metadata stamped on a clipboard content event. Shared by
+/// every per-OS clipboard backend so the engine sees an identical
+/// `source`/`content_type` regardless of platform.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+    allow(dead_code)
+)]
+pub(crate) fn clipboard_metadata() -> ContentMetadata {
+    ContentMetadata {
+        filename: None,
+        content_type: Some("text/plain".to_owned()),
+        source: Some("clipboard".to_owned()),
+        mip_labels: Vec::new(),
+        ..ContentMetadata::default()
+    }
+}
+
+/// FNV-1a hash for clipboard-selection dedup. Not cryptographic; only
+/// used to detect "the selection changed since we last read it" so a
+/// backend does not re-emit an unchanged clipboard.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+    allow(dead_code)
+)]
+pub(crate) fn content_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -1295,7 +815,7 @@ tmpfs /run tmpfs rw 0 0
         assert_eq!(removable.len(), 1);
         assert_eq!(removable[0].device, "/dev/sdb1");
 
-        let monitor = LinuxUsbTransferMonitor::new(detector);
+        let monitor = LinuxUsbTransferMonitor::new(detector, FileWatchOptions::default());
         let event = monitor.next_event().await.expect("ok").expect("some");
         assert_eq!(event.channel, DlpChannel::UsbTransfer);
         assert_eq!(event.content, b"exfiltrated");
@@ -1318,5 +838,189 @@ tmpfs /run tmpfs rw 0 0
             result.is_none(),
             "post-shutdown next_event must yield None, got {result:?}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_uevent_decodes_block_partition_add() {
+        // A kernel block `add` uevent: summary line then NUL-separated
+        // KEY=VALUE records, exactly as delivered on the netlink socket.
+        let payload = b"add@/devices/pci/usb/sdb1\0ACTION=add\0SUBSYSTEM=block\0DEVNAME=sdb1\0DEVTYPE=partition\0";
+        let event = parse_uevent(payload).expect("parses");
+        assert_eq!(event.action, "add");
+        assert_eq!(event.subsystem.as_deref(), Some("block"));
+        assert_eq!(event.devname.as_deref(), Some("sdb1"));
+        assert!(event.is_block_partition_add());
+
+        // A whole-disk add (DEVTYPE=disk) is not a mountable partition.
+        let disk = b"add@/x\0ACTION=add\0SUBSYSTEM=block\0DEVTYPE=disk\0";
+        assert!(!parse_uevent(disk).expect("parses").is_block_partition_add());
+
+        // No ACTION → not a usable uevent.
+        assert!(parse_uevent(b"SUBSYSTEM=block\0").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn inotify_file_write_monitor_reports_close_write() {
+        // The native inotify backend must report a file the instant its
+        // writer closes the descriptor — edge-triggered, no poll cadence.
+        let dir = tempfile::tempdir().expect("dir");
+        let monitor = LinuxFileWriteMonitor::new(vec![dir.path().to_path_buf()]);
+
+        // Write a sensitive file after the watch is armed.
+        let path = dir.path().join("secret.txt");
+        std::fs::write(&path, b"4111111111111111").expect("write");
+
+        let event = tokio::time::timeout(Duration::from_secs(5), monitor.next_event())
+            .await
+            .expect("inotify should report the write within 5s")
+            .expect("ok")
+            .expect("some");
+        assert_eq!(event.channel, DlpChannel::FileWrite);
+        assert_eq!(event.content, b"4111111111111111");
+        assert_eq!(event.metadata.filename.as_deref(), Some("secret.txt"));
+        monitor.shutdown();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn inotify_watches_subdirectories_created_after_start() {
+        // A directory created under a watched root after start-up must be
+        // armed dynamically so writes inside it are still observed.
+        let dir = tempfile::tempdir().expect("dir");
+        let monitor = LinuxFileWriteMonitor::new(vec![dir.path().to_path_buf()]);
+
+        let sub = dir.path().join("nested");
+        std::fs::create_dir(&sub).expect("mkdir");
+        // Give the worker a moment to arm the new sub-directory watch.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::fs::write(sub.join("deep.txt"), b"ssn 123-45-6789").expect("write");
+
+        let event = tokio::time::timeout(Duration::from_secs(5), monitor.next_event())
+            .await
+            .expect("inotify should report the nested write within 5s")
+            .expect("ok")
+            .expect("some");
+        assert_eq!(event.metadata.filename.as_deref(), Some("deep.txt"));
+        monitor.shutdown();
+    }
+
+    // Live X11 clipboard round-trip. Ignored by default: it needs a
+    // reachable X server (`DISPLAY`) and so cannot run on headless CI;
+    // run locally with `cargo test -p sng-pal -- --ignored x11_clipboard`.
+    // It spins up a real CLIPBOARD selection owner with x11rb, sets the
+    // selection, and asserts the native monitor reports the bytes via
+    // the XFIXES edge-trigger + ConvertSelection path.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires a live X server (DISPLAY)"]
+    async fn x11_clipboard_roundtrip_reports_selection() {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::Event;
+        use x11rb::protocol::xproto::{
+            ConnectionExt, CreateWindowAux, EventMask, PropMode, SELECTION_NOTIFY_EVENT,
+            SelectionNotifyEvent, WindowClass,
+        };
+        use x11rb::wrapper::ConnectionExt as _;
+
+        const SECRET: &[u8] = b"live-clip-4111111111111111";
+
+        // Arm the monitor first so it observes the SET_SELECTION_OWNER
+        // edge the owner thread produces below.
+        let monitor = LinuxClipboardMonitor::new();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Selection-owner thread: owns CLIPBOARD and serves UTF8_STRING.
+        let owner = std::thread::spawn(|| {
+            let Ok((conn, screen_num)) = x11rb::connect(None) else {
+                return;
+            };
+            let root = conn.setup().roots[screen_num].root;
+            let win = conn.generate_id().unwrap();
+            conn.create_window(
+                0,
+                win,
+                root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+            )
+            .unwrap();
+            let clipboard = conn
+                .intern_atom(false, b"CLIPBOARD")
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom;
+            let utf8 = conn
+                .intern_atom(false, b"UTF8_STRING")
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom;
+            conn.set_selection_owner(win, clipboard, x11rb::CURRENT_TIME)
+                .unwrap();
+            conn.flush().unwrap();
+            // Serve conversion requests until the monitor has read once.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            while std::time::Instant::now() < deadline {
+                match conn.poll_for_event() {
+                    Ok(Some(Event::SelectionRequest(req))) if req.target == utf8 => {
+                        conn.change_property8(
+                            PropMode::REPLACE,
+                            req.requestor,
+                            req.property,
+                            utf8,
+                            SECRET,
+                        )
+                        .unwrap();
+                        let notify = SelectionNotifyEvent {
+                            response_type: SELECTION_NOTIFY_EVENT,
+                            sequence: 0,
+                            time: req.time,
+                            requestor: req.requestor,
+                            selection: req.selection,
+                            target: req.target,
+                            property: req.property,
+                        };
+                        conn.send_event(false, req.requestor, EventMask::NO_EVENT, notify)
+                            .unwrap();
+                        conn.flush().unwrap();
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let event = tokio::time::timeout(Duration::from_secs(6), monitor.next_event())
+            .await
+            .expect("monitor should report the selection within 6s")
+            .expect("ok")
+            .expect("some");
+        assert_eq!(event.channel, DlpChannel::Clipboard);
+        assert_eq!(event.content, SECRET);
+        monitor.shutdown();
+        let _ = owner.join();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn inotify_monitor_honors_shutdown_with_none() {
+        let dir = tempfile::tempdir().expect("dir");
+        let monitor = LinuxFileWriteMonitor::new(vec![dir.path().to_path_buf()]);
+        monitor.shutdown();
+        let result = tokio::time::timeout(Duration::from_secs(5), monitor.next_event())
+            .await
+            .expect("shutdown should unblock next_event")
+            .expect("shutdown is not an error");
+        assert!(result.is_none(), "post-shutdown must yield None");
     }
 }

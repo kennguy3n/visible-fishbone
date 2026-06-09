@@ -222,10 +222,18 @@ memmap2 = "0.9"
 # that don't have a libstd equivalent (TPROXY, NETLINK, kqueue).
 # The `sched` feature adds sched_setaffinity / CpuSet for the edge
 # commodity-hardware CPU-affinity pinning (Linux-only; the calls are
-# cfg-gated at the call site). windows is used for the Windows-side
-# WFP / TPM hooks. Both are version-pinned here even when only one
-# crate consumes them so they cannot drift between crates.
-nix = { version = "0.30", default-features = false, features = ["fs", "user", "process", "signal", "net", "hostname", "sched"] }
+# cfg-gated at the call site). The `inotify` feature backs the
+# endpoint DLP file-write / print-spool channel (`sng-pal::dlp`):
+# edge-triggered `IN_CLOSE_WRITE` delivery replaces a poll loop so
+# the agent holds the sub-0.1% idle-CPU budget on a quiet endpoint.
+# The `socket` feature backs the DLP USB / removable-media channel:
+# a `NETLINK_KOBJECT_UEVENT` netlink socket (the same kernel uevent
+# multicast `udev` itself consumes) delivers device add/remove
+# edge-triggered instead of polling `/proc/mounts`. windows is used
+# for the Windows-side WFP / TPM hooks. Both are version-pinned here
+# even when only one crate consumes them so they cannot drift
+# between crates.
+nix = { version = "0.30", default-features = false, features = ["fs", "user", "process", "signal", "net", "hostname", "sched", "inotify", "socket", "poll"] }
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -233,7 +241,39 @@ windows = { version = "0.61", features = [
     "Win32_System_SystemInformation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_WindowsFilteringPlatform",
+    # Endpoint DLP (`sng-pal::dlp::windows`): the clipboard-format
+    # listener chain (`AddClipboardFormatListener` + a message-only
+    # window pumping `WM_CLIPBOARDUPDATE`), the WMI removable-volume
+    # event sink (`Win32_VolumeChangeEvent` via the COM `IWbemServices`
+    # surface), and the print-spooler change notification
+    # (`FindFirstPrinterChangeNotification`).
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Com",
+    "Win32_System_Wmi",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_System_Threading",
+    "Win32_System_Memory",
+    "Win32_System_IO",
+    "Win32_System_Rpc",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Printing",
+    "Win32_Storage_FileSystem",
 ] }
+
+# Pure-Rust X11 client (endpoint DLP clipboard channel on Linux,
+# `sng-pal::dlp::linux`). x11rb speaks the X11 wire protocol directly
+# over its `RustConnection` (no libxcb / C-toolchain linkage, matching
+# the "no OpenSSL-FFI" posture cargo-deny enforces) and exposes the
+# XFIXES extension, whose `SelectionNotify` events make CLIPBOARD
+# ownership changes edge-triggered — the agent reads the new selection
+# exactly when it changes rather than polling. `default-features =
+# false` drops the optional libxcb bridge; only the XFIXES extension is
+# pulled in.
+x11rb = { version = "0.13", default-features = false, features = ["xfixes"] }
 
 # IP / CIDR utilities (shared across pal posture + future fw rules).
 ipnet = { version = "2", features = ["serde"] }
