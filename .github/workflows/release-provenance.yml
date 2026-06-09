@@ -88,9 +88,15 @@ jobs:
         run: cargo build --release --locked -p sng-edge --target x86_64-unknown-linux-gnu
       - name: assemble edge image payload
         id: pack
+        env:
+          # Resolve from the ref actually checked out, so a workflow_dispatch
+          # run with a custom ref names the artifact after that ref rather
+          # than the triggering branch. Passed via env (not inlined into the
+          # script) to avoid shell injection from the dispatch input.
+          RESOLVED_REF: ${{ inputs.ref || github.ref_name }}
         run: |
           set -euo pipefail
-          ver="${GITHUB_REF_NAME:-dev}"
+          ver="${RESOLVED_REF//\//-}"
           art="sng-edge-image-${ver}-linux-x86_64.tar.gz"
           mkdir -p dist/edge
           cp target/x86_64-unknown-linux-gnu/release/sng-edge dist/edge/
@@ -152,9 +158,13 @@ jobs:
       - name: assemble agent installer payload
         id: pack
         shell: bash
+        env:
+          # See the edge-image job: name the artifact after the checked-out
+          # ref, injected via env to avoid shell injection from the input.
+          RESOLVED_REF: ${{ inputs.ref || github.ref_name }}
         run: |
           set -euo pipefail
-          ver="${GITHUB_REF_NAME:-dev}"
+          ver="${RESOLVED_REF//\//-}"
           art="sng-agent-installer-${ver}-${{ matrix.os }}-${{ matrix.target }}.tar.gz"
           mkdir -p dist/agent
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/agent/

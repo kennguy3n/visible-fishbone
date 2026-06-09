@@ -143,7 +143,11 @@ var keyURIPattern = map[KeyProviderKind]*regexp.Regexp{
 	ProviderAWSKMS: regexp.MustCompile(
 		`^arn:aws[a-z-]*:kms:[a-z0-9-]+:\d{12}:(key|alias)/[A-Za-z0-9/_-]+$`),
 	ProviderAzureKV: regexp.MustCompile(
-		`^https://[a-z0-9-]{3,24}\.(vault\.azure\.net|managedhsm\.azure\.net)/keys/[A-Za-z0-9-]+(/[0-9a-f]{32})?$`),
+		// Vault/HSM name: 3-24 chars, alphanumeric start and end, hyphens
+		// only in the interior — matching Azure's own naming rule so an
+		// obviously malformed name (leading/trailing hyphen) is rejected
+		// here rather than at the first production call.
+		`^https://[a-z0-9][a-z0-9-]{1,22}[a-z0-9]\.(vault\.azure\.net|managedhsm\.azure\.net)/keys/[A-Za-z0-9-]+(/[0-9a-f]{32})?$`),
 	ProviderGCPKMS: regexp.MustCompile(
 		`^projects/[a-z0-9-]+/locations/[a-z0-9-]+/keyRings/[A-Za-z0-9_-]+/cryptoKeys/[A-Za-z0-9_-]+(/cryptoKeyVersions/\d+)?$`),
 }

@@ -105,6 +105,11 @@ func (s *CMKService) UnwrapDataKey(ctx context.Context, tenantID uuid.UUID, wrap
 	if err != nil {
 		return nil, err
 	}
+	// Region is intentionally the zero value here: the read path does
+	// not re-bind residency (see the doc comment above), and WrappedDataKey
+	// does not persist a region. Cloud KMS adapters must therefore derive
+	// any region they need from wrapped.KeyURI (the ARN/resource name/vault
+	// host already encodes it) rather than reading ref.Region on unwrap.
 	ref := TenantKeyRef{TenantID: tenantID, Kind: wrapped.Kind, KeyURI: wrapped.KeyURI}
 	dek, err := provider.UnwrapDataKey(ctx, ref, wrapped, boundEC)
 	if err != nil {

@@ -57,6 +57,15 @@ func TestTenantKeyRefValidate(t *testing.T) {
 		{"azure no version", residency.TenantKeyRef{
 			TenantID: tid, Kind: residency.ProviderAzureKV, Region: "eu-central-1",
 			KeyURI: "https://sng-vault.vault.azure.net/keys/tenant-cmk"}, false},
+		{"azure managed hsm", residency.TenantKeyRef{
+			TenantID: tid, Kind: residency.ProviderAzureKV, Region: "eu-central-1",
+			KeyURI: "https://sng-hsm.managedhsm.azure.net/keys/tenant-cmk"}, false},
+		{"azure leading hyphen vault", residency.TenantKeyRef{
+			TenantID: tid, Kind: residency.ProviderAzureKV, Region: "eu-central-1",
+			KeyURI: "https://-vault.vault.azure.net/keys/tenant-cmk"}, true},
+		{"azure trailing hyphen vault", residency.TenantKeyRef{
+			TenantID: tid, Kind: residency.ProviderAzureKV, Region: "eu-central-1",
+			KeyURI: "https://vault-.vault.azure.net/keys/tenant-cmk"}, true},
 		{"gcp valid", residency.TenantKeyRef{
 			TenantID: tid, Kind: residency.ProviderGCPKMS, Region: "eu-central-1",
 			KeyURI: "projects/sng/locations/europe-west3/keyRings/tenants/cryptoKeys/cmk"}, false},
