@@ -128,6 +128,13 @@ pub enum SwgError {
     #[error("url model bundle body decode failed: {0}")]
     UrlModelBodyDecode(String),
 
+    /// URL categorisation ML model bundle body failed to encode to
+    /// MessagePack. Kept distinct from [`Self::UrlModelBodyDecode`]
+    /// so dashboards filtering on `swg.url_model.body.decode` do not
+    /// misclassify a failure on the outbound encode path.
+    #[error("url model bundle body encode failed: {0}")]
+    UrlModelBodyEncode(String),
+
     /// URL categorisation ML model decoded but failed structural
     /// validation (dimension mismatch, out-of-range vocabulary
     /// index, empty class set). The staged model is rejected and the
@@ -167,6 +174,7 @@ impl SwgError {
             Self::UrlModelUnknownKey(_) => ErrorCode::SwgUrlModelSigningKeyUnknown,
             Self::UrlModelStale { .. } => ErrorCode::SwgUrlModelStale,
             Self::UrlModelBodyDecode(_) => ErrorCode::SwgUrlModelBodyDecode,
+            Self::UrlModelBodyEncode(_) => ErrorCode::SwgUrlModelBodyEncode,
             Self::UrlModelInvalid(_) => ErrorCode::SwgUrlModelInvalid,
         }
     }
@@ -218,6 +226,7 @@ mod tests {
                 current: 2,
             },
             SwgError::UrlModelBodyDecode("x".into()),
+            SwgError::UrlModelBodyEncode("x".into()),
             SwgError::UrlModelInvalid("x".into()),
         ];
         for err in cases {

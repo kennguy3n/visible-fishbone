@@ -349,7 +349,7 @@ impl UrlModelClaims {
     /// Encode a claims body to MessagePack bytes (named-map shape so
     /// the Go trainer reads it without remapping).
     pub fn encode(&self) -> Result<Vec<u8>, SwgError> {
-        rmp_serde::to_vec_named(self).map_err(|e| SwgError::UrlModelBodyDecode(e.to_string()))
+        rmp_serde::to_vec_named(self).map_err(|e| SwgError::UrlModelBodyEncode(e.to_string()))
     }
 }
 

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,6 +122,40 @@ func TestParseCommunityCategoryFeed(t *testing.T) {
 func TestParseCommunityCategoryFeedRejectsNonGzip(t *testing.T) {
 	if _, err := ParseCommunityCategoryFeed([]byte("not a gzip archive")); err == nil {
 		t.Fatal("expected error parsing non-gzip body")
+	}
+}
+
+func TestParseCommunityCategoryFeedEnforcesSizeLimits(t *testing.T) {
+	// One member just over the per-member limit is rejected with an
+	// explicit limit error (not a silent truncation).
+	big := buildFeedArchive(t, map[string]string{
+		"BL/adv/domains": strings.Repeat("a.example.com\n", 64),
+	})
+	if _, err := parseCommunityCategoryFeed(big, 16, 1<<20); err == nil ||
+		!strings.Contains(err.Error(), "per-member limit") {
+		t.Fatalf("member limit: got err=%v, want per-member limit error", err)
+	}
+
+	// Several small members whose aggregate decompressed size crosses
+	// the total cap are rejected even though each member is under the
+	// per-member limit.
+	many := buildFeedArchive(t, map[string]string{
+		"BL/a/domains": "a.example.com\n",
+		"BL/b/domains": "b.example.com\n",
+		"BL/c/domains": "c.example.com\n",
+	})
+	if _, err := parseCommunityCategoryFeed(many, 1<<20, 20); err == nil ||
+		!strings.Contains(err.Error(), "total decompressed size") {
+		t.Fatalf("total limit: got err=%v, want total-size error", err)
+	}
+
+	// Generous limits parse the same archive cleanly.
+	got, err := parseCommunityCategoryFeed(many, 1<<20, 1<<20)
+	if err != nil {
+		t.Fatalf("within limits: unexpected err: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("within limits: got %d categories, want 3", len(got))
 	}
 }
 

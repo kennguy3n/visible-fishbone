@@ -208,6 +208,14 @@ pub enum ErrorCode {
     /// from MessagePack — the control plane and the agent disagree
     /// on the model schema or the body was truncated.
     SwgUrlModelBodyDecode,
+    /// URL categorisation ML model bundle body failed to encode
+    /// (serializer rejected the in-memory claims struct).
+    /// Pragmatically unreachable for the current `UrlModelClaims`
+    /// shape — `rmp_serde` does not fail on a well-formed Rust struct
+    /// — but kept distinct from [`Self::SwgUrlModelBodyDecode`] so
+    /// dashboards filtering on `swg.url_model.body.decode` do not
+    /// misclassify a failure on the outbound encode path.
+    SwgUrlModelBodyEncode,
     /// URL categorisation ML model bundle decoded but failed
     /// structural validation (dimension mismatch between weights,
     /// vocabulary and idf vectors; out-of-range vocabulary index;
@@ -404,6 +412,7 @@ impl ErrorCode {
             Self::SwgUrlModelSigningKeyUnknown => "swg.url_model.signing_key.unknown",
             Self::SwgUrlModelStale => "swg.url_model.stale",
             Self::SwgUrlModelBodyDecode => "swg.url_model.body.decode",
+            Self::SwgUrlModelBodyEncode => "swg.url_model.body.encode",
             Self::SwgUrlModelInvalid => "swg.url_model.invalid",
             Self::UpdaterManifestBodyDecode => "updater.manifest.body.decode",
             Self::UpdaterManifestSignatureInvalid => "updater.manifest.signature.invalid",
@@ -601,6 +610,10 @@ mod tests {
             (
                 ErrorCode::SwgUrlModelBodyDecode,
                 "swg.url_model.body.decode",
+            ),
+            (
+                ErrorCode::SwgUrlModelBodyEncode,
+                "swg.url_model.body.encode",
             ),
             (ErrorCode::SwgUrlModelInvalid, "swg.url_model.invalid"),
             (
