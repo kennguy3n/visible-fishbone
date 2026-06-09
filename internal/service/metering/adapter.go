@@ -373,6 +373,13 @@ type RowLimitSnapshot struct {
 
 // Snapshot returns the current per-tenant budgets. Nil receiver yields
 // nil so an optional limiter can be snapshotted without a nil check.
+//
+// Lock ordering: this is the one place that holds l.mu (RLock) while
+// taking a per-bucket b.mu. That respects the package-wide invariant
+// — l.mu is always acquired before b.mu, never the reverse — so it
+// cannot deadlock against the hot path: bucketFor releases l.mu before
+// allowN/refreshLocked/WaitN ever touch b.mu. The per-bucket hold here
+// is bounded to two field reads, so it doesn't stall AllowN.
 func (l *ClickHouseRowLimiter) Snapshot() map[uuid.UUID]RowLimitSnapshot {
 	if l == nil {
 		return nil
