@@ -15,6 +15,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
@@ -77,7 +78,7 @@ func main() {
 
 	out, _ := json.MarshalIndent(summary, "", "  ")
 	fmt.Println(string(out))
-	_ = os.WriteFile("blog/artifacts/seed-summary.json", out, 0o644)
+	_ = os.WriteFile("blog/artifacts/seed-summary.json", out, 0o600)
 }
 
 // --- scenario data model ---------------------------------------------------
@@ -654,36 +655,36 @@ func scenarioPolicyGraph() map[string]any {
 				"description": "Corp users reach private apps during business hours"},
 			{"id": "ngfw-deny-guest-apps", "domain": "ngfw", "verb": "deny",
 				"subject_refs": []string{"guest-net", "private-apps"},
-				"description": "Guest network is denied all private-app access"},
+				"description":  "Guest network is denied all private-app access"},
 			{"id": "swg-decrypt-corp", "domain": "swg", "verb": "decrypt",
 				"subject_refs": []string{"corp-users"},
-				"description": "TLS-inspect corp web traffic"},
+				"description":  "TLS-inspect corp web traffic"},
 			{"id": "swg-deny-gambling", "domain": "swg", "verb": "deny",
 				"predicate_refs": []string{"cat-gambling"},
-				"description": "Block the gambling URL category"},
+				"description":    "Block the gambling URL category"},
 			{"id": "dns-deny-malware", "domain": "dns", "verb": "deny",
 				"predicate_refs": []string{"cat-malware"},
-				"description": "Sinkhole known-malware domains via DNS"},
+				"description":    "Sinkhole known-malware domains via DNS"},
 			{"id": "ztna-allow-posture", "domain": "ztna", "verb": "allow",
 				"subject_refs": []string{"corp-users", "managed-devices", "private-apps"},
-				"description": "ZTNA: posture-checked corp devices reach private apps"},
+				"description":  "ZTNA: posture-checked corp devices reach private apps"},
 			{"id": "ztna-deny-geo", "domain": "ztna", "verb": "deny",
 				"predicate_refs": []string{"geo-sanctioned"},
-				"description": "Deny access from sanctioned geographies"},
+				"description":    "Deny access from sanctioned geographies"},
 			{"id": "sdwan-steer-saas", "domain": "sdwan", "verb": "steer",
 				"predicate_refs": []string{"saas-m365"},
-				"description": "Steer M365 SaaS onto the interactive class"},
+				"description":    "Steer M365 SaaS onto the interactive class"},
 			{"id": "dlp-inspect-uploads", "domain": "dlp", "verb": "inspect",
 				"subject_refs": []string{"managed-devices"},
-				"description": "Inspect uploads from managed devices for regulated data"},
+				"description":  "Inspect uploads from managed devices for regulated data"},
 			{"id": "casb-inspect-m365", "domain": "inline_casb", "verb": "inspect",
 				"predicate_refs": []string{"saas-m365"},
-				"description": "Inline-CASB inspection of M365 share/upload actions"},
+				"description":    "Inline-CASB inspection of M365 share/upload actions"},
 			// Two dormant (suggest_only) deltas — proposed but not yet
 			// enforcing, so the coverage meter reads < 100%.
 			{"id": "ngfw-suggest-tls10", "domain": "ngfw", "verb": "suggest_only",
 				"subject_refs": []string{"corp-users"},
-				"description": "Proposed: block legacy TLS 1.0 egress"},
+				"description":  "Proposed: block legacy TLS 1.0 egress"},
 			{"id": "dns-suggest-nrd", "domain": "dns", "verb": "suggest_only",
 				"description": "Proposed: block newly-registered domains (<30d)"},
 		},
@@ -812,7 +813,7 @@ func doJSON(method, path string, body any, out any) bool {
 		b, _ := json.Marshal(body)
 		rdr = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, *apiBase+path, rdr)
+	req, err := http.NewRequestWithContext(context.Background(), method, *apiBase+path, rdr)
 	if err != nil {
 		logf("ERR build %s %s: %v", method, path, err)
 		return false
