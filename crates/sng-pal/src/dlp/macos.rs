@@ -48,7 +48,7 @@
 // `Arc::into_raw` that is reclaimed in `Drop`.
 #![allow(unsafe_code)]
 
-use super::{DEFAULT_MAX_FILE_BYTES, FileWatchOptions, SensitiveDirWatcher, lock, mime_for_path};
+use super::{FileWatchOptions, SensitiveDirWatcher, lock, mime_for_path};
 use async_trait::async_trait;
 use sng_dlp::{ChannelError, ChannelInterceptor, ContentEvent, ContentMetadata, DlpChannel};
 use std::collections::VecDeque;
@@ -624,22 +624,15 @@ pub struct MacPrintMonitor {
 }
 
 impl MacPrintMonitor {
-    /// Watch `spool_dir` (default `/private/var/spool/cups`), reading at
-    /// most `max_file_bytes` of each spooled job so the operator's
-    /// per-event ceiling is honoured on the print channel too.
+    /// Watch `spool_dir` (default `/private/var/spool/cups`).
+    /// `opts.max_file_bytes` bounds how much of each spooled job is read and
+    /// `opts.poll_interval` is honoured on the portable poll fallback, so the
+    /// operator's tuning applies to the print channel regardless of backend.
     #[must_use]
-    pub fn new(spool_dir: Option<PathBuf>, max_file_bytes: usize) -> Self {
+    pub fn new(spool_dir: Option<PathBuf>, opts: FileWatchOptions) -> Self {
         let dir = spool_dir.unwrap_or_else(|| PathBuf::from("/private/var/spool/cups"));
         Self {
-            inner: DirInner::start(
-                DlpChannel::Print,
-                vec![dir],
-                false,
-                FileWatchOptions {
-                    max_file_bytes,
-                    ..FileWatchOptions::default()
-                },
-            ),
+            inner: DirInner::start(DlpChannel::Print, vec![dir], false, opts),
         }
     }
 
@@ -673,25 +666,23 @@ pub struct MacUsbTransferMonitor {
 
 impl Default for MacUsbTransferMonitor {
     fn default() -> Self {
-        Self::new(DEFAULT_MAX_FILE_BYTES)
+        Self::new(FileWatchOptions::default())
     }
 }
 
 impl MacUsbTransferMonitor {
-    /// Watch `/Volumes` for writes onto mounted external media, reading
-    /// at most `max_file_bytes` of each file so the operator's per-event
-    /// ceiling is honoured on the USB-transfer channel too.
+    /// Watch `/Volumes` for writes onto mounted external media.
+    /// `opts.max_file_bytes` bounds how much of each file is read and
+    /// `opts.poll_interval` is honoured on the portable poll fallback, so the
+    /// operator's tuning applies to the USB channel regardless of backend.
     #[must_use]
-    pub fn new(max_file_bytes: usize) -> Self {
+    pub fn new(opts: FileWatchOptions) -> Self {
         Self {
             inner: DirInner::start(
                 DlpChannel::UsbTransfer,
                 vec![PathBuf::from("/Volumes")],
                 true,
-                FileWatchOptions {
-                    max_file_bytes,
-                    ..FileWatchOptions::default()
-                },
+                opts,
             ),
         }
     }

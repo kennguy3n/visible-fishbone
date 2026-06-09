@@ -453,14 +453,16 @@ pub struct LinuxPrintMonitor {
 }
 
 impl LinuxPrintMonitor {
-    /// Watch `spool_dir` (default `/var/spool/cups`), reading at most
-    /// `max_file_bytes` of each spooled job so the operator-configured
-    /// per-event ceiling is honoured on the print channel too.
+    /// Watch `spool_dir` (default `/var/spool/cups`). `opts.max_file_bytes`
+    /// bounds how much of each spooled job is read; `opts.poll_interval` is
+    /// applied when inotify is unavailable and the monitor falls back to the
+    /// portable poll watcher, so the operator-configured cadence is honoured
+    /// on the print channel too.
     #[must_use]
-    pub fn new(spool_dir: Option<PathBuf>, max_file_bytes: usize) -> Self {
+    pub fn new(spool_dir: Option<PathBuf>, opts: FileWatchOptions) -> Self {
         let dir = spool_dir.unwrap_or_else(|| PathBuf::from("/var/spool/cups"));
         let dirs = vec![dir];
-        match InotifyWatcher::start(DlpChannel::Print, &dirs, max_file_bytes) {
+        match InotifyWatcher::start(DlpChannel::Print, &dirs, opts.max_file_bytes) {
             Ok(watcher) => Self {
                 inner: FileWriteInner::Inotify(watcher),
             },
@@ -473,7 +475,8 @@ impl LinuxPrintMonitor {
                 Self {
                     inner: FileWriteInner::Poll(
                         SensitiveDirWatcher::new(DlpChannel::Print, dirs)
-                            .with_max_file_bytes(max_file_bytes),
+                            .with_max_file_bytes(opts.max_file_bytes)
+                            .with_poll_interval(opts.poll_interval),
                     ),
                 }
             }
@@ -715,9 +718,15 @@ const USB_IDLE_FALLBACK: Duration = Duration::from_secs(5);
 
 /// Wake ceiling when parked waiting for a udev arrival notification.
 /// The wait is normally ended by the notify; this only bounds it so a
-/// missed wake can never wedge the channel forever.
-#[allow(clippy::duration_suboptimal_units)]
-const USB_EDGE_PARK_CEILING: Duration = Duration::from_secs(3600);
+/// missed wake can never wedge the channel — and, more importantly,
+/// bounds the worst-case detection latency if a uevent is genuinely
+/// dropped. The `NETLINK_KOBJECT_UEVENT` socket is not a reliable
+/// transport: under device-event storms the kernel can overflow the
+/// receive buffer and silently drop a multicast uevent, so the arrival
+/// `notify` is best-effort. A one-minute re-scan floor keeps the
+/// missed-event window small at negligible cost (one `/proc/mounts`
+/// read per idle minute) rather than risking an hour-long blind spot.
+const USB_EDGE_PARK_CEILING: Duration = Duration::from_secs(60);
 
 /// Watches removable volumes and reports the files written onto them as
 /// [`DlpChannel::UsbTransfer`] events.
@@ -748,7 +757,7 @@ impl LinuxUsbTransferMonitor {
     /// thread owns the socket and pulses [`Self::wake`] on each
     /// removable-partition `add`; the async side never blocks on it.
     #[must_use]
-    pub fn new(detector: LinuxRemovableStorageMonitor, max_file_bytes: usize) -> Self {
+    pub fn new(detector: LinuxRemovableStorageMonitor, opts: FileWatchOptions) -> Self {
         let wake = Arc::new(tokio::sync::Notify::new());
         let closed = Arc::new(AtomicBool::new(false));
         let (worker, edge_triggered) = match UdevMonitor::open() {
@@ -779,7 +788,8 @@ impl LinuxUsbTransferMonitor {
         Self {
             detector,
             watcher: SensitiveDirWatcher::new(DlpChannel::UsbTransfer, Vec::new())
-                .with_max_file_bytes(max_file_bytes),
+                .with_max_file_bytes(opts.max_file_bytes)
+                .with_poll_interval(opts.poll_interval),
             wake,
             closed,
             worker: Mutex::new(worker),
@@ -859,8 +869,8 @@ impl ChannelInterceptor for LinuxUsbTransferMonitor {
             let wait = if has_mounts {
                 self.watcher.poll_interval()
             } else if self.edge_triggered {
-                // Effectively "until notified": a generous ceiling that
-                // still bounds the wait should a notify ever be missed.
+                // Normally "until notified"; the ceiling re-scans once a
+                // minute so a dropped uevent bounds detection latency.
                 USB_EDGE_PARK_CEILING
             } else {
                 USB_IDLE_FALLBACK

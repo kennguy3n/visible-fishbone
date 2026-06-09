@@ -43,8 +43,7 @@
 #![allow(unsafe_code)]
 
 use super::{
-    DEFAULT_MAX_FILE_BYTES, FileWatchOptions, SensitiveDirWatcher, clipboard_metadata, content_hash,
-    lock, mime_for_path,
+    FileWatchOptions, SensitiveDirWatcher, clipboard_metadata, content_hash, lock, mime_for_path,
 };
 use async_trait::async_trait;
 use sng_dlp::{ChannelError, ChannelInterceptor, ContentEvent, ContentMetadata, DlpChannel};
@@ -393,6 +392,15 @@ enum DirInner {
     Native {
         _watches: Vec<RdcWatch>,
         shared: Arc<ChannelBuffer>,
+        /// Poll watcher covering the requested roots that the native
+        /// backend could *not* arm — a directory that does not yet exist
+        /// or whose `ReadDirectoryChangesW` handle failed to open
+        /// (permission denied, handle exhaustion, …). Without it those
+        /// roots would be silently uncovered whenever at least one other
+        /// root armed successfully; the residual watcher guarantees no
+        /// requested directory ever loses DLP coverage. `None` when every
+        /// root armed natively.
+        residual: Option<SensitiveDirWatcher>,
     },
     Poll(SensitiveDirWatcher),
 }
@@ -401,14 +409,26 @@ impl DirInner {
     fn start(channel: DlpChannel, dirs: Vec<PathBuf>, warm: bool, opts: FileWatchOptions) -> Self {
         let shared = ChannelBuffer::new();
         let mut watches = Vec::new();
+        let mut uncovered = Vec::new();
         for dir in &dirs {
             if !dir.exists() {
+                // A root that is absent at start-up cannot be armed by
+                // ReadDirectoryChangesW; hand it to the poll watcher,
+                // which tolerates missing roots and picks them up once
+                // they appear.
+                uncovered.push(dir.clone());
                 continue;
             }
             match RdcWatch::start(dir, channel, &shared, opts.max_file_bytes) {
                 Ok(w) => watches.push(w),
                 Err(reason) => {
-                    tracing::info!(target: "sng_pal::dlp", %reason, "ReadDirectoryChangesW unavailable");
+                    tracing::info!(
+                        target: "sng_pal::dlp",
+                        %reason,
+                        dir = %dir.display(),
+                        "ReadDirectoryChangesW unavailable for directory; covering it via poll fallback"
+                    );
+                    uncovered.push(dir.clone());
                 }
             }
         }
@@ -418,23 +438,55 @@ impl DirInner {
                 .with_poll_interval(opts.poll_interval);
             DirInner::Poll(if warm { w.warm_started() } else { w })
         } else {
+            let residual = if uncovered.is_empty() {
+                None
+            } else {
+                let w = SensitiveDirWatcher::new(channel, uncovered)
+                    .with_max_file_bytes(opts.max_file_bytes)
+                    .with_poll_interval(opts.poll_interval);
+                Some(if warm { w.warm_started() } else { w })
+            };
             DirInner::Native {
                 _watches: watches,
                 shared,
+                residual,
             }
         }
     }
 
     async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
         match self {
-            DirInner::Native { shared, .. } => loop {
+            DirInner::Native {
+                shared, residual, ..
+            } => loop {
                 if let Some(e) = shared.pop() {
                     return Ok(Some(e));
                 }
                 if shared.is_closed() {
                     return Ok(None);
                 }
-                tokio::time::sleep(DRAIN_TICK).await;
+                match residual {
+                    // Drive the residual poll watcher concurrently with
+                    // the native drain tick: whichever produces first
+                    // wins. The watcher owns its own `poll_interval`
+                    // cadence internally, so cancelling its future on a
+                    // drain tick only drops an idle sleep (its watermark
+                    // map is persisted), never a pending event.
+                    Some(r) => {
+                        tokio::select! {
+                            () = tokio::time::sleep(DRAIN_TICK) => {}
+                            ev = r.next_event() => {
+                                if let Some(e) = ev? {
+                                    return Ok(Some(e));
+                                }
+                                // Residual closed: fall through; the
+                                // `shared.is_closed` check above ends the
+                                // loop on the next iteration.
+                            }
+                        }
+                    }
+                    None => tokio::time::sleep(DRAIN_TICK).await,
+                }
             },
             DirInner::Poll(w) => w.next_event().await,
         }
@@ -442,7 +494,14 @@ impl DirInner {
 
     fn shutdown(&self) {
         match self {
-            DirInner::Native { shared, .. } => shared.closed.store(true, Ordering::SeqCst),
+            DirInner::Native {
+                shared, residual, ..
+            } => {
+                shared.closed.store(true, Ordering::SeqCst);
+                if let Some(r) = residual {
+                    r.shutdown();
+                }
+            }
             DirInner::Poll(w) => w.shutdown(),
         }
     }
@@ -516,16 +575,18 @@ pub struct WindowsUsbTransferMonitor {
 
 impl Default for WindowsUsbTransferMonitor {
     fn default() -> Self {
-        Self::new(DEFAULT_MAX_FILE_BYTES)
+        Self::new(FileWatchOptions::default())
     }
 }
 
 impl WindowsUsbTransferMonitor {
-    /// Build a monitor, attempting the WMI arrival subscription. Files
-    /// copied onto a removable drive are read up to `max_file_bytes` so
-    /// the operator's per-event ceiling is honoured on this channel too.
+    /// Build a monitor, attempting the WMI arrival subscription.
+    /// `opts.max_file_bytes` bounds how much of each file copied onto a
+    /// removable drive is read; `opts.poll_interval` sets the cadence of the
+    /// portable poll fallback, so the operator's tuning is honoured on this
+    /// channel regardless of whether WMI initialises.
     #[must_use]
-    pub fn new(max_file_bytes: usize) -> Self {
+    pub fn new(opts: FileWatchOptions) -> Self {
         let shared = ChannelBuffer::new();
         let arrivals = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let arrivals_w = Arc::clone(&arrivals);
@@ -541,7 +602,8 @@ impl WindowsUsbTransferMonitor {
             worker: Mutex::new(worker),
             last_seen_arrivals: Mutex::new(ARRIVALS_UNSCANNED),
             watcher: SensitiveDirWatcher::new(DlpChannel::UsbTransfer, Vec::new())
-                .with_max_file_bytes(max_file_bytes),
+                .with_max_file_bytes(opts.max_file_bytes)
+                .with_poll_interval(opts.poll_interval),
             native,
         }
     }
@@ -746,17 +808,18 @@ pub struct WindowsPrintMonitor {
 
 impl Default for WindowsPrintMonitor {
     fn default() -> Self {
-        Self::new(None, DEFAULT_MAX_FILE_BYTES)
+        Self::new(None, FileWatchOptions::default())
     }
 }
 
 impl WindowsPrintMonitor {
     /// Watch the print spooler. `spool_dir` overrides the fallback
     /// directory (default `%SystemRoot%\System32\spool\PRINTERS`); the
-    /// fallback reads at most `max_file_bytes` of each spooled job so the
-    /// operator's per-event ceiling is honoured on the print channel too.
+    /// fallback reads at most `opts.max_file_bytes` of each spooled job and
+    /// polls at `opts.poll_interval`, so the operator's tuning is honoured on
+    /// the print channel regardless of whether the spooler hook initialises.
     #[must_use]
-    pub fn new(spool_dir: Option<PathBuf>, max_file_bytes: usize) -> Self {
+    pub fn new(spool_dir: Option<PathBuf>, opts: FileWatchOptions) -> Self {
         let shared = ChannelBuffer::new();
         let shared_w = Arc::clone(&shared);
         let worker = std::thread::Builder::new()
@@ -767,15 +830,7 @@ impl WindowsPrintMonitor {
             None
         } else {
             let dir = spool_dir.unwrap_or_else(default_spool_dir);
-            Some(DirInner::start(
-                DlpChannel::Print,
-                vec![dir],
-                false,
-                FileWatchOptions {
-                    max_file_bytes,
-                    ..FileWatchOptions::default()
-                },
-            ))
+            Some(DirInner::start(DlpChannel::Print, vec![dir], false, opts))
         };
         Self {
             shared,
@@ -904,6 +959,11 @@ pub struct WindowsClipboardMonitor {
     /// quit message on shutdown.
     hwnd: Mutex<isize>,
     fallback_closed: Arc<AtomicBool>,
+    /// Last selection hash emitted by the PowerShell fallback path, so a
+    /// clipboard left unchanged between polls is reported once rather
+    /// than re-emitted every tick. Mirrors the native listener's
+    /// `ClipboardWindowState::last_hash` dedup.
+    fallback_last_hash: Mutex<Option<u64>>,
     native: bool,
 }
 
@@ -938,6 +998,7 @@ impl WindowsClipboardMonitor {
             worker: Mutex::new(worker),
             hwnd: Mutex::new(hwnd),
             fallback_closed: Arc::new(AtomicBool::new(false)),
+            fallback_last_hash: Mutex::new(None),
             native,
         }
     }
@@ -1003,11 +1064,30 @@ impl ChannelInterceptor for WindowsClipboardMonitor {
                     .await
                     .map_err(|e| ChannelError::Init(format!("Get-Clipboard task panicked: {e}")))?;
                 if let Some(bytes) = bytes {
-                    return Ok(Some(ContentEvent {
-                        channel: DlpChannel::Clipboard,
-                        content: bytes,
-                        metadata: clipboard_metadata(),
-                    }));
+                    // Dedup by content hash: `Get-Clipboard` returns the
+                    // current selection on every poll, so without this an
+                    // unchanged clipboard would re-emit each tick. Skip
+                    // empty reads and unchanged selections, matching the
+                    // native listener-chain path.
+                    if !bytes.is_empty() {
+                        let hash = content_hash(&bytes);
+                        let changed = {
+                            let mut last = lock(&self.fallback_last_hash);
+                            if *last == Some(hash) {
+                                false
+                            } else {
+                                *last = Some(hash);
+                                true
+                            }
+                        };
+                        if changed {
+                            return Ok(Some(ContentEvent {
+                                channel: DlpChannel::Clipboard,
+                                content: bytes,
+                                metadata: clipboard_metadata(),
+                            }));
+                        }
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(700)).await;
             }

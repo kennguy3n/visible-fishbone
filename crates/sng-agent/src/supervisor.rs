@@ -492,8 +492,12 @@ fn push_native_interceptors(
     interceptors: &mut Vec<Arc<dyn ChannelInterceptor>>,
 ) {
     use sng_pal::dlp::{
-        LinuxClipboardMonitor, LinuxPrintMonitor, LinuxRemovableStorageMonitor,
+        FileWatchOptions, LinuxClipboardMonitor, LinuxPrintMonitor, LinuxRemovableStorageMonitor,
         LinuxUsbTransferMonitor,
+    };
+    let opts = FileWatchOptions {
+        max_file_bytes: cfg.max_file_bytes,
+        poll_interval: cfg.poll_interval,
     };
     if cfg.clipboard {
         interceptors.push(Arc::new(LinuxClipboardMonitor::new()));
@@ -501,13 +505,13 @@ fn push_native_interceptors(
     if cfg.usb {
         interceptors.push(Arc::new(LinuxUsbTransferMonitor::new(
             LinuxRemovableStorageMonitor::default(),
-            cfg.max_file_bytes,
+            opts,
         )));
     }
     if cfg.print {
         interceptors.push(Arc::new(LinuxPrintMonitor::new(
             cfg.print_spool_dir.clone(),
-            cfg.max_file_bytes,
+            opts,
         )));
     }
 }
@@ -517,17 +521,23 @@ fn push_native_interceptors(
     cfg: &crate::config::DlpConfig,
     interceptors: &mut Vec<Arc<dyn ChannelInterceptor>>,
 ) {
-    use sng_pal::dlp::{MacClipboardMonitor, MacPrintMonitor, MacUsbTransferMonitor};
+    use sng_pal::dlp::{
+        FileWatchOptions, MacClipboardMonitor, MacPrintMonitor, MacUsbTransferMonitor,
+    };
+    let opts = FileWatchOptions {
+        max_file_bytes: cfg.max_file_bytes,
+        poll_interval: cfg.poll_interval,
+    };
     if cfg.clipboard {
         interceptors.push(Arc::new(MacClipboardMonitor::new()));
     }
     if cfg.usb {
-        interceptors.push(Arc::new(MacUsbTransferMonitor::new(cfg.max_file_bytes)));
+        interceptors.push(Arc::new(MacUsbTransferMonitor::new(opts)));
     }
     if cfg.print {
         interceptors.push(Arc::new(MacPrintMonitor::new(
             cfg.print_spool_dir.clone(),
-            cfg.max_file_bytes,
+            opts,
         )));
     }
 }
@@ -537,17 +547,23 @@ fn push_native_interceptors(
     cfg: &crate::config::DlpConfig,
     interceptors: &mut Vec<Arc<dyn ChannelInterceptor>>,
 ) {
-    use sng_pal::dlp::{WindowsClipboardMonitor, WindowsPrintMonitor, WindowsUsbTransferMonitor};
+    use sng_pal::dlp::{
+        FileWatchOptions, WindowsClipboardMonitor, WindowsPrintMonitor, WindowsUsbTransferMonitor,
+    };
+    let opts = FileWatchOptions {
+        max_file_bytes: cfg.max_file_bytes,
+        poll_interval: cfg.poll_interval,
+    };
     if cfg.clipboard {
         interceptors.push(Arc::new(WindowsClipboardMonitor::new()));
     }
     if cfg.usb {
-        interceptors.push(Arc::new(WindowsUsbTransferMonitor::new(cfg.max_file_bytes)));
+        interceptors.push(Arc::new(WindowsUsbTransferMonitor::new(opts)));
     }
     if cfg.print {
         interceptors.push(Arc::new(WindowsPrintMonitor::new(
             cfg.print_spool_dir.clone(),
-            cfg.max_file_bytes,
+            opts,
         )));
     }
 }

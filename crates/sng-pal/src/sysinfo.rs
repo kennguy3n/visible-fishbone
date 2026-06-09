@@ -234,7 +234,7 @@ mod macos {
                 mib.as_mut_ptr(),
                 u32::try_from(mib.len()).unwrap_or(2),
                 std::ptr::null_mut(),
-                &mut len,
+                &raw mut len,
                 std::ptr::null_mut(),
                 0,
             )
@@ -253,7 +253,7 @@ mod macos {
                 mib.as_mut_ptr(),
                 u32::try_from(mib.len()).unwrap_or(2),
                 buf.as_mut_ptr().cast::<libc::c_void>(),
-                &mut len,
+                &raw mut len,
                 std::ptr::null_mut(),
                 0,
             )
