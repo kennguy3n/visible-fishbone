@@ -424,7 +424,19 @@ func run() error {
 		logger.Info("sng-control: compliance evidence scheduler registered (runs on leader only)")
 	}
 
-	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher)
+	// Shadow-IT auto-discovery: the telemetry consumer feeds every
+	// processed DNS/HTTP event's hostname to this discoverer, which
+	// turns the SWG exhaust into a per-tenant inventory of SaaS apps
+	// in use (including unsanctioned ones with no connector). It
+	// persists into the same casb_discovered_apps table the operator
+	// portal renders. The Run loop flushes the windowed in-memory
+	// aggregate on a ticker; it is cancelled with rootCtx and does a
+	// final flush on shutdown.
+	shadowDiscoverer := casb.NewShadowITDiscoverer(
+		postgres.NewStoreWithPool(pool).NewCASBDiscoveredAppRepository(), logger)
+	go shadowDiscoverer.Run(rootCtx, 0)
+
+	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
@@ -1116,6 +1128,26 @@ func buildRouter(
 		repository.CASBConnectorGoogle:     casbconnectors.NewGoogle(casbHTTP, casbUA),
 		repository.CASBConnectorSlack:      casbconnectors.NewSlack(casbHTTP, casbUA),
 		repository.CASBConnectorSalesforce: casbconnectors.NewSalesforce(casbHTTP, casbUA),
+
+		// WS4 inline-CASB expansion: 16 additional SaaS / cloud-console
+		// connectors. The plugins are stateless, so a single instance
+		// per type is shared across all tenants (per-call config+secret).
+		repository.CASBConnectorBox:         casbconnectors.NewBox(casbHTTP, casbUA),
+		repository.CASBConnectorDropbox:     casbconnectors.NewDropbox(casbHTTP, casbUA),
+		repository.CASBConnectorGitHub:      casbconnectors.NewGitHub(casbHTTP, casbUA),
+		repository.CASBConnectorGitLab:      casbconnectors.NewGitLab(casbHTTP, casbUA),
+		repository.CASBConnectorJira:        casbconnectors.NewJira(casbHTTP, casbUA),
+		repository.CASBConnectorConfluence:  casbconnectors.NewConfluence(casbHTTP, casbUA),
+		repository.CASBConnectorServiceNow:  casbconnectors.NewServiceNow(casbHTTP, casbUA),
+		repository.CASBConnectorZendesk:     casbconnectors.NewZendesk(casbHTTP, casbUA),
+		repository.CASBConnectorHubSpot:     casbconnectors.NewHubSpot(casbHTTP, casbUA),
+		repository.CASBConnectorZoom:        casbconnectors.NewZoom(casbHTTP, casbUA),
+		repository.CASBConnectorTeams:       casbconnectors.NewTeams(casbHTTP, casbUA),
+		repository.CASBConnectorAWSConsole:  casbconnectors.NewAWSConsole(casbHTTP, casbUA),
+		repository.CASBConnectorGCPConsole:  casbconnectors.NewGCPConsole(casbHTTP, casbUA),
+		repository.CASBConnectorAzurePortal: casbconnectors.NewAzurePortal(casbHTTP, casbUA),
+		repository.CASBConnectorOkta:        casbconnectors.NewOkta(casbHTTP, casbUA),
+		repository.CASBConnectorWorkday:     casbconnectors.NewWorkday(casbHTTP, casbUA),
 	}
 	casbSvc := casb.New(
 		casbConnectorRepo, casbAppRepo, casbPostureRepo, auditRepo,
@@ -1949,6 +1981,7 @@ func startTelemetry(
 	logger *slog.Logger,
 	js jetstream.JetStream,
 	pub *sngnats.Publisher,
+	shadowObserver telemetry.ShadowITObserver,
 ) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), error) {
 	var hot telemetry.HotWriter
 	var cold telemetry.ColdWriter
@@ -2057,6 +2090,9 @@ func startTelemetry(
 		return nil, nil, nil, fmt.Errorf("telemetry service: %w", err)
 	}
 	svc.WithDLQ(pub)
+	if shadowObserver != nil {
+		svc.WithShadowITObserver(shadowObserver)
+	}
 	if err := svc.Start(ctx); err != nil {
 		if hotStop != nil {
 			_ = hotStop(ctx)

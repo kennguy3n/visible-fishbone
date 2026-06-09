@@ -1347,13 +1347,42 @@ const (
 	CASBConnectorGoogle     CASBConnectorType = "google"
 	CASBConnectorSlack      CASBConnectorType = "slack"
 	CASBConnectorSalesforce CASBConnectorType = "salesforce"
+
+	// WS4 inline-CASB expansion: 16 additional SaaS connectors.
+	// Values are stable wire identifiers persisted in
+	// casb_connectors.type and referenced by the plugin registry
+	// (cmd/sng-control/main.go); never rename an existing value.
+	CASBConnectorBox         CASBConnectorType = "box"
+	CASBConnectorDropbox     CASBConnectorType = "dropbox"
+	CASBConnectorGitHub      CASBConnectorType = "github"
+	CASBConnectorGitLab      CASBConnectorType = "gitlab"
+	CASBConnectorJira        CASBConnectorType = "jira"
+	CASBConnectorConfluence  CASBConnectorType = "confluence"
+	CASBConnectorServiceNow  CASBConnectorType = "servicenow"
+	CASBConnectorZendesk     CASBConnectorType = "zendesk"
+	CASBConnectorHubSpot     CASBConnectorType = "hubspot"
+	CASBConnectorZoom        CASBConnectorType = "zoom"
+	CASBConnectorTeams       CASBConnectorType = "teams"
+	CASBConnectorAWSConsole  CASBConnectorType = "aws_console"
+	CASBConnectorGCPConsole  CASBConnectorType = "gcp_console"
+	CASBConnectorAzurePortal CASBConnectorType = "azure_portal"
+	CASBConnectorOkta        CASBConnectorType = "okta"
+	CASBConnectorWorkday     CASBConnectorType = "workday"
 )
 
 // IsValid reports whether t is a known CASB connector type.
 func (t CASBConnectorType) IsValid() bool {
 	switch t {
 	case CASBConnectorM365, CASBConnectorGoogle,
-		CASBConnectorSlack, CASBConnectorSalesforce:
+		CASBConnectorSlack, CASBConnectorSalesforce,
+		CASBConnectorBox, CASBConnectorDropbox,
+		CASBConnectorGitHub, CASBConnectorGitLab,
+		CASBConnectorJira, CASBConnectorConfluence,
+		CASBConnectorServiceNow, CASBConnectorZendesk,
+		CASBConnectorHubSpot, CASBConnectorZoom,
+		CASBConnectorTeams, CASBConnectorAWSConsole,
+		CASBConnectorGCPConsole, CASBConnectorAzurePortal,
+		CASBConnectorOkta, CASBConnectorWorkday:
 		return true
 	}
 	return false
