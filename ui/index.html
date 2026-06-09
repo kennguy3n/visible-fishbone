@@ -11,6 +11,29 @@
       default is served and the app falls back to Vite env vars / the dev proxy.
     -->
     <script src="/config.js"></script>
+    <!--
+      Apply the saved theme (or the OS preference for first-run / "System"
+      users) before first paint so there is no light-on-dark flash. Mirrors the
+      resolution logic in src/lib/theme.ts; keep the storage key in sync.
+    -->
+    <script>
+      (function () {
+        try {
+          var choice = localStorage.getItem("sng-theme") || "system";
+          var dark =
+            choice === "dark" ||
+            (choice === "system" &&
+              window.matchMedia &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.setAttribute(
+            "data-theme",
+            dark ? "dark" : "light",
+          );
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "light");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

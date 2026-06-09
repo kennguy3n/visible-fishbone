@@ -10,7 +10,12 @@ import { AuthProvider } from "@/auth/auth-context";
 import { LocaleProvider } from "@/lib/i18n/locale-context";
 import { ToastProvider } from "@/components/Toast";
 import { router } from "@/router";
+import { initTheme } from "@/lib/theme";
 import "@/styles.css";
+
+// Re-apply the persisted theme and wire the System-mode OS listener. The inline
+// script in index.html already stamped data-theme before first paint.
+initTheme();
 
 // The orval-generated mutation hooks don't invalidate query caches on success
 // (unlike the hand-written hooks in src/api/manual/hooks.ts). Without a global
