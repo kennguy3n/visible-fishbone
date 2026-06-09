@@ -279,17 +279,20 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           # Mirror crates/sng-ebpf/bpf/rust-toolchain.toml so rustup does
-          # not have to fetch components mid-build when it enters that dir.
-          components: rust-src, rustc-dev, llvm-tools-preview
+          # not have to fetch components mid-build when it enters that dir,
+          # plus clippy for the `cargo +nightly clippy` step below.
+          components: rust-src, rustc-dev, llvm-tools-preview, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-${{ runner.os }}
       # Lint + test the feature-gated, Linux-only loader that the
-      # default workspace jobs skip.
+      # default workspace jobs skip. Pin the stable toolchain explicitly
+      # (the nightly install above is the active default, but the loader
+      # builds on the workspace-pinned stable like the other rust jobs).
       - name: cargo clippy -p sng-ebpf --features xdp
-        run: cargo clippy -p sng-ebpf --features xdp --all-targets -- -D warnings
+        run: cargo +${{ env.RUST_TOOLCHAIN }} clippy -p sng-ebpf --features xdp --all-targets -- -D warnings
       - name: cargo test -p sng-ebpf --features xdp
-        run: cargo test -p sng-ebpf --features xdp
+        run: cargo +${{ env.RUST_TOOLCHAIN }} test -p sng-ebpf --features xdp
       # Type-check the excluded kernel BPF object (no link step; the
       # full bpf-linker link runs in the appliance-image pipeline).
       - name: cargo +nightly check (bpf crate)
