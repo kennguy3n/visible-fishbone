@@ -1069,6 +1069,113 @@ func TestService_ClickHouseRowLimiter_NaksOverBudget(t *testing.T) {
 	}
 }
 
+// TestService_RowLimitExhaustionRoutedToDLQ proves the row-write cap
+// honours the same no-silent-loss contract as the event limiter: an
+// envelope row-limited on every delivery attempt is routed to the DLQ
+// (with the ClickHouse row-write cause) once its JetStream delivery
+// budget is exhausted — never silently dropped. It also pins the
+// RowRateLimited metric semantics: the counter must include the
+// terminal (DLQ'd) rejection, not just the retried (Nak'd) ones, so an
+// operator watching it does not undercount the tenants most over
+// budget. The bucket holds a single token, so exactly one envelope is
+// written and the other is rejected on all hotPathMaxDeliver (5)
+// deliveries: RowRateLimited must therefore be >= 5 (pre-fix it was 4,
+// because the terminal rejection on the DLQ branch was not counted).
+func TestService_RowLimitExhaustionRoutedToDLQ(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	// Burst=1, negligible refill: the first envelope dispatched
+	// consumes the single token and is written; every delivery of
+	// the second is row-limited until it exhausts MaxDeliver.
+	rl, err := metering.NewRowLimit(0.001, 1)
+	if err != nil {
+		t.Fatalf("NewRowLimit: %v", err)
+	}
+	rowLimiter := metering.NewClickHouseRowLimiter(metering.StaticRowLimitResolver{Limit: rl})
+
+	svc, err := telemetry.New(js, cfg,
+		telemetry.Config{Durable: "tlm-rowrl-dlq", DedupRingSize: 16},
+		hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dlq := &recordingDLQ{}
+	svc.WithDLQ(dlq)
+	svc.
+		WithClickHouseRowLimiter(rowLimiter).
+		WithNakBackoff(200 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	tenant := uuid.New()
+	for i := 0; i < 2; i++ {
+		env := schema.Envelope{
+			SchemaVersion: schema.SchemaVersion, EventID: uuid.New(),
+			TenantID: tenant, DeviceID: uuid.New(),
+			Timestamp:  time.Now().UTC(),
+			EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
+			Payload: newPayload(t),
+		}
+		if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
+			t.Fatalf("publish[%d]: %v", i, err)
+		}
+	}
+
+	// 5 attempts * (Nak 200ms + JS backoff) ≈ a few seconds; allow
+	// 90s of headroom for CI jitter. Exit as soon as DLQPublished hits 1.
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		if svc.MetricsSnapshot().DLQPublished >= 1 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	_ = svc.Stop(stopCtx)
+
+	calls := dlq.Snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("DLQ publisher received %d calls, want 1 (row-limit exhaustion must route to DLQ)", len(calls))
+	}
+	call := calls[0]
+	if call.delivery < uint64(5) {
+		t.Errorf("DLQ delivery count = %d, want >= 5 (terminal attempt only)", call.delivery)
+	}
+	if !strings.HasPrefix(call.cause, "rate-limit exhausted:") {
+		t.Errorf("DLQ cause = %q, want prefix \"rate-limit exhausted:\" (operator dashboard contract)", call.cause)
+	}
+	if !strings.Contains(call.cause, "clickhouse row-write rate limit exceeded") {
+		t.Errorf("DLQ cause = %q, want the ClickHouse row-write sentinel (distinct from the event-limit cause)", call.cause)
+	}
+
+	m := svc.MetricsSnapshot()
+	if m.DLQPublished != 1 {
+		t.Errorf("expected DLQPublished = 1, got %d", m.DLQPublished)
+	}
+	if m.DLQPublishFail != 0 {
+		t.Errorf("expected DLQPublishFail = 0 when DLQ accepts, got %d", m.DLQPublishFail)
+	}
+	if hits := len(hot.Snapshot()); hits > 1 {
+		t.Errorf("hot writer hits = %d, want <= 1 (only the burst-token envelope is written)", hits)
+	}
+	// The key assertion: the terminal rejection that produced the DLQ
+	// entry is counted too. With MaxDeliver=5 the over-budget envelope
+	// is rejected on all 5 deliveries, so RowRateLimited must be >= 5.
+	if m.RowRateLimited < 5 {
+		t.Errorf("RowRateLimited = %d, want >= 5 (every rejection including the terminal DLQ'd one)", m.RowRateLimited)
+	}
+}
+
 // TestService_ClickHouseRowLimiter_NilIsNoOp confirms an unset row
 // limiter does not shed: every envelope reaches the hot writer.
 func TestService_ClickHouseRowLimiter_NilIsNoOp(t *testing.T) {

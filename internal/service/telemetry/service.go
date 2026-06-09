@@ -125,7 +125,7 @@ type Metrics struct {
 	Acked          atomic.Uint64
 	Nacked         atomic.Uint64
 	Sampled        atomic.Uint64 // events dropped by adaptive sampling (Ack'd, not written)
-	RowRateLimited atomic.Uint64 // events deferred by the ClickHouse row-write limiter (Nak'd for retry)
+	RowRateLimited atomic.Uint64 // events rejected by the ClickHouse row-write limiter (every rejection: Nak'd for retry or DLQ'd on delivery exhaustion)
 	DLQPublished   atomic.Uint64 // bad payloads successfully routed to DLQ
 	DLQPublishFail atomic.Uint64 // DLQ publish itself failed (data preserved by Nak retry)
 }
@@ -805,6 +805,15 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 	// ClickHouse). Kept events stay full fidelity; this is
 	// back-pressure, not sampling.
 	if w.rowLimiter != nil && !w.rowLimiter.AllowN(ctx, env.TenantID, 1) {
+		// Count every row-limit rejection, before the
+		// retry/DLQ split, mirroring HotWriteFails below: the
+		// counter measures the limiter's impact (rows it
+		// rejected), so a row rejected on its final delivery
+		// and routed to the DLQ must count just like a row
+		// Nak'd for retry — otherwise an operator watching
+		// RowRateLimited undercounts exactly the tenants that
+		// are most over budget (rejected on every attempt).
+		s.metrics.RowRateLimited.Add(1)
 		if s.deliveryExhausted(msg) {
 			s.routeRateLimitExhaustionToDLQ(msg, ErrRowWriteLimited)
 			if termErr := msg.Term(); termErr != nil {
@@ -821,7 +830,6 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 		}
 		_ = msg.NakWithDelay(delay)
 		s.metrics.Nacked.Add(1)
-		s.metrics.RowRateLimited.Add(1)
 		s.logger.Debug("telemetry: clickhouse row-write rate limit",
 			slog.String("tenant_id", env.TenantID.String()),
 			slog.String("event_id", env.EventID.String()))
