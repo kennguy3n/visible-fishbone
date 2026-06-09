@@ -364,7 +364,18 @@ func (d *ShadowITDiscoverer) ObserveHost(tenantID, deviceID uuid.UUID, host stri
 	if deviceID != uuid.Nil && !agg.saturated {
 		if _, seen := agg.devices[deviceID]; !seen {
 			if len(agg.devices) >= maxDevicesPerApp {
+				// Distinct-device cap reached for this (tenant, app)
+				// within the window; the flushed active_device_count
+				// saturates at maxDevicesPerApp. Logged once per app
+				// per window (this branch runs only on the transition)
+				// so operators can tell a true cap from an exact count
+				// — implausible at SME scale, so it usually signals a
+				// misclassified high-volume host rather than real usage.
 				agg.saturated = true
+				d.logger.Warn("casb: shadow-it device count saturated",
+					slog.String("tenant_id", tenantID.String()),
+					slog.String("app", app.Name),
+					slog.Int("cap", maxDevicesPerApp))
 			} else {
 				agg.devices[deviceID] = struct{}{}
 			}
