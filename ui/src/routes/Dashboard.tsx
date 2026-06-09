@@ -1,5 +1,7 @@
 import { useMemo } from "react";
 import { Link } from "@tanstack/react-router";
+import { Icon } from "@/components/Icon";
+import { CHART, CHART_TOOLTIP } from "@/lib/chart-theme";
 import {
   Area,
   AreaChart,
@@ -249,7 +251,7 @@ export function Dashboard() {
       {isEmptyTenant && (
         <div className="banner">
           <div className="score-ring" style={{ ["--ring-size" as string]: "56px" }}>
-            <span style={{ fontSize: 28 }}>🚀</span>
+            <Icon name="rocket" size={26} />
           </div>
           <div className="banner__body">
             <div className="banner__title">Let's get you protected</div>
@@ -389,7 +391,25 @@ export function Dashboard() {
           </div>
           <div style={{ marginTop: 12 }}>
             <span className={`trend trend--${trend}`}>
-              {trend === "up" ? "▲" : trend === "down" ? "▼" : "▬"}{" "}
+              <svg
+                width="11"
+                height="11"
+                viewBox="0 0 12 12"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                {trend === "up" ? (
+                  <path d="M2 9l4-5 4 5" />
+                ) : trend === "down" ? (
+                  <path d="M2 3l4 5 4-5" />
+                ) : (
+                  <path d="M2 6h8" />
+                )}
+              </svg>{" "}
               {trend === "up"
                 ? "Usage trending up"
                 : trend === "down"
@@ -498,51 +518,45 @@ export function Dashboard() {
               <AreaChart data={buckets} margin={{ top: 8, right: 12, bottom: 0, left: -16 }}>
                 <defs>
                   <linearGradient id="gInfo" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.6} />
-                    <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.05} />
+                    <stop offset="0%" stopColor={CHART.brand} stopOpacity={0.6} />
+                    <stop offset="100%" stopColor={CHART.brand} stopOpacity={0.05} />
                   </linearGradient>
                   <linearGradient id="gWarn" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#fbbf24" stopOpacity={0.6} />
-                    <stop offset="100%" stopColor="#fbbf24" stopOpacity={0.05} />
+                    <stop offset="0%" stopColor={CHART.warn} stopOpacity={0.6} />
+                    <stop offset="100%" stopColor={CHART.warn} stopOpacity={0.05} />
                   </linearGradient>
                   <linearGradient id="gCrit" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#f87171" stopOpacity={0.6} />
-                    <stop offset="100%" stopColor="#f87171" stopOpacity={0.05} />
+                    <stop offset="0%" stopColor={CHART.danger} stopOpacity={0.6} />
+                    <stop offset="100%" stopColor={CHART.danger} stopOpacity={0.05} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid stroke="#243352" vertical={false} />
+                <CartesianGrid stroke={CHART.border} vertical={false} />
                 <XAxis
                   dataKey="label"
-                  tick={{ fill: "#9fb0cc", fontSize: 10 }}
+                  tick={{ fill: CHART.axis, fontSize: 10 }}
                   interval={3}
                 />
-                <YAxis allowDecimals={false} tick={{ fill: "#9fb0cc", fontSize: 11 }} />
-                <Tooltip
-                  contentStyle={{
-                    background: "#111a2e",
-                    border: "1px solid #243352",
-                    borderRadius: 8,
-                  }}
-                />
+                <YAxis allowDecimals={false} tick={{ fill: CHART.axis, fontSize: 11 }} />
+                <Tooltip contentStyle={CHART_TOOLTIP} />
                 <Area
                   type="monotone"
                   dataKey="critical"
                   stackId="1"
-                  stroke="#f87171"
+                  stroke={CHART.danger}
                   fill="url(#gCrit)"
                 />
                 <Area
                   type="monotone"
                   dataKey="warning"
                   stackId="1"
-                  stroke="#fbbf24"
+                  stroke={CHART.warn}
                   fill="url(#gWarn)"
                 />
                 <Area
                   type="monotone"
                   dataKey="info"
                   stackId="1"
-                  stroke="#3b82f6"
+                  stroke={CHART.brand}
                   fill="url(#gInfo)"
                 />
               </AreaChart>
