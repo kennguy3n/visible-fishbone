@@ -44,11 +44,14 @@ func runSquash(stdout, stderr *os.File, args []string) error {
 		return err
 	}
 
-	ups, downs, maxVersion, err := collectSquashFiles(migrate.SourceFS())
+	ups, downs, maxVersion, err := collectSquashFiles(migrate.SourceFS(), flags.through)
 	if err != nil {
 		return err
 	}
 	if len(ups) == 0 {
+		if flags.through > 0 {
+			return fmt.Errorf("squash: no migrations found at or below version %d to consolidate", flags.through)
+		}
 		return fmt.Errorf("squash: no migrations found to consolidate")
 	}
 
@@ -76,6 +79,11 @@ func runSquash(stdout, stderr *os.File, args []string) error {
 		"sng-migrate: fresh deployments apply this baseline and record schema version %d; "+
 			"existing deployments keep the individual files (see docs/migration-consolidation.md)\n",
 		maxVersion)
+	if flags.through > 0 {
+		_, _ = fmt.Fprintf(stdout,
+			"sng-migrate: migrations after %03d are NOT consolidated and apply on top of the baseline\n",
+			maxVersion)
+	}
 	return nil
 }
 
@@ -83,7 +91,12 @@ func runSquash(stdout, stderr *os.File, args []string) error {
 type squashFlags struct {
 	outDir string
 	force  bool
-	stderr *os.File
+	// through, when non-zero, caps the consolidation at this schema
+	// version: only migrations with version <= through are folded into
+	// the baseline, and migrations after it stay as individual files
+	// applied on top. Zero consolidates every embedded migration.
+	through uint
+	stderr  *os.File
 }
 
 func newSquashFlags(stderr *os.File) *squashFlags {
@@ -106,6 +119,22 @@ func (f *squashFlags) parse(args []string) error {
 			f.outDir = strings.TrimPrefix(a, "--out=")
 		case strings.HasPrefix(a, "-out="):
 			f.outDir = strings.TrimPrefix(a, "-out=")
+		case a == "--through" || a == "-through":
+			if i+1 >= len(args) {
+				return newUsageError("squash: --through requires a version argument")
+			}
+			i++
+			if err := f.setThrough(args[i]); err != nil {
+				return err
+			}
+		case strings.HasPrefix(a, "--through="):
+			if err := f.setThrough(strings.TrimPrefix(a, "--through=")); err != nil {
+				return err
+			}
+		case strings.HasPrefix(a, "-through="):
+			if err := f.setThrough(strings.TrimPrefix(a, "-through=")); err != nil {
+				return err
+			}
 		default:
 			return newUsageError("squash: unexpected argument %q", a)
 		}
@@ -116,12 +145,29 @@ func (f *squashFlags) parse(args []string) error {
 	return nil
 }
 
+// setThrough parses and validates the --through version argument.
+func (f *squashFlags) setThrough(s string) error {
+	v, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return newUsageError("squash: --through expects a positive integer version, got %q", s)
+	}
+	if v == 0 {
+		return newUsageError("squash: --through version must be >= 1")
+	}
+	f.through = uint(v)
+	return nil
+}
+
 // collectSquashFiles reads every embedded migration, returning the up
 // files sorted ascending, the down files sorted ascending (the caller
 // reverses them for the baseline down), and the highest version seen.
 // It errors if the same (version, direction) appears twice so a
 // duplicate or mis-numbered file cannot silently drop SQL.
-func collectSquashFiles(fsys fs.FS) (ups, downs []squashFile, maxVersion uint, err error) {
+//
+// When through is non-zero, only migrations with version <= through
+// are consolidated; files after the cut are left for the deployment
+// to apply on top of the baseline (see docs/migration-consolidation.md).
+func collectSquashFiles(fsys fs.FS, through uint) (ups, downs []squashFile, maxVersion uint, err error) {
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("squash: read embedded migrations: %w", err)
@@ -153,6 +199,11 @@ func collectSquashFiles(fsys fs.FS) (ups, downs []squashFile, maxVersion uint, e
 			return nil, nil, 0, fmt.Errorf("squash: parse version from %q: %w", e.Name(), perr)
 		}
 		v := uint(v64)
+		// Past the cut line: this migration stays an individual file
+		// applied on top of the baseline, so it is not consolidated.
+		if through > 0 && v > through {
+			continue
+		}
 		b, rerr := fs.ReadFile(fsys, e.Name())
 		if rerr != nil {
 			return nil, nil, 0, fmt.Errorf("squash: read %q: %w", e.Name(), rerr)

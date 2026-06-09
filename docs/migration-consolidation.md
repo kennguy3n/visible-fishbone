@@ -77,18 +77,29 @@ every `down` in descending order into its reverse, and writes the
 pair to an output directory:
 
 ```sh
-# Generates migrations/baseline/041_consolidated_baseline.{up,down}.sql
-sng-migrate squash
+# Consolidate 001..041 into
+# migrations/baseline/041_consolidated_baseline.{up,down}.sql and leave
+# 042+ as individual files applied on top of the baseline.
+sng-migrate squash --through 41
 
 # Custom location / overwrite an existing baseline
-sng-migrate squash --out deploy/baseline --force
+sng-migrate squash --through 41 --out deploy/baseline --force
 ```
+
+`--through V` is the **cut line**: only migrations `001..V` are folded
+into the baseline; everything after `V` stays an individual file
+applied on top. `41` is the current cut. Omitting `--through`
+consolidates *every* embedded migration — only correct at a fresh
+re-baseline when no post-cut files exist yet, so day-to-day use always
+passes `--through`. The committed baseline under `migrations/baseline/`
+is exactly `--through 41`, and CI (`migration-baseline`) regenerates it
+on every PR to guarantee it never drifts from the individual files.
 
 The generated baseline:
 
-- is named with the **highest** consolidated version
-  (`041_consolidated_baseline.*`) so that applying it records schema
-  version `41`, and migrations `042+` apply on top unchanged;
+- is named with the **cut** version (`041_consolidated_baseline.*`) so
+  that applying it records schema version `41`, and migrations `042+`
+  apply on top unchanged;
 - carries a `DO NOT EDIT BY HAND` header and a per-source banner
   (`-- NNN_name.up.sql`) before each segment so the provenance of
   every statement is auditable;
@@ -109,9 +120,11 @@ containing the baseline pair plus any post-baseline files (`042+`);
 an existing deployment keeps its source at the full `migrations/`
 directory. Both converge on identical schema and apply future
 migrations the same way. The baseline must be **regenerated**
-(`sng-migrate squash --force`) whenever the consolidation cut line
-moves forward (e.g. after a future re-baseline), and the regenerated
-file committed.
+(`sng-migrate squash --through V --force`) whenever the consolidation
+cut line moves forward (e.g. after a future re-baseline), and the
+regenerated file committed. CI fails the PR if the committed baseline
+is not what `squash --through <cut>` produces, so a stale baseline can
+never merge.
 
 ### Verifying a baseline
 
@@ -121,8 +134,12 @@ the step-by-step replay:
 1. DB A: apply `001..041` individually.
 2. DB B: apply the baseline.
 3. `pg_dump --schema-only` both and diff. The dumps must be
-   byte-identical (modulo the `schema_migrations` rows, which differ
-   by construction — A has 41 rows, B has 1).
+   byte-identical, modulo two non-schema artefacts: the
+   `schema_migrations` rows (which differ by construction — A has 41
+   rows, B has 1) and the `\restrict`/`\unrestrict` nonce tokens that
+   `pg_dump` 16+ emits afresh on every invocation. The verification was
+   run for the committed `--through 41` baseline and the two schemas
+   are identical line-for-line once those artefacts are filtered.
 
 ## Online-migration pattern (required for all future migrations)
 
@@ -131,7 +148,11 @@ hold `ACCESS EXCLUSIVE` on a hot table for more than the time of a
 catalog-only change. `sng-migrate validate` (and `sng-migrate
 --online up`) enforce this statically via `internal/migrate`'s
 validator; new files are gated while the historical baseline is
-grandfathered. The rules:
+grandfathered (the frozen `internal/migrate/lint_baseline.txt`). The
+`migration-lint` CI job runs `validate --strict` against the
+migrations a PR adds: `--strict` drops the grandfather baseline so an
+added or modified file is judged purely on its own merits (a brand-new
+migration is never on the baseline anyway). The rules:
 
 - **No `ADD COLUMN ... NOT NULL` without a `DEFAULT`.** On a
   non-empty table that rewrites every row under `ACCESS EXCLUSIVE`.
@@ -141,7 +162,22 @@ grandfathered. The rules:
   `VALIDATE CONSTRAINT`.
 - **No `CREATE INDEX` without `CONCURRENTLY`.** A plain create takes
   a `SHARE` lock blocking writes for the whole build. Use
-  `CREATE INDEX CONCURRENTLY` (outside a transaction).
+  `CREATE INDEX CONCURRENTLY`. Because `CONCURRENTLY` cannot run inside
+  a transaction block, the index must be the *only* statement in its
+  migration: the golang-migrate pgx/v5 runner sends each migration to
+  the server as a single command, so a single-statement file runs in
+  autocommit, while a multi-statement file is wrapped in one implicit
+  transaction (where the server rejects `CONCURRENTLY`). **Exemption:**
+  an index on a table *created earlier in the same migration* is not
+  flagged — that table is brand-new, empty, and invisible to other
+  sessions until the migration commits, so the build takes no
+  meaningful lock (and `CONCURRENTLY` would in fact be illegal there).
+  The validator tracks `CREATE TABLE` statements in source order to
+  recognise this case. Migrations `052`→`055` are the worked example:
+  `052` makes `audit_log.tenant_id` nullable for platform-scoped rows
+  and `055` adds the supporting partial index `CONCURRENTLY` in its own
+  single-statement migration, rather than inline in `052` where it
+  would have locked the hot `audit_log` table for a full scan.
 - **No `ALTER COLUMN ... TYPE` in place.** A type change rewrites the
   table under `ACCESS EXCLUSIVE`. Use the **shadow-column / shadow
   table** pattern instead.
