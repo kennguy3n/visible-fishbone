@@ -114,14 +114,19 @@ function materialize(row: Row): GraphRule {
 // Stable signature of the rule *content* (not array identity) plus the default
 // action, used both to detect drift from the server and to gate Apply on a
 // matching dry-run. Order matters (first-match-wins), so it is preserved.
+//
+// Empty/absent ref arrays are canonicalized to null so that a server rule that
+// omits `subject_refs` (Go `omitempty` → undefined) and the same rule after a
+// materialize round-trip (undefined → "" → []) hash identically — otherwise the
+// editor would report a phantom dirty state on load with no user edit.
 function signatureOf(rules: GraphRule[], defaultAction: string): string {
   return JSON.stringify({
     d: defaultAction,
     r: rules.map((r) => [
       r.domain ?? null,
       r.verb ?? null,
-      r.subject_refs ?? null,
-      r.predicate_refs ?? null,
+      r.subject_refs?.length ? r.subject_refs : null,
+      r.predicate_refs?.length ? r.predicate_refs : null,
       r.subjects ?? null,
       r.predicates ?? null,
       r.description ?? null,
@@ -246,7 +251,11 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
           predicate_refs: [],
         },
       };
-      next.splice(lastIdx + 1, 0, row);
+      // lastIdx < 0 means this domain has no rules yet → append at the end so
+      // the new rule sits after every existing rule (preserving global
+      // first-match-wins order) rather than being prepended at index 0.
+      if (lastIdx < 0) next.push(row);
+      else next.splice(lastIdx + 1, 0, row);
       return next;
     });
 
