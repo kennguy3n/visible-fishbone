@@ -39,10 +39,21 @@ ipnet = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true }
+# Pure-Rust X11 client for the endpoint DLP clipboard channel
+# (`dlp::linux::X11ClipboardMonitor`). Used over `RustConnection`
+# (no libxcb), with the XFIXES extension for edge-triggered
+# CLIPBOARD-ownership change notifications.
+x11rb = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # libc is needed for the few BSD syscalls that don't have a
-# higher-level wrapper on macOS (sysctl + IOKit shape probing).
+# higher-level wrapper on macOS (sysctl + IOKit shape probing) and
+# for the endpoint DLP backends (`dlp::macos`): the Pasteboard
+# (HIServices), IOKit USB-device, FSEvents file-write, and
+# EndpointSecurity bindings are declared as minimal `extern "C"`
+# framework imports against the libc-provided C types rather than a
+# heavier objc / core-foundation crate graph, keeping the macOS
+# dependency surface to the single `libc` crate it already was.
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
