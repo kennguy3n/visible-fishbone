@@ -50,12 +50,25 @@ const (
 	InlineActionDownload InlineAction = "download"
 	InlineActionShare    InlineAction = "share"
 	InlineActionDelete   InlineAction = "delete"
+
+	// WS4 inline-CASB expansion. These mirror the additional
+	// crate sng-swg CasbAction variants (casb_rules.rs); the
+	// string forms MUST stay byte-identical across the Go control
+	// plane and the Rust data plane or compiled bundles fail to
+	// match at the edge.
+	InlineActionLogin             InlineAction = "login"
+	InlineActionAdminConfigChange InlineAction = "admin_config_change"
+	InlineActionAPIKeyCreate      InlineAction = "api_key_create"
+	InlineActionExternalShare     InlineAction = "external_share"
+	InlineActionBulkExport        InlineAction = "bulk_export"
 )
 
 // IsValid reports whether the action is one of the known verbs.
 func (a InlineAction) IsValid() bool {
 	switch a {
-	case InlineActionUpload, InlineActionDownload, InlineActionShare, InlineActionDelete:
+	case InlineActionUpload, InlineActionDownload, InlineActionShare, InlineActionDelete,
+		InlineActionLogin, InlineActionAdminConfigChange, InlineActionAPIKeyCreate,
+		InlineActionExternalShare, InlineActionBulkExport:
 		return true
 	}
 	return false

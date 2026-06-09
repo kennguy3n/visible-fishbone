@@ -41,6 +41,7 @@ export interface CasbApp {
   category: string;
   risk_score: number;
   users_count: number;
+  active_device_count: number;
   first_seen: string;
   last_seen: string;
 }

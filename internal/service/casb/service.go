@@ -218,12 +218,16 @@ func (svc *Service) SyncConnector(
 	}
 
 	now := svc.nowFunc()
+	// API-mode sync owns users_count (the full account roster) and
+	// leaves active_device_count nil so it never clobbers the
+	// windowed device count written by shadow-IT discovery.
+	roster := len(users)
 	app := repository.CASBDiscoveredApp{
 		TenantID:   tenantID,
 		Name:       c.Name,
 		Vendor:     string(c.Type),
 		Category:   "saas",
-		UsersCount: len(users),
+		UsersCount: &roster,
 		FirstSeen:  now,
 		LastSeen:   now,
 	}

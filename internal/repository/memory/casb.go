@@ -10,6 +10,16 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
+// zeroIfNil returns p, or a pointer to 0 when p is nil, so in-memory
+// rows mirror the NOT NULL DEFAULT 0 of the postgres count columns.
+func zeroIfNil(p *int) *int {
+	if p != nil {
+		return p
+	}
+	z := 0
+	return &z
+}
+
 // --- CASBConnectorRepository ---
 
 type CASBConnectorRepository struct{ s *Store }
@@ -353,13 +363,32 @@ func (r *CASBDiscoveredAppRepository) Upsert(
 	// Find existing by (tenant_id, name).
 	for id, existing := range r.s.casbDiscoveredApps {
 		if existing.TenantID == tenantID && existing.Name == app.Name {
-			existing.Vendor = app.Vendor
-			existing.Category = app.Category
+			// vendor/category describe the app's identity and are
+			// fixed at first discovery, not updated on conflict: the
+			// two writers (API-mode sync, shadow-IT discovery) label
+			// the same app differently, so overwriting here would make
+			// them oscillate on a (tenant, name) collision. Mirrors the
+			// postgres upsert, which omits them from DO UPDATE SET.
 			if app.RiskScore != nil {
 				existing.RiskScore = app.RiskScore
 			}
-			existing.UsersCount = app.UsersCount
-			existing.LastSeen = app.LastSeen
+			// users_count (API-mode roster) and active_device_count
+			// (shadow-IT window count) have separate writers; a nil
+			// value means "leave this column untouched" so neither
+			// writer clobbers the other's value, mirroring the
+			// CASE WHEN ... IS NOT NULL guards in the postgres upsert.
+			if app.UsersCount != nil {
+				existing.UsersCount = app.UsersCount
+			}
+			if app.ActiveDeviceCount != nil {
+				existing.ActiveDeviceCount = app.ActiveDeviceCount
+			}
+			// Keep last_seen monotonic, mirroring the GREATEST guard in
+			// the postgres upsert: a delayed shadow-IT flush must not
+			// regress a newer last_seen written by API-mode discovery.
+			if app.LastSeen.After(existing.LastSeen) {
+				existing.LastSeen = app.LastSeen
+			}
 			r.s.casbDiscoveredApps[id] = existing
 			return existing, nil
 		}
@@ -368,10 +397,11 @@ func (r *CASBDiscoveredAppRepository) Upsert(
 		app.ID = uuid.New()
 	}
 	app.TenantID = tenantID
-	if app.RiskScore == nil {
-		zero := 0
-		app.RiskScore = &zero
-	}
+	// Mirror the postgres columns' NOT NULL DEFAULT 0: a writer that
+	// owns only one count leaves the other nil, which inserts as 0.
+	app.RiskScore = zeroIfNil(app.RiskScore)
+	app.UsersCount = zeroIfNil(app.UsersCount)
+	app.ActiveDeviceCount = zeroIfNil(app.ActiveDeviceCount)
 	r.s.casbDiscoveredApps[app.ID] = app
 	return app, nil
 }
