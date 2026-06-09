@@ -230,25 +230,34 @@ func (r *CASBDiscoveredAppRepository) Upsert(
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
 			INSERT INTO casb_discovered_apps
-			    (id, tenant_id, name, vendor, category, risk_score, users_count, first_seen, last_seen)
-			VALUES ($1, $2, $3, $4, $5, COALESCE($6, 0), $7, $8, $9)
+			    (id, tenant_id, name, vendor, category, risk_score,
+			     users_count, active_device_count, first_seen, last_seen)
+			VALUES ($1, $2, $3, $4, $5, COALESCE($6, 0),
+			        COALESCE($7, 0), COALESCE($8, 0), $9, $10)
 			ON CONFLICT (tenant_id, name) DO UPDATE SET
 			    vendor = EXCLUDED.vendor,
 			    category = EXCLUDED.category,
 			    risk_score = CASE WHEN $6 IS NOT NULL THEN $6 ELSE casb_discovered_apps.risk_score END,
-			    users_count = EXCLUDED.users_count,
-			    -- last_seen is monotonic: this table has two writers (API-mode
-			    -- discovery and the windowed shadow-IT flusher), so a delayed
-			    -- flush carrying an older window timestamp must not regress a
-			    -- newer last_seen written by the other path.
+			    -- users_count (API-mode roster) and active_device_count
+			    -- (shadow-IT window count) have separate writers; each
+			    -- passes its own column and nil for the other, so a NULL
+			    -- param leaves the column untouched rather than clobbering
+			    -- the other writer's value with a zero.
+			    users_count = CASE WHEN $7 IS NOT NULL THEN $7 ELSE casb_discovered_apps.users_count END,
+			    active_device_count = CASE WHEN $8 IS NOT NULL THEN $8 ELSE casb_discovered_apps.active_device_count END,
+			    -- last_seen is monotonic: a delayed flush carrying an older
+			    -- window timestamp must not regress a newer last_seen
+			    -- written by the other path.
 			    last_seen = GREATEST(EXCLUDED.last_seen, casb_discovered_apps.last_seen)
 			RETURNING id, tenant_id, name, vendor, category, risk_score,
-			          users_count, first_seen, last_seen`,
+			          users_count, active_device_count, first_seen, last_seen`,
 			app.ID, tenantID, app.Name, app.Vendor, app.Category,
-			app.RiskScore, app.UsersCount, app.FirstSeen, app.LastSeen,
+			app.RiskScore, app.UsersCount, app.ActiveDeviceCount,
+			app.FirstSeen, app.LastSeen,
 		).Scan(
 			&out.ID, &out.TenantID, &out.Name, &out.Vendor, &out.Category,
-			&out.RiskScore, &out.UsersCount, &out.FirstSeen, &out.LastSeen,
+			&out.RiskScore, &out.UsersCount, &out.ActiveDeviceCount,
+			&out.FirstSeen, &out.LastSeen,
 		)
 	})
 	if err != nil {
@@ -265,7 +274,7 @@ func (r *CASBDiscoveredAppRepository) List(
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT id, tenant_id, name, vendor, category, risk_score,
-			       users_count, first_seen, last_seen
+			       users_count, active_device_count, first_seen, last_seen
 			FROM casb_discovered_apps
 			ORDER BY last_seen DESC`)
 		if err != nil {
@@ -276,7 +285,8 @@ func (r *CASBDiscoveredAppRepository) List(
 			var a repository.CASBDiscoveredApp
 			if err := rows.Scan(
 				&a.ID, &a.TenantID, &a.Name, &a.Vendor, &a.Category,
-				&a.RiskScore, &a.UsersCount, &a.FirstSeen, &a.LastSeen,
+				&a.RiskScore, &a.UsersCount, &a.ActiveDeviceCount,
+				&a.FirstSeen, &a.LastSeen,
 			); err != nil {
 				return err
 			}
@@ -298,12 +308,13 @@ func (r *CASBDiscoveredAppRepository) Get(
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
 			SELECT id, tenant_id, name, vendor, category, risk_score,
-			       users_count, first_seen, last_seen
+			       users_count, active_device_count, first_seen, last_seen
 			FROM casb_discovered_apps
 			WHERE id = $1`, id,
 		).Scan(
 			&out.ID, &out.TenantID, &out.Name, &out.Vendor, &out.Category,
-			&out.RiskScore, &out.UsersCount, &out.FirstSeen, &out.LastSeen,
+			&out.RiskScore, &out.UsersCount, &out.ActiveDeviceCount,
+			&out.FirstSeen, &out.LastSeen,
 		)
 	})
 	if err != nil {

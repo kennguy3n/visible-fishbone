@@ -393,19 +393,19 @@ func (d *ShadowITDiscoverer) Flush(ctx context.Context) error {
 			continue
 		}
 		for key, agg := range sh.aggs {
-			// UsersCount is the number of distinct devices that
-			// reached this app within the window being flushed —
-			// a "recently active" signal, not an all-time total.
-			// This is deliberate: device IDs are never persisted
-			// (privacy), so an all-time distinct count cannot be
-			// reconstructed DB-side, and retaining every device ID
-			// in memory across windows would be unbounded across
-			// 5000 tenants. The repository upsert replaces
-			// users_count on conflict (correct for the API-mode
-			// discovery in service.go, which reports a full roster);
-			// because Flush only upserts apps that saw traffic this
-			// window, a quiet window writes nothing and the prior
-			// value is retained rather than reset to zero.
+			// ActiveDeviceCount is the number of distinct devices that
+			// reached this app within the window being flushed — a
+			// "recently active" signal, not an all-time total. This is
+			// deliberate: device IDs are never persisted (privacy), so
+			// an all-time distinct count cannot be reconstructed
+			// DB-side, and retaining every device ID in memory across
+			// windows would be unbounded across 5000 tenants. It is
+			// written to its own column, leaving UsersCount (the
+			// API-mode roster) nil so a shadow flush never clobbers a
+			// connector's accurate roster on a name collision. Because
+			// Flush only upserts apps that saw traffic this window, a
+			// quiet window writes nothing and the prior value is
+			// retained rather than reset to zero.
 			count := len(agg.devices)
 			if agg.saturated {
 				count = maxDevicesPerApp
@@ -414,13 +414,13 @@ func (d *ShadowITDiscoverer) Flush(ctx context.Context) error {
 			batch = append(batch, pending{
 				tenant: key.tenant,
 				app: repository.CASBDiscoveredApp{
-					Name:       agg.app.Name,
-					Vendor:     agg.app.Vendor,
-					Category:   agg.app.Category,
-					RiskScore:  &risk,
-					UsersCount: count,
-					FirstSeen:  agg.firstSeen,
-					LastSeen:   agg.lastSeen,
+					Name:              agg.app.Name,
+					Vendor:            agg.app.Vendor,
+					Category:          agg.app.Category,
+					RiskScore:         &risk,
+					ActiveDeviceCount: &count,
+					FirstSeen:         agg.firstSeen,
+					LastSeen:          agg.lastSeen,
 				},
 			})
 		}

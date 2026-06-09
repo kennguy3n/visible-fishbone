@@ -61,6 +61,15 @@ func (f *fakeAppRepo) Upsert(ctx context.Context, tenantID uuid.UUID, app reposi
 	return app, nil
 }
 
+// deviceCount returns the shadow-IT active-device count an upsert
+// carried, or -1 if the writer left it nil (which would be a bug).
+func deviceCount(a repository.CASBDiscoveredApp) int {
+	if a.ActiveDeviceCount == nil {
+		return -1
+	}
+	return *a.ActiveDeviceCount
+}
+
 func (f *fakeAppRepo) find(name string) (repository.CASBDiscoveredApp, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -94,8 +103,11 @@ func TestShadowIT_ObserveAndFlush(t *testing.T) {
 	if !ok {
 		t.Fatal("expected Slack discovered app")
 	}
-	if slack.UsersCount != 2 {
-		t.Errorf("Slack users_count = %d, want 2 (distinct devices)", slack.UsersCount)
+	if deviceCount(slack) != 2 {
+		t.Errorf("Slack active_device_count = %d, want 2 (distinct devices)", deviceCount(slack))
+	}
+	if slack.UsersCount != nil {
+		t.Errorf("Slack users_count should be nil (shadow-IT must not write the roster), got %v", *slack.UsersCount)
 	}
 	if slack.Vendor != "Slack" || slack.Category != "collaboration" {
 		t.Errorf("Slack metadata wrong: %+v", slack)
@@ -108,7 +120,7 @@ func TestShadowIT_ObserveAndFlush(t *testing.T) {
 	}
 
 	gh, ok := repo.find("GitHub")
-	if !ok || gh.UsersCount != 1 {
+	if !ok || deviceCount(gh) != 1 {
 		t.Errorf("expected GitHub with 1 device, got ok=%v %+v", ok, gh)
 	}
 	if _, ok := repo.find("example.com"); ok {
@@ -228,7 +240,7 @@ func TestShadowIT_ConcurrentObserve(t *testing.T) {
 		t.Fatalf("Flush: %v", err)
 	}
 	slack, ok := repo.find("Slack")
-	if !ok || slack.UsersCount != 50 {
-		t.Errorf("expected 50 distinct devices, got ok=%v count=%d", ok, slack.UsersCount)
+	if !ok || deviceCount(slack) != 50 {
+		t.Errorf("expected 50 distinct devices, got ok=%v count=%d", ok, deviceCount(slack))
 	}
 }

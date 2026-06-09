@@ -1425,17 +1425,32 @@ type CASBConnector struct {
 }
 
 // CASBDiscoveredApp is a SaaS application discovered by a CASB
-// connector sync.
+// connector sync or by shadow-IT telemetry analysis.
+//
+// UsersCount and ActiveDeviceCount have distinct semantics and
+// distinct writers, so they are kept in separate columns rather than
+// overwriting one another (see migration 056):
+//
+//   - UsersCount is the app's full account roster, written by API-mode
+//     connector sync (service.go) from the vendor API.
+//   - ActiveDeviceCount is the number of distinct devices that reached
+//     the app within the most recent shadow-IT flush window, written
+//     by shadow-IT discovery (shadow_it.go).
+//
+// Both are pointers so a writer that owns only one quantity can leave
+// the other nil to mean "do not modify this column on conflict",
+// mirroring RiskScore. A nil value inserts as 0.
 type CASBDiscoveredApp struct {
-	ID         uuid.UUID
-	TenantID   uuid.UUID
-	Name       string
-	Vendor     string
-	Category   string
-	RiskScore  *int
-	UsersCount int
-	FirstSeen  time.Time
-	LastSeen   time.Time
+	ID                uuid.UUID
+	TenantID          uuid.UUID
+	Name              string
+	Vendor            string
+	Category          string
+	RiskScore         *int
+	UsersCount        *int
+	ActiveDeviceCount *int
+	FirstSeen         time.Time
+	LastSeen          time.Time
 }
 
 // CASBPostureCheckStatus enumerates posture check outcomes.
