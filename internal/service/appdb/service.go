@@ -26,6 +26,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/region"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
@@ -952,6 +953,12 @@ func (s *Service) audited(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 // events have no owning tenant, so they go through AppendGlobal
 // (tenant_id IS NULL) rather than Append (which rejects uuid.Nil).
 // Like audited, an append failure is logged but never propagated.
+//
+// The acting operator is attributed from the request context when an
+// authenticated user is bound (operator-initiated CreateApp/UpdateApp/
+// DeleteApp). Background work without a user — e.g. the vendor-feed
+// sync worker — leaves actor_id NULL, which honestly reflects that no
+// human performed the mutation.
 func (s *Service) auditedGlobal(ctx context.Context, action string, resourceID *uuid.UUID, details json.RawMessage) {
 	if s.audit == nil {
 		return
@@ -959,7 +966,12 @@ func (s *Service) auditedGlobal(ctx context.Context, action string, resourceID *
 	if details == nil {
 		details = json.RawMessage(`{}`)
 	}
+	var actorID *uuid.UUID
+	if uid := middleware.UserIDFromContext(ctx); uid != uuid.Nil {
+		actorID = &uid
+	}
 	_, err := s.audit.AppendGlobal(ctx, repository.AuditEntry{
+		ActorID:      actorID,
 		Action:       action,
 		ResourceType: "app_registry",
 		ResourceID:   resourceID,

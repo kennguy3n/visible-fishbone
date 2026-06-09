@@ -1413,7 +1413,7 @@ func buildRouter(
 		RBAC:             handler.NewRBACHandler(rbacSvc),
 		Policy:           handler.NewPolicyHandler(policySvc, policyKeySvc, policyHandlerOpts...),
 		PolicySimulation: policySimHandler,
-		Audit:            handler.NewAuditHandler(auditSvc),
+		Audit:            handler.NewAuditHandler(auditSvc, rbacSvc),
 		Webhooks:         handler.NewWebhookHandler(webhookSvc),
 		APIKeys:          handler.NewAPIKeyHandler(apiKeySvc),
 		Telemetry:        handler.NewTelemetryHandler(replay),
