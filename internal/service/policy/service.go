@@ -353,10 +353,15 @@ func (s *Service) countableRules(tenantID uuid.UUID, pg repository.PolicyGraph) 
 			} `json:"rules"`
 		}
 		if jerr := json.Unmarshal(pg.Graph, &legacy); jerr != nil {
+			// Log jerr (the JSON-decode failure that actually
+			// triggered this branch), not perr: perr is the typed
+			// ParseGraph error, but here even the lightweight
+			// verbatim decode failed, so jerr is the diagnostic
+			// that explains why the graph is wholly unparseable.
 			s.logger.Warn("policy: stored graph is unparseable; reporting empty coverage",
 				slog.String("tenant_id", tenantID.String()),
 				slog.String("graph_id", pg.ID.String()),
-				slog.Any("error", perr),
+				slog.Any("error", jerr),
 			)
 			return nil, false
 		}
