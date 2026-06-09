@@ -11,11 +11,14 @@
 //!   endpoint costs no CPU. Falls back to the portable
 //!   [`SensitiveDirWatcher`] poll watcher when the directory handle
 //!   cannot be opened.
-//! * **Print** — [`WindowsPrintMonitor`] arms the print-spooler change
-//!   notification (`FindFirstPrinterChangeNotification` with
-//!   `PRINTER_CHANGE_ADD_JOB`) on the local print server and reports a
-//!   spooled job as a [`DlpChannel::Print`] event. Falls back to
-//!   watching the spool directory.
+//! * **Print** — [`WindowsPrintMonitor`] watches the spooler directory
+//!   (`…\spool\PRINTERS`) for spooled `.SPL` job files and reads their
+//!   content via `ReadDirectoryChangesW` (portable poll fallback),
+//!   reporting each as a [`DlpChannel::Print`] event. This mirrors the
+//!   Linux/macOS print backends, which watch the spool over
+//!   inotify/FSEvents; the spooler change notification
+//!   (`FindFirstPrinterChangeNotification`) is a content-less edge and so
+//!   is not used as the event source.
 //! * **USB transfer** — [`WindowsUsbTransferMonitor`] subscribes to the
 //!   WMI `Win32_VolumeChangeEvent` arrival notification through the COM
 //!   `IWbemServices` surface; on a volume arrival it scans the
@@ -609,11 +612,23 @@ impl WindowsUsbTransferMonitor {
         let arrivals = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let arrivals_w = Arc::clone(&arrivals);
         let shared_w = Arc::clone(&shared);
+        let (init_tx, init_rx) = std::sync::mpsc::channel::<bool>();
         let worker = std::thread::Builder::new()
             .name("sng-dlp-wmi-usb".to_owned())
-            .spawn(move || wmi_volume_worker(&shared_w, &arrivals_w))
+            .spawn(move || wmi_volume_worker(&shared_w, &arrivals_w, &init_tx))
             .ok();
-        let native = worker.is_some();
+        // The worker reports whether the WMI arrival subscription actually
+        // armed (COM init + `ConnectServer` + `ExecNotificationQuery` all
+        // succeeded). Only then is the native arrival pulse live; until
+        // that handshake completes we must assume polling. Setting
+        // `native` on mere thread-spawn success would be a bug: if WMI
+        // init then failed inside the worker, no arrival would ever pulse,
+        // so `next_event` would scan once (the `ARRIVALS_UNSCANNED`
+        // sentinel) and then park forever waiting on a counter that never
+        // moves — missing every USB device. Mirrors the clipboard
+        // monitor's HWND handshake.
+        let native = worker.is_some()
+            && init_rx.recv_timeout(Duration::from_secs(2)).unwrap_or(false);
         Self {
             shared,
             arrivals,
@@ -733,7 +748,17 @@ fn removable_drive_roots() -> Vec<PathBuf> {
 /// (`EventType = 2`) and increments `arrivals` on each, waking the
 /// async consumer to scan. Returns (the thread exits) if WMI cannot be
 /// initialised, leaving the monitor in its polling fallback.
-fn wmi_volume_worker(shared: &ChannelBuffer, arrivals: &std::sync::atomic::AtomicU64) {
+///
+/// `init_tx` reports the one-shot initialisation outcome back to the
+/// constructor: `true` once the notification query is armed (the native
+/// arrival pulse is live), or `false` on any failure before that point.
+/// Exactly one value is sent. A send error (receiver hung up because the
+/// constructor's 2 s handshake already timed out) is ignored.
+fn wmi_volume_worker(
+    shared: &ChannelBuffer,
+    arrivals: &std::sync::atomic::AtomicU64,
+    init_tx: &std::sync::mpsc::Sender<bool>,
+) {
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
         CoSetProxyBlanket, CoUninitialize, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL,
@@ -749,6 +774,7 @@ fn wmi_volume_worker(shared: &ChannelBuffer, arrivals: &std::sync::atomic::Atomi
     // CoUninitialize before the thread exits.
     let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     if hr.is_err() {
+        let _ = init_tx.send(false);
         return;
     }
     let result = (|| -> windows::core::Result<()> {
@@ -790,6 +816,11 @@ fn wmi_volume_worker(shared: &ChannelBuffer, arrivals: &std::sync::atomic::Atomi
                 None,
             )?
         };
+        // Subscription armed: the native arrival pulse is now live, so
+        // tell the constructor it can run in native mode. After this point
+        // there is no further fallible step, so `result` stays `Ok` and no
+        // second handshake value is sent.
+        let _ = init_tx.send(true);
         while !shared.is_closed() {
             let mut objs = [const { None }; 1];
             let mut returned = 0u32;
@@ -805,6 +836,10 @@ fn wmi_volume_worker(shared: &ChannelBuffer, arrivals: &std::sync::atomic::Atomi
         Ok(())
     })();
     if let Err(e) = result {
+        // An init step failed before the success signal; tell the
+        // constructor so it uses the poll fallback rather than waiting on
+        // an arrival pulse that will never come.
+        let _ = init_tx.send(false);
         tracing::info!(target: "sng_pal::dlp", error = %e, "WMI volume subscription unavailable; USB channel will poll");
     }
     // SAFETY: balances the CoInitializeEx above.
@@ -815,13 +850,26 @@ fn wmi_volume_worker(shared: &ChannelBuffer, arrivals: &std::sync::atomic::Atomi
 // Print — spooler change notification
 // ---------------------------------------------------------------------------
 
-/// Windows print monitor — arms the spooler `PRINTER_CHANGE_ADD_JOB`
-/// notification on the local print server and reports each spooled job.
+/// Windows print monitor — watches the spooler directory for spooled
+/// jobs and reads their content.
+///
+/// Mirrors the Linux (`inotify` on the CUPS spool) and macOS (`FSEvents`
+/// on the spool) print backends: the spooler writes each job to a `.SPL`
+/// file under `…\spool\PRINTERS`, so watching that directory (via
+/// [`DirInner`] — `ReadDirectoryChangesW` with a poll fallback) yields
+/// the actual job bytes to classify.
+///
+/// The spooler change notification (`FindFirstPrinterChangeNotification`
+/// with `PRINTER_CHANGE_ADD_JOB`) is deliberately *not* used as the
+/// event source: it is a content-less edge — it reports only that a job
+/// was added, never the job bytes — so a classifier would always see an
+/// empty buffer and emit `Allow`, silently disabling print DLP in the
+/// common case where the hook succeeds. Watching the spool directory
+/// also lets [`DirInner`] decide native-vs-poll synchronously, so there
+/// is no worker-initialisation race.
 #[derive(Debug)]
 pub struct WindowsPrintMonitor {
-    shared: Arc<ChannelBuffer>,
-    worker: Mutex<Option<JoinHandle<()>>>,
-    fallback: Option<DirInner>,
+    inner: DirInner,
 }
 
 impl Default for WindowsPrintMonitor {
@@ -831,47 +879,28 @@ impl Default for WindowsPrintMonitor {
 }
 
 impl WindowsPrintMonitor {
-    /// Watch the print spooler. `spool_dir` overrides the fallback
-    /// directory (default `%SystemRoot%\System32\spool\PRINTERS`); the
-    /// fallback reads at most `opts.max_file_bytes` of each spooled job and
-    /// polls at `opts.poll_interval`, so the operator's tuning is honoured on
-    /// the print channel regardless of whether the spooler hook initialises.
+    /// Watch the print spooler directory (`spool_dir`, default
+    /// `%SystemRoot%\System32\spool\PRINTERS`), reading at most
+    /// `opts.max_file_bytes` of each spooled job and polling at
+    /// `opts.poll_interval` when the native `ReadDirectoryChangesW` hook
+    /// is unavailable, so the operator's tuning is honoured on the print
+    /// channel either way.
     #[must_use]
     pub fn new(spool_dir: Option<PathBuf>, opts: FileWatchOptions) -> Self {
-        let shared = ChannelBuffer::new();
-        let shared_w = Arc::clone(&shared);
-        let worker = std::thread::Builder::new()
-            .name("sng-dlp-spooler".to_owned())
-            .spawn(move || spooler_worker(&shared_w))
-            .ok();
-        let fallback = if worker.is_some() {
-            None
-        } else {
-            let dir = spool_dir.unwrap_or_else(default_spool_dir);
-            // `warm = true`: the native spooler hook (`PRINTER_CHANGE_ADD_JOB`)
-            // only fires for jobs added *after* it is armed, so the poll
-            // fallback must likewise treat jobs already in the spool at
-            // startup as the watermark rather than re-reporting them as fresh
-            // prints — keeping the two transports observably identical (see
-            // mod.rs) and matching the Linux and macOS print paths.
-            Some(DirInner::start(DlpChannel::Print, vec![dir], true, opts))
-        };
+        let dir = spool_dir.unwrap_or_else(default_spool_dir);
+        // `warm = true`: a print monitor reports jobs spooled *after* it
+        // starts, treating jobs already in the spool at startup as the
+        // watermark rather than re-reporting them — keeping the native
+        // and poll transports observably identical (see mod.rs) and
+        // matching the Linux and macOS print paths.
         Self {
-            shared,
-            worker: Mutex::new(worker),
-            fallback,
+            inner: DirInner::start(DlpChannel::Print, vec![dir], true, opts),
         }
     }
 
     /// Stop the monitor.
     pub fn shutdown(&self) {
-        self.shared.closed.store(true, Ordering::SeqCst);
-        if let Some(fb) = &self.fallback {
-            fb.shutdown();
-        }
-        if let Some(worker) = lock(&self.worker).take() {
-            let _ = worker.join();
-        }
+        self.inner.shutdown();
     }
 }
 
@@ -887,18 +916,7 @@ impl ChannelInterceptor for WindowsPrintMonitor {
         DlpChannel::Print
     }
     async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
-        if let Some(fb) = &self.fallback {
-            return fb.next_event().await;
-        }
-        loop {
-            if let Some(e) = self.shared.pop() {
-                return Ok(Some(e));
-            }
-            if self.shared.is_closed() {
-                return Ok(None);
-            }
-            tokio::time::sleep(DRAIN_TICK).await;
-        }
+        self.inner.next_event().await
     }
 }
 
@@ -907,66 +925,6 @@ fn default_spool_dir() -> PathBuf {
     let root =
         std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from);
     root.join("System32").join("spool").join("PRINTERS")
-}
-
-/// Spooler-notification worker: blocks on `FindNextPrinterChangeNotification`
-/// and reports a `Print` event per spooled job.
-fn spooler_worker(shared: &ChannelBuffer) {
-    use windows::Win32::Foundation::WAIT_OBJECT_0;
-    use windows::Win32::Graphics::Printing::{
-        ClosePrinter, FindClosePrinterChangeNotification, FindFirstPrinterChangeNotification,
-        FindNextPrinterChangeNotification, OpenPrinterW, PRINTER_CHANGE_ADD_JOB, PRINTER_HANDLE,
-    };
-    use windows::Win32::System::Threading::WaitForSingleObject;
-
-    let mut printer = PRINTER_HANDLE::default();
-    // SAFETY: opening the local print server (null name) for change
-    // monitoring; `&raw mut printer` receives the handle.
-    let opened = unsafe { OpenPrinterW(PCWSTR::null(), &raw mut printer, None) };
-    if opened.is_err() {
-        tracing::info!(target: "sng_pal::dlp", "OpenPrinterW failed; print channel idle");
-        return;
-    }
-    // SAFETY: arm the add-job notification on the opened server handle;
-    // `FindFirstPrinterChangeNotification` returns the change handle
-    // directly (an invalid handle signals failure).
-    let change =
-        unsafe { FindFirstPrinterChangeNotification(printer, PRINTER_CHANGE_ADD_JOB, 0, None) };
-    if change.is_invalid() {
-        // SAFETY: `printer` is a valid handle opened above.
-        unsafe {
-            let _ = ClosePrinter(printer);
-        };
-        return;
-    }
-    while !shared.is_closed() {
-        // SAFETY: wait up to 1s on the change object so the loop can
-        // observe the shutdown flag.
-        let wait = unsafe { WaitForSingleObject(change, 1000) };
-        if wait == WAIT_OBJECT_0 {
-            let mut flags = 0u32;
-            // SAFETY: drain the change so the next job re-signals.
-            let _ = unsafe {
-                FindNextPrinterChangeNotification(change, Some(&raw mut flags), None, None)
-            };
-            shared.push(ContentEvent {
-                channel: DlpChannel::Print,
-                content: Vec::new(),
-                metadata: ContentMetadata {
-                    filename: None,
-                    content_type: None,
-                    source: Some("print-spooler".to_owned()),
-                    mip_labels: Vec::new(),
-                    ..ContentMetadata::default()
-                },
-            });
-        }
-    }
-    // SAFETY: both handles were opened above and are released once.
-    unsafe {
-        let _ = FindClosePrinterChangeNotification(change);
-        let _ = ClosePrinter(printer);
-    }
 }
 
 // ---------------------------------------------------------------------------

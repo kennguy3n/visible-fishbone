@@ -47,12 +47,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`crates/sng-pal/src/dlp/`) for the file-write, clipboard, print and
   USB-transfer channels — Linux (inotify, udev/netlink, X11 XFIXES / Wayland),
   macOS (FSEvents, IOKit, `NSPasteboard`) and Windows (`ReadDirectoryChangesW`,
-  WMI, clipboard format-listener chain, print spooler) — each transparently
-  falling back to a bounded portable poll watcher when its kernel hook is
-  unavailable. The `sng-dlp` engine is wired into the `sng-agent` supervisor
+  WMI, clipboard format-listener chain, print-spool-directory watch) — each
+  transparently falling back to a bounded portable poll watcher when its kernel
+  hook is unavailable. The Windows print channel watches the spool directory
+  (`…\spool\PRINTERS`) and reads the actual spooled-job content, mirroring the
+  Linux/macOS spool watchers, rather than the content-less spooler change
+  notification. The `sng-dlp` engine is wired into the `sng-agent` supervisor
   loop, gated per channel by `[dlp]` config flags. Operator `[dlp]` tuning
   (`max_file_bytes`, `poll_interval`) is honoured by every channel regardless
-  of which backend a host ends up using ([#133]).
+  of which backend a host ends up using, and is validated at load time
+  (`> 0` when `dlp.enabled`) so a zero ceiling cannot silently disable content
+  inspection ([#133]).
 
 [#87]: https://github.com/kennguy3n/visible-fishbone/pull/87
 [#133]: https://github.com/kennguy3n/visible-fishbone/pull/133

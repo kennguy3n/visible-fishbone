@@ -478,6 +478,15 @@ fn validate(cfg: &AgentConfig) -> Result<(), String> {
         if cfg.dlp.poll_interval.is_zero() {
             return Err("dlp.poll_interval must be > 0 when dlp.enabled".into());
         }
+        // A zero read ceiling makes every backend read `file.take(0)` —
+        // an empty buffer — so the classifier sees no content and every
+        // verdict is `Allow`: the subsystem registers and reports healthy
+        // yet inspects nothing, a silent DLP bypass. Reject it at load
+        // time (the same class of operator typo as a zero poll cadence)
+        // rather than letting it disable content inspection unnoticed.
+        if cfg.dlp.max_file_bytes == 0 {
+            return Err("dlp.max_file_bytes must be > 0 when dlp.enabled".into());
+        }
         // An enabled subsystem with every channel toggled off and no
         // watch directories registers with the supervisor and reports
         // healthy yet observes nothing. The empty-watch_dirs file-write
@@ -832,6 +841,67 @@ client_key  = "/etc/sng/client.key"
 [dlp]
 enabled       = false
 poll_interval = "0s"
+"#,
+        )
+        .unwrap();
+        assert!(load_from_path(f.path()).is_ok());
+    }
+
+    /// A zero `dlp.max_file_bytes` makes every backend read an empty
+    /// buffer (`file.take(0)`), so the classifier sees no content and
+    /// every verdict is `Allow` — a silent DLP bypass. The validator must
+    /// reject it at load time when the subsystem is enabled.
+    #[test]
+    fn validate_rejects_zero_dlp_max_file_bytes_when_enabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[dlp]
+enabled        = true
+max_file_bytes = 0
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("dlp.max_file_bytes"),
+            "message did not name the bad field: {message}"
+        );
+    }
+
+    /// The same zero `dlp.max_file_bytes` is harmless when the subsystem
+    /// is disabled (the field is never read), so it must not be rejected.
+    #[test]
+    fn validate_allows_zero_dlp_max_file_bytes_when_disabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[dlp]
+enabled        = false
+max_file_bytes = 0
 "#,
         )
         .unwrap();
