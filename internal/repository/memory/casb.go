@@ -359,7 +359,12 @@ func (r *CASBDiscoveredAppRepository) Upsert(
 				existing.RiskScore = app.RiskScore
 			}
 			existing.UsersCount = app.UsersCount
-			existing.LastSeen = app.LastSeen
+			// Keep last_seen monotonic, mirroring the GREATEST guard in
+			// the postgres upsert: a delayed shadow-IT flush must not
+			// regress a newer last_seen written by API-mode discovery.
+			if app.LastSeen.After(existing.LastSeen) {
+				existing.LastSeen = app.LastSeen
+			}
 			r.s.casbDiscoveredApps[id] = existing
 			return existing, nil
 		}

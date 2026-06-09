@@ -237,7 +237,11 @@ func (r *CASBDiscoveredAppRepository) Upsert(
 			    category = EXCLUDED.category,
 			    risk_score = CASE WHEN $6 IS NOT NULL THEN $6 ELSE casb_discovered_apps.risk_score END,
 			    users_count = EXCLUDED.users_count,
-			    last_seen = EXCLUDED.last_seen
+			    -- last_seen is monotonic: this table has two writers (API-mode
+			    -- discovery and the windowed shadow-IT flusher), so a delayed
+			    -- flush carrying an older window timestamp must not regress a
+			    -- newer last_seen written by the other path.
+			    last_seen = GREATEST(EXCLUDED.last_seen, casb_discovered_apps.last_seen)
 			RETURNING id, tenant_id, name, vendor, category, risk_score,
 			          users_count, first_seen, last_seen`,
 			app.ID, tenantID, app.Name, app.Vendor, app.Category,
