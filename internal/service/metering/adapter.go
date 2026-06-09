@@ -209,10 +209,16 @@ type rowBucket struct {
 // RowLimiterOption customises a ClickHouseRowLimiter.
 type RowLimiterOption func(*ClickHouseRowLimiter)
 
-// withRowLimiterClock overrides the wall clock; test-only. The bucket's
-// token math is driven through rate.Limiter's explicit-time API
-// (AllowN(now, n) / ReserveN(now, n)) so a pinned clock makes the
-// limiter fully deterministic under test.
+// withRowLimiterClock overrides the wall clock; test-only. It governs
+// the explicit-time API only — AllowN drives the bucket through
+// rate.Limiter's AllowN(now, n) and budget refresh uses SetLimitAt /
+// SetBurstAt(now, ...) — so a pinned clock makes the non-blocking path
+// fully deterministic. WaitN is the deliberate exception: golang.org/x/
+// time/rate exposes no explicit-time WaitN (it must compute a delay and
+// sleep against the real monotonic clock), so WaitN always uses the real
+// clock regardless of this option. Tests that pin the clock must assert
+// over AllowN; WaitN tests should assert on context cancellation /
+// completion, not on pinned-clock token math.
 func withRowLimiterClock(now func() time.Time) RowLimiterOption {
 	return func(l *ClickHouseRowLimiter) {
 		if now != nil {
@@ -310,6 +316,11 @@ func (l *ClickHouseRowLimiter) AllowN(ctx context.Context, tenantID uuid.UUID, r
 // rejected; a rate.Inf tenant returns immediately. `rows` exceeding the
 // burst returns ErrRowLimitExceeded (it can never be satisfied), so the
 // caller splits the batch rather than blocking forever.
+//
+// Unlike AllowN, WaitN always uses the real monotonic clock, not the
+// withRowLimiterClock test clock: rate.Limiter has no explicit-time
+// WaitN (it sleeps for the computed delay), so a pinned clock cannot
+// drive it. In production l.now is time.Now, so the two stay consistent.
 func (l *ClickHouseRowLimiter) WaitN(ctx context.Context, tenantID uuid.UUID, rows int64) error {
 	if l == nil || rows <= 0 {
 		return nil
