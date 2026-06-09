@@ -485,9 +485,17 @@ mod aya_backend {
         let Some(map) = ebpf.map_mut(name) else {
             return Ok(());
         };
+        // The verdict cache is declared `BPF_MAP_TYPE_LRU_HASH` on the kernel
+        // side. `aya::maps::HashMap` is the correct (and only) userspace handle
+        // for it: aya has no separate `LruHashMap` type — its
+        // `TryFrom<&mut Map> for HashMap` matches *both* the `Map::HashMap` and
+        // `Map::LruHashMap` variants (see aya 0.13 `impl_try_from_map!`), and
+        // `HashMap::new` validates only key/value sizes, not the map type. So
+        // opening an LRU hash via `HashMap` succeeds; the `keys()`/`remove()`
+        // flush below works the same on either flavour.
         let mut cache: HashMap<&mut MapData, FlowKey, VerdictCacheEntry> =
             HashMap::try_from(map)
-                .map_err(|e| EbpfError::Map(format!("map {name} is not a hash: {e}")))?;
+                .map_err(|e| EbpfError::Map(format!("map {name} is not a hash map: {e}")))?;
         let keys: Vec<FlowKey> = cache.keys().filter_map(Result::ok).collect();
         for key in keys {
             cache
