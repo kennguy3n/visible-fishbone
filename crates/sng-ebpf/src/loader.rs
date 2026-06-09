@@ -297,8 +297,16 @@ mod aya_backend {
     use crate::class::Classifier;
     use crate::ddos::DdosConfig;
     use crate::firewall::XdpRuleSet;
+    use crate::maps::{FlowKey, VerdictCacheEntry};
     use crate::tc::EgressSteeringTable;
+    use crate::wire::{
+        self, MarshalledDdos, WireClassMeta, WireClassRule, WireCountry, WireGeoEntry, WireRule,
+        WireRuleSetMeta, WireSteeringTarget,
+    };
     use aya::Ebpf;
+    use aya::Pod;
+    use aya::maps::lpm_trie::{Key, LpmTrie};
+    use aya::maps::{Array, HashMap, MapData};
     use aya::programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags};
     use std::path::Path;
     use std::sync::{Mutex, PoisonError};
@@ -312,12 +320,14 @@ mod aya_backend {
     /// Kernel-backed loader built on `aya`. Owns the loaded [`Ebpf`]
     /// handle and the attach lifecycle.
     ///
-    /// The map-content update methods (`update_rules` /
-    /// `update_classification` / `update_steering`) require the kernel
-    /// object's map definitions and `Pod` marshalling, which land with
-    /// the BPF object crate; until then they validate their input and
-    /// surface a clear [`EbpfError::Unsupported`] rather than silently
-    /// dropping the update. Program load / attach / pin are fully wired.
+    /// The map-content update methods marshal the userspace policy models
+    /// into the `#[repr(C)]` wire layouts defined in [`crate::wire`] and
+    /// write them into the kernel maps the BPF object (in
+    /// `crates/sng-ebpf/bpf/`) declares. Each update validates its input
+    /// first (so a partial policy is never installed) and, where it
+    /// changes the verdict a cached flow would receive, flushes the
+    /// policy-verdict cache so repeat packets are re-evaluated against the
+    /// new policy. Program load / attach / pin are fully wired.
     #[derive(Debug)]
     pub struct AyaLoader {
         object_path: std::path::PathBuf,
@@ -349,6 +359,141 @@ mod aya_backend {
         fn lock(&self) -> std::sync::MutexGuard<'_, Option<Ebpf>> {
             self.ebpf.lock().unwrap_or_else(PoisonError::into_inner)
         }
+
+        /// Run `f` against the loaded [`Ebpf`] handle, holding the lock for
+        /// the whole update so a concurrent reload cannot observe a
+        /// half-written map set.
+        fn with_ebpf<R>(
+            &self,
+            f: impl FnOnce(&mut Ebpf) -> Result<R, EbpfError>,
+        ) -> Result<R, EbpfError> {
+            let mut guard = self.lock();
+            let ebpf = guard
+                .as_mut()
+                .ok_or_else(|| EbpfError::Map("load() must precede a map update".into()))?;
+            f(ebpf)
+        }
+    }
+
+    /// Borrow a named `BPF_MAP_TYPE_ARRAY` typed to value `V`.
+    fn array_map<'a, V: Pod>(
+        ebpf: &'a mut Ebpf,
+        name: &str,
+    ) -> Result<Array<&'a mut MapData, V>, EbpfError> {
+        let map = ebpf
+            .map_mut(name)
+            .ok_or_else(|| EbpfError::Map(format!("map {name} not found in BPF object")))?;
+        Array::try_from(map).map_err(|e| EbpfError::Map(format!("map {name} is not an array: {e}")))
+    }
+
+    /// Overwrite the first `values.len()` slots of array `name`. The
+    /// caller writes the companion `*_meta` count afterwards so a growing
+    /// set never exposes a slot the kernel reads before it is populated.
+    fn write_array<V: Pod>(ebpf: &mut Ebpf, name: &str, values: &[V]) -> Result<(), EbpfError> {
+        let mut array = array_map::<V>(ebpf, name)?;
+        for (idx, value) in values.iter().enumerate() {
+            let idx = u32::try_from(idx)
+                .map_err(|_| EbpfError::Map(format!("map {name} index {idx} overflows u32")))?;
+            array
+                .set(idx, value, 0)
+                .map_err(|e| EbpfError::Map(format!("map {name} set[{idx}]: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Write the single element of a one-entry metadata/config array.
+    fn write_singleton<V: Pod>(ebpf: &mut Ebpf, name: &str, value: V) -> Result<(), EbpfError> {
+        let mut array = array_map::<V>(ebpf, name)?;
+        array
+            .set(0, value, 0)
+            .map_err(|e| EbpfError::Map(format!("map {name} set[0]: {e}")))
+    }
+
+    /// Replace every entry of an LPM trie with `entries`, removing stale
+    /// keys the new set no longer covers. Keyed on the family-appropriate
+    /// address bytes via `key_of`.
+    fn replace_lpm<const N: usize>(
+        ebpf: &mut Ebpf,
+        name: &str,
+        entries: &[WireGeoEntry],
+        key_of: impl Fn(&WireGeoEntry) -> Option<[u8; N]>,
+    ) -> Result<(), EbpfError>
+    where
+        [u8; N]: Pod,
+    {
+        let map = ebpf
+            .map_mut(name)
+            .ok_or_else(|| EbpfError::Map(format!("map {name} not found in BPF object")))?;
+        let mut trie: LpmTrie<&mut MapData, [u8; N], WireCountry> = LpmTrie::try_from(map)
+            .map_err(|e| EbpfError::Map(format!("map {name} is not an LPM trie: {e}")))?;
+
+        let desired: std::collections::HashSet<(u32, [u8; N])> = entries
+            .iter()
+            .filter_map(|e| key_of(e).map(|k| (u32::from(e.prefix_len), k)))
+            .collect();
+        let stale: Vec<Key<[u8; N]>> = trie
+            .keys()
+            .filter_map(Result::ok)
+            .filter(|k| !desired.contains(&(k.prefix_len(), k.data())))
+            .collect();
+        for key in stale {
+            trie.remove(&key)
+                .map_err(|e| EbpfError::Map(format!("map {name} remove: {e}")))?;
+        }
+        for entry in entries {
+            if let Some(data) = key_of(entry) {
+                let key = Key::new(u32::from(entry.prefix_len), data);
+                trie.insert(&key, entry.country, 0)
+                    .map_err(|e| EbpfError::Map(format!("map {name} insert: {e}")))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Replace the blocked-country hash with `blocked`, removing codes the
+    /// new set drops.
+    fn replace_country_hash(ebpf: &mut Ebpf, blocked: &[WireCountry]) -> Result<(), EbpfError> {
+        let name = wire::MAP_GEO_BLOCK;
+        let map = ebpf
+            .map_mut(name)
+            .ok_or_else(|| EbpfError::Map(format!("map {name} not found in BPF object")))?;
+        let mut hash: HashMap<&mut MapData, WireCountry, u8> = HashMap::try_from(map)
+            .map_err(|e| EbpfError::Map(format!("map {name} is not a hash: {e}")))?;
+
+        let desired: std::collections::HashSet<WireCountry> = blocked.iter().copied().collect();
+        let stale: Vec<WireCountry> = hash
+            .keys()
+            .filter_map(Result::ok)
+            .filter(|k| !desired.contains(k))
+            .collect();
+        for key in stale {
+            hash.remove(&key)
+                .map_err(|e| EbpfError::Map(format!("map {name} remove: {e}")))?;
+        }
+        for country in blocked {
+            hash.insert(country, 1u8, 0)
+                .map_err(|e| EbpfError::Map(format!("map {name} insert: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Flush the policy-verdict cache so flows are re-evaluated against the
+    /// new policy. The cache is an optional accelerator — if the object
+    /// does not declare it, there is nothing to invalidate.
+    fn flush_verdict_cache(ebpf: &mut Ebpf) -> Result<(), EbpfError> {
+        let name = wire::MAP_VERDICT_CACHE;
+        let Some(map) = ebpf.map_mut(name) else {
+            return Ok(());
+        };
+        let mut cache: HashMap<&mut MapData, FlowKey, VerdictCacheEntry> = HashMap::try_from(map)
+            .map_err(|e| EbpfError::Map(format!("map {name} is not a hash: {e}")))?;
+        let keys: Vec<FlowKey> = cache.keys().filter_map(Result::ok).collect();
+        for key in keys {
+            cache
+                .remove(&key)
+                .map_err(|e| EbpfError::Map(format!("map {name} evict: {e}")))?;
+        }
+        Ok(())
     }
 
     impl ProgramLoader for AyaLoader {
@@ -427,29 +572,49 @@ mod aya_backend {
         }
 
         fn update_rules(&self, rules: &XdpRuleSet) -> Result<(), EbpfError> {
-            rules.validate()?;
-            Err(EbpfError::Unsupported(
-                "kernel rule-map marshalling lands with the BPF object crate".into(),
-            ))
+            // Marshal (and validate) before touching the kernel so a
+            // rejected ruleset never leaves the maps half-updated.
+            let (wire, meta): (Vec<WireRule>, WireRuleSetMeta) = wire::marshal_rules(rules)?;
+            self.with_ebpf(|ebpf| {
+                write_array(ebpf, wire::MAP_FW_RULES, &wire)?;
+                write_singleton(ebpf, wire::MAP_FW_META, meta)?;
+                // The ruleset changed; cached verdicts may now be stale.
+                flush_verdict_cache(ebpf)
+            })
         }
 
-        fn update_classification(&self, _classifier: &Classifier) -> Result<(), EbpfError> {
-            Err(EbpfError::Unsupported(
-                "kernel classification-map marshalling lands with the BPF object crate".into(),
-            ))
+        fn update_classification(&self, classifier: &Classifier) -> Result<(), EbpfError> {
+            let (wire, meta): (Vec<WireClassRule>, WireClassMeta) =
+                wire::marshal_classification(classifier)?;
+            self.with_ebpf(|ebpf| {
+                write_array(ebpf, wire::MAP_CLASS_RULES, &wire)?;
+                write_singleton(ebpf, wire::MAP_CLASS_META, meta)?;
+                // A re-tiered destination must not keep its cached verdict.
+                flush_verdict_cache(ebpf)
+            })
         }
 
-        fn update_steering(&self, _steering: &EgressSteeringTable) -> Result<(), EbpfError> {
-            Err(EbpfError::Unsupported(
-                "kernel steering-map marshalling lands with the BPF object crate".into(),
-            ))
+        fn update_steering(&self, steering: &EgressSteeringTable) -> Result<(), EbpfError> {
+            let wire: [WireSteeringTarget; wire::STEERING_SLOTS] = wire::marshal_steering(steering);
+            // Steering is egress-only and keyed on the class tag, so it
+            // does not invalidate the ingress verdict cache.
+            self.with_ebpf(|ebpf| write_array(ebpf, wire::MAP_STEERING, &wire))
         }
 
         fn update_ddos(&self, config: &DdosConfig) -> Result<(), EbpfError> {
-            config.validate()?;
-            Err(EbpfError::Unsupported(
-                "kernel ddos-map marshalling lands with the BPF object crate".into(),
-            ))
+            let MarshalledDdos {
+                config: wire_config,
+                geoip,
+                blocked,
+            } = wire::marshal_ddos(config)?;
+            self.with_ebpf(|ebpf| {
+                replace_lpm(ebpf, wire::MAP_GEOIP_V4, &geoip, WireGeoEntry::key_v4)?;
+                replace_lpm(ebpf, wire::MAP_GEOIP_V6, &geoip, WireGeoEntry::key_v6)?;
+                replace_country_hash(ebpf, &blocked)?;
+                // Publish the scalar config last so the data path only
+                // enables a limiter once its backing tables are in place.
+                write_singleton(ebpf, wire::MAP_DDOS_CONFIG, wire_config)
+            })
         }
     }
 }

@@ -56,6 +56,8 @@
 //! * [`maps`] — `#[repr(C)]` map key/value layouts and the TTL verdict
 //!   cache.
 //! * [`tc`] — the TC egress steering table.
+//! * [`wire`] — the kernel map-name contract and `#[repr(C)]` wire
+//!   layouts the loader marshals the policy models into.
 //! * [`loader`] — the [`loader::ProgramLoader`] abstraction, the no-op
 //!   model, and the feature-gated `aya` kernel loader.
 //! * [`control`] — [`control::XdpControlPlane`], the handle the firewall
@@ -69,6 +71,7 @@ pub mod firewall;
 pub mod loader;
 pub mod maps;
 pub mod tc;
+pub mod wire;
 
 pub use class::{ClassRule, ClassVerdict, Classifier, XdpAction, verdict_for};
 pub use control::{AttachOutcome, XdpCapabilities, XdpControlPlane, XdpStats};
@@ -83,6 +86,11 @@ pub use maps::{
     ConntrackEntry, ConntrackState, FlowKey, FlowState, PolicyVerdictCache, VerdictCacheEntry,
 };
 pub use tc::{EgressSteeringTable, SteeringAction, SteeringTarget};
+pub use wire::{
+    MarshalledDdos, WireClassMeta, WireClassRule, WireCountry, WireDdosConfig, WireGeoEntry,
+    WireRule, WireRuleSetMeta, WireSteeringTarget, class_to_u8, marshal_classification,
+    marshal_ddos, marshal_rules, marshal_steering,
+};
 
 #[cfg(all(feature = "xdp", target_os = "linux"))]
 pub use loader::AyaLoader;

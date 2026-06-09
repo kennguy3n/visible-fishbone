@@ -60,6 +60,11 @@ members = [
     "crates/sng-mobile-sdk",
     "crates/sng-uniffi-bindgen",
 ]
+# The kernel-space BPF object is a standalone `no_std` crate cross-compiled
+# for a BPF target by the appliance image pipeline; it is never built by the
+# host workspace. It declares its own `[workspace]` and is excluded here so
+# host-side cargo never attempts to resolve or compile it.
+exclude = ["crates/sng-ebpf/bpf"]
 resolver = "3"
 
 [workspace.package]

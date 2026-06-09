@@ -62,9 +62,10 @@ pub struct Cli {
     /// (default) probes for an XDP-capable kernel and uses the
     /// eBPF fast path when available, falling back to nftables
     /// otherwise. `nftables` forces the classic slow path;
-    /// `ebpf` forces the fast path (the eBPF backend keeps an
-    /// nftables fallback for the L7 / inspect / steer verdicts
-    /// XDP cannot express). See STREAM B / ARCHITECTURE.md §4.1.
+    /// `ebpf` (alias `xdp`) forces the fast path (the eBPF backend
+    /// keeps an nftables fallback for the L7 / inspect / steer
+    /// verdicts XDP cannot express). See STREAM B /
+    /// ARCHITECTURE.md §4.1.
     #[arg(long, env = "SNG_EDGE_DATAPATH", value_enum, default_value_t = DataPathSelection::Auto)]
     pub datapath: DataPathSelection,
 
@@ -134,6 +135,11 @@ pub enum DataPathSelection {
     /// this never loses L7 enforcement; on an XDP-incapable
     /// kernel the userspace control-plane model is used and the
     /// fallback carries all traffic.
+    ///
+    /// Accepts `xdp` as an alias so operators can select the fast
+    /// path by the kernel hook it attaches (`--datapath=xdp`) as
+    /// well as by the technology name (`--datapath=ebpf`).
+    #[value(name = "ebpf", alias = "xdp")]
     Ebpf,
 }
 
@@ -161,7 +167,34 @@ mod tests {
         let cli = Cli::parse_from(["sng-edge", "--config", "/etc/sng/edge.toml"]);
         assert_eq!(cli.updater_backend, UpdaterBackend::InMemory);
         assert_eq!(cli.pal_backend, PalBackend::InMemory);
+        assert_eq!(cli.datapath, DataPathSelection::Auto);
         assert!(cli.health_bind.is_none());
         assert!(!cli.log_json);
+    }
+
+    #[test]
+    fn datapath_accepts_xdp_alias_and_canonical_names() {
+        // Operators may select the fast path either by technology
+        // name (`ebpf`) or by the kernel hook it attaches (`xdp`);
+        // both must resolve to the same backend selection.
+        for token in ["ebpf", "xdp"] {
+            let cli = Cli::parse_from([
+                "sng-edge",
+                "--config",
+                "/etc/sng/edge.toml",
+                "--datapath",
+                token,
+            ]);
+            assert_eq!(cli.datapath, DataPathSelection::Ebpf, "token {token}");
+        }
+
+        let nft = Cli::parse_from([
+            "sng-edge",
+            "--config",
+            "/etc/sng/edge.toml",
+            "--datapath",
+            "nftables",
+        ]);
+        assert_eq!(nft.datapath, DataPathSelection::Nftables);
     }
 }
