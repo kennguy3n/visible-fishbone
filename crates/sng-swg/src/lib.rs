@@ -108,6 +108,7 @@ pub mod manager;
 pub mod process;
 pub mod rate_limit;
 pub mod telemetry;
+pub mod url_ml;
 pub mod verdict;
 pub mod yara;
 
@@ -138,6 +139,11 @@ pub use rate_limit::{
     TestClock,
 };
 pub use telemetry::{TelemetryEmitter, VerdictEvent};
+pub use url_ml::{
+    DomainPattern, DomainPatternIndex, HybridUrlCategorizer, HybridUrlCategorizerBuilder,
+    LocalLlmCategorizer, UrlMlClassifier, UrlModelBundle, UrlModelClaims, UrlModelSignature,
+    UrlModelSigningKeyId, UrlModelVerifier,
+};
 pub use verdict::{Action, RequestContext, Verdict};
 pub use yara::{
     YaraEngine, YaraMatch, YaraRuleBundle, YaraRuleBundleClaims, YaraRuleSignature,
