@@ -312,6 +312,12 @@ export function useUpdateBudgets(tenantId: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["metering", "usage", tenantId] });
       qc.invalidateQueries({ queryKey: ["metering", "cost-report", tenantId] });
+      // A budget change moves this tenant's over-budget flag and margin in
+      // the fleet-wide view too, so refresh the platform admin report when
+      // an MSP admin edits budgets with the fleet table also mounted. The
+      // query is gated on platform-admin access, so for tenant users this
+      // key is unused and the invalidation is a no-op.
+      qc.invalidateQueries({ queryKey: ["metering", "admin", "cost-report"] });
     },
   });
 }
