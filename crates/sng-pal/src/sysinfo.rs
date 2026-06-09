@@ -319,8 +319,9 @@ mod windows_impl {
         let _ = unsafe {
             GetComputerNameExW(
                 ComputerNameDnsHostname,
-                windows::core::PWSTR::null(),
-                &mut len,
+                // Null buffer on the probe pass: the API only fills `len`.
+                None,
+                &raw mut len,
             )
         };
         if len == 0 {
@@ -333,8 +334,8 @@ mod windows_impl {
         unsafe {
             GetComputerNameExW(
                 ComputerNameDnsHostname,
-                windows::core::PWSTR::from_raw(buf.as_mut_ptr()),
-                &mut len,
+                Some(windows::core::PWSTR::from_raw(buf.as_mut_ptr())),
+                &raw mut len,
             )
             .map_err(|e| SystemInfoError::Parse(format!("GetComputerNameExW: {e}")))?;
         }

@@ -514,8 +514,7 @@ pub use linux::{
 mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{
-    MacClipboardMonitor, MacEndpointSecurityMonitor, MacFileWriteMonitor, MacPrintMonitor,
-    MacUsbTransferMonitor,
+    MacClipboardMonitor, MacFileWriteMonitor, MacPrintMonitor, MacUsbTransferMonitor,
 };
 
 #[cfg(target_os = "windows")]
@@ -530,6 +529,33 @@ pub use windows_impl::{
 /// holder must not wedge the DLP source).
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Build the metadata stamped on a clipboard content event. Shared by
+/// every per-OS clipboard backend so the engine sees an identical
+/// `source`/`content_type` regardless of platform.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub(crate) fn clipboard_metadata() -> ContentMetadata {
+    ContentMetadata {
+        filename: None,
+        content_type: Some("text/plain".to_owned()),
+        source: Some("clipboard".to_owned()),
+        mip_labels: Vec::new(),
+        ..ContentMetadata::default()
+    }
+}
+
+/// FNV-1a hash for clipboard-selection dedup. Not cryptographic; only
+/// used to detect "the selection changed since we last read it" so a
+/// backend does not re-emit an unchanged clipboard.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub(crate) fn content_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 #[cfg(test)]

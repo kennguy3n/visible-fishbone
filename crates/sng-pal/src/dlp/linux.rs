@@ -37,7 +37,10 @@
 //!   bridge; on a headless host with neither, it reports
 //!   [`ChannelError::Unavailable`].
 
-use super::{DEFAULT_MAX_FILE_BYTES, MountEntry, RemovableMount, SensitiveDirWatcher, mime_for_path};
+use super::{
+    DEFAULT_MAX_FILE_BYTES, MountEntry, RemovableMount, SensitiveDirWatcher, clipboard_metadata,
+    content_hash, mime_for_path,
+};
 use async_trait::async_trait;
 use nix::poll::{PollFd, PollFlags, PollTimeout};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify, WatchDescriptor};
@@ -926,17 +929,6 @@ impl ChannelInterceptor for LinuxClipboardMonitor {
     }
 }
 
-/// Build the metadata stamped on a clipboard content event.
-fn clipboard_metadata() -> ContentMetadata {
-    ContentMetadata {
-        filename: None,
-        content_type: Some("text/plain".to_owned()),
-        source: Some("clipboard".to_owned()),
-        mip_labels: Vec::new(),
-        ..ContentMetadata::default()
-    }
-}
-
 /// Wayland clipboard reader. Wayland deliberately denies an unfocused
 /// client direct access to the clipboard, so the portable native path
 /// is the compositor's own `wl-paste` data bridge (part of
@@ -1003,17 +995,6 @@ impl ChannelInterceptor for WaylandClipboardMonitor {
             metadata: clipboard_metadata(),
         }))
     }
-}
-
-/// FNV-1a hash for clipboard-selection dedup. Not cryptographic; only
-/// used to detect "the selection changed since we last read it".
-fn content_hash(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for &b in bytes {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
 }
 
 /// Native X11 clipboard backend (its own module so the x11rb protocol
