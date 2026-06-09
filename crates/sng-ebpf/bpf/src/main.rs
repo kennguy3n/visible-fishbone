@@ -571,6 +571,20 @@ fn parse_flow(data: usize, data_end: usize) -> Option<Parsed> {
         key.family = FAMILY_V6;
         let proto = unsafe { (*ip).next_hdr };
         let payload = u16::from_be_bytes(unsafe { (*ip).payload_len });
+        // `next_hdr` is the real L4 protocol only when no extension headers
+        // are present. A Hop-by-Hop / Routing / Fragment / Dest-Options /
+        // AH / ESP / Mobility header instead chains to the true L4 at a
+        // variable offset, so reading L4 at the fixed 40-byte offset would
+        // mis-key ports (they stay 0) — letting an attacker prepend an
+        // extension header to slip past port-keyed rules and SYN/UDP rate
+        // limiting. Resolving the chain needs a variable-length walk the
+        // verifier dislikes; instead fail open to the kernel stack (same
+        // semantics as a short IPv4 IHL above), where nftables parses the
+        // chain and enforces correctly. The fast path simply does not
+        // accelerate these (rare) packets rather than mis-classifying them.
+        if is_ipv6_ext_hdr(proto) {
+            return None;
+        }
         (
             EthHdr::LEN + Ipv6Hdr::LEN,
             proto,
@@ -599,6 +613,16 @@ fn parse_flow(data: usize, data_end: usize) -> Option<Parsed> {
         is_tcp_syn,
         bytes,
     })
+}
+
+/// True if `next_hdr` is an IPv6 extension header (rather than the real L4
+/// protocol). These chain to the true L4 at a variable offset, so the fast
+/// path fails open on them; see [`parse_flow`]. Covers Hop-by-Hop (0),
+/// Routing (43), Fragment (44), ESP (50), Authentication (51),
+/// Destination Options (60) and Mobility (135) — RFC 8200 §4 plus AH/ESP.
+#[inline(always)]
+const fn is_ipv6_ext_hdr(next_hdr: u8) -> bool {
+    matches!(next_hdr, 0 | 43 | 44 | 50 | 51 | 60 | 135)
 }
 
 /// Bounds-checked pointer into the packet at `offset`, valid for `T`.
