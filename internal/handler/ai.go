@@ -32,6 +32,7 @@ type AIHandler struct {
 	guardrails      *ai.GuardrailedProvider
 	correlationRepo repository.AICorrelationRepository
 	postureData     PostureDataSource
+	policyCounts    PolicyCountSource
 
 	// AI policy-tightening suggestions (Tasks 55-60).
 	reviewSvc     *ai.ReviewService
@@ -46,6 +47,16 @@ type AIHandler struct {
 // depend on this source.
 type PostureDataSource interface {
 	AlertCountsBySeverity(ctx context.Context, tenantID uuid.UUID, start, end time.Time) (map[string]int, error)
+}
+
+// PolicyCountSource optionally supplies the tenant's published
+// policy-rule coverage counts (total rules and the actively-enforcing
+// subset) for the read-only GET posture report. When set, the report
+// computes a real coverage_pct; when nil, coverage falls back to 0/0
+// — the same honest empty state the dashboard rendered before this
+// source existed, so unconfigured deployments are unaffected.
+type PolicyCountSource interface {
+	PolicyCounts(ctx context.Context, tenantID uuid.UUID) (total, active int, err error)
 }
 
 // NewAIHandler constructs an AIHandler. svc may be nil (endpoints
@@ -82,6 +93,15 @@ func (h *AIHandler) SetEnhancedAI(
 // other enhanced-AI dependencies.
 func (h *AIHandler) SetPostureDataSource(src PostureDataSource) {
 	h.postureData = src
+}
+
+// SetPolicyCountSource wires the optional policy-rule coverage source
+// used by the read-only GET posture report. When unset, the report's
+// policy coverage is 0/0 (the prior behaviour). Kept as a separate
+// setter so it can be wired independently of the other enhanced-AI
+// dependencies.
+func (h *AIHandler) SetPolicyCountSource(src PolicyCountSource) {
+	h.policyCounts = src
 }
 
 // SetReviewService attaches the suggestion review service.
@@ -410,6 +430,20 @@ func (h *AIHandler) getPostureReport(w http.ResponseWriter, r *http.Request) {
 	for _, v := range prevCounts {
 		prevTotal += v
 	}
+	// Policy coverage: the actively-enforcing share of the tenant's
+	// published rules. Optional — without a source we report 0/0 (the
+	// prior behaviour) rather than fabricating coverage.
+	var totalPolicies, activePolicies int
+	if h.policyCounts != nil {
+		totalPolicies, activePolicies, err = h.policyCounts.PolicyCounts(ctx, tenantID)
+		if err != nil {
+			h.logger.Error("ai: posture report policy counts failed",
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("error", err.Error()))
+			WriteError(w, http.StatusInternalServerError, "ai_error", "report generation failed")
+			return
+		}
+	}
 	report, err := h.reports.Generate(ctx, ai.PostureInput{
 		TenantID: tenantID,
 		Period: ai.ReportPeriod{
@@ -419,6 +453,8 @@ func (h *AIHandler) getPostureReport(w http.ResponseWriter, r *http.Request) {
 		},
 		AlertsBySeverity: counts,
 		PrevPeriodAlerts: &prevTotal,
+		TotalPolicies:    totalPolicies,
+		ActivePolicies:   activePolicies,
 	})
 	if err != nil {
 		h.logger.Error("ai: posture report failed",

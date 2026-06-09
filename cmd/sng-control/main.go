@@ -1627,6 +1627,12 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	if alertRepo != nil {
 		h.SetPostureDataSource(alertPostureDataSource{alerts: alertRepo})
 	}
+	// Back the report's policy-coverage section with the tenant's real
+	// published-rule counts so the dashboard coverage meter reflects
+	// the actual policy graph instead of a structural 0%.
+	if policySvc != nil {
+		h.SetPolicyCountSource(policySvc)
+	}
 
 	// Wire the policy-tightening suggestion features (Tasks 55-60).
 	// The review service is backed by the ai_suggestions repository;

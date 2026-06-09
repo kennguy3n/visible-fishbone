@@ -294,6 +294,36 @@ func (s *Service) GetCurrentGraph(ctx context.Context, tenantID uuid.UUID) (repo
 	return s.repo.GetCurrentGraph(ctx, tenantID)
 }
 
+// PolicyCounts reports the tenant's current published policy-rule
+// totals: the total number of rules and the subset that is actively
+// enforcing. "Active" excludes suggest_only rules, which are
+// proposed-but-not-enforcing (e.g. AI-suggested deltas awaiting
+// operator approval) — these are exactly the "dormant" policies the
+// dashboard prompts operators to activate.
+//
+// Returns (0, 0, nil) when the tenant has no published graph yet so
+// callers render an honest empty coverage state rather than an error.
+func (s *Service) PolicyCounts(ctx context.Context, tenantID uuid.UUID) (total, active int, err error) {
+	pg, err := s.repo.GetCurrentGraph(ctx, tenantID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+	g, err := ParseGraph(pg.Graph)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, r := range g.Rules {
+		total++
+		if r.Verb != VerbSuggestOnly {
+			active++
+		}
+	}
+	return total, active, nil
+}
+
 // PutGraph stores a new policy graph version for the tenant. The
 // version number is auto-incremented by the repository if zero.
 //

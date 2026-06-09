@@ -86,6 +86,13 @@ func (r *IntegrationConnectorRepository) Create(
 	if len(c.Config) == 0 {
 		c.Config = json.RawMessage(`{}`)
 	}
+	if c.Secret == nil {
+		// secret is BYTEA NOT NULL: a nil []byte encodes as SQL NULL and
+		// violates the constraint, so a connector created without a secret
+		// (e.g. syslog) must send empty bytes rather than NULL. A non-nil
+		// empty slice encodes as an empty bytea (the column default '\x').
+		c.Secret = json.RawMessage{}
+	}
 	if c.EventTypes == nil {
 		// Postgres rejects NULL for TEXT[] NOT NULL.
 		c.EventTypes = []string{}

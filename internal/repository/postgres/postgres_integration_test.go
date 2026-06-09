@@ -1163,4 +1163,37 @@ func TestPostgres_Integration(t *testing.T) {
 			t.Errorf("feedback not preserved across apply: got %v want %q", got.Feedback, feedback)
 		}
 	})
+
+	t.Run("IntegrationConnector_CreateWithoutSecret", func(t *testing.T) {
+		tnt := mustTenant(t, store.NewTenantRepository())
+		repo := store.NewIntegrationConnectorRepository()
+
+		// A connector with no secret (e.g. plain syslog) leaves Secret nil.
+		// secret is BYTEA NOT NULL, so a nil []byte must be coerced to empty
+		// bytes rather than SQL NULL — otherwise Create fails the constraint
+		// and the operator portal sees a 500. Regression for that path.
+		created, err := repo.Create(bgCtx(), tnt.ID, repository.IntegrationConnector{
+			Type:   repository.IntegrationConnectorType("syslog"),
+			Name:   "rsyslog-no-secret",
+			Config: json.RawMessage(`{"host":"logs.example.com","port":514}`),
+			// EventTypes and Secret intentionally left nil.
+		})
+		if err != nil {
+			t.Fatalf("create connector without secret: %v", err)
+		}
+		if len(created.Secret) != 0 {
+			t.Errorf("secret: want empty, got %d bytes", len(created.Secret))
+		}
+
+		got, err := repo.Get(bgCtx(), tnt.ID, created.ID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got.Name != "rsyslog-no-secret" {
+			t.Errorf("name round-trip: got %q", got.Name)
+		}
+		if len(got.Secret) != 0 {
+			t.Errorf("secret round-trip: want empty, got %d bytes", len(got.Secret))
+		}
+	})
 }
