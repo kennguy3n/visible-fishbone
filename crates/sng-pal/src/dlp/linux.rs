@@ -1007,7 +1007,11 @@ impl ChannelInterceptor for WaylandClipboardMonitor {
             if self.closed.load(Ordering::SeqCst) {
                 return Ok(None);
             }
-            let content = Self::read_selection()?;
+            // `wl-paste` is a blocking subprocess; run it on a blocking
+            // thread so the tokio runtime worker is never parked on it.
+            let content = tokio::task::spawn_blocking(Self::read_selection)
+                .await
+                .map_err(|e| ChannelError::Init(format!("wl-paste task panicked: {e}")))??;
             // An empty selection carries nothing to classify; suppress it
             // (matching the X11, macOS and Windows backends, which all
             // filter empty content) so an empty clipboard never produces a

@@ -764,12 +764,10 @@ impl MacClipboardMonitor {
         self.closed.store(true, Ordering::SeqCst);
     }
 
-    /// Read the current UTF-8 selection, or `None` if empty/unchanged.
-    fn read_changed(&self) -> Option<Vec<u8>> {
-        let bytes = match &self.inner {
-            ClipboardInner::Pasteboard(p) => read_pasteboard_utf8(*p as ffi::PasteboardRef)?,
-            ClipboardInner::PbPaste => read_pbpaste()?,
-        };
+    /// Deduplicate a freshly-read selection: drop it if empty or
+    /// unchanged since the last reported value, otherwise record it as
+    /// the new watermark and return it.
+    fn dedup(&self, bytes: Vec<u8>) -> Option<Vec<u8>> {
         if bytes.is_empty() {
             return None;
         }
@@ -793,7 +791,19 @@ impl ChannelInterceptor for MacClipboardMonitor {
             if self.closed.load(Ordering::SeqCst) {
                 return Ok(None);
             }
-            if let Some(bytes) = self.read_changed() {
+            let raw = match &self.inner {
+                // In-process Pasteboard Manager read — a cheap FFI call,
+                // and the raw `PasteboardRef` is not `Send`, so it runs
+                // inline.
+                ClipboardInner::Pasteboard(p) => read_pasteboard_utf8(*p as ffi::PasteboardRef),
+                // `pbpaste` is a blocking subprocess; run it on a
+                // blocking thread so the tokio runtime worker is never
+                // parked on it.
+                ClipboardInner::PbPaste => tokio::task::spawn_blocking(read_pbpaste)
+                    .await
+                    .unwrap_or(None),
+            };
+            if let Some(bytes) = raw.and_then(|b| self.dedup(b)) {
                 return Ok(Some(ContentEvent {
                     channel: DlpChannel::Clipboard,
                     content: bytes,
