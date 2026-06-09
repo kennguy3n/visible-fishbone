@@ -14,6 +14,9 @@
   --text-faint: #69748a;
   --brand: #4f8dff;
   --brand-strong: #3b76f0;
+  /* Brand RGB channels so translucent brand tints (focus ring, soft fills,
+     glows, info accents) compose via rgba() and all track --brand. */
+  --brand-rgb: 79, 141, 255;
   --accent: #22d3ee;
   --ok: #34d399;
   --warn: #fbbf24;
@@ -47,12 +50,12 @@
   /* Standard motion + focus tokens so every interactive element shares one
      timing curve and one keyboard focus treatment. */
   --transition: 160ms cubic-bezier(0.4, 0, 0.2, 1);
-  --focus-ring: 0 0 0 3px rgba(79, 141, 255, 0.4);
+  --focus-ring: 0 0 0 3px rgba(var(--brand-rgb), 0.4);
 
   --ok-soft: rgba(52, 211, 153, 0.13);
   --warn-soft: rgba(251, 191, 36, 0.13);
   --danger-soft: rgba(248, 113, 113, 0.13);
-  --brand-soft: rgba(79, 141, 255, 0.14);
+  --brand-soft: rgba(var(--brand-rgb), 0.14);
 }
 
 /* Honour users who prefer reduced motion: disable transitions/animations. */
@@ -532,9 +535,9 @@ table.data tbody tr:hover {
   border-color: var(--border);
 }
 .badge--info {
-  background: rgba(79, 141, 255, 0.14);
+  background: var(--brand-soft);
   color: #9dc1ff;
-  border-color: rgba(79, 141, 255, 0.3);
+  border-color: rgba(var(--brand-rgb), 0.3);
 }
 
 /* --- Buttons ------------------------------------------------------------ */
@@ -577,7 +580,7 @@ table.data tbody tr:hover {
 .btn--primary:hover {
   background: linear-gradient(135deg, #5f99ff, var(--brand));
   border-color: var(--brand);
-  box-shadow: 0 3px 12px rgba(79, 141, 255, 0.35),
+  box-shadow: 0 3px 12px rgba(var(--brand-rgb), 0.35),
     inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
 .btn--danger {
@@ -620,7 +623,7 @@ select:focus,
 textarea:focus {
   outline: none;
   border-color: var(--brand);
-  box-shadow: 0 0 0 3px rgba(79, 141, 255, 0.18);
+  box-shadow: 0 0 0 3px rgba(var(--brand-rgb), 0.18);
 }
 textarea {
   resize: vertical;
@@ -1382,10 +1385,10 @@ label.field > span {
   gap: 16px;
   padding: 18px 20px;
   border-radius: var(--radius);
-  border: 1px solid rgba(79, 141, 255, 0.35);
+  border: 1px solid rgba(var(--brand-rgb), 0.35);
   background: linear-gradient(
     100deg,
-    rgba(79, 141, 255, 0.16),
+    rgba(var(--brand-rgb), 0.16),
     rgba(34, 211, 238, 0.08)
   );
   margin-bottom: 18px;
