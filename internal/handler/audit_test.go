@@ -10,15 +10,17 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
 )
 
-// TestAuditHandler_AdminListGlobal verifies the admin endpoint returns
-// only platform-scoped (tenant_id IS NULL) rows, renders their
-// tenant_id as JSON null, and never leaks tenant-scoped rows.
-func TestAuditHandler_AdminListGlobal(t *testing.T) {
+// auditMux wires an AuditHandler over a memory-backed audit service
+// and the given platform authorizer. A nil authorizer leaves the
+// admin route unregistered (mirroring production wiring).
+func auditMux(t *testing.T, authz handler.PlatformAuthorizer) (*http.ServeMux, *memory.AuditLogRepository, repository.Tenant) {
+	t.Helper()
 	s := memory.NewStore()
 	tn, err := memory.NewTenantRepository(s).Create(context.Background(), repository.Tenant{
 		Name: "T", Slug: "t", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
@@ -27,6 +29,17 @@ func TestAuditHandler_AdminListGlobal(t *testing.T) {
 		t.Fatalf("seed tenant: %v", err)
 	}
 	repo := memory.NewAuditLogRepository(s)
+	mux := http.NewServeMux()
+	handler.NewAuditHandler(audit.New(repo), authz).Register(mux)
+	return mux, repo, tn
+}
+
+// TestAuditHandler_AdminListGlobal verifies that, for an authorized
+// platform operator, the admin endpoint returns only platform-scoped
+// (tenant_id IS NULL) rows, renders their tenant_id as JSON null, and
+// never leaks tenant-scoped rows.
+func TestAuditHandler_AdminListGlobal(t *testing.T) {
+	mux, repo, tn := auditMux(t, platformAuthz{allow: true})
 	ctx := context.Background()
 
 	// One tenant-scoped row (must NOT appear in the global list).
@@ -48,11 +61,8 @@ func TestAuditHandler_AdminListGlobal(t *testing.T) {
 		t.Fatalf("append global (sync): %v", err)
 	}
 
-	mux := http.NewServeMux()
-	handler.NewAuditHandler(audit.New(repo)).Register(mux)
-
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/audit-log", nil))
+	mux.ServeHTTP(rec, authedReq(httptest.NewRequest(http.MethodGet, "/api/v1/admin/audit-log", nil)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -89,9 +99,10 @@ func TestAuditHandler_AdminListGlobal(t *testing.T) {
 	}
 
 	// The tenant-scoped endpoint must still render tenant_id (the
-	// pointer change must not drop it for owned rows).
+	// pointer change must not drop it for owned rows). It is not
+	// platform-gated; MountTenantScoped handles its auth.
 	rec2 := httptest.NewRecorder()
-	mux.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/api/v1/tenants/"+tn.ID.String()+"/audit-log", nil))
+	mux.ServeHTTP(rec2, authedReq(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/"+tn.ID.String()+"/audit-log", nil)))
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("tenant status = %d, want 200; body=%s", rec2.Code, rec2.Body.String())
 	}
@@ -112,15 +123,59 @@ func TestAuditHandler_AdminListGlobal(t *testing.T) {
 }
 
 // TestAuditHandler_AdminListGlobalRejectsBadFilter checks the shared
-// query parser surfaces a 400 on a malformed actor_id.
+// query parser surfaces a 400 on a malformed actor_id (after the
+// platform gate is passed).
 func TestAuditHandler_AdminListGlobalRejectsBadFilter(t *testing.T) {
-	repo := memory.NewAuditLogRepository(memory.NewStore())
-	mux := http.NewServeMux()
-	handler.NewAuditHandler(audit.New(repo)).Register(mux)
-
+	mux, _, _ := auditMux(t, platformAuthz{allow: true})
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/audit-log?actor_id=not-a-uuid", nil))
+	mux.ServeHTTP(rec, authedReq(httptest.NewRequest(http.MethodGet, "/api/v1/admin/audit-log?actor_id=not-a-uuid", nil)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+// TestAuditHandler_AdminListGlobalAuthz exercises the platform-auth
+// gate: missing identity → 401, denied grant → 403, tenant-bound
+// credential → 403, and a nil authorizer → route unregistered (404).
+func TestAuditHandler_AdminListGlobalAuthz(t *testing.T) {
+	const path = "/api/v1/admin/audit-log"
+
+	t.Run("unauthenticated", func(t *testing.T) {
+		mux, _, _ := auditMux(t, platformAuthz{allow: true})
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("grant denied", func(t *testing.T) {
+		mux, _, _ := auditMux(t, platformAuthz{allow: false})
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, authedReq(httptest.NewRequest(http.MethodGet, path, nil)))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("tenant-bound credential refused", func(t *testing.T) {
+		mux, _, _ := auditMux(t, platformAuthz{allow: true})
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		ctx := middleware.WithUserIDForTest(req.Context(), uuid.New())
+		ctx = middleware.WithTenantIDForTest(ctx, uuid.New())
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req.WithContext(ctx))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("nil authorizer leaves route unregistered", func(t *testing.T) {
+		mux, _, _ := auditMux(t, nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, authedReq(httptest.NewRequest(http.MethodGet, path, nil)))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+		}
+	})
 }

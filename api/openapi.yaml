@@ -776,6 +776,13 @@ paths:
         (tenant_id is null) — e.g. global app-registry catalog
         mutations and vendor-feed syncs. These are invisible to the
         tenant-scoped audit-log endpoint.
+
+
+        Platform admin only: the caller must present a platform-scoped
+        credential (no tenant_id claim) holding the
+        `audit:read_platform` permission (or the platform wildcard).
+        An MSP- or tenant-scoped grant does not satisfy it — a
+        tenant-bound credential is rejected with 403.
       parameters:
         - in: query
           name: resource_type
@@ -806,6 +813,12 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/AuditEntry" }
                   next_cursor: { type: string }
+        "401":
+          description: missing or unauthenticated credential
+        "403":
+          description: >
+            credential lacks the platform-scoped audit:read_platform
+            grant, or is tenant-bound
   /admin/app-registry:
     get:
       tags: [admin, app-registry]

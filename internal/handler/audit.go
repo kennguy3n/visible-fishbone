@@ -7,28 +7,80 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
 )
 
+// permAuditReadPlatform is the platform-scoped permission the admin
+// audit-log endpoint requires. The platform-scoped (tenant_id IS
+// NULL) audit rows span the whole control plane and carry operator
+// identities, so — exactly like the metering platform cost-report —
+// an MSP- or tenant-scoped grant does NOT satisfy it; only a
+// platform-scoped role with this permission (or the platform
+// wildcard "*"). The PlatformAuthorizer interface is shared with the
+// PoP / metering admin surfaces (see pop.go).
+const permAuditReadPlatform = "audit:read_platform"
+
 // AuditHandler exposes the (read-only) audit-log endpoint.
 type AuditHandler struct {
-	svc *audit.Service
+	svc   *audit.Service
+	authz PlatformAuthorizer
 }
 
-// NewAuditHandler wires the handler.
-func NewAuditHandler(svc *audit.Service) *AuditHandler {
-	return &AuditHandler{svc: svc}
+// NewAuditHandler wires the handler. authz gates the platform-scoped
+// admin audit-log route; a nil authorizer leaves that route
+// unregistered (it 404s) rather than serving cross-tenant audit data
+// behind authentication alone — mirroring NewMeteringHandler /
+// NewPoPHandler. The tenant-scoped route is unaffected.
+func NewAuditHandler(svc *audit.Service, authz PlatformAuthorizer) *AuditHandler {
+	return &AuditHandler{svc: svc, authz: authz}
 }
 
 // Register attaches routes.
 func (h *AuditHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/audit-log", h.list)
 	// Admin — platform-scoped (tenant-less) audit rows for SNG
-	// operators. No path tenant binding; the router's auth chain
-	// handles authentication, mirroring the /admin/app-registry
-	// catalog routes whose mutations these rows record.
-	mux.HandleFunc("GET /api/v1/admin/audit-log", h.listGlobal)
+	// operators. No path tenant binding; gated on an explicit
+	// platform-scoped RBAC grant (audit:read_platform) via
+	// AuthorizePlatform, mirroring the metering cost-report surface.
+	// A nil authorizer leaves it unregistered (404).
+	if h.authz != nil {
+		mux.HandleFunc("GET /api/v1/admin/audit-log", h.listGlobal)
+	}
+}
+
+// requirePlatform gates a platform-scoped audit route on an explicit
+// RBAC grant. Returns true when the request may proceed, false (after
+// writing the response) otherwise. Mirrors
+// MeteringHandler.requirePlatform / PoPHandler.requirePlatform: a
+// tenant-bound credential is refused outright (defense in depth),
+// an authenticated user identity is required, and AuthorizePlatform
+// must grant the permission against a platform-scoped role.
+func (h *AuditHandler) requirePlatform(w http.ResponseWriter, r *http.Request, permission string) bool {
+	if middleware.TenantIDFromContext(r.Context()) != uuid.Nil {
+		WriteError(w, http.StatusForbidden, "platform_forbidden",
+			"platform-scoped audit routes are not accessible to tenant-bound credentials")
+		return false
+	}
+	userID := middleware.UserIDFromContext(r.Context())
+	if userID == uuid.Nil {
+		WriteError(w, http.StatusUnauthorized, "unauthenticated",
+			"platform-scoped audit routes require an authenticated user identity")
+		return false
+	}
+	allowed, err := h.authz.AuthorizePlatform(r.Context(), userID, permission)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "authorization_failed",
+			"failed to evaluate platform authorization")
+		return false
+	}
+	if !allowed {
+		WriteError(w, http.StatusForbidden, "platform_forbidden",
+			"credentials do not authorise platform-scoped audit operations")
+		return false
+	}
+	return true
 }
 
 // AuditEntryResponse is the JSON projection of repository.AuditEntry.
@@ -142,6 +194,9 @@ func (h *AuditHandler) list(w http.ResponseWriter, r *http.Request) {
 // rows — global app_registry catalog mutations and vendor syncs that
 // the tenant-scoped list can never see.
 func (h *AuditHandler) listGlobal(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatform(w, r, permAuditReadPlatform) {
+		return
+	}
 	filter, page, ok := parseAuditQuery(w, r)
 	if !ok {
 		return
