@@ -43,6 +43,18 @@ const umbrella = "0c8d2d9d-896d-45b1-8001-6a6776f832b9"
 // dataset (its current-month run rate runs well above its own history).
 const initech = "b6520bda-e7bb-4af9-9c53-7b0051eae65b"
 
+// Globex Health Systems — the HIPAA tenant; used to capture a playbook
+// set with a mix of enabled and disabled automated-response runbooks.
+const globex = "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a"
+
+// postSpec captures a live POST response. Bodies are fixed so reruns
+// against the same seeded stack reproduce the same files.
+type postSpec struct {
+	name string
+	path string
+	body map[string]any
+}
+
 type spec struct {
 	name string // output filename (without .json) and scenario tag
 	path string // request path
@@ -83,6 +95,8 @@ func main() {
 		{"s5-umbrella-dlp-policies-emptystate", "/api/v1/tenants/" + umbrella + "/dlp/policies"},
 		// S6 — AI posture report (the live policy-coverage fix, #119)
 		{"s6-acme-posture-report", "/api/v1/tenants/" + acme + "/ai/reports/posture"},
+		{"s6-acme-playbooks", "/api/v1/tenants/" + acme + "/playbooks"},
+		{"s6-globex-playbooks", "/api/v1/tenants/" + globex + "/playbooks"},
 		// S7 — cost / metering / compliance / integrations
 		{"s7-acme-usage", "/api/v1/tenants/" + acme + "/usage"},
 		{"s7-acme-usage-history", "/api/v1/tenants/" + acme + "/usage/history"},
@@ -123,10 +137,75 @@ func main() {
 		logf("OK   %-40s HTTP %d  %d bytes -> %s", s.name, status, len(pretty), dst)
 		ok++
 	}
+	// POST captures — request + response pairs for the AI NL policy
+	// query (S6). The request body is saved alongside the response so
+	// the blog can show both sides of a real, deterministic verdict.
+	posts := []postSpec{
+		{
+			"s6-acme-nl-policy-query",
+			"/api/v1/tenants/" + acme + "/ai/query",
+			map[string]any{"question": "Can user finance access app private-apps from a managed device?"},
+		},
+	}
+	for _, p := range posts {
+		reqBytes, _ := json.MarshalIndent(p.body, "", "  ")
+		if err := os.WriteFile(filepath.Join(*out, p.name+"-request.json"), append(reqBytes, '\n'), 0o644); err != nil {
+			logf("FAIL %-40s write request: %v", p.name, err)
+			fail++
+			continue
+		}
+		status, body, err := post(client, *base, p.path, token, p.body)
+		if err != nil {
+			logf("FAIL %-40s %v", p.name, err)
+			fail++
+			continue
+		}
+		if status < 200 || status >= 300 {
+			logf("FAIL %-40s HTTP %d: %s", p.name, status, truncate(body, 200))
+			fail++
+			continue
+		}
+		pretty, perr := prettyJSON(body)
+		if perr != nil {
+			logf("FAIL %-40s non-JSON response: %v", p.name, perr)
+			fail++
+			continue
+		}
+		dst := filepath.Join(*out, p.name+"-response.json")
+		if err := os.WriteFile(dst, pretty, 0o644); err != nil {
+			logf("FAIL %-40s write: %v", p.name, err)
+			fail++
+			continue
+		}
+		logf("OK   %-40s HTTP %d  %d bytes -> %s", p.name, status, len(pretty), dst)
+		ok++
+	}
+
 	logf("\ncaptured %d ok, %d failed", ok, fail)
 	if fail > 0 {
 		os.Exit(1)
 	}
+}
+
+func post(c *http.Client, base, path, token string, body map[string]any) (int, []byte, error) {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return 0, nil, err
+	}
+	req, err := http.NewRequest("POST", base+path, bytes.NewReader(b))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	rb, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, rb, err
 }
 
 func get(c *http.Client, base, path, token string) (int, []byte, error) {

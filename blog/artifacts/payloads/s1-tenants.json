@@ -10,7 +10,7 @@
       "slug": "umbrella-logistics",
       "status": "active",
       "tier": "starter",
-      "updated_at": "2026-06-09T01:09:09.163881000Z"
+      "updated_at": "2026-06-09T02:18:11.249403000Z"
     },
     {
       "created_at": "2026-06-09T00:18:24.990767000Z",
@@ -33,7 +33,7 @@
       "slug": "globex-health",
       "status": "active",
       "tier": "enterprise",
-      "updated_at": "2026-06-09T01:09:09.046304000Z"
+      "updated_at": "2026-06-09T02:18:11.082063000Z"
     },
     {
       "created_at": "2026-06-09T00:12:37.099779000Z",
@@ -45,7 +45,7 @@
       "slug": "acme-retail",
       "status": "active",
       "tier": "enterprise",
-      "updated_at": "2026-06-09T01:09:08.959393000Z"
+      "updated_at": "2026-06-09T02:18:10.954824000Z"
     },
     {
       "created_at": "2026-06-08T22:46:51.594006000Z",

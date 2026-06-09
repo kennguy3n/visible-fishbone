@@ -96,6 +96,7 @@ type tenantSpec struct {
 	health       int
 	components   map[string]int
 	integrations []integrationSpec
+	playbooks    []playbookSpec
 }
 
 type siteSpec struct {
@@ -113,6 +114,13 @@ type casbSpec struct {
 }
 type integrationSpec struct {
 	typ, name string
+}
+type playbookSpec struct {
+	name        string
+	description string
+	trigger     string
+	steps       []map[string]any
+	enabled     bool
 }
 
 func scenarioTenants() []tenantSpec {
@@ -142,6 +150,30 @@ func scenarioTenants() []tenantSpec {
 			casb:   []casbSpec{{"m365", "Acme Microsoft 365"}, {"slack", "Acme Slack"}},
 			health: 88, components: map[string]int{"policy": 92, "posture": 85, "patch": 84, "identity": 90},
 			integrations: []integrationSpec{{"siem_webhook", "Acme Splunk HEC"}},
+			playbooks: []playbookSpec{
+				{
+					name:        "Contain malware-flagged POS endpoint",
+					description: "Isolate a point-of-sale device when the edge raises a critical malware verdict, then notify the SOC and open a ticket.",
+					trigger:     "alert.severity == 'critical' && alert.category == 'malware'",
+					steps: []map[string]any{
+						{"action": "isolate_device", "target": "alert.device_id"},
+						{"action": "notify", "channel": "soc", "severity": "critical"},
+						{"action": "open_ticket", "system": "splunk", "priority": "P1"},
+					},
+					enabled: true,
+				},
+				{
+					name:        "Quarantine PCI cardholder-data exfil",
+					description: "Block an outbound transfer that trips the PCI-DSS DLP classifier and require an analyst sign-off before release.",
+					trigger:     "dlp.violation && dlp.template == 'pci-dss'",
+					steps: []map[string]any{
+						{"action": "block_transfer"},
+						{"action": "require_approval", "role": "security_admin"},
+						{"action": "notify", "channel": "soc"},
+					},
+					enabled: true,
+				},
+			},
 		},
 		{
 			name: "Globex Health Systems", slug: "globex-health", region: "us-west",
@@ -167,6 +199,30 @@ func scenarioTenants() []tenantSpec {
 			casb:   []casbSpec{{"google", "Globex Google Workspace"}, {"m365", "Globex Microsoft 365"}},
 			health: 81, components: map[string]int{"policy": 88, "posture": 78, "patch": 72, "identity": 86},
 			integrations: []integrationSpec{{"servicenow", "Globex ServiceNow ITSM"}},
+			playbooks: []playbookSpec{
+				{
+					name:        "Isolate PHI exfil over webmail",
+					description: "Route the session to remote browser isolation when the PHI classifier fires on a webmail upload, then alert the privacy officer.",
+					trigger:     "dlp.violation && dlp.classifier == 'phi' && app.category == 'webmail'",
+					steps: []map[string]any{
+						{"action": "isolate_browser", "mode": "rbi"},
+						{"action": "notify", "channel": "privacy_officer", "severity": "high"},
+						{"action": "open_ticket", "system": "servicenow", "priority": "P2"},
+					},
+					enabled: true,
+				},
+				{
+					name:        "Revoke access on impossible travel",
+					description: "Step up to re-authentication and revoke the active ZTNA session when an impossible-travel anomaly is detected for a clinician identity.",
+					trigger:     "alert.type == 'impossible_travel'",
+					steps: []map[string]any{
+						{"action": "revoke_session", "target": "alert.user_id"},
+						{"action": "require_approval", "role": "security_admin"},
+						{"action": "notify", "channel": "soc"},
+					},
+					enabled: false,
+				},
+			},
 		},
 		{
 			name: "Initech Financial", slug: "initech-financial", region: "eu-central",
@@ -189,6 +245,18 @@ func scenarioTenants() []tenantSpec {
 			casb:   []casbSpec{{"salesforce", "Initech Salesforce"}, {"m365", "Initech Microsoft 365"}},
 			health: 76, components: map[string]int{"policy": 80, "posture": 74, "patch": 70, "identity": 82},
 			integrations: []integrationSpec{{"jira", "Initech Jira SecOps"}},
+			playbooks: []playbookSpec{
+				{
+					name:        "Throttle anomalous URL-category surge",
+					description: "Open a SecOps ticket and notify the cost owner when a tenant's URL-category lookup run rate exceeds 2x its trailing baseline.",
+					trigger:     "anomaly.meter == 'url_cat_lookups' && anomaly.ratio > 2.0",
+					steps: []map[string]any{
+						{"action": "notify", "channel": "finops", "severity": "warning"},
+						{"action": "open_ticket", "system": "jira", "priority": "P3"},
+					},
+					enabled: true,
+				},
+			},
 		},
 		{
 			name: "Umbrella Logistics", slug: "umbrella-logistics", region: "ap-southeast",
@@ -267,6 +335,14 @@ func seedTenant(tid string, t tenantSpec) map[string]any {
 	res["casb_inline_rules"] = seedInlineCASBRules(tid)
 	res["compliance_reports"] = seedComplianceReport(tid)
 
+	pb := 0
+	for _, p := range t.playbooks {
+		if createPlaybook(tid, p) {
+			pb++
+		}
+	}
+	res["playbooks"] = pb
+
 	if recordOpsHealth(tid, t.health, t.components) {
 		res["ops_health"] = t.health
 	}
@@ -283,8 +359,27 @@ func seedTenant(tid string, t tenantSpec) map[string]any {
 	res["browser_policies"] = listCount(tid, "browser-policies")
 	res["casb_connectors"] = listCount(tid, "casb/connectors")
 	res["integrations"] = listCount(tid, "integrations")
+	res["playbooks"] = listCount(tid, "playbooks")
 
 	return res
+}
+
+// createPlaybook publishes one automated-response playbook. It is
+// idempotent across reruns: playbook names are unique per tenant, so a
+// name that already exists is skipped rather than duplicated.
+func createPlaybook(tid string, p playbookSpec) bool {
+	if namedItemExists(tid, "playbooks", "name", p.name) {
+		return false
+	}
+	steps, _ := json.Marshal(p.steps)
+	body := map[string]any{
+		"name":              p.name,
+		"description":       p.description,
+		"trigger_condition": p.trigger,
+		"steps":             json.RawMessage(steps),
+		"enabled":           p.enabled,
+	}
+	return doJSON("POST", fmt.Sprintf("/api/v1/tenants/%s/playbooks", tid), body, nil)
 }
 
 func createTenant(t tenantSpec) string {
