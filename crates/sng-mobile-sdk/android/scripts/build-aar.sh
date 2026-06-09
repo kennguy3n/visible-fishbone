@@ -7,7 +7,8 @@
 #      module's source set.
 #   2. Cross-compile the crate's `cdylib` for each Android ABI with
 #      `cargo-ndk`, placing the `.so`s under `src/main/jniLibs/`.
-#   3. Assemble the release AAR with the Gradle wrapper.
+#   3. Assemble the AAR with the Gradle wrapper, selecting the
+#      release/debug variant to match the cargo profile.
 #
 # The generated Kotlin and the `.so`s are git-ignored build outputs.
 #
@@ -31,12 +32,15 @@ KOTLIN_SRC="$GENERATED_DIR/uniffi"
 KOTLIN_DEST="$ANDROID_DIR/src/main/kotlin/uniffi"
 JNILIBS_DIR="$ANDROID_DIR/src/main/jniLibs"
 
-# Android ABIs and the cargo `--release`/`--profile` flag.
+# Android ABIs, the cargo `--release`/`--profile` flag, and the matching
+# Gradle assemble task. The Gradle variant must track the native build so a
+# `debug` invocation produces a debug AAR (debug `.so`s) rather than an AAR
+# named "release" that actually carries debug libraries.
 ABIS=("arm64-v8a" "armeabi-v7a" "x86_64")
 case "$PROFILE" in
-  release)   NDK_BUILD_FLAGS=(--release) ;;
-  dev|debug) NDK_BUILD_FLAGS=() ;;
-  *)         NDK_BUILD_FLAGS=(--profile "$PROFILE") ;;
+  release)   NDK_BUILD_FLAGS=(--release)             ; GRADLE_TASK=assembleRelease ;;
+  dev|debug) NDK_BUILD_FLAGS=()                      ; GRADLE_TASK=assembleDebug ;;
+  *)         NDK_BUILD_FLAGS=(--profile "$PROFILE")  ; GRADLE_TASK=assembleRelease ;;
 esac
 
 cd "$REPO_ROOT"
@@ -59,9 +63,9 @@ mkdir -p "$JNILIBS_DIR"
 cargo ndk "${NDK_TARGET_FLAGS[@]}" -o "$JNILIBS_DIR" \
   build -p sng-mobile-sdk "${NDK_BUILD_FLAGS[@]}"
 
-echo "==> assembling the AAR"
+echo "==> assembling the AAR ($GRADLE_TASK)"
 cd "$ANDROID_DIR"
-./gradlew --no-daemon assembleRelease
+./gradlew --no-daemon "$GRADLE_TASK"
 
 echo "==> done; AAR(s):"
 find "$ANDROID_DIR/build/outputs/aar" -name "*.aar" 2>/dev/null | sort

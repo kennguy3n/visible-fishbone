@@ -45,16 +45,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: mobile-sdk-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   # Must match `rust-version` in the workspace Cargo.toml (the
   # workspace refuses an older toolchain at build time).
   RUST_TOOLCHAIN: "1.91"
-  # NDK the cargo-ndk cross-build links against; pinned so a runner
-  # image bump does not silently change the linker.
-  ANDROID_NDK_VERSION: "27.2.12479018"
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -127,12 +124,18 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - name: set up android sdk
-        uses: android-actions/setup-android@v3
-      - name: install android ndk
-        run: sdkmanager "ndk;${ANDROID_NDK_VERSION}"
-      - name: export ndk home
-        run: echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+      - name: use preinstalled android sdk + ndk
+        # The ubuntu runner image ships a full Android SDK (at
+        # $ANDROID_SDK_ROOT) and a current NDK (at
+        # $ANDROID_NDK_LATEST_HOME). Reuse them instead of downloading,
+        # which keeps the job hermetic to the image and avoids a redundant
+        # sdkmanager fetch. `cargo-ndk` only needs ANDROID_NDK_HOME and
+        # Gradle (AGP, no pinned ndkVersion) only needs ANDROID_SDK_ROOT.
+        run: |
+          test -n "$ANDROID_NDK_LATEST_HOME" || { echo "no preinstalled NDK on runner"; exit 1; }
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "using NDK: $ANDROID_NDK_LATEST_HOME"
+          "$ANDROID_NDK_LATEST_HOME"/ndk-build --version || true
       - name: install cargo-ndk
         uses: taiki-e/install-action@v2
         with:
