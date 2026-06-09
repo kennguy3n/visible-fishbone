@@ -512,8 +512,13 @@ impl LinearModel {
             idf: claims.idf,
             weights: claims.weights,
             bias: claims.bias,
-            // Clamp the gates into the valid probability range so a
-            // malformed-but-finite threshold cannot disable gating.
+            // Clamp the gates into the valid probability range [0, 1]
+            // so an out-of-range (but finite) threshold maps to a
+            // sensible extreme rather than comparing nonsensically:
+            // <= 0 becomes 0.0 (most permissive — accept any confident
+            // prediction) and >= 1 becomes 1.0 (strictest). Both ends
+            // are signed-model choices; non-finite thresholds are
+            // already rejected above.
             min_confidence: claims.min_confidence.clamp(0.0, 1.0),
             min_margin: claims.min_margin.clamp(0.0, 1.0),
         })
