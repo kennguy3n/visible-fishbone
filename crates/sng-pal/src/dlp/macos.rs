@@ -631,8 +631,13 @@ impl MacPrintMonitor {
     #[must_use]
     pub fn new(spool_dir: Option<PathBuf>, opts: FileWatchOptions) -> Self {
         let dir = spool_dir.unwrap_or_else(|| PathBuf::from("/private/var/spool/cups"));
+        // `warm = true`: the FSEvents native path only reports jobs spooled
+        // *after* the stream is armed, so the poll fallback must likewise
+        // treat jobs already in the spool at startup as the watermark rather
+        // than re-reporting them as fresh prints. Keeps the two transports
+        // observably identical (see mod.rs) and matches the Linux print path.
         Self {
-            inner: DirInner::start(DlpChannel::Print, vec![dir], false, opts),
+            inner: DirInner::start(DlpChannel::Print, vec![dir], true, opts),
         }
     }
 

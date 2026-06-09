@@ -77,9 +77,16 @@ const SHUTDOWN_POLL: Duration = Duration::from_millis(500);
 /// Convert a (small) [`Duration`] to a nix [`PollTimeout`]. Our
 /// timeouts are sub-second, well inside the representable range; an
 /// out-of-range value falls back to the shutdown tick.
+///
+/// The final fallback is [`PollTimeout::ZERO`] (return immediately),
+/// never [`PollTimeout::NONE`]: both fallbacks are unreachable for the
+/// bounded sub-second constants every caller passes, but a non-blocking
+/// floor is the safe degenerate — it makes the surrounding loop spin and
+/// observe the shutdown flag rather than parking the worker in `poll`
+/// indefinitely, which `NONE` (an infinite timeout) would do.
 fn poll_timeout(d: Duration) -> PollTimeout {
     PollTimeout::try_from(d)
-        .unwrap_or_else(|_| PollTimeout::try_from(SHUTDOWN_POLL).unwrap_or(PollTimeout::NONE))
+        .unwrap_or_else(|_| PollTimeout::try_from(SHUTDOWN_POLL).unwrap_or(PollTimeout::ZERO))
 }
 
 /// Default directories an endpoint watches for sensitive-file writes
@@ -476,7 +483,17 @@ impl LinuxPrintMonitor {
                     inner: FileWriteInner::Poll(
                         SensitiveDirWatcher::new(DlpChannel::Print, dirs)
                             .with_max_file_bytes(opts.max_file_bytes)
-                            .with_poll_interval(opts.poll_interval),
+                            .with_poll_interval(opts.poll_interval)
+                            // Warm-start so the poll fallback observes the
+                            // same start boundary as the inotify path:
+                            // inotify can only report jobs spooled *after* the
+                            // watch is armed (`IN_CLOSE_WRITE`), so the
+                            // fallback must likewise treat jobs already in the
+                            // spool at startup as the watermark rather than
+                            // re-reporting them as fresh prints. Keeps the two
+                            // transports observably identical (mod.rs contract)
+                            // and avoids re-scanning a job the spooler is mid-write.
+                            .warm_started(),
                     ),
                 }
             }
@@ -726,6 +743,10 @@ const USB_IDLE_FALLBACK: Duration = Duration::from_secs(5);
 /// `notify` is best-effort. A one-minute re-scan floor keeps the
 /// missed-event window small at negligible cost (one `/proc/mounts`
 /// read per idle minute) rather than risking an hour-long blind spot.
+// `from_secs(60)` is intentional: `Duration::from_mins` is still unstable
+// on the toolchain, and seconds keep this re-scan floor in the same unit
+// as the other USB timeouts in this module.
+#[allow(clippy::duration_suboptimal_units)]
 const USB_EDGE_PARK_CEILING: Duration = Duration::from_secs(60);
 
 /// Watches removable volumes and reports the files written onto them as

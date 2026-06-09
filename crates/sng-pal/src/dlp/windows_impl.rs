@@ -369,9 +369,27 @@ fn parse_notify_buffer(buf: &[u8]) -> Vec<OsString> {
             || action == FILE_ACTION_MODIFIED
             || action == FILE_ACTION_RENAMED_NEW_NAME
         {
-            let name_len = info.FileNameLength as usize / 2;
-            // SAFETY: the name is `name_len` UTF-16 units immediately
-            // after the fixed header, within the record.
+            // Defense-in-depth: verify the variable-length name field lies
+            // wholly within the buffer before reading it, rather than
+            // trusting the `ReadDirectoryChangesW` contract that every record
+            // inside `returned` bytes is structurally complete. A malformed
+            // record (or a wrong `returned`) could otherwise have us read
+            // zero-filled tail bytes past the real data (in-bounds of the
+            // allocation, so not UB, but it would forge a bogus file name).
+            // If the name does not fit, skip this record and stop walking —
+            // the rest of the chain cannot be trusted either.
+            let name_off = offset + std::mem::offset_of!(FILE_NOTIFY_INFORMATION, FileName);
+            let name_bytes = info.FileNameLength as usize;
+            let Some(name_end) = name_off.checked_add(name_bytes) else {
+                break;
+            };
+            if name_end > buf.len() {
+                break;
+            }
+            let name_len = name_bytes / 2;
+            // SAFETY: the name is `name_len` UTF-16 units immediately after
+            // the fixed header and, per the bounds check just above, lies
+            // wholly within `buf`.
             let name = unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), name_len) };
             out.push(OsString::from_wide(name));
         }
@@ -830,7 +848,13 @@ impl WindowsPrintMonitor {
             None
         } else {
             let dir = spool_dir.unwrap_or_else(default_spool_dir);
-            Some(DirInner::start(DlpChannel::Print, vec![dir], false, opts))
+            // `warm = true`: the native spooler hook (`PRINTER_CHANGE_ADD_JOB`)
+            // only fires for jobs added *after* it is armed, so the poll
+            // fallback must likewise treat jobs already in the spool at
+            // startup as the watermark rather than re-reporting them as fresh
+            // prints — keeping the two transports observably identical (see
+            // mod.rs) and matching the Linux and macOS print paths.
+            Some(DirInner::start(DlpChannel::Print, vec![dir], true, opts))
         };
         Self {
             shared,
