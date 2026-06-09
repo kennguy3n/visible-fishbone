@@ -145,6 +145,15 @@ func NewRowLimit(r rate.Limit, burst int) (RowLimit, error) {
 // Implementations typically read from the tenant/tier service or a
 // config map; a nil resolver means "every tenant gets the default
 // budget", which is the common path.
+//
+// HOT-PATH CONTRACT: ResolveRowLimit is called by AllowN/WaitN once per
+// admitted event on the telemetry hot path (millions/sec aggregate), so
+// it MUST be cheap and non-blocking — an in-memory lookup, never a
+// synchronous DB/RPC call. The shipped StaticRowLimitResolver is a field
+// read, and bucketFor only rebuilds a tenant's bucket when the resolved
+// budget actually changes, so a resolver that wants live, per-tenant
+// budgets must serve them from a cache it refreshes out-of-band (e.g. a
+// background sync off the tenant/tier service), not by doing I/O here.
 type RowLimitResolver interface {
 	ResolveRowLimit(ctx context.Context, tenantID uuid.UUID) RowLimit
 }
