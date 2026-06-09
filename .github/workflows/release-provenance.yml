@@ -107,6 +107,9 @@ jobs:
           ( cd dist && { sha256sum "${art}" || shasum -a 256 "${art}"; } > "${art}.sha256" )
           echo "artifact=dist/${art}" >> "$GITHUB_OUTPUT"
           echo "checksum=dist/${art}.sha256" >> "$GITHUB_OUTPUT"
+          # Export the slash-normalized version so the upload-artifact name
+          # matches the tarball name even for a branch-style dispatch ref.
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
       - name: generate SLSA build provenance
         uses: actions/attest-build-provenance@v2
         with:
@@ -114,7 +117,7 @@ jobs:
       - name: upload artifact + provenance inputs
         uses: actions/upload-artifact@v4
         with:
-          name: sng-edge-image-${{ inputs.ref || github.ref_name }}
+          name: sng-edge-image-${{ steps.pack.outputs.version }}
           path: |
             ${{ steps.pack.outputs.artifact }}
             ${{ steps.pack.outputs.checksum }}
@@ -178,6 +181,8 @@ jobs:
           ( cd dist && { sha256sum "${art}" || shasum -a 256 "${art}"; } > "${art}.sha256" )
           echo "artifact=dist/${art}" >> "$GITHUB_OUTPUT"
           echo "checksum=dist/${art}.sha256" >> "$GITHUB_OUTPUT"
+          # Export the slash-normalized version (see edge-image job).
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
       - name: generate SLSA build provenance
         uses: actions/attest-build-provenance@v2
         with:
@@ -185,7 +190,7 @@ jobs:
       - name: upload artifact + provenance inputs
         uses: actions/upload-artifact@v4
         with:
-          name: sng-agent-installer-${{ inputs.ref || github.ref_name }}-${{ matrix.os }}
+          name: sng-agent-installer-${{ steps.pack.outputs.version }}-${{ matrix.os }}
           path: |
             ${{ steps.pack.outputs.artifact }}
             ${{ steps.pack.outputs.checksum }}

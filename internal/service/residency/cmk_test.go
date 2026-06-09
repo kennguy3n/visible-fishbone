@@ -66,7 +66,10 @@ func TestCMKServicePlatformFallbackRoundTrip(t *testing.T) {
 
 func awsRegistry(t *testing.T, region residency.Region, keyURI string) *residency.KeyProviderRegistry {
 	t.Helper()
-	plat, _ := residency.NewLocalKeyProvider(residency.ProviderPlatform, bytes.Repeat([]byte{0xB2}, 32))
+	plat, err := residency.NewLocalKeyProvider(residency.ProviderPlatform, bytes.Repeat([]byte{0xB2}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
 	aws, err := residency.NewLocalKeyProvider(
 		residency.ProviderAWSKMS, bytes.Repeat([]byte{0xC3}, 32),
 		residency.WithLocalKey(keyURI, bytes.Repeat([]byte{0xD4}, 32)))
