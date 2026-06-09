@@ -245,39 +245,55 @@ func NewClickHouseRowLimiter(resolver RowLimitResolver, opts ...RowLimiterOption
 	return l
 }
 
-// bucketFor returns the tenant's bucket, creating it on first touch and
-// rebuilding it in place when the resolved budget has changed. The
-// returned bucket's own mutex is NOT held; callers must guard the
-// rate.Limiter call themselves where ordering matters (AllowN/ReserveN
-// on *rate.Limiter are individually goroutine-safe, so no extra lock is
-// needed for a single call).
+// bucketFor returns the tenant's bucket, creating it on first touch.
+// Budget refresh and token consumption are done together under the
+// bucket's own mutex by refreshLocked/allowN, so this only handles the
+// map lookup-or-create (guarded by l.mu).
 func (l *ClickHouseRowLimiter) bucketFor(id uuid.UUID, desired RowLimit) *rowBucket {
 	l.mu.RLock()
 	b, ok := l.buckets[id]
 	l.mu.RUnlock()
-	if !ok {
-		l.mu.Lock()
-		if b, ok = l.buckets[id]; !ok {
-			b = &rowBucket{cur: desired, bucket: rate.NewLimiter(desired.Rate, desired.Burst)}
-			l.buckets[id] = b
-		}
-		l.mu.Unlock()
+	if ok {
+		return b
 	}
-	// Refresh the bucket in place if the operator changed the budget, so
-	// a lowered cap takes effect without dropping the accumulated tokens
-	// of an unrelated tenant.
-	b.mu.Lock()
-	if b.cur != desired {
-		b.cur = desired
-		// Single clock read so the rate and burst updates share one
-		// instant — the token math stays consistent regardless of the
-		// clock source.
-		now := l.now()
-		b.bucket.SetLimitAt(now, desired.Rate)
-		b.bucket.SetBurstAt(now, desired.Burst)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b, ok = l.buckets[id]; !ok {
+		b = &rowBucket{cur: desired, bucket: rate.NewLimiter(desired.Rate, desired.Burst)}
+		l.buckets[id] = b
 	}
-	b.mu.Unlock()
 	return b
+}
+
+// refreshLocked rebuilds the limiter's rate and burst in place when the
+// operator changed the tenant's budget, so a lowered cap takes effect on
+// the next call without dropping the tenant's accumulated tokens (and
+// without touching any other tenant's bucket). The caller MUST hold
+// b.mu: SetLimitAt and SetBurstAt are two calls, and only holding b.mu
+// across both — and across the token op that follows (see allowN) —
+// keeps a concurrent reader from observing a half-applied limiter (new
+// rate, old burst). `now` is passed in so the refresh and the token op
+// share a single clock instant.
+func (b *rowBucket) refreshLocked(now time.Time, desired RowLimit) {
+	if b.cur == desired {
+		return
+	}
+	b.cur = desired
+	b.bucket.SetLimitAt(now, desired.Rate)
+	b.bucket.SetBurstAt(now, desired.Burst)
+}
+
+// allowN refreshes the budget and consumes `rows` tokens atomically
+// under b.mu, so the non-blocking hot path can never see a half-applied
+// (new rate, old burst) limiter mid-reconfigure. b.mu is per-tenant and
+// a tenant is pinned to one partition, so it is uncontended in practice;
+// the extra hold around the already-internally-locked rate.Limiter call
+// costs nothing on the common path and closes the reconfigure window.
+func (b *rowBucket) allowN(now time.Time, desired RowLimit, rows int) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.refreshLocked(now, desired)
+	return b.bucket.AllowN(now, rows)
 }
 
 // AllowN reports whether the tenant may write `rows` ClickHouse rows
@@ -305,7 +321,7 @@ func (l *ClickHouseRowLimiter) AllowN(ctx context.Context, tenantID uuid.UUID, r
 		return false
 	}
 	b := l.bucketFor(tenantID, desired)
-	return b.bucket.AllowN(l.now(), int(rows))
+	return b.allowN(l.now(), desired, int(rows))
 }
 
 // WaitN blocks until the tenant has accrued enough budget to write
@@ -321,6 +337,11 @@ func (l *ClickHouseRowLimiter) AllowN(ctx context.Context, tenantID uuid.UUID, r
 // withRowLimiterClock test clock: rate.Limiter has no explicit-time
 // WaitN (it sleeps for the computed delay), so a pinned clock cannot
 // drive it. In production l.now is time.Now, so the two stay consistent.
+//
+// The budget refresh runs under b.mu before the (blocking) reservation
+// so the two SetXAt calls are applied atomically; WaitN cannot hold b.mu
+// across its sleep, but a budget change concurrent with an in-flight
+// WaitN is an operator-rare event and self-corrects on the next call.
 func (l *ClickHouseRowLimiter) WaitN(ctx context.Context, tenantID uuid.UUID, rows int64) error {
 	if l == nil || rows <= 0 {
 		return nil
@@ -336,6 +357,9 @@ func (l *ClickHouseRowLimiter) WaitN(ctx context.Context, tenantID uuid.UUID, ro
 		return fmt.Errorf("metering: batch of %d rows exceeds tenant burst %d: %w", rows, desired.Burst, ErrRowLimitExceeded)
 	}
 	b := l.bucketFor(tenantID, desired)
+	b.mu.Lock()
+	b.refreshLocked(l.now(), desired)
+	b.mu.Unlock()
 	return b.bucket.WaitN(ctx, int(rows))
 }
 

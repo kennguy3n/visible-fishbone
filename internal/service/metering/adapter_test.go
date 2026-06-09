@@ -250,6 +250,74 @@ func TestRowLimiterRebuildsBucketOnBudgetChange(t *testing.T) {
 	}
 }
 
+// TestRowLimiterConcurrentAllowNDuringBudgetChange hammers AllowN from
+// many goroutines while an operator repeatedly changes the budget. With
+// -race this exercises the atomic refresh-then-consume path (allowN /
+// refreshLocked under b.mu): the two SetXAt calls and the AllowN that
+// follows must be serialised so no caller observes a half-applied
+// limiter. The assertion is liveness/safety (no race, no panic, every
+// call returns a bool) rather than an exact admit count, since the
+// admitted volume legitimately depends on the interleaving.
+func TestRowLimiterConcurrentAllowNDuringBudgetChange(t *testing.T) {
+	tid := uuid.New()
+	res := &mutableRowResolver{limit: RowLimit{Rate: 1000, Burst: 1000}}
+	l := NewClickHouseRowLimiter(res)
+	ctx := context.Background()
+
+	const readers = 16
+	const iters = 2000
+
+	// Writer: flip the budget between two finite values continuously
+	// until the readers are done.
+	stop := make(chan struct{})
+	var writer sync.WaitGroup
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		hi := true
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if hi {
+					res.set(RowLimit{Rate: 2000, Burst: 5000})
+				} else {
+					res.set(RowLimit{Rate: 500, Burst: 800})
+				}
+				hi = !hi
+			}
+		}
+	}()
+
+	var readersWG sync.WaitGroup
+	for r := 0; r < readers; r++ {
+		readersWG.Add(1)
+		go func() {
+			defer readersWG.Done()
+			for i := 0; i < iters; i++ {
+				// Mix single-row and small-batch writes; both must
+				// return without racing the concurrent reconfigure.
+				_ = l.AllowN(ctx, tid, 1)
+				_ = l.AllowN(ctx, tid, 64)
+			}
+		}()
+	}
+
+	readersWG.Wait()
+	close(stop)
+	writer.Wait()
+
+	// The bucket must be in one of the two configured states — never a
+	// half-applied (new rate, old burst) hybrid.
+	snap := l.Snapshot()[tid]
+	okHi := snap.Rate == 2000 && snap.Burst == 5000
+	okLo := snap.Rate == 500 && snap.Burst == 800
+	if !okHi && !okLo {
+		t.Fatalf("bucket left half-applied after concurrent reconfigure: %+v", snap)
+	}
+}
+
 func TestRowLimiterWaitNRespectsContextCancellation(t *testing.T) {
 	tid := uuid.New()
 	limit, _ := NewRowLimit(1, 1) // 1 row/sec, burst 1 — very slow refill
