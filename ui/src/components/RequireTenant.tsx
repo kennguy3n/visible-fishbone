@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { useTenant } from "@/lib/tenant-context";
-import { EmptyState, LoadingState } from "./ui";
+import { EmptyState, EmptyIllustration, LoadingState } from "./ui";
 
 /**
  * Gate for tenant-scoped pages: most control-plane endpoints require a
@@ -18,7 +18,7 @@ export function RequireTenant({
   if (!selectedTenantId || tenants.length === 0) {
     return (
       <EmptyState
-        icon="◳"
+        illustration={<EmptyIllustration kind="shield" />}
         title="No tenant selected"
         hint="Create a tenant or pick one from the switcher in the top bar to manage its configuration."
       />

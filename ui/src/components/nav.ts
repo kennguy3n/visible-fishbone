@@ -3,10 +3,12 @@
 // overview, the policy/security domains, fleet, operations, and the
 // MSP partner portal.
 
+import type { IconName } from "./Icon";
+
 export interface NavItem {
   label: string;
   to: string;
-  icon: string;
+  icon: IconName;
 }
 
 export interface NavGroup {
@@ -18,57 +20,57 @@ export const NAV: NavGroup[] = [
   {
     label: "Overview",
     items: [
-      { label: "Dashboard", to: "/", icon: "▦" },
-      { label: "Get started", to: "/onboarding", icon: "✸" },
-      { label: "Tenants", to: "/tenants", icon: "◳" },
-      { label: "Sites", to: "/sites", icon: "⌂" },
-      { label: "Devices", to: "/devices", icon: "▢" },
+      { label: "Dashboard", to: "/", icon: "dashboard" },
+      { label: "Get started", to: "/onboarding", icon: "rocket" },
+      { label: "Tenants", to: "/tenants", icon: "tenants" },
+      { label: "Sites", to: "/sites", icon: "sites" },
+      { label: "Devices", to: "/devices", icon: "devices" },
     ],
   },
   {
     label: "Security policy",
     items: [
-      { label: "Policy editor", to: "/policy", icon: "⎇" },
-      { label: "Network policies", to: "/network-policies", icon: "⇄" },
-      { label: "DLP", to: "/dlp", icon: "❏" },
-      { label: "CASB", to: "/casb", icon: "☁" },
-      { label: "Browser protection", to: "/browser", icon: "◍" },
+      { label: "Policy editor", to: "/policy", icon: "policy" },
+      { label: "Network policies", to: "/network-policies", icon: "network" },
+      { label: "DLP", to: "/dlp", icon: "dlp" },
+      { label: "CASB", to: "/casb", icon: "casb" },
+      { label: "Browser protection", to: "/browser", icon: "browser" },
     ],
   },
   {
     label: "Operations",
     items: [
-      { label: "Alerts", to: "/alerts", icon: "◆" },
-      { label: "AI assistant", to: "/assistant", icon: "✦" },
-      { label: "Troubleshooting", to: "/troubleshoot", icon: "✚" },
-      { label: "Compliance", to: "/compliance", icon: "✓" },
-      { label: "Playbooks", to: "/playbooks", icon: "⛭" },
-      { label: "Audit log", to: "/audit", icon: "≡" },
-      { label: "Metering", to: "/metering", icon: "▤" },
+      { label: "Alerts", to: "/alerts", icon: "alerts" },
+      { label: "AI assistant", to: "/assistant", icon: "assistant" },
+      { label: "Troubleshooting", to: "/troubleshoot", icon: "troubleshoot" },
+      { label: "Compliance", to: "/compliance", icon: "compliance" },
+      { label: "Playbooks", to: "/playbooks", icon: "playbooks" },
+      { label: "Audit log", to: "/audit", icon: "audit" },
+      { label: "Metering", to: "/metering", icon: "metering" },
     ],
   },
   {
     label: "Platform",
     items: [
-      { label: "Integrations", to: "/integrations", icon: "⌥" },
-      { label: "Terraform / IaC", to: "/terraform", icon: "ⓣ" },
-      { label: "API keys", to: "/api-keys", icon: "⚿" },
-      { label: "Webhooks", to: "/webhooks", icon: "➶" },
-      { label: "RBAC roles", to: "/rbac", icon: "⚖" },
-      { label: "SCIM provisioning", to: "/scim", icon: "⇆" },
-      { label: "IdP / SSO", to: "/idp", icon: "⛨" },
-      { label: "App registry", to: "/app-registry", icon: "▣" },
-      { label: "Points of presence", to: "/pops", icon: "◉" },
+      { label: "Integrations", to: "/integrations", icon: "integrations" },
+      { label: "Terraform / IaC", to: "/terraform", icon: "terraform" },
+      { label: "API keys", to: "/api-keys", icon: "key" },
+      { label: "Webhooks", to: "/webhooks", icon: "webhooks" },
+      { label: "RBAC roles", to: "/rbac", icon: "rbac" },
+      { label: "SCIM provisioning", to: "/scim", icon: "scim" },
+      { label: "IdP / SSO", to: "/idp", icon: "idp" },
+      { label: "App registry", to: "/app-registry", icon: "registry" },
+      { label: "Points of presence", to: "/pops", icon: "pops" },
     ],
   },
   {
     label: "MSP portal",
     items: [
-      { label: "MSP hierarchy", to: "/msp", icon: "⧉" },
-      { label: "Bulk operations", to: "/msp/bulk", icon: "⨁" },
-      { label: "Branding", to: "/msp/branding", icon: "🖌" },
-      { label: "Policy templates", to: "/msp/templates", icon: "❒" },
-      { label: "MSP RBAC", to: "/msp/rbac", icon: "⚐" },
+      { label: "MSP hierarchy", to: "/msp", icon: "msp" },
+      { label: "Bulk operations", to: "/msp/bulk", icon: "bulk" },
+      { label: "Branding", to: "/msp/branding", icon: "branding" },
+      { label: "Policy templates", to: "/msp/templates", icon: "templates" },
+      { label: "MSP RBAC", to: "/msp/rbac", icon: "flag" },
     ],
   },
 ];

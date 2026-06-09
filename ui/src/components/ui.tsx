@@ -69,15 +69,28 @@ export function Stat({
 export function Badge({
   children,
   tone = "neutral",
+  dot = false,
 }: {
   children: ReactNode;
   tone?: Tone;
+  /** Show a leading status dot. Reserved for badges that signal live state
+   *  (see StatusBadge); plain label/count/verdict badges leave it off so the
+   *  dot doesn't read as a status indicator where none is meant. */
+  dot?: boolean;
 }) {
-  return <span className={`badge badge--${tone}`}>{children}</span>;
+  return (
+    <span className={`badge badge--${tone}${dot ? " badge--dot" : ""}`}>
+      {children}
+    </span>
+  );
 }
 
 export function StatusBadge({ status }: { status?: string | null }) {
-  return <Badge tone={statusTone(status)}>{titleCase(status)}</Badge>;
+  return (
+    <Badge tone={statusTone(status)} dot>
+      {titleCase(status)}
+    </Badge>
+  );
 }
 
 export function Spinner() {
