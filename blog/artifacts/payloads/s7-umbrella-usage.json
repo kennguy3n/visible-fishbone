@@ -1,94 +1,94 @@
 {
-  "generated_at": "2026-06-09T02:00:26.62802929Z",
+  "generated_at": "2026-06-09T02:00:26.643754557Z",
   "lines": [
     {
       "hard_exceeded": false,
-      "hard_limit": 20000000,
+      "hard_limit": 1000000,
       "meter": "llm_tokens_used",
       "period": "monthly",
-      "projected": 11987566,
+      "projected": 599378,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
-      "soft_limit": 16000000,
-      "used": 3230106
+      "soft_limit": 800000,
+      "used": 161505
     },
     {
       "hard_exceeded": false,
-      "hard_limit": 20000,
+      "hard_limit": 1000,
       "meter": "llm_calls",
       "period": "monthly",
-      "projected": 12986,
+      "projected": 602,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
-      "soft_limit": 16000,
-      "used": 3499
+      "soft_limit": 800,
+      "used": 162
     },
     {
       "hard_exceeded": false,
-      "hard_limit": 2000000,
+      "hard_limit": 100000,
       "meter": "url_cat_lookups",
       "period": "daily",
-      "projected": 107985,
+      "projected": 5405,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
-      "soft_limit": 1600000,
-      "used": 9032
+      "soft_limit": 80000,
+      "used": 452
     },
     {
       "hard_exceeded": false,
       "meter": "malware_scans",
       "period": "daily",
-      "projected": 4496,
+      "projected": 180,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
-      "used": 376
+      "used": 15
     },
     {
       "hard_exceeded": false,
       "meter": "clickhouse_rows_written",
       "period": "monthly",
-      "projected": 299689105,
+      "projected": 19979275,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
-      "used": 80752643
+      "used": 5383510
     },
     {
       "hard_exceeded": false,
       "meter": "s3_bytes_archived",
       "period": "monthly",
-      "projected": 1498445516389,
+      "projected": 59937819305,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
-      "used": 403763213460
+      "used": 16150528538
     },
     {
       "hard_exceeded": false,
       "meter": "bandwidth_proxied_bytes",
       "period": "monthly",
-      "projected": 4994818387963,
+      "projected": 299689096530,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
-      "used": 1345877378200
+      "used": 80752642692
     },
     {
       "hard_exceeded": false,
-      "hard_limit": 100000000,
+      "hard_limit": 5000000,
       "meter": "policy_evaluations",
       "period": "daily",
-      "projected": 53990597,
+      "projected": 2699527,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
-      "soft_limit": 80000000,
-      "used": 4515856
+      "soft_limit": 4000000,
+      "used": 225793
     }
   ],
-  "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+  "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9"
 }
