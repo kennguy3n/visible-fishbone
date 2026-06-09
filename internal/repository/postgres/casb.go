@@ -235,8 +235,14 @@ func (r *CASBDiscoveredAppRepository) Upsert(
 			VALUES ($1, $2, $3, $4, $5, COALESCE($6, 0),
 			        COALESCE($7, 0), COALESCE($8, 0), $9, $10)
 			ON CONFLICT (tenant_id, name) DO UPDATE SET
-			    vendor = EXCLUDED.vendor,
-			    category = EXCLUDED.category,
+			    -- vendor/category describe the app's identity and are
+			    -- deliberately NOT updated on conflict. The two writers
+			    -- (API-mode connector sync and shadow-IT discovery) label
+			    -- the same app differently (e.g. vendor "box"/"Box",
+			    -- category "saas"/"cloud_storage"); overwriting on every
+			    -- upsert would make these columns oscillate when the two
+			    -- collide on (tenant_id, name). The identity is fixed at
+			    -- first discovery and left stable thereafter.
 			    risk_score = CASE WHEN $6 IS NOT NULL THEN $6 ELSE casb_discovered_apps.risk_score END,
 			    -- users_count (API-mode roster) and active_device_count
 			    -- (shadow-IT window count) have separate writers; each

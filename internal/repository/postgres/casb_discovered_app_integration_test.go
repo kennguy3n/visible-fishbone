@@ -131,6 +131,14 @@ func TestCASBDiscoveredApp_TwoWriterCounts(t *testing.T) {
 		t.Errorf("listed counts = users:%d devices:%d, want 300/7",
 			deref(apps[0].UsersCount), deref(apps[0].ActiveDeviceCount))
 	}
+	// vendor/category are fixed at first discovery and must NOT
+	// oscillate: the row was first inserted by the API-mode writer
+	// ("box"/"saas"), so the later shadow-IT upserts carrying
+	// "Box"/"collaboration" must leave them untouched.
+	if apps[0].Vendor != "box" || apps[0].Category != "saas" {
+		t.Errorf("listed vendor/category = %q/%q, want box/saas (sticky, no oscillation)",
+			apps[0].Vendor, apps[0].Category)
+	}
 }
 
 func deref(p *int) int {

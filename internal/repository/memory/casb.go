@@ -363,8 +363,12 @@ func (r *CASBDiscoveredAppRepository) Upsert(
 	// Find existing by (tenant_id, name).
 	for id, existing := range r.s.casbDiscoveredApps {
 		if existing.TenantID == tenantID && existing.Name == app.Name {
-			existing.Vendor = app.Vendor
-			existing.Category = app.Category
+			// vendor/category describe the app's identity and are
+			// fixed at first discovery, not updated on conflict: the
+			// two writers (API-mode sync, shadow-IT discovery) label
+			// the same app differently, so overwriting here would make
+			// them oscillate on a (tenant, name) collision. Mirrors the
+			// postgres upsert, which omits them from DO UPDATE SET.
 			if app.RiskScore != nil {
 				existing.RiskScore = app.RiskScore
 			}
