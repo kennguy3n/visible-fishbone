@@ -38,6 +38,11 @@ const acme = "92112770-7c0a-410b-b0f4-09dde70e063a"
 // used to capture an honest, intentional empty-state payload.
 const umbrella = "0c8d2d9d-896d-45b1-8001-6a6776f832b9"
 
+// Initech Financial — the professional-tier tenant carrying a seeded
+// url_cat surge; used to capture the one credible cost anomaly in the
+// dataset (its current-month run rate runs well above its own history).
+const initech = "b6520bda-e7bb-4af9-9c53-7b0051eae65b"
+
 type spec struct {
 	name string // output filename (without .json) and scenario tag
 	path string // request path
@@ -80,6 +85,11 @@ func main() {
 		{"s6-acme-posture-report", "/api/v1/tenants/" + acme + "/ai/reports/posture"},
 		// S7 — cost / metering / compliance / integrations
 		{"s7-acme-usage", "/api/v1/tenants/" + acme + "/usage"},
+		{"s7-acme-usage-history", "/api/v1/tenants/" + acme + "/usage/history"},
+		{"s7-acme-cost-anomalies", "/api/v1/tenants/" + acme + "/cost-anomalies"},
+		{"s7-initech-cost-anomalies", "/api/v1/tenants/" + initech + "/cost-anomalies"},
+		{"s7-umbrella-usage", "/api/v1/tenants/" + umbrella + "/usage"},
+		{"s7-admin-cost-report", "/api/v1/admin/cost-report"},
 		{"s7-acme-compliance-reports", "/api/v1/tenants/" + acme + "/compliance/reports"},
 		{"s7-acme-integrations", "/api/v1/tenants/" + acme + "/integrations"},
 	}
