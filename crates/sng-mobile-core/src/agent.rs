@@ -242,6 +242,19 @@ impl Scheduler {
         }
     }
 
+    /// Override the low-power interval multiplier (the factor every
+    /// interval is stretched by under [`PowerState::LowPower`]),
+    /// returning `self` for chaining off [`Self::new`].
+    ///
+    /// Clamped to a floor of `1` so a misconfigured `0` cannot zero
+    /// out the intervals and spin the coalesced loop; `1` simply
+    /// disables stretching (low power then paces like normal).
+    #[must_use]
+    pub fn with_low_power_multiplier(mut self, multiplier: u32) -> Self {
+        self.low_power_multiplier = multiplier.max(1);
+        self
+    }
+
     /// The effective interval of slot `i` under the current power
     /// state: the base interval scaled by the active multiplier.
     fn effective_interval(&self, i: usize) -> Duration {
@@ -447,11 +460,11 @@ impl MobileAgent {
     /// `ProcessInfo.isLowPowerModeEnabled`; Android
     /// `PowerManager.ACTION_POWER_SAVE_MODE_CHANGED` /
     /// `isPowerSaveMode`). The steady-state [`Self::run`] loop applies
-    /// it to its [`Scheduler`] each cycle; setting it also wakes a
-    /// sleeping loop so the new cadence takes effect immediately
-    /// rather than after the in-flight coalesced sleep. Safe to call
-    /// in any lifecycle state — it is a no-op on the cadence until the
-    /// agent is `Connected` and running.
+    /// it to its [`Scheduler`] each cycle; setting it while the agent
+    /// is `Connected` also wakes the sleeping loop so the new cadence
+    /// takes effect immediately rather than after the in-flight
+    /// coalesced sleep. Safe to call in any lifecycle state — it is a
+    /// no-op on the cadence until the agent is `Connected` and running.
     pub fn set_power_state(&self, state: PowerState) {
         let changed = {
             let mut guard = self.power.lock();
@@ -459,11 +472,17 @@ impl MobileAgent {
             *guard = state;
             changed
         };
-        if changed {
-            // Re-evaluate the loop now so the stretched/normal cadence
-            // is armed at once. `notify_one` stores a permit if the
-            // loop is not parked yet, so a change racing the loop's
-            // sleep is still delivered.
+        // Only wake a loop that is actually parked on the coalesced
+        // sleep, i.e. when the agent is `Connected` and `run` is live.
+        // In any other state the loop is not waiting on `wake`, so
+        // storing a permit would just make the next `run` burn one
+        // no-op iteration — the same stale-permit discipline
+        // [`Self::transition`] follows by gating on its `Suspended` /
+        // `Terminated` targets. A change applied while not `Connected`
+        // is not lost: `run` re-reads [`Self::power_state`] every cycle,
+        // so it is picked up the moment the loop next paces the
+        // scheduler.
+        if changed && self.state() == LifecycleState::Connected {
             self.wake.notify_one();
         }
     }
@@ -783,7 +802,8 @@ impl MobileAgent {
             self.config.telemetry_interval,
             self.config.posture_interval,
             Duration::ZERO,
-        );
+        )
+        .with_low_power_multiplier(self.config.low_power_multiplier);
         while self.state() == LifecycleState::Connected {
             let now = start.elapsed();
             // Pace the coalesced timer to the latest pushed power
@@ -958,6 +978,38 @@ mod tests {
             s.pop_due(Duration::from_secs(80)),
             Some(ScheduledTask::PullPolicy)
         );
+    }
+
+    #[test]
+    fn with_low_power_multiplier_overrides_the_default_stretch() {
+        // A deployment-configured multiplier (here 2×) replaces the
+        // default 4× while leaving the normal cadence untouched.
+        let mut s = Scheduler::new(
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+            Duration::from_secs(30),
+            Duration::ZERO,
+        )
+        .with_low_power_multiplier(2);
+        assert_eq!(s.time_until_next(Duration::ZERO), Duration::from_secs(10));
+        assert!(s.set_power_state(Duration::ZERO, PowerState::LowPower));
+        // Policy pull now stretches to 2×10s = 20s, not the default 40s.
+        assert_eq!(s.time_until_next(Duration::ZERO), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn with_low_power_multiplier_clamps_zero_to_one() {
+        // A degenerate 0 must not zero out the intervals (which would
+        // spin the coalesced loop); it clamps to 1, i.e. no stretch.
+        let mut s = Scheduler::new(
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+            Duration::from_secs(30),
+            Duration::ZERO,
+        )
+        .with_low_power_multiplier(0);
+        assert!(s.set_power_state(Duration::ZERO, PowerState::LowPower));
+        assert_eq!(s.time_until_next(Duration::ZERO), Duration::from_secs(10));
     }
 
     #[test]

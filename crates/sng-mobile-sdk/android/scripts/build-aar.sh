@@ -53,6 +53,14 @@ rm -rf "$KOTLIN_DEST"
 mkdir -p "$(dirname "$KOTLIN_DEST")"
 cp -R "$KOTLIN_SRC" "$KOTLIN_DEST"
 
+# NOTE: unlike apple/scripts/build-xcframework.sh, this script does NOT
+# override `[profile.release] strip = true` (Cargo.toml). That override
+# exists for the iOS `staticlib`, whose exported C-ABI symbols are
+# consumed at *link* time and would be stripped away. The Android target
+# is a `cdylib` (.so): `strip = symbols` removes debug/local symbols but
+# preserves the dynamic symbol table (`.dynsym`), so the `#[no_mangle]
+# pub extern "C"` UniFFI entrypoints JNA resolves at runtime survive.
+# Keeping strip on shrinks the shipped `.so`.
 echo "==> building cdylib per ABI with cargo-ndk"
 NDK_TARGET_FLAGS=()
 for ABI in "${ABIS[@]}"; do

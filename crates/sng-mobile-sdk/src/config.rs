@@ -120,6 +120,11 @@ pub struct SdkMobileConfig {
     pub telemetry_interval_secs: u64,
     /// Posture collection cadence, in seconds.
     pub posture_interval_secs: u64,
+    /// Factor by which every periodic cadence is stretched while the
+    /// device is in low-power / battery-saver mode (see
+    /// [`MobileSdk::set_power_state`](crate::MobileSdk::set_power_state)).
+    /// `1` disables stretching; must be `>= 1`.
+    pub low_power_multiplier: u32,
     /// Per-request deadline applied to every control-plane round
     /// trip, in milliseconds.
     pub request_timeout_ms: u64,
@@ -153,6 +158,7 @@ impl SdkMobileConfig {
             poll_interval: Duration::from_secs(self.poll_interval_secs),
             telemetry_interval: Duration::from_secs(self.telemetry_interval_secs),
             posture_interval: Duration::from_secs(self.posture_interval_secs),
+            low_power_multiplier: self.low_power_multiplier,
             request_timeout: Duration::from_millis(self.request_timeout_ms),
             connect_timeout: Duration::from_millis(self.connect_timeout_ms),
         })
@@ -220,6 +226,7 @@ pub(crate) mod tests {
             poll_interval_secs: 900,
             telemetry_interval_secs: 300,
             posture_interval_secs: 600,
+            low_power_multiplier: 4,
             request_timeout_ms: 30_000,
             connect_timeout_ms: 10_000,
             trust_anchors: Vec::new(),
@@ -233,6 +240,7 @@ pub(crate) mod tests {
         assert_eq!(core.device_name, "Test Device");
         assert_eq!(core.platform, MobilePlatform::Ios);
         assert_eq!(core.poll_interval, Duration::from_secs(900));
+        assert_eq!(core.low_power_multiplier, 4);
         // 30_000 ms == 30 s; assert in seconds to satisfy the
         // duration-unit lint while still proving the ms field maps.
         assert_eq!(core.request_timeout, Duration::from_secs(30));
