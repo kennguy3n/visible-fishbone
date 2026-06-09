@@ -1,0 +1,39 @@
+{
+  "items": [
+    {
+      "action": "rbi",
+      "created_at": "2026-06-09T00:18:24.872330000Z",
+      "enabled": true,
+      "id": "6a2ccf9a-860d-4ae5-b092-dd1a62e25296",
+      "name": "Isolate uncategorized sites",
+      "rules": [
+        {
+          "action": "rbi",
+          "condition": "uncategorized",
+          "type": "url_category"
+        }
+      ],
+      "scope": "group",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "updated_at": "2026-06-09T00:18:24.872330000Z"
+    },
+    {
+      "action": "block",
+      "created_at": "2026-06-09T00:18:24.867291000Z",
+      "enabled": true,
+      "id": "43fcc000-374e-423c-95a2-002234281b9b",
+      "name": "Block gambling at stores",
+      "rules": [
+        {
+          "action": "block",
+          "condition": "gambling",
+          "type": "url_category"
+        }
+      ],
+      "scope": "site",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "updated_at": "2026-06-09T00:18:24.867291000Z"
+    }
+  ],
+  "next_cursor": ""
+}

@@ -101,6 +101,48 @@ func TestBuildReportOverBudgetFlag(t *testing.T) {
 	}
 }
 
+func TestProjectToPeriodEnd(t *testing.T) {
+	// Daily period at exactly noon → half the day elapsed → projection
+	// doubles the accumulator.
+	dayNoon := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	if got := ProjectToPeriodEnd(1000, PeriodDaily, dayNoon); got != 2000 {
+		t.Fatalf("daily-noon projection = %d, want 2000", got)
+	}
+
+	// Non-positive values project to 0 (no division, no negatives).
+	if got := ProjectToPeriodEnd(0, PeriodDaily, dayNoon); got != 0 {
+		t.Fatalf("zero projection = %d, want 0", got)
+	}
+	if got := ProjectToPeriodEnd(-5, PeriodMonthly, dayNoon); got != 0 {
+		t.Fatalf("negative projection = %d, want 0", got)
+	}
+
+	// Near the very end of a daily period the projection converges on
+	// the accumulator itself (at most one unit of ceil rounding).
+	dayEnd := time.Date(2026, 6, 15, 23, 59, 59, 0, time.UTC)
+	if got := ProjectToPeriodEnd(1000, PeriodDaily, dayEnd); got < 1000 || got > 1001 {
+		t.Fatalf("end-of-day projection = %d, want ~1000", got)
+	}
+
+	// Monthly mid-period extrapolates strictly above the accumulator
+	// but stays bounded (the 0.01 floor caps runaway extrapolation).
+	monthMid := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	mid := ProjectToPeriodEnd(1_000_000, PeriodMonthly, monthMid)
+	if mid <= 1_000_000 {
+		t.Fatalf("mid-month projection = %d, should exceed accumulator", mid)
+	}
+	if mid > 100_000_000 {
+		t.Fatalf("mid-month projection = %d, exceeds the 100x floor cap", mid)
+	}
+
+	// First instant of a period hits the elapsed-fraction floor (0.01),
+	// so projection is capped at 100x rather than dividing by ~0.
+	monthStart := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	if got := ProjectToPeriodEnd(100, PeriodMonthly, monthStart); got != 10_000 {
+		t.Fatalf("period-start projection = %d, want 10000 (100x floor)", got)
+	}
+}
+
 // --- Reports orchestrator ------------------------------------------------
 
 func TestNewReportsValidatesDeps(t *testing.T) {

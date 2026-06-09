@@ -1,0 +1,13 @@
+{
+  "anomalies": [
+    {
+      "baseline_monthly_usd": 72.31,
+      "baseline_months": 5,
+      "meter": "url_cat_lookups",
+      "projected_monthly_usd": 173.86,
+      "ratio": 2.4042,
+      "severity": "warning"
+    }
+  ],
+  "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b"
+}

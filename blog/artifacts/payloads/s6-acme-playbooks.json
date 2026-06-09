@@ -1,0 +1,54 @@
+{
+  "items": [
+    {
+      "created_at": "2026-06-09T02:18:11.05253Z",
+      "description": "Block an outbound transfer that trips the PCI-DSS DLP classifier and require an analyst sign-off before release.",
+      "enabled": true,
+      "id": "4f138859-5834-4372-8c8e-86aedbea0900",
+      "name": "Quarantine PCI cardholder-data exfil",
+      "steps": [
+        {
+          "action": "block_transfer"
+        },
+        {
+          "action": "require_approval",
+          "role": "security_admin"
+        },
+        {
+          "action": "notify",
+          "channel": "soc"
+        }
+      ],
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "trigger_condition": "dlp.violation && dlp.template == 'pci-dss'",
+      "updated_at": "2026-06-09T02:18:11.05253Z"
+    },
+    {
+      "created_at": "2026-06-09T02:18:11.047231Z",
+      "description": "Isolate a point-of-sale device when the edge raises a critical malware verdict, then notify the SOC and open a ticket.",
+      "enabled": true,
+      "id": "d47db86b-4606-454a-9775-cd2ff83f95cf",
+      "name": "Contain malware-flagged POS endpoint",
+      "steps": [
+        {
+          "action": "isolate_device",
+          "target": "alert.device_id"
+        },
+        {
+          "action": "notify",
+          "channel": "soc",
+          "severity": "critical"
+        },
+        {
+          "action": "open_ticket",
+          "priority": "P1",
+          "system": "splunk"
+        }
+      ],
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "trigger_condition": "alert.severity == 'critical' && alert.category == 'malware'",
+      "updated_at": "2026-06-09T02:18:11.047231Z"
+    }
+  ],
+  "next_cursor": ""
+}

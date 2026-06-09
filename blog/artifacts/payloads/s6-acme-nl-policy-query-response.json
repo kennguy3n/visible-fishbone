@@ -1,0 +1,10 @@
+{
+  "ai_generated": false,
+  "confidence": 0.7,
+  "evaluation_mode": "compiled-bundle",
+  "explanation": "Verdict \"inspect\" from tenant policy graph f5f9fdbb-a67f-47c7-991b-ada245cbf954 (v1) for user=finance, app=private-apps. Note: user-subject rules were not evaluated — user identity is not represented in the synthesized access envelope, so this verdict reflects only app/device and default-action matching.",
+  "matched_rules": [
+    "policy-graph:f5f9fdbb-a67f-47c7-991b-ada245cbf954@v1"
+  ],
+  "verdict": "inspect"
+}

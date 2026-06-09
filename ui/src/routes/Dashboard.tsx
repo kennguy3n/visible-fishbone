@@ -212,13 +212,17 @@ export function Dashboard() {
   const monthlyCost = seats * PRICE_PER_SEAT;
   const periodTotals = new Map<string, number>();
   for (const l of usageHistory.data?.lines ?? []) {
-    periodTotals.set(l.period, (periodTotals.get(l.period) ?? 0) + l.used);
+    const period = l.period_start.slice(0, 7); // YYYY-MM
+    periodTotals.set(period, (periodTotals.get(period) ?? 0) + l.value);
   }
   const sortedPeriods = [...periodTotals.entries()].sort((a, b) =>
     a[0].localeCompare(b[0]),
   );
-  const last = sortedPeriods.at(-1)?.[1];
-  const prev = sortedPeriods.at(-2)?.[1];
+  // The latest period is the in-progress month (a partial total) that would
+  // always read as a drop, so trend the completed months only.
+  const completedPeriods = sortedPeriods.slice(0, -1);
+  const last = completedPeriods.at(-1)?.[1];
+  const prev = completedPeriods.at(-2)?.[1];
   const trend: "up" | "down" | "flat" =
     last != null && prev != null
       ? last > prev * 1.02

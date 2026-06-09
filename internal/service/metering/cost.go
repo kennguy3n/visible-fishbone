@@ -412,6 +412,20 @@ func elapsedFraction(period Period, at time.Time) float64 {
 	return frac
 }
 
+// ProjectToPeriodEnd extrapolates a partial-period usage value to the
+// full period it belongs to, using the same elapsed-fraction model the
+// cost report uses for projected spend. It is what the usage view
+// surfaces as "on track to use N this period", so a budget gauge reads
+// the steady-state run rate rather than the raw mid-period accumulator
+// (which understates utilisation early in a period). A non-positive
+// value projects to 0.
+func ProjectToPeriodEnd(value int64, period Period, at time.Time) int64 {
+	if value <= 0 {
+		return 0
+	}
+	return int64(math.Ceil(float64(value) / elapsedFraction(period, at)))
+}
+
 // monthlyMultiplier scales a single-period projected cost to a full
 // calendar month: daily meters multiply by the number of days in the
 // month; monthly meters are already monthly.

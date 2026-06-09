@@ -123,13 +123,23 @@ const (
 // --- wire types -----------------------------------------------------------
 
 type usageLineResponse struct {
-	Meter        string `json:"meter"`
-	Period       string `json:"period"`
-	Used         int64  `json:"used"`
-	SoftLimit    int64  `json:"soft_limit,omitempty"`
-	HardLimit    int64  `json:"hard_limit,omitempty"`
-	SoftExceeded bool   `json:"soft_exceeded"`
-	HardExceeded bool   `json:"hard_exceeded"`
+	Meter     string `json:"meter"`
+	Period    string `json:"period"`
+	Used      int64  `json:"used"`
+	SoftLimit int64  `json:"soft_limit,omitempty"`
+	HardLimit int64  `json:"hard_limit,omitempty"`
+	// SoftExceeded / HardExceeded compare the raw mid-period usage
+	// against the limits (what has been consumed so far).
+	SoftExceeded bool `json:"soft_exceeded"`
+	HardExceeded bool `json:"hard_exceeded"`
+	// Projected is the elapsed-fraction extrapolation of Used to the
+	// end of the period — the steady-state run rate. ProjectedSoft/
+	// HardExceeded compare it against the limits, so a budget gauge can
+	// warn that a tenant is *on track* to breach before it actually
+	// has. This is the figure the cost report uses for projected spend.
+	Projected             int64 `json:"projected"`
+	ProjectedSoftExceeded bool  `json:"projected_soft_exceeded"`
+	ProjectedHardExceeded bool  `json:"projected_hard_exceeded"`
 }
 
 type usageResponse struct {
@@ -213,6 +223,7 @@ func (h *MeteringHandler) getUsage(w http.ResponseWriter, r *http.Request) {
 		usedByMeter[rec.Meter] += rec.Value
 	}
 
+	now := time.Now().UTC()
 	lines := make([]usageLineResponse, 0, len(metering.AllMeters))
 	for _, meter := range metering.AllMeters {
 		used := usedByMeter[meter]
@@ -221,19 +232,23 @@ func (h *MeteringHandler) getUsage(w http.ResponseWriter, r *http.Request) {
 		if hasLimit && lim.Period.Valid() {
 			period = lim.Period
 		}
+		projected := metering.ProjectToPeriodEnd(used, period, now)
 		line := usageLineResponse{
-			Meter:  string(meter),
-			Period: string(period),
-			Used:   used,
+			Meter:     string(meter),
+			Period:    string(period),
+			Used:      used,
+			Projected: projected,
 		}
 		if hasLimit {
 			if lim.HardLimit > 0 {
 				line.HardLimit = lim.HardLimit
 				line.HardExceeded = used > lim.HardLimit
+				line.ProjectedHardExceeded = projected > lim.HardLimit
 			}
 			if lim.SoftLimit > 0 {
 				line.SoftLimit = lim.SoftLimit
 				line.SoftExceeded = used > lim.SoftLimit
+				line.ProjectedSoftExceeded = projected > lim.SoftLimit
 			}
 		}
 		lines = append(lines, line)

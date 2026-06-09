@@ -108,6 +108,27 @@ export function formatNumber(n?: number | null): string {
   return n.toLocaleString();
 }
 
+/** Abbreviate large numbers for compact display (axis ticks, badges):
+ *  1_600_000 -> "1.6M", 100_000_000 -> "100M", 20_000 -> "20K". */
+export function formatCompact(n?: number | null): string {
+  if (n == null) return "—";
+  const abs = Math.abs(n);
+  if (abs < 1_000) return String(n);
+  const units: [number, string][] = [
+    [1_000_000_000, "B"],
+    [1_000_000, "M"],
+    [1_000, "K"],
+  ];
+  for (const [div, suffix] of units) {
+    if (abs >= div) {
+      const v = n / div;
+      const s = v % 1 === 0 ? v.toFixed(0) : v.toFixed(1);
+      return `${s}${suffix}`;
+    }
+  }
+  return String(n);
+}
+
 export function titleCase(s?: string | null): string {
   if (!s) return "—";
   return s

@@ -1,0 +1,294 @@
+{
+  "lines": [
+    {
+      "meter": "bandwidth_proxied_bytes",
+      "period_end": "2026-07-01T00:00:00Z",
+      "period_start": "2026-06-01T00:00:00Z",
+      "value": 1345877378200
+    },
+    {
+      "meter": "clickhouse_rows_written",
+      "period_end": "2026-07-01T00:00:00Z",
+      "period_start": "2026-06-01T00:00:00Z",
+      "value": 80752643
+    },
+    {
+      "meter": "llm_calls",
+      "period_end": "2026-07-01T00:00:00Z",
+      "period_start": "2026-06-01T00:00:00Z",
+      "value": 3499
+    },
+    {
+      "meter": "llm_tokens_used",
+      "period_end": "2026-07-01T00:00:00Z",
+      "period_start": "2026-06-01T00:00:00Z",
+      "value": 3230106
+    },
+    {
+      "meter": "malware_scans",
+      "period_end": "2026-07-01T00:00:00Z",
+      "period_start": "2026-06-01T00:00:00Z",
+      "value": 376
+    },
+    {
+      "meter": "policy_evaluations",
+      "period_end": "2026-07-01T00:00:00Z",
+      "period_start": "2026-06-01T00:00:00Z",
+      "value": 4515856
+    },
+    {
+      "meter": "s3_bytes_archived",
+      "period_end": "2026-07-01T00:00:00Z",
+      "period_start": "2026-06-01T00:00:00Z",
+      "value": 403763213460
+    },
+    {
+      "meter": "url_cat_lookups",
+      "period_end": "2026-07-01T00:00:00Z",
+      "period_start": "2026-06-01T00:00:00Z",
+      "value": 9032
+    },
+    {
+      "meter": "bandwidth_proxied_bytes",
+      "period_end": "2026-06-01T00:00:00Z",
+      "period_start": "2026-05-01T00:00:00Z",
+      "value": 4629500000000
+    },
+    {
+      "meter": "clickhouse_rows_written",
+      "period_end": "2026-06-01T00:00:00Z",
+      "period_start": "2026-05-01T00:00:00Z",
+      "value": 282090240
+    },
+    {
+      "meter": "llm_calls",
+      "period_end": "2026-06-01T00:00:00Z",
+      "period_start": "2026-05-01T00:00:00Z",
+      "value": 11825
+    },
+    {
+      "meter": "llm_tokens_used",
+      "period_end": "2026-06-01T00:00:00Z",
+      "period_start": "2026-05-01T00:00:00Z",
+      "value": 11723078
+    },
+    {
+      "meter": "malware_scans",
+      "period_end": "2026-06-01T00:00:00Z",
+      "period_start": "2026-05-01T00:00:00Z",
+      "value": 141539
+    },
+    {
+      "meter": "policy_evaluations",
+      "period_end": "2026-06-01T00:00:00Z",
+      "period_start": "2026-05-01T00:00:00Z",
+      "value": 1757211935
+    },
+    {
+      "meter": "s3_bytes_archived",
+      "period_end": "2026-06-01T00:00:00Z",
+      "period_start": "2026-05-01T00:00:00Z",
+      "value": 1378134000001
+    },
+    {
+      "meter": "url_cat_lookups",
+      "period_end": "2026-06-01T00:00:00Z",
+      "period_start": "2026-05-01T00:00:00Z",
+      "value": 3577086
+    },
+    {
+      "meter": "bandwidth_proxied_bytes",
+      "period_end": "2026-05-01T00:00:00Z",
+      "period_start": "2026-04-01T00:00:00Z",
+      "value": 4248036000000
+    },
+    {
+      "meter": "clickhouse_rows_written",
+      "period_end": "2026-05-01T00:00:00Z",
+      "period_start": "2026-04-01T00:00:00Z",
+      "value": 263286360
+    },
+    {
+      "meter": "llm_calls",
+      "period_end": "2026-05-01T00:00:00Z",
+      "period_start": "2026-04-01T00:00:00Z",
+      "value": 11753
+    },
+    {
+      "meter": "llm_tokens_used",
+      "period_end": "2026-05-01T00:00:00Z",
+      "period_start": "2026-04-01T00:00:00Z",
+      "value": 10102997
+    },
+    {
+      "meter": "malware_scans",
+      "period_end": "2026-05-01T00:00:00Z",
+      "period_start": "2026-04-01T00:00:00Z",
+      "value": 127875
+    },
+    {
+      "meter": "policy_evaluations",
+      "period_end": "2026-05-01T00:00:00Z",
+      "period_start": "2026-04-01T00:00:00Z",
+      "value": 1587109680
+    },
+    {
+      "meter": "s3_bytes_archived",
+      "period_end": "2026-05-01T00:00:00Z",
+      "period_start": "2026-04-01T00:00:00Z",
+      "value": 1264492800000
+    },
+    {
+      "meter": "url_cat_lookups",
+      "period_end": "2026-05-01T00:00:00Z",
+      "period_start": "2026-04-01T00:00:00Z",
+      "value": 3230344
+    },
+    {
+      "meter": "bandwidth_proxied_bytes",
+      "period_end": "2026-04-01T00:00:00Z",
+      "period_start": "2026-03-01T00:00:00Z",
+      "value": 4007519999999
+    },
+    {
+      "meter": "clickhouse_rows_written",
+      "period_end": "2026-04-01T00:00:00Z",
+      "period_start": "2026-03-01T00:00:00Z",
+      "value": 233030400
+    },
+    {
+      "meter": "llm_calls",
+      "period_end": "2026-04-01T00:00:00Z",
+      "period_start": "2026-03-01T00:00:00Z",
+      "value": 10719
+    },
+    {
+      "meter": "llm_tokens_used",
+      "period_end": "2026-04-01T00:00:00Z",
+      "period_start": "2026-03-01T00:00:00Z",
+      "value": 9371136
+    },
+    {
+      "meter": "malware_scans",
+      "period_end": "2026-04-01T00:00:00Z",
+      "period_start": "2026-03-01T00:00:00Z",
+      "value": 122552
+    },
+    {
+      "meter": "policy_evaluations",
+      "period_end": "2026-04-01T00:00:00Z",
+      "period_start": "2026-03-01T00:00:00Z",
+      "value": 1520616960
+    },
+    {
+      "meter": "s3_bytes_archived",
+      "period_end": "2026-04-01T00:00:00Z",
+      "period_start": "2026-03-01T00:00:00Z",
+      "value": 1233648000000
+    },
+    {
+      "meter": "url_cat_lookups",
+      "period_end": "2026-04-01T00:00:00Z",
+      "period_start": "2026-03-01T00:00:00Z",
+      "value": 3094563
+    },
+    {
+      "meter": "bandwidth_proxied_bytes",
+      "period_end": "2026-03-01T00:00:00Z",
+      "period_start": "2026-02-01T00:00:00Z",
+      "value": 3576384000000
+    },
+    {
+      "meter": "clickhouse_rows_written",
+      "period_end": "2026-03-01T00:00:00Z",
+      "period_start": "2026-02-01T00:00:00Z",
+      "value": 211550400
+    },
+    {
+      "meter": "llm_calls",
+      "period_end": "2026-03-01T00:00:00Z",
+      "period_start": "2026-02-01T00:00:00Z",
+      "value": 9568
+    },
+    {
+      "meter": "llm_tokens_used",
+      "period_end": "2026-03-01T00:00:00Z",
+      "period_start": "2026-02-01T00:00:00Z",
+      "value": 8506944
+    },
+    {
+      "meter": "malware_scans",
+      "period_end": "2026-03-01T00:00:00Z",
+      "period_start": "2026-02-01T00:00:00Z",
+      "value": 100474
+    },
+    {
+      "meter": "policy_evaluations",
+      "period_end": "2026-03-01T00:00:00Z",
+      "period_start": "2026-02-01T00:00:00Z",
+      "value": 1246323456
+    },
+    {
+      "meter": "s3_bytes_archived",
+      "period_end": "2026-03-01T00:00:00Z",
+      "period_start": "2026-02-01T00:00:00Z",
+      "value": 1101168000000
+    },
+    {
+      "meter": "url_cat_lookups",
+      "period_end": "2026-03-01T00:00:00Z",
+      "period_start": "2026-02-01T00:00:00Z",
+      "value": 2342463
+    },
+    {
+      "meter": "bandwidth_proxied_bytes",
+      "period_end": "2026-02-01T00:00:00Z",
+      "period_start": "2026-01-01T00:00:00Z",
+      "value": 3260032000000
+    },
+    {
+      "meter": "clickhouse_rows_written",
+      "period_end": "2026-02-01T00:00:00Z",
+      "period_start": "2026-01-01T00:00:00Z",
+      "value": 198543360
+    },
+    {
+      "meter": "llm_calls",
+      "period_end": "2026-02-01T00:00:00Z",
+      "period_start": "2026-01-01T00:00:00Z",
+      "value": 8435
+    },
+    {
+      "meter": "llm_tokens_used",
+      "period_end": "2026-02-01T00:00:00Z",
+      "period_start": "2026-01-01T00:00:00Z",
+      "value": 7626548
+    },
+    {
+      "meter": "malware_scans",
+      "period_end": "2026-02-01T00:00:00Z",
+      "period_start": "2026-01-01T00:00:00Z",
+      "value": 99715
+    },
+    {
+      "meter": "policy_evaluations",
+      "period_end": "2026-02-01T00:00:00Z",
+      "period_start": "2026-01-01T00:00:00Z",
+      "value": 1236587520
+    },
+    {
+      "meter": "s3_bytes_archived",
+      "period_end": "2026-02-01T00:00:00Z",
+      "period_start": "2026-01-01T00:00:00Z",
+      "value": 970713599999
+    },
+    {
+      "meter": "url_cat_lookups",
+      "period_end": "2026-02-01T00:00:00Z",
+      "period_start": "2026-01-01T00:00:00Z",
+      "value": 2325375
+    }
+  ],
+  "months": 6,
+  "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+}

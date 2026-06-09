@@ -81,10 +81,20 @@ export interface DlpTemplate {
   rules: DlpRule[];
 }
 
-export interface DlpClassifyResult {
-  classification: string;
+export interface DlpMatch {
+  rule_type: string;
+  pattern: string;
+  offset: number;
+  length: number;
+  snippet: string;
   confidence: number;
-  matched_detectors: string[];
+}
+
+export interface DlpClassifyResult {
+  matches: DlpMatch[];
+  policy_ids: string[];
+  action: string;
+  confidence: number;
 }
 
 // --- Compliance ------------------------------------------------------------
@@ -126,6 +136,12 @@ export interface UsageLine {
   hard_limit?: number;
   soft_exceeded: boolean;
   hard_exceeded: boolean;
+  // Elapsed-fraction extrapolation of `used` to the end of the period
+  // (the steady-state run rate). The projected_* flags compare it
+  // against the limits so the UI can warn of an on-track breach.
+  projected: number;
+  projected_soft_exceeded: boolean;
+  projected_hard_exceeded: boolean;
 }
 
 export interface UsageResponse {
@@ -136,8 +152,9 @@ export interface UsageResponse {
 
 export interface UsageHistoryLine {
   meter: string;
-  period: string;
-  used: number;
+  period_start: string;
+  period_end: string;
+  value: number;
 }
 
 export interface UsageHistoryResponse {
