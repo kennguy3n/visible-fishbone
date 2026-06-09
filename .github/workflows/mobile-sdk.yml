@@ -1,0 +1,147 @@
+# GitHub Actions pipeline for the ShieldNet Gateway (SNG) mobile SDK
+# distributions.
+#
+# `sng-mobile-sdk` exposes a UniFFI binding layer; this workflow turns
+# it into the two shippable mobile artifacts:
+#
+#   * ios-xcframework  — builds the iOS `staticlib` for the device +
+#     simulator slices and assembles `sng_mobile_sdkFFI.xcframework`,
+#     then uploads the XCFramework + generated Swift + `Package.swift`
+#     as the resolvable Swift Package.
+#   * android-aar      — cross-compiles the `cdylib` per ABI with
+#     cargo-ndk and assembles the release `.aar` with Gradle.
+#
+# A fast `bindings` job verifies the (target-independent) Swift +
+# Kotlin generation on Linux first, so a binding break surfaces in
+# ~a minute before the slower platform jobs spin up.
+#
+# Heavy platform builds only run when the mobile SDK surface (or this
+# workflow) changes, on PRs and pushes to main.
+
+name: mobile-sdk
+
+on:
+  pull_request:
+    branches: ["**"]
+    paths:
+      - "crates/sng-mobile-sdk/**"
+      - "crates/sng-mobile-core/**"
+      - "crates/sng-mobile-pal-ios/**"
+      - "crates/sng-mobile-pal-android/**"
+      - "crates/sng-uniffi-bindgen/**"
+      - ".github/workflows/mobile-sdk.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/sng-mobile-sdk/**"
+      - "crates/sng-mobile-core/**"
+      - "crates/sng-mobile-pal-ios/**"
+      - "crates/sng-mobile-pal-android/**"
+      - "crates/sng-uniffi-bindgen/**"
+      - ".github/workflows/mobile-sdk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-sdk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Must match `rust-version` in the workspace Cargo.toml (the
+  # workspace refuses an older toolchain at build time).
+  RUST_TOOLCHAIN: "1.91"
+  # NDK the cargo-ndk cross-build links against; pinned so a runner
+  # image bump does not silently change the linker.
+  ANDROID_NDK_VERSION: "27.2.12479018"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bindings:
+    name: bindings (swift + kotlin generation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-${{ runner.os }}
+      - name: generate bindings
+        run: crates/sng-mobile-sdk/bindings/generate.sh release
+      - name: upload generated bindings
+        uses: actions/upload-artifact@v4
+        with:
+          name: sng-mobile-bindings-${{ github.sha }}
+          path: crates/sng-mobile-sdk/bindings/generated/
+          retention-days: 7
+
+  ios-xcframework:
+    name: ios xcframework (swift package)
+    needs: bindings
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-macos
+      - name: build xcframework + assemble swift package
+        run: crates/sng-mobile-sdk/apple/scripts/build-xcframework.sh release
+      - name: upload swift package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShieldNetMobile-swift-package-${{ github.sha }}
+          path: |
+            crates/sng-mobile-sdk/apple/Package.swift
+            crates/sng-mobile-sdk/apple/Sources/
+            crates/sng-mobile-sdk/apple/Frameworks/
+          retention-days: 7
+
+  android-aar:
+    name: android aar
+    needs: bindings
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-${{ runner.os }}
+      - name: set up jdk 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: set up android sdk
+        uses: android-actions/setup-android@v3
+      - name: install android ndk
+        run: sdkmanager "ndk;${ANDROID_NDK_VERSION}"
+      - name: export ndk home
+        run: echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+      - name: install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      - name: build aar
+        run: crates/sng-mobile-sdk/android/scripts/build-aar.sh release
+      - name: upload aar
+        uses: actions/upload-artifact@v4
+        with:
+          name: sng-mobile-sdk-aar-${{ github.sha }}
+          path: crates/sng-mobile-sdk/android/build/outputs/aar/*.aar
+          retention-days: 7

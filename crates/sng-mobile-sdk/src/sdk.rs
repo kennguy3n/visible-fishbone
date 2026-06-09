@@ -26,7 +26,7 @@ use crate::error::MobileSdkError;
 use crate::oidc::OidcAuthSession;
 use crate::types::{
     SdkAccessDecision, SdkAccessRequest, SdkAgentHealth, SdkAuthState, SdkEnrollmentOutcome,
-    SdkLifecycleState, SdkPostureSnapshot,
+    SdkLifecycleState, SdkPostureSnapshot, SdkPowerState,
 };
 
 /// The mobile SDK: a foreign-friendly handle to a configured
@@ -118,6 +118,29 @@ impl MobileSdk {
     #[must_use]
     pub fn last_posture(&self) -> Option<SdkPostureSnapshot> {
         self.agent.last_posture().map(Into::into)
+    }
+
+    /// The device power state the agent is currently pacing its
+    /// heartbeat to.
+    #[must_use]
+    pub fn power_state(&self) -> SdkPowerState {
+        self.agent.power_state().into()
+    }
+
+    /// Push a device power-state change from the host.
+    ///
+    /// Wire this to the platform's power-state notification — iOS
+    /// `ProcessInfo.isLowPowerModeEnabled` /
+    /// `NSProcessInfoPowerStateDidChange`, Android
+    /// `PowerManager.isPowerSaveMode` /
+    /// `ACTION_POWER_SAVE_MODE_CHANGED`. Under
+    /// [`SdkPowerState::LowPower`] the agent stretches its coalesced
+    /// heartbeat 4× to cut radio wakeups; the new cadence takes
+    /// effect immediately even if the steady-state loop is mid-sleep.
+    /// Idempotent and thread-safe; cheap enough to call on every
+    /// platform notification.
+    pub fn set_power_state(&self, state: SdkPowerState) {
+        self.agent.set_power_state(state.into());
     }
 
     /// Suspend the agent (app backgrounded / network lost). Valid
@@ -296,6 +319,22 @@ mod tests {
         let health = sdk.health();
         assert_eq!(health.lifecycle, SdkLifecycleState::Init);
         assert!(!health.authenticated);
+        // A fresh SDK paces itself at normal power.
+        assert_eq!(health.power, SdkPowerState::Normal);
+        assert_eq!(sdk.power_state(), SdkPowerState::Normal);
+    }
+
+    #[test]
+    fn set_power_state_is_reflected_in_state_and_health() {
+        let sdk = sdk();
+        sdk.set_power_state(SdkPowerState::LowPower);
+        assert_eq!(sdk.power_state(), SdkPowerState::LowPower);
+        assert_eq!(sdk.health().power, SdkPowerState::LowPower);
+        // Idempotent: re-asserting and clearing round-trips cleanly.
+        sdk.set_power_state(SdkPowerState::LowPower);
+        assert_eq!(sdk.power_state(), SdkPowerState::LowPower);
+        sdk.set_power_state(SdkPowerState::Normal);
+        assert_eq!(sdk.power_state(), SdkPowerState::Normal);
     }
 
     #[test]

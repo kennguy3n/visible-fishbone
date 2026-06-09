@@ -55,16 +55,31 @@ or a tunnel.
 | Record | `SdkMobileConfig` | Top-level config; ids, control-plane URL, intervals (`*_secs` / `*_ms`), OIDC `oidc_redirect_uri`, `auth`, `trust_anchors`. |
 | Record | `SdkAuthConfig` | OIDC issuer, client id, scopes, refresh skew/jitter. |
 | Record | `SdkTrustAnchor` | Ed25519 policy-signing public key (`key_id` + base64). |
-| Record | `SdkAgentHealth`, `SdkPostureSnapshot`, `SdkEnrollmentOutcome` | Owned, secret-free projections; timestamps as `i64` epoch-ms. |
-| Enum | `SdkLifecycleState`, `SdkAuthState`, `SdkTunnelStatus`, `SdkPlatform` | FFI-safe mirrors of the core enums. |
+| Record | `SdkAgentHealth`, `SdkPostureSnapshot`, `SdkEnrollmentOutcome` | Owned, secret-free projections; timestamps as `i64` epoch-ms. `SdkAgentHealth` includes the current `power` state. |
+| Enum | `SdkLifecycleState`, `SdkAuthState`, `SdkTunnelStatus`, `SdkPlatform`, `SdkPowerState` | FFI-safe mirrors of the core enums. |
 | Error | `MobileSdkError` | Flat, owned error contract; one `description: String` per variant. |
 
 ### `MobileSdk` methods
 
 * Sync: `state`, `health`, `auth_state`, `is_authenticated`,
-  `last_posture`, `suspend`, `resume`, `terminate`.
+  `last_posture`, `power_state`, `set_power_state`, `suspend`,
+  `resume`, `terminate`.
 * Async (`async_runtime = "tokio"`): `enroll(claim_token)`,
   `collect_posture`, `sign_in`, `refresh_auth`.
+
+### Battery-aware scheduling
+
+The agent coalesces its policy-pull / telemetry-flush / posture timers
+into a single wakeup. `set_power_state(SdkPowerState::LowPower)`
+stretches that wakeup **4×** (see
+`sng_mobile_core::LOW_POWER_INTERVAL_MULTIPLIER`) to cut radio wakeups
+on battery saver; `SdkPowerState::Normal` restores the configured
+cadence. It is a *push* signal — wire it to the platform notification
+(iOS `ProcessInfo.isLowPowerModeEnabled` /
+`NSProcessInfoPowerStateDidChange`, Android
+`PowerManager.isPowerSaveMode` / `ACTION_POWER_SAVE_MODE_CHANGED`); the
+agent never polls a battery API itself. The change takes effect
+immediately, even mid-sleep.
 
 A typical drive is: `new(config)` → `sign_in` → `enroll(claim_token)`
 → steady state (`collect_posture`, `refresh_auth`) →
@@ -112,47 +127,41 @@ Generated output is git-ignored (regenerate it; never hand-edit).
 Produces: `sng_mobile_sdk.swift`, `sng_mobile_sdkFFI.h`,
 `sng_mobile_sdkFFI.modulemap`, and `uniffi/sng_mobile_sdk/sng_mobile_sdk.kt`.
 
-### iOS packaging (`.xcframework`)
+### iOS packaging — Swift Package + `.xcframework`
 
-The crate already builds a `staticlib`. On a macOS host with the Rust
-Apple targets installed, build the static lib for device + simulator
-and assemble an `.xcframework` around the generated header/modulemap:
-
-```sh
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-for T in aarch64-apple-ios aarch64-apple-ios-sim; do
-  cargo build -p sng-mobile-sdk --release --target "$T"
-done
-# (lipo the simulator archs as needed, then:)
-xcodebuild -create-xcframework \
-  -library target/aarch64-apple-ios/release/libsng_mobile_sdk.a \
-  -headers crates/sng-mobile-sdk/bindings/generated \
-  -library target/aarch64-apple-ios-sim/release/libsng_mobile_sdk.a \
-  -headers crates/sng-mobile-sdk/bindings/generated \
-  -output SngMobileSdk.xcframework
-```
-
-Drop `SngMobileSdk.xcframework` and `sng_mobile_sdk.swift` into a Swift
-Package / Xcode project. The modulemap names the FFI module
-`sng_mobile_sdkFFI`, which the Swift source imports.
-
-### Android packaging (`.aar`)
-
-The crate builds a `cdylib`. With the Android NDK targets installed,
-build the `.so` per ABI and place them under an AAR's `jniLibs`
-alongside the generated Kotlin:
+The [`apple/`](apple) directory is a ready-to-resolve Swift Package
+(`ShieldNetMobile`) wrapping an `XCFramework` of the crate's
+`staticlib`. On a macOS host with Xcode:
 
 ```sh
-rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
-# build each with cargo-ndk (or a linker-configured cargo build), e.g.:
-cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
-  -o android/src/main/jniLibs build -p sng-mobile-sdk --release
-# copy uniffi/sng_mobile_sdk/sng_mobile_sdk.kt into the module source set,
-# then assemble the AAR with Gradle.
+crates/sng-mobile-sdk/apple/scripts/build-xcframework.sh   # release
 ```
 
-The generated Kotlin loads the native library via JNA; ship JNA on the
-Android classpath (UniFFI's Kotlin runtime dependency).
+The script regenerates the bindings, cross-compiles the device +
+simulator slices, assembles `sng_mobile_sdkFFI.xcframework`, and copies
+the generated Swift into the package. See [`apple/README.md`](apple/README.md).
+
+### Android packaging — Gradle module + `.aar`
+
+The [`android/`](android) directory is a Gradle Android library module
+that packages the generated Kotlin + per-ABI `cdylib`s into an `.aar`.
+With the Android SDK + NDK and `cargo-ndk`:
+
+```sh
+crates/sng-mobile-sdk/android/scripts/build-aar.sh         # release
+```
+
+The script regenerates the bindings, builds `libsng_mobile_sdk.so` for
+`arm64-v8a` / `armeabi-v7a` / `x86_64` with cargo-ndk, and runs
+`./gradlew assembleRelease`. The generated Kotlin loads the native
+library via JNA (shipped transitively as `net.java.dev.jna:jna@aar`).
+See [`android/README.md`](android/README.md).
+
+### CI
+
+[`.github/workflows/mobile-sdk.yml`](../../.github/workflows/mobile-sdk.yml)
+verifies binding generation on Linux, then builds + uploads the Swift
+Package (`XCFramework`) on macOS and the `.aar` on Linux as artifacts.
 
 ## Local verification
 

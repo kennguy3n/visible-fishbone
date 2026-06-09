@@ -15,7 +15,7 @@
 use chrono::{DateTime, Utc};
 use sng_mobile_core::{
     AccessRequest, AgentHealth, AuthState, EnrollmentOutcome, LifecycleState,
-    MobilePostureSnapshot, TunnelStatus, ZtnaDecision,
+    MobilePostureSnapshot, PowerState, TunnelStatus, ZtnaDecision,
 };
 
 /// Convert a `chrono` UTC timestamp to epoch milliseconds for the
@@ -48,6 +48,45 @@ impl From<LifecycleState> for SdkLifecycleState {
             LifecycleState::Connected => Self::Connected,
             LifecycleState::Suspended => Self::Suspended,
             LifecycleState::Terminated => Self::Terminated,
+        }
+    }
+}
+
+/// Device power state, FFI-safe mirror of
+/// [`sng_mobile_core::PowerState`].
+///
+/// The host pushes this from the platform's own power-state
+/// notification — iOS `ProcessInfo.isLowPowerModeEnabled` /
+/// `NSProcessInfoPowerStateDidChange`, Android
+/// `PowerManager.isPowerSaveMode` /
+/// `ACTION_POWER_SAVE_MODE_CHANGED` — via
+/// [`crate::MobileSdk::set_power_state`]. Under
+/// [`SdkPowerState::LowPower`] the agent's coalesced heartbeat is
+/// stretched 4× to cut radio wakeups.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum SdkPowerState {
+    /// Normal power: the configured intervals are used as-is.
+    #[default]
+    Normal,
+    /// Low power (battery saver / iOS Low Power Mode): the heartbeat
+    /// is stretched 4×.
+    LowPower,
+}
+
+impl From<PowerState> for SdkPowerState {
+    fn from(value: PowerState) -> Self {
+        match value {
+            PowerState::Normal => Self::Normal,
+            PowerState::LowPower => Self::LowPower,
+        }
+    }
+}
+
+impl From<SdkPowerState> for PowerState {
+    fn from(value: SdkPowerState) -> Self {
+        match value {
+            SdkPowerState::Normal => Self::Normal,
+            SdkPowerState::LowPower => Self::LowPower,
         }
     }
 }
@@ -93,6 +132,8 @@ pub struct SdkAgentHealth {
     pub authenticated: bool,
     /// Number of apps currently in the allowed state.
     pub allowed_apps: u64,
+    /// Device power state the agent is pacing its heartbeat to.
+    pub power: SdkPowerState,
 }
 
 impl From<AgentHealth> for SdkAgentHealth {
@@ -101,6 +142,7 @@ impl From<AgentHealth> for SdkAgentHealth {
             lifecycle: value.lifecycle.into(),
             authenticated: value.authenticated,
             allowed_apps: u64::try_from(value.allowed_apps).unwrap_or(u64::MAX),
+            power: value.power.into(),
         }
     }
 }

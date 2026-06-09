@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright 2026 ShieldNet Gateway contributors.
+  SPDX-License-Identifier: LicenseRef-Proprietary
+
+  Library manifest for the ShieldNet Gateway mobile SDK AAR. The
+  namespace carries the package; permissions and the VpnService /
+  posture host wiring belong to the consuming application, not this
+  binding library.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
