@@ -26,20 +26,27 @@ export function PageHeader({
 
 export function Card({
   title,
+  subtitle,
   children,
   className,
   actions,
 }: {
   title?: string;
+  subtitle?: string;
   children: ReactNode;
   className?: string;
   actions?: ReactNode;
 }) {
   return (
     <div className={`card${className ? ` ${className}` : ""}`}>
-      {(title || actions) && (
+      {(title || subtitle || actions) && (
         <div className="card__header">
-          {title && <h3 className="card__title">{title}</h3>}
+          {(title || subtitle) && (
+            <div className="card__heading">
+              {title && <h3 className="card__title">{title}</h3>}
+              {subtitle && <p className="card__subtitle">{subtitle}</p>}
+            </div>
+          )}
           {actions && <div className="card__actions">{actions}</div>}
         </div>
       )}
