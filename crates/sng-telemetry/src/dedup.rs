@@ -28,7 +28,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use sng_core::events::{
-    AgentEvent, DnsEvent, FlowEvent, HttpEvent, IpsEvent, SdwanEvent, ZtnaEvent,
+    AgentEvent, DnsEvent, FlowEvent, HttpEvent, IpsEvent, SdwanEvent, SubsystemRestart, ZtnaEvent,
 };
 
 use crate::source::TelemetryEvent;
@@ -80,6 +80,10 @@ impl Fingerprint {
             TelemetryEvent::Agent(e) => {
                 6u8.hash(&mut h);
                 hash_agent(e, &mut h);
+            }
+            TelemetryEvent::System(e) => {
+                7u8.hash(&mut h);
+                hash_system(e, &mut h);
             }
         }
         Self(h.finish())
@@ -183,6 +187,25 @@ fn hash_agent(e: &AgentEvent, h: &mut DefaultHasher) {
     // dedup on (device, event_type, reason, platform) inside the
     // window. A change in event_type (started → posture →
     // stopped) is what's worth reporting.
+}
+
+fn hash_system(e: &SubsystemRestart, h: &mut DefaultHasher) {
+    e.subsystem.hash(h);
+    (e.reason as u8).hash(h);
+    (e.outcome as u8).hash(h);
+    // `attempt` participates: each restart attempt within a
+    // failure episode is a distinct, meaningful event (a climbing
+    // attempt counter is the crash-loop signal the dashboard
+    // renders), so two attempts that otherwise share the same
+    // (subsystem, reason, outcome) must NOT collapse inside the
+    // window. The counter is monotonic per episode and resets on
+    // recovery, so this keys each attempt uniquely.
+    e.attempt.hash(h);
+    e.rolled_back_config.hash(h);
+    // backoff_ms / detail / fail_open excluded — they are
+    // attributes of an attempt already uniquely keyed by
+    // (subsystem, reason, outcome, attempt, rolled_back_config),
+    // not independent dedup dimensions.
 }
 
 /// Rolling-window event deduplicator.

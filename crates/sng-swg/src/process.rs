@@ -134,6 +134,31 @@ pub trait EnvoyProcess: Send + Sync + std::fmt::Debug {
         self.stop().await?;
         self.start(config_path).await
     }
+    /// Hot-restart Envoy at the given restart epoch.
+    ///
+    /// Envoy's hot-restart protocol launches the replacement
+    /// process with `--restart-epoch <n>` (strictly increasing per
+    /// restart); parent and child rendezvous over the domain socket
+    /// named by `--base-id`, the child adopts the listening sockets,
+    /// and the parent drains in-flight connections then exits — a
+    /// true zero-downtime restart.
+    ///
+    /// The default implementation does **not** perform that
+    /// shared-memory handshake: the shipped single-process
+    /// [`ShellEnvoy`] has no hot-restarter parent, so it falls back
+    /// to a graceful drain + restart via [`Self::restart`], which is
+    /// the honest behaviour for this architecture (`stop()` sends
+    /// `Shutdown` and waits the grace window, draining connections,
+    /// before the fresh `start()`). The `restart_epoch` is still
+    /// threaded through so the supervisor's accounting and emitted
+    /// telemetry are correct, and so a backend that reintroduces the
+    /// hot-restarter (or runs Envoy under `hot-restarter.py`) can
+    /// override this to pass the epoch to the child and get true
+    /// zero-downtime restarts without any change to the supervisor.
+    async fn hot_restart(&self, config_path: &Path, restart_epoch: u32) -> Result<(), SwgError> {
+        let _ = restart_epoch;
+        self.restart(config_path).await
+    }
     /// Validate a candidate config without actually loading it.
     /// In production this calls `envoy --mode validate`; in the
     /// mock it consults a scripted result.
@@ -472,6 +497,18 @@ struct MockState {
     /// validate completes synchronously — the v0 default for
     /// every existing test.
     validate_gate: Option<Arc<tokio::sync::Notify>>,
+    /// Queue of errors to return from successive `start()` calls,
+    /// popped one-per-call in FIFO order. Empty => `start()`
+    /// succeeds. Lets a supervisor test script a run of consecutive
+    /// launch failures (the restart-with-backoff / exhaustion path).
+    fail_next_start: std::collections::VecDeque<SwgError>,
+    /// Restart epochs recorded by `hot_restart`, in call order. A
+    /// supervisor test asserts the epoch increments monotonically.
+    hot_restart_epochs: Vec<u32>,
+    /// Total `start()` invocations (successful or not) — a
+    /// supervisor test counts attempted launches independently of
+    /// the scripted outcome.
+    start_count: usize,
 }
 
 impl MockEnvoy {
@@ -534,6 +571,39 @@ impl MockEnvoy {
         notify
     }
 
+    /// Force `is_alive` / `status` to report a crashed process,
+    /// regardless of any prior `is_alive` override. Used by
+    /// supervisor tests to drive the restart-on-crash path: the
+    /// override is cleared so a subsequent `start()` (issued by the
+    /// supervisor's restart) naturally flips the process back to
+    /// alive via its `Running` status.
+    pub fn mark_crashed(&self) {
+        let mut g = self.inner.lock();
+        g.status = ProcessStatus::Crashed;
+        g.is_alive_override = None;
+    }
+
+    /// Script the next `start()` call to fail with `err`. Composes:
+    /// invoking this `n` times queues `n` failures, popped
+    /// one-per-`start()` in FIFO order. Once the queue drains,
+    /// `start()` succeeds.
+    pub fn fail_next_start(&self, err: SwgError) {
+        self.inner.lock().fail_next_start.push_back(err);
+    }
+
+    /// Number of times `start()` has been invoked (successful or
+    /// not).
+    #[must_use]
+    pub fn start_count(&self) -> usize {
+        self.inner.lock().start_count
+    }
+
+    /// Restart epochs passed to `hot_restart`, in call order.
+    #[must_use]
+    pub fn hot_restart_epochs(&self) -> Vec<u32> {
+        self.inner.lock().hot_restart_epochs.clone()
+    }
+
     /// Snapshot of recorded events — used by tests to assert
     /// the supervisor walked the exact lifecycle order.
     #[must_use]
@@ -568,6 +638,12 @@ impl EnvoyProcess for MockEnvoy {
             return Err(SwgError::Process(
                 "envoy already running; call stop() first".into(),
             ));
+        }
+        // Count the attempt before consulting the scripted-failure
+        // queue so a test counting attempted starts sees every call.
+        g.start_count += 1;
+        if let Some(err) = g.fail_next_start.pop_front() {
+            return Err(err);
         }
         g.started_with.push(config_path.to_path_buf());
         g.status = ProcessStatus::Running;
@@ -626,6 +702,13 @@ impl EnvoyProcess for MockEnvoy {
 
     async fn status(&self) -> ProcessStatus {
         self.inner.lock().status
+    }
+
+    async fn hot_restart(&self, config_path: &Path, restart_epoch: u32) -> Result<(), SwgError> {
+        // Record the epoch (guard dropped before the await), then run
+        // the honest graceful-drain restart the default impl provides.
+        self.inner.lock().hot_restart_epochs.push(restart_epoch);
+        self.restart(config_path).await
     }
 }
 

@@ -286,6 +286,103 @@ pub struct AgentEvent {
     pub platform: Platform,
 }
 
+/// What triggered a subsystem restart.
+///
+/// Mirrors `internal/nats/schema/events.go::SubsystemRestartReason`.
+/// The set is closed so the control plane's operator dashboard can
+/// bucket self-healing activity by cause without parsing a free-form
+/// string.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubsystemRestartReason {
+    /// The supervised process was observed dead / unreachable
+    /// (PID gone, or the OS reported it exited).
+    LivenessLost,
+    /// The process is alive at the OS level but its control
+    /// surface (Suricata stats socket, Envoy `/ready`) stopped
+    /// answering — the classic "alive but wedged" failure.
+    Unresponsive,
+    /// The subsystem's composite health state machine reached
+    /// its terminal `Failed` state (e.g. a sustained drop-ratio
+    /// breach) without a clean single cause.
+    HealthFailed,
+    /// A lower tier's self-heal exhausted its restart budget and
+    /// the top-level watchdog escalated (subsystem restart →
+    /// edge restart → control-plane alert).
+    Escalated,
+}
+
+/// Outcome of a single restart attempt.
+///
+/// Mirrors `internal/nats/schema/events.go::SubsystemRestartOutcome`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubsystemRestartOutcome {
+    /// The restart attempt was issued and the subsystem returned
+    /// to a serving state.
+    Recovered,
+    /// The restart attempt was issued but the subsystem did not
+    /// recover; the supervisor will retry under backoff.
+    Failed,
+    /// The supervisor exhausted its restart budget and is handing
+    /// off to the next escalation tier.
+    Exhausted,
+}
+
+/// Self-healing supervisor telemetry: a subsystem (`ips`, `swg`,
+/// or the edge appliance itself) was restarted, or a restart was
+/// attempted, by the WS2 self-healing supervisors.
+///
+/// This is the wire form of the "alert control plane" leg of the
+/// watchdog escalation chain — the operator dashboard renders one
+/// of these per restart attempt so a flapping subsystem is visible
+/// fleet-wide across the 5000-tenant estate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubsystemRestart {
+    /// Stable subsystem name (`ips`, `swg`, `edge`). Matches the
+    /// `sng_core::Subsystem::name` of the affected subsystem so a
+    /// consumer can join this against the `/health` report.
+    #[serde(rename = "sub")]
+    pub subsystem: String,
+    /// Why the restart was triggered.
+    #[serde(rename = "rsn")]
+    pub reason: SubsystemRestartReason,
+    /// Outcome of this attempt.
+    #[serde(rename = "out")]
+    pub outcome: SubsystemRestartOutcome,
+    /// 1-based attempt counter within the current failure episode.
+    /// Resets to zero once the subsystem recovers, so a climbing
+    /// value is the dashboard's crash-loop signal.
+    #[serde(rename = "att")]
+    pub attempt: u32,
+    /// Fail posture in effect at the time of the restart: `true`
+    /// when the operator policy is fail-open (traffic keeps
+    /// flowing without coverage), `false` for fail-closed (traffic
+    /// dropped until coverage returns).
+    #[serde(rename = "fo")]
+    pub fail_open: bool,
+    /// Whether the restart rolled the subsystem back to its
+    /// last-known-good config (rather than re-applying the config
+    /// that was live when it failed). `true` means a candidate
+    /// config was implicated in the failure and discarded.
+    #[serde(rename = "rbc", default, skip_serializing_if = "is_false")]
+    pub rolled_back_config: bool,
+    /// Backoff applied before this attempt, in milliseconds.
+    #[serde(rename = "boff")]
+    pub backoff_ms: u64,
+    /// Optional operator-readable detail (e.g. the underlying
+    /// start error). Empty for the common success path, so most
+    /// records omit it on the wire.
+    #[serde(rename = "det", default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+/// `skip_serializing_if` predicate matching Go's `omitempty` for a
+/// `bool`: a `false` value is omitted from the wire map entirely.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +685,91 @@ mod tests {
                 "Rust field {forbidden} leaked onto the wire; got {keys:?}"
             );
         }
+    }
+
+    fn sample_restart() -> SubsystemRestart {
+        SubsystemRestart {
+            subsystem: "ips".into(),
+            reason: SubsystemRestartReason::Unresponsive,
+            outcome: SubsystemRestartOutcome::Recovered,
+            attempt: 2,
+            fail_open: true,
+            rolled_back_config: true,
+            backoff_ms: 4_000,
+            detail: "stats socket silent for 9s".into(),
+        }
+    }
+
+    #[test]
+    fn subsystem_restart_round_trip_preserves_all_fields() {
+        let ev = sample_restart();
+        let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
+        let back: SubsystemRestart = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn subsystem_restart_uses_short_field_tags() {
+        let ev = sample_restart();
+        let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
+        let decoded: std::collections::BTreeMap<String, rmpv::Value> =
+            rmp_serde::from_slice(&bytes).expect("decode");
+        let keys: std::collections::BTreeSet<&str> = decoded.keys().map(String::as_str).collect();
+        for required in ["sub", "rsn", "out", "att", "fo", "rbc", "boff", "det"] {
+            assert!(
+                keys.contains(required),
+                "msgpack key {required} missing; got {keys:?}"
+            );
+        }
+        for forbidden in [
+            "subsystem",
+            "reason",
+            "outcome",
+            "attempt",
+            "fail_open",
+            "backoff_ms",
+        ] {
+            assert!(
+                !keys.contains(forbidden),
+                "Rust field {forbidden} leaked onto the wire; got {keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn subsystem_restart_omits_empty_optionals() {
+        // The common success path carries no detail and did not
+        // roll back config — both must be omitted (Go `omitempty`).
+        let ev = SubsystemRestart {
+            rolled_back_config: false,
+            detail: String::new(),
+            ..sample_restart()
+        };
+        let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
+        let decoded: std::collections::BTreeMap<String, rmpv::Value> =
+            rmp_serde::from_slice(&bytes).expect("decode");
+        assert!(!decoded.contains_key("rbc"), "false rbc must be omitted");
+        assert!(!decoded.contains_key("det"), "empty det must be omitted");
+        // fail_open is NOT omitempty even when false — it is
+        // meaningful posture state, mirroring the Go tag.
+        let ev = SubsystemRestart {
+            fail_open: false,
+            ..ev
+        };
+        let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
+        let decoded: std::collections::BTreeMap<String, rmpv::Value> =
+            rmp_serde::from_slice(&bytes).expect("decode");
+        assert!(decoded.contains_key("fo"), "fo must always be present");
+    }
+
+    #[test]
+    fn subsystem_restart_reason_and_outcome_wire_strings() {
+        // The enum wire forms are part of the dashboard contract.
+        let bytes = rmp_serde::to_vec_named(&SubsystemRestartReason::LivenessLost).expect("encode");
+        let s: String = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(s, "liveness_lost");
+        let bytes = rmp_serde::to_vec_named(&SubsystemRestartOutcome::Exhausted).expect("encode");
+        let s: String = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(s, "exhausted");
     }
 }
