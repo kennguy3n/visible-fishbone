@@ -129,21 +129,25 @@ impl ChannelBuffer {
     }
 }
 
-/// Read up to `DEFAULT_MAX_FILE_BYTES` of `path`, or `None` if it
-/// vanished / is unreadable / is not a regular file.
-fn read_file_event(path: &Path, channel: DlpChannel) -> Option<ContentEvent> {
+/// Read up to `max_file_bytes` of `path`, or `None` if it vanished / is
+/// unreadable / is not a regular file.
+fn read_file_event(
+    path: &Path,
+    channel: DlpChannel,
+    max_file_bytes: usize,
+) -> Option<ContentEvent> {
     use std::io::Read;
-    let meta = std::fs::metadata(path).ok()?;
+    // `symlink_metadata` (lstat-equivalent) so a symlink is not followed
+    // out of the watched tree, matching the Linux and macOS backends and
+    // avoiding reading a target outside the monitored directories.
+    let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() {
         return None;
     }
     let file = std::fs::File::open(path).ok()?;
+    let cap = u64::try_from(max_file_bytes).unwrap_or(u64::MAX);
     let mut buf = Vec::new();
-    if file
-        .take(DEFAULT_MAX_FILE_BYTES as u64)
-        .read_to_end(&mut buf)
-        .is_err()
-    {
+    if file.take(cap).read_to_end(&mut buf).is_err() {
         return None;
     }
     let metadata = ContentMetadata {
@@ -184,7 +188,12 @@ struct RdcWatch {
 impl RdcWatch {
     /// Open `dir` and spawn the blocking watcher. `Err` lets the caller
     /// fall back to the poll watcher.
-    fn start(dir: &Path, channel: DlpChannel, shared: &Arc<ChannelBuffer>) -> Result<Self, String> {
+    fn start(
+        dir: &Path,
+        channel: DlpChannel,
+        shared: &Arc<ChannelBuffer>,
+        max_file_bytes: usize,
+    ) -> Result<Self, String> {
         let wpath = wide(dir);
         // SAFETY: `wpath` is a valid NUL-terminated wide string; the
         // share/flags open a directory handle for change monitoring.
@@ -212,7 +221,8 @@ impl RdcWatch {
                     &root,
                     channel,
                     &shared_w,
-                )
+                    max_file_bytes,
+                );
             })
             .map_err(|e| format!("spawn rdc worker: {e}"))?;
 
@@ -244,7 +254,13 @@ impl Drop for RdcWatch {
 
 /// Blocking `ReadDirectoryChangesW` loop. Reports created/modified/
 /// renamed regular files under `root`.
-fn rdc_worker(handle: HANDLE, root: &Path, channel: DlpChannel, shared: &ChannelBuffer) {
+fn rdc_worker(
+    handle: HANDLE,
+    root: &Path,
+    channel: DlpChannel,
+    shared: &ChannelBuffer,
+    max_file_bytes: usize,
+) {
     // `FILE_NOTIFY_INFORMATION` records are DWORD-aligned, so the receive
     // buffer must be 4-byte aligned: a `Vec<u32>` allocation guarantees
     // that, and we view it as bytes for the API call and the walk.
@@ -285,7 +301,7 @@ fn rdc_worker(handle: HANDLE, root: &Path, channel: DlpChannel, shared: &Channel
             unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), RDC_BUFFER_BYTES) };
         for name in parse_notify_buffer(&bytes[..returned as usize]) {
             let path = root.join(&name);
-            if let Some(event) = read_file_event(&path, channel) {
+            if let Some(event) = read_file_event(&path, channel, max_file_bytes) {
                 shared.push(event);
             }
         }
@@ -340,14 +356,14 @@ enum DirInner {
 }
 
 impl DirInner {
-    fn start(channel: DlpChannel, dirs: Vec<PathBuf>, warm: bool) -> Self {
+    fn start(channel: DlpChannel, dirs: Vec<PathBuf>, warm: bool, max_file_bytes: usize) -> Self {
         let shared = ChannelBuffer::new();
         let mut watches = Vec::new();
         for dir in &dirs {
             if !dir.exists() {
                 continue;
             }
-            match RdcWatch::start(dir, channel, &shared) {
+            match RdcWatch::start(dir, channel, &shared, max_file_bytes) {
                 Ok(w) => watches.push(w),
                 Err(reason) => {
                     tracing::info!(target: "sng_pal::dlp", %reason, "ReadDirectoryChangesW unavailable");
@@ -355,7 +371,7 @@ impl DirInner {
             }
         }
         if watches.is_empty() {
-            let w = SensitiveDirWatcher::new(channel, dirs);
+            let w = SensitiveDirWatcher::new(channel, dirs).with_max_file_bytes(max_file_bytes);
             DirInner::Poll(if warm { w.warm_started() } else { w })
         } else {
             DirInner::Native {
@@ -395,16 +411,25 @@ pub struct WindowsFileWriteMonitor {
 }
 
 impl WindowsFileWriteMonitor {
-    /// Watch `dirs` (empty → the default sensitive set).
+    /// Watch `dirs` (empty → the default sensitive set), capping each
+    /// read at [`DEFAULT_MAX_FILE_BYTES`].
     #[must_use]
     pub fn new(dirs: Vec<PathBuf>) -> Self {
+        Self::with_max_file_bytes(dirs, DEFAULT_MAX_FILE_BYTES)
+    }
+
+    /// Watch `dirs` (empty → the default sensitive set), capping each
+    /// read at `max_file_bytes` so the operator-configured limit is
+    /// honoured on Windows exactly as it is on Linux.
+    #[must_use]
+    pub fn with_max_file_bytes(dirs: Vec<PathBuf>, max_file_bytes: usize) -> Self {
         let dirs = if dirs.is_empty() {
             default_sensitive_dirs()
         } else {
             dirs
         };
         Self {
-            inner: DirInner::start(DlpChannel::FileWrite, dirs, true),
+            inner: DirInner::start(DlpChannel::FileWrite, dirs, true, max_file_bytes),
         }
     }
 
@@ -684,7 +709,12 @@ impl WindowsPrintMonitor {
             None
         } else {
             let dir = spool_dir.unwrap_or_else(default_spool_dir);
-            Some(DirInner::start(DlpChannel::Print, vec![dir], false))
+            Some(DirInner::start(
+                DlpChannel::Print,
+                vec![dir],
+                false,
+                DEFAULT_MAX_FILE_BYTES,
+            ))
         };
         Self {
             shared,

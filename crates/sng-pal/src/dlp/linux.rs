@@ -223,8 +223,13 @@ fn arm_recursive(
     let Ok(wd) = inotify.add_watch(dir, flags) else {
         return;
     };
-    wd_paths.insert(wd, dir.to_path_buf());
-    *armed += 1;
+    // `add_watch` returns the existing descriptor when `dir` is already
+    // watched (inotify coalesces re-watches of the same inode). Only
+    // count a watch that actually grew the map so `armed` cannot drift
+    // above `wd_paths.len()` and prematurely trip `MAX_INOTIFY_WATCHES`.
+    if wd_paths.insert(wd, dir.to_path_buf()).is_none() {
+        *armed += 1;
+    }
 
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -297,8 +302,12 @@ fn inotify_worker(
                         | AddWatchFlags::IN_CREATE
                         | AddWatchFlags::IN_ONLYDIR;
                     if let Ok(wd) = inotify.add_watch(&path, flags) {
-                        wd_paths.insert(wd, path);
-                        armed += 1;
+                        // Only count a genuinely new descriptor (see
+                        // `arm_recursive`): re-arming an inode inotify
+                        // already tracks returns the same `wd`.
+                        if wd_paths.insert(wd, path).is_none() {
+                            armed += 1;
+                        }
                     }
                 }
                 continue;
@@ -903,6 +912,10 @@ impl LinuxClipboardMonitor {
         } else if wayland {
             ClipboardInner::Wayland(WaylandClipboardMonitor::new())
         } else {
+            tracing::info!(
+                target: "sng_pal::dlp",
+                "no X11 or Wayland display; clipboard channel disabled on this host"
+            );
             ClipboardInner::Unavailable
         };
         Self { inner }
@@ -928,9 +941,13 @@ impl ChannelInterceptor for LinuxClipboardMonitor {
         match &self.inner {
             ClipboardInner::X11(m) => m.next_event().await,
             ClipboardInner::Wayland(m) => m.next_event().await,
-            ClipboardInner::Unavailable => Err(ChannelError::Unavailable(
-                "no X11 or Wayland display".to_owned(),
-            )),
+            // No display server to read from: report the clean-close
+            // signal so a looping consumer (the DLP subsystem worker)
+            // retires the clipboard channel gracefully instead of
+            // treating the missing hook as a fatal channel error. This
+            // also honours the `ChannelInterceptor` post-shutdown
+            // contract exercised by `clipboard_monitor_honors_shutdown_with_none`.
+            ClipboardInner::Unavailable => Ok(None),
         }
     }
 }
@@ -946,6 +963,12 @@ struct WaylandClipboardMonitor {
     closed: AtomicBool,
     last_hash: Mutex<Option<u64>>,
 }
+
+/// Backoff between `wl-paste` polls when the Wayland selection has not
+/// changed since the last reported event. Wayland denies an unfocused
+/// client an edge-trigger, so the bridge is poll-based; this bound keeps
+/// an idle, unchanged clipboard from busy-spawning `wl-paste`.
+const WAYLAND_DEDUP_BACKOFF: Duration = Duration::from_millis(500);
 
 impl WaylandClipboardMonitor {
     fn new() -> Self {
@@ -976,30 +999,36 @@ impl ChannelInterceptor for WaylandClipboardMonitor {
         DlpChannel::Clipboard
     }
     async fn next_event(&self) -> Result<Option<ContentEvent>, ChannelError> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Ok(None);
-        }
-        let content = Self::read_selection()?;
-        // Dedup: only surface a selection that differs from the last one
-        // we reported, so a consumer that loops does not re-inspect an
-        // unchanged clipboard.
-        let hash = content_hash(&content);
-        {
-            let mut last = lock(&self.last_hash);
-            if *last == Some(hash) {
-                return Ok(Some(ContentEvent {
-                    channel: DlpChannel::Clipboard,
-                    content: Vec::new(),
-                    metadata: clipboard_metadata(),
-                }));
+        loop {
+            if self.closed.load(Ordering::SeqCst) {
+                return Ok(None);
             }
-            *last = Some(hash);
+            let content = Self::read_selection()?;
+            // Dedup: only surface a selection that differs from the last
+            // one we reported. An unchanged selection is suppressed
+            // silently (matching the X11 and macOS backends) rather than
+            // emitting a spurious empty event into the DLP engine; the
+            // monitor parks briefly and re-polls.
+            let hash = content_hash(&content);
+            let is_duplicate = {
+                let mut last = lock(&self.last_hash);
+                if *last == Some(hash) {
+                    true
+                } else {
+                    *last = Some(hash);
+                    false
+                }
+            };
+            if is_duplicate {
+                tokio::time::sleep(WAYLAND_DEDUP_BACKOFF).await;
+                continue;
+            }
+            return Ok(Some(ContentEvent {
+                channel: DlpChannel::Clipboard,
+                content,
+                metadata: clipboard_metadata(),
+            }));
         }
-        Ok(Some(ContentEvent {
-            channel: DlpChannel::Clipboard,
-            content,
-            metadata: clipboard_metadata(),
-        }))
     }
 }
 

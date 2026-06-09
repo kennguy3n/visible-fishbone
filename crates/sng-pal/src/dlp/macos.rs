@@ -213,6 +213,7 @@ mod ffi {
     // libdispatch lives in libSystem, which is always linked.
     unsafe extern "C" {
         pub fn dispatch_queue_create(label: *const c_char, attr: *const c_void) -> DispatchQueueT;
+        pub fn dispatch_release(object: DispatchQueueT);
     }
 }
 
@@ -432,6 +433,12 @@ impl FsEventsWatcher {
         // failure (e.g. the path set could not be watched).
         let started = unsafe {
             ffi::FSEventStreamSetDispatchQueue(stream, queue);
+            // `FSEventStreamSetDispatchQueue` takes its own retain on the
+            // queue, so balance the +1 returned by `dispatch_queue_create`
+            // now. The stream then owns the sole reference and
+            // `FSEventStreamInvalidate` (in `Drop`/teardown) releases it,
+            // leaving no leaked dispatch queue across monitor restarts.
+            ffi::dispatch_release(queue);
             ffi::FSEventStreamStart(stream) != 0
         };
         if !started {
@@ -525,8 +532,8 @@ enum DirInner {
 }
 
 impl DirInner {
-    fn start(channel: DlpChannel, dirs: Vec<PathBuf>, warm: bool) -> Self {
-        match FsEventsWatcher::start(channel, &dirs, DEFAULT_MAX_FILE_BYTES) {
+    fn start(channel: DlpChannel, dirs: Vec<PathBuf>, warm: bool, max_file_bytes: usize) -> Self {
+        match FsEventsWatcher::start(channel, &dirs, max_file_bytes) {
             Ok(w) => DirInner::FsEvents(w),
             Err(reason) => {
                 tracing::info!(
@@ -534,7 +541,7 @@ impl DirInner {
                     %reason,
                     "FSEvents unavailable; falling back to poll watcher"
                 );
-                let w = SensitiveDirWatcher::new(channel, dirs);
+                let w = SensitiveDirWatcher::new(channel, dirs).with_max_file_bytes(max_file_bytes);
                 DirInner::Poll(if warm { w.warm_started() } else { w })
             }
         }
@@ -570,16 +577,25 @@ pub struct MacFileWriteMonitor {
 }
 
 impl MacFileWriteMonitor {
-    /// Watch `dirs` (empty → the default sensitive set).
+    /// Watch `dirs` (empty → the default sensitive set), capping each
+    /// read at [`DEFAULT_MAX_FILE_BYTES`].
     #[must_use]
     pub fn new(dirs: Vec<PathBuf>) -> Self {
+        Self::with_max_file_bytes(dirs, DEFAULT_MAX_FILE_BYTES)
+    }
+
+    /// Watch `dirs` (empty → the default sensitive set), capping each
+    /// read at `max_file_bytes` so the operator-configured limit is
+    /// honoured on macOS exactly as it is on Linux.
+    #[must_use]
+    pub fn with_max_file_bytes(dirs: Vec<PathBuf>, max_file_bytes: usize) -> Self {
         let dirs = if dirs.is_empty() {
             default_sensitive_dirs()
         } else {
             dirs
         };
         Self {
-            inner: DirInner::start(DlpChannel::FileWrite, dirs, true),
+            inner: DirInner::start(DlpChannel::FileWrite, dirs, true, max_file_bytes),
         }
     }
 
@@ -611,7 +627,7 @@ impl MacPrintMonitor {
     pub fn new(spool_dir: Option<PathBuf>) -> Self {
         let dir = spool_dir.unwrap_or_else(|| PathBuf::from("/private/var/spool/cups"));
         Self {
-            inner: DirInner::start(DlpChannel::Print, vec![dir], false),
+            inner: DirInner::start(DlpChannel::Print, vec![dir], false, DEFAULT_MAX_FILE_BYTES),
         }
     }
 
@@ -658,6 +674,7 @@ impl MacUsbTransferMonitor {
                 DlpChannel::UsbTransfer,
                 vec![PathBuf::from("/Volumes")],
                 true,
+                DEFAULT_MAX_FILE_BYTES,
             ),
         }
     }

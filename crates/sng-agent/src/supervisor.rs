@@ -452,14 +452,16 @@ fn file_write_interceptor(cfg: &crate::config::DlpConfig) -> Arc<dyn ChannelInte
     }
     #[cfg(target_os = "macos")]
     {
-        Arc::new(sng_pal::dlp::MacFileWriteMonitor::new(
+        Arc::new(sng_pal::dlp::MacFileWriteMonitor::with_max_file_bytes(
             cfg.watch_dirs.clone(),
+            cfg.max_file_bytes,
         ))
     }
     #[cfg(target_os = "windows")]
     {
-        Arc::new(sng_pal::dlp::WindowsFileWriteMonitor::new(
+        Arc::new(sng_pal::dlp::WindowsFileWriteMonitor::with_max_file_bytes(
             cfg.watch_dirs.clone(),
+            cfg.max_file_bytes,
         ))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
