@@ -55,12 +55,14 @@ static SNG_STEERING: Array<WireSteeringTarget> = Array::with_max_entries(STEERIN
 #[map(name = "sng_ddos_cfg")]
 static SNG_DDOS_CFG: Array<WireDdosConfig> = Array::with_max_entries(1, 0);
 #[map(name = "sng_geoip_v4")]
-static SNG_GEOIP_V4: LpmTrie<[u8; 4], WireCountry> = LpmTrie::with_max_entries(MAX_GEOIP_ENTRIES, 0);
+static SNG_GEOIP_V4: LpmTrie<[u8; 4], WireCountry> =
+    LpmTrie::with_max_entries(MAX_GEOIP_ENTRIES, 0);
 #[map(name = "sng_geoip_v6")]
 static SNG_GEOIP_V6: LpmTrie<[u8; 16], WireCountry> =
     LpmTrie::with_max_entries(MAX_GEOIP_ENTRIES, 0);
 #[map(name = "sng_geo_block")]
-static SNG_GEO_BLOCK: HashMap<WireCountry, u8> = HashMap::with_max_entries(MAX_BLOCKED_COUNTRIES, 0);
+static SNG_GEO_BLOCK: HashMap<WireCountry, u8> =
+    HashMap::with_max_entries(MAX_BLOCKED_COUNTRIES, 0);
 #[map(name = "sng_flow_state")]
 static SNG_FLOW_STATE: LruHashMap<FlowKey, FlowState> = LruHashMap::with_max_entries(MAX_FLOWS, 0);
 #[map(name = "sng_verdict_cache")]
@@ -202,10 +204,22 @@ fn geoip_blocked(key: &FlowKey) -> bool {
 /// Apply the relevant per-source token bucket; returns `false` to drop.
 fn rate_limit_admits(cfg: &WireDdosConfig, parsed: &Parsed, now: u64) -> bool {
     if parsed.is_tcp_syn && cfg.syn_enabled == PRESENT {
-        return bucket_admit(&SNG_SYN_BUCKETS, &parsed.key.src, cfg.syn_capacity, cfg.syn_refill_per_sec, now);
+        return bucket_admit(
+            &SNG_SYN_BUCKETS,
+            &parsed.key.src,
+            cfg.syn_capacity,
+            cfg.syn_refill_per_sec,
+            now,
+        );
     }
     if parsed.key.protocol == PROTO_UDP && cfg.udp_enabled == PRESENT {
-        return bucket_admit(&SNG_UDP_BUCKETS, &parsed.key.src, cfg.udp_capacity, cfg.udp_refill_per_sec, now);
+        return bucket_admit(
+            &SNG_UDP_BUCKETS,
+            &parsed.key.src,
+            cfg.udp_capacity,
+            cfg.udp_refill_per_sec,
+            now,
+        );
     }
     true
 }
@@ -346,10 +360,22 @@ fn fw_rule_matches(rule: &WireRule, key: &FlowKey) -> bool {
     if rule.protocol_present == PRESENT && rule.protocol != key.protocol {
         return false;
     }
-    if !cidr_list_matches(&rule.src_cidrs, rule.n_src_cidrs, &key.src, key.family, len_bytes) {
+    if !cidr_list_matches(
+        &rule.src_cidrs,
+        rule.n_src_cidrs,
+        &key.src,
+        key.family,
+        len_bytes,
+    ) {
         return false;
     }
-    if !cidr_list_matches(&rule.dst_cidrs, rule.n_dst_cidrs, &key.dst, key.family, len_bytes) {
+    if !cidr_list_matches(
+        &rule.dst_cidrs,
+        rule.n_dst_cidrs,
+        &key.dst,
+        key.family,
+        len_bytes,
+    ) {
         return false;
     }
     if !port_list_matches(&rule.src_ports, rule.n_src_ports, key.src_port) {

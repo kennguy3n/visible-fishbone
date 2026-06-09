@@ -390,10 +390,30 @@ pub fn marshal_rules(set: &XdpRuleSet) -> Result<(Vec<WireRule>, WireRuleSetMeta
 }
 
 fn marshal_rule(rule: &crate::firewall::XdpRule) -> Result<WireRule, EbpfError> {
-    let n_src_cidrs = checked_len(rule.src_cidrs.len(), MAX_CIDRS_PER_RULE, &rule.id, "source CIDRs")?;
-    let n_dst_cidrs = checked_len(rule.dst_cidrs.len(), MAX_CIDRS_PER_RULE, &rule.id, "destination CIDRs")?;
-    let n_src_ports = checked_len(rule.src_ports.len(), MAX_PORTS_PER_RULE, &rule.id, "source ports")?;
-    let n_dst_ports = checked_len(rule.dst_ports.len(), MAX_PORTS_PER_RULE, &rule.id, "destination ports")?;
+    let n_src_cidrs = checked_len(
+        rule.src_cidrs.len(),
+        MAX_CIDRS_PER_RULE,
+        &rule.id,
+        "source CIDRs",
+    )?;
+    let n_dst_cidrs = checked_len(
+        rule.dst_cidrs.len(),
+        MAX_CIDRS_PER_RULE,
+        &rule.id,
+        "destination CIDRs",
+    )?;
+    let n_src_ports = checked_len(
+        rule.src_ports.len(),
+        MAX_PORTS_PER_RULE,
+        &rule.id,
+        "source ports",
+    )?;
+    let n_dst_ports = checked_len(
+        rule.dst_ports.len(),
+        MAX_PORTS_PER_RULE,
+        &rule.id,
+        "destination ports",
+    )?;
 
     let mut wire = WireRule {
         n_src_cidrs,
@@ -401,7 +421,11 @@ fn marshal_rule(rule: &crate::firewall::XdpRule) -> Result<WireRule, EbpfError> 
         n_src_ports,
         n_dst_ports,
         protocol: rule.protocol.unwrap_or(0),
-        protocol_present: if rule.protocol.is_some() { PRESENT } else { ABSENT },
+        protocol_present: if rule.protocol.is_some() {
+            PRESENT
+        } else {
+            ABSENT
+        },
         action: rule.action as u8,
         ..WireRule::default()
     };
@@ -471,7 +495,11 @@ pub fn marshal_classification(
                 dst,
                 prefix_len,
                 family,
-                port_present: if rule.dst_port.is_some() { PRESENT } else { ABSENT },
+                port_present: if rule.dst_port.is_some() {
+                    PRESENT
+                } else {
+                    ABSENT
+                },
                 class: class_to_u8(rule.class),
                 dst_port: rule.dst_port.unwrap_or(0),
                 pad: [0; 2],
@@ -520,9 +548,21 @@ pub fn marshal_ddos(config: &DdosConfig) -> Result<MarshalledDdos, EbpfError> {
         syn_refill_per_sec: config.syn.map_or(0, |l| l.refill_per_sec),
         udp_capacity: config.udp.map_or(0, |l| l.capacity),
         udp_refill_per_sec: config.udp.map_or(0, |l| l.refill_per_sec),
-        syn_enabled: if config.syn.is_some() { PRESENT } else { ABSENT },
-        udp_enabled: if config.udp.is_some() { PRESENT } else { ABSENT },
-        geoip_enabled: if config.blocklist.is_empty() { ABSENT } else { PRESENT },
+        syn_enabled: if config.syn.is_some() {
+            PRESENT
+        } else {
+            ABSENT
+        },
+        udp_enabled: if config.udp.is_some() {
+            PRESENT
+        } else {
+            ABSENT
+        },
+        geoip_enabled: if config.blocklist.is_empty() {
+            ABSENT
+        } else {
+            PRESENT
+        },
         pad: [0; 5],
     };
     let geoip = config
@@ -683,7 +723,9 @@ mod tests {
     fn marshal_rules_rejects_too_many_cidrs() {
         let rule = XdpRule {
             id: "huge".into(),
-            src_cidrs: (0..=MAX_CIDRS_PER_RULE).map(|i| net(&format!("10.{i}.0.0/16"))).collect(),
+            src_cidrs: (0..=MAX_CIDRS_PER_RULE)
+                .map(|i| net(&format!("10.{i}.0.0/16")))
+                .collect(),
             dst_cidrs: vec![],
             src_ports: vec![],
             dst_ports: vec![],
@@ -715,7 +757,10 @@ mod tests {
         ]);
         let (wire, meta) = marshal_classification(&classifier).unwrap();
         assert_eq!(meta.count, 2);
-        assert_eq!(meta.fallback_class, class_to_u8(TrafficClass::default_conservative()));
+        assert_eq!(
+            meta.fallback_class,
+            class_to_u8(TrafficClass::default_conservative())
+        );
         // Longest prefix (/24) must come first.
         assert_eq!(wire[0].prefix_len, 24);
         assert_eq!(wire[0].port_present, PRESENT);
@@ -728,7 +773,10 @@ mod tests {
     #[test]
     fn marshal_steering_orders_by_class_index() {
         let mut table = EgressSteeringTable::new();
-        table.set(TrafficClass::TunnelPrivate, SteeringTarget::redirect(7, 0x55));
+        table.set(
+            TrafficClass::TunnelPrivate,
+            SteeringTarget::redirect(7, 0x55),
+        );
         let wire = marshal_steering(&table);
         // TunnelPrivate is index 4.
         assert_eq!(wire[4].action, crate::tc::SteeringAction::Redirect as u8);
@@ -758,10 +806,18 @@ mod tests {
         assert_eq!(marshalled.geoip.len(), 2);
         assert_eq!(marshalled.blocked, vec![WireCountry::new(*b"CN")]);
 
-        let v4 = marshalled.geoip.iter().find(|e| e.family == family::V4).unwrap();
+        let v4 = marshalled
+            .geoip
+            .iter()
+            .find(|e| e.family == family::V4)
+            .unwrap();
         assert_eq!(v4.key_v4(), Some([1, 0, 0, 0]));
         assert_eq!(v4.key_v6(), None);
-        let v6 = marshalled.geoip.iter().find(|e| e.family == family::V6).unwrap();
+        let v6 = marshalled
+            .geoip
+            .iter()
+            .find(|e| e.family == family::V6)
+            .unwrap();
         assert_eq!(v6.key_v6().unwrap()[..4], [0x20, 0x01, 0x0d, 0xb8]);
         assert_eq!(v6.key_v4(), None);
     }

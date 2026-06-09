@@ -485,8 +485,9 @@ mod aya_backend {
         let Some(map) = ebpf.map_mut(name) else {
             return Ok(());
         };
-        let mut cache: HashMap<&mut MapData, FlowKey, VerdictCacheEntry> = HashMap::try_from(map)
-            .map_err(|e| EbpfError::Map(format!("map {name} is not a hash: {e}")))?;
+        let mut cache: HashMap<&mut MapData, FlowKey, VerdictCacheEntry> =
+            HashMap::try_from(map)
+                .map_err(|e| EbpfError::Map(format!("map {name} is not a hash: {e}")))?;
         let keys: Vec<FlowKey> = cache.keys().filter_map(Result::ok).collect();
         for key in keys {
             cache
