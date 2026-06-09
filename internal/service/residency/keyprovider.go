@@ -297,6 +297,15 @@ type TenantKeyProvider interface {
 	// UnwrapDataKey decrypts wrapped under the KEK named by ref, with
 	// ec bound as additional authenticated data. ec must be identical
 	// to the context used at wrap time or the unwrap fails.
+	//
+	// Adapter contract: on the unwrap path the CMKService builds ref
+	// from the wrapped key alone, so only ref.TenantID, ref.Kind and
+	// ref.KeyURI are populated — ref.Region is the zero value. The read
+	// path deliberately does not re-bind residency (see CMKService.
+	// UnwrapDataKey), and WrappedDataKey does not persist a region. A
+	// cloud adapter that needs the region MUST derive it from
+	// wrapped.KeyURI (the ARN, GCP resource name, or Key Vault host
+	// already encodes it); it must NOT read ref.Region here.
 	UnwrapDataKey(ctx context.Context, ref TenantKeyRef, wrapped WrappedDataKey, ec EncryptionContext) ([]byte, error)
 }
 
