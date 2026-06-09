@@ -38,8 +38,8 @@
 //!   [`ChannelError::Unavailable`].
 
 use super::{
-    DEFAULT_MAX_FILE_BYTES, MountEntry, RemovableMount, SensitiveDirWatcher, clipboard_metadata,
-    content_hash, mime_for_path,
+    DEFAULT_MAX_FILE_BYTES, FileWatchOptions, MountEntry, RemovableMount, SensitiveDirWatcher,
+    clipboard_metadata, content_hash, mime_for_path,
 };
 use async_trait::async_trait;
 use nix::poll::{PollFd, PollFlags, PollTimeout};
@@ -382,18 +382,21 @@ impl LinuxFileWriteMonitor {
     /// Watch `dirs` (empty → the default sensitive set).
     #[must_use]
     pub fn new(dirs: Vec<PathBuf>) -> Self {
-        Self::with_max_file_bytes(dirs, DEFAULT_MAX_FILE_BYTES)
+        Self::with_options(dirs, FileWatchOptions::default())
     }
 
-    /// Watch `dirs` with an explicit per-file read ceiling.
+    /// Watch `dirs` with explicit operator tuning. `opts.max_file_bytes`
+    /// bounds each read; `opts.poll_interval` is applied when inotify is
+    /// unavailable and the monitor falls back to the portable poll
+    /// watcher, so the operator-configured cadence is honoured there too.
     #[must_use]
-    pub fn with_max_file_bytes(dirs: Vec<PathBuf>, max_file_bytes: usize) -> Self {
+    pub fn with_options(dirs: Vec<PathBuf>, opts: FileWatchOptions) -> Self {
         let dirs = if dirs.is_empty() {
             default_sensitive_dirs()
         } else {
             dirs
         };
-        match InotifyWatcher::start(DlpChannel::FileWrite, &dirs, max_file_bytes) {
+        match InotifyWatcher::start(DlpChannel::FileWrite, &dirs, opts.max_file_bytes) {
             Ok(watcher) => Self {
                 inner: FileWriteInner::Inotify(watcher),
             },
@@ -406,7 +409,8 @@ impl LinuxFileWriteMonitor {
                 // Warm-start: files that predate the agent are recorded
                 // as the watermark, not re-reported as fresh writes.
                 let watcher = SensitiveDirWatcher::new(DlpChannel::FileWrite, dirs)
-                    .with_max_file_bytes(max_file_bytes)
+                    .with_max_file_bytes(opts.max_file_bytes)
+                    .with_poll_interval(opts.poll_interval)
                     .warm_started();
                 Self {
                     inner: FileWriteInner::Poll(watcher),
@@ -1004,6 +1008,14 @@ impl ChannelInterceptor for WaylandClipboardMonitor {
                 return Ok(None);
             }
             let content = Self::read_selection()?;
+            // An empty selection carries nothing to classify; suppress it
+            // (matching the X11, macOS and Windows backends, which all
+            // filter empty content) so an empty clipboard never produces a
+            // spurious event. The monitor parks briefly and re-polls.
+            if content.is_empty() {
+                tokio::time::sleep(WAYLAND_DEDUP_BACKOFF).await;
+                continue;
+            }
             // Dedup: only surface a selection that differs from the last
             // one we reported. An unchanged selection is suppressed
             // silently (matching the X11 and macOS backends) rather than

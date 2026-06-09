@@ -52,6 +52,36 @@ pub const DEFAULT_MAX_FILE_BYTES: usize = 1024 * 1024;
 /// Default poll cadence for [`SensitiveDirWatcher`].
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Operator-tunable knobs shared by the native file-write monitors
+/// (the inotify / FSEvents / `ReadDirectoryChangesW` backends).
+///
+/// `max_file_bytes` bounds how much of each written file the monitor
+/// reads — it applies to both the native edge-triggered backend and the
+/// portable poll fallback. `poll_interval` is consulted only on the
+/// fallback path: the native inotify / FSEvents / `ReadDirectoryChangesW`
+/// backends are edge-triggered and never poll, but when a host cannot
+/// initialise its kernel hook the monitor reverts to the portable
+/// [`SensitiveDirWatcher`]. Surfacing the cadence here keeps the
+/// operator's `[dlp] poll_interval` honoured regardless of which backend
+/// a given host ends up using.
+#[derive(Debug, Clone, Copy)]
+pub struct FileWatchOptions {
+    /// Maximum bytes read from any single file write.
+    pub max_file_bytes: usize,
+    /// Poll cadence applied when the native backend falls back to the
+    /// portable [`SensitiveDirWatcher`].
+    pub poll_interval: Duration,
+}
+
+impl Default for FileWatchOptions {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            poll_interval: DEFAULT_POLL_INTERVAL,
+        }
+    }
+}
+
 /// Maximum directory depth [`SensitiveDirWatcher::scan`] descends.
 const MAX_WALK_DEPTH: usize = 8;
 

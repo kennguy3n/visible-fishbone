@@ -443,25 +443,30 @@ fn build_dlp_subsystem(
 /// when its kernel hook cannot be initialised. On any other target the
 /// portable watcher is used directly.
 fn file_write_interceptor(cfg: &crate::config::DlpConfig) -> Arc<dyn ChannelInterceptor> {
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    let opts = sng_pal::dlp::FileWatchOptions {
+        max_file_bytes: cfg.max_file_bytes,
+        poll_interval: cfg.poll_interval,
+    };
     #[cfg(target_os = "linux")]
     {
-        Arc::new(sng_pal::dlp::LinuxFileWriteMonitor::with_max_file_bytes(
+        Arc::new(sng_pal::dlp::LinuxFileWriteMonitor::with_options(
             cfg.watch_dirs.clone(),
-            cfg.max_file_bytes,
+            opts,
         ))
     }
     #[cfg(target_os = "macos")]
     {
-        Arc::new(sng_pal::dlp::MacFileWriteMonitor::with_max_file_bytes(
+        Arc::new(sng_pal::dlp::MacFileWriteMonitor::with_options(
             cfg.watch_dirs.clone(),
-            cfg.max_file_bytes,
+            opts,
         ))
     }
     #[cfg(target_os = "windows")]
     {
-        Arc::new(sng_pal::dlp::WindowsFileWriteMonitor::with_max_file_bytes(
+        Arc::new(sng_pal::dlp::WindowsFileWriteMonitor::with_options(
             cfg.watch_dirs.clone(),
-            cfg.max_file_bytes,
+            opts,
         ))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
