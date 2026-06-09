@@ -430,16 +430,22 @@ func run() error {
 	// in use (including unsanctioned ones with no connector). It
 	// persists into the same casb_discovered_apps table the operator
 	// portal renders. Start launches a loop that flushes the windowed
-	// in-memory aggregate on a ticker and does a final flush on
-	// shutdown. The deferred Stop is registered after the line-131
-	// `defer pool.Close()`, so it runs *before* it (defers are LIFO)
-	// and joins the loop's final flush before the pool closes —
-	// matching the feedMgr/recompiler shutdown pattern above and
-	// closing the race the goroutine would otherwise have with
-	// pool.Close(). Stop is idempotent.
+	// in-memory aggregate on a ticker and does a final flush on Stop.
+	//
+	// The loop is deliberately NOT bound to rootCtx: the telemetry
+	// consumer runs on its own background context and is drained by
+	// telShutdown *after* rootCtx is cancelled, so it keeps feeding
+	// observations during the shutdown window. The discoverer must
+	// therefore outlive rootCtx and only stop once the consumer has
+	// drained — hence the explicit Stop in the graceful-shutdown block
+	// below, right after telShutdown. The deferred Stop here is the
+	// idempotent safety net for early-return paths; registered after
+	// the line-131 `defer pool.Close()`, it runs *before* it (defers
+	// are LIFO) so the final flush completes before the pool closes,
+	// matching the feedMgr/recompiler shutdown pattern above.
 	shadowDiscoverer := casb.NewShadowITDiscoverer(
 		postgres.NewStoreWithPool(pool).NewCASBDiscoveredAppRepository(), logger)
-	shadowDiscoverer.Start(rootCtx, 0)
+	shadowDiscoverer.Start(0)
 	defer shadowDiscoverer.Stop()
 
 	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer)
@@ -606,6 +612,15 @@ func run() error {
 	if err := telShutdown(shutdownCtx); err != nil {
 		logger.Warn("sng-control: telemetry shutdown error", slog.Any("error", err))
 	}
+	// Stop the shadow-IT discoverer only now that telShutdown has
+	// drained the telemetry consumer: the consumer feeds ObserveHost on
+	// its own background context (independent of rootCtx, already
+	// cancelled above), so stopping the discoverer earlier would drop
+	// the observations accumulated during this shutdown window. Stop
+	// performs the final flush; it runs before the deferred pool.Close
+	// (registered at line 134) so the upserts complete against a live
+	// pool, and makes the deferred Stop a no-op (idempotent).
+	shadowDiscoverer.Stop()
 
 	logger.Info("sng-control: stopped")
 	return nil

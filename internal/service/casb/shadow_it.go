@@ -208,11 +208,17 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-// DefaultShadowITFlushInterval is how often Run persists the
+// DefaultShadowITFlushInterval is how often the loop persists the
 // accumulated shadow-IT inventory. Sized for a near-real-time
 // operator inventory without hammering the database: each flush is
 // one upsert per (tenant, app) pair that saw traffic in the window.
 const DefaultShadowITFlushInterval = 5 * time.Minute
+
+// shadowFlushTimeout bounds a single flush (its batch of per-(tenant,
+// app) upserts). Flushes run on a context derived from
+// context.Background() rather than the process root context so they
+// keep persisting during the graceful-shutdown drain window — see run.
+const shadowFlushTimeout = 30 * time.Second
 
 // maxDevicesPerApp caps the distinct-device set held per (tenant,
 // app) within a window so a single busy app cannot grow the working
@@ -254,8 +260,9 @@ type shadowShard struct {
 
 // ShadowITDiscoverer turns SWG DNS/HTTP telemetry into a per-tenant
 // shadow-IT inventory. Construct with NewShadowITDiscoverer, feed it
-// with ObserveHost from the telemetry consumer, and run Flush (or the
-// Run loop) to persist. Safe for concurrent use.
+// with ObserveHost from the telemetry consumer, and either call Flush
+// directly or run the Start/Stop loop to persist. Safe for concurrent
+// use.
 type ShadowITDiscoverer struct {
 	apps    shadowAggregator
 	logger  *slog.Logger
@@ -265,11 +272,12 @@ type ShadowITDiscoverer struct {
 	mask   uint64
 
 	// Lifecycle: Start launches the flush loop, Stop joins it after a
-	// final flush. stopCh is closed by Stop to wind the loop down even
-	// when the parent context is still live (the early-return shutdown
-	// path); doneCh is closed when the loop has returned so Stop can
-	// block until the final DB flush completes — this is what keeps the
-	// final upserts from racing pool.Close() on shutdown.
+	// final flush. The loop terminates only when Stop closes stopCh
+	// (never on a process-scoped context), so the discoverer outlives
+	// rootCtx and is still flushing while the telemetry consumer drains
+	// during shutdown; doneCh is closed when the loop has returned so
+	// Stop can block until the final DB flush completes — this is what
+	// keeps the final upserts from racing pool.Close() on shutdown.
 	startOnce sync.Once
 	stopOnce  sync.Once
 	started   atomic.Bool
@@ -442,21 +450,32 @@ func (d *ShadowITDiscoverer) Flush(ctx context.Context) error {
 
 // Start launches the flush loop in a background goroutine and returns
 // immediately. interval <= 0 selects DefaultShadowITFlushInterval.
-// Start is idempotent; pair it with a deferred Stop so the final flush
-// is joined before the DB pool is closed on shutdown. It is the
-// one-call "no ops" path for keeping the inventory current.
-func (d *ShadowITDiscoverer) Start(ctx context.Context, interval time.Duration) {
+//
+// The loop's lifetime is controlled solely by Stop, deliberately NOT
+// by any request- or process-scoped context. The telemetry consumer
+// that feeds ObserveHost runs on its own background context and is
+// drained during graceful shutdown *after* the process root context is
+// cancelled; binding the loop to rootCtx would make it exit (and do
+// its final flush) while the consumer is still emitting observations,
+// silently dropping that last window. So the discoverer must outlive
+// rootCtx and flush only once the consumer has stopped.
+//
+// Start is idempotent; pair it with Stop (deferred as a safety net for
+// early-return paths, and called explicitly after the telemetry
+// consumer drains) so the final window is persisted before the DB pool
+// is closed on shutdown. It is the one-call "no ops" path for keeping
+// the inventory current.
+func (d *ShadowITDiscoverer) Start(interval time.Duration) {
 	d.startOnce.Do(func() {
 		d.started.Store(true)
-		go d.run(ctx, interval)
+		go d.run(interval)
 	})
 }
 
 // Stop winds the flush loop down and blocks until its final flush has
 // completed, so the last window's upserts finish before the caller
-// proceeds to close the DB pool. Closing stopCh also aborts the loop
-// on the early-return path where the parent context is still live.
-// Stop is idempotent and safe to call when Start was never invoked.
+// proceeds to close the DB pool. Stop is idempotent and safe to call
+// when Start was never invoked.
 func (d *ShadowITDiscoverer) Stop() {
 	d.stopOnce.Do(func() { close(d.stopCh) })
 	if d.started.Load() {
@@ -464,10 +483,15 @@ func (d *ShadowITDiscoverer) Stop() {
 	}
 }
 
-// run flushes the inventory on a ticker until the parent context is
-// cancelled or Stop is called, then performs a final flush so
-// in-flight observations are not lost on shutdown.
-func (d *ShadowITDiscoverer) run(ctx context.Context, interval time.Duration) {
+// run flushes the inventory on a ticker until Stop is called, then
+// performs a final flush so the last window's observations are not
+// lost. Flushes run on detached, bounded contexts (see flushWindow /
+// finalFlush) rather than a process-scoped context, so they keep
+// persisting even after rootCtx is cancelled during the graceful
+// shutdown drain window — the loop intentionally terminates only on
+// stopCh, since the telemetry consumer keeps feeding observations
+// until it is drained later in the shutdown sequence.
+func (d *ShadowITDiscoverer) run(interval time.Duration) {
 	defer close(d.doneCh)
 	if interval <= 0 {
 		interval = DefaultShadowITFlushInterval
@@ -476,24 +500,32 @@ func (d *ShadowITDiscoverer) run(ctx context.Context, interval time.Duration) {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ctx.Done():
-			d.finalFlush()
-			return
 		case <-d.stopCh:
 			d.finalFlush()
 			return
 		case <-ticker.C:
-			if err := d.Flush(ctx); err != nil {
-				d.logger.Warn("casb: shadow-it flush failed", slog.Any("error", err))
-			}
+			d.flushWindow()
 		}
 	}
 }
 
+// flushWindow persists the current window on a bounded, detached
+// deadline. Detaching from rootCtx is what lets periodic flushes keep
+// succeeding during the shutdown drain window (between rootCtx cancel
+// and the telemetry consumer's drain).
+func (d *ShadowITDiscoverer) flushWindow() {
+	ctx, cancel := context.WithTimeout(context.Background(), shadowFlushTimeout)
+	defer cancel()
+	if err := d.Flush(ctx); err != nil {
+		d.logger.Warn("casb: shadow-it flush failed", slog.Any("error", err))
+	}
+}
+
 // finalFlush persists the last window on a short detached deadline so
-// it completes even though the parent context is already cancelled.
+// it completes even though the process root context is already
+// cancelled by the time Stop is called.
 func (d *ShadowITDiscoverer) finalFlush() {
-	flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	flushCtx, cancel := context.WithTimeout(context.Background(), shadowFlushTimeout)
 	defer cancel()
 	if err := d.Flush(flushCtx); err != nil {
 		d.logger.Warn("casb: shadow-it final flush failed", slog.Any("error", err))

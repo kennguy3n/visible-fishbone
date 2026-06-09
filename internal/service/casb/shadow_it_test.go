@@ -178,6 +178,39 @@ func TestShadowIT_NilTenantIgnored(t *testing.T) {
 	}
 }
 
+// TestShadowIT_StopFlushesFinalWindow locks in the shutdown-ordering
+// guarantee: the loop's lifetime is controlled solely by Stop (not a
+// process context), and Stop performs a final flush of observations
+// made after Start even when the ticker never fired. This is the
+// window that would be silently dropped if the loop exited on rootCtx
+// cancellation while the telemetry consumer was still feeding it.
+func TestShadowIT_StopFlushesFinalWindow(t *testing.T) {
+	repo := &fakeAppRepo{}
+	d := NewShadowITDiscoverer(repo, nil)
+	tenant := uuid.New()
+
+	// A long interval guarantees the periodic ticker never fires, so
+	// the only thing that can persist the observation is Stop's final
+	// flush.
+	d.Start(time.Hour)
+	d.ObserveHost(tenant, uuid.New(), "slack.com", time.Now())
+	d.Stop()
+
+	if _, ok := repo.find("Slack"); !ok {
+		t.Fatal("Stop must flush the final window; Slack observation was dropped")
+	}
+	// Stop is idempotent and must not block or double-flush.
+	repo.mu.Lock()
+	n := len(repo.upserts)
+	repo.mu.Unlock()
+	d.Stop()
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if len(repo.upserts) != n {
+		t.Errorf("second Stop should be a no-op: before=%d after=%d", n, len(repo.upserts))
+	}
+}
+
 func TestShadowIT_ConcurrentObserve(t *testing.T) {
 	repo := &fakeAppRepo{}
 	d := NewShadowITDiscoverer(repo, nil)
