@@ -284,11 +284,6 @@ a:hover {
      so future directional tweaks have a home. */
   flex: 1;
 }
-[dir="rtl"] .nav-link__icon {
-  margin-right: 0;
-  margin-left: 8px;
-}
-
 /* CJK typography: prepend region-appropriate system CJK font stacks so
    Han/Kana/Hangul render with correct glyphs and comfortable line
    metrics rather than falling back to a Latin-first face. Scoped by

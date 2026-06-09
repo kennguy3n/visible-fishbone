@@ -89,8 +89,8 @@ function Topbar({ onToggleNav }: { onToggleNav: () => void }) {
   const intl = useIntl();
   const name = claims?.name || claims?.email || claims?.sub || "Operator";
   const issuer = claims?.iss ?? "shieldnet";
-  // Two-letter monogram for the identity avatar: initials of a display
-  // name ("Ada Lovelace" -> "AL"), or the first two characters otherwise.
+  // Up-to-two-letter monogram for the identity avatar: initials of a display
+  // name ("Ada Lovelace" -> "AL"), or the first one-to-two characters otherwise.
   const initials = (() => {
     const trimmed = name.trim();
     const parts = trimmed.split(/\s+/).filter(Boolean);
