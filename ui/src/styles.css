@@ -178,12 +178,15 @@ a:hover {
 .nav-link.active::before {
   content: "";
   position: absolute;
-  left: calc(-1 * var(--nav-gutter));
+  inset-inline-start: calc(-1 * var(--nav-gutter));
   top: 50%;
   transform: translateY(-50%);
   width: 3px;
   height: 18px;
-  border-radius: 0 3px 3px 0;
+  /* Round the corners on the interior (inline-end) side; logical props keep
+     the accent bar flush to the sidebar's outer edge in both LTR and RTL. */
+  border-start-end-radius: 3px;
+  border-end-end-radius: 3px;
   background: var(--brand);
 }
 .nav-link.active .nav-link__icon {
