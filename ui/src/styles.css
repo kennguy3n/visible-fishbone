@@ -134,8 +134,10 @@
     --accent: #22d3ee;
     --ok: #34d399;
     --warn: #fbbf24;
+    --warn-alt: #f59e0b;
     --danger: #f87171;
     --danger-strong: #ef4444;
+    --chart-violet: #a78bfa;
     --nav-active-text: #ffffff;
     --hero-glow: #15233f;
     --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
