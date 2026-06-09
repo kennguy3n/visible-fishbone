@@ -479,11 +479,21 @@ function UsageTrendChart({
   // Pivot the long-format history (one row per meter per month) into a
   // wide format keyed by month, one column per meter, so a single line
   // chart can render every meter's series sharing the month axis.
+  //
+  // The backend window includes the current calendar month, whose total
+  // is only a partial accumulation and would read as a sharp end-of-series
+  // drop. The card trends "Completed-month totals", so drop the in-progress
+  // (current UTC) month — and any future row — keeping only finished months.
+  // This is precise: when the current month has no usage yet, nothing is
+  // dropped (vs. a "skip the latest period" heuristic, which would discard
+  // the most recent *completed* month).
   const { rows, meters } = useMemo(() => {
+    const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM (UTC)
     const byPeriod = new Map<string, Record<string, number | string>>();
     const meterSet = new Set<string>();
     for (const l of history) {
       const period = l.period_start.slice(0, 7); // YYYY-MM
+      if (period >= currentMonth) continue; // skip in-progress / future month
       meterSet.add(l.meter);
       const row = byPeriod.get(period) ?? { period };
       row[l.meter] = l.value;
@@ -631,7 +641,14 @@ function InfraCostBreakdown({
         name: "NATS",
         value: data.nats_monthly_usd,
         color: CHART.accent,
-        detail: `${formatNumber(Math.round(bytesToGB(data.nats_stream_bytes)))} GB resident`,
+        // JetStream has no per-tenant stream-size primitive, so the backend
+        // reports 0 unless a deployment-specific sizer is wired (see
+        // metering.NATSStreamSizer). Distinguish "unmeasured" from a measured
+        // zero so the always-$0 slice isn't read as a real cost of zero.
+        detail:
+          data.nats_stream_bytes > 0
+            ? `${formatNumber(Math.round(bytesToGB(data.nats_stream_bytes)))} GB resident`
+            : "not attributed per-tenant",
       },
       {
         name: "S3 archive",

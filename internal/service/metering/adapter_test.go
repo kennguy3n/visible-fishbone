@@ -110,6 +110,28 @@ func TestNewRowLimitValidation(t *testing.T) {
 	}
 }
 
+func TestRowLimitFromConfig(t *testing.T) {
+	def := defaultRowLimit()
+	// Non-positive fields fall back to the package default, so an
+	// operator who leaves the knobs unset gets exactly the default.
+	if got := RowLimitFromConfig(0, 0); got != def {
+		t.Errorf("RowLimitFromConfig(0,0) = %+v, want default %+v", got, def)
+	}
+	if got := RowLimitFromConfig(-1, -1); got != def {
+		t.Errorf("RowLimitFromConfig(neg) = %+v, want default %+v", got, def)
+	}
+	// Each field is overridden independently.
+	if got := RowLimitFromConfig(5000, 0); got.Rate != 5000 || got.Burst != def.Burst {
+		t.Errorf("rate override = %+v, want rate=5000 burst=%d", got, def.Burst)
+	}
+	if got := RowLimitFromConfig(0, 60000); got.Rate != def.Rate || got.Burst != 60000 {
+		t.Errorf("burst override = %+v, want rate=%v burst=60000", got, def.Rate)
+	}
+	if got := RowLimitFromConfig(5000, 60000); got.Rate != 5000 || got.Burst != 60000 {
+		t.Errorf("both override = %+v, want rate=5000 burst=60000", got)
+	}
+}
+
 func TestRowLimiterAllowNBurstThenRefill(t *testing.T) {
 	clk := newRowTestClock()
 	tid := uuid.New()

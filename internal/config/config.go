@@ -1184,6 +1184,24 @@ type TelemetryAnalytics struct {
 	// identical).
 	ClickHouseSharding bool
 
+	// ClickHouseRowLimitEnabled toggles the WS8 per-tenant ClickHouse
+	// row-write rate limiter on the telemetry hot path (env
+	// CLICKHOUSE_ROW_LIMIT_ENABLED). Defaults true: the limiter bounds
+	// the dominant write-amplification cost driver, deferring (never
+	// dropping) over-budget rows. Set false to disable it entirely —
+	// the operator escape hatch for a deployment that bounds ClickHouse
+	// write cost another way and does not want any per-tenant ceiling.
+	ClickHouseRowLimitEnabled bool
+	// ClickHouseRowLimitPerSec / ClickHouseRowLimitBurst tune the
+	// per-tenant token bucket (env CLICKHOUSE_ROW_LIMIT_PER_SEC, rows/s,
+	// and CLICKHOUSE_ROW_LIMIT_BURST, rows). A value <= 0 means "use the
+	// metering package default" (2000 rows/s, 20000 burst), so the
+	// defaults live in exactly one place. Raise these for a tenant base
+	// with a legitimately high steady row-write rate; the limiter is
+	// per-tenant so one noisy tenant cannot consume another's budget.
+	ClickHouseRowLimitPerSec float64
+	ClickHouseRowLimitBurst  int
+
 	// S3: bucket name. Empty disables the cold-path sink.
 	S3Bucket string
 	// S3Prefix is the top-level key prefix under which archive
@@ -1503,6 +1521,10 @@ func Load() (Config, error) {
 		{"AI_GUARDRAIL_MAX_TOKENS_PER_DAY", 100000, &cfg.AI.GuardrailMaxTokensPerDay},
 		{"CLICKHOUSE_BATCH_SIZE", 1024, &cfg.TelemetryAnalytics.ClickHouseBatchSize},
 		{"CLICKHOUSE_MAX_BACKLOG_MULTIPLIER", 4, &cfg.TelemetryAnalytics.ClickHouseMaxBacklogMultiplier},
+		// WS8 ClickHouse row-write limiter burst, in rows. 0 ⇒ use the
+		// metering package default (20000). Parsed strictly so a typo
+		// can't silently revert a tightened cost ceiling.
+		{"CLICKHOUSE_ROW_LIMIT_BURST", 0, &cfg.TelemetryAnalytics.ClickHouseRowLimitBurst},
 		{"S3_TELEMETRY_MAX_BYTES_PER_OBJECT", 16 * 1024 * 1024, &cfg.TelemetryAnalytics.S3MaxBytesPerObject},
 		{"S3_TELEMETRY_MAX_EVENTS_PER_OBJECT", 50_000, &cfg.TelemetryAnalytics.S3MaxEventsPerObject},
 		// Per-tenant cap on registered OIDC IdP configs. Parsed
@@ -1579,6 +1601,10 @@ func Load() (Config, error) {
 		// silently reverting to the default would weaken the capacity
 		// guardrail that keeps a PoP from being over-subscribed.
 		{"POP_HIGH_WATER_FRACTION", 0.85, &cfg.PoP.HighWaterFraction},
+		// WS8 ClickHouse row-write limiter steady-state rate, in rows/s.
+		// 0 ⇒ use the metering package default (2000). Parsed strictly so
+		// a typo can't silently revert a tightened cost ceiling.
+		{"CLICKHOUSE_ROW_LIMIT_PER_SEC", 0, &cfg.TelemetryAnalytics.ClickHouseRowLimitPerSec},
 	}
 	// Boolean fields parsed strictly. Both entries below toggle
 	// security- or correctness-adjacent behaviour:
@@ -1606,6 +1632,7 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_TLS", false, &cfg.TelemetryAnalytics.ClickHouseTLS},
 		{"CLICKHOUSE_ENSURE_SCHEMA", true, &cfg.TelemetryAnalytics.ClickHouseEnsureSchema},
 		{"CLICKHOUSE_SHARDING", false, &cfg.TelemetryAnalytics.ClickHouseSharding},
+		{"CLICKHOUSE_ROW_LIMIT_ENABLED", true, &cfg.TelemetryAnalytics.ClickHouseRowLimitEnabled},
 		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
 		{"MOBILE_AUTH_AUTO_PROVISION_USERS", true, &cfg.MobileAuth.AutoProvisionUsers},
 		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},

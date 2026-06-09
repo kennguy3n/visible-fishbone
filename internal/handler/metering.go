@@ -5,6 +5,7 @@
 //   - GET  /api/v1/tenants/{tenant_id}/usage/history — trailing monthly aggregates
 //   - GET  /api/v1/tenants/{tenant_id}/cost-anomalies — per-meter spend anomalies
 //   - GET  /api/v1/tenants/{tenant_id}/cost          — per-tenant infra cost projection
+//   - GET  /api/v1/tenants/{tenant_id}/cost-report   — per-tenant per-meter cost & margin report
 //   - PUT  /api/v1/tenants/{tenant_id}/budgets       — set per-tenant budget overrides
 //   - GET  /api/v1/admin/cost-report                 — platform-wide cost report (MSP/admin only)
 //

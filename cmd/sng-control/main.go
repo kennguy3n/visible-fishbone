@@ -2072,8 +2072,20 @@ func startTelemetry(
 	//     (DefaultClickHouseRow* budget) bounding the dominant
 	//     write-amplification cost driver; over-budget rows are
 	//     deferred (Nak/retry, DLQ on exhaustion), never dropped.
+	//     Operator-tunable (CLICKHOUSE_ROW_LIMIT_*), and skippable
+	//     entirely via CLICKHOUSE_ROW_LIMIT_ENABLED=false — a nil
+	//     limiter is a no-op, so a deployment that bounds write cost
+	//     another way carries no per-tenant ceiling.
 	svc.WithSampler(telemetry.NewAdaptiveSampler(telemetry.SamplerConfig{}))
-	svc.WithClickHouseRowLimiter(metering.NewClickHouseRowLimiter(nil))
+	if cfg.TelemetryAnalytics.ClickHouseRowLimitEnabled {
+		rowLimit := metering.RowLimitFromConfig(
+			cfg.TelemetryAnalytics.ClickHouseRowLimitPerSec,
+			cfg.TelemetryAnalytics.ClickHouseRowLimitBurst,
+		)
+		svc.WithClickHouseRowLimiter(
+			metering.NewClickHouseRowLimiter(metering.StaticRowLimitResolver{Limit: rowLimit}),
+		)
+	}
 	if err := svc.Start(ctx); err != nil {
 		if hotStop != nil {
 			_ = hotStop(ctx)

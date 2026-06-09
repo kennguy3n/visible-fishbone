@@ -161,6 +161,22 @@ func defaultRowLimit() RowLimit {
 	return RowLimit{Rate: DefaultClickHouseRowRateLimit, Burst: DefaultClickHouseRowBurst}
 }
 
+// RowLimitFromConfig builds a per-tenant RowLimit from operator-supplied
+// values, falling back to the package default for any field <= 0. This
+// keeps the default budget defined in exactly one place (the
+// DefaultClickHouseRow* constants) so config plumbing never duplicates —
+// and therefore never drifts from — it.
+func RowLimitFromConfig(perSec float64, burst int) RowLimit {
+	rl := defaultRowLimit()
+	if perSec > 0 {
+		rl.Rate = rate.Limit(perSec)
+	}
+	if burst > 0 {
+		rl.Burst = burst
+	}
+	return rl
+}
+
 // ClickHouseRowLimiter holds the per-tenant row-write token buckets.
 // Safe for concurrent use: the bucket map is guarded by an RWMutex and
 // the hot path (an existing bucket) takes only the read lock.
