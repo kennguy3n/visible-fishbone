@@ -134,7 +134,7 @@ var shadowCatalog = buildShadowCatalog(
 	entry(shadowApp{Name: "OpenAI ChatGPT", Vendor: "OpenAI", Category: "generative_ai", Risk: 70},
 		"chatgpt.com", "openai.com"),
 	entry(shadowApp{Name: "Telegram", Vendor: "Telegram", Category: "messaging", Risk: 60},
-		"telegram.org", "web.telegram.org"),
+		"telegram.org"),
 	entry(shadowApp{Name: "WhatsApp", Vendor: "Meta", Category: "messaging", Risk: 55},
 		"web.whatsapp.com"),
 )
