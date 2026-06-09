@@ -1,8 +1,10 @@
 package connectors
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,9 +20,22 @@ func dropboxServer(t *testing.T) *httptest.Server {
 		if got := r.Header.Get("Authorization"); got != "Bearer dbx-test" {
 			t.Errorf("auth header = %q", got)
 		}
+		// Dropbox RPC endpoints require a JSON body and Content-Type on
+		// every call; a no-args route must still receive the literal
+		// `null` (never an empty body).
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", ct)
+		}
+		bodyBytes, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(bodyBytes)) == 0 {
+			t.Errorf("%s: empty request body; Dropbox requires JSON (null for no-args)", r.URL.Path)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/2/team/get_info"):
+			if got := strings.TrimSpace(string(bodyBytes)); got != "null" {
+				t.Errorf("get_info body = %q, want null", got)
+			}
 			json.NewEncoder(w).Encode(map[string]any{
 				"name": map[string]any{"display_name": "Acme"},
 				"policies": map[string]any{

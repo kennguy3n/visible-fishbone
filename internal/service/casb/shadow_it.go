@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -262,6 +263,18 @@ type ShadowITDiscoverer struct {
 
 	shards []*shadowShard
 	mask   uint64
+
+	// Lifecycle: Start launches the flush loop, Stop joins it after a
+	// final flush. stopCh is closed by Stop to wind the loop down even
+	// when the parent context is still live (the early-return shutdown
+	// path); doneCh is closed when the loop has returned so Stop can
+	// block until the final DB flush completes — this is what keeps the
+	// final upserts from racing pool.Close() on shutdown.
+	startOnce sync.Once
+	stopOnce  sync.Once
+	started   atomic.Bool
+	stopCh    chan struct{}
+	doneCh    chan struct{}
 }
 
 // NewShadowITDiscoverer constructs a discoverer that persists through
@@ -283,13 +296,16 @@ func NewShadowITDiscoverer(apps shadowAggregator, logger *slog.Logger) *ShadowIT
 		nowFunc: func() time.Time { return time.Now().UTC() },
 		shards:  shards,
 		mask:    uint64(shardCount - 1),
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
 	}
 }
 
 func (d *ShadowITDiscoverer) shardFor(tenantID uuid.UUID) *shadowShard {
 	// FNV-1a over the 16 UUID bytes — cheap and well-distributed.
+	// Constants are the canonical 64-bit FNV-1a offset basis and prime.
 	const (
-		offset = 1469598103934665603
+		offset = 14695981039346656037
 		prime  = 1099511628211
 	)
 	h := uint64(offset)
@@ -411,12 +427,35 @@ func (d *ShadowITDiscoverer) Flush(ctx context.Context) error {
 	return firstErr
 }
 
-// Run flushes the inventory on a ticker until ctx is cancelled, then
-// performs a final flush so in-flight observations are not lost on
-// shutdown. interval <= 0 selects DefaultShadowITFlushInterval. Wire
-// this as a background goroutine — it is the one-call "no ops" path
-// for keeping the inventory current.
-func (d *ShadowITDiscoverer) Run(ctx context.Context, interval time.Duration) {
+// Start launches the flush loop in a background goroutine and returns
+// immediately. interval <= 0 selects DefaultShadowITFlushInterval.
+// Start is idempotent; pair it with a deferred Stop so the final flush
+// is joined before the DB pool is closed on shutdown. It is the
+// one-call "no ops" path for keeping the inventory current.
+func (d *ShadowITDiscoverer) Start(ctx context.Context, interval time.Duration) {
+	d.startOnce.Do(func() {
+		d.started.Store(true)
+		go d.run(ctx, interval)
+	})
+}
+
+// Stop winds the flush loop down and blocks until its final flush has
+// completed, so the last window's upserts finish before the caller
+// proceeds to close the DB pool. Closing stopCh also aborts the loop
+// on the early-return path where the parent context is still live.
+// Stop is idempotent and safe to call when Start was never invoked.
+func (d *ShadowITDiscoverer) Stop() {
+	d.stopOnce.Do(func() { close(d.stopCh) })
+	if d.started.Load() {
+		<-d.doneCh
+	}
+}
+
+// run flushes the inventory on a ticker until the parent context is
+// cancelled or Stop is called, then performs a final flush so
+// in-flight observations are not lost on shutdown.
+func (d *ShadowITDiscoverer) run(ctx context.Context, interval time.Duration) {
+	defer close(d.doneCh)
 	if interval <= 0 {
 		interval = DefaultShadowITFlushInterval
 	}
@@ -425,18 +464,25 @@ func (d *ShadowITDiscoverer) Run(ctx context.Context, interval time.Duration) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Best-effort final flush on a short detached deadline so
-			// the last window is persisted even though ctx is done.
-			flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if err := d.Flush(flushCtx); err != nil {
-				d.logger.Warn("casb: shadow-it final flush failed", slog.Any("error", err))
-			}
-			cancel()
+			d.finalFlush()
+			return
+		case <-d.stopCh:
+			d.finalFlush()
 			return
 		case <-ticker.C:
 			if err := d.Flush(ctx); err != nil {
 				d.logger.Warn("casb: shadow-it flush failed", slog.Any("error", err))
 			}
 		}
+	}
+}
+
+// finalFlush persists the last window on a short detached deadline so
+// it completes even though the parent context is already cancelled.
+func (d *ShadowITDiscoverer) finalFlush() {
+	flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := d.Flush(flushCtx); err != nil {
+		d.logger.Warn("casb: shadow-it final flush failed", slog.Any("error", err))
 	}
 }

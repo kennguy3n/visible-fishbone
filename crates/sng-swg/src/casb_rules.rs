@@ -383,7 +383,10 @@ mod tests {
         assert_eq!(CasbAction::Share.as_str(), "share");
         assert_eq!(CasbAction::Delete.as_str(), "delete");
         assert_eq!(CasbAction::Login.as_str(), "login");
-        assert_eq!(CasbAction::AdminConfigChange.as_str(), "admin_config_change");
+        assert_eq!(
+            CasbAction::AdminConfigChange.as_str(),
+            "admin_config_change"
+        );
         assert_eq!(CasbAction::ApiKeyCreate.as_str(), "api_key_create");
         assert_eq!(CasbAction::ExternalShare.as_str(), "external_share");
         assert_eq!(CasbAction::BulkExport.as_str(), "bulk_export");

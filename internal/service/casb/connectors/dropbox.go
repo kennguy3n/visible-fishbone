@@ -58,7 +58,11 @@ func parseDropboxToken(secret []byte) (string, error) {
 // rpc posts a JSON arg to a Dropbox RPC endpoint. Dropbox requires a
 // body on every RPC call; null is the documented "no args" value.
 func (d *Dropbox) rpc(ctx context.Context, token, path string, arg any, out any) error {
-	var body []byte
+	// Dropbox RPC endpoints require a JSON body on every call; the
+	// documented value for a no-args route is the literal `null`.
+	// Sending an empty body (or omitting Content-Type) is rejected
+	// with a 400 by the stricter endpoints, so default to `null`.
+	body := []byte("null")
 	if arg != nil {
 		b, err := json.Marshal(arg)
 		if err != nil {
@@ -71,9 +75,7 @@ func (d *Dropbox) rpc(ctx context.Context, token, path string, arg any, out any)
 		return fmt.Errorf("dropbox: %w", err)
 	}
 	bearer(req, token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	return doJSON(d.client, d.userAgent, "dropbox", req, out)
 }

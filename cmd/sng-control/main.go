@@ -429,12 +429,18 @@ func run() error {
 	// turns the SWG exhaust into a per-tenant inventory of SaaS apps
 	// in use (including unsanctioned ones with no connector). It
 	// persists into the same casb_discovered_apps table the operator
-	// portal renders. The Run loop flushes the windowed in-memory
-	// aggregate on a ticker; it is cancelled with rootCtx and does a
-	// final flush on shutdown.
+	// portal renders. Start launches a loop that flushes the windowed
+	// in-memory aggregate on a ticker and does a final flush on
+	// shutdown. The deferred Stop is registered after the line-131
+	// `defer pool.Close()`, so it runs *before* it (defers are LIFO)
+	// and joins the loop's final flush before the pool closes —
+	// matching the feedMgr/recompiler shutdown pattern above and
+	// closing the race the goroutine would otherwise have with
+	// pool.Close(). Stop is idempotent.
 	shadowDiscoverer := casb.NewShadowITDiscoverer(
 		postgres.NewStoreWithPool(pool).NewCASBDiscoveredAppRepository(), logger)
-	go shadowDiscoverer.Run(rootCtx, 0)
+	shadowDiscoverer.Start(rootCtx, 0)
+	defer shadowDiscoverer.Stop()
 
 	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer)
 	if err != nil {

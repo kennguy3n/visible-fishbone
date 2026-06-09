@@ -101,7 +101,10 @@ func doJSON(client HTTPDoer, userAgent, prefix string, req *http.Request, out an
 	if err != nil {
 		return fmt.Errorf("%s: %s %s: %w", prefix, req.Method, req.URL.Path, err)
 	}
-	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBody)); resp.Body.Close() }()
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBody))
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 		return fmt.Errorf("%s: %s %s returned %d: %s",
