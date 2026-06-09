@@ -1,0 +1,9 @@
+# Build artifacts produced by scripts/build-aar.sh — never committed;
+# regenerate from the crate. See android/README.md.
+/src/main/kotlin/
+/src/main/jniLibs/
+
+# Gradle build state
+/.gradle/
+/build/
+/local.properties

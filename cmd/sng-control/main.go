@@ -424,7 +424,31 @@ func run() error {
 		logger.Info("sng-control: compliance evidence scheduler registered (runs on leader only)")
 	}
 
-	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher)
+	// Shadow-IT auto-discovery: the telemetry consumer feeds every
+	// processed DNS/HTTP event's hostname to this discoverer, which
+	// turns the SWG exhaust into a per-tenant inventory of SaaS apps
+	// in use (including unsanctioned ones with no connector). It
+	// persists into the same casb_discovered_apps table the operator
+	// portal renders. Start launches a loop that flushes the windowed
+	// in-memory aggregate on a ticker and does a final flush on Stop.
+	//
+	// The loop is deliberately NOT bound to rootCtx: the telemetry
+	// consumer runs on its own background context and is drained by
+	// telShutdown *after* rootCtx is cancelled, so it keeps feeding
+	// observations during the shutdown window. The discoverer must
+	// therefore outlive rootCtx and only stop once the consumer has
+	// drained — hence the explicit Stop in the graceful-shutdown block
+	// below, right after telShutdown. The deferred Stop here is the
+	// idempotent safety net for early-return paths; registered after
+	// the line-131 `defer pool.Close()`, it runs *before* it (defers
+	// are LIFO) so the final flush completes before the pool closes,
+	// matching the feedMgr/recompiler shutdown pattern above.
+	shadowDiscoverer := casb.NewShadowITDiscoverer(
+		postgres.NewStoreWithPool(pool).NewCASBDiscoveredAppRepository(), logger)
+	shadowDiscoverer.Start(0)
+	defer shadowDiscoverer.Stop()
+
+	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
@@ -588,6 +612,15 @@ func run() error {
 	if err := telShutdown(shutdownCtx); err != nil {
 		logger.Warn("sng-control: telemetry shutdown error", slog.Any("error", err))
 	}
+	// Stop the shadow-IT discoverer only now that telShutdown has
+	// drained the telemetry consumer: the consumer feeds ObserveHost on
+	// its own background context (independent of rootCtx, already
+	// cancelled above), so stopping the discoverer earlier would drop
+	// the observations accumulated during this shutdown window. Stop
+	// performs the final flush; it runs before the deferred pool.Close
+	// (registered at line 134) so the upserts complete against a live
+	// pool, and makes the deferred Stop a no-op (idempotent).
+	shadowDiscoverer.Stop()
 
 	logger.Info("sng-control: stopped")
 	return nil
@@ -1116,6 +1149,26 @@ func buildRouter(
 		repository.CASBConnectorGoogle:     casbconnectors.NewGoogle(casbHTTP, casbUA),
 		repository.CASBConnectorSlack:      casbconnectors.NewSlack(casbHTTP, casbUA),
 		repository.CASBConnectorSalesforce: casbconnectors.NewSalesforce(casbHTTP, casbUA),
+
+		// WS4 inline-CASB expansion: 16 additional SaaS / cloud-console
+		// connectors. The plugins are stateless, so a single instance
+		// per type is shared across all tenants (per-call config+secret).
+		repository.CASBConnectorBox:         casbconnectors.NewBox(casbHTTP, casbUA),
+		repository.CASBConnectorDropbox:     casbconnectors.NewDropbox(casbHTTP, casbUA),
+		repository.CASBConnectorGitHub:      casbconnectors.NewGitHub(casbHTTP, casbUA),
+		repository.CASBConnectorGitLab:      casbconnectors.NewGitLab(casbHTTP, casbUA),
+		repository.CASBConnectorJira:        casbconnectors.NewJira(casbHTTP, casbUA),
+		repository.CASBConnectorConfluence:  casbconnectors.NewConfluence(casbHTTP, casbUA),
+		repository.CASBConnectorServiceNow:  casbconnectors.NewServiceNow(casbHTTP, casbUA),
+		repository.CASBConnectorZendesk:     casbconnectors.NewZendesk(casbHTTP, casbUA),
+		repository.CASBConnectorHubSpot:     casbconnectors.NewHubSpot(casbHTTP, casbUA),
+		repository.CASBConnectorZoom:        casbconnectors.NewZoom(casbHTTP, casbUA),
+		repository.CASBConnectorTeams:       casbconnectors.NewTeams(casbHTTP, casbUA),
+		repository.CASBConnectorAWSConsole:  casbconnectors.NewAWSConsole(casbHTTP, casbUA),
+		repository.CASBConnectorGCPConsole:  casbconnectors.NewGCPConsole(casbHTTP, casbUA),
+		repository.CASBConnectorAzurePortal: casbconnectors.NewAzurePortal(casbHTTP, casbUA),
+		repository.CASBConnectorOkta:        casbconnectors.NewOkta(casbHTTP, casbUA),
+		repository.CASBConnectorWorkday:     casbconnectors.NewWorkday(casbHTTP, casbUA),
 	}
 	casbSvc := casb.New(
 		casbConnectorRepo, casbAppRepo, casbPostureRepo, auditRepo,
@@ -1949,6 +2002,7 @@ func startTelemetry(
 	logger *slog.Logger,
 	js jetstream.JetStream,
 	pub *sngnats.Publisher,
+	shadowObserver telemetry.ShadowITObserver,
 ) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), error) {
 	var hot telemetry.HotWriter
 	var cold telemetry.ColdWriter
@@ -2085,6 +2139,9 @@ func startTelemetry(
 		svc.WithClickHouseRowLimiter(
 			metering.NewClickHouseRowLimiter(metering.StaticRowLimitResolver{Limit: rowLimit}),
 		)
+	}
+	if shadowObserver != nil {
+		svc.WithShadowITObserver(shadowObserver)
 	}
 	if err := svc.Start(ctx); err != nil {
 		if hotStop != nil {

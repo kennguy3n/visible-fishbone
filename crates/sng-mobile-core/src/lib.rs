@@ -60,8 +60,8 @@ pub mod tunnel;
 pub mod ztna;
 
 pub use agent::{
-    AgentHealth, AgentLifecycle, LifecycleState, MobileAgent, MobileAgentDeps, ScheduledTask,
-    Scheduler,
+    AgentHealth, AgentLifecycle, LOW_POWER_INTERVAL_MULTIPLIER, LifecycleState, MobileAgent,
+    MobileAgentDeps, PowerState, ScheduledTask, Scheduler,
 };
 pub use auth::{
     AccessToken, AuthError, AuthSession, AuthState, IdToken, InMemoryTokenStorage, RefreshToken,

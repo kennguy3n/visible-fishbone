@@ -1347,13 +1347,42 @@ const (
 	CASBConnectorGoogle     CASBConnectorType = "google"
 	CASBConnectorSlack      CASBConnectorType = "slack"
 	CASBConnectorSalesforce CASBConnectorType = "salesforce"
+
+	// WS4 inline-CASB expansion: 16 additional SaaS connectors.
+	// Values are stable wire identifiers persisted in
+	// casb_connectors.type and referenced by the plugin registry
+	// (cmd/sng-control/main.go); never rename an existing value.
+	CASBConnectorBox         CASBConnectorType = "box"
+	CASBConnectorDropbox     CASBConnectorType = "dropbox"
+	CASBConnectorGitHub      CASBConnectorType = "github"
+	CASBConnectorGitLab      CASBConnectorType = "gitlab"
+	CASBConnectorJira        CASBConnectorType = "jira"
+	CASBConnectorConfluence  CASBConnectorType = "confluence"
+	CASBConnectorServiceNow  CASBConnectorType = "servicenow"
+	CASBConnectorZendesk     CASBConnectorType = "zendesk"
+	CASBConnectorHubSpot     CASBConnectorType = "hubspot"
+	CASBConnectorZoom        CASBConnectorType = "zoom"
+	CASBConnectorTeams       CASBConnectorType = "teams"
+	CASBConnectorAWSConsole  CASBConnectorType = "aws_console"
+	CASBConnectorGCPConsole  CASBConnectorType = "gcp_console"
+	CASBConnectorAzurePortal CASBConnectorType = "azure_portal"
+	CASBConnectorOkta        CASBConnectorType = "okta"
+	CASBConnectorWorkday     CASBConnectorType = "workday"
 )
 
 // IsValid reports whether t is a known CASB connector type.
 func (t CASBConnectorType) IsValid() bool {
 	switch t {
 	case CASBConnectorM365, CASBConnectorGoogle,
-		CASBConnectorSlack, CASBConnectorSalesforce:
+		CASBConnectorSlack, CASBConnectorSalesforce,
+		CASBConnectorBox, CASBConnectorDropbox,
+		CASBConnectorGitHub, CASBConnectorGitLab,
+		CASBConnectorJira, CASBConnectorConfluence,
+		CASBConnectorServiceNow, CASBConnectorZendesk,
+		CASBConnectorHubSpot, CASBConnectorZoom,
+		CASBConnectorTeams, CASBConnectorAWSConsole,
+		CASBConnectorGCPConsole, CASBConnectorAzurePortal,
+		CASBConnectorOkta, CASBConnectorWorkday:
 		return true
 	}
 	return false
@@ -1396,17 +1425,32 @@ type CASBConnector struct {
 }
 
 // CASBDiscoveredApp is a SaaS application discovered by a CASB
-// connector sync.
+// connector sync or by shadow-IT telemetry analysis.
+//
+// UsersCount and ActiveDeviceCount have distinct semantics and
+// distinct writers, so they are kept in separate columns rather than
+// overwriting one another (see migration 056):
+//
+//   - UsersCount is the app's full account roster, written by API-mode
+//     connector sync (service.go) from the vendor API.
+//   - ActiveDeviceCount is the number of distinct devices that reached
+//     the app within the most recent shadow-IT flush window, written
+//     by shadow-IT discovery (shadow_it.go).
+//
+// Both are pointers so a writer that owns only one quantity can leave
+// the other nil to mean "do not modify this column on conflict",
+// mirroring RiskScore. A nil value inserts as 0.
 type CASBDiscoveredApp struct {
-	ID         uuid.UUID
-	TenantID   uuid.UUID
-	Name       string
-	Vendor     string
-	Category   string
-	RiskScore  *int
-	UsersCount int
-	FirstSeen  time.Time
-	LastSeen   time.Time
+	ID                uuid.UUID
+	TenantID          uuid.UUID
+	Name              string
+	Vendor            string
+	Category          string
+	RiskScore         *int
+	UsersCount        *int
+	ActiveDeviceCount *int
+	FirstSeen         time.Time
+	LastSeen          time.Time
 }
 
 // CASBPostureCheckStatus enumerates posture check outcomes.

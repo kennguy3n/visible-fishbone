@@ -272,6 +272,13 @@ type Service struct {
 	// per partition. Set via WithClickHouseRowLimiter.
 	rowLimiter RowWriteLimiter
 
+	// shadowObserver receives the SaaS-relevant hostname (DNS query
+	// name, HTTP host/SNI) extracted from each processed DNS/HTTP
+	// event so an out-of-band discoverer can build a shadow-IT
+	// inventory. nil disables extraction (the prior behaviour). Set
+	// via WithShadowITObserver.
+	shadowObserver ShadowITObserver
+
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -293,6 +300,7 @@ type worker struct {
 	nakBackoff        time.Duration
 	sampler           *AdaptiveSampler
 	rowLimiter        RowWriteLimiter
+	shadowObserver    ShadowITObserver
 	dedup             *dedupRing
 }
 
@@ -307,6 +315,17 @@ type worker struct {
 // metering. A nil RowWriteLimiter is treated as "no row cap".
 type RowWriteLimiter interface {
 	AllowN(ctx context.Context, tenantID uuid.UUID, rows int64) bool
+}
+
+// ShadowITObserver receives the SaaS-relevant hostname carried by a
+// processed DNS or HTTP event (the DNS query name, or the HTTP host
+// falling back to the TLS SNI) along with the emitting tenant and
+// device. Implementations build a shadow-IT inventory out of this
+// exhaust (see casb.ShadowITDiscoverer). The hook is called inline
+// on the dispatch hot path, so implementations MUST be cheap,
+// non-blocking, and safe for concurrent use.
+type ShadowITObserver interface {
+	ObserveHost(tenantID, deviceID uuid.UUID, host string, ts time.Time)
 }
 
 // WithPerTenantLimiter wires a PerTenantLimiter onto the
@@ -378,6 +397,19 @@ func (s *Service) WithClickHouseRowLimiter(limiter RowWriteLimiter) *Service {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rowLimiter = limiter
+	return s
+}
+
+// WithShadowITObserver wires a shadow-IT observer onto the service.
+// Once set, dispatch extracts the SaaS-relevant hostname from every
+// processed DNS/HTTP event and hands it to the observer for
+// out-of-band shadow-IT discovery. Pass nil to remove it. Additive
+// and optional — wiring paths that pre-date shadow-IT discovery keep
+// their prior behaviour. Returns the receiver for fluent wiring.
+func (s *Service) WithShadowITObserver(o ShadowITObserver) *Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shadowObserver = o
 	return s
 }
 
@@ -510,6 +542,7 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			nakBackoff:        s.nakBackoff,
 			sampler:           s.sampler,
 			rowLimiter:        s.rowLimiter,
+			shadowObserver:    s.shadowObserver,
 			dedup:             s.dedup,
 		}}, nil
 	}
@@ -550,9 +583,11 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			// concurrency-safe; share the one instance across
 			// partitions rather than cloning (a tenant is pinned to
 			// one partition, but a shared bucket keeps the budget
-			// correct even if that ever changes).
-			rowLimiter: s.rowLimiter,
-			dedup:      newDedupRing(s.cfg.DedupRingSize),
+			// correct even if that ever changes). The shadow-IT
+			// observer is likewise shared, not cloned.
+			rowLimiter:        s.rowLimiter,
+			shadowObserver:    s.shadowObserver,
+			dedup:             newDedupRing(s.cfg.DedupRingSize),
 		})
 	}
 	return workers, nil
@@ -884,12 +919,54 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 	// a subsequent redelivery of a transient-failure message is
 	// allowed to retry the write rather than being silently acked.
 	w.dedup.Add(env.EventID)
+	// Feed shadow-IT discovery from the same DNS/HTTP exhaust. Runs
+	// after the hot write and dedup so a host is observed exactly
+	// once per unique event, and only for events that were actually
+	// processed (sampled-out / duplicate events are correctly
+	// excluded from the inventory's volume signal).
+	observeShadowIT(w.shadowObserver, env)
 	s.metrics.Enriched.Add(1)
 	if err := msg.Ack(); err != nil {
 		s.logger.Warn("telemetry: ack failed", slog.Any("error", err))
 		return
 	}
 	s.metrics.Acked.Add(1)
+}
+
+// observeShadowIT extracts the SaaS-relevant hostname from a DNS or
+// HTTP event and hands it to the shadow-IT observer. A nil observer
+// or any non-DNS/HTTP class is a no-op. Payload decode errors are
+// swallowed: the envelope already passed Unmarshal validation and a
+// malformed inner payload must never disturb the dispatch hot path
+// (it has, by this point, already been written to the hot store).
+func observeShadowIT(obs ShadowITObserver, env schema.Envelope) {
+	if obs == nil {
+		return
+	}
+	switch env.EventClass {
+	case schema.EventClassDNS:
+		var d schema.DNSEvent
+		if err := schema.UnpackPayload(env.Payload, &d); err != nil {
+			return
+		}
+		if d.Query != "" {
+			obs.ObserveHost(env.TenantID, env.DeviceID, d.Query, env.Timestamp)
+		}
+	case schema.EventClassHTTP:
+		var h schema.HTTPEvent
+		if err := schema.UnpackPayload(env.Payload, &h); err != nil {
+			return
+		}
+		// Prefer the explicit Host header; fall back to the TLS SNI
+		// for HTTPS requests where the proxy only saw the handshake.
+		host := h.Host
+		if host == "" {
+			host = h.SNI
+		}
+		if host != "" {
+			obs.ObserveHost(env.TenantID, env.DeviceID, host, env.Timestamp)
+		}
+	}
 }
 
 // deliveryExhausted reports whether the message has reached the

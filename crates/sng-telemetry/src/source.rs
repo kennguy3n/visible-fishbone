@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 use sng_core::events::{
-    AgentEvent, DnsEvent, FlowEvent, HttpEvent, IpsEvent, SdwanEvent, ZtnaEvent,
+    AgentEvent, DnsEvent, FlowEvent, HttpEvent, IpsEvent, SdwanEvent, SubsystemRestart, ZtnaEvent,
 };
 
 /// A typed telemetry event produced by one of the agent's
@@ -24,6 +24,11 @@ pub enum TelemetryEvent {
     Ztna(ZtnaEvent),
     Sdwan(SdwanEvent),
     Agent(AgentEvent),
+    /// Edge-internal self-healing supervisor signal. Carried on
+    /// the same pipeline as traffic telemetry so a subsystem
+    /// restart surfaces on the control-plane dashboard via the
+    /// existing dedup / redaction / batch path.
+    System(SubsystemRestart),
 }
 
 impl TelemetryEvent {
@@ -40,6 +45,7 @@ impl TelemetryEvent {
             Self::Ztna(_) => EventClass::Ztna,
             Self::Sdwan(_) => EventClass::Sdwan,
             Self::Agent(_) => EventClass::Agent,
+            Self::System(_) => EventClass::System,
         }
     }
 
@@ -54,6 +60,7 @@ impl TelemetryEvent {
             Self::Ztna(e) => rmp_serde::to_vec_named(e),
             Self::Sdwan(e) => rmp_serde::to_vec_named(e),
             Self::Agent(e) => rmp_serde::to_vec_named(e),
+            Self::System(e) => rmp_serde::to_vec_named(e),
         }
     }
 }

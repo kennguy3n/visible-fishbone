@@ -42,7 +42,8 @@ function CasbInner({ tenantId }: { tenantId: string }) {
     { header: "Vendor", cell: (a) => a.vendor },
     { header: "Category", cell: (a) => <Badge tone="neutral">{a.category}</Badge> },
     { header: "Risk", cell: (a) => <Badge tone={riskTone(a.risk_score)}>{a.risk_score}</Badge> },
-    { header: "Users", cell: (a) => a.users_count },
+    { header: "Licensed users", cell: (a) => a.users_count },
+    { header: "Active devices", cell: (a) => a.active_device_count },
     { header: "Last seen", cell: (a) => formatRelative(a.last_seen) },
   ];
 

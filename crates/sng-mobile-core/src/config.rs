@@ -134,6 +134,12 @@ pub struct MobileAgentConfig {
     /// Cadence at which the agent collects a fresh posture
     /// snapshot from the PAL.
     pub posture_interval: Duration,
+    /// Factor by which every periodic interval is stretched while the
+    /// device reports [`crate::PowerState::LowPower`]. Defaults to
+    /// [`crate::LOW_POWER_INTERVAL_MULTIPLIER`]; a deployment can pace
+    /// the battery-saver cadence to its own fleet policy. `1` disables
+    /// stretching (low power paces like normal); must be `>= 1`.
+    pub low_power_multiplier: u32,
     /// Per-request deadline applied to every control-plane round
     /// trip. Kept aggressive so a stalled radio link cannot pin a
     /// wakeup open and drain the battery.
@@ -181,6 +187,11 @@ impl MobileAgentConfig {
                     "{name} must be greater than zero"
                 )));
             }
+        }
+        if self.low_power_multiplier == 0 {
+            return Err(MobileError::Config(
+                "low_power_multiplier must be greater than or equal to 1".into(),
+            ));
         }
         self.auth.validate()?;
         Ok(())
@@ -248,6 +259,7 @@ mod tests {
             poll_interval: Duration::from_secs(300),
             telemetry_interval: Duration::from_secs(60),
             posture_interval: Duration::from_secs(900),
+            low_power_multiplier: crate::LOW_POWER_INTERVAL_MULTIPLIER,
             request_timeout: Duration::from_secs(10),
             connect_timeout: Duration::from_secs(5),
         }
@@ -256,6 +268,13 @@ mod tests {
     #[test]
     fn valid_config_passes() {
         assert!(valid_config().validate().is_ok());
+    }
+
+    #[test]
+    fn zero_low_power_multiplier_rejected() {
+        let mut cfg = valid_config();
+        cfg.low_power_multiplier = 0;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

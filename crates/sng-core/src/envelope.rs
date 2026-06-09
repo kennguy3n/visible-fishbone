@@ -64,6 +64,10 @@ pub enum EventClass {
     Sdwan,
     Agent,
     Posture,
+    /// Edge-internal control-plane signal (not endpoint traffic):
+    /// self-healing supervisor restarts and other appliance
+    /// lifecycle events. Carries a [`crate::events::SubsystemRestart`].
+    System,
 }
 
 impl EventClass {
@@ -80,6 +84,7 @@ impl EventClass {
             Self::Sdwan => "sdwan",
             Self::Agent => "agent",
             Self::Posture => "posture",
+            Self::System => "system",
         }
     }
 }

@@ -1,0 +1,9 @@
+# Build artifacts produced by scripts/build-xcframework.sh — never
+# committed; regenerate from the crate. See apple/README.md.
+/Frameworks/
+/Sources/ShieldNetMobile/sng_mobile_sdk.swift
+
+# SwiftPM local state
+/.build/
+/.swiftpm/
+Package.resolved

@@ -187,6 +187,41 @@ pub enum ErrorCode {
     /// install rate, extend the timeout, or wait for the
     /// in-flight install to drain).
     SwgInstallBusy,
+    /// URL categorisation ML model bundle failed Ed25519 signature
+    /// verification. The bytes were tampered with in transit or the
+    /// signing key id does not match the public key the operator
+    /// installed. The classifier keeps the previously installed
+    /// model (or stays model-less) and falls back to the
+    /// deterministic tiers.
+    SwgUrlModelSignatureInvalid,
+    /// URL categorisation ML model bundle was signed with a key id
+    /// the operator trust store does not know about. Mirrors
+    /// [`Self::SwgYaraBundleSigningKeyUnknown`] for the model
+    /// pipeline — the classifier fails closed and never installs an
+    /// unverifiable model.
+    SwgUrlModelSigningKeyUnknown,
+    /// URL categorisation ML model bundle version is older than or
+    /// equal to the installed model. Downgrade protection: a stale
+    /// model would silently regress categorisation accuracy.
+    SwgUrlModelStale,
+    /// URL categorisation ML model bundle body failed to decode
+    /// from MessagePack — the control plane and the agent disagree
+    /// on the model schema or the body was truncated.
+    SwgUrlModelBodyDecode,
+    /// URL categorisation ML model bundle body failed to encode
+    /// (serializer rejected the in-memory claims struct).
+    /// Pragmatically unreachable for the current `UrlModelClaims`
+    /// shape — `rmp_serde` does not fail on a well-formed Rust struct
+    /// — but kept distinct from [`Self::SwgUrlModelBodyDecode`] so
+    /// dashboards filtering on `swg.url_model.body.decode` do not
+    /// misclassify a failure on the outbound encode path.
+    SwgUrlModelBodyEncode,
+    /// URL categorisation ML model bundle decoded but failed
+    /// structural validation (dimension mismatch between weights,
+    /// vocabulary and idf vectors; out-of-range vocabulary index;
+    /// empty class set). The staged model is rejected and the live
+    /// model is left untouched.
+    SwgUrlModelInvalid,
     /// Self-update engine could not decode an update manifest
     /// envelope. The signed body bytes are not a well-formed
     /// `manifestPayload` MessagePack map — either the engine and
@@ -373,6 +408,12 @@ impl ErrorCode {
             Self::SwgYaraBundleBodyDecode => "swg.yara.bundle.body.decode",
             Self::SwgYaraRuleCompile => "swg.yara.rule.compile",
             Self::SwgInstallBusy => "swg.install.busy",
+            Self::SwgUrlModelSignatureInvalid => "swg.url_model.signature.invalid",
+            Self::SwgUrlModelSigningKeyUnknown => "swg.url_model.signing_key.unknown",
+            Self::SwgUrlModelStale => "swg.url_model.stale",
+            Self::SwgUrlModelBodyDecode => "swg.url_model.body.decode",
+            Self::SwgUrlModelBodyEncode => "swg.url_model.body.encode",
+            Self::SwgUrlModelInvalid => "swg.url_model.invalid",
             Self::UpdaterManifestBodyDecode => "updater.manifest.body.decode",
             Self::UpdaterManifestSignatureInvalid => "updater.manifest.signature.invalid",
             Self::UpdaterManifestSigningKeyUnknown => "updater.manifest.signing_key.unknown",
@@ -557,6 +598,24 @@ mod tests {
             ),
             (ErrorCode::SwgYaraRuleCompile, "swg.yara.rule.compile"),
             (ErrorCode::SwgInstallBusy, "swg.install.busy"),
+            (
+                ErrorCode::SwgUrlModelSignatureInvalid,
+                "swg.url_model.signature.invalid",
+            ),
+            (
+                ErrorCode::SwgUrlModelSigningKeyUnknown,
+                "swg.url_model.signing_key.unknown",
+            ),
+            (ErrorCode::SwgUrlModelStale, "swg.url_model.stale"),
+            (
+                ErrorCode::SwgUrlModelBodyDecode,
+                "swg.url_model.body.decode",
+            ),
+            (
+                ErrorCode::SwgUrlModelBodyEncode,
+                "swg.url_model.body.encode",
+            ),
+            (ErrorCode::SwgUrlModelInvalid, "swg.url_model.invalid"),
             (
                 ErrorCode::UpdaterManifestBodyDecode,
                 "updater.manifest.body.decode",

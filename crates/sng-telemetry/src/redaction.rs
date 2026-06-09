@@ -102,14 +102,17 @@ impl RedactionPolicy {
             TelemetryEvent::Dns(e) => self.redact_dns(e),
             TelemetryEvent::Http(e) => self.redact_http(e),
             TelemetryEvent::Agent(e) => self.redact_agent(e),
-            // Flow / IPS / ZTNA / SDWAN events do not carry
-            // user-visible payload fields — only metadata
-            // (5-tuple, verdict, counters, decision). They
-            // pass through unchanged.
+            // Flow / IPS / ZTNA / SDWAN / System events do not
+            // carry user-visible payload fields — only metadata
+            // (5-tuple, verdict, counters, decision, restart
+            // cause). They pass through unchanged. In particular
+            // a System (subsystem-restart) event is appliance
+            // telemetry with no tenant/user PII to strip.
             TelemetryEvent::Flow(_)
             | TelemetryEvent::Ips(_)
             | TelemetryEvent::Ztna(_)
-            | TelemetryEvent::Sdwan(_) => {}
+            | TelemetryEvent::Sdwan(_)
+            | TelemetryEvent::System(_) => {}
         }
     }
 

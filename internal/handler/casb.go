@@ -104,33 +104,39 @@ func toCASBConnectorResponse(c repository.CASBConnector) casbConnectorResponse {
 }
 
 type casbAppResponse struct {
-	ID         string `json:"id"`
-	TenantID   string `json:"tenant_id"`
-	Name       string `json:"name"`
-	Vendor     string `json:"vendor"`
-	Category   string `json:"category"`
-	RiskScore  int    `json:"risk_score"`
-	UsersCount int    `json:"users_count"`
-	FirstSeen  string `json:"first_seen"`
-	LastSeen   string `json:"last_seen"`
+	ID                string `json:"id"`
+	TenantID          string `json:"tenant_id"`
+	Name              string `json:"name"`
+	Vendor            string `json:"vendor"`
+	Category          string `json:"category"`
+	RiskScore         int    `json:"risk_score"`
+	UsersCount        int    `json:"users_count"`
+	ActiveDeviceCount int    `json:"active_device_count"`
+	FirstSeen         string `json:"first_seen"`
+	LastSeen          string `json:"last_seen"`
 }
 
 func toCASBAppResponse(a repository.CASBDiscoveredApp) casbAppResponse {
-	riskScore := 0
-	if a.RiskScore != nil {
-		riskScore = *a.RiskScore
-	}
 	return casbAppResponse{
-		ID:         a.ID.String(),
-		TenantID:   a.TenantID.String(),
-		Name:       a.Name,
-		Vendor:     a.Vendor,
-		Category:   a.Category,
-		RiskScore:  riskScore,
-		UsersCount: a.UsersCount,
-		FirstSeen:  a.FirstSeen.Format("2006-01-02T15:04:05Z"),
-		LastSeen:   a.LastSeen.Format("2006-01-02T15:04:05Z"),
+		ID:                a.ID.String(),
+		TenantID:          a.TenantID.String(),
+		Name:              a.Name,
+		Vendor:            a.Vendor,
+		Category:          a.Category,
+		RiskScore:         derefInt(a.RiskScore),
+		UsersCount:        derefInt(a.UsersCount),
+		ActiveDeviceCount: derefInt(a.ActiveDeviceCount),
+		FirstSeen:         a.FirstSeen.Format("2006-01-02T15:04:05Z"),
+		LastSeen:          a.LastSeen.Format("2006-01-02T15:04:05Z"),
 	}
+}
+
+// derefInt returns the pointed-to value, or 0 when p is nil.
+func derefInt(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // --- handlers ---

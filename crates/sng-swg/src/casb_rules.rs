@@ -57,10 +57,41 @@ pub enum CasbAction {
     Share,
     /// A file / object is being deleted.
     Delete,
+    /// An interactive / programmatic sign-in to the SaaS app
+    /// (OAuth token grant, SAML assertion consumption, console
+    /// login). High-signal for impossible-travel and
+    /// new-geo-login detection.
+    Login,
+    /// A tenant-level administrative configuration change (SSO /
+    /// MFA policy edit, security-setting change, role-binding
+    /// update). The highest-signal action for detecting account
+    /// takeover and insider tampering with security controls.
+    AdminConfigChange,
+    /// A new API key / personal-access-token / OAuth client
+    /// secret is being minted. High-signal for persistence
+    /// establishment after a compromise (a long-lived credential
+    /// that survives a password reset).
+    ApiKeyCreate,
+    /// A share specifically to a principal outside the tenant's
+    /// own domain (external collaborator invite, public link to an
+    /// anonymous audience). Distinguished from [`Self::Share`] so a
+    /// rule can permit internal sharing while blocking external
+    /// exfiltration.
+    ExternalShare,
+    /// A bulk extraction of records / objects (Salesforce Bulk API
+    /// job, a report export, a mailbox export). High-signal for
+    /// mass data exfiltration that a per-object download rule would
+    /// miss.
+    BulkExport,
 }
 
 impl CasbAction {
-    /// Stable string form for telemetry / bundle encoding.
+    /// Stable string form for telemetry / bundle encoding. MUST
+    /// stay byte-identical to the control plane's `InlineAction`
+    /// (`internal/service/casb/inline.go`) — the compiled bundle's
+    /// action column is matched as a string across the
+    /// Go↔Rust boundary, so a drift here silently breaks rule
+    /// matching at the edge.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -68,6 +99,11 @@ impl CasbAction {
             Self::Download => "download",
             Self::Share => "share",
             Self::Delete => "delete",
+            Self::Login => "login",
+            Self::AdminConfigChange => "admin_config_change",
+            Self::ApiKeyCreate => "api_key_create",
+            Self::ExternalShare => "external_share",
+            Self::BulkExport => "bulk_export",
         }
     }
 }
@@ -338,14 +374,71 @@ mod tests {
 
     #[test]
     fn action_and_verdict_strings_are_stable() {
-        // Telemetry + bundle wire contract.
+        // Telemetry + bundle wire contract. These string forms are
+        // matched verbatim against the control plane's InlineAction
+        // (internal/service/casb/inline.go); a drift silently breaks
+        // rule matching at the edge.
         assert_eq!(CasbAction::Upload.as_str(), "upload");
         assert_eq!(CasbAction::Download.as_str(), "download");
         assert_eq!(CasbAction::Share.as_str(), "share");
         assert_eq!(CasbAction::Delete.as_str(), "delete");
+        assert_eq!(CasbAction::Login.as_str(), "login");
+        assert_eq!(
+            CasbAction::AdminConfigChange.as_str(),
+            "admin_config_change"
+        );
+        assert_eq!(CasbAction::ApiKeyCreate.as_str(), "api_key_create");
+        assert_eq!(CasbAction::ExternalShare.as_str(), "external_share");
+        assert_eq!(CasbAction::BulkExport.as_str(), "bulk_export");
         assert_eq!(CasbVerdict::Allow.as_str(), "allow");
         assert_eq!(CasbVerdict::Block.as_str(), "block");
         assert_eq!(CasbVerdict::Log.as_str(), "log");
+    }
+
+    #[test]
+    fn action_serde_roundtrip_matches_wire_form() {
+        // The data plane must decode every action the control plane
+        // can author into the bundle (the WS4 expansion adds five).
+        // serde's snake_case form must equal as_str(), and a JSON
+        // round-trip must be lossless for every variant.
+        for action in [
+            CasbAction::Upload,
+            CasbAction::Download,
+            CasbAction::Share,
+            CasbAction::Delete,
+            CasbAction::Login,
+            CasbAction::AdminConfigChange,
+            CasbAction::ApiKeyCreate,
+            CasbAction::ExternalShare,
+            CasbAction::BulkExport,
+        ] {
+            let json = serde_json::to_string(&action).expect("serialize");
+            assert_eq!(json, format!("\"{}\"", action.as_str()));
+            let back: CasbAction = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, action);
+        }
+    }
+
+    #[test]
+    fn new_actions_decode_and_evaluate() {
+        // A bundle carrying a WS4 action must decode into a rule and
+        // match a request the inspector classifies with that action.
+        let raw = r#"{
+            "id": "r-bulk",
+            "app_id": "salesforce",
+            "action": "bulk_export",
+            "verdict": "block"
+        }"#;
+        let decoded: CasbRule = serde_json::from_str(raw).expect("decode rule");
+        assert_eq!(decoded.action, CasbAction::BulkExport);
+        let set = CasbRuleSet::new(vec![decoded]);
+        let d = set
+            .evaluate(&meta("salesforce", CasbAction::BulkExport))
+            .expect("match");
+        assert_eq!(d.verdict, CasbVerdict::Block);
+        assert_eq!(d.action, CasbAction::BulkExport);
+        // A different action must not fire the bulk-export rule.
+        assert_eq!(set.evaluate(&meta("salesforce", CasbAction::Login)), None);
     }
 
     #[test]

@@ -1,10 +1,15 @@
 // Package connectors provides CASB connector plugin implementations
-// for Microsoft 365, Google Workspace, Slack, and Salesforce.
+// for the supported SaaS and cloud-console applications (Microsoft
+// 365, Google Workspace, Slack, Salesforce, Box, Dropbox, GitHub,
+// GitLab, Jira, Confluence, ServiceNow, Zendesk, HubSpot, Zoom,
+// Teams, AWS Console, GCP Console, Azure Portal, Okta, and Workday).
 //
-// Each connector implements the casb.CASBConnectorPlugin interface.
-// Shared HTTP plumbing is in this file; per-connector logic lives
-// in the eponymous files (m365.go, google.go, slack.go,
-// salesforce.go).
+// Each connector implements the casb.CASBConnectorPlugin interface
+// and lives in an eponymous file (m365.go, github.go, ...). The
+// shared HTTP/auth plumbing (request execution, error shaping,
+// tenant base-URL SSRF validation, OAuth/JWT token minting, and the
+// common posture-check builders) lives in helpers.go; the
+// posture-scoring helper and the HTTPDoer test seam live here.
 package connectors
 
 import (
