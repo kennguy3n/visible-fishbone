@@ -69,6 +69,12 @@
   --warn-soft: rgba(217, 119, 6, 0.12);
   --danger-soft: rgba(220, 38, 38, 0.1);
   --brand-soft: rgba(var(--brand-rgb), 0.1);
+  /* Badge outlines: a touch stronger than the soft fill so the pill has a
+     visible edge. Using the soft fill as the border (as before) made the
+     outline disappear against the fill. */
+  --ok-border: rgba(5, 150, 105, 0.3);
+  --warn-border: rgba(217, 119, 6, 0.3);
+  --danger-border: rgba(220, 38, 38, 0.3);
   /* Skeleton shimmer sweep. Light surfaces are near-white, so the sweep is a
      dark graphite tint; dark theme overrides this with a white tint. */
   --shimmer: rgba(17, 24, 39, 0.06);
@@ -112,6 +118,9 @@
   --warn-soft: rgba(251, 191, 36, 0.13);
   --danger-soft: rgba(248, 113, 113, 0.13);
   --brand-soft: rgba(var(--brand-rgb), 0.14);
+  --ok-border: rgba(52, 211, 153, 0.32);
+  --warn-border: rgba(251, 191, 36, 0.32);
+  --danger-border: rgba(248, 113, 113, 0.32);
   --shimmer: rgba(255, 255, 255, 0.06);
 }
 
@@ -155,6 +164,9 @@
     --warn-soft: rgba(251, 191, 36, 0.13);
     --danger-soft: rgba(248, 113, 113, 0.13);
     --brand-soft: rgba(var(--brand-rgb), 0.14);
+    --ok-border: rgba(52, 211, 153, 0.32);
+    --warn-border: rgba(251, 191, 36, 0.32);
+    --danger-border: rgba(248, 113, 113, 0.32);
     --shimmer: rgba(255, 255, 255, 0.06);
   }
 }
@@ -618,17 +630,17 @@ table.data tbody tr:hover {
 .badge--ok {
   background: var(--ok-soft);
   color: var(--ok);
-  border-color: var(--ok-soft);
+  border-color: var(--ok-border);
 }
 .badge--warn {
   background: var(--warn-soft);
   color: var(--warn);
-  border-color: var(--warn-soft);
+  border-color: var(--warn-border);
 }
 .badge--danger {
   background: var(--danger-soft);
   color: var(--danger);
-  border-color: var(--danger-soft);
+  border-color: var(--danger-border);
 }
 .badge--neutral {
   background: rgba(159, 176, 204, 0.12);
