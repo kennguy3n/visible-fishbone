@@ -71,9 +71,16 @@ interface GraphDoc {
 
 // A locally-managed row: the rule plus a stable key (so React keeps input
 // focus across re-orders) and whether it was just added (not yet saved).
+//
+// srcText/dstText are the *raw* contents of the Source/Destination inputs and
+// are the source of truth while editing. Parsing to ref arrays only happens at
+// commit time (see materialize) so an in-progress comma (e.g. "team-a,") is not
+// stripped on every keystroke, which would make multi-ref entry impossible.
 interface Row {
   key: string;
   rule: GraphRule;
+  srcText: string;
+  dstText: string;
   isNew: boolean;
 }
 
@@ -91,6 +98,17 @@ function textToRefs(text: string): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+// Resolve a row's editing state into the rule that gets simulated/saved: the
+// structured subjects/predicates are preserved verbatim (via spread) while the
+// guided *_refs arrays are derived from the raw input text at commit time.
+function materialize(row: Row): GraphRule {
+  return {
+    ...row.rule,
+    subject_refs: textToRefs(row.srcText),
+    predicate_refs: textToRefs(row.dstText),
+  };
 }
 
 // Stable signature of the rule *content* (not array identity) plus the default
@@ -160,6 +178,8 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
       seedRef.current.rules.map((rule) => ({
         key: freshKey(),
         rule,
+        srcText: refsToText(rule.subject_refs),
+        dstText: refsToText(rule.predicate_refs),
         isNew: false,
       })),
     );
@@ -168,7 +188,7 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
     resetSim.current();
   }, [upstreamSig]);
 
-  const draftRules = rows.map((r) => r.rule);
+  const draftRules = rows.map(materialize);
   const draftSig = signatureOf(draftRules, defaultAction);
   const dirty = draftSig !== upstreamSig;
   const simDataForDraft = sim.data && simulatedSig === draftSig ? sim.data : null;
@@ -195,6 +215,13 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
       prev.map((r) => (r.key === key ? { ...r, rule: { ...r.rule, ...patch } } : r)),
     );
 
+  // Update the raw Source/Destination input text. Refs are parsed from this
+  // text only at commit time (materialize), so commas survive while typing.
+  const setText = (key: string, field: "srcText" | "dstText", value: string) =>
+    setRows((prev) =>
+      prev.map((r) => (r.key === key ? { ...r, [field]: value } : r)),
+    );
+
   const removeRule = (key: string) =>
     setRows((prev) => prev.filter((r) => r.key !== key));
 
@@ -210,6 +237,8 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
       const row: Row = {
         key: freshKey(),
         isNew: true,
+        srcText: "",
+        dstText: "",
         rule: {
           domain: active,
           verb: DOMAIN_VERBS[active][0],
@@ -268,7 +297,13 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
 
   const discard = () => {
     setRows(
-      upstreamRules.map((rule) => ({ key: freshKey(), rule, isNew: false })),
+      upstreamRules.map((rule) => ({
+        key: freshKey(),
+        rule,
+        srcText: refsToText(rule.subject_refs),
+        dstText: refsToText(rule.predicate_refs),
+        isNew: false,
+      })),
     );
     setDefaultAction(upstreamDefault);
     setSimulatedSig(null);
@@ -389,13 +424,9 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
                       Source <b>{idx + 1}.</b>
                     </label>
                     <input
-                      value={refsToText(r.subject_refs)}
+                      value={row.srcText}
                       placeholder="any (identity / group / cidr refs)"
-                      onChange={(e) =>
-                        patchRule(row.key, {
-                          subject_refs: textToRefs(e.target.value),
-                        })
-                      }
+                      onChange={(e) => setText(row.key, "srcText", e.target.value)}
                     />
                   </div>
                   <div>
@@ -414,13 +445,9 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
                   <div>
                     <label className="net-rule__label">Destination</label>
                     <input
-                      value={refsToText(r.predicate_refs)}
+                      value={row.dstText}
                       placeholder="any (app / url-category / fqdn refs)"
-                      onChange={(e) =>
-                        patchRule(row.key, {
-                          predicate_refs: textToRefs(e.target.value),
-                        })
-                      }
+                      onChange={(e) => setText(row.key, "dstText", e.target.value)}
                     />
                   </div>
                   <div className="net-rule__acts">
