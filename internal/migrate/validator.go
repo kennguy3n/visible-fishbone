@@ -185,11 +185,26 @@ func (mv *MigrationValidator) ValidateFiles(fsys fs.FS, names []string) error {
 // the violations it contains. file is used only to populate
 // Violation.File. The baseline is not consulted here — callers that
 // want baseline behaviour go through ValidateFiles.
+//
+// Statements are evaluated in source order so the analysis can track
+// which tables this migration creates. An index on a table created
+// earlier in the same migration is lock-safe regardless of
+// CONCURRENTLY (the table is brand-new and empty, holds no rows to
+// scan, and is invisible to other sessions until the migration
+// commits), so it is exempt from the CONCURRENTLY rule — see
+// newTables below.
 func (mv *MigrationValidator) ValidateContent(file, sql string) []Violation {
 	var out []Violation
 	masked := maskSQL(sql)
+	// newTables accumulates the (normalised) names of tables this
+	// migration creates, so a later CREATE INDEX on one of them is
+	// recognised as operating on a brand-new empty table.
+	newTables := map[string]struct{}{}
 	for _, st := range splitStatements(sql, masked) {
-		out = append(out, checkStatement(file, st)...)
+		if tbl, ok := createdTableName(st.norm); ok {
+			newTables[tbl] = struct{}{}
+		}
+		out = append(out, checkStatement(file, st, newTables)...)
 	}
 	return out
 }
@@ -248,10 +263,58 @@ var (
 	reConcurrent  = regexp.MustCompile(`\bCONCURRENTLY\b`)
 	reLockTable   = regexp.MustCompile(`^LOCK( TABLE)?\b`)
 	reAlterTable  = regexp.MustCompile(`^ALTER TABLE (IF EXISTS )?(ONLY )?("?[\w$.]+"?)\s*(.*)$`)
+	// reCreateTable captures the table name from a CREATE TABLE so
+	// indexes on a just-created table can be recognised as lock-safe.
+	// TEMPORARY/UNLOGGED tables are matched too (the qualifier sits
+	// between CREATE and TABLE) but their indexes are equally safe.
+	reCreateTable = regexp.MustCompile(`^CREATE (?:(?:GLOBAL|LOCAL) )?(?:TEMP|TEMPORARY|UNLOGGED) TABLE (?:IF NOT EXISTS )?("?[\w$.]+"?)|^CREATE TABLE (?:IF NOT EXISTS )?("?[\w$.]+"?)`)
+	// reIndexTarget captures the table an index is built on. The
+	// optional index-name group is skipped when absent (CREATE INDEX
+	// ON tbl ...); ONLY is consumed so the table name is captured
+	// either way.
+	reIndexTarget = regexp.MustCompile(`^CREATE (?:UNIQUE )?INDEX (?:CONCURRENTLY )?(?:IF NOT EXISTS )?(?:\S+ )?ON (?:ONLY )?("?[\w$.]+"?)`)
 )
 
+// createdTableName reports the normalised name of the table a CREATE
+// TABLE statement defines, or ("", false) if the statement is not a
+// CREATE TABLE. The name is stripped of surrounding double quotes so
+// it compares equal to an index target written without quotes.
+func createdTableName(norm string) (string, bool) {
+	m := reCreateTable.FindStringSubmatch(norm)
+	if m == nil {
+		return "", false
+	}
+	// Either the qualified-table branch (group 1) or the plain branch
+	// (group 2) matched; take whichever is non-empty.
+	name := m[1]
+	if name == "" {
+		name = m[2]
+	}
+	return normalizeIdent(name), name != ""
+}
+
+// indexTargetTable reports the normalised name of the table a CREATE
+// INDEX builds on, or ("", false) if the target cannot be parsed.
+func indexTargetTable(norm string) (string, bool) {
+	m := reIndexTarget.FindStringSubmatch(norm)
+	if m == nil {
+		return "", false
+	}
+	return normalizeIdent(m[1]), m[1] != ""
+}
+
+// normalizeIdent strips surrounding double quotes from a (already
+// upper-cased) identifier so quoted and unquoted spellings of the
+// same name compare equal.
+func normalizeIdent(s string) string {
+	return strings.Trim(s, `"`)
+}
+
 // checkStatement applies every rule to one normalised statement.
-func checkStatement(file string, st statement) []Violation {
+// newTables holds the names of tables created earlier in the same
+// migration; an index on one of them is exempt from the CONCURRENTLY
+// rule because the table is brand-new and empty.
+func checkStatement(file string, st statement, newTables map[string]struct{}) []Violation {
 	var out []Violation
 	add := func(rule Rule, msg string) {
 		out = append(out, Violation{File: file, Line: st.line, Rule: rule, Message: msg})
@@ -259,10 +322,24 @@ func checkStatement(file string, st statement) []Violation {
 
 	switch {
 	case reCreateIndex.MatchString(st.norm):
-		if !reConcurrent.MatchString(st.norm) {
-			add(RuleIndexNotConcurrent,
-				"CREATE INDEX must use CONCURRENTLY so it does not block writes while the index builds")
+		if reConcurrent.MatchString(st.norm) {
+			break
 		}
+		// A non-concurrent index on a table created earlier in this
+		// same migration takes no meaningful lock: the table is
+		// brand-new, empty, and invisible to other sessions until the
+		// migration commits. CONCURRENTLY would in fact be illegal
+		// here (it cannot run inside the implicit transaction a
+		// multi-statement migration executes in). Only flag indexes
+		// built on pre-existing tables, where the build holds a SHARE
+		// lock that blocks writes for the duration of a full scan.
+		if tbl, ok := indexTargetTable(st.norm); ok {
+			if _, isNew := newTables[tbl]; isNew {
+				break
+			}
+		}
+		add(RuleIndexNotConcurrent,
+			"CREATE INDEX on an existing table must use CONCURRENTLY so it does not block writes while the index builds")
 	case reLockTable.MatchString(st.norm):
 		add(RuleLockTable,
 			"explicit LOCK TABLE is not allowed in a migration; it blocks all access to the table")

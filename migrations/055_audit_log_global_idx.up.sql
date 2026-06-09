@@ -1,0 +1,22 @@
+-- 055_audit_log_global_idx
+--
+-- Create the partial index that backs the global-audit read path
+-- (system-role sessions filtering tenant_id IS NULL — see migration
+-- 052, which made tenant_id nullable for platform-scoped rows).
+--
+-- audit_log is a hot, append-heavy, per-tenant table. Building this
+-- index with a plain CREATE INDEX would hold a SHARE lock that blocks
+-- every audit write for the duration of a full-table scan — at 5,000
+-- tenants that is a control-plane-wide stall. CREATE INDEX
+-- CONCURRENTLY builds the index without blocking writes.
+--
+-- CONCURRENTLY cannot run inside a transaction block, so this is the
+-- ONLY statement in the migration: the golang-migrate pgx runner
+-- sends each migration file to the server as a single command, and a
+-- single statement therefore runs in autocommit (a multi-statement
+-- file would be wrapped in one implicit transaction and the server
+-- would reject CONCURRENTLY). IF NOT EXISTS makes the migration a
+-- no-op on any database that already built the index under the
+-- pre-split migration 052, so the split is safe to deploy on top of
+-- an already-migrated database.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_global_idx ON audit_log (created_at DESC) WHERE tenant_id IS NULL;

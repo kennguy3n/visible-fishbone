@@ -36,7 +36,13 @@ CREATE POLICY audit_log_tenant_isolation ON audit_log
         OR NULLIF(current_setting('sng.system_role', true), '') = 'true'
     );
 
--- A partial index keeps the global-audit read path (system-role
+-- The partial index that keeps the global-audit read path (system-role
 -- sessions filtering tenant_id IS NULL) from scanning the full
--- per-tenant history.
-CREATE INDEX audit_log_global_idx ON audit_log (created_at DESC) WHERE tenant_id IS NULL;
+-- per-tenant history is created separately, CONCURRENTLY, in migration
+-- 055. audit_log is a hot, per-tenant-append table, so a plain CREATE
+-- INDEX here would hold a SHARE lock that blocks every audit write for
+-- the length of a full-table scan — a control-plane-wide stall at 5,000
+-- tenants. CONCURRENTLY cannot run inside the implicit transaction this
+-- multi-statement migration executes in, so the index lives in its own
+-- single-statement migration (see docs/migration-consolidation.md, the
+-- online-migration pattern).
