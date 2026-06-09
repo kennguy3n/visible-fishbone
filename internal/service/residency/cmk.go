@@ -140,6 +140,12 @@ func (s *CMKService) resolveForWrite(ctx context.Context, tenantID uuid.UUID, ec
 	if err := ref.Validate(); err != nil {
 		return TenantKeyRef{}, nil, nil, err
 	}
+	// Validate() only reads Region (it normalizes internally for its
+	// regex check without mutating the value receiver). Canonicalize it
+	// once here so the region the provider sees and the CMKService logs
+	// is the same normalized form the binding check compares against,
+	// rather than whatever case/whitespace the resolver returned.
+	ref.Region = Normalize(ref.Region)
 	if err := s.enforceRegionBinding(ctx, tenantID, ref); err != nil {
 		return TenantKeyRef{}, nil, nil, err
 	}

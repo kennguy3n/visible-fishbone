@@ -232,6 +232,56 @@ func TestCMKServiceUnwrapRoutesByWrappedKindAcrossRotation(t *testing.T) {
 	}
 }
 
+// recordingProvider is a TenantKeyProvider that captures the ref it is
+// called with, so a test can assert what the CMKService passes down.
+type recordingProvider struct {
+	kind   residency.KeyProviderKind
+	gotRef residency.TenantKeyRef
+}
+
+func (p *recordingProvider) Kind() residency.KeyProviderKind { return p.kind }
+
+func (p *recordingProvider) GenerateDataKey(_ context.Context, ref residency.TenantKeyRef, _ residency.EncryptionContext) (residency.DataKey, error) {
+	p.gotRef = ref
+	return residency.DataKey{
+		Plaintext: bytes.Repeat([]byte{0x01}, 32),
+		Wrapped:   residency.WrappedDataKey{Kind: p.kind, KeyURI: ref.KeyURI, Ciphertext: []byte("ct")},
+	}, nil
+}
+
+func (p *recordingProvider) UnwrapDataKey(_ context.Context, ref residency.TenantKeyRef, _ residency.WrappedDataKey, _ residency.EncryptionContext) ([]byte, error) {
+	p.gotRef = ref
+	return bytes.Repeat([]byte{0x01}, 32), nil
+}
+
+// TestCMKServiceCanonicalizesRefRegion asserts that the CMKService
+// normalizes a resolver-supplied region before handing the ref to the
+// provider, so the region on the struct is the canonical form rather
+// than whatever case/whitespace the resolver returned.
+func TestCMKServiceCanonicalizesRefRegion(t *testing.T) {
+	tid := uuid.New()
+	keyURI := "arn:aws:kms:eu-central-1:123456789012:key/abcd"
+	rec := &recordingProvider{kind: residency.ProviderAWSKMS}
+	reg, err := residency.NewKeyProviderRegistry(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Resolver returns a non-canonical region (mixed case + whitespace)
+	// that normalizes to the tenant's designated region.
+	ref := residency.TenantKeyRef{
+		TenantID: tid, Kind: residency.ProviderAWSKMS, Region: "  EU-Central-1 ", KeyURI: keyURI}
+	svc, err := residency.NewCMKService(refFn(ref), regionFn("eu-central-1"), reg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GenerateDataKey(context.Background(), tid, nil); err != nil {
+		t.Fatalf("matching (post-normalization) region must be allowed: %v", err)
+	}
+	if got := rec.gotRef.Region; got != residency.Region("eu-central-1") {
+		t.Fatalf("provider received non-canonical region %q, want %q", got, "eu-central-1")
+	}
+}
+
 func TestCMKServiceConstructorValidation(t *testing.T) {
 	if _, err := residency.NewCMKService(nil, regionFn(""), platformRegistry(t), nil); err == nil {
 		t.Fatal("nil refs must be rejected")
