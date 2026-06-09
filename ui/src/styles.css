@@ -1,25 +1,26 @@
 :root {
   /* ===== Light theme (default) ==========================================
-     Clean, modern, violet-dominant design system on white / light-lavender
-     surfaces. The dark theme lives in :root[data-theme="dark"] below, and a
+     Clean, modern, ShieldNet 360 blue (#255FE5) design system on white /
+     light surfaces, matching shieldnet360.com. The dark theme lives in
+     :root[data-theme="dark"] below, and a
      no-JS prefers-color-scheme fallback mirrors it. src/lib/theme.ts sets
      data-theme on <html> for the Light / Dark / System choice. */
   color-scheme: light;
   --bg: #ffffff;
   --bg-elev: #f9fafb;
-  --bg-elev-2: #f5f3ff;
+  --bg-elev-2: #eef3fd;
   --surface: #ffffff;
-  --surface-2: #f5f3ff;
+  --surface-2: #eef3fd;
   --border: #e5e7eb;
   --border-soft: #eef0f4;
   --text: #111827;
   --text-dim: #4b5563;
   --text-faint: #6b7280;
-  --brand: #7c3aed;
-  --brand-strong: #6d28d9;
+  --brand: #255fe5;
+  --brand-strong: #1e4fc4;
   /* Brand RGB channels so translucent brand tints (focus ring, soft fills,
      glows, info accents) compose via rgba() and all track --brand. */
-  --brand-rgb: 124, 58, 237;
+  --brand-rgb: 37, 95, 229;
   --accent: #06b6d4;
   --ok: #059669;
   --warn: #d97706;
@@ -30,7 +31,7 @@
   /* Text on the translucent active-nav fill (high-contrast per theme). */
   --nav-active-text: var(--brand-strong);
   /* Ambient glow behind the login hero / radial backdrops. */
-  --hero-glow: #ede9fe;
+  --hero-glow: #e6eefe;
   --radius: 12px;
   --radius-sm: 8px;
   --radius-lg: 16px;
@@ -40,8 +41,8 @@
      flush against the sidebar regardless of this value. */
   --nav-gutter: 10px;
   --shadow: 0 8px 24px rgba(17, 24, 39, 0.12);
-  --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica,
-    Arial, sans-serif;
+  --font: "Noto Sans", "Inter", system-ui, -apple-system, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 
   /* Richer design system additions (WS5) ------------------------------- */
@@ -71,7 +72,7 @@
 }
 
 /* ===== Dark theme ========================================================
-   Graphite canvas with a brighter violet brand for legibility on dark
+   Graphite canvas with a brighter ShieldNet blue brand for legibility on dark
    surfaces. Applied when the operator picks Dark, or picks System on a
    dark-OS desktop (resolved to data-theme="dark" by src/lib/theme.ts). */
 :root[data-theme="dark"] {
@@ -86,9 +87,9 @@
   --text: #eef2f8;
   --text-dim: #9aa7bd;
   --text-faint: #69748a;
-  --brand: #8b5cf6;
-  --brand-strong: #7c3aed;
-  --brand-rgb: 139, 92, 246;
+  --brand: #4d83f0;
+  --brand-strong: #255fe5;
+  --brand-rgb: 77, 131, 240;
   --accent: #22d3ee;
   --ok: #34d399;
   --warn: #fbbf24;
@@ -127,9 +128,9 @@
     --text: #eef2f8;
     --text-dim: #9aa7bd;
     --text-faint: #69748a;
-    --brand: #8b5cf6;
-    --brand-strong: #7c3aed;
-    --brand-rgb: 139, 92, 246;
+    --brand: #4d83f0;
+    --brand-strong: #255fe5;
+    --brand-rgb: 77, 131, 240;
     --accent: #22d3ee;
     --ok: #34d399;
     --warn: #fbbf24;
@@ -667,7 +668,7 @@ table.data tbody tr:hover {
   background: var(--brand);
   border-color: var(--brand);
   color: #fff;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   box-shadow: 0 1px 2px rgba(17, 24, 39, 0.12),
     inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }

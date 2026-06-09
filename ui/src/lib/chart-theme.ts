@@ -17,7 +17,7 @@ function cssVar(name: string, fallback: string): string {
 // at render time (the common case) always gets the active theme's color.
 export const CHART = {
   get brand() {
-    return cssVar("--brand", "#8b5cf6");
+    return cssVar("--brand", "#4d83f0");
   },
   get accent() {
     return cssVar("--accent", "#22d3ee");
