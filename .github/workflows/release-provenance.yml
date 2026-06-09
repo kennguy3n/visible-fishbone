@@ -101,7 +101,10 @@ jobs:
           mkdir -p dist/edge
           cp target/x86_64-unknown-linux-gnu/release/sng-edge dist/edge/
           tar -C dist/edge -czf "dist/${art}" sng-edge
-          ( cd dist && sha256sum "${art}" > "${art}.sha256" )
+          # sha256sum (GNU coreutils) is the Linux norm; fall back to BSD
+          # `shasum -a 256` so this stays correct if a runner image ever
+          # ships without coreutils. Output format matches for verify.
+          ( cd dist && { sha256sum "${art}" || shasum -a 256 "${art}"; } > "${art}.sha256" )
           echo "artifact=dist/${art}" >> "$GITHUB_OUTPUT"
           echo "checksum=dist/${art}.sha256" >> "$GITHUB_OUTPUT"
       - name: generate SLSA build provenance
@@ -111,7 +114,7 @@ jobs:
       - name: upload artifact + provenance inputs
         uses: actions/upload-artifact@v4
         with:
-          name: sng-edge-image-${{ github.ref_name }}
+          name: sng-edge-image-${{ inputs.ref || github.ref_name }}
           path: |
             ${{ steps.pack.outputs.artifact }}
             ${{ steps.pack.outputs.checksum }}
@@ -169,7 +172,10 @@ jobs:
           mkdir -p dist/agent
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/agent/
           tar -C dist/agent -czf "dist/${art}" "${{ matrix.bin }}"
-          ( cd dist && sha256sum "${art}" > "${art}.sha256" )
+          # Portable checksum: prefer GNU sha256sum, fall back to BSD
+          # shasum -a 256 (present on the macOS/Windows-bash runners) so
+          # the step does not depend on coreutils being on every image.
+          ( cd dist && { sha256sum "${art}" || shasum -a 256 "${art}"; } > "${art}.sha256" )
           echo "artifact=dist/${art}" >> "$GITHUB_OUTPUT"
           echo "checksum=dist/${art}.sha256" >> "$GITHUB_OUTPUT"
       - name: generate SLSA build provenance
@@ -179,7 +185,7 @@ jobs:
       - name: upload artifact + provenance inputs
         uses: actions/upload-artifact@v4
         with:
-          name: sng-agent-installer-${{ github.ref_name }}-${{ matrix.os }}
+          name: sng-agent-installer-${{ inputs.ref || github.ref_name }}-${{ matrix.os }}
           path: |
             ${{ steps.pack.outputs.artifact }}
             ${{ steps.pack.outputs.checksum }}
