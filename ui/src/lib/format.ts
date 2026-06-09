@@ -108,6 +108,32 @@ export function formatNumber(n?: number | null): string {
   return n.toLocaleString();
 }
 
+/** Format a USD estimate with a leading "$" and 2 decimals
+ *  (1234.5 -> "$1,234.50"). These are cost estimates, not invoices. */
+export function formatUSD(n?: number | null): string {
+  if (n == null) return "—";
+  return n.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+/** Format a 0–1 ratio as a whole-number percent (0.7475 -> "75%").
+ *  `digits` controls decimals for finer-grained values. */
+export function formatPct(ratio?: number | null, digits = 0): string {
+  if (ratio == null) return "—";
+  return `${(ratio * 100).toFixed(digits)}%`;
+}
+
+/** Convert a byte count to gibibytes for display (÷ 1e9 per the cost
+ *  model, which prices on decimal GB). */
+export function bytesToGB(bytes?: number | null): number {
+  if (!bytes) return 0;
+  return bytes / 1e9;
+}
+
 /** Abbreviate large numbers for compact display (axis ticks, badges):
  *  1_600_000 -> "1.6M", 100_000_000 -> "100M", 20_000 -> "20K". */
 export function formatCompact(n?: number | null): string {

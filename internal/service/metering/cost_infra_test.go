@@ -33,8 +33,8 @@ func TestS3StorageCostUSD(t *testing.T) {
 	}{
 		{0, 0},
 		{-1, 0},
-		{bytesPerGB, 0.023},      // 1 GB-month * $0.023
-		{100 * bytesPerGB, 2.30}, // 100 GB-month * $0.023
+		{bytesPerGB, 0.00099},     // 1 GB-month * $0.00099 (Glacier Deep Archive)
+		{100 * bytesPerGB, 0.099}, // 100 GB-month * $0.00099
 	}
 	for _, tc := range cases {
 		if got := c.S3StorageCostUSD(tc.bytes); !approx(got, tc.want) {
@@ -78,9 +78,9 @@ func TestProjectInfraMonthlyCostGaugesAndFlow(t *testing.T) {
 	if !approx(got.NATSMonthlyUSD, 0.20) {
 		t.Fatalf("nats monthly = %v, want 0.20", got.NATSMonthlyUSD)
 	}
-	// Gauge: S3 50 GB * $0.023 = $1.15.
-	if !approx(got.S3MonthlyUSD, 1.15) {
-		t.Fatalf("s3 monthly = %v, want 1.15", got.S3MonthlyUSD)
+	// Gauge: S3 50 GB * $0.00099 = $0.0495 -> $0.05 (Glacier Deep Archive).
+	if !approx(got.S3MonthlyUSD, 0.05) {
+		t.Fatalf("s3 monthly = %v, want 0.05", got.S3MonthlyUSD)
 	}
 	if !approx(got.TotalMonthlyUSD, round2(got.ClickHouseMonthlyUSD+got.NATSMonthlyUSD+got.S3MonthlyUSD)) {
 		t.Fatalf("total mismatch: %v", got.TotalMonthlyUSD)
@@ -139,9 +139,9 @@ func TestAggregateInfraCostSumsPerDriver(t *testing.T) {
 	if !approx(agg.NATSMonthlyUSD, 0.40) {
 		t.Fatalf("nats total = %v, want 0.40", agg.NATSMonthlyUSD)
 	}
-	// S3: (10+20) GB * $0.023 = $0.69.
-	if !approx(agg.S3MonthlyUSD, 0.69) {
-		t.Fatalf("s3 total = %v, want 0.69", agg.S3MonthlyUSD)
+	// S3: (10+20) GB * $0.00099 = $0.0297 -> $0.03 (Glacier Deep Archive).
+	if !approx(agg.S3MonthlyUSD, 0.03) {
+		t.Fatalf("s3 total = %v, want 0.03", agg.S3MonthlyUSD)
 	}
 	if !approx(agg.TotalMonthlyUSD, round2(agg.ClickHouseMonthlyUSD+agg.NATSMonthlyUSD+agg.S3MonthlyUSD)) {
 		t.Fatalf("total mismatch: %v", agg.TotalMonthlyUSD)

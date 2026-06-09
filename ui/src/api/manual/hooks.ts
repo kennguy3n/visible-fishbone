@@ -10,6 +10,8 @@ import {
 } from "@tanstack/react-query";
 import { sngRequest } from "@/api/http-client";
 import type {
+  BudgetOverride,
+  BudgetUpdateResponse,
   CasbApp,
   CasbConnector,
   CasbConnectorCreate,
@@ -19,13 +21,16 @@ import type {
   DlpPolicyCreate,
   DlpTemplate,
   GenerateReportRequest,
+  InfraCostProjection,
   ListEnvelope,
+  PlatformCostReport,
   Playbook,
   PlaybookApproval,
   PlaybookCreate,
   PlaybookExecution,
   SimulationRequest,
   SimulationResponse,
+  TenantCostReport,
   UsageHistoryResponse,
   UsageResponse,
 } from "./types";
@@ -218,16 +223,96 @@ export function useUsage(tenantId: string): UseQueryResult<UsageResponse> {
 
 export function useUsageHistory(
   tenantId: string,
+  months?: number,
 ): UseQueryResult<UsageHistoryResponse> {
   return useQuery({
-    queryKey: ["metering", "usage-history", tenantId],
+    queryKey: ["metering", "usage-history", tenantId, months ?? null],
     queryFn: ({ signal }) =>
       sngRequest<UsageHistoryResponse>({
         method: "GET",
         url: `${base(tenantId)}/usage/history`,
+        params: months ? { months } : undefined,
         signal,
       }),
     enabled: !!tenantId,
+  });
+}
+
+// useCost reads the per-tenant infrastructure cost projection
+// (ClickHouse / NATS / S3 monthly USD) for the infra-breakdown panel.
+export function useCost(
+  tenantId: string,
+): UseQueryResult<InfraCostProjection> {
+  return useQuery({
+    queryKey: ["metering", "cost", tenantId],
+    queryFn: ({ signal }) =>
+      sngRequest<InfraCostProjection>({
+        method: "GET",
+        url: `${base(tenantId)}/cost`,
+        signal,
+      }),
+    enabled: !!tenantId,
+  });
+}
+
+// useCostReport reads the per-tenant per-meter cost report (projected
+// monthly cost, per-meter cost + budget utilisation, margin). This is
+// the source for the summary cards and the cost columns of the usage
+// table.
+export function useCostReport(
+  tenantId: string,
+): UseQueryResult<TenantCostReport> {
+  return useQuery({
+    queryKey: ["metering", "cost-report", tenantId],
+    queryFn: ({ signal }) =>
+      sngRequest<TenantCostReport>({
+        method: "GET",
+        url: `${base(tenantId)}/cost-report`,
+        signal,
+      }),
+    enabled: !!tenantId,
+  });
+}
+
+// usePlatformCostReport reads the fleet-wide cost + margin report. It is
+// platform-admin only: the route 404s for tenant-scoped callers, which
+// the MSP view treats as "not authorized" rather than a hard error
+// (see retry guard below). `enabled` lets the caller gate the request on
+// a permission check so non-platform users never even issue it.
+export function usePlatformCostReport(
+  enabled = true,
+): UseQueryResult<PlatformCostReport> {
+  return useQuery({
+    queryKey: ["metering", "admin", "cost-report"],
+    queryFn: ({ signal }) =>
+      sngRequest<PlatformCostReport>({
+        method: "GET",
+        url: `/admin/cost-report`,
+        signal,
+      }),
+    enabled,
+    // A 404/403 here means "not a platform admin" — a terminal,
+    // expected state for tenant users, so don't retry it.
+    retry: false,
+  });
+}
+
+// useUpdateBudgets PUTs a batch of per-meter budget overrides and
+// refreshes the usage + cost views on success so the table and cards
+// reflect the new limits immediately.
+export function useUpdateBudgets(tenantId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (budgets: BudgetOverride[]) =>
+      sngRequest<BudgetUpdateResponse>({
+        method: "PUT",
+        url: `${base(tenantId)}/budgets`,
+        data: { budgets },
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["metering", "usage", tenantId] });
+      qc.invalidateQueries({ queryKey: ["metering", "cost-report", tenantId] });
+    },
   });
 }
 

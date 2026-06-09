@@ -60,6 +60,8 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
+
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
 
 // DefaultSamplingWindow is the per-tenant rate-estimation window.
@@ -77,6 +79,37 @@ const DefaultSamplingWindow = 10 * time.Second
 // 1-in-20 at the extreme, enough to retain every active dimension on
 // a busy tenant while still shedding 95% of the flood.
 const DefaultMinSampleRate = 0.05
+
+// TrustedClassSampleRate is the fixed 1-in-100 keep probability applied
+// to the trusted_direct and trusted_media_bypass traffic classes. Both
+// carry the strongest trust guarantees in the taxonomy (DNS + cert-pin
+// + IP-range binding, no proxy, no TLS decrypt — see
+// repository.TrafficClass), so their per-event telemetry is high-volume
+// but low-information-density: a 1:100 sample retains a statistically
+// faithful picture (de-biased by 1/rate) while shedding 99% of the
+// write load these classes would otherwise impose on ClickHouse. The
+// trusted_media_bypass class is documented as "telemetry sampled for
+// cost control" precisely for this. This is a class-level policy: it is
+// applied at a constant rate independent of the tenant's adaptive
+// budget, because the rationale (low signal density) is a property of
+// the class, not of any tenant's volume.
+const TrustedClassSampleRate = 0.01
+
+// fixedClassSampleRate reports the constant, class-determined keep
+// probability for traffic classes that are sampled for cost control
+// independently of per-tenant adaptive load shedding. It returns
+// (rate, true) for such a class and (0, false) for every other class,
+// which then falls through to the adaptive per-tenant sampler. Keyed on
+// the canonical repository.TrafficClass values so it stays in lockstep
+// with the taxonomy; an empty or unknown class is never fixed-rate.
+func fixedClassSampleRate(trafficClass string) (float64, bool) {
+	switch repository.TrafficClass(trafficClass) {
+	case repository.TrafficClassTrustedDirect, repository.TrafficClassTrustedMediaBypass:
+		return TrustedClassSampleRate, true
+	default:
+		return 0, false
+	}
+}
 
 // SamplerConfig configures an AdaptiveSampler.
 type SamplerConfig struct {
@@ -188,9 +221,40 @@ func (s *AdaptiveSampler) ForPartition() *AdaptiveSampler {
 // The decision is deterministic: for a fixed tenant keep probability,
 // the same eventID always yields the same verdict. A nil sampler
 // keeps everything at rate 1.0.
+//
+// Decide applies only the adaptive per-tenant policy. Callers that
+// know the event's traffic class should use DecideClass so the fixed
+// class-level rates (see TrustedClassSampleRate) are honoured.
 func (s *AdaptiveSampler) Decide(ctx context.Context, tenantID, eventID uuid.UUID) (keep bool, sampleRate float64) {
+	return s.DecideClass(ctx, tenantID, eventID, "")
+}
+
+// DecideClass is the traffic-class-aware keep/drop decision. It is the
+// entry point the consumer hot path uses, because the chosen sampling
+// regime depends on the class:
+//
+//   - trusted_direct / trusted_media_bypass are sampled at the fixed
+//     TrustedClassSampleRate (1:100) — a class-level cost-control
+//     policy that does NOT depend on, and does not feed, the tenant's
+//     adaptive arrival-rate window. The verdict is the same
+//     deterministic hash threshold, so it is redelivery-stable and the
+//     1/rate de-bias weight is exact.
+//   - every other class falls through to the adaptive per-tenant
+//     sampler (Decide's historical behaviour), which records the
+//     arrival and sheds load only when the tenant exceeds its budget.
+//
+// A nil sampler keeps everything at rate 1.0 (the optional-dependency
+// no-op contract is preserved: when no sampler is wired, no sampling —
+// including the fixed class policy — is applied).
+func (s *AdaptiveSampler) DecideClass(ctx context.Context, tenantID, eventID uuid.UUID, trafficClass string) (keep bool, sampleRate float64) {
 	if s == nil {
 		return true, 1.0
+	}
+	if fixed, ok := fixedClassSampleRate(trafficClass); ok {
+		// Fixed class rate: deterministic threshold, no adaptive state
+		// touched (no arrival recorded) — these events bypass the
+		// per-tenant window entirely.
+		return hashFraction(eventID) < fixed, fixed
 	}
 	p := s.keepProb(ctx, tenantID)
 	if p >= 1.0 {
@@ -231,6 +295,24 @@ func (s *AdaptiveSampler) SampleRateFor(tenantID uuid.UUID) float64 {
 		return 1.0
 	}
 	return st.keepProb
+}
+
+// SampleRateForClass is the traffic-class-aware companion to
+// SampleRateFor, used to recover a redelivered event's de-bias rate.
+// For a fixed-rate class (trusted_direct / trusted_media_bypass) it
+// returns the constant class rate directly — the verdict on the first
+// delivery used that rate, never the tenant's adaptive probability, so
+// recovering it from per-tenant state would stamp the wrong weight.
+// Every other class defers to SampleRateFor. Returns 1.0 for a nil
+// sampler.
+func (s *AdaptiveSampler) SampleRateForClass(tenantID uuid.UUID, trafficClass string) float64 {
+	if s == nil {
+		return 1.0
+	}
+	if fixed, ok := fixedClassSampleRate(trafficClass); ok {
+		return fixed
+	}
+	return s.SampleRateFor(tenantID)
 }
 
 // keepProb returns the keep probability for the tenant's current

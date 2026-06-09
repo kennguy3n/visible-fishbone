@@ -20,6 +20,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
 	"github.com/kennguy3n/visible-fishbone/internal/nats/schema"
+	"github.com/kennguy3n/visible-fishbone/internal/service/metering"
 	"github.com/kennguy3n/visible-fishbone/internal/service/telemetry"
 )
 
@@ -991,5 +992,125 @@ func TestService_PerTenantLimiter_NilLimiterIsNoOp(t *testing.T) {
 	_ = svc.Stop(stopCtx)
 	if hits := len(hot.Snapshot()); hits != 4 {
 		t.Errorf("nil limiter: hot writer hits = %d, want 4 (no shedding)", hits)
+	}
+}
+
+// TestService_ClickHouseRowLimiter_NaksOverBudget proves the
+// row-write cost cap is wired into dispatch and applies back-pressure:
+// a tenant whose row budget is exhausted has its over-budget envelopes
+// Nak'd (deferred), never written to the hot tier, and the over-budget
+// rows are NOT silently dropped (they remain redeliverable).
+func TestService_ClickHouseRowLimiter_NaksOverBudget(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	// Budget admits exactly two rows (burst) with negligible refill
+	// in the test window, so the third+ envelope is row-limited.
+	rl, err := metering.NewRowLimit(0.001, 2)
+	if err != nil {
+		t.Fatalf("NewRowLimit: %v", err)
+	}
+	rowLimiter := metering.NewClickHouseRowLimiter(metering.StaticRowLimitResolver{Limit: rl})
+
+	svc, err := telemetry.New(js, cfg, telemetry.Config{Durable: "tlm-rowrl"}, hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	svc.
+		WithClickHouseRowLimiter(rowLimiter).
+		WithNakBackoff(200 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	tenant := uuid.New()
+	const total = 6
+	for i := 0; i < total; i++ {
+		env := schema.Envelope{
+			SchemaVersion: schema.SchemaVersion, EventID: uuid.New(),
+			TenantID: tenant, DeviceID: uuid.New(),
+			Timestamp:  time.Now().UTC(),
+			EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
+			Payload: newPayload(t),
+		}
+		if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
+			t.Fatalf("publish[%d]: %v", i, err)
+		}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		m := svc.MetricsSnapshot()
+		if len(hot.Snapshot()) >= 2 && m.RowRateLimited >= uint64(total-2) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	if err := svc.Stop(stopCtx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	// At most the burst (2) rows reached the hot writer; the rest were
+	// row-limited (deferred), and de-duplicated retries never inflate
+	// past the burst because dispatch checks dedup before the cap.
+	if hits := len(hot.Snapshot()); hits > 2 {
+		t.Errorf("hot writer hits = %d, want <= 2 (row burst budget)", hits)
+	}
+	m := svc.MetricsSnapshot()
+	if m.RowRateLimited < uint64(total-2) {
+		t.Errorf("RowRateLimited = %d, want >= %d (row-limited envelopes)", m.RowRateLimited, total-2)
+	}
+}
+
+// TestService_ClickHouseRowLimiter_NilIsNoOp confirms an unset row
+// limiter does not shed: every envelope reaches the hot writer.
+func TestService_ClickHouseRowLimiter_NilIsNoOp(t *testing.T) {
+	t.Parallel()
+	js, cfg := startNATS(t)
+	hot := &captureWriter{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	svc, err := telemetry.New(js, cfg, telemetry.Config{Durable: "tlm-nilrowrl"}, hot, nil, logger)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	svc.WithClickHouseRowLimiter(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pub := sngnats.NewPublisher(js, cfg, "publisher")
+	tenant := uuid.New()
+	for i := 0; i < 4; i++ {
+		env := schema.Envelope{
+			SchemaVersion: schema.SchemaVersion, EventID: uuid.New(),
+			TenantID: tenant, DeviceID: uuid.New(),
+			Timestamp:  time.Now().UTC(),
+			EventClass: schema.EventClassFlow, Platform: schema.PlatformLinux,
+			Payload: newPayload(t),
+		}
+		if err := pub.PublishEnvelope(ctx, env, sngnats.PublishOptions{}); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(hot.Snapshot()) >= 4 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	_ = svc.Stop(stopCtx)
+	if hits := len(hot.Snapshot()); hits != 4 {
+		t.Errorf("nil row limiter: hot writer hits = %d, want 4 (no shedding)", hits)
 	}
 }

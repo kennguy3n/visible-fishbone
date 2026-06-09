@@ -27,7 +27,7 @@ func TestMeterCostUSDPerMeter(t *testing.T) {
 		{MeterMalwareScans, 2000, 2.0},                 // 2000 * $0.001
 		{MeterBandwidthProxiedBytes, bytesPerGB, 0.09}, // 1 GB * $0.09
 		{MeterClickHouseRowsWritten, 1_000_000, 0.20},  // 1M rows * $0.20/1M
-		{MeterS3BytesArchived, bytesPerGB, 0.023},      // 1 GB-month * $0.023
+		{MeterS3BytesArchived, bytesPerGB, 0.00099},    // 1 GB-month * $0.00099 (Glacier Deep Archive)
 		{Meter("unknown"), 1000, 0},                    // unknown → 0
 		{MeterLLMTokensUsed, 0, 0},                     // zero → 0
 	}
@@ -257,5 +257,107 @@ func TestReportsPlatformReportPropagatesTierError(t *testing.T) {
 
 	if _, err := reports.PlatformReport(ctx); err == nil {
 		t.Fatal("expected PlatformReport to propagate the tier lookup error")
+	}
+}
+
+// fakeNATSStreamSizer is a test double for the optional per-tenant
+// NATS retained-byte gauge.
+type fakeNATSStreamSizer struct {
+	bytes int64
+	err   error
+}
+
+func (f fakeNATSStreamSizer) TenantStreamBytes(context.Context, uuid.UUID) (int64, error) {
+	return f.bytes, f.err
+}
+
+func TestReportsTenantInfraProjectionDrivers(t *testing.T) {
+	store := newFakeStore()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC) // mid 30-day month
+	svc := mustService(t, store, withClock(fixedClock(now)))
+	enf := mustEnforcer(t, svc, store, fakeTiers{tier: repository.TenantTierStarter})
+	calc := NewCostCalculator(DefaultUnitCosts, withCostClock(fixedClock(now)))
+	reports, err := NewReports(svc, enf, store, fakeTiers{tier: repository.TenantTierStarter}, calc,
+		WithNATSStreamSizer(fakeNATSStreamSizer{bytes: 2 * bytesPerGB}))
+	if err != nil {
+		t.Fatalf("NewReports: %v", err)
+	}
+	ctx := context.Background()
+	tid := uuid.New()
+	// ClickHouse rows are a flow (extrapolated to a month); S3 bytes are
+	// a gauge priced as-is.
+	_ = svc.Record(ctx, tid, MeterClickHouseRowsWritten, 5_000_000)
+	_ = svc.Record(ctx, tid, MeterS3BytesArchived, 50*bytesPerGB)
+
+	proj, err := reports.TenantInfraProjection(ctx, tid)
+	if err != nil {
+		t.Fatalf("TenantInfraProjection: %v", err)
+	}
+	if proj.TenantID != tid {
+		t.Fatalf("tenant id mismatch")
+	}
+	// ClickHouse flow: ~5M rows half a month in projects to ~10M/month
+	// -> ~$2.00 at $0.20/1M.
+	if proj.ClickHouseProjectedRows <= 5_000_000 {
+		t.Fatalf("clickhouse rows should project beyond in-period count: %d", proj.ClickHouseProjectedRows)
+	}
+	if proj.ClickHouseMonthlyUSD < 1.9 || proj.ClickHouseMonthlyUSD > 2.2 {
+		t.Fatalf("clickhouse monthly = %v, want ~2.0", proj.ClickHouseMonthlyUSD)
+	}
+	// NATS gauge: 2 GB * $0.10 = $0.20 (wired sizer).
+	if !approx(proj.NATSMonthlyUSD, 0.20) {
+		t.Fatalf("nats monthly = %v, want 0.20", proj.NATSMonthlyUSD)
+	}
+	// S3 gauge: 50 GB * $0.00099 = $0.0495 -> $0.05 (Glacier Deep Archive).
+	if !approx(proj.S3MonthlyUSD, 0.05) {
+		t.Fatalf("s3 monthly = %v, want 0.05", proj.S3MonthlyUSD)
+	}
+}
+
+func TestReportsTenantInfraProjectionNoSizerReportsZeroNATS(t *testing.T) {
+	store := newFakeStore()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	svc := mustService(t, store, withClock(fixedClock(now)))
+	enf := mustEnforcer(t, svc, store, fakeTiers{tier: repository.TenantTierStarter})
+	calc := NewCostCalculator(DefaultUnitCosts, withCostClock(fixedClock(now)))
+	// No NATSStreamSizer wired: the NATS driver must report 0 rather
+	// than guessing (honest under-reporting; see NATSStreamSizer).
+	reports, err := NewReports(svc, enf, store, fakeTiers{tier: repository.TenantTierStarter}, calc)
+	if err != nil {
+		t.Fatalf("NewReports: %v", err)
+	}
+	ctx := context.Background()
+	tid := uuid.New()
+	_ = svc.Record(ctx, tid, MeterS3BytesArchived, 10*bytesPerGB)
+
+	proj, err := reports.TenantInfraProjection(ctx, tid)
+	if err != nil {
+		t.Fatalf("TenantInfraProjection: %v", err)
+	}
+	if proj.NATSMonthlyUSD != 0 {
+		t.Fatalf("nats monthly = %v, want 0 (no sizer wired)", proj.NATSMonthlyUSD)
+	}
+}
+
+func TestReportsTenantInfraProjectionNilTenant(t *testing.T) {
+	store := newFakeStore()
+	svc := mustService(t, store)
+	enf := mustEnforcer(t, svc, store, fakeTiers{tier: repository.TenantTierStarter})
+	reports, _ := NewReports(svc, enf, store, fakeTiers{tier: repository.TenantTierStarter}, NewCostCalculator(DefaultUnitCosts))
+	if _, err := reports.TenantInfraProjection(context.Background(), uuid.Nil); err == nil {
+		t.Fatal("expected error for nil tenant")
+	}
+}
+
+func TestReportsTenantInfraProjectionPropagatesSizerError(t *testing.T) {
+	store := newFakeStore()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	svc := mustService(t, store, withClock(fixedClock(now)))
+	enf := mustEnforcer(t, svc, store, fakeTiers{tier: repository.TenantTierStarter})
+	calc := NewCostCalculator(DefaultUnitCosts, withCostClock(fixedClock(now)))
+	reports, _ := NewReports(svc, enf, store, fakeTiers{tier: repository.TenantTierStarter}, calc,
+		WithNATSStreamSizer(fakeNATSStreamSizer{err: errors.New("jetstream unavailable")}))
+	if _, err := reports.TenantInfraProjection(context.Background(), uuid.New()); err == nil {
+		t.Fatal("expected TenantInfraProjection to propagate the sizer error")
 	}
 }
