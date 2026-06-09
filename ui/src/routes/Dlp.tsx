@@ -116,14 +116,43 @@ function DlpInner({ tenantId }: { tenantId: string }) {
           </button>
           {classify.data && (
             <div style={{ marginTop: 12 }}>
-              <Badge tone="info">{classify.data.classification}</Badge>{" "}
-              <span className="muted">
-                confidence {(classify.data.confidence * 100).toFixed(0)}%
-              </span>
-              {classify.data.matched_detectors?.length > 0 && (
-                <p className="mono" style={{ marginTop: 8 }}>
-                  {classify.data.matched_detectors.join(", ")}
-                </p>
+              <Badge
+                tone={
+                  classify.data.action === "block"
+                    ? "danger"
+                    : classify.data.matches.length > 0
+                      ? "warn"
+                      : "ok"
+                }
+              >
+                {classify.data.matches.length > 0
+                  ? `${classify.data.action} · ${classify.data.matches.length} match${classify.data.matches.length === 1 ? "" : "es"}`
+                  : "no sensitive data detected"}
+              </Badge>{" "}
+              {classify.data.matches.length > 0 && (
+                <span className="muted">
+                  confidence {(classify.data.confidence * 100).toFixed(0)}%
+                </span>
+              )}
+              {classify.data.matches.length > 0 && (
+                <table className="table" style={{ marginTop: 10 }}>
+                  <thead>
+                    <tr>
+                      <th>Detector</th>
+                      <th>Match</th>
+                      <th>Confidence</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {classify.data.matches.map((m, i) => (
+                      <tr key={`${m.pattern}-${m.offset}-${i}`}>
+                        <td>{m.rule_type}</td>
+                        <td className="mono">{m.snippet || m.pattern}</td>
+                        <td>{(m.confidence * 100).toFixed(0)}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               )}
             </div>
           )}

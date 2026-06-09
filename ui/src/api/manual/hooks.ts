@@ -156,7 +156,7 @@ export function useClassifyText(tenantId: string) {
       sngRequest<DlpClassifyResult>({
         method: "POST",
         url: `${base(tenantId)}/dlp/classify`,
-        data: { text },
+        data: { content: text, content_type: "text/plain" },
       }),
   });
 }

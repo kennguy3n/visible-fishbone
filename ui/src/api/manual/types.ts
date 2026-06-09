@@ -81,10 +81,20 @@ export interface DlpTemplate {
   rules: DlpRule[];
 }
 
-export interface DlpClassifyResult {
-  classification: string;
+export interface DlpMatch {
+  rule_type: string;
+  pattern: string;
+  offset: number;
+  length: number;
+  snippet: string;
   confidence: number;
-  matched_detectors: string[];
+}
+
+export interface DlpClassifyResult {
+  matches: DlpMatch[];
+  policy_ids: string[];
+  action: string;
+  confidence: number;
 }
 
 // --- Compliance ------------------------------------------------------------
