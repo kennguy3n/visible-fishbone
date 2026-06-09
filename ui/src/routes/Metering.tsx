@@ -23,7 +23,6 @@ import { RequireTenant } from "@/components/RequireTenant";
 import { formatNumber, formatCompact, titleCase } from "@/lib/format";
 import { CHART, CHART_TOOLTIP } from "@/lib/chart-theme";
 
-const AXIS = { fill: CHART.axis, fontSize: 11 };
 const TOOLTIP = CHART_TOOLTIP;
 
 export function Metering() {
@@ -33,6 +32,9 @@ export function Metering() {
 }
 
 function MeteringInner({ tenantId }: { tenantId: string }) {
+  // Read axis color at render so it tracks the active theme (CHART.axis is a
+  // live token getter; capturing it at module load would freeze it).
+  const AXIS = { fill: CHART.axis, fontSize: 11 };
   const usage = useUsage(tenantId);
   const history = useUsageHistory(tenantId);
 

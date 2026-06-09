@@ -1,36 +1,48 @@
 :root {
-  /* Neutral graphite canvas with clearly separated elevation layers so the
-     shell, content, and cards read as distinct planes rather than one flat
-     wash of navy. Brand blue + cyan are reserved as accents, not the base. */
-  --bg: #0a0d12;
-  --bg-elev: #10141b;
-  --bg-elev-2: #1a212c;
-  --surface: #141a23;
-  --surface-2: #1b232f;
-  --border: #2b3543;
-  --border-soft: #1e2632;
-  --text: #eef2f8;
-  --text-dim: #9aa7bd;
-  --text-faint: #69748a;
-  --brand: #4f8dff;
-  --brand-strong: #3b76f0;
+  /* ===== Light theme (default) ==========================================
+     Clean, modern, ShieldNet 360 blue (#255FE5) design system on white /
+     light surfaces, matching shieldnet360.com. The dark theme lives in
+     :root[data-theme="dark"] below, and a
+     no-JS prefers-color-scheme fallback mirrors it. src/lib/theme.ts sets
+     data-theme on <html> for the Light / Dark / System choice. */
+  color-scheme: light;
+  --bg: #ffffff;
+  --bg-elev: #f9fafb;
+  --bg-elev-2: #eef3fd;
+  --surface: #ffffff;
+  --surface-2: #eef3fd;
+  --border: #e5e7eb;
+  --border-soft: #eef0f4;
+  --text: #111827;
+  --text-dim: #4b5563;
+  --text-faint: #6b7280;
+  --brand: #255fe5;
+  --brand-strong: #1e4fc4;
   /* Brand RGB channels so translucent brand tints (focus ring, soft fills,
      glows, info accents) compose via rgba() and all track --brand. */
-  --brand-rgb: 79, 141, 255;
-  --accent: #22d3ee;
-  --ok: #34d399;
-  --warn: #fbbf24;
-  --danger: #f87171;
-  --danger-strong: #ef4444;
-  --radius: 11px;
+  --brand-rgb: 37, 95, 229;
+  --accent: #06b6d4;
+  --ok: #059669;
+  --warn: #d97706;
+  --warn-alt: #f59e0b;
+  --danger: #dc2626;
+  --danger-strong: #b91c1c;
+  --chart-violet: #a78bfa;
+  /* Text on the translucent active-nav fill (high-contrast per theme). */
+  --nav-active-text: var(--brand-strong);
+  /* Ambient glow behind the login hero / radial backdrops. */
+  --hero-glow: #e6eefe;
+  --radius: 12px;
   --radius-sm: 8px;
   --radius-lg: 16px;
+  --radius-pill: 9999px;
   /* Horizontal gutter between a nav link and the sidebar edge. Shared by the
      link margin and the active-indicator offset so the accent bar always sits
      flush against the sidebar regardless of this value. */
   --nav-gutter: 10px;
-  --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --shadow: 0 8px 24px rgba(17, 24, 39, 0.12);
+  --font: "Noto Sans", "Inter", system-ui, -apple-system, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 
   /* Richer design system additions (WS5) ------------------------------- */
@@ -41,21 +53,110 @@
   /* Card elevation levels. `flat` sits in the page, `raised` lifts on hover,
      `floating` is for overlays / popovers / toasts. Layered shadows (a tight
      contact shadow + a soft ambient one) read more naturally than a single
-     blurred drop. */
-  --elev-flat: 0 1px 2px rgba(0, 0, 0, 0.28);
-  --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 22px rgba(3, 6, 12, 0.45);
-  --elev-floating: 0 2px 4px rgba(0, 0, 0, 0.3),
-    0 18px 44px rgba(2, 5, 10, 0.6);
+     blurred drop. Light theme uses soft graphite-tinted shadows. */
+  --elev-flat: 0 1px 3px rgba(17, 24, 39, 0.1);
+  --elev-raised: 0 1px 2px rgba(17, 24, 39, 0.06),
+    0 8px 22px rgba(17, 24, 39, 0.1);
+  --elev-floating: 0 2px 4px rgba(17, 24, 39, 0.08),
+    0 18px 44px rgba(17, 24, 39, 0.16);
 
   /* Standard motion + focus tokens so every interactive element shares one
      timing curve and one keyboard focus treatment. */
   --transition: 160ms cubic-bezier(0.4, 0, 0.2, 1);
-  --focus-ring: 0 0 0 3px rgba(var(--brand-rgb), 0.4);
+  --focus-ring: 0 0 0 3px rgba(var(--brand-rgb), 0.3);
 
+  --ok-soft: rgba(5, 150, 105, 0.12);
+  --warn-soft: rgba(217, 119, 6, 0.12);
+  --danger-soft: rgba(220, 38, 38, 0.1);
+  --brand-soft: rgba(var(--brand-rgb), 0.1);
+  /* Skeleton shimmer sweep. Light surfaces are near-white, so the sweep is a
+     dark graphite tint; dark theme overrides this with a white tint. */
+  --shimmer: rgba(17, 24, 39, 0.06);
+}
+
+/* ===== Dark theme ========================================================
+   Graphite canvas with a brighter ShieldNet blue brand for legibility on dark
+   surfaces. Applied when the operator picks Dark, or picks System on a
+   dark-OS desktop (resolved to data-theme="dark" by src/lib/theme.ts). */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0a0d12;
+  --bg-elev: #10141b;
+  --bg-elev-2: #1a212c;
+  --surface: #141a23;
+  --surface-2: #1b232f;
+  --border: #2b3543;
+  --border-soft: #1e2632;
+  --text: #eef2f8;
+  --text-dim: #9aa7bd;
+  --text-faint: #69748a;
+  --brand: #4d83f0;
+  --brand-strong: #255fe5;
+  --brand-rgb: 77, 131, 240;
+  --accent: #22d3ee;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --warn-alt: #f59e0b;
+  --danger: #f87171;
+  --danger-strong: #ef4444;
+  --chart-violet: #a78bfa;
+  --nav-active-text: #ffffff;
+  --hero-glow: #15233f;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --elev-flat: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 22px rgba(3, 6, 12, 0.45);
+  --elev-floating: 0 2px 4px rgba(0, 0, 0, 0.3),
+    0 18px 44px rgba(2, 5, 10, 0.6);
+  --focus-ring: 0 0 0 3px rgba(var(--brand-rgb), 0.4);
   --ok-soft: rgba(52, 211, 153, 0.13);
   --warn-soft: rgba(251, 191, 36, 0.13);
   --danger-soft: rgba(248, 113, 113, 0.13);
   --brand-soft: rgba(var(--brand-rgb), 0.14);
+  --shimmer: rgba(255, 255, 255, 0.06);
+}
+
+/* No-JS / pre-paint fallback: if the theme bootstrap script didn't run and the
+   OS prefers dark, mirror the dark palette. The inline script in index.html
+   normally stamps data-theme before first paint, so this only covers
+   JS-disabled sessions. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --bg: #0a0d12;
+    --bg-elev: #10141b;
+    --bg-elev-2: #1a212c;
+    --surface: #141a23;
+    --surface-2: #1b232f;
+    --border: #2b3543;
+    --border-soft: #1e2632;
+    --text: #eef2f8;
+    --text-dim: #9aa7bd;
+    --text-faint: #69748a;
+    --brand: #4d83f0;
+    --brand-strong: #255fe5;
+    --brand-rgb: 77, 131, 240;
+    --accent: #22d3ee;
+    --ok: #34d399;
+    --warn: #fbbf24;
+    --warn-alt: #f59e0b;
+    --danger: #f87171;
+    --danger-strong: #ef4444;
+    --chart-violet: #a78bfa;
+    --nav-active-text: #ffffff;
+    --hero-glow: #15233f;
+    --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    --elev-flat: 0 1px 2px rgba(0, 0, 0, 0.28);
+    --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.3),
+      0 8px 22px rgba(3, 6, 12, 0.45);
+    --elev-floating: 0 2px 4px rgba(0, 0, 0, 0.3),
+      0 18px 44px rgba(2, 5, 10, 0.6);
+    --focus-ring: 0 0 0 3px rgba(var(--brand-rgb), 0.4);
+    --ok-soft: rgba(52, 211, 153, 0.13);
+    --warn-soft: rgba(251, 191, 36, 0.13);
+    --danger-soft: rgba(248, 113, 113, 0.13);
+    --brand-soft: rgba(var(--brand-rgb), 0.14);
+    --shimmer: rgba(255, 255, 255, 0.06);
+  }
 }
 
 /* Honour users who prefer reduced motion: disable transitions/animations. */
@@ -175,7 +276,7 @@ a:hover {
   text-decoration: none;
 }
 .nav-link.active {
-  color: #fff;
+  color: var(--nav-active-text);
   background: var(--brand-soft);
 }
 .nav-link.active::before {
@@ -382,7 +483,7 @@ a:hover {
   background: linear-gradient(90deg, var(--ok), var(--accent));
 }
 .card--accent.card--accent-warn::before {
-  background: linear-gradient(90deg, var(--warn), #f59e0b);
+  background: linear-gradient(90deg, var(--warn), var(--warn-alt));
 }
 .card--accent.card--accent-danger::before {
   background: linear-gradient(90deg, var(--danger), var(--danger-strong));
@@ -515,19 +616,19 @@ table.data tbody tr:hover {
   flex-shrink: 0;
 }
 .badge--ok {
-  background: rgba(52, 211, 153, 0.13);
+  background: var(--ok-soft);
   color: var(--ok);
-  border-color: rgba(52, 211, 153, 0.3);
+  border-color: var(--ok-soft);
 }
 .badge--warn {
-  background: rgba(251, 191, 36, 0.13);
+  background: var(--warn-soft);
   color: var(--warn);
-  border-color: rgba(251, 191, 36, 0.3);
+  border-color: var(--warn-soft);
 }
 .badge--danger {
-  background: rgba(248, 113, 113, 0.13);
+  background: var(--danger-soft);
   color: var(--danger);
-  border-color: rgba(248, 113, 113, 0.3);
+  border-color: var(--danger-soft);
 }
 .badge--neutral {
   background: rgba(159, 176, 204, 0.12);
@@ -536,7 +637,7 @@ table.data tbody tr:hover {
 }
 .badge--info {
   background: var(--brand-soft);
-  color: #9dc1ff;
+  color: var(--brand);
   border-color: rgba(var(--brand-rgb), 0.3);
 }
 
@@ -571,17 +672,18 @@ table.data tbody tr:hover {
   cursor: not-allowed;
 }
 .btn--primary {
-  background: linear-gradient(135deg, var(--brand), var(--brand-strong));
-  border-color: var(--brand-strong);
+  background: var(--brand);
+  border-color: var(--brand);
   color: #fff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
 .btn--primary:hover {
-  background: linear-gradient(135deg, #5f99ff, var(--brand));
-  border-color: var(--brand);
-  box-shadow: 0 3px 12px rgba(var(--brand-rgb), 0.35),
-    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  background: var(--brand-strong);
+  border-color: var(--brand-strong);
+  box-shadow: 0 3px 12px rgba(var(--brand-rgb), 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 .btn--danger {
   background: transparent;
@@ -806,7 +908,7 @@ label.field > span {
   min-height: 100vh;
   display: grid;
   place-items: center;
-  background: radial-gradient(1200px 600px at 50% -10%, #15233f, var(--bg));
+  background: radial-gradient(1200px 600px at 50% -10%, var(--hero-glow), var(--bg));
 }
 .login__card {
   width: 100%;
@@ -1013,12 +1115,7 @@ label.field > span {
   position: absolute;
   inset: 0;
   transform: translateX(-100%);
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.06),
-    transparent
-  );
+  background: linear-gradient(90deg, transparent, var(--shimmer), transparent);
   animation: skeleton-shimmer 1.3s ease-in-out infinite;
 }
 @keyframes skeleton-shimmer {
@@ -1113,7 +1210,7 @@ label.field > span {
   border-left: 3px solid var(--brand);
 }
 .toast--info .toast__icon {
-  color: #93c5fd;
+  color: var(--brand);
 }
 .toast__body {
   flex: 1;
@@ -1362,7 +1459,7 @@ label.field > span {
   background: linear-gradient(90deg, var(--ok), var(--accent));
 }
 .meter__fill--warn {
-  background: linear-gradient(90deg, var(--warn), #f59e0b);
+  background: linear-gradient(90deg, var(--warn), var(--warn-alt));
 }
 .meter__fill--danger {
   background: linear-gradient(90deg, var(--danger), var(--danger-strong));
@@ -2040,5 +2137,58 @@ label.field > span {
 @media (min-width: 1025px) {
   .icon-btn {
     display: none;
+  }
+}
+
+/* --- Settings: theme toggle -------------------------------------------- */
+
+.theme-toggle {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.theme-toggle__option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: border-color var(--transition), background var(--transition),
+    color var(--transition), box-shadow var(--transition);
+}
+.theme-toggle__option:hover {
+  border-color: var(--brand);
+  color: var(--text);
+}
+.theme-toggle__option b {
+  font-size: 14px;
+  color: var(--text);
+}
+.theme-toggle__option .muted {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.theme-toggle__option.active {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+  box-shadow: var(--focus-ring);
+}
+.theme-toggle__option.active b {
+  color: var(--brand);
+}
+.theme-toggle__option > svg {
+  color: var(--brand);
+}
+
+@media (max-width: 640px) {
+  .theme-toggle {
+    grid-template-columns: 1fr;
   }
 }

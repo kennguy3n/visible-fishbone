@@ -73,4 +73,8 @@ export const NAV: NavGroup[] = [
       { label: "MSP RBAC", to: "/msp/rbac", icon: "flag" },
     ],
   },
+  {
+    label: "Preferences",
+    items: [{ label: "Settings", to: "/settings", icon: "settings" }],
+  },
 ];

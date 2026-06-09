@@ -33,6 +33,7 @@ import { Scim } from "@/routes/Scim";
 import { Idp } from "@/routes/Idp";
 import { AppRegistry } from "@/routes/AppRegistry";
 import { Pops } from "@/routes/Pops";
+import { Settings } from "@/routes/Settings";
 import { MspHierarchy } from "@/routes/msp/MspHierarchy";
 import { MspBulkOps } from "@/routes/msp/MspBulkOps";
 import { MspBranding } from "@/routes/msp/MspBranding";
@@ -90,6 +91,7 @@ const appRoutes = [
   page("/idp", Idp),
   page("/app-registry", AppRegistry),
   page("/pops", Pops),
+  page("/settings", Settings),
   page("/msp", MspHierarchy),
   page("/msp/bulk", MspBulkOps),
   page("/msp/branding", MspBranding),
