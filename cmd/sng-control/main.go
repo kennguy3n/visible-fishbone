@@ -46,9 +46,11 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
+	"github.com/kennguy3n/visible-fishbone/internal/service/browser"
 	"github.com/kennguy3n/visible-fishbone/internal/service/casb"
 	casbconnectors "github.com/kennguy3n/visible-fishbone/internal/service/casb/connectors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/compliance"
+	"github.com/kennguy3n/visible-fishbone/internal/service/dlp"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration/connectors"
@@ -69,6 +71,7 @@ import (
 	telreplay "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/replay"
 	s3writer "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/s3"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenant"
+	"github.com/kennguy3n/visible-fishbone/internal/service/terraform"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot/checks"
 	"github.com/kennguy3n/visible-fishbone/internal/service/webhook"
@@ -677,6 +680,12 @@ func buildRouter(
 	rbiArtifactRepo := store.NewRBIArtifactRepository()
 	opsHealthRepo := store.NewOpsHealthSnapshotRepository()
 	aiSuggestionRepo := store.NewAISuggestionRepository()
+	dlpPolicyRepo := store.NewDLPPolicyRepository()
+	dlpFingerprintRepo := store.NewDLPFingerprintRepository()
+	dlpMatchRepo := store.NewDLPMatchRepository()
+	dlpModelRepo := store.NewDLPModelRepository()
+	browserPolicyRepo := store.NewBrowserPolicyRepository()
+	dataClassificationRepo := store.NewDataClassificationRepository()
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -1358,6 +1367,23 @@ func buildRouter(
 		}
 	}
 
+	// DLP, browser protection, and Terraform/IaC export. These three
+	// features carry full schema, services, handlers, and UI, but
+	// their Postgres repositories and wiring were never assembled, so
+	// their routes never registered (the admin UI surfaced a 404 on
+	// /dlp, /browser, and /terraform). Construct them here so the
+	// route-registration guards in buildRouter see non-nil handlers.
+	dlpSvc := dlp.New(dlpPolicyRepo, dlpFingerprintRepo, dlpMatchRepo, dlpModelRepo, logger)
+	browserSvc := browser.New(browserPolicyRepo, auditRepo, logger)
+	terraformProvider := terraform.New(terraform.Deps{
+		Sites:               siteRepo,
+		Policies:            policyRepo,
+		BrowserPolicies:     browserPolicyRepo,
+		DataClassifications: dataClassificationRepo,
+		Integrations:        integrationConnectorRepo,
+		Audit:               auditRepo,
+	}, logger)
+
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:  cfg,
 		Logger:  logger,
@@ -1417,6 +1443,9 @@ func buildRouter(
 		PoP:               popHandler,
 		Sandbox:           handler.NewSandboxHandler(sandboxSvc),
 		RBI:               handler.NewRBIHandler(rbiSvc),
+		DLP:               handler.NewDLPHandler(dlpSvc),
+		Browser:           handler.NewBrowserHandler(browserSvc),
+		Terraform:         handler.NewTerraformHandler(terraformProvider),
 		APIKeyLookup:      apiKeySvc,
 		// Device kill-switch for stateless mobile session JWTs: a
 		// token bound to a suspended/deleted device is refused by the

@@ -108,6 +108,12 @@ func NewSyncer(svc *Service, client *http.Client) *Syncer {
 	s.RegisterParser("endpoints.office.com", parseMicrosoftEndpoints)
 	s.RegisterParser("www.gstatic.com", parseGoogleIPRanges)
 	s.RegisterParser("ip-ranges.amazonaws.com", parseAWSIPRanges)
+	// Plaintext CIDR-per-line feeds (Zoom, Cloudflare).
+	s.RegisterParser("assets.zoom.us", parsePlaintextCIDRList)
+	s.RegisterParser("www.cloudflare.com", parsePlaintextCIDRList)
+	// JSON feeds with bespoke shapes.
+	s.RegisterParser("api.github.com", parseGitHubMeta)
+	s.RegisterParser("api.fastly.com", parseFastlyIPList)
 	return s
 }
 
@@ -497,6 +503,93 @@ func parseAWSIPRanges(body []byte, _ []string) ([]string, []netip.Prefix, error)
 			continue
 		}
 		ranges = append(ranges, pref)
+	}
+	return nil, ranges, nil
+}
+
+// parsePlaintextCIDRList parses a feed that lists one CIDR (or bare
+// IP) per line — the shape Zoom and Cloudflare publish. Blank lines
+// and `#`/`;` comments are ignored, and any token that is not a
+// valid prefix/address is skipped rather than failing the whole feed
+// (vendors occasionally interleave headers or notes). Bare addresses
+// are normalised to /32 or /128 so downstream callers always see a
+// prefix.
+func parsePlaintextCIDRList(body []byte, _ []string) ([]string, []netip.Prefix, error) {
+	var ranges []netip.Prefix
+	for _, line := range strings.Split(string(body), "\n") {
+		tok := strings.TrimSpace(line)
+		if tok == "" || strings.HasPrefix(tok, "#") || strings.HasPrefix(tok, ";") {
+			continue
+		}
+		if p, err := netip.ParsePrefix(tok); err == nil {
+			ranges = append(ranges, p)
+			continue
+		}
+		if addr, err := netip.ParseAddr(tok); err == nil {
+			ranges = append(ranges, netip.PrefixFrom(addr, addr.BitLen()))
+		}
+	}
+	// Plaintext feeds carry only IPs — domains stay as in the registry.
+	return nil, ranges, nil
+}
+
+// parseGitHubMeta parses https://api.github.com/meta. The document is
+// a flat object whose values are mostly []string CIDR lists keyed by
+// service (hooks, web, api, git, packages, pages, actions, …), plus a
+// few non-CIDR fields (ssh_keys, ssh_key_fingerprints, booleans) and a
+// nested `domains` object. We flatten every string array, keep the
+// tokens that parse as prefixes as IP ranges, and collect the nested
+// `domains` values as domains. New service keys GitHub adds later are
+// picked up automatically.
+func parseGitHubMeta(body []byte, _ []string) ([]string, []netip.Prefix, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, nil, fmt.Errorf("github meta: %w", err)
+	}
+	var (
+		domains []string
+		ranges  []netip.Prefix
+	)
+	for key, val := range raw {
+		// The nested domains object: { "website": [...], ... }.
+		if key == "domains" {
+			var groups map[string][]string
+			if err := json.Unmarshal(val, &groups); err == nil {
+				for _, g := range groups {
+					domains = append(domains, g...)
+				}
+			}
+			continue
+		}
+		var list []string
+		if err := json.Unmarshal(val, &list); err != nil {
+			continue // bool / object / non-array field
+		}
+		for _, tok := range list {
+			if p, err := netip.ParsePrefix(tok); err == nil {
+				ranges = append(ranges, p)
+			}
+		}
+	}
+	return domains, ranges, nil
+}
+
+// fastlyIPList is the shape of https://api.fastly.com/public-ip-list.
+type fastlyIPList struct {
+	Addresses     []string `json:"addresses"`
+	IPv6Addresses []string `json:"ipv6_addresses"`
+}
+
+func parseFastlyIPList(body []byte, _ []string) ([]string, []netip.Prefix, error) {
+	var doc fastlyIPList
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, nil, fmt.Errorf("fastly ip list: %w", err)
+	}
+	var ranges []netip.Prefix
+	for _, raw := range append(doc.Addresses, doc.IPv6Addresses...) {
+		if p, err := netip.ParsePrefix(raw); err == nil {
+			ranges = append(ranges, p)
+		}
 	}
 	return nil, ranges, nil
 }

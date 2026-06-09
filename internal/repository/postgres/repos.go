@@ -219,6 +219,36 @@ func (s *Store) NewIDPConfigRepository() *IDPConfigRepository {
 	return &IDPConfigRepository{s: s}
 }
 
+// NewDLPPolicyRepository binds the Store to repository.DLPPolicyRepository.
+func (s *Store) NewDLPPolicyRepository() *DLPPolicyRepository {
+	return &DLPPolicyRepository{s: s}
+}
+
+// NewDLPFingerprintRepository binds the Store to repository.DLPFingerprintRepository.
+func (s *Store) NewDLPFingerprintRepository() *DLPFingerprintRepository {
+	return &DLPFingerprintRepository{s: s}
+}
+
+// NewDLPMatchRepository binds the Store to repository.DLPMatchRepository.
+func (s *Store) NewDLPMatchRepository() *DLPMatchRepository {
+	return &DLPMatchRepository{s: s}
+}
+
+// NewDLPModelRepository binds the Store to repository.DLPModelRepository.
+func (s *Store) NewDLPModelRepository() *DLPModelRepository {
+	return &DLPModelRepository{s: s}
+}
+
+// NewBrowserPolicyRepository binds the Store to repository.BrowserPolicyRepository.
+func (s *Store) NewBrowserPolicyRepository() *BrowserPolicyRepository {
+	return &BrowserPolicyRepository{s: s}
+}
+
+// NewDataClassificationRepository binds the Store to repository.DataClassificationRepository.
+func (s *Store) NewDataClassificationRepository() *DataClassificationRepository {
+	return &DataClassificationRepository{s: s}
+}
+
 // Compile-time interface compliance asserts. Keeping these in this
 // file means a single grep tells us "did the postgres package
 // implement every interface?" without scanning eight files.
@@ -264,4 +294,10 @@ var (
 	_ repository.IDPConfigRepository             = (*IDPConfigRepository)(nil)
 	_ repository.ResidencyAuditRepository        = (*ResidencyAuditRepository)(nil)
 	_ repository.ThreatIOCRepository             = (*ThreatIOCRepository)(nil)
+	_ repository.DLPPolicyRepository             = (*DLPPolicyRepository)(nil)
+	_ repository.DLPFingerprintRepository        = (*DLPFingerprintRepository)(nil)
+	_ repository.DLPMatchRepository              = (*DLPMatchRepository)(nil)
+	_ repository.DLPModelRepository              = (*DLPModelRepository)(nil)
+	_ repository.BrowserPolicyRepository         = (*BrowserPolicyRepository)(nil)
+	_ repository.DataClassificationRepository    = (*DataClassificationRepository)(nil)
 )

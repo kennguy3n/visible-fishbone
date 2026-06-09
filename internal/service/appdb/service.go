@@ -153,7 +153,7 @@ func (s *Service) CreateApp(ctx context.Context, app repository.AppRegistry) (re
 	if err != nil {
 		return out, err
 	}
-	s.audited(ctx, uuid.Nil, nil, "app_registry.created", &out.ID, mustJSON(map[string]any{
+	s.auditedGlobal(ctx, "app_registry.created", &out.ID, mustJSON(map[string]any{
 		"name":          out.Name,
 		"traffic_class": string(out.TrafficClass),
 	}))
@@ -172,7 +172,7 @@ func (s *Service) UpdateApp(ctx context.Context, app repository.AppRegistry) (re
 	if err != nil {
 		return out, err
 	}
-	s.audited(ctx, uuid.Nil, nil, "app_registry.updated", &out.ID, mustJSON(map[string]any{
+	s.auditedGlobal(ctx, "app_registry.updated", &out.ID, mustJSON(map[string]any{
 		"name":          out.Name,
 		"traffic_class": string(out.TrafficClass),
 	}))
@@ -218,7 +218,7 @@ func (s *Service) SyncUpdateApp(
 	if err != nil {
 		return out, err
 	}
-	s.audited(ctx, uuid.Nil, nil, "app.synced", &out.ID, mustJSON(map[string]any{
+	s.auditedGlobal(ctx, "app.synced", &out.ID, mustJSON(map[string]any{
 		"name":             out.Name,
 		"traffic_class":    string(out.TrafficClass),
 		"metadata_url":     out.MetadataURL,
@@ -237,7 +237,7 @@ func (s *Service) DeleteApp(ctx context.Context, id uuid.UUID) error {
 	if err := s.apps.Delete(ctx, id); err != nil {
 		return err
 	}
-	s.audited(ctx, uuid.Nil, nil, "app_registry.deleted", &id, nil)
+	s.auditedGlobal(ctx, "app_registry.deleted", &id, nil)
 	return nil
 }
 
@@ -933,20 +933,41 @@ func (s *Service) audited(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 		Details:      details,
 	})
 	if err != nil && s.logger != nil {
-		// Audit failures used to be silently dropped, which hid
-		// schema-level issues like the audit_log.tenant_id NOT
-		// NULL constraint rejecting global mutations
-		// (tenantID = uuid.Nil). Surfacing the failure as a
-		// structured warning lets operators see when the audit
-		// trail is incomplete — they should at minimum file a
-		// follow-up to extend the schema for global events.
 		// We deliberately do NOT propagate the error: the caller
 		// has already mutated the underlying row, and failing
 		// the API on audit-only errors would make the side
-		// effects irreversible from the client's perspective.
+		// effects irreversible from the client's perspective. The
+		// failure is surfaced as a structured warning so operators
+		// can see when the audit trail is incomplete.
 		s.logger.WarnContext(ctx, "appdb: audit append failed",
 			"action", action,
 			"tenant_id", tenantID.String(),
+			"error", err,
+		)
+	}
+}
+
+// auditedGlobal records a platform-scoped (tenant-less) audit entry
+// for global app_registry catalog mutations and vendor syncs. These
+// events have no owning tenant, so they go through AppendGlobal
+// (tenant_id IS NULL) rather than Append (which rejects uuid.Nil).
+// Like audited, an append failure is logged but never propagated.
+func (s *Service) auditedGlobal(ctx context.Context, action string, resourceID *uuid.UUID, details json.RawMessage) {
+	if s.audit == nil {
+		return
+	}
+	if details == nil {
+		details = json.RawMessage(`{}`)
+	}
+	_, err := s.audit.AppendGlobal(ctx, repository.AuditEntry{
+		Action:       action,
+		ResourceType: "app_registry",
+		ResourceID:   resourceID,
+		Details:      details,
+	})
+	if err != nil && s.logger != nil {
+		s.logger.WarnContext(ctx, "appdb: global audit append failed",
+			"action", action,
 			"error", err,
 		)
 	}

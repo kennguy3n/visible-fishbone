@@ -27,11 +27,15 @@ type AppRegistryRepository struct{ s *Store }
 // isolates the rows.
 type AppRegistryOverrideRepository struct{ s *Store }
 
+// appRegistryCols is the shared SELECT list for app_registry. ip_ranges
+// is cast to text[] because pgx v5 has no binary decode plan for cidr[]
+// (OID 651) into []string; scanAppRegistry parses the text form back into
+// netip.Prefix.
 const appRegistryCols = `
 id, name, COALESCE(vendor, ''), traffic_class, scope,
 COALESCE(regions, ARRAY[]::text[]),
 domains,
-COALESCE(ip_ranges, ARRAY[]::cidr[]),
+COALESCE(ip_ranges, ARRAY[]::cidr[])::text[],
 COALESCE(cert_pins, ARRAY[]::text[]),
 COALESCE(metadata_url, ''),
 COALESCE(category, ''),

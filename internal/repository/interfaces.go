@@ -350,7 +350,18 @@ type AuditFilter struct {
 // implementations enforce the no-update / no-delete invariant.
 type AuditLogRepository interface {
 	Append(ctx context.Context, tenantID uuid.UUID, e AuditEntry) (AuditEntry, error)
+	// AppendGlobal records a platform-scoped audit row that has no
+	// owning tenant (tenant_id IS NULL) — e.g. global app_registry
+	// catalog mutations and vendor syncs. It runs with system-role
+	// privileges; the row is invisible to tenant-scoped reads and is
+	// only returned by ListGlobal. Append (which rejects uuid.Nil)
+	// remains the path for tenant-scoped events, so an accidental
+	// zero-value tenant is still caught.
+	AppendGlobal(ctx context.Context, e AuditEntry) (AuditEntry, error)
 	List(ctx context.Context, tenantID uuid.UUID, filter AuditFilter, page Page) (PageResult[AuditEntry], error)
+	// ListGlobal returns the platform-scoped (tenant_id IS NULL)
+	// audit rows written by AppendGlobal.
+	ListGlobal(ctx context.Context, filter AuditFilter, page Page) (PageResult[AuditEntry], error)
 }
 
 // --- Webhooks -------------------------------------------------------------
