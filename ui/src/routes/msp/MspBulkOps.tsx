@@ -140,8 +140,8 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
       setFormError("Site name is required.");
       return;
     }
-    if (!Number.isFinite(tokensPerTenant) || tokensPerTenant < 1) {
-      setFormError("Tokens per tenant must be at least 1.");
+    if (!Number.isInteger(tokensPerTenant) || tokensPerTenant < 1) {
+      setFormError("Tokens per tenant must be a whole number of at least 1.");
       return;
     }
     let policyTemplate: Record<string, unknown> | null = null;
@@ -323,6 +323,7 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
           <input
             type="number"
             min={1}
+            step={1}
             value={tokensPerTenant}
             onChange={(e) => setTokensPerTenant(Number(e.target.value))}
           />
