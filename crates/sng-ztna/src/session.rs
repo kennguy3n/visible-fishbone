@@ -225,13 +225,19 @@ impl Shard {
     /// generation the caller evaluated, identified by
     /// [`AccessGrant::granted_at_ms`]. See
     /// [`SessionTracker::remove_if_unchanged`] for the rationale.
-    fn remove_if_unchanged(&mut self, session_id: &str, expected_granted_at_ms: u64) -> GuardedRemoval {
+    fn remove_if_unchanged(
+        &mut self,
+        session_id: &str,
+        expected_granted_at_ms: u64,
+    ) -> GuardedRemoval {
         match self.grants.get(session_id) {
             None => GuardedRemoval::Absent,
             // A different generation is stored: the producer
             // re-recorded the session (step-up re-auth) after the
             // caller cloned its grant. Leave the fresh grant in place.
-            Some(current) if current.granted_at_ms != expected_granted_at_ms => GuardedRemoval::Superseded,
+            Some(current) if current.granted_at_ms != expected_granted_at_ms => {
+                GuardedRemoval::Superseded
+            }
             // Same generation: remove it (reusing `remove` so the
             // device index is pruned identically). The `None` arm is
             // unreachable under the held lock but handled totally.
@@ -352,7 +358,11 @@ impl SessionTracker {
     /// [`GuardedRemoval::Absent`]. Revoking still fails safe — at
     /// worst a regression waits one extra sweep — while a legitimate
     /// re-auth is never collateral.
-    pub fn remove_if_unchanged(&self, session_id: &str, expected_granted_at_ms: u64) -> GuardedRemoval {
+    pub fn remove_if_unchanged(
+        &self,
+        session_id: &str,
+        expected_granted_at_ms: u64,
+    ) -> GuardedRemoval {
         let idx = self.shard_index(session_id);
         self.shards[idx]
             .lock()
@@ -427,7 +437,12 @@ impl SessionTracker {
     /// producer update to the grant's `request` (e.g. a step-up
     /// re-auth) is preserved rather than clobbered by a sweep that
     /// read a now-stale clone.
-    pub fn mark_evaluated(&self, session_id: &str, now_ms: u64, reason: ZtnaDecisionReason) -> bool {
+    pub fn mark_evaluated(
+        &self,
+        session_id: &str,
+        now_ms: u64,
+        reason: ZtnaDecisionReason,
+    ) -> bool {
         let idx = self.shard_index(session_id);
         if let Some(grant) = self.shards[idx].lock().grants.get_mut(session_id) {
             grant.last_eval_ms = now_ms;
