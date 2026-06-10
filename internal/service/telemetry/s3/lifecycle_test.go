@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -125,10 +126,14 @@ func TestBuildLifecycleConfiguration_Custom(t *testing.T) {
 }
 
 func TestBuildLifecycleConfiguration_NegativeDisables(t *testing.T) {
+	// A negative transition and a negative abort each disable their own
+	// action; ExpirationDays keeps one action present so the rule is still
+	// valid (a rule with no actions at all is rejected — see below).
 	lc, err := BuildLifecycleConfiguration(LifecyclePolicyConfig{
 		Prefix:                       "telemetry",
 		TransitionDays:               -1,
 		AbortIncompleteMultipartDays: -1,
+		ExpirationDays:               365,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -139,6 +144,26 @@ func TestBuildLifecycleConfiguration_NegativeDisables(t *testing.T) {
 	}
 	if r.AbortIncompleteMultipartUpload != nil {
 		t.Errorf("abort-incomplete-multipart should be nil when disabled")
+	}
+	if r.Expiration == nil || i32(r.Expiration.Days) != 365 {
+		t.Errorf("expiration should remain the one enabled action, got %+v", r.Expiration)
+	}
+}
+
+func TestBuildLifecycleConfiguration_NoActionsRejected(t *testing.T) {
+	// Disabling every action (negative transition, negative abort, no
+	// expiration) would emit an action-less rule that AWS rejects, so the
+	// builder must reject it locally with a clear error.
+	_, err := BuildLifecycleConfiguration(LifecyclePolicyConfig{
+		Prefix:                       "telemetry",
+		TransitionDays:               -1,
+		AbortIncompleteMultipartDays: -1,
+	})
+	if err == nil {
+		t.Fatal("expected an error for a rule with no actions, got nil")
+	}
+	if !strings.Contains(err.Error(), "no actions") {
+		t.Errorf("error should explain the rule has no actions, got %q", err.Error())
 	}
 }
 

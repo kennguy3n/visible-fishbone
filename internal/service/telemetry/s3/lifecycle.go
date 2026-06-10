@@ -132,11 +132,25 @@ func (c LifecyclePolicyConfig) withDefaults() LifecyclePolicyConfig {
 // or self-contradictory policy before it reaches S3, so a
 // misconfiguration surfaces as a clear local error rather than an
 // opaque API rejection.
+//
+// validate runs on the post-withDefaults config, so the action fields it
+// inspects are the ones BuildLifecycleConfiguration will actually emit.
 func (c LifecyclePolicyConfig) validate() error {
 	if c.ExpirationDays > 0 && c.TransitionDays > 0 && c.ExpirationDays < c.TransitionDays {
 		return fmt.Errorf(
 			"s3 lifecycle: expiration (%d days) must not precede the Deep Archive transition (%d days)",
 			c.ExpirationDays, c.TransitionDays)
+	}
+	// A rule with every action disabled (e.g. a negative transition *and* a
+	// negative abort with no expiration) carries no transition, expiration,
+	// or incomplete-multipart cleanup. AWS rejects such an action-less rule,
+	// so reject it here to surface a clear local error rather than an opaque
+	// API rejection. The main code path never reaches this — abort defaults
+	// to 7 days — but the exported builder must stay robust for direct callers.
+	if c.TransitionDays <= 0 && c.AbortIncompleteMultipartDays <= 0 && c.ExpirationDays <= 0 {
+		return errors.New(
+			"s3 lifecycle: rule has no actions; enable at least one of transition, " +
+				"abort-incomplete-multipart, or expiration")
 	}
 	return nil
 }
