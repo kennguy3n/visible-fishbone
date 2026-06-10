@@ -5,6 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -115,6 +120,73 @@ func TestKnownApps_CoverConnectorCatalog(t *testing.T) {
 		}, nil); err != nil {
 			t.Errorf("create inline rule for %q: %v", app, err)
 		}
+	}
+}
+
+// TestKnownApps_MatchRustDataPlaneCatalog enforces the cross-language
+// invariant the whole catalog rests on: the control-plane set
+// (KnownApps) and the data-plane detector
+// (crates/sng-swg/src/casb.rs AppCatalog::builtin) must list
+// byte-identical app ids. The control plane validates a rule's
+// app_id against KnownApps; the edge resolves that same id to a
+// detection signature. An id present on one side but mistyped or
+// missing on the other compiles cleanly and passes every
+// single-language test, yet produces a bundle that silently never
+// matches at the edge. This guard parses the app_id literals out of
+// AppCatalog::builtin and asserts set equality, so such a drift fails
+// the Go suite instead of shipping.
+func TestKnownApps_MatchRustDataPlaneCatalog(t *testing.T) {
+	t.Parallel()
+
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot resolve test file path")
+	}
+	// internal/service/casb -> repo root.
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", ".."))
+	casbRs := filepath.Join(repoRoot, "crates", "sng-swg", "src", "casb.rs")
+	src, err := os.ReadFile(casbRs)
+	if err != nil {
+		t.Fatalf("read rust catalog %s: %v", casbRs, err)
+	}
+
+	// Scope to AppCatalog::builtin by dropping the test module, so
+	// test-only signatures (e.g. "acme", the "*" wildcard rule) don't
+	// pollute the comparison.
+	text := string(src)
+	if idx := strings.Index(text, "#[cfg(test)]"); idx >= 0 {
+		text = text[:idx]
+	}
+	start := strings.Index(text, "fn builtin()")
+	if start < 0 {
+		t.Fatal("could not locate AppCatalog::builtin in casb.rs")
+	}
+	text = text[start:]
+
+	appIDRe := regexp.MustCompile(`app_id:\s*"([^"]+)"`)
+	rustApps := make(map[string]struct{})
+	for _, m := range appIDRe.FindAllStringSubmatch(text, -1) {
+		rustApps[m[1]] = struct{}{}
+	}
+	if len(rustApps) == 0 {
+		t.Fatal("parsed zero app_id literals from AppCatalog::builtin")
+	}
+
+	goSet := make(map[string]struct{}, len(KnownApps()))
+	for _, a := range KnownApps() {
+		goSet[a] = struct{}{}
+		if _, ok := rustApps[a]; !ok {
+			t.Errorf("app %q is in Go knownApps but missing from Rust AppCatalog::builtin", a)
+		}
+	}
+	for a := range rustApps {
+		if _, ok := goSet[a]; !ok {
+			t.Errorf("app %q is in Rust AppCatalog::builtin but missing from Go knownApps", a)
+		}
+	}
+	if len(rustApps) != len(goSet) {
+		t.Errorf("catalog size mismatch: Rust builtin has %d app ids, Go KnownApps has %d",
+			len(rustApps), len(goSet))
 	}
 }
 
