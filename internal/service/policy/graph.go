@@ -54,6 +54,32 @@ type Graph struct {
 	// significant: the first matching rule wins, and the compiler
 	// preserves order in each per-target bundle.
 	Rules []Rule `json:"rules,omitempty"`
+
+	// Sampling carries this graph's telemetry sampling-rate overrides
+	// (per traffic class). A policy graph is per-tenant, so these are
+	// the tenant's per-class keep probabilities; the control plane
+	// distils them into the telemetry consumer's per-tenant /
+	// per-class SampleRateResolver. Optional: a nil Sampling means the
+	// tenant uses the built-in defaults (trusted classes 1:100,
+	// inspect_full 1:1, everything else adaptive). It is deliberately
+	// NOT part of any compiled enforcement bundle — sampling is a
+	// server-side telemetry-cost control, never shipped to edges.
+	Sampling *Sampling `json:"sampling,omitempty"`
+}
+
+// Sampling is the typed per-traffic-class telemetry sampling
+// configuration carried in a policy graph. Splitting it out (rather
+// than a bare map on Graph) keeps room for future sampling knobs
+// (e.g. per-class retention hints) without another schema change.
+type Sampling struct {
+	// ClassRates maps a traffic class (one of repository.TrafficClass)
+	// to the keep probability applied to that class for this graph's
+	// tenant. Each rate is a fraction in (0,1]: 1.0 keeps every event
+	// (1:1), 0.01 keeps 1-in-100. An absent class uses the built-in
+	// default. Validated by Graph.Validate: keys must be known traffic
+	// classes and rates must lie in (0,1], with inspect_full pinned at
+	// 1:1 (see the floor in validateSampling).
+	ClassRates map[string]float64 `json:"class_rates,omitempty"`
 }
 
 // Verb is a policy verb. The set mirrors ARCHITECTURE.md §3.2.
@@ -320,7 +346,53 @@ func (g Graph) Validate() error {
 			return fmt.Errorf("rules[%d]: %d bytes exceeds the %d-byte per-rule limit: %w", i, len(enc), MaxRuleBytes, repository.ErrInvalidArgument)
 		}
 	}
+	if err := validateSampling(g.Sampling); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validateSampling checks the optional per-class sampling overrides:
+// every key must be a known traffic class and every rate must be a keep
+// probability in (0,1]. inspect_full is additionally floored at 1:1 —
+// it is the full-inspection compliance/audit record (see
+// telemetry.InspectFullSampleRate), so the policy layer refuses to let
+// any tenant configuration sample it away, even though the telemetry
+// override mechanism itself is class-agnostic. A nil Sampling is valid
+// (no overrides).
+func validateSampling(s *Sampling) error {
+	if s == nil {
+		return nil
+	}
+	for class, rate := range s.ClassRates {
+		if !repository.TrafficClass(class).IsValid() {
+			return fmt.Errorf("sampling.class_rates[%q]: unknown traffic class: %w", class, repository.ErrInvalidArgument)
+		}
+		if rate <= 0 || rate > 1 {
+			return fmt.Errorf("sampling.class_rates[%q] = %v: rate must be in (0,1]: %w", class, rate, repository.ErrInvalidArgument)
+		}
+		if repository.TrafficClass(class) == repository.TrafficClassInspectFull && rate < 1.0 {
+			return fmt.Errorf("sampling.class_rates[%q] = %v: inspect_full must stay 1:1 (rate 1.0) — its full-inspection telemetry is the compliance/audit record and may not be sampled: %w", class, rate, repository.ErrInvalidArgument)
+		}
+	}
+	return nil
+}
+
+// SampleClassRates returns a defensive copy of the graph's per-class
+// sampling overrides, or nil when the graph configures none. The
+// control plane calls this per tenant graph to assemble the telemetry
+// consumer's per-tenant / per-class sampling override snapshot, keeping
+// the policy package free of any dependency on the telemetry package
+// (the dependency arrow points outward, from the wiring layer in).
+func (g Graph) SampleClassRates() map[string]float64 {
+	if g.Sampling == nil || len(g.Sampling.ClassRates) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(g.Sampling.ClassRates))
+	for k, v := range g.Sampling.ClassRates {
+		out[k] = v
+	}
+	return out
 }
 
 // CompileTarget returns the rule subset that applies to `target`,

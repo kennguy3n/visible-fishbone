@@ -448,7 +448,7 @@ func run() error {
 	shadowDiscoverer.Start(0)
 	defer shadowDiscoverer.Stop()
 
-	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer)
+	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, rc.SampleRateResolver)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
@@ -651,6 +651,12 @@ type routerComponents struct {
 	// Recompiler is the feed-driven auto-recompile worker. Nil when
 	// THREATINTEL_AUTO_RECOMPILE=false (the prior pull-only behaviour).
 	Recompiler *aisvc.Recompiler
+	// SampleRateResolver carries the policy-graph-driven per-tenant /
+	// per-class telemetry sampling overrides. Built here (where the
+	// policy service that publishes into it is constructed) and handed
+	// to startTelemetry so the telemetry consumer reads the same
+	// instance on its sampling hot path. Never nil.
+	SampleRateResolver *telemetry.MapSampleRateResolver
 }
 
 // buildRouter wires every repository / service / handler against
@@ -968,6 +974,17 @@ func buildRouter(
 		aisvc.WithLeaderCheck(isLeader),
 	)
 
+	// WS12: per-tenant / per-class telemetry sampling overrides sourced
+	// from the policy graph. Constructed here so a single instance is
+	// shared by the policy service (which pushes a tenant's overrides
+	// into it on graph publish / promote via the SamplingObserver hook)
+	// and the telemetry consumer (which reads it on the sampling hot
+	// path via an atomic snapshot load); it is returned through
+	// routerComponents and handed to startTelemetry. Seeded empty: until
+	// a tenant publishes sampling config, the consumer uses its built-in
+	// class defaults (trusted 1:100, inspect_full 1:1, else adaptive).
+	sampleRateResolver := telemetry.NewMapSampleRateResolver(nil)
+
 	policySvc := policy.New(
 		policyRepo,
 		auditRepo,
@@ -977,6 +994,9 @@ func buildRouter(
 		policy.WithInlineCASBCompiler(inlineCASBSvc),
 		policy.WithIOCCompiler(iocCompiler),
 		policy.WithMalwareHashCompiler(iocCompiler),
+		// WS12: push each tenant's published per-class sampling rates
+		// into the telemetry consumer's resolver on publish / promote.
+		policy.WithSamplingObserver(samplingObserver{resolver: sampleRateResolver}),
 	)
 
 	// Feed-driven auto-recompile: turn the FeedManager's frequent
@@ -1523,18 +1543,19 @@ func buildRouter(
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
 	return routerComponents{
-		Router:            router,
-		WebhookWorker:     webhookWorker,
-		IntegrationWorker: integrationWorker,
-		AppRegistry:       appRegHandler,
-		AppSyncer:         appSyncer,
-		PolicySim:         policySimHandler,
-		AI:                aiSvc,
-		Metering:          meteringSvc,
-		PoP:               popSvc,
-		EvidenceScheduler: evidenceScheduler,
-		FeedManager:       feedMgr,
-		Recompiler:        recompiler,
+		Router:             router,
+		WebhookWorker:      webhookWorker,
+		IntegrationWorker:  integrationWorker,
+		AppRegistry:        appRegHandler,
+		AppSyncer:          appSyncer,
+		PolicySim:          policySimHandler,
+		AI:                 aiSvc,
+		Metering:           meteringSvc,
+		PoP:                popSvc,
+		EvidenceScheduler:  evidenceScheduler,
+		FeedManager:        feedMgr,
+		Recompiler:         recompiler,
+		SampleRateResolver: sampleRateResolver,
 	}, nil
 }
 
@@ -1974,6 +1995,21 @@ func loadPolicyKeyWrapMaster(cfg *config.Config) ([]byte, error) {
 	return nil, nil
 }
 
+// samplingObserver adapts the telemetry sample-rate resolver to the
+// policy.SamplingObserver hook: when a tenant's graph is published or
+// promoted, the policy service hands us that tenant's validated
+// per-class rates and we install them into the resolver the telemetry
+// consumer reads on its sampling hot path. The dependency arrow points
+// from this wiring layer into both packages; neither service package
+// imports the other.
+type samplingObserver struct {
+	resolver *telemetry.MapSampleRateResolver
+}
+
+func (o samplingObserver) ObserveSampling(tenantID uuid.UUID, classRates map[string]float64) {
+	o.resolver.SetTenant(tenantID, classRates)
+}
+
 // startTelemetry builds the hot-path + cold-path writers and the
 // consumer service, starts the consumer, and returns a shutdown
 // closure that drains the writers + stops the consumer.
@@ -2003,6 +2039,7 @@ func startTelemetry(
 	js jetstream.JetStream,
 	pub *sngnats.Publisher,
 	shadowObserver telemetry.ShadowITObserver,
+	sampleResolver *telemetry.MapSampleRateResolver,
 ) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), error) {
 	var hot telemetry.HotWriter
 	var cold telemetry.ColdWriter
@@ -2015,6 +2052,12 @@ func startTelemetry(
 	// the rest of main is oblivious to the sharding mode.
 	var chStats handler.TelemetryClassQuerier
 	var chReaderFactory func() (policy.TelemetrySource, error)
+	// tunables collects the ClickHouse writers the WS12 batch
+	// auto-tuner drives: one entry per shard in shard-aware mode (each
+	// shard is an independent failure domain tuned against its own row
+	// rate), or the single writer otherwise. Empty when no hot tier is
+	// configured, in which case no tuner (and no goroutine) is created.
+	var tunables []telemetry.BatchTunable
 
 	if len(cfg.TelemetryAnalytics.ClickHouseEndpoints) > 0 {
 		chCfg := chwriter.Config{
@@ -2043,6 +2086,9 @@ func startTelemetry(
 			hotStop = sw.Stop
 			chStats = sw
 			chReaderFactory = func() (policy.TelemetrySource, error) { return sw.NewReader() }
+			for _, shard := range sw.Shards() {
+				tunables = append(tunables, shard)
+			}
 			logger.Info("telemetry: clickhouse hot-path writer enabled (shard-aware)",
 				slog.Int("shards", sw.ShardCount()),
 				slog.String("endpoints", strings.Join(chCfg.Endpoints, ",")),
@@ -2063,6 +2109,7 @@ func startTelemetry(
 			hotStop = w.Stop
 			chStats = w
 			chReaderFactory = func() (policy.TelemetrySource, error) { return w.NewReader() }
+			tunables = append(tunables, w)
 			logger.Info("telemetry: clickhouse hot-path writer enabled",
 				slog.String("endpoints", strings.Join(chCfg.Endpoints, ",")),
 				slog.String("database", chCfg.Database),
@@ -2130,15 +2177,29 @@ func startTelemetry(
 	//     entirely via CLICKHOUSE_ROW_LIMIT_ENABLED=false — a nil
 	//     limiter is a no-op, so a deployment that bounds write cost
 	//     another way carries no per-tenant ceiling.
-	svc.WithSampler(telemetry.NewAdaptiveSampler(telemetry.SamplerConfig{}))
+	svc.WithSampler(telemetry.NewAdaptiveSampler(telemetry.SamplerConfig{
+		// WS12: consult the policy-graph-published per-tenant / per-class
+		// sampling overrides ahead of the built-in class defaults and the
+		// adaptive sampler. Empty until a tenant publishes sampling config.
+		RateResolver: sampleResolver,
+	}))
 	if cfg.TelemetryAnalytics.ClickHouseRowLimitEnabled {
-		rowLimit := metering.RowLimitFromConfig(
-			cfg.TelemetryAnalytics.ClickHouseRowLimitPerSec,
-			cfg.TelemetryAnalytics.ClickHouseRowLimitBurst,
-		)
-		svc.WithClickHouseRowLimiter(
-			metering.NewClickHouseRowLimiter(metering.StaticRowLimitResolver{Limit: rowLimit}),
-		)
+		// WS12: prefer the self-calibrating per-tenant limiter (cap tracks
+		// 2× each tenant's trailing-median row rate) when enabled — the
+		// right default for a large, heterogeneous tenant base. Otherwise
+		// keep the static budget (one explicit, audited number).
+		if cfg.TelemetryAnalytics.ClickHouseRowLimitAdaptive {
+			svc.WithClickHouseRowLimiter(metering.NewAdaptiveRowLimiter(metering.AdaptiveRowLimitConfig{}))
+			logger.Info("telemetry: clickhouse row-write limiter enabled (adaptive, 2× trailing-median per tenant)")
+		} else {
+			rowLimit := metering.RowLimitFromConfig(
+				cfg.TelemetryAnalytics.ClickHouseRowLimitPerSec,
+				cfg.TelemetryAnalytics.ClickHouseRowLimitBurst,
+			)
+			svc.WithClickHouseRowLimiter(
+				metering.NewClickHouseRowLimiter(metering.StaticRowLimitResolver{Limit: rowLimit}),
+			)
+		}
 	}
 	if shadowObserver != nil {
 		svc.WithShadowITObserver(shadowObserver)
@@ -2154,8 +2215,29 @@ func startTelemetry(
 	}
 	logger.Info("telemetry: consumer started")
 
+	// WS12: launch the ClickHouse batch-size auto-tuner once the writers
+	// and consumer are live. It holds each shard's insert frequency near
+	// the target (~2/sec) so the hot path does not trip ClickHouse's "too
+	// many parts" failure at 5000 tenants (docs/scaling.md). One
+	// background goroutine for the whole fleet; nil (and started never)
+	// when no hot tier is configured or the feature is disabled.
+	var autoTuner *telemetry.BatchAutoTuner
+	if cfg.TelemetryAnalytics.ClickHouseAutoTuneEnabled && len(tunables) > 0 {
+		autoTuner = telemetry.NewBatchAutoTuner(telemetry.AutoTuneConfig{
+			TargetInsertsPerSec: cfg.TelemetryAnalytics.ClickHouseAutoTuneTargetInsertsPerSec,
+			Logger:              logger,
+		}, tunables...)
+		autoTuner.Start(ctx)
+		logger.Info("telemetry: clickhouse batch auto-tuner enabled",
+			slog.Int("writers", len(tunables)))
+	}
+
 	shutdown := func(sCtx context.Context) error {
 		var firstErr error
+		// Stop the tuner before the writers so it issues no further
+		// SetBatchSize calls during writer drain. A nil tuner Stop is a
+		// no-op.
+		autoTuner.Stop()
 		if err := svc.Stop(sCtx); err != nil && firstErr == nil {
 			firstErr = err
 		}

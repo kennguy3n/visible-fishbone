@@ -174,11 +174,11 @@ func TestDecideClassNonTrustedFallsThroughToAdaptive(t *testing.T) {
 	ctx := context.Background()
 	tid := uuid.New()
 
-	// inspect_full must use adaptive sampling: under budget it keeps
-	// everything, and unlike a trusted class it DOES record arrivals.
-	keep, sampleRate := s.DecideClass(ctx, tid, newRandUUID(r), "inspect_full")
+	// inspect_lite must use adaptive sampling: under budget it keeps
+	// everything, and unlike a fixed-rate class it DOES record arrivals.
+	keep, sampleRate := s.DecideClass(ctx, tid, newRandUUID(r), "inspect_lite")
 	if !keep || sampleRate != 1.0 {
-		t.Fatalf("inspect_full under budget: keep=%v rate=%v, want true/1.0", keep, sampleRate)
+		t.Fatalf("inspect_lite under budget: keep=%v rate=%v, want true/1.0", keep, sampleRate)
 	}
 	if snap := s.Snapshot(); len(snap) != 1 {
 		t.Fatalf("adaptive class must create per-tenant state, got %d entries", len(snap))
@@ -186,6 +186,37 @@ func TestDecideClassNonTrustedFallsThroughToAdaptive(t *testing.T) {
 	// An empty class (unknown) also falls through to adaptive.
 	if _, ok := fixedClassSampleRate(""); ok {
 		t.Fatal("empty traffic class must not be treated as fixed-rate")
+	}
+}
+
+func TestDecideClassInspectFullPinnedFullFidelity(t *testing.T) {
+	clk := newTestClock()
+	r := rand.New(rand.NewSource(13))
+	// Budget of 1/s with a flood of arrivals: an adaptive class would be
+	// sampled hard here. inspect_full must stay 1:1 regardless.
+	s := NewAdaptiveSampler(SamplerConfig{
+		Resolver: budgetResolver(1),
+		Window:   time.Second,
+		NowFunc:  clk.now,
+	})
+	ctx := context.Background()
+	tid := uuid.New()
+
+	for i := 0; i < 100; i++ {
+		keep, sampleRate := s.DecideClass(ctx, tid, newRandUUID(r), "inspect_full")
+		if !keep || sampleRate != InspectFullSampleRate {
+			t.Fatalf("inspect_full event %d: keep=%v rate=%v, want true/%v", i, keep, sampleRate, InspectFullSampleRate)
+		}
+		clk.advance(time.Second) // roll windows to prove adaptive never engages
+	}
+	// inspect_full is a fixed-rate class: it must NOT create per-tenant
+	// adaptive state (no arrivals recorded).
+	if snap := s.Snapshot(); len(snap) != 0 {
+		t.Fatalf("inspect_full must not create adaptive state, got %d entries", len(snap))
+	}
+	// And the redelivery rate-recovery path reports the same 1:1 rate.
+	if sr := s.SampleRateForClass(tid, "inspect_full"); sr != InspectFullSampleRate {
+		t.Fatalf("SampleRateForClass(inspect_full) = %v, want %v", sr, InspectFullSampleRate)
 	}
 }
 
@@ -413,4 +444,200 @@ func TestAdaptiveSamplerForPartitionIndependent(t *testing.T) {
 	if parent.resolver != child.resolver {
 		t.Error("ForPartition must share the budget resolver")
 	}
+}
+
+func TestSampleRateOverrideTakesPrecedence(t *testing.T) {
+	tid := uuid.New()
+	other := uuid.New()
+	resolver := NewMapSampleRateResolver(&SampleRateOverrides{
+		// Per-class default: dial inspect_lite down to 1:10 fleet-wide.
+		ByClass: map[string]float64{"inspect_lite": 0.1},
+		// Per-tenant: this tenant gets trusted_direct at 1:2 (overriding
+		// the 1:100 built-in). The inspect_full entry attempts to sample
+		// it to 1:4, but inspect_full carries a mandatory 1:1 compliance
+		// floor (mandatorySampleRateFloor) that the sampler enforces, so
+		// the override is raised back to 1.0 rather than honoured.
+		ByTenant: map[uuid.UUID]map[string]float64{
+			tid: {"trusted_direct": 0.5, "inspect_full": 0.25},
+		},
+	})
+	s := NewAdaptiveSampler(SamplerConfig{
+		Resolver:     budgetResolver(1000),
+		Window:       time.Second,
+		RateResolver: resolver,
+		NowFunc:      newTestClock().now,
+	})
+
+	// Per-tenant override beats the built-in trusted rate (0.01).
+	if sr := s.SampleRateForClass(tid, "trusted_direct"); sr != 0.5 {
+		t.Fatalf("trusted_direct override = %v, want 0.5", sr)
+	}
+	// A sub-1.0 inspect_full override is floored back to the 1:1 pin:
+	// the compliance guarantee holds even against a resolver that asks
+	// to shed it.
+	if sr := s.SampleRateForClass(tid, "inspect_full"); sr != InspectFullSampleRate {
+		t.Fatalf("inspect_full override = %v, want %v (mandatory floor)", sr, InspectFullSampleRate)
+	}
+	// Per-class default applies to any tenant lacking a per-tenant entry.
+	if sr := s.SampleRateForClass(other, "inspect_lite"); sr != 0.1 {
+		t.Fatalf("inspect_lite class override = %v, want 0.1", sr)
+	}
+	// A tenant/class with no override falls back to the built-in fixed
+	// rate (trusted_direct → 0.01 for the un-overridden tenant).
+	if sr := s.SampleRateForClass(other, "trusted_direct"); sr != TrustedClassSampleRate {
+		t.Fatalf("un-overridden trusted_direct = %v, want %v", sr, TrustedClassSampleRate)
+	}
+}
+
+// TestInspectFullOverrideCannotShed is the compliance backstop: even a
+// resolver that explicitly configures inspect_full far below 1:1 must
+// not cause a single inspect_full event to be dropped, because the
+// sampler floors the class at its mandatory 1:1 retention rate.
+func TestInspectFullOverrideCannotShed(t *testing.T) {
+	tid := uuid.New()
+	resolver := NewMapSampleRateResolver(&SampleRateOverrides{
+		ByTenant: map[uuid.UUID]map[string]float64{
+			tid: {"inspect_full": 0.001},
+		},
+	})
+	s := NewAdaptiveSampler(SamplerConfig{
+		Resolver:     budgetResolver(1),
+		Window:       time.Second,
+		RateResolver: resolver,
+		NowFunc:      newTestClock().now,
+	})
+	ctx := context.Background()
+	r := rand.New(rand.NewSource(7))
+	for i := 0; i < 2000; i++ {
+		keep, sampleRate := s.DecideClass(ctx, tid, newRandUUID(r), "inspect_full")
+		if !keep || sampleRate != InspectFullSampleRate {
+			t.Fatalf("inspect_full event %d shed by override: keep=%v rate=%v, want true/%v",
+				i, keep, sampleRate, InspectFullSampleRate)
+		}
+	}
+}
+
+func TestSampleRateOverrideDeterministicAndNoAdaptiveState(t *testing.T) {
+	tid := uuid.New()
+	eid := uuid.New()
+	resolver := NewMapSampleRateResolver(&SampleRateOverrides{
+		ByClass: map[string]float64{"inspect_lite": 0.3},
+	})
+	s := NewAdaptiveSampler(SamplerConfig{
+		Resolver:     budgetResolver(1000),
+		Window:       time.Second,
+		RateResolver: resolver,
+		NowFunc:      newTestClock().now,
+	})
+	ctx := context.Background()
+
+	k1, r1 := s.DecideClass(ctx, tid, eid, "inspect_lite")
+	k2, r2 := s.DecideClass(ctx, tid, eid, "inspect_lite")
+	if k1 != k2 || r1 != r2 || r1 != 0.3 {
+		t.Fatalf("override verdict not deterministic/at-rate: (%v,%v) vs (%v,%v)", k1, r1, k2, r2)
+	}
+	// Overridden events bypass adaptive state entirely.
+	if snap := s.Snapshot(); len(snap) != 0 {
+		t.Fatalf("override path must not create adaptive state, got %d", len(snap))
+	}
+}
+
+func TestSampleRateOverrideClampAndReplace(t *testing.T) {
+	tid := uuid.New()
+	resolver := NewMapSampleRateResolver(nil)
+	s := NewAdaptiveSampler(SamplerConfig{
+		Resolver:     budgetResolver(1000),
+		Window:       time.Second,
+		RateResolver: resolver,
+		NowFunc:      newTestClock().now,
+	})
+
+	// Nil snapshot: no override, trusted_direct keeps its built-in rate.
+	if sr := s.SampleRateForClass(tid, "trusted_direct"); sr != TrustedClassSampleRate {
+		t.Fatalf("nil overrides should defer to built-in, got %v", sr)
+	}
+	// A non-positive configured rate is rejected by the clamp (would
+	// drop everything / infinite de-bias weight) and falls back.
+	resolver.Replace(&SampleRateOverrides{
+		ByClass: map[string]float64{"inspect_lite": 0, "trusted_direct": 2.0},
+	})
+	if _, ok := s.overrideRate(context.Background(), tid, "inspect_lite"); ok {
+		t.Fatal("non-positive override rate must be rejected")
+	}
+	// A rate > 1 clamps to 1.0 (keep everything).
+	if sr := s.SampleRateForClass(tid, "trusted_direct"); sr != 1.0 {
+		t.Fatalf("rate>1 should clamp to 1.0, got %v", sr)
+	}
+}
+
+func TestMapSampleRateResolverNilSafe(t *testing.T) {
+	var r *MapSampleRateResolver
+	if _, ok := r.ResolveSampleRate(context.Background(), uuid.New(), "inspect_lite"); ok {
+		t.Fatal("nil resolver should report no override")
+	}
+	r.Replace(&SampleRateOverrides{}) // must not panic
+}
+
+func TestMapSampleRateResolverSetTenant(t *testing.T) {
+	t.Parallel()
+	r := NewMapSampleRateResolver(nil)
+	tenantA := uuid.New()
+	tenantB := uuid.New()
+
+	r.SetTenant(tenantA, map[string]float64{"trusted_direct": 0.5})
+	r.SetTenant(tenantB, map[string]float64{"trusted_direct": 0.25})
+
+	if got, ok := r.ResolveSampleRate(context.Background(), tenantA, "trusted_direct"); !ok || got != 0.5 {
+		t.Fatalf("tenantA: got (%v,%v), want (0.5,true)", got, ok)
+	}
+	// Updating tenantB must not perturb tenantA.
+	if got, ok := r.ResolveSampleRate(context.Background(), tenantB, "trusted_direct"); !ok || got != 0.25 {
+		t.Fatalf("tenantB: got (%v,%v), want (0.25,true)", got, ok)
+	}
+
+	// >1 is clamped to 1.0; <=0 entries are dropped.
+	r.SetTenant(tenantA, map[string]float64{"trusted_direct": 2.0, "inspect_lite": -1})
+	if got, ok := r.ResolveSampleRate(context.Background(), tenantA, "trusted_direct"); !ok || got != 1.0 {
+		t.Fatalf("clamp: got (%v,%v), want (1.0,true)", got, ok)
+	}
+	if _, ok := r.ResolveSampleRate(context.Background(), tenantA, "inspect_lite"); ok {
+		t.Fatal("non-positive rate should have been dropped")
+	}
+
+	// Empty input removes the tenant's row (revert to defaults), leaving others intact.
+	r.SetTenant(tenantA, nil)
+	if _, ok := r.ResolveSampleRate(context.Background(), tenantA, "trusted_direct"); ok {
+		t.Fatal("tenantA override should have been removed")
+	}
+	if got, ok := r.ResolveSampleRate(context.Background(), tenantB, "trusted_direct"); !ok || got != 0.25 {
+		t.Fatalf("tenantB after tenantA removal: got (%v,%v), want (0.25,true)", got, ok)
+	}
+}
+
+func TestMapSampleRateResolverSetTenantPreservesClassDefaults(t *testing.T) {
+	t.Parallel()
+	r := NewMapSampleRateResolver(&SampleRateOverrides{
+		ByClass: map[string]float64{"trusted_direct": 0.1},
+	})
+	tenant := uuid.New()
+	r.SetTenant(tenant, map[string]float64{"inspect_lite": 0.5})
+
+	// Per-class default still applies to an unrelated tenant.
+	if got, ok := r.ResolveSampleRate(context.Background(), uuid.New(), "trusted_direct"); !ok || got != 0.1 {
+		t.Fatalf("class default: got (%v,%v), want (0.1,true)", got, ok)
+	}
+	// And to the updated tenant, for a class it did not override.
+	if got, ok := r.ResolveSampleRate(context.Background(), tenant, "trusted_direct"); !ok || got != 0.1 {
+		t.Fatalf("class default for updated tenant: got (%v,%v), want (0.1,true)", got, ok)
+	}
+	// The tenant's own override wins for its class.
+	if got, ok := r.ResolveSampleRate(context.Background(), tenant, "inspect_lite"); !ok || got != 0.5 {
+		t.Fatalf("tenant override: got (%v,%v), want (0.5,true)", got, ok)
+	}
+}
+
+func TestMapSampleRateResolverSetTenantNilSafe(t *testing.T) {
+	t.Parallel()
+	var r *MapSampleRateResolver
+	r.SetTenant(uuid.New(), map[string]float64{"trusted_direct": 0.5}) // must not panic
 }

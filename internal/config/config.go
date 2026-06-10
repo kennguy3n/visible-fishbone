@@ -1202,6 +1202,34 @@ type TelemetryAnalytics struct {
 	ClickHouseRowLimitPerSec float64
 	ClickHouseRowLimitBurst  int
 
+	// ClickHouseRowLimitAdaptive switches the per-tenant ClickHouse
+	// row-write limiter from the static budget (above) to the WS12
+	// self-calibrating limiter, whose per-tenant cap tracks 2× the
+	// tenant's own trailing-median row rate (env
+	// CLICKHOUSE_ROW_LIMIT_ADAPTIVE). Defaults false so existing
+	// deployments keep the static cap; only consulted when
+	// ClickHouseRowLimitEnabled is true. The adaptive limiter is the
+	// right default for a large, heterogeneous tenant base (a single
+	// static cap is simultaneously too loose for small tenants and too
+	// tight for large ones), while the static cap stays available for
+	// deployments that want one explicit, audited number.
+	ClickHouseRowLimitAdaptive bool
+
+	// ClickHouseAutoTuneEnabled toggles the WS12 batch-size auto-tuner
+	// on the ClickHouse hot path (env CLICKHOUSE_AUTOTUNE_ENABLED).
+	// Defaults true: the tuner measures each shard's insert rate and
+	// adjusts its batch size to hold inserts/sec at the target,
+	// avoiding the "too many parts" failure mode the static 1024-row
+	// batch hits at 5000 tenants (see docs/scaling.md). Set false to
+	// pin the batch size at ClickHouseBatchSize.
+	ClickHouseAutoTuneEnabled bool
+	// ClickHouseAutoTuneTargetInsertsPerSec is the per-shard inserts/sec
+	// the auto-tuner drives toward (env
+	// CLICKHOUSE_AUTOTUNE_TARGET_INSERTS_PER_SEC). <= 0 ⇒ use the
+	// telemetry package default (~2/sec), so the default lives in one
+	// place. The healthy per-shard ceiling is ~1–2 inserts/sec.
+	ClickHouseAutoTuneTargetInsertsPerSec float64
+
 	// S3: bucket name. Empty disables the cold-path sink.
 	S3Bucket string
 	// S3Prefix is the top-level key prefix under which archive
@@ -1605,6 +1633,10 @@ func Load() (Config, error) {
 		// 0 ⇒ use the metering package default (2000). Parsed strictly so
 		// a typo can't silently revert a tightened cost ceiling.
 		{"CLICKHOUSE_ROW_LIMIT_PER_SEC", 0, &cfg.TelemetryAnalytics.ClickHouseRowLimitPerSec},
+		// WS12 batch auto-tune target, per-shard inserts/sec. 0 ⇒ use the
+		// telemetry package default (~2/sec). Parsed strictly so a typo
+		// can't silently revert the "too many parts" health target.
+		{"CLICKHOUSE_AUTOTUNE_TARGET_INSERTS_PER_SEC", 0, &cfg.TelemetryAnalytics.ClickHouseAutoTuneTargetInsertsPerSec},
 	}
 	// Boolean fields parsed strictly. Both entries below toggle
 	// security- or correctness-adjacent behaviour:
@@ -1633,6 +1665,8 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_ENSURE_SCHEMA", true, &cfg.TelemetryAnalytics.ClickHouseEnsureSchema},
 		{"CLICKHOUSE_SHARDING", false, &cfg.TelemetryAnalytics.ClickHouseSharding},
 		{"CLICKHOUSE_ROW_LIMIT_ENABLED", true, &cfg.TelemetryAnalytics.ClickHouseRowLimitEnabled},
+		{"CLICKHOUSE_ROW_LIMIT_ADAPTIVE", false, &cfg.TelemetryAnalytics.ClickHouseRowLimitAdaptive},
+		{"CLICKHOUSE_AUTOTUNE_ENABLED", true, &cfg.TelemetryAnalytics.ClickHouseAutoTuneEnabled},
 		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
 		{"MOBILE_AUTH_AUTO_PROVISION_USERS", true, &cfg.MobileAuth.AutoProvisionUsers},
 		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},
