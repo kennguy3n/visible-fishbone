@@ -25,15 +25,19 @@ export function MspBulkOps() {
         <MspPicker value={mspId} onChange={setMspId} />
       </Card>
       {mspId && (
+        // Key every operation on the MSP id so switching cohorts remounts them
+        // and clears prior results — otherwise one MSP's outcomes would linger
+        // on screen against another, which is especially misleading for the
+        // rich per-tenant onboarding table.
         <>
-          <BulkOnboarding mspId={mspId} />
+          <BulkOnboarding key={mspId} mspId={mspId} />
           <h3 style={{ margin: "24px 0 8px", fontSize: 14 }}>
             Individual operations
           </h3>
           <div className="grid grid--2">
-            <BulkProvision mspId={mspId} />
-            <BulkClaimTokens mspId={mspId} />
-            <BulkPolicyTemplate mspId={mspId} />
+            <BulkProvision key={mspId} mspId={mspId} />
+            <BulkClaimTokens key={mspId} mspId={mspId} />
+            <BulkPolicyTemplate key={mspId} mspId={mspId} />
           </div>
         </>
       )}

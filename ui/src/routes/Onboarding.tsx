@@ -202,7 +202,7 @@ function StepTenant({ onNext }: { onNext: () => void }) {
         </p>
       )}
 
-      {(creating || tenants.length === 0) && (
+      {!isLoading && (creating || tenants.length === 0) && (
         <NewTenantForm
           busy={create.isPending}
           onCancel={tenants.length > 0 ? () => setCreating(false) : undefined}
@@ -481,6 +481,10 @@ function StepIdentity({
   );
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Bumped by the Retry button to re-run verification without leaving the step;
+  // a transient network/issuer blip shouldn't force the operator to navigate
+  // away and back.
+  const [reloadKey, setReloadKey] = useState(0);
 
   // SSO is wired in at deploy time via runtime config (the static console image
   // reads window.__SNG_CONFIG__), not through a per-tenant API — so this step
@@ -506,7 +510,7 @@ function StepIdentity({
     return () => {
       cancelled = true;
     };
-  }, [cfg.authMode, cfg.oidcIssuer]);
+  }, [cfg.authMode, cfg.oidcIssuer, reloadKey]);
 
   return (
     <Card
@@ -542,10 +546,19 @@ function StepIdentity({
                 <span className="muted">Verifying issuer…</span>
               </div>
             ) : error ? (
-              <p className="error-text">
-                Could not reach the issuer's discovery document: {error}. Check
-                the issuer URL and that it's reachable from the browser.
-              </p>
+              <>
+                <p className="error-text">
+                  Could not reach the issuer's discovery document: {error}.
+                  Check the issuer URL and that it's reachable from the browser.
+                </p>
+                <button
+                  className="btn"
+                  style={{ marginTop: 8 }}
+                  onClick={() => setReloadKey((k) => k + 1)}
+                >
+                  Retry verification
+                </button>
+              </>
             ) : discovery ? (
               <>
                 <p style={{ color: "var(--ok)", fontSize: 13 }}>
