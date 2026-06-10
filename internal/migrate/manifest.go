@@ -142,15 +142,15 @@ func CheckVersionSequence(fsys fs.FS) error {
 
 	// Contiguity: the sorted version numbers must be exactly 1..N.
 	// The first version must be 1, and each subsequent version must
-	// be exactly one greater than its predecessor.
+	// be exactly one greater than its predecessor. `versions` holds
+	// the distinct version numbers (map keys), so a duplicate version
+	// appears here only once — it is reported above as a name
+	// collision, not as a gap.
 	if versions[0] != 1 {
 		problems = append(problems, fmt.Sprintf("migration sequence must start at 001, but the lowest version is %03d", versions[0]))
 	}
 	for i := 1; i < len(versions); i++ {
 		prev, cur := versions[i-1], versions[i]
-		if cur == prev {
-			continue // duplicate already reported above
-		}
 		if cur != prev+1 {
 			problems = append(problems, fmt.Sprintf("gap in migration sequence: %03d follows %03d (expected %03d)", cur, prev, prev+1))
 		}
