@@ -59,9 +59,24 @@ use crate::policy::ZtnaDecisionReason;
 use crate::service::ZtnaService;
 use crate::session::{AccessGrant, SessionTracker};
 
-/// A monotonic millisecond clock. Supplied by the caller so the
-/// loop measures freshness against the same time base the producer
-/// stamps on [`AccessRequest`](crate::request::AccessRequest)s.
+/// A millisecond clock supplying "now" to the re-eval loop.
+///
+/// The one hard contract is *shared time base*: this clock must
+/// read the same base the producer stamps on
+/// [`AccessRequest`](crate::request::AccessRequest)s, so a grant's
+/// recorded timestamp and the loop's "now" are comparable. Freshness
+/// (e.g. MFA age) is then `now.saturating_sub(stamp)`.
+///
+/// Strict monotonicity is *not* required: the only arithmetic on the
+/// returned value is `saturating_sub`, so a backward step (NTP slew,
+/// leap second) can only shrink a computed age — i.e. err toward
+/// *retaining* a session one extra sweep, never toward wrongly
+/// revoking it — and the next sweep self-corrects.
+/// [`ReevalLoop::with_system_clock`] therefore supplies a wall-clock
+/// source. A deployment that wants ages to keep advancing across
+/// wall-clock adjustments should pass a monotonic source (e.g. one
+/// derived from [`std::time::Instant`]) via [`ReevalLoop::new`],
+/// using the same base on its access requests.
 pub type ClockFn = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// Emitted when the re-evaluation loop revokes a session whose

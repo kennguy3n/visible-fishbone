@@ -56,7 +56,7 @@ use crate::policy::ZtnaDecisionReason;
 use crate::request::AccessRequest;
 
 /// Default shard count. A power of two so the `& (n - 1)` fast path
-/// in [`SessionTracker::shard_index`] holds. 64 shards keeps
+/// in `SessionTracker::shard_index` holds. 64 shards keeps
 /// per-shard lock contention low for the thousands-per-tenant /
 /// thousands-of-tenants fleet while staying a trivial fixed
 /// allocation (64 `HashMap`s) for the small single-tenant
