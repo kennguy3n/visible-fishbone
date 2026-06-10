@@ -54,9 +54,12 @@ const (
 	DefaultAbortIncompleteMultipartDays int32 = 7
 
 	// DefaultLifecycleRuleID is the stable identifier for the managed
-	// rule. It is stable on purpose: re-applying the policy replaces the
-	// rule with this ID rather than appending a duplicate, so repeated
-	// boots converge on a single rule.
+	// rule. The ID is stable on purpose so the rule is recognisable and
+	// the generated document is deterministic across boots. Note S3's
+	// PutBucketLifecycleConfiguration is not a per-rule merge: it replaces
+	// the bucket's whole lifecycle document (see ApplyLifecyclePolicy), so
+	// convergence comes from re-PUTting the same single-rule document, not
+	// from S3 matching on this ID.
 	DefaultLifecycleRuleID = "sng-telemetry-cold-archive"
 )
 
