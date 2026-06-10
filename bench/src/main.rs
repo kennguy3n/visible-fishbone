@@ -374,16 +374,31 @@ struct ForwardingCompareArgs {
     #[arg(long, required = true, num_args = 1..)]
     current: Vec<PathBuf>,
     /// Fractional rise in normalised per-packet cost (or drop in fast-path
-    /// speedup) of the sample *median* that counts as a regression.
-    #[arg(long, default_value_t = 0.15)]
+    /// speedup) of the sample *median* that counts as a regression. Must be
+    /// finite and non-negative (a negative threshold would flag every run).
+    #[arg(long, default_value_t = 0.15, value_parser = parse_nonneg_f64)]
     threshold: f64,
     /// Noise-band width in sample standard deviations. A metric is flagged
     /// only when the median move clears the threshold *and* is larger than
     /// `sigma × σ` of the samples, so single-run scatter on a shared CI
     /// runner does not fail the build. `0` disables the band (threshold
-    /// only); the default of ~2σ covers ~95% of Gaussian noise.
-    #[arg(long, default_value_t = 2.0)]
+    /// only); the default of ~2σ covers ~95% of Gaussian noise. Must be
+    /// finite and non-negative (a negative sigma would silently disable the
+    /// band, masking real regressions).
+    #[arg(long, default_value_t = 2.0, value_parser = parse_nonneg_f64)]
     sigma: f64,
+}
+
+/// Clap parser that accepts only finite, non-negative `f64` values. Used to
+/// reject footgun inputs (negative `--threshold`/`--sigma`, `NaN`, `inf`)
+/// that would quietly weaken or invert the regression gate.
+fn parse_nonneg_f64(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|e| format!("not a number: {e}"))?;
+    if v.is_finite() && v >= 0.0 {
+        Ok(v)
+    } else {
+        Err(format!("must be a finite, non-negative number (got `{s}`)"))
+    }
 }
 
 fn main() -> std::process::ExitCode {
