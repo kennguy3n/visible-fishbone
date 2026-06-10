@@ -26,7 +26,7 @@ use crate::error::MobileSdkError;
 use crate::oidc::OidcAuthSession;
 use crate::types::{
     SdkAccessDecision, SdkAccessRequest, SdkAgentHealth, SdkAuthState, SdkEnrollmentOutcome,
-    SdkLifecycleState, SdkPostureSnapshot, SdkPowerState,
+    SdkLifecycleState, SdkPostureSnapshot, SdkPowerState, SdkTunnelConfig, SdkTunnelStatus,
 };
 
 /// The mobile SDK: a foreign-friendly handle to a configured
@@ -178,7 +178,12 @@ impl MobileSdk {
 #[uniffi::export(async_runtime = "tokio")]
 impl MobileSdk {
     /// Run the claim-token enrolment exchange, transitioning the
-    /// agent from `Init` through `Enrolling` to `Connected`.
+    /// agent from `Init` through `Enrolling` to `Enrolled`.
+    ///
+    /// Enrolment establishes the device identity (certificate chain)
+    /// only; it does **not** bring the data-plane tunnel up. Drive
+    /// [`Self::connect`] afterwards to reach
+    /// [`SdkLifecycleState::Connected`].
     ///
     /// # Errors
     ///
@@ -194,6 +199,49 @@ impl MobileSdk {
     ) -> Result<SdkEnrollmentOutcome, MobileSdkError> {
         let outcome = self.agent.enroll(&claim_token).await?;
         Ok(outcome.into())
+    }
+
+    /// Bring the data-plane tunnel up, transitioning the agent from
+    /// `Enrolled` to `Connected`.
+    ///
+    /// The device's interface private key is generated locally (see
+    /// [`SdkTunnelConfig`]); `config` carries only the gateway-side
+    /// parameters. On a host build with no platform tunnel backend
+    /// this surfaces as [`MobileSdkError::Tunnel`] /
+    /// [`MobileSdkError::Unsupported`] and the agent stays
+    /// `Enrolled`.
+    ///
+    /// # Errors
+    ///
+    /// [`MobileSdkError::Tunnel`] if `config` is malformed or the
+    /// platform backend rejects the start;
+    /// [`MobileSdkError::Lifecycle`] if the agent is not `Enrolled`;
+    /// [`MobileSdkError::Timeout`] if the start exceeds the connect
+    /// deadline.
+    pub async fn connect(&self, config: SdkTunnelConfig) -> Result<(), MobileSdkError> {
+        let core_config = config.into_core()?;
+        self.agent.connect(core_config).await.map_err(Into::into)
+    }
+
+    /// Tear the data-plane tunnel down, transitioning the agent from
+    /// `Connected` back to `Enrolled`. The device stays enrolled, so
+    /// [`Self::connect`] can be called again without re-enrolling.
+    ///
+    /// # Errors
+    ///
+    /// [`MobileSdkError::Lifecycle`] if the agent is not `Connected`;
+    /// [`MobileSdkError::Tunnel`] if the platform backend fails to
+    /// stop the tunnel.
+    pub async fn disconnect(&self) -> Result<(), MobileSdkError> {
+        self.agent.disconnect().await.map_err(Into::into)
+    }
+
+    /// The platform tunnel's current observable status. Infallible:
+    /// reports [`SdkTunnelStatus::Down`] / [`SdkTunnelStatus::Failed`]
+    /// rather than erroring, so the host can poll it for a status
+    /// surface regardless of lifecycle state.
+    pub async fn tunnel_status(&self) -> SdkTunnelStatus {
+        self.agent.tunnel_status().await.into()
     }
 
     /// Collect a fresh device posture snapshot from the platform
