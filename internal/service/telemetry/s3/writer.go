@@ -297,6 +297,13 @@ type Stats struct {
 	ResidencyRejects uint64
 }
 
+// Prefix returns the effective top-level key prefix the writer archives
+// under, after fillDefaults has resolved an empty config to "telemetry".
+// Callers (e.g. the control plane's lifecycle wiring and its startup logs)
+// use this so they report and target the same prefix the writer actually
+// uses, rather than the raw — possibly empty — config value.
+func (w *Writer) Prefix() string { return w.cfg.Prefix }
+
 // Stats returns a snapshot of writer counters.
 func (w *Writer) Stats() Stats {
 	w.mu.Lock()

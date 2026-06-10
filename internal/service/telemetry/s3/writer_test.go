@@ -255,3 +255,29 @@ func TestWriter_UploadFailureLeavesNoPartitionLeak(t *testing.T) {
 		t.Errorf("expected open partitions to be drained, got %d", st.OpenPartitions)
 	}
 }
+
+func TestWriter_PrefixReportsEffectiveValue(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		configured string
+		want       string
+	}{
+		{"explicit", "archive/cold", "archive/cold"},
+		{"empty defaults", "", "telemetry"},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w, err := New(&fakeS3{}, Config{Bucket: "b", Prefix: tc.configured}, nil)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			t.Cleanup(func() { _ = w.Stop(context.Background()) })
+			if got := w.Prefix(); got != tc.want {
+				t.Errorf("Prefix() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

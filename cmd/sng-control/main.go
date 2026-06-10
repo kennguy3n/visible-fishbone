@@ -2144,7 +2144,7 @@ func startTelemetry(
 		coldStop = w.Stop
 		logger.Info("telemetry: s3 cold-path archive enabled",
 			slog.String("bucket", s3Cfg.Bucket),
-			slog.String("prefix", s3Cfg.Prefix))
+			slog.String("prefix", w.Prefix()))
 
 		// Ensure the cold-archive bucket ages objects into Glacier Deep
 		// Archive (the storage class the cost model prices against).
@@ -2164,6 +2164,7 @@ func startTelemetry(
 				logger.Warn("telemetry: s3 cold-archive lifecycle policy not applied; "+
 					"archive will not auto-transition to Glacier Deep Archive",
 					slog.String("bucket", s3Cfg.Bucket),
+					slog.String("prefix", w.Prefix()),
 					slog.String("error", err.Error()))
 			} else {
 				// Log the age actually applied to the bucket, not the raw
@@ -2171,6 +2172,7 @@ func startTelemetry(
 				// EnsureLifecyclePolicy resolves to 90.
 				logger.Info("telemetry: s3 cold-archive lifecycle policy applied",
 					slog.String("bucket", s3Cfg.Bucket),
+					slog.String("prefix", w.Prefix()),
 					slog.Int("deep_archive_transition_days", int(s3writer.EffectiveTransitionDays(transitionDays))))
 			}
 		}
