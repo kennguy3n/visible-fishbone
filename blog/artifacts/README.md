@@ -43,7 +43,10 @@ records exactly how each was produced and what it does (and does not) prove.
   `profiles/skus` merged by `sng-bench datasheet`. The JSON is a `DualDatasheet`
   (`{ "dry_run": …, "wire": … }`); the markdown renders both columns. The
   `wire-datasheet` job in `.github/workflows/benchmark.yml` regenerates it on the
-  self-hosted `sng-bench-wire` runner. To reproduce locally:
+  self-hosted `sng-bench-wire` runner and uploads it as a run artifact; the hosted
+  `publish-datasheet` job then commits the refreshed artifact back here on the weekly
+  scheduled run (the commit is kept off the privileged in-path runner). To reproduce
+  locally:
 
   ```sh
   bin=bench/target/release/sng-bench
