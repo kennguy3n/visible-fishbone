@@ -428,16 +428,12 @@ jobs:
             --out-md ../blog/artifacts/edge-performance-datasheet.md \
             --out-json ../blog/artifacts/edge-performance-datasheet.json
 
-      # The refreshed datasheet is published as a run artifact only — it is
-      # deliberately NOT committed back to the repo from here. Two reasons:
-      #   1. Security: this job runs on the privileged in-path self-hosted
-      #      runner (CAP_NET_RAW, sng-edge in-path). Granting it contents:write
-      #      to main would widen its blast radius; it keeps contents:read.
-      #   2. Robustness: the committed blog/artifacts/edge-performance-datasheet
-      #      .{md,json} are curated, reviewed artifacts. They are refreshed via
-      #      a normal PR (download this artifact, commit, open PR) so a number
-      #      change is always reviewed, and the weekly dry-run `publish` job is
-      #      never coupled to the wire runner's availability.
+      # This job runs on the privileged in-path self-hosted runner
+      # (CAP_NET_RAW, sng-edge in-path), so it keeps contents:read and only
+      # *uploads* the regenerated datasheet as a run artifact — it never pushes
+      # to the repo itself. The separate hosted `publish-datasheet` job
+      # (ubuntu-latest, contents:write) picks this artifact up and commits it,
+      # keeping the write off the privileged runner.
       - name: upload datasheet
         if: always()
         uses: actions/upload-artifact@v4
@@ -491,4 +487,64 @@ jobs:
             exit 0
           fi
           git commit -m "bench: publish weekly results ($(date -u +%Y-%m-%d))"
-          git push
+          # Push to main, retrying the non-atomic fetch-rebase-push against the
+          # sibling `publish-datasheet` job (or any other concurrent writer).
+          # The two publish jobs touch disjoint paths (bench/results vs
+          # blog/artifacts) so each rebase is a clean replay.
+          bash .github/scripts/push-with-retry.sh
+
+  publish-datasheet:
+    name: publish dual datasheet to blog/artifacts
+    needs: wire-datasheet
+    # Mirror `publish`: only persist on the scheduled run so a manual
+    # workflow_dispatch experiment never rewrites the committed datasheet.
+    # `always()` so a single failed `wire` SKU leg does not skip the publish —
+    # wire-datasheet runs its own sweep and uploads whatever it produced.
+    # Kept as its own job (not folded into `publish`) so the weekly dry-run
+    # `publish` is never blocked by the self-hosted wire runner's availability,
+    # and the commit stays off the privileged in-path runner.
+    if: github.event_name == 'schedule' && always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download datasheet artifact
+        # Tolerate a missing artifact (e.g. no wire runner was online, so
+        # wire-datasheet produced nothing): the next step detects the absent
+        # files and exits cleanly instead of failing the run.
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: edge-performance-datasheet-*
+          path: incoming-datasheet
+          merge-multiple: true
+
+      - name: stage and commit datasheet
+        run: |
+          set -euo pipefail
+          md="incoming-datasheet/edge-performance-datasheet.md"
+          json="incoming-datasheet/edge-performance-datasheet.json"
+          # The datasheet artifact only exists when wire-datasheet produced it.
+          # If it is absent there is nothing to publish — exit cleanly.
+          if [ ! -f "$md" ] || [ ! -f "$json" ]; then
+            echo "no datasheet artifact to publish"
+            exit 0
+          fi
+          mkdir -p blog/artifacts
+          cp "$md" "$json" blog/artifacts/
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add blog/artifacts/edge-performance-datasheet.md \
+            blog/artifacts/edge-performance-datasheet.json
+          if git diff --cached --quiet -- blog/artifacts; then
+            echo "datasheet unchanged; nothing to commit"
+            exit 0
+          fi
+          git commit -m "bench: publish refreshed edge datasheet ($(date -u +%Y-%m-%d))"
+          # See `publish`: rebase-then-push is not atomic, so reuse the shared
+          # retry helper to survive a concurrent push to main (the sibling
+          # `publish` job or any other writer).
+          bash .github/scripts/push-with-retry.sh
