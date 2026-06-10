@@ -63,7 +63,32 @@ const (
 	// posturePushSource labels trigger messages this consumer
 	// publishes (X-SNG-Source / audit attribution).
 	posturePushSource = "sng-identity-posture-push"
+
+	// fetchErrBackoffBase / fetchErrBackoffMax bound the retry delay
+	// after a non-transient Fetch error. The NATS client normally
+	// absorbs a reconnect inside Fetch (it blocks up to FetchMaxWait),
+	// so a fast-returning error means a pathological state — e.g. the
+	// stream/consumer was deleted out from under us, or the connection
+	// is drained and not recovering. Without a delay the loop would
+	// busy-spin and flood the log; capped exponential backoff keeps a
+	// single retry path that neither spins nor stalls recovery.
+	fetchErrBackoffBase = 100 * time.Millisecond
+	fetchErrBackoffMax  = 5 * time.Second
 )
+
+// nextFetchBackoff returns the next capped-exponential backoff after a
+// Fetch error: base on the first failure, doubling each subsequent
+// failure up to the ceiling. Reset to zero on any successful (or
+// empty) fetch by the caller.
+func nextFetchBackoff(prev time.Duration) time.Duration {
+	if prev <= 0 {
+		return fetchErrBackoffBase
+	}
+	if next := prev * 2; next < fetchErrBackoffMax {
+		return next
+	}
+	return fetchErrBackoffMax
+}
 
 // PostureUpdate is the wire payload an agent / edge node publishes
 // to announce a fresh device-posture snapshot. JSON-encoded to
@@ -205,18 +230,36 @@ func (c *PosturePushConsumer) Run(ctx context.Context) error {
 		return fmt.Errorf("posture-push: ensure consumer: %w", err)
 	}
 
+	var backoff time.Duration
 	for ctx.Err() == nil {
 		batch, err := cons.Fetch(c.fetchBatchSize, jetstream.FetchMaxWait(c.fetchMaxWait))
 		if err != nil {
+			// An empty window (no posture changed) and cancellation
+			// are normal: Fetch already blocked for FetchMaxWait, so
+			// re-fetch immediately and clear any prior backoff.
 			if errors.Is(err, context.Canceled) || errors.Is(err, jetstream.ErrNoMessages) {
+				backoff = 0
 				continue
 			}
-			// A fetch error other than "no messages" / cancellation is
-			// transient (server hiccup); log and retry rather than
-			// exiting the long-running loop.
-			c.logger.Warn("posture-push: fetch failed", slog.Any("error", err))
+			// Any other fetch error is treated as transient (server
+			// hiccup, mid-reconnect) and retried rather than exiting
+			// the long-running loop. Back off with a capped
+			// exponential delay so a fast-returning error (e.g. the
+			// connection is drained and not recovering) cannot busy-
+			// spin the loop or flood the log.
+			backoff = nextFetchBackoff(backoff)
+			c.logger.Warn("posture-push: fetch failed, backing off",
+				slog.Any("error", err),
+				slog.Duration("backoff", backoff))
+			select {
+			case <-ctx.Done():
+			case <-time.After(backoff):
+			}
 			continue
 		}
+		// A good fetch clears the backoff so the next transient error
+		// starts from the base delay again.
+		backoff = 0
 		for msg := range batch.Messages() {
 			c.handleMessage(ctx, msg)
 		}
