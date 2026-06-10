@@ -118,6 +118,15 @@ func EffectiveTransitionDays(configured int32) int32 {
 }
 
 func (c LifecyclePolicyConfig) withDefaults() LifecyclePolicyConfig {
+	// Both day fields follow the same contract — 0 ⇒ default, negative ⇒
+	// disabled — and downstream treats "disabled" uniformly as a non-positive
+	// value (BuildLifecycleConfiguration emits an action only when > 0;
+	// validate counts actions with <= 0). TransitionDays routes through the
+	// exported EffectiveTransitionDays so a negative is normalised to 0 here,
+	// because that helper is also the single source of truth callers use to
+	// log the applied age (main.go); abort days has no such external consumer,
+	// so it keeps the inline form and leaves a negative as-is. The normalised
+	// vs raw negative is immaterial downstream (both are <= 0).
 	c.TransitionDays = EffectiveTransitionDays(c.TransitionDays)
 	if c.AbortIncompleteMultipartDays == 0 {
 		c.AbortIncompleteMultipartDays = DefaultAbortIncompleteMultipartDays
