@@ -1,0 +1,33 @@
+# Edge SKU profile: Micro (commodity-baseline floor).
+#
+# The smallest supported deployment: a 2-core / 2 GiB box on a 1 GbE
+# uplink. This is deliberately pinned to `COMMODITY_BASELINE` in
+# `crates/sng-edge/src/commodity.rs` (2 logical CPUs, 2 GiB RAM, 8 GiB
+# storage) — a host that passes the edge preflight is, by definition, at
+# least a Micro. It is also the profile the CI datapath-regression gate
+# watches (see docs/throughput-skus.md), so its parameters are the
+# committed contract for "forwarding throughput must not regress".
+#
+# `nic_queues` pins the RSS fan-out the published number was measured at;
+# `[datapath]` pins the synthetic ruleset, frame size, and sample size so
+# a re-run reproduces the figure; `[traffic_mix]` pins the per-class blend
+# (relative weights) that composes the forwarding sweep's packet stream.
+name = "micro"
+vcpus = 2
+ram_gb = 2
+nic_gbps = 1.0
+target_gbps = 0.8
+nic_queues = 2
+
+[datapath]
+rule_count = 128
+packet_bytes = 1500
+sample_packets = 100000
+
+[traffic_mix]
+trusted_direct = 40.0
+trusted_media_bypass = 22.0
+inspect_lite = 15.0
+inspect_full = 16.0
+tunnel_private = 4.0
+block = 3.0

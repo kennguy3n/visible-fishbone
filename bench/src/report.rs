@@ -459,49 +459,45 @@ pub fn detect_regression(
 
     let mut regressions = Vec::new();
 
-    if let (Some(base), Some(cur)) = (&baseline.throughput, &current.throughput) {
-        // A drop in throughput is bad. change = (cur - base)/base; a
-        // change <= -threshold is a regression.
-        if let Some(change) = fractional_change(base.max_gbps, cur.max_gbps) {
-            if change <= -thresholds.throughput_drop {
-                regressions.push(Regression {
-                    metric: "max_gbps".to_string(),
-                    previous: base.max_gbps,
-                    current: cur.max_gbps,
-                    change_fraction: change,
-                });
-            }
-        }
+    // A drop in throughput is bad. change = (cur - base)/base; a
+    // change <= -threshold is a regression.
+    if let (Some(base), Some(cur)) = (&baseline.throughput, &current.throughput)
+        && let Some(change) = fractional_change(base.max_gbps, cur.max_gbps)
+        && change <= -thresholds.throughput_drop
+    {
+        regressions.push(Regression {
+            metric: "max_gbps".to_string(),
+            previous: base.max_gbps,
+            current: cur.max_gbps,
+            change_fraction: change,
+        });
     }
 
-    if let (Some(base), Some(cur)) = (&baseline.latency, &current.latency) {
-        // An increase in p99 latency is bad.
-        if let Some(change) = fractional_change(base.p99_ns as f64, cur.p99_ns as f64) {
-            if change >= thresholds.latency_increase {
-                regressions.push(Regression {
-                    metric: "p99_ns".to_string(),
-                    previous: base.p99_ns as f64,
-                    current: cur.p99_ns as f64,
-                    change_fraction: change,
-                });
-            }
-        }
+    // An increase in p99 latency is bad.
+    if let (Some(base), Some(cur)) = (&baseline.latency, &current.latency)
+        && let Some(change) = fractional_change(base.p99_ns as f64, cur.p99_ns as f64)
+        && change >= thresholds.latency_increase
+    {
+        regressions.push(Regression {
+            metric: "p99_ns".to_string(),
+            previous: base.p99_ns as f64,
+            current: cur.p99_ns as f64,
+            change_fraction: change,
+        });
     }
 
-    if let (Some(base), Some(cur)) = (&baseline.concurrent_flows, &current.concurrent_flows) {
-        // A drop in sustainable concurrent flows is bad.
-        if let Some(change) =
+    // A drop in sustainable concurrent flows is bad.
+    if let (Some(base), Some(cur)) = (&baseline.concurrent_flows, &current.concurrent_flows)
+        && let Some(change) =
             fractional_change(base.max_active_flows as f64, cur.max_active_flows as f64)
-        {
-            if change <= -thresholds.concurrent_flows_drop {
-                regressions.push(Regression {
-                    metric: "max_active_flows".to_string(),
-                    previous: base.max_active_flows as f64,
-                    current: cur.max_active_flows as f64,
-                    change_fraction: change,
-                });
-            }
-        }
+        && change <= -thresholds.concurrent_flows_drop
+    {
+        regressions.push(Regression {
+            metric: "max_active_flows".to_string(),
+            previous: base.max_active_flows as f64,
+            current: cur.max_active_flows as f64,
+            change_fraction: change,
+        });
     }
 
     Ok(RegressionReport { regressions })
@@ -515,6 +511,330 @@ fn fractional_change(previous: f64, current: f64) -> Option<f64> {
     }
     Some((current - previous) / previous)
 }
+
+/// Schema version for the forwarding-sweep artifact. Bumped independently
+/// of [`SCHEMA_VERSION`] so the two report families version separately.
+pub const FORWARDING_SCHEMA_VERSION: u32 = 1;
+
+/// One measured `(mode, backend)` point of a forwarding sweep, in the
+/// serializable shape persisted to `bench/results/forwarding-*.json` and
+/// rendered into `docs/throughput-skus.md`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForwardingMeasurement {
+    /// Inspection-depth label (`raw-l3`, `ngfw-verdict`, ...).
+    pub mode: String,
+    /// Forwarding-substrate label (`nftables`, `xdp`).
+    pub backend: String,
+    /// Packets pushed through the pipeline.
+    pub packets: u64,
+    /// Throughput in packets per second.
+    pub pps: f64,
+    /// Throughput in Gbps at the profile's representative frame size.
+    pub gbps: f64,
+    /// Median per-packet service time (ns).
+    pub p50_ns: u64,
+    /// 99th-percentile per-packet service time (ns).
+    pub p99_ns: u64,
+    /// Spare decision capacity over the SKU's published target at this
+    /// operating point, in `0.0..=1.0`. `1.0 - target_pps / pps`, floored
+    /// at zero.
+    pub cpu_headroom: f64,
+}
+
+impl ForwardingMeasurement {
+    /// Mean per-packet service time in nanoseconds derived from `pps`.
+    /// This is the hardware-invariant quantity the regression detector
+    /// normalises on. `f64::INFINITY` for a zero-throughput point so it
+    /// sorts as "infinitely slow" rather than dividing by zero.
+    #[must_use]
+    pub fn ns_per_packet(&self) -> f64 {
+        if self.pps <= 0.0 {
+            f64::INFINITY
+        } else {
+            1e9 / self.pps
+        }
+    }
+}
+
+/// One traffic class's result under the full pipeline on the fast path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForwardingClassMeasurement {
+    /// Traffic-class wire string (`trusted_direct`, `inspect_full`, ...).
+    pub class: String,
+    /// Packets pushed (all of this class).
+    pub packets: u64,
+    /// Throughput in packets per second.
+    pub pps: f64,
+    /// Throughput in Gbps at the profile's representative frame size.
+    pub gbps: f64,
+    /// Median per-packet service time (ns).
+    pub p50_ns: u64,
+    /// 99th-percentile per-packet service time (ns).
+    pub p99_ns: u64,
+}
+
+/// A full forwarding-sweep report for one SKU profile: every
+/// `(mode, backend)` point plus the per-traffic-class breakdown. This is
+/// the committed-baseline artifact the CI regression gate compares
+/// against.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForwardingReport {
+    /// Artifact schema version.
+    pub schema_version: u32,
+    /// SKU profile name the sweep ran against.
+    pub profile: String,
+    /// Wall-clock time the report was produced (Unix seconds).
+    pub unix_time_secs: u64,
+    /// Source revision, when known.
+    pub git_sha: Option<String>,
+    /// Rule count of the synthetic policy walked.
+    pub rule_count: usize,
+    /// Representative frame size used for the Gbps figures.
+    pub packet_bytes: u32,
+    /// Packets pushed per measurement.
+    pub sample_packets: usize,
+    /// Per-`(mode, backend)` measurements.
+    pub measurements: Vec<ForwardingMeasurement>,
+    /// Per-traffic-class breakdown (full pipeline, fast path).
+    pub per_class: Vec<ForwardingClassMeasurement>,
+}
+
+impl ForwardingReport {
+    /// Serialize to pretty JSON.
+    ///
+    /// # Errors
+    /// Propagates a `serde_json` failure (never expected for this plain
+    /// struct).
+    pub fn to_json(&self) -> Result<String, ReportError> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Parse from JSON.
+    ///
+    /// # Errors
+    /// Returns [`ReportError::Json`] on malformed input.
+    pub fn from_json(s: &str) -> Result<Self, ReportError> {
+        Ok(serde_json::from_str(s)?)
+    }
+
+    /// Look up a `(mode, backend)` measurement by label.
+    #[must_use]
+    pub fn get(&self, mode: &str, backend: &str) -> Option<&ForwardingMeasurement> {
+        self.measurements
+            .iter()
+            .find(|m| m.mode == mode && m.backend == backend)
+    }
+
+    /// Render this SKU's section of the published throughput document: the
+    /// per-mode table on the fast path, the raw-L3 nftables-vs-XDP toggle,
+    /// and the per-traffic-class breakdown.
+    #[must_use]
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "### SKU: `{}`", self.profile);
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "Synthetic policy: {} rules · representative frame {} B · {} packets/measurement.",
+            self.rule_count, self.packet_bytes, self.sample_packets
+        );
+        let _ = writeln!(out);
+
+        // Per-mode table on the shipping (XDP) data path.
+        let _ = writeln!(out, "**Forwarding modes (XDP fast path):**");
+        let _ = writeln!(out);
+        let _ = writeln!(out, "| Mode | Mpps | Gbps | p50 | p99 | CPU headroom |");
+        let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: | ---: |");
+        for mode in ["raw-l3", "ngfw-verdict", "full-stack", "full-stack-tls"] {
+            if let Some(m) = self.get(mode, "xdp") {
+                let _ = writeln!(
+                    out,
+                    "| {} | {:.2} | {:.3} | {} | {} | {:.0}% |",
+                    mode,
+                    m.pps / 1e6,
+                    m.gbps,
+                    fmt_ns(m.p50_ns),
+                    fmt_ns(m.p99_ns),
+                    m.cpu_headroom * 100.0
+                );
+            }
+        }
+        let _ = writeln!(out);
+
+        // Raw-L3 backend toggle.
+        if let (Some(xdp), Some(nft)) = (self.get("raw-l3", "xdp"), self.get("raw-l3", "nftables"))
+        {
+            let speedup = if nft.pps > 0.0 {
+                xdp.pps / nft.pps
+            } else {
+                0.0
+            };
+            let _ = writeln!(out, "**Raw-L3 datapath toggle (nftables vs XDP):**");
+            let _ = writeln!(out);
+            let _ = writeln!(out, "| Substrate | Mpps | Gbps |");
+            let _ = writeln!(out, "| --- | ---: | ---: |");
+            let _ = writeln!(
+                out,
+                "| nftables (slow path) | {:.2} | {:.3} |",
+                nft.pps / 1e6,
+                nft.gbps
+            );
+            let _ = writeln!(
+                out,
+                "| XDP (fast path) | {:.2} | {:.3} |",
+                xdp.pps / 1e6,
+                xdp.gbps
+            );
+            let _ = writeln!(out);
+            let _ = writeln!(out, "XDP fast-path speedup: **{speedup:.2}×**.");
+            let _ = writeln!(out);
+        }
+
+        // Per-traffic-class breakdown (full pipeline, fast path).
+        if !self.per_class.is_empty() {
+            let _ = writeln!(
+                out,
+                "**Per-traffic-class (full-stack + TLS, XDP fast path):**"
+            );
+            let _ = writeln!(out);
+            let _ = writeln!(out, "| Traffic class | Mpps | Gbps | p50 | p99 |");
+            let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: |");
+            for c in &self.per_class {
+                let _ = writeln!(
+                    out,
+                    "| {} | {:.2} | {:.3} | {} | {} |",
+                    c.class,
+                    c.pps / 1e6,
+                    c.gbps,
+                    fmt_ns(c.p50_ns),
+                    fmt_ns(c.p99_ns)
+                );
+            }
+            let _ = writeln!(out);
+        }
+
+        out
+    }
+}
+
+/// Compare a current forwarding sweep against a committed baseline and
+/// flag regressions.
+///
+/// The gate is **hardware-invariant**: it never compares two absolute
+/// throughput numbers (which drift with the runner), only dimensionless
+/// ratios that hold across machines:
+///
+///   1. *Per-mode inspection cost*, normalised to the raw-L3 fast path:
+///      `ns_per_packet(mode, backend) / ns_per_packet(raw-l3, xdp)`. A
+///      rise beyond `threshold` means a stage (NGFW, IPS, TLS, ...) got
+///      disproportionately more expensive — i.e. forwarding throughput at
+///      that depth regressed relative to the line-rate fast path.
+///   2. *Fast-path advantage*: the raw-L3 XDP-over-nftables speedup
+///      `pps(raw-l3, xdp) / pps(raw-l3, nftables)`. A drop beyond
+///      `threshold` means the XDP fast path lost ground against the
+///      engine — the one regression a relative-cost check anchored on the
+///      fast path cannot see on its own.
+///
+/// # Errors
+/// Returns an error string when the reports describe different schema
+/// versions or profiles, or when either is missing the `(raw-l3, xdp)`
+/// anchor the normalisation requires.
+pub fn detect_forwarding_regression(
+    baseline: &ForwardingReport,
+    current: &ForwardingReport,
+    threshold: f64,
+) -> Result<RegressionReport, String> {
+    if baseline.schema_version != current.schema_version {
+        return Err(format!(
+            "forwarding schema version mismatch: baseline {} vs current {}",
+            baseline.schema_version, current.schema_version
+        ));
+    }
+    if baseline.profile != current.profile {
+        return Err(format!(
+            "cannot compare different profiles: baseline {:?} vs current {:?}",
+            baseline.profile, current.profile
+        ));
+    }
+
+    let anchor = |r: &ForwardingReport| -> Result<f64, String> {
+        let m = r
+            .get(RAW_L3_LABEL, XDP_LABEL)
+            .ok_or_else(|| "report missing (raw-l3, xdp) anchor measurement".to_string())?;
+        let nspp = m.ns_per_packet();
+        if nspp.is_finite() && nspp > 0.0 {
+            Ok(nspp)
+        } else {
+            Err("(raw-l3, xdp) anchor has non-positive throughput".to_string())
+        }
+    };
+    let base_anchor = anchor(baseline)?;
+    let cur_anchor = anchor(current)?;
+
+    let mut regressions = Vec::new();
+
+    // (1) Per-mode normalised inspection cost.
+    for cur in &current.measurements {
+        if cur.mode == RAW_L3_LABEL && cur.backend == XDP_LABEL {
+            continue; // the anchor itself
+        }
+        let Some(base) = baseline.get(&cur.mode, &cur.backend) else {
+            continue; // a point absent from the baseline can't regress
+        };
+        let base_rel = base.ns_per_packet() / base_anchor;
+        let cur_rel = cur.ns_per_packet() / cur_anchor;
+        // A *rise* in normalised per-packet cost is the regression.
+        if let Some(change) = fractional_change(base_rel, cur_rel)
+            && change >= threshold
+        {
+            regressions.push(Regression {
+                metric: format!("{}/{} relative-cost", cur.mode, cur.backend),
+                previous: base_rel,
+                current: cur_rel,
+                change_fraction: change,
+            });
+        }
+    }
+
+    // (2) Raw-L3 fast-path advantage (XDP over nftables).
+    if let (Some(base_xdp), Some(base_nft), Some(cur_xdp), Some(cur_nft)) = (
+        baseline.get(RAW_L3_LABEL, XDP_LABEL),
+        baseline.get(RAW_L3_LABEL, NFTABLES_LABEL),
+        current.get(RAW_L3_LABEL, XDP_LABEL),
+        current.get(RAW_L3_LABEL, NFTABLES_LABEL),
+    ) && let (Some(base_speedup), Some(cur_speedup)) = (
+        ratio(base_xdp.pps, base_nft.pps),
+        ratio(cur_xdp.pps, cur_nft.pps),
+    ) && let Some(change) = fractional_change(base_speedup, cur_speedup)
+        && change <= -threshold
+    {
+        regressions.push(Regression {
+            metric: "raw-l3 xdp-over-nftables speedup".to_string(),
+            previous: base_speedup,
+            current: cur_speedup,
+            change_fraction: change,
+        });
+    }
+
+    Ok(RegressionReport { regressions })
+}
+
+/// `numerator / denominator`, or `None` when the denominator is zero.
+fn ratio(numerator: f64, denominator: f64) -> Option<f64> {
+    if denominator == 0.0 {
+        None
+    } else {
+        Some(numerator / denominator)
+    }
+}
+
+/// Mode/backend labels the forwarding gate keys on. Kept here (rather than
+/// importing the `datapath` enums) so the report model stays a pure data
+/// layer; they must match [`crate::datapath::ForwardingMode::label`] and
+/// [`crate::datapath::Backend::label`].
+const RAW_L3_LABEL: &str = "raw-l3";
+const XDP_LABEL: &str = "xdp";
+const NFTABLES_LABEL: &str = "nftables";
 
 #[cfg(test)]
 mod tests {
@@ -767,5 +1087,107 @@ mod tests {
         };
         let md = cmp.to_markdown();
         assert!(md.contains("no same-class competitor"));
+    }
+
+    /// A four-point fixture: raw-L3 on both substrates plus the two deeper
+    /// XDP modes, with `pps` chosen so the anchor and ratios are tidy.
+    fn fwd_report(raw_xdp_pps: f64, raw_nft_pps: f64, full_xdp_pps: f64) -> ForwardingReport {
+        let m = |mode: &str, backend: &str, pps: f64| ForwardingMeasurement {
+            mode: mode.to_string(),
+            backend: backend.to_string(),
+            packets: 10_000,
+            pps,
+            gbps: pps * 1500.0 * 8.0 / 1e9,
+            p50_ns: 100,
+            p99_ns: 200,
+            cpu_headroom: 0.5,
+        };
+        ForwardingReport {
+            schema_version: FORWARDING_SCHEMA_VERSION,
+            profile: "micro".to_string(),
+            unix_time_secs: 1_700_000_000,
+            git_sha: Some("abc123".to_string()),
+            rule_count: 128,
+            packet_bytes: 1500,
+            sample_packets: 10_000,
+            measurements: vec![
+                m("raw-l3", "xdp", raw_xdp_pps),
+                m("raw-l3", "nftables", raw_nft_pps),
+                m("full-stack-tls", "xdp", full_xdp_pps),
+            ],
+            per_class: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn forwarding_identical_reports_have_no_regression() {
+        let base = fwd_report(10e6, 2e6, 5e6);
+        let cur = fwd_report(10e6, 2e6, 5e6);
+        let rr = detect_forwarding_regression(&base, &cur, 0.15).unwrap();
+        assert!(!rr.has_regression(), "identical reports must be clean");
+    }
+
+    #[test]
+    fn forwarding_flags_inflated_inspection_cost() {
+        // Baseline: full-stack runs at half the raw-L3 rate (2× cost).
+        let base = fwd_report(10e6, 2e6, 5e6);
+        // Current: full-stack collapses to a quarter of raw-L3 (4× cost)
+        // while the anchor itself is unchanged → normalised cost doubles.
+        let cur = fwd_report(10e6, 2e6, 2.5e6);
+        let rr = detect_forwarding_regression(&base, &cur, 0.15).unwrap();
+        assert!(rr.has_regression());
+        assert!(
+            rr.regressions
+                .iter()
+                .any(|r| r.metric.contains("full-stack-tls/xdp")),
+            "the inflated full-stack point is flagged: {:?}",
+            rr.regressions
+        );
+    }
+
+    #[test]
+    fn forwarding_is_invariant_to_uniform_hardware_slowdown() {
+        // A runner that is uniformly 2× slower scales *every* pps by the
+        // same factor; no normalised ratio moves, so nothing is flagged.
+        let base = fwd_report(10e6, 2e6, 5e6);
+        let cur = fwd_report(5e6, 1e6, 2.5e6);
+        let rr = detect_forwarding_regression(&base, &cur, 0.15).unwrap();
+        assert!(
+            !rr.has_regression(),
+            "uniform slowdown must not trip the gate: {:?}",
+            rr.regressions
+        );
+    }
+
+    #[test]
+    fn forwarding_flags_lost_fast_path_advantage() {
+        // Baseline XDP is 5× nftables on raw-L3; current is only 2×, a
+        // collapse of the fast-path advantage even though absolute XDP
+        // throughput and the deeper-mode ratio are unchanged.
+        let base = fwd_report(10e6, 2e6, 5e6);
+        let cur = fwd_report(10e6, 5e6, 5e6);
+        let rr = detect_forwarding_regression(&base, &cur, 0.15).unwrap();
+        assert!(rr.has_regression());
+        assert!(
+            rr.regressions.iter().any(|r| r.metric.contains("speedup")),
+            "the lost speedup is flagged: {:?}",
+            rr.regressions
+        );
+    }
+
+    #[test]
+    fn forwarding_rejects_mismatched_profiles() {
+        let base = fwd_report(10e6, 2e6, 5e6);
+        let mut cur = fwd_report(10e6, 2e6, 5e6);
+        cur.profile = "large".to_string();
+        assert!(detect_forwarding_regression(&base, &cur, 0.15).is_err());
+    }
+
+    #[test]
+    fn forwarding_report_json_round_trips() {
+        let base = fwd_report(10e6, 2e6, 5e6);
+        let json = base.to_json().unwrap();
+        let back = ForwardingReport::from_json(&json).unwrap();
+        assert_eq!(base, back);
     }
 }

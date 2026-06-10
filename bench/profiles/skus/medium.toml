@@ -1,0 +1,31 @@
+# Edge SKU profile: Medium.
+#
+# Regional-office / campus-edge deployment: an 8-core / 16 GiB box on a
+# 25 GbE uplink. The acceptance target is 6 Gbps of fully-inspected
+# throughput — the point at which per-core inspection cost, not the NIC,
+# starts to bound the box, so the SKU carries a deeper ruleset and a
+# heavier inspect-full share than Small.
+#
+# `nic_queues` pins the RSS fan-out the published number was measured at;
+# `[datapath]` pins the synthetic ruleset, frame size, and sample size so
+# a re-run reproduces the figure; `[traffic_mix]` pins the per-class blend
+# (relative weights) that composes the forwarding sweep's packet stream.
+name = "medium"
+vcpus = 8
+ram_gb = 16
+nic_gbps = 25.0
+target_gbps = 6.0
+nic_queues = 8
+
+[datapath]
+rule_count = 512
+packet_bytes = 1500
+sample_packets = 400000
+
+[traffic_mix]
+trusted_direct = 30.0
+trusted_media_bypass = 18.0
+inspect_lite = 16.0
+inspect_full = 28.0
+tunnel_private = 5.0
+block = 3.0

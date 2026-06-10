@@ -1,0 +1,31 @@
+# Edge SKU profile: Large (data-center edge / cloud PoP).
+#
+# Highest single-node SKU: a 16-core / 32 GiB box on a 50 GbE uplink,
+# fronting either a large campus or a multi-tenant cloud point-of-presence.
+# The acceptance target is 12 Gbps of fully-inspected throughput. At this
+# core count the workload is inspection-bound, so the SKU carries the
+# deepest ruleset and the heaviest inspect-full share of the four.
+#
+# `nic_queues` pins the RSS fan-out the published number was measured at;
+# `[datapath]` pins the synthetic ruleset, frame size, and sample size so
+# a re-run reproduces the figure; `[traffic_mix]` pins the per-class blend
+# (relative weights) that composes the forwarding sweep's packet stream.
+name = "large"
+vcpus = 16
+ram_gb = 32
+nic_gbps = 50.0
+target_gbps = 12.0
+nic_queues = 16
+
+[datapath]
+rule_count = 1024
+packet_bytes = 1500
+sample_packets = 600000
+
+[traffic_mix]
+trusted_direct = 28.0
+trusted_media_bypass = 16.0
+inspect_lite = 16.0
+inspect_full = 32.0
+tunnel_private = 5.0
+block = 3.0

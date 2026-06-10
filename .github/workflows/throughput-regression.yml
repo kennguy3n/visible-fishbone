@@ -1,0 +1,76 @@
+# Forwarding-throughput regression gate for the ShieldNet Gateway (SNG)
+# data path (WS3).
+#
+# The forwarding-benchmark harness lives in its own Cargo workspace under
+# bench/ (excluded from the root workspace because it pulls the enforcement
+# crates in as path deps and ships its own binaries). The root `ci.yml`
+# rust jobs run `--workspace` against the root manifest, so they never lint,
+# test, or build the harness. This workflow is the gate that does:
+#
+#   * lint + test the harness (cargo fmt/clippy/test on the bench manifest)
+#   * run the Micro-SKU forwarding sweep and compare it against the
+#     committed baseline `bench/results/forwarding-micro.json`
+#
+# The comparison is hardware-invariant: it never diffs absolute throughput
+# (which drifts with the runner) but dimensionless ratios — per-mode
+# normalised per-packet cost and the raw-L3 XDP-over-nftables speedup — so a
+# baseline committed on one machine is a valid gate on GitHub's runners.
+# `forwarding-compare` exits 2 when a ratio regresses beyond the threshold,
+# which fails the build. See docs/throughput-skus.md for the methodology and
+# how to refresh the baseline for an intentional change.
+#
+# Mirrors the Makefile (`make bench-regression`) so local == CI, and follows
+# the toolchain pin / cache / concurrency conventions of ci.yml.
+
+name: throughput-regression
+
+on:
+  pull_request:
+    branches: ["**"]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: throughput-regression-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Must match the workspace Cargo.toml rust-version pin, like ci.yml.
+  RUST_TOOLCHAIN: "1.91"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  forwarding-regression:
+    name: forwarding throughput regression (micro)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The harness is a separate workspace; cache it under its own key
+          # so it does not churn the root-workspace cache shared by ci.yml.
+          workspaces: bench
+          shared-key: bench-${{ runner.os }}
+      # Gate the harness itself — these surfaces are not covered by the
+      # root-workspace clippy/test jobs in ci.yml.
+      - name: cargo fmt --check (bench)
+        run: cargo fmt --manifest-path bench/Cargo.toml --all -- --check
+      - name: cargo clippy (bench)
+        run: cargo clippy --manifest-path bench/Cargo.toml --all-targets -- -D warnings
+      - name: cargo test (bench)
+        run: cargo test --manifest-path bench/Cargo.toml --all-targets
+      # Build the harness and run the Micro-SKU regression gate against the
+      # committed baseline. `make bench-regression` is the single source of
+      # truth for the commands so this stays in lockstep with local runs.
+      - name: forwarding regression gate (micro vs committed baseline)
+        run: make bench-regression

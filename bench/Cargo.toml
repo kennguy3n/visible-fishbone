@@ -89,6 +89,22 @@ sng-policy-eval = { path = "../crates/sng-policy-eval" }
 tokio = { version = "1", features = ["rt"] }
 ipnet = "2"
 
+# Real symmetric AEAD for the full-stack + TLS-decrypt forwarding mode.
+# `ring` is the crypto provider the edge's `rustls` stack uses (see the
+# workspace `rustls` dependency), so opening AES-256-GCM TLS records here
+# measures the *same* primitive the gateway pays on a decrypted flow —
+# not a stand-in. The `datapath` forwarding benchmark drives it over
+# record-sized payload chunks so the TLS-decrypt numbers are real.
+ring = "0.17"
+
+# Multi-pattern content matcher for the full-stack IPS/DLP inspection
+# stage. Aho-Corasick is the multi-pattern-matcher (MPM) core that
+# dominates a real signature engine's hot path (Suricata's MPM, the DLP
+# keyword classifier in `sng-dlp`), so scanning payloads through it is a
+# faithful, dependency-light model of the per-packet content-inspection
+# cost without dragging the ONNX / YARA toolchains onto the bench runner.
+aho-corasick = "1"
+
 [dev-dependencies]
 # Float-tolerant assertions for the histogram percentile tests.
 approx = "0.5"
