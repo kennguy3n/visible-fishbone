@@ -71,6 +71,13 @@ jobs:
           cache: true
       - name: go vet
         run: go vet ./...
+      # Structural guard over the migration *set* (not SQL content):
+      # fails fast and names the files when two branches collide on a
+      # version number — the merge-order bug that is invisible on
+      # either branch alone and only breaks main once both land. Needs
+      # no database, so it lives in the fast PR gate.
+      - name: migration version sequence (unique + contiguous + paired)
+        run: go run ./cmd/sng-migrate check-versions
       - name: golangci-lint (default tags)
         uses: golangci/golangci-lint-action@v7
         with:
@@ -245,6 +252,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-${{ runner.os }}
+      # sng-dlp's `ort` dependency uses `load-dynamic` (see the root
+      # Cargo.toml rationale: download-binaries drags in the banned
+      # native-tls/openssl chain), so the ONNX Runtime shared library
+      # must be present and located via ORT_DYLIB_PATH for the model-
+      # loading DLP tests to run. v1.22.0 matches the ort API-version
+      # pin. Build/clippy don't need this (the lib is dlopen'd at first
+      # use, not link time) — only the test job that executes it does.
+      - name: install ONNX Runtime (libonnxruntime for ort load-dynamic)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz
+          mkdir -p "$HOME/.local/onnxruntime"
+          tar xzf /tmp/ort.tgz -C /tmp
+          cp -a /tmp/onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so* "$HOME/.local/onnxruntime/"
+          rm -rf /tmp/ort.tgz /tmp/onnxruntime-linux-x64-1.22.0
+          echo "ORT_DYLIB_PATH=$HOME/.local/onnxruntime/libonnxruntime.so" >> "$GITHUB_ENV"
       - name: cargo test --workspace
         run: cargo test --workspace --all-targets
 

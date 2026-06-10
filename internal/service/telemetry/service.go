@@ -585,9 +585,9 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			// one partition, but a shared bucket keeps the budget
 			// correct even if that ever changes). The shadow-IT
 			// observer is likewise shared, not cloned.
-			rowLimiter:        s.rowLimiter,
-			shadowObserver:    s.shadowObserver,
-			dedup:             newDedupRing(s.cfg.DedupRingSize),
+			rowLimiter:     s.rowLimiter,
+			shadowObserver: s.shadowObserver,
+			dedup:          newDedupRing(s.cfg.DedupRingSize),
 		})
 	}
 	return workers, nil

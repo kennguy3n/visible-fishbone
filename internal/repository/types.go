@@ -1429,7 +1429,7 @@ type CASBConnector struct {
 //
 // UsersCount and ActiveDeviceCount have distinct semantics and
 // distinct writers, so they are kept in separate columns rather than
-// overwriting one another (see migration 056):
+// overwriting one another (see migration 058):
 //
 //   - UsersCount is the app's full account roster, written by API-mode
 //     connector sync (service.go) from the vendor API.

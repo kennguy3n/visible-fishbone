@@ -1,4 +1,4 @@
--- 056_casb_active_device_count (down)
+-- 058_casb_active_device_count (down)
 --
 -- Drop the windowed active-device column. users_count is left intact;
 -- the windowed signal is reconstructable from the next shadow-IT flush

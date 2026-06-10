@@ -11,7 +11,7 @@ import (
 
 func intp(v int) *int { return &v }
 
-// TestCASBDiscoveredApp_TwoWriterCounts validates migration 056's
+// TestCASBDiscoveredApp_TwoWriterCounts validates migration 058's
 // split of the "how many users" signal into two independently-owned
 // columns. casb_discovered_apps has two writers with different
 // semantics that collide on (tenant_id, name) when an operator names a

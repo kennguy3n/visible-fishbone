@@ -628,7 +628,9 @@ impl WindowsUsbTransferMonitor {
         // moves — missing every USB device. Mirrors the clipboard
         // monitor's HWND handshake.
         let native = worker.is_some()
-            && init_rx.recv_timeout(Duration::from_secs(2)).unwrap_or(false);
+            && init_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap_or(false);
         Self {
             shared,
             arrivals,

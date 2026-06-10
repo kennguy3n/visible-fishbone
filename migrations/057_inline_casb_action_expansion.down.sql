@@ -1,4 +1,4 @@
--- 055_inline_casb_action_expansion (down)
+-- 057_inline_casb_action_expansion (down)
 --
 -- Restore the original four-verb action set. Any rows using one of
 -- the five new actions would violate the restored constraint, so

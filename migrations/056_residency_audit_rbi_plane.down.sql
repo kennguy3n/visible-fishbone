@@ -1,4 +1,4 @@
--- 055_residency_audit_rbi_plane (down)
+-- 056_residency_audit_rbi_plane (down)
 --
 -- Restore the original telemetry/policy_bundle/cold_storage plane set.
 -- residency_audit is append-only, so any 'rbi_artifact' rows recorded

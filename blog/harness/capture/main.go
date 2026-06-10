@@ -17,6 +17,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -72,9 +73,11 @@ func main() {
 	}
 	token := mintGlobalAdminJWT(secret, *operator)
 
-	if err := os.MkdirAll(*out, 0o755); err != nil {
+	if err := os.MkdirAll(*out, 0o750); err != nil {
 		fatal("mkdir out: " + err.Error())
 	}
+
+	ctx := context.Background()
 
 	specs := []spec{
 		// S1 — multi-tenant / MSP onboarding + audit
@@ -111,7 +114,7 @@ func main() {
 	client := &http.Client{Timeout: 15 * time.Second}
 	ok, fail := 0, 0
 	for _, s := range specs {
-		status, body, err := get(client, *base, s.path, token)
+		status, body, err := get(ctx, client, *base, s.path, token)
 		if err != nil {
 			logf("FAIL %-40s %v", s.name, err)
 			fail++
@@ -129,7 +132,7 @@ func main() {
 			continue
 		}
 		dst := filepath.Join(*out, s.name+".json")
-		if err := os.WriteFile(dst, pretty, 0o644); err != nil {
+		if err := os.WriteFile(dst, pretty, 0o600); err != nil {
 			logf("FAIL %-40s write: %v", s.name, err)
 			fail++
 			continue
@@ -149,12 +152,12 @@ func main() {
 	}
 	for _, p := range posts {
 		reqBytes, _ := json.MarshalIndent(p.body, "", "  ")
-		if err := os.WriteFile(filepath.Join(*out, p.name+"-request.json"), append(reqBytes, '\n'), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(*out, p.name+"-request.json"), append(reqBytes, '\n'), 0o600); err != nil {
 			logf("FAIL %-40s write request: %v", p.name, err)
 			fail++
 			continue
 		}
-		status, body, err := post(client, *base, p.path, token, p.body)
+		status, body, err := post(ctx, client, *base, p.path, token, p.body)
 		if err != nil {
 			logf("FAIL %-40s %v", p.name, err)
 			fail++
@@ -172,7 +175,7 @@ func main() {
 			continue
 		}
 		dst := filepath.Join(*out, p.name+"-response.json")
-		if err := os.WriteFile(dst, pretty, 0o644); err != nil {
+		if err := os.WriteFile(dst, pretty, 0o600); err != nil {
 			logf("FAIL %-40s write: %v", p.name, err)
 			fail++
 			continue
@@ -187,12 +190,12 @@ func main() {
 	}
 }
 
-func post(c *http.Client, base, path, token string, body map[string]any) (int, []byte, error) {
+func post(ctx context.Context, c *http.Client, base, path, token string, body map[string]any) (int, []byte, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return 0, nil, err
 	}
-	req, err := http.NewRequest("POST", base+path, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, "POST", base+path, bytes.NewReader(b))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -208,8 +211,8 @@ func post(c *http.Client, base, path, token string, body map[string]any) (int, [
 	return resp.StatusCode, rb, err
 }
 
-func get(c *http.Client, base, path, token string) (int, []byte, error) {
-	req, err := http.NewRequest("GET", base+path, nil)
+func get(ctx context.Context, c *http.Client, base, path, token string) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", base+path, nil)
 	if err != nil {
 		return 0, nil, err
 	}

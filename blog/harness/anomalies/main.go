@@ -75,11 +75,11 @@ type dimProfile struct {
 // across dimensions, but the severity itself is computed by the
 // detector, not asserted here.
 var profiles = []dimProfile{
-	{"egress_bytes_per_min", "baseline.exfil_volume", 4_200_000, 480_000, []float64{5.2}},     // data-exfil spike -> critical
-	{"dns_nxdomain_rate", "baseline.dga_c2", 18, 4.0, []float64{3.4}},                          // DGA/C2 beaconing -> warning
-	{"auth_failures_per_min", "baseline.credential_stuffing", 6, 2.2, []float64{4.8}},          // credential stuffing -> critical
-	{"blocked_sessions_per_min", "baseline.policy_block_surge", 140, 22, []float64{3.1}},       // policy-block surge -> warning
-	{"newly_registered_domain_hits", "baseline.nrd_access", 9, 3.0, []float64{3.6}},            // NRD access burst -> warning
+	{"egress_bytes_per_min", "baseline.exfil_volume", 4_200_000, 480_000, []float64{5.2}}, // data-exfil spike -> critical
+	{"dns_nxdomain_rate", "baseline.dga_c2", 18, 4.0, []float64{3.4}},                     // DGA/C2 beaconing -> warning
+	{"auth_failures_per_min", "baseline.credential_stuffing", 6, 2.2, []float64{4.8}},     // credential stuffing -> critical
+	{"blocked_sessions_per_min", "baseline.policy_block_surge", 140, 22, []float64{3.1}},  // policy-block surge -> warning
+	{"newly_registered_domain_hits", "baseline.nrd_access", 9, 3.0, []float64{3.6}},       // NRD access burst -> warning
 }
 
 const windowSeconds = 60
@@ -136,7 +136,11 @@ func seedTenant(ctx context.Context, det *baseline.Detector, tid uuid.UUID) int 
 	for _, b := range tid[:8] {
 		seed = seed*31 + int64(b)
 	}
-	rng := rand.New(rand.NewSource(seed))
+	// math/rand (not crypto/rand) is intentional: the series must be
+	// deterministic and reproducible from a per-tenant seed so the
+	// captured alerts are stable across runs. This is synthetic
+	// test-data generation, not a security-sensitive draw.
+	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // G404: deterministic, reproducible synthetic data; not security-sensitive
 
 	const warmup = 36 // > MinWarmupSamples (30) so spikes are eligible
 
