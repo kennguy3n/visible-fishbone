@@ -453,8 +453,10 @@ func TestSampleRateOverrideTakesPrecedence(t *testing.T) {
 		// Per-class default: dial inspect_lite down to 1:10 fleet-wide.
 		ByClass: map[string]float64{"inspect_lite": 0.1},
 		// Per-tenant: this tenant gets trusted_direct at 1:2 (overriding
-		// the 1:100 built-in) and inspect_full sampled to 1:4 — a
-		// deliberate, operator-chosen exception to the 1:1 default.
+		// the 1:100 built-in). The inspect_full entry attempts to sample
+		// it to 1:4, but inspect_full carries a mandatory 1:1 compliance
+		// floor (mandatorySampleRateFloor) that the sampler enforces, so
+		// the override is raised back to 1.0 rather than honoured.
 		ByTenant: map[uuid.UUID]map[string]float64{
 			tid: {"trusted_direct": 0.5, "inspect_full": 0.25},
 		},
@@ -466,13 +468,15 @@ func TestSampleRateOverrideTakesPrecedence(t *testing.T) {
 		NowFunc:      newTestClock().now,
 	})
 
-	// Per-tenant override beats the built-in trusted (0.01) and the
-	// inspect_full pin (1.0).
+	// Per-tenant override beats the built-in trusted rate (0.01).
 	if sr := s.SampleRateForClass(tid, "trusted_direct"); sr != 0.5 {
 		t.Fatalf("trusted_direct override = %v, want 0.5", sr)
 	}
-	if sr := s.SampleRateForClass(tid, "inspect_full"); sr != 0.25 {
-		t.Fatalf("inspect_full override = %v, want 0.25", sr)
+	// A sub-1.0 inspect_full override is floored back to the 1:1 pin:
+	// the compliance guarantee holds even against a resolver that asks
+	// to shed it.
+	if sr := s.SampleRateForClass(tid, "inspect_full"); sr != InspectFullSampleRate {
+		t.Fatalf("inspect_full override = %v, want %v (mandatory floor)", sr, InspectFullSampleRate)
 	}
 	// Per-class default applies to any tenant lacking a per-tenant entry.
 	if sr := s.SampleRateForClass(other, "inspect_lite"); sr != 0.1 {
@@ -482,6 +486,34 @@ func TestSampleRateOverrideTakesPrecedence(t *testing.T) {
 	// rate (trusted_direct → 0.01 for the un-overridden tenant).
 	if sr := s.SampleRateForClass(other, "trusted_direct"); sr != TrustedClassSampleRate {
 		t.Fatalf("un-overridden trusted_direct = %v, want %v", sr, TrustedClassSampleRate)
+	}
+}
+
+// TestInspectFullOverrideCannotShed is the compliance backstop: even a
+// resolver that explicitly configures inspect_full far below 1:1 must
+// not cause a single inspect_full event to be dropped, because the
+// sampler floors the class at its mandatory 1:1 retention rate.
+func TestInspectFullOverrideCannotShed(t *testing.T) {
+	tid := uuid.New()
+	resolver := NewMapSampleRateResolver(&SampleRateOverrides{
+		ByTenant: map[uuid.UUID]map[string]float64{
+			tid: {"inspect_full": 0.001},
+		},
+	})
+	s := NewAdaptiveSampler(SamplerConfig{
+		Resolver:     budgetResolver(1),
+		Window:       time.Second,
+		RateResolver: resolver,
+		NowFunc:      newTestClock().now,
+	})
+	ctx := context.Background()
+	r := rand.New(rand.NewSource(7))
+	for i := 0; i < 2000; i++ {
+		keep, sampleRate := s.DecideClass(ctx, tid, newRandUUID(r), "inspect_full")
+		if !keep || sampleRate != InspectFullSampleRate {
+			t.Fatalf("inspect_full event %d shed by override: keep=%v rate=%v, want true/%v",
+				i, keep, sampleRate, InspectFullSampleRate)
+		}
 	}
 }
 

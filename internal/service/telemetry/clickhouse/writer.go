@@ -557,10 +557,10 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Writer, error) 
 	}
 
 	w := &Writer{
-		conn:      conn,
-		cfg:       cfg,
-		logger:    logger,
-		pending:   make([]schema.Envelope, 0, cfg.BatchSize),
+		conn:    conn,
+		cfg:     cfg,
+		logger:  logger,
+		pending: make([]schema.Envelope, 0, cfg.BatchSize),
 		// (batchSize atomic is seeded below, after the literal, so
 		// the effective flush trigger starts at the configured size
 		// and the autotuner only ever moves it from there.)
@@ -679,12 +679,23 @@ func (w *Writer) qualifiedTable() (string, error) {
 // continues to behave correctly under the same operational
 // envelope the constructor advertises.
 func (w *Writer) backlogCapacity() int {
-	// Use the effective (possibly autotuned) batch size so the
-	// backlog shield scales with the live flush trigger: when the
-	// autotuner grows the batch under load, the requeue cap grows
-	// with it rather than shedding rows against a stale, smaller
-	// construction-time size.
+	// Scale the backlog shield with the effective (possibly autotuned)
+	// batch size so that when the autotuner GROWS the batch under load
+	// the requeue cap grows with it rather than shedding rows against a
+	// stale, smaller construction-time size.
+	//
+	// But never let the cap drop BELOW the construction-time batch: the
+	// autotuner shrinks the batch when volume falls, and a smaller cap
+	// taking effect just before a ClickHouse outage could shed rows that
+	// the original static capacity would have buffered. Flooring at the
+	// configured batch keeps durability at least as strong as it was
+	// before auto-tuning, while still allowing the cap to expand. The
+	// upper bound is unchanged (MaxBatchSize × multiplier), so the
+	// worst-case backlog memory is the same either way.
 	batch := w.BatchSize()
+	if cfg := w.cfg.BatchSize; cfg > batch {
+		batch = cfg
+	}
 	if batch <= 0 {
 		batch = DefaultBatchSize
 	}

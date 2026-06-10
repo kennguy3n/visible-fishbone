@@ -135,6 +135,25 @@ func fixedClassSampleRate(trafficClass string) (float64, bool) {
 	}
 }
 
+// mandatorySampleRateFloor reports the minimum keep probability a class
+// may EVER be sampled at, regardless of any operator override. It is the
+// compliance backstop for inspect_full: that class is legally-required
+// audit evidence (see InspectFullSampleRate), so its 1:1 retention is an
+// invariant of the sampling hot path itself, not merely of the policy
+// graph validator that rejects a sub-1.0 inspect_full rate on publish.
+// Enforcing it here too means an override reaching the sampler by any
+// path — a directly constructed SampleRateOverrides, a future bug in
+// policy validation, a test fixture — can still never shed inspect_full.
+// Returns (floor, true) for a floored class and (0, false) for classes
+// an operator may freely tune in either direction (e.g. the trusted
+// classes, which an operator may legitimately sample more aggressively).
+func mandatorySampleRateFloor(trafficClass string) (float64, bool) {
+	if repository.TrafficClass(trafficClass) == repository.TrafficClassInspectFull {
+		return InspectFullSampleRate, true
+	}
+	return 0, false
+}
+
 // clampSampleRate bounds a configured keep probability to the valid
 // (0,1] range the deterministic sampler operates on. A rate <= 0 is
 // nonsensical (it would drop everything and make the 1/rate de-bias
@@ -568,6 +587,13 @@ func (s *AdaptiveSampler) SampleRateForClass(tenantID uuid.UUID, trafficClass st
 // to the valid (0,1] range. Reports ok=false when no resolver is wired,
 // no override applies, or the configured value is non-positive (which
 // the clamp rejects rather than silently dropping all events).
+//
+// A class with a mandatory floor (mandatorySampleRateFloor — currently
+// only inspect_full at 1:1) is raised to that floor here, so the
+// compliance pin holds no matter what an override asks for. This is the
+// single chokepoint both DecideClass and SampleRateForClass consult, so
+// flooring once here keeps the keep/drop verdict and the recovered
+// de-bias rate in agreement.
 func (s *AdaptiveSampler) overrideRate(ctx context.Context, tenantID uuid.UUID, trafficClass string) (float64, bool) {
 	if s.rateResolver == nil {
 		return 0, false
@@ -576,7 +602,14 @@ func (s *AdaptiveSampler) overrideRate(ctx context.Context, tenantID uuid.UUID, 
 	if !ok {
 		return 0, false
 	}
-	return clampSampleRate(r)
+	clamped, ok := clampSampleRate(r)
+	if !ok {
+		return 0, false
+	}
+	if floor, floored := mandatorySampleRateFloor(trafficClass); floored && clamped < floor {
+		clamped = floor
+	}
+	return clamped, true
 }
 
 // keepProb returns the keep probability for the tenant's current

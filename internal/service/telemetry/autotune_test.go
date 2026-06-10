@@ -305,3 +305,22 @@ func TestAutoTuneStartStop(t *testing.T) {
 	tuner.Stop()
 	tuner.Stop() // idempotent
 }
+
+// TestAutoTuneStopWithoutStart guards the shutdown path: a tuner that
+// was constructed but never Start()-ed (e.g. an early return between
+// construction and Start) must not block forever in Stop waiting on a
+// loop that was never launched.
+func TestAutoTuneStopWithoutStart(t *testing.T) {
+	tuner := NewBatchAutoTuner(AutoTuneConfig{}, newFakeTunable(1024))
+	done := make(chan struct{})
+	go func() {
+		tuner.Stop()
+		tuner.Stop() // still idempotent without a prior Start
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop blocked when called without a prior Start")
+	}
+}

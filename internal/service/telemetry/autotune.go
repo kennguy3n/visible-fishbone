@@ -257,17 +257,24 @@ func (t *BatchAutoTuner) Start(ctx context.Context) {
 }
 
 // Stop terminates the control loop and waits for it to exit. Idempotent
-// and safe on a nil tuner. The batch sizes the tuner last set remain in
-// force on the writers (Stop does not reset them).
+// and safe on a nil tuner, and safe to call without a prior Start (in
+// which case there is no loop to join, so it returns immediately). The
+// batch sizes the tuner last set remain in force on the writers (Stop
+// does not reset them).
 func (t *BatchAutoTuner) Stop() {
 	if t == nil {
 		return
 	}
 	t.stopOnce.Do(func() {
+		// t.cancel is set only by Start. When Stop runs without a
+		// prior Start the loop goroutine was never launched, so
+		// nothing will ever close t.done — join on it only when we
+		// actually cancelled a running loop, otherwise this blocks
+		// forever.
 		if t.cancel != nil {
 			t.cancel()
+			<-t.done
 		}
-		<-t.done
 	})
 }
 
