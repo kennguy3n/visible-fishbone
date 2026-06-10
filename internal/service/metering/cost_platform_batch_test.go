@@ -37,7 +37,7 @@ func (c *countingTiers) TenantTiersBatch(ctx context.Context, ids []uuid.UUID) (
 // one round trip at a time before folding the per-tenant report into the
 // platform totals. It is the oracle the batched implementation must stay
 // byte-identical to.
-func legacyPlatformReport(t *testing.T, ctx context.Context, store *fakeStore, enf *BudgetEnforcer, tiers TierResolver, calc *CostCalculator, now time.Time) PlatformCostReport {
+func legacyPlatformReport(ctx context.Context, t *testing.T, store *fakeStore, enf *BudgetEnforcer, tiers TierResolver, calc *CostCalculator, now time.Time) PlatformCostReport {
 	t.Helper()
 	rows, err := store.PlatformCurrentUsage(ctx, now)
 	if err != nil {
@@ -80,7 +80,7 @@ func legacyPlatformReport(t *testing.T, ctx context.Context, store *fakeStore, e
 // some tenants, so the report exercises tier defaults, global defaults,
 // and overrides together. Tenant ids are deterministic (uuid.NewSHA1)
 // so the system-scoped ORDER BY tenant_id is stable across runs.
-func seedPlatformFixture(t *testing.T, ctx context.Context, svc *MeteringService, store *fakeStore, n int) []uuid.UUID {
+func seedPlatformFixture(ctx context.Context, t *testing.T, svc *MeteringService, store *fakeStore, n int) []uuid.UUID {
 	t.Helper()
 	// Tenant tiers are resolved independently by newFixtureTiers; this
 	// fixture only seeds usage and budget-override rows.
@@ -134,14 +134,14 @@ func TestPlatformReportBatchedMatchesLegacy(t *testing.T) {
 	svc := mustService(t, store, withClock(fixedClock(now)))
 	ctx := context.Background()
 
-	ids := seedPlatformFixture(t, ctx, svc, store, 7)
+	ids := seedPlatformFixture(ctx, t, svc, store, 7)
 	tiers := newFixtureTiers(ids)
 	enf := mustEnforcer(t, svc, store, tiers)
 	calc := NewCostCalculator(DefaultUnitCosts, withCostClock(fixedClock(now)))
 
 	// Oracle is computed before the batched run so neither mutates the
 	// other's view (both read the same deterministic store state).
-	want := legacyPlatformReport(t, ctx, store, enf, tiers, calc, now)
+	want := legacyPlatformReport(ctx, t, store, enf, tiers, calc, now)
 
 	reports, err := NewReports(svc, enf, store, tiers, calc, withReportsClock(fixedClock(now)))
 	if err != nil {
@@ -170,7 +170,7 @@ func TestPlatformReportBatchedIssuesBoundedLookups(t *testing.T) {
 		now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 		svc := mustService(t, store, withClock(fixedClock(now)))
 		ctx := context.Background()
-		ids := seedPlatformFixture(t, ctx, svc, store, n)
+		ids := seedPlatformFixture(ctx, t, svc, store, n)
 		tiers := &countingTiers{inner: newFixtureTiers(ids)}
 		enf := mustEnforcer(t, svc, store, tiers)
 		calc := NewCostCalculator(DefaultUnitCosts, withCostClock(fixedClock(now)))
@@ -223,7 +223,7 @@ func TestPlatformReportBatchedTierErrorAborts(t *testing.T) {
 	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	svc := mustService(t, store, withClock(fixedClock(now)))
 	ctx := context.Background()
-	_ = seedPlatformFixture(t, ctx, svc, store, 4)
+	_ = seedPlatformFixture(ctx, t, svc, store, 4)
 
 	tiers := fakeTiers{err: errors.New("tier backend down")}
 	enf := mustEnforcer(t, svc, store, tiers)
@@ -242,7 +242,7 @@ func TestPlatformReportBatchedBudgetErrorAborts(t *testing.T) {
 	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	svc := mustService(t, store, withClock(fixedClock(now)))
 	ctx := context.Background()
-	ids := seedPlatformFixture(t, ctx, svc, store, 4)
+	ids := seedPlatformFixture(ctx, t, svc, store, 4)
 
 	store.failTenantBudgetsBatch = errors.New("override backend down")
 	tiers := newFixtureTiers(ids)
