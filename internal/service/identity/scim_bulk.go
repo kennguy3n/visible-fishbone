@@ -126,7 +126,20 @@ func (s *SCIMService) runBulkOp(ctx context.Context, tenantID uuid.UUID, op SCIM
 		return bulkError(res, repository.ErrInvalidArgument, err.Error())
 	}
 
-	switch strings.ToUpper(op.Method) {
+	method := strings.ToUpper(op.Method)
+
+	// Enforce the optional If-Match precondition the operation carries
+	// (RFC 7644 §3.7.1 maps an operation's "version" to If-Match) for
+	// mutating-by-id methods, mirroring the standalone handlers'
+	// checkIfMatch so optimistic concurrency holds in batch too. POST
+	// has no target yet, so its version (if any) is ignored.
+	if method == "PUT" || method == "PATCH" || method == "DELETE" {
+		if failed, ok := s.checkBulkVersion(ctx, tenantID, resourceType, id, op.Version, res); !ok {
+			return failed
+		}
+	}
+
+	switch method {
 	case "POST":
 		return s.bulkCreate(ctx, tenantID, resourceType, op, data, bulkIDs, res)
 	case "PUT":
@@ -263,6 +276,48 @@ func (s *SCIMService) bulkDelete(ctx context.Context, tenantID uuid.UUID, resour
 	}
 	res.Status = strconv.Itoa(204)
 	return res
+}
+
+// checkBulkVersion enforces an optional If-Match precondition on a bulk
+// PUT/PATCH/DELETE operation. When version is empty it is a no-op
+// (return ok=true). Otherwise it loads the current resource and compares
+// its meta.version; on a mismatch it returns a 412 result, and a missing
+// resource surfaces as the same 404 the standalone endpoint would
+// return. The load is tenant-scoped (GetUser/GetGroup both verify
+// tenant ownership), so a precondition can never probe another tenant's
+// resource.
+func (s *SCIMService) checkBulkVersion(ctx context.Context, tenantID uuid.UUID, resourceType, id, version string, res SCIMBulkOperationResult) (SCIMBulkOperationResult, bool) {
+	if version == "" {
+		return res, true
+	}
+	uid := uuidFromString(id)
+	if uid == uuid.Nil {
+		return bulkError(res, repository.ErrInvalidArgument, "version precondition requires a valid resource id"), false
+	}
+
+	var current any
+	var err error
+	switch resourceType {
+	case "Users":
+		current, err = s.GetUser(ctx, tenantID, uid)
+	case "Groups":
+		current, err = s.GetGroup(ctx, tenantID, uid)
+	default:
+		return bulkError(res, repository.ErrInvalidArgument, "unsupported bulk resource type"), false
+	}
+	if err != nil {
+		return bulkRepoError(res, err), false
+	}
+	if !etagMatches(version, resourceVersion(current)) {
+		res.Status = strconv.Itoa(412)
+		res.Response = &SCIMError{
+			Schemas: []string{SCIMSchemaError},
+			Status:  strconv.Itoa(412),
+			Detail:  "resource version does not match the operation's If-Match precondition",
+		}
+		return res, false
+	}
+	return res, true
 }
 
 // --- bulk helpers ---------------------------------------------------------

@@ -2,9 +2,11 @@ package identity
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"hash"
+	"io"
 	"strings"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -24,8 +26,8 @@ import (
 // monotonic UpdatedAt, so any provisioning change rotates the version.
 func scimUserVersion(u repository.User) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "user|%s|%s|%s|%s|%s|%d",
-		u.ID, u.Email, u.Name, u.ExternalID, u.Status, u.UpdatedAt.UnixNano())
+	hashFields(h, "user", u.ID.String(), u.Email, u.Name, u.ExternalID, string(u.Status))
+	hashInt64(h, u.UpdatedAt.UnixNano())
 	return weakETag(h.Sum(nil))
 }
 
@@ -35,8 +37,35 @@ func scimUserVersion(u repository.User) string {
 // rotates the version.
 func scimGroupVersion(r repository.Role) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "group|%s|%s|%s", r.ID, r.Name, r.ExternalID)
+	hashFields(h, "group", r.ID.String(), r.Name, r.ExternalID)
 	return weakETag(h.Sum(nil))
+}
+
+// hashFields folds a domain tag and a sequence of variable-length string
+// fields into h unambiguously: each field is length-prefixed (uvarint)
+// before its bytes, so no field value — whatever characters it contains
+// — can shift the boundary into its neighbour. This makes the version
+// injective in the field tuple, unlike a fixed in-band separator which a
+// field containing that separator could spoof.
+func hashFields(h hash.Hash, domain string, fields ...string) {
+	hashInt64(h, int64(len(fields)))
+	writeLenPrefixed(h, domain)
+	for _, f := range fields {
+		writeLenPrefixed(h, f)
+	}
+}
+
+func writeLenPrefixed(h hash.Hash, s string) {
+	var lb [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(lb[:], uint64(len(s)))
+	_, _ = h.Write(lb[:n])
+	_, _ = io.WriteString(h, s)
+}
+
+func hashInt64(h hash.Hash, v int64) {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], uint64(v))
+	_, _ = h.Write(b[:])
 }
 
 func weakETag(sum []byte) string {
