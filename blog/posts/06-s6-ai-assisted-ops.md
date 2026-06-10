@@ -124,15 +124,64 @@ So the screenshots and payloads here are the *fallback* path working correctly �
 which is the path that must never break, because it's what runs when the model is
 down.
 
+## Live inference, measured
+
+Earlier drafts of this post conceded we had *not* run live model generation. We
+have now. [`blog/harness/llm_validation`](../harness/llm_validation) drives the
+**real** `NLQueryEngine` against a model served over Ollama's
+OpenAI-compatible endpoint, runs 20 curated AI-assistant queries spanning every
+intent kind, and asserts the four properties the design promises:
+
+1. **JSON validity** — the model's structured reply parses as JSON.
+2. **`ai_generated` flag** — true *only* when the LLM was consulted *and*
+   returned valid JSON; false on every fallback path.
+3. **Verifier correctness** — policy-verdict questions resolve through the
+   deterministic compiled-bundle evaluator, never a model guess.
+4. **Agreement with the deterministic fallback** — the LLM-augmented engine's
+   classification and verdict routing are *identical* with and without the
+   model. The model only fills free-form entity references the deterministic
+   tokenizer missed; it can never change the security-relevant routing.
+
+The same harness is wired into CI (`llm-validation` job in
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)): it installs
+Ollama, pulls a small test model, and fails the build if any property regresses.
+For CI speed we serve `qwen2.5:0.5b` — a ~400 MB quantized model — as a faithful,
+cheap stand-in for the self-hosted Ternary-Bonsai-8B; the contract being
+validated (structured JSON intent + deterministic verification) is model-agnostic.
+
+Measured results, verbatim from
+[`llm_validation/quality_report.json`](../artifacts/llm_validation/quality_report.json):
+
+| Metric | Result |
+|---|---|
+| Queries | 20 |
+| Parse success rate (valid JSON) | 100% |
+| Verifier pass rate | 100% |
+| Classification accuracy | 100% |
+| Fallback agreement | 100% |
+| `ai_generated` correctness | 100% |
+| Raw-parse agreement vs deterministic ground truth | 100% |
+| Latency p50 / p95 / p99 | 890 / 1093 / 1093 ms (CPU) |
+
+The headline number is the one that matters for the thesis: **fallback agreement
+is 100%.** Turning the model on did not change a single verdict the deterministic
+engine already computes — exactly what "AI proposes, the policy engine disposes"
+should mean in practice.
+
 ## Where we fall short
 
-- **No live 8B inference on this rig.** We exercised the deterministic and
-  fallback paths, not live model generation — that needs the model served
-  (Ollama). The generative-quality story is therefore methodology + design, not a
-  measured generation benchmark here.
-- **Intent parsing is heuristic.** The NL→query parser is a deterministic
-  tokenizer, not an LLM — robust and auditable, but it understands a bounded
-  grammar, not arbitrary phrasing.
+- **CI validates a small stand-in model, not the 8B at scale.** The harness
+  proves the *contract* (valid JSON, flagged generation, verified verdicts,
+  fallback agreement) on live inference, but the published latency/quality
+  numbers are from a 0.5B model on a CPU runner. The 8B served on tenant
+  hardware will differ; the harness is built to re-run against it and publish
+  the same report.
+- **Intent parsing is deterministic-first by design.** The NL→query parser is a
+  deterministic tokenizer that classifies intent, time windows and policy
+  versions; it now spans a wider grammar (blocked-traffic, change-summary,
+  policy-version-compare and posture-failure questions in addition to policy
+  verdicts), and the LLM augments free-form entity extraction. It is robust and
+  auditable, but it still understands a bounded grammar, not arbitrary phrasing.
 - **The verifier is the safety net, and it's conservative.** It will reject a
   proposed delta it can't prove safe, which means some legitimate changes need a
   human. We consider that the correct bias; it is still friction.

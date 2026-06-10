@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +32,45 @@ const (
 	// evalModeDefaultHeuristic: no policy graph source is wired
 	// (or evaluation failed), so the heuristic default was applied.
 	evalModeDefaultHeuristic = "default-heuristic"
+	// evalModeIntentClassified: the question is an operational
+	// analytics request (blocked traffic, change summary, policy
+	// version comparison, posture failures) rather than an
+	// enforcement question, so no verdict is produced — only the
+	// deterministically classified, structured intent.
+	evalModeIntentClassified = "intent-classified"
 )
+
+// verdictInformational is the Verdict reported for analytics queries
+// (IntentKind other than IntentPolicyVerdict). These questions do not
+// resolve to an allow/deny/inspect enforcement decision; the value
+// signals "no enforcement verdict — see query_kind / intent".
+const verdictInformational = "informational"
+
+// IntentKind classifies the operator's question so the engine routes
+// it correctly. IntentPolicyVerdict is the default "can X reach Y"
+// question that resolves to a deterministic enforcement verdict; the
+// remaining kinds are read-only operational-analytics questions that
+// carry structured parameters (subject, time window, versions) rather
+// than a verdict.
+type IntentKind string
+
+const (
+	IntentPolicyVerdict        IntentKind = "policy_verdict"
+	IntentBlockedTraffic       IntentKind = "blocked_traffic"
+	IntentChangeSummary        IntentKind = "change_summary"
+	IntentPolicyVersionCompare IntentKind = "policy_version_compare"
+	IntentPostureFailure       IntentKind = "posture_failure"
+)
+
+// TimeWindow is a normalized relative lookback parsed from a question
+// (e.g. "since last week" -> 7 days, "in 24h" -> 24 hours). Seconds is
+// the canonical machine-readable magnitude a downstream query can use
+// directly; Label preserves the operator's phrasing for the
+// explanation and audit trail.
+type TimeWindow struct {
+	Label   string `json:"label"`
+	Seconds int64  `json:"seconds"`
+}
 
 // Delimiters fencing the untrusted user question inside the intent-parsing
 // prompt. They mark a prompt-injection boundary so the model treats the
@@ -88,7 +129,10 @@ type NLQueryRequest struct {
 
 // NLQueryResponse is the deterministic answer to a policy query.
 type NLQueryResponse struct {
-	Verdict      string   `json:"verdict"` // allow, deny, inspect, log, alert, unknown
+	// Verdict is allow, deny, inspect, log, alert, or unknown for a
+	// policy-verdict question, and "informational" for an analytics
+	// question (which carries no enforcement verdict).
+	Verdict      string   `json:"verdict"`
 	MatchedRules []string `json:"matched_rules"`
 	Explanation  string   `json:"explanation"`
 	Confidence   float64  `json:"confidence"`
@@ -96,17 +140,65 @@ type NLQueryResponse struct {
 	ModelID      string   `json:"model_id,omitempty"`
 	// EvaluationMode records how the verdict was produced:
 	// compiled-bundle (real policy graph), no-policy (no live graph),
-	// or default-heuristic (no policy source / evaluation error).
+	// default-heuristic (no policy source / evaluation error), or
+	// intent-classified (analytics query, no verdict).
 	EvaluationMode string `json:"evaluation_mode,omitempty"`
+	// QueryKind echoes the classified IntentKind so an API consumer can
+	// dispatch analytics questions without re-parsing.
+	QueryKind string `json:"query_kind,omitempty"`
+	// Intent is the structured interpretation behind the answer. It is
+	// auditable evidence of how the question was understood.
+	Intent *ParsedIntent `json:"intent,omitempty"`
 }
 
 // ParsedIntent is the structured interpretation of a natural
-// language query.
+// language query. Kind, Window and CompareVersions are derived
+// deterministically and are never taken from raw LLM output; the LLM
+// may only augment the free-form entity references (UserRef, AppRef,
+// DeviceRef, Action) when the deterministic tokenizer leaves them
+// empty.
 type ParsedIntent struct {
-	UserRef   string `json:"user_ref,omitempty"`
-	AppRef    string `json:"app_ref,omitempty"`
-	DeviceRef string `json:"device_ref,omitempty"`
-	Action    string `json:"action,omitempty"` // access, block, etc.
+	// Kind is the deterministically classified query family. An empty
+	// value is treated as IntentPolicyVerdict.
+	Kind      IntentKind `json:"kind,omitempty"`
+	UserRef   string     `json:"user_ref,omitempty"`
+	AppRef    string     `json:"app_ref,omitempty"`
+	DeviceRef string     `json:"device_ref,omitempty"`
+	Action    string     `json:"action,omitempty"` // access, block, etc.
+	// Window is the relative lookback for analytics queries
+	// (blocked-traffic, change-summary, posture-failure). Nil when the
+	// question names no time range.
+	Window *TimeWindow `json:"window,omitempty"`
+	// CompareVersions holds the policy graph versions named in a
+	// IntentPolicyVersionCompare question, ascending and de-duplicated.
+	// Empty means "compare the two most recent versions".
+	CompareVersions []int `json:"compare_versions,omitempty"`
+}
+
+// IntentParse is the outcome of parsing a question into a ParsedIntent.
+// It records exactly how the parse was produced — the signals the WS14
+// LLM-inference validation harness asserts on. The intent itself is
+// always deterministic-first: LLMConsulted/AIGenerated describe only
+// whether the model augmented the free-form entity extraction.
+type IntentParse struct {
+	// Intent is the merged, authoritative interpretation used to answer
+	// the query.
+	Intent ParsedIntent
+	// LLMConsulted is true when an LLM provider was wired and called.
+	LLMConsulted bool
+	// AIGenerated is true only when the LLM was consulted AND returned
+	// valid JSON that was merged into the intent. It mirrors the
+	// ai_generated flag on NLQueryResponse.
+	AIGenerated bool
+	// ModelID is the served model identifier when AIGenerated is true.
+	ModelID string
+	// LLMRawOutput is the model's raw completion text (empty on a
+	// transport failure). Retained so the harness can assert JSON
+	// validity on the verbatim model output.
+	LLMRawOutput string
+	// LLMValidJSON reports whether LLMRawOutput parsed as a valid
+	// ParsedIntent JSON object.
+	LLMValidJSON bool
 }
 
 // Query processes a natural language policy question. When the LLM
@@ -118,22 +210,21 @@ func (e *NLQueryEngine) Query(ctx context.Context, req NLQueryRequest) (NLQueryR
 		return NLQueryResponse{}, fmt.Errorf("ai/nl_query: empty question")
 	}
 
-	var intent ParsedIntent
-	var aiGenerated bool
-	var modelID string
+	parse, err := e.ParseIntent(ctx, req.Question)
+	if err != nil {
+		return NLQueryResponse{}, err
+	}
+	intent := parse.Intent
+	aiGenerated := parse.AIGenerated
+	modelID := parse.ModelID
 
-	if e.llm != nil {
-		parsed, resp, err := e.parseWithLLM(ctx, req.Question)
-		if err != nil {
-			// Fall back to structured parsing on LLM failure.
-			intent = e.parseStructured(req.Question)
-		} else {
-			intent = parsed
-			aiGenerated = true
-			modelID = resp.ModelID
-		}
-	} else {
-		intent = e.parseStructured(req.Question)
+	// Operational-analytics questions (blocked traffic, change
+	// summary, version comparison, posture failures) do not resolve
+	// to an enforcement verdict. Return the deterministically
+	// classified, structured intent so a downstream router can
+	// dispatch to the owning data source. No data is fabricated here.
+	if intent.Kind != "" && intent.Kind != IntentPolicyVerdict {
+		return e.answerAnalytics(intent, aiGenerated, modelID), nil
 	}
 
 	verdict, matchedRules, explanation, mode := e.decide(ctx, req.TenantID, intent)
@@ -165,6 +256,7 @@ func (e *NLQueryEngine) Query(ctx context.Context, req NLQueryRequest) (NLQueryR
 		}
 	}
 
+	intentCopy := intent
 	return NLQueryResponse{
 		Verdict:        verdict,
 		MatchedRules:   matchedRules,
@@ -173,7 +265,81 @@ func (e *NLQueryEngine) Query(ctx context.Context, req NLQueryRequest) (NLQueryR
 		AIGenerated:    aiGenerated,
 		ModelID:        modelID,
 		EvaluationMode: mode,
+		QueryKind:      string(IntentPolicyVerdict),
+		Intent:         &intentCopy,
 	}, nil
+}
+
+// ParseIntent parses a question into a structured ParsedIntent,
+// deterministic-first. The deterministic tokenizer is authoritative
+// for every security-relevant routing decision (intent kind, time
+// window, policy versions); when an LLM is wired it is consulted only
+// to augment the free-form entity references the tokenizer could not
+// extract, and its output is never trusted to change the
+// classification or the verdict path. The returned IntentParse
+// records how the parse was produced for the validation harness.
+func (e *NLQueryEngine) ParseIntent(ctx context.Context, question string) (IntentParse, error) {
+	if strings.TrimSpace(question) == "" {
+		return IntentParse{}, fmt.Errorf("ai/nl_query: empty question")
+	}
+
+	det := e.parseStructured(question)
+	out := IntentParse{Intent: det}
+	if e.llm == nil {
+		return out, nil
+	}
+
+	out.LLMConsulted = true
+	llmIntent, resp, err := e.parseWithLLM(ctx, question)
+	out.LLMRawOutput = resp.Text
+	out.ModelID = resp.ModelID
+	if err != nil {
+		// A transport failure leaves resp.Text empty; an invalid-JSON
+		// failure carries the raw text (LLMValidJSON stays false).
+		// Either way the deterministic parse stands and ai_generated
+		// is reported false — raw LLM output is never trusted.
+		return out, nil
+	}
+	out.AIGenerated = true
+	out.LLMValidJSON = true
+	out.Intent = mergeIntent(det, llmIntent)
+	return out, nil
+}
+
+// mergeIntent augments the authoritative deterministic intent with the
+// LLM's entity references, but only where the deterministic tokenizer
+// found nothing. The deterministic Kind, Window and CompareVersions
+// are preserved verbatim so the LLM can never change the
+// classification or the verdict routing.
+func mergeIntent(det, llm ParsedIntent) ParsedIntent {
+	merged := det
+	if merged.UserRef == "" {
+		merged.UserRef = cleanEntityRef(llm.UserRef)
+	}
+	if merged.AppRef == "" {
+		merged.AppRef = cleanEntityRef(llm.AppRef)
+	}
+	if merged.DeviceRef == "" {
+		merged.DeviceRef = cleanEntityRef(llm.DeviceRef)
+	}
+	if merged.Action == "" {
+		merged.Action = normalizeAction(llm.Action)
+	}
+	return merged
+}
+
+// normalizeAction maps a free-form LLM action token onto the bounded
+// vocabulary the engine acts on, dropping anything it does not
+// recognise rather than letting an arbitrary string flow through.
+func normalizeAction(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "access", "allow", "reach", "connect":
+		return "access"
+	case "block", "deny", "reject":
+		return "block"
+	default:
+		return ""
+	}
 }
 
 func (e *NLQueryEngine) parseWithLLM(ctx context.Context, question string) (ParsedIntent, LLMResponse, error) {
@@ -219,7 +385,10 @@ func (e *NLQueryEngine) parseWithLLM(ctx context.Context, question string) (Pars
 		}
 	}
 	if err := json.Unmarshal([]byte(text), &intent); err != nil {
-		return ParsedIntent{}, LLMResponse{}, fmt.Errorf("ai/nl_query: parse LLM intent: %w", err)
+		// Return the raw response alongside the error so the caller can
+		// record the model output and flag it as invalid JSON for the
+		// validation harness; the deterministic parse is used regardless.
+		return ParsedIntent{}, resp, fmt.Errorf("ai/nl_query: parse LLM intent: %w", err)
 	}
 	return intent, resp, nil
 }
@@ -241,7 +410,7 @@ func cleanEntityRef(s string) string {
 func (e *NLQueryEngine) parseStructured(question string) ParsedIntent {
 	q := strings.ToLower(question)
 	parts := strings.Fields(q)
-	var intent ParsedIntent
+	intent := ParsedIntent{Kind: classifyKind(q)}
 
 	for i, p := range parts {
 		token := cleanEntityRef(p)
@@ -274,7 +443,254 @@ func (e *NLQueryEngine) parseStructured(question string) ParsedIntent {
 		intent.Action = "block"
 	}
 
+	// Relative time windows ("since last week", "in 24h") qualify the
+	// analytics kinds and are also harmless to extract for verdict
+	// questions, so they are parsed unconditionally.
+	intent.Window = parseTimeWindow(q)
+
+	// Free-form subject extraction for analytics questions that name a
+	// user without the "user" keyword, e.g. "blocked traffic for
+	// alice". Restricted to the kinds where a bare subject is a user
+	// so a verdict question's host token is never mistaken for one.
+	if intent.UserRef == "" && intent.Kind == IntentBlockedTraffic {
+		intent.UserRef = subjectAfter(parts, "for", "by")
+	}
+
+	// Version references are only meaningful for a comparison request;
+	// gating extraction on the kind keeps a window magnitude in another
+	// query (e.g. "24") from being read as a policy version.
+	if intent.Kind == IntentPolicyVersionCompare {
+		intent.CompareVersions = parseVersionRefs(q)
+	}
+
 	return intent
+}
+
+// classifyKind maps a lowercased question onto an IntentKind using a
+// deterministic, ordered set of phrase rules (most specific first).
+// This classification is authoritative and never sourced from the LLM:
+// it decides which data path a question is routed to, so it must be
+// auditable and stable.
+func classifyKind(q string) IntentKind {
+	switch {
+	case strings.Contains(q, "posture") &&
+		(strings.Contains(q, "fail") || strings.Contains(q, "failed") || strings.Contains(q, "failing")):
+		return IntentPostureFailure
+	case (strings.Contains(q, "compare") || strings.Contains(q, "diff")) &&
+		(strings.Contains(q, "version") || versionRe.MatchString(q)):
+		return IntentPolicyVersionCompare
+	case strings.Contains(q, "blocked traffic") ||
+		(strings.Contains(q, "blocked") &&
+			(strings.Contains(q, "show") || strings.Contains(q, "list") || strings.Contains(q, "report"))):
+		return IntentBlockedTraffic
+	case strings.Contains(q, "what changed") || strings.Contains(q, "what has changed") ||
+		strings.Contains(q, "changes since") ||
+		(strings.Contains(q, "chang") && strings.Contains(q, "since")):
+		return IntentChangeSummary
+	default:
+		return IntentPolicyVerdict
+	}
+}
+
+// subjectAfter returns the first cleaned token following any of the
+// given preposition keywords, skipping entity keywords (so "for user
+// alice" defers to the "user" extractor and "by the device ..." is not
+// captured as a user). Returns "" when no subject is found.
+func subjectAfter(parts []string, preps ...string) string {
+	skip := map[string]bool{"user": true, "users": true, "the": true, "a": true, "an": true, "app": true, "application": true, "device": true}
+	for i, p := range parts {
+		token := cleanEntityRef(p)
+		isPrep := false
+		for _, prep := range preps {
+			if token == prep {
+				isPrep = true
+				break
+			}
+		}
+		if !isPrep || i+1 >= len(parts) {
+			continue
+		}
+		next := cleanEntityRef(parts[i+1])
+		if next == "" || skip[next] {
+			continue
+		}
+		return next
+	}
+	return ""
+}
+
+// windowRe matches an explicit "<N> <unit>" lookback (optionally
+// preceded by "last"/"past"/"in"/"since"), e.g. "24h", "last 7 days",
+// "past 2 weeks". The numeric form is preferred over the named windows
+// below because it is unambiguous.
+var windowRe = regexp.MustCompile(`(\d+)\s*(hours?|hrs?|h|days?|d|weeks?|w|months?|mo)\b`)
+
+// parseTimeWindow extracts a normalized relative lookback from a
+// question, or nil when none is named. Numeric windows ("24h", "7
+// days") take precedence; otherwise a small set of named windows is
+// recognised. Magnitudes are normalized to seconds so a downstream
+// query can consume them directly.
+func parseTimeWindow(q string) *TimeWindow {
+	if m := windowRe.FindStringSubmatch(q); m != nil {
+		n, err := strconv.Atoi(m[1])
+		if err == nil && n > 0 {
+			if unit := unitDuration(m[2]); unit > 0 {
+				total := time.Duration(n) * unit
+				return &TimeWindow{Label: humanizeWindow(n, m[2]), Seconds: int64(total / time.Second)}
+			}
+		}
+	}
+	day := int64((24 * time.Hour) / time.Second)
+	switch {
+	case strings.Contains(q, "last week") || strings.Contains(q, "past week") || strings.Contains(q, "this week"):
+		return &TimeWindow{Label: "last week", Seconds: 7 * day}
+	case strings.Contains(q, "last month") || strings.Contains(q, "past month") || strings.Contains(q, "this month"):
+		return &TimeWindow{Label: "last month", Seconds: 30 * day}
+	case strings.Contains(q, "yesterday"):
+		return &TimeWindow{Label: "yesterday", Seconds: day}
+	case strings.Contains(q, "today"):
+		return &TimeWindow{Label: "today", Seconds: day}
+	}
+	return nil
+}
+
+// unitDuration maps a time-unit token to its duration. Returns 0 for
+// an unrecognised unit.
+func unitDuration(unit string) time.Duration {
+	switch unit {
+	case "h", "hr", "hrs", "hour", "hours":
+		return time.Hour
+	case "d", "day", "days":
+		return 24 * time.Hour
+	case "w", "week", "weeks":
+		return 7 * 24 * time.Hour
+	case "mo", "month", "months":
+		return 30 * 24 * time.Hour
+	default:
+		return 0
+	}
+}
+
+// humanizeWindow renders a normalized "<N> <unit>" label with a
+// canonical, correctly-pluralized unit.
+func humanizeWindow(n int, unit string) string {
+	var name string
+	switch unit {
+	case "h", "hr", "hrs", "hour", "hours":
+		name = "hour"
+	case "d", "day", "days":
+		name = "day"
+	case "w", "week", "weeks":
+		name = "week"
+	case "mo", "month", "months":
+		name = "month"
+	default:
+		name = unit
+	}
+	if n != 1 {
+		name += "s"
+	}
+	return strconv.Itoa(n) + " " + name
+}
+
+// versionRe matches an explicit "v<N>" policy version token.
+var versionRe = regexp.MustCompile(`\bv(\d+)\b`)
+
+// parseVersionRefs extracts policy graph version numbers from a
+// comparison question, accepting both "v2"/"v5" and bare integers
+// ("versions 3 and 5"). The result is de-duplicated and sorted
+// ascending; nil means no explicit versions were named (interpreted
+// downstream as "the two most recent versions").
+func parseVersionRefs(q string) []int {
+	set := make(map[int]struct{})
+	for _, m := range versionRe.FindAllStringSubmatch(q, -1) {
+		if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
+			set[n] = struct{}{}
+		}
+	}
+	for _, tok := range strings.Fields(q) {
+		if n, err := strconv.Atoi(cleanEntityRef(tok)); err == nil && n > 0 {
+			set[n] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// answerAnalytics builds the response for a classified analytics
+// question. It carries no enforcement verdict — only the structured,
+// auditable interpretation — so a downstream router can dispatch to
+// the owning data source. No telemetry, audit, or posture data is
+// fabricated here.
+func (e *NLQueryEngine) answerAnalytics(intent ParsedIntent, aiGenerated bool, modelID string) NLQueryResponse {
+	explanation, complete := describeAnalytics(intent)
+	confidence := 0.5
+	if complete {
+		confidence = 0.85
+	}
+	intentCopy := intent
+	return NLQueryResponse{
+		Verdict:        verdictInformational,
+		MatchedRules:   nil,
+		Explanation:    explanation,
+		Confidence:     confidence,
+		AIGenerated:    aiGenerated,
+		ModelID:        modelID,
+		EvaluationMode: evalModeIntentClassified,
+		QueryKind:      string(intent.Kind),
+		Intent:         &intentCopy,
+	}
+}
+
+// describeAnalytics renders a human explanation of a classified
+// analytics intent and reports whether the parameters required to
+// action it are present (used to set confidence). It never invents a
+// result — it states what was understood and, when a required
+// parameter is missing, says so.
+func describeAnalytics(intent ParsedIntent) (explanation string, complete bool) {
+	window := "an unspecified time range"
+	haveWindow := intent.Window != nil
+	if haveWindow {
+		window = intent.Window.Label
+	}
+	switch intent.Kind {
+	case IntentBlockedTraffic:
+		if intent.UserRef != "" {
+			return fmt.Sprintf("Blocked-traffic report for user %q over %s. This is a read-only telemetry query; it carries no enforcement verdict.", intent.UserRef, window), true
+		}
+		return fmt.Sprintf("Blocked-traffic report over %s. Name a user (e.g. \"for user alice\") to scope it; no enforcement verdict applies.", window), haveWindow
+	case IntentChangeSummary:
+		return fmt.Sprintf("Configuration change summary over %s, sourced from the audit log. This is read-only; it carries no enforcement verdict.", window), haveWindow
+	case IntentPolicyVersionCompare:
+		switch len(intent.CompareVersions) {
+		case 0:
+			return "Policy version comparison of the two most recent compiled graph versions. This is a read-only diff; it carries no enforcement verdict.", true
+		case 1:
+			return fmt.Sprintf("Policy version comparison naming only version %d. Name a second version to diff against; no enforcement verdict applies.", intent.CompareVersions[0]), false
+		default:
+			return fmt.Sprintf("Policy version comparison of versions %s. This is a read-only diff; it carries no enforcement verdict.", formatVersions(intent.CompareVersions)), true
+		}
+	case IntentPostureFailure:
+		return fmt.Sprintf("Posture-failure report over %s, sourced from device posture evaluations. This is read-only; it carries no enforcement verdict.", window), haveWindow
+	default:
+		return "Classified as a non-enforcement analytics query.", false
+	}
+}
+
+// formatVersions renders version numbers as "v2, v5".
+func formatVersions(vs []int) string {
+	parts := make([]string, len(vs))
+	for i, v := range vs {
+		parts[i] = "v" + strconv.Itoa(v)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // decide resolves a verdict for the parsed intent, preferring the

@@ -1,0 +1,26 @@
+[
+  {"question": "Can app salesforce.com be reached from device laptop1?", "expect_kind": "policy_verdict", "expect_verdict": "allow"},
+  {"question": "Can app evil.com be reached from device laptop2?", "expect_kind": "policy_verdict", "expect_verdict": "deny"},
+  {"question": "Can app internal.corp be reached from device kiosk9?", "expect_kind": "policy_verdict", "expect_verdict": "allow"},
+  {"question": "Can user alice access app salesforce.com from device laptop1?", "expect_kind": "policy_verdict", "expect_verdict": "allow"},
+
+  {"question": "show blocked traffic for user alice in the last 24h", "expect_kind": "blocked_traffic", "expect_verdict": "informational"},
+  {"question": "show blocked traffic for user bob since last week", "expect_kind": "blocked_traffic", "expect_verdict": "informational"},
+  {"question": "list blocked connections for user carol in the last 7 days", "expect_kind": "blocked_traffic", "expect_verdict": "informational"},
+  {"question": "report blocked traffic for dave today", "expect_kind": "blocked_traffic", "expect_verdict": "informational"},
+
+  {"question": "what changed since last week", "expect_kind": "change_summary", "expect_verdict": "informational"},
+  {"question": "what has changed since yesterday", "expect_kind": "change_summary", "expect_verdict": "informational"},
+  {"question": "what changed in the last 7 days", "expect_kind": "change_summary", "expect_verdict": "informational"},
+  {"question": "what configuration changed since last month", "expect_kind": "change_summary", "expect_verdict": "informational"},
+
+  {"question": "compare policy versions", "expect_kind": "policy_version_compare", "expect_verdict": "informational"},
+  {"question": "compare policy versions 3 and 5", "expect_kind": "policy_version_compare", "expect_verdict": "informational"},
+  {"question": "compare policy v2 and v5", "expect_kind": "policy_version_compare", "expect_verdict": "informational"},
+  {"question": "diff policy versions 7 and 8", "expect_kind": "policy_version_compare", "expect_verdict": "informational"},
+
+  {"question": "which devices failed posture in 24h", "expect_kind": "posture_failure", "expect_verdict": "informational"},
+  {"question": "show devices failing posture checks today", "expect_kind": "posture_failure", "expect_verdict": "informational"},
+  {"question": "which devices failed posture in the last 7 days", "expect_kind": "posture_failure", "expect_verdict": "informational"},
+  {"question": "list devices that failed posture since yesterday", "expect_kind": "posture_failure", "expect_verdict": "informational"}
+]

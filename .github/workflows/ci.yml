@@ -190,6 +190,67 @@ jobs:
           TESTCONTAINERS_RYUK_DISABLED: "false"
         run: go test -race -timeout 600s -tags=integration ./...
 
+  llm-validation:
+    name: llm inference validation (ollama)
+    runs-on: ubuntu-latest
+    # Model pull + 20 live completions on a CPU runner; the harness
+    # itself runs in seconds, the budget is for the one-off model pull.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: install ollama
+        # Official installer; pinned by the upstream script to the
+        # latest stable release. Ollama serves an OpenAI-compatible
+        # /v1/chat/completions endpoint, which is exactly what
+        # ai.HTTPProvider speaks — no adapter needed.
+        run: curl -fsSL https://ollama.com/install.sh | sh
+      - name: start ollama and pull the test model
+        env:
+          # qwen2.5:0.5b is a ~400 MB Q4 model that loads in seconds on
+          # a CPU runner and reliably emits the small JSON intent object
+          # the engine asks for — a faithful, cheap stand-in for the
+          # self-hosted Ternary-Bonsai-8B in CI.
+          OLLAMA_TEST_MODEL: qwen2.5:0.5b
+        run: |
+          ollama serve > "${RUNNER_TEMP}/ollama.log" 2>&1 &
+          echo "OLLAMA_TEST_MODEL=${OLLAMA_TEST_MODEL}" >> "$GITHUB_ENV"
+          # Wait for the daemon's HTTP API before pulling.
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:11434/api/tags >/dev/null; then
+              echo "ollama is up"; break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::ollama did not start"; cat "${RUNNER_TEMP}/ollama.log"; exit 1
+            fi
+            sleep 1
+          done
+          ollama pull "${OLLAMA_TEST_MODEL}"
+      - name: run LLM validation harness
+        # The harness drives the real NLQueryEngine over 20 curated
+        # queries against live inference and ASSERTS the four contract
+        # properties (valid JSON, ai_generated flag, verifier
+        # correctness, deterministic-fallback agreement). It exits
+        # non-zero on any violation, so this step is the gate.
+        env:
+          AI_LLM_ENDPOINT: http://localhost:11434/v1/chat/completions
+          AI_LLM_MODEL: ${{ env.OLLAMA_TEST_MODEL }}
+        run: |
+          go run ./blog/harness/llm_validation \
+            -out "${RUNNER_TEMP}/llm_validation" \
+            -timeout 60s \
+            -json
+      - name: upload quality report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-validation-report-${{ github.sha }}
+          path: ${{ runner.temp }}/llm_validation
+          retention-days: 14
+
   tidy:
     name: go mod tidy
     runs-on: ubuntu-latest
