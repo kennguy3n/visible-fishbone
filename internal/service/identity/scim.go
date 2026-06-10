@@ -31,6 +31,19 @@ type SCIMService struct {
 	// bridge is the optional upstream propagation collaborator. Nil
 	// disables propagation (pure local SCIM, unchanged behaviour).
 	bridge *iamCoreBridge
+
+	// revoker, when set, receives a revocation when a user is
+	// de-provisioned (SCIM DELETE / deactivating PATCH) so the ZTNA
+	// enforcement plane drops the user's live sessions immediately
+	// rather than waiting for token expiry. Nil keeps the prior
+	// behaviour (soft-delete only).
+	revoker RevocationPublisher
+}
+
+// WithRevocationPublisher wires a RevocationPublisher so user
+// de-provisioning pushes a revocation downstream to the ZTNA plane.
+func WithRevocationPublisher(r RevocationPublisher) SCIMOption {
+	return func(s *SCIMService) { s.revoker = r }
 }
 
 // SCIMOption configures optional SCIMService behaviour without
@@ -235,6 +248,15 @@ func (s *SCIMService) DeleteUser(ctx context.Context, tenantID uuid.UUID, userID
 			return fmt.Errorf("iam-core delete failed: %w", derr)
 		}
 	}
+	// Cut the de-provisioned user's live ZTNA sessions immediately
+	// instead of waiting for token expiry. Best-effort: a publish
+	// failure must not undo the (already durable) soft-delete, so it is
+	// surfaced as an error only when no other failure occurred.
+	if s.revoker != nil {
+		if rerr := s.revoker.PublishRevocation(ctx, tenantID, userID, "scim_user_deleted"); rerr != nil {
+			return fmt.Errorf("revocation publish failed: %w", rerr)
+		}
+	}
 	return nil
 }
 
@@ -254,30 +276,57 @@ func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter 
 		count = repository.MaxPageLimit
 	}
 
-	var parsed *SCIMFilter
+	var expr filterExpr
 	if filter != "" {
-		f, err := ParseSCIMFilter(filter)
+		e, err := parseFilterExpr(filter)
 		if err != nil {
 			return SCIMListResponse{}, fmt.Errorf("invalid filter: %w: %w", err, repository.ErrInvalidArgument)
 		}
-		parsed = &f
+		expr = e
 	}
 
-	// Fast path: userName eq "x" — the standard IdP dedup lookup
-	// (Okta, Azure AD, OneLogin). Use GetByEmail for O(1) indexed
-	// lookup instead of paginating through all users.
-	if parsed != nil && parsed.Op == SCIMFilterEq &&
-		strings.EqualFold(parsed.Attribute, "username") {
+	// Pushdown fast path: a single eq/co/sw clause on a backed column
+	// is resolved by the repository (indexed query + DB-side window +
+	// total count), never an in-memory scan. This keeps the standard
+	// IdP dedup lookup (`userName eq "x"`) O(1) and a 100K-user tenant
+	// from materialising every row to filter+slice it.
+	if expr != nil {
+		if simple, ok := pushdown(expr); ok {
+			return s.listUsersPushdown(ctx, tenantID, &simple, startIndex, count)
+		}
+	} else {
+		return s.listUsersPushdown(ctx, tenantID, nil, startIndex, count)
+	}
+
+	// General path: compound / negated / richer-operator filters are
+	// evaluated in memory over the tenant's user set. The scan is
+	// tenant-scoped and batched through cursor pagination so it never
+	// loads another tenant's rows; SME tenants hold a bounded user
+	// count, so this stays cheap while remaining RFC 7644 §3.4.2
+	// compliant for filters no SQL column can express.
+	all, err := s.listAllUsers(ctx, tenantID)
+	if err != nil {
+		return SCIMListResponse{}, err
+	}
+	matching := make([]any, 0, len(all))
+	for _, u := range all {
+		su := userToSCIM(u)
+		if expr.matchUser(su) {
+			matching = append(matching, su)
+		}
+	}
+	return paginateResources(matching, startIndex, count), nil
+}
+
+// listUsersPushdown serves an unfiltered list or a single pushdownable
+// clause by delegating to the repository's indexed SearchUsers (and the
+// GetByEmail shortcut for the userName-eq dedup lookup).
+func (s *SCIMService) listUsersPushdown(ctx context.Context, tenantID uuid.UUID, parsed *SCIMFilter, startIndex, count int) (SCIMListResponse, error) {
+	if parsed != nil && parsed.Op == SCIMFilterEq && strings.EqualFold(parsed.Attribute, "username") {
 		u, err := s.users.GetByEmail(ctx, tenantID, parsed.Value)
 		if err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
-				return SCIMListResponse{
-					Schemas:      []string{SCIMSchemaList},
-					TotalResults: 0,
-					StartIndex:   startIndex,
-					ItemsPerPage: 0,
-					Resources:    []any{},
-				}, nil
+				return emptyList(startIndex), nil
 			}
 			return SCIMListResponse{}, err
 		}
@@ -290,26 +339,10 @@ func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter 
 		}, nil
 	}
 
-	// General path (co/sw filters and unfiltered lists): push the
-	// filter, the RFC 7644 §3.4.2 pagination window, and the total
-	// count down to the repository. This avoids materialising the
-	// entire tenant user set in memory — a 100K-user tenant would
-	// otherwise allocate every row on each page request just to filter
-	// and slice it.
 	searchFilter, matchable := scimUserSearchFilter(parsed)
 	if !matchable {
-		// The filter targets an attribute with no backing user column
-		// and does not degenerate to matching every row, so nothing can
-		// match. Return an empty page without touching the store.
-		return SCIMListResponse{
-			Schemas:      []string{SCIMSchemaList},
-			TotalResults: 0,
-			StartIndex:   startIndex,
-			ItemsPerPage: 0,
-			Resources:    []any{},
-		}, nil
+		return emptyList(startIndex), nil
 	}
-
 	users, totalResults, err := s.users.SearchUsers(ctx, tenantID, searchFilter, startIndex-1, count)
 	if err != nil {
 		return SCIMListResponse{}, err
@@ -318,7 +351,6 @@ func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter 
 	for _, u := range users {
 		resources = append(resources, userToSCIM(u))
 	}
-
 	return SCIMListResponse{
 		Schemas:      []string{SCIMSchemaList},
 		TotalResults: totalResults,
@@ -326,6 +358,28 @@ func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter 
 		ItemsPerPage: len(resources),
 		Resources:    resources,
 	}, nil
+}
+
+// listAllUsers pages the tenant's full user set through the cursor API.
+func (s *SCIMService) listAllUsers(ctx context.Context, tenantID uuid.UUID) ([]repository.User, error) {
+	var out []repository.User
+	cursor := ""
+	for {
+		page, err := s.users.List(ctx, tenantID, repository.Page{
+			After: cursor,
+			Limit: repository.MaxPageLimit,
+			Order: repository.SortDesc,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page.Items...)
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	return out, nil
 }
 
 // scimUserSearchFilter translates a parsed SCIM filter into a
@@ -539,25 +593,13 @@ func (s *SCIMService) ListGroups(ctx context.Context, tenantID uuid.UUID, filter
 		return SCIMListResponse{}, err
 	}
 
-	var parsed *SCIMFilter
+	var expr filterExpr
 	if filter != "" {
-		f, err := ParseSCIMFilter(filter)
+		e, err := parseFilterExpr(filter)
 		if err != nil {
 			return SCIMListResponse{}, fmt.Errorf("invalid filter: %w: %w", err, repository.ErrInvalidArgument)
 		}
-		parsed = &f
-	}
-
-	if startIndex < 1 {
-		startIndex = 1
-	}
-	if count <= 0 {
-		count = repository.DefaultPageLimit
-	}
-	// Cap the client-requested page size to the platform maximum (see
-	// ListUsers).
-	if count > repository.MaxPageLimit {
-		count = repository.MaxPageLimit
+		expr = e
 	}
 
 	allMatching := make([]any, 0, len(roles))
@@ -566,14 +608,44 @@ func (s *SCIMService) ListGroups(ctx context.Context, tenantID uuid.UUID, filter
 			continue
 		}
 		sg := roleToSCIMGroup(r)
-		if parsed != nil && !parsed.MatchGroup(sg) {
+		if expr != nil && !expr.matchGroup(sg) {
 			continue
 		}
 		allMatching = append(allMatching, sg)
 	}
 
-	// Apply RFC 7644 §3.4.2 pagination window.
-	totalResults := len(allMatching)
+	return paginateResources(allMatching, startIndex, count), nil
+}
+
+// emptyList returns a zero-result SCIM list response anchored at the
+// requested start index.
+func emptyList(startIndex int) SCIMListResponse {
+	if startIndex < 1 {
+		startIndex = 1
+	}
+	return SCIMListResponse{
+		Schemas:      []string{SCIMSchemaList},
+		TotalResults: 0,
+		StartIndex:   startIndex,
+		ItemsPerPage: 0,
+		Resources:    []any{},
+	}
+}
+
+// paginateResources applies the RFC 7644 §3.4.2 1-based startIndex /
+// count window to an already-filtered resource slice, normalising the
+// bounds the same way the list endpoints do.
+func paginateResources(all []any, startIndex, count int) SCIMListResponse {
+	if startIndex < 1 {
+		startIndex = 1
+	}
+	if count <= 0 {
+		count = repository.DefaultPageLimit
+	}
+	if count > repository.MaxPageLimit {
+		count = repository.MaxPageLimit
+	}
+	totalResults := len(all)
 	start := startIndex - 1
 	if start > totalResults {
 		start = totalResults
@@ -582,15 +654,14 @@ func (s *SCIMService) ListGroups(ctx context.Context, tenantID uuid.UUID, filter
 	if end > totalResults {
 		end = totalResults
 	}
-	page := allMatching[start:end]
-
+	page := all[start:end]
 	return SCIMListResponse{
 		Schemas:      []string{SCIMSchemaList},
 		TotalResults: totalResults,
 		StartIndex:   startIndex,
 		ItemsPerPage: len(page),
 		Resources:    page,
-	}, nil
+	}
 }
 
 // --- Conversion helpers ---------------------------------------------------
@@ -613,6 +684,7 @@ func userToSCIM(u repository.User) SCIMUser {
 			ResourceType: "User",
 			Created:      u.CreatedAt.Format(time.RFC3339),
 			LastModified: u.UpdatedAt.Format(time.RFC3339),
+			Version:      scimUserVersion(u),
 		},
 	}
 	return su
@@ -627,6 +699,7 @@ func roleToSCIMGroup(r repository.Role) SCIMGroup {
 		Meta: &SCIMMeta{
 			ResourceType: "Group",
 			Created:      r.CreatedAt.Format(time.RFC3339),
+			Version:      scimGroupVersion(r),
 		},
 	}
 }

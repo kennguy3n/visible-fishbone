@@ -83,6 +83,29 @@ pub enum ZtnaError {
     /// rejected the [`sng_core::events::ZtnaEvent`].
     #[error("telemetry: {0}")]
     Telemetry(String),
+
+    /// An OIDC ID token presented on the access path failed
+    /// validation — bad signature, wrong `iss`/`aud`, expired, a
+    /// `kid` not in the provider JWKS, or (for a tenant-scoped
+    /// resolve) a `tenant_id` claim that does not match the
+    /// requesting tenant. The proxy fails closed: no
+    /// [`crate::identity::UserIdentity`] is produced and the
+    /// request is denied as identity-rejected.
+    #[error("token rejected: {reason}")]
+    TokenRejected {
+        /// Human-readable validation failure reason.
+        reason: String,
+    },
+
+    /// No IdP configuration is registered for the tenant the
+    /// access request (or token) is scoped to, so its tokens
+    /// cannot be validated. Distinct from a token that fails
+    /// validation against a known config.
+    #[error("no idp config for tenant: {tenant_id}")]
+    IdpConfigNotFound {
+        /// The tenant id with no registered IdP configuration.
+        tenant_id: String,
+    },
 }
 
 impl ZtnaError {
@@ -105,10 +128,10 @@ impl ZtnaError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::BundleDecode(_) | Self::InvalidPolicy(_) => ErrorCode::WireSchema,
-            Self::UnknownApp { .. } => ErrorCode::ResourceMissing,
-            Self::DeviceNotEnrolled { .. } | Self::IdentityNotFound { .. } => {
-                ErrorCode::IdentityRejected
-            }
+            Self::UnknownApp { .. } | Self::IdpConfigNotFound { .. } => ErrorCode::ResourceMissing,
+            Self::DeviceNotEnrolled { .. }
+            | Self::IdentityNotFound { .. }
+            | Self::TokenRejected { .. } => ErrorCode::IdentityRejected,
             Self::ProviderFailure { .. } | Self::Telemetry(_) => ErrorCode::Io,
         }
     }
