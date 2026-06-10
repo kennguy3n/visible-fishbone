@@ -11,14 +11,20 @@ either a bearer JWT (operator console) or `X-SNG-API-Key`
  */
 import type { AINLQueryResponseVerdict } from './aINLQueryResponseVerdict';
 import type { AINLQueryResponseEvaluationMode } from './aINLQueryResponseEvaluationMode';
+import type { AINLQueryResponseQueryKind } from './aINLQueryResponseQueryKind';
+import type { AINLQueryIntent } from './aINLQueryIntent';
 
 export interface AINLQueryResponse {
+  /** Enforcement verdict for a policy-verdict question, or 'informational' for a read-only analytics question (which carries no verdict). */
   verdict: AINLQueryResponseVerdict;
   matched_rules?: string[];
   explanation: string;
   confidence?: number;
   ai_generated: boolean;
   model_id?: string;
-  /** How the verdict was produced: compiled-bundle (tenant's live policy graph evaluated), no-policy (no live graph, heuristic default), or default-heuristic (no policy source/evaluation error). */
+  /** How the answer was produced: compiled-bundle (tenant's live policy graph evaluated), no-policy (no live graph, heuristic default), default-heuristic (no policy source/evaluation error), or intent-classified (operational-analytics question routed by deterministic intent classification, no enforcement verdict). */
   evaluation_mode?: AINLQueryResponseEvaluationMode;
+  /** The deterministically classified query family. policy_verdict yields an enforcement verdict; the others are read-only analytics questions answered informationally. */
+  query_kind?: AINLQueryResponseQueryKind;
+  intent?: AINLQueryIntent;
 }
