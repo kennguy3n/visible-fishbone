@@ -69,7 +69,11 @@ fn validator_for(name: &str) -> Option<Validator> {
         "uae_emirates_id" => validators::uae_emirates_id,
         "saudi_id" => validators::saudi_national_id,
         "kuwait_civil_id" => validators::kuwait_civil_id,
-        _ => return None,
+        // The jurisdiction detector catalog supplies validators for the
+        // remaining national / regional identifiers (UK NINO + NHS,
+        // Canada SIN, Australia TFN + Medicare, Germany, France, Brazil,
+        // EU IBAN + VAT, Philippines, Indonesia).
+        _ => return crate::detectors::validator(name),
     };
     Some(v)
 }
@@ -121,7 +125,8 @@ fn context_keywords(name: &str) -> Option<&'static [&'static str]> {
         // alone, so give them English field-label cues.
         "qatar_qid" => &["qatar id", "qid", "national id"],
         "bahrain_cpr" => &["cpr", "bahrain", "personal number"],
-        _ => return None,
+        // Locale cues for the jurisdiction detector catalog patterns.
+        _ => return crate::detectors::context(name),
     };
     Some(kws)
 }
@@ -1019,7 +1024,9 @@ pub fn builtin_pattern(name: &str) -> Option<&'static str> {
         "qatar_qid" => r"\b\d{11}\b",
         "kuwait_civil_id" => r"\b\d{12}\b",
         "bahrain_cpr" => r"\b\d{9}\b",
-        _ => return None,
+        // The jurisdiction detector catalog supplies the regex shapes
+        // for the remaining national / regional identifiers.
+        _ => return crate::detectors::pattern(name),
     };
     Some(pat)
 }

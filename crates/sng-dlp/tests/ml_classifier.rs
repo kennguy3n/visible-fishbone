@@ -18,7 +18,7 @@
 //! (`sng_dlp::ml_classifier`), Workstream 4 Step 1.
 //!
 //! These exercise the *real* inference path against the committed
-//! `assets/ner_v1.onnx` model — there is no stubbed / hardcoded entity
+//! `assets/ner_v2.onnx` model — there is no stubbed / hardcoded entity
 //! return anywhere. The suite proves four things:
 //!
 //! 1. the Rust feature extractor reproduces the Python authoring
@@ -38,8 +38,8 @@ use sng_dlp::ml_classifier::{
 };
 
 /// The committed, signed-bundle NER model and its parity fixture.
-const MODEL_BYTES: &[u8] = include_bytes!("../assets/ner_v1.onnx");
-const FEATURECHECK: &str = include_str!("../assets/ner_v1.featurecheck.json");
+const MODEL_BYTES: &[u8] = include_bytes!("../assets/ner_v2.onnx");
+const FEATURECHECK: &str = include_str!("../assets/ner_v2.featurecheck.json");
 /// The cross-language entity-class contract shared with the Go control
 /// plane (internal/service/dlp/entity_classes_parity_test.go).
 const ENTITY_CLASSES: &str = include_str!("../assets/entity_classes.json");
@@ -83,7 +83,7 @@ fn entity_classes_match_shared_contract() {
 }
 
 fn load_model() -> NerModel {
-    NerModel::load_from_bytes(MODEL_BYTES).expect("ner_v1.onnx loads into ONNX Runtime")
+    NerModel::load_from_bytes(MODEL_BYTES).expect("ner_v2.onnx loads into ONNX Runtime")
 }
 
 /// The Rust featurizer must reproduce the Python exporter's vectors
@@ -157,12 +157,33 @@ fn onnx_model_detects_each_entity_class() {
             EntityClass::BankAccount,
         ),
         (
-            "The patient record MRN8472910 shows the diagnosis",
+            "Lab results A12-3456 pending review",
             EntityClass::MedicalRecord,
         ),
         (
             "The court filed case 1:21-cv-04567 last week",
             EntityClass::LegalDocument,
+        ),
+        (
+            "The patient record MRN8472910 shows the diagnosis",
+            EntityClass::MedicalRecordNumber,
+        ),
+        (
+            "Driver license D1234567 expires soon",
+            EntityClass::DriverLicense,
+        ),
+        ("Tax id 12-3456789 for filing", EntityClass::TaxId),
+        (
+            "Date of birth 1990-05-21 recorded",
+            EntityClass::DateOfBirth,
+        ),
+        (
+            "Passport number AB1234567 expires 2030",
+            EntityClass::PassportNumber,
+        ),
+        (
+            "National identity card S1234567A verified",
+            EntityClass::NationalId,
         ),
     ];
     for (text, want) in cases {
@@ -230,6 +251,41 @@ fn regex_fallback_does_not_treat_bare_digit_run_as_phone() {
         ents.iter().any(|e| e.class == EntityClass::PhoneNumber),
         "punctuated phone token should classify standalone: {ents:?}"
     );
+}
+
+/// The fallback also covers the WS5 breadth classes: a standalone
+/// `MRN#######` code, and date/code/number tokens in the matching
+/// conservative keyword context. No model is loaded here.
+#[test]
+fn regex_fallback_detects_ws5_breadth_classes() {
+    let f = RegexNerFallback;
+    let cases = [
+        (
+            "The patient record MRN8472910 shows the diagnosis",
+            EntityClass::MedicalRecordNumber,
+        ),
+        (
+            "Driver license D1234567 expires soon",
+            EntityClass::DriverLicense,
+        ),
+        ("Taxpayer tin 12-3456789 verified", EntityClass::TaxId),
+        (
+            "Date of birth 1990-05-21 recorded",
+            EntityClass::DateOfBirth,
+        ),
+        (
+            "Travel passport AB1234567 issued today",
+            EntityClass::PassportNumber,
+        ),
+        ("Citizen nric S1234567A on file", EntityClass::NationalId),
+    ];
+    for (text, want) in cases {
+        let ents = f.detect(text);
+        assert!(
+            ents.iter().any(|e| e.class == want),
+            "fallback expected {want:?} in {text:?}, got {ents:?}"
+        );
+    }
 }
 
 fn fixed_key() -> SigningKey {

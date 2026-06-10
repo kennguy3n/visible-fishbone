@@ -94,7 +94,7 @@ pub use oidc::OidcAuthSession;
 pub use sdk::MobileSdk;
 pub use types::{
     SdkAgentHealth, SdkAuthState, SdkEnrollmentOutcome, SdkLifecycleState, SdkPostureSnapshot,
-    SdkPowerState, SdkTunnelStatus,
+    SdkPowerState, SdkTunnelConfig, SdkTunnelStatus,
 };
 
 uniffi::setup_scaffolding!();

@@ -100,36 +100,48 @@ harness; their numbers feed the datasheet table below.
 ## Performance: what we can and can't measure here
 
 Policy **compile latency** is real and measured — it's pure Go and runs
-unprivileged. Edge **throughput** is the number we are most careful about.
+unprivileged. Edge **throughput** is the number we are most careful about, and
+we now report it two ways in the
+[edge performance datasheet](../artifacts/edge-performance-datasheet.md):
 
-The `bench/` harness produces a per-SKU throughput matrix, but on this VM it runs
-in `--dry-run` mode (crafts and measures frames in-process, no NIC I/O). The tell
-is right there in the data: the headline throughput is ~96 Gbps *regardless of
-whether the SKU has 2 vCPUs or 8*, and CPU utilisation reads 0.0%. That is a
-dry-run artifact, not a wire result, and we present it as such. Real inspected
-throughput needs `CAP_NET_RAW` and an in-path edge.
+- **dry-run** — the `bench/` harness crafts and measures frames in-process with
+  no NIC in the loop. This is a synthetic *ceiling*; the tell is that the
+  headline throughput is ~76–100 Gbps largely independent of SKU vCPU count and
+  CPU utilisation reads ~0%. Useful for catching datapath regressions, useless
+  as a wire number.
+- **wire** — real `AF_PACKET` frames transmitted over a veth pair with
+  `sng-edge` enforcing in-path under `CAP_NET_RAW` on the self-hosted
+  `sng-bench-wire` runner (provisioned by
+  [`deploy/terraform/modules/bench-runner`](../../deploy/terraform/modules/bench-runner)).
+  This is the measured *floor*.
 
-What *is* genuinely informative from the same run is the **per-packet latency
-distribution**, because the craft→inspect→measure path exercises the real
-inspection code. From the
-[edge performance datasheet](../artifacts/edge-performance-datasheet.md)
-(branch-large, full-TLS inspection):
+For the `large` SKU (16 vCPU), the real-wire firewall throughput is **5.37 Gbps
+at 1500B** and **18.39 Gbps at 9000B** — versus the ~76 Gbps dry-run ceiling at
+1500B. The wire rig is a single-stream egress path, so these are a conservative
+floor, not a multi-queue NIC's line-rate; the honest gap between the two columns
+is exactly the point of publishing both.
+
+The **per-packet latency distribution** remains the sharpest signal, because the
+craft→inspect→measure path exercises the real inspection code in both passes
+(`large`, full-TLS inspection):
 
 | packet size | p50 | p95 | p99 |
 | --- | ---: | ---: | ---: |
-| 64B | 80 ns | 151 ns | 161 ns |
-| 512B | 110 ns | 190 ns | 200 ns |
-| 1500B | 180 ns | 260 ns | 280 ns |
-| 9000B | 742 ns | 832 ns | 1.383 µs |
+| 64B | 70 ns | 141 ns | 160 ns |
+| 512B | 101 ns | 180 ns | 200 ns |
+| 1500B | 180 ns | 260 ns | 270 ns |
+| 9000B | 731 ns | 811 ns | 832 ns |
 
-Sub-microsecond per-packet inspection latency at p99 for sub-jumbo frames is the
-honest, defensible performance story here — not the Gbps headline.
+Sub-microsecond per-packet inspection latency at p99 for sub-jumbo frames,
+backed by a real-wire Gbps floor, is the honest, defensible performance story.
 
 ## Where we fall short
 
-- **No real wire throughput on this rig.** Until SNG is benched in-path with
-  `CAP_NET_RAW` on a real NIC, the Gbps column is methodology + dry-run only. We
-  refuse to publish it as a head-to-head number.
+- **Wire numbers are a single-stream floor.** The `sng-bench-wire` rig transmits
+  over a veth pair, not a multi-queue physical NIC, so the real-wire Gbps is a
+  conservative lower bound rather than a head-to-head line-rate. We publish it as
+  a floor next to the dry-run ceiling and label both — we still refuse to quote
+  the dry-run number as a competitive figure.
 - **One graph is a single blast radius.** The flip side of "author once" is that
   a bad compile is a bad compile everywhere. This is why drafts, simulation, and
   the verifier (Post 6) exist — but it's a real design tension worth naming.

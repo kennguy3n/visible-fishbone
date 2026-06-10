@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
-"""Train + export the endpoint DLP on-device NER model (`ner_v1.onnx`).
+"""Train + export the endpoint DLP on-device NER model (`ner_v2.onnx`).
 
-ShieldNet Gateway (SNG) — Workstream 4, Step 1.
+ShieldNet Gateway (SNG) — Workstream 4 (authoring) + Workstream 5 (breadth).
+
+VERSION HISTORY
+===============
+``ner_v1`` shipped six entity classes over a 17-dim feature vector.
+``ner_v2`` (this file) extends the head to **twelve** entity classes by
+adding six WS5 breadth features (date / driver-licence / tax-id /
+passport / national-id context cues and an MRN code shape) for a 24-dim
+vector. The architecture is unchanged — still a single dense layer over
+a deterministic, hand-specified feature vector — so the model stays
+small, fast, and explainable.
 
 PROVENANCE
 ==========
@@ -10,7 +20,7 @@ endpoint DLP engine runs on-device (`crates/sng-dlp/src/ml_classifier.rs`).
 
 The model is a **multinomial logistic-regression NER head**: a single
 dense layer (``logits = softmax(X · W + b)``) over a fixed, hand-specified
-17-dimensional feature vector extracted per token. There is no embedding
+24-dimensional feature vector extracted per token. There is no embedding
 table and no learned tokenizer — feature extraction is deterministic code
 (re-implemented byte-for-byte in `ml_classifier::featurize`), so the model
 is small (a few KB), fast (well under the 50 ms/document budget), and fully
@@ -31,13 +41,19 @@ real inference over this graph; it is NOT a stub returning canned entities.
 
 ENTITY CLASSES (output columns, in order)
 =========================================
-    0  O               (not a sensitive entity)
+    0  O                       (not a sensitive entity)
     1  person_name
     2  address
     3  phone_number
     4  bank_account
     5  medical_record
     6  legal_document
+    7  medical_record_number    (WS5)
+    8  driver_license           (WS5)
+    9  tax_id                   (WS5)
+   10  date_of_birth            (WS5)
+   11  passport_number          (WS5)
+   12  national_id              (WS5)
 
 REPRODUCE
 =========
@@ -45,13 +61,14 @@ REPRODUCE
     python3 crates/sng-dlp/assets/train_ner_model.py
 
     # writes:
-    #   crates/sng-dlp/assets/ner_v1.onnx          (the signed-bundle asset)
-    #   crates/sng-dlp/assets/ner_v1.featurecheck.json  (Rust parity fixture)
+    #   crates/sng-dlp/assets/ner_v2.onnx          (the signed-bundle asset)
+    #   crates/sng-dlp/assets/ner_v2.featurecheck.json  (Rust parity fixture)
 
-The committed `ner_v1.onnx` MUST be regenerated through this script; do not
+The committed `ner_v2.onnx` MUST be regenerated through this script; do not
 edit the binary by hand. The model file is distributed inside the
 Ed25519-signed endpoint policy bundle (same trust chain as the policy
-itself); see `ml_classifier::ModelVerifier`.
+itself) and additionally carries a detached signature produced by
+`sign_model.py`; see `ml_classifier::ModelVerifier`.
 """
 
 from __future__ import annotations
@@ -66,13 +83,13 @@ from onnx import TensorProto, helper, numpy_helper
 
 # ---------------------------------------------------------------------------
 # Feature extractor.  MUST stay byte-for-byte in step with the Rust
-# `ml_classifier::featurize`.  The `ner_v1.featurecheck.json` fixture pins a
+# `ml_classifier::featurize`.  The `ner_v2.featurecheck.json` fixture pins a
 # set of (token, context) -> feature-vector triples so a Rust unit test fails
 # loudly if the two implementations ever drift.
 # ---------------------------------------------------------------------------
 
-FEATURE_DIM = 17
-NUM_CLASSES = 7
+FEATURE_DIM = 24
+NUM_CLASSES = 13
 
 CLASS_NAMES = [
     "o",
@@ -82,6 +99,12 @@ CLASS_NAMES = [
     "bank_account",
     "medical_record",
     "legal_document",
+    "medical_record_number",
+    "driver_license",
+    "tax_id",
+    "date_of_birth",
+    "passport_number",
+    "national_id",
 ]
 
 NAME_TITLES = {
@@ -133,6 +156,27 @@ LEGAL_KW = {
     "plaintiff", "defendant", "contract", "agreement", "whereas",
     "hereby", "court", "case", "vs", "v", "attorney", "counsel",
     "clause", "exhibit", "docket", "matter", "deposition", "filing",
+}
+# WS5 breadth context dictionaries. Each gates a new entity class via a
+# +/-2 keyword window, exactly like the WS4 ADDR/PHONE/BANK/MEDICAL/LEGAL
+# cues. They are deliberately conservative (no bare "id"/"number") to
+# keep the linear head's precision high.
+DOB_KW = {
+    "dob", "birth", "born", "birthdate", "birthday", "natal", "d.o.b",
+}
+DL_KW = {
+    "dl", "license", "licence", "driver", "driving", "permit", "dmv",
+}
+TAX_KW = {
+    "tax", "taxpayer", "tin", "ein", "itin", "ssn", "vat", "pan",
+    "tfn", "fiscal", "nif", "irs",
+}
+PASSPORT_KW = {
+    "passport", "mrz", "travel",
+}
+NATIONALID_KW = {
+    "national", "identity", "citizen", "nric", "aadhaar",
+    "identification",
 }
 
 _TRIM = ".,;:!?()[]{}\"'«»<>"
@@ -221,8 +265,46 @@ def _has_digit_and_sep(t: str) -> bool:
     return any(_is_ascii_digit(c) for c in t) and any(c in "-/" for c in t)
 
 
+# --- WS5 breadth shape predicates (ASCII-only, Rust-mirrored) -------------
+def _date_shape(t: str) -> bool:
+    """Two `-`/`/`-separated all-digit groups, 6-8 digits, length 8-10:
+    matches `1990-05-21`, `05/21/1990`, `21-05-90` but not bare numbers."""
+    if not (8 <= len(t) <= 10):
+        return False
+    seps = sum(1 for c in t if c in "-/")
+    digits = _digit_count(t)
+    others = len(t) - seps - digits
+    return others == 0 and seps == 2 and 6 <= digits <= 8
+
+
+def _mrn_shape(t: str) -> bool:
+    """`MRN` (any case) followed by >=4 digits: a medical-record-number code."""
+    u = t.upper()
+    if not u.startswith("MRN") or len(u) < 7:
+        return False
+    return all(_is_ascii_digit(c) for c in u[3:])
+
+
+def _code_token(t: str) -> bool:
+    """>=6 alphanumerics carrying >=4 digits: a licence/tax/id code shape."""
+    if len(t) < 6:
+        return False
+    if not all(_is_ascii_alnum(c) for c in t):
+        return False
+    return _digit_count(t) >= 4
+
+
+def _passport_shape(t: str) -> bool:
+    """8-9 alphanumerics with >=6 digits: passport-number shape."""
+    if not (8 <= len(t) <= 9):
+        return False
+    if not all(_is_ascii_alnum(c) for c in t):
+        return False
+    return _digit_count(t) >= 6
+
+
 def featurize_token(tokens, i: int):
-    """Return the 17-dim feature vector for token ``i`` of ``tokens`` (list of
+    """Return the 24-dim feature vector for token ``i`` of ``tokens`` (list of
     surface strings). Pure function of the token and a +/-2 window."""
     t = tokens[i]
     lt = _lower(t)
@@ -260,6 +342,14 @@ def featurize_token(tokens, i: int):
     f[14] = 1.0 if neighbor_title() else 0.0
     f[15] = 1.0 if _has_digit_and_sep(t) else 0.0
     f[16] = 1.0 if (lt in NAME_GAZ or neighbor_in(NAME_GAZ)) else 0.0
+    # --- WS5 breadth features (columns 17-23) ---
+    f[17] = 1.0 if _date_shape(t) else 0.0
+    f[18] = 1.0 if (neighbor_in(DOB_KW) or lt in DOB_KW) else 0.0
+    f[19] = 1.0 if (neighbor_in(DL_KW) or lt in DL_KW) else 0.0
+    f[20] = 1.0 if (neighbor_in(TAX_KW) or lt in TAX_KW) else 0.0
+    f[21] = 1.0 if (neighbor_in(PASSPORT_KW) or lt in PASSPORT_KW) else 0.0
+    f[22] = 1.0 if (neighbor_in(NATIONALID_KW) or lt in NATIONALID_KW) else 0.0
+    f[23] = 1.0 if _mrn_shape(t) else 0.0
     return f
 
 
@@ -334,8 +424,12 @@ def labelled_sentences():
                   ("balance", O)])
     # medical records across the expanded clinical vocabulary
     # (lab/results/admission/intake/ward), not only "record"/"chart".
-    med_codes = ["MRN8472910", "A12-3456", "78451236", "MRN3391045",
-                 "MRN7782134"]
+    # These are *non-MRN* record codes (coded labs, accession ids): the
+    # medical_record class is the clinical-context code that is NOT a
+    # bare "MRN#######" identifier — that shape is the distinct
+    # medical_record_number class below (separated by feature f[23]).
+    med_codes = ["A12-3456", "78451236", "C45-9981", "00785512",
+                 "LR-4471-22"]
     med_cues = [("Patient", "diagnosis"), ("Chart", "updated"),
                 ("Lab", "results"), ("Admission", "note"), ("ward", "intake")]
     for k, code in enumerate(med_codes):
@@ -344,6 +438,60 @@ def labelled_sentences():
                   ("pending", O)])
         S.append([("medical", O), ("record", O), (code, "medical_record"),
                   ("on", O), ("chart", O)])
+    # WS5 medical_record_number: the canonical "MRN#######" identifier
+    # shape (feature f[23]). Trained both with and without explicit
+    # "number"/"mrn" word cues so the shape alone carries the class.
+    for code in ["MRN8472910", "MRN3391045", "MRN7782134", "MRN0099821",
+                 "MRN5567013"]:
+        S.append([("Medical", O), ("record", O), ("number", O),
+                  (code, "medical_record_number"), ("on", O), ("file", O)])
+        S.append([("Patient", O), (code, "medical_record_number"),
+                  ("admitted", O), ("today", O)])
+        S.append([("chart", O), ("ref", O), (code, "medical_record_number"),
+                  ("updated", O)])
+    # WS5 driver_license: alphanumeric licence codes in a DL/DMV context.
+    for code in ["D1234567", "S99887766", "DL0456789", "X4471230",
+                 "P7782134A"]:
+        S.append([("Driver", O), ("license", O), (code, "driver_license"),
+                  ("expires", O), ("soon", O)])
+        S.append([("DL", O), (code, "driver_license"), ("issued", O),
+                  ("by", O), ("DMV", O)])
+        S.append([("driving", O), ("licence", O), (code, "driver_license"),
+                  ("on", O), ("record", O)])
+    # WS5 tax_id: taxpayer identifiers (TIN/EIN/SSN/VAT/PAN/TFN…).
+    for code in ["123456789", "12-3456789", "078051120", "AAAPL1234C",
+                 "GB123456789"]:
+        S.append([("Tax", O), ("id", O), (code, "tax_id"), ("for", O),
+                  ("filing", O)])
+        S.append([("taxpayer", O), ("tin", O), (code, "tax_id"),
+                  ("verified", O)])
+        S.append([("the", O), ("ein", O), ("is", O), (code, "tax_id"),
+                  ("on", O), ("file", O)])
+    # WS5 date_of_birth: two-separator date shapes in a birth context.
+    for code in ["1990-05-21", "05/21/1990", "1985-12-03", "03/14/1978",
+                 "21-07-1965"]:
+        S.append([("Date", O), ("of", O), ("birth", O), (code,
+                  "date_of_birth"), ("recorded", O)])
+        S.append([("born", O), ("on", O), (code, "date_of_birth"),
+                  ("in", O), ("London", O)])
+        S.append([("DOB", O), (code, "date_of_birth"), ("per", O),
+                  ("passport", O)])
+    # WS5 passport_number: 8-9 alnum passport shapes in a passport context.
+    for code in ["123456789", "AB1234567", "X12345678", "P1234567",
+                 "98765432A"]:
+        S.append([("Passport", O), ("number", O), (code, "passport_number"),
+                  ("expires", O), ("2030", O)])
+        S.append([("travel", O), ("passport", O), (code, "passport_number"),
+                  ("issued", O)])
+    # WS5 national_id: national identity numbers in an identity context.
+    for code in ["S1234567A", "901020-12345", "123456789012", "T7712345B",
+                 "990101135792"]:
+        S.append([("National", O), ("identity", O), ("card", O),
+                  (code, "national_id"), ("verified", O)])
+        S.append([("citizen", O), ("nric", O), (code, "national_id"),
+                  ("on", O), ("file", O)])
+        S.append([("identification", O), ("number", O),
+                  (code, "national_id"), ("recorded", O)])
     # legal documents (case numbers / docket ids)
     for code in ["1:21-cv-04567", "CR-2020-118822", "2019-CA-003344",
                  "3:19-cr-00321", "2:20-cv-09981"]:
@@ -443,11 +591,11 @@ def export_onnx(W, b, path):
         helper.make_node("Softmax", ["logits"], ["probs"], axis=1),
     ]
     graph = helper.make_graph(
-        nodes, "sng_dlp_ner_v1", [x], [y], initializer=[Wt, bt],
-        doc_string="ShieldNet Gateway endpoint DLP NER head (WS4). "
-                   "Multinomial logistic regression over a 17-dim "
-                   "deterministic token feature vector. See "
-                   "train_ner_model.py for provenance.")
+        nodes, "sng_dlp_ner_v2", [x], [y], initializer=[Wt, bt],
+        doc_string="ShieldNet Gateway endpoint DLP NER head (WS4 base, "
+                   "WS5 breadth). Multinomial logistic regression over a "
+                   "24-dim deterministic token feature vector, 12 entity "
+                   "classes. See train_ner_model.py for provenance.")
     model = helper.make_model(
         graph, opset_imports=[helper.make_opsetid("", 13)],
         producer_name="sng-dlp-train_ner_model")
@@ -469,6 +617,16 @@ def write_featurecheck(path):
         (["Case", "No", "1:21-cv-04567", "filed", "court"], 2),
         (["The", "quarterly", "report"], 0),
         (["Order", "48210", "shipped"], 1),
+        # WS5 breadth feature coverage: each pins a new feature column
+        # (f[17] date_shape, f[18..22] DOB/DL/TAX/PASSPORT/NATIONALID
+        # context, f[23] mrn_shape) so Rust/Python drift on any of the
+        # six new features fails this fixture.
+        (["Date", "of", "birth", "1990-05-21", "recorded"], 3),
+        (["Driver", "license", "D1234567", "expires"], 2),
+        (["taxpayer", "tin", "12-3456789", "verified"], 2),
+        (["Passport", "number", "AB1234567", "expires"], 2),
+        (["citizen", "nric", "S1234567A", "file"], 2),
+        (["Medical", "record", "number", "MRN0099821", "file"], 3),
         # Untitled gazetteer name: exercises f[16] (token in NAME_GAZ) for
         # both the given name and, via the neighbour window, the surname.
         (["Robert", "Williams", "approved", "the", "budget"], 0),
@@ -502,9 +660,9 @@ def main():
     # report training accuracy (sanity only)
     P = softmax(X @ W.astype(np.float64) + b.astype(np.float64))
     acc = (P.argmax(axis=1) == Y).mean()
-    onnx_path = os.path.join(here, "ner_v1.onnx")
+    onnx_path = os.path.join(here, "ner_v2.onnx")
     size = export_onnx(W, b, onnx_path)
-    write_featurecheck(os.path.join(here, "ner_v1.featurecheck.json"))
+    write_featurecheck(os.path.join(here, "ner_v2.featurecheck.json"))
     print(f"train accuracy={acc:.3f}  wrote {onnx_path} ({size} bytes)")
 
 

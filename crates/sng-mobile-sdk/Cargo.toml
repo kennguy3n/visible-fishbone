@@ -33,6 +33,8 @@ sng-oidc = { workspace = true }
 # id/key-id newtypes parsed out of the FFI config record.
 sng-comms = { workspace = true }
 sng-core = { workspace = true }
+# CIDR parsing for the `allowed_ips` of the FFI tunnel config record.
+ipnet = { workspace = true }
 
 # UniFFI proc-macro mode (no UDL). The `tokio` feature routes the
 # exported `async fn`s through a Tokio runtime context so the agent's

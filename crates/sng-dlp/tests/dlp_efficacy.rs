@@ -18,12 +18,12 @@
 //! ML NER efficacy: drive the *real* on-device ONNX inference path over
 //! a labelled PII corpus and assert the DLP spec's precision/recall
 //! targets (precision > 0.90, recall > 0.85). The model is the exact
-//! shipped `ner_v1.onnx` asset, so this is a measurement of the product
+//! shipped `ner_v2.onnx` asset, so this is a measurement of the product
 //! detector, not a re-trained or stubbed one.
 
 use sng_dlp::ml_classifier::{EntityClass, NerModel};
 
-const MODEL_BYTES: &[u8] = include_bytes!("../assets/ner_v1.onnx");
+const MODEL_BYTES: &[u8] = include_bytes!("../assets/ner_v2.onnx");
 
 /// A labelled example: text plus the single entity class it contains,
 /// or `None` for a benign control that must produce no detection.
@@ -40,14 +40,15 @@ fn benign(text: &'static str) -> Example {
     (text, None)
 }
 
-/// Labelled PII examples across all six entity classes. The first block
-/// uses surface forms close to the training templates; the held-out
-/// block uses names/codes deliberately absent from the templates, so a
-/// pass there demonstrates generalisation (gazetteer + shape features)
-/// rather than memorisation.
+/// Labelled PII examples across all twelve entity classes. The first
+/// block uses surface forms close to the training templates; the
+/// held-out block uses names/codes deliberately absent from the
+/// templates, so a pass there demonstrates generalisation (gazetteer +
+/// shape features) rather than memorisation.
 fn pii_examples() -> Vec<Example> {
     use EntityClass::{
-        Address, BankAccount, LegalDocument, MedicalRecord, PersonName, PhoneNumber,
+        Address, BankAccount, DateOfBirth, DriverLicense, LegalDocument, MedicalRecord,
+        MedicalRecordNumber, NationalId, PassportNumber, PersonName, PhoneNumber, TaxId,
     };
     vec![
         pii(
@@ -115,26 +116,52 @@ fn pii_examples() -> Vec<Example> {
             "Settle the invoice via ES9121000418450200051332 promptly",
             BankAccount,
         ),
+        // medical_record: clinical-context record codes that are NOT
+        // the bare `MRN#######` shape (that is the distinct
+        // medical_record_number class below).
+        pii("Lab results A12-3456 pending review", MedicalRecord),
+        pii("The patient chart 78451236 on record", MedicalRecord),
+        pii("Lab chart C45-9981 needs review", MedicalRecord),
+        pii("The clinic record D88-2210 was filed", MedicalRecord),
+        // medical_record_number: the canonical `MRN#######` identifier.
         pii(
             "The patient record MRN8472910 shows the diagnosis",
-            MedicalRecord,
+            MedicalRecordNumber,
         ),
         pii(
             "Chart MRN5523017 was updated by the attending nurse",
-            MedicalRecord,
+            MedicalRecordNumber,
         ),
         pii(
             "Lab results for MRN3391045 are now available",
-            MedicalRecord,
+            MedicalRecordNumber,
         ),
         pii(
             "Admission note references MRN7782134 from intake",
-            MedicalRecord,
+            MedicalRecordNumber,
         ),
         pii(
-            "The medical record MRN1209887 needs a follow up",
-            MedicalRecord,
+            "The medical record number MRN1209887 needs a follow up",
+            MedicalRecordNumber,
         ),
+        // driver_license
+        pii("Driver license D1234567 expires soon", DriverLicense),
+        pii("DL S99887766 issued by DMV", DriverLicense),
+        pii("His driving licence X4471230 is on record", DriverLicense),
+        // tax_id
+        pii("Tax id 12-3456789 for filing", TaxId),
+        pii("Taxpayer tin 078051120 verified", TaxId),
+        pii("The ein is 123456789 on file", TaxId),
+        // date_of_birth
+        pii("Date of birth 1990-05-21 recorded", DateOfBirth),
+        pii("Born on 05/21/1990 in London", DateOfBirth),
+        pii("DOB 1985-12-03 per passport", DateOfBirth),
+        // passport_number
+        pii("Passport number AB1234567 expires 2030", PassportNumber),
+        pii("Travel passport X12345678 issued", PassportNumber),
+        // national_id
+        pii("National identity card S1234567A verified", NationalId),
+        pii("Citizen nric T7712345B on file", NationalId),
         pii(
             "The court filed case 1:21-cv-04567 last week",
             LegalDocument,
@@ -166,7 +193,10 @@ fn pii_examples() -> Vec<Example> {
             "The wire went to account IT60X0542811101000000123456 today",
             BankAccount,
         ),
-        pii("Pull the chart for MRN9981002 from the ward", MedicalRecord),
+        pii(
+            "Pull the chart for MRN9981002 from the ward",
+            MedicalRecordNumber,
+        ),
         pii(
             "The hearing for case 6:23-cv-07788 is set for May",
             LegalDocument,
@@ -174,6 +204,18 @@ fn pii_examples() -> Vec<Example> {
         pii(
             "Ring the front desk at +49-30-1234-5678 if delayed",
             PhoneNumber,
+        ),
+        // Held-out WS5 breadth entities (absent from training templates).
+        pii(
+            "Driver license P7782134A on record at the dmv",
+            DriverLicense,
+        ),
+        pii("Taxpayer fiscal id GB123456789 confirmed", TaxId),
+        pii("Date of birth 03/14/1978 on the form", DateOfBirth),
+        pii("Passport 98765432A for travel", PassportNumber),
+        pii(
+            "Identification number 990101135792 recorded for the citizen",
+            NationalId,
         ),
     ]
 }
