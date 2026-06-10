@@ -163,7 +163,9 @@ var knownApps = map[string]struct{}{
 // wildcard). The returned slice is freshly allocated, so callers may
 // mutate it freely.
 func KnownApps() []string {
-	apps := make([]string, 0, len(knownApps))
+	// Capacity excludes the AnyApp wildcard, which is always present
+	// and is skipped below, so the slice never reallocates.
+	apps := make([]string, 0, len(knownApps)-1)
 	for app := range knownApps {
 		if app == AnyApp {
 			continue
