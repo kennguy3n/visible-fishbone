@@ -662,7 +662,19 @@ impl MobileAgent {
         // terminate, tear the freshly-started tunnel back down rather
         // than leak an orphaned data plane the agent no longer tracks.
         if let Err(e) = self.transition(LifecycleState::Connected) {
-            if let Err(stop_err) = self.deps.tunnel.stop_tunnel().await {
+            // Bound the compensating stop under the same deadline as the
+            // start so a wedged backend cannot pin this call open while
+            // we hold the control lock.
+            if let Err(stop_err) = self
+                .deadline(self.config.connect_timeout, async {
+                    self.deps
+                        .tunnel
+                        .stop_tunnel()
+                        .await
+                        .map_err(MobileError::from)
+                })
+                .await
+            {
                 warn!(
                     error = %stop_err,
                     "failed to stop tunnel after connect lost the lifecycle race; \
@@ -701,7 +713,19 @@ impl MobileAgent {
                 "disconnect is only valid from Connected, not {state:?}"
             )));
         }
-        self.deps.tunnel.stop_tunnel().await?;
+        // Bound the stop the same way connect bounds the start: a
+        // wedged Network Extension / VpnService must not pin the call
+        // open while we hold the control lock, which would brick every
+        // later lifecycle op. On timeout the agent stays Connected and
+        // the error surfaces, exactly as a stop failure already does.
+        self.deadline(self.config.connect_timeout, async {
+            self.deps
+                .tunnel
+                .stop_tunnel()
+                .await
+                .map_err(MobileError::from)
+        })
+        .await?;
         self.transition(LifecycleState::Enrolled)?;
         Ok(())
     }
@@ -895,7 +919,19 @@ impl MobileAgent {
         // Cut the data plane before destroying the identity so a
         // revoked device stops carrying traffic at once, even if the
         // key delete or lifecycle move below runs into trouble.
-        if let Err(e) = self.deps.tunnel.stop_tunnel().await {
+        // Best-effort, but still bounded by the connect deadline so a
+        // wedged backend cannot hold the control lock open forever and
+        // block the key delete / later lifecycle ops.
+        if let Err(e) = self
+            .deadline(self.config.connect_timeout, async {
+                self.deps
+                    .tunnel
+                    .stop_tunnel()
+                    .await
+                    .map_err(MobileError::from)
+            })
+            .await
+        {
             warn!(
                 error = %e,
                 "wipe: tunnel stop failed; continuing de-enrolment"
@@ -1686,5 +1722,39 @@ mod tests {
             .expect("disconnect completes once the backend returns");
         assert_eq!(agent.state(), LifecycleState::Enrolled);
         assert_eq!(tunnel.stops(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wedged_stop_tunnel_times_out_and_frees_the_control_lock() {
+        let tunnel = RecordingTunnel::new();
+        let agent = Arc::new(build_agent(Arc::clone(&tunnel)));
+        drive_to_enrolled(&agent);
+        agent.connect(valid_tunnel_config()).await.unwrap();
+
+        // Wedge stop_tunnel: it parks and is never released, modelling a
+        // hung Network Extension / VpnService. Because disconnect holds
+        // the control lock across the stop, an unbounded wait here would
+        // brick every later lifecycle op — the connect_timeout deadline
+        // must break it instead.
+        tunnel.gate_stop.store(true, Ordering::SeqCst);
+        let disconnect_agent = Arc::clone(&agent);
+        let disconnecting = tokio::spawn(async move { disconnect_agent.disconnect().await });
+        tunnel.stop_entered.notified().await;
+
+        // Advance past the connect deadline so the bounded stop elapses.
+        tokio::time::advance(test_config().connect_timeout + Duration::from_secs(1)).await;
+        let err = disconnecting
+            .await
+            .expect("disconnect task joins")
+            .expect_err("a wedged stop must surface as an error");
+        assert!(matches!(err, MobileError::Timeout(_)));
+        // The agent is left Connected (the stop never confirmed) and,
+        // crucially, the control lock was released — so the lifecycle is
+        // still usable rather than permanently wedged.
+        assert_eq!(agent.state(), LifecycleState::Connected);
+        agent
+            .suspend()
+            .expect("control lock freed after the timeout");
+        assert_eq!(agent.state(), LifecycleState::Suspended);
     }
 }
