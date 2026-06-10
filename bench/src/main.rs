@@ -407,7 +407,7 @@ fn sweep_profile(
     // published target. The headroom column therefore compares the measured
     // per-core rate against the *per-core* target share, not the whole-box
     // figure — otherwise every multi-core SKU would read ~0% headroom.
-    let fan_out = f64::from(profile.nic_queues.unwrap_or(profile.vcpus).max(1));
+    let fan_out = f64::from(profile.effective_nic_queues());
     let target_pps_per_core = if packet_bytes == 0 {
         0.0
     } else {

@@ -683,6 +683,14 @@ impl std::fmt::Debug for ForwardingHarness {
 /// reflect a real record rather than a token.
 const RECORD_BYTES: usize = 1400;
 
+/// Base of the synthetic ephemeral source-port window. Flows vary their
+/// source port by slot within `[EPHEMERAL_BASE, EPHEMERAL_BASE + EPHEMERAL_SPAN)`
+/// — inside the IANA ephemeral range and chosen so `base + offset` can never
+/// overflow `u16` regardless of pool size.
+const EPHEMERAL_BASE: u16 = 40_000;
+/// Width of the ephemeral source-port window (see [`EPHEMERAL_BASE`]).
+const EPHEMERAL_SPAN: u16 = 20_000;
+
 impl ForwardingHarness {
     /// Build the harness: install a `rule_count`-rule synthetic policy
     /// into both substrates and construct every inspector once.
@@ -989,10 +997,16 @@ impl ForwardingHarness {
             let lo = u8::try_from(idx & 0xff).unwrap_or(0);
             IpAddr::V4(Ipv4Addr::new(10, hi, lo, 7))
         };
+        // Vary the ephemeral source port per slot so flows stay distinct
+        // (the 5-tuple feeds the XDP hash and the conntrack key). Confine it
+        // to a fixed window inside the IANA ephemeral range so `base + offset`
+        // can never overflow u16 no matter how large the pool grows — the
+        // offset is bounded by the span, so the sum stays < 60000.
+        let src_port = EPHEMERAL_BASE + u16::try_from(slot % EPHEMERAL_SPAN as usize).unwrap_or(0);
         let flow = FlowKey::new(
             IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
             dst,
-            40000 + u16::try_from(slot % u16::MAX as usize).unwrap_or(0),
+            src_port,
             443,
             Protocol::Tcp,
         );

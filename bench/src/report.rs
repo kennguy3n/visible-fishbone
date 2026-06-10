@@ -585,7 +585,10 @@ pub struct ForwardingReport {
     pub profile: String,
     /// Wall-clock time the report was produced (Unix seconds).
     pub unix_time_secs: u64,
-    /// Source revision, when known.
+    /// Source revision, when known. Additive `Option`: `serde(default)` lets
+    /// a baseline that omits the key entirely still deserialize, matching the
+    /// `competitor_comparison` convention above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_sha: Option<String>,
     /// Rule count of the synthetic policy walked.
     pub rule_count: usize,
