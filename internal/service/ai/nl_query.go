@@ -175,6 +175,14 @@ type ParsedIntent struct {
 	CompareVersions []int `json:"compare_versions,omitempty"`
 }
 
+// isVerdictKind reports whether the intent should be answered as a
+// policy-verdict question. An empty Kind is treated as
+// IntentPolicyVerdict per the Kind doc contract, so every place that
+// branches on "is this a verdict?" honours that contract identically.
+func (i ParsedIntent) isVerdictKind() bool {
+	return i.Kind == "" || i.Kind == IntentPolicyVerdict
+}
+
 // IntentParse is the outcome of parsing a question into a ParsedIntent.
 // It records exactly how the parse was produced — the signals the WS14
 // LLM-inference validation harness asserts on. The intent itself is
@@ -206,7 +214,7 @@ type IntentParse struct {
 // entities; when nil, it attempts direct entity extraction from the
 // question text.
 func (e *NLQueryEngine) Query(ctx context.Context, req NLQueryRequest) (NLQueryResponse, error) {
-	if req.Question == "" {
+	if strings.TrimSpace(req.Question) == "" {
 		return NLQueryResponse{}, fmt.Errorf("ai/nl_query: empty question")
 	}
 
@@ -223,7 +231,7 @@ func (e *NLQueryEngine) Query(ctx context.Context, req NLQueryRequest) (NLQueryR
 	// to an enforcement verdict. Return the deterministically
 	// classified, structured intent so a downstream router can
 	// dispatch to the owning data source. No data is fabricated here.
-	if intent.Kind != "" && intent.Kind != IntentPolicyVerdict {
+	if !intent.isVerdictKind() {
 		return e.answerAnalytics(intent, aiGenerated, modelID), nil
 	}
 
@@ -325,7 +333,7 @@ func mergeIntent(det, llm ParsedIntent) ParsedIntent {
 	// Action is enforcement-only state; never let the LLM attach one to
 	// a read-only analytics intent even if the deterministic pass left
 	// it empty.
-	if merged.Action == "" && merged.Kind == IntentPolicyVerdict {
+	if merged.Action == "" && merged.isVerdictKind() {
 		merged.Action = normalizeAction(llm.Action)
 	}
 	return merged
@@ -446,7 +454,7 @@ func (e *NLQueryEngine) parseStructured(question string) ParsedIntent {
 	// enforcement intent — that would surface a misleading
 	// "action":"block" in the serialized intent and could mislead any
 	// future consumer that inspects Action on an analytics response.
-	if intent.Kind == IntentPolicyVerdict {
+	if intent.isVerdictKind() {
 		if strings.Contains(q, "access") {
 			intent.Action = "access"
 		} else if strings.Contains(q, "block") {
@@ -477,6 +485,11 @@ func (e *NLQueryEngine) parseStructured(question string) ParsedIntent {
 	return intent
 }
 
+// changeRe matches the change-summary verbs as whole words so the
+// substring inside an unrelated token ("exchanged", "unchanged",
+// "exchanges") is never read as a configuration-change question.
+var changeRe = regexp.MustCompile(`\b(?:change[ds]?|changing)\b`)
+
 // classifyKind maps a lowercased question onto an IntentKind using a
 // deterministic, ordered set of phrase rules (most specific first).
 // This classification is authoritative and never sourced from the LLM:
@@ -496,8 +509,7 @@ func classifyKind(q string) IntentKind {
 			(strings.Contains(q, "show") || strings.Contains(q, "list") || strings.Contains(q, "report"))):
 		return IntentBlockedTraffic
 	case strings.Contains(q, "what changed") || strings.Contains(q, "what has changed") ||
-		strings.Contains(q, "changes since") ||
-		((strings.Contains(q, "changed") || strings.Contains(q, "changing")) && strings.Contains(q, "since")):
+		(changeRe.MatchString(q) && strings.Contains(q, "since")):
 		return IntentChangeSummary
 	default:
 		return IntentPolicyVerdict

@@ -324,6 +324,12 @@ func run() error {
 	rep.AIGenCorrectness = float64(aiGenOK) / n
 	if verdictKinds > 0 {
 		rep.VerifierPassRate = float64(verifierOK) / float64(verdictKinds)
+	} else {
+		// No policy-verdict questions in the fixture: the verifier gate
+		// is vacuously satisfied rather than failing on a 0/0 rate (it
+		// would otherwise stay at the 0.0 zero value and trip the
+		// "< 100%" threshold).
+		rep.VerifierPassRate = 1
 	}
 	if live {
 		rep.ParseSuccessRate = float64(parseOK) / n
@@ -443,11 +449,17 @@ func percentile(vs []int64, p int) int64 {
 	}
 	sorted := append([]int64(nil), vs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	rank := (p * len(sorted)) / 100
-	if rank >= len(sorted) {
-		rank = len(sorted) - 1
+	// Nearest-rank: rank = ceil(p/100 * N), 1-based (ceil via
+	// round-up integer division), then clamped into [1, N] and
+	// converted to a 0-based index.
+	rank := (p*len(sorted) + 99) / 100
+	if rank < 1 {
+		rank = 1
 	}
-	return sorted[rank]
+	if rank > len(sorted) {
+		rank = len(sorted)
+	}
+	return sorted[rank-1]
 }
 
 func loadQueries() ([]curatedQuery, error) {

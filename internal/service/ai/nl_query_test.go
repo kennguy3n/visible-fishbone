@@ -14,11 +14,34 @@ import (
 func TestNLQueryEngine_EmptyQuestion(t *testing.T) {
 	t.Parallel()
 	engine := NewNLQueryEngine(nil)
-	_, err := engine.Query(context.Background(), NLQueryRequest{
-		TenantID: uuid.New(),
-	})
-	if err == nil {
-		t.Fatal("expected error for empty question")
+	// Both an empty and a whitespace-only question must be rejected at
+	// the same guard so Query and ParseIntent share one contract (a
+	// blank question never reaches classification).
+	for _, q := range []string{"", "   ", "\t\n "} {
+		if _, err := engine.Query(context.Background(), NLQueryRequest{
+			Question: q,
+			TenantID: uuid.New(),
+		}); err == nil {
+			t.Fatalf("expected error for blank question %q", q)
+		}
+	}
+}
+
+// TestMergeIntent_EmptyKindContract locks the documented contract that
+// an empty Kind is treated as IntentPolicyVerdict: the LLM's action is
+// still merged in (verdict path) when the deterministic Kind is unset,
+// while a non-verdict analytics Kind never accepts an LLM action.
+func TestMergeIntent_EmptyKindContract(t *testing.T) {
+	t.Parallel()
+	// Empty deterministic Kind => verdict semantics => LLM action merged.
+	got := mergeIntent(ParsedIntent{}, ParsedIntent{Action: "block"})
+	if got.Action != "block" {
+		t.Errorf("empty-Kind merge: Action = %q, want %q", got.Action, "block")
+	}
+	// Analytics Kind => read-only => LLM action dropped.
+	got = mergeIntent(ParsedIntent{Kind: IntentBlockedTraffic}, ParsedIntent{Action: "block"})
+	if got.Action != "" {
+		t.Errorf("analytics merge: Action = %q, want empty", got.Action)
 	}
 }
 
@@ -315,6 +338,12 @@ func TestNLQueryEngine_ClassifyKind(t *testing.T) {
 		// "exchange" contains the substring "chang" but a reachability
 		// verdict question must not be routed to the change-summary path.
 		{"Can app exchange be reached since yesterday?", IntentPolicyVerdict},
+		// "exchanged"/"unchanged"/"exchanges" embed "changed"/"changes"
+		// but are not change-summary questions — word-boundary matching
+		// keeps them on the verdict path even with a "since" clause.
+		{"what has exchanged since yesterday?", IntentPolicyVerdict},
+		{"are the rules unchanged since last week?", IntentPolicyVerdict},
+		{"can bob access the data exchanges since monday?", IntentPolicyVerdict},
 		{"what is the weather?", IntentPolicyVerdict},
 	}
 	for _, tc := range cases {
