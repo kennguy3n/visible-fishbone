@@ -102,6 +102,7 @@ pub mod app;
 pub mod device;
 pub mod error;
 pub mod identity;
+pub mod oidc_identity;
 pub mod policy;
 pub mod request;
 pub mod service;
@@ -114,6 +115,7 @@ pub use device::{
 };
 pub use error::ZtnaError;
 pub use identity::{IdentityProvider, StaticIdentityProvider, UserIdentity};
+pub use oidc_identity::{OidcIdentityResolver, TenantIdpConfig, identity_from_claims};
 pub use policy::{
     AccessConditions, PostureRequirement, PostureResult, RevocationProvider, StaticRevocationList,
     TagCondition, TagOp, TimeWindow, ZtnaDecision, ZtnaDecisionReason, ZtnaPolicy,

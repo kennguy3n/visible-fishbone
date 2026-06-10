@@ -3777,6 +3777,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sng-core",
+ "sng-oidc",
  "sng-telemetry",
  "thiserror 2.0.18",
  "tokio",

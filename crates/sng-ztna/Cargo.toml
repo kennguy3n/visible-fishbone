@@ -11,6 +11,7 @@ description = "ShieldNet Gateway Zero-Trust Network Access subsystem: per-applic
 [dependencies]
 sng-core = { workspace = true }
 sng-telemetry = { workspace = true }
+sng-oidc = { workspace = true }
 
 tokio = { workspace = true, features = ["sync", "time"] }
 arc-swap = { workspace = true }

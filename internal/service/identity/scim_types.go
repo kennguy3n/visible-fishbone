@@ -68,6 +68,9 @@ type SCIMMeta struct {
 	Created      string `json:"created,omitempty"`
 	LastModified string `json:"lastModified,omitempty"`
 	Location     string `json:"location,omitempty"`
+	// Version is the resource's weak ETag (RFC 7644 §3.14), surfaced
+	// both here and in the HTTP ETag header for optimistic concurrency.
+	Version string `json:"version,omitempty"`
 }
 
 // SCIMListResponse is the SCIM 2.0 list response (RFC 7644 §3.4.2).

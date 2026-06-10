@@ -83,6 +83,29 @@ pub enum ZtnaError {
     /// rejected the [`sng_core::events::ZtnaEvent`].
     #[error("telemetry: {0}")]
     Telemetry(String),
+
+    /// An OIDC ID token presented on the access path failed
+    /// validation — bad signature, wrong `iss`/`aud`, expired, a
+    /// `kid` not in the provider JWKS, or (for a tenant-scoped
+    /// resolve) a `tenant_id` claim that does not match the
+    /// requesting tenant. The proxy fails closed: no
+    /// [`crate::identity::UserIdentity`] is produced and the
+    /// request is denied as identity-rejected.
+    #[error("token rejected: {reason}")]
+    TokenRejected {
+        /// Human-readable validation failure reason.
+        reason: String,
+    },
+
+    /// No IdP configuration is registered for the tenant the
+    /// access request (or token) is scoped to, so its tokens
+    /// cannot be validated. Distinct from a token that fails
+    /// validation against a known config.
+    #[error("no idp config for tenant: {tenant_id}")]
+    IdpConfigNotFound {
+        /// The tenant id with no registered IdP configuration.
+        tenant_id: String,
+    },
 }
 
 impl ZtnaError {
@@ -94,21 +117,29 @@ impl ZtnaError {
     /// that is not in the active catalog — the failure is
     /// resource-shaped, not identity-shaped).
     ///
-    /// `DeviceNotEnrolled` and `IdentityNotFound` map to
+    /// `DeviceNotEnrolled`, `IdentityNotFound`, `TokenRejected`
+    /// and `IdpConfigNotFound` map to
     /// [`ErrorCode::IdentityRejected`] — the proxy's
     /// mTLS + IdP chain may have produced a client cert
     /// or `sub` claim, but the ZTNA brain itself has no
     /// record for that identity, which from the
     /// supervisor's perspective is functionally
     /// indistinguishable from an mTLS-level rejection.
+    /// `IdpConfigNotFound` belongs here too: with no IdP
+    /// config the tenant's token cannot be validated, so the
+    /// principal's identity is *unestablished* — a fail-closed
+    /// ZTNA must treat an unauthenticatable request as an
+    /// identity rejection, not a softer "resource missing"
+    /// (which implies an already-authenticated caller).
     #[must_use]
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::BundleDecode(_) | Self::InvalidPolicy(_) => ErrorCode::WireSchema,
             Self::UnknownApp { .. } => ErrorCode::ResourceMissing,
-            Self::DeviceNotEnrolled { .. } | Self::IdentityNotFound { .. } => {
-                ErrorCode::IdentityRejected
-            }
+            Self::DeviceNotEnrolled { .. }
+            | Self::IdentityNotFound { .. }
+            | Self::TokenRejected { .. }
+            | Self::IdpConfigNotFound { .. } => ErrorCode::IdentityRejected,
             Self::ProviderFailure { .. } | Self::Telemetry(_) => ErrorCode::Io,
         }
     }
@@ -201,6 +232,32 @@ mod tests {
     #[test]
     fn telemetry_maps_to_io() {
         assert_eq!(ZtnaError::Telemetry("closed".into()).code(), ErrorCode::Io);
+    }
+
+    #[test]
+    fn token_rejected_maps_to_identity_rejected() {
+        assert_eq!(
+            ZtnaError::TokenRejected {
+                reason: "expired".into()
+            }
+            .code(),
+            ErrorCode::IdentityRejected
+        );
+    }
+
+    #[test]
+    fn idp_config_not_found_maps_to_identity_rejected() {
+        // With no IdP config the tenant's token cannot be
+        // validated, so the principal's identity is never
+        // established — a fail-closed ZTNA must surface this as
+        // an identity rejection, not a softer resource-missing.
+        assert_eq!(
+            ZtnaError::IdpConfigNotFound {
+                tenant_id: "tenant-x".into()
+            }
+            .code(),
+            ErrorCode::IdentityRejected
+        );
     }
 
     #[test]
