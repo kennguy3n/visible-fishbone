@@ -365,5 +365,5 @@ func indonesiaNIK(s string) bool {
 	if !validYMD(2000, month, day) {
 		return false
 	}
-	return !(d[12] == 0 && d[13] == 0 && d[14] == 0 && d[15] == 0)
+	return d[12] != 0 || d[13] != 0 || d[14] != 0 || d[15] != 0
 }

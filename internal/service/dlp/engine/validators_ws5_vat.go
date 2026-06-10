@@ -99,8 +99,8 @@ func vatStructural(rest []rune, lengths []int, alpha bool) bool {
 	return vatCharset(rest, alpha)
 }
 
-func vatStructuralRange(rest []rune, min, max int, alpha bool) bool {
-	if len(rest) < min || len(rest) > max {
+func vatStructuralRange(rest []rune, lo, hi int, alpha bool) bool {
+	if len(rest) < lo || len(rest) > hi {
 		return false
 	}
 	return vatCharset(rest, alpha)
@@ -110,7 +110,8 @@ func vatCharset(rest []rune, alpha bool) bool {
 	for _, r := range rest {
 		isDigit := r >= '0' && r <= '9'
 		isAlnum := isDigit || (r >= 'A' && r <= 'Z')
-		if !(isDigit || (alpha && isAlnum)) {
+		accepted := isDigit || (alpha && isAlnum)
+		if !accepted {
 			return false
 		}
 	}
