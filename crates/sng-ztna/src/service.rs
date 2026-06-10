@@ -418,7 +418,14 @@ impl ZtnaService {
         {
             let decision =
                 ZtnaDecision::deny(ZtnaDecisionReason::Revoked, PostureResult::NotEvaluated);
-            self.report_decision(report, &request.device_id, &request.app_id, &decision, true);
+            // `identity_verified=false`: revocation is step 0, short-
+            // circuiting before any provider is resolved, so the brain
+            // has not consulted the identity provider and cannot vouch
+            // for the user. This matches the other pre-policy deny
+            // paths (UnknownApp / DeviceNotEnrolled / IdentityNotFound),
+            // all of which report `false`; only a decision reached after
+            // a successful identity resolution (step 4) reports `true`.
+            self.report_decision(report, &request.device_id, &request.app_id, &decision, false);
             return Ok(decision);
         }
 
@@ -1139,7 +1146,13 @@ mod tests {
         // ticks.
         let evs = drain(&mut rx);
         assert_eq!(evs.len(), 1);
-        assert_eq!(ztna_event(&evs[0]).reason, "revoked");
+        let ev = ztna_event(&evs[0]);
+        assert_eq!(ev.reason, "revoked");
+        // The revocation short-circuit runs before any provider
+        // resolution, so the brain never verified the identity:
+        // the emitted event must report `identity_verified=false`,
+        // consistent with the other pre-policy deny paths.
+        assert!(!ev.identity_verified);
         assert_eq!(svc.stats.snapshot().deny_revoked, 1);
     }
 
