@@ -487,6 +487,12 @@ jobs:
             exit 0
           fi
           git commit -m "bench: publish weekly results ($(date -u +%Y-%m-%d))"
+          # The `publish-datasheet` job pushes blog/artifacts on the same
+          # scheduled run; rebase onto the latest main first so whichever job
+          # pushes second isn't rejected non-fast-forward. The two jobs touch
+          # disjoint paths (bench/results vs blog/artifacts) so it always
+          # resolves cleanly.
+          git pull --rebase origin main
           git push
 
   publish-datasheet:
