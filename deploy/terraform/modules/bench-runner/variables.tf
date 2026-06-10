@@ -166,7 +166,7 @@ variable "bench_interface" {
 }
 
 variable "edge_datapath" {
-  description = "sng-edge --datapath backend: auto | nftables | ebpf. `auto` probes for XDP and falls back to nftables; pin nftables on kernels without an XDP-capable veth driver."
+  description = "sng-edge --datapath backend: auto | nftables | ebpf (xdp is an accepted alias for ebpf). `auto` probes for XDP and falls back to nftables; pin nftables on kernels without an XDP-capable veth driver."
   type        = string
   default     = "auto"
 

@@ -428,6 +428,16 @@ jobs:
             --out-md ../blog/artifacts/edge-performance-datasheet.md \
             --out-json ../blog/artifacts/edge-performance-datasheet.json
 
+      # The refreshed datasheet is published as a run artifact only — it is
+      # deliberately NOT committed back to the repo from here. Two reasons:
+      #   1. Security: this job runs on the privileged in-path self-hosted
+      #      runner (CAP_NET_RAW, sng-edge in-path). Granting it contents:write
+      #      to main would widen its blast radius; it keeps contents:read.
+      #   2. Robustness: the committed blog/artifacts/edge-performance-datasheet
+      #      .{md,json} are curated, reviewed artifacts. They are refreshed via
+      #      a normal PR (download this artifact, commit, open PR) so a number
+      #      change is always reviewed, and the weekly dry-run `publish` job is
+      #      never coupled to the wire runner's availability.
       - name: upload datasheet
         if: always()
         uses: actions/upload-artifact@v4

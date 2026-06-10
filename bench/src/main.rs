@@ -1293,20 +1293,8 @@ fn run_datasheet(args: &DatasheetArgs) -> Result<std::process::ExitCode, BenchEr
     let wire = load_business_report(&args.wire_json)?;
     let doc = DualDatasheet::new(dry_run, wire);
 
-    if let Some(parent) = args.out_md.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| BenchError::Io {
-            path: parent.display().to_string(),
-            source,
-        })?;
-    }
-    std::fs::write(&args.out_md, doc.to_markdown()).map_err(|source| BenchError::Io {
-        path: args.out_md.display().to_string(),
-        source,
-    })?;
-    std::fs::write(&args.out_json, doc.to_json()?).map_err(|source| BenchError::Io {
-        path: args.out_json.display().to_string(),
-        source,
-    })?;
+    write_file(&args.out_md, &doc.to_markdown())?;
+    write_file(&args.out_json, &doc.to_json()?)?;
     println!(
         "dual datasheet written to {} and {}",
         args.out_md.display(),
