@@ -553,6 +553,15 @@ func (b *BudgetEnforcer) TenantBudgetsBatchWithTiers(ctx context.Context, tenant
 // batch entry points, so the tier-resolving and tier-supplied paths
 // produce byte-identical results and seed the cache identically.
 func (b *BudgetEnforcer) budgetsForTiers(ctx context.Context, ids []uuid.UUID, tiers map[uuid.UUID]repository.TenantTier) (map[uuid.UUID]map[Meter]BudgetLimit, error) {
+	// Validate the tier map covers every id before doing any work, so a
+	// missing tier aborts with zero side effects — no override query and
+	// no cache writes. The batch is all-or-nothing: a caller that sees an
+	// error never finds the cache half-seeded from the failed attempt.
+	for _, id := range ids {
+		if _, ok := tiers[id]; !ok {
+			return nil, fmt.Errorf("metering: tenant budgets batch: missing tier for tenant %s", id)
+		}
+	}
 	overrides, err := b.store.TenantBudgetsBatch(ctx, ids)
 	if err != nil {
 		return nil, fmt.Errorf("metering: tenant budgets batch: overrides: %w", err)
@@ -562,11 +571,7 @@ func (b *BudgetEnforcer) budgetsForTiers(ctx context.Context, ids []uuid.UUID, t
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, id := range ids {
-		tier, ok := tiers[id]
-		if !ok {
-			return nil, fmt.Errorf("metering: tenant budgets batch: missing tier for tenant %s", id)
-		}
-		limits := b.assembleLimits(tier, overrides[id])
+		limits := b.assembleLimits(tiers[id], overrides[id])
 		b.cache[id] = tenantBudgetCache{limits: limits, loadedAt: now}
 		out[id] = cloneLimits(limits)
 	}

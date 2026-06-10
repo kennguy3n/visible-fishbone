@@ -274,6 +274,11 @@ func TestTenantBudgetsBatchWithTiersMissingTierAborts(t *testing.T) {
 	if _, err := enf.TenantBudgetsBatchWithTiers(ctx, ids, partial); err == nil {
 		t.Fatal("expected abort when a requested tenant's tier is missing from the supplied map")
 	}
+	// The abort must be all-or-nothing: no override query is issued when
+	// the tier map is incomplete, so the batch has zero side effects.
+	if store.tenantBudgetsBatchCalls != 0 {
+		t.Fatalf("override query issued on aborted batch: %d calls, want 0", store.tenantBudgetsBatchCalls)
+	}
 }
 
 // TestPlatformReportBatchedTierErrorAborts proves a batched tier lookup
