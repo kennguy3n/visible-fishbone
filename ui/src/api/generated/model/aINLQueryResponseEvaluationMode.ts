@@ -11,7 +11,7 @@ either a bearer JWT (operator console) or `X-SNG-API-Key`
  */
 
 /**
- * How the verdict was produced: compiled-bundle (tenant's live policy graph evaluated), no-policy (no live graph, heuristic default), or default-heuristic (no policy source/evaluation error).
+ * How the answer was produced: compiled-bundle (tenant's live policy graph evaluated), no-policy (no live graph, heuristic default), default-heuristic (no policy source/evaluation error), or intent-classified (operational-analytics question routed by deterministic intent classification, no enforcement verdict).
  */
 export type AINLQueryResponseEvaluationMode = typeof AINLQueryResponseEvaluationMode[keyof typeof AINLQueryResponseEvaluationMode];
 
@@ -21,4 +21,5 @@ export const AINLQueryResponseEvaluationMode = {
   'compiled-bundle': 'compiled-bundle',
   'no-policy': 'no-policy',
   'default-heuristic': 'default-heuristic',
+  'intent-classified': 'intent-classified',
 } as const;

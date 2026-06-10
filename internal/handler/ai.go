@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -364,7 +365,7 @@ func (h *AIHandler) nlPolicyQuery(w http.ResponseWriter, r *http.Request) {
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
-	if req.Question == "" {
+	if strings.TrimSpace(req.Question) == "" {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "question is required")
 		return
 	}

@@ -4697,7 +4697,7 @@ components:
       type: object
       required: [verdict, explanation, ai_generated]
       properties:
-        verdict: { type: string, enum: [allow, deny, inspect, log, alert, unknown] }
+        verdict: { type: string, enum: [allow, deny, inspect, log, alert, unknown, informational], description: "Enforcement verdict for a policy-verdict question, or 'informational' for a read-only analytics question (which carries no verdict)." }
         matched_rules: { type: array, items: { type: string } }
         explanation: { type: string }
         confidence: { type: number, format: double }
@@ -4705,8 +4705,36 @@ components:
         model_id: { type: string }
         evaluation_mode:
           type: string
-          enum: [compiled-bundle, no-policy, default-heuristic]
-          description: "How the verdict was produced: compiled-bundle (tenant's live policy graph evaluated), no-policy (no live graph, heuristic default), or default-heuristic (no policy source/evaluation error)."
+          enum: [compiled-bundle, no-policy, default-heuristic, intent-classified]
+          description: "How the answer was produced: compiled-bundle (tenant's live policy graph evaluated), no-policy (no live graph, heuristic default), default-heuristic (no policy source/evaluation error), or intent-classified (operational-analytics question routed by deterministic intent classification, no enforcement verdict)."
+        query_kind:
+          type: string
+          enum: [policy_verdict, blocked_traffic, change_summary, policy_version_compare, posture_failure]
+          description: "The deterministically classified query family. policy_verdict yields an enforcement verdict; the others are read-only analytics questions answered informationally."
+        intent: { $ref: "#/components/schemas/AINLQueryIntent" }
+
+    AINLQueryIntent:
+      type: object
+      description: "Structured, deterministic-first interpretation of the question. Kind, window and compare_versions are derived deterministically; the LLM may only augment the free-form entity references when present."
+      properties:
+        kind:
+          type: string
+          enum: [policy_verdict, blocked_traffic, change_summary, policy_version_compare, posture_failure]
+        user_ref: { type: string }
+        app_ref: { type: string }
+        device_ref: { type: string }
+        action: { type: string, description: "Enforcement action (access/block) — only set for policy_verdict questions." }
+        window:
+          type: object
+          description: "Normalized relative lookback for analytics questions; absent when the question names no time range."
+          required: [label, seconds]
+          properties:
+            label: { type: string, description: "Operator's phrasing, e.g. 'last week', '24 hours'." }
+            seconds: { type: integer, format: int64, description: "Canonical machine-readable magnitude of the lookback." }
+        compare_versions:
+          type: array
+          items: { type: integer }
+          description: "Policy graph versions named in a policy_version_compare question, ascending and de-duplicated; empty means the two most recent versions."
 
     AIPostureReport:
       type: object

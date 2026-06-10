@@ -10,6 +10,9 @@ either a bearer JWT (operator console) or `X-SNG-API-Key`
  * OpenAPI spec version: 0.1.0
  */
 
+/**
+ * Enforcement verdict for a policy-verdict question, or 'informational' for a read-only analytics question (which carries no verdict).
+ */
 export type AINLQueryResponseVerdict = typeof AINLQueryResponseVerdict[keyof typeof AINLQueryResponseVerdict];
 
 
@@ -21,4 +24,5 @@ export const AINLQueryResponseVerdict = {
   log: 'log',
   alert: 'alert',
   unknown: 'unknown',
+  informational: 'informational',
 } as const;

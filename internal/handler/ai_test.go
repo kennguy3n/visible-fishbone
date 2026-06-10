@@ -312,6 +312,26 @@ func TestAIHandler_NLPolicyQuery_400MissingQuestion(t *testing.T) {
 	}
 }
 
+// Whitespace-only questions are rejected at the boundary with 400,
+// not surfaced as a 500 from the engine's empty-question guard.
+func TestAIHandler_NLPolicyQuery_400WhitespaceQuestion(t *testing.T) {
+	t.Parallel()
+	h := NewAIHandler(nil, nil)
+	h.SetEnhancedAI(nil, ai.NewNLQueryEngine(nil), nil, nil, nil, nil)
+	tenantID := uuid.New().String()
+	body, _ := json.Marshal(map[string]string{"question": "   \t\n"})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/tenants/"+tenantID+"/ai/query",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("tenant_id", tenantID)
+	rec := httptest.NewRecorder()
+	h.nlPolicyQuery(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAIHandler_NLPolicyQuery_200(t *testing.T) {
 	t.Parallel()
 	h := NewAIHandler(nil, nil)

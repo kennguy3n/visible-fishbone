@@ -484,8 +484,9 @@ func (e *NLQueryEngine) parseStructured(question string) ParsedIntent {
 // auditable and stable.
 func classifyKind(q string) IntentKind {
 	switch {
-	case strings.Contains(q, "posture") &&
-		(strings.Contains(q, "fail") || strings.Contains(q, "failed") || strings.Contains(q, "failing")):
+	// "fail" is a substring of "failed"/"failing"/"failure", so the
+	// single check covers every tense.
+	case strings.Contains(q, "posture") && strings.Contains(q, "fail"):
 		return IntentPostureFailure
 	case (strings.Contains(q, "compare") || strings.Contains(q, "diff")) &&
 		(strings.Contains(q, "version") || versionRe.MatchString(q)):
