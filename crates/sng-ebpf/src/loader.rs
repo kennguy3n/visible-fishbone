@@ -297,8 +297,16 @@ mod aya_backend {
     use crate::class::Classifier;
     use crate::ddos::DdosConfig;
     use crate::firewall::XdpRuleSet;
+    use crate::maps::{FlowKey, VerdictCacheEntry};
     use crate::tc::EgressSteeringTable;
+    use crate::wire::{
+        self, MarshalledDdos, WireClassMeta, WireClassRule, WireCountry, WireGeoEntry, WireRule,
+        WireRuleSetMeta, WireSteeringTarget,
+    };
     use aya::Ebpf;
+    use aya::Pod;
+    use aya::maps::lpm_trie::{Key, LpmTrie};
+    use aya::maps::{Array, HashMap, MapData, MapError, ProgramArray};
     use aya::programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags};
     use std::path::Path;
     use std::sync::{Mutex, PoisonError};
@@ -309,15 +317,45 @@ mod aya_backend {
     /// `cargo build --workspace`.
     const OBJECT_PATH_ENV: &str = "SNG_EBPF_OBJECT";
 
+    /// XDP entry program attached to the NIC; the rest of the pipeline is
+    /// reached from it through the `sng_xdp_progs` tail-call jump table.
+    const XDP_ENTRY_PROGRAM: &str = "sng_xdp_classify";
+
+    /// Name of the `BPF_MAP_TYPE_PROG_ARRAY` jump table the entry program
+    /// tail-calls through.
+    const XDP_PROG_ARRAY: &str = "sng_xdp_progs";
+
+    /// The chained stage programs, in jump-table-slot order. This mirrors the
+    /// `SNG_TAIL_*` indices in `bpf/src/main.rs` exactly — slot `i` holds
+    /// `XDP_STAGE_PROGRAMS[i]`. The kernel pipeline is: entry tail-calls slot
+    /// 0 (classify chunk 0) → 1 (classify chunk 1) → 2..=9 (firewall chunks
+    /// 0..7) → 10 (apply). A tail call to an unpopulated slot fails, and the
+    /// program falls open to `XDP_PASS`, so the loader must fill every slot.
+    const XDP_STAGE_PROGRAMS: [&str; 11] = [
+        "sng_xdp_stage_classify",   // slot 0  — SNG_TAIL_CLASSIFY_0
+        "sng_xdp_stage_classify_1", // slot 1  — SNG_TAIL_CLASSIFY_1
+        "sng_xdp_stage_firewall",   // slot 2  — SNG_TAIL_FIREWALL_0
+        "sng_xdp_stage_firewall_1", // slot 3  — SNG_TAIL_FIREWALL_1
+        "sng_xdp_stage_firewall_2", // slot 4  — SNG_TAIL_FIREWALL_2
+        "sng_xdp_stage_firewall_3", // slot 5  — SNG_TAIL_FIREWALL_3
+        "sng_xdp_stage_firewall_4", // slot 6  — SNG_TAIL_FIREWALL_4
+        "sng_xdp_stage_firewall_5", // slot 7  — SNG_TAIL_FIREWALL_5
+        "sng_xdp_stage_firewall_6", // slot 8  — SNG_TAIL_FIREWALL_6
+        "sng_xdp_stage_firewall_7", // slot 9  — SNG_TAIL_FIREWALL_7
+        "sng_xdp_stage_apply",      // slot 10 — SNG_TAIL_APPLY
+    ];
+
     /// Kernel-backed loader built on `aya`. Owns the loaded [`Ebpf`]
     /// handle and the attach lifecycle.
     ///
-    /// The map-content update methods (`update_rules` /
-    /// `update_classification` / `update_steering`) require the kernel
-    /// object's map definitions and `Pod` marshalling, which land with
-    /// the BPF object crate; until then they validate their input and
-    /// surface a clear [`EbpfError::Unsupported`] rather than silently
-    /// dropping the update. Program load / attach / pin are fully wired.
+    /// The map-content update methods marshal the userspace policy models
+    /// into the `#[repr(C)]` wire layouts defined in [`crate::wire`] and
+    /// write them into the kernel maps the BPF object (in
+    /// `crates/sng-ebpf/bpf/`) declares. Each update validates its input
+    /// first (so a partial policy is never installed) and, where it
+    /// changes the verdict a cached flow would receive, flushes the
+    /// policy-verdict cache so repeat packets are re-evaluated against the
+    /// new policy. Program load / attach / pin are fully wired.
     #[derive(Debug)]
     pub struct AyaLoader {
         object_path: std::path::PathBuf,
@@ -349,6 +387,205 @@ mod aya_backend {
         fn lock(&self) -> std::sync::MutexGuard<'_, Option<Ebpf>> {
             self.ebpf.lock().unwrap_or_else(PoisonError::into_inner)
         }
+
+        /// Run `f` against the loaded [`Ebpf`] handle, holding the lock for
+        /// the whole update so a concurrent reload cannot observe a
+        /// half-written map set.
+        fn with_ebpf<R>(
+            &self,
+            f: impl FnOnce(&mut Ebpf) -> Result<R, EbpfError>,
+        ) -> Result<R, EbpfError> {
+            let mut guard = self.lock();
+            let ebpf = guard
+                .as_mut()
+                .ok_or_else(|| EbpfError::Map("load() must precede a map update".into()))?;
+            f(ebpf)
+        }
+    }
+
+    /// Borrow a named `BPF_MAP_TYPE_ARRAY` typed to value `V`.
+    fn array_map<'a, V: Pod>(
+        ebpf: &'a mut Ebpf,
+        name: &str,
+    ) -> Result<Array<&'a mut MapData, V>, EbpfError> {
+        let map = ebpf
+            .map_mut(name)
+            .ok_or_else(|| EbpfError::Map(format!("map {name} not found in BPF object")))?;
+        Array::try_from(map).map_err(|e| EbpfError::Map(format!("map {name} is not an array: {e}")))
+    }
+
+    /// Overwrite the first `values.len()` slots of array `name`. The
+    /// caller writes the companion `*_meta` count afterwards so a growing
+    /// set never exposes a slot the kernel reads before it is populated.
+    fn write_array<V: Pod>(ebpf: &mut Ebpf, name: &str, values: &[V]) -> Result<(), EbpfError> {
+        let mut array = array_map::<V>(ebpf, name)?;
+        for (idx, value) in values.iter().enumerate() {
+            let idx = u32::try_from(idx)
+                .map_err(|_| EbpfError::Map(format!("map {name} index {idx} overflows u32")))?;
+            array
+                .set(idx, value, 0)
+                .map_err(|e| EbpfError::Map(format!("map {name} set[{idx}]: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Write the single element of a one-entry metadata/config array.
+    fn write_singleton<V: Pod>(ebpf: &mut Ebpf, name: &str, value: V) -> Result<(), EbpfError> {
+        let mut array = array_map::<V>(ebpf, name)?;
+        array
+            .set(0, value, 0)
+            .map_err(|e| EbpfError::Map(format!("map {name} set[0]: {e}")))
+    }
+
+    /// Replace every entry of an LPM trie with `entries`, removing stale
+    /// keys the new set no longer covers. Keyed on the family-appropriate
+    /// address bytes via `key_of`.
+    fn replace_lpm<const N: usize>(
+        ebpf: &mut Ebpf,
+        name: &str,
+        entries: &[WireGeoEntry],
+        key_of: impl Fn(&WireGeoEntry) -> Option<[u8; N]>,
+    ) -> Result<(), EbpfError>
+    where
+        [u8; N]: Pod,
+    {
+        let map = ebpf
+            .map_mut(name)
+            .ok_or_else(|| EbpfError::Map(format!("map {name} not found in BPF object")))?;
+        let mut trie: LpmTrie<&mut MapData, [u8; N], WireCountry> = LpmTrie::try_from(map)
+            .map_err(|e| EbpfError::Map(format!("map {name} is not an LPM trie: {e}")))?;
+
+        let desired: std::collections::HashSet<(u32, [u8; N])> = entries
+            .iter()
+            .filter_map(|e| key_of(e).map(|k| (u32::from(e.prefix_len), k)))
+            .collect();
+        let stale: Vec<Key<[u8; N]>> = trie
+            .keys()
+            .filter_map(Result::ok)
+            .filter(|k| !desired.contains(&(k.prefix_len(), k.data())))
+            .collect();
+        for key in stale {
+            trie.remove(&key)
+                .map_err(|e| EbpfError::Map(format!("map {name} remove: {e}")))?;
+        }
+        for entry in entries {
+            if let Some(data) = key_of(entry) {
+                let key = Key::new(u32::from(entry.prefix_len), data);
+                trie.insert(&key, entry.country, 0)
+                    .map_err(|e| EbpfError::Map(format!("map {name} insert: {e}")))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Replace the blocked-country hash with `blocked`, removing codes the
+    /// new set drops.
+    fn replace_country_hash(ebpf: &mut Ebpf, blocked: &[WireCountry]) -> Result<(), EbpfError> {
+        let name = wire::MAP_GEO_BLOCK;
+        let map = ebpf
+            .map_mut(name)
+            .ok_or_else(|| EbpfError::Map(format!("map {name} not found in BPF object")))?;
+        let mut hash: HashMap<&mut MapData, WireCountry, u8> = HashMap::try_from(map)
+            .map_err(|e| EbpfError::Map(format!("map {name} is not a hash: {e}")))?;
+
+        let desired: std::collections::HashSet<WireCountry> = blocked.iter().copied().collect();
+        let stale: Vec<WireCountry> = hash
+            .keys()
+            .filter_map(Result::ok)
+            .filter(|k| !desired.contains(k))
+            .collect();
+        for key in stale {
+            hash.remove(&key)
+                .map_err(|e| EbpfError::Map(format!("map {name} remove: {e}")))?;
+        }
+        for country in blocked {
+            hash.insert(country, 1u8, 0)
+                .map_err(|e| EbpfError::Map(format!("map {name} insert: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Fill the `sng_xdp_progs` tail-call jump table so the entry program can
+    /// chain into the classify/firewall/apply stages. Every
+    /// [`XDP_STAGE_PROGRAMS`] entry must already be loaded (so its fd exists).
+    ///
+    /// The map is *taken* out of the [`Ebpf`] handle so it no longer borrows
+    /// it, letting each stage program be borrowed immutably for its fd. The
+    /// kernel keeps the populated table alive through the attached entry
+    /// program's reference, so dropping the userspace map handle afterwards is
+    /// safe — the loader never needs to rewrite the table (its layout is
+    /// fixed at compile time).
+    fn populate_jump_table(ebpf: &mut Ebpf) -> Result<(), EbpfError> {
+        let map = ebpf
+            .take_map(XDP_PROG_ARRAY)
+            .ok_or_else(|| EbpfError::Map(format!("map {XDP_PROG_ARRAY} not found")))?;
+        let mut prog_array = ProgramArray::try_from(map).map_err(|e| {
+            EbpfError::Map(format!("map {XDP_PROG_ARRAY} is not a prog array: {e}"))
+        })?;
+        for (slot, name) in (0u32..).zip(XDP_STAGE_PROGRAMS) {
+            let prog: &Xdp = ebpf
+                .program(name)
+                .ok_or_else(|| EbpfError::Attach(format!("stage program {name} not found")))?
+                .try_into()
+                .map_err(|e| EbpfError::Attach(format!("stage {name} is not XDP: {e}")))?;
+            let fd = prog
+                .fd()
+                .map_err(|e| EbpfError::Attach(format!("stage {name} not loaded: {e}")))?;
+            prog_array
+                .set(slot, fd, 0)
+                .map_err(|e| EbpfError::Map(format!("jump table set[{slot}] = {name}: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Flush the policy-verdict cache so flows are re-evaluated against the
+    /// new policy. The cache is an optional accelerator — if the object
+    /// does not declare it, there is nothing to invalidate.
+    fn flush_verdict_cache(ebpf: &mut Ebpf) -> Result<(), EbpfError> {
+        let name = wire::MAP_VERDICT_CACHE;
+        let Some(map) = ebpf.map_mut(name) else {
+            return Ok(());
+        };
+        // The verdict cache is declared `BPF_MAP_TYPE_LRU_HASH` on the kernel
+        // side. `aya::maps::HashMap` is the correct (and only) userspace handle
+        // for it: aya has no separate `LruHashMap` type — its
+        // `TryFrom<&mut Map> for HashMap` matches *both* the `Map::HashMap` and
+        // `Map::LruHashMap` variants (see aya 0.13 `impl_try_from_map!`), and
+        // `HashMap::new` validates only key/value sizes, not the map type. So
+        // opening an LRU hash via `HashMap` succeeds; the `keys()`/`remove()`
+        // flush below works the same on either flavour.
+        let mut cache: HashMap<&mut MapData, FlowKey, VerdictCacheEntry> =
+            HashMap::try_from(map)
+                .map_err(|e| EbpfError::Map(format!("map {name} is not a hash map: {e}")))?;
+        let keys: Vec<FlowKey> = cache.keys().filter_map(Result::ok).collect();
+        for key in keys {
+            // The XDP program writes this `LRU_HASH` on every cache-miss
+            // packet, so the kernel can evict a key between the `keys()`
+            // snapshot above and this `remove()`. A key that is already gone
+            // satisfies the flush goal (no stale verdict survives), so treat
+            // that race as success and surface only genuine failures —
+            // otherwise a single benign eviction would fail the whole policy
+            // update even though the rule/class maps were already written.
+            match cache.remove(&key) {
+                Ok(()) => {}
+                Err(e) if is_already_evicted(&e) => {}
+                Err(e) => return Err(EbpfError::Map(format!("map {name} evict: {e}"))),
+            }
+        }
+        Ok(())
+    }
+
+    /// True when a `remove` failure just means the key is already gone — aya's
+    /// explicit not-found variants, or a `bpf_map_delete_elem` that returned
+    /// `ENOENT` (mapped by std to [`io::ErrorKind::NotFound`]). On the
+    /// concurrently-evicted verdict cache this race is benign for a flush; any
+    /// other error (e.g. `EPERM`) is a real failure and must propagate.
+    fn is_already_evicted(err: &MapError) -> bool {
+        match err {
+            MapError::KeyNotFound | MapError::ElementNotFound => true,
+            MapError::SyscallError(e) => e.io_error.kind() == std::io::ErrorKind::NotFound,
+            _ => false,
+        }
     }
 
     impl ProgramLoader for AyaLoader {
@@ -369,20 +606,51 @@ mod aya_backend {
             let ebpf = guard
                 .as_mut()
                 .ok_or_else(|| EbpfError::Attach("load() must precede attach_xdp()".into()))?;
-            let program: &mut Xdp = ebpf
-                .program_mut("sng_xdp_classify")
-                .ok_or_else(|| EbpfError::Attach("program sng_xdp_classify not found".into()))?
+
+            // Load (verify) every chained stage program first so each has a
+            // file descriptor to install in the jump table. The entry program
+            // tail-calls into these, so they must be loaded *and* registered
+            // before the entry begins handling packets.
+            for name in XDP_STAGE_PROGRAMS {
+                let stage: &mut Xdp = ebpf
+                    .program_mut(name)
+                    .ok_or_else(|| EbpfError::Attach(format!("program {name} not found")))?
+                    .try_into()
+                    .map_err(|e| EbpfError::Attach(format!("program {name} is not XDP: {e}")))?;
+                stage
+                    .load()
+                    .map_err(|e| EbpfError::Load(format!("xdp stage {name} load: {e}")))?;
+            }
+
+            // Load the entry program before populating the table: an XDP
+            // program must be loaded to expose its fd, and the populate step
+            // below borrows the program set immutably.
+            let entry: &mut Xdp = ebpf
+                .program_mut(XDP_ENTRY_PROGRAM)
+                .ok_or_else(|| EbpfError::Attach(format!("program {XDP_ENTRY_PROGRAM} not found")))?
                 .try_into()
-                .map_err(|e| EbpfError::Attach(format!("program is not XDP: {e}")))?;
-            program
+                .map_err(|e| EbpfError::Attach(format!("entry program is not XDP: {e}")))?;
+            entry
                 .load()
-                .map_err(|e| EbpfError::Load(format!("xdp program load: {e}")))?;
+                .map_err(|e| EbpfError::Load(format!("xdp entry load: {e}")))?;
+
+            populate_jump_table(ebpf)?;
+
+            // Re-borrow the (now loaded) entry program to attach it. The
+            // kernel keeps the jump table and every stage program alive via
+            // the attached entry's reference, so the pipeline survives even
+            // though the populate step's map handle has been dropped.
+            let entry: &mut Xdp = ebpf
+                .program_mut(XDP_ENTRY_PROGRAM)
+                .ok_or_else(|| EbpfError::Attach(format!("program {XDP_ENTRY_PROGRAM} not found")))?
+                .try_into()
+                .map_err(|e| EbpfError::Attach(format!("entry program is not XDP: {e}")))?;
             let flags = match mode {
                 XdpMode::Skb => XdpFlags::SKB_MODE,
                 XdpMode::Native => XdpFlags::DRV_MODE,
                 XdpMode::Hardware => XdpFlags::HW_MODE,
             };
-            program
+            entry
                 .attach(iface, flags)
                 .map_err(|e| EbpfError::Attach(format!("attach xdp to {iface}: {e}")))?;
             Ok(())
@@ -427,29 +695,57 @@ mod aya_backend {
         }
 
         fn update_rules(&self, rules: &XdpRuleSet) -> Result<(), EbpfError> {
-            rules.validate()?;
-            Err(EbpfError::Unsupported(
-                "kernel rule-map marshalling lands with the BPF object crate".into(),
-            ))
+            // Marshal (and validate) before touching the kernel so a
+            // rejected ruleset never leaves the maps half-updated.
+            let (wire, meta): (Vec<WireRule>, WireRuleSetMeta) = wire::marshal_rules(rules)?;
+            self.with_ebpf(|ebpf| {
+                write_array(ebpf, wire::MAP_FW_RULES, &wire)?;
+                write_singleton(ebpf, wire::MAP_FW_META, meta)?;
+                // The ruleset changed; cached verdicts may now be stale.
+                flush_verdict_cache(ebpf)
+            })
         }
 
-        fn update_classification(&self, _classifier: &Classifier) -> Result<(), EbpfError> {
-            Err(EbpfError::Unsupported(
-                "kernel classification-map marshalling lands with the BPF object crate".into(),
-            ))
+        fn update_classification(&self, classifier: &Classifier) -> Result<(), EbpfError> {
+            let (wire, meta): (Vec<WireClassRule>, WireClassMeta) =
+                wire::marshal_classification(classifier)?;
+            self.with_ebpf(|ebpf| {
+                write_array(ebpf, wire::MAP_CLASS_RULES, &wire)?;
+                write_singleton(ebpf, wire::MAP_CLASS_META, meta)?;
+                // A re-tiered destination must not keep its cached verdict.
+                flush_verdict_cache(ebpf)
+            })
         }
 
-        fn update_steering(&self, _steering: &EgressSteeringTable) -> Result<(), EbpfError> {
-            Err(EbpfError::Unsupported(
-                "kernel steering-map marshalling lands with the BPF object crate".into(),
-            ))
+        fn update_steering(&self, steering: &EgressSteeringTable) -> Result<(), EbpfError> {
+            let wire: [WireSteeringTarget; wire::STEERING_SLOTS] = wire::marshal_steering(steering);
+            // Steering is egress-only and keyed on the class tag, so it
+            // does not invalidate the ingress verdict cache.
+            self.with_ebpf(|ebpf| write_array(ebpf, wire::MAP_STEERING, &wire))
         }
 
         fn update_ddos(&self, config: &DdosConfig) -> Result<(), EbpfError> {
-            config.validate()?;
-            Err(EbpfError::Unsupported(
-                "kernel ddos-map marshalling lands with the BPF object crate".into(),
-            ))
+            let MarshalledDdos {
+                config: wire_config,
+                geoip,
+                blocked,
+            } = wire::marshal_ddos(config)?;
+            self.with_ebpf(|ebpf| {
+                replace_lpm(ebpf, wire::MAP_GEOIP_V4, &geoip, WireGeoEntry::key_v4)?;
+                replace_lpm(ebpf, wire::MAP_GEOIP_V6, &geoip, WireGeoEntry::key_v6)?;
+                replace_country_hash(ebpf, &blocked)?;
+                // Publish the scalar config last so the data path only
+                // enables a limiter once its backing tables are in place.
+                write_singleton(ebpf, wire::MAP_DDOS_CONFIG, wire_config)?;
+                // A tightened rate-limit budget or a freshly blocked
+                // country must take effect now, not after the verdict-cache
+                // TTL: the XDP fast path short-circuits the whole pipeline
+                // (GeoIP + rate limit included) on a cached verdict, so a
+                // flow cached as PASS would keep bypassing the new DDoS
+                // policy for up to VERDICT_TTL_NS. Flush as update_rules and
+                // update_classification do.
+                flush_verdict_cache(ebpf)
+            })
         }
     }
 }

@@ -1,0 +1,11 @@
+# Default the BPF crate to the little-endian BPF target and build the
+# core/alloc sysroot from source (BPF has no prebuilt std). `bpf-linker`
+# must be on PATH (`cargo install bpf-linker`) for the link step.
+[build]
+target = "bpfel-unknown-none"
+
+[unstable]
+build-std = ["core"]
+
+[target.bpfel-unknown-none]
+linker = "bpf-linker"

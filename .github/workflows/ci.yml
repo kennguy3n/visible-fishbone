@@ -271,6 +271,60 @@ jobs:
       - name: cargo test --workspace
         run: cargo test --workspace --all-targets
 
+  # The sng-ebpf kernel data path is split across two compilation
+  # surfaces that the default workspace jobs above do NOT cover:
+  #
+  #   * the `xdp` feature of sng-ebpf gates the aya-backed loader
+  #     (loader.rs map writes, wire.rs `aya::Pod` impls). It is off
+  #     by default so non-Linux hosts and unit tests need no kernel,
+  #     which means `clippy/test --workspace` never lints or compiles
+  #     it. We add an explicit `--features xdp` pass on Linux.
+  #
+  #   * `crates/sng-ebpf/bpf/` is `exclude`d from the workspace (it
+  #     cross-compiles to bpfel-unknown-none with nightly + build-std,
+  #     which host cargo cannot do). `cargo +nightly check` type-checks
+  #     it without the linker so layout/type drift in the kernel object
+  #     (main.rs, contract.rs) is caught in CI rather than at deploy.
+  rust-ebpf:
+    name: rust ebpf (xdp feature + bpf nightly check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: install rust toolchain (xdp feature gate)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      # The BPF crate pins its own nightly via rust-toolchain.toml and
+      # needs rust-src for the build-std core sysroot (.cargo/config.toml).
+      - name: install nightly toolchain (bpf crate, build-std)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          # Mirror crates/sng-ebpf/bpf/rust-toolchain.toml so rustup does
+          # not have to fetch components mid-build when it enters that dir,
+          # plus clippy for the `cargo +nightly clippy` step below.
+          components: rust-src, rustc-dev, llvm-tools-preview, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-${{ runner.os }}
+      # Lint + test the feature-gated, Linux-only loader that the
+      # default workspace jobs skip. Pin the stable toolchain explicitly
+      # (the nightly install above is the active default, but the loader
+      # builds on the workspace-pinned stable like the other rust jobs).
+      - name: cargo clippy -p sng-ebpf --features xdp
+        run: cargo +${{ env.RUST_TOOLCHAIN }} clippy -p sng-ebpf --features xdp --all-targets -- -D warnings
+      - name: cargo test -p sng-ebpf --features xdp
+        run: cargo +${{ env.RUST_TOOLCHAIN }} test -p sng-ebpf --features xdp
+      # Type-check the excluded kernel BPF object (no link step; the
+      # full bpf-linker link runs in the appliance-image pipeline).
+      - name: cargo +nightly check (bpf crate)
+        working-directory: crates/sng-ebpf/bpf
+        run: cargo +nightly check
+      - name: cargo +nightly clippy (bpf crate)
+        working-directory: crates/sng-ebpf/bpf
+        run: cargo +nightly clippy -- -D warnings
+
   rust-deny:
     name: rust deny (licenses + bans + advisories + sources)
     runs-on: ubuntu-latest

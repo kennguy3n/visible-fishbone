@@ -1,0 +1,6 @@
+# aya-ebpf requires a nightly toolchain (it relies on `build-std` and
+# BPF-target codegen unavailable on stable). Pin nightly + the components
+# the BPF build needs so the appliance image pipeline is reproducible.
+[toolchain]
+channel = "nightly"
+components = ["rust-src", "rustc-dev", "llvm-tools-preview"]

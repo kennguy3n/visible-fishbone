@@ -1,0 +1,56 @@
+# Kernel-space BPF object for the SNG eBPF/XDP fast path.
+#
+# This crate is intentionally **NOT** a member of the root workspace: it
+# is a `no_std` unit cross-compiled for a BPF target (`bpfel-unknown-none`)
+# by the appliance image pipeline using a nightly toolchain and
+# `bpf-linker`, not by `cargo build --workspace`. Declaring its own
+# `[workspace]` table below detaches it from the parent workspace so a
+# host `cargo build` never tries to compile it for the host target.
+#
+# Build (offline pipeline):
+#   cd crates/sng-ebpf/bpf
+#   cargo +nightly build --release   # emits target/bpfel-unknown-none/release/sng-ebpf-bpf
+# The resulting object is published to the image and located at runtime
+# via the `SNG_EBPF_OBJECT` environment variable the userspace loader
+# reads (see `crates/sng-ebpf/src/loader.rs`).
+
+[package]
+name = "sng-ebpf-bpf"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-Proprietary"
+publish = false
+
+# Standalone workspace: keep this crate out of the host workspace's build
+# graph and lockfile resolution.
+[workspace]
+
+[[bin]]
+name = "sng-ebpf-bpf"
+path = "src/main.rs"
+
+[dependencies]
+# Pinned to the kernel-side counterpart of the userspace `aya` 0.13.x the
+# `sng-ebpf` crate links; the two must stay in lockstep.
+aya-ebpf = "0.1.1"
+network-types = "0.2.0"
+
+[profile.dev]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = "abort"
+incremental = false
+codegen-units = 1
+
+[profile.release]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = "abort"
+incremental = false
+codegen-units = 1

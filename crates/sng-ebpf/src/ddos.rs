@@ -377,6 +377,13 @@ impl GeoIpTable {
             .find(|e| e.net.contains(&ip))
             .map(|e| e.country)
     }
+
+    /// Borrow the database entries (longest-prefix-first) — the layout
+    /// the loader marshals into the kernel LPM tries.
+    #[must_use]
+    pub fn entries(&self) -> &[GeoIpEntry] {
+        &self.entries
+    }
 }
 
 /// A per-tenant set of blocked country codes.
@@ -419,6 +426,12 @@ impl GeoIpBlocklist {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.blocked.is_empty()
+    }
+
+    /// Iterate the blocked country codes in sorted order — the set the
+    /// loader fills the kernel blocklist hash from.
+    pub fn codes(&self) -> impl Iterator<Item = CountryCode> + '_ {
+        self.blocked.iter().copied()
     }
 }
 
