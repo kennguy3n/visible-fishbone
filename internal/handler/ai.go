@@ -365,13 +365,14 @@ func (h *AIHandler) nlPolicyQuery(w http.ResponseWriter, r *http.Request) {
 	if !DecodeJSON(w, r, &req) {
 		return
 	}
-	if strings.TrimSpace(req.Question) == "" {
+	question := strings.TrimSpace(req.Question)
+	if question == "" {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "question is required")
 		return
 	}
 	ctx := ai.ContextWithTenantID(r.Context(), tenantID)
 	resp, err := h.nlQuery.Query(ctx, ai.NLQueryRequest{
-		Question: req.Question,
+		Question: question,
 		TenantID: tenantID,
 	})
 	if err != nil {
