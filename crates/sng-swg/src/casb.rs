@@ -108,8 +108,9 @@ impl PathRule {
 
     /// A rule whose final `*` segment is a real filename, so a file
     /// extension is derived from it for file-type-gated rules. Use
-    /// only when the matched segment genuinely carries a filename.
-    #[cfg(test)]
+    /// only when the matched segment genuinely carries a filename
+    /// (e.g. Confluence's `/wiki/download/attachments/{id}/{name}`),
+    /// never an opaque resource id or a dotted API method name.
     fn new_filename(method: Option<&str>, path_glob: &str, action: CasbAction) -> Self {
         Self {
             filename_in_path: true,
@@ -185,8 +186,10 @@ pub struct DetectedApp {
 }
 
 /// Catalog of SaaS-app detection signatures. The default catalog
-/// covers the four launch apps; an operator can install a wider
-/// or narrower catalog from the policy bundle.
+/// ([`AppCatalog::builtin`]) covers the twenty apps the control
+/// plane recognises (`internal/service/casb/inline.go` `knownApps`);
+/// an operator can install a wider or narrower catalog from the
+/// policy bundle.
 #[derive(Clone, Debug, Default)]
 pub struct AppCatalog {
     signatures: Vec<AppSignature>,
@@ -228,10 +231,42 @@ impl AppCatalog {
         })
     }
 
-    /// The built-in catalog for the four launch SaaS apps. The
-    /// path globs encode the documented API shapes for file
-    /// upload, download, sharing, and delete on each provider.
+    /// The built-in catalog of detection signatures for the twenty
+    /// apps the control plane's `knownApps` set recognises. The path
+    /// globs encode the documented API shapes for the gated actions
+    /// (upload, download, share/external-share, delete, login,
+    /// admin-config-change, api-key-create, bulk-export) on each
+    /// provider.
+    ///
+    /// Two design rules keep detection precise (no over-broad
+    /// matches) for the 5000-tenant multi-tenant edge:
+    ///
+    ///   * Host suffixes target the **API / sign-in hosts** that
+    ///     actually carry the action (e.g. `api.box.com`,
+    ///     `signin.aws.amazon.com`, `management.azure.com`), not a
+    ///     marketing apex, so a request to a vendor's web app is not
+    ///     misclassified as an API action.
+    ///   * Path globs are anchored to the provider's documented API
+    ///     prefix and matched segment-for-segment, so a wildcard can
+    ///     never span an unintended depth.
+    ///
+    /// Apps that legitimately share a host are separate signatures
+    /// keyed on disjoint path prefixes: Jira (`/rest/api`) vs
+    /// Confluence (`/wiki`) on `*.atlassian.net`; Teams
+    /// (`/v1.0/teams`) vs M365 (`/v1.0/me/drive`, `/v1.0/drives`) on
+    /// `graph.microsoft.com`; and GCP (`/v3/projects`, IAM keys) vs
+    /// Google Workspace (`/drive/v3`) on `*.googleapis.com`. Because
+    /// [`detect`](Self::detect) scans signatures in declaration order
+    /// and a host-but-no-path match falls through, the launch apps
+    /// are declared first and the expansion apps after them.
+    ///
+    /// Allow `clippy::too_many_lines`: the body is a single flat
+    /// declarative table of twenty app signatures with no control
+    /// flow. Splitting it into per-app helpers would scatter the
+    /// catalog and obscure the declaration-order contract above
+    /// without reducing real complexity.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn builtin() -> Self {
         Self::new(vec![
             // Microsoft 365 (OneDrive / SharePoint via Graph).
@@ -340,6 +375,423 @@ impl AppCatalog {
                         Some("delete"),
                         "/services/data/*/sobjects/ContentVersion/*",
                         CasbAction::Delete,
+                    ),
+                ],
+            },
+            // --- Catalog expansion -------------------------------
+            // Box (Content API). Files live under api.box.com
+            // (`/2.0/...`); uploads go to upload.box.com
+            // (`/api/2.0/...`). Both share the box.com suffix; the
+            // path prefixes disambiguate them from the box.com web
+            // app.
+            AppSignature {
+                app_id: "box".to_string(),
+                host_suffixes: vec!["box.com".to_string()],
+                path_rules: vec![
+                    PathRule::new(Some("post"), "/api/2.0/files/content", CasbAction::Upload),
+                    PathRule::new(Some("post"), "/api/2.0/files/*/content", CasbAction::Upload),
+                    PathRule::new(Some("get"), "/2.0/files/*/content", CasbAction::Download),
+                    // A collaboration invite can target an external
+                    // (non-managed) account, so it is the stronger
+                    // external-share signal than a shared link.
+                    PathRule::new(
+                        Some("post"),
+                        "/2.0/collaborations",
+                        CasbAction::ExternalShare,
+                    ),
+                    PathRule::new(Some("delete"), "/2.0/files/*", CasbAction::Delete),
+                ],
+            },
+            // Dropbox (API v2). Content endpoints on
+            // content.dropboxapi.com, metadata/sharing on
+            // api.dropboxapi.com; both under the dropboxapi.com
+            // suffix. The dropbox.com web app is intentionally
+            // excluded — only the programmatic API carries these
+            // actions, and every Dropbox API call is a POST.
+            AppSignature {
+                app_id: "dropbox".to_string(),
+                host_suffixes: vec!["dropboxapi.com".to_string()],
+                path_rules: vec![
+                    PathRule::new(Some("post"), "/2/files/upload", CasbAction::Upload),
+                    PathRule::new(
+                        Some("post"),
+                        "/2/files/upload_session/finish",
+                        CasbAction::Upload,
+                    ),
+                    PathRule::new(
+                        Some("post"),
+                        "/2/files/download_zip",
+                        CasbAction::BulkExport,
+                    ),
+                    PathRule::new(Some("post"), "/2/files/download", CasbAction::Download),
+                    PathRule::new(
+                        Some("post"),
+                        "/2/sharing/create_shared_link_with_settings",
+                        CasbAction::Share,
+                    ),
+                    PathRule::new(
+                        Some("post"),
+                        "/2/sharing/add_file_member",
+                        CasbAction::ExternalShare,
+                    ),
+                    PathRule::new(Some("post"), "/2/files/delete_v2", CasbAction::Delete),
+                ],
+            },
+            // GitHub (REST API + uploads host). Restricted to the
+            // api/uploads subdomains so the github.com web UI is not
+            // swept in.
+            AppSignature {
+                app_id: "github".to_string(),
+                host_suffixes: vec![
+                    "api.github.com".to_string(),
+                    "uploads.github.com".to_string(),
+                ],
+                path_rules: vec![
+                    PathRule::new(
+                        Some("post"),
+                        "/repos/*/*/releases/*/assets",
+                        CasbAction::Upload,
+                    ),
+                    PathRule::new(
+                        Some("get"),
+                        "/repos/*/*/releases/assets/*",
+                        CasbAction::Download,
+                    ),
+                    // Whole-repository archive: a bulk egress signal.
+                    PathRule::new(Some("get"), "/repos/*/*/tarball/*", CasbAction::BulkExport),
+                    PathRule::new(Some("get"), "/repos/*/*/zipball/*", CasbAction::BulkExport),
+                    // Org migration = account-wide data export.
+                    PathRule::new(Some("post"), "/orgs/*/migrations", CasbAction::BulkExport),
+                    // Credential creation: repo deploy keys and user
+                    // SSH keys.
+                    PathRule::new(Some("post"), "/repos/*/*/keys", CasbAction::ApiKeyCreate),
+                    PathRule::new(Some("post"), "/user/keys", CasbAction::ApiKeyCreate),
+                    PathRule::new(Some("patch"), "/orgs/*", CasbAction::AdminConfigChange),
+                    PathRule::new(Some("delete"), "/repos/*/*", CasbAction::Delete),
+                ],
+            },
+            // GitLab SaaS (REST API v4 under gitlab.com).
+            AppSignature {
+                app_id: "gitlab".to_string(),
+                host_suffixes: vec!["gitlab.com".to_string()],
+                path_rules: vec![
+                    PathRule::new(
+                        Some("post"),
+                        "/api/v4/projects/*/uploads",
+                        CasbAction::Upload,
+                    ),
+                    PathRule::new(
+                        Some("get"),
+                        "/api/v4/projects/*/repository/archive",
+                        CasbAction::BulkExport,
+                    ),
+                    PathRule::new(
+                        Some("post"),
+                        "/api/v4/projects/*/export",
+                        CasbAction::BulkExport,
+                    ),
+                    PathRule::new(
+                        Some("post"),
+                        "/api/v4/projects/*/access_tokens",
+                        CasbAction::ApiKeyCreate,
+                    ),
+                    PathRule::new(
+                        Some("post"),
+                        "/api/v4/projects/*/members",
+                        CasbAction::Share,
+                    ),
+                    PathRule::new(Some("delete"), "/api/v4/projects/*", CasbAction::Delete),
+                ],
+            },
+            // Jira Cloud (REST API under *.atlassian.net). Confluence
+            // shares the host but lives under /wiki, so the two are
+            // separate signatures keyed on disjoint path prefixes.
+            // The version segment (`2` or `3`) is a wildcard.
+            AppSignature {
+                app_id: "jira".to_string(),
+                host_suffixes: vec!["atlassian.net".to_string()],
+                path_rules: vec![
+                    PathRule::new(
+                        Some("post"),
+                        "/rest/api/*/issue/*/attachments",
+                        CasbAction::Upload,
+                    ),
+                    PathRule::new(
+                        Some("get"),
+                        "/rest/api/*/attachment/content/*",
+                        CasbAction::Download,
+                    ),
+                    PathRule::new(Some("delete"), "/rest/api/*/issue/*", CasbAction::Delete),
+                ],
+            },
+            // Confluence Cloud (REST + binary download under /wiki on
+            // *.atlassian.net). The download path's final segment is a
+            // real filename, so file-type-gated rules derive an
+            // extension from it.
+            AppSignature {
+                app_id: "confluence".to_string(),
+                host_suffixes: vec!["atlassian.net".to_string()],
+                path_rules: vec![
+                    PathRule::new(
+                        Some("post"),
+                        "/wiki/rest/api/content/*/child/attachment",
+                        CasbAction::Upload,
+                    ),
+                    PathRule::new_filename(
+                        Some("get"),
+                        "/wiki/download/attachments/*/*",
+                        CasbAction::Download,
+                    ),
+                    PathRule::new(
+                        Some("delete"),
+                        "/wiki/rest/api/content/*",
+                        CasbAction::Delete,
+                    ),
+                ],
+            },
+            // ServiceNow (Table & Attachment API under
+            // *.service-now.com).
+            AppSignature {
+                app_id: "servicenow".to_string(),
+                host_suffixes: vec!["service-now.com".to_string()],
+                path_rules: vec![
+                    PathRule::new(Some("post"), "/api/now/attachment/file", CasbAction::Upload),
+                    PathRule::new(
+                        Some("post"),
+                        "/api/now/attachment/upload",
+                        CasbAction::Upload,
+                    ),
+                    PathRule::new(
+                        Some("get"),
+                        "/api/now/attachment/*/file",
+                        CasbAction::Download,
+                    ),
+                    PathRule::new(
+                        Some("put"),
+                        "/api/now/table/sys_properties/*",
+                        CasbAction::AdminConfigChange,
+                    ),
+                    PathRule::new(Some("delete"), "/api/now/attachment/*", CasbAction::Delete),
+                ],
+            },
+            // Zendesk (REST API v2 under *.zendesk.com). The `.json`
+            // suffix is optional in the modern API, so both forms are
+            // matched.
+            AppSignature {
+                app_id: "zendesk".to_string(),
+                host_suffixes: vec!["zendesk.com".to_string()],
+                path_rules: vec![
+                    PathRule::new(Some("post"), "/api/v2/uploads", CasbAction::Upload),
+                    PathRule::new(Some("post"), "/api/v2/uploads.json", CasbAction::Upload),
+                    PathRule::new(
+                        Some("post"),
+                        "/api/v2/oauth/tokens",
+                        CasbAction::ApiKeyCreate,
+                    ),
+                    PathRule::new(
+                        Some("post"),
+                        "/api/v2/oauth/tokens.json",
+                        CasbAction::ApiKeyCreate,
+                    ),
+                    PathRule::new(
+                        Some("put"),
+                        "/api/v2/account/settings",
+                        CasbAction::AdminConfigChange,
+                    ),
+                    PathRule::new(
+                        Some("put"),
+                        "/api/v2/account/settings.json",
+                        CasbAction::AdminConfigChange,
+                    ),
+                    PathRule::new(
+                        Some("get"),
+                        "/api/v2/incremental/tickets",
+                        CasbAction::BulkExport,
+                    ),
+                    PathRule::new(
+                        Some("get"),
+                        "/api/v2/incremental/tickets.json",
+                        CasbAction::BulkExport,
+                    ),
+                ],
+            },
+            // HubSpot (Files & CRM API under api.hubapi.com).
+            AppSignature {
+                app_id: "hubspot".to_string(),
+                host_suffixes: vec!["hubapi.com".to_string()],
+                path_rules: vec![
+                    PathRule::new(Some("post"), "/files/v3/files", CasbAction::Upload),
+                    PathRule::new(
+                        Some("get"),
+                        "/files/v3/files/*/signed-url",
+                        CasbAction::Download,
+                    ),
+                    PathRule::new(
+                        Some("post"),
+                        "/crm/v3/exports/export/async",
+                        CasbAction::BulkExport,
+                    ),
+                    PathRule::new(Some("delete"), "/files/v3/files/*", CasbAction::Delete),
+                ],
+            },
+            // Zoom (REST API v2 under api.zoom.us).
+            AppSignature {
+                app_id: "zoom".to_string(),
+                host_suffixes: vec!["zoom.us".to_string()],
+                path_rules: vec![
+                    // Recording sharing settings can expose a
+                    // recording to a public/anonymous audience.
+                    PathRule::new(
+                        Some("patch"),
+                        "/v2/meetings/*/recordings/settings",
+                        CasbAction::ExternalShare,
+                    ),
+                    PathRule::new(
+                        Some("get"),
+                        "/v2/meetings/*/recordings",
+                        CasbAction::Download,
+                    ),
+                    PathRule::new(
+                        Some("delete"),
+                        "/v2/meetings/*/recordings",
+                        CasbAction::Delete,
+                    ),
+                    PathRule::new(
+                        Some("patch"),
+                        "/v2/accounts/*/settings",
+                        CasbAction::AdminConfigChange,
+                    ),
+                ],
+            },
+            // Microsoft Teams (Graph API). Shares graph.microsoft.com
+            // with M365 but matches the disjoint /v1.0/teams resource
+            // tree, so the two never collide.
+            AppSignature {
+                app_id: "teams".to_string(),
+                host_suffixes: vec!["graph.microsoft.com".to_string()],
+                path_rules: vec![
+                    // Adding a team member can grant a guest/external
+                    // identity access to the team's content.
+                    PathRule::new(
+                        Some("post"),
+                        "/v1.0/teams/*/members",
+                        CasbAction::ExternalShare,
+                    ),
+                    PathRule::new(
+                        Some("patch"),
+                        "/v1.0/teams/*",
+                        CasbAction::AdminConfigChange,
+                    ),
+                    PathRule::new(
+                        Some("delete"),
+                        "/v1.0/teams/*/channels/*",
+                        CasbAction::Delete,
+                    ),
+                ],
+            },
+            // AWS Console sign-in on the dedicated AWS sign-in host.
+            // The console host carries no path-classifiable actions
+            // (its XHRs go to per-service API hosts), so it is listed
+            // only to anchor the app; sign-in is the actionable
+            // signal.
+            AppSignature {
+                app_id: "aws_console".to_string(),
+                host_suffixes: vec![
+                    "signin.aws.amazon.com".to_string(),
+                    "console.aws.amazon.com".to_string(),
+                ],
+                path_rules: vec![
+                    PathRule::new(Some("post"), "/signin", CasbAction::Login),
+                    PathRule::new(Some("get"), "/federation", CasbAction::Login),
+                ],
+            },
+            // Azure management plane (ARM) driven by the Azure Portal.
+            // ARM accepts both `resourcegroups` and `resourceGroups`
+            // casing on the wire; the matcher is case-sensitive, so
+            // both forms are listed.
+            AppSignature {
+                app_id: "azure_portal".to_string(),
+                host_suffixes: vec![
+                    "management.azure.com".to_string(),
+                    "portal.azure.com".to_string(),
+                ],
+                path_rules: vec![
+                    PathRule::new(
+                        Some("put"),
+                        "/subscriptions/*/resourcegroups/*",
+                        CasbAction::AdminConfigChange,
+                    ),
+                    PathRule::new(
+                        Some("put"),
+                        "/subscriptions/*/resourceGroups/*",
+                        CasbAction::AdminConfigChange,
+                    ),
+                    PathRule::new(
+                        Some("delete"),
+                        "/subscriptions/*/resourcegroups/*",
+                        CasbAction::Delete,
+                    ),
+                    PathRule::new(
+                        Some("delete"),
+                        "/subscriptions/*/resourceGroups/*",
+                        CasbAction::Delete,
+                    ),
+                ],
+            },
+            // Google Cloud Platform control plane (Resource Manager +
+            // IAM) — the surfaces the GCP console drives. The
+            // googleapis.com suffix is also matched by
+            // google_workspace (declared earlier); its Drive paths are
+            // disjoint from these, so detection falls through here for
+            // GCP API paths.
+            AppSignature {
+                app_id: "gcp_console".to_string(),
+                host_suffixes: vec![
+                    "cloudresourcemanager.googleapis.com".to_string(),
+                    "iam.googleapis.com".to_string(),
+                    "console.cloud.google.com".to_string(),
+                ],
+                path_rules: vec![
+                    PathRule::new(Some("post"), "/v3/projects", CasbAction::AdminConfigChange),
+                    PathRule::new(Some("delete"), "/v3/projects/*", CasbAction::Delete),
+                    // Service-account key creation is a high-value
+                    // long-lived-credential event.
+                    PathRule::new(
+                        Some("post"),
+                        "/v1/projects/*/serviceAccounts/*/keys",
+                        CasbAction::ApiKeyCreate,
+                    ),
+                ],
+            },
+            // Okta (Core API under *.okta.com / *.oktapreview.com).
+            AppSignature {
+                app_id: "okta".to_string(),
+                host_suffixes: vec!["okta.com".to_string(), "oktapreview.com".to_string()],
+                path_rules: vec![
+                    PathRule::new(Some("post"), "/api/v1/authn", CasbAction::Login),
+                    PathRule::new(Some("post"), "/api/v1/sessions", CasbAction::Login),
+                    PathRule::new(Some("post"), "/api/v1/apps", CasbAction::AdminConfigChange),
+                    PathRule::new(
+                        Some("put"),
+                        "/api/v1/policies/*",
+                        CasbAction::AdminConfigChange,
+                    ),
+                    PathRule::new(Some("delete"), "/api/v1/users/*", CasbAction::Delete),
+                    PathRule::new(Some("delete"), "/api/v1/apps/*", CasbAction::Delete),
+                ],
+            },
+            // Workday (REST API + Report-as-a-Service under
+            // *.workday.com / *.myworkday.com). RaaS custom reports
+            // and bulk worker reads are the major PII-egress surfaces.
+            AppSignature {
+                app_id: "workday".to_string(),
+                host_suffixes: vec!["workday.com".to_string(), "myworkday.com".to_string()],
+                path_rules: vec![
+                    PathRule::new(Some("get"), "/ccx/api/v1/*/workers", CasbAction::BulkExport),
+                    PathRule::new(
+                        Some("get"),
+                        "/ccx/service/customreport2/*/*/*",
+                        CasbAction::BulkExport,
                     ),
                 ],
             },
@@ -1012,6 +1464,479 @@ mod tests {
                 &ctx("POST", "acme.example", "/files/report.pdf"),
                 &RequestSignals::default(),
             ),
+            None
+        );
+    }
+
+    // --- Catalog expansion (WS6) -----------------------------------
+
+    /// Assert the builtin catalog detects the given (method, host,
+    /// path) as the expected (app_id, action). Keeps the per-app
+    /// table-driven tests below terse.
+    fn assert_detect(method: &str, host: &str, path: &str, app: &str, action: CasbAction) {
+        let cat = AppCatalog::builtin();
+        let d = cat
+            .detect(&ctx(method, host, path))
+            .unwrap_or_else(|| panic!("{method} {host}{path} should detect {app}"));
+        assert_eq!(d.app_id, app, "{method} {host}{path}");
+        assert_eq!(d.action, action, "{method} {host}{path}");
+    }
+
+    #[test]
+    fn builtin_catalog_covers_twenty_apps() {
+        // The data-plane catalog must stay in lockstep with the
+        // control plane's knownApps set (20 apps + the "*" wildcard,
+        // which is a rule dimension, not a catalog signature).
+        assert_eq!(AppCatalog::builtin().len(), 20);
+    }
+
+    #[test]
+    fn detects_box_actions() {
+        assert_detect(
+            "POST",
+            "upload.box.com",
+            "/api/2.0/files/content",
+            "box",
+            CasbAction::Upload,
+        );
+        assert_detect(
+            "POST",
+            "upload.box.com",
+            "/api/2.0/files/55/content",
+            "box",
+            CasbAction::Upload,
+        );
+        assert_detect(
+            "GET",
+            "api.box.com",
+            "/2.0/files/55/content",
+            "box",
+            CasbAction::Download,
+        );
+        assert_detect(
+            "POST",
+            "api.box.com",
+            "/2.0/collaborations",
+            "box",
+            CasbAction::ExternalShare,
+        );
+        assert_detect(
+            "DELETE",
+            "api.box.com",
+            "/2.0/files/55",
+            "box",
+            CasbAction::Delete,
+        );
+    }
+
+    #[test]
+    fn detects_dropbox_actions() {
+        assert_detect(
+            "POST",
+            "content.dropboxapi.com",
+            "/2/files/upload",
+            "dropbox",
+            CasbAction::Upload,
+        );
+        assert_detect(
+            "POST",
+            "content.dropboxapi.com",
+            "/2/files/download",
+            "dropbox",
+            CasbAction::Download,
+        );
+        assert_detect(
+            "POST",
+            "content.dropboxapi.com",
+            "/2/files/download_zip",
+            "dropbox",
+            CasbAction::BulkExport,
+        );
+        assert_detect(
+            "POST",
+            "api.dropboxapi.com",
+            "/2/sharing/add_file_member",
+            "dropbox",
+            CasbAction::ExternalShare,
+        );
+        assert_detect(
+            "POST",
+            "api.dropboxapi.com",
+            "/2/files/delete_v2",
+            "dropbox",
+            CasbAction::Delete,
+        );
+        // The dropbox.com web app is intentionally NOT in the catalog.
+        assert_eq!(
+            AppCatalog::builtin().detect(&ctx("GET", "www.dropbox.com", "/home")),
+            None
+        );
+    }
+
+    #[test]
+    fn detects_github_actions() {
+        assert_detect(
+            "POST",
+            "uploads.github.com",
+            "/repos/acme/app/releases/12/assets",
+            "github",
+            CasbAction::Upload,
+        );
+        assert_detect(
+            "GET",
+            "api.github.com",
+            "/repos/acme/app/releases/assets/9",
+            "github",
+            CasbAction::Download,
+        );
+        assert_detect(
+            "GET",
+            "api.github.com",
+            "/repos/acme/app/tarball/main",
+            "github",
+            CasbAction::BulkExport,
+        );
+        assert_detect(
+            "POST",
+            "api.github.com",
+            "/orgs/acme/migrations",
+            "github",
+            CasbAction::BulkExport,
+        );
+        assert_detect(
+            "POST",
+            "api.github.com",
+            "/repos/acme/app/keys",
+            "github",
+            CasbAction::ApiKeyCreate,
+        );
+        assert_detect(
+            "PATCH",
+            "api.github.com",
+            "/orgs/acme",
+            "github",
+            CasbAction::AdminConfigChange,
+        );
+        assert_detect(
+            "DELETE",
+            "api.github.com",
+            "/repos/acme/app",
+            "github",
+            CasbAction::Delete,
+        );
+        // The github.com web UI host is not in the catalog (only the
+        // api/uploads subdomains are), so a browser request is ignored.
+        assert_eq!(
+            AppCatalog::builtin().detect(&ctx("GET", "github.com", "/acme/app")),
+            None
+        );
+    }
+
+    #[test]
+    fn detects_gitlab_actions() {
+        assert_detect(
+            "POST",
+            "gitlab.com",
+            "/api/v4/projects/7/uploads",
+            "gitlab",
+            CasbAction::Upload,
+        );
+        assert_detect(
+            "GET",
+            "gitlab.com",
+            "/api/v4/projects/7/repository/archive",
+            "gitlab",
+            CasbAction::BulkExport,
+        );
+        assert_detect(
+            "POST",
+            "gitlab.com",
+            "/api/v4/projects/7/access_tokens",
+            "gitlab",
+            CasbAction::ApiKeyCreate,
+        );
+        assert_detect(
+            "DELETE",
+            "gitlab.com",
+            "/api/v4/projects/7",
+            "gitlab",
+            CasbAction::Delete,
+        );
+    }
+
+    #[test]
+    fn jira_and_confluence_share_host_but_disjoint_paths() {
+        // Both live on *.atlassian.net; the /rest/api vs /wiki prefix
+        // is what separates them. A miss on one must fall through to
+        // the other rather than being swallowed by the first.
+        assert_detect(
+            "POST",
+            "acme.atlassian.net",
+            "/rest/api/3/issue/PROJ-1/attachments",
+            "jira",
+            CasbAction::Upload,
+        );
+        assert_detect(
+            "GET",
+            "acme.atlassian.net",
+            "/rest/api/2/attachment/content/100",
+            "jira",
+            CasbAction::Download,
+        );
+        assert_detect(
+            "POST",
+            "acme.atlassian.net",
+            "/wiki/rest/api/content/42/child/attachment",
+            "confluence",
+            CasbAction::Upload,
+        );
+        assert_detect(
+            "DELETE",
+            "acme.atlassian.net",
+            "/wiki/rest/api/content/42",
+            "confluence",
+            CasbAction::Delete,
+        );
+    }
+
+    #[test]
+    fn confluence_download_derives_file_type_from_filename() {
+        // The download path's final segment is a real filename, so a
+        // file-type-gated rule can act on the extension.
+        let cat = AppCatalog::builtin();
+        let d = cat
+            .detect(&ctx(
+                "GET",
+                "acme.atlassian.net",
+                "/wiki/download/attachments/42/quarterly.pdf",
+            ))
+            .expect("confluence download");
+        assert_eq!(
+            (d.app_id.as_str(), d.action),
+            ("confluence", CasbAction::Download)
+        );
+        assert!(
+            d.filename_in_path,
+            "confluence download tail is a real filename"
+        );
+    }
+
+    #[test]
+    fn detects_servicenow_zendesk_hubspot() {
+        assert_detect(
+            "POST",
+            "acme.service-now.com",
+            "/api/now/attachment/file",
+            "servicenow",
+            CasbAction::Upload,
+        );
+        assert_detect(
+            "GET",
+            "acme.service-now.com",
+            "/api/now/attachment/abc/file",
+            "servicenow",
+            CasbAction::Download,
+        );
+        // Zendesk accepts both the bare and the .json-suffixed form.
+        assert_detect(
+            "POST",
+            "acme.zendesk.com",
+            "/api/v2/uploads",
+            "zendesk",
+            CasbAction::Upload,
+        );
+        assert_detect(
+            "POST",
+            "acme.zendesk.com",
+            "/api/v2/uploads.json",
+            "zendesk",
+            CasbAction::Upload,
+        );
+        assert_detect(
+            "GET",
+            "acme.zendesk.com",
+            "/api/v2/incremental/tickets.json",
+            "zendesk",
+            CasbAction::BulkExport,
+        );
+        assert_detect(
+            "POST",
+            "api.hubapi.com",
+            "/files/v3/files",
+            "hubspot",
+            CasbAction::Upload,
+        );
+        assert_detect(
+            "POST",
+            "api.hubapi.com",
+            "/crm/v3/exports/export/async",
+            "hubspot",
+            CasbAction::BulkExport,
+        );
+    }
+
+    #[test]
+    fn detects_zoom_recording_actions() {
+        assert_detect(
+            "PATCH",
+            "api.zoom.us",
+            "/v2/meetings/88/recordings/settings",
+            "zoom",
+            CasbAction::ExternalShare,
+        );
+        assert_detect(
+            "GET",
+            "api.zoom.us",
+            "/v2/meetings/88/recordings",
+            "zoom",
+            CasbAction::Download,
+        );
+        assert_detect(
+            "DELETE",
+            "api.zoom.us",
+            "/v2/meetings/88/recordings",
+            "zoom",
+            CasbAction::Delete,
+        );
+    }
+
+    #[test]
+    fn teams_and_m365_share_graph_host_but_disjoint_trees() {
+        // Teams uses /v1.0/teams; M365 uses /v1.0/me/drive and
+        // /v1.0/drives. The two signatures share graph.microsoft.com
+        // and must not steal each other's traffic.
+        assert_detect(
+            "POST",
+            "graph.microsoft.com",
+            "/v1.0/teams/abc/members",
+            "teams",
+            CasbAction::ExternalShare,
+        );
+        assert_detect(
+            "DELETE",
+            "graph.microsoft.com",
+            "/v1.0/teams/abc/channels/xyz",
+            "teams",
+            CasbAction::Delete,
+        );
+        // M365 Drive traffic on the same host still resolves to m365.
+        assert_detect(
+            "PUT",
+            "graph.microsoft.com",
+            "/v1.0/me/drive/items/01X/content",
+            "m365",
+            CasbAction::Upload,
+        );
+    }
+
+    #[test]
+    fn detects_cloud_console_actions() {
+        // AWS sign-in.
+        assert_detect(
+            "POST",
+            "signin.aws.amazon.com",
+            "/signin",
+            "aws_console",
+            CasbAction::Login,
+        );
+        // Azure ARM accepts either casing of the resourcegroups
+        // segment; the case-sensitive matcher lists both.
+        assert_detect(
+            "PUT",
+            "management.azure.com",
+            "/subscriptions/sub-1/resourcegroups/rg-1",
+            "azure_portal",
+            CasbAction::AdminConfigChange,
+        );
+        assert_detect(
+            "DELETE",
+            "management.azure.com",
+            "/subscriptions/sub-1/resourceGroups/rg-1",
+            "azure_portal",
+            CasbAction::Delete,
+        );
+        // GCP control plane on googleapis.com falls through the
+        // google_workspace signature (declared earlier) to gcp_console.
+        assert_detect(
+            "POST",
+            "cloudresourcemanager.googleapis.com",
+            "/v3/projects",
+            "gcp_console",
+            CasbAction::AdminConfigChange,
+        );
+        assert_detect(
+            "POST",
+            "iam.googleapis.com",
+            "/v1/projects/p1/serviceAccounts/sa1/keys",
+            "gcp_console",
+            CasbAction::ApiKeyCreate,
+        );
+        // Google Workspace Drive traffic on googleapis.com still wins.
+        assert_detect(
+            "POST",
+            "www.googleapis.com",
+            "/upload/drive/v3/files",
+            "google_workspace",
+            CasbAction::Upload,
+        );
+    }
+
+    #[test]
+    fn detects_okta_and_workday() {
+        assert_detect(
+            "POST",
+            "acme.okta.com",
+            "/api/v1/authn",
+            "okta",
+            CasbAction::Login,
+        );
+        assert_detect(
+            "POST",
+            "acme.okta.com",
+            "/api/v1/apps",
+            "okta",
+            CasbAction::AdminConfigChange,
+        );
+        assert_detect(
+            "DELETE",
+            "acme.okta.com",
+            "/api/v1/users/00u1",
+            "okta",
+            CasbAction::Delete,
+        );
+        assert_detect(
+            "GET",
+            "acme.workday.com",
+            "/ccx/api/v1/acmeco/workers",
+            "workday",
+            CasbAction::BulkExport,
+        );
+        assert_detect(
+            "GET",
+            "acme.myworkday.com",
+            "/ccx/service/customreport2/acmeco/jsmith/Headcount",
+            "workday",
+            CasbAction::BulkExport,
+        );
+    }
+
+    #[test]
+    fn expansion_apps_ignore_wrong_method_and_unanchored_paths() {
+        let cat = AppCatalog::builtin();
+        // Right host + path but wrong method: not classified.
+        assert_eq!(
+            cat.detect(&ctx("GET", "content.dropboxapi.com", "/2/files/upload")),
+            None
+        );
+        // Right host, unrelated path: not classified (no over-broad
+        // catch-all on the API host).
+        assert_eq!(
+            cat.detect(&ctx("GET", "api.box.com", "/2.0/users/me")),
+            None
+        );
+        // GitHub repo-delete glob must not span an extra path segment.
+        assert_eq!(
+            cat.detect(&ctx("DELETE", "api.github.com", "/repos/acme/app/keys/1")),
             None
         );
     }

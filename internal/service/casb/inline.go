@@ -114,14 +114,64 @@ func (v InlineVerdict) verb() policy.Verb {
 const AnyApp = "*"
 
 // knownApps is the set of SaaS app ids the inline inspector can
-// detect (see crates/sng-swg/src/casb.rs AppCatalog::builtin).
-// Plus the AnyApp wildcard.
+// detect, plus the AnyApp wildcard. Every id here MUST have a
+// matching AppSignature in the data-plane catalog
+// (crates/sng-swg/src/casb.rs AppCatalog::builtin) — the control
+// plane validates a rule's app_id against this set, and the edge
+// resolves the same id to a detection signature. The two lists are
+// kept byte-identical so a rule an operator can create is a rule the
+// edge can actually enforce; an id present here but absent in the
+// Rust catalog would compile into a bundle that silently never
+// matches at the edge.
+//
+// The ids mirror the canonical app ids used by the data-plane
+// catalog and the repository.CASBConnectorType values (e.g. "box",
+// "aws_console"). "google_workspace" intentionally keeps the
+// data-plane spelling rather than the connector type's "google".
 var knownApps = map[string]struct{}{
+	// Launch apps.
 	"m365":             {},
 	"google_workspace": {},
 	"slack":            {},
 	"salesforce":       {},
-	AnyApp:             {},
+	// Catalog expansion: cloud storage, code, ITSM/CRM/support,
+	// conferencing/collaboration, cloud consoles, identity, and HCM.
+	"box":          {},
+	"dropbox":      {},
+	"github":       {},
+	"gitlab":       {},
+	"jira":         {},
+	"confluence":   {},
+	"servicenow":   {},
+	"zendesk":      {},
+	"hubspot":      {},
+	"zoom":         {},
+	"teams":        {},
+	"aws_console":  {},
+	"gcp_console":  {},
+	"azure_portal": {},
+	"okta":         {},
+	"workday":      {},
+	// Wildcard: a rule that applies to every configured app.
+	AnyApp: {},
+}
+
+// KnownApps returns the sorted set of SaaS app ids the inline
+// inspector recognises, excluding the AnyApp wildcard. It lets the
+// API surface and tooling enumerate the catalog without exposing the
+// internal map (and without the caller having to special-case the
+// wildcard). The returned slice is freshly allocated, so callers may
+// mutate it freely.
+func KnownApps() []string {
+	apps := make([]string, 0, len(knownApps))
+	for app := range knownApps {
+		if app == AnyApp {
+			continue
+		}
+		apps = append(apps, app)
+	}
+	sort.Strings(apps)
+	return apps
 }
 
 // InlineConditions narrows when a rule fires. All fields are

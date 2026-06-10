@@ -554,9 +554,8 @@ func recordOpsHealth(tid string, score int, components map[string]int) bool {
 }
 
 // inlineCASBRule is one seeded inline-CASB rule. app_id must be one of
-// the service's knownApps (m365, google_workspace, slack, salesforce,
-// or "any"); action ∈ {upload,download,share,delete}; verdict ∈
-// {allow,block,log}.
+// the service's knownApps (see casb.KnownApps) or the "any" wildcard;
+// action ∈ {upload,download,share,delete}; verdict ∈ {allow,block,log}.
 type inlineCASBRule struct {
 	appID      string
 	action     string
