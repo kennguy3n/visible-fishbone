@@ -367,6 +367,47 @@ impl ZtnaService {
     /// the producer drops the error on the floor. The
     /// data path then treats the error as a deny.
     pub fn evaluate(&self, request: &AccessRequest) -> Result<ZtnaDecision, ZtnaError> {
+        self.evaluate_reported(request, EvalReport::Emit)
+    }
+
+    /// Re-evaluate `request` for the continuous re-evaluation loop
+    /// *without* touching the access-path observability.
+    ///
+    /// The verdict, including the cross-tenant guard and every policy
+    /// rule, is computed identically to [`Self::evaluate`] — this is
+    /// the same evaluator, so a tracked grant can never outlive what a
+    /// fresh access request would be granted. What differs is
+    /// bookkeeping: a sweep re-runs the evaluator over *every* live
+    /// session (thousands per tenant across ~5000 tenants) on each
+    /// cycle, so emitting an access-path telemetry event and bumping
+    /// the access decision counters per session would (a) drown the
+    /// producer's telemetry channel in periodic sweep noise — inflating
+    /// `telemetry_drop` and masking genuine access-path backpressure —
+    /// and (b) double-count sweep verdicts into counters that are meant
+    /// to tally *access* decisions. The re-evaluation loop owns its own
+    /// observability instead ([`SweepStats`](crate::reeval::SweepStats)
+    /// plus a [`SessionRevoked`](crate::reeval::SessionRevoked) per
+    /// torn-down session), so this path stays silent on the access
+    /// channels.
+    ///
+    /// # Errors
+    ///
+    /// Same provider-resolution errors as [`Self::evaluate`]
+    /// ([`ZtnaError::UnknownApp`], [`ZtnaError::DeviceNotEnrolled`],
+    /// [`ZtnaError::IdentityNotFound`]); the re-eval loop maps each to
+    /// the corresponding revocation reason.
+    pub fn evaluate_for_reeval(
+        &self,
+        request: &AccessRequest,
+    ) -> Result<ZtnaDecision, ZtnaError> {
+        self.evaluate_reported(request, EvalReport::Quiet)
+    }
+
+    fn evaluate_reported(
+        &self,
+        request: &AccessRequest,
+        report: EvalReport,
+    ) -> Result<ZtnaDecision, ZtnaError> {
         // Step 0: revocation. Checked before any provider
         // resolution so a compromised device or off-boarded
         // user is cut off immediately — even if its app /
@@ -377,21 +418,14 @@ impl ZtnaService {
         {
             let decision =
                 ZtnaDecision::deny(ZtnaDecisionReason::Revoked, PostureResult::NotEvaluated);
-            self.stats.record_decision(&decision.reason);
-            let event = build_ztna_event(&request.device_id, &request.app_id, &decision, true);
-            if self
-                .telemetry
-                .try_send(TelemetryEvent::Ztna(event))
-                .is_err()
-            {
-                self.stats.record_telemetry_drop();
-            }
+            self.report_decision(report, &request.device_id, &request.app_id, &decision, true);
             return Ok(decision);
         }
 
         // Step 1: resolve the app.
         let Some(app) = self.apps.get(&request.app_id) else {
             self.emit_deny(
+                report,
                 &request.device_id,
                 &request.app_id,
                 ZtnaDecisionReason::UnknownApp,
@@ -406,6 +440,7 @@ impl ZtnaService {
         // Step 2: resolve the device.
         let Some(device) = self.devices.get(&request.device_id) else {
             self.emit_deny(
+                report,
                 &request.device_id,
                 &request.app_id,
                 ZtnaDecisionReason::DeviceNotEnrolled,
@@ -425,6 +460,7 @@ impl ZtnaService {
         // identity it has no record of.
         let Some(identity) = self.identities.get(&request.user_id) else {
             self.emit_deny(
+                report,
                 &request.device_id,
                 &request.app_id,
                 ZtnaDecisionReason::IdentityNotFound,
@@ -456,9 +492,10 @@ impl ZtnaService {
         // Step 5: stats + telemetry. The decision reason
         // is the authoritative bucket; the boolean
         // `allow` is just a derived view for the
-        // producer.
-        self.stats.record_decision(&decision.reason);
-        let event = build_ztna_event(
+        // producer. Skipped on the re-eval path (see
+        // [`Self::evaluate_for_reeval`]).
+        self.report_decision(
+            report,
             &request.device_id,
             &request.app_id,
             &decision,
@@ -467,6 +504,29 @@ impl ZtnaService {
             // recognisable user.
             true,
         );
+
+        Ok(decision)
+    }
+
+    /// Record a finished decision on the access-path observability:
+    /// bump the decision counter and emit a `ZtnaEvent` to telemetry
+    /// (counting a drop if the channel is full). A no-op when `report`
+    /// is [`EvalReport::Quiet`] (the continuous re-evaluation sweep,
+    /// which owns its own observability and must not flood the
+    /// access-path channels — see [`Self::evaluate_for_reeval`]).
+    fn report_decision(
+        &self,
+        report: EvalReport,
+        device_id: &str,
+        app_id: &str,
+        decision: &ZtnaDecision,
+        identity_verified: bool,
+    ) {
+        if !matches!(report, EvalReport::Emit) {
+            return;
+        }
+        self.stats.record_decision(&decision.reason);
+        let event = build_ztna_event(device_id, app_id, decision, identity_verified);
         if self
             .telemetry
             .try_send(TelemetryEvent::Ztna(event))
@@ -474,8 +534,6 @@ impl ZtnaService {
         {
             self.stats.record_telemetry_drop();
         }
-
-        Ok(decision)
     }
 
     /// Helper that emits a deny telemetry event +
@@ -485,9 +543,12 @@ impl ZtnaService {
     /// `evaluate`'s `let-else` short-circuits. The
     /// `reason` is moved into the constructed
     /// [`ZtnaDecision`] so the helper allocates nothing
-    /// of its own beyond the [`ZtnaEvent`] body.
+    /// of its own beyond the [`ZtnaEvent`] body. Honours
+    /// `report` so a re-eval miss stays silent on the
+    /// access channels.
     fn emit_deny(
         &self,
+        report: EvalReport,
         device_id: &str,
         app_id: &str,
         reason: ZtnaDecisionReason,
@@ -495,16 +556,26 @@ impl ZtnaService {
         identity_verified: bool,
     ) {
         let decision = ZtnaDecision::deny(reason, posture_result);
-        self.stats.record_decision(&decision.reason);
-        let event = build_ztna_event(device_id, app_id, &decision, identity_verified);
-        if self
-            .telemetry
-            .try_send(TelemetryEvent::Ztna(event))
-            .is_err()
-        {
-            self.stats.record_telemetry_drop();
-        }
+        self.report_decision(report, device_id, app_id, &decision, identity_verified);
     }
+}
+
+/// Whether an evaluation records to the access-path observability.
+///
+/// [`ZtnaService::evaluate`] runs once per access request and reports
+/// its verdict ([`EvalReport::Emit`]); the continuous re-evaluation
+/// loop runs over every live session each sweep and stays
+/// [`EvalReport::Quiet`] so it neither floods the producer telemetry
+/// channel nor double-counts into the access decision counters (it has
+/// its own [`SweepStats`](crate::reeval::SweepStats) /
+/// [`SessionRevoked`](crate::reeval::SessionRevoked) observability).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvalReport {
+    /// Access-time: bump decision counters + emit a telemetry event.
+    Emit,
+    /// Re-evaluation sweep: compute the verdict only, no access-path
+    /// stats or telemetry.
+    Quiet,
 }
 
 /// Build a wire-shape [`ZtnaEvent`] from a decision +

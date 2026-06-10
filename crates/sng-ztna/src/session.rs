@@ -46,7 +46,7 @@
 //! than trusting the cached grant. A grant can never widen access
 //! beyond what a fresh evaluation would grant.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use parking_lot::Mutex;
@@ -155,6 +155,64 @@ impl AccessGrant {
     }
 }
 
+/// One shard of the tracker: the session map plus a secondary
+/// `device_id -> session_ids` index over the sessions held *in this
+/// shard*.
+///
+/// The index lets the out-of-cycle posture-push path
+/// ([`SessionTracker::sessions_for_device`]) find a device's
+/// sessions with a single `HashMap` lookup per shard instead of
+/// scanning every grant — the difference between O(shards) and
+/// O(total sessions) when a posture push fires. It is kept in
+/// lockstep with `grants` under the same lock, so it can never
+/// reference a session that is no longer present, and empty
+/// device sets are pruned so the index does not leak memory as
+/// devices churn.
+#[derive(Debug, Default)]
+struct Shard {
+    grants: HashMap<String, AccessGrant>,
+    by_device: HashMap<String, HashSet<String>>,
+}
+
+impl Shard {
+    /// Insert or replace a grant, keeping the device index
+    /// consistent. Replacing a session that previously pointed at a
+    /// different device de-indexes the stale device entry first, so
+    /// the index never points a device at a session that has since
+    /// moved.
+    fn insert(&mut self, grant: AccessGrant) {
+        let session_id = grant.session_id.clone();
+        let device_id = grant.device_id().to_owned();
+        if let Some(prev) = self.grants.insert(session_id.clone(), grant)
+            && prev.device_id() != device_id.as_str()
+        {
+            self.deindex(prev.device_id(), &session_id);
+        }
+        self.by_device
+            .entry(device_id)
+            .or_default()
+            .insert(session_id);
+    }
+
+    /// Remove a grant and its device-index entry.
+    fn remove(&mut self, session_id: &str) -> Option<AccessGrant> {
+        let grant = self.grants.remove(session_id)?;
+        self.deindex(grant.device_id(), session_id);
+        Some(grant)
+    }
+
+    /// Drop `session_id` from `device_id`'s index set, pruning the
+    /// set entirely when it becomes empty.
+    fn deindex(&mut self, device_id: &str, session_id: &str) {
+        if let Some(sessions) = self.by_device.get_mut(device_id) {
+            sessions.remove(session_id);
+            if sessions.is_empty() {
+                self.by_device.remove(device_id);
+            }
+        }
+    }
+}
+
 /// Sharded, thread-safe store of active [`AccessGrant`]s.
 ///
 /// Cheap to share via [`std::sync::Arc`]; all interior mutability
@@ -162,7 +220,7 @@ impl AccessGrant {
 /// docs for the scale / isolation rationale.
 #[derive(Debug)]
 pub struct SessionTracker {
-    shards: Box<[Mutex<HashMap<String, AccessGrant>>]>,
+    shards: Box<[Mutex<Shard>]>,
     /// Cached `shards.len()`; always a power of two so the index
     /// computation can mask instead of divide.
     mask: usize,
@@ -190,7 +248,7 @@ impl SessionTracker {
         let count = requested.max(1).next_power_of_two();
         let mut shards = Vec::with_capacity(count);
         for _ in 0..count {
-            shards.push(Mutex::new(HashMap::new()));
+            shards.push(Mutex::new(Shard::default()));
         }
         Self {
             shards: shards.into_boxed_slice(),
@@ -214,7 +272,7 @@ impl SessionTracker {
         // narrowing cannot lose information; `try_from` makes that
         // total without an `as` cast (the `unwrap_or` arm is
         // unreachable and harmlessly falls back to shard 0).
-        usize::try_from(hasher.finish() & self.mask as u64).unwrap_or(0)
+        usize::try_from(hasher.finish() & (self.mask as u64)).unwrap_or(0)
     }
 
     /// Record (insert or replace) a grant. Keyed by
@@ -223,9 +281,7 @@ impl SessionTracker {
     /// the cached request after a step-up re-auth).
     pub fn record(&self, grant: AccessGrant) {
         let idx = self.shard_index(&grant.session_id);
-        self.shards[idx]
-            .lock()
-            .insert(grant.session_id.clone(), grant);
+        self.shards[idx].lock().insert(grant);
     }
 
     /// Remove and return the grant for `session_id`, if present.
@@ -240,14 +296,14 @@ impl SessionTracker {
     #[must_use]
     pub fn get(&self, session_id: &str) -> Option<AccessGrant> {
         let idx = self.shard_index(session_id);
-        self.shards[idx].lock().get(session_id).cloned()
+        self.shards[idx].lock().grants.get(session_id).cloned()
     }
 
     /// True iff `session_id` is currently tracked.
     #[must_use]
     pub fn contains(&self, session_id: &str) -> bool {
         let idx = self.shard_index(session_id);
-        self.shards[idx].lock().contains_key(session_id)
+        self.shards[idx].lock().grants.contains_key(session_id)
     }
 
     /// Total number of tracked sessions across all shards.
@@ -259,14 +315,14 @@ impl SessionTracker {
     /// gauges, not for coordination.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.shards.iter().map(|s| s.lock().len()).sum()
+        self.shards.iter().map(|s| s.lock().grants.len()).sum()
     }
 
     /// True iff no sessions are tracked. See [`Self::len`] for the
     /// consistency caveat.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.shards.iter().all(|s| s.lock().is_empty())
+        self.shards.iter().all(|s| s.lock().grants.is_empty())
     }
 
     /// Count the sessions owned by `tenant_id`.
@@ -279,6 +335,7 @@ impl SessionTracker {
             .iter()
             .map(|s| {
                 s.lock()
+                    .grants
                     .values()
                     .filter(|g| g.tenant_id == tenant_id)
                     .count()
@@ -291,16 +348,26 @@ impl SessionTracker {
     /// [`AccessGrant::last_reason`]. No-op if the session is no
     /// longer tracked.
     ///
+    /// Returns `true` if the session was still present (and stamped),
+    /// `false` if it had already been removed — the re-eval loop uses
+    /// this to count a session that vanished mid-sweep (a producer
+    /// close racing the sweep) distinctly from one it actually
+    /// retained, so [`SweepStats`](crate::reeval::SweepStats) stays
+    /// accurate under the clone-then-evaluate TOCTOU window.
+    ///
     /// Used by the re-evaluation loop to stamp a retained session
     /// without re-recording the whole grant — so a concurrent
     /// producer update to the grant's `request` (e.g. a step-up
     /// re-auth) is preserved rather than clobbered by a sweep that
     /// read a now-stale clone.
-    pub fn mark_evaluated(&self, session_id: &str, now_ms: u64, reason: ZtnaDecisionReason) {
+    pub fn mark_evaluated(&self, session_id: &str, now_ms: u64, reason: ZtnaDecisionReason) -> bool {
         let idx = self.shard_index(session_id);
-        if let Some(grant) = self.shards[idx].lock().get_mut(session_id) {
+        if let Some(grant) = self.shards[idx].lock().grants.get_mut(session_id) {
             grant.last_eval_ms = now_ms;
             grant.last_reason = reason;
+            true
+        } else {
+            false
         }
     }
 
@@ -314,7 +381,7 @@ impl SessionTracker {
     #[must_use]
     pub fn shard_grants(&self, idx: usize) -> Vec<AccessGrant> {
         match self.shards.get(idx) {
-            Some(shard) => shard.lock().values().cloned().collect(),
+            Some(shard) => shard.lock().grants.values().cloned().collect(),
             None => Vec::new(),
         }
     }
@@ -323,16 +390,22 @@ impl SessionTracker {
     ///
     /// Used by the out-of-cycle posture-push path to re-evaluate
     /// only the sessions affected by a single device's posture
-    /// change instead of sweeping the whole tracker. Scans all
-    /// shards (O(total sessions)); a device touches few sessions,
-    /// so the result is small even though the scan is full-width.
+    /// change instead of sweeping the whole tracker. Backed by the
+    /// per-shard device index, so the cost is O(shards) lookups plus
+    /// O(sessions-on-device) clones — independent of the total
+    /// session count, which matters when a posture push fires
+    /// against a tracker holding millions of grants.
     #[must_use]
     pub fn sessions_for_device(&self, device_id: &str) -> Vec<AccessGrant> {
         let mut out = Vec::new();
         for shard in &self.shards {
             let guard = shard.lock();
-            for grant in guard.values() {
-                if grant.device_id() == device_id {
+            let Some(session_ids) = guard.by_device.get(device_id) else {
+                continue;
+            };
+            out.reserve(session_ids.len());
+            for sid in session_ids {
+                if let Some(grant) = guard.grants.get(sid) {
                     out.push(grant.clone());
                 }
             }

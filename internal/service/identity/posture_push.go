@@ -308,7 +308,17 @@ func (c *PosturePushConsumer) triggerReeval(ctx context.Context, tenantID, devic
 	}
 	subject := sngnats.SubjectForEvent(tenantID.String(), ReevalDeviceEventKind)
 	err = c.pub.Publish(ctx, subject, payload, sngnats.PublishOptions{
-		Source: posturePushSource,
+		// Pin the JetStream dedup key to the (tenant, device) pair so
+		// a burst of posture pushes for the same device inside the
+		// events stream's dedup window collapses to a single re-eval
+		// trigger. Without this the publisher mints a fresh UUID per
+		// call (internal/nats/publisher.go), so every push would emit
+		// its own trigger and the brain would redundantly re-evaluate
+		// the same device's sessions. A collapsed trigger is safe: the
+		// posture is already persisted and the periodic sweep re-reads
+		// the latest snapshot regardless.
+		MessageID: fmt.Sprintf("reeval-%s-%s", tenantID, deviceID),
+		Source:    posturePushSource,
 		Headers: map[string]string{
 			sngnats.HeaderTenantID: tenantID.String(),
 			sngnats.HeaderDeviceID: deviceID.String(),

@@ -101,13 +101,23 @@ pub struct SweepStats {
     /// [`SessionRevoked`] events dropped because the channel was
     /// full. The sessions were still removed from the tracker.
     pub revocation_emit_dropped: u64,
+    /// Sessions that disappeared mid-sweep: the grant was cloned
+    /// while present but the producer closed the session before this
+    /// sweep could act on it (a retained session whose stamp found
+    /// nothing, or a deny flip whose `remove` found nothing). Counted
+    /// separately so [`Self::examined`] reconciles exactly with the
+    /// number of grants iterated, distinguishing a benign close race
+    /// from a retain / revoke.
+    pub vanished: u64,
 }
 
 impl SweepStats {
-    /// Total sessions examined by the sweep.
+    /// Total sessions examined by the sweep — every grant the sweep
+    /// iterated ends up in exactly one bucket: retained, revoked, or
+    /// vanished (closed concurrently).
     #[must_use]
     pub fn examined(&self) -> u64 {
-        self.retained + self.revoked
+        self.retained + self.revoked + self.vanished
     }
 }
 
@@ -248,17 +258,26 @@ impl ReevalLoop {
     /// deny) removing the session and emitting a [`SessionRevoked`].
     fn process_grant(&self, grant: &AccessGrant, now_ms: u64, stats: &mut SweepStats) {
         match self.verdict(grant, now_ms) {
-            // Still allowed: refresh the grant's evaluation
-            // metadata in place and keep it.
+            // Still allowed: refresh the grant's evaluation metadata
+            // in place and keep it. If the stamp finds nothing the
+            // producer closed the session between the shard clone and
+            // here — count it as vanished, not retained, so the tally
+            // reconciles with the grants iterated.
             None => {
-                self.tracker
-                    .mark_evaluated(&grant.session_id, now_ms, ZtnaDecisionReason::Allow);
-                stats.retained += 1;
+                if self
+                    .tracker
+                    .mark_evaluated(&grant.session_id, now_ms, ZtnaDecisionReason::Allow)
+                {
+                    stats.retained += 1;
+                } else {
+                    stats.vanished += 1;
+                }
             }
             // Flipped to deny: tear the session down. Remove first;
             // only emit a revocation if the session was still
             // present (the producer may have closed it concurrently,
-            // in which case there is nothing to revoke).
+            // in which case there is nothing to revoke — count it as
+            // vanished rather than revoked).
             Some(reason) => {
                 if self.tracker.remove(&grant.session_id).is_some() {
                     stats.revoked += 1;
@@ -274,6 +293,8 @@ impl ReevalLoop {
                     if self.revoked_tx.try_send(event).is_err() {
                         stats.revocation_emit_dropped += 1;
                     }
+                } else {
+                    stats.vanished += 1;
                 }
             }
         }
@@ -291,7 +312,12 @@ impl ReevalLoop {
     /// reason rather than being treated as "still allowed".
     fn verdict(&self, grant: &AccessGrant, now_ms: u64) -> Option<ZtnaDecisionReason> {
         let request = grant.reeval_request(now_ms);
-        match self.service.evaluate(&request) {
+        // Telemetry-free evaluation: a sweep re-runs the evaluator over
+        // every live session, so it must not flood the access-path
+        // telemetry channel nor double-count into the access decision
+        // counters. The sweep's own SweepStats + SessionRevoked events
+        // are its observability.
+        match self.service.evaluate_for_reeval(&request) {
             Ok(decision) => {
                 if decision.allow {
                     None
@@ -407,6 +433,22 @@ mod tests {
         }
     }
 
+    /// The grant epoch every test stamps its sessions / providers at.
+    const TEST_EPOCH_MS: u64 = 1_000_000;
+
+    /// A clock backed by a settable cell. Seeded to `now`; the cell is
+    /// returned so a test driving [`ReevalLoop::run`] can advance the
+    /// loop's notion of time and exercise time-based revocation (MFA /
+    /// posture freshness) on the periodic path, not just via direct
+    /// `sweep(now)` calls.
+    fn settable_clock(now: u64) -> (ClockFn, Arc<std::sync::atomic::AtomicU64>) {
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(now));
+        let reader = cell.clone();
+        let clock: ClockFn =
+            Arc::new(move || reader.load(std::sync::atomic::Ordering::Relaxed));
+        (clock, cell)
+    }
+
     fn loop_with(
         h: &Harness,
     ) -> (
@@ -416,7 +458,12 @@ mod tests {
     ) {
         let tracker = Arc::new(SessionTracker::with_shards(8));
         let (tx, rx) = mpsc::channel(256);
-        let clock: ClockFn = Arc::new(|| 0);
+        // Seed the loop clock to the grant epoch (not 0): freshness
+        // budgets are `now - stamped_at`, so a zero clock would make
+        // every age `0` (saturating) and mask any time-based verdict
+        // on the `run` path. Tests that want to age the clock forward
+        // use `settable_clock` directly.
+        let (clock, _) = settable_clock(TEST_EPOCH_MS);
         let lp = ReevalLoop::new(h.service.clone(), tracker.clone(), tx, clock);
         (lp, tracker, rx)
     }
@@ -729,6 +776,61 @@ mod tests {
             .await
             .expect("revocation event from the running loop");
         assert_eq!(ev.session_id, "s1");
+        assert!(!tracker.contains("s1"));
+
+        stop_tx.send(true).expect("signal stop");
+        handle.await.expect("loop task joins after stop");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_revokes_on_time_based_mfa_expiry() {
+        // Regression guard for the `run` path's clock: a session whose
+        // MFA ages past its budget must be revoked by the periodic
+        // loop even when nothing else about the device or posture
+        // changes. A clock pinned at 0 would mask this — every
+        // freshness age would saturate to 0 and the session would
+        // wrongly survive — so this exercises the loop reading an
+        // advancing clock end to end.
+        let now = TEST_EPOCH_MS;
+        let h = harness(
+            vec![app("wiki", PostureRequirement::NONE, &[])],
+            vec![device("dev-1", TENANT, DevicePosture::pristine(now))],
+            vec![user("alice", TENANT, &[], now)],
+        );
+        h.service
+            .reload_policy(ZtnaPolicy {
+                tenant_id: TENANT.into(),
+                reeval_interval_ms: 1_000,
+                ..ZtnaPolicy::default()
+            })
+            .expect("valid policy");
+
+        let tracker = Arc::new(SessionTracker::with_shards(8));
+        let (tx, mut rx) = mpsc::channel(256);
+        let (clock, clock_cell) = settable_clock(now);
+        let lp = ReevalLoop::new(h.service.clone(), tracker.clone(), tx, clock);
+        grant_session(&h, &tracker, "s1", "dev-1", "alice", "wiki", now);
+
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let lp_run = lp.clone();
+        let handle = tokio::spawn(async move { lp_run.run(stop_rx).await });
+
+        // Age the loop clock past the MFA budget; keep posture fresh
+        // by re-attesting at the new time so only MFA goes stale.
+        let mfa_budget = h.policy.snapshot().mfa_max_age_ms;
+        let later = now + mfa_budget + 1;
+        h.devices
+            .record(device("dev-1", TENANT, DevicePosture::pristine(later)));
+        clock_cell.store(later, std::sync::atomic::Ordering::Relaxed);
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        tokio::task::yield_now().await;
+
+        let ev = rx
+            .recv()
+            .await
+            .expect("revocation event from the running loop");
+        assert_eq!(ev.session_id, "s1");
+        assert_eq!(ev.reason, ZtnaDecisionReason::MfaStale);
         assert!(!tracker.contains("s1"));
 
         stop_tx.send(true).expect("signal stop");
