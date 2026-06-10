@@ -775,7 +775,10 @@ fn write_dual_throughput_matrix(out: &mut String, dry: &BusinessSku, wire: Optio
             .filter(|d| depths.contains(d))
             .collect();
     }
-    let mut sizes: BTreeSet<u32> = dry.packet_sizes_for(BenchMode::Throughput).into_iter().collect();
+    let mut sizes: BTreeSet<u32> = dry
+        .packet_sizes_for(BenchMode::Throughput)
+        .into_iter()
+        .collect();
     if let Some(w) = wire {
         sizes.extend(w.packet_sizes_for(BenchMode::Throughput));
     }
