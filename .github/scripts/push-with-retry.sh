@@ -21,8 +21,11 @@ for attempt in $(seq 1 "$attempts"); do
     exit 0
   fi
   git rebase --abort 2>/dev/null || true
-  echo "push attempt $attempt hit a concurrent update; retrying after backoff..."
-  sleep "$((attempt * 3))"
+  # Don't back off after the final attempt — we're about to give up.
+  if [ "$attempt" -lt "$attempts" ]; then
+    echo "push attempt $attempt hit a concurrent update; retrying after backoff..."
+    sleep "$((attempt * 3))"
+  fi
 done
 
 echo "failed to push to main after $attempts attempts" >&2
