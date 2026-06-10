@@ -79,6 +79,22 @@ func NewShardedWriter(ctx context.Context, cfg Config, logger *slog.Logger) (*Sh
 // ShardCount returns the number of shards.
 func (s *ShardedWriter) ShardCount() int { return len(s.shards) }
 
+// Shards returns the per-shard writers so the telemetry autotuner
+// can tune each shard's batch size independently. Independent
+// tuning is required, not optional: "too many parts" is a
+// per-shard failure mode (each shard is a distinct ClickHouse
+// cluster with its own merge scheduler) and the insert-frequency
+// target is per-shard (docs/scaling.md §3.2). A single tuner
+// driving an aggregate batch size would misjudge a fleet with
+// skewed per-shard row rates. The returned slice is a fresh copy
+// so a caller cannot reorder or mutate the shard set; the
+// *Writer elements are shared (the tuner needs the live writers).
+func (s *ShardedWriter) Shards() []*Writer {
+	out := make([]*Writer, len(s.shards))
+	copy(out, s.shards)
+	return out
+}
+
 // ShardFor returns the shard index that owns tenantID.
 func (s *ShardedWriter) ShardFor(tenantID uuid.UUID) int {
 	return shardIndex(tenantID, len(s.shards))
@@ -133,6 +149,12 @@ func (s *ShardedWriter) Stats() Stats {
 		st := w.Stats()
 		agg.Pending += st.Pending
 		agg.Flushed += st.Flushed
+		agg.Inserts += st.Inserts
+		// BatchSize is per-shard; the fleet aggregate sums them so
+		// the figure stays meaningful (total buffered-row headroom
+		// across shards) and a single-shard deployment reports its
+		// own batch size unchanged.
+		agg.BatchSize += st.BatchSize
 		agg.FlushErrors += st.FlushErrors
 		agg.ConsecutiveErrors += st.ConsecutiveErrors
 		agg.DroppedRows += st.DroppedRows

@@ -56,6 +56,7 @@ import (
 	"context"
 	"hash/fnv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -95,20 +96,244 @@ const DefaultMinSampleRate = 0.05
 // the class, not of any tenant's volume.
 const TrustedClassSampleRate = 0.01
 
+// InspectFullSampleRate is the fixed full-fidelity (1:1) keep
+// probability for the inspect_full traffic class. inspect_full is the
+// full secure-web-gateway path — TLS decrypt, AV, IPS, DLP (see
+// repository.TrafficClassInspectFull) — so its per-event telemetry is
+// the security-and-compliance record of the highest-scrutiny traffic on
+// the platform: detections, blocks, DLP hits, and the audit trail an
+// SME tenant is legally obligated to retain. Sampling it away to save
+// ClickHouse cost would silently drop evidence, so the class is pinned
+// at 1:1 as a class-level policy and is deliberately exempt from the
+// adaptive per-tenant load shedder: even a tenant flooding inspect_full
+// keeps every event (back-pressure for that case is the row limiter,
+// which defers rather than drops). 1.0 is the no-sampling rate; it is
+// expressed as a fixed class rate (rather than "fall through to
+// adaptive") so a misconfigured budget can never cause inspect_full to
+// be shed.
+const InspectFullSampleRate = 1.0
+
 // fixedClassSampleRate reports the constant, class-determined keep
-// probability for traffic classes that are sampled for cost control
-// independently of per-tenant adaptive load shedding. It returns
+// probability for traffic classes whose sampling regime is a property
+// of the class, not of any tenant's adaptive volume. It returns
 // (rate, true) for such a class and (0, false) for every other class,
 // which then falls through to the adaptive per-tenant sampler. Keyed on
 // the canonical repository.TrafficClass values so it stays in lockstep
 // with the taxonomy; an empty or unknown class is never fixed-rate.
+//
+// These are the BUILT-IN defaults. A per-tenant / per-class override
+// supplied through a SampleRateResolver (e.g. distilled from the policy
+// graph) takes precedence over them — see AdaptiveSampler.DecideClass.
 func fixedClassSampleRate(trafficClass string) (float64, bool) {
 	switch repository.TrafficClass(trafficClass) {
 	case repository.TrafficClassTrustedDirect, repository.TrafficClassTrustedMediaBypass:
 		return TrustedClassSampleRate, true
+	case repository.TrafficClassInspectFull:
+		return InspectFullSampleRate, true
 	default:
 		return 0, false
 	}
+}
+
+// clampSampleRate bounds a configured keep probability to the valid
+// (0,1] range the deterministic sampler operates on. A rate <= 0 is
+// nonsensical (it would drop everything and make the 1/rate de-bias
+// weight infinite), so it is rejected by reporting ok=false to the
+// caller; a rate > 1 is clamped to 1 (keep everything).
+func clampSampleRate(r float64) (float64, bool) {
+	if r <= 0 {
+		return 0, false
+	}
+	if r > 1 {
+		return 1, true
+	}
+	return r, true
+}
+
+// SampleRateResolver supplies an operator-configured keep probability
+// for a (tenant, trafficClass) pair, overriding the built-in class
+// default and the adaptive per-tenant policy. It is the seam through
+// which the policy graph drives sampling: a deployment can dial a
+// noisy class down (or a compliance-sensitive class up to 1:1) per
+// tenant without a code change.
+//
+// ResolveSampleRate returns (rate, true) when an override applies and
+// (0, false) to defer to the built-in behaviour (fixed class rate, else
+// adaptive). The returned rate is a keep probability; the sampler
+// clamps it to (0,1], so a resolver need not pre-validate.
+//
+// HOT-PATH CONTRACT: ResolveSampleRate is called once per event on the
+// consumer hot path, so it MUST be cheap, non-blocking, and in-memory —
+// never a synchronous DB/RPC call. The shipped MapSampleRateResolver is
+// a couple of map reads under a read lock; a resolver wanting live
+// per-tenant config must serve it from a cache it refreshes out-of-band
+// (e.g. on policy-graph publish), not by doing I/O here.
+type SampleRateResolver interface {
+	ResolveSampleRate(ctx context.Context, tenantID uuid.UUID, trafficClass string) (rate float64, ok bool)
+}
+
+// SampleRateOverrides is an immutable snapshot of operator-configured
+// keep probabilities: a per-class default layer (applied to every
+// tenant) and a per-tenant layer (which takes precedence). It is the
+// value the policy graph compiles its sampling configuration into and
+// hands to a MapSampleRateResolver. Treat instances as read-only after
+// construction (the resolver swaps whole snapshots rather than mutating
+// in place), so they are safe to share across goroutines without a lock.
+type SampleRateOverrides struct {
+	// ByClass maps a traffic class to the keep probability applied to
+	// that class for ALL tenants (unless a per-tenant override exists).
+	// A nil/absent entry means "no class-level override".
+	ByClass map[string]float64
+	// ByTenant maps a tenant to its per-class keep probabilities, which
+	// take precedence over ByClass. A nil/absent entry means "no
+	// per-tenant override for this tenant".
+	ByTenant map[uuid.UUID]map[string]float64
+}
+
+// lookup resolves the most specific configured rate for (tenant,class):
+// per-tenant per-class first, then the per-class default. Reports
+// ok=false when neither layer configures the pair.
+func (o *SampleRateOverrides) lookup(tenantID uuid.UUID, trafficClass string) (float64, bool) {
+	if o == nil {
+		return 0, false
+	}
+	if byClass, ok := o.ByTenant[tenantID]; ok {
+		if r, ok := byClass[trafficClass]; ok {
+			return r, true
+		}
+	}
+	if r, ok := o.ByClass[trafficClass]; ok {
+		return r, true
+	}
+	return 0, false
+}
+
+// MapSampleRateResolver is a SampleRateResolver backed by an atomically
+// swappable SampleRateOverrides snapshot. The hot path (ResolveSampleRate)
+// loads the current snapshot pointer with a single atomic load — no lock,
+// no allocation — and the control plane installs a new snapshot with
+// Replace when the policy graph republishes. A nil *MapSampleRateResolver
+// is a valid no-op resolver (never overrides), so wiring it is optional.
+type MapSampleRateResolver struct {
+	snap atomic.Pointer[SampleRateOverrides]
+	// writeMu serialises snapshot producers (Replace, SetTenant) so a
+	// read-copy-update in SetTenant cannot lose a concurrent update.
+	// Readers (ResolveSampleRate) never take it — they only atomic-load
+	// the snapshot pointer.
+	writeMu sync.Mutex
+}
+
+// NewMapSampleRateResolver builds a resolver seeded with the given
+// overrides (nil is allowed and means "no overrides yet").
+func NewMapSampleRateResolver(initial *SampleRateOverrides) *MapSampleRateResolver {
+	r := &MapSampleRateResolver{}
+	r.snap.Store(initial)
+	return r
+}
+
+// Replace atomically installs a new overrides snapshot. The next
+// ResolveSampleRate call sees it; in-flight calls finish against the
+// snapshot they loaded. Passing nil clears all overrides.
+func (r *MapSampleRateResolver) Replace(overrides *SampleRateOverrides) {
+	if r == nil {
+		return
+	}
+	// Held so Replace cannot interleave with a SetTenant read-copy-update
+	// and silently undo it (or be undone). Readers are unaffected.
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	r.snap.Store(overrides)
+}
+
+// SetTenant atomically updates a single tenant's per-class overrides,
+// preserving every other tenant's overrides and the per-class default
+// layer. It is the per-tenant entry point the policy-graph sampling
+// observer drives on publish/promote: one tenant republishes, only that
+// tenant's row changes.
+//
+// Semantics:
+//   - classRates is sanitised through clampSampleRate, so a rate > 1 is
+//     pinned to 1 and a non-positive rate drops that class entry.
+//   - An empty result (nil/empty input, or every entry rejected) REMOVES
+//     the tenant's override row, so the tenant reverts to the per-class
+//     defaults / built-in behaviour rather than being pinned at a stale
+//     value.
+//
+// Implemented copy-on-write under writeMu: a fresh snapshot is built and
+// atomically swapped in, so concurrent ResolveSampleRate readers always
+// observe a complete, consistent snapshot and never a half-applied map.
+func (r *MapSampleRateResolver) SetTenant(tenantID uuid.UUID, classRates map[string]float64) {
+	if r == nil {
+		return
+	}
+	sane := make(map[string]float64, len(classRates))
+	for class, rate := range classRates {
+		if c, ok := clampSampleRate(rate); ok {
+			sane[class] = c
+		}
+	}
+
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	cur := r.snap.Load()
+	next := &SampleRateOverrides{
+		ByClass:  copyRateMap(curByClass(cur)),
+		ByTenant: copyTenantMap(curByTenant(cur)),
+	}
+	if next.ByTenant == nil {
+		next.ByTenant = make(map[uuid.UUID]map[string]float64, 1)
+	}
+	if len(sane) == 0 {
+		delete(next.ByTenant, tenantID)
+	} else {
+		next.ByTenant[tenantID] = sane
+	}
+	r.snap.Store(next)
+}
+
+func curByClass(o *SampleRateOverrides) map[string]float64 {
+	if o == nil {
+		return nil
+	}
+	return o.ByClass
+}
+
+func curByTenant(o *SampleRateOverrides) map[uuid.UUID]map[string]float64 {
+	if o == nil {
+		return nil
+	}
+	return o.ByTenant
+}
+
+func copyRateMap(m map[string]float64) map[string]float64 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func copyTenantMap(m map[uuid.UUID]map[string]float64) map[uuid.UUID]map[string]float64 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[uuid.UUID]map[string]float64, len(m))
+	for k, v := range m {
+		out[k] = v // inner maps are immutable once stored, so share them
+	}
+	return out
+}
+
+// ResolveSampleRate implements SampleRateResolver with two map reads on
+// the current snapshot. Nil receiver returns no override.
+func (r *MapSampleRateResolver) ResolveSampleRate(_ context.Context, tenantID uuid.UUID, trafficClass string) (float64, bool) {
+	if r == nil {
+		return 0, false
+	}
+	return r.snap.Load().lookup(tenantID, trafficClass)
 }
 
 // SamplerConfig configures an AdaptiveSampler.
@@ -127,6 +352,13 @@ type SamplerConfig struct {
 	// Defaults to DefaultMinSampleRate when zero. Values are clamped
 	// to (0,1].
 	MinSampleRate float64
+	// RateResolver supplies operator-configured per-tenant /
+	// per-traffic-class keep-probability overrides (typically distilled
+	// from the policy graph). When it returns an override for an event's
+	// (tenant, class), that rate wins over both the built-in fixed class
+	// rate and the adaptive per-tenant policy. Nil means "no overrides":
+	// the sampler keeps its built-in behaviour unchanged.
+	RateResolver SampleRateResolver
 	// NowFunc returns the current time. Injected so tests can pin the
 	// clock; production passes time.Now.
 	NowFunc func() time.Time
@@ -137,10 +369,11 @@ type SamplerConfig struct {
 // *AdaptiveSampler is a valid no-op (keeps every event at rate 1.0),
 // so wiring it onto the Service is optional.
 type AdaptiveSampler struct {
-	resolver LimitResolver
-	window   time.Duration
-	minRate  float64
-	now      func() time.Time
+	resolver     LimitResolver
+	rateResolver SampleRateResolver
+	window       time.Duration
+	minRate      float64
+	now          func() time.Time
 
 	mu      sync.RWMutex
 	tenants map[uuid.UUID]*samplerState
@@ -183,11 +416,12 @@ func NewAdaptiveSampler(cfg SamplerConfig) *AdaptiveSampler {
 		now = time.Now
 	}
 	return &AdaptiveSampler{
-		resolver: resolver,
-		window:   window,
-		minRate:  minRate,
-		now:      now,
-		tenants:  make(map[uuid.UUID]*samplerState),
+		resolver:     resolver,
+		rateResolver: cfg.RateResolver,
+		window:       window,
+		minRate:      minRate,
+		now:          now,
+		tenants:      make(map[uuid.UUID]*samplerState),
 	}
 }
 
@@ -205,11 +439,12 @@ func (s *AdaptiveSampler) ForPartition() *AdaptiveSampler {
 		return nil
 	}
 	return &AdaptiveSampler{
-		resolver: s.resolver,
-		window:   s.window,
-		minRate:  s.minRate,
-		now:      s.now,
-		tenants:  make(map[uuid.UUID]*samplerState),
+		resolver:     s.resolver,
+		rateResolver: s.rateResolver,
+		window:       s.window,
+		minRate:      s.minRate,
+		now:          s.now,
+		tenants:      make(map[uuid.UUID]*samplerState),
 	}
 }
 
@@ -249,6 +484,13 @@ func (s *AdaptiveSampler) Decide(ctx context.Context, tenantID, eventID uuid.UUI
 func (s *AdaptiveSampler) DecideClass(ctx context.Context, tenantID, eventID uuid.UUID, trafficClass string) (keep bool, sampleRate float64) {
 	if s == nil {
 		return true, 1.0
+	}
+	if r, ok := s.overrideRate(ctx, tenantID, trafficClass); ok {
+		// Operator-configured per-tenant / per-class override wins over
+		// the built-in class rate and the adaptive policy. Same
+		// deterministic hash threshold, so it is redelivery-stable and
+		// the 1/rate de-bias weight is exact; no adaptive state touched.
+		return hashFraction(eventID) < r, r
 	}
 	if fixed, ok := fixedClassSampleRate(trafficClass); ok {
 		// Fixed class rate: deterministic threshold, no adaptive state
@@ -309,10 +551,32 @@ func (s *AdaptiveSampler) SampleRateForClass(tenantID uuid.UUID, trafficClass st
 	if s == nil {
 		return 1.0
 	}
+	// Mirror DecideClass's precedence so a redelivered event recovers
+	// the exact rate its keep/drop verdict was made under: override
+	// first, then fixed class rate, then the adaptive per-tenant rate.
+	if r, ok := s.overrideRate(context.Background(), tenantID, trafficClass); ok {
+		return r
+	}
 	if fixed, ok := fixedClassSampleRate(trafficClass); ok {
 		return fixed
 	}
 	return s.SampleRateFor(tenantID)
+}
+
+// overrideRate consults the configured SampleRateResolver (if any) for a
+// per-tenant / per-class keep-probability override, clamping the result
+// to the valid (0,1] range. Reports ok=false when no resolver is wired,
+// no override applies, or the configured value is non-positive (which
+// the clamp rejects rather than silently dropping all events).
+func (s *AdaptiveSampler) overrideRate(ctx context.Context, tenantID uuid.UUID, trafficClass string) (float64, bool) {
+	if s.rateResolver == nil {
+		return 0, false
+	}
+	r, ok := s.rateResolver.ResolveSampleRate(ctx, tenantID, trafficClass)
+	if !ok {
+		return 0, false
+	}
+	return clampSampleRate(r)
 }
 
 // keepProb returns the keep probability for the tenant's current

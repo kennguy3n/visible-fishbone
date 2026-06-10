@@ -31,6 +31,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -364,6 +365,17 @@ type Writer struct {
 	cfg    Config
 	logger *slog.Logger
 
+	// batchSize is the effective max-rows-per-insert flush
+	// trigger. It is seeded from cfg.BatchSize and may be
+	// retuned at runtime by the telemetry autotuner (SetBatchSize)
+	// to hold the ClickHouse insert frequency near its healthy
+	// target as fleet-wide row volume changes (see
+	// docs/scaling.md §3.2 "too many parts"). Stored as an atomic
+	// so the Write hot path reads it without taking w.mu; cfg.BatchSize
+	// is retained untouched as the construction-time seed and the
+	// floor used by fillDefaults/backlog math.
+	batchSize atomic.Int64
+
 	mu          sync.Mutex
 	pending     []schema.Envelope
 	startOnce   sync.Once
@@ -393,6 +405,13 @@ type Writer struct {
 	flushed           uint64
 	flushErrors       uint64
 	consecutiveErrors uint64
+	// inserts counts successful flushes (a flushOnce call that
+	// sent at least one row to ClickHouse via prepared.Send).
+	// This is the per-INSERT (per-part) signal the autotuner
+	// samples to measure insert frequency — distinct from
+	// `flushed`, which counts rows. One insert can carry many
+	// rows; the healthy target is on inserts/sec, not rows/sec.
+	inserts uint64
 
 	// retentionCache memoises RetentionResolver lookups for
 	// retentionCacheTTL so a single flush pays at most one
@@ -542,6 +561,9 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Writer, error) 
 		cfg:       cfg,
 		logger:    logger,
 		pending:   make([]schema.Envelope, 0, cfg.BatchSize),
+		// (batchSize atomic is seeded below, after the literal, so
+		// the effective flush trigger starts at the configured size
+		// and the autotuner only ever moves it from there.)
 		done:      make(chan struct{}),
 		validated: true,
 		// Use explicit column names so the prepared batch's
@@ -561,8 +583,56 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Writer, error) 
 		),
 		retentionCache: make(map[uuid.UUID]retentionCacheEntry),
 	}
+	w.batchSize.Store(int64(cfg.BatchSize))
 	w.start()
 	return w, nil
+}
+
+// BatchSize returns the effective max-rows-per-insert flush
+// trigger currently in force. It reflects any runtime retuning by
+// SetBatchSize, so it is the value the next Write consults — not
+// necessarily the construction-time cfg.BatchSize. Lock-free.
+func (w *Writer) BatchSize() int {
+	if n := w.batchSize.Load(); n > 0 {
+		return int(n)
+	}
+	return w.cfg.BatchSize
+}
+
+// SetBatchSize updates the effective max-rows-per-insert flush
+// trigger. It is the autotuner's control surface: a larger batch
+// means more rows per ClickHouse part (fewer inserts/sec, the
+// healthy direction at scale), a smaller batch flushes sooner.
+// Values < 1 are ignored so a misbehaving controller can never
+// wedge the writer at a zero trigger (which would flush on every
+// single Write). Safe for concurrent use and cheap; takes no lock.
+//
+// Only the size trigger is retuned — FlushInterval still bounds
+// staleness, so raising the batch never strands rows: a partially
+// filled larger batch is still flushed every FlushInterval.
+func (w *Writer) SetBatchSize(n int) {
+	if n < 1 {
+		return
+	}
+	w.batchSize.Store(int64(n))
+}
+
+// RowsWritten returns the cumulative count of rows successfully
+// sent to ClickHouse. Mirrors Stats().Flushed but is a single
+// cheap accessor for the autotuner's rate sampling.
+func (w *Writer) RowsWritten() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.flushed
+}
+
+// InsertCount returns the cumulative count of successful inserts
+// (flushes that sent at least one row). It is the signal the
+// autotuner differentiates over time to measure inserts/sec.
+func (w *Writer) InsertCount() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.inserts
 }
 
 // qualifiedTable returns the writer's table name wrapped in
@@ -609,7 +679,12 @@ func (w *Writer) qualifiedTable() (string, error) {
 // continues to behave correctly under the same operational
 // envelope the constructor advertises.
 func (w *Writer) backlogCapacity() int {
-	batch := w.cfg.BatchSize
+	// Use the effective (possibly autotuned) batch size so the
+	// backlog shield scales with the live flush trigger: when the
+	// autotuner grows the batch under load, the requeue cap grows
+	// with it rather than shedding rows against a stale, smaller
+	// construction-time size.
+	batch := w.BatchSize()
 	if batch <= 0 {
 		batch = DefaultBatchSize
 	}
@@ -751,7 +826,7 @@ SETTINGS index_granularity = 8192`, table, w.cfg.DefaultRetentionDays)
 func (w *Writer) Write(_ context.Context, env schema.Envelope) error {
 	w.mu.Lock()
 	w.pending = append(w.pending, env)
-	full := len(w.pending) >= w.cfg.BatchSize
+	full := len(w.pending) >= w.BatchSize()
 	w.mu.Unlock()
 	if full {
 		// Asynchronous trigger — wake the flusher immediately
@@ -842,8 +917,21 @@ func (w *Writer) logShutdownAbandon(flushErr error) {
 // traffic should be diverted from ClickHouse to the cold-path
 // archive until the writer recovers.
 type Stats struct {
-	Pending           int
-	Flushed           uint64
+	Pending int
+	Flushed uint64
+	// Inserts is the cumulative count of successful inserts
+	// (flushes that sent >=1 row). inserts/sec — derived by
+	// differencing this over time — is the "too many parts"
+	// health signal the autotuner drives toward its target; the
+	// per-shard healthy ceiling is ~1-2 inserts/sec (see
+	// docs/scaling.md §3.2).
+	Inserts uint64
+	// BatchSize is the effective max-rows-per-insert flush
+	// trigger at the moment of the snapshot. It starts at the
+	// configured CLICKHOUSE_BATCH_SIZE and is moved at runtime by
+	// the autotuner; surfacing it lets the /metrics endpoint show
+	// the live, tuned value rather than the static config.
+	BatchSize         int
 	FlushErrors       uint64
 	ConsecutiveErrors uint64
 	// DroppedRows is the cumulative count of envelopes that
@@ -901,6 +989,8 @@ func (w *Writer) Stats() Stats {
 	return Stats{
 		Pending:            len(w.pending),
 		Flushed:            w.flushed,
+		Inserts:            w.inserts,
+		BatchSize:          w.BatchSize(),
 		FlushErrors:        w.flushErrors,
 		ConsecutiveErrors:  w.consecutiveErrors,
 		DroppedRows:        w.droppedRows,
@@ -972,7 +1062,7 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 		return nil
 	}
 	batch := w.pending
-	w.pending = make([]schema.Envelope, 0, w.cfg.BatchSize)
+	w.pending = make([]schema.Envelope, 0, w.BatchSize())
 	w.mu.Unlock()
 
 	prepared, err := w.conn.PrepareBatch(ctx, w.insertSQL)
@@ -1134,6 +1224,7 @@ func (w *Writer) flushOnce(ctx context.Context) error {
 	sent = true
 	w.mu.Lock()
 	w.flushed += uint64(len(batch) - dropped)
+	w.inserts++
 	w.droppedRows += uint64(dropped)
 	w.consecutiveErrors = 0
 	if dropped > 0 {

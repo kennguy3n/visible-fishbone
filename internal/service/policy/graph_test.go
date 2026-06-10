@@ -258,3 +258,79 @@ func TestValidate_AllowsNormalSizedRule(t *testing.T) {
 		t.Fatalf("normal rule rejected: %v", err)
 	}
 }
+
+func TestParseGraph_SamplingValid(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{
+		"default_action": "deny",
+		"sampling": {
+			"class_rates": {
+				"trusted_direct": 0.5,
+				"trusted_media_bypass": 0.02,
+				"inspect_lite": 0.25,
+				"inspect_full": 1.0
+			}
+		}
+	}`)
+	g, err := ParseGraph(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	rates := g.SampleClassRates()
+	if rates["trusted_direct"] != 0.5 || rates["inspect_lite"] != 0.25 {
+		t.Fatalf("unexpected class rates: %v", rates)
+	}
+	if rates["inspect_full"] != 1.0 {
+		t.Fatalf("inspect_full rate = %v, want 1.0", rates["inspect_full"])
+	}
+	// Returned map is a defensive copy: mutating it must not touch the graph.
+	rates["trusted_direct"] = 0.99
+	if g.Sampling.ClassRates["trusted_direct"] != 0.5 {
+		t.Fatal("SampleClassRates must return a defensive copy")
+	}
+}
+
+func TestParseGraph_SamplingUnknownClass(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{"default_action":"deny","sampling":{"class_rates":{"nonsense":0.5}}}`)
+	_, err := ParseGraph(raw)
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("want ErrInvalidArgument for unknown class, got %v", err)
+	}
+}
+
+func TestParseGraph_SamplingRateOutOfRange(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []string{
+		`{"default_action":"deny","sampling":{"class_rates":{"trusted_direct":0}}}`,
+		`{"default_action":"deny","sampling":{"class_rates":{"trusted_direct":-0.1}}}`,
+		`{"default_action":"deny","sampling":{"class_rates":{"trusted_direct":1.5}}}`,
+	} {
+		if _, err := ParseGraph([]byte(tc)); !errors.Is(err, repository.ErrInvalidArgument) {
+			t.Fatalf("want ErrInvalidArgument for %q, got %v", tc, err)
+		}
+	}
+}
+
+func TestParseGraph_SamplingInspectFullMustStay1to1(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{"default_action":"deny","sampling":{"class_rates":{"inspect_full":0.5}}}`)
+	_, err := ParseGraph(raw)
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("want ErrInvalidArgument for inspect_full < 1.0, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "inspect_full must stay 1:1") {
+		t.Fatalf("error should explain the inspect_full pin, got %v", err)
+	}
+}
+
+func TestParseGraph_NoSamplingIsNil(t *testing.T) {
+	t.Parallel()
+	g, err := ParseGraph([]byte(`{"default_action":"deny"}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if g.SampleClassRates() != nil {
+		t.Fatal("graph without sampling should yield nil class rates")
+	}
+}
