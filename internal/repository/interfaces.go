@@ -126,6 +126,28 @@ type TenantRepository interface {
 	// no-op for keys that are not present.
 	DeleteSettingsKey(ctx context.Context, id uuid.UUID, key string) (Tenant, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status TenantStatus) (Tenant, error)
+	// TouchLastActive advances tenants.last_active_at to `seen` for a
+	// tenant, recording data-plane activity. The advance is
+	// forward-only: a `seen` at or before the stored value is a no-op
+	// (so out-of-order or duplicate activity pings never move the
+	// signal backwards). The write deliberately does NOT bump
+	// updated_at — a tenants-specific trigger (migration 059) masks
+	// last_active_at-only changes — so the high-rate activity path
+	// cannot churn the config-change timestamp that caches/audit rely
+	// on. Callers SHOULD debounce (only call when the in-memory
+	// last-seen has advanced past a coarse floor) so a busy tenant
+	// does not issue a write per request. Returns ErrNotFound if the
+	// tenant does not exist or is soft-deleted.
+	TouchLastActive(ctx context.Context, id uuid.UUID, seen time.Time) error
+	// ListTenantActivity returns the (id, last_active_at) projection
+	// for every non-deleted tenant, ordered by id, in a single query.
+	// It is the enumeration primitive for activity-tiered sweep
+	// planning: a sweep reads this once per cycle, buckets tenants by
+	// recency, and only does its expensive per-tenant work for the
+	// tiers due this cycle — so the dormant-trial majority no longer
+	// costs a full fan-out every time. Soft-deleted tenants are
+	// excluded.
+	ListTenantActivity(ctx context.Context) ([]TenantActivity, error)
 	// TransitionStatus atomically changes the tenant status only if
 	// the current status matches `from`. Returns ErrForbidden if the
 	// precondition is not met, ErrNotFound if the tenant does not

@@ -60,6 +60,28 @@ type Tenant struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	DeletedAt *time.Time
+	// LastActiveAt is the most recent time the data plane reported
+	// activity for this tenant. Nil means the tenant has never been
+	// seen active (e.g. a freshly-provisioned trial). It is advanced
+	// forward-only and debounced from the data path via
+	// TenantRepository.TouchLastActive, and deliberately does NOT
+	// bump UpdatedAt (which tracks configuration/state changes). It
+	// is the first-class dormancy signal that lets activity-tiered
+	// sweep planning skip dormant trials on most cycles instead of
+	// fanning out across all tenants every time. See migration 059.
+	LastActiveAt *time.Time
+}
+
+// TenantActivity is the lightweight (id, last_active_at) projection a
+// sweep planner reads for every live tenant once per cycle to bucket
+// them by recency. It deliberately avoids loading the full Tenant row
+// (name/settings/etc.) so the enumeration stays a single cheap indexed
+// scan even at ~5000 tenants.
+type TenantActivity struct {
+	ID uuid.UUID
+	// LastActiveAt is nil for a tenant that has never been seen
+	// active; such tenants classify as the most-dormant tier.
+	LastActiveAt *time.Time
 }
 
 // TenantPatch is the input to TenantRepository.Update. Each field

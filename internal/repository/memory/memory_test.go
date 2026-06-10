@@ -997,3 +997,111 @@ func TestTenantRepository_DeleteSettingsKey_NormalisesNilSettingsToEmptyObject(t
 		t.Errorf("stored Settings: want %q, got %q", "{}", string(got.Settings))
 	}
 }
+
+// --- Tenant activity (dormancy) -------------------------------------------
+
+func TestTenantRepository_TouchLastActiveForwardOnly(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+	tn, err := repo.Create(ctx(), repository.Tenant{Name: "Acme", Slug: "acme", Tier: repository.TenantTierStarter, Status: repository.TenantStatusActive})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if tn.LastActiveAt != nil {
+		t.Fatalf("new tenant should have nil LastActiveAt, got %v", tn.LastActiveAt)
+	}
+
+	t1 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	if err := repo.TouchLastActive(ctx(), tn.ID, t1); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	got, _ := repo.Get(ctx(), tn.ID)
+	if got.LastActiveAt == nil || !got.LastActiveAt.Equal(t1) {
+		t.Fatalf("after first touch want %v, got %v", t1, got.LastActiveAt)
+	}
+
+	// Earlier timestamp must be ignored (forward-only).
+	if err := repo.TouchLastActive(ctx(), tn.ID, t1.Add(-time.Hour)); err != nil {
+		t.Fatalf("touch backwards: %v", err)
+	}
+	got, _ = repo.Get(ctx(), tn.ID)
+	if !got.LastActiveAt.Equal(t1) {
+		t.Fatalf("backwards touch must be a no-op, got %v", got.LastActiveAt)
+	}
+
+	// Later timestamp advances the signal.
+	t2 := t1.Add(48 * time.Hour)
+	if err := repo.TouchLastActive(ctx(), tn.ID, t2); err != nil {
+		t.Fatalf("touch forward: %v", err)
+	}
+	got, _ = repo.Get(ctx(), tn.ID)
+	if !got.LastActiveAt.Equal(t2) {
+		t.Fatalf("forward touch want %v, got %v", t2, got.LastActiveAt)
+	}
+}
+
+func TestTenantRepository_TouchLastActiveErrors(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+
+	if err := repo.TouchLastActive(ctx(), uuid.Nil, time.Now()); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Errorf("nil id: want ErrInvalidArgument, got %v", err)
+	}
+	if err := repo.TouchLastActive(ctx(), uuid.New(), time.Now()); !errors.Is(err, repository.ErrNotFound) {
+		t.Errorf("missing tenant: want ErrNotFound, got %v", err)
+	}
+
+	tn, _ := repo.Create(ctx(), repository.Tenant{Name: "Gone", Slug: "gone", Tier: repository.TenantTierStarter, Status: repository.TenantStatusActive})
+	if err := repo.Delete(ctx(), tn.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := repo.TouchLastActive(ctx(), tn.ID, time.Now()); !errors.Is(err, repository.ErrNotFound) {
+		t.Errorf("soft-deleted tenant: want ErrNotFound, got %v", err)
+	}
+}
+
+func TestTenantRepository_ListTenantActivity(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewTenantRepository(s)
+
+	a, _ := repo.Create(ctx(), repository.Tenant{Name: "A", Slug: "a", Tier: repository.TenantTierStarter, Status: repository.TenantStatusActive})
+	b, _ := repo.Create(ctx(), repository.Tenant{Name: "B", Slug: "b", Tier: repository.TenantTierStarter, Status: repository.TenantStatusActive})
+	gone, _ := repo.Create(ctx(), repository.Tenant{Name: "C", Slug: "c", Tier: repository.TenantTierStarter, Status: repository.TenantStatusActive})
+
+	seen := time.Date(2026, 6, 5, 0, 0, 0, 0, time.UTC)
+	if err := repo.TouchLastActive(ctx(), a.ID, seen); err != nil {
+		t.Fatalf("touch a: %v", err)
+	}
+	if err := repo.Delete(ctx(), gone.ID); err != nil {
+		t.Fatalf("delete c: %v", err)
+	}
+
+	acts, err := repo.ListTenantActivity(ctx())
+	if err != nil {
+		t.Fatalf("list activity: %v", err)
+	}
+	if len(acts) != 2 {
+		t.Fatalf("want 2 live tenants, got %d", len(acts))
+	}
+	byID := map[uuid.UUID]*time.Time{}
+	for _, x := range acts {
+		byID[x.ID] = x.LastActiveAt
+	}
+	if _, ok := byID[gone.ID]; ok {
+		t.Error("soft-deleted tenant must be excluded")
+	}
+	if la, ok := byID[a.ID]; !ok || la == nil || !la.Equal(seen) {
+		t.Errorf("tenant a last_active want %v, got %v", seen, la)
+	}
+	if la, ok := byID[b.ID]; !ok || la != nil {
+		t.Errorf("tenant b never touched -> nil last_active, got %v", la)
+	}
+
+	// Ordering is by id string, ascending.
+	all, _ := repo.ListTenantActivity(ctx())
+	for i := 1; i < len(all); i++ {
+		if all[i-1].ID.String() > all[i].ID.String() {
+			t.Fatalf("not ordered by id at %d", i)
+		}
+	}
+}
