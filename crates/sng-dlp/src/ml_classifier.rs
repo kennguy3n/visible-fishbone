@@ -2,21 +2,23 @@
 //!
 //! Adds a fifth detector class to the endpoint DLP engine alongside
 //! regex / keyword / fingerprint / MIP-label: a lightweight **NER**
-//! classifier that labels spans of content as one of six sensitive
+//! classifier that labels spans of content as one of twelve sensitive
 //! entity types ([`EntityClass`]) — person name, postal address,
-//! phone number, bank account, medical record, or legal document.
+//! phone number, bank account, medical record, legal document, and the
+//! WS5 breadth classes medical record number, driver licence, tax id,
+//! date of birth, passport number, and national id.
 //!
 //! ## Real on-device inference (no network, no stub)
 //!
 //! Detection runs a genuine ONNX compute graph through ONNX Runtime
 //! (the [`ort`] crate). The graph is a multinomial-logistic-regression
 //! NER head — `softmax(features · W + b)` — over a fixed,
-//! deterministic 17-dimensional feature vector extracted per token by
-//! [`featurize_token`]. The model is tiny (sub-KB) and inference is a
+//! deterministic 24-dimensional feature vector extracted per token by
+//! [`featurize_token`]. The model is tiny (a few KB) and inference is a
 //! single batched matmul, so a whole document classifies in well under
 //! the 50 ms budget with zero network calls. The model is authored /
 //! exported by `crates/sng-dlp/assets/train_ner_model.py` (see that
-//! file for full provenance); the committed `ner_v1.onnx` is the asset
+//! file for full provenance); the committed `ner_v2.onnx` is the asset
 //! shipped inside the signed policy bundle.
 //!
 //! ## Signed-bundle trust chain
@@ -34,7 +36,7 @@
 //!
 //! When no model is installed (or a model failed verification / load),
 //! detection degrades to a **real** regex-and-context NER
-//! ([`RegexNerFallback`]) that detects the same six entity classes
+//! ([`RegexNerFallback`]) that detects the same entity classes
 //! using shape patterns plus the locale keyword dictionaries. DLP is
 //! never disarmed by a missing model — the fallback is fully
 //! functional, just lower-recall than the trained head.
@@ -54,14 +56,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 
 /// Width of the per-token feature vector. MUST equal `FEATURE_DIM` in
-/// `assets/train_ner_model.py`; the [`ner_v1.featurecheck.json`]
+/// `assets/train_ner_model.py`; the `ner_v2.featurecheck.json`
 /// fixture pins specific vectors so any drift between the Python
 /// authoring code and [`featurize_token`] fails a unit test.
-pub const FEATURE_DIM: usize = 17;
+pub const FEATURE_DIM: usize = 24;
 
-/// Number of output classes the NER head emits: `O` plus the six
+/// Number of output classes the NER head emits: `O` plus the twelve
 /// [`EntityClass`] variants. MUST equal `NUM_CLASSES` in the exporter.
-pub const NUM_CLASSES: usize = 7;
+pub const NUM_CLASSES: usize = 13;
 
 /// Minimum softmax probability for a token's predicted entity class to
 /// be accepted. Below this the token is treated as `O` (not an
@@ -92,16 +94,28 @@ pub enum EntityClass {
     PhoneNumber,
     /// A bank account / IBAN (`bank_account`).
     BankAccount,
-    /// A medical record identifier (`medical_record`).
+    /// A medical record identifier in clinical context (`medical_record`).
     MedicalRecord,
     /// A legal document / case identifier (`legal_document`).
     LegalDocument,
+    /// A canonical medical-record-number code (`medical_record_number`).
+    MedicalRecordNumber,
+    /// A driver's licence number (`driver_license`).
+    DriverLicense,
+    /// A taxpayer identifier — TIN/EIN/SSN/VAT/PAN/TFN (`tax_id`).
+    TaxId,
+    /// A date of birth (`date_of_birth`).
+    DateOfBirth,
+    /// A passport number (`passport_number`).
+    PassportNumber,
+    /// A national identity number (`national_id`).
+    NationalId,
 }
 
 impl EntityClass {
-    /// All six classes, in model-column order (after the `O` column).
+    /// All twelve classes, in model-column order (after the `O` column).
     #[must_use]
-    pub const fn all() -> [Self; 6] {
+    pub const fn all() -> [Self; 12] {
         [
             Self::PersonName,
             Self::Address,
@@ -109,6 +123,12 @@ impl EntityClass {
             Self::BankAccount,
             Self::MedicalRecord,
             Self::LegalDocument,
+            Self::MedicalRecordNumber,
+            Self::DriverLicense,
+            Self::TaxId,
+            Self::DateOfBirth,
+            Self::PassportNumber,
+            Self::NationalId,
         ]
     }
 
@@ -122,6 +142,12 @@ impl EntityClass {
             Self::BankAccount => "bank_account",
             Self::MedicalRecord => "medical_record",
             Self::LegalDocument => "legal_document",
+            Self::MedicalRecordNumber => "medical_record_number",
+            Self::DriverLicense => "driver_license",
+            Self::TaxId => "tax_id",
+            Self::DateOfBirth => "date_of_birth",
+            Self::PassportNumber => "passport_number",
+            Self::NationalId => "national_id",
         }
     }
 
@@ -132,7 +158,7 @@ impl EntityClass {
     }
 
     /// The output-column index of this class in the ONNX model
-    /// (`O` is column 0, so the six entities are 1..=6).
+    /// (`O` is column 0, so the twelve entities are 1..=12).
     #[must_use]
     const fn model_column(self) -> usize {
         match self {
@@ -142,6 +168,12 @@ impl EntityClass {
             Self::BankAccount => 4,
             Self::MedicalRecord => 5,
             Self::LegalDocument => 6,
+            Self::MedicalRecordNumber => 7,
+            Self::DriverLicense => 8,
+            Self::TaxId => 9,
+            Self::DateOfBirth => 10,
+            Self::PassportNumber => 11,
+            Self::NationalId => 12,
         }
     }
 
@@ -451,6 +483,43 @@ static LEGAL_KW: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "filing"
     ]
 });
+// --- WS5 breadth context dictionaries (mirror train_ner_model.py) ---
+// Each gates a new entity class via a ±2 keyword window, exactly like
+// the WS4 ADDR/PHONE/BANK/MEDICAL/LEGAL cues, and is deliberately
+// conservative (no bare "id"/"number") to keep precision high.
+static DOB_KW: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    kw_set![
+        "dob",
+        "birth",
+        "born",
+        "birthdate",
+        "birthday",
+        "natal",
+        "d.o.b"
+    ]
+});
+static DL_KW: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    kw_set![
+        "dl", "license", "licence", "driver", "driving", "permit", "dmv"
+    ]
+});
+static TAX_KW: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    kw_set![
+        "tax", "taxpayer", "tin", "ein", "itin", "ssn", "vat", "pan", "tfn", "fiscal", "nif", "irs"
+    ]
+});
+static PASSPORT_KW: LazyLock<HashSet<&'static str>> =
+    LazyLock::new(|| kw_set!["passport", "mrz", "travel"]);
+static NATIONALID_KW: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    kw_set![
+        "national",
+        "identity",
+        "citizen",
+        "nric",
+        "aadhaar",
+        "identification"
+    ]
+});
 
 fn is_title_case(t: &str) -> bool {
     let mut chars = t.chars();
@@ -501,6 +570,45 @@ fn has_digit_and_sep(t: &str) -> bool {
     t.chars().count() >= 5
         && t.chars().any(|c| c.is_ascii_digit())
         && t.chars().any(|c| matches!(c, '-' | '/'))
+}
+
+// --- WS5 breadth shape predicates (mirror train_ner_model.py) ---
+
+/// Two `-`/`/`-separated all-digit groups, 6-8 digits, length 8-10:
+/// matches `1990-05-21`, `05/21/1990`, `21-05-90` but not bare numbers.
+fn date_shape(t: &str) -> bool {
+    let len = t.chars().count();
+    if !(8..=10).contains(&len) {
+        return false;
+    }
+    let seps = t.chars().filter(|c| matches!(c, '-' | '/')).count();
+    let digits = ascii_digit_count(t);
+    let others = len - seps - digits;
+    others == 0 && seps == 2 && (6..=8).contains(&digits)
+}
+
+/// `MRN` (any case) followed by ≥4 digits: a medical-record-number code.
+fn mrn_shape(t: &str) -> bool {
+    let u = t.to_uppercase();
+    if !u.starts_with("MRN") || u.chars().count() < 7 {
+        return false;
+    }
+    u[3..].chars().all(|c| c.is_ascii_digit())
+}
+
+/// ≥6 alphanumerics carrying ≥4 digits: a licence/tax/id code shape.
+fn code_token(t: &str) -> bool {
+    t.chars().count() >= 6
+        && t.chars().all(|c| c.is_ascii_alphanumeric())
+        && ascii_digit_count(t) >= 4
+}
+
+/// 8-9 alphanumerics with ≥6 digits: passport-number shape.
+fn passport_shape(t: &str) -> bool {
+    let len = t.chars().count();
+    (8..=9).contains(&len)
+        && t.chars().all(|c| c.is_ascii_alphanumeric())
+        && ascii_digit_count(t) >= 6
 }
 
 /// Extract the [`FEATURE_DIM`]-dimensional feature vector for token
@@ -560,6 +668,14 @@ pub fn featurize_token(tokens: &[Token], i: usize) -> [f32; FEATURE_DIM] {
     f[14] = f32::from(neighbor_title());
     f[15] = f32::from(has_digit_and_sep(t));
     f[16] = f32::from(neighbor_in(&NAME_GAZ) || NAME_GAZ.contains(lt.as_str()));
+    // --- WS5 breadth features (columns 17-23) ---
+    f[17] = f32::from(date_shape(t));
+    f[18] = f32::from(neighbor_in(&DOB_KW) || DOB_KW.contains(lt.as_str()));
+    f[19] = f32::from(neighbor_in(&DL_KW) || DL_KW.contains(lt.as_str()));
+    f[20] = f32::from(neighbor_in(&TAX_KW) || TAX_KW.contains(lt.as_str()));
+    f[21] = f32::from(neighbor_in(&PASSPORT_KW) || PASSPORT_KW.contains(lt.as_str()));
+    f[22] = f32::from(neighbor_in(&NATIONALID_KW) || NATIONALID_KW.contains(lt.as_str()));
+    f[23] = f32::from(mrn_shape(t));
     f
 }
 
@@ -833,11 +949,11 @@ impl NerModel {
 
 /// A real regex-and-context NER used when no ONNX model is installed.
 ///
-/// It detects the same six [`EntityClass`]es using token shape
-/// (digits, capitalisation, IBAN/phone structure) plus the locale
-/// keyword dictionaries the trained head's features are built from.
-/// Lower recall than the model, but fully functional — DLP is never
-/// disarmed by a missing or rejected model.
+/// It detects the same [`EntityClass`]es using token shape
+/// (digits, capitalisation, IBAN/phone/date/code structure) plus the
+/// locale keyword dictionaries the trained head's features are built
+/// from. Lower recall than the model, but fully functional — DLP is
+/// never disarmed by a missing or rejected model.
 #[derive(Debug, Default, Clone)]
 pub struct RegexNerFallback;
 
@@ -857,15 +973,45 @@ impl RegexNerFallback {
             set.contains(lt.as_str())
         };
 
-        // Shape signals first. A phone-shaped token carrying telephone
-        // punctuation (+, -, parentheses) is unambiguous and stands on
-        // its own; a *bare* run of digits (an order id, ticket number,
-        // etc.) is ambiguous, so it is only called a phone number when
-        // a phone keyword sits in its ±2 window — the same PHONE_KW
-        // context cue the ONNX model weighs. This keeps the fallback
-        // from labelling every long number a phone. An alphanumeric
-        // account code (mixed letters+digits) remains a strong
-        // standalone signal.
+        // Shape signals first, most specific to least. A canonical
+        // `MRN#######` code is an unambiguous standalone
+        // medical-record-number signal (checked before the alnum
+        // account shape, which it would otherwise also match).
+        if mrn_shape(t) {
+            return Some(EntityClass::MedicalRecordNumber);
+        }
+        // A date in a birth context is a date_of_birth. Checked before
+        // the phone branch because a hyphenated date also satisfies the
+        // permissive phone shape.
+        if date_shape(t) && near(&DOB_KW) {
+            return Some(EntityClass::DateOfBirth);
+        }
+        // Passport / driver-licence / tax-id / national-id codes: a
+        // code- or number-shaped token in the matching conservative
+        // keyword context. Checked before the phone branch because a
+        // hyphenated identifier (e.g. a `12-3456789` TIN) also satisfies
+        // the permissive phone shape, so the specific id context must
+        // win over the generic phone fallback.
+        let code_like = code_token(t) || has_digit_and_sep(t) || is_all_digits(t);
+        if passport_shape(t) && near(&PASSPORT_KW) {
+            return Some(EntityClass::PassportNumber);
+        }
+        if code_like && near(&DL_KW) {
+            return Some(EntityClass::DriverLicense);
+        }
+        if code_like && near(&TAX_KW) {
+            return Some(EntityClass::TaxId);
+        }
+        if code_like && near(&NATIONALID_KW) {
+            return Some(EntityClass::NationalId);
+        }
+        // A phone-shaped token carrying telephone punctuation (+, -,
+        // parentheses) is unambiguous and stands on its own; a *bare*
+        // run of digits (an order id, ticket number, etc.) is
+        // ambiguous, so it is only called a phone number when a phone
+        // keyword sits in its ±2 window — the same PHONE_KW context cue
+        // the ONNX model weighs. This keeps the fallback from labelling
+        // every long number a phone.
         if phone_shape(t) && (has_phone_punct(t) || near(&PHONE_KW)) {
             return Some(EntityClass::PhoneNumber);
         }

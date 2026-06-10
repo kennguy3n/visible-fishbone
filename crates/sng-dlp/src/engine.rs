@@ -568,7 +568,7 @@ mod tests {
         // through the hot-swap (now via on-device ONNX inference).
         let key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
         let kid = sng_core::ids::PolicySigningKeyId::new("engine-model-key").expect("kid");
-        let model_bytes = include_bytes!("../assets/ner_v1.onnx");
+        let model_bytes = include_bytes!("../assets/ner_v2.onnx");
         let sig = ed25519_dalek::Signer::sign(&key, model_bytes.as_slice());
         let signed = SignedModel {
             model: model_bytes.to_vec(),
@@ -609,7 +609,7 @@ mod tests {
         let key = ed25519_dalek::SigningKey::from_bytes(&[4u8; 32]);
         let kid = sng_core::ids::PolicySigningKeyId::new("bad-model-key").expect("kid");
         let signed = SignedModel {
-            model: include_bytes!("../assets/ner_v1.onnx").to_vec(),
+            model: include_bytes!("../assets/ner_v2.onnx").to_vec(),
             signature: [0u8; 64], // not a valid signature
             signing_key_id: kid.clone(),
         };
@@ -646,7 +646,7 @@ mod tests {
 
         let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let kid = sng_core::ids::PolicySigningKeyId::new("preserve-model-key").expect("kid");
-        let model_bytes = include_bytes!("../assets/ner_v1.onnx");
+        let model_bytes = include_bytes!("../assets/ner_v2.onnx");
         let sig = ed25519_dalek::Signer::sign(&key, model_bytes.as_slice());
         let signed = SignedModel {
             model: model_bytes.to_vec(),

@@ -48,6 +48,33 @@ func validatorFor(name string) func(string) bool {
 		return saudiNationalID
 	case "kuwait_civil_id":
 		return kuwaitCivilID
+	// WS5 jurisdiction breadth — twins in validators_ws5.go.
+	case "ni_uk":
+		return ukNINO
+	case "uk_nhs":
+		return ukNHS
+	case "canada_sin":
+		return canadaSIN
+	case "tfn_au":
+		return australiaTFN
+	case "australia_medicare":
+		return australiaMedicare
+	case "germany_personalausweis":
+		return germanyPersonalausweis
+	case "france_insee":
+		return franceINSEE
+	case "brazil_cpf":
+		return brazilCPF
+	case "brazil_cnpj":
+		return brazilCNPJ
+	case "iban":
+		return euIBAN
+	case "eu_vat":
+		return euVAT
+	case "philippines_umid":
+		return philippinesUMID
+	case "indonesia_nik":
+		return indonesiaNIK
 	default:
 		return nil
 	}
