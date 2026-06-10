@@ -35,9 +35,9 @@ export function MspBulkOps() {
             Individual operations
           </h3>
           <div className="grid grid--2">
-            <BulkProvision key={mspId} mspId={mspId} />
-            <BulkClaimTokens key={mspId} mspId={mspId} />
-            <BulkPolicyTemplate key={mspId} mspId={mspId} />
+            <BulkProvision key={`${mspId}-provision`} mspId={mspId} />
+            <BulkClaimTokens key={`${mspId}-tokens`} mspId={mspId} />
+            <BulkPolicyTemplate key={`${mspId}-policy`} mspId={mspId} />
           </div>
         </>
       )}
@@ -140,7 +140,7 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
       setFormError("Site name is required.");
       return;
     }
-    if (tokensPerTenant < 1) {
+    if (!Number.isFinite(tokensPerTenant) || tokensPerTenant < 1) {
       setFormError("Tokens per tenant must be at least 1.");
       return;
     }

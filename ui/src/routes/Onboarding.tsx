@@ -360,7 +360,7 @@ function StepSite({
 
   const submit = () => {
     create.mutate(
-      { tenantId, data: { name, slug: slug || undefined, template } },
+      { tenantId, data: { name, slug: slug.trim() || undefined, template } },
       {
         onSuccess: () => {
           toast.success("Site created", `${name} is now connected.`);
