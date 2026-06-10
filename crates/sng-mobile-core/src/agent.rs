@@ -5,9 +5,13 @@
 //! owns:
 //!
 //! * an explicit [`LifecycleState`] machine
-//!   (`Init → Enrolling → Connected ⇄ Suspended → Terminated`) with
-//!   validated transitions, so an illegal transition is a typed
-//!   error rather than undefined behaviour;
+//!   (`Init → Enrolling → Enrolled ⇄ Connected ⇄ Suspended →
+//!   Terminated`) with validated transitions, so an illegal
+//!   transition is a typed error rather than undefined behaviour.
+//!   Enrolment lands in `Enrolled` (control plane up, data-plane
+//!   tunnel down); [`MobileAgent::connect`] brings the
+//!   [`MobileTunnelProvider`] up to reach `Connected`, and
+//!   [`MobileAgent::disconnect`] takes it back down;
 //! * the claim-token [`Enroller`];
 //! * a coalescing [`Scheduler`] that folds the policy-pull,
 //!   telemetry-flush, and posture-collection timers into a single
@@ -44,7 +48,7 @@ use crate::enrollment::{DEFAULT_DEVICE_KEY_LABEL, Enroller, EnrollmentOutcome, S
 use crate::error::MobileError;
 use crate::posture::{MobilePostureCollector, MobilePostureSnapshot};
 use crate::telemetry::MobileTelemetry;
-use crate::tunnel::MobileTunnelProvider;
+use crate::tunnel::{MobileTunnelProvider, TunnelConfig, TunnelStatus};
 use crate::ztna::MobileZtnaManager;
 
 /// The agent's lifecycle phase.
@@ -54,10 +58,24 @@ pub enum LifecycleState {
     Init,
     /// An enrolment attempt is in flight.
     Enrolling,
-    /// Enrolled and operating (policy pulls, telemetry, ZTNA).
+    /// Enrolment complete: the control plane has issued the device
+    /// its certificate chain and the control-plane subsystems
+    /// (policy pulls, telemetry, ZTNA) can operate, but the
+    /// data-plane tunnel is **not** up. This is the resting state of
+    /// an enrolled device whose VPN is paused — distinct from
+    /// [`Self::Connected`], where [`MobileTunnelProvider`] is
+    /// actively carrying traffic.
+    Enrolled,
+    /// Enrolled **and** the data-plane tunnel is up: the
+    /// [`MobileTunnelProvider`] has been started and the
+    /// steady-state heartbeat loop runs here.
     Connected,
     /// Temporarily parked (app backgrounded / network lost) —
-    /// timers are halted but identity is retained.
+    /// the control-plane heartbeat is halted but identity is
+    /// retained. The platform data-plane extension
+    /// (`NEPacketTunnelProvider` / `VpnService`) keeps running on its
+    /// own out-of-process, so suspension does not tear the tunnel
+    /// down.
     Suspended,
     /// Shut down. Terminal: no further transitions are permitted.
     Terminated,
@@ -67,15 +85,24 @@ impl LifecycleState {
     /// Whether `to` is a legal successor of `self`.
     #[must_use]
     pub fn can_transition_to(self, to: LifecycleState) -> bool {
-        use LifecycleState::{Connected, Enrolling, Init, Suspended, Terminated};
+        use LifecycleState::{Connected, Enrolled, Enrolling, Init, Suspended, Terminated};
         matches!(
             (self, to),
+            // Begin an enrolment attempt.
             (Init, Enrolling)
-                | (Enrolling | Suspended, Connected)
-                | (Enrolling, Init)
-                | (Connected, Suspended)
+                // Enrolment succeeds into Enrolled (control plane up,
+                // tunnel down) or rolls back to Init on failure.
+                | (Enrolling, Enrolled | Init)
+                // The data-plane tunnel comes up (connect, from
+                // Enrolled) or the heartbeat resumes (from Suspended);
+                // both land in Connected.
+                | (Enrolled | Suspended, Connected)
+                // From Connected the tunnel goes down (disconnect →
+                // Enrolled) or the heartbeat parks (suspend →
+                // Suspended).
+                | (Connected, Enrolled | Suspended)
                 // Terminate is reachable from any non-terminal state.
-                | (Init | Enrolling | Connected | Suspended, Terminated)
+                | (Init | Enrolling | Enrolled | Connected | Suspended, Terminated)
         )
     }
 }
@@ -488,16 +515,22 @@ impl MobileAgent {
     }
 
     fn transition(&self, to: LifecycleState) -> Result<(), MobileError> {
-        let result = self.lifecycle.lock().transition_to(to);
-        if result.is_ok() && matches!(to, LifecycleState::Suspended | LifecycleState::Terminated) {
+        let mut guard = self.lifecycle.lock();
+        let from = guard.state();
+        let result = guard.transition_to(to);
+        drop(guard);
+        if result.is_ok() && from == LifecycleState::Connected && to != LifecycleState::Connected {
             // Only a transition *out of* `Connected` needs to wake a
             // sleeping `run` loop so it re-checks the loop condition at
             // once rather than finishing the pending coalesced sleep.
-            // Gating on these two targets avoids leaving a stale permit
-            // after e.g. `Enrolling → Connected` that would make the
-            // next `run` burn one no-op iteration. `notify_one` stores
-            // a permit if no waiter is parked yet, so a suspend/
-            // terminate racing the loop's state check is still
+            // Gating on "left Connected" (rather than on the target)
+            // covers every exit — disconnect → Enrolled, suspend →
+            // Suspended, terminate → Terminated — while avoiding a
+            // stale permit when *entering* Connected (e.g.
+            // `Suspended → Connected` resume), which would otherwise
+            // make the next `run` burn one no-op iteration.
+            // `notify_one` stores a permit if no waiter is parked yet,
+            // so an exit racing the loop's state check is still
             // delivered.
             self.wake.notify_one();
         }
@@ -516,8 +549,112 @@ impl MobileAgent {
     }
 
     /// Terminate the agent. Valid from any non-terminal state.
+    ///
+    /// This is the synchronous control-plane shutdown: it stops the
+    /// heartbeat loop but does **not** itself tear the data-plane
+    /// tunnel down (that is an async platform call). A host that owns
+    /// a live tunnel should [`Self::disconnect`] first, or use
+    /// [`Self::wipe`] — which cuts the data plane as part of
+    /// de-enrolment — when revoking the device.
     pub fn terminate(&self) -> Result<(), MobileError> {
         self.transition(LifecycleState::Terminated)
+    }
+
+    /// Bring the data-plane tunnel up and move
+    /// [`LifecycleState::Enrolled`] → [`LifecycleState::Connected`].
+    ///
+    /// Starts the platform [`MobileTunnelProvider`]
+    /// (`NEPacketTunnelProvider` / `VpnService`) with `config` under
+    /// the configured connect deadline, then — and only once the
+    /// data plane is actually up — marks the agent `Connected` so the
+    /// steady-state loop may run. The lifecycle is left in `Enrolled`
+    /// if the tunnel fails to start, so the host can retry without
+    /// losing its enrolment.
+    ///
+    /// # Errors
+    ///
+    /// * [`MobileError::Lifecycle`] if the agent is not in
+    ///   [`LifecycleState::Enrolled`] (connect is only valid from a
+    ///   freshly-enrolled or disconnected agent).
+    /// * [`MobileError::Tunnel`] if `config` is invalid or the
+    ///   platform tunnel backend rejects the start.
+    /// * [`MobileError::Timeout`] if the start exceeds
+    ///   [`MobileAgentConfig::connect_timeout`].
+    pub async fn connect(&self, config: TunnelConfig) -> Result<(), MobileError> {
+        // Fail fast before touching the platform backend if the
+        // lifecycle does not permit a connect; the authoritative
+        // guard is still the `Enrolled → Connected` transition below,
+        // which closes the race where another thread moves us first.
+        let state = self.state();
+        if state != LifecycleState::Enrolled {
+            return Err(MobileError::Lifecycle(format!(
+                "connect is only valid from Enrolled, not {state:?}"
+            )));
+        }
+        config.validate()?;
+        // Start the tunnel under the connect deadline so a wedged
+        // Network Extension / VpnService cannot pin the call open.
+        self.deadline(self.config.connect_timeout, async {
+            self.deps
+                .tunnel
+                .start_tunnel(config)
+                .await
+                .map_err(MobileError::from)
+        })
+        .await?;
+        // Only claim `Connected` once the data plane is genuinely up.
+        // If the transition now loses a race with a concurrent
+        // terminate, tear the freshly-started tunnel back down rather
+        // than leak an orphaned data plane the agent no longer tracks.
+        if let Err(e) = self.transition(LifecycleState::Connected) {
+            if let Err(stop_err) = self.deps.tunnel.stop_tunnel().await {
+                warn!(
+                    error = %stop_err,
+                    "failed to stop tunnel after connect lost the lifecycle race; \
+                     the data plane may be left up"
+                );
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Tear the data-plane tunnel down and move
+    /// [`LifecycleState::Connected`] → [`LifecycleState::Enrolled`].
+    ///
+    /// The agent stays enrolled (identity + cert retained) so the
+    /// host can [`Self::connect`] again without re-enrolling. The
+    /// tunnel is stopped **first**; the agent only reports `Enrolled`
+    /// once the data plane is down, so a teardown failure leaves the
+    /// agent `Connected` and surfaces the error rather than claiming
+    /// a disconnect that did not happen.
+    ///
+    /// # Errors
+    ///
+    /// * [`MobileError::Lifecycle`] if the agent is not
+    ///   [`LifecycleState::Connected`].
+    /// * [`MobileError::Tunnel`] if the platform backend fails to
+    ///   stop the tunnel.
+    pub async fn disconnect(&self) -> Result<(), MobileError> {
+        let state = self.state();
+        if state != LifecycleState::Connected {
+            return Err(MobileError::Lifecycle(format!(
+                "disconnect is only valid from Connected, not {state:?}"
+            )));
+        }
+        self.deps.tunnel.stop_tunnel().await?;
+        self.transition(LifecycleState::Enrolled)?;
+        Ok(())
+    }
+
+    /// The platform tunnel's current observable status.
+    ///
+    /// A direct read-through to [`MobileTunnelProvider::status`];
+    /// infallible (the provider reports [`TunnelStatus::Down`] /
+    /// [`TunnelStatus::Failed`] rather than erroring) so the host can
+    /// poll it for a status surface regardless of lifecycle state.
+    pub async fn tunnel_status(&self) -> TunnelStatus {
+        self.deps.tunnel.status().await
     }
 
     /// Attach the post-enrolment runtime subsystems. The host
@@ -623,14 +760,17 @@ impl MobileAgent {
     /// token to the control plane, and receive the device's
     /// certificate chain.
     ///
-    /// Transitions `Init → Enrolling → Connected` on success, or
-    /// back to `Init` on failure so the host can retry.
+    /// Transitions `Init → Enrolling → Enrolled` on success, or
+    /// back to `Init` on failure so the host can retry. Enrolment
+    /// establishes the device identity (cert chain) only; the host
+    /// then drives [`Self::connect`] to bring the data-plane tunnel
+    /// up and reach [`LifecycleState::Connected`].
     pub async fn enroll(&self, claim_token: &str) -> Result<EnrollmentOutcome, MobileError> {
         self.transition(LifecycleState::Enrolling)?;
         match self.enroll_inner(claim_token).await {
             Ok(outcome) => {
                 // The control plane has already issued the device its
-                // certificate chain. If the `Enrolling → Connected`
+                // certificate chain. If the `Enrolling → Enrolled`
                 // transition now fails — only possible if we were
                 // concurrently terminated mid-round-trip — we must
                 // still hand the outcome back rather than drop it,
@@ -638,7 +778,7 @@ impl MobileAgent {
                 // cert was minted that the client threw away). The
                 // caller can persist the cert and re-drive the
                 // lifecycle.
-                if let Err(e) = self.transition(LifecycleState::Connected) {
+                if let Err(e) = self.transition(LifecycleState::Enrolled) {
                     warn!(
                         device_id = %outcome.device_id,
                         error = %e,
@@ -671,18 +811,34 @@ impl MobileAgent {
     /// Wipe the device's enrolment and move the agent to the
     /// terminal state.
     ///
-    /// Deletes the enrolment keypair from the secure store (after
-    /// which the device can no longer mTLS-authenticate, so it is
-    /// de-enrolled) and then transitions to
-    /// [`LifecycleState::Terminated`] so the steady-state loop stops
-    /// and no further work is attempted with the destroyed identity.
+    /// Cuts the data-plane tunnel, deletes the enrolment keypair
+    /// from the secure store (after which the device can no longer
+    /// mTLS-authenticate, so it is de-enrolled) and then transitions
+    /// to [`LifecycleState::Terminated`] so the steady-state loop
+    /// stops and no further work is attempted with the destroyed
+    /// identity.
+    ///
+    /// The tunnel is stopped **first** so a revoked device stops
+    /// carrying traffic immediately; this step is best-effort
+    /// (a tunnel already down, or a provider that errors, must never
+    /// block destroying the key) and is logged but not propagated.
     ///
     /// This is the device-local half of a leaver / revoke: the
     /// control-plane-side revocation (ZTNA revocation list) is
     /// driven separately by the operator workflow. Idempotent — the
-    /// key delete tolerates an absent key and an already-terminated
-    /// agent is the desired end state — so a revoke can be replayed.
+    /// tunnel stop and key delete both tolerate an absent target and
+    /// an already-terminated agent is the desired end state — so a
+    /// revoke can be replayed.
     pub async fn wipe(&self) -> Result<(), MobileError> {
+        // Cut the data plane before destroying the identity so a
+        // revoked device stops carrying traffic at once, even if the
+        // key delete or lifecycle move below runs into trouble.
+        if let Err(e) = self.deps.tunnel.stop_tunnel().await {
+            warn!(
+                error = %e,
+                "wipe: tunnel stop failed; continuing de-enrolment"
+            );
+        }
         self.enroller.wipe(self.deps.key_store.as_ref()).await?;
         if self.state() != LifecycleState::Terminated
             && let Err(e) = self.transition(LifecycleState::Terminated)
@@ -851,9 +1007,15 @@ mod tests {
         let mut lc = AgentLifecycle::new();
         assert_eq!(lc.state(), LifecycleState::Init);
         lc.transition_to(LifecycleState::Enrolling).unwrap();
+        // Enrolment lands in Enrolled (control plane up, tunnel down).
+        lc.transition_to(LifecycleState::Enrolled).unwrap();
+        // connect() brings the data-plane tunnel up.
         lc.transition_to(LifecycleState::Connected).unwrap();
+        // Background / resume around the live tunnel.
         lc.transition_to(LifecycleState::Suspended).unwrap();
         lc.transition_to(LifecycleState::Connected).unwrap();
+        // disconnect() drops back to Enrolled without de-enrolling.
+        lc.transition_to(LifecycleState::Enrolled).unwrap();
         lc.transition_to(LifecycleState::Terminated).unwrap();
         assert_eq!(lc.state(), LifecycleState::Terminated);
     }
@@ -871,7 +1033,15 @@ mod tests {
         let mut lc = AgentLifecycle::new();
         // Cannot connect straight from Init.
         assert!(lc.transition_to(LifecycleState::Connected).is_err());
+        // Cannot reach Enrolled without enrolling first.
+        assert!(lc.transition_to(LifecycleState::Enrolled).is_err());
         // Cannot suspend from Init.
+        assert!(lc.transition_to(LifecycleState::Suspended).is_err());
+        // Enrolment cannot skip straight past Enrolled to Connected.
+        lc.transition_to(LifecycleState::Enrolling).unwrap();
+        assert!(lc.transition_to(LifecycleState::Connected).is_err());
+        // Nor can it suspend from Enrolled (the tunnel is not up yet).
+        lc.transition_to(LifecycleState::Enrolled).unwrap();
         assert!(lc.transition_to(LifecycleState::Suspended).is_err());
     }
 
@@ -882,6 +1052,7 @@ mod tests {
         for to in [
             LifecycleState::Init,
             LifecycleState::Enrolling,
+            LifecycleState::Enrolled,
             LifecycleState::Connected,
             LifecycleState::Suspended,
         ] {
@@ -1064,5 +1235,330 @@ mod tests {
         assert_eq!(PowerState::Normal.interval_multiplier(4), 1);
         assert_eq!(PowerState::LowPower.interval_multiplier(4), 4);
         assert_eq!(LOW_POWER_INTERVAL_MULTIPLIER, 4);
+    }
+
+    // -- End-to-end lifecycle tests -------------------------------
+    //
+    // These drive a real `MobileAgent` (not just the bare
+    // `AgentLifecycle`) through `Init → Enrolling → Enrolled →
+    // Connected ⇄ Suspended` and out via `disconnect` / `wipe`,
+    // asserting the data-plane `MobileTunnelProvider` is started and
+    // stopped at exactly the right edges. The enrolment *network*
+    // leg (`enroll_inner` → control-plane mTLS round-trip) needs a
+    // live control plane and is exercised by the comms-layer suites;
+    // here we drive the lifecycle past it via the same private
+    // `transition` the real `enroll` uses, so the tunnel
+    // orchestration and state machine are tested end-to-end against
+    // recording PAL doubles.
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use crate::auth::{AccessToken, AuthError, AuthSession, AuthState};
+    use crate::config::{AuthConfig, MobileAgentConfig, MobilePlatform};
+    use crate::enrollment::InMemorySecureKeyStore;
+    use crate::posture::{MobilePostureCollector, MobilePostureSnapshot, PostureError};
+    use crate::tunnel::{TUNNEL_KEY_LEN, TunnelError, TunnelPrivateKey, TunnelPublicKey};
+    use sng_comms::PolicyTrustStore;
+    use sng_core::{DeviceId, TenantId};
+
+    /// Auth double: never holds a credential. The lifecycle/tunnel
+    /// paths under test never touch it, so it only has to satisfy the
+    /// trait.
+    struct StubAuth;
+
+    #[async_trait::async_trait]
+    impl AuthSession for StubAuth {
+        async fn access_token(&self) -> Result<AccessToken, AuthError> {
+            Err(AuthError::Unauthenticated)
+        }
+        async fn refresh(&self) -> Result<(), AuthError> {
+            Err(AuthError::Unauthenticated)
+        }
+        fn state(&self) -> AuthState {
+            AuthState::Unauthenticated
+        }
+        fn is_authenticated(&self) -> bool {
+            false
+        }
+    }
+
+    /// Posture double: the heartbeat loop is never spun up in these
+    /// tests, so `collect` is unreachable; report unavailable rather
+    /// than fabricate a snapshot.
+    struct StubPosture;
+
+    #[async_trait::async_trait]
+    impl MobilePostureCollector for StubPosture {
+        async fn collect(&self) -> Result<MobilePostureSnapshot, PostureError> {
+            Err(PostureError::Unavailable("stub".into()))
+        }
+    }
+
+    /// Recording tunnel double: counts `start`/`stop`, can be told to
+    /// fail either call, and reports a status consistent with the
+    /// calls it has seen so `tunnel_status` is meaningful.
+    struct RecordingTunnel {
+        starts: AtomicUsize,
+        stops: AtomicUsize,
+        fail_start: AtomicBool,
+        fail_stop: AtomicBool,
+        status: Mutex<TunnelStatus>,
+    }
+
+    impl RecordingTunnel {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                starts: AtomicUsize::new(0),
+                stops: AtomicUsize::new(0),
+                fail_start: AtomicBool::new(false),
+                fail_stop: AtomicBool::new(false),
+                status: Mutex::new(TunnelStatus::Down),
+            })
+        }
+        fn starts(&self) -> usize {
+            self.starts.load(Ordering::SeqCst)
+        }
+        fn stops(&self) -> usize {
+            self.stops.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MobileTunnelProvider for RecordingTunnel {
+        async fn start_tunnel(&self, _config: TunnelConfig) -> Result<(), TunnelError> {
+            if self.fail_start.load(Ordering::SeqCst) {
+                return Err(TunnelError::Backend("induced start failure".into()));
+            }
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            *self.status.lock() = TunnelStatus::Up { since: Utc::now() };
+            Ok(())
+        }
+        async fn stop_tunnel(&self) -> Result<(), TunnelError> {
+            if self.fail_stop.load(Ordering::SeqCst) {
+                return Err(TunnelError::Backend("induced stop failure".into()));
+            }
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            *self.status.lock() = TunnelStatus::Down;
+            Ok(())
+        }
+        async fn status(&self) -> TunnelStatus {
+            self.status.lock().clone()
+        }
+    }
+
+    fn test_config() -> MobileAgentConfig {
+        MobileAgentConfig {
+            control_plane_url: "https://cp.example.com:8443".into(),
+            tenant_id: TenantId::new_v4(),
+            device_id: DeviceId::new_v4(),
+            platform: MobilePlatform::Ios,
+            device_name: "iPhone 15".into(),
+            auth: AuthConfig {
+                issuer: "https://idp.example.com".into(),
+                client_id: "sng-mobile".into(),
+                scopes: vec!["openid".into(), "offline_access".into()],
+                refresh_skew: Duration::from_secs(60),
+                refresh_jitter: Duration::from_secs(30),
+            },
+            poll_interval: Duration::from_secs(300),
+            telemetry_interval: Duration::from_secs(60),
+            posture_interval: Duration::from_secs(900),
+            low_power_multiplier: LOW_POWER_INTERVAL_MULTIPLIER,
+            request_timeout: Duration::from_secs(10),
+            connect_timeout: Duration::from_secs(5),
+        }
+    }
+
+    fn build_agent(tunnel: Arc<RecordingTunnel>) -> MobileAgent {
+        let deps = MobileAgentDeps {
+            key_store: Arc::new(InMemorySecureKeyStore::new()),
+            auth: Arc::new(StubAuth),
+            posture: Arc::new(StubPosture),
+            tunnel,
+            policy_trust: Arc::new(PolicyTrustStore::new()),
+        };
+        MobileAgent::new(test_config(), deps).expect("valid test config builds an agent")
+    }
+
+    fn valid_tunnel_config() -> TunnelConfig {
+        TunnelConfig {
+            interface_private_key: TunnelPrivateKey::from_bytes([7u8; TUNNEL_KEY_LEN]),
+            peer_public_key: TunnelPublicKey::from_bytes([9u8; TUNNEL_KEY_LEN]),
+            endpoint: "gw.example.com:51820".into(),
+            allowed_ips: vec!["0.0.0.0/0".parse().expect("static CIDR parses")],
+            dns: vec![],
+            persistent_keepalive: Some(Duration::from_secs(25)),
+            mtu: Some(1280),
+        }
+    }
+
+    /// Move a freshly-built agent past the network enrolment leg into
+    /// `Enrolled`, mirroring what a successful `enroll` would leave
+    /// behind, so connect/disconnect can be exercised without a
+    /// control plane.
+    fn drive_to_enrolled(agent: &MobileAgent) {
+        agent
+            .transition(LifecycleState::Enrolling)
+            .expect("Init → Enrolling");
+        agent
+            .transition(LifecycleState::Enrolled)
+            .expect("Enrolling → Enrolled");
+        assert_eq!(agent.state(), LifecycleState::Enrolled);
+    }
+
+    #[tokio::test]
+    async fn full_lifecycle_init_enrolling_enrolled_connected_and_back() {
+        let tunnel = RecordingTunnel::new();
+        let agent = build_agent(Arc::clone(&tunnel));
+
+        assert_eq!(agent.state(), LifecycleState::Init);
+        drive_to_enrolled(&agent);
+        // Enrolment alone must not bring the data plane up.
+        assert_eq!(tunnel.starts(), 0);
+        assert!(matches!(agent.tunnel_status().await, TunnelStatus::Down));
+
+        // connect() starts the tunnel and only then reports Connected.
+        agent
+            .connect(valid_tunnel_config())
+            .await
+            .expect("connect from Enrolled");
+        assert_eq!(agent.state(), LifecycleState::Connected);
+        assert_eq!(tunnel.starts(), 1);
+        assert!(matches!(
+            agent.tunnel_status().await,
+            TunnelStatus::Up { .. }
+        ));
+
+        // Suspend / resume park the heartbeat but leave the tunnel
+        // (which lives out-of-process) untouched.
+        agent.suspend().expect("Connected → Suspended");
+        assert_eq!(agent.state(), LifecycleState::Suspended);
+        agent.resume().expect("Suspended → Connected");
+        assert_eq!(agent.state(), LifecycleState::Connected);
+        assert_eq!(tunnel.starts(), 1, "resume must not re-start the tunnel");
+        assert_eq!(tunnel.stops(), 0, "suspend must not stop the tunnel");
+
+        // disconnect() drops the data plane and returns to Enrolled,
+        // keeping the device enrolled for a later reconnect.
+        agent.disconnect().await.expect("Connected → Enrolled");
+        assert_eq!(agent.state(), LifecycleState::Enrolled);
+        assert_eq!(tunnel.stops(), 1);
+        assert!(matches!(agent.tunnel_status().await, TunnelStatus::Down));
+
+        // A second connect proves Enrolled is a true resting state.
+        agent
+            .connect(valid_tunnel_config())
+            .await
+            .expect("reconnect from Enrolled");
+        assert_eq!(agent.state(), LifecycleState::Connected);
+        assert_eq!(tunnel.starts(), 2);
+
+        agent.terminate().expect("Connected → Terminated");
+        assert_eq!(agent.state(), LifecycleState::Terminated);
+    }
+
+    #[tokio::test]
+    async fn connect_is_rejected_outside_enrolled() {
+        let tunnel = RecordingTunnel::new();
+        let agent = build_agent(Arc::clone(&tunnel));
+
+        // From Init.
+        let err = agent.connect(valid_tunnel_config()).await.unwrap_err();
+        assert!(matches!(err, MobileError::Lifecycle(_)));
+
+        // From Connected (already up).
+        drive_to_enrolled(&agent);
+        agent.connect(valid_tunnel_config()).await.unwrap();
+        let err = agent.connect(valid_tunnel_config()).await.unwrap_err();
+        assert!(matches!(err, MobileError::Lifecycle(_)));
+        // Exactly one real start despite the rejected second attempt.
+        assert_eq!(tunnel.starts(), 1);
+    }
+
+    #[tokio::test]
+    async fn connect_with_invalid_config_does_not_start_tunnel() {
+        let tunnel = RecordingTunnel::new();
+        let agent = build_agent(Arc::clone(&tunnel));
+        drive_to_enrolled(&agent);
+
+        let mut cfg = valid_tunnel_config();
+        cfg.endpoint = String::new(); // invalid: empty endpoint
+        let err = agent.connect(cfg).await.unwrap_err();
+        assert!(matches!(err, MobileError::Tunnel(_)));
+        // Validation runs before the backend, so no start and no
+        // half-open lifecycle.
+        assert_eq!(tunnel.starts(), 0);
+        assert_eq!(agent.state(), LifecycleState::Enrolled);
+    }
+
+    #[tokio::test]
+    async fn connect_failure_leaves_agent_enrolled() {
+        let tunnel = RecordingTunnel::new();
+        tunnel.fail_start.store(true, Ordering::SeqCst);
+        let agent = build_agent(Arc::clone(&tunnel));
+        drive_to_enrolled(&agent);
+
+        let err = agent.connect(valid_tunnel_config()).await.unwrap_err();
+        assert!(matches!(err, MobileError::Tunnel(_)));
+        // Failed start must not claim Connected.
+        assert_eq!(agent.state(), LifecycleState::Enrolled);
+    }
+
+    #[tokio::test]
+    async fn disconnect_is_rejected_when_not_connected() {
+        let tunnel = RecordingTunnel::new();
+        let agent = build_agent(Arc::clone(&tunnel));
+        drive_to_enrolled(&agent);
+
+        let err = agent.disconnect().await.unwrap_err();
+        assert!(matches!(err, MobileError::Lifecycle(_)));
+        assert_eq!(tunnel.stops(), 0);
+    }
+
+    #[tokio::test]
+    async fn disconnect_failure_keeps_agent_connected() {
+        let tunnel = RecordingTunnel::new();
+        let agent = build_agent(Arc::clone(&tunnel));
+        drive_to_enrolled(&agent);
+        agent.connect(valid_tunnel_config()).await.unwrap();
+
+        tunnel.fail_stop.store(true, Ordering::SeqCst);
+        let err = agent.disconnect().await.unwrap_err();
+        assert!(matches!(err, MobileError::Tunnel(_)));
+        // A failed teardown must not report a disconnect that did not
+        // happen.
+        assert_eq!(agent.state(), LifecycleState::Connected);
+    }
+
+    #[tokio::test]
+    async fn wipe_cuts_the_tunnel_and_terminates() {
+        let tunnel = RecordingTunnel::new();
+        let agent = build_agent(Arc::clone(&tunnel));
+        drive_to_enrolled(&agent);
+        agent.connect(valid_tunnel_config()).await.unwrap();
+        assert_eq!(agent.state(), LifecycleState::Connected);
+
+        agent.wipe().await.expect("wipe from Connected");
+        assert_eq!(agent.state(), LifecycleState::Terminated);
+        // The data plane is cut as part of de-enrolment.
+        assert_eq!(tunnel.stops(), 1);
+        assert!(matches!(agent.tunnel_status().await, TunnelStatus::Down));
+    }
+
+    #[tokio::test]
+    async fn wipe_tolerates_tunnel_stop_failure() {
+        let tunnel = RecordingTunnel::new();
+        let agent = build_agent(Arc::clone(&tunnel));
+        drive_to_enrolled(&agent);
+        agent.connect(valid_tunnel_config()).await.unwrap();
+
+        // A best-effort tunnel stop must never block destroying the
+        // identity / reaching the terminal state.
+        tunnel.fail_stop.store(true, Ordering::SeqCst);
+        agent
+            .wipe()
+            .await
+            .expect("wipe completes despite stop error");
+        assert_eq!(agent.state(), LifecycleState::Terminated);
     }
 }
