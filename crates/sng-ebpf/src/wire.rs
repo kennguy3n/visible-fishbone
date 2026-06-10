@@ -631,8 +631,102 @@ mod pod {
     );
 }
 
+// ===================== IPv6 extension-header walk (host reference) ====
+//
+// The BPF data path resolves the true L4 header of an IPv6 packet by
+// walking the extension-header chain (`resolve_ipv6_l4` in
+// `bpf/src/main.rs`). That code is `no_std`/`no_main` and only runs inside
+// the kernel, so it cannot be unit-tested on the host. The module below is
+// a byte-for-byte mirror of that walk — same constants, same bounded
+// iteration count, same fail-open conditions — so its host tests pin the
+// wire-level behaviour of the kernel parser. Any change to one must be
+// mirrored in the other (the two are intentionally identical). It is
+// compiled only under `cfg(test)` since it exists purely as a host oracle.
+#[cfg(test)]
+mod ipv6_ext_ref {
+    /// IPv6 "next header" numbers (RFC 8200 §4) the fast path understands.
+    /// Mirror the identically-named constants in `bpf/src/contract.rs`.
+    pub(super) const IPPROTO_HOPOPTS: u8 = 0;
+    pub(super) const IPPROTO_ROUTING: u8 = 43;
+    pub(super) const IPPROTO_FRAGMENT: u8 = 44;
+    pub(super) const IPPROTO_ESP: u8 = 50;
+    pub(super) const IPPROTO_AH: u8 = 51;
+    pub(super) const IPPROTO_DSTOPTS: u8 = 60;
+    pub(super) const IPPROTO_MOBILITY: u8 = 135;
+
+    /// Upper bound on the chain length the fast path walks before failing
+    /// open. Mirrors `MAX_IPV6_EXT_HDRS` in `bpf/src/contract.rs`.
+    pub(super) const MAX_IPV6_EXT_HDRS: usize = 8;
+
+    /// True if `next_hdr` is an IPv6 extension header rather than a real L4
+    /// protocol. Mirrors `is_ipv6_ext_hdr` in `bpf/src/main.rs`.
+    pub(super) const fn is_ipv6_ext_hdr(next_hdr: u8) -> bool {
+        matches!(
+            next_hdr,
+            IPPROTO_HOPOPTS
+                | IPPROTO_ROUTING
+                | IPPROTO_FRAGMENT
+                | IPPROTO_ESP
+                | IPPROTO_AH
+                | IPPROTO_DSTOPTS
+                | IPPROTO_MOBILITY
+        )
+    }
+
+    /// Host reference for the BPF `resolve_ipv6_l4` walk. Given `ext` (the
+    /// packet bytes starting immediately after the 40-byte IPv6 fixed
+    /// header) and the fixed header's `next_hdr`, returns `(offset,
+    /// l4_protocol)` of the real upper-layer header — where `offset` is
+    /// measured from the start of `ext` — or `None` when the chain cannot
+    /// be resolved on the fast path:
+    ///
+    /// * ESP/AH — payload is encrypted/authenticated, ports are unreadable;
+    /// * a non-first Fragment — this packet carries no L4 header;
+    /// * a chain longer than [`MAX_IPV6_EXT_HDRS`] — pathological / hostile;
+    /// * a truncated read — `ext` ends mid extension header.
+    ///
+    /// The loop is bounded by the same compile-time constant as the kernel
+    /// walk, and every slice read is bounds-checked (`get`), so the function
+    /// is total. A generic extension header only requires its first two
+    /// bytes to be present (matching the kernel's `ptr_at::<Ipv6ExtHdr>`);
+    /// the bytes it skips over and the eventual L4 header are bounds-checked
+    /// by the caller (in the kernel, the subsequent `ptr_at` for the
+    /// TCP/UDP header).
+    pub(super) fn ipv6_l4_offset(ext: &[u8], first_proto: u8) -> Option<(usize, u8)> {
+        let mut proto = first_proto;
+        let mut off = 0usize;
+        for _ in 0..MAX_IPV6_EXT_HDRS {
+            if !is_ipv6_ext_hdr(proto) {
+                return Some((off, proto));
+            }
+            if proto == IPPROTO_ESP || proto == IPPROTO_AH {
+                return None;
+            }
+            if proto == IPPROTO_FRAGMENT {
+                // Fragment header is a fixed 8 bytes; the 13-bit fragment
+                // offset is the top bits of the big-endian field at 2..4.
+                let fh = ext.get(off..off + 8)?;
+                let frag_off = u16::from_be_bytes([fh[2], fh[3]]) >> 3;
+                if frag_off != 0 {
+                    return None;
+                }
+                proto = fh[0];
+                off = off.checked_add(8)?;
+            } else {
+                // Generic ext header: total length is (hdr_ext_len + 1) * 8.
+                let eh = ext.get(off..off + 2)?;
+                let hdr_len = (eh[1] as usize + 1) * 8;
+                proto = eh[0];
+                off = off.checked_add(hdr_len)?;
+            }
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::ipv6_ext_ref::*;
     use super::*;
     use crate::class::ClassRule;
     use crate::ddos::{GeoIpBlocklist, GeoIpEntry, GeoIpTable, RateLimit};
@@ -841,5 +935,122 @@ mod tests {
             marshal_ddos(&config).unwrap_err(),
             EbpfError::RuleInvalid(_)
         ));
+    }
+
+    // ---- IPv6 extension-header walk (mirrors bpf `resolve_ipv6_l4`) ----
+
+    const PROTO_TCP: u8 = 6;
+    const PROTO_UDP: u8 = 17;
+
+    /// One 8-byte generic extension header `[next_hdr, hdr_ext_len=0, 0;6]`.
+    fn ext8(next_hdr: u8) -> [u8; 8] {
+        [next_hdr, 0, 0, 0, 0, 0, 0, 0]
+    }
+
+    #[test]
+    fn ipv6_walk_no_ext_headers_returns_l4_at_zero() {
+        // `next_hdr` already the real L4: offset 0, protocol unchanged.
+        assert_eq!(ipv6_l4_offset(&[], PROTO_TCP), Some((0, PROTO_TCP)));
+        assert_eq!(ipv6_l4_offset(&[], PROTO_UDP), Some((0, PROTO_UDP)));
+    }
+
+    #[test]
+    fn ipv6_walk_single_hop_by_hop_to_tcp() {
+        // Hop-by-Hop (8 bytes) chaining to TCP → L4 at offset 8.
+        let ext = ext8(PROTO_TCP);
+        assert_eq!(
+            ipv6_l4_offset(&ext, IPPROTO_HOPOPTS),
+            Some((8, PROTO_TCP))
+        );
+    }
+
+    #[test]
+    fn ipv6_walk_chained_hopopts_routing_to_udp() {
+        // Hop-by-Hop → Routing → UDP: two 8-byte headers, L4 at offset 16.
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&ext8(IPPROTO_ROUTING));
+        ext.extend_from_slice(&ext8(PROTO_UDP));
+        assert_eq!(
+            ipv6_l4_offset(&ext, IPPROTO_HOPOPTS),
+            Some((16, PROTO_UDP))
+        );
+    }
+
+    #[test]
+    fn ipv6_walk_variable_length_dstopts() {
+        // Destination-Options with hdr_ext_len=1 → (1+1)*8 = 16 bytes.
+        let mut ext = vec![PROTO_TCP, 1, 0, 0, 0, 0, 0, 0];
+        ext.extend_from_slice(&[0u8; 8]); // remainder of the 16-byte header
+        assert_eq!(
+            ipv6_l4_offset(&ext, IPPROTO_DSTOPTS),
+            Some((16, PROTO_TCP))
+        );
+    }
+
+    #[test]
+    fn ipv6_walk_first_fragment_resolves_l4() {
+        // Fragment header, fragment offset 0 (first fragment) → TCP at 8.
+        let frag = [PROTO_TCP, 0, 0x00, 0x00, 0xde, 0xad, 0xbe, 0xef];
+        assert_eq!(
+            ipv6_l4_offset(&frag, IPPROTO_FRAGMENT),
+            Some((8, PROTO_TCP))
+        );
+    }
+
+    #[test]
+    fn ipv6_walk_non_first_fragment_fails_open() {
+        // Fragment offset non-zero (top 13 bits): no L4 in this packet.
+        // 0x0008 big-endian → frag_off field; >> 3 = 1 (non-first).
+        let frag = [PROTO_TCP, 0, 0x00, 0x08, 0xde, 0xad, 0xbe, 0xef];
+        assert_eq!(ipv6_l4_offset(&frag, IPPROTO_FRAGMENT), None);
+    }
+
+    #[test]
+    fn ipv6_walk_esp_and_ah_fail_open() {
+        // Encrypted / authenticated payloads have no readable L4.
+        assert_eq!(ipv6_l4_offset(&ext8(PROTO_TCP), IPPROTO_ESP), None);
+        assert_eq!(ipv6_l4_offset(&ext8(PROTO_TCP), IPPROTO_AH), None);
+    }
+
+    #[test]
+    fn ipv6_walk_truncated_header_fails_open() {
+        // `next_hdr` says Hop-by-Hop but only one byte is present.
+        assert_eq!(ipv6_l4_offset(&[IPPROTO_HOPOPTS], IPPROTO_HOPOPTS), None);
+        // Fragment claimed but fewer than 8 bytes present.
+        assert_eq!(
+            ipv6_l4_offset(&[PROTO_TCP, 0, 0, 0], IPPROTO_FRAGMENT),
+            None
+        );
+    }
+
+    #[test]
+    fn ipv6_walk_overlong_chain_fails_open() {
+        // MAX_IPV6_EXT_HDRS Dest-Options headers each chaining to another
+        // Dest-Options: the bounded walk exhausts its iterations while still
+        // on an extension header (the trailing TCP header is never reached),
+        // so it fails open.
+        let mut ext = Vec::new();
+        for _ in 0..MAX_IPV6_EXT_HDRS {
+            ext.extend_from_slice(&ext8(IPPROTO_DSTOPTS));
+        }
+        ext.extend_from_slice(&ext8(PROTO_TCP));
+        assert_eq!(ipv6_l4_offset(&ext, IPPROTO_DSTOPTS), None);
+    }
+
+    #[test]
+    fn ipv6_walk_max_length_chain_resolves() {
+        // The longest chain that still resolves: MAX_IPV6_EXT_HDRS-1 leading
+        // Dest-Options headers, the last of which chains to TCP. L4 is then
+        // detected at the top of the final (8th) bounded iteration.
+        let mut ext = Vec::new();
+        for _ in 0..(MAX_IPV6_EXT_HDRS - 2) {
+            ext.extend_from_slice(&ext8(IPPROTO_DSTOPTS));
+        }
+        ext.extend_from_slice(&ext8(PROTO_TCP));
+        let expected_off = (MAX_IPV6_EXT_HDRS - 1) * 8;
+        assert_eq!(
+            ipv6_l4_offset(&ext, IPPROTO_DSTOPTS),
+            Some((expected_off, PROTO_TCP))
+        );
     }
 }

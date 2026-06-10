@@ -59,6 +59,27 @@ pub const FAMILY_V6: u8 = 6;
 pub const PROTO_TCP: u8 = 6;
 pub const PROTO_UDP: u8 = 17;
 
+// ---- IPv6 extension-header "next header" numbers (RFC 8200 §4) ----
+//
+// These appear in the IPv6 fixed header's `next_hdr` (or a preceding
+// extension header's `next_hdr`) in place of the real L4 protocol. The
+// fast-path parser walks the skippable ones to reach the true L4 header;
+// see `parse_flow` in `main.rs`.
+pub const IPPROTO_HOPOPTS: u8 = 0; // Hop-by-Hop Options
+pub const IPPROTO_ROUTING: u8 = 43; // Routing
+pub const IPPROTO_FRAGMENT: u8 = 44; // Fragment
+pub const IPPROTO_ESP: u8 = 50; // Encapsulating Security Payload
+pub const IPPROTO_AH: u8 = 51; // Authentication Header
+pub const IPPROTO_DSTOPTS: u8 = 60; // Destination Options
+pub const IPPROTO_MOBILITY: u8 = 135; // Mobility (RFC 6275)
+
+/// Upper bound on the IPv6 extension-header chain the fast path will walk
+/// before failing open. RFC 8200 allows an arbitrarily long chain, but a
+/// fixed cap is required for the BPF verifier (bounded loop) and is far
+/// beyond any legitimate packet; a longer chain is treated as unparseable
+/// and handed to the slow path.
+pub const MAX_IPV6_EXT_HDRS: usize = 8;
+
 // ---- Action / flag discriminants ----
 
 /// `XdpRuleAction` discriminants (mirror `crate::firewall`).

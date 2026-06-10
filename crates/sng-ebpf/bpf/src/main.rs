@@ -528,6 +528,14 @@ struct Parsed {
 
 /// Parse Ethernet → IPv4/IPv6 → TCP/UDP into a [`Parsed`]. Returns `None`
 /// for non-IP or truncated packets (the caller passes them through).
+///
+/// `#[inline(always)]` is load-bearing: returning `Option<Parsed>` across a
+/// BPF-to-BPF call boundary makes the kernel verifier reject the program on
+/// the `None` paths (the struct-return stack slot is only partially
+/// initialised, so the caller's read of it is flagged as an uninitialised
+/// stack read). Inlining folds the parse into the caller's frame, letting
+/// the verifier track each field's initialisation per path.
+#[inline(always)]
 fn parse_flow(data: usize, data_end: usize) -> Option<Parsed> {
     let eth: *const EthHdr = ptr_at(data, data_end, 0)?;
     let ether_type = unsafe { (*eth).ether_type };
@@ -569,27 +577,23 @@ fn parse_flow(data: usize, data_end: usize) -> Option<Parsed> {
         key.src = unsafe { (*ip).src_addr };
         key.dst = unsafe { (*ip).dst_addr };
         key.family = FAMILY_V6;
-        let proto = unsafe { (*ip).next_hdr };
+        let first_proto = unsafe { (*ip).next_hdr };
         let payload = u16::from_be_bytes(unsafe { (*ip).payload_len });
         // `next_hdr` is the real L4 protocol only when no extension headers
-        // are present. A Hop-by-Hop / Routing / Fragment / Dest-Options /
-        // AH / ESP / Mobility header instead chains to the true L4 at a
-        // variable offset, so reading L4 at the fixed 40-byte offset would
-        // mis-key ports (they stay 0) — letting an attacker prepend an
-        // extension header to slip past port-keyed rules and SYN/UDP rate
-        // limiting. Resolving the chain needs a variable-length walk the
-        // verifier dislikes; instead fail open to the kernel stack (same
-        // semantics as a short IPv4 IHL above), where nftables parses the
-        // chain and enforces correctly. The fast path simply does not
-        // accelerate these (rare) packets rather than mis-classifying them.
-        if is_ipv6_ext_hdr(proto) {
-            return None;
-        }
-        (
-            EthHdr::LEN + Ipv6Hdr::LEN,
-            proto,
-            u32::from(payload) + Ipv6Hdr::LEN as u32,
-        )
+        // are present. A Hop-by-Hop / Routing / Dest-Options / Mobility /
+        // Fragment header instead chains to the true L4 at a variable
+        // offset; reading L4 at the fixed 40-byte offset would mis-key ports
+        // (they stay 0), letting an attacker prepend an extension header to
+        // slip past port-keyed rules and SYN/UDP rate limiting on the fast
+        // path. Walk the chain (bounded by `MAX_IPV6_EXT_HDRS` for the
+        // verifier) to the real L4 header. Anything we cannot resolve —
+        // ESP/AH (encrypted/authenticated, no readable L4), a non-first
+        // fragment (no L4 in this packet), or a chain longer than the cap —
+        // fails open to the kernel stack (same semantics as a short IPv4
+        // IHL), where nftables parses the chain and enforces correctly.
+        let (l4_off, proto) =
+            resolve_ipv6_l4(data, data_end, EthHdr::LEN + Ipv6Hdr::LEN, first_proto)?;
+        (l4_off, proto, u32::from(payload) + Ipv6Hdr::LEN as u32)
     } else {
         return None;
     };
@@ -615,14 +619,104 @@ fn parse_flow(data: usize, data_end: usize) -> Option<Parsed> {
     })
 }
 
+/// The first two bytes shared by every "generic" IPv6 extension header
+/// (Hop-by-Hop, Routing, Destination Options, Mobility): a next-header byte
+/// and a length in 8-byte units (excluding the first 8 bytes).
+#[repr(C)]
+struct Ipv6ExtHdr {
+    next_hdr: u8,
+    hdr_ext_len: u8,
+}
+
+/// The IPv6 Fragment header (RFC 8200 §4.5), fixed at 8 bytes. `frag_off`
+/// holds a 13-bit fragment offset (in 8-byte units) in its top bits, with
+/// the low 3 bits holding reserved bits and the More-Fragments flag. The
+/// `reserved` / `ident` fields are unread by the fast path but are kept so
+/// the struct is a faithful, `#[repr(C)]`-correct 8-byte mirror of the wire
+/// layout (the parser advances a fixed 8 bytes past it).
+#[repr(C)]
+#[allow(dead_code)]
+struct Ipv6FragHdr {
+    next_hdr: u8,
+    reserved: u8,
+    frag_off: [u8; 2],
+    ident: [u8; 4],
+}
+
 /// True if `next_hdr` is an IPv6 extension header (rather than the real L4
-/// protocol). These chain to the true L4 at a variable offset, so the fast
-/// path fails open on them; see [`parse_flow`]. Covers Hop-by-Hop (0),
-/// Routing (43), Fragment (44), ESP (50), Authentication (51),
-/// Destination Options (60) and Mobility (135) — RFC 8200 §4 plus AH/ESP.
+/// protocol). These chain to the true L4 at a variable offset; the fast
+/// path walks them in [`resolve_ipv6_l4`]. Covers Hop-by-Hop, Routing,
+/// Fragment, ESP, Authentication, Destination Options and Mobility —
+/// RFC 8200 §4 plus AH/ESP.
 #[inline(always)]
 const fn is_ipv6_ext_hdr(next_hdr: u8) -> bool {
-    matches!(next_hdr, 0 | 43 | 44 | 50 | 51 | 60 | 135)
+    matches!(
+        next_hdr,
+        IPPROTO_HOPOPTS
+            | IPPROTO_ROUTING
+            | IPPROTO_FRAGMENT
+            | IPPROTO_ESP
+            | IPPROTO_AH
+            | IPPROTO_DSTOPTS
+            | IPPROTO_MOBILITY
+    )
+}
+
+/// Walk the IPv6 extension-header chain starting at `start_off` (the byte
+/// just past the 40-byte fixed header) with initial next-header `first_proto`,
+/// returning the `(l4_offset, l4_protocol)` of the real upper-layer header.
+///
+/// Returns `None` (caller fails open to nftables) when the chain cannot be
+/// resolved on the fast path:
+/// * ESP/AH — payload is encrypted/authenticated, L4 ports are unreadable;
+/// * a non-first Fragment — this packet carries no L4 header;
+/// * a chain longer than [`MAX_IPV6_EXT_HDRS`] — pathological / hostile;
+/// * any truncated read (bounds-checked by [`ptr_at`]).
+///
+/// The loop is bounded by a compile-time constant so the BPF verifier can
+/// prove termination, and every packet access is range-checked, so `off`
+/// never reads past `data_end`. This mirrors the host-tested reference
+/// `ipv6_l4_offset` in `crates/sng-ebpf/src/wire.rs`.
+#[inline(always)]
+fn resolve_ipv6_l4(
+    data: usize,
+    data_end: usize,
+    start_off: usize,
+    first_proto: u8,
+) -> Option<(usize, u8)> {
+    let mut proto = first_proto;
+    let mut off = start_off;
+    for _ in 0..MAX_IPV6_EXT_HDRS {
+        if !is_ipv6_ext_hdr(proto) {
+            // `proto` is the real upper-layer protocol (TCP/UDP/ICMPv6/...).
+            return Some((off, proto));
+        }
+        // Encrypted (ESP) or authenticated (AH) payloads have no L4 we can
+        // read on the fast path; hand them to nftables.
+        if proto == IPPROTO_ESP || proto == IPPROTO_AH {
+            return None;
+        }
+        if proto == IPPROTO_FRAGMENT {
+            let fh: *const Ipv6FragHdr = ptr_at(data, data_end, off)?;
+            // Fragment offset lives in the top 13 bits of the big-endian
+            // field; a non-zero offset means this is not the first fragment,
+            // so the L4 header is in another packet — fail open.
+            let frag_off = u16::from_be_bytes(unsafe { (*fh).frag_off }) >> 3;
+            if frag_off != 0 {
+                return None;
+            }
+            proto = unsafe { (*fh).next_hdr };
+            off = off.checked_add(8)?;
+        } else {
+            // Generic ext header: total length is (hdr_ext_len + 1) * 8 bytes.
+            let eh: *const Ipv6ExtHdr = ptr_at(data, data_end, off)?;
+            let hdr_len = (unsafe { (*eh).hdr_ext_len } as usize + 1) * 8;
+            proto = unsafe { (*eh).next_hdr };
+            off = off.checked_add(hdr_len)?;
+        }
+    }
+    // Ran out of iterations and still on an extension header → too long.
+    None
 }
 
 /// Bounds-checked pointer into the packet at `offset`, valid for `T`.
@@ -637,6 +731,7 @@ fn ptr_at<T>(data: usize, data_end: usize, offset: usize) -> Option<*const T> {
     Some(start as *const T)
 }
 
+#[inline(always)]
 fn copy4(dst: &mut [u8; 16], src: &[u8; 4]) {
     dst[0] = src[0];
     dst[1] = src[1];
@@ -644,6 +739,7 @@ fn copy4(dst: &mut [u8; 16], src: &[u8; 4]) {
     dst[3] = src[3];
 }
 
+#[inline(always)]
 fn min_u64(a: u64, b: u64) -> u64 {
     if a < b {
         a
