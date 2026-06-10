@@ -1,0 +1,21 @@
+# ShieldNet Gateway edge appliance configuration — bench wire runner.
+#
+# Reference schema: crates/sng-edge/src/config.rs (EdgeConfig). This mirrors
+# the deploy/helm/sng-edge values skeleton but binds the enforcement tiers to
+# the in-path veth endpoint so the harness's AF_PACKET frames traverse a real
+# edge. The identity ids are the all-zero bench tenant — this rig never talks
+# to a production control plane.
+[identity]
+tenant_id = "00000000-0000-0000-0000-000000000000"
+device_id = "00000000-0000-0000-0000-000000000000"
+site_id   = "00000000-0000-0000-0000-000000000000"
+
+[ips]
+enable         = ${edge_ips_enabled}
+interface      = "${edge_interface}"
+rule_file_path = "/var/lib/sng/ips/sng.rules"
+staging_dir    = "/var/lib/sng/ips"
+runtime        = "ids"
+
+[swg]
+config_path = "/var/lib/sng/swg/envoy.yaml"
