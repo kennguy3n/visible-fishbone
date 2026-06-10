@@ -1059,9 +1059,7 @@ mod tests {
         let rule = XdpRule {
             id: "max".into(),
             src_cidrs: (0..8).map(|i| net(&format!("10.{i}.0.0/16"))).collect(),
-            dst_cidrs: (0..8)
-                .map(|i| net(&format!("192.168.{i}.0/24")))
-                .collect(),
+            dst_cidrs: (0..8).map(|i| net(&format!("192.168.{i}.0/24"))).collect(),
             src_ports: (0..8).map(|i| PortRange::single(1000 + i)).collect(),
             dst_ports: (0..8).map(|i| PortRange::single(2000 + i)).collect(),
             protocol: Some(6),
@@ -1073,10 +1071,18 @@ mod tests {
 
         // Probe a grid that straddles in- and out-of-set values on every axis.
         let src_ips = [
-            "10.0.5.5", "10.7.9.9", "10.8.1.1", "11.0.0.1", "192.168.0.5",
+            "10.0.5.5",
+            "10.7.9.9",
+            "10.8.1.1",
+            "11.0.0.1",
+            "192.168.0.5",
         ];
         let dst_ips = [
-            "192.168.0.9", "192.168.7.9", "192.168.8.9", "10.0.0.9", "8.8.8.8",
+            "192.168.0.9",
+            "192.168.7.9",
+            "192.168.8.9",
+            "10.0.0.9",
+            "8.8.8.8",
         ];
         let ports = [999u16, 1000, 1007, 1008, 2000, 2007, 2008, 4000];
         let protos = [6u8, 17];
@@ -1141,9 +1147,7 @@ mod tests {
         let wide = || XdpRule {
             id: "w".into(),
             src_cidrs: (0..8).map(|i| net(&format!("10.{i}.0.0/16"))).collect(),
-            dst_cidrs: (0..8)
-                .map(|i| net(&format!("192.168.{i}.0/24")))
-                .collect(),
+            dst_cidrs: (0..8).map(|i| net(&format!("192.168.{i}.0/24"))).collect(),
             src_ports: (0..8).map(|i| PortRange::single(1000 + i)).collect(),
             dst_ports: (0..8).map(|i| PortRange::single(2000 + i)).collect(),
             protocol: Some(6),
@@ -1274,10 +1278,7 @@ mod tests {
     fn ipv6_walk_single_hop_by_hop_to_tcp() {
         // Hop-by-Hop (8 bytes) chaining to TCP → L4 at offset 8.
         let ext = ext8(PROTO_TCP);
-        assert_eq!(
-            ipv6_l4_offset(&ext, IPPROTO_HOPOPTS),
-            Some((8, PROTO_TCP))
-        );
+        assert_eq!(ipv6_l4_offset(&ext, IPPROTO_HOPOPTS), Some((8, PROTO_TCP)));
     }
 
     #[test]
@@ -1286,10 +1287,7 @@ mod tests {
         let mut ext = Vec::new();
         ext.extend_from_slice(&ext8(IPPROTO_ROUTING));
         ext.extend_from_slice(&ext8(PROTO_UDP));
-        assert_eq!(
-            ipv6_l4_offset(&ext, IPPROTO_HOPOPTS),
-            Some((16, PROTO_UDP))
-        );
+        assert_eq!(ipv6_l4_offset(&ext, IPPROTO_HOPOPTS), Some((16, PROTO_UDP)));
     }
 
     #[test]
@@ -1297,10 +1295,7 @@ mod tests {
         // Destination-Options with hdr_ext_len=1 → (1+1)*8 = 16 bytes.
         let mut ext = vec![PROTO_TCP, 1, 0, 0, 0, 0, 0, 0];
         ext.extend_from_slice(&[0u8; 8]); // remainder of the 16-byte header
-        assert_eq!(
-            ipv6_l4_offset(&ext, IPPROTO_DSTOPTS),
-            Some((16, PROTO_TCP))
-        );
+        assert_eq!(ipv6_l4_offset(&ext, IPPROTO_DSTOPTS), Some((16, PROTO_TCP)));
     }
 
     #[test]

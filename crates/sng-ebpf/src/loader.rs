@@ -531,9 +531,9 @@ mod aya_backend {
             let fd = prog
                 .fd()
                 .map_err(|e| EbpfError::Attach(format!("stage {name} not loaded: {e}")))?;
-            prog_array.set(slot, fd, 0).map_err(|e| {
-                EbpfError::Map(format!("jump table set[{slot}] = {name}: {e}"))
-            })?;
+            prog_array
+                .set(slot, fd, 0)
+                .map_err(|e| EbpfError::Map(format!("jump table set[{slot}] = {name}: {e}")))?;
         }
         Ok(())
     }
@@ -605,9 +605,7 @@ mod aya_backend {
             // below borrows the program set immutably.
             let entry: &mut Xdp = ebpf
                 .program_mut(XDP_ENTRY_PROGRAM)
-                .ok_or_else(|| {
-                    EbpfError::Attach(format!("program {XDP_ENTRY_PROGRAM} not found"))
-                })?
+                .ok_or_else(|| EbpfError::Attach(format!("program {XDP_ENTRY_PROGRAM} not found")))?
                 .try_into()
                 .map_err(|e| EbpfError::Attach(format!("entry program is not XDP: {e}")))?;
             entry
@@ -622,9 +620,7 @@ mod aya_backend {
             // though the populate step's map handle has been dropped.
             let entry: &mut Xdp = ebpf
                 .program_mut(XDP_ENTRY_PROGRAM)
-                .ok_or_else(|| {
-                    EbpfError::Attach(format!("program {XDP_ENTRY_PROGRAM} not found"))
-                })?
+                .ok_or_else(|| EbpfError::Attach(format!("program {XDP_ENTRY_PROGRAM} not found")))?
                 .try_into()
                 .map_err(|e| EbpfError::Attach(format!("entry program is not XDP: {e}")))?;
             let flags = match mode {
