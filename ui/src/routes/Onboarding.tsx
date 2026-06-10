@@ -124,6 +124,12 @@ function StepTenant({ onNext }: { onNext: () => void }) {
   const toast = useToast();
   const qc = useQueryClient();
   const [creating, setCreating] = useState(false);
+  // `create.mutate` flips `isPending` to false the moment the HTTP request
+  // resolves — but the async `onSuccess` below still has to invalidate the
+  // tenant list and switch the active tenant. This latch keeps the wizard
+  // "busy" across that whole settling window so Continue can't advance with the
+  // previously-selected tenant before the new one is in context.
+  const [settling, setSettling] = useState(false);
 
   const create = useCreateTenant({
     mutation: {
@@ -131,10 +137,15 @@ function StepTenant({ onNext }: { onNext: () => void }) {
         // The generated mutation doesn't know about the tenant-list query, so
         // refetch it and make the freshly-created tenant the active one before
         // advancing — otherwise step 2 would run against the previous tenant.
-        await qc.invalidateQueries({ queryKey: getListTenantsQueryKey() });
-        setSelectedTenantId(tenant.id);
-        toast.success("Tenant created", `${tenant.name} is now active.`);
-        onNext();
+        setSettling(true);
+        try {
+          await qc.invalidateQueries({ queryKey: getListTenantsQueryKey() });
+          setSelectedTenantId(tenant.id);
+          toast.success("Tenant created", `${tenant.name} is now active.`);
+          onNext();
+        } finally {
+          setSettling(false);
+        }
       },
       onError: (e) =>
         toast.error(
@@ -143,6 +154,7 @@ function StepTenant({ onNext }: { onNext: () => void }) {
         ),
     },
   });
+  const busy = create.isPending || settling;
 
   return (
     <Card title="Choose the tenant to set up">
@@ -204,7 +216,7 @@ function StepTenant({ onNext }: { onNext: () => void }) {
 
       {!isLoading && (creating || tenants.length === 0) && (
         <NewTenantForm
-          busy={create.isPending}
+          busy={busy}
           onCancel={tenants.length > 0 ? () => setCreating(false) : undefined}
           onCreate={(data) => create.mutate({ data })}
         />
@@ -214,7 +226,7 @@ function StepTenant({ onNext }: { onNext: () => void }) {
         <button
           className="btn btn--primary"
           onClick={onNext}
-          disabled={!selectedTenantId || create.isPending}
+          disabled={!selectedTenantId || busy}
         >
           Continue →
         </button>
