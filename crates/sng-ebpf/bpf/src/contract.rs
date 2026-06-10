@@ -34,13 +34,19 @@ pub const MAP_VERDICT_CACHE: &str = "sng_verdict_cache";
 pub const MAP_SYN_BUCKETS: &str = "sng_syn_buckets";
 /// Kernel-owned per-source UDP token buckets (not written by userspace).
 pub const MAP_UDP_BUCKETS: &str = "sng_udp_buckets";
+/// Tail-call jump table for the split XDP pipeline. The userspace loader
+/// populates it with the FDs of the `sng_xdp_stage_*` programs after load.
+pub const MAP_XDP_PROGS: &str = "sng_xdp_progs";
+/// Kernel-owned per-CPU scratch buffer that carries the parsed flow
+/// context across the tail-call boundary (not written by userspace).
+pub const MAP_XDP_SCRATCH: &str = "sng_xdp_scratch";
 
 // ---- Capacities (mirror `crate::wire::MAX_*`) ----
 
 pub const MAX_FW_RULES: u32 = 1024;
 pub const MAX_CLASS_RULES: u32 = 1024;
-pub const MAX_CIDRS_PER_RULE: usize = 8;
-pub const MAX_PORTS_PER_RULE: usize = 8;
+pub const MAX_CIDRS_PER_RULE: usize = 4;
+pub const MAX_PORTS_PER_RULE: usize = 4;
 pub const STEERING_SLOTS: u32 = 6;
 /// Per-family GeoIP trie capacity and per-source bucket / flow-table
 /// capacities. These bound kernel memory; tune with the deployment.

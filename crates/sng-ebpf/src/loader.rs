@@ -306,7 +306,7 @@ mod aya_backend {
     use aya::Ebpf;
     use aya::Pod;
     use aya::maps::lpm_trie::{Key, LpmTrie};
-    use aya::maps::{Array, HashMap, MapData};
+    use aya::maps::{Array, HashMap, MapData, ProgramArray};
     use aya::programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags};
     use std::path::Path;
     use std::sync::{Mutex, PoisonError};
@@ -316,6 +316,34 @@ mod aya_backend {
     /// pipeline (a separate `no_std` BPF compilation), not by
     /// `cargo build --workspace`.
     const OBJECT_PATH_ENV: &str = "SNG_EBPF_OBJECT";
+
+    /// XDP entry program attached to the NIC; the rest of the pipeline is
+    /// reached from it through the `sng_xdp_progs` tail-call jump table.
+    const XDP_ENTRY_PROGRAM: &str = "sng_xdp_classify";
+
+    /// Name of the `BPF_MAP_TYPE_PROG_ARRAY` jump table the entry program
+    /// tail-calls through.
+    const XDP_PROG_ARRAY: &str = "sng_xdp_progs";
+
+    /// The chained stage programs, in jump-table-slot order. This mirrors the
+    /// `SNG_TAIL_*` indices in `bpf/src/main.rs` exactly — slot `i` holds
+    /// `XDP_STAGE_PROGRAMS[i]`. The kernel pipeline is: entry tail-calls slot
+    /// 0 (classify chunk 0) → 1 (classify chunk 1) → 2..=9 (firewall chunks
+    /// 0..7) → 10 (apply). A tail call to an unpopulated slot fails, and the
+    /// program falls open to `XDP_PASS`, so the loader must fill every slot.
+    const XDP_STAGE_PROGRAMS: [&str; 11] = [
+        "sng_xdp_stage_classify",   // slot 0  — SNG_TAIL_CLASSIFY_0
+        "sng_xdp_stage_classify_1", // slot 1  — SNG_TAIL_CLASSIFY_1
+        "sng_xdp_stage_firewall",   // slot 2  — SNG_TAIL_FIREWALL_0
+        "sng_xdp_stage_firewall_1", // slot 3  — SNG_TAIL_FIREWALL_1
+        "sng_xdp_stage_firewall_2", // slot 4  — SNG_TAIL_FIREWALL_2
+        "sng_xdp_stage_firewall_3", // slot 5  — SNG_TAIL_FIREWALL_3
+        "sng_xdp_stage_firewall_4", // slot 6  — SNG_TAIL_FIREWALL_4
+        "sng_xdp_stage_firewall_5", // slot 7  — SNG_TAIL_FIREWALL_5
+        "sng_xdp_stage_firewall_6", // slot 8  — SNG_TAIL_FIREWALL_6
+        "sng_xdp_stage_firewall_7", // slot 9  — SNG_TAIL_FIREWALL_7
+        "sng_xdp_stage_apply",      // slot 10 — SNG_TAIL_APPLY
+    ];
 
     /// Kernel-backed loader built on `aya`. Owns the loaded [`Ebpf`]
     /// handle and the attach lifecycle.
@@ -477,6 +505,39 @@ mod aya_backend {
         Ok(())
     }
 
+    /// Fill the `sng_xdp_progs` tail-call jump table so the entry program can
+    /// chain into the classify/firewall/apply stages. Every
+    /// [`XDP_STAGE_PROGRAMS`] entry must already be loaded (so its fd exists).
+    ///
+    /// The map is *taken* out of the [`Ebpf`] handle so it no longer borrows
+    /// it, letting each stage program be borrowed immutably for its fd. The
+    /// kernel keeps the populated table alive through the attached entry
+    /// program's reference, so dropping the userspace map handle afterwards is
+    /// safe — the loader never needs to rewrite the table (its layout is
+    /// fixed at compile time).
+    fn populate_jump_table(ebpf: &mut Ebpf) -> Result<(), EbpfError> {
+        let map = ebpf
+            .take_map(XDP_PROG_ARRAY)
+            .ok_or_else(|| EbpfError::Map(format!("map {XDP_PROG_ARRAY} not found")))?;
+        let mut prog_array = ProgramArray::try_from(map).map_err(|e| {
+            EbpfError::Map(format!("map {XDP_PROG_ARRAY} is not a prog array: {e}"))
+        })?;
+        for (slot, name) in (0u32..).zip(XDP_STAGE_PROGRAMS) {
+            let prog: &Xdp = ebpf
+                .program(name)
+                .ok_or_else(|| EbpfError::Attach(format!("stage program {name} not found")))?
+                .try_into()
+                .map_err(|e| EbpfError::Attach(format!("stage {name} is not XDP: {e}")))?;
+            let fd = prog
+                .fd()
+                .map_err(|e| EbpfError::Attach(format!("stage {name} not loaded: {e}")))?;
+            prog_array.set(slot, fd, 0).map_err(|e| {
+                EbpfError::Map(format!("jump table set[{slot}] = {name}: {e}"))
+            })?;
+        }
+        Ok(())
+    }
+
     /// Flush the policy-verdict cache so flows are re-evaluated against the
     /// new policy. The cache is an optional accelerator — if the object
     /// does not declare it, there is nothing to invalidate.
@@ -523,20 +584,55 @@ mod aya_backend {
             let ebpf = guard
                 .as_mut()
                 .ok_or_else(|| EbpfError::Attach("load() must precede attach_xdp()".into()))?;
-            let program: &mut Xdp = ebpf
-                .program_mut("sng_xdp_classify")
-                .ok_or_else(|| EbpfError::Attach("program sng_xdp_classify not found".into()))?
+
+            // Load (verify) every chained stage program first so each has a
+            // file descriptor to install in the jump table. The entry program
+            // tail-calls into these, so they must be loaded *and* registered
+            // before the entry begins handling packets.
+            for name in XDP_STAGE_PROGRAMS {
+                let stage: &mut Xdp = ebpf
+                    .program_mut(name)
+                    .ok_or_else(|| EbpfError::Attach(format!("program {name} not found")))?
+                    .try_into()
+                    .map_err(|e| EbpfError::Attach(format!("program {name} is not XDP: {e}")))?;
+                stage
+                    .load()
+                    .map_err(|e| EbpfError::Load(format!("xdp stage {name} load: {e}")))?;
+            }
+
+            // Load the entry program before populating the table: an XDP
+            // program must be loaded to expose its fd, and the populate step
+            // below borrows the program set immutably.
+            let entry: &mut Xdp = ebpf
+                .program_mut(XDP_ENTRY_PROGRAM)
+                .ok_or_else(|| {
+                    EbpfError::Attach(format!("program {XDP_ENTRY_PROGRAM} not found"))
+                })?
                 .try_into()
-                .map_err(|e| EbpfError::Attach(format!("program is not XDP: {e}")))?;
-            program
+                .map_err(|e| EbpfError::Attach(format!("entry program is not XDP: {e}")))?;
+            entry
                 .load()
-                .map_err(|e| EbpfError::Load(format!("xdp program load: {e}")))?;
+                .map_err(|e| EbpfError::Load(format!("xdp entry load: {e}")))?;
+
+            populate_jump_table(ebpf)?;
+
+            // Re-borrow the (now loaded) entry program to attach it. The
+            // kernel keeps the jump table and every stage program alive via
+            // the attached entry's reference, so the pipeline survives even
+            // though the populate step's map handle has been dropped.
+            let entry: &mut Xdp = ebpf
+                .program_mut(XDP_ENTRY_PROGRAM)
+                .ok_or_else(|| {
+                    EbpfError::Attach(format!("program {XDP_ENTRY_PROGRAM} not found"))
+                })?
+                .try_into()
+                .map_err(|e| EbpfError::Attach(format!("entry program is not XDP: {e}")))?;
             let flags = match mode {
                 XdpMode::Skb => XdpFlags::SKB_MODE,
                 XdpMode::Native => XdpFlags::DRV_MODE,
                 XdpMode::Hardware => XdpFlags::HW_MODE,
             };
-            program
+            entry
                 .attach(iface, flags)
                 .map_err(|e| EbpfError::Attach(format!("attach xdp to {iface}: {e}")))?;
             Ok(())

@@ -78,10 +78,25 @@ pub const MAP_VERDICT_CACHE: &str = "sng_verdict_cache";
 pub const MAX_FW_RULES: usize = 1024;
 /// Maximum classification entries the XDP array holds.
 pub const MAX_CLASS_RULES: usize = 1024;
-/// Maximum source/destination CIDR predicates a single [`WireRule`] carries.
-pub const MAX_CIDRS_PER_RULE: usize = 8;
-/// Maximum source/destination port ranges a single [`WireRule`] carries.
-pub const MAX_PORTS_PER_RULE: usize = 8;
+/// Maximum source/destination CIDR predicates a single *wire* [`WireRule`]
+/// carries. This is the kernel contract: keeping it at 4 (vs. 8) roughly
+/// halves the per-rule verifier jump cost so a firewall chunk program
+/// verifies on Linux 5.15 (see `sng-ebpf-bpf` module header). A richer
+/// logical rule (up to [`LOGICAL_MAX_CIDRS_PER_RULE`]) is preserved by
+/// splitting it across several contiguous wire rules during marshalling.
+pub const MAX_CIDRS_PER_RULE: usize = 4;
+/// Maximum source/destination port ranges a single *wire* [`WireRule`]
+/// carries. See [`MAX_CIDRS_PER_RULE`] for why this is 4, not 8.
+pub const MAX_PORTS_PER_RULE: usize = 4;
+/// Maximum CIDR predicates per *logical* [`crate::firewall::XdpRule`] and
+/// direction that marshalling accepts. A logical rule wider than the wire
+/// cap ([`MAX_CIDRS_PER_RULE`]) is split into several wire rules whose
+/// union matches identically (the matcher OR-s within a field); this is the
+/// user-facing per-direction CIDR capacity.
+pub const LOGICAL_MAX_CIDRS_PER_RULE: usize = 8;
+/// Maximum port ranges per *logical* [`crate::firewall::XdpRule`] and
+/// direction that marshalling accepts. See [`LOGICAL_MAX_CIDRS_PER_RULE`].
+pub const LOGICAL_MAX_PORTS_PER_RULE: usize = 8;
 /// The six steering tiers — the fixed length of the steering array.
 pub const STEERING_SLOTS: usize = 6;
 
@@ -362,24 +377,39 @@ impl WireCidr {
 /// Marshal a hot-path ruleset into the kernel array layout plus its
 /// metadata entry.
 ///
+/// A logical [`crate::firewall::XdpRule`] may carry up to
+/// [`LOGICAL_MAX_CIDRS_PER_RULE`] CIDRs / [`LOGICAL_MAX_PORTS_PER_RULE`]
+/// ports per direction, but a *wire* [`WireRule`] holds only
+/// [`MAX_CIDRS_PER_RULE`] / [`MAX_PORTS_PER_RULE`] (the kernel verifier
+/// contract). A rule wider than the wire cap is split into several
+/// contiguous wire rules via [`expand_rule`]; their union matches exactly
+/// what the logical rule does, and first-match-wins ordering is preserved
+/// because all of a rule's wire rows are emitted together and share its
+/// action. The expanded total must still fit [`MAX_FW_RULES`].
+///
 /// # Errors
 ///
-/// Returns [`EbpfError::RuleInvalid`] if the set is larger than
-/// [`MAX_FW_RULES`], if any rule carries more than [`MAX_CIDRS_PER_RULE`]
-/// CIDRs or [`MAX_PORTS_PER_RULE`] port ranges per direction, or if a
-/// member rule fails its own validation. Marshalling validates first, so
-/// a returned `Ok` is byte-for-byte installable.
+/// Returns [`EbpfError::RuleInvalid`] if a rule carries more than
+/// [`LOGICAL_MAX_CIDRS_PER_RULE`] CIDRs or [`LOGICAL_MAX_PORTS_PER_RULE`]
+/// ports per direction, if the expanded wire ruleset exceeds
+/// [`MAX_FW_RULES`], or if a member rule fails its own validation.
+/// Marshalling validates first, so a returned `Ok` is byte-for-byte
+/// installable.
 pub fn marshal_rules(set: &XdpRuleSet) -> Result<(Vec<WireRule>, WireRuleSetMeta), EbpfError> {
     set.validate()?;
-    if set.len() > MAX_FW_RULES {
-        return Err(EbpfError::RuleInvalid(format!(
-            "hot-path ruleset has {} rules, exceeding the XDP capacity of {MAX_FW_RULES}",
-            set.len()
-        )));
-    }
-    let mut out = Vec::with_capacity(set.len());
+    let mut out: Vec<WireRule> = Vec::with_capacity(set.len());
     for rule in set.rules() {
-        out.push(marshal_rule(rule)?);
+        let expanded = expand_rule(rule)?;
+        if out.len() + expanded.len() > MAX_FW_RULES {
+            return Err(EbpfError::RuleInvalid(format!(
+                "hot-path ruleset expands to more than {MAX_FW_RULES} wire rules at \
+                 rule {:?}: a rule with many CIDR/port predicates splits into several \
+                 wire rules (the kernel holds {MAX_CIDRS_PER_RULE} CIDRs / \
+                 {MAX_PORTS_PER_RULE} ports each); reduce predicates or rule count",
+                rule.id
+            )));
+        }
+        out.extend(expanded);
     }
     let meta = WireRuleSetMeta {
         count: count_u32(out.len()),
@@ -389,77 +419,136 @@ pub fn marshal_rules(set: &XdpRuleSet) -> Result<(Vec<WireRule>, WireRuleSetMeta
     Ok((out, meta))
 }
 
-fn marshal_rule(rule: &crate::firewall::XdpRule) -> Result<WireRule, EbpfError> {
-    let n_src_cidrs = checked_len(
-        rule.src_cidrs.len(),
+/// Expand one logical rule into the contiguous run of wire rules whose union
+/// matches the same packets.
+///
+/// The matcher OR-s the values within a predicate field (an empty field is
+/// "any") and AND-s across fields. Splitting each field into wire-sized
+/// groups and emitting the cross-product of those groups preserves the match
+/// set exactly, because AND distributes over OR:
+///
+/// ```text
+/// (a0|a1|a2|a3|a4) & (b0|b1) ==  (a0|a1|a2|a3)&(b0|b1)  |  (a4)&(b0|b1)
+/// ```
+///
+/// Each emitted wire rule carries the original rule's protocol and action, so
+/// whichever row fires first yields the verdict the logical rule would. The
+/// rows are contiguous, so first-match-wins ordering against *other* rules is
+/// unchanged.
+fn expand_rule(rule: &crate::firewall::XdpRule) -> Result<Vec<WireRule>, EbpfError> {
+    rule.validate()?;
+    let src_cidr_groups = chunk_field(
+        &rule.src_cidrs,
         MAX_CIDRS_PER_RULE,
+        LOGICAL_MAX_CIDRS_PER_RULE,
         &rule.id,
         "source CIDRs",
     )?;
-    let n_dst_cidrs = checked_len(
-        rule.dst_cidrs.len(),
+    let dst_cidr_groups = chunk_field(
+        &rule.dst_cidrs,
         MAX_CIDRS_PER_RULE,
+        LOGICAL_MAX_CIDRS_PER_RULE,
         &rule.id,
         "destination CIDRs",
     )?;
-    let n_src_ports = checked_len(
-        rule.src_ports.len(),
+    let src_port_groups = chunk_field(
+        &rule.src_ports,
         MAX_PORTS_PER_RULE,
+        LOGICAL_MAX_PORTS_PER_RULE,
         &rule.id,
         "source ports",
     )?;
-    let n_dst_ports = checked_len(
-        rule.dst_ports.len(),
+    let dst_port_groups = chunk_field(
+        &rule.dst_ports,
         MAX_PORTS_PER_RULE,
+        LOGICAL_MAX_PORTS_PER_RULE,
         &rule.id,
         "destination ports",
     )?;
 
-    let mut wire = WireRule {
-        n_src_cidrs,
-        n_dst_cidrs,
-        n_src_ports,
-        n_dst_ports,
-        protocol: rule.protocol.unwrap_or(0),
-        protocol_present: if rule.protocol.is_some() {
-            PRESENT
-        } else {
-            ABSENT
-        },
-        action: rule.action as u8,
-        ..WireRule::default()
+    let protocol = rule.protocol.unwrap_or(0);
+    let protocol_present = if rule.protocol.is_some() {
+        PRESENT
+    } else {
+        ABSENT
     };
-    for (slot, net) in wire.src_cidrs.iter_mut().zip(&rule.src_cidrs) {
-        *slot = WireCidr::from_net(*net);
+    let action = rule.action as u8;
+
+    let mut wires = Vec::with_capacity(
+        src_cidr_groups.len()
+            * dst_cidr_groups.len()
+            * src_port_groups.len()
+            * dst_port_groups.len(),
+    );
+    for sc in &src_cidr_groups {
+        for dc in &dst_cidr_groups {
+            for sp in &src_port_groups {
+                for dp in &dst_port_groups {
+                    let mut wire = WireRule {
+                        n_src_cidrs: group_len(sc),
+                        n_dst_cidrs: group_len(dc),
+                        n_src_ports: group_len(sp),
+                        n_dst_ports: group_len(dp),
+                        protocol,
+                        protocol_present,
+                        action,
+                        ..WireRule::default()
+                    };
+                    for (slot, net) in wire.src_cidrs.iter_mut().zip(sc) {
+                        *slot = WireCidr::from_net(*net);
+                    }
+                    for (slot, net) in wire.dst_cidrs.iter_mut().zip(dc) {
+                        *slot = WireCidr::from_net(*net);
+                    }
+                    for (slot, range) in wire.src_ports.iter_mut().zip(sp) {
+                        *slot = WirePortRange {
+                            from: range.from,
+                            to: range.to,
+                        };
+                    }
+                    for (slot, range) in wire.dst_ports.iter_mut().zip(dp) {
+                        *slot = WirePortRange {
+                            from: range.from,
+                            to: range.to,
+                        };
+                    }
+                    wires.push(wire);
+                }
+            }
+        }
     }
-    for (slot, net) in wire.dst_cidrs.iter_mut().zip(&rule.dst_cidrs) {
-        *slot = WireCidr::from_net(*net);
-    }
-    for (slot, range) in wire.src_ports.iter_mut().zip(&rule.src_ports) {
-        *slot = WirePortRange {
-            from: range.from,
-            to: range.to,
-        };
-    }
-    for (slot, range) in wire.dst_ports.iter_mut().zip(&rule.dst_ports) {
-        *slot = WirePortRange {
-            from: range.from,
-            to: range.to,
-        };
-    }
-    Ok(wire)
+    Ok(wires)
 }
 
-fn checked_len(len: usize, max: usize, id: &str, what: &str) -> Result<u8, EbpfError> {
-    if len > max {
+/// Split a logical predicate list into wire-sized groups of at most
+/// `wire_max` elements each (the [`WireRule`] slot count for this field). An
+/// empty list ("any") yields a single empty group — a wildcard wire field —
+/// so the cross-product in [`expand_rule`] still emits one row. Rejects a
+/// list longer than `logical_max`, the user-facing per-direction capacity.
+fn chunk_field<T: Clone>(
+    items: &[T],
+    wire_max: usize,
+    logical_max: usize,
+    id: &str,
+    what: &str,
+) -> Result<Vec<Vec<T>>, EbpfError> {
+    if items.len() > logical_max {
         return Err(EbpfError::RuleInvalid(format!(
-            "rule {id:?} has {len} {what}, exceeding the XDP per-rule capacity of {max}"
+            "rule {id:?} has {} {what}, exceeding the per-rule capacity of {logical_max}",
+            items.len()
         )));
     }
-    // `max` is a per-rule capacity constant well under `u8::MAX`, so the
-    // bound check above guarantees this conversion; saturate rather than
-    // panic to keep the data path total even if a future `max` grows.
-    Ok(u8::try_from(len).unwrap_or(u8::MAX))
+    if items.is_empty() {
+        return Ok(vec![Vec::new()]);
+    }
+    Ok(items.chunks(wire_max).map(<[T]>::to_vec).collect())
+}
+
+/// Live-element count of a wire group. A group never exceeds the wire cap
+/// (a low single-digit constant), so it always fits a `u8`; saturate rather
+/// than panic to keep marshalling total.
+fn group_len<T>(group: &[T]) -> u8 {
+    u8::try_from(group.len()).unwrap_or(u8::MAX)
 }
 
 /// Convert a slice length already bounded by the map capacity (a low
@@ -733,6 +822,7 @@ mod tests {
     use crate::firewall::{PortRange, XdpRule};
     use pretty_assertions::assert_eq;
     use std::mem::size_of;
+    use std::net::IpAddr;
 
     fn net(s: &str) -> IpNet {
         s.parse().unwrap()
@@ -760,7 +850,9 @@ mod tests {
         assert_eq!(size_of::<WireCountry>(), 4);
         // The largest and most complex wire type; pin it so a stray field
         // or padding change is caught (the kernel re-declares it identically).
-        assert_eq!(size_of::<WireRule>(), 392);
+        // 4*20 (src_cidrs) + 4*20 (dst_cidrs) + 4*4 (src_ports) + 4*4
+        // (dst_ports) + 8 trailing u8 fields = 200 bytes at the 4/4 wire cap.
+        assert_eq!(size_of::<WireRule>(), 200);
         // `FlowState` and `VerdictCacheEntry` are read back from the kernel
         // maps verbatim, so their layout is part of the same contract and the
         // kernel mirror (`bpf/src/contract.rs`) must match byte-for-byte.
@@ -823,10 +915,12 @@ mod tests {
     }
 
     #[test]
-    fn marshal_rules_rejects_too_many_cidrs() {
+    fn marshal_rules_rejects_more_than_logical_cidrs() {
+        // A list within the logical cap now *splits* rather than erroring; a
+        // list beyond it is still rejected. Build LOGICAL_MAX + 1 CIDRs.
         let rule = XdpRule {
             id: "huge".into(),
-            src_cidrs: (0..=MAX_CIDRS_PER_RULE)
+            src_cidrs: (0..=LOGICAL_MAX_CIDRS_PER_RULE)
                 .map(|i| net(&format!("10.{i}.0.0/16")))
                 .collect(),
             dst_cidrs: vec![],
@@ -836,6 +930,228 @@ mod tests {
             action: XdpRuleAction::Pass,
         };
         let set = XdpRuleSet::new(vec![rule], XdpRuleAction::Drop);
+        let err = marshal_rules(&set).unwrap_err();
+        assert!(matches!(err, EbpfError::RuleInvalid(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn marshal_rules_keeps_wire_cap_within_a_single_wire_rule() {
+        // Exactly the wire cap in every field stays one wire rule (no split).
+        let rule = XdpRule {
+            id: "exact".into(),
+            src_cidrs: (0..MAX_CIDRS_PER_RULE)
+                .map(|i| net(&format!("10.{i}.0.0/16")))
+                .collect(),
+            dst_cidrs: (0..MAX_CIDRS_PER_RULE)
+                .map(|i| net(&format!("192.168.{i}.0/24")))
+                .collect(),
+            src_ports: (0..MAX_PORTS_PER_RULE)
+                .map(|i| PortRange::single(1000 + i as u16))
+                .collect(),
+            dst_ports: (0..MAX_PORTS_PER_RULE)
+                .map(|i| PortRange::single(2000 + i as u16))
+                .collect(),
+            protocol: Some(6),
+            action: XdpRuleAction::Pass,
+        };
+        let set = XdpRuleSet::new(vec![rule], XdpRuleAction::Drop);
+        let (wire, meta) = marshal_rules(&set).unwrap();
+        assert_eq!(wire.len(), 1);
+        assert_eq!(meta.count, 1);
+        assert_eq!(wire[0].n_src_cidrs as usize, MAX_CIDRS_PER_RULE);
+        assert_eq!(wire[0].n_dst_ports as usize, MAX_PORTS_PER_RULE);
+    }
+
+    #[test]
+    fn marshal_rules_splits_wide_rule_into_contiguous_cross_product() {
+        // 5 src CIDRs (-> 2 groups: 4 + 1) x 6 dst ports (-> 2 groups: 4 + 2)
+        // = 4 contiguous wire rules, each carrying the rule's action.
+        let rule = XdpRule {
+            id: "wide".into(),
+            src_cidrs: (0..5).map(|i| net(&format!("10.{i}.0.0/16"))).collect(),
+            dst_cidrs: vec![],
+            src_ports: vec![],
+            dst_ports: (0..6).map(|i| PortRange::single(8000 + i)).collect(),
+            protocol: Some(6),
+            action: XdpRuleAction::Pass,
+        };
+        let set = XdpRuleSet::new(vec![rule], XdpRuleAction::Drop);
+        let (wire, meta) = marshal_rules(&set).unwrap();
+        assert_eq!(wire.len(), 4, "ceil(5/4)=2 x ceil(6/4)=2");
+        assert_eq!(meta.count, 4);
+        for w in &wire {
+            assert_eq!(w.action, XdpRuleAction::Pass as u8);
+            assert_eq!(w.protocol_present, PRESENT);
+            assert_eq!(w.protocol, 6);
+            // dst_cidrs is "any" in every row; no group exceeds the wire cap.
+            assert_eq!(w.n_dst_cidrs, 0);
+            assert!(w.n_src_cidrs as usize <= MAX_CIDRS_PER_RULE);
+            assert!(w.n_dst_ports as usize <= MAX_PORTS_PER_RULE);
+        }
+        // Every src CIDR group is covered across the rows (4 then 1).
+        let total_src: usize = [wire[0].n_src_cidrs, wire[2].n_src_cidrs]
+            .iter()
+            .map(|&n| n as usize)
+            .sum();
+        assert_eq!(total_src, 5);
+    }
+
+    /// Reference matcher over a marshalled `WireRule`, mirroring the kernel:
+    /// OR within each populated field, AND across fields, empty field = any.
+    fn wire_matches(
+        w: &WireRule,
+        src: IpAddr,
+        dst: IpAddr,
+        sport: u16,
+        dport: u16,
+        proto: u8,
+    ) -> bool {
+        if w.protocol_present == PRESENT && w.protocol != proto {
+            return false;
+        }
+        let cidr_hit = |c: &WireCidr, ip: IpAddr| -> bool {
+            let net = if c.family == family::V4 {
+                let mut o = [0u8; 4];
+                o.copy_from_slice(&c.addr[..4]);
+                IpNet::new(IpAddr::from(o), c.prefix_len).unwrap()
+            } else {
+                IpNet::new(IpAddr::from(c.addr), c.prefix_len).unwrap()
+            };
+            net.contains(&ip)
+        };
+        if w.n_src_cidrs > 0
+            && !w.src_cidrs[..w.n_src_cidrs as usize]
+                .iter()
+                .any(|c| cidr_hit(c, src))
+        {
+            return false;
+        }
+        if w.n_dst_cidrs > 0
+            && !w.dst_cidrs[..w.n_dst_cidrs as usize]
+                .iter()
+                .any(|c| cidr_hit(c, dst))
+        {
+            return false;
+        }
+        if w.n_src_ports > 0
+            && !w.src_ports[..w.n_src_ports as usize]
+                .iter()
+                .any(|p| sport >= p.from && sport <= p.to)
+        {
+            return false;
+        }
+        if w.n_dst_ports > 0
+            && !w.dst_ports[..w.n_dst_ports as usize]
+                .iter()
+                .any(|p| dport >= p.from && dport <= p.to)
+        {
+            return false;
+        }
+        true
+    }
+
+    #[test]
+    fn expand_rule_union_matches_logical_rule_exactly() {
+        // A maximally wide rule (8 src CIDRs, 8 dst CIDRs, 8 src ports, 8 dst
+        // ports) splits into 2*2*2*2 = 16 wire rules. For a battery of probe
+        // packets, "the logical rule matches" must equal "some wire row
+        // matches" — the equivalence the split relies on.
+        let rule = XdpRule {
+            id: "max".into(),
+            src_cidrs: (0..8).map(|i| net(&format!("10.{i}.0.0/16"))).collect(),
+            dst_cidrs: (0..8)
+                .map(|i| net(&format!("192.168.{i}.0/24")))
+                .collect(),
+            src_ports: (0..8).map(|i| PortRange::single(1000 + i)).collect(),
+            dst_ports: (0..8).map(|i| PortRange::single(2000 + i)).collect(),
+            protocol: Some(6),
+            action: XdpRuleAction::Pass,
+        };
+        let set = XdpRuleSet::new(vec![rule.clone()], XdpRuleAction::Drop);
+        let (wire, _) = marshal_rules(&set).unwrap();
+        assert_eq!(wire.len(), 16);
+
+        // Probe a grid that straddles in- and out-of-set values on every axis.
+        let src_ips = [
+            "10.0.5.5", "10.7.9.9", "10.8.1.1", "11.0.0.1", "192.168.0.5",
+        ];
+        let dst_ips = [
+            "192.168.0.9", "192.168.7.9", "192.168.8.9", "10.0.0.9", "8.8.8.8",
+        ];
+        let ports = [999u16, 1000, 1007, 1008, 2000, 2007, 2008, 4000];
+        let protos = [6u8, 17];
+        for s in src_ips {
+            for d in dst_ips {
+                for &sp in &ports {
+                    for &dp in &ports {
+                        for &pr in &protos {
+                            let src: IpAddr = s.parse().unwrap();
+                            let dst: IpAddr = d.parse().unwrap();
+                            let logical = rule.matches(src, dst, sp, dp, pr);
+                            let union = wire.iter().any(|w| wire_matches(w, src, dst, sp, dp, pr));
+                            assert_eq!(
+                                logical, union,
+                                "mismatch for {src} {dst} {sp} {dp} proto {pr}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn marshal_rules_split_preserves_first_match_ordering() {
+        // Two overlapping logical rules: a wide PASS that splits, then a DROP
+        // catch-all. A packet the first rule matches must resolve via one of
+        // the first rule's (contiguous, earlier) rows, not the catch-all.
+        let pass = XdpRule {
+            id: "pass".into(),
+            src_cidrs: (0..5).map(|i| net(&format!("10.{i}.0.0/16"))).collect(),
+            dst_cidrs: vec![],
+            src_ports: vec![],
+            dst_ports: vec![],
+            protocol: None,
+            action: XdpRuleAction::Pass,
+        };
+        let drop = XdpRule::catch_all("drop-all", XdpRuleAction::Drop);
+        let set = XdpRuleSet::new(vec![pass, drop], XdpRuleAction::Drop);
+        let (wire, _) = marshal_rules(&set).unwrap();
+        // 2 PASS rows (ceil(5/4)) followed by 1 DROP row.
+        assert_eq!(wire.len(), 3);
+        assert_eq!(wire[0].action, XdpRuleAction::Pass as u8);
+        assert_eq!(wire[1].action, XdpRuleAction::Pass as u8);
+        assert_eq!(wire[2].action, XdpRuleAction::Drop as u8);
+
+        // A packet from 10.4.x (only in the PASS rule's second group) hits a
+        // PASS row before the DROP catch-all.
+        let src: IpAddr = "10.4.0.1".parse().unwrap();
+        let dst: IpAddr = "8.8.8.8".parse().unwrap();
+        let first = wire
+            .iter()
+            .find(|w| wire_matches(w, src, dst, 1234, 443, 6))
+            .expect("a row matches");
+        assert_eq!(first.action, XdpRuleAction::Pass as u8);
+    }
+
+    #[test]
+    fn marshal_rules_rejects_overflow_after_expansion() {
+        // Each rule splits into 16 wire rows; enough of them overflow the
+        // 1024 wire-rule budget even though the logical count is far smaller.
+        let wide = || XdpRule {
+            id: "w".into(),
+            src_cidrs: (0..8).map(|i| net(&format!("10.{i}.0.0/16"))).collect(),
+            dst_cidrs: (0..8)
+                .map(|i| net(&format!("192.168.{i}.0/24")))
+                .collect(),
+            src_ports: (0..8).map(|i| PortRange::single(1000 + i)).collect(),
+            dst_ports: (0..8).map(|i| PortRange::single(2000 + i)).collect(),
+            protocol: Some(6),
+            action: XdpRuleAction::Pass,
+        };
+        // 65 rules * 16 rows = 1040 > 1024.
+        let rules: Vec<_> = (0..65).map(|_| wide()).collect();
+        let set = XdpRuleSet::new(rules, XdpRuleAction::Drop);
         let err = marshal_rules(&set).unwrap_err();
         assert!(matches!(err, EbpfError::RuleInvalid(_)), "got {err:?}");
     }
