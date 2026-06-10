@@ -1,19 +1,17 @@
 {
   "items": [
     {
-      "created_at": "2026-06-09T00:18:25.068019000Z",
-      "id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
-      "msp_id": "b47fb518-f336-4449-82b0-bd33a1f36833",
-      "name": "Umbrella Logistics",
-      "region": "ap-southeast",
+      "created_at": "2026-06-10T16:05:22.757199000Z",
+      "id": "f79e9245-24eb-4573-b9f9-7e5b34fd7056",
+      "name": "ShieldNet Platform",
       "settings": {},
-      "slug": "umbrella-logistics",
+      "slug": "platform",
       "status": "active",
-      "tier": "starter",
-      "updated_at": "2026-06-09T02:18:11.249403000Z"
+      "tier": "enterprise",
+      "updated_at": "2026-06-10T16:05:22.757199000Z"
     },
     {
-      "created_at": "2026-06-09T00:18:24.990767000Z",
+      "created_at": "2026-06-10T16:05:22.757199000Z",
       "id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
       "name": "Initech Financial",
       "region": "eu-central",
@@ -21,22 +19,10 @@
       "slug": "initech-financial",
       "status": "active",
       "tier": "professional",
-      "updated_at": "2026-06-09T00:18:24.990767000Z"
+      "updated_at": "2026-06-10T16:05:22.757199000Z"
     },
     {
-      "created_at": "2026-06-09T00:18:24.904210000Z",
-      "id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
-      "msp_id": "b47fb518-f336-4449-82b0-bd33a1f36833",
-      "name": "Globex Health Systems",
-      "region": "us-west",
-      "settings": {},
-      "slug": "globex-health",
-      "status": "active",
-      "tier": "enterprise",
-      "updated_at": "2026-06-09T02:18:11.082063000Z"
-    },
-    {
-      "created_at": "2026-06-09T00:12:37.099779000Z",
+      "created_at": "2026-06-10T16:05:22.757199000Z",
       "id": "92112770-7c0a-410b-b0f4-09dde70e063a",
       "msp_id": "b47fb518-f336-4449-82b0-bd33a1f36833",
       "name": "Acme Retail Group",
@@ -45,17 +31,31 @@
       "slug": "acme-retail",
       "status": "active",
       "tier": "enterprise",
-      "updated_at": "2026-06-09T02:18:10.954824000Z"
+      "updated_at": "2026-06-10T16:05:22.787582000Z"
     },
     {
-      "created_at": "2026-06-08T22:46:51.594006000Z",
-      "id": "f79e9245-24eb-4573-b9f9-7e5b34fd7056",
-      "name": "ShieldNet Platform",
+      "created_at": "2026-06-10T16:05:22.757199000Z",
+      "id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+      "msp_id": "b47fb518-f336-4449-82b0-bd33a1f36833",
+      "name": "Globex Health Systems",
+      "region": "us-west",
       "settings": {},
-      "slug": "platform",
+      "slug": "globex-health",
       "status": "active",
       "tier": "enterprise",
-      "updated_at": "2026-06-08T22:46:51.594006000Z"
+      "updated_at": "2026-06-10T16:05:23.002109000Z"
+    },
+    {
+      "created_at": "2026-06-10T16:05:22.757199000Z",
+      "id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
+      "msp_id": "b47fb518-f336-4449-82b0-bd33a1f36833",
+      "name": "Umbrella Logistics",
+      "region": "ap-southeast",
+      "settings": {},
+      "slug": "umbrella-logistics",
+      "status": "active",
+      "tier": "starter",
+      "updated_at": "2026-06-10T16:05:23.369247000Z"
     }
   ]
 }

@@ -24,7 +24,7 @@ what the numbers are and aren't:
 
 With that contract stated, here is the full matrix, captured verbatim from
 [`efficacy-report.json`](../artifacts/efficacy-report.json) (suite verdict:
-**PASS**, commit `3c2c0fc9`):
+**PASS**, commit `6c6406b`):
 
 | function | crate | kind | cases | bad | good | TP | FN | TN | FP | catch | FPR |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -39,7 +39,10 @@ With that contract stated, here is the full matrix, captured verbatim from
 
 The two interesting cells are the **DLP** rows (1100 + 31 cases) — that's the one
 with enough volume to be more than a smoke test, and it's the on-device ML story
-we go deep on in Post 5.
+we go deep on in Post 5. That post also covers the new **edge-driven wake**
+([PR #135](https://github.com/kennguy3n/visible-fishbone/pull/135)) that fires the
+classifier the instant a file is written or the clipboard changes, rather than on
+a fixed poll — the detection-*trigger* counterpart to this catch-rate matrix.
 
 ## What each row actually verified (the honest notes)
 

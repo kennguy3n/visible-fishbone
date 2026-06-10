@@ -3,6 +3,11 @@
 Every figure in the blog series traces back to one of these files. This README
 records exactly how each was produced and what it does (and does not) prove.
 
+**Provenance:** all artifacts in this directory were regenerated at commit
+`6c6406bdfa8c394d9aad18e7c496d9148f519026` (generated 2026-06-10). The
+`git_sha` / `generated_at` fields embedded in `efficacy-report.json` and
+`edge-performance-datasheet.json` are the authoritative per-file stamps.
+
 ## `efficacy-report.json` — security efficacy (REAL, measured)
 
 - **Produced by:** `bench/efficacy` (`sng-efficacy`), which drives the *actual*
@@ -22,9 +27,9 @@ records exactly how each was produced and what it does (and does not) prove.
   | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
   | firewall | block-rate | 7 | 5 | 100.0 | 0.0 | 100.0 | — |
   | swg | block-rate | 6 | 5 | 100.0 | 0.0 | 100.0 | — |
-  | ztna | block-rate | 8 | 4 | 100.0 | 0.0 | 100.0 | 1.73M decisions/s · 577 ns/op |
-  | dlp | detect-rate | 550 | 550 | 100.0 | 0.0 | 100.0 | 4,532 scans/s · 2.4 MiB/s |
-  | dlp_ml_ner | detect-rate | 23 | 8 | 100.0 | 0.0 | 100.0 | 32,509 scans/s · 5.1 MiB/s |
+  | ztna | block-rate | 8 | 4 | 100.0 | 0.0 | 100.0 | 1.56M decisions/s · 643 ns/op |
+  | dlp | detect-rate | 550 | 550 | 100.0 | 0.0 | 100.0 | 3,914 scans/s · 2.05 MiB/s |
+  | dlp_ml_ner | detect-rate | 23 | 8 | 100.0 | 0.0 | 100.0 | 30,524 scans/s · 4.83 MiB/s |
   | malware (YARA) | detect-rate | 8 | 6 | 100.0 | 0.0 | 100.0 | — |
   | dns | detect-rate | 10 | 13 | 100.0 | 0.0 | 100.0 | — |
   | ips (Suricata) | detect-rate | 7 | 6 | 100.0 | 0.0 | 100.0 | — |

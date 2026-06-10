@@ -79,6 +79,32 @@ row by far:
   [`s5-umbrella-dlp-policies-emptystate.json`](../artifacts/payloads/s5-umbrella-dlp-policies-emptystate.json)
   — so the empty state in the UI is an honest tier difference, not a load failure.
 
+## Edge-driven wake: classify on-write, not on a timer
+
+On-device DLP only matters if it catches an exfiltration *as it happens*. The
+endpoint monitors used to busy-poll — a fixed 50 ms async poll per channel — which
+both burned CPU on idle endpoints and added up to 50 ms of detection latency.
+[PR #135](https://github.com/kennguy3n/visible-fishbone/pull/135) replaces that
+with an **edge-driven wake** in `sng-pal`:
+
+- **inotify file-write monitor + X11 clipboard monitor** now pulse a
+  `tokio::sync::Notify` the moment the kernel reports a write or the X selection
+  changes, mirroring the existing udev wake on the USB-transfer monitor. The
+  classifier consumer parks on `notified()` instead of spinning, with a defensive
+  shutdown-poll fallback only.
+- Because `Notify` stores a permit when no waiter is parked, an event that races
+  the await is **never lost** — correctness doesn't depend on the timing of the
+  wake.
+- The result: the fixed ~20 wakeups/sec/channel idle busy-poll is gone, and
+  write-to-detection latency drops from up-to-50 ms to ~0. The same release adds
+  native macOS (FSEvents / Pasteboard / IOKit) and Windows (RDCW / clipboard /
+  WMI / spooler / WFP) endpoint-DLP backends so the on-write trigger is uniform
+  across platforms.
+
+This is a *trigger* change, not a detection-quality change: the same
+`ContentClassifier` and ONNX NER from the matrix above run on the woken content —
+they just run sooner and without the idle tax.
+
 ## Where we fall short
 
 - **Corpus is synthetic.** As with all of Post 3: the 1100-case result proves the

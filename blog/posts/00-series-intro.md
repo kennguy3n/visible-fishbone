@@ -26,7 +26,11 @@ ShieldNet Gateway is a multi-tenant SASE platform with three moving parts:
   (firewall), `sng-ips` (Suricata-driven IPS), `sng-swg` (secure web gateway +
   yara-x malware scanning), `sng-dns` (threat-intel sinkhole + tunneling
   detection), `sng-ztna` (zero-trust brokering), `sng-dlp` (on-device ML
-  classifier).
+  classifier). Beneath the firewall sits an optional **eBPF/XDP fast path**
+  ([PR #129](https://github.com/kennguy3n/visible-fishbone/pull/129)) — a
+  tail-call-split in-kernel pipeline with an LRU verdict cache that serves
+  repeat flows before they ever reach userspace, failing open to nftables for
+  anything it can't decide. Post 1 walks it.
 
 ## The honesty contract
 
