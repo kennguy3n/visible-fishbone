@@ -52,10 +52,9 @@ pub const STEERING_SLOTS: u32 = 6;
 /// capacities. These bound kernel memory; tune with the deployment.
 pub const MAX_GEOIP_ENTRIES: u32 = 1 << 16;
 pub const MAX_BLOCKED_COUNTRIES: u32 = 512;
-/// Capacity of the `LRU_HASH` fast-path tables: per-flow state, the
-/// conntrack shadow, and **the policy verdict cache**
-/// (`sng_verdict_cache`, declared `with_max_entries(MAX_FLOWS, …)` in
-/// `main.rs`).
+/// Capacity of the flow-keyed `LRU_HASH` fast-path tables: per-flow state
+/// (`sng_flow_state`) and **the policy verdict cache** (`sng_verdict_cache`)
+/// — the two maps declared `with_max_entries(MAX_FLOWS, …)` in `main.rs`.
 ///
 /// This is a single **PoP-wide** ceiling on concurrent flows, shared by
 /// every tenant on the edge, **not** a per-tenant allocation — the cache

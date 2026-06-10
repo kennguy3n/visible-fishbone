@@ -100,9 +100,10 @@ pub const LOGICAL_MAX_PORTS_PER_RULE: usize = 8;
 /// The six steering tiers — the fixed length of the steering array.
 pub const STEERING_SLOTS: usize = 6;
 
-/// Capacity of the kernel-owned `LRU_HASH` fast-path tables — the per-flow
-/// state map ([`MAP_FLOW_STATE`]), the conntrack shadow ([`MAP_CONNTRACK`]),
-/// and **the policy verdict cache** ([`MAP_VERDICT_CACHE`]).
+/// Capacity of the kernel-owned, flow-keyed `LRU_HASH` fast-path tables —
+/// the per-flow state map ([`MAP_FLOW_STATE`]) and **the policy verdict
+/// cache** ([`MAP_VERDICT_CACHE`]) — the two maps `main.rs` declares with
+/// `with_max_entries(MAX_FLOWS, …)`.
 ///
 /// # PoP-shared, tenant-count-independent invariant
 ///
@@ -128,8 +129,8 @@ pub const STEERING_SLOTS: usize = 6;
 pub const MAX_FLOWS: usize = 1 << 20;
 
 /// Capacity of the kernel-owned per-source `LRU_HASH` rate-limit tables
-/// ([`MAP_SYN_BUCKETS`] / [`MAP_UDP_BUCKETS`]). Like [`MAX_FLOWS`] this is
-/// a single PoP-wide ceiling on distinct *source addresses*, never a
+/// (`sng_syn_buckets` / `sng_udp_buckets`). Like [`MAX_FLOWS`] this is a
+/// single PoP-wide ceiling on distinct *source addresses*, never a
 /// per-tenant allocation, and mirrors `MAX_SOURCES` in
 /// `crates/sng-ebpf/bpf/src/contract.rs`.
 pub const MAX_SOURCES: usize = 1 << 20;
