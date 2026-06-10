@@ -418,6 +418,18 @@ pub struct MobileAgent {
     /// [`PowerState::LowPower`] the heartbeat is stretched by
     /// [`LOW_POWER_INTERVAL_MULTIPLIER`].
     power: Mutex<PowerState>,
+    /// Serializes the lifecycle-mutating operations that span an async
+    /// tunnel call — [`Self::connect`], [`Self::disconnect`] and
+    /// [`Self::wipe`] — so their check → `start`/`stop` → transition
+    /// sequences cannot interleave with one another. The sync
+    /// [`Self::suspend`] / [`Self::resume`] take it with `try_lock`,
+    /// failing fast while such an operation is in flight rather than
+    /// racing it — e.g. a `suspend` slipping between a `disconnect`'s
+    /// `stop_tunnel` and its transition, which would strand a
+    /// `Suspended` agent whose data plane has already been cut.
+    /// [`Self::terminate`] deliberately does **not** take it: it is the
+    /// unconditional kill switch and must win even mid-operation.
+    control: tokio::sync::Mutex<()>,
 }
 
 impl fmt::Debug for MobileAgent {
@@ -448,6 +460,7 @@ impl MobileAgent {
             last_posture: Mutex::new(None),
             wake: tokio::sync::Notify::new(),
             power: Mutex::new(PowerState::Normal),
+            control: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -539,12 +552,43 @@ impl MobileAgent {
 
     /// Suspend the agent (app backgrounded / network lost). Only
     /// valid from [`LifecycleState::Connected`].
+    ///
+    /// Returns a [`MobileError::Lifecycle`] busy error if a
+    /// connect/disconnect/wipe is in flight, so a suspend can never
+    /// split such an operation's check → tunnel-call → transition.
     pub fn suspend(&self) -> Result<(), MobileError> {
+        let _control = self.control.try_lock().map_err(|_| {
+            MobileError::Lifecycle(
+                "a tunnel operation is in progress; retry suspend once it completes".into(),
+            )
+        })?;
         self.transition(LifecycleState::Suspended)
     }
 
-    /// Resume from [`LifecycleState::Suspended`].
+    /// Resume the parked heartbeat, moving [`LifecycleState::Suspended`]
+    /// → [`LifecycleState::Connected`].
+    ///
+    /// Only valid from [`LifecycleState::Suspended`]. Resuming from any
+    /// other state is rejected — notably [`LifecycleState::Enrolled`],
+    /// which also legally precedes `Connected` (via [`Self::connect`]):
+    /// without this guard a `resume` could reach `Connected` from
+    /// `Enrolled` without the data-plane tunnel ever being started,
+    /// leaving the steady-state loop spinning against a down tunnel.
+    ///
+    /// Returns a [`MobileError::Lifecycle`] busy error while a
+    /// connect/disconnect/wipe holds the control lock.
     pub fn resume(&self) -> Result<(), MobileError> {
+        let _control = self.control.try_lock().map_err(|_| {
+            MobileError::Lifecycle(
+                "a tunnel operation is in progress; retry resume once it completes".into(),
+            )
+        })?;
+        let state = self.state();
+        if state != LifecycleState::Suspended {
+            return Err(MobileError::Lifecycle(format!(
+                "resume is only valid from Suspended, not {state:?}"
+            )));
+        }
         self.transition(LifecycleState::Connected)
     }
 
@@ -556,6 +600,12 @@ impl MobileAgent {
     /// a live tunnel should [`Self::disconnect`] first, or use
     /// [`Self::wipe`] — which cuts the data plane as part of
     /// de-enrolment — when revoking the device.
+    ///
+    /// Deliberately does **not** take the control lock the tunnel ops
+    /// hold: terminate is the unconditional kill switch and must win
+    /// even while a connect/disconnect/wipe is in flight. A `connect`
+    /// racing it detects the lost transition and tears its own tunnel
+    /// back down, so no data plane is leaked.
     pub fn terminate(&self) -> Result<(), MobileError> {
         self.transition(LifecycleState::Terminated)
     }
@@ -581,6 +631,11 @@ impl MobileAgent {
     /// * [`MobileError::Timeout`] if the start exceeds
     ///   [`MobileAgentConfig::connect_timeout`].
     pub async fn connect(&self, config: TunnelConfig) -> Result<(), MobileError> {
+        // Serialize the whole check → start_tunnel → transition
+        // sequence against every other tunnel-affecting lifecycle op so
+        // they cannot interleave (and so a racing suspend/resume fails
+        // fast rather than mutating the lifecycle underneath us).
+        let _control = self.control.lock().await;
         // Fail fast before touching the platform backend if the
         // lifecycle does not permit a connect; the authoritative
         // guard is still the `Enrolled → Connected` transition below,
@@ -636,6 +691,10 @@ impl MobileAgent {
     /// * [`MobileError::Tunnel`] if the platform backend fails to
     ///   stop the tunnel.
     pub async fn disconnect(&self) -> Result<(), MobileError> {
+        // Hold the control lock across stop_tunnel → transition so a
+        // concurrent suspend/resume cannot split the teardown and
+        // strand a Suspended agent whose data plane is already cut.
+        let _control = self.control.lock().await;
         let state = self.state();
         if state != LifecycleState::Connected {
             return Err(MobileError::Lifecycle(format!(
@@ -830,6 +889,9 @@ impl MobileAgent {
     /// an already-terminated agent is the desired end state — so a
     /// revoke can be replayed.
     pub async fn wipe(&self) -> Result<(), MobileError> {
+        // Serialize against connect/disconnect so a revoke cannot race
+        // a connect bringing the tunnel back up underneath it.
+        let _control = self.control.lock().await;
         // Cut the data plane before destroying the identity so a
         // revoked device stops carrying traffic at once, even if the
         // key delete or lifecycle move below runs into trouble.
@@ -1303,6 +1365,12 @@ mod tests {
         fail_start: AtomicBool,
         fail_stop: AtomicBool,
         status: Mutex<TunnelStatus>,
+        /// When set, `stop_tunnel` signals `stop_entered` and parks on
+        /// `stop_release`, so a test can hold a `disconnect`/`wipe`
+        /// in-flight (its control lock held) and observe what races it.
+        gate_stop: AtomicBool,
+        stop_entered: tokio::sync::Notify,
+        stop_release: tokio::sync::Notify,
     }
 
     impl RecordingTunnel {
@@ -1313,6 +1381,9 @@ mod tests {
                 fail_start: AtomicBool::new(false),
                 fail_stop: AtomicBool::new(false),
                 status: Mutex::new(TunnelStatus::Down),
+                gate_stop: AtomicBool::new(false),
+                stop_entered: tokio::sync::Notify::new(),
+                stop_release: tokio::sync::Notify::new(),
             })
         }
         fn starts(&self) -> usize {
@@ -1334,6 +1405,12 @@ mod tests {
             Ok(())
         }
         async fn stop_tunnel(&self) -> Result<(), TunnelError> {
+            if self.gate_stop.load(Ordering::SeqCst) {
+                // Signal the call is in flight (the agent now holds its
+                // control lock) and park until the test releases us.
+                self.stop_entered.notify_one();
+                self.stop_release.notified().await;
+            }
             if self.fail_stop.load(Ordering::SeqCst) {
                 return Err(TunnelError::Backend("induced stop failure".into()));
             }
@@ -1560,5 +1637,54 @@ mod tests {
             .await
             .expect("wipe completes despite stop error");
         assert_eq!(agent.state(), LifecycleState::Terminated);
+    }
+
+    #[tokio::test]
+    async fn resume_is_rejected_outside_suspended() {
+        let tunnel = RecordingTunnel::new();
+        let agent = build_agent(Arc::clone(&tunnel));
+        drive_to_enrolled(&agent);
+
+        // Enrolled also legally precedes Connected (via connect), so a
+        // resume that leaned only on the transition table could reach
+        // Connected from Enrolled without ever starting the tunnel.
+        let err = agent.resume().unwrap_err();
+        assert!(matches!(err, MobileError::Lifecycle(_)));
+        assert_eq!(agent.state(), LifecycleState::Enrolled);
+        assert_eq!(tunnel.starts(), 0, "resume must never start the tunnel");
+    }
+
+    #[tokio::test]
+    async fn disconnect_in_flight_blocks_suspend() {
+        let tunnel = RecordingTunnel::new();
+        let agent = Arc::new(build_agent(Arc::clone(&tunnel)));
+        drive_to_enrolled(&agent);
+        agent.connect(valid_tunnel_config()).await.unwrap();
+        assert_eq!(agent.state(), LifecycleState::Connected);
+
+        // Park disconnect inside stop_tunnel while it holds the control
+        // lock, modelling a slow Network Extension / VpnService stop.
+        tunnel.gate_stop.store(true, Ordering::SeqCst);
+        let disconnect_agent = Arc::clone(&agent);
+        let disconnecting = tokio::spawn(async move { disconnect_agent.disconnect().await });
+        tunnel.stop_entered.notified().await;
+
+        // Without serialization this suspend would succeed (Connected →
+        // Suspended) and strand a Suspended agent whose tunnel is about
+        // to be cut. It must instead fail fast and leave state intact.
+        assert!(matches!(
+            agent.suspend().unwrap_err(),
+            MobileError::Lifecycle(_)
+        ));
+        assert_eq!(agent.state(), LifecycleState::Connected);
+
+        // Releasing the stop lets disconnect finish and reach Enrolled.
+        tunnel.stop_release.notify_one();
+        disconnecting
+            .await
+            .expect("disconnect task joins")
+            .expect("disconnect completes once the backend returns");
+        assert_eq!(agent.state(), LifecycleState::Enrolled);
+        assert_eq!(tunnel.stops(), 1);
     }
 }
