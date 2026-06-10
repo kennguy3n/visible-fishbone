@@ -360,10 +360,13 @@ function StepSite({
 
   const submit = () => {
     create.mutate(
-      { tenantId, data: { name, slug: slug.trim() || undefined, template } },
+      {
+        tenantId,
+        data: { name: name.trim(), slug: slug.trim() || undefined, template },
+      },
       {
         onSuccess: () => {
-          toast.success("Site created", `${name} is now connected.`);
+          toast.success("Site created", `${name.trim()} is now connected.`);
           onNext();
         },
         onError: (e) =>
@@ -446,7 +449,7 @@ function StepSite({
           <button
             className="btn btn--primary"
             onClick={submit}
-            disabled={!name || create.isPending}
+            disabled={!name.trim() || create.isPending}
           >
             {create.isPending ? "Creating…" : "Create site →"}
           </button>

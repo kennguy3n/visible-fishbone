@@ -156,6 +156,9 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
 
     setRunning(true);
     const acc = new Map<string, CohortRow>();
+    // Track which phase is in flight so a whole-phase throw can tell the
+    // operator exactly where the rollout stopped (later phases never ran).
+    let phase: Phase = "site";
     try {
       // Provision the site first so every tenant has somewhere to route, then
       // layer policy and enrolment on top. Phases run sequentially so the
@@ -169,6 +172,7 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
         }),
       );
       if (policyTemplate) {
+        phase = "policy";
         mergePhase(
           acc,
           "policy",
@@ -178,6 +182,7 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
           }),
         );
       }
+      phase = "tokens";
       mergePhase(
         acc,
         "tokens",
@@ -214,9 +219,12 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
         setRows(partial);
         setRanAt(new Date().toLocaleString());
       }
+      // Name the phase that failed so the operator knows later phases were
+      // skipped, not silently completed.
+      const reason = e instanceof Error ? e.message : "request failed";
       toast.error(
-        "Bulk onboarding failed",
-        e instanceof Error ? e.message : undefined,
+        `Bulk onboarding failed during ${PHASE_LABEL[phase]}`,
+        `${reason}. Phases after ${PHASE_LABEL[phase]} were not attempted.`,
       );
     } finally {
       setRunning(false);
@@ -317,7 +325,7 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
             onChange={(e) => setTokensPerTenant(Number(e.target.value))}
           />
         </label>
-        <label className="field">
+        <div className="field">
           <span>Baseline policy</span>
           <label
             style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}
@@ -331,7 +339,7 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
               Apply a policy template to every tenant
             </span>
           </label>
-        </label>
+        </div>
       </div>
 
       {withPolicy && (
