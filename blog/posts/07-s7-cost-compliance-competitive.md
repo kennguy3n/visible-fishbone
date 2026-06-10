@@ -93,16 +93,20 @@ we closed.
 From the [edge performance datasheet](../artifacts/edge-performance-datasheet.md),
 SNG cloud opex at a representative **$0.0416/vCPU-hour** over 730 h/mo:
 
-| SKU | vCPU | est. $/mo |
-| --- | ---: | ---: |
-| branch-large | 8 | $243 |
-| branch-medium | 4 | $121 |
-| branch-small | 2 | $61 |
+| SKU | vCPU | est. $/mo | wire firewall peak | $/Gbps (wire) |
+| --- | ---: | ---: | ---: | ---: |
+| micro | 2 | $61 | 19.35 Gbps | $3 |
+| small | 4 | $121 | 18.98 Gbps | $6 |
+| medium | 8 | $243 | 18.90 Gbps | $13 |
+| large | 16 | $486 | 18.39 Gbps | $26 |
 
-We deliberately **do not** publish a `$/Gbps` headline, because the Gbps
-denominator is dry-run (Post 1). Appliance capex/support TCO is vendor-quote
-territory and we don't invent it. The defensible cost claim is the *opex side*:
-software-only, no appliance refresh cycle, scales with cloud vCPU.
+We now publish a `$/Gbps` figure because the denominator is a **real-wire**
+measurement (AF_PACKET, `sng-edge` in-path, on the self-hosted `sng-bench-wire`
+runner — Post 1), not the dry-run ceiling. Read it as a *floor*: the wire rig is
+a single-stream egress path, so the true price/performance on a multi-queue NIC
+is better than these numbers, not worse. Appliance capex/support TCO is
+vendor-quote territory and we don't invent it. The defensible cost claim is the
+*opex side*: software-only, no appliance refresh cycle, scales with cloud vCPU.
 
 ---
 
@@ -117,12 +121,14 @@ comparison (which is informative-but-not-fair) and the *architecture* comparison
 All competitor numbers are **published datasheet figures** from
 [`competitors.json`](../../bench/business-report/competitors.json), each with a
 `source_url`. **Every hardware row is an ASIC-accelerated fixed appliance; SNG is
-software-only on a generic x86 VM, and SNG's own numbers are dry-run.** This table
-is informative context, **not** a head-to-head result:
+software-only on a generic x86 VM.** SNG's own numbers are now shown both ways —
+the dry-run *ceiling* and the real-wire *floor* (single-stream veth, Post 1). The
+table is informative context, **not** a head-to-head result:
 
 | Box (class) | firewall | IPS/threat | source |
 | --- | ---: | ---: | --- |
-| SNG branch-small (dry-run, VM) | ~73 Gbps | ~72 Gbps | sng-bench |
+| SNG micro (2-core, dry-run ceiling) | ~79 Gbps | ~74 Gbps | sng-bench |
+| SNG micro (2-core, wire floor) | 5.5 Gbps | 5.5 Gbps | sng-bench |
 | Fortinet FortiGate 40F (2-core) | 5.0 Gbps | 0.8 Gbps | FortiGate 40F datasheet |
 | Palo Alto PA-440 (2-core) | 3.1 Gbps | 0.7 Gbps | PA-400 series datasheet |
 | Fortinet FortiGate 60F (4-core) | 10.0 Gbps | 1.4 Gbps | FortiGate 60F datasheet |
@@ -132,8 +138,9 @@ is informative context, **not** a head-to-head result:
 The honest reading: appliance IPS/threat throughput collapses to a fraction of
 its firewall throughput once inspection is on — that's the ASIC hitting software
 inspection paths. SNG's inspection cost is comparatively flat (Post 1's latency
-table), which is the genuinely interesting architectural signal *even before* a
-real wire benchmark.
+table, and the wire firewall/IPS columns above sit on top of each other), which
+is the genuinely interesting architectural signal — now backed by a real wire
+benchmark rather than dry-run alone.
 
 ## The one apples-to-apples comparison
 
@@ -176,7 +183,8 @@ that comparison *is* fair because both are software services, not silicon.
 
 ## Where SNG genuinely falls short
 
-1. **No real wire throughput measured** — dry-run only on this rig.
+1. **Wire throughput is a single-stream floor** — measured over a veth pair, not
+   a multi-queue physical NIC, so it understates real line-rate.
 2. **Identity/IAM depth** is scaffolding, not a finished IGA suite (Posts 2, 4).
 3. **No global PoP network** — it's software you operate, not a network you rent.
 4. **Threat-intel and DLP-detector breadth** trail the specialist incumbents.

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use thiserror::Error;
 
-use sng_bench::business_report::{BusinessReport, BusinessSku, SkuProfile};
+use sng_bench::business_report::{BusinessReport, BusinessSku, DualDatasheet, SkuProfile};
 use sng_bench::competitor::{self, InspectionDepth};
 use sng_bench::measurement::{
     self, LatencyHistogram, ResourceMeasurement, ThroughputMeasurement, rate_between,
@@ -85,6 +85,9 @@ enum Command {
     ForwardingDoc(ForwardingDocArgs),
     /// Compare two forwarding artifacts and fail (exit 2) on a regression.
     ForwardingCompare(ForwardingCompareArgs),
+    /// Merge a dry-run and a wire `business-report` JSON into one
+    /// dual-column datasheet (markdown + combined JSON).
+    Datasheet(DatasheetArgs),
 }
 
 /// IP version selector for the CLI.
@@ -283,6 +286,25 @@ struct BusinessReportArgs {
 }
 
 #[derive(Debug, Args)]
+struct DatasheetArgs {
+    /// `business-report` JSON from the in-process (`--dry-run`) sweep.
+    #[arg(long)]
+    dry_run_json: PathBuf,
+
+    /// `business-report` JSON from the real-wire (AF_PACKET, in-path) sweep.
+    #[arg(long)]
+    wire_json: PathBuf,
+
+    /// Markdown datasheet output path.
+    #[arg(long, default_value = "blog/artifacts/edge-performance-datasheet.md")]
+    out_md: PathBuf,
+
+    /// Combined JSON (both sweeps) output path.
+    #[arg(long, default_value = "blog/artifacts/edge-performance-datasheet.json")]
+    out_json: PathBuf,
+}
+
+#[derive(Debug, Args)]
 struct CompareArgs {
     /// Baseline (previous) report JSON.
     #[arg(long)]
@@ -379,6 +401,7 @@ fn run(cli: Cli) -> Result<std::process::ExitCode, BenchError> {
         Command::Forwarding(args) => run_forwarding(&args),
         Command::ForwardingDoc(args) => run_forwarding_doc(&args),
         Command::ForwardingCompare(args) => run_forwarding_compare(&args),
+        Command::Datasheet(args) => run_datasheet(&args),
     }
 }
 
@@ -1263,6 +1286,41 @@ fn write_business_report(
         source,
     })?;
     Ok((md_path, json_path))
+}
+
+fn run_datasheet(args: &DatasheetArgs) -> Result<std::process::ExitCode, BenchError> {
+    let dry_run = load_business_report(&args.dry_run_json)?;
+    let wire = load_business_report(&args.wire_json)?;
+    let doc = DualDatasheet::new(dry_run, wire);
+
+    if let Some(parent) = args.out_md.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| BenchError::Io {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+    std::fs::write(&args.out_md, doc.to_markdown()).map_err(|source| BenchError::Io {
+        path: args.out_md.display().to_string(),
+        source,
+    })?;
+    std::fs::write(&args.out_json, doc.to_json()?).map_err(|source| BenchError::Io {
+        path: args.out_json.display().to_string(),
+        source,
+    })?;
+    println!(
+        "dual datasheet written to {} and {}",
+        args.out_md.display(),
+        args.out_json.display()
+    );
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn load_business_report(path: &Path) -> Result<BusinessReport, BenchError> {
+    let raw = std::fs::read_to_string(path).map_err(|source| BenchError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    BusinessReport::from_json(&raw).map_err(BenchError::Report)
 }
 
 fn now_secs() -> u64 {

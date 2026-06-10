@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# sng-bench wire-throughput runner bootstrap (cloud-init user-data).
+#
+# Rendered by Terraform (deploy/terraform/modules/bench-runner). Terraform
+# template tokens are expanded by templatefile(); shell variable expansions
+# are double-dollar-escaped in the template source so they reach the instance
+# verbatim.
+set -euo pipefail
+exec > >(tee -a /var/log/sng-bench-bootstrap.log) 2>&1
+echo "[bootstrap] start $(date -u +%FT%TZ)"
+
+# --- Terraform-injected configuration -------------------------------------
+NAME="${name}"
+GITHUB_URL="${github_url}"
+USE_PAT="${use_pat}"
+GITHUB_PAT_SSM_PARAMETER="${github_pat_ssm_parameter}"
+GITHUB_REGISTRATION_TOKEN="${github_registration_token}"
+RUNNER_VERSION="${runner_version}"
+RUNNER_LABELS="${runner_labels}"
+RUNNER_GROUP="${runner_group}"
+EPHEMERAL_RUNNER="${ephemeral_runner}"
+AWS_REGION="${aws_region}"
+REPO_URL="${repo_url}"
+REPO_REF="${repo_ref}"
+BENCH_IFACE="${bench_interface}"
+EDGE_IFACE="${edge_interface}"
+EDGE_DATAPATH="${edge_datapath}"
+EDGE_IPS_ENABLED="${edge_ips_enabled}"
+
+RUNNER_USER="sng-runner"
+RUNNER_HOME="/opt/actions-runner"
+SRC_DIR="/opt/sng-src"
+
+# --- Base packages ---------------------------------------------------------
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y --no-install-recommends \
+  build-essential pkg-config libssl-dev cmake clang llvm \
+  git curl jq unzip ca-certificates iproute2 libcap2-bin awscli
+
+if [ "$${EDGE_IPS_ENABLED}" = "true" ]; then
+  apt-get install -y --no-install-recommends suricata || \
+    echo "[bootstrap] WARN: suricata install failed; sng-edge IPS tier may not start"
+fi
+
+# --- Dedicated unprivileged runner user ------------------------------------
+if ! id "$${RUNNER_USER}" >/dev/null 2>&1; then
+  useradd --system --create-home --home-dir "/home/$${RUNNER_USER}" --shell /bin/bash "$${RUNNER_USER}"
+fi
+
+# --- Rust toolchain (system-wide) ------------------------------------------
+# Match the bench workspace's rust-version. Installed under /opt/rust so both
+# the runner user and the sng-edge build can use it.
+export RUSTUP_HOME=/opt/rust/rustup
+export CARGO_HOME=/opt/rust/cargo
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+  sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.91.0
+echo 'export RUSTUP_HOME=/opt/rust/rustup' > /etc/profile.d/rust.sh
+echo 'export CARGO_HOME=/opt/rust/cargo' >> /etc/profile.d/rust.sh
+echo 'export PATH=$PATH:/opt/rust/cargo/bin' >> /etc/profile.d/rust.sh
+chmod 0644 /etc/profile.d/rust.sh
+export PATH="$PATH:/opt/rust/cargo/bin"
+
+# --- Build sng-edge (in-path enforcer) from the pinned ref -----------------
+rm -rf "$${SRC_DIR}"
+git clone --depth 1 --branch "$${REPO_REF}" "$${REPO_URL}" "$${SRC_DIR}" 2>/dev/null || \
+  git clone "$${REPO_URL}" "$${SRC_DIR}"
+cd "$${SRC_DIR}"
+git checkout "$${REPO_REF}" || true
+cargo build --release --locked --bin sng-edge
+install -D -m 0755 target/release/sng-edge /usr/local/bin/sng-edge
+
+# --- Edge appliance config -------------------------------------------------
+install -d -m 0755 /etc/sng-edge /var/lib/sng/ips /var/lib/sng/swg
+cat > /etc/sng-edge/edge.toml <<'SNG_EDGE_TOML'
+${edge_config}
+SNG_EDGE_TOML
+
+# --- veth pair (sng-edge in-path) ------------------------------------------
+# Oneshot unit so the pair is recreated idempotently on every boot before the
+# edge and any benchmark job needs it.
+# Interface names are injected literally by Terraform (validated to be safe
+# identifiers), so the helper has no runtime parameters to misparse.
+cat > /usr/local/sbin/sng-bench-veth-up <<'VETH'
+#!/usr/bin/env bash
+set -euo pipefail
+BENCH_IFACE="__BENCH_IFACE__"
+EDGE_IFACE="__EDGE_IFACE__"
+if ! ip link show "$BENCH_IFACE" >/dev/null 2>&1; then
+  ip link add "$BENCH_IFACE" type veth peer name "$EDGE_IFACE"
+fi
+# Jumbo MTU on both ends so the 9000B frame size in the wire sweep is not
+# rejected as "Message too long" by the AF_PACKET TX path.
+ip link set "$BENCH_IFACE" mtu 9216
+ip link set "$EDGE_IFACE" mtu 9216
+ip link set "$BENCH_IFACE" up
+ip link set "$EDGE_IFACE" up
+# The edge endpoint runs promiscuous so it receives every crafted frame the
+# harness transmits regardless of destination MAC.
+ip link set "$EDGE_IFACE" promisc on
+VETH
+sed -i "s/__BENCH_IFACE__/$${BENCH_IFACE}/g; s/__EDGE_IFACE__/$${EDGE_IFACE}/g" /usr/local/sbin/sng-bench-veth-up
+chmod 0755 /usr/local/sbin/sng-bench-veth-up
+
+cat > /etc/systemd/system/sng-bench-veth.service <<'UNIT'
+[Unit]
+Description=sng-bench in-path veth pair
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sng-bench-veth-up
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- sng-edge service (in-path, CAP_NET_RAW + CAP_NET_ADMIN) ----------------
+cat > /etc/systemd/system/sng-edge.service <<UNIT
+[Unit]
+Description=ShieldNet Gateway edge (in-path, bench rig)
+After=sng-bench-veth.service network-online.target
+Requires=sng-bench-veth.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sng-edge --config /etc/sng-edge/edge.toml --datapath $${EDGE_DATAPATH} --log-json
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_BPF
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_SYS_ADMIN
+NoNewPrivileges=no
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now sng-bench-veth.service
+# The edge is best-effort: a wire throughput sweep still measures real
+# AF_PACKET egress even if the edge supervisor is degraded, so do not let an
+# edge boot failure block runner registration. Operators monitor it via
+# `systemctl status sng-edge`.
+systemctl enable --now sng-edge.service || \
+  echo "[bootstrap] WARN: sng-edge failed to start; check journalctl -u sng-edge"
+
+# --- GitHub Actions runner -------------------------------------------------
+install -d -m 0755 "$${RUNNER_HOME}"
+cd "$${RUNNER_HOME}"
+RUNNER_TARBALL="actions-runner-linux-x64-$${RUNNER_VERSION}.tar.gz"
+curl -fsSL -o "$${RUNNER_TARBALL}" \
+  "https://github.com/actions/runner/releases/download/v$${RUNNER_VERSION}/$${RUNNER_TARBALL}"
+tar xzf "$${RUNNER_TARBALL}"
+rm -f "$${RUNNER_TARBALL}"
+chown -R "$${RUNNER_USER}:$${RUNNER_USER}" "$${RUNNER_HOME}"
+
+# Mint a registration token. With a PAT in SSM we exchange it for a
+# short-lived registration token at boot (nothing long-lived in user-data);
+# otherwise we use the pre-minted token passed directly.
+reg_token=""
+if [ "$${USE_PAT}" = "true" ]; then
+  pat=$(aws ssm get-parameter --with-decryption --region "$${AWS_REGION}" \
+    --name "$${GITHUB_PAT_SSM_PARAMETER}" --query 'Parameter.Value' --output text)
+  api="https://api.github.com"
+  path="$${GITHUB_URL#https://github.com/}"
+  if [[ "$${path}" == */* ]]; then
+    endpoint="$${api}/repos/$${path}/actions/runners/registration-token"
+  else
+    endpoint="$${api}/orgs/$${path}/actions/runners/registration-token"
+  fi
+  reg_token=$(curl -fsSL -X POST \
+    -H "Authorization: Bearer $${pat}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "$${endpoint}" | jq -r '.token')
+else
+  reg_token="$${GITHUB_REGISTRATION_TOKEN}"
+fi
+
+if [ -z "$${reg_token}" ] || [ "$${reg_token}" = "null" ]; then
+  echo "[bootstrap] FATAL: could not obtain a runner registration token" >&2
+  exit 1
+fi
+
+runner_group_arg=""
+if [ -n "$${RUNNER_GROUP}" ]; then
+  runner_group_arg="--runnergroup $${RUNNER_GROUP}"
+fi
+ephemeral_arg=""
+if [ "$${EPHEMERAL_RUNNER}" = "true" ]; then
+  ephemeral_arg="--ephemeral"
+fi
+
+sudo -u "$${RUNNER_USER}" ./config.sh \
+  --unattended \
+  --url "$${GITHUB_URL}" \
+  --token "$${reg_token}" \
+  --name "$${NAME}-$(hostname)" \
+  --labels "$${RUNNER_LABELS}" \
+  --work _work \
+  --replace \
+  $${runner_group_arg} $${ephemeral_arg}
+
+# Install as a systemd service running as the runner user.
+./svc.sh install "$${RUNNER_USER}"
+
+# Grant every job process the wire capabilities via a drop-in: ambient
+# CAP_NET_RAW/CAP_NET_ADMIN is inherited across execve, so a freshly built
+# sng-bench binary can open AF_PACKET without setcap or root.
+svc_unit=$(systemctl list-unit-files 'actions.runner.*' --no-legend | awk '{print $1; exit}')
+if [ -n "$${svc_unit}" ]; then
+  install -d -m 0755 "/etc/systemd/system/$${svc_unit}.d"
+  cat > "/etc/systemd/system/$${svc_unit}.d/10-cap-net-raw.conf" <<'DROPIN'
+[Service]
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID
+NoNewPrivileges=no
+DROPIN
+  systemctl daemon-reload
+fi
+
+./svc.sh start
+
+echo "[bootstrap] done $(date -u +%FT%TZ)"

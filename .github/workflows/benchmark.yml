@@ -53,6 +53,10 @@ env:
   # Per-mode wall-clock. Kept small for the hosted dry-run sweep; raise it
   # on a dedicated runner where you want a statistically stable sample.
   BENCH_DURATION: "15"
+  # Per-mode wall-clock for the real-wire sweep. The dedicated in-path
+  # runner can afford a longer, statistically stabler sample than the
+  # hosted dry-run sweep.
+  BENCH_WIRE_DURATION: "30"
   # Throughput regression threshold (fractional drop) the compare gate
   # alerts on. 0.10 == a >10% throughput drop fails the run.
   BENCH_THROUGHPUT_DROP: "0.10"
@@ -194,6 +198,242 @@ jobs:
         run: |
           echo "::error::throughput regression detected for ${{ matrix.profile }} (threshold ${BENCH_THROUGHPUT_DROP})"
           exit 1
+
+  wire:
+    name: wire (${{ matrix.profile }})
+    # Real-wire numbers need a runner that can open AF_PACKET (CAP_NET_RAW)
+    # with sng-edge in-path. The `bench-runner` Terraform module
+    # (deploy/terraform/modules/bench-runner) provisions exactly this and
+    # registers it with the `sng-bench-wire` label. If no such runner is
+    # online the job simply queues — it never runs on a hosted runner, so
+    # the wire numbers are always real.
+    runs-on: [self-hosted, sng-bench-wire]
+    # Wire runs are the scheduled source of truth; a manual dispatch can
+    # also drive them. They never run on push (no self-hosted exposure to
+    # untrusted PRs).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [micro, small, medium, large]
+    defaults:
+      run:
+        working-directory: bench
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bench
+          # Distinct key so the self-hosted wire cache never collides with
+          # the hosted dry-run cache.
+          shared-key: bench-wire-${{ runner.os }}
+
+      - name: build harness (release)
+        run: cargo build --release --locked
+
+      - name: resolve wire interface
+        run: |
+          set -euo pipefail
+          # The bench-runner module names the harness veth endpoint
+          # `veth-bench`; allow an override via a runner-level env for rigs
+          # wired differently.
+          echo "BENCH_WIRE_IFACE=${BENCH_WIRE_IFACE:-veth-bench}" >> "$GITHUB_ENV"
+
+      - name: real-wire forwarding sweep (4 inspection modes)
+        run: |
+          set -euo pipefail
+          bin=target/release/sng-bench
+          profile=profiles/skus/${{ matrix.profile }}.toml
+          mkdir -p results/wire
+          # The forwarding sweep exercises all four inspection modes
+          # (raw-l3 / ngfw-verdict / full-stack / full-stack+TLS) against the
+          # real edge datapath, per traffic class and backend.
+          echo "::group::forwarding (4 modes) / ${{ matrix.profile }}"
+          "$bin" forwarding \
+            --profile "$profile" \
+            --out "results/wire/forwarding-${{ matrix.profile }}.json" \
+            --git-sha "${GITHUB_SHA}"
+          echo "::endgroup::"
+
+      - name: real-wire throughput + latency (AF_PACKET)
+        env:
+          # Empty == real wire. The whole point of this job: frames leave on
+          # ${BENCH_WIRE_IFACE} and traverse sng-edge in-path.
+          BENCH_DRY_RUN: ""
+        run: |
+          set -euo pipefail
+          bin=target/release/sng-bench
+          profile=profiles/skus/${{ matrix.profile }}.toml
+          mkdir -p results/wire
+          # Sweep the full frame-size range on the wire at the deepest
+          # inspection depth (the worst case an operator provisions for).
+          for mode in throughput latency; do
+            for ps in 64 512 1500 9000; do
+              echo "::group::wire ${mode} ${ps}B / ${{ matrix.profile }}"
+              "$bin" "$mode" \
+                --profile "$profile" \
+                --interface "${BENCH_WIRE_IFACE}" \
+                --duration "${BENCH_WIRE_DURATION}" \
+                --packet-size "$ps" \
+                --policy-rules 100 \
+                --inspection full-tls \
+                --out-dir results/wire \
+                --git-sha "${GITHUB_SHA}" \
+                ${BENCH_DRY_RUN}
+              echo "::endgroup::"
+            done
+          done
+
+      - name: compare against wire baseline
+        id: compare
+        run: |
+          set -uo pipefail
+          bin=target/release/sng-bench
+          baseline="results/wire/baseline-wire-${{ matrix.profile }}.json"
+          echo "regressed=false" >> "$GITHUB_OUTPUT"
+          if [ ! -f "$baseline" ]; then
+            echo "no committed wire baseline at ${baseline}; skipping regression gate (first run seeds it)"
+            exit 0
+          fi
+          latest=$(ls -t results/wire/${{ matrix.profile }}-throughput-*.json | head -n1)
+          echo "comparing ${latest} against ${baseline}"
+          set +e
+          "$bin" compare \
+            --baseline "$baseline" \
+            --current "$latest" \
+            --throughput-drop "${BENCH_THROUGHPUT_DROP}" \
+            --latency-increase "${BENCH_LATENCY_INCREASE}"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 2 ]; then
+            echo "regressed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::sng-bench compare failed with exit code ${rc}"
+            exit "$rc"
+          fi
+
+      - name: upload wire reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-wire-${{ matrix.profile }}-${{ github.run_id }}
+          path: bench/results/wire/*${{ matrix.profile }}*.json
+          retention-days: 90
+
+      - name: alert on wire regression
+        if: steps.compare.outputs.regressed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const profile = '${{ matrix.profile }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title = `Wire benchmark regression: ${profile} throughput dropped >${{ env.BENCH_THROUGHPUT_DROP }}`;
+            const body = [
+              `The weekly **real-wire** benchmark detected a throughput regression on the **${profile}** edge SKU `,
+              `exceeding the ${{ env.BENCH_THROUGHPUT_DROP }} fractional threshold.`,
+              ``,
+              `- Run: ${runUrl}`,
+              `- Commit: ${context.sha}`,
+              ``,
+              `Reports are attached as the \`bench-wire-${profile}-${context.runId}\` artifact. `,
+              `Review, then update \`bench/results/wire/baseline-wire-${profile}.json\` if the new number is the intended baseline.`,
+            ].join('\n');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['benchmark', 'regression', 'wire'],
+            });
+
+      - name: fail run on wire regression
+        if: steps.compare.outputs.regressed == 'true'
+        run: |
+          echo "::error::wire throughput regression detected for ${{ matrix.profile }} (threshold ${BENCH_THROUGHPUT_DROP})"
+          exit 1
+
+  wire-datasheet:
+    name: regenerate dual datasheet (dry-run + wire)
+    needs: wire
+    # Runs on the same in-path runner: the wire half of the datasheet must
+    # be measured over AF_PACKET, so this cannot fall back to a hosted box.
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, sng-bench-wire]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: bench
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bench
+          shared-key: bench-wire-${{ runner.os }}
+
+      - name: build harness (release)
+        run: cargo build --release --locked
+
+      - name: resolve wire interface
+        run: |
+          set -euo pipefail
+          echo "BENCH_WIRE_IFACE=${BENCH_WIRE_IFACE:-veth-bench}" >> "$GITHUB_ENV"
+
+      - name: sweep both passes and merge
+        run: |
+          set -euo pipefail
+          bin=target/release/sng-bench
+          mkdir -p results/datasheet
+          # Dry-run pass (in-process ceiling) — runs anywhere.
+          "$bin" business-report \
+            --profiles-dir profiles/skus \
+            --duration-ms 1000 \
+            --packet-sizes 64,512,1500,9000 \
+            --out-dir results/datasheet/dry \
+            --git-sha "${GITHUB_SHA}" \
+            --dry-run
+          # Wire pass (real AF_PACKET over the in-path veth).
+          "$bin" business-report \
+            --profiles-dir profiles/skus \
+            --interface "${BENCH_WIRE_IFACE}" \
+            --duration-ms 1000 \
+            --packet-sizes 64,512,1500,9000 \
+            --out-dir results/datasheet/wire \
+            --git-sha "${GITHUB_SHA}"
+          dry=$(ls -t results/datasheet/dry/business-report-*.json | head -n1)
+          wire=$(ls -t results/datasheet/wire/business-report-*.json | head -n1)
+          "$bin" datasheet \
+            --dry-run-json "$dry" \
+            --wire-json "$wire" \
+            --out-md ../blog/artifacts/edge-performance-datasheet.md \
+            --out-json ../blog/artifacts/edge-performance-datasheet.json
+
+      - name: upload datasheet
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-performance-datasheet-${{ github.run_id }}
+          path: |
+            blog/artifacts/edge-performance-datasheet.md
+            blog/artifacts/edge-performance-datasheet.json
+          retention-days: 90
 
   publish:
     name: publish results to bench/results
