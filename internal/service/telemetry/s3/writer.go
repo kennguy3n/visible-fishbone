@@ -184,14 +184,25 @@ func New(client API, cfg Config, logger *slog.Logger) (*Writer, error) {
 	return w, nil
 }
 
+// NewClient builds the S3 client used by the cold-path archive from an
+// aws.Config. Path-style addressing is enabled so the same client works
+// against AWS and S3-compatible stores (MinIO, R2, GCS-via-S3) that
+// don't support virtual-hosted-style buckets. It is the single source
+// of truth for client construction, shared by NewWithAWSConfig (the
+// archive writer) and by callers that need a sibling client for
+// management calls such as applying the bucket lifecycle policy
+// (see ApplyLifecyclePolicy / Writer.EnsureLifecyclePolicy).
+func NewClient(awsCfg aws.Config) *s3.Client {
+	return s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		o.UsePathStyle = true
+	})
+}
+
 // NewWithAWSConfig is a convenience constructor that wraps an
 // aws.Config into the S3 client used by the writer. Most callers
 // use this; the New constructor is the lower-level seam for tests.
 func NewWithAWSConfig(awsCfg aws.Config, cfg Config, logger *slog.Logger) (*Writer, error) {
-	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		o.UsePathStyle = true
-	})
-	return New(client, cfg, logger)
+	return New(NewClient(awsCfg), cfg, logger)
 }
 
 // Archive enqueues an envelope for upload. The buffered batch is

@@ -2098,6 +2098,32 @@ func startTelemetry(
 		logger.Info("telemetry: s3 cold-path archive enabled",
 			slog.String("bucket", s3Cfg.Bucket),
 			slog.String("prefix", s3Cfg.Prefix))
+
+		// Ensure the cold-archive bucket ages objects into Glacier Deep
+		// Archive (the storage class the cost model prices against).
+		// Best-effort and idempotent: a failure here (e.g. the bucket
+		// lifecycle is managed by Terraform and IAM withholds
+		// s3:PutLifecycleConfiguration) must not take down the control
+		// plane — the archive still works, it just won't auto-tier — so
+		// we log loudly and continue. Operators who manage lifecycle
+		// out-of-band set S3_TELEMETRY_MANAGE_LIFECYCLE=false to silence
+		// this entirely.
+		if cfg.TelemetryAnalytics.S3ManageLifecycle {
+			transitionDays := int32(cfg.TelemetryAnalytics.S3LifecycleDeepArchiveDays)
+			// A sibling client (same aws.Config) backs the one-shot
+			// lifecycle PUT; the archive writer owns its own.
+			lifecycleClient := s3writer.NewClient(awsCfg)
+			if err := w.EnsureLifecyclePolicy(ctx, lifecycleClient, transitionDays); err != nil {
+				logger.Warn("telemetry: s3 cold-archive lifecycle policy not applied; "+
+					"archive will not auto-transition to Glacier Deep Archive",
+					slog.String("bucket", s3Cfg.Bucket),
+					slog.String("error", err.Error()))
+			} else {
+				logger.Info("telemetry: s3 cold-archive lifecycle policy applied",
+					slog.String("bucket", s3Cfg.Bucket),
+					slog.Int("deep_archive_transition_days", cfg.TelemetryAnalytics.S3LifecycleDeepArchiveDays))
+			}
+		}
 	}
 
 	svc, err := telemetry.New(js, &cfg.NATS, telemetry.Config{}, hot, cold, logger)

@@ -1231,6 +1231,20 @@ type TelemetryAnalytics struct {
 	S3MaxBytesPerObject  int
 	S3MaxEventsPerObject int
 
+	// S3ManageLifecycle controls whether the control plane PUTs the
+	// cold-archive bucket lifecycle policy (transition to Glacier Deep
+	// Archive) at startup. Defaults to true — the low-ops default, so a
+	// fresh deployment ages its archive into the cheapest storage class
+	// without any manual step. Set to false when the bucket lifecycle is
+	// owned out-of-band (Terraform, an org policy, a shared bucket) so
+	// two owners don't fight over the configuration.
+	S3ManageLifecycle bool
+	// S3LifecycleDeepArchiveDays is the object age, in days, at which the
+	// managed lifecycle policy transitions archive objects to Glacier
+	// Deep Archive. Defaults to 90. Ignored when S3ManageLifecycle is
+	// false.
+	S3LifecycleDeepArchiveDays int
+
 	// ReplayDurable is the JetStream durable consumer name the
 	// replay worker maintains on SNG_DLQ. Defaults to
 	// "sng-telemetry-replay". Allowing operators to override this
@@ -1527,6 +1541,10 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_ROW_LIMIT_BURST", 0, &cfg.TelemetryAnalytics.ClickHouseRowLimitBurst},
 		{"S3_TELEMETRY_MAX_BYTES_PER_OBJECT", 16 * 1024 * 1024, &cfg.TelemetryAnalytics.S3MaxBytesPerObject},
 		{"S3_TELEMETRY_MAX_EVENTS_PER_OBJECT", 50_000, &cfg.TelemetryAnalytics.S3MaxEventsPerObject},
+		// Days before archived objects transition to Glacier Deep
+		// Archive. Parsed strictly so a typo can't silently revert the
+		// transition age and inflate the storage bill.
+		{"S3_TELEMETRY_LIFECYCLE_DEEP_ARCHIVE_DAYS", 90, &cfg.TelemetryAnalytics.S3LifecycleDeepArchiveDays},
 		// Per-tenant cap on registered OIDC IdP configs. Parsed
 		// strictly so a typo can't silently revert the limit.
 		{"MOBILE_AUTH_MAX_PROVIDERS_PER_TENANT", 10, &cfg.MobileAuth.MaxProvidersPerTenant},
@@ -1633,6 +1651,7 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_ENSURE_SCHEMA", true, &cfg.TelemetryAnalytics.ClickHouseEnsureSchema},
 		{"CLICKHOUSE_SHARDING", false, &cfg.TelemetryAnalytics.ClickHouseSharding},
 		{"CLICKHOUSE_ROW_LIMIT_ENABLED", true, &cfg.TelemetryAnalytics.ClickHouseRowLimitEnabled},
+		{"S3_TELEMETRY_MANAGE_LIFECYCLE", true, &cfg.TelemetryAnalytics.S3ManageLifecycle},
 		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
 		{"MOBILE_AUTH_AUTO_PROVISION_USERS", true, &cfg.MobileAuth.AutoProvisionUsers},
 		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},
