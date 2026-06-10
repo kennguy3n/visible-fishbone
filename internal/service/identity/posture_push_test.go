@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -229,6 +230,63 @@ func TestPosturePushAppliesAndTriggersReeval(t *testing.T) {
 	}
 	if got := msg.Header.Get(sngnats.HeaderDeviceID); got != deviceID.String() {
 		t.Fatalf("trigger device header = %q, want %q", got, deviceID.String())
+	}
+}
+
+// TestPosturePushReevalDedupKeyReflectsCollectionInstant pins the
+// dedup-key contract that lets a genuinely newer posture snapshot fire
+// its own out-of-cycle re-evaluation instead of being collapsed into an
+// earlier trigger inside the events stream's dedup window. Two distinct
+// posture snapshots for the same device (distinct CollectedAt) must
+// publish triggers with *distinct* JetStream dedup keys, each keyed on
+// the collection instant; a snapshot without CollectedAt must fall back
+// to the (tenant, device) key.
+func TestPosturePushReevalDedupKeyReflectsCollectionInstant(t *testing.T) {
+	t.Parallel()
+	nc, js := startEmbeddedNATS(t)
+	pub := setupEventsStream(t, js)
+
+	tenantID := uuid.New()
+	deviceID := uuid.New()
+
+	sub, err := nc.SubscribeSync(sngnats.SubjectForEvent(tenantID.String(), identity.ReevalDeviceEventKind))
+	if err != nil {
+		t.Fatalf("subscribe reeval: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	updater := &stubUpdater{}
+	c := identity.NewPosturePushConsumer(js, updater, pub, testStreamPrefix, nil,
+		identity.WithPosturePushFetch(16, 200*time.Millisecond))
+	runConsumer(t, c)
+
+	t1 := time.Unix(1_700_000_000, 0).UTC()
+	t2 := t1.Add(30 * time.Second)
+	publishPostureUpdate(t, pub, identity.PostureUpdate{
+		TenantID: tenantID, DeviceID: deviceID,
+		Posture: repository.Posture{DiskEncrypted: ptrBool(false), CollectedAt: &t1},
+	}, tenantID.String())
+	publishPostureUpdate(t, pub, identity.PostureUpdate{
+		TenantID: tenantID, DeviceID: deviceID,
+		Posture: repository.Posture{DiskEncrypted: ptrBool(false), CollectedAt: &t2},
+	}, tenantID.String())
+
+	waitFor(t, "both posture updates applied", func() bool { return updater.callCount() == 2 })
+
+	wantFirst := fmt.Sprintf("reeval-%s-%s-%d", tenantID, deviceID, t1.UnixNano())
+	wantSecond := fmt.Sprintf("reeval-%s-%s-%d", tenantID, deviceID, t2.UnixNano())
+
+	keys := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		msg, err := sub.NextMsg(5 * time.Second)
+		if err != nil {
+			t.Fatalf("expected reeval trigger %d: %v", i, err)
+		}
+		keys[msg.Header.Get(jetstream.MsgIDHeader)] = true
+	}
+	if !keys[wantFirst] || !keys[wantSecond] {
+		t.Fatalf("dedup keys = %v, want both %q and %q (distinct per collection instant)",
+			keys, wantFirst, wantSecond)
 	}
 }
 

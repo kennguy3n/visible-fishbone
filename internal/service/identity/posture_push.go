@@ -281,7 +281,7 @@ func (c *PosturePushConsumer) handleMessage(ctx context.Context, msg jetstream.M
 		return
 	}
 
-	c.triggerReeval(ctx, upd.TenantID, upd.DeviceID)
+	c.triggerReeval(ctx, upd.TenantID, upd.DeviceID, upd.Posture.CollectedAt)
 
 	if err := msg.Ack(); err != nil {
 		c.logger.Warn("posture-push: ack failed after applying posture",
@@ -292,11 +292,12 @@ func (c *PosturePushConsumer) handleMessage(ctx context.Context, msg jetstream.M
 
 // triggerReeval publishes the out-of-cycle re-evaluation trigger for
 // one device. Best-effort: a failure is logged but never fails the
-// message (the periodic sweep is the safety net). The message id is
-// pinned to the (tenant, device) pair so JetStream's dedup window
-// collapses a burst of posture pushes for the same device into a
-// single trigger.
-func (c *PosturePushConsumer) triggerReeval(ctx context.Context, tenantID, deviceID uuid.UUID) {
+// message (the periodic sweep is the safety net). The dedup key is
+// derived from the (tenant, device, posture-collection-instant) tuple
+// by [reevalMessageID] so a redelivery of the *same* posture snapshot
+// collapses to one trigger while a genuinely *newer* snapshot still
+// fires its own — see that helper for the rationale.
+func (c *PosturePushConsumer) triggerReeval(ctx context.Context, tenantID, deviceID uuid.UUID, collectedAt *time.Time) {
 	payload, err := json.Marshal(reevalDeviceTrigger{TenantID: tenantID, DeviceID: deviceID})
 	if err != nil {
 		// Marshalling two UUIDs cannot realistically fail; guard
@@ -308,16 +309,7 @@ func (c *PosturePushConsumer) triggerReeval(ctx context.Context, tenantID, devic
 	}
 	subject := sngnats.SubjectForEvent(tenantID.String(), ReevalDeviceEventKind)
 	err = c.pub.Publish(ctx, subject, payload, sngnats.PublishOptions{
-		// Pin the JetStream dedup key to the (tenant, device) pair so
-		// a burst of posture pushes for the same device inside the
-		// events stream's dedup window collapses to a single re-eval
-		// trigger. Without this the publisher mints a fresh UUID per
-		// call (internal/nats/publisher.go), so every push would emit
-		// its own trigger and the brain would redundantly re-evaluate
-		// the same device's sessions. A collapsed trigger is safe: the
-		// posture is already persisted and the periodic sweep re-reads
-		// the latest snapshot regardless.
-		MessageID: fmt.Sprintf("reeval-%s-%s", tenantID, deviceID),
+		MessageID: reevalMessageID(tenantID, deviceID, collectedAt),
 		Source:    posturePushSource,
 		Headers: map[string]string{
 			sngnats.HeaderTenantID: tenantID.String(),
@@ -329,6 +321,44 @@ func (c *PosturePushConsumer) triggerReeval(ctx context.Context, tenantID, devic
 			slog.String("device", deviceID.String()),
 			slog.Any("error", err))
 	}
+}
+
+// reevalMessageID builds the JetStream dedup key for an out-of-cycle
+// re-evaluation trigger.
+//
+// The key is scoped to the (tenant, device) pair and, when the agent
+// stamped one, the posture's collection instant. This balances the two
+// competing failure modes:
+//
+//   - Without any stable key the publisher mints a fresh UUID per call
+//     (internal/nats/publisher.go), so a redelivery of the *same*
+//     posture snapshot — JetStream at-least-once redelivery, an agent
+//     re-reporting unchanged posture — would emit a duplicate trigger
+//     and the brain would redundantly re-evaluate the device's
+//     sessions.
+//   - Pinning the key to *only* (tenant, device) over-collapses: a
+//     genuinely newer snapshot arriving inside the events stream's
+//     dedup window (default 2m, streams.go) would be suppressed, so a
+//     posture that degrades and then degrades *further* seconds later
+//     would not re-evaluate out of cycle until the next periodic sweep
+//     — defeating the whole point of the posture-push fast path for
+//     the second regression.
+//
+// Including the collection instant distinguishes distinct snapshots
+// (each fires its own trigger, bounding revocation latency to the push
+// latency) while still collapsing exact redeliveries of one snapshot
+// (same instant -> same key -> deduped). CollectedAt is optional on the
+// wire (older / mobile agents may omit it); when absent we fall back to
+// the (tenant, device) key, preserving the burst-collapse behaviour for
+// those agents. A nanosecond instant is stable across redeliveries and
+// monotone across genuine re-collections, so it is the smallest key
+// that gets both cases right. Over-firing is always safe regardless:
+// the posture is already persisted and re-evaluation is idempotent.
+func reevalMessageID(tenantID, deviceID uuid.UUID, collectedAt *time.Time) string {
+	if collectedAt == nil {
+		return fmt.Sprintf("reeval-%s-%s", tenantID, deviceID)
+	}
+	return fmt.Sprintf("reeval-%s-%s-%d", tenantID, deviceID, collectedAt.UTC().UnixNano())
 }
 
 func (c *PosturePushConsumer) term(msg jetstream.Msg, reason string) {
