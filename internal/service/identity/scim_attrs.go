@@ -35,6 +35,12 @@ func scimUserVersion(u repository.User) string {
 // Roles have no UpdatedAt column, so the hash folds the mutable
 // name/externalId alongside the id; a rename or externalId change
 // rotates the version.
+//
+// Membership is deliberately excluded: roleToSCIMGroup does not
+// serialise the members attribute, so the version covers exactly the
+// returned representation (rotating on membership changes would
+// spuriously invalidate caches). If group responses ever start
+// populating members, fold the membership state in here too.
 func scimGroupVersion(r repository.Role) string {
 	h := sha256.New()
 	hashFields(h, "group", r.ID.String(), r.Name, r.ExternalID)
