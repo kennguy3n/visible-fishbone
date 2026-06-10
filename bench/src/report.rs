@@ -720,23 +720,323 @@ impl ForwardingReport {
     }
 }
 
-/// Compare a current forwarding sweep against a committed baseline and
-/// flag regressions.
+/// Direction in which a forwarding metric regresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegressDir {
+    /// A *rise* beyond the threshold is the regression (cost-like metric:
+    /// normalised per-packet cost — bigger is worse).
+    Rise,
+    /// A *drop* beyond the threshold is the regression (advantage-like
+    /// metric: fast-path speedup — smaller is worse).
+    Drop,
+}
+
+/// One hardware-invariant forwarding metric the gate keys on. Each is a
+/// dimensionless ratio that is a pure function of a *single* report, so it
+/// can be evaluated independently on the baseline and on every current
+/// sample — which is what lets the statistical gate aggregate N samples.
+#[derive(Debug, Clone)]
+enum FwdMetric {
+    /// Per-mode inspection cost normalised to the raw-L3 fast path:
+    /// `ns_per_packet(mode, backend) / ns_per_packet(raw-l3, xdp)`. A rise
+    /// means a stage (NGFW, IPS, TLS, ...) got disproportionately more
+    /// expensive relative to the line-rate fast path.
+    RelativeCost { mode: String, backend: String },
+    /// Raw-L3 XDP-over-nftables speedup `pps(raw-l3, xdp) /
+    /// pps(raw-l3, nftables)`. A drop means the XDP fast path lost ground
+    /// against the engine — the one regression a relative-cost check
+    /// anchored on the fast path cannot see on its own.
+    FastPathAdvantage,
+}
+
+impl FwdMetric {
+    /// Stable human-readable name surfaced in the regression report.
+    fn name(&self) -> String {
+        match self {
+            FwdMetric::RelativeCost { mode, backend } => format!("{mode}/{backend} relative-cost"),
+            FwdMetric::FastPathAdvantage => "raw-l3 xdp-over-nftables speedup".to_string(),
+        }
+    }
+
+    /// Which direction of movement counts as a regression.
+    fn direction(&self) -> RegressDir {
+        match self {
+            FwdMetric::RelativeCost { .. } => RegressDir::Rise,
+            FwdMetric::FastPathAdvantage => RegressDir::Drop,
+        }
+    }
+
+    /// Evaluate the metric on a single report, given that report's own
+    /// `(raw-l3, xdp)` anchor cost in ns/packet. Returns `None` when the
+    /// report lacks a measurement the metric needs (so the metric is
+    /// skipped rather than fabricated).
+    fn eval(&self, r: &ForwardingReport, anchor_ns: f64) -> Option<f64> {
+        match self {
+            FwdMetric::RelativeCost { mode, backend } => {
+                let m = r.get(mode, backend)?;
+                let nspp = m.ns_per_packet();
+                if nspp.is_finite() {
+                    Some(nspp / anchor_ns)
+                } else {
+                    None
+                }
+            }
+            FwdMetric::FastPathAdvantage => {
+                let xdp = r.get(RAW_L3_LABEL, XDP_LABEL)?;
+                let nft = r.get(RAW_L3_LABEL, NFTABLES_LABEL)?;
+                ratio(xdp.pps, nft.pps)
+            }
+        }
+    }
+}
+
+/// The report's `(raw-l3, xdp)` anchor cost in ns/packet, used to
+/// normalise every relative-cost metric. Errors when the anchor is absent
+/// or has non-positive throughput (which would make the ratios undefined).
+fn forwarding_anchor_ns(r: &ForwardingReport) -> Result<f64, String> {
+    let m = r
+        .get(RAW_L3_LABEL, XDP_LABEL)
+        .ok_or_else(|| "report missing (raw-l3, xdp) anchor measurement".to_string())?;
+    let nspp = m.ns_per_packet();
+    if nspp.is_finite() && nspp > 0.0 {
+        Ok(nspp)
+    } else {
+        Err("(raw-l3, xdp) anchor has non-positive throughput".to_string())
+    }
+}
+
+/// Enumerate the metrics to gate on, derived from the committed baseline:
+/// every `(mode, backend)` point except the anchor (a relative-cost
+/// metric), plus the raw-L3 fast-path advantage when the baseline carries
+/// both raw-L3 substrates. A point absent from the baseline has no
+/// reference value, so it can never be a regression and is not enumerated.
+fn forwarding_metrics(baseline: &ForwardingReport) -> Vec<FwdMetric> {
+    let mut metrics = Vec::new();
+    for m in &baseline.measurements {
+        if m.mode == RAW_L3_LABEL && m.backend == XDP_LABEL {
+            continue; // the anchor itself
+        }
+        metrics.push(FwdMetric::RelativeCost {
+            mode: m.mode.clone(),
+            backend: m.backend.clone(),
+        });
+    }
+    if baseline.get(RAW_L3_LABEL, XDP_LABEL).is_some()
+        && baseline.get(RAW_L3_LABEL, NFTABLES_LABEL).is_some()
+    {
+        metrics.push(FwdMetric::FastPathAdvantage);
+    }
+    metrics
+}
+
+/// Median of `values`, ignoring non-finite entries. `None` for an empty
+/// (or all-non-finite) input. The median is robust to the single wild
+/// outlier a shared CI runner periodically produces, which is precisely
+/// why the gate aggregates with it rather than the mean.
+fn median(values: &[f64]) -> Option<f64> {
+    let mut v: Vec<f64> = values.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).expect("finite values are totally ordered"));
+    let n = v.len();
+    Some(if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        f64::midpoint(v[n / 2 - 1], v[n / 2])
+    })
+}
+
+/// Corrected (Bessel, `n-1`) sample standard deviation of `values`,
+/// ignoring non-finite entries. `0.0` for fewer than two finite samples —
+/// a single sample carries no dispersion information, which collapses the
+/// noise band to zero and recovers the plain threshold gate.
+fn sample_stddev(values: &[f64]) -> f64 {
+    let v: Vec<f64> = values.iter().copied().filter(|x| x.is_finite()).collect();
+    let n = v.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mean = v.iter().sum::<f64>() / n as f64;
+    let variance = v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
+    variance.sqrt()
+}
+
+/// Per-metric statistical verdict produced by the N-sample forwarding
+/// gate. Carries the full picture — baseline, sample median, dispersion,
+/// and both gate conditions — so the CLI can explain *why* a metric was or
+/// was not flagged instead of emitting a bare pass/fail.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StatMetric {
+    /// Metric name (`ngfw-verdict/xdp relative-cost`, `raw-l3
+    /// xdp-over-nftables speedup`, ...).
+    pub metric: String,
+    /// Baseline value (the committed reference).
+    pub baseline: f64,
+    /// Median of the metric across the N current samples.
+    pub median: f64,
+    /// Corrected sample standard deviation across the N samples — the
+    /// measured run-to-run noise that defines the band.
+    pub stddev: f64,
+    /// Number of finite samples that fed the median/stddev.
+    pub samples: usize,
+    /// Signed fractional move of the median off the baseline,
+    /// `(median - baseline) / baseline`.
+    pub change_fraction: f64,
+    /// Whether the median moved in the regressing direction by at least
+    /// the threshold.
+    pub exceeds_threshold: bool,
+    /// Whether the absolute median move is larger than the noise band
+    /// (`sigma × stddev`) — i.e. too large to be sampling noise.
+    pub outside_noise_band: bool,
+    /// The final verdict: a regression only when it both exceeds the
+    /// threshold *and* sits outside the noise band.
+    pub flagged: bool,
+}
+
+/// Result of the statistical forwarding gate over N current samples.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StatRegressionReport {
+    /// Noise-band width applied, in sample standard deviations.
+    pub sigma: f64,
+    /// Fractional regression threshold applied to the median.
+    pub threshold: f64,
+    /// Number of current samples aggregated.
+    pub sample_count: usize,
+    /// Every gated metric with its verdict (flagged or not) for full
+    /// transparency.
+    pub metrics: Vec<StatMetric>,
+}
+
+impl StatRegressionReport {
+    /// Whether any metric was flagged as a real regression.
+    #[must_use]
+    pub fn has_regression(&self) -> bool {
+        self.metrics.iter().any(|m| m.flagged)
+    }
+
+    /// Iterator over only the flagged (regressing) metrics.
+    pub fn flagged(&self) -> impl Iterator<Item = &StatMetric> {
+        self.metrics.iter().filter(|m| m.flagged)
+    }
+}
+
+/// Statistically gate a set of `samples` (N independent re-runs of the
+/// forwarding sweep on this host) against a committed `baseline`.
 ///
-/// The gate is **hardware-invariant**: it never compares two absolute
-/// throughput numbers (which drift with the runner), only dimensionless
-/// ratios that hold across machines:
+/// The gate is **hardware-invariant** — it only ever diffs dimensionless
+/// ratios that hold across machines (per-mode normalised cost and the
+/// raw-L3 fast-path advantage), never absolute throughput. On top of that
+/// it is **statistically robust**, which is what stops a single noisy run
+/// on a shared CI runner from failing the build:
 ///
-///   1. *Per-mode inspection cost*, normalised to the raw-L3 fast path:
-///      `ns_per_packet(mode, backend) / ns_per_packet(raw-l3, xdp)`. A
-///      rise beyond `threshold` means a stage (NGFW, IPS, TLS, ...) got
-///      disproportionately more expensive — i.e. forwarding throughput at
-///      that depth regressed relative to the line-rate fast path.
-///   2. *Fast-path advantage*: the raw-L3 XDP-over-nftables speedup
-///      `pps(raw-l3, xdp) / pps(raw-l3, nftables)`. A drop beyond
-///      `threshold` means the XDP fast path lost ground against the
-///      engine — the one regression a relative-cost check anchored on the
-///      fast path cannot see on its own.
+///   1. Each metric is evaluated on every sample and aggregated with the
+///      **median**, which shrugs off the lone wild outlier a shared runner
+///      periodically emits.
+///   2. A metric is flagged only when the median move (a) exceeds the
+///      fractional `threshold` in the regressing direction **and** (b) is
+///      larger than the **noise band** `sigma × σ`, where `σ` is the
+///      corrected sample standard deviation of the samples themselves. A
+///      real per-stage or fast-path regression clears both bars; a dip
+///      that lives inside the run-to-run scatter does not.
+///
+/// With a single sample (`samples.len() == 1`) the standard deviation is
+/// zero, the noise band vanishes, and the gate degrades exactly to the
+/// legacy threshold-only behaviour — so the interface stays backward
+/// compatible.
+///
+/// # Errors
+/// Returns an error string when any sample describes a different schema
+/// version or profile than the baseline, when `samples` is empty, or when
+/// the baseline or any sample is missing the `(raw-l3, xdp)` anchor the
+/// normalisation requires.
+pub fn detect_forwarding_regression_stats(
+    baseline: &ForwardingReport,
+    samples: &[ForwardingReport],
+    threshold: f64,
+    sigma: f64,
+) -> Result<StatRegressionReport, String> {
+    if samples.is_empty() {
+        return Err("no current samples to compare against the baseline".to_string());
+    }
+    for s in samples {
+        if baseline.schema_version != s.schema_version {
+            return Err(format!(
+                "forwarding schema version mismatch: baseline {} vs current {}",
+                baseline.schema_version, s.schema_version
+            ));
+        }
+        if baseline.profile != s.profile {
+            return Err(format!(
+                "cannot compare different profiles: baseline {:?} vs current {:?}",
+                baseline.profile, s.profile
+            ));
+        }
+    }
+
+    let base_anchor = forwarding_anchor_ns(baseline)?;
+    let sample_anchors: Vec<f64> = samples
+        .iter()
+        .map(forwarding_anchor_ns)
+        .collect::<Result<_, _>>()?;
+
+    let mut metrics = Vec::new();
+    for metric in forwarding_metrics(baseline) {
+        let Some(base_val) = metric.eval(baseline, base_anchor) else {
+            continue; // baseline can't form this metric → nothing to gate
+        };
+        if base_val == 0.0 {
+            continue; // no defined reference to take a fractional change from
+        }
+
+        // Evaluate the metric on every sample; a sample missing the point
+        // simply does not contribute (rather than poisoning the set).
+        let sample_vals: Vec<f64> = samples
+            .iter()
+            .zip(&sample_anchors)
+            .filter_map(|(s, &a)| metric.eval(s, a))
+            .collect();
+        let Some(median_val) = median(&sample_vals) else {
+            continue; // no current evidence for this metric
+        };
+        let stddev = sample_stddev(&sample_vals);
+
+        let change = (median_val - base_val) / base_val;
+        let exceeds_threshold = match metric.direction() {
+            RegressDir::Rise => change >= threshold,
+            RegressDir::Drop => change <= -threshold,
+        };
+        let noise_band = sigma * stddev;
+        let outside_noise_band = (median_val - base_val).abs() > noise_band;
+
+        metrics.push(StatMetric {
+            metric: metric.name(),
+            baseline: base_val,
+            median: median_val,
+            stddev,
+            samples: sample_vals.len(),
+            change_fraction: change,
+            exceeds_threshold,
+            outside_noise_band,
+            flagged: exceeds_threshold && outside_noise_band,
+        });
+    }
+
+    Ok(StatRegressionReport {
+        sigma,
+        threshold,
+        sample_count: samples.len(),
+        metrics,
+    })
+}
+
+/// Compare a single current forwarding sweep against a committed baseline.
+///
+/// This is the single-sample special case of
+/// [`detect_forwarding_regression_stats`] (one sample, zero-width noise
+/// band) preserved for the existing CLI/JSON callers and tests. It is
+/// hardware-invariant but **not** noise-robust — prefer the statistical
+/// gate with N samples on a shared runner.
 ///
 /// # Errors
 /// Returns an error string when the reports describe different schema
@@ -747,78 +1047,21 @@ pub fn detect_forwarding_regression(
     current: &ForwardingReport,
     threshold: f64,
 ) -> Result<RegressionReport, String> {
-    if baseline.schema_version != current.schema_version {
-        return Err(format!(
-            "forwarding schema version mismatch: baseline {} vs current {}",
-            baseline.schema_version, current.schema_version
-        ));
-    }
-    if baseline.profile != current.profile {
-        return Err(format!(
-            "cannot compare different profiles: baseline {:?} vs current {:?}",
-            baseline.profile, current.profile
-        ));
-    }
-
-    let anchor = |r: &ForwardingReport| -> Result<f64, String> {
-        let m = r
-            .get(RAW_L3_LABEL, XDP_LABEL)
-            .ok_or_else(|| "report missing (raw-l3, xdp) anchor measurement".to_string())?;
-        let nspp = m.ns_per_packet();
-        if nspp.is_finite() && nspp > 0.0 {
-            Ok(nspp)
-        } else {
-            Err("(raw-l3, xdp) anchor has non-positive throughput".to_string())
-        }
-    };
-    let base_anchor = anchor(baseline)?;
-    let cur_anchor = anchor(current)?;
-
-    let mut regressions = Vec::new();
-
-    // (1) Per-mode normalised inspection cost.
-    for cur in &current.measurements {
-        if cur.mode == RAW_L3_LABEL && cur.backend == XDP_LABEL {
-            continue; // the anchor itself
-        }
-        let Some(base) = baseline.get(&cur.mode, &cur.backend) else {
-            continue; // a point absent from the baseline can't regress
-        };
-        let base_rel = base.ns_per_packet() / base_anchor;
-        let cur_rel = cur.ns_per_packet() / cur_anchor;
-        // A *rise* in normalised per-packet cost is the regression.
-        if let Some(change) = fractional_change(base_rel, cur_rel)
-            && change >= threshold
-        {
-            regressions.push(Regression {
-                metric: format!("{}/{} relative-cost", cur.mode, cur.backend),
-                previous: base_rel,
-                current: cur_rel,
-                change_fraction: change,
-            });
-        }
-    }
-
-    // (2) Raw-L3 fast-path advantage (XDP over nftables).
-    if let (Some(base_xdp), Some(base_nft), Some(cur_xdp), Some(cur_nft)) = (
-        baseline.get(RAW_L3_LABEL, XDP_LABEL),
-        baseline.get(RAW_L3_LABEL, NFTABLES_LABEL),
-        current.get(RAW_L3_LABEL, XDP_LABEL),
-        current.get(RAW_L3_LABEL, NFTABLES_LABEL),
-    ) && let (Some(base_speedup), Some(cur_speedup)) = (
-        ratio(base_xdp.pps, base_nft.pps),
-        ratio(cur_xdp.pps, cur_nft.pps),
-    ) && let Some(change) = fractional_change(base_speedup, cur_speedup)
-        && change <= -threshold
-    {
-        regressions.push(Regression {
-            metric: "raw-l3 xdp-over-nftables speedup".to_string(),
-            previous: base_speedup,
-            current: cur_speedup,
-            change_fraction: change,
-        });
-    }
-
+    let stats = detect_forwarding_regression_stats(
+        baseline,
+        std::slice::from_ref(current),
+        threshold,
+        0.0,
+    )?;
+    let regressions = stats
+        .flagged()
+        .map(|m| Regression {
+            metric: m.metric.clone(),
+            previous: m.baseline,
+            current: m.median,
+            change_fraction: m.change_fraction,
+        })
+        .collect();
     Ok(RegressionReport { regressions })
 }
 
@@ -1192,5 +1435,174 @@ mod tests {
         let json = base.to_json().unwrap();
         let back = ForwardingReport::from_json(&json).unwrap();
         assert_eq!(base, back);
+    }
+
+    // --- Statistical (N-sample median + noise-band) gate ------------------
+
+    /// A report whose only relative-cost metric (`full-stack-tls/xdp`)
+    /// equals `relcost` exactly, with the raw-L3 anchors held fixed. Since
+    /// `relcost = ns_per_packet(full) / ns_per_packet(raw-xdp) =
+    /// pps(raw-xdp) / pps(full)`, pinning `raw_xdp_pps` and solving for
+    /// `full_xdp_pps` gives a sample with a known metric value, which lets
+    /// these tests drive the median/σ logic with exact numbers. The
+    /// raw-L3 `xdp/nftables` speedup stays a constant 5× so it never
+    /// confounds the relative-cost assertions.
+    fn fwd_sample_relcost(relcost: f64) -> ForwardingReport {
+        fwd_report(10e6, 2e6, 10e6 / relcost)
+    }
+
+    fn relcost_metric(rr: &StatRegressionReport) -> &StatMetric {
+        rr.metrics
+            .iter()
+            .find(|m| m.metric.contains("full-stack-tls/xdp"))
+            .expect("full-stack-tls/xdp metric is gated")
+    }
+
+    #[test]
+    fn median_handles_odd_even_and_ignores_non_finite() {
+        assert_eq!(median(&[3.0, 1.0, 2.0]), Some(2.0));
+        assert_eq!(median(&[4.0, 1.0, 3.0, 2.0]), Some(2.5));
+        // A single NaN/inf must not poison the median.
+        assert_eq!(median(&[2.0, f64::NAN, 2.0, 2.0, 8.0]), Some(2.0));
+        assert_eq!(median(&[]), None);
+        assert_eq!(median(&[f64::INFINITY]), None);
+    }
+
+    #[test]
+    fn sample_stddev_uses_bessel_and_is_zero_below_two() {
+        assert!(sample_stddev(&[]).abs() < f64::EPSILON);
+        assert!(sample_stddev(&[42.0]).abs() < f64::EPSILON);
+        // Corrected (n-1) stddev of {2,4,4,4,5,5,7,9} is 2.13809...
+        let s = sample_stddev(&[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]);
+        assert!((s - 2.138_089_9).abs() < 1e-6, "got {s}");
+    }
+
+    #[test]
+    fn stats_flags_a_real_median_regression() {
+        // Baseline cost ratio 2.0; every sample sits tightly around 2.5
+        // (+25%), so the median clears the 15% threshold and the move
+        // dwarfs the tiny noise band.
+        let base = fwd_sample_relcost(2.0);
+        let samples: Vec<_> = [2.48, 2.49, 2.50, 2.50, 2.50, 2.51, 2.52]
+            .iter()
+            .map(|&c| fwd_sample_relcost(c))
+            .collect();
+        let rr = detect_forwarding_regression_stats(&base, &samples, 0.15, 2.0).unwrap();
+        assert!(rr.has_regression(), "a real, tight +25% shift must flag");
+        let m = relcost_metric(&rr);
+        assert!(m.flagged);
+        assert!(m.exceeds_threshold && m.outside_noise_band);
+        assert!((m.median - 2.50).abs() < 1e-9);
+        assert_eq!(m.samples, 7);
+    }
+
+    #[test]
+    fn stats_ignores_a_single_noisy_outlier_via_median() {
+        // Six clean runs at the baseline plus one wild 2.5× cost spike.
+        // The MEAN (2.43, +21%) would trip a 15% gate; the MEDIAN (2.0)
+        // does not — which is the whole point of aggregating with it.
+        let base = fwd_sample_relcost(2.0);
+        let mut costs = vec![2.0; 6];
+        costs.push(5.0);
+        let samples: Vec<_> = costs.iter().map(|&c| fwd_sample_relcost(c)).collect();
+        let rr = detect_forwarding_regression_stats(&base, &samples, 0.15, 2.0).unwrap();
+        let m = relcost_metric(&rr);
+        assert!(!m.flagged, "a lone outlier must not fail the build: {m:?}");
+        assert!((m.median - 2.0).abs() < 1e-9, "median pinned at baseline");
+        assert!(!rr.has_regression());
+    }
+
+    #[test]
+    fn stats_does_not_flag_a_median_move_inside_the_noise_band() {
+        // Median lands at 2.35 (+17.5%, past the 15% threshold) but the
+        // samples are so scattered that 2σ exceeds the move — so the band
+        // absorbs it and nothing is flagged.
+        let base = fwd_sample_relcost(2.0);
+        let samples: Vec<_> = [2.0, 2.05, 2.35, 2.35, 2.40, 2.80, 2.85]
+            .iter()
+            .map(|&c| fwd_sample_relcost(c))
+            .collect();
+        let rr = detect_forwarding_regression_stats(&base, &samples, 0.15, 2.0).unwrap();
+        let m = relcost_metric(&rr);
+        assert!(m.exceeds_threshold, "median did clear the threshold");
+        assert!(!m.outside_noise_band, "but it sits inside the 2σ band");
+        assert!(!m.flagged);
+        assert!(!rr.has_regression());
+    }
+
+    #[test]
+    fn stats_never_flags_an_improvement() {
+        // Cost ratio dropped to 1.5 (cheaper) and the speedup rose; an
+        // improvement on every axis must never be reported as a regression.
+        let base = fwd_sample_relcost(2.0);
+        let samples: Vec<_> = [1.48, 1.49, 1.50, 1.50, 1.51, 1.52, 1.50]
+            .iter()
+            .map(|&c| fwd_sample_relcost(c))
+            .collect();
+        let rr = detect_forwarding_regression_stats(&base, &samples, 0.15, 2.0).unwrap();
+        assert!(!rr.has_regression(), "improvements never flag: {rr:?}");
+        let m = relcost_metric(&rr);
+        assert!(!m.exceeds_threshold && !m.flagged);
+        assert!(m.change_fraction < 0.0, "the median cost actually fell");
+    }
+
+    #[test]
+    fn stats_single_sample_reduces_to_threshold_gate() {
+        // With one sample σ is 0 and the band vanishes, so the gate is the
+        // plain threshold check: a real shift flags, a clean run does not.
+        let base = fwd_sample_relcost(2.0);
+
+        let regress = detect_forwarding_regression_stats(
+            &base,
+            std::slice::from_ref(&fwd_sample_relcost(2.5)),
+            0.15,
+            2.0,
+        )
+        .unwrap();
+        assert!(regress.has_regression());
+        assert!(relcost_metric(&regress).stddev.abs() < f64::EPSILON);
+
+        let clean = detect_forwarding_regression_stats(
+            &base,
+            std::slice::from_ref(&fwd_sample_relcost(2.05)),
+            0.15,
+            2.0,
+        )
+        .unwrap();
+        assert!(!clean.has_regression(), "a 2.5% move stays clean");
+    }
+
+    #[test]
+    fn stats_flags_a_real_lost_fast_path_advantage() {
+        // Speedup collapses from 5× to ~2× across tight samples — a real
+        // fast-path regression the relative-cost axis cannot see.
+        let base = fwd_report(10e6, 2e6, 5e6); // speedup 5
+        let samples: Vec<_> = [4.9e6, 4.95e6, 5.0e6, 5.0e6, 5.0e6, 5.05e6, 5.1e6]
+            .iter()
+            .map(|&nft| fwd_report(10e6, nft, 5e6)) // speedup ~2
+            .collect();
+        let rr = detect_forwarding_regression_stats(&base, &samples, 0.15, 2.0).unwrap();
+        assert!(rr.has_regression());
+        assert!(
+            rr.flagged().any(|m| m.metric.contains("speedup")),
+            "the lost speedup is flagged: {rr:?}"
+        );
+    }
+
+    #[test]
+    fn stats_rejects_empty_samples_and_mismatches() {
+        let base = fwd_sample_relcost(2.0);
+        assert!(detect_forwarding_regression_stats(&base, &[], 0.15, 2.0).is_err());
+
+        let mut wrong_profile = fwd_sample_relcost(2.0);
+        wrong_profile.profile = "large".to_string();
+        assert!(
+            detect_forwarding_regression_stats(&base, &[wrong_profile], 0.15, 2.0).is_err(),
+            "profile mismatch must error rather than silently compare"
+        );
+
+        let mut wrong_schema = fwd_sample_relcost(2.0);
+        wrong_schema.schema_version = FORWARDING_SCHEMA_VERSION + 1;
+        assert!(detect_forwarding_regression_stats(&base, &[wrong_schema], 0.15, 2.0).is_err());
     }
 }

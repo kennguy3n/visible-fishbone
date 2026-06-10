@@ -141,13 +141,27 @@ BENCH_MANIFEST   := bench/Cargo.toml
 BENCH_BIN        := bench/target/release/sng-bench
 MICRO_PROFILE    := bench/profiles/skus/micro.toml
 MICRO_BASELINE   := bench/results/forwarding-micro.json
-# Written under bench/target/ (gitignored) so the gate leaves no untracked
-# files behind.
-MICRO_CURRENT    := bench/target/forwarding-micro.current.json
-# Maximum tolerated drift in the hardware-invariant ratios before the gate
-# fails the build. 15% absorbs runner noise while still catching a real
-# per-stage cost or fast-path-advantage regression.
+# Per-sample artifacts are written under bench/target/ (gitignored) so the
+# gate leaves no untracked files behind.
+MICRO_SAMPLE_DIR := bench/target/forwarding-micro-samples
+# Maximum tolerated drift in the hardware-invariant ratios (of the sample
+# *median*) before the gate fails the build. 15% absorbs runner noise while
+# still catching a real per-stage cost or fast-path-advantage regression.
 BENCH_THRESHOLD  := 0.15
+# Number of independent re-runs of the forwarding sweep aggregated by the
+# gate. A single run on a shared CI runner fires on noise; sampling and
+# taking the median makes the gate statistically sound. Odd N gives a
+# tie-free median.
+BENCH_SAMPLES    := 7
+# Noise-band width, in sample standard deviations. A metric regresses only
+# when the median move clears BENCH_THRESHOLD *and* is larger than
+# BENCH_SIGMA × σ of the samples — so run-to-run scatter alone never fails
+# the build. ~2σ covers ~95% of Gaussian noise.
+BENCH_SIGMA      := 2.0
+# Optional single-core pin: serialise the sweep onto one CPU so the OS
+# scheduler does not migrate it mid-measurement and inflate the variance.
+# Falls back to running unpinned where taskset is unavailable (e.g. macOS).
+BENCH_TASKSET    := $(shell command -v taskset >/dev/null 2>&1 && echo "taskset -c 0")
 
 .PHONY: bench-lint
 bench-lint:
@@ -163,17 +177,31 @@ bench-build:
 	$(CARGO) build --release --manifest-path $(BENCH_MANIFEST)
 
 # Forwarding-throughput regression gate (Micro SKU). Re-runs the sweep on
-# this host and compares hardware-invariant ratios against the committed
-# baseline; the compare exits non-zero (code 2) and fails the build if any
-# mode/backend regresses beyond BENCH_THRESHOLD. Refresh the baseline
-# deliberately (see docs/throughput-skus.md) for an intentional change.
+# this host BENCH_SAMPLES times (serialised, optionally pinned to one core),
+# then compares the hardware-invariant ratios against the committed
+# baseline. The compare aggregates the samples by median and only fails
+# (exit 2) when a metric's median move clears BENCH_THRESHOLD *and* sits
+# outside the BENCH_SIGMA × σ noise band — so a single noisy run on a shared
+# runner no longer fails the build. Refresh the baseline deliberately on
+# `main` post-merge (see bench/README.md → "Refreshing the baseline") for an
+# intentional change.
 .PHONY: bench-regression
 bench-regression: bench-build
-	$(BENCH_BIN) forwarding --profile $(MICRO_PROFILE) --out $(MICRO_CURRENT)
+	@rm -rf $(MICRO_SAMPLE_DIR)
+	@mkdir -p $(MICRO_SAMPLE_DIR)
+	@echo ">> forwarding micro sweep: $(BENCH_SAMPLES) serialised sample(s) $(if $(BENCH_TASKSET),(pinned: $(BENCH_TASKSET)),(unpinned))"
+	@i=1; while [ $$i -le $(BENCH_SAMPLES) ]; do \
+		echo ">>   sample $$i/$(BENCH_SAMPLES)"; \
+		$(BENCH_TASKSET) $(BENCH_BIN) forwarding \
+			--profile $(MICRO_PROFILE) \
+			--out $(MICRO_SAMPLE_DIR)/sample-$$i.json || exit $$?; \
+		i=$$((i+1)); \
+	done
 	$(BENCH_BIN) forwarding-compare \
 		--baseline $(MICRO_BASELINE) \
-		--current $(MICRO_CURRENT) \
-		--threshold $(BENCH_THRESHOLD)
+		$(foreach n,$(shell seq 1 $(BENCH_SAMPLES)),--current $(MICRO_SAMPLE_DIR)/sample-$(n).json) \
+		--threshold $(BENCH_THRESHOLD) \
+		--sigma $(BENCH_SIGMA)
 
 # --- Combined --------------------------------------------------------------
 

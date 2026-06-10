@@ -8,16 +8,26 @@
 # test, or build the harness. This workflow is the gate that does:
 #
 #   * lint + test the harness (cargo fmt/clippy/test on the bench manifest)
-#   * run the Micro-SKU forwarding sweep and compare it against the
-#     committed baseline `bench/results/forwarding-micro.json`
+#   * run the Micro-SKU forwarding sweep N times and compare the aggregate
+#     against the committed baseline `bench/results/forwarding-micro.json`
 #
 # The comparison is hardware-invariant: it never diffs absolute throughput
 # (which drifts with the runner) but dimensionless ratios — per-mode
 # normalised per-packet cost and the raw-L3 XDP-over-nftables speedup — so a
 # baseline committed on one machine is a valid gate on GitHub's runners.
-# `forwarding-compare` exits 2 when a ratio regresses beyond the threshold,
-# which fails the build. See docs/throughput-skus.md for the methodology and
-# how to refresh the baseline for an intentional change.
+#
+# It is also statistically robust, which is the point of this workflow.
+# Shared Azure runners are noisy: a single run periodically reports a
+# double-digit "regression" with no datapath change, and a one-shot gate on
+# that noise trains everyone to ignore it. So `make bench-regression`:
+#   * re-runs the sweep N times (default 7), serialised and pinned to one
+#     core (taskset) to suppress scheduler-induced variance;
+#   * aggregates each metric by the MEDIAN (robust to a lone outlier); and
+#   * flags a regression only when the median move clears the threshold AND
+#     is larger than a ~2σ noise band measured from the samples themselves.
+# `forwarding-compare` exits 2 only then, which fails the build. See
+# bench/README.md for the method and how to refresh the baseline (regenerated
+# on `main` post-merge) for an intentional change.
 #
 # Mirrors the Makefile (`make bench-regression`) so local == CI, and follows
 # the toolchain pin / cache / concurrency conventions of ci.yml.

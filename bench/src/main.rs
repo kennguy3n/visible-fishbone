@@ -367,13 +367,23 @@ struct ForwardingCompareArgs {
     /// Committed baseline forwarding artifact.
     #[arg(long)]
     baseline: PathBuf,
-    /// Current forwarding artifact.
-    #[arg(long)]
-    current: PathBuf,
+    /// Current forwarding artifact(s). Pass `--current` once per sample
+    /// (the `forwarding` sweep re-run N times on this host); the gate
+    /// aggregates the samples by median and tests the move against a noise
+    /// band. A single `--current` reproduces the legacy one-shot compare.
+    #[arg(long, required = true, num_args = 1..)]
+    current: Vec<PathBuf>,
     /// Fractional rise in normalised per-packet cost (or drop in fast-path
-    /// speedup) that counts as a regression.
+    /// speedup) of the sample *median* that counts as a regression.
     #[arg(long, default_value_t = 0.15)]
     threshold: f64,
+    /// Noise-band width in sample standard deviations. A metric is flagged
+    /// only when the median move clears the threshold *and* is larger than
+    /// `sigma × σ` of the samples, so single-run scatter on a shared CI
+    /// runner does not fail the build. `0` disables the band (threshold
+    /// only); the default of ~2σ covers ~95% of Gaussian noise.
+    #[arg(long, default_value_t = 2.0)]
+    sigma: f64,
 }
 
 fn main() -> std::process::ExitCode {
@@ -528,30 +538,63 @@ fn run_forwarding_compare(
     args: &ForwardingCompareArgs,
 ) -> Result<std::process::ExitCode, BenchError> {
     let baseline = load_forwarding_report(&args.baseline)?;
-    let current = load_forwarding_report(&args.current)?;
-    let rr = report::detect_forwarding_regression(&baseline, &current, args.threshold)
-        .map_err(BenchError::Regression)?;
+    let samples = args
+        .current
+        .iter()
+        .map(|p| load_forwarding_report(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let profile = samples
+        .first()
+        .map_or_else(|| baseline.profile.clone(), |s| s.profile.clone());
+
+    let rr =
+        report::detect_forwarding_regression_stats(&baseline, &samples, args.threshold, args.sigma)
+            .map_err(BenchError::Regression)?;
+
+    // Always surface the full statistical picture (median, σ, noise band)
+    // so an engineer can see *why* the gate did or did not fire — the
+    // opacity of the old single-run gate is what trained people to ignore
+    // it.
+    eprintln!(
+        "forwarding gate: profile {profile}, {} sample(s), threshold {:.0}%, noise band {:.1}σ",
+        rr.sample_count,
+        args.threshold * 100.0,
+        args.sigma,
+    );
+    for m in &rr.metrics {
+        let verdict = if m.flagged {
+            "REGRESSION"
+        } else if m.exceeds_threshold {
+            "within-noise" // crossed threshold but inside the σ band
+        } else {
+            "ok"
+        };
+        eprintln!(
+            "  [{verdict}] {}: baseline {:.4} -> median {:.4} ({:+.1}%), σ={:.4} (n={}), band=±{:.4}",
+            m.metric,
+            m.baseline,
+            m.median,
+            m.change_fraction * 100.0,
+            m.stddev,
+            m.samples,
+            args.sigma * m.stddev,
+        );
+    }
+
     if rr.has_regression() {
         eprintln!(
-            "FORWARDING REGRESSION DETECTED (profile {}, threshold {:.0}%):",
-            current.profile,
-            args.threshold * 100.0
+            "FORWARDING REGRESSION DETECTED (profile {profile}): {} metric(s) cleared both the {:.0}% threshold and the {:.1}σ noise band.",
+            rr.flagged().count(),
+            args.threshold * 100.0,
+            args.sigma,
         );
-        for r in &rr.regressions {
-            eprintln!(
-                "  {} {:.4} -> {:.4} ({:+.1}%)",
-                r.metric,
-                r.previous,
-                r.current,
-                r.change_fraction * 100.0
-            );
-        }
         Ok(std::process::ExitCode::from(EXIT_REGRESSION))
     } else {
         println!(
-            "no forwarding regression: profile {} within {:.0}% threshold",
-            current.profile,
-            args.threshold * 100.0
+            "no forwarding regression: profile {profile} median within {:.0}% threshold / {:.1}σ noise band across {} sample(s)",
+            args.threshold * 100.0,
+            args.sigma,
+            rr.sample_count,
         );
         Ok(std::process::ExitCode::SUCCESS)
     }
