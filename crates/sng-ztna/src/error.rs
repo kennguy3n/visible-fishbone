@@ -8,6 +8,8 @@
 use sng_core::error::ErrorCode;
 use thiserror::Error;
 
+use crate::policy::ZtnaDecisionReason;
+
 /// Errors produced by the ZTNA subsystem.
 #[derive(Debug, Error)]
 pub enum ZtnaError {
@@ -141,6 +143,38 @@ impl ZtnaError {
             | Self::TokenRejected { .. }
             | Self::IdpConfigNotFound { .. } => ErrorCode::IdentityRejected,
             Self::ProviderFailure { .. } | Self::Telemetry(_) => ErrorCode::Io,
+        }
+    }
+
+    /// Map a *provider-resolution* error from
+    /// [`crate::service::ZtnaService::evaluate`] to the deny
+    /// [`ZtnaDecisionReason`] it is equivalent to.
+    ///
+    /// `evaluate` returns `Err` only for the three resolution
+    /// misses — `UnknownApp`, `DeviceNotEnrolled`,
+    /// `IdentityNotFound` — each of which is a genuine deny cause
+    /// for a *live* session (the app was de-listed, the device was
+    /// offboarded, or the user record was removed). The continuous
+    /// re-evaluation loop uses this to treat those errors as a
+    /// verdict flip to deny rather than as "still allowed", mapping
+    /// each to its decision-reason twin.
+    ///
+    /// The remaining variants (`BundleDecode`, `InvalidPolicy`,
+    /// `ProviderFailure`, `Telemetry`) are never produced by
+    /// `evaluate` — they originate at bundle-load / telemetry time.
+    /// Should one ever reach this mapping it is treated as a
+    /// fail-closed [`ZtnaDecisionReason::Revoked`]: a session that
+    /// cannot be positively re-affirmed must not be kept alive.
+    #[must_use]
+    pub fn as_decision_reason(&self) -> ZtnaDecisionReason {
+        match self {
+            Self::UnknownApp { .. } => ZtnaDecisionReason::UnknownApp,
+            Self::DeviceNotEnrolled { .. } => ZtnaDecisionReason::DeviceNotEnrolled,
+            Self::IdentityNotFound { .. } => ZtnaDecisionReason::IdentityNotFound,
+            Self::BundleDecode(_)
+            | Self::InvalidPolicy(_)
+            | Self::ProviderFailure { .. }
+            | Self::Telemetry(_) => ZtnaDecisionReason::Revoked,
         }
     }
 }
