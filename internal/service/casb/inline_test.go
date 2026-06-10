@@ -5,6 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -35,7 +40,7 @@ func TestCreateInlineRule_ValidatesInput(t *testing.T) {
 
 	cases := map[string]CreateInlineRuleInput{
 		"empty app":       {AppID: "", Action: InlineActionUpload, Verdict: InlineVerdictLog},
-		"unknown app":     {AppID: "dropbox", Action: InlineActionUpload, Verdict: InlineVerdictLog},
+		"unknown app":     {AppID: "definitely_not_a_real_app", Action: InlineActionUpload, Verdict: InlineVerdictLog},
 		"invalid action":  {AppID: "m365", Action: InlineAction("rename"), Verdict: InlineVerdictLog},
 		"invalid verdict": {AppID: "m365", Action: InlineActionUpload, Verdict: InlineVerdict("quarantine")},
 		"negative size": {
@@ -51,6 +56,137 @@ func TestCreateInlineRule_ValidatesInput(t *testing.T) {
 				t.Fatalf("want ErrInvalidArgument, got %v", err)
 			}
 		})
+	}
+}
+
+// TestKnownApps_CoverConnectorCatalog locks the inline catalog to
+// the connector catalog: every CASB connector type the control
+// plane ships must be a creatable inline-rule app_id, and the
+// wildcard must never leak into the enumerated set. This is the
+// guard that keeps an operator from being unable to write an inline
+// rule for an app they have a connector for.
+func TestKnownApps_CoverConnectorCatalog(t *testing.T) {
+	t.Parallel()
+
+	// "google" is the connector type; the inline/data-plane catalog
+	// spells the same vendor "google_workspace" (its Drive/Workspace
+	// detection id). Map the one divergent name so the rest can be
+	// asserted verbatim.
+	connectorToApp := func(ct repository.CASBConnectorType) string {
+		if ct == repository.CASBConnectorGoogle {
+			return "google_workspace"
+		}
+		return string(ct)
+	}
+
+	connectorTypes := []repository.CASBConnectorType{
+		repository.CASBConnectorM365, repository.CASBConnectorGoogle,
+		repository.CASBConnectorSlack, repository.CASBConnectorSalesforce,
+		repository.CASBConnectorBox, repository.CASBConnectorDropbox,
+		repository.CASBConnectorGitHub, repository.CASBConnectorGitLab,
+		repository.CASBConnectorJira, repository.CASBConnectorConfluence,
+		repository.CASBConnectorServiceNow, repository.CASBConnectorZendesk,
+		repository.CASBConnectorHubSpot, repository.CASBConnectorZoom,
+		repository.CASBConnectorTeams, repository.CASBConnectorAWSConsole,
+		repository.CASBConnectorGCPConsole, repository.CASBConnectorAzurePortal,
+		repository.CASBConnectorOkta, repository.CASBConnectorWorkday,
+	}
+
+	known := make(map[string]struct{}, len(KnownApps()))
+	for _, a := range KnownApps() {
+		if a == AnyApp {
+			t.Fatalf("KnownApps must not include the %q wildcard", AnyApp)
+		}
+		known[a] = struct{}{}
+	}
+	if len(known) != len(connectorTypes) {
+		t.Fatalf("catalog size mismatch: %d known apps, %d connector types",
+			len(known), len(connectorTypes))
+	}
+
+	svc := newTestService(t)
+	ctx := context.Background()
+	tenant := uuid.New()
+	for _, ct := range connectorTypes {
+		app := connectorToApp(ct)
+		if _, ok := known[app]; !ok {
+			t.Errorf("connector %q has no inline catalog app %q", ct, app)
+			continue
+		}
+		// The app must also be creatable end-to-end, not merely
+		// present in the map.
+		if _, err := svc.CreateInlineRule(ctx, tenant, CreateInlineRuleInput{
+			AppID: app, Action: InlineActionUpload, Verdict: InlineVerdictLog, Enabled: true,
+		}, nil); err != nil {
+			t.Errorf("create inline rule for %q: %v", app, err)
+		}
+	}
+}
+
+// TestKnownApps_MatchRustDataPlaneCatalog enforces the cross-language
+// invariant the whole catalog rests on: the control-plane set
+// (KnownApps) and the data-plane detector
+// (crates/sng-swg/src/casb.rs AppCatalog::builtin) must list
+// byte-identical app ids. The control plane validates a rule's
+// app_id against KnownApps; the edge resolves that same id to a
+// detection signature. An id present on one side but mistyped or
+// missing on the other compiles cleanly and passes every
+// single-language test, yet produces a bundle that silently never
+// matches at the edge. This guard parses the app_id literals out of
+// AppCatalog::builtin and asserts set equality, so such a drift fails
+// the Go suite instead of shipping.
+func TestKnownApps_MatchRustDataPlaneCatalog(t *testing.T) {
+	t.Parallel()
+
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot resolve test file path")
+	}
+	// internal/service/casb -> repo root.
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", ".."))
+	casbRs := filepath.Join(repoRoot, "crates", "sng-swg", "src", "casb.rs")
+	src, err := os.ReadFile(casbRs)
+	if err != nil {
+		t.Fatalf("read rust catalog %s: %v", casbRs, err)
+	}
+
+	// Scope to AppCatalog::builtin by dropping the test module, so
+	// test-only signatures (e.g. "acme", the "*" wildcard rule) don't
+	// pollute the comparison.
+	text := string(src)
+	if idx := strings.Index(text, "#[cfg(test)]"); idx >= 0 {
+		text = text[:idx]
+	}
+	start := strings.Index(text, "fn builtin()")
+	if start < 0 {
+		t.Fatal("could not locate AppCatalog::builtin in casb.rs")
+	}
+	text = text[start:]
+
+	appIDRe := regexp.MustCompile(`app_id:\s*"([^"]+)"`)
+	rustApps := make(map[string]struct{})
+	for _, m := range appIDRe.FindAllStringSubmatch(text, -1) {
+		rustApps[m[1]] = struct{}{}
+	}
+	if len(rustApps) == 0 {
+		t.Fatal("parsed zero app_id literals from AppCatalog::builtin")
+	}
+
+	goSet := make(map[string]struct{}, len(KnownApps()))
+	for _, a := range KnownApps() {
+		goSet[a] = struct{}{}
+		if _, ok := rustApps[a]; !ok {
+			t.Errorf("app %q is in Go knownApps but missing from Rust AppCatalog::builtin", a)
+		}
+	}
+	for a := range rustApps {
+		if _, ok := goSet[a]; !ok {
+			t.Errorf("app %q is in Rust AppCatalog::builtin but missing from Go knownApps", a)
+		}
+	}
+	if len(rustApps) != len(goSet) {
+		t.Errorf("catalog size mismatch: Rust builtin has %d app ids, Go KnownApps has %d",
+			len(rustApps), len(goSet))
 	}
 }
 
@@ -168,7 +304,7 @@ func TestUpdateInlineRule_RejectsBadValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	badApp := "dropbox"
+	badApp := "definitely_not_a_real_app"
 	if _, err := svc.UpdateInlineRule(ctx, tenant, created.ID, UpdateInlineRuleInput{AppID: &badApp}, nil); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("want ErrInvalidArgument for bad app, got %v", err)
 	}
