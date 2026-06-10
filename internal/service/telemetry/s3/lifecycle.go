@@ -179,10 +179,12 @@ func BuildLifecycleConfiguration(cfg LifecyclePolicyConfig) (*types.BucketLifecy
 		ID:     aws.String(cfg.RuleID),
 		Status: types.ExpirationStatusEnabled,
 		// A prefix Filter (never the deprecated top-level Prefix field)
-		// scopes the rule. An empty prefix yields an empty-prefix
-		// filter, which matches the whole bucket — the documented
-		// "no prefix" behaviour.
-		Filter: &types.LifecycleRuleFilter{Prefix: aws.String(cfg.Prefix)},
+		// scopes the rule. lifecycleFilterPrefix anchors it to the
+		// archive key subtree ("{prefix}/") so the rule matches only the
+		// writer's own objects and never a sibling prefix that shares the
+		// bucket; an empty prefix stays empty, matching the whole bucket —
+		// the documented "no prefix" behaviour.
+		Filter: &types.LifecycleRuleFilter{Prefix: aws.String(lifecycleFilterPrefix(cfg.Prefix))},
 	}
 
 	if cfg.TransitionDays > 0 {
@@ -201,6 +203,23 @@ func BuildLifecycleConfiguration(cfg LifecyclePolicyConfig) (*types.BucketLifecy
 	}
 
 	return &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{rule}}, nil
+}
+
+// lifecycleFilterPrefix anchors the rule's prefix filter to exactly the
+// archive key subtree. The writer keys every object as
+// "{prefix}/tenant=.../..." (see Writer.uploadPartition), so the rule must
+// match on "{prefix}/": matching on the bare "{prefix}" would also sweep
+// sibling keys like "{prefix}-backup/..." that happen to share the bucket,
+// violating this file's "never touch objects outside the archive prefix"
+// invariant. An empty prefix is left empty — an empty-prefix filter matches
+// the whole bucket (the documented "no prefix" behaviour), whereas "/" would
+// match only keys under a literal leading slash. A prefix already ending in
+// "/" is not doubled.
+func lifecycleFilterPrefix(prefix string) string {
+	if prefix == "" {
+		return ""
+	}
+	return strings.TrimSuffix(prefix, "/") + "/"
 }
 
 // LifecycleAPI is the S3 surface needed to apply a bucket lifecycle

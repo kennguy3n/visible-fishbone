@@ -63,8 +63,10 @@ func TestBuildLifecycleConfiguration_Defaults(t *testing.T) {
 	if r.Prefix != nil {
 		t.Errorf("deprecated top-level Prefix should be nil, got %q", deref(r.Prefix))
 	}
-	if r.Filter == nil || deref(r.Filter.Prefix) != "telemetry" {
-		t.Fatalf("filter prefix = %+v, want \"telemetry\"", r.Filter)
+	// The filter is anchored to the archive subtree ("telemetry/"), not the
+	// bare prefix, so it can't sweep a sibling prefix like "telemetry-backup/".
+	if r.Filter == nil || deref(r.Filter.Prefix) != "telemetry/" {
+		t.Fatalf("filter prefix = %+v, want \"telemetry/\"", r.Filter)
 	}
 
 	if len(r.Transitions) != 1 {
@@ -111,6 +113,7 @@ func TestBuildLifecycleConfiguration_Custom(t *testing.T) {
 	if deref(r.ID) != "custom-id" {
 		t.Errorf("rule ID = %q, want custom-id", deref(r.ID))
 	}
+	// Prefix already ends in "/", so the anchor is not doubled.
 	if deref(r.Filter.Prefix) != "cold/" {
 		t.Errorf("filter prefix = %q, want cold/", deref(r.Filter.Prefix))
 	}
@@ -207,6 +210,30 @@ func TestBuildLifecycleConfiguration_EmptyPrefixMatchesWholeBucket(t *testing.T)
 	}
 }
 
+func TestLifecycleFilterPrefix(t *testing.T) {
+	// The filter must anchor to the archive subtree so it never sweeps a
+	// sibling prefix that shares the bucket, while preserving the empty ⇒
+	// whole-bucket contract and not doubling an existing trailing slash.
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty matches whole bucket", "", ""},
+		{"bare prefix gets anchored", "telemetry", "telemetry/"},
+		{"trailing slash not doubled", "telemetry/", "telemetry/"},
+		{"nested prefix anchored", "archive/cold", "archive/cold/"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lifecycleFilterPrefix(tc.in); got != tc.want {
+				t.Errorf("lifecycleFilterPrefix(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildLifecycleConfiguration_ExpirationBeforeTransitionRejected(t *testing.T) {
 	_, err := BuildLifecycleConfiguration(LifecyclePolicyConfig{
 		TransitionDays: 90,
@@ -285,8 +312,8 @@ func TestWriterEnsureLifecyclePolicy_UsesWriterBucketAndPrefix(t *testing.T) {
 		t.Errorf("bucket = %q, want telem-bucket", deref(api.last.Bucket))
 	}
 	r := api.last.LifecycleConfiguration.Rules[0]
-	if deref(r.Filter.Prefix) != "cold-archive" {
-		t.Errorf("filter prefix = %q, want cold-archive", deref(r.Filter.Prefix))
+	if deref(r.Filter.Prefix) != "cold-archive/" {
+		t.Errorf("filter prefix = %q, want cold-archive/", deref(r.Filter.Prefix))
 	}
 	// transitionDays 0 ⇒ the 90-day default.
 	if got := i32(r.Transitions[0].Days); got != DefaultDeepArchiveTransitionDays {
@@ -308,8 +335,8 @@ func TestWriterEnsureLifecyclePolicy_DefaultPrefixApplied(t *testing.T) {
 		t.Fatalf("EnsureLifecyclePolicy: %v", err)
 	}
 	r := api.last.LifecycleConfiguration.Rules[0]
-	if deref(r.Filter.Prefix) != "telemetry" {
-		t.Errorf("filter prefix = %q, want default telemetry", deref(r.Filter.Prefix))
+	if deref(r.Filter.Prefix) != "telemetry/" {
+		t.Errorf("filter prefix = %q, want default telemetry/", deref(r.Filter.Prefix))
 	}
 	if got := i32(r.Transitions[0].Days); got != 45 {
 		t.Errorf("transition days = %d, want 45", got)
