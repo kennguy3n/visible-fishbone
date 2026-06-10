@@ -124,12 +124,6 @@ function StepTenant({ onNext }: { onNext: () => void }) {
   const toast = useToast();
   const qc = useQueryClient();
   const [creating, setCreating] = useState(false);
-  // `create.mutate` flips `isPending` to false the moment the HTTP request
-  // resolves — but the async `onSuccess` below still has to invalidate the
-  // tenant list and switch the active tenant. This latch keeps the wizard
-  // "busy" across that whole settling window so Continue can't advance with the
-  // previously-selected tenant before the new one is in context.
-  const [settling, setSettling] = useState(false);
 
   const create = useCreateTenant({
     mutation: {
@@ -137,15 +131,13 @@ function StepTenant({ onNext }: { onNext: () => void }) {
         // The generated mutation doesn't know about the tenant-list query, so
         // refetch it and make the freshly-created tenant the active one before
         // advancing — otherwise step 2 would run against the previous tenant.
-        setSettling(true);
-        try {
-          await qc.invalidateQueries({ queryKey: getListTenantsQueryKey() });
-          setSelectedTenantId(tenant.id);
-          toast.success("Tenant created", `${tenant.name} is now active.`);
-          onNext();
-        } finally {
-          setSettling(false);
-        }
+        // react-query keeps the mutation in `pending` (isPending === true) until
+        // this awaited onSuccess resolves, so the buttons below stay disabled
+        // across the whole invalidate-then-select window with no extra latch.
+        await qc.invalidateQueries({ queryKey: getListTenantsQueryKey() });
+        setSelectedTenantId(tenant.id);
+        toast.success("Tenant created", `${tenant.name} is now active.`);
+        onNext();
       },
       onError: (e) =>
         toast.error(
@@ -154,7 +146,7 @@ function StepTenant({ onNext }: { onNext: () => void }) {
         ),
     },
   });
-  const busy = create.isPending || settling;
+  const busy = create.isPending;
 
   return (
     <Card title="Choose the tenant to set up">

@@ -219,14 +219,20 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
         setRows(partial);
         setRanAt(new Date().toLocaleString());
       }
-      // Name the phase that failed so the operator knows later phases were
-      // skipped, not silently completed. Tokens is the last phase, so there's
-      // nothing after it to mention.
+      // Name the phase that failed and exactly which later phases were skipped
+      // (not silently completed), matching the singular/plural to how many
+      // actually remained — the policy phase is absent when it was opted out.
       const reason = e instanceof Error ? e.message : "request failed";
-      const detail =
-        phase === "tokens"
-          ? reason
-          : `${reason}. Phases after ${PHASE_LABEL[phase]} were not attempted.`;
+      const plan: Phase[] = policyTemplate
+        ? ["site", "policy", "tokens"]
+        : ["site", "tokens"];
+      const remaining = plan.slice(plan.indexOf(phase) + 1);
+      let detail = reason;
+      if (remaining.length === 1) {
+        detail = `${reason}. The ${PHASE_LABEL[remaining[0]]} phase was not attempted.`;
+      } else if (remaining.length > 1) {
+        detail = `${reason}. Phases after ${PHASE_LABEL[phase]} were not attempted.`;
+      }
       toast.error(`Bulk onboarding failed during ${PHASE_LABEL[phase]}`, detail);
     } finally {
       setRunning(false);
