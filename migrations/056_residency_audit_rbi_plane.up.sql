@@ -1,4 +1,4 @@
--- 055_residency_audit_rbi_plane
+-- 056_residency_audit_rbi_plane
 --
 -- Allow the 'rbi_artifact' residency plane in the residency_audit
 -- CHECK constraint.

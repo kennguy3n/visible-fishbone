@@ -1,4 +1,4 @@
--- 056_casb_active_device_count
+-- 058_casb_active_device_count
 --
 -- WS4 — Inline CASB Expansion. casb_discovered_apps now has two
 -- independent writers with different semantics for "how many users":
