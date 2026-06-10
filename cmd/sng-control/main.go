@@ -2119,9 +2119,12 @@ func startTelemetry(
 					slog.String("bucket", s3Cfg.Bucket),
 					slog.String("error", err.Error()))
 			} else {
+				// Log the age actually applied to the bucket, not the raw
+				// config: a configured 0 means "use the default", which
+				// EnsureLifecyclePolicy resolves to 90.
 				logger.Info("telemetry: s3 cold-archive lifecycle policy applied",
 					slog.String("bucket", s3Cfg.Bucket),
-					slog.Int("deep_archive_transition_days", cfg.TelemetryAnalytics.S3LifecycleDeepArchiveDays))
+					slog.Int("deep_archive_transition_days", int(s3writer.EffectiveTransitionDays(transitionDays))))
 			}
 		}
 	}

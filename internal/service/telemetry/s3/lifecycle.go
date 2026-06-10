@@ -95,10 +95,27 @@ type LifecyclePolicyConfig struct {
 	RuleID string
 }
 
-func (c LifecyclePolicyConfig) withDefaults() LifecyclePolicyConfig {
-	if c.TransitionDays == 0 {
-		c.TransitionDays = DefaultDeepArchiveTransitionDays
+// EffectiveTransitionDays reports the Deep Archive transition age the
+// policy actually applies for a configured value: 0 ⇒ the 90-day
+// DefaultDeepArchiveTransitionDays, a negative value ⇒ 0 (the transition
+// is disabled), any positive value ⇒ itself. It is the single source of
+// truth for this defaulting (withDefaults below uses it), exported so a
+// caller can log/report the age that was really applied rather than the
+// raw configured input — e.g. an operator who set the knob to 0 sees 90
+// in the logs, the value on the bucket.
+func EffectiveTransitionDays(configured int32) int32 {
+	switch {
+	case configured == 0:
+		return DefaultDeepArchiveTransitionDays
+	case configured < 0:
+		return 0
+	default:
+		return configured
 	}
+}
+
+func (c LifecyclePolicyConfig) withDefaults() LifecyclePolicyConfig {
+	c.TransitionDays = EffectiveTransitionDays(c.TransitionDays)
 	if c.AbortIncompleteMultipartDays == 0 {
 		c.AbortIncompleteMultipartDays = DefaultAbortIncompleteMultipartDays
 	}

@@ -142,6 +142,35 @@ func TestBuildLifecycleConfiguration_NegativeDisables(t *testing.T) {
 	}
 }
 
+func TestEffectiveTransitionDays(t *testing.T) {
+	cases := []struct {
+		name       string
+		configured int32
+		want       int32
+	}{
+		{"zero uses default", 0, DefaultDeepArchiveTransitionDays},
+		{"positive passthrough", 45, 45},
+		{"negative disables", -1, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EffectiveTransitionDays(tc.configured); got != tc.want {
+				t.Errorf("EffectiveTransitionDays(%d) = %d, want %d", tc.configured, got, tc.want)
+			}
+		})
+	}
+	// The exported resolver must agree with the value the builder actually
+	// applies, so a caller logging EffectiveTransitionDays reports the truth.
+	lc, err := BuildLifecycleConfiguration(LifecyclePolicyConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := i32(lc.Rules[0].Transitions[0].Days); got != EffectiveTransitionDays(0) {
+		t.Errorf("built transition days = %d, want EffectiveTransitionDays(0) = %d",
+			got, EffectiveTransitionDays(0))
+	}
+}
+
 func TestBuildLifecycleConfiguration_EmptyPrefixMatchesWholeBucket(t *testing.T) {
 	lc, err := BuildLifecycleConfiguration(LifecyclePolicyConfig{})
 	if err != nil {
