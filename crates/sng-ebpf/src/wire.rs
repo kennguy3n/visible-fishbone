@@ -100,6 +100,49 @@ pub const LOGICAL_MAX_PORTS_PER_RULE: usize = 8;
 /// The six steering tiers — the fixed length of the steering array.
 pub const STEERING_SLOTS: usize = 6;
 
+/// Capacity of the kernel-owned, flow-keyed `LRU_HASH` fast-path tables —
+/// the per-flow state map ([`MAP_FLOW_STATE`]) and **the policy verdict
+/// cache** ([`MAP_VERDICT_CACHE`]) — the two maps `main.rs` declares with
+/// `with_max_entries(MAX_FLOWS, …)`.
+///
+/// # PoP-shared, tenant-count-independent invariant
+///
+/// This is a single **PoP-wide** ceiling on the number of concurrent
+/// *flows* a shared edge tracks, **not** a per-tenant allocation. The
+/// verdict cache is keyed by the [`crate::maps::FlowKey`] 5-tuple, which
+/// carries **no tenant discriminant** (see `FlowKey` — it is
+/// `src`/`dst`/`src_port`/`dst_port`/`protocol`/`family` only), so all of
+/// a PoP's tenants share one fixed-size LRU keyed on flow identity. The
+/// kernel `LRU_HASH` reclaims the least-recently-used flow on insert
+/// pressure, so the working set self-balances across whichever tenants are
+/// currently busy instead of being statically partitioned.
+///
+/// Sizing it per tenant (e.g. `MAX_FLOWS_PER_TENANT * n_tenants`) is the
+/// regression this contract forbids: at ~5000 SME tenants per PoP it would
+/// multiply locked kernel memory by the tenant count, fragment cache
+/// locality, and decay the hit-rate as tenants are added. The value MUST
+/// stay a compile-time constant that does not reference any tenant count.
+/// It mirrors `MAX_FLOWS` in `crates/sng-ebpf/bpf/src/contract.rs`; change
+/// one and you must change the other (the two halves cannot share a crate
+/// — see the module header). `wire::tests::lru_map_capacities_*` pin both
+/// the value and the no-tenant-in-the-key invariant.
+pub const MAX_FLOWS: usize = 1 << 20;
+
+/// Capacity of the kernel-owned per-source `LRU_HASH` rate-limit tables
+/// (`sng_syn_buckets` / `sng_udp_buckets`). Like [`MAX_FLOWS`] this is a
+/// single PoP-wide ceiling on distinct *source addresses*, never a
+/// per-tenant allocation, and mirrors `MAX_SOURCES` in
+/// `crates/sng-ebpf/bpf/src/contract.rs`.
+pub const MAX_SOURCES: usize = 1 << 20;
+
+/// The BPF map API (`aya_ebpf::maps::LruHashMap::with_max_entries`) takes
+/// the capacity as a `u32`, and the verifier rejects a zero-capacity map.
+/// Lock both bounds at compile time so a future edit to [`MAX_FLOWS`] /
+/// [`MAX_SOURCES`] that overflows `u32` or zeroes the capacity fails the
+/// build here rather than at kernel load on the edge.
+const _: () = assert!(MAX_FLOWS > 0 && MAX_FLOWS <= u32::MAX as usize);
+const _: () = assert!(MAX_SOURCES > 0 && MAX_SOURCES <= u32::MAX as usize);
+
 /// Sentinel [`WireRule::protocol_present`] / generic "absent" flag value.
 const ABSENT: u8 = 0;
 /// Generic "present" flag value.
@@ -859,6 +902,77 @@ mod tests {
         assert_eq!(size_of::<crate::maps::FlowState>(), 40);
         assert_eq!(size_of::<crate::maps::VerdictCacheEntry>(), 16);
         assert_eq!(size_of::<crate::maps::FlowKey>(), 40);
+    }
+
+    #[test]
+    fn lru_map_capacities_are_fixed_and_tenant_independent() {
+        // Both are compile-time `usize` constants, usable in `const` context —
+        // which is exactly what "independent of any runtime tenant count"
+        // means. The non-zero / fits-in-`u32` (`with_max_entries` arg type)
+        // bounds are locked at compile time by the `const _: () = assert!(…)`
+        // checks next to the definitions above.
+        const _CAP_IS_CONST_U32: u32 = MAX_FLOWS as u32;
+        const _SRC_IS_CONST_U32: u32 = MAX_SOURCES as u32;
+
+        // The verdict cache / flow-state / conntrack LRU maps are sized by a
+        // single PoP-wide constant, NOT scaled per tenant. This pins the
+        // value (mirrored in `bpf/src/contract.rs`) and, more importantly,
+        // documents the invariant: a future edit that makes capacity a
+        // function of tenant count — e.g. `MAX_FLOWS = PER_TENANT * 5000` —
+        // changes this literal and trips the test, forcing review.
+        assert_eq!(MAX_FLOWS, 1 << 20, "verdict-cache LRU capacity drifted");
+        assert_eq!(MAX_SOURCES, 1 << 20, "rate-limit LRU capacity drifted");
+    }
+
+    #[test]
+    fn verdict_cache_key_is_pop_shared_five_tuple() {
+        use crate::maps::FlowKey;
+
+        // The verdict cache (`LRU_HASH<FlowKey, VerdictCacheEntry>`) is keyed
+        // on flow identity alone. `FlowKey` is exactly the 5-tuple + family +
+        // explicit padding (40 bytes); there is no room for — and no — tenant
+        // discriminant. If anyone adds a `tenant_id` field to fragment the
+        // cache per tenant, this size assertion fails.
+        assert_eq!(
+            size_of::<FlowKey>(),
+            40,
+            "FlowKey grew — a tenant_id (or other) field would fragment the \
+             PoP-shared verdict cache"
+        );
+
+        // Two different tenants whose flows happen to share the same 5-tuple
+        // map to the SAME cache key — i.e. the cache is PoP-shared and keyed
+        // on the flow, never partitioned by tenant. (There is no tenant input
+        // to `FlowKey::new` to even express a per-tenant key.)
+        let tenant_a_flow = FlowKey::new(
+            IpAddr::from([10, 0, 0, 1]),
+            IpAddr::from([93, 184, 216, 34]),
+            44_000,
+            443,
+            6,
+        );
+        let tenant_b_same_flow = FlowKey::new(
+            IpAddr::from([10, 0, 0, 1]),
+            IpAddr::from([93, 184, 216, 34]),
+            44_000,
+            443,
+            6,
+        );
+        assert_eq!(
+            tenant_a_flow, tenant_b_same_flow,
+            "identical 5-tuples must collapse to one shared key (PoP-shared)"
+        );
+
+        // Distinct flows remain distinct keys, so the shared cache still
+        // separates real flows (only the tenant dimension is absent).
+        let other_flow = FlowKey::new(
+            IpAddr::from([10, 0, 0, 1]),
+            IpAddr::from([93, 184, 216, 34]),
+            44_001,
+            443,
+            6,
+        );
+        assert_ne!(tenant_a_flow, other_flow);
     }
 
     #[test]

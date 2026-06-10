@@ -65,6 +65,9 @@ static SNG_GEO_BLOCK: HashMap<WireCountry, u8> =
     HashMap::with_max_entries(MAX_BLOCKED_COUNTRIES, 0);
 #[map(name = "sng_flow_state")]
 static SNG_FLOW_STATE: LruHashMap<FlowKey, FlowState> = LruHashMap::with_max_entries(MAX_FLOWS, 0);
+// PoP-shared policy verdict cache: one fixed-capacity LRU keyed by the
+// `FlowKey` 5-tuple (no tenant field) for every tenant on the edge. Keep
+// `MAX_FLOWS` a tenant-count-independent constant — see `contract::MAX_FLOWS`.
 #[map(name = "sng_verdict_cache")]
 static SNG_VERDICT_CACHE: LruHashMap<FlowKey, VerdictCacheEntry> =
     LruHashMap::with_max_entries(MAX_FLOWS, 0);

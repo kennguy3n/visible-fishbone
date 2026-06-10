@@ -52,8 +52,31 @@ pub const STEERING_SLOTS: u32 = 6;
 /// capacities. These bound kernel memory; tune with the deployment.
 pub const MAX_GEOIP_ENTRIES: u32 = 1 << 16;
 pub const MAX_BLOCKED_COUNTRIES: u32 = 512;
+/// Capacity of the flow-keyed `LRU_HASH` fast-path tables: per-flow state
+/// (`sng_flow_state`) and **the policy verdict cache** (`sng_verdict_cache`)
+/// — the two maps declared `with_max_entries(MAX_FLOWS, …)` in `main.rs`.
+///
+/// This is a single **PoP-wide** ceiling on concurrent flows, shared by
+/// every tenant on the edge, **not** a per-tenant allocation — the cache
+/// is keyed by the `FlowKey` 5-tuple (no tenant field), so all tenants
+/// share one fixed-size LRU and the kernel reclaims the least-recently-used
+/// flow under pressure. It MUST remain a compile-time constant that does
+/// not reference any tenant count: scaling it per tenant
+/// (`PER_TENANT * n_tenants`) would, at ~5000 SME tenants per PoP, blow up
+/// locked kernel memory and decay the hit-rate. Mirrors
+/// `crate::wire::MAX_FLOWS` on the userspace side; keep the two in lockstep.
 pub const MAX_FLOWS: u32 = 1 << 20;
+/// Per-source rate-limit `LRU_HASH` capacity — likewise PoP-wide, never
+/// per-tenant. Mirrors `crate::wire::MAX_SOURCES`.
 pub const MAX_SOURCES: u32 = 1 << 20;
+
+// Lock the PoP-shared capacities at compile time: non-zero (the verifier
+// rejects a zero-capacity map) and pinned to the value the userspace
+// mirror (`crate::wire::MAX_FLOWS` / `MAX_SOURCES`) also asserts. A future
+// edit that zeroes or per-tenant-scales either constant fails the BPF
+// build here, in lockstep with the userspace regression test.
+const _: () = assert!(MAX_FLOWS == 1 << 20);
+const _: () = assert!(MAX_SOURCES == 1 << 20);
 
 // ---- Address family discriminants (mirror `crate::maps::family`) ----
 
