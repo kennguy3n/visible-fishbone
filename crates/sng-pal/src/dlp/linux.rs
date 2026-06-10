@@ -38,8 +38,8 @@
 //!   [`ChannelError::Unavailable`].
 
 use super::{
-    FileWatchOptions, MountEntry, RemovableMount, SensitiveDirWatcher,
-    clipboard_metadata, content_hash, mime_for_path,
+    FileWatchOptions, MountEntry, RemovableMount, SensitiveDirWatcher, clipboard_metadata,
+    content_hash, mime_for_path,
 };
 use async_trait::async_trait;
 use nix::poll::{PollFd, PollFlags, PollTimeout};
@@ -746,7 +746,11 @@ const USB_IDLE_FALLBACK: Duration = Duration::from_secs(5);
 // `from_secs(60)` is intentional: `Duration::from_mins` is still unstable
 // on the toolchain, and seconds keep this re-scan floor in the same unit
 // as the other USB timeouts in this module.
-#[allow(clippy::duration_suboptimal_units)]
+// `unknown_lints` keeps this compiling on the pinned 1.91 toolchain,
+// whose clippy doesn't yet know `duration_suboptimal_units`; on newer
+// clippy the second allow suppresses the real lint (the `from_secs(60)`
+// choice is deliberate — see above).
+#[allow(unknown_lints, clippy::duration_suboptimal_units)]
 const USB_EDGE_PARK_CEILING: Duration = Duration::from_secs(60);
 
 /// Watches removable volumes and reports the files written onto them as
