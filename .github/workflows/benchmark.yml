@@ -249,15 +249,18 @@ jobs:
           # wired differently.
           echo "BENCH_WIRE_IFACE=${BENCH_WIRE_IFACE:-veth-bench}" >> "$GITHUB_ENV"
 
-      - name: real-wire forwarding sweep (4 inspection modes)
+      - name: forwarding sweep (4 inspection modes)
         run: |
           set -euo pipefail
           bin=target/release/sng-bench
           profile=profiles/skus/${{ matrix.profile }}.toml
           mkdir -p results/wire
-          # The forwarding sweep exercises all four inspection modes
-          # (raw-l3 / ngfw-verdict / full-stack / full-stack+TLS) against the
-          # real edge datapath, per traffic class and backend.
+          # The forwarding sweep characterises all four cumulative inspection
+          # modes (raw-l3 / ngfw-verdict / full-stack / full-stack+TLS) per
+          # traffic class and backend. This is the in-process datapath model;
+          # the real AF_PACKET wire transmission happens in the next step. The
+          # two are complementary: the model gives the per-mode breakdown, the
+          # wire sweep gives the measured floor.
           echo "::group::forwarding (4 modes) / ${{ matrix.profile }}"
           "$bin" forwarding \
             --profile "$profile" \
