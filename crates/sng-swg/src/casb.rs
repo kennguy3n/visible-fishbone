@@ -1491,6 +1491,68 @@ mod tests {
     }
 
     #[test]
+    fn builtin_catalog_has_no_same_host_shadowing() {
+        // Guards the declaration-order fall-through that same-host
+        // signatures rely on (jira/confluence on atlassian.net,
+        // teams/m365 on graph.microsoft.com, gcp_console/
+        // google_workspace on googleapis.com): for every signature
+        // `j`, no *earlier* signature `i` that also matches j's host
+        // may classify a request that one of j's own path rules is
+        // meant to own. If it could, `detect`'s `find_map` would let
+        // `i` silently steal j's traffic — a misclassification that
+        // for a CASB means the wrong (or no) policy fires. This is
+        // the missing structural assertion the catalog's correctness
+        // otherwise rests on by inspection; it runs only in tests, so
+        // it adds no edge cost.
+        //
+        // A wildcard segment is concretised to a sentinel that is not
+        // a literal in any signature, so a literal-vs-`*` mismatch in
+        // `i` correctly does NOT register as shadowing while an `i`
+        // that is `*` (or identical literal) in that position does.
+        fn concretize(glob: &str) -> String {
+            glob.split('/')
+                .map(|seg| if seg == "*" { "00wildcard00" } else { seg })
+                .collect::<Vec<_>>()
+                .join("/")
+        }
+
+        let sigs = AppCatalog::builtin().signatures;
+        for (j_idx, j) in sigs.iter().enumerate() {
+            for rule in &j.path_rules {
+                let path = concretize(&rule.path_glob);
+                // Every builtin rule pins a method; fall back to the
+                // full verb set if one is ever left open so an
+                // open-method rule can't hide a collision.
+                let methods: Vec<String> = match &rule.method {
+                    Some(m) => vec![m.clone()],
+                    None => ["get", "post", "put", "patch", "delete"]
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect(),
+                };
+                for host in &j.host_suffixes {
+                    for method in &methods {
+                        let c = ctx(method, host, &path);
+                        for i in sigs.iter().take(j_idx) {
+                            if i.app_id == j.app_id {
+                                continue;
+                            }
+                            assert!(
+                                !(i.host_matches(&c) && i.classify(&c).is_some()),
+                                "catalog shadowing: earlier signature {:?} would \
+                                 steal `{method} {host}{path}`, which {:?} owns; \
+                                 same-host signatures must keep disjoint path globs",
+                                i.app_id,
+                                j.app_id,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn detects_box_actions() {
         assert_detect(
             "POST",
