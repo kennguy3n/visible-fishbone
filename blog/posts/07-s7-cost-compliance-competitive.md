@@ -12,9 +12,13 @@ hand an auditor. SNG's metering engine is built for that.
 
 ## Walking it in the console
 
-The metering surface shows eight meters per tenant, each with current usage, a
-**projected** end-of-period total, and a budget utilisation bar. Here it is
-across all four tiers — the meter limits and projections differ by tier:
+The metering surface is the new **WS8 cost metering UI**
+([PR #130](https://github.com/kennguy3n/visible-fishbone/pull/130)) — a
+purpose-built spend dashboard that turns the raw usage meters into a buyer-facing
+view. It shows eight meters per tenant, each with current usage, a **projected**
+end-of-period total, and a budget utilisation bar, and the fleet cost report
+refreshes when a tenant's budgets change. Here it is across all four tiers — the
+meter limits and projections differ by tier:
 
 ![Metering — Acme (enterprise)](../artifacts/screenshots/s7-metering-acme.png)
 ![Metering — Globex (enterprise)](../artifacts/screenshots/s7-metering-globex.png)
@@ -30,14 +34,14 @@ steady-state period-end total:
 
 | meter | used | projected (period-end) |
 | --- | ---: | ---: |
-| llm_tokens_used | 3,230,106 | 11,967,185 |
-| llm_calls | 3,499 | 12,964 |
-| url_cat_lookups | 9,032 | 92,723 |
-| malware_scans | 376 | 3,861 |
-| clickhouse_rows_written | 80,752,643 | 299,179,575 |
-| s3_bytes_archived | 403.8 GB | ~1.50 TB |
-| bandwidth_proxied_bytes | 1.35 TB | ~4.99 TB |
-| policy_evaluations | 4,515,856 | 46,359,887 |
+| llm_tokens_used | 3,864,223 | 11,999,824 |
+| llm_calls | 4,186 | 13,000 |
+| url_cat_lookups | 79,267 | 119,975 |
+| malware_scans | 3,303 | 5,000 |
+| clickhouse_rows_written | 96,605,574 | 299,995,595 |
+| s3_bytes_archived | 483.0 GB | ~1.50 TB |
+| bandwidth_proxied_bytes | 1.61 TB | ~5.00 TB |
+| policy_evaluations | 39,633,445 | 59,987,119 |
 
 ### Projection is the feature
 
@@ -55,26 +59,26 @@ Initech's URL-category lookups, captured at
 
 ```json
 { "meter": "url_cat_lookups", "baseline_monthly_usd": 72.31,
-  "projected_monthly_usd": 173.86, "ratio": 2.4042,
+  "projected_monthly_usd": 224.97, "ratio": 3.111,
   "baseline_months": 5, "severity": "warning" }
 ```
 
-A 2.4× run-rate over a 5-month baseline — flagged `warning`, not screamed as
+A 3.1× run-rate over a 5-month baseline — flagged `warning`, not screamed as
 critical. Acme's anomalies file, by contrast, is quiet. That restraint is the
 point: an anomaly detector that flags everything is noise.
 
 ### The margin story (for the MSP)
 
-The admin cost-report rolls up a **projected $2,014.78/mo** across the four
+The admin cost-report rolls up a **projected $2,216.39/mo** across the four
 tenants. Per-tenant gross margins (`margin_pct` from
 [`s7-admin-cost-report.json`](../artifacts/payloads/s7-admin-cost-report.json)):
 
 | tenant | tier | margin |
 | --- | --- | ---: |
-| Globex | enterprise | 69.4% |
-| Acme | enterprise | 51.2% |
-| Umbrella | starter | 46.7% |
-| Initech | professional | 24.9% |
+| Globex | enterprise | 66.5% |
+| Acme | enterprise | 46.8% |
+| Umbrella | starter | 42.3% |
+| Initech | professional | 14.4% |
 
 Initech's thinner margin is *because* of its url_cat surge — the anomaly and the
 margin compression are the same story, and an MSP can see it before renewal.
@@ -122,7 +126,7 @@ is informative context, **not** a head-to-head result:
 
 | Box (class) | firewall | IPS/threat | source |
 | --- | ---: | ---: | --- |
-| SNG branch-small (dry-run, VM) | ~73 Gbps | ~72 Gbps | sng-bench |
+| SNG branch-small (dry-run, VM) | ~74 Gbps | ~74 Gbps | sng-bench |
 | Fortinet FortiGate 40F (2-core) | 5.0 Gbps | 0.8 Gbps | FortiGate 40F datasheet |
 | Palo Alto PA-440 (2-core) | 3.1 Gbps | 0.7 Gbps | PA-400 series datasheet |
 | Fortinet FortiGate 60F (4-core) | 10.0 Gbps | 1.4 Gbps | FortiGate 60F datasheet |

@@ -41,7 +41,7 @@ finance access app private-apps from a managed device?"* returns, verbatim from
 {
   "verdict": "inspect",
   "evaluation_mode": "compiled-bundle",
-  "matched_rules": ["policy-graph:f5f9fdbb-...@v1"],
+  "matched_rules": ["policy-graph:d582fe06-...@v1"],
   "ai_generated": false,
   "explanation": "Verdict \"inspect\" ... user-subject rules were not evaluated
     — user identity is not represented in the synthesized access envelope, so

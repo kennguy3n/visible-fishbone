@@ -47,6 +47,13 @@ func main() {
 	}
 	token = mintGlobalAdminJWT(secret, *operator)
 
+	// Provision the platform RBAC grant and canonical fixture identities
+	// the API-driven seed cannot create for itself (see bootstrap.go), so
+	// a fresh, freshly-migrated database reproduces the same dataset.
+	if err := bootstrapFixtures(context.Background(), *operator); err != nil {
+		fatal("bootstrap: " + err.Error())
+	}
+
 	existing := loadTenantsBySlug()
 
 	summary := map[string]any{}
@@ -749,10 +756,45 @@ func policyGraphRuleCount(tid string) int {
 			Rules []map[string]any `json:"rules"`
 		} `json:"graph"`
 	}
-	if doJSON("GET", fmt.Sprintf("/api/v1/tenants/%s/policy", tid), nil, &pg) {
+	// A tenant that has never published a graph legitimately 404s here;
+	// that is the "no policy yet" answer to an existence probe, not a
+	// failure, so use the 404-tolerant GET to keep the run output clean
+	// (a real route regression on this path still surfaces as FAIL).
+	if getOptional(fmt.Sprintf("/api/v1/tenants/%s/policy", tid), &pg) {
 		return len(pg.Graph.Rules)
 	}
 	return 0
+}
+
+// getOptional performs a GET that treats 404 as a clean "absent" answer
+// (returns false without logging), used for existence probes where the
+// resource may not have been created yet. Any other non-2xx is still
+// logged as FAIL so genuine route regressions remain visible.
+func getOptional(path string, out any) bool {
+	req, err := http.NewRequestWithContext(context.Background(), "GET", *apiBase+path, nil)
+	if err != nil {
+		logf("ERR build GET %s: %v", path, err)
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		logf("ERR GET %s: %v", path, err)
+		return false
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if out != nil && len(raw) > 0 {
+			_ = json.Unmarshal(raw, out)
+		}
+		return true
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return false
+	}
+	logf("FAIL %d GET %s: %s", resp.StatusCode, path, strings.TrimSpace(string(raw)))
+	return false
 }
 
 func createAPIKey(tid, name, subject string) {

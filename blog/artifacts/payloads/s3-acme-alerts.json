@@ -3,7 +3,7 @@
     {
       "baseline_mean": 9.148271344172677,
       "baseline_stddev": 3.4114626522011444,
-      "created_at": "2026-06-09T01:06:25.035346Z",
+      "created_at": "2026-06-10T16:05:28.355214Z",
       "dimension": "newly_registered_domain_hits",
       "evidence": {
         "alpha": 0.1,
@@ -18,23 +18,23 @@
         "z_ewma": 3.161133733544123,
         "z_welford": 3.122334828714778
       },
-      "id": "9b930a95-1d0c-4d5c-b7af-c6269b1c6a52",
+      "id": "633df8a3-4c5a-4717-806d-031cabc2747e",
       "kind": "baseline.nrd_access",
       "observed_value": 19.8,
       "severity": "warning",
       "state": "open",
       "summary": "baseline.nrd_access on newly_registered_domain_hits: observed=19.800 mean=9.148 stddev=3.411 z=3.16σ (warning ≥ 3.00σ)",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-09T01:06:25.035346Z",
-      "window_end": "2026-06-09T01:05:24.914059Z",
+      "updated_at": "2026-06-10T16:05:28.355214Z",
+      "window_end": "2026-06-10T16:04:28.243938Z",
       "window_seconds": 60,
-      "window_start": "2026-06-09T01:04:24.914059Z",
+      "window_start": "2026-06-10T16:03:28.243938Z",
       "z_score": 3.161133733544123
     },
     {
       "baseline_mean": 5.87275432664272,
       "baseline_stddev": 1.874674280927495,
-      "created_at": "2026-06-09T01:06:24.801349Z",
+      "created_at": "2026-06-10T16:05:28.119586Z",
       "dimension": "auth_failures_per_min",
       "evidence": {
         "alpha": 0.1,
@@ -49,23 +49,23 @@
         "z_ewma": 5.917573773445528,
         "z_welford": 5.7008546935789655
       },
-      "id": "f4988608-7b36-4933-81af-2749030ed458",
+      "id": "ee8b2d9d-8f72-4554-86bf-5ea1fe4fe9bb",
       "kind": "baseline.credential_stuffing",
       "observed_value": 16.560000000000002,
       "severity": "critical",
       "state": "open",
       "summary": "baseline.credential_stuffing on auth_failures_per_min: observed=16.560 mean=5.873 stddev=1.875 z=5.92σ (warning ≥ 3.00σ)",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-09T01:06:24.801349Z",
-      "window_end": "2026-06-09T01:05:24.687477Z",
+      "updated_at": "2026-06-10T16:05:28.119586Z",
+      "window_end": "2026-06-10T16:04:27.999166Z",
       "window_seconds": 60,
-      "window_start": "2026-06-09T01:04:24.687477Z",
+      "window_start": "2026-06-10T16:03:27.999166Z",
       "z_score": 5.917573773445528
     },
     {
       "baseline_mean": 19.076834557125302,
       "baseline_stddev": 3.7379482503068933,
-      "created_at": "2026-06-09T01:06:24.685515Z",
+      "created_at": "2026-06-10T16:05:27.997194Z",
       "dimension": "dns_nxdomain_rate",
       "evidence": {
         "alpha": 0.1,
@@ -80,23 +80,23 @@
         "z_ewma": 3.055951162711059,
         "z_welford": 3.3502779076319533
       },
-      "id": "22beafef-8335-418d-bb65-6484c20c903e",
+      "id": "4adaef20-4b3c-4d78-bf6d-37339d794e7d",
       "kind": "baseline.dga_c2",
       "observed_value": 31.6,
       "severity": "warning",
       "state": "open",
       "summary": "baseline.dga_c2 on dns_nxdomain_rate: observed=31.600 mean=19.077 stddev=3.738 z=3.35σ (warning ≥ 3.00σ)",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-09T01:06:24.685515Z",
-      "window_end": "2026-06-09T01:05:24.56108Z",
+      "updated_at": "2026-06-10T16:05:27.997194Z",
+      "window_end": "2026-06-10T16:04:27.876024Z",
       "window_seconds": 60,
-      "window_start": "2026-06-09T01:04:24.56108Z",
+      "window_start": "2026-06-10T16:03:27.876024Z",
       "z_score": 3.3502779076319533
     },
     {
       "baseline_mean": 4398838.990007066,
       "baseline_stddev": 630828.7194243011,
-      "created_at": "2026-06-09T01:06:24.557965Z",
+      "created_at": "2026-06-10T16:05:27.873115Z",
       "dimension": "egress_bytes_per_min",
       "evidence": {
         "alpha": 0.1,
@@ -111,17 +111,17 @@
         "z_ewma": 4.437636303844072,
         "z_welford": 3.6414971913284795
       },
-      "id": "87cb54dd-b872-4664-ba36-2f1a5bf28913",
+      "id": "bc3b5777-3db7-48ed-96c3-613bb8b798c9",
       "kind": "baseline.exfil_volume",
       "observed_value": 6696000,
       "severity": "warning",
       "state": "open",
       "summary": "baseline.exfil_volume on egress_bytes_per_min: observed=6696000.000 mean=4398838.990 stddev=630828.719 z=4.44σ (warning ≥ 3.00σ)",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-09T01:06:24.557965Z",
-      "window_end": "2026-06-09T01:05:24.432781Z",
+      "updated_at": "2026-06-10T16:05:27.873115Z",
+      "window_end": "2026-06-10T16:04:27.752738Z",
       "window_seconds": 60,
-      "window_start": "2026-06-09T01:04:24.432781Z",
+      "window_start": "2026-06-10T16:03:27.752738Z",
       "z_score": 4.437636303844072
     }
   ]

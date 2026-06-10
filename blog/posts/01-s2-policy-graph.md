@@ -66,6 +66,37 @@ re-derives deterministically in Post 6.
   [`docs/TRAFFIC_CLASSIFICATION.md`](../../docs/TRAFFIC_CLASSIFICATION.md)) rather
   than living in a separate appliance.
 
+## The edge fast path (eBPF/XDP)
+
+The compiled bundle is enforced in userspace, but the same firewall and
+classification verdicts now also lower to an optional **in-kernel eBPF/XDP fast
+path** ([PR #129](https://github.com/kennguy3n/visible-fishbone/pull/129)) that
+intercepts packets at the driver, before they reach the network stack:
+
+- **LRU verdict cache.** The XDP entry program (`sng_xdp_classify`) parses the
+  packet and serves a cached verdict for a known flow immediately, so repeat
+  traffic never re-runs the rule walk. The cache is flushed when the ruleset or
+  DDoS state changes, so a policy update can't be served a stale verdict.
+- **Tail-call split pipeline.** The single program is broken into a chain reached
+  through a `BPF_MAP_TYPE_PROG_ARRAY` jump table — classification in 2 chunks,
+  the firewall in 8 — so each sub-program stays under the kernel's 8192-jump
+  verifier ceiling while preserving the full 1024-rule firewall + 1024-rule
+  classification capacity on a stock Linux 5.15 kernel.
+- **Bounded IPv6 extension-header walk.** `resolve_ipv6_l4` walks up to 8
+  extension headers (Hop-by-Hop / Routing / Dest-Options / Mobility / Fragment)
+  to find the real L4 header, so port-keyed rules and SYN/UDP rate limiting now
+  apply to extension-header-bearing IPv6 packets that used to bypass the fast
+  path.
+- **Fail-open by construction.** Anything the fast path can't read authoritatively
+  — ESP/AH, a non-first fragment, an over-long header chain, a truncated read —
+  returns `XDP_PASS`, and nftables in the slow path enforces the verdict. The
+  fast path can only ever be an accelerator, never the sole arbiter.
+
+The throughput evidence for this layer comes from the **WS3 forwarding
+benchmarks** ([PR #136](https://github.com/kennguy3n/visible-fishbone/pull/136)),
+which add per-SKU forwarding profiles and a regression gate to the `bench/`
+harness; their numbers feed the datasheet table below.
+
 ## Performance: what we can and can't measure here
 
 Policy **compile latency** is real and measured — it's pure Go and runs
@@ -86,10 +117,10 @@ inspection code. From the
 
 | packet size | p50 | p95 | p99 |
 | --- | ---: | ---: | ---: |
-| 64B | 80 ns | 151 ns | 170 ns |
-| 512B | 110 ns | 190 ns | 191 ns |
-| 1500B | 180 ns | 260 ns | 270 ns |
-| 9000B | 732 ns | 812 ns | 822 ns |
+| 64B | 80 ns | 151 ns | 161 ns |
+| 512B | 110 ns | 190 ns | 200 ns |
+| 1500B | 180 ns | 260 ns | 280 ns |
+| 9000B | 742 ns | 832 ns | 1.383 µs |
 
 Sub-microsecond per-packet inspection latency at p99 for sub-jumbo frames is the
 honest, defensible performance story here — not the Gbps headline.

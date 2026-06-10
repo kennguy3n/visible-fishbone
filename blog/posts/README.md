@@ -25,8 +25,9 @@ Scenario definitions and the evidence map live in
 
 - **Screenshots:** [`../artifacts/screenshots/`](../artifacts/screenshots/) — 16
   live console captures, audited error-free across all 31 routes / 4 tenants.
-- **Payloads:** [`../artifacts/payloads/`](../artifacts/payloads/) — 22+ verbatim
-  control-plane responses (and the S6 NL-query request/response pair).
+- **Payloads:** [`../artifacts/payloads/`](../artifacts/payloads/) — 27 captured
+  files: 25 verbatim control-plane responses across the seven scenarios, plus the
+  S5 DLP-classify and S6 NL-query request payloads that pair with their responses.
 - **Efficacy matrix:** [`../artifacts/efficacy-report.json`](../artifacts/efficacy-report.json)
   — 8 functions, real crate APIs, curated corpora, suite verdict PASS.
 - **Performance datasheet:** [`../artifacts/edge-performance-datasheet.md`](../artifacts/edge-performance-datasheet.md)
@@ -47,10 +48,13 @@ on `:5173`) and `AUTH_JWT_SECRET` exported:
 # 2. Drive usage so the metering projections have data.
 (cd blog/harness/usage && go run .)
 
-# 3. Capture the API payloads (GET set + the S6 NL-query POST pair).
+# 3. Emit anomaly alerts (fresh baseline models + spikes for the Alerts surface).
+(cd blog/harness/anomalies && go run .)
+
+# 4. Capture the API payloads (GET set + the S5 DLP-classify and S6 NL-query POST pairs).
 (cd blog/harness/capture && go run . -base http://localhost:8080 -out ../../artifacts/payloads)
 
-# 4. Efficacy + performance (Rust).
+# 5. Efficacy + performance (Rust).
 (cd bench/efficacy && cargo run --release)   # -> efficacy-report.json
 (cd bench && cargo run --release -- ... )    # see bench/README.md (uses --dry-run unprivileged)
 ```

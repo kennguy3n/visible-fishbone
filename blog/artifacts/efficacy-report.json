@@ -1,7 +1,7 @@
 {
   "suite": "security-efficacy",
-  "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
-  "generated_at": "2026-06-09T00:02:30.671887720+00:00",
+  "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
+  "generated_at": "2026-06-10T15:55:11.937867158+00:00",
   "host": "devin-box",
   "overall_verdict": "PASS",
   "functions": [
@@ -267,8 +267,8 @@
           "label": "evaluate",
           "unit": "decisions/s",
           "iterations": 50000,
-          "per_op_ns": 577.28928,
-          "ops_per_sec": 1732233.7944678273,
+          "per_op_ns": 642.87866,
+          "ops_per_sec": 1555503.4911253704,
           "debug_build": false
         }
       ],
@@ -410,10 +410,10 @@
           "label": "classify",
           "unit": "scans/s",
           "iterations": 5000,
-          "per_op_ns": 220653.6766,
-          "ops_per_sec": 4531.988840651839,
+          "per_op_ns": 255469.7904,
+          "ops_per_sec": 3914.357147411665,
           "bytes_per_op": 548,
-          "mb_per_sec": 2.3684786650440293,
+          "mb_per_sec": 2.0456959884468007,
           "debug_build": false
         }
       ],
@@ -8166,10 +8166,10 @@
           "label": "ner_detect",
           "unit": "scans/s",
           "iterations": 5000,
-          "per_op_ns": 30761.0996,
-          "ops_per_sec": 32508.590817735265,
+          "per_op_ns": 32760.6286,
+          "ops_per_sec": 30524.44482093973,
           "bytes_per_op": 166,
-          "mb_per_sec": 5.146432948822073,
+          "mb_per_sec": 4.832322922016139,
           "debug_build": false
         }
       ],

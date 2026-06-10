@@ -67,7 +67,9 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 ### S2 — "One typed policy graph lights up a branch: NGFW + IPS + SWG + DNS + SD-WAN"
 - **Persona:** Devraj (SME). **Outcome:** one policy model, not five consoles.
 - **Capabilities:** unified policy graph + compiler, NGFW (`sng-fw`), IPS (`sng-ips`),
-  SWG (`sng-swg`), DNS security, SD-WAN six-class steering.
+  SWG (`sng-swg`), DNS security, SD-WAN six-class steering, optional in-kernel
+  eBPF/XDP fast path (tail-call split pipeline, LRU verdict cache, bounded IPv6
+  extension-header walk; PR #129) with WS3 forwarding throughput benchmarks (PR #136).
 - **UI surfaces:** Policy editor (React-Flow graph), Network policies, Sites, Devices.
 - **Evidence:** policy-graph screenshots; policy-compile latency from
   [`bench/controlplane`](../../bench/controlplane); edge throughput/latency datasheet
@@ -102,7 +104,9 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 ### S5 — "Keep regulated data from leaving: DLP + CASB + browser isolation"
 - **Persona:** Lena (SOC) / Tom (compliance). **Outcome:** prevent exfiltration.
 - **Capabilities:** on-device DLP (ML classifier), data classification, CASB,
-  remote browser isolation (RBI action, migration 054).
+  remote browser isolation (RBI action, migration 054), edge-driven DLP wake
+  (inotify file-write + X11 clipboard monitors classify on-write rather than
+  polling; PR #135).
 - **UI surfaces:** DLP, CASB, Browser protection. (These were the 3 dead routes
   fixed in PR #116 — now fully wired to Postgres repos.)
 - **Evidence:** DLP policy + match-event screenshots; classifier input→label
@@ -126,7 +130,8 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 ### S7 — "Prove the spend and the compliance posture to the board"
 - **Persona:** Tom (CFO). **Outcome:** predictable cost + consolidation savings + audit.
 - **Capabilities:** metering, cost model, compliance, audit, integrations (SIEM/PSA/RMM).
-- **UI surfaces:** Metering (charts), Compliance, Audit, Integrations.
+- **UI surfaces:** Metering / cost metering dashboard (WS8 cost metering UI, PR #130),
+  Compliance, Audit, Integrations.
 - **Evidence:** metering dashboard screenshots; **cost analysis + consolidation math
   from [`bench/business-report`](../../bench/business-report)**; compliance posture UI;
   audit completeness (global-audit fix from PR #116).

@@ -1,6 +1,6 @@
 {
-  "generated_unix_secs": 1780963388,
-  "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+  "generated_unix_secs": 1781107000,
+  "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
   "skus": [
     {
       "profile": {
@@ -8,39 +8,52 @@
         "vcpus": 8,
         "ram_gb": 16,
         "nic_gbps": 25.0,
-        "target_gbps": 10.0
+        "target_gbps": 10.0,
+        "datapath": {
+          "rule_count": 256,
+          "packet_bytes": 1500,
+          "sample_packets": 200000
+        },
+        "traffic_mix": {
+          "trusted_direct": 35.0,
+          "trusted_media_bypass": 20.0,
+          "inspect_lite": 15.0,
+          "inspect_full": 22.0,
+          "tunnel_private": 5.0,
+          "block": 3.0
+        }
       },
       "reports": [
         {
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "throughput",
-          "unix_time_secs": 1780963363,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106975,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 16336013.659230236,
-            "max_gbps": 8.364045048767442,
-            "mean_gbps": 8.364045048767442
+            "max_pps": 17283305.115957897,
+            "max_gbps": 8.849068536306158,
+            "mean_gbps": 8.849068536306158
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 1064960
+            "peak_rss_bytes": 3702784
           },
           "target_gbps": 10.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 8.364045048767442,
+            "sng_measured_gbps": 8.849068536306158,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 100F",
                 "published_gbps": 20.0,
-                "delta_pct": -58.179774756162786,
-                "verdict": "SNG 8.36 Gbps (software, VM) vs Fortinet FortiGate 100F 20.00 Gbps published (-58%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": -55.754657318469214,
+                "verdict": "SNG 8.85 Gbps (software, VM) vs Fortinet FortiGate 100F 20.00 Gbps published (-56%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -49,8 +62,8 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "latency",
-          "unix_time_secs": 1780963363,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106975,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
@@ -59,13 +72,13 @@
           "latency": {
             "p50_ns": 80,
             "p95_ns": 151,
-            "p99_ns": 170,
-            "max_ns": 32871,
+            "p99_ns": 161,
+            "max_ns": 254335,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3702784
           },
           "target_gbps": 10.0
         },
@@ -73,32 +86,32 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "throughput",
-          "unix_time_secs": 1780963364,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106976,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 17129395.945482,
-            "max_gbps": 8.770253530555454,
-            "mean_gbps": 8.770253530555454
+            "max_pps": 17738238.59138481,
+            "max_gbps": 9.082094254219744,
+            "mean_gbps": 9.082094254219744
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 8.770253530555454,
+            "sng_measured_gbps": 9.082094254219744,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 100F",
                 "published_gbps": 1.6,
-                "delta_pct": 448.14084565971586,
-                "verdict": "SNG 8.77 Gbps (software, VM) vs Fortinet FortiGate 100F 1.60 Gbps published (+448%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 467.6308908887339,
+                "verdict": "SNG 9.08 Gbps (software, VM) vs Fortinet FortiGate 100F 1.60 Gbps published (+468%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -107,8 +120,8 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "latency",
-          "unix_time_secs": 1780963364,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106976,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
@@ -116,14 +129,14 @@
           },
           "latency": {
             "p50_ns": 80,
-            "p95_ns": 160,
+            "p95_ns": 151,
             "p99_ns": 170,
-            "max_ns": 41228,
+            "max_ns": 223206,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0
         },
@@ -131,32 +144,32 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "throughput",
-          "unix_time_secs": 1780963364,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106976,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 17017546.484864533,
-            "max_gbps": 8.712986936868889,
-            "mean_gbps": 8.712986936868889
+            "max_pps": 17444945.763589416,
+            "max_gbps": 8.931840132519335,
+            "mean_gbps": 8.931840132519335
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 8.712986936868889,
+            "sng_measured_gbps": 8.931840132519335,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 100F",
                 "published_gbps": 2.6,
-                "delta_pct": 235.11488218726498,
-                "verdict": "SNG 8.71 Gbps (software, VM) vs Fortinet FortiGate 100F 2.60 Gbps published (+235%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 243.5323127892052,
+                "verdict": "SNG 8.93 Gbps (software, VM) vs Fortinet FortiGate 100F 2.60 Gbps published (+244%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -165,8 +178,8 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "latency",
-          "unix_time_secs": 1780963364,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106977,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
@@ -175,13 +188,13 @@
           "latency": {
             "p50_ns": 80,
             "p95_ns": 151,
-            "p99_ns": 170,
-            "max_ns": 30036,
+            "p99_ns": 161,
+            "max_ns": 3177034,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0
         },
@@ -189,32 +202,32 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "throughput",
-          "unix_time_secs": 1780963365,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106977,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 11404874.69148483,
-            "max_gbps": 46.714402237906285,
-            "mean_gbps": 46.714402237906285
+            "max_pps": 10964162.100642279,
+            "max_gbps": 44.909281789502046,
+            "mean_gbps": 44.909281789502046
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 46.714402237906285,
+            "sng_measured_gbps": 44.909281789502046,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 100F",
                 "published_gbps": 20.0,
-                "delta_pct": 133.57201118953142,
-                "verdict": "SNG 46.71 Gbps (software, VM) vs Fortinet FortiGate 100F 20.00 Gbps published (+134%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 124.54640894751023,
+                "verdict": "SNG 44.91 Gbps (software, VM) vs Fortinet FortiGate 100F 20.00 Gbps published (+125%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -223,23 +236,81 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "latency",
-          "unix_time_secs": 1780963365,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106977,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "no-inspect"
+          },
+          "latency": {
+            "p50_ns": 111,
+            "p95_ns": 190,
+            "p99_ns": 201,
+            "max_ns": 3211327,
+            "clamped": 0
+          },
+          "resources": {
+            "mean_cpu_busy_pct": 0.0,
+            "peak_rss_bytes": 3969024
+          },
+          "target_gbps": 10.0
+        },
+        {
+          "schema_version": 1,
+          "profile": "branch-large",
+          "mode": "throughput",
+          "unix_time_secs": 1781106977,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
+          "dimensions": {
+            "packet_size": 512,
+            "policy_rules": 100,
+            "inspection": "url-cat"
+          },
+          "throughput": {
+            "max_pps": 11407032.298776122,
+            "max_gbps": 46.72333549114408,
+            "mean_gbps": 46.72333549114408
+          },
+          "resources": {
+            "mean_cpu_busy_pct": 0.0,
+            "peak_rss_bytes": 3969024
+          },
+          "target_gbps": 10.0,
+          "competitor_comparison": {
+            "sng_measured_gbps": 46.72333549114408,
+            "feature": "NGFW (URL filtering + app-id) throughput",
+            "rows": [
+              {
+                "competitor": "Fortinet FortiGate 100F",
+                "published_gbps": 1.6,
+                "delta_pct": 2820.208468196505,
+                "verdict": "SNG 46.72 Gbps (software, VM) vs Fortinet FortiGate 100F 1.60 Gbps published (+2820%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
+              }
+            ]
+          }
+        },
+        {
+          "schema_version": 1,
+          "profile": "branch-large",
+          "mode": "latency",
+          "unix_time_secs": 1781106978,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
+          "dimensions": {
+            "packet_size": 512,
+            "policy_rules": 100,
+            "inspection": "url-cat"
           },
           "latency": {
             "p50_ns": 110,
-            "p95_ns": 180,
-            "p99_ns": 191,
-            "max_ns": 47027,
+            "p95_ns": 190,
+            "p99_ns": 200,
+            "max_ns": 3205257,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0
         },
@@ -247,90 +318,32 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "throughput",
-          "unix_time_secs": 1780963365,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
-          "dimensions": {
-            "packet_size": 512,
-            "policy_rules": 100,
-            "inspection": "url-cat"
-          },
-          "throughput": {
-            "max_pps": 10931807.454408757,
-            "max_gbps": 44.77669766125556,
-            "mean_gbps": 44.77669766125556
-          },
-          "resources": {
-            "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
-          },
-          "target_gbps": 10.0,
-          "competitor_comparison": {
-            "sng_measured_gbps": 44.77669766125556,
-            "feature": "NGFW (URL filtering + app-id) throughput",
-            "rows": [
-              {
-                "competitor": "Fortinet FortiGate 100F",
-                "published_gbps": 1.6,
-                "delta_pct": 2698.5436038284724,
-                "verdict": "SNG 44.78 Gbps (software, VM) vs Fortinet FortiGate 100F 1.60 Gbps published (+2699%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
-              }
-            ]
-          }
-        },
-        {
-          "schema_version": 1,
-          "profile": "branch-large",
-          "mode": "latency",
-          "unix_time_secs": 1780963365,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
-          "dimensions": {
-            "packet_size": 512,
-            "policy_rules": 100,
-            "inspection": "url-cat"
-          },
-          "latency": {
-            "p50_ns": 101,
-            "p95_ns": 180,
-            "p99_ns": 191,
-            "max_ns": 37090,
-            "clamped": 0
-          },
-          "resources": {
-            "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
-          },
-          "target_gbps": 10.0
-        },
-        {
-          "schema_version": 1,
-          "profile": "branch-large",
-          "mode": "throughput",
-          "unix_time_secs": 1780963366,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106978,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 10933485.138941519,
-            "max_gbps": 44.78358934130454,
-            "mean_gbps": 44.78358934130454
+            "max_pps": 11405374.435692076,
+            "max_gbps": 46.71649608954678,
+            "mean_gbps": 46.71649608954678
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 44.78358934130454,
+            "sng_measured_gbps": 46.71649608954678,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 100F",
                 "published_gbps": 2.6,
-                "delta_pct": 1622.4457438963284,
-                "verdict": "SNG 44.78 Gbps (software, VM) vs Fortinet FortiGate 100F 2.60 Gbps published (+1622%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1696.7883111364144,
+                "verdict": "SNG 46.72 Gbps (software, VM) vs Fortinet FortiGate 100F 2.60 Gbps published (+1697%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -339,8 +352,8 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "latency",
-          "unix_time_secs": 1780963366,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106978,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
@@ -349,13 +362,13 @@
           "latency": {
             "p50_ns": 110,
             "p95_ns": 190,
-            "p99_ns": 191,
-            "max_ns": 31138,
+            "p99_ns": 200,
+            "max_ns": 2541479,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0
         },
@@ -363,32 +376,32 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "throughput",
-          "unix_time_secs": 1780963366,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106978,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 6084446.640475094,
-            "max_gbps": 73.01341225396385,
-            "mean_gbps": 73.01341225396385
+            "max_pps": 6243492.8454365255,
+            "max_gbps": 74.92212719445077,
+            "mean_gbps": 74.92212719445077
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 73.01341225396385,
+            "sng_measured_gbps": 74.92212719445077,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 100F",
                 "published_gbps": 20.0,
-                "delta_pct": 265.06706126981925,
-                "verdict": "SNG 73.01 Gbps (software, VM) vs Fortinet FortiGate 100F 20.00 Gbps published (+265%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 274.6106359722538,
+                "verdict": "SNG 74.92 Gbps (software, VM) vs Fortinet FortiGate 100F 20.00 Gbps published (+275%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -397,8 +410,8 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "latency",
-          "unix_time_secs": 1780963366,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106979,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
@@ -406,14 +419,14 @@
           },
           "latency": {
             "p50_ns": 180,
-            "p95_ns": 260,
-            "p99_ns": 270,
-            "max_ns": 36257,
+            "p95_ns": 261,
+            "p99_ns": 301,
+            "max_ns": 2690907,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0
         },
@@ -421,32 +434,32 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "throughput",
-          "unix_time_secs": 1780963367,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106979,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 6227866.211754635,
-            "max_gbps": 74.7344546265751,
-            "mean_gbps": 74.7344546265751
+            "max_pps": 6272708.056240624,
+            "max_gbps": 75.27262944911826,
+            "mean_gbps": 75.27262944911826
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 74.7344546265751,
+            "sng_measured_gbps": 75.27262944911826,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 100F",
                 "published_gbps": 1.6,
-                "delta_pct": 4570.903414160944,
-                "verdict": "SNG 74.73 Gbps (software, VM) vs Fortinet FortiGate 100F 1.60 Gbps published (+4571%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 4604.539340569891,
+                "verdict": "SNG 75.27 Gbps (software, VM) vs Fortinet FortiGate 100F 1.60 Gbps published (+4605%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -455,8 +468,8 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "latency",
-          "unix_time_secs": 1780963367,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106979,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
@@ -464,14 +477,14 @@
           },
           "latency": {
             "p50_ns": 180,
-            "p95_ns": 250,
-            "p99_ns": 270,
-            "max_ns": 33804,
+            "p95_ns": 260,
+            "p99_ns": 271,
+            "max_ns": 3098236,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0
         },
@@ -479,32 +492,32 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "throughput",
-          "unix_time_secs": 1780963367,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106979,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 6063375.0258357925,
-            "max_gbps": 72.76052068044561,
-            "mean_gbps": 72.76052068044561
+            "max_pps": 6273454.48101846,
+            "max_gbps": 75.28148689294228,
+            "mean_gbps": 75.28148689294228
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 72.76052068044561,
+            "sng_measured_gbps": 75.28148689294228,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 100F",
                 "published_gbps": 2.6,
-                "delta_pct": 2698.4815646325233,
-                "verdict": "SNG 72.76 Gbps (software, VM) vs Fortinet FortiGate 100F 2.60 Gbps published (+2698%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 2795.441803574703,
+                "verdict": "SNG 75.28 Gbps (software, VM) vs Fortinet FortiGate 100F 2.60 Gbps published (+2795%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -513,8 +526,8 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "latency",
-          "unix_time_secs": 1780963367,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106980,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
@@ -523,13 +536,13 @@
           "latency": {
             "p50_ns": 180,
             "p95_ns": 260,
-            "p99_ns": 270,
-            "max_ns": 46558,
+            "p99_ns": 280,
+            "max_ns": 210613,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0
         },
@@ -537,32 +550,32 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "throughput",
-          "unix_time_secs": 1780963368,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106980,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 1354658.9078398533,
-            "max_gbps": 97.53547257367596,
-            "mean_gbps": 97.53547257367596
+            "max_pps": 1226474.5518327826,
+            "max_gbps": 88.30757927422434,
+            "mean_gbps": 88.30757927422434
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 97.53547257367596,
+            "sng_measured_gbps": 88.30757927422434,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 100F",
                 "published_gbps": 20.0,
-                "delta_pct": 387.6773628683798,
-                "verdict": "SNG 97.54 Gbps (software, VM) vs Fortinet FortiGate 100F 20.00 Gbps published (+388%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 341.5378963711217,
+                "verdict": "SNG 88.31 Gbps (software, VM) vs Fortinet FortiGate 100F 20.00 Gbps published (+342%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -571,23 +584,23 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "latency",
-          "unix_time_secs": 1780963368,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106980,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "latency": {
-            "p50_ns": 732,
-            "p95_ns": 812,
-            "p99_ns": 822,
-            "max_ns": 54061,
+            "p50_ns": 742,
+            "p95_ns": 1273,
+            "p99_ns": 1463,
+            "max_ns": 3299241,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0
         },
@@ -595,32 +608,32 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "throughput",
-          "unix_time_secs": 1780963368,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106980,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 1333108.4662030593,
-            "max_gbps": 95.98383643928177,
-            "mean_gbps": 95.98383643928177
+            "max_pps": 1251681.9596268283,
+            "max_gbps": 90.12123836441594,
+            "mean_gbps": 90.12123836441594
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 95.98383643928177,
+            "sng_measured_gbps": 90.12123836441594,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 100F",
                 "published_gbps": 1.6,
-                "delta_pct": 5898.989777455111,
-                "verdict": "SNG 95.98 Gbps (software, VM) vs Fortinet FortiGate 100F 1.60 Gbps published (+5899%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 5532.577397775996,
+                "verdict": "SNG 90.12 Gbps (software, VM) vs Fortinet FortiGate 100F 1.60 Gbps published (+5533%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -629,23 +642,23 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "latency",
-          "unix_time_secs": 1780963368,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106981,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "latency": {
-            "p50_ns": 732,
-            "p95_ns": 821,
-            "p99_ns": 822,
-            "max_ns": 36398,
+            "p50_ns": 741,
+            "p95_ns": 832,
+            "p99_ns": 1392,
+            "max_ns": 3230012,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0
         },
@@ -653,32 +666,32 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "throughput",
-          "unix_time_secs": 1780963369,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106981,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 1352204.4415910984,
-            "max_gbps": 97.35874704494088,
-            "mean_gbps": 97.35874704494088
+            "max_pps": 1340255.5893305966,
+            "max_gbps": 96.49869977102844,
+            "mean_gbps": 96.49869977102844
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 97.35874704494088,
+            "sng_measured_gbps": 96.49869977102844,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 100F",
                 "published_gbps": 2.6,
-                "delta_pct": 3644.5671940361876,
-                "verdict": "SNG 97.36 Gbps (software, VM) vs Fortinet FortiGate 100F 2.60 Gbps published (+3645%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 3611.488452731863,
+                "verdict": "SNG 96.50 Gbps (software, VM) vs Fortinet FortiGate 100F 2.60 Gbps published (+3611%) — informative, not apples-to-apples: NP6Lite/CP9 ASIC fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -687,23 +700,23 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "latency",
-          "unix_time_secs": 1780963369,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106981,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "latency": {
-            "p50_ns": 732,
-            "p95_ns": 812,
-            "p99_ns": 822,
-            "max_ns": 35356,
+            "p50_ns": 742,
+            "p95_ns": 832,
+            "p99_ns": 1383,
+            "max_ns": 3090853,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0
         },
@@ -711,19 +724,19 @@
           "schema_version": 1,
           "profile": "branch-large",
           "mode": "concurrent-flows",
-          "unix_time_secs": 1780963369,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106981,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "concurrent_flows": {
-            "max_active_flows": 4556288
+            "max_active_flows": 4340992
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 10.0
         }
@@ -735,51 +748,64 @@
         "vcpus": 4,
         "ram_gb": 8,
         "nic_gbps": 10.0,
-        "target_gbps": 5.0
+        "target_gbps": 5.0,
+        "datapath": {
+          "rule_count": 256,
+          "packet_bytes": 1500,
+          "sample_packets": 200000
+        },
+        "traffic_mix": {
+          "trusted_direct": 35.0,
+          "trusted_media_bypass": 20.0,
+          "inspect_lite": 15.0,
+          "inspect_full": 22.0,
+          "tunnel_private": 5.0,
+          "block": 3.0
+        }
       },
       "reports": [
         {
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "throughput",
-          "unix_time_secs": 1780963369,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106982,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 17067183.351375036,
-            "max_gbps": 8.738403118685198,
-            "mean_gbps": 8.738403118685198
+            "max_pps": 16881970.988928158,
+            "max_gbps": 8.643575023712609,
+            "mean_gbps": 8.643575023712609
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 8.738403118685198,
+            "sng_measured_gbps": 8.643575023712609,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 10.0,
-                "delta_pct": -12.615968813148015,
-                "verdict": "SNG 8.74 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (-13%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": -13.564249762873908,
+                "verdict": "SNG 8.64 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (-14%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 5.2,
-                "delta_pct": 68.0462138208692,
-                "verdict": "SNG 8.74 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+68%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 66.22259660985786,
+                "verdict": "SNG 8.64 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+66%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 3.4,
-                "delta_pct": 157.0118564319176,
-                "verdict": "SNG 8.74 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+157%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 154.22279481507672,
+                "verdict": "SNG 8.64 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+154%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -788,8 +814,8 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "latency",
-          "unix_time_secs": 1780963370,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106982,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
@@ -797,14 +823,14 @@
           },
           "latency": {
             "p50_ns": 80,
-            "p95_ns": 160,
-            "p99_ns": 171,
-            "max_ns": 55073,
+            "p95_ns": 151,
+            "p99_ns": 161,
+            "max_ns": 96911,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         },
@@ -812,32 +838,32 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "throughput",
-          "unix_time_secs": 1780963370,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106982,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 17064126.51980427,
-            "max_gbps": 8.736836272703606,
-            "mean_gbps": 8.736836272703606
+            "max_pps": 16585555.974613432,
+            "max_gbps": 8.491818279737323,
+            "mean_gbps": 8.491818279737323
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 8.736836272703606,
+            "sng_measured_gbps": 8.491818279737323,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.0,
-                "delta_pct": 773.6836272703606,
-                "verdict": "SNG 8.74 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+774%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 749.1818279737323,
+                "verdict": "SNG 8.49 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+749%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -846,8 +872,8 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "latency",
-          "unix_time_secs": 1780963370,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106982,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
@@ -856,13 +882,13 @@
           "latency": {
             "p50_ns": 80,
             "p95_ns": 151,
-            "p99_ns": 170,
-            "max_ns": 37741,
+            "p99_ns": 171,
+            "max_ns": 84747,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         },
@@ -870,44 +896,44 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "throughput",
-          "unix_time_secs": 1780963370,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106983,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 17074397.503317345,
-            "max_gbps": 8.742105543376752,
-            "mean_gbps": 8.742105543376752
+            "max_pps": 17235052.95656843,
+            "max_gbps": 8.824354525827315,
+            "mean_gbps": 8.824354525827315
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 8.742105543376752,
+            "sng_measured_gbps": 8.824354525827315,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.4,
-                "delta_pct": 524.4361102411966,
-                "verdict": "SNG 8.74 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+524%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 530.311037559094,
+                "verdict": "SNG 8.82 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+530%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 1.6,
-                "delta_pct": 446.381596461047,
-                "verdict": "SNG 8.74 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+446%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 451.52215786420726,
+                "verdict": "SNG 8.82 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+452%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 0.65,
-                "delta_pct": 1244.9393143656541,
-                "verdict": "SNG 8.74 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+1245%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1257.593003973433,
+                "verdict": "SNG 8.82 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+1258%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -916,8 +942,8 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "latency",
-          "unix_time_secs": 1780963371,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106983,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
@@ -925,14 +951,14 @@
           },
           "latency": {
             "p50_ns": 80,
-            "p95_ns": 160,
-            "p99_ns": 170,
-            "max_ns": 33693,
+            "p95_ns": 151,
+            "p99_ns": 161,
+            "max_ns": 60533,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         },
@@ -940,44 +966,44 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "throughput",
-          "unix_time_secs": 1780963371,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106983,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 11040674.286756655,
-            "max_gbps": 45.222616349669664,
-            "mean_gbps": 45.222616349669664
+            "max_pps": 10905074.375415105,
+            "max_gbps": 44.66726521756297,
+            "mean_gbps": 44.66726521756297
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 45.222616349669664,
+            "sng_measured_gbps": 44.66726521756297,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 10.0,
-                "delta_pct": 352.22616349669664,
-                "verdict": "SNG 45.22 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (+352%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 346.6726521756297,
+                "verdict": "SNG 44.67 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (+347%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 5.2,
-                "delta_pct": 769.6656990321088,
-                "verdict": "SNG 45.22 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+770%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 758.9858695685185,
+                "verdict": "SNG 44.67 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+759%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 3.4,
-                "delta_pct": 1230.0769514608726,
-                "verdict": "SNG 45.22 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+1230%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1213.7430946342051,
+                "verdict": "SNG 44.67 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+1214%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -986,8 +1012,8 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "latency",
-          "unix_time_secs": 1780963371,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106983,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
@@ -995,14 +1021,14 @@
           },
           "latency": {
             "p50_ns": 110,
-            "p95_ns": 190,
-            "p99_ns": 200,
-            "max_ns": 45184,
+            "p95_ns": 181,
+            "p99_ns": 191,
+            "max_ns": 83536,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         },
@@ -1010,32 +1036,32 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "throughput",
-          "unix_time_secs": 1780963371,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106984,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 10984970.689877596,
-            "max_gbps": 44.99457690298055,
-            "mean_gbps": 44.99457690298055
+            "max_pps": 10595123.005560089,
+            "max_gbps": 43.39771600573952,
+            "mean_gbps": 43.39771600573952
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 44.99457690298055,
+            "sng_measured_gbps": 43.39771600573952,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.0,
-                "delta_pct": 4399.457690298054,
-                "verdict": "SNG 44.99 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+4399%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 4239.771600573952,
+                "verdict": "SNG 43.40 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+4240%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1044,8 +1070,8 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "latency",
-          "unix_time_secs": 1780963372,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106984,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
@@ -1053,14 +1079,14 @@
           },
           "latency": {
             "p50_ns": 110,
-            "p95_ns": 190,
-            "p99_ns": 200,
-            "max_ns": 35627,
+            "p95_ns": 181,
+            "p99_ns": 191,
+            "max_ns": 38702,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         },
@@ -1068,44 +1094,44 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "throughput",
-          "unix_time_secs": 1780963372,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106984,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 11066567.230877416,
-            "max_gbps": 45.328681133819394,
-            "mean_gbps": 45.328681133819394
+            "max_pps": 10756099.375242481,
+            "max_gbps": 44.05743855168533,
+            "mean_gbps": 44.05743855168533
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 45.328681133819394,
+            "sng_measured_gbps": 44.05743855168533,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.4,
-                "delta_pct": 3137.762938129957,
-                "verdict": "SNG 45.33 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+3138%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 3046.959896548952,
+                "verdict": "SNG 44.06 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+3047%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 1.6,
-                "delta_pct": 2733.0425708637117,
-                "verdict": "SNG 45.33 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+2733%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 2653.589909480333,
+                "verdict": "SNG 44.06 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+2654%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 0.65,
-                "delta_pct": 6873.643251356831,
-                "verdict": "SNG 45.33 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+6874%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 6678.067469490051,
+                "verdict": "SNG 44.06 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+6678%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1114,8 +1140,8 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "latency",
-          "unix_time_secs": 1780963372,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106984,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
@@ -1123,14 +1149,14 @@
           },
           "latency": {
             "p50_ns": 110,
-            "p95_ns": 190,
-            "p99_ns": 200,
-            "max_ns": 46176,
+            "p95_ns": 181,
+            "p99_ns": 191,
+            "max_ns": 87784,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         },
@@ -1138,44 +1164,44 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "throughput",
-          "unix_time_secs": 1780963372,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106985,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 6104882.452254586,
-            "max_gbps": 73.25863044362717,
-            "mean_gbps": 73.25863044362717
+            "max_pps": 5928142.58027589,
+            "max_gbps": 71.1378620392981,
+            "mean_gbps": 71.1378620392981
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 73.25863044362717,
+            "sng_measured_gbps": 71.1378620392981,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 10.0,
-                "delta_pct": 632.5863044362717,
-                "verdict": "SNG 73.26 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (+633%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 611.378620392981,
+                "verdict": "SNG 71.14 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (+611%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 5.2,
-                "delta_pct": 1308.8198162235994,
-                "verdict": "SNG 73.26 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+1309%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1268.0358084480404,
+                "verdict": "SNG 71.14 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+1268%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 3.4,
-                "delta_pct": 2054.665601283152,
-                "verdict": "SNG 73.26 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+2055%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1992.2900599793556,
+                "verdict": "SNG 71.14 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+1992%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1184,8 +1210,8 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "latency",
-          "unix_time_secs": 1780963373,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106985,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
@@ -1195,12 +1221,12 @@
             "p50_ns": 180,
             "p95_ns": 260,
             "p99_ns": 270,
-            "max_ns": 36719,
+            "max_ns": 88695,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         },
@@ -1208,32 +1234,32 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "throughput",
-          "unix_time_secs": 1780963373,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106985,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 6119856.014088045,
-            "max_gbps": 73.43829566703815,
-            "mean_gbps": 73.43829566703815
+            "max_pps": 5905936.680902447,
+            "max_gbps": 70.8713906890395,
+            "mean_gbps": 70.8713906890395
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 73.43829566703815,
+            "sng_measured_gbps": 70.8713906890395,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.0,
-                "delta_pct": 7243.829566703815,
-                "verdict": "SNG 73.44 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+7244%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 6987.13906890395,
+                "verdict": "SNG 70.87 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+6987%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1242,8 +1268,8 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "latency",
-          "unix_time_secs": 1780963373,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106985,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
@@ -1251,14 +1277,14 @@
           },
           "latency": {
             "p50_ns": 180,
-            "p95_ns": 270,
-            "p99_ns": 341,
-            "max_ns": 74319,
+            "p95_ns": 260,
+            "p99_ns": 271,
+            "max_ns": 74279,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         },
@@ -1266,44 +1292,44 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "throughput",
-          "unix_time_secs": 1780963373,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106986,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 6080957.99278087,
-            "max_gbps": 72.97152539106479,
-            "mean_gbps": 72.97152539106479
+            "max_pps": 5970154.506768025,
+            "max_gbps": 71.64250021112397,
+            "mean_gbps": 71.64250021112397
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 72.97152539106479,
+            "sng_measured_gbps": 71.64250021112397,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.4,
-                "delta_pct": 5112.251813647485,
-                "verdict": "SNG 72.97 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+5112%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 5017.321443651712,
+                "verdict": "SNG 71.64 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+5017%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 1.6,
-                "delta_pct": 4460.720336941549,
-                "verdict": "SNG 72.97 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+4461%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 4377.656263195248,
+                "verdict": "SNG 71.64 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+4378%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 0.65,
-                "delta_pct": 11126.388521702273,
-                "verdict": "SNG 72.97 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+11126%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 10921.923109403688,
+                "verdict": "SNG 71.64 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+10922%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1312,8 +1338,8 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "latency",
-          "unix_time_secs": 1780963374,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106986,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
@@ -1323,12 +1349,12 @@
             "p50_ns": 180,
             "p95_ns": 260,
             "p99_ns": 270,
-            "max_ns": 35776,
+            "max_ns": 70181,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         },
@@ -1336,44 +1362,44 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "throughput",
-          "unix_time_secs": 1780963374,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106986,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 1339614.2301663316,
-            "max_gbps": 96.45226312980397,
-            "mean_gbps": 96.45226312980397
+            "max_pps": 1313321.489443192,
+            "max_gbps": 94.55929885870626,
+            "mean_gbps": 94.55929885870626
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 96.45226312980397,
+            "sng_measured_gbps": 94.55929885870626,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 10.0,
-                "delta_pct": 864.5226312980396,
-                "verdict": "SNG 96.45 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (+865%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 845.5929885870626,
+                "verdict": "SNG 94.56 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (+846%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 5.2,
-                "delta_pct": 1754.8512140346916,
-                "verdict": "SNG 96.45 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+1755%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1718.4480549751204,
+                "verdict": "SNG 94.56 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+1718%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 3.4,
-                "delta_pct": 2736.831268523646,
-                "verdict": "SNG 96.45 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+2737%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 2681.1558487854777,
+                "verdict": "SNG 94.56 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+2681%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1382,23 +1408,23 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "latency",
-          "unix_time_secs": 1780963374,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106986,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "latency": {
-            "p50_ns": 742,
-            "p95_ns": 831,
-            "p99_ns": 1273,
-            "max_ns": 36258,
+            "p50_ns": 731,
+            "p95_ns": 811,
+            "p99_ns": 822,
+            "max_ns": 50093,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         },
@@ -1406,32 +1432,32 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "throughput",
-          "unix_time_secs": 1780963374,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106987,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 1322735.2837301416,
-            "max_gbps": 95.236978515509,
-            "mean_gbps": 95.236978515509
+            "max_pps": 1289404.9813340881,
+            "max_gbps": 92.83734458168743,
+            "mean_gbps": 92.83734458168743
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 95.236978515509,
+            "sng_measured_gbps": 92.83734458168743,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.0,
-                "delta_pct": 9423.6978515509,
-                "verdict": "SNG 95.24 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+9424%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 9183.734458168743,
+                "verdict": "SNG 92.84 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+9184%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1440,23 +1466,23 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "latency",
-          "unix_time_secs": 1780963375,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106987,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "latency": {
-            "p50_ns": 742,
-            "p95_ns": 831,
-            "p99_ns": 832,
-            "max_ns": 36478,
+            "p50_ns": 731,
+            "p95_ns": 811,
+            "p99_ns": 822,
+            "max_ns": 144038,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         },
@@ -1464,44 +1490,44 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "throughput",
-          "unix_time_secs": 1780963375,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106987,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 1346280.3775655795,
-            "max_gbps": 96.9322181965904,
-            "mean_gbps": 96.9322181965904
+            "max_pps": 1314028.9124497897,
+            "max_gbps": 94.6115174176855,
+            "mean_gbps": 94.6115174176855
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 96.9322181965904,
+            "sng_measured_gbps": 94.6115174176855,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.4,
-                "delta_pct": 6823.729871185029,
-                "verdict": "SNG 96.93 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+6824%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 6657.96552983468,
+                "verdict": "SNG 94.61 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+6658%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 1.6,
-                "delta_pct": 5958.2636372869,
-                "verdict": "SNG 96.93 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+5958%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 5813.219838605344,
+                "verdict": "SNG 94.61 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+5813%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 0.65,
-                "delta_pct": 14812.648953321599,
-                "verdict": "SNG 96.93 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+14813%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 14455.618064259306,
+                "verdict": "SNG 94.61 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+14456%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1510,23 +1536,23 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "latency",
-          "unix_time_secs": 1780963375,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106987,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "latency": {
-            "p50_ns": 742,
-            "p95_ns": 831,
-            "p99_ns": 1263,
-            "max_ns": 49653,
+            "p50_ns": 731,
+            "p95_ns": 812,
+            "p99_ns": 1112,
+            "max_ns": 2284250,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         },
@@ -1534,19 +1560,19 @@
           "schema_version": 1,
           "profile": "branch-medium",
           "mode": "concurrent-flows",
-          "unix_time_secs": 1780963375,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106988,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "concurrent_flows": {
-            "max_active_flows": 4663808
+            "max_active_flows": 4134912
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 5.0
         }
@@ -1558,45 +1584,58 @@
         "vcpus": 2,
         "ram_gb": 4,
         "nic_gbps": 1.0,
-        "target_gbps": 0.8
+        "target_gbps": 0.8,
+        "datapath": {
+          "rule_count": 256,
+          "packet_bytes": 1500,
+          "sample_packets": 200000
+        },
+        "traffic_mix": {
+          "trusted_direct": 35.0,
+          "trusted_media_bypass": 20.0,
+          "inspect_lite": 15.0,
+          "inspect_full": 22.0,
+          "tunnel_private": 5.0,
+          "block": 3.0
+        }
       },
       "reports": [
         {
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963376,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106988,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 17255985.53958754,
-            "max_gbps": 8.835067776807982,
-            "mean_gbps": 8.835067776807982
+            "max_pps": 17186458.727895964,
+            "max_gbps": 8.799480243614665,
+            "mean_gbps": 8.799480243614665
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8,
           "competitor_comparison": {
-            "sng_measured_gbps": 8.835067776807982,
+            "sng_measured_gbps": 8.799480243614665,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 40F",
                 "published_gbps": 5.0,
-                "delta_pct": 76.70135553615964,
-                "verdict": "SNG 8.84 Gbps (software, VM) vs Fortinet FortiGate 40F 5.00 Gbps published (+77%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 75.9896048722933,
+                "verdict": "SNG 8.80 Gbps (software, VM) vs Fortinet FortiGate 40F 5.00 Gbps published (+76%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-440",
                 "published_gbps": 3.1,
-                "delta_pct": 185.00218634864459,
-                "verdict": "SNG 8.84 Gbps (software, VM) vs Palo Alto PA-440 3.10 Gbps published (+185%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 183.8542014069247,
+                "verdict": "SNG 8.80 Gbps (software, VM) vs Palo Alto PA-440 3.10 Gbps published (+184%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1605,8 +1644,8 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "latency",
-          "unix_time_secs": 1780963376,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106988,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
@@ -1614,14 +1653,14 @@
           },
           "latency": {
             "p50_ns": 80,
-            "p95_ns": 150,
+            "p95_ns": 151,
             "p99_ns": 161,
-            "max_ns": 30757,
+            "max_ns": 2076151,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8
         },
@@ -1629,32 +1668,32 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963376,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106988,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 17332529.87862207,
-            "max_gbps": 8.874258847410974,
-            "mean_gbps": 8.874258847410974
+            "max_pps": 17412995.578115635,
+            "max_gbps": 8.915537679161773,
+            "mean_gbps": 8.915537679161773
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8,
           "competitor_comparison": {
-            "sng_measured_gbps": 8.874258847410974,
+            "sng_measured_gbps": 8.915537679161773,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 40F",
                 "published_gbps": 0.6,
-                "delta_pct": 1379.0431412351625,
-                "verdict": "SNG 8.87 Gbps (software, VM) vs Fortinet FortiGate 40F 0.60 Gbps published (+1379%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1385.9229465269623,
+                "verdict": "SNG 8.92 Gbps (software, VM) vs Fortinet FortiGate 40F 0.60 Gbps published (+1386%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1663,8 +1702,8 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "latency",
-          "unix_time_secs": 1780963376,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106989,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
@@ -1674,12 +1713,12 @@
             "p50_ns": 80,
             "p95_ns": 151,
             "p99_ns": 170,
-            "max_ns": 39564,
+            "max_ns": 290112,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8
         },
@@ -1687,38 +1726,38 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963377,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106989,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 17378936.695861354,
-            "max_gbps": 8.898018471174087,
-            "mean_gbps": 8.898018471174087
+            "max_pps": 17736026.058139954,
+            "max_gbps": 9.080873745655024,
+            "mean_gbps": 9.080873745655024
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8,
           "competitor_comparison": {
-            "sng_measured_gbps": 8.898018471174087,
+            "sng_measured_gbps": 9.080873745655024,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 40F",
                 "published_gbps": 0.8,
-                "delta_pct": 1012.2523088967607,
-                "verdict": "SNG 8.90 Gbps (software, VM) vs Fortinet FortiGate 40F 0.80 Gbps published (+1012%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1035.1092182068778,
+                "verdict": "SNG 9.08 Gbps (software, VM) vs Fortinet FortiGate 40F 0.80 Gbps published (+1035%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-440",
                 "published_gbps": 0.7,
-                "delta_pct": 1171.1454958820125,
-                "verdict": "SNG 8.90 Gbps (software, VM) vs Palo Alto PA-440 0.70 Gbps published (+1171%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1197.2676779507178,
+                "verdict": "SNG 9.08 Gbps (software, VM) vs Palo Alto PA-440 0.70 Gbps published (+1197%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1727,23 +1766,23 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "latency",
-          "unix_time_secs": 1780963377,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106989,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "latency": {
-            "p50_ns": 71,
-            "p95_ns": 150,
-            "p99_ns": 170,
-            "max_ns": 29855,
+            "p50_ns": 80,
+            "p95_ns": 151,
+            "p99_ns": 161,
+            "max_ns": 2661473,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8
         },
@@ -1751,38 +1790,38 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963377,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106989,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 11403985.110155474,
-            "max_gbps": 46.71074169499726,
-            "mean_gbps": 46.71074169499726
+            "max_pps": 11364985.468448656,
+            "max_gbps": 46.55104750393187,
+            "mean_gbps": 46.55104750393187
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8,
           "competitor_comparison": {
-            "sng_measured_gbps": 46.71074169499726,
+            "sng_measured_gbps": 46.55104750393187,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 40F",
                 "published_gbps": 5.0,
-                "delta_pct": 834.2148338999452,
-                "verdict": "SNG 46.71 Gbps (software, VM) vs Fortinet FortiGate 40F 5.00 Gbps published (+834%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 831.0209500786375,
+                "verdict": "SNG 46.55 Gbps (software, VM) vs Fortinet FortiGate 40F 5.00 Gbps published (+831%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-440",
                 "published_gbps": 3.1,
-                "delta_pct": 1406.79811919346,
-                "verdict": "SNG 46.71 Gbps (software, VM) vs Palo Alto PA-440 3.10 Gbps published (+1407%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1401.6466936752215,
+                "verdict": "SNG 46.55 Gbps (software, VM) vs Palo Alto PA-440 3.10 Gbps published (+1402%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1791,23 +1830,23 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "latency",
-          "unix_time_secs": 1780963377,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106990,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "latency": {
-            "p50_ns": 100,
-            "p95_ns": 171,
+            "p50_ns": 110,
+            "p95_ns": 180,
             "p99_ns": 191,
-            "max_ns": 46477,
+            "max_ns": 2919503,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8
         },
@@ -1815,32 +1854,32 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963378,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106990,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 11110590.487040015,
-            "max_gbps": 45.50935975759562,
-            "mean_gbps": 45.50935975759562
+            "max_pps": 11380414.243254906,
+            "max_gbps": 46.61462306922333,
+            "mean_gbps": 46.61462306922333
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8,
           "competitor_comparison": {
-            "sng_measured_gbps": 45.50935975759562,
+            "sng_measured_gbps": 46.61462306922333,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 40F",
                 "published_gbps": 0.6,
-                "delta_pct": 7484.893292932603,
-                "verdict": "SNG 45.51 Gbps (software, VM) vs Fortinet FortiGate 40F 0.60 Gbps published (+7485%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 7669.103844870554,
+                "verdict": "SNG 46.61 Gbps (software, VM) vs Fortinet FortiGate 40F 0.60 Gbps published (+7669%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1849,8 +1888,8 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "latency",
-          "unix_time_secs": 1780963378,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106990,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
@@ -1858,14 +1897,14 @@
           },
           "latency": {
             "p50_ns": 110,
-            "p95_ns": 181,
+            "p95_ns": 180,
             "p99_ns": 191,
-            "max_ns": 50715,
+            "max_ns": 2301771,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8
         },
@@ -1873,38 +1912,38 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963378,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106990,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 11313463.342317142,
-            "max_gbps": 46.33996253146674,
-            "mean_gbps": 46.33996253146674
+            "max_pps": 11120455.17803494,
+            "max_gbps": 45.54945728715155,
+            "mean_gbps": 45.54945728715155
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8,
           "competitor_comparison": {
-            "sng_measured_gbps": 46.33996253146674,
+            "sng_measured_gbps": 45.54945728715155,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 40F",
                 "published_gbps": 0.8,
-                "delta_pct": 5692.495316433342,
-                "verdict": "SNG 46.34 Gbps (software, VM) vs Fortinet FortiGate 40F 0.80 Gbps published (+5692%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 5593.682160893944,
+                "verdict": "SNG 45.55 Gbps (software, VM) vs Fortinet FortiGate 40F 0.80 Gbps published (+5594%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-440",
                 "published_gbps": 0.7,
-                "delta_pct": 6519.9946473523905,
-                "verdict": "SNG 46.34 Gbps (software, VM) vs Palo Alto PA-440 0.70 Gbps published (+6520%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 6407.065326735935,
+                "verdict": "SNG 45.55 Gbps (software, VM) vs Palo Alto PA-440 0.70 Gbps published (+6407%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1913,8 +1952,8 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "latency",
-          "unix_time_secs": 1780963378,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106991,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
@@ -1922,14 +1961,14 @@
           },
           "latency": {
             "p50_ns": 110,
-            "p95_ns": 181,
+            "p95_ns": 180,
             "p99_ns": 191,
-            "max_ns": 41287,
+            "max_ns": 1938004,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8
         },
@@ -1937,38 +1976,38 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963379,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106991,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 6117928.821593876,
-            "max_gbps": 73.41516935017151,
-            "mean_gbps": 73.41516935017151
+            "max_pps": 6177180.335603169,
+            "max_gbps": 74.12629477307554,
+            "mean_gbps": 74.12629477307554
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8,
           "competitor_comparison": {
-            "sng_measured_gbps": 73.41516935017151,
+            "sng_measured_gbps": 74.12629477307554,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 40F",
                 "published_gbps": 5.0,
-                "delta_pct": 1368.3033870034303,
-                "verdict": "SNG 73.42 Gbps (software, VM) vs Fortinet FortiGate 40F 5.00 Gbps published (+1368%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1382.5258954615108,
+                "verdict": "SNG 74.13 Gbps (software, VM) vs Fortinet FortiGate 40F 5.00 Gbps published (+1383%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-440",
                 "published_gbps": 3.1,
-                "delta_pct": 2268.2312693603712,
-                "verdict": "SNG 73.42 Gbps (software, VM) vs Palo Alto PA-440 3.10 Gbps published (+2268%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 2291.1707991314693,
+                "verdict": "SNG 74.13 Gbps (software, VM) vs Palo Alto PA-440 3.10 Gbps published (+2291%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -1977,145 +2016,23 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "latency",
-          "unix_time_secs": 1780963379,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106991,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "no-inspect"
-          },
-          "latency": {
-            "p50_ns": 180,
-            "p95_ns": 250,
-            "p99_ns": 270,
-            "max_ns": 38792,
-            "clamped": 0
-          },
-          "resources": {
-            "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
-          },
-          "target_gbps": 0.8
-        },
-        {
-          "schema_version": 1,
-          "profile": "branch-small",
-          "mode": "throughput",
-          "unix_time_secs": 1780963379,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
-          "dimensions": {
-            "packet_size": 1500,
-            "policy_rules": 100,
-            "inspection": "url-cat"
-          },
-          "throughput": {
-            "max_pps": 6201851.336168886,
-            "max_gbps": 74.42224877708833,
-            "mean_gbps": 74.42224877708833
-          },
-          "resources": {
-            "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
-          },
-          "target_gbps": 0.8,
-          "competitor_comparison": {
-            "sng_measured_gbps": 74.42224877708833,
-            "feature": "NGFW (URL filtering + app-id) throughput",
-            "rows": [
-              {
-                "competitor": "Fortinet FortiGate 40F",
-                "published_gbps": 0.6,
-                "delta_pct": 12303.708129514724,
-                "verdict": "SNG 74.42 Gbps (software, VM) vs Fortinet FortiGate 40F 0.60 Gbps published (+12304%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
-              }
-            ]
-          }
-        },
-        {
-          "schema_version": 1,
-          "profile": "branch-small",
-          "mode": "latency",
-          "unix_time_secs": 1780963379,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
-          "dimensions": {
-            "packet_size": 1500,
-            "policy_rules": 100,
-            "inspection": "url-cat"
-          },
-          "latency": {
-            "p50_ns": 180,
-            "p95_ns": 251,
-            "p99_ns": 270,
-            "max_ns": 34144,
-            "clamped": 0
-          },
-          "resources": {
-            "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
-          },
-          "target_gbps": 0.8
-        },
-        {
-          "schema_version": 1,
-          "profile": "branch-small",
-          "mode": "throughput",
-          "unix_time_secs": 1780963380,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
-          "dimensions": {
-            "packet_size": 1500,
-            "policy_rules": 100,
-            "inspection": "full-tls"
-          },
-          "throughput": {
-            "max_pps": 5961249.788541962,
-            "max_gbps": 71.53503179656452,
-            "mean_gbps": 71.53503179656452
-          },
-          "resources": {
-            "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
-          },
-          "target_gbps": 0.8,
-          "competitor_comparison": {
-            "sng_measured_gbps": 71.53503179656452,
-            "feature": "threat-prevention / IPS throughput",
-            "rows": [
-              {
-                "competitor": "Fortinet FortiGate 40F",
-                "published_gbps": 0.8,
-                "delta_pct": 8841.878974570565,
-                "verdict": "SNG 71.54 Gbps (software, VM) vs Fortinet FortiGate 40F 0.80 Gbps published (+8842%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
-              },
-              {
-                "competitor": "Palo Alto PA-440",
-                "published_gbps": 0.7,
-                "delta_pct": 10119.290256652075,
-                "verdict": "SNG 71.54 Gbps (software, VM) vs Palo Alto PA-440 0.70 Gbps published (+10119%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
-              }
-            ]
-          }
-        },
-        {
-          "schema_version": 1,
-          "profile": "branch-small",
-          "mode": "latency",
-          "unix_time_secs": 1780963380,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
-          "dimensions": {
-            "packet_size": 1500,
-            "policy_rules": 100,
-            "inspection": "full-tls"
           },
           "latency": {
             "p50_ns": 180,
             "p95_ns": 260,
-            "p99_ns": 270,
-            "max_ns": 62707,
+            "p99_ns": 271,
+            "max_ns": 2394535,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8
         },
@@ -2123,96 +2040,32 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963380,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106991,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
-            "packet_size": 9000,
-            "policy_rules": 100,
-            "inspection": "no-inspect"
-          },
-          "throughput": {
-            "max_pps": 1338332.560953786,
-            "max_gbps": 96.3599790773465,
-            "mean_gbps": 96.3599790773465
-          },
-          "resources": {
-            "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
-          },
-          "target_gbps": 0.8,
-          "competitor_comparison": {
-            "sng_measured_gbps": 96.3599790773465,
-            "feature": "firewall throughput",
-            "rows": [
-              {
-                "competitor": "Fortinet FortiGate 40F",
-                "published_gbps": 5.0,
-                "delta_pct": 1827.19958154693,
-                "verdict": "SNG 96.36 Gbps (software, VM) vs Fortinet FortiGate 40F 5.00 Gbps published (+1827%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
-              },
-              {
-                "competitor": "Palo Alto PA-440",
-                "published_gbps": 3.1,
-                "delta_pct": 3008.386421849887,
-                "verdict": "SNG 96.36 Gbps (software, VM) vs Palo Alto PA-440 3.10 Gbps published (+3008%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
-              }
-            ]
-          }
-        },
-        {
-          "schema_version": 1,
-          "profile": "branch-small",
-          "mode": "latency",
-          "unix_time_secs": 1780963380,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
-          "dimensions": {
-            "packet_size": 9000,
-            "policy_rules": 100,
-            "inspection": "no-inspect"
-          },
-          "latency": {
-            "p50_ns": 742,
-            "p95_ns": 831,
-            "p99_ns": 1263,
-            "max_ns": 67326,
-            "clamped": 0
-          },
-          "resources": {
-            "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
-          },
-          "target_gbps": 0.8
-        },
-        {
-          "schema_version": 1,
-          "profile": "branch-small",
-          "mode": "throughput",
-          "unix_time_secs": 1780963381,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
-          "dimensions": {
-            "packet_size": 9000,
+            "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 1338701.4495990446,
-            "max_gbps": 96.3872188102125,
-            "mean_gbps": 96.3872188102125
+            "max_pps": 6181616.280874757,
+            "max_gbps": 74.18007631366612,
+            "mean_gbps": 74.18007631366612
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8,
           "competitor_comparison": {
-            "sng_measured_gbps": 96.3872188102125,
+            "sng_measured_gbps": 74.18007631366612,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 40F",
                 "published_gbps": 0.6,
-                "delta_pct": 15964.536468368751,
-                "verdict": "SNG 96.39 Gbps (software, VM) vs Fortinet FortiGate 40F 0.60 Gbps published (+15965%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 12263.346052277688,
+                "verdict": "SNG 74.18 Gbps (software, VM) vs Fortinet FortiGate 40F 0.60 Gbps published (+12263%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -2221,23 +2074,23 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "latency",
-          "unix_time_secs": 1780963381,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106992,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
-            "packet_size": 9000,
+            "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "latency": {
-            "p50_ns": 742,
-            "p95_ns": 822,
-            "p99_ns": 1192,
-            "max_ns": 70101,
+            "p50_ns": 180,
+            "p95_ns": 260,
+            "p99_ns": 271,
+            "max_ns": 2112980,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8
         },
@@ -2245,38 +2098,38 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963381,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106992,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
-            "packet_size": 9000,
+            "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 1351556.732619758,
-            "max_gbps": 97.31212016700404,
-            "mean_gbps": 97.31212016700404
+            "max_pps": 6157808.201943396,
+            "max_gbps": 73.89371615629268,
+            "mean_gbps": 73.89371615629268
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8,
           "competitor_comparison": {
-            "sng_measured_gbps": 97.31212016700404,
+            "sng_measured_gbps": 73.89371615629268,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 40F",
                 "published_gbps": 0.8,
-                "delta_pct": 12064.015020875504,
-                "verdict": "SNG 97.31 Gbps (software, VM) vs Fortinet FortiGate 40F 0.80 Gbps published (+12064%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 9136.714519536585,
+                "verdict": "SNG 73.89 Gbps (software, VM) vs Fortinet FortiGate 40F 0.80 Gbps published (+9137%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-440",
                 "published_gbps": 0.7,
-                "delta_pct": 13801.731452429149,
-                "verdict": "SNG 97.31 Gbps (software, VM) vs Palo Alto PA-440 0.70 Gbps published (+13802%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 10456.245165184668,
+                "verdict": "SNG 73.89 Gbps (software, VM) vs Palo Alto PA-440 0.70 Gbps published (+10456%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -2285,23 +2138,209 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "latency",
-          "unix_time_secs": 1780963381,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106992,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
+          "dimensions": {
+            "packet_size": 1500,
+            "policy_rules": 100,
+            "inspection": "full-tls"
+          },
+          "latency": {
+            "p50_ns": 180,
+            "p95_ns": 261,
+            "p99_ns": 301,
+            "max_ns": 2143256,
+            "clamped": 0
+          },
+          "resources": {
+            "mean_cpu_busy_pct": 0.0,
+            "peak_rss_bytes": 3969024
+          },
+          "target_gbps": 0.8
+        },
+        {
+          "schema_version": 1,
+          "profile": "branch-small",
+          "mode": "throughput",
+          "unix_time_secs": 1781106992,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
+          "dimensions": {
+            "packet_size": 9000,
+            "policy_rules": 100,
+            "inspection": "no-inspect"
+          },
+          "throughput": {
+            "max_pps": 1291878.0354242383,
+            "max_gbps": 93.01524086712104,
+            "mean_gbps": 93.01524086712104
+          },
+          "resources": {
+            "mean_cpu_busy_pct": 0.0,
+            "peak_rss_bytes": 3969024
+          },
+          "target_gbps": 0.8,
+          "competitor_comparison": {
+            "sng_measured_gbps": 93.01524086712104,
+            "feature": "firewall throughput",
+            "rows": [
+              {
+                "competitor": "Fortinet FortiGate 40F",
+                "published_gbps": 5.0,
+                "delta_pct": 1760.3048173424206,
+                "verdict": "SNG 93.02 Gbps (software, VM) vs Fortinet FortiGate 40F 5.00 Gbps published (+1760%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+              },
+              {
+                "competitor": "Palo Alto PA-440",
+                "published_gbps": 3.1,
+                "delta_pct": 2900.4916408748722,
+                "verdict": "SNG 93.02 Gbps (software, VM) vs Palo Alto PA-440 3.10 Gbps published (+2900%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+              }
+            ]
+          }
+        },
+        {
+          "schema_version": 1,
+          "profile": "branch-small",
+          "mode": "latency",
+          "unix_time_secs": 1781106993,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
+          "dimensions": {
+            "packet_size": 9000,
+            "policy_rules": 100,
+            "inspection": "no-inspect"
+          },
+          "latency": {
+            "p50_ns": 741,
+            "p95_ns": 1192,
+            "p99_ns": 1483,
+            "max_ns": 2500402,
+            "clamped": 0
+          },
+          "resources": {
+            "mean_cpu_busy_pct": 0.0,
+            "peak_rss_bytes": 3969024
+          },
+          "target_gbps": 0.8
+        },
+        {
+          "schema_version": 1,
+          "profile": "branch-small",
+          "mode": "throughput",
+          "unix_time_secs": 1781106993,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
+          "dimensions": {
+            "packet_size": 9000,
+            "policy_rules": 100,
+            "inspection": "url-cat"
+          },
+          "throughput": {
+            "max_pps": 1336510.6695594017,
+            "max_gbps": 96.2291109551216,
+            "mean_gbps": 96.2291109551216
+          },
+          "resources": {
+            "mean_cpu_busy_pct": 0.0,
+            "peak_rss_bytes": 3969024
+          },
+          "target_gbps": 0.8,
+          "competitor_comparison": {
+            "sng_measured_gbps": 96.2291109551216,
+            "feature": "NGFW (URL filtering + app-id) throughput",
+            "rows": [
+              {
+                "competitor": "Fortinet FortiGate 40F",
+                "published_gbps": 0.6,
+                "delta_pct": 15938.185159186934,
+                "verdict": "SNG 96.23 Gbps (software, VM) vs Fortinet FortiGate 40F 0.60 Gbps published (+15938%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+              }
+            ]
+          }
+        },
+        {
+          "schema_version": 1,
+          "profile": "branch-small",
+          "mode": "latency",
+          "unix_time_secs": 1781106993,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
+          "dimensions": {
+            "packet_size": 9000,
+            "policy_rules": 100,
+            "inspection": "url-cat"
+          },
+          "latency": {
+            "p50_ns": 741,
+            "p95_ns": 822,
+            "p99_ns": 1202,
+            "max_ns": 2881363,
+            "clamped": 0
+          },
+          "resources": {
+            "mean_cpu_busy_pct": 0.0,
+            "peak_rss_bytes": 3969024
+          },
+          "target_gbps": 0.8
+        },
+        {
+          "schema_version": 1,
+          "profile": "branch-small",
+          "mode": "throughput",
+          "unix_time_secs": 1781106993,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
+          "dimensions": {
+            "packet_size": 9000,
+            "policy_rules": 100,
+            "inspection": "full-tls"
+          },
+          "throughput": {
+            "max_pps": 1332608.0709434685,
+            "max_gbps": 95.94783903260861,
+            "mean_gbps": 95.94783903260861
+          },
+          "resources": {
+            "mean_cpu_busy_pct": 0.0,
+            "peak_rss_bytes": 3969024
+          },
+          "target_gbps": 0.8,
+          "competitor_comparison": {
+            "sng_measured_gbps": 95.94783903260861,
+            "feature": "threat-prevention / IPS throughput",
+            "rows": [
+              {
+                "competitor": "Fortinet FortiGate 40F",
+                "published_gbps": 0.8,
+                "delta_pct": 11893.479879076076,
+                "verdict": "SNG 95.95 Gbps (software, VM) vs Fortinet FortiGate 40F 0.80 Gbps published (+11893%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+              },
+              {
+                "competitor": "Palo Alto PA-440",
+                "published_gbps": 0.7,
+                "delta_pct": 13606.834147515516,
+                "verdict": "SNG 95.95 Gbps (software, VM) vs Palo Alto PA-440 0.70 Gbps published (+13607%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+              }
+            ]
+          }
+        },
+        {
+          "schema_version": 1,
+          "profile": "branch-small",
+          "mode": "latency",
+          "unix_time_secs": 1781106994,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "latency": {
-            "p50_ns": 742,
-            "p95_ns": 822,
-            "p99_ns": 832,
-            "max_ns": 93404,
+            "p50_ns": 741,
+            "p95_ns": 832,
+            "p99_ns": 1362,
+            "max_ns": 2529096,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8
         },
@@ -2309,19 +2348,19 @@
           "schema_version": 1,
           "profile": "branch-small",
           "mode": "concurrent-flows",
-          "unix_time_secs": 1780963382,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106994,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "concurrent_flows": {
-            "max_active_flows": 4540416
+            "max_active_flows": 4419072
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 0.8
         }
@@ -2333,51 +2372,64 @@
         "vcpus": 4,
         "ram_gb": 8,
         "nic_gbps": 10.0,
-        "target_gbps": 2.0
+        "target_gbps": 2.0,
+        "datapath": {
+          "rule_count": 256,
+          "packet_bytes": 1500,
+          "sample_packets": 200000
+        },
+        "traffic_mix": {
+          "trusted_direct": 35.0,
+          "trusted_media_bypass": 20.0,
+          "inspect_lite": 15.0,
+          "inspect_full": 22.0,
+          "tunnel_private": 5.0,
+          "block": 3.0
+        }
       },
       "reports": [
         {
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963382,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106994,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 17047342.385878023,
-            "max_gbps": 8.728245969867476,
-            "mean_gbps": 8.728245969867476
+            "max_pps": 17459695.567043822,
+            "max_gbps": 8.9395060689277,
+            "mean_gbps": 8.9395060689277
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 8.728245969867476,
+            "sng_measured_gbps": 8.9395060689277,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 10.0,
-                "delta_pct": -12.717540301325236,
-                "verdict": "SNG 8.73 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (-13%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": -10.604939310722994,
+                "verdict": "SNG 8.94 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (-11%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 5.2,
-                "delta_pct": 67.85088403591301,
-                "verdict": "SNG 8.73 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+68%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 71.91357824860962,
+                "verdict": "SNG 8.94 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+72%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 3.4,
-                "delta_pct": 156.71311676080813,
-                "verdict": "SNG 8.73 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+157%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 162.92664908610882,
+                "verdict": "SNG 8.94 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+163%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -2386,8 +2438,8 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "latency",
-          "unix_time_secs": 1780963382,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106994,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
@@ -2395,14 +2447,14 @@
           },
           "latency": {
             "p50_ns": 80,
-            "p95_ns": 160,
-            "p99_ns": 170,
-            "max_ns": 49212,
+            "p95_ns": 151,
+            "p99_ns": 161,
+            "max_ns": 236070,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0
         },
@@ -2410,32 +2462,32 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963382,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106995,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 17044436.54102831,
-            "max_gbps": 8.726759188073654,
-            "mean_gbps": 8.726759188073654
+            "max_pps": 17114961.982480984,
+            "max_gbps": 8.762873051449214,
+            "mean_gbps": 8.762873051449214
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 8.726759188073654,
+            "sng_measured_gbps": 8.762873051449214,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.0,
-                "delta_pct": 772.6759188073654,
-                "verdict": "SNG 8.73 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+773%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 776.2873051449213,
+                "verdict": "SNG 8.76 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+776%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -2444,8 +2496,8 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "latency",
-          "unix_time_secs": 1780963383,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106995,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
@@ -2453,14 +2505,14 @@
           },
           "latency": {
             "p50_ns": 80,
-            "p95_ns": 160,
-            "p99_ns": 170,
-            "max_ns": 77064,
+            "p95_ns": 151,
+            "p99_ns": 171,
+            "max_ns": 204341,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0
         },
@@ -2468,44 +2520,44 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963383,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106995,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 17162177.529673792,
-            "max_gbps": 8.787038761475962,
-            "mean_gbps": 8.787038761475962
+            "max_pps": 17067727.10212305,
+            "max_gbps": 8.738693788316517,
+            "mean_gbps": 8.738693788316517
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 8.787038761475962,
+            "sng_measured_gbps": 8.738693788316517,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.4,
-                "delta_pct": 527.6456258197115,
-                "verdict": "SNG 8.79 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+528%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 524.1924134511798,
+                "verdict": "SNG 8.74 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+524%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 1.6,
-                "delta_pct": 449.1899225922476,
-                "verdict": "SNG 8.79 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+449%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 446.16836176978234,
+                "verdict": "SNG 8.74 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+446%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 0.65,
-                "delta_pct": 1251.852117150148,
-                "verdict": "SNG 8.79 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+1252%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1244.4144289717717,
+                "verdict": "SNG 8.74 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+1244%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -2514,8 +2566,8 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "latency",
-          "unix_time_secs": 1780963383,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106995,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
@@ -2523,14 +2575,14 @@
           },
           "latency": {
             "p50_ns": 80,
-            "p95_ns": 160,
-            "p99_ns": 170,
-            "max_ns": 64340,
+            "p95_ns": 151,
+            "p99_ns": 161,
+            "max_ns": 301753,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0
         },
@@ -2538,44 +2590,44 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963383,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106996,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 10853219.974109652,
-            "max_gbps": 44.45482457730154,
-            "mean_gbps": 44.45482457730154
+            "max_pps": 10830749.790699724,
+            "max_gbps": 44.36281511131177,
+            "mean_gbps": 44.36281511131177
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 44.45482457730154,
+            "sng_measured_gbps": 44.36281511131177,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 10.0,
-                "delta_pct": 344.54824577301537,
-                "verdict": "SNG 44.45 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (+345%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 343.62815111311767,
+                "verdict": "SNG 44.36 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (+344%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 5.2,
-                "delta_pct": 754.900472640414,
-                "verdict": "SNG 44.45 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+755%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 753.1310598329186,
+                "verdict": "SNG 44.36 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+753%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 3.4,
-                "delta_pct": 1207.494840508869,
-                "verdict": "SNG 44.45 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+1207%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1204.788679744464,
+                "verdict": "SNG 44.36 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+1205%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -2584,8 +2636,8 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "latency",
-          "unix_time_secs": 1780963384,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106996,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
@@ -2593,14 +2645,14 @@
           },
           "latency": {
             "p50_ns": 110,
-            "p95_ns": 190,
+            "p95_ns": 180,
             "p99_ns": 191,
-            "max_ns": 225350,
+            "max_ns": 330667,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0
         },
@@ -2608,32 +2660,32 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963384,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106996,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 10902269.87785837,
-            "max_gbps": 44.65571706775821,
-            "mean_gbps": 44.65571706775821
+            "max_pps": 10924609.0960911,
+            "max_gbps": 44.74723286409497,
+            "mean_gbps": 44.74723286409497
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 44.65571706775821,
+            "sng_measured_gbps": 44.74723286409497,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.0,
-                "delta_pct": 4365.571706775821,
-                "verdict": "SNG 44.66 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+4366%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 4374.723286409497,
+                "verdict": "SNG 44.75 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+4375%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -2642,8 +2694,8 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "latency",
-          "unix_time_secs": 1780963384,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106996,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
@@ -2651,14 +2703,14 @@
           },
           "latency": {
             "p50_ns": 110,
-            "p95_ns": 190,
+            "p95_ns": 180,
             "p99_ns": 191,
-            "max_ns": 44723,
+            "max_ns": 211915,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0
         },
@@ -2666,44 +2718,44 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963384,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106997,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 11113951.371926969,
-            "max_gbps": 45.52276320970801,
-            "mean_gbps": 45.52276320970801
+            "max_pps": 10882813.903185472,
+            "max_gbps": 44.57607724577994,
+            "mean_gbps": 44.57607724577994
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 45.52276320970801,
+            "sng_measured_gbps": 44.57607724577994,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.4,
-                "delta_pct": 3151.625943550572,
-                "verdict": "SNG 45.52 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+3152%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 3084.0055175557104,
+                "verdict": "SNG 44.58 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+3084%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 1.6,
-                "delta_pct": 2745.1727006067504,
-                "verdict": "SNG 45.52 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+2745%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 2686.004827861246,
+                "verdict": "SNG 44.58 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+2686%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 0.65,
-                "delta_pct": 6903.50203226277,
-                "verdict": "SNG 45.52 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+6904%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 6757.8580378123,
+                "verdict": "SNG 44.58 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+6758%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -2712,8 +2764,8 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "latency",
-          "unix_time_secs": 1780963385,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106997,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 512,
             "policy_rules": 100,
@@ -2721,14 +2773,14 @@
           },
           "latency": {
             "p50_ns": 110,
-            "p95_ns": 190,
+            "p95_ns": 180,
             "p99_ns": 191,
-            "max_ns": 36458,
+            "max_ns": 288648,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0
         },
@@ -2736,44 +2788,44 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963385,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106997,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 6228267.97630429,
-            "max_gbps": 74.73923962942824,
-            "mean_gbps": 74.73923962942824
+            "max_pps": 5695762.7931943135,
+            "max_gbps": 68.34924361214402,
+            "mean_gbps": 68.34924361214402
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 74.73923962942824,
+            "sng_measured_gbps": 68.34924361214402,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 10.0,
-                "delta_pct": 647.3923962942824,
-                "verdict": "SNG 74.74 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (+647%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 583.4924361214403,
+                "verdict": "SNG 68.35 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (+583%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 5.2,
-                "delta_pct": 1337.2930697966967,
-                "verdict": "SNG 74.74 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+1337%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1214.4085310027697,
+                "verdict": "SNG 68.35 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+1214%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 3.4,
-                "delta_pct": 2098.212930277301,
-                "verdict": "SNG 74.74 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+2098%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1910.2718709454123,
+                "verdict": "SNG 68.35 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+1910%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -2782,8 +2834,8 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "latency",
-          "unix_time_secs": 1780963385,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106997,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
@@ -2791,14 +2843,14 @@
           },
           "latency": {
             "p50_ns": 180,
-            "p95_ns": 260,
-            "p99_ns": 270,
-            "max_ns": 264473,
+            "p95_ns": 261,
+            "p99_ns": 300,
+            "max_ns": 317582,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0
         },
@@ -2806,32 +2858,32 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963385,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106998,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 6123954.557125967,
-            "max_gbps": 73.48748143238042,
-            "mean_gbps": 73.48748143238042
+            "max_pps": 5876283.432155188,
+            "max_gbps": 70.51548607996932,
+            "mean_gbps": 70.51548607996932
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 73.48748143238042,
+            "sng_measured_gbps": 70.51548607996932,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.0,
-                "delta_pct": 7248.748143238042,
-                "verdict": "SNG 73.49 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+7249%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 6951.548607996932,
+                "verdict": "SNG 70.52 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+6952%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -2840,23 +2892,93 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "latency",
-          "unix_time_secs": 1780963386,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106998,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 1500,
             "policy_rules": 100,
             "inspection": "url-cat"
+          },
+          "latency": {
+            "p50_ns": 180,
+            "p95_ns": 260,
+            "p99_ns": 270,
+            "max_ns": 3040719,
+            "clamped": 0
+          },
+          "resources": {
+            "mean_cpu_busy_pct": 0.0,
+            "peak_rss_bytes": 3969024
+          },
+          "target_gbps": 2.0
+        },
+        {
+          "schema_version": 1,
+          "profile": "cloud-pop-small",
+          "mode": "throughput",
+          "unix_time_secs": 1781106998,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
+          "dimensions": {
+            "packet_size": 1500,
+            "policy_rules": 100,
+            "inspection": "full-tls"
+          },
+          "throughput": {
+            "max_pps": 6041777.889336949,
+            "max_gbps": 72.50142187764189,
+            "mean_gbps": 72.50142187764189
+          },
+          "resources": {
+            "mean_cpu_busy_pct": 0.0,
+            "peak_rss_bytes": 3969024
+          },
+          "target_gbps": 2.0,
+          "competitor_comparison": {
+            "sng_measured_gbps": 72.50142187764189,
+            "feature": "threat-prevention / IPS throughput",
+            "rows": [
+              {
+                "competitor": "Fortinet FortiGate 60F",
+                "published_gbps": 1.4,
+                "delta_pct": 5078.672991260135,
+                "verdict": "SNG 72.50 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+5079%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+              },
+              {
+                "competitor": "Palo Alto PA-450",
+                "published_gbps": 1.6,
+                "delta_pct": 4431.338867352619,
+                "verdict": "SNG 72.50 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+4431%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+              },
+              {
+                "competitor": "Check Point 3600",
+                "published_gbps": 0.65,
+                "delta_pct": 11054.064904252597,
+                "verdict": "SNG 72.50 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+11054%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+              }
+            ]
+          }
+        },
+        {
+          "schema_version": 1,
+          "profile": "cloud-pop-small",
+          "mode": "latency",
+          "unix_time_secs": 1781106998,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
+          "dimensions": {
+            "packet_size": 1500,
+            "policy_rules": 100,
+            "inspection": "full-tls"
           },
           "latency": {
             "p50_ns": 180,
             "p95_ns": 260,
             "p99_ns": 271,
-            "max_ns": 59982,
+            "max_ns": 130193,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0
         },
@@ -2864,114 +2986,44 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963386,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
-          "dimensions": {
-            "packet_size": 1500,
-            "policy_rules": 100,
-            "inspection": "full-tls"
-          },
-          "throughput": {
-            "max_pps": 6158281.511525186,
-            "max_gbps": 73.89943755292431,
-            "mean_gbps": 73.89943755292431
-          },
-          "resources": {
-            "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
-          },
-          "target_gbps": 2.0,
-          "competitor_comparison": {
-            "sng_measured_gbps": 73.89943755292431,
-            "feature": "threat-prevention / IPS throughput",
-            "rows": [
-              {
-                "competitor": "Fortinet FortiGate 60F",
-                "published_gbps": 1.4,
-                "delta_pct": 5178.531253780308,
-                "verdict": "SNG 73.90 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+5179%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
-              },
-              {
-                "competitor": "Palo Alto PA-450",
-                "published_gbps": 1.6,
-                "delta_pct": 4518.7148470577695,
-                "verdict": "SNG 73.90 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+4519%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
-              },
-              {
-                "competitor": "Check Point 3600",
-                "published_gbps": 0.65,
-                "delta_pct": 11269.14423891143,
-                "verdict": "SNG 73.90 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+11269%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
-              }
-            ]
-          }
-        },
-        {
-          "schema_version": 1,
-          "profile": "cloud-pop-small",
-          "mode": "latency",
-          "unix_time_secs": 1780963386,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
-          "dimensions": {
-            "packet_size": 1500,
-            "policy_rules": 100,
-            "inspection": "full-tls"
-          },
-          "latency": {
-            "p50_ns": 180,
-            "p95_ns": 260,
-            "p99_ns": 270,
-            "max_ns": 44352,
-            "clamped": 0
-          },
-          "resources": {
-            "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
-          },
-          "target_gbps": 2.0
-        },
-        {
-          "schema_version": 1,
-          "profile": "cloud-pop-small",
-          "mode": "throughput",
-          "unix_time_secs": 1780963386,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106999,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "throughput": {
-            "max_pps": 1337162.3545171127,
-            "max_gbps": 96.27572417978521,
-            "mean_gbps": 96.27572417978521
+            "max_pps": 1336778.7831948895,
+            "max_gbps": 96.24813011450307,
+            "mean_gbps": 96.24813011450307
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 96.27572417978521,
+            "sng_measured_gbps": 96.24813011450307,
             "feature": "firewall throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 10.0,
-                "delta_pct": 862.7572417978522,
-                "verdict": "SNG 96.28 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (+863%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 862.4813011450307,
+                "verdict": "SNG 96.25 Gbps (software, VM) vs Fortinet FortiGate 60F 10.00 Gbps published (+862%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 5.2,
-                "delta_pct": 1751.4562342266388,
-                "verdict": "SNG 96.28 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+1751%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 1750.925579125059,
+                "verdict": "SNG 96.25 Gbps (software, VM) vs Palo Alto PA-450 5.20 Gbps published (+1751%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 3.4,
-                "delta_pct": 2731.6389464642707,
-                "verdict": "SNG 96.28 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+2732%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 2730.8273563089137,
+                "verdict": "SNG 96.25 Gbps (software, VM) vs Check Point 3600 3.40 Gbps published (+2731%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -2980,23 +3032,23 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "latency",
-          "unix_time_secs": 1780963387,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106999,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "latency": {
-            "p50_ns": 742,
-            "p95_ns": 831,
-            "p99_ns": 841,
-            "max_ns": 36147,
+            "p50_ns": 731,
+            "p95_ns": 812,
+            "p99_ns": 1253,
+            "max_ns": 3106913,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0
         },
@@ -3004,32 +3056,32 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963387,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106999,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "throughput": {
-            "max_pps": 1354635.4580022772,
-            "max_gbps": 97.53461276734056,
-            "mean_gbps": 97.53461276734056
+            "max_pps": 1332373.1424766793,
+            "max_gbps": 95.93128884596436,
+            "mean_gbps": 95.93128884596436
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 97.53461276734056,
+            "sng_measured_gbps": 95.93128884596436,
             "feature": "NGFW (URL filtering + app-id) throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.0,
-                "delta_pct": 9653.461276734057,
-                "verdict": "SNG 97.53 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+9653%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 9493.128884596435,
+                "verdict": "SNG 95.93 Gbps (software, VM) vs Fortinet FortiGate 60F 1.00 Gbps published (+9493%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -3038,23 +3090,23 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "latency",
-          "unix_time_secs": 1780963387,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781106999,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "url-cat"
           },
           "latency": {
-            "p50_ns": 742,
-            "p95_ns": 831,
-            "p99_ns": 841,
-            "max_ns": 399025,
+            "p50_ns": 731,
+            "p95_ns": 811,
+            "p99_ns": 822,
+            "max_ns": 2677472,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0
         },
@@ -3062,44 +3114,44 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "throughput",
-          "unix_time_secs": 1780963387,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781107000,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "throughput": {
-            "max_pps": 1326166.516975152,
-            "max_gbps": 95.48402357217704,
-            "mean_gbps": 95.48402357217704
+            "max_pps": 1321150.2379386397,
+            "max_gbps": 95.12411228513197,
+            "mean_gbps": 95.12411228513197
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0,
           "competitor_comparison": {
-            "sng_measured_gbps": 95.48402357217704,
+            "sng_measured_gbps": 95.12411228513197,
             "feature": "threat-prevention / IPS throughput",
             "rows": [
               {
                 "competitor": "Fortinet FortiGate 60F",
                 "published_gbps": 1.4,
-                "delta_pct": 6720.287398012645,
-                "verdict": "SNG 95.48 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+6720%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 6694.579448937998,
+                "verdict": "SNG 95.12 Gbps (software, VM) vs Fortinet FortiGate 60F 1.40 Gbps published (+6695%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Palo Alto PA-450",
                 "published_gbps": 1.6,
-                "delta_pct": 5867.751473261064,
-                "verdict": "SNG 95.48 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+5868%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 5845.257017820748,
+                "verdict": "SNG 95.12 Gbps (software, VM) vs Palo Alto PA-450 1.60 Gbps published (+5845%) — informative, not apples-to-apples: single-pass hardware appliance; SNG is software-only on a generic x86 VM"
               },
               {
                 "competitor": "Check Point 3600",
                 "published_gbps": 0.65,
-                "delta_pct": 14589.849780334927,
-                "verdict": "SNG 95.48 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+14590%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
+                "delta_pct": 14534.478813097227,
+                "verdict": "SNG 95.12 Gbps (software, VM) vs Check Point 3600 0.65 Gbps published (+14534%) — informative, not apples-to-apples: fixed security appliance; SNG is software-only on a generic x86 VM"
               }
             ]
           }
@@ -3108,23 +3160,23 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "latency",
-          "unix_time_secs": 1780963388,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781107000,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 9000,
             "policy_rules": 100,
             "inspection": "full-tls"
           },
           "latency": {
-            "p50_ns": 742,
-            "p95_ns": 831,
-            "p99_ns": 842,
-            "max_ns": 37219,
+            "p50_ns": 731,
+            "p95_ns": 812,
+            "p99_ns": 1212,
+            "max_ns": 2844062,
             "clamped": 0
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0
         },
@@ -3132,19 +3184,19 @@
           "schema_version": 1,
           "profile": "cloud-pop-small",
           "mode": "concurrent-flows",
-          "unix_time_secs": 1780963388,
-          "git_sha": "3c2c0fc9c29e85a656e77b3cd1bdd0bf77124e6c",
+          "unix_time_secs": 1781107000,
+          "git_sha": "6c6406bdfa8c394d9aad18e7c496d9148f519026",
           "dimensions": {
             "packet_size": 64,
             "policy_rules": 100,
             "inspection": "no-inspect"
           },
           "concurrent_flows": {
-            "max_active_flows": 4583936
+            "max_active_flows": 4303616
           },
           "resources": {
             "mean_cpu_busy_pct": 0.0,
-            "peak_rss_bytes": 3145728
+            "peak_rss_bytes": 3969024
           },
           "target_gbps": 2.0
         }
