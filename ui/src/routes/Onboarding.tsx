@@ -465,12 +465,15 @@ function StepSite({
 
 // --- Step 3: Identity (SSO) ------------------------------------------------
 
-async function fetchDiscovery(issuer: string): Promise<Record<string, unknown>> {
+async function fetchDiscovery(
+  issuer: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
   const base = issuer.replace(/\/+$/, "");
   const url = base.endsWith("/.well-known/openid-configuration")
     ? base
     : `${base}/.well-known/openid-configuration`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`Discovery failed (${res.status})`);
   return (await res.json()) as Record<string, unknown>;
 }
@@ -500,22 +503,26 @@ function StepIdentity({
   // operator relies on it for sign-in.
   useEffect(() => {
     if (cfg.authMode !== "oidc" || !cfg.oidcIssuer) return;
-    let cancelled = false;
+    // Abort the in-flight discovery GET when the step unmounts or re-runs, so a
+    // slow/hung issuer can't keep a request open after the operator has moved
+    // on — mirrors how the generated hooks thread `signal` into `sngRequest`.
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
-    fetchDiscovery(cfg.oidcIssuer)
+    fetchDiscovery(cfg.oidcIssuer, controller.signal)
       .then((d) => {
-        if (!cancelled) setDiscovery(d);
+        if (!controller.signal.aborted) setDiscovery(d);
       })
       .catch((e) => {
-        if (!cancelled)
-          setError(e instanceof Error ? e.message : "Discovery failed");
+        // An abort is our own cleanup, not a verification failure — ignore it.
+        if (controller.signal.aborted) return;
+        setError(e instanceof Error ? e.message : "Discovery failed");
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       });
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [cfg.authMode, cfg.oidcIssuer, reloadKey]);
 

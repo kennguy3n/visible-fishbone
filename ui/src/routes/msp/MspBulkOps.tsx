@@ -365,7 +365,12 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
         <button
           className="btn btn--primary"
-          disabled={!siteName.trim() || running}
+          disabled={
+            !siteName.trim() ||
+            !Number.isInteger(tokensPerTenant) ||
+            tokensPerTenant < 1 ||
+            running
+          }
           onClick={run}
         >
           {running ? "Onboarding cohort…" : "Onboard entire cohort"}
