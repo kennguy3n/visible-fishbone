@@ -160,11 +160,15 @@ impl ZtnaError {
     /// each to its decision-reason twin.
     ///
     /// The remaining variants (`BundleDecode`, `InvalidPolicy`,
-    /// `ProviderFailure`, `Telemetry`) are never produced by
-    /// `evaluate` — they originate at bundle-load / telemetry time.
-    /// Should one ever reach this mapping it is treated as a
+    /// `ProviderFailure`, `Telemetry`, `TokenRejected`,
+    /// `IdpConfigNotFound`) are never produced by `evaluate` —
+    /// they originate at bundle-load / telemetry / token-validation
+    /// time. Should one ever reach this mapping it is treated as a
     /// fail-closed [`ZtnaDecisionReason::Revoked`]: a session that
-    /// cannot be positively re-affirmed must not be kept alive.
+    /// cannot be positively re-affirmed must not be kept alive. This
+    /// match is deliberately exhaustive (no wildcard) so a newly
+    /// added [`ZtnaError`] variant fails to compile here until its
+    /// re-eval deny semantics are decided explicitly.
     #[must_use]
     pub fn as_decision_reason(&self) -> ZtnaDecisionReason {
         match self {
@@ -174,7 +178,9 @@ impl ZtnaError {
             Self::BundleDecode(_)
             | Self::InvalidPolicy(_)
             | Self::ProviderFailure { .. }
-            | Self::Telemetry(_) => ZtnaDecisionReason::Revoked,
+            | Self::Telemetry(_)
+            | Self::TokenRejected { .. }
+            | Self::IdpConfigNotFound { .. } => ZtnaDecisionReason::Revoked,
         }
     }
 }
@@ -300,5 +306,58 @@ mod tests {
             app_id: "wiki".into(),
         };
         assert_eq!(format!("{err}"), "unknown app: wiki");
+    }
+
+    #[test]
+    fn as_decision_reason_maps_resolution_misses_to_their_twins() {
+        assert_eq!(
+            ZtnaError::UnknownApp { app_id: "x".into() }.as_decision_reason(),
+            ZtnaDecisionReason::UnknownApp
+        );
+        assert_eq!(
+            ZtnaError::DeviceNotEnrolled {
+                device_id: "d".into()
+            }
+            .as_decision_reason(),
+            ZtnaDecisionReason::DeviceNotEnrolled
+        );
+        assert_eq!(
+            ZtnaError::IdentityNotFound {
+                user_id: "u".into()
+            }
+            .as_decision_reason(),
+            ZtnaDecisionReason::IdentityNotFound
+        );
+    }
+
+    #[test]
+    fn as_decision_reason_fails_closed_for_non_evaluate_variants() {
+        // These variants are never produced by the re-eval evaluator;
+        // if one ever surfaces in the loop, the session must die rather
+        // than be silently kept alive. `TokenRejected` and
+        // `IdpConfigNotFound` (added with the OIDC token-validation
+        // path) are the regression guard here: they were once omitted
+        // from this match, which is a non-exhaustive-match compile error.
+        for err in [
+            ZtnaError::BundleDecode("bad".into()),
+            ZtnaError::InvalidPolicy("zero budget".into()),
+            ZtnaError::ProviderFailure {
+                provider: "device".into(),
+                reason: "timeout".into(),
+            },
+            ZtnaError::Telemetry("closed".into()),
+            ZtnaError::TokenRejected {
+                reason: "expired".into(),
+            },
+            ZtnaError::IdpConfigNotFound {
+                tenant_id: "t".into(),
+            },
+        ] {
+            assert_eq!(
+                err.as_decision_reason(),
+                ZtnaDecisionReason::Revoked,
+                "non-evaluate variant must fail closed to Revoked"
+            );
+        }
     }
 }
