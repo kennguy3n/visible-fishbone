@@ -11,6 +11,7 @@
 //	sng-migrate version           # alias of `status`
 //	sng-migrate force <V>         # force-set version (recovery only)
 //	sng-migrate validate [files]  # lint migration SQL for lock safety
+//	sng-migrate check-versions    # verify the version sequence is unique+contiguous
 //	sng-migrate squash            # generate a consolidated baseline migration
 //
 // Lock-safety flags (apply to `up`):
@@ -91,6 +92,7 @@ func run(args []string, stdout, stderr *os.File) error {
 		_, _ = fmt.Fprintf(stderr, "  version          alias of status\n")
 		_, _ = fmt.Fprintf(stderr, "  force <V>        forcibly set version (recovery only)\n")
 		_, _ = fmt.Fprintf(stderr, "  validate [--strict] [files] lint migration SQL for lock safety (no DB needed)\n")
+		_, _ = fmt.Fprintf(stderr, "  check-versions   verify migration versions are unique+contiguous with paired up/down (no DB needed)\n")
 		_, _ = fmt.Fprintf(stderr, "  squash           generate a consolidated baseline migration (no DB needed)\n")
 		_, _ = fmt.Fprintf(stderr, "                   flags: --out DIR (default migrations/baseline), --through V, --force\n")
 	}
@@ -107,6 +109,13 @@ func run(args []string, stdout, stderr *os.File) error {
 	// connection, so it is handled before any DSN resolution.
 	if rest[0] == "validate" {
 		return runValidate(stdout, stderr, rest[1:])
+	}
+
+	// `check-versions` is a filename-only structural check (unique +
+	// contiguous versions, paired up/down). Like `validate` it needs
+	// no database, so handle it before DSN resolution.
+	if rest[0] == "check-versions" {
+		return runCheckVersions(stdout, stderr, rest[1:])
 	}
 
 	// `squash` only reads the embedded migration SQL and writes the
@@ -258,6 +267,28 @@ func runValidate(stdout, stderr *os.File, args []string) error {
 		return err
 	}
 	_, _ = fmt.Fprintf(stdout, "sng-migrate: %s ok — %d file(s) clean\n", mode, len(files))
+	return nil
+}
+
+// runCheckVersions verifies that the embedded migration set forms a
+// unique, gap-free version sequence with paired up/down files. It is
+// the structural complement to `validate` (which lints SQL content):
+// this catches the merge-order collision where two branches each add
+// a migration at the same next version number — a failure that is
+// invisible on either branch in isolation and only appears once both
+// land on main. Running it in the fast PR lint job (and locally as a
+// pre-flight) surfaces the collision early with the colliding
+// filenames named, instead of as a cryptic "duplicate version" deep
+// in a -race test run. It needs no database.
+func runCheckVersions(stdout, stderr *os.File, args []string) error {
+	if len(args) > 0 {
+		return newUsageError("check-versions: takes no arguments, got %q", args[0])
+	}
+	if err := migrate.CheckVersionSequence(migrate.SourceFS()); err != nil {
+		_, _ = fmt.Fprintln(stderr, err.Error())
+		return err
+	}
+	_, _ = fmt.Fprintln(stdout, "sng-migrate: check-versions ok — migration versions are unique, contiguous, and paired")
 	return nil
 }
 

@@ -71,6 +71,13 @@ jobs:
           cache: true
       - name: go vet
         run: go vet ./...
+      # Structural guard over the migration *set* (not SQL content):
+      # fails fast and names the files when two branches collide on a
+      # version number — the merge-order bug that is invisible on
+      # either branch alone and only breaks main once both land. Needs
+      # no database, so it lives in the fast PR gate.
+      - name: migration version sequence (unique + contiguous + paired)
+        run: go run ./cmd/sng-migrate check-versions
       - name: golangci-lint (default tags)
         uses: golangci/golangci-lint-action@v7
         with:

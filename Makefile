@@ -49,6 +49,7 @@ help:
 	@echo "  migrate-up          Apply migrations"
 	@echo "  migrate-down        Roll back one migration"
 	@echo "  migrate-status      Print migration status"
+	@echo "  migrate-check       Verify migration versions are unique+contiguous (no DB)"
 
 # --- Go --------------------------------------------------------------------
 
@@ -75,7 +76,7 @@ cover:
 	$(GO) tool cover -func=coverage.out
 
 .PHONY: lint-go
-lint-go:
+lint-go: migrate-check
 	$(GO) vet ./...
 	golangci-lint run ./...
 
@@ -171,6 +172,16 @@ migrate-down: build-migrate
 .PHONY: migrate-status
 migrate-status: build-migrate
 	$(BIN_DIR)/sng-migrate status
+
+# migrate-check is the structural guard over the migration set:
+# unique + contiguous version numbers with paired up/down files. It
+# needs no database (it only reads filenames), so it runs as part of
+# `lint-go` and mirrors the `check-versions` step in CI's lint job —
+# catching the merge-order collision where two branches both add the
+# next free version number.
+.PHONY: migrate-check
+migrate-check:
+	$(GO) run ./cmd/sng-migrate check-versions
 
 .PHONY: clean
 clean:
