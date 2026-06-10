@@ -37,19 +37,40 @@ records exactly how each was produced and what it does (and does not) prove.
   "100% against all real-world threats." The blog states corpus sizes inline and
   does not extrapolate to a universal catch-rate.
 
-## `edge-performance-datasheet.{md,json}` — edge throughput (DRY-RUN, methodology)
+## `edge-performance-datasheet.{md,json}` — edge throughput (DUAL: dry-run + wire)
 
-- **Produced by:** `bench/` (`sng-bench business-report --dry-run`).
-- **CRITICAL CAVEAT:** `--dry-run` crafts and measures frames **in-process with
-  no NIC / wire I/O**. The Gbps figures (~73 Gbps) reflect the harness's
-  craft→measure pipeline throughput, **not** real inspected wire throughput.
-  Real wire numbers require `CAP_NET_RAW` + an in-path edge, which this
-  unprivileged VM cannot provide.
-- **How the blog uses it:** as a **methodology demonstration** and to show the
-  report/competitor-table structure. The blog does **NOT** present the dry-run
-  Gbps as a performance result, and does **NOT** claim the "+N% vs <competitor>"
-  deltas as real wins — those rows are explicitly labeled dry-run + the harness's
-  own "informative, not apples-to-apples, software-only VM" caveat is preserved.
+- **Produced by:** `bench/` — two `sng-bench business-report` sweeps over
+  `profiles/skus` merged by `sng-bench datasheet`. The JSON is a `DualDatasheet`
+  (`{ "dry_run": …, "wire": … }`); the markdown renders both columns. The
+  `wire-datasheet` job in `.github/workflows/benchmark.yml` regenerates it on the
+  self-hosted `sng-bench-wire` runner. To reproduce locally:
+
+  ```sh
+  bin=bench/target/release/sng-bench
+  $bin business-report --profiles-dir bench/profiles/skus --duration-ms 1000 \
+    --packet-sizes 64,512,1500,9000 --out-dir /tmp/ds/dry --dry-run
+  $bin business-report --profiles-dir bench/profiles/skus --duration-ms 1000 \
+    --packet-sizes 64,512,1500,9000 --interface veth-bench --out-dir /tmp/ds/wire
+  $bin datasheet --dry-run-json /tmp/ds/dry/business-report-*.json \
+    --wire-json /tmp/ds/wire/business-report-*.json \
+    --out-md blog/artifacts/edge-performance-datasheet.md \
+    --out-json blog/artifacts/edge-performance-datasheet.json
+  ```
+
+- **Two columns, two meanings:**
+  - **dry-run** crafts and measures frames **in-process with no NIC / wire I/O**.
+    The ~76–100 Gbps figures are the harness's craft→measure pipeline *ceiling*,
+    **not** real inspected wire throughput (the tell: throughput is nearly
+    SKU-independent and CPU reads ~0%).
+  - **wire** is real `AF_PACKET` egress over a veth pair with `sng-edge` in-path
+    under `CAP_NET_RAW`. It is a conservative *floor* — a single-stream egress
+    path, not a multi-queue physical NIC's line-rate.
+- **How the blog uses it:** the dry-run column stays a **methodology
+  demonstration**; the wire column is the honest performance floor. The blog
+  does **NOT** present the dry-run Gbps as a performance result, and the
+  "+N% vs <competitor>" verdicts are computed from the **wire** number when
+  present. The harness's "informative, not apples-to-apples, software-only VM"
+  caveat is preserved on every competitor row.
 - **Competitor rows:** vendor-published datasheet numbers from
   `bench/business-report/competitors.json`, each carrying `source_url` + a
   hardware caveat (most are ASIC appliances; SNG is software-only).

@@ -435,6 +435,53 @@ func TestGroupClaimMapping(t *testing.T) {
 	}
 }
 
+// TestResolveTokenIdentity_GroupsAndTenantScope covers the ZTNA access-
+// path primitive: a bearer ID token resolves to a UserIdentity carrying
+// the IdP group claims, without minting a session, and the lookup is
+// strictly tenant-scoped so another tenant cannot resolve the token.
+func TestResolveTokenIdentity_GroupsAndTenantScope(t *testing.T) {
+	f := newOIDCFixture(t, OIDCOptions{AutoProvision: true})
+	idp := newMockIDP(t, "client-ztna")
+	f.seedConfig(t, repository.IDPConfig{
+		ProviderType:   repository.IDPProviderOkta,
+		IssuerURL:      idp.issuer(),
+		ClientID:       "client-ztna",
+		GroupClaimPath: "groups",
+		Enabled:        true,
+	})
+	idToken := idp.sign(t, jwt.MapClaims{
+		"sub":    "okta|42",
+		"email":  "Dana@acme.com",
+		"groups": []string{"vpn-users", "engineering"},
+	})
+
+	got, err := f.svc.ResolveTokenIdentity(context.Background(), f.tenantID, idToken, "")
+	if err != nil {
+		t.Fatalf("ResolveTokenIdentity: %v", err)
+	}
+	if got.Subject != "okta|42" {
+		t.Errorf("subject = %q, want okta|42", got.Subject)
+	}
+	if got.Email != "dana@acme.com" {
+		t.Errorf("email = %q, want lowercased dana@acme.com", got.Email)
+	}
+	if strings.Join(got.Groups, ",") != "vpn-users,engineering" {
+		t.Errorf("groups = %v, want [vpn-users engineering]", got.Groups)
+	}
+	if got.UserID == uuid.Nil {
+		t.Error("expected a resolved user id")
+	}
+	if got.TenantID != f.tenantID {
+		t.Errorf("tenant = %v, want %v", got.TenantID, f.tenantID)
+	}
+
+	// Tenant isolation: a different tenant has no config for this
+	// issuer, so the very same token cannot resolve under it.
+	if _, err := f.svc.ResolveTokenIdentity(context.Background(), uuid.New(), idToken, ""); err == nil {
+		t.Error("expected cross-tenant token resolution to fail")
+	}
+}
+
 func TestExtractGroups_PathForms(t *testing.T) {
 	cases := []struct {
 		name   string

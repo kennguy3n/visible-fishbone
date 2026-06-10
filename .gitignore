@@ -26,3 +26,9 @@ go.work.sum
 # Generated UniFFI bindings (regenerate with
 # crates/sng-mobile-sdk/bindings/generate.sh — do not hand-edit/commit)
 /crates/sng-mobile-sdk/bindings/generated/
+
+# Python bytecode cache from the NER model training script
+__pycache__/
+
+# Generated bench/efficacy report artifact
+/bench/efficacy/efficacy-report.json

@@ -276,6 +276,49 @@ func (s *OIDCService) RefreshSession(
 	return res, nil
 }
 
+// ResolveTokenIdentity validates an OIDC ID token for the ZTNA access
+// path and returns the resolved SNG identity WITHOUT minting a session.
+// It performs the full token validation chain — resolve the tenant's
+// IdP config by issuer, verify the signature against the provider JWKS
+// and the iss/aud/exp claims, then map the `sub`/email claims to the
+// local user — and populates Groups from the provider's configured
+// group claim (IDPConfig.GroupClaimPath).
+//
+// This is the control-plane primitive the ZTNA enforcement path uses to
+// turn a bearer ID token into a UserIdentity (user_id + group
+// entitlements): the access evaluator resolves the subject and the
+// IdP-asserted groups here, then feeds them into the policy decision.
+// Like the session-minting paths, the token itself is never persisted;
+// only the validated identity flows downstream. The lookup is strictly
+// tenant-scoped — the issuer must match one of THIS tenant's enabled
+// configs, so a token minted for another tenant's IdP cannot resolve.
+func (s *OIDCService) ResolveTokenIdentity(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	idToken string,
+	issuer string,
+) (ValidatedIdentity, error) {
+	if idToken == "" {
+		return ValidatedIdentity{}, fmt.Errorf("id_token is required: %w", repository.ErrInvalidArgument)
+	}
+	if issuer == "" {
+		var err error
+		issuer, err = unverifiedIssuer(idToken)
+		if err != nil {
+			return ValidatedIdentity{}, err
+		}
+	}
+	cfg, err := s.resolveConfig(ctx, tenantID, issuer)
+	if err != nil {
+		return ValidatedIdentity{}, err
+	}
+	claims, err := s.validateIDToken(ctx, cfg, idToken)
+	if err != nil {
+		return ValidatedIdentity{}, err
+	}
+	return s.mapIdentity(ctx, tenantID, cfg, claims)
+}
+
 // resolveConfig finds the tenant's enabled IdP config whose issuer
 // matches `issuer`. Returns ErrNotFound when none matches.
 func (s *OIDCService) resolveConfig(ctx context.Context, tenantID uuid.UUID, issuer string) (repository.IDPConfig, error) {

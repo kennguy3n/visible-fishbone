@@ -82,6 +82,8 @@ fn error_reason_label(err: &ZtnaError) -> &'static str {
         ZtnaError::UnknownApp { .. } => "unknown_app",
         ZtnaError::DeviceNotEnrolled { .. } => "device_not_enrolled",
         ZtnaError::IdentityNotFound { .. } => "identity_not_found",
+        ZtnaError::TokenRejected { .. } => "token_rejected",
+        ZtnaError::IdpConfigNotFound { .. } => "idp_config_not_found",
         ZtnaError::BundleDecode(_) | ZtnaError::InvalidPolicy(_) => "policy_unavailable",
         ZtnaError::ProviderFailure { .. } => "provider_failure",
         ZtnaError::Telemetry(_) => "telemetry_error",

@@ -52,6 +52,24 @@ var contextKeywords = map[string][]string{
 	// alone, so give them English field-label cues.
 	"qatar_qid":   {"qatar id", "qid", "national id"},
 	"bahrain_cpr": {"cpr", "bahrain", "personal number"},
+
+	// --- WS5 jurisdiction breadth (mirrors the detectors registry) ---
+	"ni_uk":                   {"national insurance", "nino", "ni number", "ni no"},
+	"uk_nhs":                  {"nhs", "nhs number", "national health"},
+	"canada_sin":              {"social insurance", "sin", "numéro d'assurance sociale", "nas"},
+	"tfn_au":                  {"tax file number", "tfn", "ato"},
+	"australia_medicare":      {"medicare"},
+	"germany_personalausweis": {"personalausweis", "ausweisnummer", "identity card", "id card"},
+	"france_insee":            {"insee", "sécurité sociale", "securite sociale", "numéro de sécurité sociale", "social security", "nir"},
+	"korea_rrn":               {"주민등록번호", "rrn", "resident registration"},
+	"india_pan":               {"pan", "permanent account", "income tax"},
+	"brazil_cpf":              {"cpf", "cadastro de pessoas", "receita federal"},
+	"brazil_cnpj":             {"cnpj", "cadastro nacional", "pessoa jurídica"},
+	"iban":                    {"iban", "bank account", "account number", "swift", "bic"},
+	"eu_vat":                  {"vat", "vat number", "ust-idnr", "tva", "btw", "p.iva", "iva"},
+	"philippines_umid":        {"umid", "crn", "common reference", "sss", "gsis"},
+	"thailand_id":             {"บัตรประชาชน", "national id", "thai id"},
+	"indonesia_nik":           {"nik", "ktp", "nomor induk kependudukan"},
 }
 
 // proximityKeywords returns the locale context keywords for a pattern

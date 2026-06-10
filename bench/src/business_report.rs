@@ -491,6 +491,333 @@ fn sng_1500(sku: &BusinessSku, depth: InspectionDepth) -> Option<f64> {
         .map(|t| t.max_gbps)
 }
 
+/// A datasheet that pairs an in-process **dry-run** sweep with a real
+/// **wire** (AF_PACKET, edge in-path) sweep so every throughput figure
+/// carries both numbers side by side.
+///
+/// The dry-run sweep upper-bounds the harness's craft+measure+report
+/// pipeline with no NIC in the loop; the wire sweep is the real line-rate
+/// an `sng-edge` rig sustains. Keeping both in one artifact lets a reader
+/// see the gap between the synthetic ceiling and the measured floor without
+/// cross-referencing two documents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DualDatasheet {
+    /// In-process (`--dry-run`) sweep.
+    pub dry_run: BusinessReport,
+    /// Real-wire (AF_PACKET, edge in-path) sweep.
+    pub wire: BusinessReport,
+}
+
+impl DualDatasheet {
+    /// Pair a dry-run report with a wire report.
+    #[must_use]
+    pub fn new(dry_run: BusinessReport, wire: BusinessReport) -> Self {
+        Self { dry_run, wire }
+    }
+
+    /// Serialize to pretty JSON.
+    ///
+    /// # Errors
+    /// Propagates a [`ReportError::Json`] on serialization failure.
+    pub fn to_json(&self) -> Result<String, ReportError> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Deserialize from JSON.
+    ///
+    /// # Errors
+    /// Propagates a [`ReportError::Json`] on parse failure.
+    pub fn from_json(s: &str) -> Result<Self, ReportError> {
+        Ok(serde_json::from_str(s)?)
+    }
+
+    /// Render the full dual-column RFP datasheet markdown.
+    #[must_use]
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::with_capacity(8192);
+        let _ = writeln!(out, "# ShieldNet Gateway — edge performance datasheet");
+        let _ = writeln!(out);
+        let _ = write!(
+            out,
+            "_Generated (unix): `{}`",
+            self.wire.generated_unix_secs
+        );
+        if let Some(sha) = self.wire.git_sha.as_ref().or(self.dry_run.git_sha.as_ref()) {
+            let _ = write!(out, " · commit `{sha}`");
+        }
+        let _ = writeln!(
+            out,
+            " · all SNG figures measured by the `sng-bench` harness._"
+        );
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "Every throughput figure is reported in two columns:\n\n\
+             - **dry-run** — the in-process craft+measure+report pipeline with no \
+             NIC in the loop (the synthetic ceiling; runs on any CI runner).\n\
+             - **wire** — real `AF_PACKET` frames transmitted over a veth pair with \
+             `sng-edge` enforcing in-path under `CAP_NET_RAW` on the self-hosted \
+             `sng-bench-wire` runner (the measured line-rate floor).\n"
+        );
+        let _ = writeln!(out);
+
+        self.write_dual_executive_summary(&mut out);
+        self.write_dual_per_sku_detail(&mut out);
+        self.write_dual_competitor_comparison(&mut out);
+        self.write_dual_cost_analysis(&mut out);
+        out
+    }
+
+    /// Wire SKU paired to a dry-run SKU by profile name, if present.
+    fn wire_sku(&self, name: &str) -> Option<&BusinessSku> {
+        self.wire.skus.iter().find(|s| s.profile.name == name)
+    }
+
+    fn write_dual_executive_summary(&self, out: &mut String) {
+        let _ = writeln!(out, "## Executive summary");
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "| SKU | vCPU | RAM | NIC | target | firewall dry-run | firewall wire | inspected dry-run | inspected wire | meets target (wire) |"
+        );
+        let _ = writeln!(
+            out,
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |"
+        );
+        for sku in &self.dry_run.skus {
+            let p = &sku.profile;
+            let wire = self.wire_sku(&p.name);
+            let dry_fw = sku.peak_throughput(InspectionDepth::NoInspect);
+            let dry_tls = sku.peak_throughput(InspectionDepth::FullTls);
+            let wire_fw = wire.and_then(|w| w.peak_throughput(InspectionDepth::NoInspect));
+            let wire_tls = wire.and_then(|w| w.peak_throughput(InspectionDepth::FullTls));
+            // "meets target" is judged on the real wire firewall peak when we
+            // have one — the wire number is the figure an operator can rely
+            // on — falling back to dry-run only if no wire sweep ran.
+            let judged = wire_fw.or(dry_fw);
+            let meets = match judged {
+                Some(g) if g >= p.target_gbps => "yes",
+                Some(_) => "no",
+                None => "—",
+            };
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} GB | {:.0} Gbps | {:.2} Gbps | {} | {} | {} | {} | {} |",
+                p.name,
+                p.vcpus,
+                p.ram_gb,
+                p.nic_gbps,
+                p.target_gbps,
+                fmt_gbps(dry_fw),
+                fmt_gbps(wire_fw),
+                fmt_gbps(dry_tls),
+                fmt_gbps(wire_tls),
+                meets,
+            );
+        }
+        let _ = writeln!(out);
+    }
+
+    fn write_dual_per_sku_detail(&self, out: &mut String) {
+        let _ = writeln!(out, "## Per-SKU detail");
+        let _ = writeln!(out);
+        for sku in &self.dry_run.skus {
+            let p = &sku.profile;
+            let _ = writeln!(
+                out,
+                "### {} ({} vCPU / {} GB, {:.0} Gbps NIC)",
+                p.name, p.vcpus, p.ram_gb, p.nic_gbps
+            );
+            let _ = writeln!(out);
+            write_dual_throughput_matrix(out, sku, self.wire_sku(&p.name));
+            // Latency and resource detail come from the dry-run pass: they
+            // characterise the harness/datapath cost model and are frame-size
+            // driven, independent of whether a NIC is in the loop.
+            write_latency_table(out, sku);
+            write_resource_table(out, sku);
+        }
+    }
+
+    fn write_dual_competitor_comparison(&self, out: &mut String) {
+        let _ = writeln!(out, "## Competitor comparison");
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "Competitor figures are vendor-published throughput for purpose-built \
+             hardware/ASIC appliances; SNG is software-only on a generic x86 VM. The \
+             comparison is informative, **not** apples-to-apples. SNG numbers are the \
+             measured 1500B peak at each inspection depth, shown for both the dry-run \
+             ceiling and the real-wire floor."
+        );
+        let _ = writeln!(out);
+        for sku in &self.dry_run.skus {
+            let _ = writeln!(
+                out,
+                "### {} (vs {}-core class)",
+                sku.profile.name, sku.profile.vcpus
+            );
+            let _ = writeln!(out);
+            let appliances = competitor::appliances_for_cores(sku.profile.vcpus);
+            if appliances.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "_No competitor appliance is catalogued for the {}-core class._\n",
+                    sku.profile.vcpus
+                );
+                continue;
+            }
+            let wire = self.wire_sku(&sku.profile.name);
+            let _ = writeln!(
+                out,
+                "| competitor | firewall (no-inspect) | NGFW (url-cat) | IPS/threat (full-tls) | source |"
+            );
+            let _ = writeln!(out, "| --- | ---: | ---: | ---: | --- |");
+            let _ = writeln!(
+                out,
+                "| **SNG {}** (dry-run) | {} | {} | {} | sng-bench |",
+                sku.profile.name,
+                fmt_gbps(sng_1500(sku, InspectionDepth::NoInspect)),
+                fmt_gbps(sng_1500(sku, InspectionDepth::UrlCat)),
+                fmt_gbps(sng_1500(sku, InspectionDepth::FullTls)),
+            );
+            if let Some(w) = wire {
+                let _ = writeln!(
+                    out,
+                    "| **SNG {}** (wire) | {} | {} | {} | sng-bench |",
+                    sku.profile.name,
+                    fmt_gbps(sng_1500(w, InspectionDepth::NoInspect)),
+                    fmt_gbps(sng_1500(w, InspectionDepth::UrlCat)),
+                    fmt_gbps(sng_1500(w, InspectionDepth::FullTls)),
+                );
+            }
+            for a in &appliances {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {} | {} |",
+                    a.display_name(),
+                    fmt_gbps(a.published_for(InspectionDepth::NoInspect)),
+                    fmt_gbps(a.published_for(InspectionDepth::UrlCat)),
+                    fmt_gbps(a.published_for(InspectionDepth::FullTls)),
+                    a.source,
+                );
+            }
+            let _ = writeln!(out);
+            // Per-depth verdicts use the real-wire number when available
+            // (the honest basis for a competitive claim), else dry-run.
+            let basis = wire.unwrap_or(sku);
+            for depth in InspectionDepth::ALL {
+                if let Some(measured) = sng_1500(basis, depth) {
+                    let cmp = competitor::comparison_for(sku.profile.vcpus, depth, measured);
+                    for row in &cmp.rows {
+                        let _ = writeln!(out, "- {}", row.verdict);
+                    }
+                }
+            }
+            let _ = writeln!(out);
+        }
+    }
+
+    fn write_dual_cost_analysis(&self, out: &mut String) {
+        let _ = writeln!(out, "## Cost analysis");
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "SNG cloud opex, assuming **${VCPU_HOUR_USD:.4}/vCPU-hour** (representative \
+             public-cloud general-purpose on-demand, us-east-1) over **{HOURS_PER_MONTH:.0} \
+             hours/month**. $/Gbps uses the **real-wire** firewall peak (the number an \
+             operator actually provisions against); the dry-run $/Gbps is shown alongside \
+             as the synthetic floor on cost. Appliance capex / support TCO is vendor-quote \
+             territory and intentionally **not** invented here."
+        );
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "| SKU | vCPU | est. $/mo | firewall wire Gbps | $/Gbps (wire) | firewall dry-run Gbps | $/Gbps (dry-run) |"
+        );
+        let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: | ---: | ---: |");
+        for sku in &self.dry_run.skus {
+            let monthly = f64::from(sku.profile.vcpus) * VCPU_HOUR_USD * HOURS_PER_MONTH;
+            let dry_fw = sku.peak_throughput(InspectionDepth::NoInspect);
+            let wire_fw = self
+                .wire_sku(&sku.profile.name)
+                .and_then(|w| w.peak_throughput(InspectionDepth::NoInspect));
+            let _ = writeln!(
+                out,
+                "| {} | {} | ${:.0} | {} | {} | {} | {} |",
+                sku.profile.name,
+                sku.profile.vcpus,
+                monthly,
+                fmt_gbps(wire_fw),
+                fmt_cost_per_gbps(monthly, wire_fw),
+                fmt_gbps(dry_fw),
+                fmt_cost_per_gbps(monthly, dry_fw),
+            );
+        }
+        let _ = writeln!(out);
+    }
+}
+
+/// Render a throughput matrix whose cells carry both the dry-run and the
+/// wire Gbps for every (packet size × inspection depth) operating point.
+fn write_dual_throughput_matrix(out: &mut String, dry: &BusinessSku, wire: Option<&BusinessSku>) {
+    // Union the operating points across both passes so a point measured on
+    // only one side still gets a row/column (rendered "—" on the other).
+    let mut depths: Vec<InspectionDepth> = dry.depths_for(BenchMode::Throughput);
+    if let Some(w) = wire {
+        for d in w.depths_for(BenchMode::Throughput) {
+            if !depths.contains(&d) {
+                depths.push(d);
+            }
+        }
+        // Preserve canonical cost-ascending order after the union.
+        depths = InspectionDepth::ALL
+            .into_iter()
+            .filter(|d| depths.contains(d))
+            .collect();
+    }
+    let mut sizes: BTreeSet<u32> = dry
+        .packet_sizes_for(BenchMode::Throughput)
+        .into_iter()
+        .collect();
+    if let Some(w) = wire {
+        sizes.extend(w.packet_sizes_for(BenchMode::Throughput));
+    }
+    let sizes: Vec<u32> = sizes.into_iter().collect();
+    if depths.is_empty() || sizes.is_empty() {
+        let _ = writeln!(out, "_No throughput runs recorded._\n");
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "#### Throughput matrix — max Gbps, dry-run / wire (packet size × inspection)"
+    );
+    let _ = writeln!(out);
+    let mut header = String::from("| packet size |");
+    let mut divider = String::from("| --- |");
+    for d in &depths {
+        let _ = write!(header, " {} dry-run | {} wire |", d.label(), d.label());
+        divider.push_str(" ---: | ---: |");
+    }
+    let _ = writeln!(out, "{header}");
+    let _ = writeln!(out, "{divider}");
+    for ps in &sizes {
+        let _ = write!(out, "| {ps}B |");
+        for d in &depths {
+            let dry_cell = dry
+                .throughput_at(*ps, *d)
+                .and_then(|r| r.throughput.as_ref())
+                .map(|t| t.max_gbps);
+            let wire_cell = wire
+                .and_then(|w| w.throughput_at(*ps, *d))
+                .and_then(|r| r.throughput.as_ref())
+                .map(|t| t.max_gbps);
+            let _ = write!(out, " {} | {} |", fmt_gbps(dry_cell), fmt_gbps(wire_cell));
+        }
+        let _ = writeln!(out);
+    }
+    let _ = writeln!(out);
+}
+
 fn write_throughput_matrix(out: &mut String, sku: &BusinessSku) {
     let depths = sku.depths_for(BenchMode::Throughput);
     let sizes = sku.packet_sizes_for(BenchMode::Throughput);
@@ -782,5 +1109,95 @@ mod tests {
             .find(|l| l.contains("9000B") && l.contains("no-inspect"))
             .expect("latency row for the 9000B latency-only operating point");
         assert!(latency_line.contains("ns") || latency_line.contains("µs"));
+    }
+
+    fn dual_sample() -> DualDatasheet {
+        // Dry-run: synthetic ceiling. Wire: lower, real line-rate.
+        let dry_prof = profile("small", 4);
+        let dry = BusinessReport::new(
+            1_700_000_000,
+            Some("deadbeef".to_string()),
+            vec![BusinessSku::new(
+                dry_prof,
+                vec![
+                    throughput_report("small", 1500, InspectionDepth::NoInspect, 72.0),
+                    throughput_report("small", 1500, InspectionDepth::UrlCat, 70.0),
+                    throughput_report("small", 1500, InspectionDepth::FullTls, 68.0),
+                    latency_report("small", 1500, InspectionDepth::NoInspect),
+                ],
+            )],
+        );
+        let wire_prof = profile("small", 4);
+        let wire = BusinessReport::new(
+            1_700_000_500,
+            Some("deadbeef".to_string()),
+            vec![BusinessSku::new(
+                wire_prof,
+                vec![
+                    throughput_report("small", 1500, InspectionDepth::NoInspect, 5.4),
+                    throughput_report("small", 1500, InspectionDepth::UrlCat, 5.1),
+                    throughput_report("small", 1500, InspectionDepth::FullTls, 4.8),
+                ],
+            )],
+        );
+        DualDatasheet::new(dry, wire)
+    }
+
+    #[test]
+    fn dual_datasheet_json_round_trips() {
+        let d = dual_sample();
+        let back = DualDatasheet::from_json(&d.to_json().unwrap()).unwrap();
+        assert_eq!(d, back);
+    }
+
+    #[test]
+    fn dual_datasheet_renders_both_columns() {
+        let md = dual_sample().to_markdown();
+        // Section structure preserved.
+        assert!(md.contains("## Executive summary"));
+        assert!(md.contains("## Per-SKU detail"));
+        assert!(md.contains("## Competitor comparison"));
+        assert!(md.contains("## Cost analysis"));
+        // Dual-column headers present.
+        assert!(md.contains("firewall dry-run"));
+        assert!(md.contains("firewall wire"));
+        assert!(md.contains("no-inspect dry-run"));
+        assert!(md.contains("no-inspect wire"));
+        // Both the synthetic and the measured numbers appear.
+        assert!(md.contains("72.00 Gbps")); // dry-run no-inspect peak
+        assert!(md.contains("5.40 Gbps")); // wire no-inspect peak
+        // Competitor section carries an explicit wire row.
+        assert!(md.contains("(dry-run)"));
+        assert!(md.contains("(wire)"));
+    }
+
+    #[test]
+    fn dual_meets_target_judged_on_wire() {
+        // Wire firewall peak 5.4 >= target 2.0 → "yes" on the wire basis.
+        let md = dual_sample().to_markdown();
+        let summary_line = md
+            .lines()
+            .find(|l| l.starts_with("| small |"))
+            .expect("summary row for the small SKU");
+        assert!(summary_line.contains("yes"));
+    }
+
+    #[test]
+    fn dual_cost_per_gbps_uses_wire_peak() {
+        // $121/mo over the 5.4 Gbps wire peak ≈ $22/Gbps, not the dry-run
+        // ceiling. Assert the wire-based $/Gbps is present.
+        let md = dual_sample().to_markdown();
+        assert!(md.contains("$22"));
+    }
+
+    #[test]
+    fn dual_handles_missing_wire_sku() {
+        // A dry-run SKU with no wire counterpart renders "—" wire cells
+        // rather than panicking.
+        let dry = sample(); // cloud-pop-small
+        let wire = BusinessReport::new(1, None, vec![]);
+        let md = DualDatasheet::new(dry, wire).to_markdown();
+        assert!(md.contains("cloud-pop-small"));
+        assert!(md.contains("—"));
     }
 }

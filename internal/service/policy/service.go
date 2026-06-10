@@ -197,6 +197,7 @@ type Service struct {
 	inlineCASB  InlineCASBCompiler
 	ioc         IOCCompiler
 	malwareHash MalwareHashCompiler
+	sampling    SamplingObserver
 }
 
 // ServiceOption configures New.
@@ -265,6 +266,36 @@ func WithIOCCompiler(c IOCCompiler) ServiceOption {
 func WithMalwareHashCompiler(c MalwareHashCompiler) ServiceOption {
 	return func(s *Service) {
 		s.malwareHash = c
+	}
+}
+
+// SamplingObserver is notified when a tenant's LIVE policy graph
+// changes, carrying that graph's per-traffic-class telemetry sampling
+// overrides (the validated Graph.SampleClassRates result; nil when the
+// graph configures none). The telemetry control plane implements this
+// to keep its per-tenant sampling snapshot in step with published
+// policy without the telemetry hot path ever reading the policy store.
+//
+// Contract: called only on publish / promote (never the draft path and
+// never the per-event hot path), synchronously inside the publish call.
+// Implementations MUST be cheap, non-blocking, and safe for concurrent
+// use — the shipped telemetry resolver does a single atomic snapshot
+// swap. A nil observer disables the notification (the built-in sampling
+// defaults then apply fleet-wide).
+type SamplingObserver interface {
+	ObserveSampling(tenantID uuid.UUID, classRates map[string]float64)
+}
+
+// WithSamplingObserver installs a SamplingObserver notified whenever a
+// tenant's live graph is published or promoted, so operator-configured
+// per-tenant / per-class telemetry sampling rates (Graph.Sampling) take
+// effect on the telemetry consumer. When nil, published sampling config
+// is still validated and stored but not pushed anywhere — the telemetry
+// service falls back to its built-in class defaults. Production callers
+// pass the telemetry sampling bridge from cmd/sng-control.
+func WithSamplingObserver(o SamplingObserver) ServiceOption {
+	return func(s *Service) {
+		s.sampling = o
 	}
 }
 
@@ -428,6 +459,21 @@ func (s *Service) PromoteGraph(ctx context.Context, tenantID uuid.UUID, actorID 
 			ResourceID: &promoted.ID,
 		})
 	}
+	// Promotion makes the (formerly draft) graph live, so its sampling
+	// config now governs the tenant. Re-parse the stored graph to push
+	// its overrides; a parse failure here only means the sampling
+	// observer is not updated (the promotion itself already succeeded),
+	// so it is logged, not surfaced as a promote error.
+	if s.sampling != nil {
+		if parsed, perr := ParseGraph(promoted.Graph); perr != nil {
+			s.logger.Warn("policy: promoted graph failed to parse for sampling notification; telemetry sampling overrides not updated for tenant",
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("graph_id", promoted.ID.String()),
+				slog.Any("error", perr))
+		} else {
+			s.notifySampling(tenantID, parsed)
+		}
+	}
 	return promoted, nil
 }
 
@@ -438,7 +484,8 @@ func (s *Service) putGraph(ctx context.Context, tenantID uuid.UUID, actorID *uui
 	if !json.Valid(raw) {
 		return repository.PolicyGraph{}, fmt.Errorf("invalid graph json: %w", repository.ErrInvalidArgument)
 	}
-	if _, err := ParseGraph(raw); err != nil {
+	parsed, err := ParseGraph(raw)
+	if err != nil {
 		return repository.PolicyGraph{}, err
 	}
 	g := repository.PolicyGraph{
@@ -460,7 +507,24 @@ func (s *Service) putGraph(ctx context.Context, tenantID uuid.UUID, actorID *uui
 			ResourceID: &saved.ID,
 		})
 	}
+	// A draft is not the live graph, so it must not move telemetry
+	// sampling. Only a published (non-draft) graph notifies the
+	// sampling observer.
+	if !draft {
+		s.notifySampling(tenantID, parsed)
+	}
 	return saved, nil
+}
+
+// notifySampling pushes a graph's per-class sampling overrides to the
+// registered SamplingObserver, if any. Safe to call with a nil
+// observer. Kept separate so both the publish (putGraph) and promote
+// (PromoteGraph) paths share one notification site.
+func (s *Service) notifySampling(tenantID uuid.UUID, g Graph) {
+	if s.sampling == nil {
+		return
+	}
+	s.sampling.ObserveSampling(tenantID, g.SampleClassRates())
 }
 
 // CompileResult is the per-target output of Compile.

@@ -12,11 +12,18 @@
 //! `From` impls do the one-way core → FFI conversion at the
 //! boundary.
 
+use std::net::IpAddr;
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
+use ipnet::IpNet;
 use sng_mobile_core::{
     AccessRequest, AgentHealth, AuthState, EnrollmentOutcome, LifecycleState,
-    MobilePostureSnapshot, PowerState, TunnelStatus, ZtnaDecision,
+    MobilePostureSnapshot, PowerState, TunnelConfig, TunnelPrivateKey, TunnelPublicKey,
+    TunnelStatus, ZtnaDecision,
 };
+
+use crate::error::MobileSdkError;
 
 /// Convert a `chrono` UTC timestamp to epoch milliseconds for the
 /// FFI boundary.
@@ -32,7 +39,11 @@ pub enum SdkLifecycleState {
     Init,
     /// Claim-token enrolment in flight.
     Enrolling,
-    /// Enrolled and steady-state.
+    /// Enrolled (identity issued) with the data-plane tunnel down.
+    /// Resting state of an enrolled device whose VPN is paused; call
+    /// `connect` to bring the tunnel up.
+    Enrolled,
+    /// Enrolled and the data-plane tunnel is up — steady-state.
     Connected,
     /// Backgrounded / network lost.
     Suspended,
@@ -45,6 +56,7 @@ impl From<LifecycleState> for SdkLifecycleState {
         match value {
             LifecycleState::Init => Self::Init,
             LifecycleState::Enrolling => Self::Enrolling,
+            LifecycleState::Enrolled => Self::Enrolled,
             LifecycleState::Connected => Self::Connected,
             LifecycleState::Suspended => Self::Suspended,
             LifecycleState::Terminated => Self::Terminated,
@@ -226,6 +238,81 @@ impl From<TunnelStatus> for SdkTunnelStatus {
     }
 }
 
+/// Data-plane tunnel parameters supplied by the host to bring the
+/// VPN up, FFI-safe input mirror of [`sng_mobile_core::TunnelConfig`].
+///
+/// The device's own interface private key is **never** part of this
+/// record: it is generated locally inside [`Self::into_core`] from
+/// the OS CSPRNG and handed straight to the platform tunnel backend,
+/// so no secret key material ever crosses the FFI boundary. The host
+/// supplies only the gateway-side parameters it learns from the
+/// control plane.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SdkTunnelConfig {
+    /// The gateway peer's public key, standard base64 (44 chars).
+    pub peer_public_key_base64: String,
+    /// Gateway endpoint as `host:port`.
+    pub endpoint: String,
+    /// Prefixes routed into the tunnel, as CIDR strings
+    /// (e.g. `"10.0.0.0/8"`, `"0.0.0.0/0"`).
+    pub allowed_ips: Vec<String>,
+    /// DNS resolvers to use while the tunnel is up, as IP strings.
+    pub dns: Vec<String>,
+    /// Keepalive interval in seconds for NAT traversal, if set.
+    pub persistent_keepalive_secs: Option<u32>,
+    /// Tunnel MTU, if the host pins one.
+    pub mtu: Option<u16>,
+}
+
+impl SdkTunnelConfig {
+    /// Parse and validate into a core [`TunnelConfig`], generating a
+    /// fresh interface private key locally.
+    ///
+    /// # Errors
+    ///
+    /// [`MobileSdkError::Tunnel`] if the peer key is not valid
+    /// base64 of the right length, or any `allowed_ips` / `dns`
+    /// entry is not a valid CIDR / IP.
+    pub(crate) fn into_core(self) -> Result<TunnelConfig, MobileSdkError> {
+        let peer_public_key =
+            TunnelPublicKey::from_base64(&self.peer_public_key_base64).map_err(|e| {
+                MobileSdkError::Tunnel {
+                    description: format!("peer_public_key_base64: {e}"),
+                }
+            })?;
+        let allowed_ips = self
+            .allowed_ips
+            .iter()
+            .map(|s| {
+                s.parse::<IpNet>().map_err(|e| MobileSdkError::Tunnel {
+                    description: format!("allowed_ips entry {s:?}: {e}"),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let dns = self
+            .dns
+            .iter()
+            .map(|s| {
+                s.parse::<IpAddr>().map_err(|e| MobileSdkError::Tunnel {
+                    description: format!("dns entry {s:?}: {e}"),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(TunnelConfig {
+            // Generated here and never exposed across FFI.
+            interface_private_key: TunnelPrivateKey::generate(),
+            peer_public_key,
+            endpoint: self.endpoint,
+            allowed_ips,
+            dns,
+            persistent_keepalive: self
+                .persistent_keepalive_secs
+                .map(|s| Duration::from_secs(u64::from(s))),
+            mtu: self.mtu,
+        })
+    }
+}
+
 /// Outcome of a successful claim-token enrolment, FFI-safe mirror
 /// of [`sng_mobile_core::EnrollmentOutcome`].
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -329,6 +416,7 @@ mod tests {
         let pairs = [
             (LifecycleState::Init, SdkLifecycleState::Init),
             (LifecycleState::Enrolling, SdkLifecycleState::Enrolling),
+            (LifecycleState::Enrolled, SdkLifecycleState::Enrolled),
             (LifecycleState::Connected, SdkLifecycleState::Connected),
             (LifecycleState::Suspended, SdkLifecycleState::Suspended),
             (LifecycleState::Terminated, SdkLifecycleState::Terminated),
@@ -371,5 +459,62 @@ mod tests {
                 since_epoch_ms: 1_700_000_000_000
             }
         );
+    }
+
+    fn valid_ffi_tunnel_config() -> SdkTunnelConfig {
+        SdkTunnelConfig {
+            // 32 zero bytes, standard base64.
+            peer_public_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+            endpoint: "gw.example.com:51820".into(),
+            allowed_ips: vec!["0.0.0.0/0".into(), "::/0".into()],
+            dns: vec!["1.1.1.1".into()],
+            persistent_keepalive_secs: Some(25),
+            mtu: Some(1280),
+        }
+    }
+
+    #[test]
+    fn tunnel_config_into_core_parses_and_generates_interface_key() {
+        let core = valid_ffi_tunnel_config()
+            .into_core()
+            .expect("valid config parses");
+        assert_eq!(core.endpoint, "gw.example.com:51820");
+        assert_eq!(core.allowed_ips.len(), 2);
+        assert_eq!(core.dns.len(), 1);
+        assert_eq!(core.persistent_keepalive, Some(Duration::from_secs(25)));
+        assert_eq!(core.mtu, Some(1280));
+        // A fresh interface key is generated locally; two conversions
+        // never collide on the same secret.
+        let core2 = valid_ffi_tunnel_config().into_core().expect("parses");
+        assert_ne!(
+            core.interface_private_key.expose_bytes(),
+            core2.interface_private_key.expose_bytes(),
+            "each connect must mint a distinct interface key"
+        );
+    }
+
+    #[test]
+    fn tunnel_config_into_core_rejects_bad_peer_key() {
+        let mut cfg = valid_ffi_tunnel_config();
+        cfg.peer_public_key_base64 = "not-base64!!!".into();
+        let err = cfg.into_core().expect_err("bad key rejected");
+        assert!(matches!(err, MobileSdkError::Tunnel { .. }));
+    }
+
+    #[test]
+    fn tunnel_config_into_core_rejects_bad_cidr_and_dns() {
+        let mut bad_cidr = valid_ffi_tunnel_config();
+        bad_cidr.allowed_ips = vec!["10.0.0.0/64".into()];
+        assert!(matches!(
+            bad_cidr.into_core().expect_err("bad cidr"),
+            MobileSdkError::Tunnel { .. }
+        ));
+
+        let mut bad_dns = valid_ffi_tunnel_config();
+        bad_dns.dns = vec!["not.an.ip".into()];
+        assert!(matches!(
+            bad_dns.into_core().expect_err("bad dns"),
+            MobileSdkError::Tunnel { .. }
+        ));
     }
 }

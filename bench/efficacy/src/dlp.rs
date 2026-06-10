@@ -22,20 +22,22 @@ use sng_dlp::{
 
 use crate::report::{measure, Case, Feature, FunctionReport, Kind, Targets};
 
-/// The exact on-device NER model asset the endpoint runs (`ner_v1.onnx`),
+/// The exact on-device NER model asset the endpoint runs (`ner_v2.onnx`),
 /// authored by `crates/sng-dlp/assets/train_ner_model.py`. Embedding it
 /// keeps this harness measuring the *real* inference path over the real
 /// shipped weights — not a re-trained or stubbed model.
-const NER_MODEL_BYTES: &[u8] = include_bytes!("../../../crates/sng-dlp/assets/ner_v1.onnx");
+const NER_MODEL_BYTES: &[u8] = include_bytes!("../../../crates/sng-dlp/assets/ner_v2.onnx");
 
 /// Timed iterations for the scan-throughput microbenchmark. Large enough
 /// to amortise warm-up and produce a stable per-scan mean.
 const THROUGHPUT_ITERS: u64 = 5_000;
 
 /// Number of valid (and, separately, invalid) identifiers generated
-/// per detector. 50 each satisfies the corpus-size requirement and
-/// keeps the confusion matrix statistically meaningful.
-const PER_PATTERN: usize = 50;
+/// per detector. 100 each keeps the confusion matrix statistically
+/// meaningful and, across the 24 validated detectors (Asia + GCC plus
+/// the WS5 jurisdiction breadth), drives several thousand generated
+/// cases — well past the WS5 corpus-size requirement.
+const PER_PATTERN: usize = 100;
 
 // ---- check-digit primitives (input generators, independent of the
 // crate under test) ----
@@ -55,7 +57,7 @@ fn luhn_ok(d: &[u8]) -> bool {
         sum += v;
         double = !double;
     }
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 /// Smallest check digit `0..=9` that makes `body ++ [c]` Luhn-valid.
@@ -301,7 +303,7 @@ fn uae(counter: usize) -> (String, String) {
 }
 
 fn saudi(counter: usize) -> (String, String) {
-    let mut body = vec![if counter % 2 == 0 { 1u8 } else { 2 }];
+    let mut body = vec![if counter.is_multiple_of(2) { 1u8 } else { 2 }];
     for i in 0..8 {
         body.push(((counter + i) % 10) as u8);
     }
@@ -342,6 +344,291 @@ fn kuwait(counter: usize) -> (String, String) {
     (digits_to_string(&v), digits_to_string(&b))
 }
 
+// ---- WS5 jurisdiction-breadth generators ----
+
+/// Valid two-letter NINO prefixes that use only allowed letters and are
+/// none of the administratively reserved combinations.
+const NINO_PREFIX: [&str; 8] = ["AA", "AB", "AC", "CE", "HM", "JT", "PR", "RH"];
+
+/// UK NINO: a valid prefix + six digits + suffix `A`–`D`. The invalid
+/// form keeps the shape but uses the reserved prefix `GB`, which the
+/// allocation-rule validator rejects.
+fn uk_nino(counter: usize) -> (String, String) {
+    let prefix = NINO_PREFIX[counter % NINO_PREFIX.len()];
+    let suffix = char::from(b'A' + (counter % 4) as u8);
+    let body: String = (0..6)
+        .map(|i| char::from(b'0' + ((counter + i) % 10) as u8))
+        .collect();
+    (
+        format!("{prefix}{body}{suffix}"),
+        format!("GB{body}{suffix}"),
+    )
+}
+
+/// UK NHS number: nine digits + weighted modulus-11 check (weights
+/// 10..2). Bases whose check resolves to the never-issued value 10 are
+/// skipped. Invalid form: a wrong final digit.
+fn uk_nhs(counter: usize) -> (String, String) {
+    let mut k = counter;
+    loop {
+        let mut d = [0u8; 9];
+        for (i, b) in d.iter_mut().enumerate() {
+            *b = ((k + i * 7) % 10) as u8;
+        }
+        let sum: u32 = (0..9).map(|i| u32::from(d[i]) * (10 - i as u32)).sum();
+        let check = (11 - sum % 11) % 11;
+        if check != 10 {
+            let mut v = d.to_vec();
+            v.push(check as u8);
+            let mut b = d.to_vec();
+            b.push(((check + 1) % 10) as u8);
+            return (digits_to_string(&v), digits_to_string(&b));
+        }
+        k += 1;
+    }
+}
+
+/// Canada SIN: nine digits, non-zero leading digit, Luhn checksum.
+fn canada_sin(counter: usize) -> (String, String) {
+    let mut base = [0u8; 8];
+    for (i, b) in base.iter_mut().enumerate() {
+        *b = ((counter + i * 3) % 10) as u8;
+    }
+    if base[0] == 0 {
+        base[0] = 1;
+    }
+    let check = luhn_check(&base);
+    let mut v = base.to_vec();
+    v.push(check);
+    let mut b = base.to_vec();
+    b.push((check + 1) % 10);
+    (digits_to_string(&v), digits_to_string(&b))
+}
+
+/// Australia TFN: nine digits, weighted sum divisible by 11.
+fn tfn_au(counter: usize) -> (String, String) {
+    const W: [u32; 9] = [1, 4, 3, 7, 5, 8, 6, 9, 10];
+    let mut k = counter;
+    loop {
+        let mut base = [0u8; 8];
+        for (i, b) in base.iter_mut().enumerate() {
+            *b = ((k + i * 5) % 10) as u8;
+        }
+        let partial: u32 = base.iter().zip(W).map(|(&x, w)| u32::from(x) * w).sum();
+        if let Some(c) = (0..10u8).find(|&c| (partial + u32::from(c) * 10).is_multiple_of(11)) {
+            let bad = (c + 1) % 10;
+            if !(partial + u32::from(bad) * 10).is_multiple_of(11) {
+                let mut v = base.to_vec();
+                v.push(c);
+                let mut b = base.to_vec();
+                b.push(bad);
+                return (digits_to_string(&v), digits_to_string(&b));
+            }
+        }
+        k += 1;
+    }
+}
+
+/// Australia Medicare: ten digits, leading digit 2..=6, ninth is a
+/// weighted modulus-10 check over the first eight; tenth is the issue.
+fn australia_medicare(counter: usize) -> (String, String) {
+    const W: [u32; 8] = [1, 3, 7, 9, 1, 3, 7, 9];
+    let mut d = [0u8; 8];
+    d[0] = ((counter % 5) + 2) as u8; // 2..=6
+    for (i, slot) in d.iter_mut().enumerate().skip(1) {
+        *slot = ((counter + i * 3) % 10) as u8;
+    }
+    let sum: u32 = d.iter().zip(W).map(|(&x, w)| u32::from(x) * w).sum();
+    let check = (sum % 10) as u8;
+    let issue = ((counter % 9) + 1) as u8;
+    let valid = format!("{}{check}{issue}", digits_to_string(&d));
+    let invalid = format!("{}{}{issue}", digits_to_string(&d), (check + 1) % 10);
+    (valid, invalid)
+}
+
+/// Germany Personalausweis: nine digits + weighted (7,3,1) modulus-10
+/// check digit. (All-digit body; the shape also permits letters.)
+fn germany_personalausweis(counter: usize) -> (String, String) {
+    const W: [u32; 3] = [7, 3, 1];
+    let mut base = [0u8; 9];
+    for (i, b) in base.iter_mut().enumerate() {
+        *b = ((counter + i * 2) % 10) as u8;
+    }
+    let sum: u32 = base
+        .iter()
+        .enumerate()
+        .map(|(i, &d)| u32::from(d) * W[i % 3])
+        .sum();
+    let check = (sum % 10) as u8;
+    let mut v = base.to_vec();
+    v.push(check);
+    let mut b = base.to_vec();
+    b.push((check + 1) % 10);
+    (digits_to_string(&v), digits_to_string(&b))
+}
+
+/// France INSEE / NIR: 13-digit body + 2-digit `97 - (body mod 97)` key.
+fn france_insee(counter: usize) -> (String, String) {
+    let sex = 1 + (counter % 2);
+    let year = counter % 100;
+    let month = 1 + (counter % 12);
+    let dept = 75;
+    let commune = 100 + (counter % 800);
+    let order = 1 + (counter % 900);
+    let body: u64 = format!("{sex}{year:02}{month:02}{dept:02}{commune:03}{order:03}")
+        .parse()
+        .unwrap();
+    let key = 97 - (body % 97);
+    let bad_key = if key == 97 { 1 } else { key + 1 };
+    (
+        format!("{body:013}{key:02}"),
+        format!("{body:013}{bad_key:02}"),
+    )
+}
+
+/// Mod-11 check used by Brazil CPF (descending weights from
+/// `start_weight`); residue < 2 maps to a 0 check digit.
+fn cpf_mod11(body: &[u8], start_weight: u32) -> u8 {
+    let sum: u32 = body
+        .iter()
+        .enumerate()
+        .map(|(i, &d)| u32::from(d) * (start_weight - i as u32))
+        .sum();
+    let r = sum % 11;
+    if r < 2 {
+        0
+    } else {
+        (11 - r) as u8
+    }
+}
+
+/// Brazil CPF: 9-digit body + two mod-11 check digits.
+fn brazil_cpf(counter: usize) -> (String, String) {
+    let mut d = [0u8; 9];
+    for (i, x) in d.iter_mut().enumerate() {
+        *x = ((counter + i * 3) % 10) as u8;
+    }
+    if d.iter().all(|&x| x == d[0]) {
+        d[0] = (d[0] + 1) % 10;
+    }
+    let c1 = cpf_mod11(&d, 10);
+    let mut d10 = d.to_vec();
+    d10.push(c1);
+    let c2 = cpf_mod11(&d10, 11);
+    let mut v = d10.clone();
+    v.push(c2);
+    let mut b = d10;
+    b.push((c2 + 1) % 10);
+    (digits_to_string(&v), digits_to_string(&b))
+}
+
+const CNPJ_W1: [u32; 12] = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+const CNPJ_W2: [u32; 13] = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+
+/// Fixed-weight mod-11 check used by Brazil CNPJ.
+fn cnpj_check(body: &[u8], weights: &[u32]) -> u8 {
+    let sum: u32 = body
+        .iter()
+        .zip(weights)
+        .map(|(&d, &w)| u32::from(d) * w)
+        .sum();
+    let r = sum % 11;
+    if r < 2 {
+        0
+    } else {
+        (11 - r) as u8
+    }
+}
+
+/// Brazil CNPJ: 12-digit body + two fixed-weight mod-11 check digits.
+fn brazil_cnpj(counter: usize) -> (String, String) {
+    let mut d = [0u8; 12];
+    for (i, x) in d.iter_mut().enumerate() {
+        *x = ((counter + i * 2) % 10) as u8;
+    }
+    if d.iter().all(|&x| x == d[0]) {
+        d[0] = (d[0] + 1) % 10;
+    }
+    let c1 = cnpj_check(&d, &CNPJ_W1);
+    let mut d13 = d.to_vec();
+    d13.push(c1);
+    let c2 = cnpj_check(&d13, &CNPJ_W2);
+    let mut v = d13.clone();
+    v.push(c2);
+    let mut b = d13;
+    b.push((c2 + 1) % 10);
+    (digits_to_string(&v), digits_to_string(&b))
+}
+
+/// ISO 13616 IBAN check digits for `cc` + `bban` (rearrange BBAN + CC +
+/// "00", interpret letters as 10..35, mod 97, check = 98 - remainder).
+fn iban_check_digits(cc: &str, bban: &str) -> u32 {
+    let rearranged = format!("{bban}{cc}00");
+    let mut rem: u64 = 0;
+    for ch in rearranged.chars() {
+        if ch.is_ascii_digit() {
+            rem = (rem * 10 + u64::from(ch as u8 - b'0')) % 97;
+        } else {
+            rem = (rem * 100 + (u64::from(ch as u8 - b'A') + 10)) % 97;
+        }
+    }
+    (98 - rem) as u32
+}
+
+/// EU IBAN (UK form): `GB` + 2 check digits + 4-letter bank code + 6
+/// sort digits + 8 account digits. Invalid form: corrupted check digits.
+fn iban(counter: usize) -> (String, String) {
+    let bank = ["NWBK", "BARC", "HBUK", "LOYD"][counter % 4];
+    let sort: String = (0..6)
+        .map(|i| char::from(b'0' + ((counter + i) % 10) as u8))
+        .collect();
+    let acct: String = (0..8)
+        .map(|i| char::from(b'0' + ((counter + i * 3) % 10) as u8))
+        .collect();
+    let bban = format!("{bank}{sort}{acct}");
+    let check = iban_check_digits("GB", &bban);
+    let bad = if check == 2 { 3 } else { 2 };
+    (format!("GB{check:02}{bban}"), format!("GB{bad:02}{bban}"))
+}
+
+/// EU VAT (Croatia form): `HR` + 11 digits, validated on length/shape.
+/// Invalid form: 10 digits — same shape, wrong length for `HR`.
+fn eu_vat(counter: usize) -> (String, String) {
+    let body: String = (0..11)
+        .map(|i| char::from(b'0' + ((counter + i) % 10) as u8))
+        .collect();
+    (format!("HR{body}"), format!("HR{}", &body[..10]))
+}
+
+/// Philippines UMID/CRN: 12 digits, non-zero leading digit, not a single
+/// repeated digit. Invalid form: a leading zero.
+fn philippines_umid(counter: usize) -> (String, String) {
+    let mut d = [0u8; 12];
+    d[0] = ((counter % 9) + 1) as u8;
+    for (i, slot) in d.iter_mut().enumerate().skip(1) {
+        *slot = ((counter + i) % 10) as u8;
+    }
+    let valid = digits_to_string(&d);
+    let mut bad = d;
+    bad[0] = 0;
+    (valid, digits_to_string(&bad))
+}
+
+/// Indonesia NIK (KTP): province(2) + regency(2) + district(2) +
+/// DOB(6) + serial(4); province in 11..=94, real calendar date,
+/// non-zero serial. Invalid form: an out-of-range province (99).
+fn indonesia_nik(counter: usize) -> (String, String) {
+    let province = 11 + (counter % 84); // 11..=94
+    let regency = (counter % 99) + 1;
+    let district = (counter % 99) + 1;
+    let dd = (counter % 28) + 1;
+    let mm = (counter % 12) + 1;
+    let yy = counter % 100;
+    let serial = (counter % 9000) + 1;
+    let tail = format!("{regency:02}{district:02}{dd:02}{mm:02}{yy:02}{serial:04}");
+    (format!("{province:02}{tail}"), format!("99{tail}"))
+}
+
 type Gen = fn(usize) -> (String, String);
 
 /// All validated detectors and their input generators.
@@ -358,6 +645,20 @@ fn detectors() -> Vec<(&'static str, Gen)> {
         ("uae_emirates_id", uae),
         ("saudi_id", saudi),
         ("kuwait_civil_id", kuwait),
+        // --- WS5 jurisdiction breadth ---
+        ("ni_uk", uk_nino),
+        ("uk_nhs", uk_nhs),
+        ("canada_sin", canada_sin),
+        ("tfn_au", tfn_au),
+        ("australia_medicare", australia_medicare),
+        ("germany_personalausweis", germany_personalausweis),
+        ("france_insee", france_insee),
+        ("brazil_cpf", brazil_cpf),
+        ("brazil_cnpj", brazil_cnpj),
+        ("iban", iban),
+        ("eu_vat", eu_vat),
+        ("philippines_umid", philippines_umid),
+        ("indonesia_nik", indonesia_nik),
     ]
 }
 
@@ -474,8 +775,10 @@ fn features() -> Vec<Feature> {
              algorithm (ISO 7064 Mod 11-2, weighted mod-11, Luhn, Verhoeff, per-series \
              tables) plus date/prefix invariants; a pass boosts confidence to 1.0, a \
              fail suppresses the match — this is what keeps the false-positive rate at 0%.",
-            "11 validated detectors across China, Japan, Korea, Singapore, Malaysia, \
-             Thailand, India (Aadhaar+PAN), UAE, Saudi, Kuwait",
+            "24 validated detectors: China, Japan, Korea, Singapore, Malaysia, \
+             Thailand, India (Aadhaar+PAN), UAE, Saudi, Kuwait, plus the WS5 breadth — \
+             UK (NINO+NHS), Canada SIN, Australia (TFN+Medicare), Germany Personalausweis, \
+             France INSEE, Brazil (CPF+CNPJ), EU (IBAN+VAT), Philippines UMID, Indonesia NIK",
         ),
         f(
             "Proximity context analysis",
@@ -546,15 +849,16 @@ const fn benign(text: &'static str) -> NerExample {
     NerExample { text, expect: None }
 }
 
-/// Labelled corpus spanning all six entity classes plus benign controls.
-/// Mixes the surface forms the per-token NER is designed for (titled and
-/// untitled gazetteer names, single-token phone/IBAN/MRN/case shapes with
-/// natural context) and includes hard negatives (capitalised place and
-/// product pairs, bare reference numbers) so precision is measured, not
-/// assumed.
+/// Labelled corpus spanning all twelve entity classes plus benign
+/// controls. Mixes the surface forms the per-token NER is designed for
+/// (titled and untitled gazetteer names, single-token
+/// phone/IBAN/MRN/date/code/case shapes with natural context) and
+/// includes hard negatives (capitalised place and product pairs, bare
+/// reference numbers) so precision is measured, not assumed.
 fn ner_corpus() -> Vec<NerExample> {
     use EntityClass::{
-        Address, BankAccount, LegalDocument, MedicalRecord, PersonName, PhoneNumber,
+        Address, BankAccount, DateOfBirth, DriverLicense, LegalDocument, MedicalRecord,
+        MedicalRecordNumber, NationalId, PassportNumber, PersonName, PhoneNumber, TaxId,
     };
     vec![
         pii(
@@ -612,19 +916,46 @@ fn ner_corpus() -> Vec<NerExample> {
             "Settle the invoice via ES9121000418450200051332 promptly",
             BankAccount,
         ),
+        // medical_record: clinical-context codes that are NOT the bare
+        // `MRN#######` shape.
+        pii("Lab results A12-3456 pending review", MedicalRecord),
+        pii("The patient chart 78451236 on record", MedicalRecord),
+        pii("Lab chart C45-9981 needs review", MedicalRecord),
+        // medical_record_number: the canonical `MRN#######` identifier.
         pii(
             "The patient record MRN8472910 shows a follow-up",
-            MedicalRecord,
+            MedicalRecordNumber,
         ),
         pii(
             "Lab results for MRN3391045 are now available",
-            MedicalRecord,
+            MedicalRecordNumber,
         ),
         pii(
             "Admission note references MRN7782134 from intake",
-            MedicalRecord,
+            MedicalRecordNumber,
         ),
-        pii("Pull the chart for MRN9981002 from the ward", MedicalRecord),
+        pii(
+            "Pull the chart for MRN9981002 from the ward",
+            MedicalRecordNumber,
+        ),
+        // driver_license
+        pii("Driver license D1234567 expires soon", DriverLicense),
+        pii("DL S99887766 issued by DMV", DriverLicense),
+        pii("His driving licence X4471230 is on record", DriverLicense),
+        // tax_id
+        pii("Tax id 12-3456789 for filing", TaxId),
+        pii("Taxpayer tin 078051120 verified", TaxId),
+        pii("The ein is 123456789 on file", TaxId),
+        // date_of_birth
+        pii("Date of birth 1990-05-21 recorded", DateOfBirth),
+        pii("Born on 05/21/1990 in London", DateOfBirth),
+        pii("DOB 1985-12-03 per passport", DateOfBirth),
+        // passport_number
+        pii("Passport number AB1234567 expires 2030", PassportNumber),
+        pii("Travel passport X12345678 issued", PassportNumber),
+        // national_id
+        pii("National identity card S1234567A verified", NationalId),
+        pii("Citizen nric T7712345B on file", NationalId),
         pii(
             "The court filed case 1:21-cv-04567 last week",
             LegalDocument,
@@ -656,7 +987,7 @@ pub async fn run_ml_ner() -> FunctionReport {
                 "dlp_ml_ner",
                 "sng-dlp",
                 Kind::Detection,
-                &format!("ner_v1.onnx failed to load: {e}"),
+                &format!("ner_v2.onnx failed to load: {e}"),
             );
         }
     };
@@ -737,8 +1068,8 @@ pub async fn run_ml_ner() -> FunctionReport {
         },
         cases,
         Some(
-            "Real on-device ONNX NER (ner_v1.onnx) over a labelled PII corpus \
-             across all six entity classes, with benign and capitalised-non-name \
+            "Real on-device ONNX NER (ner_v2.onnx) over a labelled PII corpus \
+             across all twelve entity classes, with benign and capitalised-non-name \
              controls. catch_rate is recall; the precision field is tp/(tp+fp). \
              Spec targets: precision > 0.90, recall > 0.85."
                 .into(),
@@ -764,7 +1095,8 @@ fn ml_ner_features() -> Vec<Feature> {
              token over a 16+ dimensional deterministic feature vector via the ort \
              (ONNX Runtime) crate; argmax above a 0.60 confidence threshold labels the \
              token and consecutive same-class tokens merge into one entity span.",
-            "person_name, address, phone_number, bank_account, medical_record, legal_document",
+            "person_name, address, phone_number, bank_account, medical_record, legal_document, \
+             medical_record_number, driver_license, tax_id, date_of_birth, passport_number, national_id",
         ),
         f(
             "Deterministic feature extraction",
