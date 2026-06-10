@@ -75,6 +75,27 @@
 //!   snapshot.
 //! - [`service`] — `ZtnaService` orchestrator +
 //!   `ZtnaServiceBuilder`.
+//! - [`session`] — `SessionTracker` + `AccessGrant`: the
+//!   sharded, thread-safe store of active sessions the
+//!   continuous re-evaluation path walks.
+//! - [`reeval`] — `ReevalLoop`: re-runs `evaluate_policy`
+//!   over every tracked session on a configurable
+//!   interval (and out-of-cycle on a posture push),
+//!   emitting `SessionRevoked` on a verdict flip.
+//!
+//! ## Continuous adaptive ZTNA
+//!
+//! `evaluate` is stateless and per-request: a grant made
+//! at access time is otherwise never revisited. The
+//! [`session`] + [`reeval`] modules add the "continuous"
+//! half — the producer records an [`session::AccessGrant`]
+//! per open session, and [`reeval::ReevalLoop`]
+//! periodically re-evaluates each one against the *live*
+//! providers + policy, tearing down sessions whose verdict
+//! has flipped (posture decayed, MFA expired, device / user
+//! revoked, app de-listed). It re-uses `evaluate` verbatim,
+//! so a tracked session can never outlive the access a
+//! fresh request would be granted.
 
 // Test-only allows mirror the sister sng-fw / sng-dns /
 // sng-ips / sng-swg crates so the workspace lints stay
@@ -103,8 +124,10 @@ pub mod device;
 pub mod error;
 pub mod identity;
 pub mod policy;
+pub mod reeval;
 pub mod request;
 pub mod service;
+pub mod session;
 pub mod stats;
 
 pub use app::{App, AppCatalogProvider, StaticAppCatalog};
@@ -119,6 +142,8 @@ pub use policy::{
     TagCondition, TagOp, TimeWindow, ZtnaDecision, ZtnaDecisionReason, ZtnaPolicy,
     ZtnaPolicyHolder, evaluate_policy,
 };
+pub use reeval::{ClockFn, ReevalLoop, SessionRevoked, SweepStats};
 pub use request::{AccessRequest, NetworkType};
 pub use service::{ZtnaService, ZtnaServiceBuilder, ZtnaServiceConfig};
+pub use session::{AccessGrant, DEFAULT_SHARDS, SessionTracker};
 pub use stats::{ZtnaStats, ZtnaStatsSnapshot};

@@ -608,6 +608,30 @@ pub struct ZtnaPolicy {
     /// reason; the multi-tenant bundle adapter layers
     /// its own non-empty check on top.
     pub tenant_id: String,
+    /// Cadence, in milliseconds, of the continuous
+    /// re-evaluation loop ([`crate::reeval::ReevalLoop`])
+    /// that re-runs [`evaluate_policy`] over every active
+    /// session and revokes the ones whose verdict has
+    /// flipped to deny (posture decayed, MFA expired,
+    /// device/user revoked, app de-listed, …).
+    ///
+    /// Sourced from the tenant policy bundle alongside the
+    /// freshness budgets so an operator can trade
+    /// revocation latency against re-evaluation cost: a
+    /// tighter interval cuts the window between a posture
+    /// regression and the session being torn down, at the
+    /// price of more frequent provider lookups. The loop
+    /// reads this value once per tick, so a bundle reload
+    /// that changes it takes effect on the next cycle
+    /// without restarting the loop.
+    ///
+    /// Defaults to 60_000 ms (60 s). [`Self::validate`]
+    /// rejects a zero value — a zero interval would spin
+    /// the loop with no delay and is never a valid
+    /// operational choice; an operator wanting to disable
+    /// continuous re-evaluation simply does not spawn the
+    /// loop.
+    pub reeval_interval_ms: u64,
 }
 
 impl Default for ZtnaPolicy {
@@ -626,6 +650,14 @@ impl Default for ZtnaPolicy {
             // policy on every bundle reload).
             mfa_max_age_ms: 8 * 60 * 60 * 1_000,
             tenant_id: String::new(),
+            // 60 s between re-evaluation sweeps: fast
+            // enough that a revoked device / expired MFA
+            // is torn down within a minute, slow enough
+            // that the per-session provider lookups stay
+            // cheap even at thousands of sessions per
+            // tenant. Operators tighten or relax it via
+            // the bundle.
+            reeval_interval_ms: 60 * 1_000,
         }
     }
 }
@@ -646,6 +678,11 @@ impl ZtnaPolicy {
     ///   evaluator a uniform deny.
     /// - `device_posture_max_age_ms == 0` — same reason
     ///   for posture freshness.
+    /// - `reeval_interval_ms == 0` — a zero interval
+    ///   would busy-spin the re-evaluation loop with no
+    ///   delay between sweeps; disabling continuous
+    ///   re-evaluation is expressed by not spawning the
+    ///   loop, never by a zero cadence.
     ///
     /// `tenant_id` is *not* checked here — the empty
     /// string is the intentional spelling for single-
@@ -669,6 +706,12 @@ impl ZtnaPolicy {
         if self.device_posture_max_age_ms == 0 {
             return Err(ZtnaError::InvalidPolicy(
                 "device_posture_max_age_ms must be > 0 (a zero budget marks every posture attestation stale)"
+                    .to_owned(),
+            ));
+        }
+        if self.reeval_interval_ms == 0 {
+            return Err(ZtnaError::InvalidPolicy(
+                "reeval_interval_ms must be > 0 (a zero interval would busy-spin the re-evaluation loop)"
                     .to_owned(),
             ));
         }
@@ -1820,6 +1863,33 @@ mod tests {
         assert!(
             matches!(err, ZtnaError::InvalidPolicy(ref m) if m.contains("device_posture_max_age_ms"))
         );
+    }
+
+    #[test]
+    fn validate_rejects_zero_reeval_interval() {
+        // A zero re-evaluation interval would spin the
+        // continuous-reeval loop with no delay between
+        // sweeps. Disabling continuous re-evaluation is
+        // expressed by not spawning the loop, not by a
+        // zero cadence, so the policy rejects it.
+        let p = ZtnaPolicy {
+            reeval_interval_ms: 0,
+            ..ZtnaPolicy::default()
+        };
+        let err = p
+            .validate()
+            .expect_err("zero reeval interval must be rejected");
+        assert!(matches!(err, ZtnaError::InvalidPolicy(ref m) if m.contains("reeval_interval_ms")));
+    }
+
+    #[test]
+    fn validate_accepts_default_reeval_interval() {
+        // The shipped default (60 s) must pass validation
+        // unchanged.
+        assert_eq!(ZtnaPolicy::default().reeval_interval_ms, 60_000);
+        ZtnaPolicy::default()
+            .validate()
+            .expect("default reeval interval is valid");
     }
 
     #[test]
