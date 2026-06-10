@@ -117,6 +117,12 @@ struct InotifyShared {
     /// inotify error), so `next_event` returns `Ok(None)` after the
     /// buffer drains rather than awaiting an event that will never come.
     drained: AtomicBool,
+    /// Pulsed by the worker after it queues a batch of events (and once
+    /// more on exit), and by [`InotifyWatcher::shutdown`]. Lets
+    /// `next_event` park until there is something to do instead of
+    /// waking on a fixed cadence — the same edge-driven wake bridge the
+    /// USB monitor uses for its udev worker.
+    wake: tokio::sync::Notify,
 }
 
 /// Edge-triggered directory watcher built on `inotify`.
@@ -170,6 +176,9 @@ impl InotifyWatcher {
 
     fn shutdown(&self) {
         self.shared.closed.store(true, Ordering::SeqCst);
+        // Wake a consumer parked in `next_event` so it returns `Ok(None)`
+        // immediately rather than after the fallback tick.
+        self.shared.wake.notify_one();
         if let Some(handle) = lock(&self.worker).take() {
             // The worker observes `closed` within one `SHUTDOWN_POLL`
             // tick and exits; joining keeps the inotify fd from
@@ -206,7 +215,15 @@ impl ChannelInterceptor for InotifyWatcher {
                 }
                 return Ok(None);
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Park until the worker pulses `wake` (event queued, drained,
+            // or shutdown). The fallback tick is a defensive bound only:
+            // `Notify` stores a permit when no waiter is parked, so a
+            // pulse racing this await is never lost — it just re-checks
+            // `closed`/`drained` periodically even in that impossible case.
+            tokio::select! {
+                () = self.shared.wake.notified() => {}
+                () = tokio::time::sleep(SHUTDOWN_POLL) => {}
+            }
         }
     }
 }
@@ -291,6 +308,7 @@ fn inotify_worker(
             Err(nix::errno::Errno::EAGAIN) => continue,
             Err(_) => break,
         };
+        let mut pushed = false;
         for event in events {
             let Some(parent) = wd_paths.get(&event.wd) else {
                 continue;
@@ -322,10 +340,18 @@ fn inotify_worker(
             // A regular-file close-after-write or move-into: read it.
             if let Some(event) = read_file_event(&path, channel, max_file_bytes) {
                 lock(&shared.buffer).push_back(event);
+                pushed = true;
             }
+        }
+        // Wake the consumer once per drained batch (the buffer may hold
+        // several events; `next_event` pops them without re-parking).
+        if pushed {
+            shared.wake.notify_one();
         }
     }
     shared.drained.store(true, Ordering::SeqCst);
+    // Final pulse so a parked consumer observes `drained` promptly.
+    shared.wake.notify_one();
 }
 
 /// Read up to `max_file_bytes` of `path` into a content event, or
@@ -1129,8 +1155,8 @@ impl ChannelInterceptor for WaylandClipboardMonitor {
 /// types stay scoped).
 mod x11 {
     use super::{
-        ChannelError, ContentEvent, DlpChannel, clipboard_metadata, content_hash, lock,
-        poll_timeout,
+        ChannelError, ContentEvent, DlpChannel, SHUTDOWN_POLL, clipboard_metadata, content_hash,
+        lock, poll_timeout,
     };
     use async_trait::async_trait;
     use sng_dlp::ChannelInterceptor;
@@ -1156,6 +1182,10 @@ mod x11 {
         buffer: Mutex<std::collections::VecDeque<ContentEvent>>,
         closed: AtomicBool,
         drained: AtomicBool,
+        /// Pulsed by the event loop when a selection is queued (and on
+        /// exit), and by `shutdown`, so the consumer parks until there is
+        /// work instead of polling on a fixed cadence.
+        wake: tokio::sync::Notify,
     }
 
     /// Native X11 CLIPBOARD monitor.
@@ -1233,6 +1263,8 @@ mod x11 {
 
         pub(super) fn shutdown(&self) {
             self.shared.closed.store(true, Ordering::SeqCst);
+            // Wake a parked consumer so it returns `Ok(None)` at once.
+            self.shared.wake.notify_one();
             if let Some(handle) = lock(&self.worker).take() {
                 let _ = handle.join();
             }
@@ -1263,7 +1295,13 @@ mod x11 {
                     }
                     return Ok(None);
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                // Park until the event loop pulses `wake`; the fallback
+                // tick is a defensive bound (a racing pulse is preserved
+                // as a `Notify` permit, so it is never lost).
+                tokio::select! {
+                    () = self.shared.wake.notified() => {}
+                    () = tokio::time::sleep(SHUTDOWN_POLL) => {}
+                }
             }
         }
     }
@@ -1326,6 +1364,7 @@ mod x11 {
                                 content: bytes,
                                 metadata: clipboard_metadata(),
                             });
+                            shared.wake.notify_one();
                         }
                     }
                 }
@@ -1333,6 +1372,8 @@ mod x11 {
             }
         }
         shared.drained.store(true, Ordering::SeqCst);
+        // Final pulse so a parked consumer observes `drained` promptly.
+        shared.wake.notify_one();
     }
 
     /// Wait up to ~500ms for the next X event, returning `Ok(None)` on

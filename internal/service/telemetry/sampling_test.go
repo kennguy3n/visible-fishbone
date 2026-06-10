@@ -106,6 +106,89 @@ func TestAdaptiveSamplerNilIsNoop(t *testing.T) {
 	}
 }
 
+func TestDecideClassTrustedClassesFixedRate(t *testing.T) {
+	clk := newTestClock()
+	r := rand.New(rand.NewSource(7))
+	// A generous budget so the adaptive path would keep everything —
+	// proving the trusted-class shedding comes from the fixed policy,
+	// not from adaptive load shedding.
+	s := NewAdaptiveSampler(SamplerConfig{
+		Resolver: budgetResolver(1_000_000),
+		Window:   time.Second,
+		NowFunc:  clk.now,
+	})
+	ctx := context.Background()
+	tid := uuid.New()
+
+	for _, tc := range []string{"trusted_direct", "trusted_media_bypass"} {
+		const n = 200_000
+		kept := 0
+		for i := 0; i < n; i++ {
+			keep, sampleRate := s.DecideClass(ctx, tid, newRandUUID(r), tc)
+			if sampleRate != TrustedClassSampleRate {
+				t.Fatalf("%s: sampleRate = %v, want %v", tc, sampleRate, TrustedClassSampleRate)
+			}
+			if keep {
+				kept++
+			}
+		}
+		// Kept fraction must hover around the fixed 1:100 rate.
+		if frac := float64(kept) / n; math.Abs(frac-TrustedClassSampleRate) > 0.002 {
+			t.Errorf("%s: kept fraction = %.4f, want ~%.4f", tc, frac, TrustedClassSampleRate)
+		}
+	}
+	// The fixed-rate classes must not have touched the adaptive
+	// per-tenant window (no arrival recorded), so the tenant has no
+	// adaptive state at all.
+	if snap := s.Snapshot(); len(snap) != 0 {
+		t.Errorf("trusted-class sampling must not create adaptive tenant state, got %d entries", len(snap))
+	}
+}
+
+func TestDecideClassDeterministicAndRedeliveryStable(t *testing.T) {
+	s := NewAdaptiveSampler(SamplerConfig{Resolver: budgetResolver(1_000_000)})
+	ctx := context.Background()
+	tid := uuid.New()
+	eid := uuid.New()
+
+	keep1, rate1 := s.DecideClass(ctx, tid, eid, "trusted_direct")
+	keep2, rate2 := s.DecideClass(ctx, tid, eid, "trusted_direct")
+	if keep1 != keep2 || rate1 != rate2 {
+		t.Fatalf("non-deterministic verdict for same event: (%v,%v) vs (%v,%v)", keep1, rate1, keep2, rate2)
+	}
+	// The redelivery rate-recovery path must report the same fixed rate
+	// without consulting per-tenant adaptive state.
+	if sr := s.SampleRateForClass(tid, "trusted_direct"); sr != TrustedClassSampleRate {
+		t.Fatalf("SampleRateForClass(trusted_direct) = %v, want %v", sr, TrustedClassSampleRate)
+	}
+}
+
+func TestDecideClassNonTrustedFallsThroughToAdaptive(t *testing.T) {
+	clk := newTestClock()
+	r := rand.New(rand.NewSource(11))
+	s := NewAdaptiveSampler(SamplerConfig{
+		Resolver: budgetResolver(100),
+		Window:   time.Second,
+		NowFunc:  clk.now,
+	})
+	ctx := context.Background()
+	tid := uuid.New()
+
+	// inspect_full must use adaptive sampling: under budget it keeps
+	// everything, and unlike a trusted class it DOES record arrivals.
+	keep, sampleRate := s.DecideClass(ctx, tid, newRandUUID(r), "inspect_full")
+	if !keep || sampleRate != 1.0 {
+		t.Fatalf("inspect_full under budget: keep=%v rate=%v, want true/1.0", keep, sampleRate)
+	}
+	if snap := s.Snapshot(); len(snap) != 1 {
+		t.Fatalf("adaptive class must create per-tenant state, got %d entries", len(snap))
+	}
+	// An empty class (unknown) also falls through to adaptive.
+	if _, ok := fixedClassSampleRate(""); ok {
+		t.Fatal("empty traffic class must not be treated as fixed-rate")
+	}
+}
+
 func TestAdaptiveSamplerUnderBudgetKeepsAll(t *testing.T) {
 	clk := newTestClock()
 	r := rand.New(rand.NewSource(2))

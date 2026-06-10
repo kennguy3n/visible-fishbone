@@ -12,6 +12,7 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/metering"
 )
 
@@ -99,7 +100,7 @@ func newMeteringTestRouterAuthz(usage handler.MeteringUsageReader, budgets handl
 	}
 	return handler.NewRouter(handler.RouterDeps{
 		Config:   cfg,
-		Metering: handler.NewMeteringHandler(usage, budgets, reporter, nil, authz),
+		Metering: handler.NewMeteringHandler(usage, budgets, reporter, nil, nil, authz),
 	})
 }
 
@@ -114,8 +115,45 @@ func newMeteringAnomalyTestRouter(anomalies handler.MeteringAnomalyDetector) htt
 	}
 	return handler.NewRouter(handler.RouterDeps{
 		Config:   cfg,
-		Metering: handler.NewMeteringHandler(fakeUsageReader{}, &fakeBudgetService{}, nil, anomalies, platformAuthz{allow: true}),
+		Metering: handler.NewMeteringHandler(fakeUsageReader{}, &fakeBudgetService{}, nil, anomalies, nil, platformAuthz{allow: true}),
 	})
+}
+
+func newMeteringInfraTestRouter(infra handler.MeteringInfraReporter) http.Handler {
+	cfg := &config.Config{
+		Auth: config.Auth{
+			JWTSecret:    meteringJWTSecret,
+			JWTIssuer:    "sng-control",
+			JWTAudience:  "sng-control",
+			APIKeyHeader: "X-SNG-API-Key",
+		},
+	}
+	return handler.NewRouter(handler.RouterDeps{
+		Config:   cfg,
+		Metering: handler.NewMeteringHandler(fakeUsageReader{}, &fakeBudgetService{}, nil, nil, infra, platformAuthz{allow: true}),
+	})
+}
+
+// fakeInfraReporter records the tenant it was queried for so tests can
+// assert tenant-scoping, and returns a canned projection / cost report.
+type fakeInfraReporter struct {
+	projection metering.InfraCostProjection
+	report     metering.TenantCostReport
+	gotTenant  uuid.UUID
+}
+
+func (f *fakeInfraReporter) TenantInfraProjection(_ context.Context, tenantID uuid.UUID) (metering.InfraCostProjection, error) {
+	f.gotTenant = tenantID
+	proj := f.projection
+	proj.TenantID = tenantID
+	return proj, nil
+}
+
+func (f *fakeInfraReporter) TenantReport(_ context.Context, tenantID uuid.UUID) (metering.TenantCostReport, error) {
+	f.gotTenant = tenantID
+	rep := f.report
+	rep.TenantID = tenantID
+	return rep, nil
 }
 
 func meteringToken(t *testing.T, tenantID string) string {
@@ -424,5 +462,136 @@ func TestMeteringCostAnomaliesCrossTenantForbidden(t *testing.T) {
 	}
 	if det.gotTenant != uuid.Nil {
 		t.Fatal("detector must not run on a cross-tenant path")
+	}
+}
+
+func TestMeteringGetCost(t *testing.T) {
+	t.Parallel()
+	tid := uuid.New()
+	infra := &fakeInfraReporter{projection: metering.InfraCostProjection{
+		ClickHouseMonthlyUSD: 2.0,
+		NATSMonthlyUSD:       0.2,
+		S3MonthlyUSD:         0.05,
+		TotalMonthlyUSD:      2.25,
+	}}
+	router := newMeteringInfraTestRouter(infra)
+
+	rec := doJSON(t, router, http.MethodGet,
+		"/api/v1/tenants/"+tid.String()+"/cost", meteringToken(t, tid.String()), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		TenantID             string  `json:"tenant_id"`
+		ClickHouseMonthlyUSD float64 `json:"clickhouse_monthly_usd"`
+		NATSMonthlyUSD       float64 `json:"nats_monthly_usd"`
+		S3MonthlyUSD         float64 `json:"s3_monthly_usd"`
+		TotalMonthlyUSD      float64 `json:"total_monthly_usd"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.TenantID != tid.String() {
+		t.Fatalf("tenant_id = %s, want %s", resp.TenantID, tid)
+	}
+	if resp.ClickHouseMonthlyUSD != 2.0 || resp.NATSMonthlyUSD != 0.2 ||
+		resp.S3MonthlyUSD != 0.05 || resp.TotalMonthlyUSD != 2.25 {
+		t.Fatalf("unexpected projection: %+v", resp)
+	}
+	if infra.gotTenant != tid {
+		t.Fatalf("reporter called with %s, want path tenant %s", infra.gotTenant, tid)
+	}
+}
+
+// TestMeteringCostCrossTenantForbidden confirms the cost route enforces
+// tenant isolation: a tenant-A token cannot read tenant-B's infra cost
+// via the path, and the underlying projection never runs.
+func TestMeteringCostCrossTenantForbidden(t *testing.T) {
+	t.Parallel()
+	pathTenant := uuid.New()
+	tokenTenant := uuid.New()
+	infra := &fakeInfraReporter{}
+	router := newMeteringInfraTestRouter(infra)
+
+	rec := doJSON(t, router, http.MethodGet,
+		"/api/v1/tenants/"+pathTenant.String()+"/cost", meteringToken(t, tokenTenant.String()), nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if infra.gotTenant != uuid.Nil {
+		t.Fatal("reporter must not run on a cross-tenant path")
+	}
+}
+
+func TestMeteringGetCostReport(t *testing.T) {
+	t.Parallel()
+	tid := uuid.New()
+	infra := &fakeInfraReporter{report: metering.TenantCostReport{
+		Tier:                    repository.TenantTierProfessional,
+		TotalCostUSD:            12.34,
+		ProjectedMonthlyCostUSD: 25.00,
+		MonthlyRevenueUSD:       99.00,
+		MarginUSD:               74.00,
+		MarginPct:               0.7475,
+		Lines: []metering.CostLine{{
+			Meter:            metering.MeterLLMTokensUsed,
+			Period:           metering.PeriodMonthly,
+			Usage:            1000,
+			CostUSD:          1.50,
+			ProjectedUsage:   3000,
+			ProjectedCostUSD: 4.50,
+			MonthlyCostUSD:   4.50,
+		}},
+	}}
+	router := newMeteringInfraTestRouter(infra)
+
+	rec := doJSON(t, router, http.MethodGet,
+		"/api/v1/tenants/"+tid.String()+"/cost-report", meteringToken(t, tid.String()), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		TenantID                string  `json:"tenant_id"`
+		ProjectedMonthlyCostUSD float64 `json:"projected_monthly_cost_usd"`
+		MarginPct               float64 `json:"margin_pct"`
+		Lines                   []struct {
+			Meter   string  `json:"meter"`
+			CostUSD float64 `json:"cost_usd"`
+		} `json:"lines"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.TenantID != tid.String() {
+		t.Fatalf("tenant_id = %s, want %s", resp.TenantID, tid)
+	}
+	if resp.ProjectedMonthlyCostUSD != 25.00 || resp.MarginPct != 0.7475 {
+		t.Fatalf("unexpected report totals: %+v", resp)
+	}
+	if len(resp.Lines) != 1 || resp.Lines[0].CostUSD != 1.50 {
+		t.Fatalf("unexpected cost lines: %+v", resp.Lines)
+	}
+	if infra.gotTenant != tid {
+		t.Fatalf("reporter called with %s, want path tenant %s", infra.gotTenant, tid)
+	}
+}
+
+// TestMeteringCostReportCrossTenantForbidden confirms the per-tenant
+// cost-report route enforces tenant isolation: a tenant-A token cannot
+// read tenant-B's cost report, and the reporter never runs.
+func TestMeteringCostReportCrossTenantForbidden(t *testing.T) {
+	t.Parallel()
+	pathTenant := uuid.New()
+	tokenTenant := uuid.New()
+	infra := &fakeInfraReporter{}
+	router := newMeteringInfraTestRouter(infra)
+
+	rec := doJSON(t, router, http.MethodGet,
+		"/api/v1/tenants/"+pathTenant.String()+"/cost-report", meteringToken(t, tokenTenant.String()), nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if infra.gotTenant != uuid.Nil {
+		t.Fatal("reporter must not run on a cross-tenant path")
 	}
 }

@@ -115,6 +115,56 @@ func TestClickHouseShardingStrictBool(t *testing.T) {
 	}
 }
 
+func TestClickHouseRowLimitConfig(t *testing.T) {
+	// Defaults: limiter enabled, rate/burst left at 0 so the wiring
+	// falls back to the metering package defaults.
+	clearAll(t)
+	withEnv(t, map[string]string{"ENVIRONMENT": "local"})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ta := cfg.TelemetryAnalytics
+	if !ta.ClickHouseRowLimitEnabled {
+		t.Error("ClickHouseRowLimitEnabled = false, want true (default)")
+	}
+	if ta.ClickHouseRowLimitPerSec != 0 || ta.ClickHouseRowLimitBurst != 0 {
+		t.Errorf("row-limit rate/burst defaults = %v/%d, want 0/0 (package default sentinel)",
+			ta.ClickHouseRowLimitPerSec, ta.ClickHouseRowLimitBurst)
+	}
+
+	// Operator overrides are parsed.
+	clearAll(t)
+	withEnv(t, map[string]string{
+		"ENVIRONMENT":                  "local",
+		"CLICKHOUSE_ROW_LIMIT_ENABLED": "false",
+		"CLICKHOUSE_ROW_LIMIT_PER_SEC": "5000",
+		"CLICKHOUSE_ROW_LIMIT_BURST":   "60000",
+	})
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ta = cfg.TelemetryAnalytics
+	if ta.ClickHouseRowLimitEnabled {
+		t.Error("ClickHouseRowLimitEnabled = true, want false (explicitly disabled)")
+	}
+	if ta.ClickHouseRowLimitPerSec != 5000 || ta.ClickHouseRowLimitBurst != 60000 {
+		t.Errorf("row-limit rate/burst = %v/%d, want 5000/60000",
+			ta.ClickHouseRowLimitPerSec, ta.ClickHouseRowLimitBurst)
+	}
+
+	// A typo must fail boot rather than silently revert the cost ceiling.
+	clearAll(t)
+	withEnv(t, map[string]string{
+		"ENVIRONMENT":                  "local",
+		"CLICKHOUSE_ROW_LIMIT_ENABLED": "sometimes",
+	})
+	if _, err := Load(); err == nil {
+		t.Fatal("expected strict-parse error for CLICKHOUSE_ROW_LIMIT_ENABLED=sometimes")
+	}
+}
+
 func TestReplicaPortInheritsPrimary(t *testing.T) {
 	t.Parallel()
 	// 0 (default) inherits the primary port.

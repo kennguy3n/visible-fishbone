@@ -2269,3 +2269,151 @@ label.field > span {
     grid-template-columns: 1fr;
   }
 }
+
+/* --- Metering & cost dashboard (WS8) ------------------------------------ */
+
+/* Dim helper used for inline secondary text in the metering tables. */
+.text-dim {
+  color: var(--text-dim);
+}
+
+/* Secondary line under a summary-card stat value. */
+.stat__hint {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* Footer disclaimer (cost estimates, not invoices). */
+.page-footnote {
+  margin-top: 20px;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Inline labelled control (trend-window selector in a card header). */
+.field-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.field-inline select {
+  width: auto;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+/* Compact text input for the budget editor grid. */
+.input--sm {
+  padding: 5px 9px;
+  font-size: 12px;
+  max-width: 140px;
+}
+
+/* Inline validation message under a form field. */
+.form-error {
+  color: var(--danger);
+  font-size: 11.5px;
+  margin-top: 4px;
+}
+
+/* Toggleable meter legend above the trend chart. */
+.legend-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color var(--transition), opacity var(--transition);
+}
+.legend-chip:hover {
+  border-color: var(--border);
+}
+.legend-chip--off {
+  opacity: 0.45;
+}
+.legend-chip__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  flex: none;
+}
+
+/* Row highlights for over-budget meters in the usage table. */
+table.data tbody tr.row--warn {
+  background: rgba(var(--warn-rgb, 251, 191, 36), 0.1);
+}
+table.data tbody tr.row--danger {
+  background: rgba(var(--danger-rgb, 248, 113, 113), 0.12);
+}
+
+/* Sortable column header (fleet margin). */
+.th-sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.th-sortable:hover {
+  color: var(--text);
+}
+
+/* Fleet table footer totals. */
+table.data tfoot td {
+  padding: 11px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+/* Infrastructure cost breakdown: donut + legend side by side. */
+.infra-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  align-items: center;
+}
+.infra-breakdown__legend {
+  flex: 1 1 260px;
+  min-width: 240px;
+}
+.infra-breakdown__total {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+.infra-breakdown__legend ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.infra-breakdown__legend li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.infra-breakdown__name {
+  font-weight: 600;
+}
+.infra-breakdown__detail {
+  grid-column: 2 / 4;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}

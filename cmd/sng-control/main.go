@@ -1225,7 +1225,7 @@ func buildRouter(
 	if err != nil {
 		return routerComponents{}, fmt.Errorf("control: metering anomaly detector: %w", err)
 	}
-	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports, meteringAnomalies, rbacSvc)
+	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports, meteringAnomalies, meteringReports, rbacSvc)
 
 	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo,
 		metering.NewGuardrailBudgetGate(budgetEnforcer), metering.NewGuardrailUsageRecorder(meteringSvc), iocStore, logger)
@@ -2111,6 +2111,35 @@ func startTelemetry(
 		return nil, nil, nil, fmt.Errorf("telemetry service: %w", err)
 	}
 	svc.WithDLQ(pub)
+	// WS8 cost control on the telemetry hot path. Both are additive,
+	// per-tenant, and use the package defaults (no per-tenant config
+	// required — "no ops"):
+	//
+	//   - Adaptive sampler: trusted_direct / trusted_media_bypass
+	//     events are sampled at the fixed 1:100 class rate (their
+	//     per-event telemetry is high-volume / low-signal); every
+	//     other class is full fidelity until a tenant's arrival rate
+	//     exceeds its budget, at which point that tenant is
+	//     deterministically down-sampled and kept events are stamped
+	//     with their de-bias rate.
+	//   - ClickHouse row-write limiter: a per-tenant token bucket
+	//     (DefaultClickHouseRow* budget) bounding the dominant
+	//     write-amplification cost driver; over-budget rows are
+	//     deferred (Nak/retry, DLQ on exhaustion), never dropped.
+	//     Operator-tunable (CLICKHOUSE_ROW_LIMIT_*), and skippable
+	//     entirely via CLICKHOUSE_ROW_LIMIT_ENABLED=false — a nil
+	//     limiter is a no-op, so a deployment that bounds write cost
+	//     another way carries no per-tenant ceiling.
+	svc.WithSampler(telemetry.NewAdaptiveSampler(telemetry.SamplerConfig{}))
+	if cfg.TelemetryAnalytics.ClickHouseRowLimitEnabled {
+		rowLimit := metering.RowLimitFromConfig(
+			cfg.TelemetryAnalytics.ClickHouseRowLimitPerSec,
+			cfg.TelemetryAnalytics.ClickHouseRowLimitBurst,
+		)
+		svc.WithClickHouseRowLimiter(
+			metering.NewClickHouseRowLimiter(metering.StaticRowLimitResolver{Limit: rowLimit}),
+		)
+	}
 	if shadowObserver != nil {
 		svc.WithShadowITObserver(shadowObserver)
 	}

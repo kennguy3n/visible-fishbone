@@ -81,6 +81,15 @@ const DefaultNakBackoff = 2 * time.Second
 // than dispatch it. Carries the tenant ID for logging.
 var ErrTenantBlocked = errors.New("telemetry: tenant rate-limited")
 
+// ErrRowWriteLimited is the DLQ cause stamped on an envelope that
+// exhausted its JetStream delivery budget while a tenant was over its
+// ClickHouse row-write rate cap. It is distinct from ErrTenantBlocked
+// so an operator triaging the DLQ can tell whether the event was shed
+// by the event-throughput limiter or by the row-write cost cap (the
+// remediation differs: the former is an ingestion-rate budget, the
+// latter a ClickHouse-rows budget tied to the cost model).
+var ErrRowWriteLimited = errors.New("telemetry: clickhouse row-write rate limit exceeded")
+
 // TenantLimit is the resolved budget for a single tenant.
 // Construct via NewTenantLimit; the zero value is invalid.
 type TenantLimit struct {

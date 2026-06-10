@@ -59,6 +59,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`> 0` when `dlp.enabled`) so a zero ceiling cannot silently disable content
   inspection ([#133]).
 
+### Changed
+
+- WS5 endpoint DLP (Linux): the `inotify` file-write watcher and the native
+  X11 clipboard monitor now wake their async consumer via a
+  `tokio::sync::Notify` edge bridge (pulsed by the worker thread on each
+  queued batch, on worker exit, and on shutdown) instead of draining the
+  shared buffer on a fixed 50 ms poll. This matches the existing
+  `LinuxUsbTransferMonitor` udev wake, removes ~20 idle timer wakeups
+  per second per channel, and cuts event-detection latency from up-to-50 ms
+  to effectively zero; a `SHUTDOWN_POLL` fallback tick remains as a defensive
+  bound only (`Notify` preserves a racing pulse as a permit) ([#135]).
+
 [#87]: https://github.com/kennguy3n/visible-fishbone/pull/87
 [#133]: https://github.com/kennguy3n/visible-fishbone/pull/133
+[#135]: https://github.com/kennguy3n/visible-fishbone/pull/135
 [Unreleased]: https://github.com/kennguy3n/visible-fishbone/compare/main...HEAD
