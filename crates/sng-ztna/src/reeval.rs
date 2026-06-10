@@ -57,7 +57,7 @@ use tokio::sync::mpsc;
 
 use crate::policy::ZtnaDecisionReason;
 use crate::service::ZtnaService;
-use crate::session::{AccessGrant, SessionTracker};
+use crate::session::{AccessGrant, GuardedRemoval, SessionTracker};
 
 /// A millisecond clock supplying "now" to the re-eval loop.
 ///
@@ -119,20 +119,29 @@ pub struct SweepStats {
     /// Sessions that disappeared mid-sweep: the grant was cloned
     /// while present but the producer closed the session before this
     /// sweep could act on it (a retained session whose stamp found
-    /// nothing, or a deny flip whose `remove` found nothing). Counted
-    /// separately so [`Self::examined`] reconciles exactly with the
-    /// number of grants iterated, distinguishing a benign close race
-    /// from a retain / revoke.
+    /// nothing, or a deny flip whose guarded remove found nothing).
+    /// Counted separately so [`Self::examined`] reconciles exactly
+    /// with the number of grants iterated, distinguishing a benign
+    /// close race from a retain / revoke.
     pub vanished: u64,
+    /// Sessions whose verdict flipped to deny but were *not* revoked
+    /// because the producer re-recorded the session (e.g. a step-up
+    /// re-auth) between the sweep's clone and the revoke. The stale
+    /// verdict was discarded and the refreshed grant left in place to
+    /// be judged on its own merits next sweep. Counted separately so
+    /// a legitimate re-auth that dodged revocation is observable and
+    /// never miscounted as a revoke.
+    pub superseded: u64,
 }
 
 impl SweepStats {
     /// Total sessions examined by the sweep — every grant the sweep
-    /// iterated ends up in exactly one bucket: retained, revoked, or
-    /// vanished (closed concurrently).
+    /// iterated ends up in exactly one bucket: retained, revoked,
+    /// vanished (closed concurrently), or superseded (re-recorded
+    /// concurrently).
     #[must_use]
     pub fn examined(&self) -> u64 {
-        self.retained + self.revoked + self.vanished
+        self.retained + self.revoked + self.vanished + self.superseded
     }
 }
 
@@ -288,13 +297,19 @@ impl ReevalLoop {
                     stats.vanished += 1;
                 }
             }
-            // Flipped to deny: tear the session down. Remove first;
-            // only emit a revocation if the session was still
-            // present (the producer may have closed it concurrently,
-            // in which case there is nothing to revoke — count it as
-            // vanished rather than revoked).
-            Some(reason) => {
-                if self.tracker.remove(&grant.session_id).is_some() {
+            // Flipped to deny: tear the session down — but only the
+            // exact generation we judged. A guarded remove keyed on
+            // the grant's `granted_at_ms` ensures we never delete a
+            // session the producer re-recorded in the clone→remove
+            // window (a step-up re-auth that refreshed the very
+            // credentials this verdict found stale). Removed → revoke;
+            // Superseded → a fresh grant survives for next sweep;
+            // Absent → the producer closed it concurrently.
+            Some(reason) => match self
+                .tracker
+                .remove_if_unchanged(&grant.session_id, grant.granted_at_ms)
+            {
+                GuardedRemoval::Removed(_) => {
                     stats.revoked += 1;
                     let event = SessionRevoked {
                         session_id: grant.session_id.clone(),
@@ -308,10 +323,10 @@ impl ReevalLoop {
                     if self.revoked_tx.try_send(event).is_err() {
                         stats.revocation_emit_dropped += 1;
                     }
-                } else {
-                    stats.vanished += 1;
                 }
-            }
+                GuardedRemoval::Superseded => stats.superseded += 1,
+                GuardedRemoval::Absent => stats.vanished += 1,
+            },
         }
     }
 
@@ -533,6 +548,55 @@ mod tests {
         assert_eq!(ev.session_id, "s1");
         assert_eq!(ev.reason, ZtnaDecisionReason::DevicePostureInsufficient);
         assert_eq!(ev.tenant_id, TENANT);
+    }
+
+    #[test]
+    fn sweep_does_not_revoke_a_concurrently_reauthed_session() {
+        let now = TEST_EPOCH_MS;
+        let h = harness(
+            vec![app("wiki", PostureRequirement::BASIC, &[])],
+            vec![device("dev-1", TENANT, DevicePosture::pristine(now))],
+            vec![user("alice", TENANT, &[], now)],
+        );
+        let (lp, tracker, mut rx) = loop_with(&h);
+
+        // A session opened at the epoch (grant generation == `now`).
+        grant_session(&h, &tracker, "s1", "dev-1", "alice", "wiki", now);
+        // The sweep clones the grant it is about to judge.
+        let stale = tracker.get("s1").expect("session recorded");
+
+        // Posture degrades: judged on its own, this clone flips to deny.
+        h.devices.record(device(
+            "dev-1",
+            TENANT,
+            DevicePosture {
+                disk_encrypted: false,
+                os_patched: false,
+                attested_at_ms: now,
+                ..DevicePosture::pristine(now)
+            },
+        ));
+
+        // Meanwhile the producer re-records the session (a step-up
+        // re-auth) with a newer grant generation, after the clone.
+        let reauth_at = now + 10;
+        let req = AccessRequest::new("wiki", "dev-1", "alice", reauth_at);
+        tracker.record(AccessGrant::new("s1", TENANT, req, reauth_at));
+
+        // Acting on the stale verdict must not delete the fresh grant.
+        let mut stats = SweepStats::default();
+        lp.process_grant(&stale, now, &mut stats);
+
+        assert_eq!(stats.superseded, 1);
+        assert_eq!(stats.revoked, 0);
+        assert_eq!(stats.vanished, 0);
+        assert_eq!(stats.examined(), 1);
+        assert!(tracker.contains("s1"), "re-authed session must survive");
+        assert_eq!(tracker.get("s1").unwrap().granted_at_ms, reauth_at);
+        assert!(
+            rx.try_recv().is_err(),
+            "no revocation event for a superseded session"
+        );
     }
 
     #[test]

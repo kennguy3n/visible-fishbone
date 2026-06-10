@@ -174,6 +174,26 @@ struct Shard {
     by_device: HashMap<String, HashSet<String>>,
 }
 
+/// Outcome of [`SessionTracker::remove_if_unchanged`] — a removal
+/// guarded against a concurrent re-record of the same session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GuardedRemoval {
+    /// The stored grant was still the generation the caller
+    /// evaluated and was removed; carries the removed grant. Boxed
+    /// so the common `Superseded` / `Absent` outcomes don't pay for
+    /// the grant's size on every return.
+    Removed(Box<AccessGrant>),
+    /// A grant is still present but is a *newer* generation than the
+    /// caller evaluated — the producer re-recorded the session (e.g.
+    /// a step-up re-auth) between the caller's clone and this call,
+    /// so the stale verdict was discarded and the fresh grant left in
+    /// place for the next evaluation.
+    Superseded,
+    /// No grant was present for the session id (the producer closed
+    /// the session concurrently).
+    Absent,
+}
+
 impl Shard {
     /// Insert or replace a grant, keeping the device index
     /// consistent. Replacing a session that previously pointed at a
@@ -199,6 +219,27 @@ impl Shard {
         let grant = self.grants.remove(session_id)?;
         self.deindex(grant.device_id(), session_id);
         Some(grant)
+    }
+
+    /// Remove a grant only if the one currently stored is still the
+    /// generation the caller evaluated, identified by
+    /// [`AccessGrant::granted_at_ms`]. See
+    /// [`SessionTracker::remove_if_unchanged`] for the rationale.
+    fn remove_if_unchanged(&mut self, session_id: &str, expected_granted_at_ms: u64) -> GuardedRemoval {
+        match self.grants.get(session_id) {
+            None => GuardedRemoval::Absent,
+            // A different generation is stored: the producer
+            // re-recorded the session (step-up re-auth) after the
+            // caller cloned its grant. Leave the fresh grant in place.
+            Some(current) if current.granted_at_ms != expected_granted_at_ms => GuardedRemoval::Superseded,
+            // Same generation: remove it (reusing `remove` so the
+            // device index is pruned identically). The `None` arm is
+            // unreachable under the held lock but handled totally.
+            Some(_) => match self.remove(session_id) {
+                Some(grant) => GuardedRemoval::Removed(Box::new(grant)),
+                None => GuardedRemoval::Absent,
+            },
+        }
     }
 
     /// Drop `session_id` from `device_id`'s index set, pruning the
@@ -290,6 +331,32 @@ impl SessionTracker {
     pub fn remove(&self, session_id: &str) -> Option<AccessGrant> {
         let idx = self.shard_index(session_id);
         self.shards[idx].lock().remove(session_id)
+    }
+
+    /// Remove a session **only if** the grant currently stored is
+    /// still the one the caller evaluated, identified by its
+    /// [`AccessGrant::granted_at_ms`] generation stamp.
+    ///
+    /// The re-eval sweep clones a grant, evaluates it without holding
+    /// the shard lock, and then acts on the verdict. On a flip to
+    /// deny it must tear the session down — but an unconditional
+    /// [`Self::remove`] would also delete a grant the producer
+    /// *re-recorded* in that window (a step-up re-auth that refreshed
+    /// the credentials the sweep just judged stale), silently dropping
+    /// a now-valid session. This guarded remove mirrors the in-place
+    /// [`Self::mark_evaluated`] on the retain path: it commits the
+    /// revocation only against the exact generation it evaluated. A
+    /// re-record bumps `granted_at_ms`, so a newer grant yields
+    /// [`GuardedRemoval::Superseded`] and survives to be judged on its
+    /// own merits next sweep; a missing grant yields
+    /// [`GuardedRemoval::Absent`]. Revoking still fails safe — at
+    /// worst a regression waits one extra sweep — while a legitimate
+    /// re-auth is never collateral.
+    pub fn remove_if_unchanged(&self, session_id: &str, expected_granted_at_ms: u64) -> GuardedRemoval {
+        let idx = self.shard_index(session_id);
+        self.shards[idx]
+            .lock()
+            .remove_if_unchanged(session_id, expected_granted_at_ms)
     }
 
     /// Return a clone of the grant for `session_id`, if present.
@@ -445,6 +512,52 @@ mod tests {
         assert_eq!(removed.session_id, "s1");
         assert!(t.get("s1").is_none());
         assert!(t.remove("s1").is_none());
+    }
+
+    #[test]
+    fn remove_if_unchanged_removes_matching_generation() {
+        let t = SessionTracker::new();
+        let g = grant("s1", "t1", "dev-1", "alice"); // granted_at_ms = 1_000
+        t.record(g.clone());
+        match t.remove_if_unchanged("s1", g.granted_at_ms) {
+            GuardedRemoval::Removed(removed) => assert_eq!(removed.session_id, "s1"),
+            other => panic!("expected Removed, got {other:?}"),
+        }
+        assert!(t.get("s1").is_none());
+        // Device index pruned with the grant.
+        assert!(t.sessions_for_device("dev-1").is_empty());
+    }
+
+    #[test]
+    fn remove_if_unchanged_supersedes_rerecorded_generation() {
+        let t = SessionTracker::new();
+        let stale = grant("s1", "t1", "dev-1", "alice"); // granted_at_ms = 1_000
+        t.record(stale.clone());
+        // Producer re-records the same session (step-up re-auth) with a
+        // newer grant generation before the guarded remove lands.
+        let req = AccessRequest::new("wiki", "dev-1", "alice", 5_000);
+        let refreshed = AccessGrant::new("s1", "t1", req, 5_000);
+        t.record(refreshed);
+        // The stale verdict must not delete the refreshed grant.
+        assert_eq!(
+            t.remove_if_unchanged("s1", stale.granted_at_ms),
+            GuardedRemoval::Superseded
+        );
+        let kept = t.get("s1").expect("refreshed grant survives");
+        assert_eq!(kept.granted_at_ms, 5_000);
+        // Device index still points at the live session.
+        let on_device = t.sessions_for_device("dev-1");
+        assert_eq!(on_device.len(), 1);
+        assert_eq!(on_device[0].session_id, "s1");
+    }
+
+    #[test]
+    fn remove_if_unchanged_absent_when_missing() {
+        let t = SessionTracker::new();
+        assert_eq!(
+            t.remove_if_unchanged("ghost", 1_000),
+            GuardedRemoval::Absent
+        );
     }
 
     #[test]
