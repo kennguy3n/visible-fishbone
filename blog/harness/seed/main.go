@@ -786,7 +786,15 @@ func getOptional(path string, out any) bool {
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if out != nil && len(raw) > 0 {
-			_ = json.Unmarshal(raw, out)
+			// A 2xx with a malformed body is a genuine regression, not
+			// the benign "absent" case 404 represents — surface it as
+			// FAIL rather than silently decoding into a zero-value
+			// struct (which would understate the policy-graph rule
+			// count without any signal).
+			if err := json.Unmarshal(raw, out); err != nil {
+				logf("FAIL GET %s: HTTP %d with invalid JSON: %v", path, resp.StatusCode, err)
+				return false
+			}
 		}
 		return true
 	}

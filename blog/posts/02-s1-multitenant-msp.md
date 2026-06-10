@@ -43,8 +43,10 @@ From `GET /api/v1/msps` ([`s1-msps.json`](../artifacts/payloads/s1-msps.json)):
 `GET /api/v1/tenants` returns the five tenants visible to the platform operator
 (four managed + the platform tenant itself). The audit log
 ([`s1-acme-audit-log.json`](../artifacts/payloads/s1-acme-audit-log.json)) carries
-the real provisioning trail: `policy.compiled`, `policy.signing_key_created`,
-`casb.inline_rule_created`, and so on — each with an actor and a timestamp.
+the real provisioning trail, from the `tenant.created` event that anchors each
+tenant's history through `policy.compiled`, `policy.signing_key_created`,
+`casb.inline_rule_created`, and so on — each with a resource reference and a
+timestamp.
 
 ## How isolation actually works
 

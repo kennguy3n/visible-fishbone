@@ -158,6 +158,40 @@ func bootstrapFixtures(ctx context.Context, operatorID string) error {
 		return fmt.Errorf("grant platform_admin: %w", err)
 	}
 
+	// 6. tenant.created provisioning audit. The control plane writes a
+	// tenant.created audit_log row scoped to the new tenant on every
+	// create (tenant/service.go Create -> appendAudit, with a nil actor
+	// and empty details). Because bootstrap pins the canonical tenant
+	// identities via direct SQL — the create API assigns server-side
+	// UUIDs and cannot honour the pinned ids the rest of the pipeline
+	// references — that provisioning event would otherwise be missing,
+	// leaving each tenant's audit trail with no record of its own
+	// creation. We restore the exact row a production onboarding writes
+	// so the S1 audit evidence stays complete. created_at defaults to
+	// NOW(); bootstrap runs before any API-driven seeding, so this is
+	// naturally the earliest event in each tenant's trail. audit_log is
+	// RLS-FORCEd, so the per-tenant GUC is set before each write, and the
+	// NOT EXISTS guard keeps reruns idempotent.
+	auditTenantIDs := make([]string, 0, len(canonicalTenantID)+1)
+	for _, id := range canonicalTenantID {
+		auditTenantIDs = append(auditTenantIDs, id)
+	}
+	auditTenantIDs = append(auditTenantIDs, platformTenantID)
+	for _, id := range auditTenantIDs {
+		if _, err := tx.Exec(ctx, `SELECT set_config('sng.tenant_id', $1, true)`, id); err != nil {
+			return fmt.Errorf("set tenant context for audit %s: %w", id, err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO audit_log (tenant_id, action, resource_type, resource_id, details)
+			SELECT $1::uuid, 'tenant.created', 'tenant', $1::uuid, '{}'::jsonb
+			WHERE NOT EXISTS (
+				SELECT 1 FROM audit_log
+				WHERE tenant_id = $1::uuid AND action = 'tenant.created'
+			)`, id); err != nil {
+			return fmt.Errorf("seed tenant.created audit for %s: %w", id, err)
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}

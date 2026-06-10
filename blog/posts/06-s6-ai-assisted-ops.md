@@ -32,7 +32,7 @@ Verbatim from
 {
   "verdict": "inspect",
   "evaluation_mode": "compiled-bundle",
-  "matched_rules": ["policy-graph:d582fe06-0ad8-4cc8-8cb5-bce1c97a3dd2@v1"],
+  "matched_rules": ["policy-graph:b70aebd7-7706-40ca-b8e7-c18b8d5e9c30@v1"],
   "ai_generated": false,
   "confidence": 0.7,
   "explanation": "Verdict \"inspect\" from tenant policy graph ... for

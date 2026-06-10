@@ -324,6 +324,15 @@
       "resource_id": "372eed32-5af4-4459-889c-97e3cb544d59",
       "resource_type": "site",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "tenant.created",
+      "created_at": "2026-06-10T16:05:21.795653Z",
+      "details": {},
+      "id": "fb2e9ea6-ea37-4fea-ad93-75c6de3c894c",
+      "resource_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "resource_type": "tenant",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     }
   ],
   "next_cursor": ""

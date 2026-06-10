@@ -34,14 +34,14 @@ steady-state period-end total:
 
 | meter | used | projected (period-end) |
 | --- | ---: | ---: |
-| llm_tokens_used | 3,864,223 | 11,999,824 |
-| llm_calls | 4,186 | 13,000 |
-| url_cat_lookups | 79,267 | 119,975 |
-| malware_scans | 3,303 | 5,000 |
-| clickhouse_rows_written | 96,605,574 | 299,995,595 |
-| s3_bytes_archived | 483.0 GB | ~1.50 TB |
+| llm_tokens_used | 3,868,183 | 11,999,899 |
+| llm_calls | 4,191 | 13,002 |
+| url_cat_lookups | 80,455 | 119,986 |
+| malware_scans | 3,352 | 4,999 |
+| clickhouse_rows_written | 96,704,582 | 299,997,478 |
+| s3_bytes_archived | 483.5 GB | ~1.50 TB |
 | bandwidth_proxied_bytes | 1.61 TB | ~5.00 TB |
-| policy_evaluations | 39,633,445 | 59,987,119 |
+| policy_evaluations | 40,227,494 | 59,992,728 |
 
 ### Projection is the feature
 
@@ -69,7 +69,7 @@ point: an anomaly detector that flags everything is noise.
 
 ### The margin story (for the MSP)
 
-The admin cost-report rolls up a **projected $2,216.39/mo** across the four
+The admin cost-report rolls up a **projected $2,216.43/mo** across the four
 tenants. Per-tenant gross margins (`margin_pct` from
 [`s7-admin-cost-report.json`](../artifacts/payloads/s7-admin-cost-report.json)):
 
