@@ -214,7 +214,7 @@ function StepTenant({ onNext }: { onNext: () => void }) {
         <button
           className="btn btn--primary"
           onClick={onNext}
-          disabled={!selectedTenantId}
+          disabled={!selectedTenantId || create.isPending}
         >
           Continue →
         </button>

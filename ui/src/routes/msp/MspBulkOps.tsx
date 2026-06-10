@@ -220,12 +220,14 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
         setRanAt(new Date().toLocaleString());
       }
       // Name the phase that failed so the operator knows later phases were
-      // skipped, not silently completed.
+      // skipped, not silently completed. Tokens is the last phase, so there's
+      // nothing after it to mention.
       const reason = e instanceof Error ? e.message : "request failed";
-      toast.error(
-        `Bulk onboarding failed during ${PHASE_LABEL[phase]}`,
-        `${reason}. Phases after ${PHASE_LABEL[phase]} were not attempted.`,
-      );
+      const detail =
+        phase === "tokens"
+          ? reason
+          : `${reason}. Phases after ${PHASE_LABEL[phase]} were not attempted.`;
+      toast.error(`Bulk onboarding failed during ${PHASE_LABEL[phase]}`, detail);
     } finally {
       setRunning(false);
     }
