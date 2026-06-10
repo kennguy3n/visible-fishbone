@@ -142,6 +142,81 @@ sng-bench compare \
 Exit codes: `0` within thresholds, `2` regression detected (distinct from
 a harness failure), other non-zero = error.
 
+## Forwarding regression gate (statistically sound)
+
+The per-PR CI gate
+([`throughput-regression.yml`](../.github/workflows/throughput-regression.yml),
+mirrored by `make bench-regression`) runs the **Micro** forwarding sweep
+and compares it against the committed baseline
+[`results/forwarding-micro.json`](./results/forwarding-micro.json) using
+`forwarding-compare`.
+
+The comparison is **hardware-invariant** — it never diffs absolute
+throughput (which drifts run-to-run on shared CI runners) but only
+dimensionless ratios: per-`(mode, backend)` normalised per-packet cost and
+the raw-L3 `xdp / nftables` speedup.
+
+A single run of those ratios on a shared Azure runner still wobbles by
+double digits on scheduler noise alone, so a one-shot gate fires on noise
+and trains everyone to ignore it. The gate is therefore **statistical**:
+
+1. **Sample N times.** `make bench-regression` re-runs the sweep
+   `BENCH_SAMPLES` times (default **7**), serialised and — where `taskset`
+   exists — pinned to a single core so the scheduler does not migrate the
+   measurement mid-run and inflate the variance.
+2. **Aggregate with the median.** Each ratio is reduced across the samples
+   with the **median**, which ignores the lone wild outlier a shared runner
+   periodically emits (a mean would not).
+3. **Gate against a noise band.** A metric is flagged only when the median
+   move (a) clears the fractional `--threshold` (default **15%**) in the
+   regressing direction **and** (b) is larger than `--sigma × σ` (default
+   **2σ**, ~95% of Gaussian noise), where `σ` is the corrected sample
+   standard deviation of the samples themselves. A real per-stage or
+   fast-path regression clears both bars; a dip that lives inside the
+   run-to-run scatter does not.
+
+```bash
+# What `make bench-regression` runs (abbreviated): N samples, then compare.
+for i in $(seq 1 7); do
+  sng-bench forwarding --profile profiles/skus/micro.toml \
+    --out target/forwarding-micro-samples/sample-$i.json
+done
+sng-bench forwarding-compare \
+  --baseline results/forwarding-micro.json \
+  --current target/forwarding-micro-samples/sample-1.json \
+  ... \
+  --current target/forwarding-micro-samples/sample-7.json \
+  --threshold 0.15 --sigma 2.0
+```
+
+`forwarding-compare` accepts `--current` once per sample; passing a single
+`--current` collapses `σ` to zero and reproduces the legacy one-shot
+threshold check, so the interface stays backward compatible. The command
+prints every gated metric (`baseline → median (±%)`, `σ`, and the noise
+band) so an engineer can see *why* it did or did not fire, then exits `2`
+iff a real regression cleared both bars.
+
+### Refreshing the baseline
+
+The baseline is a measured artifact, so an intentional, understood change
+to the data path (or a deliberate methodology change) means it must be
+regenerated — **on `main`, after the change has merged**, so the committed
+baseline always reflects shipped `main` rather than an in-flight branch:
+
+```bash
+# On main, after merge:
+cargo run --manifest-path bench/Cargo.toml --release -- forwarding \
+  --profile bench/profiles/skus/micro.toml \
+  --out bench/results/forwarding-micro.json \
+  --git-sha "$(git rev-parse --short HEAD)"
+git commit bench/results/forwarding-micro.json \
+  -m "bench: refresh forwarding-micro baseline (intentional <reason>)"
+```
+
+Because the gate keys on hardware-invariant ratios, you do **not** need to
+regenerate the baseline just because CI moved to a different runner — only
+when the underlying ratios genuinely, intentionally changed.
+
 ## Business report
 
 `business-report` runs the full sweep (every profile × `{throughput,
