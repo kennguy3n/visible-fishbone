@@ -1,0 +1,30 @@
+# Edge SKU profile: Small.
+#
+# Entry production deployment (small office / retail branch): a 4-core /
+# 8 GiB box on a 10 GbE uplink. Four times the Micro core budget, so the
+# acceptance target rises to 2.5 Gbps of fully-inspected throughput while
+# leaving NIC and control-plane headroom for bursts.
+#
+# `nic_queues` pins the RSS fan-out the published number was measured at;
+# `[datapath]` pins the synthetic ruleset, frame size, and sample size so
+# a re-run reproduces the figure; `[traffic_mix]` pins the per-class blend
+# (relative weights) that composes the forwarding sweep's packet stream.
+name = "small"
+vcpus = 4
+ram_gb = 8
+nic_gbps = 10.0
+target_gbps = 2.5
+nic_queues = 4
+
+[datapath]
+rule_count = 256
+packet_bytes = 1500
+sample_packets = 200000
+
+[traffic_mix]
+trusted_direct = 35.0
+trusted_media_bypass = 20.0
+inspect_lite = 15.0
+inspect_full = 22.0
+tunnel_private = 5.0
+block = 3.0

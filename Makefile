@@ -38,6 +38,12 @@ help:
 	@echo "  test-rust           cargo test --workspace"
 	@echo "  lint-rust           cargo fmt --check + cargo clippy"
 	@echo ""
+	@echo "Throughput benchmarks (bench/ workspace):"
+	@echo "  bench-build         cargo build --release (sng-bench harness)"
+	@echo "  bench-test          cargo test (sng-bench harness)"
+	@echo "  bench-lint          cargo fmt --check + cargo clippy (sng-bench)"
+	@echo "  bench-regression    Micro-SKU forwarding regression gate vs committed baseline"
+	@echo ""
 	@echo "Combined:"
 	@echo "  build               build-go + build-rust"
 	@echo "  test                test-go + test-rust"
@@ -123,6 +129,51 @@ lint-rust:
 	else \
 		echo "lint-rust: Cargo.toml not present yet; skipping"; \
 	fi
+
+# --- Throughput benchmarks (WS3) -------------------------------------------
+# The forwarding-benchmark harness lives in its own Cargo workspace under
+# bench/ (excluded from the root workspace: it pulls the enforcement crates
+# in as path deps and ships its own binaries), so the build/test/lint-rust
+# targets above — which run `--workspace` against the root manifest — never
+# touch it. These targets gate it explicitly, and the CI
+# throughput-regression job calls `bench-regression` so local == CI.
+BENCH_MANIFEST   := bench/Cargo.toml
+BENCH_BIN        := bench/target/release/sng-bench
+MICRO_PROFILE    := bench/profiles/skus/micro.toml
+MICRO_BASELINE   := bench/results/forwarding-micro.json
+# Written under bench/target/ (gitignored) so the gate leaves no untracked
+# files behind.
+MICRO_CURRENT    := bench/target/forwarding-micro.current.json
+# Maximum tolerated drift in the hardware-invariant ratios before the gate
+# fails the build. 15% absorbs runner noise while still catching a real
+# per-stage cost or fast-path-advantage regression.
+BENCH_THRESHOLD  := 0.15
+
+.PHONY: bench-lint
+bench-lint:
+	$(CARGO) fmt --manifest-path $(BENCH_MANIFEST) --all -- --check
+	$(CARGO) clippy --manifest-path $(BENCH_MANIFEST) --all-targets -- -D warnings
+
+.PHONY: bench-test
+bench-test:
+	$(CARGO) test --manifest-path $(BENCH_MANIFEST) --all-targets
+
+.PHONY: bench-build
+bench-build:
+	$(CARGO) build --release --manifest-path $(BENCH_MANIFEST)
+
+# Forwarding-throughput regression gate (Micro SKU). Re-runs the sweep on
+# this host and compares hardware-invariant ratios against the committed
+# baseline; the compare exits non-zero (code 2) and fails the build if any
+# mode/backend regresses beyond BENCH_THRESHOLD. Refresh the baseline
+# deliberately (see docs/throughput-skus.md) for an intentional change.
+.PHONY: bench-regression
+bench-regression: bench-build
+	$(BENCH_BIN) forwarding --profile $(MICRO_PROFILE) --out $(MICRO_CURRENT)
+	$(BENCH_BIN) forwarding-compare \
+		--baseline $(MICRO_BASELINE) \
+		--current $(MICRO_CURRENT) \
+		--threshold $(BENCH_THRESHOLD)
 
 # --- Combined --------------------------------------------------------------
 

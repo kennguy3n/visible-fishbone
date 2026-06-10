@@ -19,6 +19,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
+use sng_fw::TrafficClass;
 
 use crate::competitor::{self, InspectionDepth};
 use crate::report::{BenchMode, BenchmarkReport, ReportError};
@@ -41,6 +42,146 @@ pub struct SkuProfile {
     pub nic_gbps: f64,
     /// Published acceptance target throughput in Gbps.
     pub target_gbps: f64,
+    /// Number of NIC receive queues (RSS rings) the SKU pins. `None`
+    /// means "one queue per vCPU" — the default the datapath sweep
+    /// assumes. Recorded so a published throughput number names the
+    /// fan-out it was measured at and a re-run is reproducible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nic_queues: Option<u32>,
+    /// Reproducible datapath forwarding-benchmark parameters: the
+    /// synthetic rule count, representative frame size, and per-loop
+    /// sample size this SKU drives. Defaults ([`DatapathParams::default`])
+    /// keep the existing profiles valid without a `[datapath]` table.
+    #[serde(default)]
+    pub datapath: DatapathParams,
+    /// The per-traffic-class weighting used to compose the forwarding
+    /// sweep's packet stream for this SKU. Defaults to an enterprise-
+    /// representative mix ([`TrafficMix::default`]) so the existing
+    /// profiles remain valid without a `[traffic_mix]` table.
+    #[serde(default)]
+    pub traffic_mix: TrafficMix,
+}
+
+impl SkuProfile {
+    /// NIC receive-queue count the SKU is benchmarked at: the pinned
+    /// [`Self::nic_queues`] when set, otherwise one queue per vCPU (the
+    /// RSS default a stock multi-queue NIC programs).
+    #[must_use]
+    pub fn effective_nic_queues(&self) -> u32 {
+        self.nic_queues.unwrap_or(self.vcpus).max(1)
+    }
+}
+
+/// Reproducible parameters for the in-process datapath forwarding
+/// benchmark, pinned per SKU so two runs of the same profile drive the
+/// identical synthetic workload.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DatapathParams {
+    /// Number of L3/L4 policy rules in the synthetic ruleset the
+    /// forwarding decision walks.
+    pub rule_count: usize,
+    /// Representative on-wire frame size in bytes. Converts a measured
+    /// packets-per-second figure into the bits-per-second (Gbps) the
+    /// published table quotes.
+    pub packet_bytes: u32,
+    /// Packets evaluated per `(mode, backend)` measurement loop. Larger
+    /// SKUs use a larger sample so the per-packet timing is stable.
+    pub sample_packets: usize,
+}
+
+impl Default for DatapathParams {
+    fn default() -> Self {
+        // A mid-complexity ruleset, a standard 1500-byte MTU frame, and a
+        // sample large enough to time stably on a hosted runner without
+        // making the dry-run sweep slow.
+        Self {
+            rule_count: 256,
+            packet_bytes: 1500,
+            sample_packets: 200_000,
+        }
+    }
+}
+
+/// Relative weighting of the six steering tiers
+/// (`sng_fw::TrafficClass`) in a SKU's representative traffic. Weights
+/// are relative — they need not sum to 1.0; the harness normalises them.
+/// Every tier is named explicitly so the mix is auditable and a run is
+/// reproducible.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrafficMix {
+    /// `trusted_direct` — DNS + cert-pinned, no proxy, no decrypt.
+    pub trusted_direct: f64,
+    /// `trusted_media_bypass` — trusted, telemetry-sampled media.
+    pub trusted_media_bypass: f64,
+    /// `inspect_lite` — DNS + URL-category, no TLS decrypt.
+    pub inspect_lite: f64,
+    /// `inspect_full` — full SWG with TLS decrypt, AV, IPS, DLP.
+    pub inspect_full: f64,
+    /// `tunnel_private` — mTLS overlay to a tenant-private destination.
+    pub tunnel_private: f64,
+    /// `block` — refused at the earliest enforcement point.
+    pub block: f64,
+}
+
+impl Default for TrafficMix {
+    fn default() -> Self {
+        // An enterprise-representative SME mix: most bytes are trusted
+        // SaaS / media that ride the fast path, a meaningful slice needs
+        // full inspection, a little is ZTNA-tunnelled, and a small tail
+        // is blocked outright. Relative weights (sum = 100) for legible
+        // TOML.
+        Self {
+            trusted_direct: 35.0,
+            trusted_media_bypass: 20.0,
+            inspect_lite: 15.0,
+            inspect_full: 22.0,
+            tunnel_private: 5.0,
+            block: 3.0,
+        }
+    }
+}
+
+impl TrafficMix {
+    /// The raw (un-normalised) weight configured for a class. Clamped at
+    /// zero so a negative TOML value cannot make a class "subtract" from
+    /// the stream.
+    #[must_use]
+    pub fn weight(&self, class: TrafficClass) -> f64 {
+        let w = match class {
+            TrafficClass::TrustedDirect => self.trusted_direct,
+            TrafficClass::TrustedMediaBypass => self.trusted_media_bypass,
+            TrafficClass::InspectLite => self.inspect_lite,
+            TrafficClass::InspectFull => self.inspect_full,
+            TrafficClass::TunnelPrivate => self.tunnel_private,
+            TrafficClass::Block => self.block,
+        };
+        w.max(0.0)
+    }
+
+    /// Sum of every class weight.
+    #[must_use]
+    pub fn total_weight(&self) -> f64 {
+        TrafficClass::all()
+            .into_iter()
+            .map(|c| self.weight(c))
+            .sum()
+    }
+
+    /// The mix as normalised fractions in canonical [`TrafficClass::all`]
+    /// order, each in `0.0..=1.0` and summing to 1.0. A degenerate
+    /// all-zero mix falls back to a uniform split so the harness never
+    /// divides by zero or produces an empty stream.
+    #[must_use]
+    pub fn normalized(&self) -> [(TrafficClass, f64); 6] {
+        let total = self.total_weight();
+        let classes = TrafficClass::all();
+        if total <= 0.0 {
+            let uniform = 1.0 / classes.len() as f64;
+            return classes.map(|c| (c, uniform));
+        }
+        classes.map(|c| (c, self.weight(c) / total))
+    }
 }
 
 /// One SKU's profile paired with every report measured against it.
@@ -492,6 +633,9 @@ mod tests {
             ram_gb: 8,
             nic_gbps: 10.0,
             target_gbps: 2.0,
+            nic_queues: None,
+            datapath: DatapathParams::default(),
+            traffic_mix: TrafficMix::default(),
         }
     }
 

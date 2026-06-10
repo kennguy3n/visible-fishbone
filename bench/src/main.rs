@@ -12,6 +12,7 @@
 //! craft + measure + report pipeline in-process without privileges, which
 //! is what makes the harness self-testable on an unprivileged CI runner.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -75,6 +76,15 @@ enum Command {
     /// Sweep every profile across all modes, packet sizes, and inspection
     /// depths and emit one consolidated business/RFP datasheet.
     BusinessReport(BusinessReportArgs),
+    /// Run the forwarding-mode sweep (raw-L3 / NGFW / full-stack /
+    /// full-stack+TLS, nftables vs XDP, per traffic class) for one SKU
+    /// profile and emit the JSON artifact.
+    Forwarding(ForwardingArgs),
+    /// Sweep every SKU profile in a directory and render the published
+    /// throughput document (`docs/throughput-skus.md`).
+    ForwardingDoc(ForwardingDocArgs),
+    /// Compare two forwarding artifacts and fail (exit 2) on a regression.
+    ForwardingCompare(ForwardingCompareArgs),
 }
 
 /// IP version selector for the CLI.
@@ -291,6 +301,59 @@ struct CompareArgs {
     concurrent_flows_drop: f64,
 }
 
+#[derive(Debug, Args)]
+struct ForwardingArgs {
+    /// Path to the edge-SKU profile TOML.
+    #[arg(long, env = "SNG_BENCH_PROFILE")]
+    profile: PathBuf,
+
+    /// Packets per measurement. `0` uses the profile's `[datapath]`
+    /// `sample_packets`.
+    #[arg(long, default_value_t = 0)]
+    sample_packets: usize,
+
+    /// Where to write the JSON artifact. Omitted prints to stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+
+    /// Git commit recorded in the artifact.
+    #[arg(long, env = "SNG_BENCH_GIT_SHA")]
+    git_sha: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ForwardingDocArgs {
+    /// Directory of SKU profile TOMLs to sweep, in name order.
+    #[arg(long, default_value = "bench/profiles/skus")]
+    profiles_dir: PathBuf,
+
+    /// Packets per measurement. `0` uses each profile's `sample_packets`.
+    #[arg(long, default_value_t = 0)]
+    sample_packets: usize,
+
+    /// Output markdown path.
+    #[arg(long, default_value = "docs/throughput-skus.md")]
+    out: PathBuf,
+
+    /// Git commit recorded in the document.
+    #[arg(long, env = "SNG_BENCH_GIT_SHA")]
+    git_sha: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ForwardingCompareArgs {
+    /// Committed baseline forwarding artifact.
+    #[arg(long)]
+    baseline: PathBuf,
+    /// Current forwarding artifact.
+    #[arg(long)]
+    current: PathBuf,
+    /// Fractional rise in normalised per-packet cost (or drop in fast-path
+    /// speedup) that counts as a regression.
+    #[arg(long, default_value_t = 0.15)]
+    threshold: f64,
+}
+
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     match run(cli) {
@@ -313,8 +376,323 @@ fn run(cli: Cli) -> Result<std::process::ExitCode, BenchError> {
         Command::ConcurrentFlows(args) => run_mode(BenchMode::ConcurrentFlows, &args),
         Command::Compare(args) => run_compare(&args),
         Command::BusinessReport(args) => run_business_report(&args),
+        Command::Forwarding(args) => run_forwarding(&args),
+        Command::ForwardingDoc(args) => run_forwarding_doc(&args),
+        Command::ForwardingCompare(args) => run_forwarding_compare(&args),
     }
 }
+
+/// Effective packets-per-measurement: an explicit `--sample-packets`
+/// override, else the profile's `[datapath] sample_packets`.
+fn effective_sample_packets(profile: &SkuProfile, override_count: usize) -> usize {
+    if override_count > 0 {
+        override_count
+    } else {
+        profile.datapath.sample_packets
+    }
+}
+
+/// Run a forwarding sweep for one profile and assemble the report.
+fn sweep_profile(
+    profile: &SkuProfile,
+    sample_packets: usize,
+    git_sha: Option<String>,
+) -> report::ForwardingReport {
+    use sng_bench::datapath::{Backend, ForwardingHarness, ForwardingMode};
+
+    let packet_bytes = profile.datapath.packet_bytes;
+    // The harness measures one core. A SKU forwards across `nic_queues`
+    // RSS rings (one per vCPU when unset), and the WS1 XDP fast path scales
+    // per-queue, so each core only has to carry its share of the box's
+    // published target. The headroom column therefore compares the measured
+    // per-core rate against the *per-core* target share, not the whole-box
+    // figure — otherwise every multi-core SKU would read ~0% headroom.
+    let fan_out = f64::from(profile.effective_nic_queues());
+    let target_pps_per_core = if packet_bytes == 0 {
+        0.0
+    } else {
+        profile.target_gbps * 1e9 / (f64::from(packet_bytes) * 8.0) / fan_out
+    };
+    let headroom = |pps: f64| -> f64 {
+        if pps <= 0.0 || target_pps_per_core <= 0.0 {
+            0.0
+        } else {
+            (1.0 - target_pps_per_core / pps).max(0.0)
+        }
+    };
+
+    let harness = ForwardingHarness::new(profile.datapath.rule_count);
+    let sweep = harness.sweep(&profile.traffic_mix, sample_packets);
+
+    let mut measurements = Vec::with_capacity(sweep.results.len());
+    for mode in ForwardingMode::all() {
+        for backend in Backend::all() {
+            if let Some(r) = sweep.get(mode, backend) {
+                let pps = r.packets_per_sec();
+                measurements.push(report::ForwardingMeasurement {
+                    mode: mode.label().to_string(),
+                    backend: backend.label().to_string(),
+                    packets: r.packets,
+                    pps,
+                    gbps: r.gbps(packet_bytes),
+                    p50_ns: r.p50_ns,
+                    p99_ns: r.p99_ns,
+                    cpu_headroom: headroom(pps),
+                });
+            }
+        }
+    }
+
+    let per_class = sweep
+        .per_class
+        .iter()
+        .map(|c| report::ForwardingClassMeasurement {
+            class: c.class.as_str().to_string(),
+            packets: c.packets,
+            pps: c.packets_per_sec(),
+            gbps: c.gbps(packet_bytes),
+            p50_ns: c.p50_ns,
+            p99_ns: c.p99_ns,
+        })
+        .collect();
+
+    report::ForwardingReport {
+        schema_version: report::FORWARDING_SCHEMA_VERSION,
+        profile: profile.name.clone(),
+        unix_time_secs: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        git_sha,
+        rule_count: sweep.rule_count,
+        packet_bytes,
+        sample_packets,
+        measurements,
+        per_class,
+    }
+}
+
+fn run_forwarding(args: &ForwardingArgs) -> Result<std::process::ExitCode, BenchError> {
+    let profile = load_profile(&args.profile)?;
+    let sample_packets = effective_sample_packets(&profile, args.sample_packets);
+    let report = sweep_profile(&profile, sample_packets, args.git_sha.clone());
+    let json = report.to_json()?;
+    if let Some(out) = &args.out {
+        write_file(out, &json)?;
+        eprintln!("wrote {}", out.display());
+    } else {
+        println!("{json}");
+    }
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn run_forwarding_doc(args: &ForwardingDocArgs) -> Result<std::process::ExitCode, BenchError> {
+    let mut profiles = load_profiles_dir(&args.profiles_dir)?;
+    // Publish smallest SKU first; `load_profiles_dir` returns file-name
+    // order (large, medium, micro, small), which reads backwards.
+    profiles.sort_by(|a, b| a.vcpus.cmp(&b.vcpus).then_with(|| a.name.cmp(&b.name)));
+    let mut reports = Vec::with_capacity(profiles.len());
+    for profile in &profiles {
+        let sample_packets = effective_sample_packets(profile, args.sample_packets);
+        reports.push(sweep_profile(profile, sample_packets, args.git_sha.clone()));
+    }
+    let doc = render_forwarding_doc(&reports, args.git_sha.as_deref());
+    write_file(&args.out, &doc)?;
+    eprintln!("wrote {}", args.out.display());
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn run_forwarding_compare(
+    args: &ForwardingCompareArgs,
+) -> Result<std::process::ExitCode, BenchError> {
+    let baseline = load_forwarding_report(&args.baseline)?;
+    let current = load_forwarding_report(&args.current)?;
+    let rr = report::detect_forwarding_regression(&baseline, &current, args.threshold)
+        .map_err(BenchError::Regression)?;
+    if rr.has_regression() {
+        eprintln!(
+            "FORWARDING REGRESSION DETECTED (profile {}, threshold {:.0}%):",
+            current.profile,
+            args.threshold * 100.0
+        );
+        for r in &rr.regressions {
+            eprintln!(
+                "  {} {:.4} -> {:.4} ({:+.1}%)",
+                r.metric,
+                r.previous,
+                r.current,
+                r.change_fraction * 100.0
+            );
+        }
+        Ok(std::process::ExitCode::from(EXIT_REGRESSION))
+    } else {
+        println!(
+            "no forwarding regression: profile {} within {:.0}% threshold",
+            current.profile,
+            args.threshold * 100.0
+        );
+        Ok(std::process::ExitCode::SUCCESS)
+    }
+}
+
+fn load_forwarding_report(path: &Path) -> Result<report::ForwardingReport, BenchError> {
+    let s = std::fs::read_to_string(path).map_err(|source| BenchError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    Ok(report::ForwardingReport::from_json(&s)?)
+}
+
+/// Assemble the full `docs/throughput-skus.md`: methodology and
+/// reproduction prose (static) followed by every SKU's measured tables.
+fn render_forwarding_doc(reports: &[report::ForwardingReport], git_sha: Option<&str>) -> String {
+    let mut doc = String::from(FORWARDING_DOC_PREAMBLE);
+    doc.push_str("\n## Published throughput\n\n");
+    if let Some(sha) = git_sha {
+        let _ = writeln!(doc, "Measured at revision `{sha}`.");
+        let _ = writeln!(doc);
+    }
+    for r in reports {
+        doc.push_str(&r.to_markdown());
+    }
+    doc.push_str(FORWARDING_DOC_REGRESSION);
+    doc
+}
+
+fn write_file(path: &Path, contents: &str) -> Result<(), BenchError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|source| BenchError::Io {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+    std::fs::write(path, contents).map_err(|source| BenchError::Io {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
+/// Static methodology/reproduction prose that opens
+/// `docs/throughput-skus.md`. The measured tables are appended after it.
+const FORWARDING_DOC_PREAMBLE: &str = r#"# Throughput by SKU
+
+<!--
+  GENERATED FILE — do not edit the tables by hand.
+  Regenerate from the repo root with:
+    cargo run --manifest-path bench/Cargo.toml --release -- forwarding-doc \
+      --profiles-dir bench/profiles/skus --out docs/throughput-skus.md \
+      --git-sha "$(git rev-parse --short HEAD)"
+-->
+
+This document publishes the per-SKU forwarding throughput of the ShieldNet
+Gateway edge data path. It is produced by the `sng-bench` harness driving
+the **real** enforcement code paths — the same `FirewallEngine`,
+`XdpRuleSet` (WS1 eBPF/XDP fast path), L7 `AppIdentifier`/`SniExtractor`,
+Aho-Corasick IPS/DLP multi-pattern matcher, and `ring` AES-256-GCM TLS
+record opener the gateway ships — over a deterministic synthetic flow pool.
+No number below is hand-entered or extrapolated.
+
+## Forwarding modes
+
+Each SKU is swept across four cumulative inspection depths:
+
+| Mode | Stages run |
+| --- | --- |
+| `raw-l3` | L3/L4 forwarding decision only (XDP rule match or engine verdict). |
+| `ngfw-verdict` | Stateful NGFW verdict (5-tuple policy + connection tracking). |
+| `full-stack` | NGFW + L7 app-id + URL categorization + IPS/DLP content scan + malware reputation. |
+| `full-stack-tls` | Full stack with TLS decrypt: SNI extraction, decrypt decision, AES-256-GCM record opening, then cleartext content scan. |
+
+For each mode we measure both forwarding substrates — the **nftables**
+userspace slow path (`FirewallEngine`) and the **XDP** fast path
+(`XdpRuleSet`) from WS1 — so the published headline figures reflect the
+shipping fast path while the toggle quantifies its advantage. The
+`full-stack-tls` mode is additionally broken down across the six-tier
+traffic-class taxonomy (`trusted_direct`, `trusted_media_bypass`,
+`inspect_lite`, `inspect_full`, `tunnel_private`, `block`) weighted by each
+profile's configured mix.
+
+## Methodology
+
+* **Profiles.** SKUs are pinned in `bench/profiles/skus/{micro,small,medium,large}.toml`
+  (2 / 4 / 8 / 16 vCPU, matching the `commodity.rs` baseline). Each profile
+  fixes the vCPU/RAM/NIC assumptions, the synthetic policy `rule_count`, the
+  representative `packet_bytes`, the `sample_packets` per measurement, and
+  the traffic mix, so a run is fully reproducible from the file alone.
+* **Throughput.** Wall-clock time to push `sample_packets` through the
+  pipeline; `pps = packets / elapsed`. `Gbps` converts at the profile's
+  representative frame size (`pps × packet_bytes × 8`). The harness drives a
+  single core, so these are **per-core** fast-path rates; the WS1 XDP path
+  scales per RSS queue, so the box aggregate is approximately the figure
+  times the SKU's `nic_queues` fan-out.
+* **Latency.** Per-packet service time sampled in fixed brackets so timer
+  overhead amortises away, fed to an HDR-style histogram; `p50`/`p99` are
+  read from it.
+* **CPU headroom.** `1 − target_share_pps / measured_pps`, floored at zero,
+  where `target_share_pps` is the SKU's published `target_gbps` divided
+  across its `nic_queues` fan-out (one queue per vCPU when unset) at the
+  representative frame size. It is each core's spare decision capacity over
+  its share of the committed box target — comparing a per-core measurement
+  to a whole-box target would read ~0% on every multi-core SKU.
+
+## How to reproduce
+
+```sh
+# (sng-bench is a standalone workspace, hence --manifest-path; run from
+#  the repo root so the relative paths below resolve.)
+
+# One SKU → JSON artifact (used as the CI baseline):
+cargo run --manifest-path bench/Cargo.toml --release -- forwarding \
+  --profile bench/profiles/skus/micro.toml --out bench/results/forwarding-micro.json
+
+# All SKUs → regenerate this document:
+cargo run --manifest-path bench/Cargo.toml --release -- forwarding-doc \
+  --profiles-dir bench/profiles/skus --out docs/throughput-skus.md \
+  --git-sha "$(git rev-parse --short HEAD)"
+```
+
+Absolute figures scale with the host; the run is deterministic in shape
+(flow pool, rule walk, and per-class weighting are seeded), so ratios
+between modes/backends are stable across machines. That invariance is what
+the regression gate keys on.
+"#;
+
+/// Static regression-detection section appended after the measured tables.
+const FORWARDING_DOC_REGRESSION: &str = r"## Regression detection
+
+CI gates on the **Micro** profile (`.github/workflows/throughput-regression.yml`).
+On every push/PR it rebuilds the sweep and compares it against the committed
+baseline `bench/results/forwarding-micro.json` with:
+
+```sh
+cargo run --manifest-path bench/Cargo.toml --release -- forwarding \
+  --profile bench/profiles/skus/micro.toml --out /tmp/forwarding-micro.json
+cargo run --manifest-path bench/Cargo.toml --release -- forwarding-compare \
+  --baseline bench/results/forwarding-micro.json \
+  --current  /tmp/forwarding-micro.json \
+  --threshold 0.15
+```
+
+The comparison is **hardware-invariant** — it never diffs two absolute
+throughput numbers (which drift with the runner). Instead it diffs
+dimensionless ratios:
+
+1. **Per-mode normalised cost.** For every `(mode, backend)` it computes
+   `ns_per_packet(mode) / ns_per_packet(raw-l3, xdp)` and flags a regression
+   when that ratio rises by more than the threshold — i.e. a stage (NGFW,
+   IPS, TLS, …) became disproportionately more expensive relative to the
+   line-rate fast path.
+2. **Fast-path advantage.** It tracks the raw-L3 `xdp / nftables` speedup and
+   flags a regression when it drops by more than the threshold — catching a
+   fast-path that lost ground against the engine, the one regression a
+   relative-cost check anchored on the fast path cannot see on its own.
+
+A flagged regression exits non-zero (code 2) and fails the build. Refresh
+the baseline deliberately — by re-running the `forwarding` command above and
+committing the updated JSON — when a change is an intentional, understood
+shift.
+";
 
 fn run_compare(args: &CompareArgs) -> Result<std::process::ExitCode, BenchError> {
     let baseline = load_report(&args.baseline)?;
@@ -896,6 +1274,7 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sng_bench::business_report::{DatapathParams, TrafficMix};
 
     #[test]
     fn pacer_releases_at_target_rate() {
@@ -958,6 +1337,9 @@ mod tests {
             ram_gb: 8,
             nic_gbps: 10.0,
             target_gbps: 5.0,
+            nic_queues: None,
+            datapath: DatapathParams::default(),
+            traffic_mix: TrafficMix::default(),
         }
     }
 
@@ -1000,5 +1382,39 @@ mod tests {
         let profiles = load_profiles_dir(Path::new("profiles")).unwrap();
         assert!(profiles.iter().any(|p| p.name == "cloud-pop-small"));
         assert!(profiles.len() >= 4, "expected the committed profile set");
+        // The `skus/` subdirectory is not a TOML file, so the acceptance
+        // profile sweep must not descend into it.
+        assert!(profiles.iter().all(|p| p.name != "micro"));
+    }
+
+    #[test]
+    fn sku_profiles_pin_datapath_and_traffic_mix() {
+        let profiles = load_profiles_dir(Path::new("profiles/skus")).unwrap();
+        let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["large", "medium", "micro", "small"]);
+        for p in &profiles {
+            // Each WS3 SKU pins its datapath sizing and a normalisable
+            // traffic mix, so a sweep is reproducible from the file alone.
+            assert!(p.datapath.rule_count > 0, "{} pins a rule count", p.name);
+            assert!(
+                p.datapath.sample_packets > 0,
+                "{} pins a packet budget",
+                p.name
+            );
+            assert!(p.datapath.packet_bytes > 0, "{} pins a frame size", p.name);
+            // The pinned mix normalises to a proper distribution.
+            let weights = p.traffic_mix.normalized();
+            let sum: f64 = weights.iter().map(|(_, w)| w).sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-9,
+                "{} traffic mix normalises to 1.0 (got {sum})",
+                p.name
+            );
+            assert!(
+                weights.iter().any(|(_, w)| *w > 0.0),
+                "{} has a positive-weight traffic mix",
+                p.name
+            );
+        }
     }
 }

@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "profile": "micro",
+  "unix_time_secs": 1781064561,
+  "git_sha": "8e66a68",
+  "rule_count": 128,
+  "packet_bytes": 1500,
+  "sample_packets": 100000,
+  "measurements": [
+    {
+      "mode": "raw-l3",
+      "backend": "nftables",
+      "packets": 100000,
+      "pps": 517512.35681073513,
+      "gbps": 6.210148281728822,
+      "p50_ns": 1938,
+      "p99_ns": 3007,
+      "cpu_headroom": 0.9355892996666667
+    },
+    {
+      "mode": "raw-l3",
+      "backend": "xdp",
+      "packets": 100000,
+      "pps": 3229727.236293013,
+      "gbps": 38.75672683551616,
+      "p50_ns": 382,
+      "p99_ns": 623,
+      "cpu_headroom": 0.989679211
+    },
+    {
+      "mode": "ngfw-verdict",
+      "backend": "nftables",
+      "packets": 100000,
+      "pps": 533876.4237523244,
+      "gbps": 6.406517085027893,
+      "p50_ns": 1930,
+      "p99_ns": 2931,
+      "cpu_headroom": 0.9375635786666666
+    },
+    {
+      "mode": "ngfw-verdict",
+      "backend": "xdp",
+      "packets": 100000,
+      "pps": 466740.7648746956,
+      "gbps": 5.600889178496347,
+      "p50_ns": 2291,
+      "p99_ns": 3935,
+      "cpu_headroom": 0.9285827683333333
+    },
+    {
+      "mode": "full-stack",
+      "backend": "nftables",
+      "packets": 100000,
+      "pps": 491005.7637840895,
+      "gbps": 5.892069165409074,
+      "p50_ns": 2125,
+      "p99_ns": 4559,
+      "cpu_headroom": 0.9321121343333333
+    },
+    {
+      "mode": "full-stack",
+      "backend": "xdp",
+      "packets": 100000,
+      "pps": 403135.9526495216,
+      "gbps": 4.837631431794259,
+      "p50_ns": 2463,
+      "p99_ns": 4723,
+      "cpu_headroom": 0.917314908
+    },
+    {
+      "mode": "full-stack-tls",
+      "backend": "nftables",
+      "packets": 100000,
+      "pps": 316689.5443721337,
+      "gbps": 3.8002745324656044,
+      "p50_ns": 2131,
+      "p99_ns": 9711,
+      "cpu_headroom": 0.8947444463333333
+    },
+    {
+      "mode": "full-stack-tls",
+      "backend": "xdp",
+      "packets": 100000,
+      "pps": 292493.2419655814,
+      "gbps": 3.5099189035869767,
+      "p50_ns": 2459,
+      "p99_ns": 9775,
+      "cpu_headroom": 0.886037253
+    }
+  ],
+  "per_class": [
+    {
+      "class": "trusted_direct",
+      "packets": 100000,
+      "pps": 419354.68828309246,
+      "gbps": 5.032256259397109,
+      "p50_ns": 2377,
+      "p99_ns": 3771
+    },
+    {
+      "class": "trusted_media_bypass",
+      "packets": 100000,
+      "pps": 410535.1396156934,
+      "gbps": 4.926421675388321,
+      "p50_ns": 2417,
+      "p99_ns": 3823
+    },
+    {
+      "class": "inspect_lite",
+      "packets": 100000,
+      "pps": 344694.02796845965,
+      "gbps": 4.136328335621516,
+      "p50_ns": 2875,
+      "p99_ns": 4291
+    },
+    {
+      "class": "inspect_full",
+      "packets": 100000,
+      "pps": 117612.24324728336,
+      "gbps": 1.4113469189674004,
+      "p50_ns": 8535,
+      "p99_ns": 11863
+    },
+    {
+      "class": "tunnel_private",
+      "packets": 100000,
+      "pps": 361245.4977476903,
+      "gbps": 4.3349459729722835,
+      "p50_ns": 2801,
+      "p99_ns": 4507
+    },
+    {
+      "class": "block",
+      "packets": 100000,
+      "pps": 1661929.6685324486,
+      "gbps": 19.94315602238938,
+      "p50_ns": 588,
+      "p99_ns": 916
+    }
+  ]
+}
