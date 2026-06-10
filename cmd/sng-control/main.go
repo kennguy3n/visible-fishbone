@@ -1575,6 +1575,33 @@ func (m meteringTierResolver) TenantTier(ctx context.Context, tenantID uuid.UUID
 	return t.Tier, nil
 }
 
+// TenantTiersBatch resolves the tier of many tenants for the metering
+// batch path (the platform-wide cost report). The TenantRepository
+// exposes no batched primitive and adding one would touch the shared
+// repository interface that other parallel sessions also edit, so this
+// is a metering-local wrapper that resolves each tenant via the same
+// per-tenant Get the single-tenant TenantTier already uses — keeping
+// RLS scoping and lookup semantics identical. It still collapses the
+// metering loop's two-lookups-per-tenant into one batched call here and
+// one batched override query in the store, removing the per-tenant
+// budget round trip that dominated control-plane DB load. Duplicate ids
+// are resolved once; any lookup error aborts the batch so the report
+// never builds on a partially resolved tier set.
+func (m meteringTierResolver) TenantTiersBatch(ctx context.Context, tenantIDs []uuid.UUID) (map[uuid.UUID]repository.TenantTier, error) {
+	out := make(map[uuid.UUID]repository.TenantTier, len(tenantIDs))
+	for _, id := range tenantIDs {
+		if _, done := out[id]; done {
+			continue
+		}
+		t, err := m.tenants.Get(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("metering: resolve tenant tier %s: %w", id, err)
+		}
+		out[id] = t.Tier
+	}
+	return out, nil
+}
+
 // tenantRegionResolver adapts the TenantRepository onto the region
 // resolver used by both the PoP service (to bias assignment toward a
 // tenant's region-group cloud fleet) and the appdb service (to scope

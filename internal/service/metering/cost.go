@@ -761,6 +761,14 @@ type currentUsageReader interface {
 // satisfied by *BudgetEnforcer.
 type resolvedBudgetReader interface {
 	TenantBudgets(ctx context.Context, tenantID uuid.UUID) (map[Meter]BudgetLimit, error)
+	// TenantBudgetsBatch resolves the effective per-meter limits for
+	// many tenants in a bounded number of queries instead of one round
+	// trip per tenant. The result is keyed by tenant id; every id in
+	// the input appears in the output (a tenant with no overrides still
+	// maps to its tier/global defaults), so callers can index the map
+	// directly without a presence check. Each value is a private copy
+	// the caller may mutate freely, matching TenantBudgets.
+	TenantBudgetsBatch(ctx context.Context, tenantIDs []uuid.UUID) (map[uuid.UUID]map[Meter]BudgetLimit, error)
 }
 
 // platformUsageReader returns the current-period usage of every
@@ -810,6 +818,15 @@ func WithNATSStreamSizer(s NATSStreamSizer) ReportsOption {
 	return func(r *Reports) {
 		if s != nil {
 			r.natsSizer = s
+		}
+	}
+}
+
+// withReportsClock overrides the wall clock; test-only.
+func withReportsClock(now func() time.Time) ReportsOption {
+	return func(r *Reports) {
+		if now != nil {
+			r.now = now
 		}
 	}
 }
@@ -924,17 +941,24 @@ func (r *Reports) PlatformReport(ctx context.Context) (PlatformCostReport, error
 		}
 		byTenant[row.TenantID] = append(byTenant[row.TenantID], row)
 	}
+	// Resolve every tenant's tier and budgets up front in a bounded
+	// number of queries (one batched tier lookup + one batched budget
+	// lookup) instead of the two round trips per tenant the per-tenant
+	// TenantTier/TenantBudgets calls incurred inside the loop — the
+	// N+1 that dominated control-plane DB load at scale. A batch lookup
+	// failure aborts the whole report exactly as a per-tenant failure
+	// did, so a finance operator never sees a silently partial total.
+	tiers, err := r.tiers.TenantTiersBatch(ctx, order)
+	if err != nil {
+		return PlatformCostReport{}, fmt.Errorf("metering: reports: platform tiers: %w", err)
+	}
+	limitsByTenant, err := r.budgets.TenantBudgetsBatch(ctx, order)
+	if err != nil {
+		return PlatformCostReport{}, fmt.Errorf("metering: reports: platform budgets: %w", err)
+	}
 	rep := PlatformCostReport{GeneratedAt: now}
 	for _, tenantID := range order {
-		tier, err := r.tiers.TenantTier(ctx, tenantID)
-		if err != nil {
-			return PlatformCostReport{}, fmt.Errorf("metering: reports: platform tier %s: %w", tenantID, err)
-		}
-		limits, err := r.budgets.TenantBudgets(ctx, tenantID)
-		if err != nil {
-			return PlatformCostReport{}, fmt.Errorf("metering: reports: platform budgets %s: %w", tenantID, err)
-		}
-		tr := r.calc.BuildReport(tenantID, tier, byTenant[tenantID], limits)
+		tr := r.calc.BuildReport(tenantID, tiers[tenantID], byTenant[tenantID], limitsByTenant[tenantID])
 		rep.Tenants = append(rep.Tenants, tr)
 		rep.TotalCostUSD += tr.TotalCostUSD
 		rep.ProjectedMonthlyCostUSD += tr.ProjectedMonthlyCostUSD

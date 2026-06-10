@@ -1,7 +1,9 @@
 package metering
 
 import (
+	"bytes"
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -22,13 +24,16 @@ type fakeStore struct {
 	budgets map[uuid.UUID]map[Meter]BudgetLimit
 
 	// Error injection knobs (nil => succeed).
-	failBatch         error
-	failTenantBudgets error
-	failUpsertBudgets error
-	failPlatform      error
+	failBatch              error
+	failTenantBudgets      error
+	failTenantBudgetsBatch error
+	failUpsertBudgets      error
+	failPlatform           error
 
 	// Call counters for assertions.
-	batchCalls int
+	batchCalls              int
+	tenantBudgetsCalls      int
+	tenantBudgetsBatchCalls int
 }
 
 type usageKey struct {
@@ -125,20 +130,58 @@ func (f *fakeStore) PlatformCurrentUsage(_ context.Context, at time.Time) ([]Usa
 		}
 		out = append(out, row.record())
 	}
+	// Mirror the production query's `ORDER BY tenant_id, meter` so the
+	// platform report sees a deterministic first-seen tenant order
+	// (map iteration order is otherwise randomised per range).
+	sort.Slice(out, func(i, j int) bool {
+		if c := bytes.Compare(out[i].TenantID[:], out[j].TenantID[:]); c != 0 {
+			return c < 0
+		}
+		return out[i].Meter < out[j].Meter
+	})
 	return out, nil
 }
 
 func (f *fakeStore) TenantBudgets(_ context.Context, tenantID uuid.UUID) ([]BudgetLimit, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.tenantBudgetsCalls++
 	if f.failTenantBudgets != nil {
 		return nil, f.failTenantBudgets
 	}
+	return f.budgetsFor(tenantID), nil
+}
+
+// TenantBudgetsBatch mirrors the production system-scoped batch read:
+// one logical query returns every requested tenant's overrides. The
+// per-tenant slice is meter-ordered to match the single-tenant query's
+// deterministic ORDER BY, and a tenant with no overrides is absent from
+// the map (an empty set), exactly like the PostgresStore implementation.
+func (f *fakeStore) TenantBudgetsBatch(_ context.Context, tenantIDs []uuid.UUID) (map[uuid.UUID][]BudgetLimit, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tenantBudgetsBatchCalls++
+	if f.failTenantBudgetsBatch != nil {
+		return nil, f.failTenantBudgetsBatch
+	}
+	out := make(map[uuid.UUID][]BudgetLimit, len(tenantIDs))
+	for _, id := range tenantIDs {
+		if rows := f.budgetsFor(id); len(rows) > 0 {
+			out[id] = rows
+		}
+	}
+	return out, nil
+}
+
+// budgetsFor returns a tenant's override rows in meter order. Caller
+// must hold f.mu.
+func (f *fakeStore) budgetsFor(tenantID uuid.UUID) []BudgetLimit {
 	var out []BudgetLimit
 	for _, lim := range f.budgets[tenantID] {
 		out = append(out, lim)
 	}
-	return out, nil
+	sort.Slice(out, func(i, j int) bool { return out[i].Meter < out[j].Meter })
+	return out
 }
 
 func (f *fakeStore) UpsertTenantBudget(_ context.Context, tenantID uuid.UUID, limit BudgetLimit) error {
@@ -195,6 +238,21 @@ func (f fakeTiers) TenantTier(_ context.Context, tenantID uuid.UUID) (repository
 		return t, nil
 	}
 	return f.tier, nil
+}
+
+func (f fakeTiers) TenantTiersBatch(ctx context.Context, tenantIDs []uuid.UUID) (map[uuid.UUID]repository.TenantTier, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make(map[uuid.UUID]repository.TenantTier, len(tenantIDs))
+	for _, id := range tenantIDs {
+		t, err := f.TenantTier(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out[id] = t
+	}
+	return out, nil
 }
 
 // staticCurrent is a CurrentReader returning a fixed value, for budget
