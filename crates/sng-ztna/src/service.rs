@@ -396,10 +396,7 @@ impl ZtnaService {
     /// ([`ZtnaError::UnknownApp`], [`ZtnaError::DeviceNotEnrolled`],
     /// [`ZtnaError::IdentityNotFound`]); the re-eval loop maps each to
     /// the corresponding revocation reason.
-    pub fn evaluate_for_reeval(
-        &self,
-        request: &AccessRequest,
-    ) -> Result<ZtnaDecision, ZtnaError> {
+    pub fn evaluate_for_reeval(&self, request: &AccessRequest) -> Result<ZtnaDecision, ZtnaError> {
         self.evaluate_reported(request, EvalReport::Quiet)
     }
 
@@ -425,7 +422,13 @@ impl ZtnaService {
             // paths (UnknownApp / DeviceNotEnrolled / IdentityNotFound),
             // all of which report `false`; only a decision reached after
             // a successful identity resolution (step 4) reports `true`.
-            self.report_decision(report, &request.device_id, &request.app_id, &decision, false);
+            self.report_decision(
+                report,
+                &request.device_id,
+                &request.app_id,
+                &decision,
+                false,
+            );
             return Ok(decision);
         }
 

@@ -474,8 +474,7 @@ mod tests {
     fn settable_clock(now: u64) -> (ClockFn, Arc<std::sync::atomic::AtomicU64>) {
         let cell = Arc::new(std::sync::atomic::AtomicU64::new(now));
         let reader = cell.clone();
-        let clock: ClockFn =
-            Arc::new(move || reader.load(std::sync::atomic::Ordering::Relaxed));
+        let clock: ClockFn = Arc::new(move || reader.load(std::sync::atomic::Ordering::Relaxed));
         (clock, cell)
     }
 
