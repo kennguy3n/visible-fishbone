@@ -769,6 +769,13 @@ type resolvedBudgetReader interface {
 	// directly without a presence check. Each value is a private copy
 	// the caller may mutate freely, matching TenantBudgets.
 	TenantBudgetsBatch(ctx context.Context, tenantIDs []uuid.UUID) (map[uuid.UUID]map[Meter]BudgetLimit, error)
+	// TenantBudgetsBatchWithTiers is TenantBudgetsBatch for a caller
+	// that has already resolved each tenant's tier: it reuses the
+	// supplied tier map instead of resolving tiers again, so the
+	// platform report resolves tiers once rather than twice. The
+	// supplied tiers must cover every requested id. Results are
+	// identical to TenantBudgetsBatch in every other respect.
+	TenantBudgetsBatchWithTiers(ctx context.Context, tenantIDs []uuid.UUID, tiers map[uuid.UUID]repository.TenantTier) (map[uuid.UUID]map[Meter]BudgetLimit, error)
 }
 
 // platformUsageReader returns the current-period usage of every
@@ -941,18 +948,23 @@ func (r *Reports) PlatformReport(ctx context.Context) (PlatformCostReport, error
 		}
 		byTenant[row.TenantID] = append(byTenant[row.TenantID], row)
 	}
-	// Resolve every tenant's tier and budgets up front in a bounded
-	// number of queries (one batched tier lookup + one batched budget
-	// lookup) instead of the two round trips per tenant the per-tenant
-	// TenantTier/TenantBudgets calls incurred inside the loop — the
-	// N+1 that dominated control-plane DB load at scale. A batch lookup
-	// failure aborts the whole report exactly as a per-tenant failure
-	// did, so a finance operator never sees a silently partial total.
+	// Resolve every tenant's tier and budgets up front in exactly two
+	// batched lookups — one tier lookup and one override lookup —
+	// instead of the two round trips per tenant the per-tenant
+	// TenantTier/TenantBudgets calls incurred inside the loop (the N+1
+	// that dominated control-plane DB load at scale). The tier map is
+	// resolved once here and threaded into the budget batch via
+	// TenantBudgetsBatchWithTiers, so the budget enforcer does not
+	// resolve tiers a second time (tier resolution stays N, not 2N,
+	// round trips in production where the tier adapter has no batched
+	// primitive). A batch lookup failure aborts the whole report
+	// exactly as a per-tenant failure did, so a finance operator never
+	// sees a silently partial total.
 	tiers, err := r.tiers.TenantTiersBatch(ctx, order)
 	if err != nil {
 		return PlatformCostReport{}, fmt.Errorf("metering: reports: platform tiers: %w", err)
 	}
-	limitsByTenant, err := r.budgets.TenantBudgetsBatch(ctx, order)
+	limitsByTenant, err := r.budgets.TenantBudgetsBatchWithTiers(ctx, order, tiers)
 	if err != nil {
 		return PlatformCostReport{}, fmt.Errorf("metering: reports: platform budgets: %w", err)
 	}

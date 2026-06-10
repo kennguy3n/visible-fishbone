@@ -208,11 +208,71 @@ func TestPlatformReportBatchedIssuesBoundedLookups(t *testing.T) {
 	if large.budgetBatch != 1 {
 		t.Fatalf("override batch query count = %d, want 1", large.budgetBatch)
 	}
-	// Tier is resolved once for the report's BuildReport map and once
-	// inside the budget enforcer's batch — two batched calls total,
-	// independent of N.
-	if large.tierBatch != 2 {
-		t.Fatalf("tier batch call count = %d, want 2", large.tierBatch)
+	// Tier is resolved exactly once: PlatformReport resolves the tier
+	// map for BuildReport and threads it into the budget batch via
+	// TenantBudgetsBatchWithTiers, so the enforcer does not re-resolve
+	// tiers. One batched tier call total, independent of N.
+	if large.tierBatch != 1 {
+		t.Fatalf("tier batch call count = %d, want 1", large.tierBatch)
+	}
+}
+
+// TestTenantBudgetsBatchWithTiersMatchesSelfResolving proves the
+// tier-supplied batch path returns byte-identical limits to the
+// self-resolving batch path, and that supplying the tier map skips tier
+// resolution entirely (no extra TierResolver round trips).
+func TestTenantBudgetsBatchWithTiersMatchesSelfResolving(t *testing.T) {
+	store := newFakeStore()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	svc := mustService(t, store, withClock(fixedClock(now)))
+	ctx := context.Background()
+	ids := seedPlatformFixture(ctx, t, svc, store, 6)
+	tiers := &countingTiers{inner: newFixtureTiers(ids)}
+	enf := mustEnforcer(t, svc, store, tiers)
+
+	// Self-resolving path resolves tiers itself.
+	want, err := enf.TenantBudgetsBatch(ctx, ids)
+	if err != nil {
+		t.Fatalf("TenantBudgetsBatch: %v", err)
+	}
+	if tiers.batchCalls == 0 {
+		t.Fatal("expected self-resolving TenantBudgetsBatch to resolve tiers")
+	}
+
+	tierMap, err := tiers.TenantTiersBatch(ctx, ids)
+	if err != nil {
+		t.Fatalf("TenantTiersBatch: %v", err)
+	}
+	before := tiers.batchCalls
+	got, err := enf.TenantBudgetsBatchWithTiers(ctx, ids, tierMap)
+	if err != nil {
+		t.Fatalf("TenantBudgetsBatchWithTiers: %v", err)
+	}
+	// WithTiers must not resolve tiers again.
+	if tiers.batchCalls != before {
+		t.Fatalf("WithTiers re-resolved tiers: batchCalls %d -> %d", before, tiers.batchCalls)
+	}
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("WithTiers limits differ from self-resolving limits:\n want=%v\n got =%v", want, got)
+	}
+}
+
+// TestTenantBudgetsBatchWithTiersMissingTierAborts proves that supplying
+// a tier map that omits a requested tenant aborts the call rather than
+// silently assembling that tenant on global defaults only — preserving
+// the abort-the-whole-report contract.
+func TestTenantBudgetsBatchWithTiersMissingTierAborts(t *testing.T) {
+	store := newFakeStore()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	svc := mustService(t, store, withClock(fixedClock(now)))
+	ctx := context.Background()
+	ids := seedPlatformFixture(ctx, t, svc, store, 3)
+	enf := mustEnforcer(t, svc, store, newFixtureTiers(ids))
+
+	// Tier map covers only the first tenant.
+	partial := map[uuid.UUID]repository.TenantTier{ids[0]: repository.TenantTierStarter}
+	if _, err := enf.TenantBudgetsBatchWithTiers(ctx, ids, partial); err == nil {
+		t.Fatal("expected abort when a requested tenant's tier is missing from the supplied map")
 	}
 }
 

@@ -500,7 +500,8 @@ func (b *BudgetEnforcer) TenantBudgets(ctx context.Context, tenantID uuid.UUID) 
 // using a bounded number of queries — one batched tier lookup and one
 // batched override lookup — rather than the two-round-trips-per-tenant
 // the single-tenant TenantBudgets incurs when called in a loop. It is
-// the batched analogue used by the platform-wide cost report.
+// the self-contained batched analogue: it resolves tiers itself, so a
+// caller that has not already resolved them can use it directly.
 //
 // Semantics match TenantBudgets exactly per tenant: the precedence is
 // global defaults < tier defaults < overrides (assembleLimits is the
@@ -509,6 +510,73 @@ func (b *BudgetEnforcer) TenantBudgets(ctx context.Context, tenantID uuid.UUID) 
 // failure of either batch lookup aborts the whole call (no silently
 // partial result). Duplicate ids are coalesced; uuid.Nil is rejected.
 func (b *BudgetEnforcer) TenantBudgetsBatch(ctx context.Context, tenantIDs []uuid.UUID) (map[uuid.UUID]map[Meter]BudgetLimit, error) {
+	ids, err := dedupeTenantIDs(tenantIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return make(map[uuid.UUID]map[Meter]BudgetLimit), nil
+	}
+	tiers, err := b.tiers.TenantTiersBatch(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("metering: tenant budgets batch: tiers: %w", err)
+	}
+	return b.budgetsForTiers(ctx, ids, tiers)
+}
+
+// TenantBudgetsBatchWithTiers is the same as TenantBudgetsBatch but the
+// caller supplies the already-resolved tier of each tenant, so it skips
+// the batched tier lookup entirely. The platform-wide cost report
+// resolves the tier map once (for BuildReport) and reuses it here,
+// collapsing that path's tier resolution from two batched lookups to
+// one — i.e. from 2N to N tenant-repository round trips in production,
+// where the tier adapter has no batched primitive. The supplied tiers
+// must cover every requested id (a missing tier aborts the call rather
+// than silently assembling a tenant on global defaults only), matching
+// the abort-the-whole-report contract. All other semantics — precedence
+// via assembleLimits, private-copy results, cache seeding, dedup, and
+// uuid.Nil rejection — are identical to TenantBudgetsBatch.
+func (b *BudgetEnforcer) TenantBudgetsBatchWithTiers(ctx context.Context, tenantIDs []uuid.UUID, tiers map[uuid.UUID]repository.TenantTier) (map[uuid.UUID]map[Meter]BudgetLimit, error) {
+	ids, err := dedupeTenantIDs(tenantIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return make(map[uuid.UUID]map[Meter]BudgetLimit), nil
+	}
+	return b.budgetsForTiers(ctx, ids, tiers)
+}
+
+// budgetsForTiers fetches the override rows for ids in one batched query
+// and assembles each tenant's effective limits from the supplied tiers.
+// ids must already be deduped and non-nil. It is the shared tail of both
+// batch entry points, so the tier-resolving and tier-supplied paths
+// produce byte-identical results and seed the cache identically.
+func (b *BudgetEnforcer) budgetsForTiers(ctx context.Context, ids []uuid.UUID, tiers map[uuid.UUID]repository.TenantTier) (map[uuid.UUID]map[Meter]BudgetLimit, error) {
+	overrides, err := b.store.TenantBudgetsBatch(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("metering: tenant budgets batch: overrides: %w", err)
+	}
+	out := make(map[uuid.UUID]map[Meter]BudgetLimit, len(ids))
+	now := b.now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, id := range ids {
+		tier, ok := tiers[id]
+		if !ok {
+			return nil, fmt.Errorf("metering: tenant budgets batch: missing tier for tenant %s", id)
+		}
+		limits := b.assembleLimits(tier, overrides[id])
+		b.cache[id] = tenantBudgetCache{limits: limits, loadedAt: now}
+		out[id] = cloneLimits(limits)
+	}
+	return out, nil
+}
+
+// dedupeTenantIDs returns the input ids with duplicates removed (keeping
+// first-seen order) and rejects uuid.Nil. It is shared by the batch
+// budget entry points so they coalesce ids identically.
+func dedupeTenantIDs(tenantIDs []uuid.UUID) ([]uuid.UUID, error) {
 	ids := make([]uuid.UUID, 0, len(tenantIDs))
 	seen := make(map[uuid.UUID]struct{}, len(tenantIDs))
 	for _, id := range tenantIDs {
@@ -521,29 +589,7 @@ func (b *BudgetEnforcer) TenantBudgetsBatch(ctx context.Context, tenantIDs []uui
 		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
-	out := make(map[uuid.UUID]map[Meter]BudgetLimit, len(ids))
-	if len(ids) == 0 {
-		return out, nil
-	}
-
-	tiers, err := b.tiers.TenantTiersBatch(ctx, ids)
-	if err != nil {
-		return nil, fmt.Errorf("metering: tenant budgets batch: tiers: %w", err)
-	}
-	overrides, err := b.store.TenantBudgetsBatch(ctx, ids)
-	if err != nil {
-		return nil, fmt.Errorf("metering: tenant budgets batch: overrides: %w", err)
-	}
-
-	now := b.now()
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, id := range ids {
-		limits := b.assembleLimits(tiers[id], overrides[id])
-		b.cache[id] = tenantBudgetCache{limits: limits, loadedAt: now}
-		out[id] = cloneLimits(limits)
-	}
-	return out, nil
+	return ids, nil
 }
 
 // BudgetStats reports the cumulative soft-alert and hard-block counts.
