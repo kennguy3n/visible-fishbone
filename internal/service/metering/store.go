@@ -331,6 +331,52 @@ func (s *PostgresStore) TenantBudgets(ctx context.Context, tenantID uuid.UUID) (
 	return out, nil
 }
 
+// TenantBudgetsBatch returns the override rows for many tenants in a
+// single query (WHERE tenant_id = ANY($1)) rather than one query per
+// tenant. It runs system-scoped — like PlatformCurrentUsage, its only
+// caller is the platform-wide cost report, which already crosses tenant
+// boundaries under the system role — so a single statement can return
+// every tenant's overrides at once. Rows are grouped by tenant id and
+// kept in (tenant_id, meter) order so each tenant's slice matches the
+// deterministic ordering of the single-tenant TenantBudgets query. A
+// tenant with no override rows is simply absent from the result map.
+func (s *PostgresStore) TenantBudgetsBatch(ctx context.Context, tenantIDs []uuid.UUID) (map[uuid.UUID][]BudgetLimit, error) {
+	out := make(map[uuid.UUID][]BudgetLimit, len(tenantIDs))
+	if len(tenantIDs) == 0 {
+		return out, nil
+	}
+	err := s.withSystem(ctx, func(tx pgx.Tx) error {
+		const q = `SELECT tenant_id, meter, soft_limit, hard_limit, period
+FROM tenant_budgets
+WHERE tenant_id = ANY($1)
+ORDER BY tenant_id, meter`
+		rows, err := tx.Query(ctx, q, tenantIDs)
+		if err != nil {
+			return fmt.Errorf("query tenant budgets batch: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				tenantID uuid.UUID
+				meter    string
+				period   string
+				lim      BudgetLimit
+			)
+			if err := rows.Scan(&tenantID, &meter, &lim.SoftLimit, &lim.HardLimit, &period); err != nil {
+				return fmt.Errorf("scan tenant budget batch: %w", err)
+			}
+			lim.Meter = Meter(meter)
+			lim.Period = Period(period)
+			out[tenantID] = append(out[tenantID], lim)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // UpsertTenantBudget inserts or replaces one budget override.
 func (s *PostgresStore) UpsertTenantBudget(ctx context.Context, tenantID uuid.UUID, limit BudgetLimit) error {
 	return s.UpsertTenantBudgets(ctx, tenantID, []BudgetLimit{limit})

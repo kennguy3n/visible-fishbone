@@ -64,12 +64,25 @@ type CurrentReader interface {
 // tenant repository in production.
 type TierResolver interface {
 	TenantTier(ctx context.Context, tenantID uuid.UUID) (repository.TenantTier, error)
+	// TenantTiersBatch resolves the commercial tier of many tenants in
+	// a bounded number of lookups instead of one per tenant. The result
+	// is keyed by tenant id and contains an entry for every id in the
+	// input, so callers can index it directly. The single-tenant error
+	// semantics are preserved: a lookup failure for any requested
+	// tenant fails the whole batch rather than silently dropping a row.
+	TenantTiersBatch(ctx context.Context, tenantIDs []uuid.UUID) (map[uuid.UUID]repository.TenantTier, error)
 }
 
 // BudgetStore persists per-tenant budget overrides (tenant_budgets).
 type BudgetStore interface {
 	// TenantBudgets returns every override row for a tenant.
 	TenantBudgets(ctx context.Context, tenantID uuid.UUID) ([]BudgetLimit, error)
+	// TenantBudgetsBatch returns the override rows for many tenants in a
+	// single query (WHERE tenant_id = ANY($1)) instead of one query per
+	// tenant. The result is keyed by tenant id; a tenant with no
+	// overrides is simply absent from the map (an empty override set),
+	// matching how TenantBudgets returns a nil slice for such a tenant.
+	TenantBudgetsBatch(ctx context.Context, tenantIDs []uuid.UUID) (map[uuid.UUID][]BudgetLimit, error)
 	// UpsertTenantBudget writes (inserts or replaces) one override.
 	UpsertTenantBudget(ctx context.Context, tenantID uuid.UUID, limit BudgetLimit) error
 	// UpsertTenantBudgets writes (inserts or replaces) a batch of
@@ -290,13 +303,22 @@ func (b *BudgetEnforcer) loadLimits(ctx context.Context, tenantID uuid.UUID) (ma
 	if err != nil {
 		return nil, fmt.Errorf("resolve tier: %w", err)
 	}
-	limits := b.globalDefaultLimits()
-	for meter, lim := range tierDefaults[tier] {
-		limits[meter] = b.normalise(meter, lim)
-	}
 	overrides, err := b.store.TenantBudgets(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("load overrides: %w", err)
+	}
+	return b.assembleLimits(tier, overrides), nil
+}
+
+// assembleLimits merges the per-tier defaults, the configured global
+// defaults, and the persisted overrides (highest precedence) into the
+// full effective limit set for one tenant. It is the single source of
+// truth for the precedence order so the per-tenant (loadLimits) and
+// batched (TenantBudgetsBatch) paths produce byte-identical results.
+func (b *BudgetEnforcer) assembleLimits(tier repository.TenantTier, overrides []BudgetLimit) map[Meter]BudgetLimit {
+	limits := b.globalDefaultLimits()
+	for meter, lim := range tierDefaults[tier] {
+		limits[meter] = b.normalise(meter, lim)
 	}
 	for _, o := range overrides {
 		if !o.Meter.Valid() {
@@ -304,7 +326,7 @@ func (b *BudgetEnforcer) loadLimits(ctx context.Context, tenantID uuid.UUID) (ma
 		}
 		limits[o.Meter] = b.normalise(o.Meter, o)
 	}
-	return limits, nil
+	return limits
 }
 
 // globalDefaultLimits materialises the config-supplied per-meter hard
@@ -472,6 +494,56 @@ func (b *BudgetEnforcer) TenantBudgets(ctx context.Context, tenantID uuid.UUID) 
 	b.cache[tenantID] = tenantBudgetCache{limits: limits, loadedAt: b.now()}
 	b.mu.Unlock()
 	return cloneLimits(limits), nil
+}
+
+// TenantBudgetsBatch resolves the effective limits for many tenants
+// using a bounded number of queries — one batched tier lookup and one
+// batched override lookup — rather than the two-round-trips-per-tenant
+// the single-tenant TenantBudgets incurs when called in a loop. It is
+// the batched analogue used by the platform-wide cost report.
+//
+// Semantics match TenantBudgets exactly per tenant: the precedence is
+// global defaults < tier defaults < overrides (assembleLimits is the
+// shared merge), every returned map is a private copy the caller may
+// mutate, and the freshly resolved set seeds the per-tenant cache. A
+// failure of either batch lookup aborts the whole call (no silently
+// partial result). Duplicate ids are coalesced; uuid.Nil is rejected.
+func (b *BudgetEnforcer) TenantBudgetsBatch(ctx context.Context, tenantIDs []uuid.UUID) (map[uuid.UUID]map[Meter]BudgetLimit, error) {
+	ids := make([]uuid.UUID, 0, len(tenantIDs))
+	seen := make(map[uuid.UUID]struct{}, len(tenantIDs))
+	for _, id := range tenantIDs {
+		if id == uuid.Nil {
+			return nil, fmt.Errorf("metering: tenant budgets batch: tenant id must not be nil")
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	out := make(map[uuid.UUID]map[Meter]BudgetLimit, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	tiers, err := b.tiers.TenantTiersBatch(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("metering: tenant budgets batch: tiers: %w", err)
+	}
+	overrides, err := b.store.TenantBudgetsBatch(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("metering: tenant budgets batch: overrides: %w", err)
+	}
+
+	now := b.now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, id := range ids {
+		limits := b.assembleLimits(tiers[id], overrides[id])
+		b.cache[id] = tenantBudgetCache{limits: limits, loadedAt: now}
+		out[id] = cloneLimits(limits)
+	}
+	return out, nil
 }
 
 // BudgetStats reports the cumulative soft-alert and hard-block counts.
