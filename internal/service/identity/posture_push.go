@@ -263,6 +263,23 @@ func (c *PosturePushConsumer) Run(ctx context.Context) error {
 		for msg := range batch.Messages() {
 			c.handleMessage(ctx, msg)
 		}
+		// Messages() closes either when the batch is fully drained or
+		// when the fetch was cut short by a mid-batch error (heartbeat
+		// timeout, connection drop). batch.Error() surfaces the latter;
+		// without this check such failures would be silently swallowed
+		// until the next Fetch, hiding JetStream connectivity problems.
+		// Treat it like a transient fetch error: log and back off so a
+		// persistently failing connection cannot busy-spin the loop.
+		if err := batch.Error(); err != nil && !errors.Is(err, context.Canceled) {
+			backoff = nextFetchBackoff(backoff)
+			c.logger.Warn("posture-push: batch ended with error, backing off",
+				slog.Any("error", err),
+				slog.Duration("backoff", backoff))
+			select {
+			case <-ctx.Done():
+			case <-time.After(backoff):
+			}
+		}
 	}
 	return ctx.Err()
 }
