@@ -306,7 +306,7 @@ mod aya_backend {
     use aya::Ebpf;
     use aya::Pod;
     use aya::maps::lpm_trie::{Key, LpmTrie};
-    use aya::maps::{Array, HashMap, MapData, ProgramArray};
+    use aya::maps::{Array, HashMap, MapData, MapError, ProgramArray};
     use aya::programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags};
     use std::path::Path;
     use std::sync::{Mutex, PoisonError};
@@ -559,11 +559,33 @@ mod aya_backend {
                 .map_err(|e| EbpfError::Map(format!("map {name} is not a hash map: {e}")))?;
         let keys: Vec<FlowKey> = cache.keys().filter_map(Result::ok).collect();
         for key in keys {
-            cache
-                .remove(&key)
-                .map_err(|e| EbpfError::Map(format!("map {name} evict: {e}")))?;
+            // The XDP program writes this `LRU_HASH` on every cache-miss
+            // packet, so the kernel can evict a key between the `keys()`
+            // snapshot above and this `remove()`. A key that is already gone
+            // satisfies the flush goal (no stale verdict survives), so treat
+            // that race as success and surface only genuine failures —
+            // otherwise a single benign eviction would fail the whole policy
+            // update even though the rule/class maps were already written.
+            match cache.remove(&key) {
+                Ok(()) => {}
+                Err(e) if is_already_evicted(&e) => {}
+                Err(e) => return Err(EbpfError::Map(format!("map {name} evict: {e}"))),
+            }
         }
         Ok(())
+    }
+
+    /// True when a `remove` failure just means the key is already gone — aya's
+    /// explicit not-found variants, or a `bpf_map_delete_elem` that returned
+    /// `ENOENT` (mapped by std to [`io::ErrorKind::NotFound`]). On the
+    /// concurrently-evicted verdict cache this race is benign for a flush; any
+    /// other error (e.g. `EPERM`) is a real failure and must propagate.
+    fn is_already_evicted(err: &MapError) -> bool {
+        match err {
+            MapError::KeyNotFound | MapError::ElementNotFound => true,
+            MapError::SyscallError(e) => e.io_error.kind() == std::io::ErrorKind::NotFound,
+            _ => false,
+        }
     }
 
     impl ProgramLoader for AyaLoader {
