@@ -171,6 +171,78 @@ export interface BudgetOverride {
   period?: string;
 }
 
+// PUT /budgets request + response. The request mirrors the Go
+// budgetUpdateRequest (a list of per-meter overrides); the response is
+// the tenant's full resolved budget set after the write.
+export interface BudgetUpdateRequest {
+  budgets: BudgetOverride[];
+}
+
+export interface BudgetResponseLine {
+  meter: string;
+  period: string;
+  soft_limit: number;
+  hard_limit: number;
+}
+
+export interface BudgetUpdateResponse {
+  tenant_id: string;
+  budgets: BudgetResponseLine[];
+}
+
+// GET /tenants/{id}/cost — per-tenant infrastructure cost projection
+// (InfraCostProjection). NATS/S3 are point-in-time storage gauges;
+// ClickHouse is a projected write flow.
+export interface InfraCostProjection {
+  tenant_id: string;
+  clickhouse_projected_rows: number;
+  clickhouse_monthly_usd: number;
+  nats_stream_bytes: number;
+  nats_monthly_usd: number;
+  s3_archive_bytes: number;
+  s3_monthly_usd: number;
+  total_monthly_usd: number;
+}
+
+// GET /tenants/{id}/cost-report — per-tenant per-meter cost report
+// (TenantCostReport). The tenant-scoped counterpart to the platform
+// /admin/cost-report.
+export interface CostLine {
+  meter: string;
+  period: string;
+  usage: number;
+  cost_usd: number;
+  projected_usage: number;
+  projected_cost_usd: number;
+  monthly_cost_usd: number;
+  hard_limit: number;
+  budget_utilization: number;
+  over_budget: boolean;
+}
+
+export interface TenantCostReport {
+  tenant_id: string;
+  tier: string;
+  generated_at: string;
+  lines: CostLine[];
+  total_cost_usd: number;
+  projected_monthly_cost_usd: number;
+  monthly_revenue_usd: number;
+  margin_usd: number;
+  margin_pct: number;
+}
+
+// GET /admin/cost-report — fleet-wide cost report (PlatformCostReport).
+export interface PlatformCostReport {
+  generated_at: string;
+  tenant_count: number;
+  tenants: TenantCostReport[];
+  total_cost_usd: number;
+  projected_monthly_cost_usd: number;
+  total_revenue_usd: number;
+  total_margin_usd: number;
+}
+
 // --- Playbook --------------------------------------------------------------
 
 export interface Playbook {

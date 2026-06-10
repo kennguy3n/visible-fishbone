@@ -46,7 +46,16 @@ type UnitCosts struct {
 	// ClickHousePer1MRowsUSD is the price per 1,000,000 telemetry rows
 	// written.
 	ClickHousePer1MRowsUSD float64
+	// StorageTier is the S3 cold-archive storage class the archive is
+	// written to. It is the single source of truth for S3PerGBMonthUSD:
+	// the two are kept consistent by WithStorageTier / DefaultUnitCosts,
+	// so finance can re-tier the archive (e.g. Standard → Glacier Deep
+	// Archive) by changing one field rather than re-deriving a price.
+	// A zero/unknown value is treated as DefaultStorageTier.
+	StorageTier StorageTier
 	// S3PerGBMonthUSD is the price per GB-month of cold archive storage.
+	// It is the list price of StorageTier; set them together (via
+	// WithStorageTier) so a tier and its price never disagree.
 	S3PerGBMonthUSD float64
 	// NATSPerGBMonthUSD is the price per GB-month of NATS JetStream
 	// file-storage retained on disk. JetStream persistence is backed by
@@ -61,6 +70,66 @@ type UnitCosts struct {
 	// to attribute control-plane CPU to a tenant's traffic pattern, not
 	// a feed/egress charge.
 	PolicyEvalPer1MUSD float64
+}
+
+// StorageTier identifies the S3 storage class the telemetry cold
+// archive is written to. The class chosen dominates the archive's
+// per-GB-month cost: the telemetry archive is write-once / read-rarely
+// (forensic + compliance retention), so the cheaper, higher-restore-
+// latency Glacier classes are a far better fit than S3 Standard. The
+// constants mirror the AWS S3 storage classes; see docs/cost-model.md.
+type StorageTier string
+
+const (
+	// StorageTierStandard is S3 Standard — millisecond access, the
+	// most expensive class. Appropriate only for a hot archive.
+	StorageTierStandard StorageTier = "standard"
+	// StorageTierGlacierInstant is Glacier Instant Retrieval —
+	// millisecond access at a fraction of Standard's price, for an
+	// archive that is read rarely but must return immediately.
+	StorageTierGlacierInstant StorageTier = "glacier_instant_retrieval"
+	// StorageTierGlacierFlexible is Glacier Flexible Retrieval —
+	// minutes-to-hours restore, cheaper still.
+	StorageTierGlacierFlexible StorageTier = "glacier_flexible_retrieval"
+	// StorageTierGlacierDeepArchive is Glacier Deep Archive — the
+	// cheapest class (multi-hour restore). The correct default for a
+	// write-once compliance/forensic telemetry archive.
+	StorageTierGlacierDeepArchive StorageTier = "glacier_deep_archive"
+)
+
+// DefaultStorageTier is the cold-archive class the cost model assumes.
+// The telemetry archive is written once and read only for incident
+// forensics or a compliance request, so Glacier Deep Archive — the
+// cheapest class, trading a multi-hour restore latency that is
+// immaterial for this access pattern — is the cost-optimal default.
+const DefaultStorageTier = StorageTierGlacierDeepArchive
+
+// storageTierPriceUSD maps each storage class to its public-cloud list
+// price per GB-month (AWS S3, us-east-1, list pricing). These are
+// estimates for internal margin analysis; finance can re-tier via
+// WithStorageTier without a code change.
+var storageTierPriceUSD = map[StorageTier]float64{
+	StorageTierStandard:           0.023,
+	StorageTierGlacierInstant:     0.004,
+	StorageTierGlacierFlexible:    0.0036,
+	StorageTierGlacierDeepArchive: 0.00099,
+}
+
+// Valid reports whether t is a recognised storage tier.
+func (t StorageTier) Valid() bool {
+	_, ok := storageTierPriceUSD[t]
+	return ok
+}
+
+// PerGBMonthUSD returns the list price per GB-month for the tier. An
+// unknown/zero tier falls back to the DefaultStorageTier price so a
+// mis-set tier never silently prices the archive at $0 (which would
+// over-report margin — the wrong direction for a conservative estimate).
+func (t StorageTier) PerGBMonthUSD() float64 {
+	if p, ok := storageTierPriceUSD[t]; ok {
+		return p
+	}
+	return storageTierPriceUSD[DefaultStorageTier]
 }
 
 // DefaultUnitCosts are conservative public-cloud list-price estimates.
@@ -81,9 +150,13 @@ var DefaultUnitCosts = UnitCosts{
 	MalwarePerScanUSD:        0.001,
 	EgressPerGBUSD:           0.09,
 	ClickHousePer1MRowsUSD:   0.20,
-	S3PerGBMonthUSD:          0.023,
-	NATSPerGBMonthUSD:        0.10,
-	PolicyEvalPer1MUSD:       0.01,
+	// The telemetry cold archive is write-once / read-rarely, so it is
+	// stored in Glacier Deep Archive — the cheapest S3 class. The tier
+	// and its $/GB-month price are set together so they never disagree.
+	StorageTier:        DefaultStorageTier,
+	S3PerGBMonthUSD:    DefaultStorageTier.PerGBMonthUSD(),
+	NATSPerGBMonthUSD:  0.10,
+	PolicyEvalPer1MUSD: 0.01,
 }
 
 const (
@@ -125,6 +198,21 @@ func WithTierPrices(prices map[repository.TenantTier]float64) CostOption {
 		if len(prices) > 0 {
 			c.tierPrices = prices
 		}
+	}
+}
+
+// WithStorageTier re-tiers the S3 cold archive: it records the chosen
+// storage class and sets S3PerGBMonthUSD to that class's list price in
+// one step, so the tier and its price can never drift apart. An
+// unrecognised tier is ignored (the calculator keeps its current S3
+// price) rather than silently re-pricing the archive at the fallback.
+func WithStorageTier(tier StorageTier) CostOption {
+	return func(c *CostCalculator) {
+		if !tier.Valid() {
+			return
+		}
+		c.costs.StorageTier = tier
+		c.costs.S3PerGBMonthUSD = tier.PerGBMonthUSD()
 	}
 }
 
@@ -681,6 +769,22 @@ type platformUsageReader interface {
 	PlatformCurrentUsage(ctx context.Context, at time.Time) ([]UsageRecord, error)
 }
 
+// NATSStreamSizer reports a tenant's current JetStream retained byte
+// size — a point-in-time storage gauge (see NATSStorageCostUSD for why
+// it is a gauge, not a flow). It is intentionally optional: JetStream
+// has no per-tenant stream-size primitive (SNG_TELEMETRY is one stream
+// shared across tenants), so attributing retained bytes to a tenant
+// requires a deployment-specific source (e.g. a subject-prefixed
+// per-tenant stream, or a sampler that buckets `streams info` by the
+// tenant subject token). When no sizer is wired, the infra projection
+// reports the NATS driver as 0 rather than guessing — honest under-
+// reporting an operator can see, not a fabricated number. The
+// ClickHouse and S3 drivers are always populated from real recorded
+// meters and do not depend on this.
+type NATSStreamSizer interface {
+	TenantStreamBytes(ctx context.Context, tenantID uuid.UUID) (int64, error)
+}
+
 // Reports orchestrates the per-tenant and platform-wide cost reports
 // for the metering handler: it joins a tenant's current usage, its
 // resolved budgets, and its tier, then runs them through the
@@ -691,23 +795,45 @@ type Reports struct {
 	platformUsage platformUsageReader
 	tiers         TierResolver
 	calc          *CostCalculator
+	natsSizer     NATSStreamSizer
 	now           func() time.Time
 }
 
-// NewReports wires a Reports orchestrator. All dependencies must be
-// non-nil; calc is typically the same CostCalculator used elsewhere.
-func NewReports(usage currentUsageReader, budgets resolvedBudgetReader, platformUsage platformUsageReader, tiers TierResolver, calc *CostCalculator) (*Reports, error) {
+// ReportsOption customises a Reports orchestrator.
+type ReportsOption func(*Reports)
+
+// WithNATSStreamSizer wires the optional per-tenant NATS retained-byte
+// gauge into the infra projection. Without it, TenantInfraProjection
+// reports the NATS driver as 0 (see NATSStreamSizer). A nil sizer is
+// ignored so callers can pass an optional dependency unconditionally.
+func WithNATSStreamSizer(s NATSStreamSizer) ReportsOption {
+	return func(r *Reports) {
+		if s != nil {
+			r.natsSizer = s
+		}
+	}
+}
+
+// NewReports wires a Reports orchestrator. All required dependencies
+// must be non-nil; calc is typically the same CostCalculator used
+// elsewhere. Optional collaborators (e.g. a NATS stream sizer) are
+// supplied via ReportsOption.
+func NewReports(usage currentUsageReader, budgets resolvedBudgetReader, platformUsage platformUsageReader, tiers TierResolver, calc *CostCalculator, opts ...ReportsOption) (*Reports, error) {
 	if usage == nil || budgets == nil || platformUsage == nil || tiers == nil || calc == nil {
 		return nil, fmt.Errorf("metering: reports: all dependencies must be non-nil")
 	}
-	return &Reports{
+	r := &Reports{
 		usage:         usage,
 		budgets:       budgets,
 		platformUsage: platformUsage,
 		tiers:         tiers,
 		calc:          calc,
 		now:           time.Now,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r, nil
 }
 
 // TenantReport builds the current-period cost report for one tenant.
@@ -728,6 +854,55 @@ func (r *Reports) TenantReport(ctx context.Context, tenantID uuid.UUID) (TenantC
 		return TenantCostReport{}, fmt.Errorf("metering: reports: tier: %w", err)
 	}
 	return r.calc.BuildReport(tenantID, tier, usage, limits), nil
+}
+
+// TenantInfraProjection builds the per-tenant infrastructure cost
+// breakdown (ClickHouse / NATS / S3 projected monthly USD) that the
+// GET /tenants/{id}/cost endpoint surfaces.
+//
+// It reads only the calling tenant's current-period usage (so the
+// projection is tenant-scoped and RLS-safe), derives the two recorded
+// drivers from real meters — ClickHouse rows written (a flow,
+// extrapolated to a month by ProjectInfraMonthlyCost) and S3 archived
+// bytes (a gauge) — and folds in the NATS retained-byte gauge when a
+// sizer is wired (0 otherwise; see NATSStreamSizer). The ClickHouse
+// accumulation period is the meter's own budget period so the
+// extrapolation window matches how the rows were counted.
+func (r *Reports) TenantInfraProjection(ctx context.Context, tenantID uuid.UUID) (InfraCostProjection, error) {
+	if tenantID == uuid.Nil {
+		return InfraCostProjection{}, fmt.Errorf("metering: reports: tenant id must not be nil")
+	}
+	usage, err := r.usage.CurrentUsage(ctx, tenantID)
+	if err != nil {
+		return InfraCostProjection{}, fmt.Errorf("metering: reports: current usage: %w", err)
+	}
+	var clickHouseRows, s3Bytes int64
+	for _, rec := range usage {
+		switch rec.Meter {
+		case MeterClickHouseRowsWritten:
+			clickHouseRows += rec.Value
+		case MeterS3BytesArchived:
+			s3Bytes += rec.Value
+		}
+	}
+	var natsBytes int64
+	if r.natsSizer != nil {
+		natsBytes, err = r.natsSizer.TenantStreamBytes(ctx, tenantID)
+		if err != nil {
+			return InfraCostProjection{}, fmt.Errorf("metering: reports: nats stream size: %w", err)
+		}
+		if natsBytes < 0 {
+			natsBytes = 0
+		}
+	}
+	sample := InfraUsageSample{
+		TenantID:                 tenantID,
+		ClickHouseRowsThisPeriod: clickHouseRows,
+		ClickHousePeriod:         DefaultMeterPeriod(MeterClickHouseRowsWritten),
+		NATSStreamBytes:          natsBytes,
+		S3ArchiveBytes:           s3Bytes,
+	}
+	return r.calc.ProjectInfraMonthlyCost(sample), nil
 }
 
 // PlatformReport builds the platform-wide cost report across every

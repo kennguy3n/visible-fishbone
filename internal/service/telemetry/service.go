@@ -125,6 +125,7 @@ type Metrics struct {
 	Acked          atomic.Uint64
 	Nacked         atomic.Uint64
 	Sampled        atomic.Uint64 // events dropped by adaptive sampling (Ack'd, not written)
+	RowRateLimited atomic.Uint64 // events rejected by the ClickHouse row-write limiter (every rejection: Nak'd for retry or DLQ'd on delivery exhaustion)
 	DLQPublished   atomic.Uint64 // bad payloads successfully routed to DLQ
 	DLQPublishFail atomic.Uint64 // DLQ publish itself failed (data preserved by Nak retry)
 }
@@ -141,6 +142,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		Acked:          m.Acked.Load(),
 		Nacked:         m.Nacked.Load(),
 		Sampled:        m.Sampled.Load(),
+		RowRateLimited: m.RowRateLimited.Load(),
 		DLQPublished:   m.DLQPublished.Load(),
 		DLQPublishFail: m.DLQPublishFail.Load(),
 	}
@@ -157,6 +159,7 @@ type MetricsSnapshot struct {
 	Acked          uint64
 	Nacked         uint64
 	Sampled        uint64
+	RowRateLimited uint64
 	DLQPublished   uint64
 	DLQPublishFail uint64
 }
@@ -253,6 +256,22 @@ type Service struct {
 	// rate for analytics de-bias. Set via WithSampler.
 	sampler *AdaptiveSampler
 
+	// rowLimiter is the per-tenant ClickHouse row-write rate cap
+	// (token bucket, one token == one row). nil means "no row
+	// cap". Unlike the event-granularity `limiter`, this is the
+	// cost-driver-aligned control: it bounds the unit the
+	// metering layer bills for (MeterClickHouseRowsWritten) and
+	// feeds the cost projection. dispatch consults it right
+	// before the hot ClickHouse write — the seam where an
+	// admitted event becomes a persisted row — and Nak's (with
+	// the configured backoff, DLQ on delivery exhaustion) when a
+	// tenant is over budget, so over-budget rows are deferred and
+	// retried rather than dropped. The limiter is shared across
+	// partitions (its per-tenant buckets are globally
+	// authoritative and concurrency-safe), so it is NOT cloned
+	// per partition. Set via WithClickHouseRowLimiter.
+	rowLimiter RowWriteLimiter
+
 	// shadowObserver receives the SaaS-relevant hostname (DNS query
 	// name, HTTP host/SNI) extracted from each processed DNS/HTTP
 	// event so an out-of-band discoverer can build a shadow-IT
@@ -280,8 +299,22 @@ type worker struct {
 	limiterWaitBudget time.Duration
 	nakBackoff        time.Duration
 	sampler           *AdaptiveSampler
+	rowLimiter        RowWriteLimiter
 	shadowObserver    ShadowITObserver
 	dedup             *dedupRing
+}
+
+// RowWriteLimiter gates per-tenant ClickHouse row writes for cost
+// control: AllowN reports whether the tenant may write `rows` more
+// ClickHouse rows right now, consuming that budget when it returns
+// true and never blocking. *metering.ClickHouseRowLimiter satisfies
+// this interface; it is declared here (rather than importing the
+// metering package) so the telemetry consumer depends only on the
+// narrow capability it needs and the dependency arrow points from
+// the wiring layer (cmd/sng-control) inward, never telemetry ->
+// metering. A nil RowWriteLimiter is treated as "no row cap".
+type RowWriteLimiter interface {
+	AllowN(ctx context.Context, tenantID uuid.UUID, rows int64) bool
 }
 
 // ShadowITObserver receives the SaaS-relevant hostname carried by a
@@ -348,6 +381,22 @@ func (s *Service) WithSampler(sampler *AdaptiveSampler) *Service {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sampler = sampler
+	return s
+}
+
+// WithClickHouseRowLimiter wires a per-tenant ClickHouse row-write
+// rate limiter onto the service. Once set, dispatch consults it
+// immediately before the hot ClickHouse write: an over-budget tenant's
+// envelope is Nak'd (with the configured backoff, routed to the DLQ on
+// delivery exhaustion) so the row is deferred and retried once the
+// bucket refills, never silently dropped. Pass nil to remove the cap.
+// Additive and optional — wiring paths that pre-date the limiter keep
+// their prior behaviour. The limiter is shared across all partitions.
+// Returns the receiver for fluent wiring.
+func (s *Service) WithClickHouseRowLimiter(limiter RowWriteLimiter) *Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rowLimiter = limiter
 	return s
 }
 
@@ -492,6 +541,7 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			limiterWaitBudget: s.limiterWaitBudget,
 			nakBackoff:        s.nakBackoff,
 			sampler:           s.sampler,
+			rowLimiter:        s.rowLimiter,
 			shadowObserver:    s.shadowObserver,
 			dedup:             s.dedup,
 		}}, nil
@@ -529,6 +579,13 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			limiterWaitBudget: s.limiterWaitBudget,
 			nakBackoff:        s.nakBackoff,
 			sampler:           s.sampler.ForPartition(),
+			// Row limiter is globally authoritative per tenant and
+			// concurrency-safe; share the one instance across
+			// partitions rather than cloning (a tenant is pinned to
+			// one partition, but a shared bucket keeps the budget
+			// correct even if that ever changes). The shadow-IT
+			// observer is likewise shared, not cloned.
+			rowLimiter:        s.rowLimiter,
 			shadowObserver:    s.shadowObserver,
 			dedup:             newDedupRing(s.cfg.DedupRingSize),
 		})
@@ -661,11 +718,11 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 			// rate in the common case and at most one window stale
 			// otherwise — within the window granularity the de-bias
 			// scheme already operates at.
-			if sr := w.sampler.SampleRateFor(env.TenantID); sr < 1.0 {
+			if sr := w.sampler.SampleRateForClass(env.TenantID, env.TrafficClass); sr < 1.0 {
 				env.SampleRate = sr
 			}
 		} else {
-			keep, sampleRate := w.sampler.Decide(ctx, env.TenantID, env.EventID)
+			keep, sampleRate := w.sampler.DecideClass(ctx, env.TenantID, env.EventID, env.TrafficClass)
 			if !keep {
 				s.metrics.Sampled.Add(1)
 				if ackErr := msg.Ack(); ackErr != nil {
@@ -767,6 +824,50 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 		s.metrics.Deduplicated.Add(1)
 		_ = msg.Ack()
 		s.metrics.Acked.Add(1)
+		return
+	}
+
+	// ClickHouse row-write cost cap. This is the seam where an
+	// admitted event becomes a persisted ClickHouse row (the hot
+	// schema is one row per envelope), so it is the natural place
+	// to bound the unit the metering layer bills for. A tenant
+	// over its per-tenant row budget is Nak'd rather than written:
+	// the row is deferred and retried once the bucket refills,
+	// and on delivery exhaustion it is routed to the DLQ — the
+	// same no-silent-loss contract as the event limiter above.
+	// Checked after dedup (so a duplicate never spends budget) and
+	// before hot.Write (so an over-budget row never reaches
+	// ClickHouse). Kept events stay full fidelity; this is
+	// back-pressure, not sampling.
+	if w.rowLimiter != nil && !w.rowLimiter.AllowN(ctx, env.TenantID, 1) {
+		// Count every row-limit rejection, before the
+		// retry/DLQ split, mirroring HotWriteFails below: the
+		// counter measures the limiter's impact (rows it
+		// rejected), so a row rejected on its final delivery
+		// and routed to the DLQ must count just like a row
+		// Nak'd for retry — otherwise an operator watching
+		// RowRateLimited undercounts exactly the tenants that
+		// are most over budget (rejected on every attempt).
+		s.metrics.RowRateLimited.Add(1)
+		if s.deliveryExhausted(msg) {
+			s.routeRateLimitExhaustionToDLQ(msg, ErrRowWriteLimited)
+			if termErr := msg.Term(); termErr != nil {
+				s.logger.Warn("telemetry: term after row-limit exhaustion failed",
+					slog.Any("error", termErr),
+					slog.String("event_id", env.EventID.String()))
+			}
+			s.metrics.Nacked.Add(1)
+			return
+		}
+		delay := nakBackoff
+		if delay <= 0 {
+			delay = DefaultNakBackoff
+		}
+		_ = msg.NakWithDelay(delay)
+		s.metrics.Nacked.Add(1)
+		s.logger.Debug("telemetry: clickhouse row-write rate limit",
+			slog.String("tenant_id", env.TenantID.String()),
+			slog.String("event_id", env.EventID.String()))
 		return
 	}
 

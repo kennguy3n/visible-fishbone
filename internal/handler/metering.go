@@ -4,6 +4,8 @@
 //   - GET  /api/v1/tenants/{tenant_id}/usage         — current-period usage by meter
 //   - GET  /api/v1/tenants/{tenant_id}/usage/history — trailing monthly aggregates
 //   - GET  /api/v1/tenants/{tenant_id}/cost-anomalies — per-meter spend anomalies
+//   - GET  /api/v1/tenants/{tenant_id}/cost          — per-tenant infra cost projection
+//   - GET  /api/v1/tenants/{tenant_id}/cost-report   — per-tenant per-meter cost & margin report
 //   - PUT  /api/v1/tenants/{tenant_id}/budgets       — set per-tenant budget overrides
 //   - GET  /api/v1/admin/cost-report                 — platform-wide cost report (MSP/admin only)
 //
@@ -62,6 +64,18 @@ type MeteringAnomalyDetector interface {
 	TenantAnomalies(ctx context.Context, tenantID uuid.UUID) ([]metering.CostAnomaly, error)
 }
 
+// MeteringInfraReporter is the per-tenant cost-projection surface the
+// tenant cost endpoints need (satisfied by *metering.Reports). It
+// covers both the infrastructure breakdown (TenantInfraProjection,
+// driving the /cost route) and the per-meter cost report
+// (TenantReport, driving the /cost-report route). Both are scoped to a
+// single tenant and RLS-enforced at the route layer, so neither leaks
+// another tenant's spend.
+type MeteringInfraReporter interface {
+	TenantInfraProjection(ctx context.Context, tenantID uuid.UUID) (metering.InfraCostProjection, error)
+	TenantReport(ctx context.Context, tenantID uuid.UUID) (metering.TenantCostReport, error)
+}
+
 // permMeteringReadPlatformReport is the platform-scoped permission the
 // admin cost-report endpoint requires. It is platform-scoped (the
 // report spans every tenant), so an MSP- or tenant-scoped grant does
@@ -76,6 +90,7 @@ type MeteringHandler struct {
 	budgets   MeteringBudgetService
 	reporter  MeteringPlatformReporter
 	anomalies MeteringAnomalyDetector
+	infra     MeteringInfraReporter
 	authz     PlatformAuthorizer
 }
 
@@ -85,8 +100,8 @@ type MeteringHandler struct {
 // cost-report route additionally requires authz: a nil authorizer
 // leaves it unregistered (it 404s) rather than serving platform-wide
 // cost data behind a weaker gate.
-func NewMeteringHandler(usage MeteringUsageReader, budgets MeteringBudgetService, reporter MeteringPlatformReporter, anomalies MeteringAnomalyDetector, authz PlatformAuthorizer) *MeteringHandler {
-	return &MeteringHandler{usage: usage, budgets: budgets, reporter: reporter, anomalies: anomalies, authz: authz}
+func NewMeteringHandler(usage MeteringUsageReader, budgets MeteringBudgetService, reporter MeteringPlatformReporter, anomalies MeteringAnomalyDetector, infra MeteringInfraReporter, authz PlatformAuthorizer) *MeteringHandler {
+	return &MeteringHandler{usage: usage, budgets: budgets, reporter: reporter, anomalies: anomalies, infra: infra, authz: authz}
 }
 
 // Register attaches the metering routes.
@@ -102,6 +117,10 @@ func (h *MeteringHandler) Register(mux *http.ServeMux) {
 	}
 	if h.anomalies != nil {
 		MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/cost-anomalies", h.getCostAnomalies)
+	}
+	if h.infra != nil {
+		MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/cost", h.getCost)
+		MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/cost-report", h.getCostReport)
 	}
 	if h.budgets != nil {
 		MountTenantScoped(mux, "PUT /api/v1/tenants/{tenant_id}/budgets", h.putBudgets)
@@ -330,6 +349,49 @@ func (h *MeteringHandler) getCostAnomalies(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	WriteJSON(w, http.StatusOK, costAnomaliesResponse{TenantID: tenantID, Anomalies: lines})
+}
+
+// getCost returns the tenant's projected monthly infrastructure cost
+// broken down per backend driver (ClickHouse / NATS / S3), the input to
+// the dashboard's infra-cost-breakdown panel. Tenant-scoped: the path
+// tenant_id is enforced by MountTenantScoped (RequireTenant), and the
+// underlying projection reads only this tenant's usage, so a tenant
+// cannot observe another's infrastructure spend. The InfraCostProjection
+// is serialised directly — its JSON tags are the dashboard's contract.
+func (h *MeteringHandler) getCost(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	projection, err := h.infra.TenantInfraProjection(r.Context(), tenantID)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, projection)
+}
+
+// getCostReport returns the tenant's per-meter cost report for the
+// current period: usage, projected usage, cost and projected monthly
+// cost per meter, plus the tenant's projected monthly total, revenue
+// and margin. It is the tenant-scoped counterpart to the platform
+// /admin/cost-report (which spans the whole fleet): the path tenant_id
+// is enforced by MountTenantScoped, so a tenant only ever reads its own
+// report. This is the source for the dashboard's "projected monthly
+// cost" / margin summary cards and the cost columns of the usage table.
+// The TenantCostReport is serialised directly — its JSON tags are the
+// dashboard's contract.
+func (h *MeteringHandler) getCostReport(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	report, err := h.infra.TenantReport(r.Context(), tenantID)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, report)
 }
 
 // putBudgets applies one or more per-tenant budget overrides, then
