@@ -476,6 +476,10 @@ jobs:
               if git pull --rebase origin main && git push; then
                 return 0
               fi
+              # A failed `git pull --rebase` can leave a rebase in progress
+              # (e.g. an unexpected concurrent writer to the same paths);
+              # abort it so the next attempt restarts from a clean state.
+              git rebase --abort 2>/dev/null || true
               echo "push attempt $attempt hit a concurrent update; retrying after backoff..."
               sleep "$((attempt * 3))"
             done
@@ -551,6 +555,10 @@ jobs:
               if git pull --rebase origin main && git push; then
                 return 0
               fi
+              # A failed `git pull --rebase` can leave a rebase in progress
+              # (e.g. an unexpected concurrent writer to the same paths);
+              # abort it so the next attempt restarts from a clean state.
+              git rebase --abort 2>/dev/null || true
               echo "push attempt $attempt hit a concurrent update; retrying after backoff..."
               sleep "$((attempt * 3))"
             done
