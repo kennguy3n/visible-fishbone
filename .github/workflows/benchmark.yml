@@ -468,24 +468,6 @@ jobs:
       - name: stage and commit reports
         run: |
           set -euo pipefail
-          # Push HEAD to main, surviving a concurrent push from the sibling
-          # publish job or any other writer. fetch-rebase-push is not atomic,
-          # so retry with linear backoff until the push fast-forwards.
-          push_with_retry() {
-            for attempt in 1 2 3 4 5; do
-              if git pull --rebase origin main && git push; then
-                return 0
-              fi
-              # A failed `git pull --rebase` can leave a rebase in progress
-              # (e.g. an unexpected concurrent writer to the same paths);
-              # abort it so the next attempt restarts from a clean state.
-              git rebase --abort 2>/dev/null || true
-              echo "push attempt $attempt hit a concurrent update; retrying after backoff..."
-              sleep "$((attempt * 3))"
-            done
-            echo "failed to push to main after 5 attempts" >&2
-            return 1
-          }
           mkdir -p bench/results
           # download-artifact flattens into incoming/; copy the per-run
           # reports into the tracked results directory.
@@ -505,15 +487,11 @@ jobs:
             exit 0
           fi
           git commit -m "bench: publish weekly results ($(date -u +%Y-%m-%d))"
-          # Push to main via a fetch-rebase-push retry loop. The sibling
-          # `publish-datasheet` job (and, in principle, any other writer) can
-          # push to main concurrently on the same scheduled run, and
-          # rebase-then-push is NOT atomic: if both jobs rebase off the same
-          # HEAD before either pushes, the second push is rejected
-          # non-fast-forward. Retrying with backoff makes it land. The two
-          # publish jobs touch disjoint paths (bench/results vs blog/artifacts)
-          # so each rebase is always a clean replay.
-          push_with_retry
+          # Push to main, retrying the non-atomic fetch-rebase-push against the
+          # sibling `publish-datasheet` job (or any other concurrent writer).
+          # The two publish jobs touch disjoint paths (bench/results vs
+          # blog/artifacts) so each rebase is a clean replay.
+          bash .github/scripts/push-with-retry.sh
 
   publish-datasheet:
     name: publish dual datasheet to blog/artifacts
@@ -547,24 +525,6 @@ jobs:
       - name: stage and commit datasheet
         run: |
           set -euo pipefail
-          # Push HEAD to main, surviving a concurrent push from the sibling
-          # publish job or any other writer. fetch-rebase-push is not atomic,
-          # so retry with linear backoff until the push fast-forwards.
-          push_with_retry() {
-            for attempt in 1 2 3 4 5; do
-              if git pull --rebase origin main && git push; then
-                return 0
-              fi
-              # A failed `git pull --rebase` can leave a rebase in progress
-              # (e.g. an unexpected concurrent writer to the same paths);
-              # abort it so the next attempt restarts from a clean state.
-              git rebase --abort 2>/dev/null || true
-              echo "push attempt $attempt hit a concurrent update; retrying after backoff..."
-              sleep "$((attempt * 3))"
-            done
-            echo "failed to push to main after 5 attempts" >&2
-            return 1
-          }
           md="incoming-datasheet/edge-performance-datasheet.md"
           json="incoming-datasheet/edge-performance-datasheet.json"
           # The datasheet artifact only exists when wire-datasheet produced it.
@@ -584,7 +544,7 @@ jobs:
             exit 0
           fi
           git commit -m "bench: publish refreshed edge datasheet ($(date -u +%Y-%m-%d))"
-          # See `publish`: rebase-then-push is not atomic, so use the same
-          # fetch-rebase-push retry loop to survive a concurrent push to main
-          # (the sibling `publish` job or any other writer).
-          push_with_retry
+          # See `publish`: rebase-then-push is not atomic, so reuse the shared
+          # retry helper to survive a concurrent push to main (the sibling
+          # `publish` job or any other writer).
+          bash .github/scripts/push-with-retry.sh
