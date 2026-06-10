@@ -84,22 +84,22 @@ type curatedQuery struct {
 
 // queryReport is the per-query record emitted in the report.
 type queryReport struct {
-	Question       string `json:"question"`
-	ExpectedKind   string `json:"expected_kind"`
-	ParsedKind     string `json:"parsed_kind"`
-	KindCorrect    bool   `json:"kind_correct"`
-	Verdict        string `json:"verdict"`
-	ExpectedVern   string `json:"expected_verdict"`
-	VerdictCorrect bool   `json:"verdict_correct"`
-	EvaluationMode string `json:"evaluation_mode"`
-	AIGenerated    bool   `json:"ai_generated"`
-	LLMConsulted   bool   `json:"llm_consulted"`
-	LLMValidJSON   bool   `json:"llm_valid_json"`
-	AIGenCorrect   bool   `json:"ai_generated_correct"`
-	FallbackAgree  bool   `json:"fallback_agreement"`
-	RawParseAgree  bool   `json:"raw_parse_agreement"`
-	LatencyMS      int64  `json:"latency_ms,omitempty"`
-	Note           string `json:"note,omitempty"`
+	Question        string `json:"question"`
+	ExpectedKind    string `json:"expected_kind"`
+	ParsedKind      string `json:"parsed_kind"`
+	KindCorrect     bool   `json:"kind_correct"`
+	Verdict         string `json:"verdict"`
+	ExpectedVerdict string `json:"expected_verdict"`
+	VerdictCorrect  bool   `json:"verdict_correct"`
+	EvaluationMode  string `json:"evaluation_mode"`
+	AIGenerated     bool   `json:"ai_generated"`
+	LLMConsulted    bool   `json:"llm_consulted"`
+	LLMValidJSON    bool   `json:"llm_valid_json"`
+	AIGenCorrect    bool   `json:"ai_generated_correct"`
+	FallbackAgree   bool   `json:"fallback_agreement"`
+	RawParseAgree   bool   `json:"raw_parse_agreement"`
+	LatencyMS       int64  `json:"latency_ms,omitempty"`
+	Note            string `json:"note,omitempty"`
 }
 
 // report is the published quality document.
@@ -225,9 +225,9 @@ func run() error {
 		}
 
 		row := queryReport{
-			Question:     q.Question,
-			ExpectedKind: q.ExpectKind,
-			ExpectedVern: q.ExpectVerdict,
+			Question:        q.Question,
+			ExpectedKind:    q.ExpectKind,
+			ExpectedVerdict: q.ExpectVerdict,
 		}
 
 		// LLM-augmented parse (one model call). When no endpoint is

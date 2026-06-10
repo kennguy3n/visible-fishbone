@@ -322,7 +322,10 @@ func mergeIntent(det, llm ParsedIntent) ParsedIntent {
 	if merged.DeviceRef == "" {
 		merged.DeviceRef = cleanEntityRef(llm.DeviceRef)
 	}
-	if merged.Action == "" {
+	// Action is enforcement-only state; never let the LLM attach one to
+	// a read-only analytics intent even if the deterministic pass left
+	// it empty.
+	if merged.Action == "" && merged.Kind == IntentPolicyVerdict {
 		merged.Action = normalizeAction(llm.Action)
 	}
 	return merged
@@ -437,10 +440,18 @@ func (e *NLQueryEngine) parseStructured(question string) ParsedIntent {
 		}
 	}
 
-	if strings.Contains(q, "access") {
-		intent.Action = "access"
-	} else if strings.Contains(q, "block") {
-		intent.Action = "block"
+	// Enforcement actions are only meaningful for a policy-verdict
+	// question. Analytics kinds are read-only telemetry, so the word
+	// "blocked" in "show blocked traffic" must not be misread as an
+	// enforcement intent — that would surface a misleading
+	// "action":"block" in the serialized intent and could mislead any
+	// future consumer that inspects Action on an analytics response.
+	if intent.Kind == IntentPolicyVerdict {
+		if strings.Contains(q, "access") {
+			intent.Action = "access"
+		} else if strings.Contains(q, "block") {
+			intent.Action = "block"
+		}
 	}
 
 	// Relative time windows ("since last week", "in 24h") qualify the
@@ -485,7 +496,7 @@ func classifyKind(q string) IntentKind {
 		return IntentBlockedTraffic
 	case strings.Contains(q, "what changed") || strings.Contains(q, "what has changed") ||
 		strings.Contains(q, "changes since") ||
-		(strings.Contains(q, "chang") && strings.Contains(q, "since")):
+		((strings.Contains(q, "changed") || strings.Contains(q, "changing")) && strings.Contains(q, "since")):
 		return IntentChangeSummary
 	default:
 		return IntentPolicyVerdict
@@ -608,7 +619,12 @@ func parseVersionRefs(q string) []int {
 			set[n] = struct{}{}
 		}
 	}
-	for _, tok := range strings.Fields(q) {
+	// Bare integers are scanned only after the relative-time windows
+	// are removed, so a lookback magnitude (e.g. the "7" in "compare
+	// policy versions in the last 7 days") is never mistaken for a
+	// policy version number.
+	scan := windowRe.ReplaceAllString(q, " ")
+	for _, tok := range strings.Fields(scan) {
 		if n, err := strconv.Atoi(cleanEntityRef(tok)); err == nil && n > 0 {
 			set[n] = struct{}{}
 		}

@@ -303,6 +303,7 @@ func TestNLQueryEngine_ClassifyKind(t *testing.T) {
 		{"list blocked connections in the last 24h", IntentBlockedTraffic},
 		{"what changed since last week", IntentChangeSummary},
 		{"what has changed in the policy since yesterday", IntentChangeSummary},
+		{"what is changing in the rules since friday", IntentChangeSummary},
 		{"compare policy versions", IntentPolicyVersionCompare},
 		{"compare v2 and v5 of the policy", IntentPolicyVersionCompare},
 		{"which devices failed posture in 24h", IntentPostureFailure},
@@ -311,6 +312,9 @@ func TestNLQueryEngine_ClassifyKind(t *testing.T) {
 		{"Can user alice access app salesforce from device laptop1?", IntentPolicyVerdict},
 		{"block user admin from app internal", IntentPolicyVerdict},
 		{"is traffic to evil.com blocked?", IntentPolicyVerdict},
+		// "exchange" contains the substring "chang" but a reachability
+		// verdict question must not be routed to the change-summary path.
+		{"Can app exchange be reached since yesterday?", IntentPolicyVerdict},
 		{"what is the weather?", IntentPolicyVerdict},
 	}
 	for _, tc := range cases {
@@ -369,6 +373,9 @@ func TestNLQueryEngine_ParseVersionRefs(t *testing.T) {
 		{"compare policy versions 3 and 5", []int{3, 5}},
 		{"compare policy v5 and v2 and v5", []int{2, 5}},
 		{"compare policy versions", nil},
+		// A relative-time magnitude must not be read as a version number.
+		{"compare policy versions in the last 7 days", nil},
+		{"compare versions 3 and 5 over the last 24h", []int{3, 5}},
 	}
 	for _, tc := range cases {
 		got := parseVersionRefs(strings.ToLower(tc.question))
@@ -403,6 +410,33 @@ func TestNLQueryEngine_BlockedTrafficSubject(t *testing.T) {
 		}
 		if intent.Window == nil || intent.Window.Seconds != 86400 {
 			t.Fatalf("%q: window = %+v, want 24h", q, intent.Window)
+		}
+	}
+}
+
+// TestNLQueryEngine_AnalyticsIntentCarriesNoAction asserts that the
+// word "blocked" in a read-only analytics query is never promoted to
+// an enforcement Action, while a genuine verdict question still is.
+func TestNLQueryEngine_AnalyticsIntentCarriesNoAction(t *testing.T) {
+	t.Parallel()
+	engine := NewNLQueryEngine(nil)
+	cases := []struct {
+		question   string
+		wantKind   IntentKind
+		wantAction string
+	}{
+		{"show blocked traffic for user alice in the last 24h", IntentBlockedTraffic, ""},
+		{"list blocked connections today", IntentBlockedTraffic, ""},
+		{"should user admin be blocked from app internal?", IntentPolicyVerdict, "block"},
+		{"can user alice access app salesforce?", IntentPolicyVerdict, "access"},
+	}
+	for _, tc := range cases {
+		intent := engine.parseStructured(tc.question)
+		if intent.Kind != tc.wantKind {
+			t.Errorf("%q: kind = %q, want %q", tc.question, intent.Kind, tc.wantKind)
+		}
+		if intent.Action != tc.wantAction {
+			t.Errorf("%q: action = %q, want %q", tc.question, intent.Action, tc.wantAction)
 		}
 	}
 }
