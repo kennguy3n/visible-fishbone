@@ -348,12 +348,18 @@ func validEndpointPatternData(t repository.DLPRuleType, data string) bool {
 // endpointEntityClasses is the set of NER entity-class wire names an
 // ml_ner rule may target. Wire-identical to sng-dlp's `EntityClass`.
 var endpointEntityClasses = map[string]struct{}{
-	"person_name":    {},
-	"address":        {},
-	"phone_number":   {},
-	"bank_account":   {},
-	"medical_record": {},
-	"legal_document": {},
+	"person_name":           {},
+	"address":               {},
+	"phone_number":          {},
+	"bank_account":          {},
+	"medical_record":        {},
+	"legal_document":        {},
+	"medical_record_number": {},
+	"driver_license":        {},
+	"tax_id":                {},
+	"date_of_birth":         {},
+	"passport_number":       {},
+	"national_id":           {},
 }
 
 // validEntityClassCSV reports whether data is a comma-separated list

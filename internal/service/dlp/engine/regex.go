@@ -79,6 +79,28 @@ var builtinPatterns = map[string]*regexp.Regexp{
 	"kuwait_civil_id": regexp.MustCompile(`\b\d{12}\b`),
 	// Bahrain CPR: 9 digits (no validator; proximity-gated).
 	"bahrain_cpr": regexp.MustCompile(`\b\d{9}\b`),
+
+	// --- WS5 jurisdiction breadth (validators in validators_ws5.go) ---
+	// UK NHS number: 3-3-4 digits, modulus-11 check.
+	"uk_nhs": regexp.MustCompile(`\b\d{3}\s?\d{3}\s?\d{4}\b`),
+	// Canada SIN: 3-3-3 digits with optional space/hyphen, Luhn.
+	"canada_sin": regexp.MustCompile(`\b\d{3}[\s-]?\d{3}[\s-]?\d{3}\b`),
+	// Australia Medicare: leading 2-6, then 3+5+1 digits.
+	"australia_medicare": regexp.MustCompile(`\b[2-6]\d{3}\s?\d{5}\s?\d\b`),
+	// Germany Personalausweis: 9 alphanumerics + check digit.
+	"germany_personalausweis": regexp.MustCompile(`\b[0-9A-Z]{9}\d\b`),
+	// France INSEE / NIR: sex + DOB + dept (incl. Corsica A/B) + order + key.
+	"france_insee": regexp.MustCompile(`\b[1-8]\s?\d{2}\s?\d{2}\s?\d[AB0-9]\s?\d{3}\s?\d{3}\s?\d{2}\b`),
+	// Brazil CPF: 3.3.3-2 digits with optional punctuation.
+	"brazil_cpf": regexp.MustCompile(`\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b`),
+	// Brazil CNPJ: 2.3.3/4-2 digits with optional punctuation.
+	"brazil_cnpj": regexp.MustCompile(`\b\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b`),
+	// EU VAT: country prefix + 2-12 alphanumerics (+,* for some states).
+	"eu_vat": regexp.MustCompile(`\b(?:AT|BE|BG|CY|CZ|DE|DK|EE|EL|ES|FI|FR|HR|HU|IE|IT|LT|LU|LV|MT|NL|PL|PT|RO|SE|SI|SK)[0-9A-Za-z+*]{2,12}\b`),
+	// Philippines UMID / CRN: 4-7-1 digits.
+	"philippines_umid": regexp.MustCompile(`\b\d{4}-?\d{7}-?\d\b`),
+	// Indonesia NIK (KTP): 16 digits.
+	"indonesia_nik": regexp.MustCompile(`\b\d{16}\b`),
 }
 
 // RegexEngine provides pre-compiled regex matching for PII patterns.

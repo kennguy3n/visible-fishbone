@@ -46,6 +46,10 @@
 //!   per OS.
 //! * [`classifier`] — the [`classifier::ContentClassifier`] that
 //!   compiles rules into matchers and applies them.
+//! * [`detectors`] — the catalog of jurisdiction-specific national /
+//!   regional identifier detectors (regex shape + check-digit
+//!   validator + proximity cues) the classifier resolves builtin
+//!   pattern names through.
 //! * [`policy`] — the [`policy::DlpPolicy`] loaded from the endpoint
 //!   bundle.
 //! * [`engine`] — the [`engine::DlpEngine`] orchestrator.
@@ -61,6 +65,7 @@
 
 pub mod channels;
 pub mod classifier;
+pub mod detectors;
 pub mod doc_classifier;
 pub mod engine;
 pub mod error;

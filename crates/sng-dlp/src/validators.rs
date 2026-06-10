@@ -20,7 +20,7 @@
 
 /// Collect the decimal digits of `s`, ignoring any other byte
 /// (separators, letters). Each element is the digit's value `0..=9`.
-fn digits(s: &str) -> Vec<u8> {
+pub(crate) fn digits(s: &str) -> Vec<u8> {
     s.bytes()
         .filter(u8::is_ascii_digit)
         .map(|b| b - b'0')
@@ -31,7 +31,7 @@ fn digits(s: &str) -> Vec<u8> {
 /// [`crate::classifier::luhn_valid`] this imposes no length window,
 /// so it can back the fixed-width GCC identifiers (Emirates ID = 15,
 /// Saudi national ID = 10).
-fn luhn_digits(d: &[u8]) -> bool {
+pub(crate) fn luhn_digits(d: &[u8]) -> bool {
     if d.is_empty() {
         return false;
     }
@@ -53,7 +53,7 @@ fn luhn_digits(d: &[u8]) -> bool {
 
 /// True iff `(year, month, day)` is a real Gregorian calendar date.
 /// Used by the identifiers that embed a date of birth.
-fn valid_ymd(year: u32, month: u32, day: u32) -> bool {
+pub(crate) fn valid_ymd(year: u32, month: u32, day: u32) -> bool {
     if !(1..=12).contains(&month) || day < 1 {
         return false;
     }
