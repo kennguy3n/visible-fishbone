@@ -36,7 +36,7 @@ use crate::error::SwgError;
 use crate::malware::{MalwareVerdict, MalwareVerdictProvider};
 use crate::rate_limit::RateLimiter;
 use crate::telemetry::{TelemetryEmitter, VerdictEvent};
-use crate::verdict::{Action, RequestContext, Verdict};
+use crate::verdict::{Action, CategoryDenyPolicy, RequestContext, Verdict};
 use crate::yara::{YaraEngine, YaraRuleBundle, YaraRuleVerifier, YaraSeverity};
 
 use base64::Engine as _;
@@ -300,12 +300,16 @@ struct HandlerInner {
     bypass: Arc<RwLock<Arc<BypassList>>>,
     rate_limiter: RateLimiter,
     telemetry: Arc<dyn TelemetryEmitter>,
-    /// Operator-controlled deny-categories. A category that
-    /// appears here causes the handler to return Deny instead of
-    /// Allow. Stored as a sorted Vec so contains() is O(log n)
-    /// after a binary_search, which beats HashSet on the typical
-    /// 50-200 entry list.
-    deny_categories: Vec<String>,
+    /// Operator + smart-default category deny policy. A resolved
+    /// category this policy denies — by an exact rule or a
+    /// dotted-subtree group rule — causes the handler to return
+    /// Deny instead of Allow. Exact rules preserve the handler's
+    /// original operator deny-list semantics (O(log n) binary
+    /// search over a sorted, lowercased vec); group rules add the
+    /// additive, opt-in safe-browsing / topic-group deny capability
+    /// (one rule denies a whole `security.*` subtree). See
+    /// [`CategoryDenyPolicy`].
+    deny_policy: CategoryDenyPolicy,
     /// When true, [`MalwareVerdict::Suspicious`] (heuristic-only
     /// match — classifier not confident enough to deny outright)
     /// is promoted to Deny on the response-side malware check.
@@ -347,7 +351,8 @@ struct HandlerInner {
 impl std::fmt::Debug for ExtAuthzHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExtAuthzHandler")
-            .field("deny_categories_len", &self.inner.deny_categories.len())
+            .field("deny_exact_len", &self.inner.deny_policy.exact_len())
+            .field("deny_group_len", &self.inner.deny_policy.group_len())
             .finish_non_exhaustive()
     }
 }
@@ -368,7 +373,7 @@ pub struct ExtAuthzHandlerBuilder {
     bypass: Option<Arc<BypassList>>,
     rate_limiter: Option<RateLimiter>,
     telemetry: Option<Arc<dyn TelemetryEmitter>>,
-    deny_categories: Vec<String>,
+    deny_policy: CategoryDenyPolicy,
     elevated_risk_mode: bool,
     casb: Option<Arc<InlineCasbInspector>>,
     yara: Option<Arc<YaraEngine>>,
@@ -382,7 +387,8 @@ impl std::fmt::Debug for ExtAuthzHandlerBuilder {
             .field("bypass_set", &self.bypass.is_some())
             .field("rate_limiter_set", &self.rate_limiter.is_some())
             .field("telemetry_set", &self.telemetry.is_some())
-            .field("deny_categories", &self.deny_categories)
+            .field("deny_exact_len", &self.deny_policy.exact_len())
+            .field("deny_group_len", &self.deny_policy.group_len())
             .field("elevated_risk_mode", &self.elevated_risk_mode)
             .field("casb_set", &self.casb.is_some())
             .field("yara_set", &self.yara.is_some())
@@ -402,7 +408,7 @@ impl ExtAuthzHandlerBuilder {
             bypass: None,
             rate_limiter: None,
             telemetry: None,
-            deny_categories: Vec::new(),
+            deny_policy: CategoryDenyPolicy::empty(),
             elevated_risk_mode: false,
             casb: None,
             yara: None,
@@ -439,12 +445,43 @@ impl ExtAuthzHandlerBuilder {
         self
     }
 
-    /// Categories that map onto Deny instead of Allow. Stored
-    /// in a Vec the builder sorts + dedups at build time; the
-    /// hot path uses binary_search to test membership.
+    /// Add exact-match deny categories (builder style). An exact
+    /// rule denies *only* the named category — not a parent and not
+    /// a child — preserving the handler's original operator
+    /// deny-list semantics. Categories are lowercased, sorted, and
+    /// deduped inside the [`CategoryDenyPolicy`]; the hot path tests
+    /// membership with an O(log n) binary search. Repeated calls
+    /// accumulate.
     #[must_use]
     pub fn with_deny_categories(mut self, cats: Vec<String>) -> Self {
-        self.deny_categories = cats;
+        self.deny_policy = std::mem::take(&mut self.deny_policy).with_exact(cats);
+        self
+    }
+
+    /// Add group (dotted-subtree) deny rules (builder style). A
+    /// group rule `"security"` denies the whole `security.*`
+    /// subtree (`security.malware`, `security.phishing`, …) plus
+    /// the bare `security` node, with segment-boundary safety (the
+    /// group `"mal"` does not match `malware`). This is the
+    /// additive, opt-in Goal-B surface that lets an SME deny every
+    /// present and future safe-browsing threat category with one
+    /// short rule instead of enumerating each leaf. Repeated calls
+    /// accumulate.
+    #[must_use]
+    pub fn with_deny_groups(mut self, groups: Vec<String>) -> Self {
+        self.deny_policy = std::mem::take(&mut self.deny_policy).with_groups(groups);
+        self
+    }
+
+    /// Replace the accumulated deny policy wholesale with a
+    /// pre-built [`CategoryDenyPolicy`] — e.g.
+    /// [`CategoryDenyPolicy::safe_browsing_defaults`] composed with
+    /// operator rules via its builder. Overrides any prior
+    /// [`Self::with_deny_categories`] / [`Self::with_deny_groups`]
+    /// calls on this builder.
+    #[must_use]
+    pub fn with_deny_policy(mut self, policy: CategoryDenyPolicy) -> Self {
+        self.deny_policy = policy;
         self
     }
 
@@ -494,15 +531,11 @@ impl ExtAuthzHandlerBuilder {
 
     /// Build the handler. Returns an error when any required
     /// dep was not set.
-    pub fn build(mut self) -> Result<ExtAuthzHandler, SwgError> {
-        // Sort + dedup so binary_search works on the hot path.
-        // Lowercasing here keeps the case-insensitive compare
-        // out of every request.
-        for c in &mut self.deny_categories {
-            *c = c.to_ascii_lowercase();
-        }
-        self.deny_categories.sort();
-        self.deny_categories.dedup();
+    pub fn build(self) -> Result<ExtAuthzHandler, SwgError> {
+        // The deny policy canonicalises (lowercase), sorts, and
+        // dedups its rules as they are added, so the hot-path lookup
+        // is O(log n) on the exact set with no per-request
+        // allocation — no normalisation step is needed here.
         Ok(ExtAuthzHandler {
             inner: Arc::new(HandlerInner {
                 categorizer: self
@@ -521,7 +554,7 @@ impl ExtAuthzHandlerBuilder {
                 telemetry: self
                     .telemetry
                     .ok_or_else(|| SwgError::Config("telemetry emitter not set".into()))?,
-                deny_categories: self.deny_categories,
+                deny_policy: self.deny_policy,
                 elevated_risk_mode: self.elevated_risk_mode,
                 casb: self.casb,
                 yara: self.yara,
@@ -756,16 +789,22 @@ impl ExtAuthzHandler {
         // deny-list audit trail that groups by category. Doing
         // the lowercase once here is symmetric with the
         // `LocalCategoryDb::install` canonicalisation and with
-        // the binary-search lookup against the already-lowercased
-        // `deny_categories` table that follows.
+        // the case-folded lookup against the already-lowercased
+        // [`CategoryDenyPolicy`] that follows.
         let category_canonical = self
             .inner
             .categorizer
             .categorize(&ctx.host, &ctx.path)
             .await
             .map(|c| c.0.to_ascii_lowercase());
+        // The policy denies a category by an exact operator rule
+        // *or* a dotted-subtree group rule (e.g. a `security` group
+        // denies `security.malware`). The verdict still reports the
+        // resolved category (not the rule), keeping the
+        // `deny.<category>` telemetry contract stable whether the
+        // block came from an exact or a group rule.
         if let Some(cat) = &category_canonical
-            && self.inner.deny_categories.binary_search(cat).is_ok()
+            && self.inner.deny_policy.is_denied(cat)
         {
             return Verdict::deny_categorized(cat.clone());
         }
@@ -1539,6 +1578,133 @@ mod tests {
             Some("business.saas"),
             "telemetry event category must be canonical lowercase, got: {:?}",
             events[0],
+        );
+    }
+
+    // --- CategoryDenyPolicy wiring (exact + group) --------------
+
+    /// Build a handler whose categoriser always returns `category`
+    /// and whose deny decision is governed by a full
+    /// [`CategoryDenyPolicy`]. Lets a test prove a *group* rule
+    /// denies a resolved subtree category end-to-end through the
+    /// handler — the capability `with_deny_categories` (exact only)
+    /// could not exercise.
+    fn make_handler_with_policy(
+        category: &str,
+        policy: CategoryDenyPolicy,
+    ) -> (ExtAuthzHandler, Arc<CapturingEmitter>) {
+        let cap = Arc::new(CapturingEmitter::default());
+        let bypass = Arc::new(BypassList::new(Vec::new()));
+        let mal: Arc<dyn MalwareVerdictProvider> = Arc::new(NullMalwareProvider);
+        let clock = Arc::new(TestClock::new());
+        let rl = RateLimiter::new(100.0, 50.0, clock);
+        let cats = Arc::new(MixedCaseRemoteCategorizer {
+            category: Some(Category(category.into())),
+        });
+        let h = ExtAuthzHandlerBuilder::new()
+            .with_categorizer(cats)
+            .with_malware(mal)
+            .with_bypass(bypass)
+            .with_rate_limiter(rl)
+            .with_telemetry(cap.clone() as Arc<dyn TelemetryEmitter>)
+            .with_deny_policy(policy)
+            .build()
+            .unwrap();
+        (h, cap)
+    }
+
+    #[tokio::test]
+    async fn group_deny_rule_blocks_whole_subtree_through_handler() {
+        // The Goal-B capability: an operator enables the `security`
+        // group and every resolved `security.*` leaf is denied,
+        // with no per-leaf enumeration. Proves the handler consults
+        // the group rules, not just the exact set the old
+        // `Vec<String>` + binary_search supported.
+        let policy = CategoryDenyPolicy::empty().with_groups(vec!["security".into()]);
+        let (h, _cap) = make_handler_with_policy("security.malware", policy);
+        let resp = h
+            .handle_request(req("threat.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.status, Some(403));
+        // The verdict reports the *resolved* category (the leaf),
+        // not the group rule, so the `deny.<category>` telemetry
+        // contract is unchanged whether an exact or group rule fired.
+        assert_eq!(resp.category.as_deref(), Some("security.malware"));
+        assert_eq!(resp.reason, "deny.security.malware");
+    }
+
+    #[tokio::test]
+    async fn safe_browsing_defaults_deny_security_leaf_through_handler() {
+        // Wiring the SME-friendly baseline (deny the whole
+        // safe-browsing `security.*` subtree) blocks a phishing
+        // category end-to-end.
+        let (h, _cap) = make_handler_with_policy(
+            "security.phishing",
+            CategoryDenyPolicy::safe_browsing_defaults(),
+        );
+        let resp = h
+            .handle_request(req("phish.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.category.as_deref(), Some("security.phishing"));
+    }
+
+    #[tokio::test]
+    async fn group_deny_respects_segment_boundary_through_handler() {
+        // Segment-boundary safety end-to-end: a `security` group
+        // must NOT deny a sibling category that merely shares a
+        // prefix (`securityawareness`), only genuine `security.*`
+        // children. A false match here would over-block legitimate
+        // traffic for 5000 tenants.
+        let policy = CategoryDenyPolicy::empty().with_groups(vec!["security".into()]);
+        let (h, _cap) = make_handler_with_policy("securityawareness", policy);
+        let resp = h
+            .handle_request(req("training.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+        assert_eq!(resp.category.as_deref(), Some("securityawareness"));
+    }
+
+    #[tokio::test]
+    async fn exact_and_group_rules_compose_through_handler() {
+        // Exact and group rules coexist on one handler: the exact
+        // `gambling` rule and the `security` group both deny, while
+        // an unrelated category is allowed. Confirms
+        // `with_deny_categories` (exact) and `with_deny_groups`
+        // accumulate rather than overwrite.
+        let policy = CategoryDenyPolicy::empty()
+            .with_exact(vec!["gambling".into()])
+            .with_groups(vec!["security".into()]);
+        let (deny_exact, _c1) = make_handler_with_policy("gambling", policy.clone());
+        assert_eq!(
+            deny_exact
+                .handle_request(req("bet.example", "/", None, None))
+                .await
+                .unwrap()
+                .action,
+            "deny",
+        );
+        let (deny_group, _c2) = make_handler_with_policy("security.botnet", policy.clone());
+        assert_eq!(
+            deny_group
+                .handle_request(req("bot.example", "/", None, None))
+                .await
+                .unwrap()
+                .action,
+            "deny",
+        );
+        let (allow_other, _c3) = make_handler_with_policy("business.saas", policy);
+        assert_eq!(
+            allow_other
+                .handle_request(req("ok.example", "/", None, None))
+                .await
+                .unwrap()
+                .action,
+            "allow",
         );
     }
 
