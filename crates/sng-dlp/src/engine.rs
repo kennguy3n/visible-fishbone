@@ -224,6 +224,13 @@ impl DlpEngine {
         let model = current.model.clone();
         let classifier =
             ContentClassifier::compile_with_model(policy.rules(), max_scan_bytes, model.clone())?;
+        // `install` rotates only the rule set + channel config. The
+        // AI-app detector and the ML-NER model are orthogonal
+        // dimensions, each mutated by its own atomic path
+        // (`set_ai_app_policy`, `install_model`), so a rule rotation
+        // must preserve both. The bundle-apply path applies the
+        // document's `ai_app` block via a separate `set_ai_app_policy`
+        // call so all three dimensions stay independently swappable.
         let ai_app_policy = current.ai_app_policy;
         let ai_app = build_ai_app(ai_app_policy, max_scan_bytes, &model)?;
         self.state.store(Arc::new(EngineState {

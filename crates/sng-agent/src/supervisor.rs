@@ -229,6 +229,24 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
     let bootstrap_body = bootstrap_bundle_body();
     let policy_eval = Arc::new(PolicyEvalSubsystem::new(&bootstrap_body)?);
 
+    // Endpoint DLP engine. Built here — ahead of the bundle
+    // publisher — so two consumers can share one live engine: the
+    // publisher hot-swaps its policy on each fresh bundle, and the
+    // DLP subsystem (built later) runs channel inspection against the
+    // same instance. `None` when `[dlp] enabled = false`, so a
+    // deployment without endpoint DLP pays no cost. `with_limit` over
+    // the default (empty) policy is infallible today; propagate the
+    // error anyway so a future fallible default surfaces as a clean
+    // boot error rather than a panic.
+    let dlp_engine: Option<Arc<DlpEngine>> = if cfg.dlp.enabled {
+        Some(Arc::new(DlpEngine::with_limit(
+            DlpPolicy::default(),
+            cfg.dlp.max_file_bytes,
+        )?))
+    } else {
+        None
+    };
+
     // 2. Comms. Builds the long-lived ControlPlaneClient
     //    internally from the operator-supplied TLS
     //    material; the telemetry subsystem will reuse the
@@ -236,7 +254,7 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
     //    store / endpoint are configured in exactly one
     //    place. Wire the bundle publisher to dispatch fresh
     //    bundles into the policy evaluator.
-    let publisher = make_bundle_publisher(Arc::clone(&policy_eval));
+    let publisher = make_bundle_publisher(Arc::clone(&policy_eval), dlp_engine.clone());
     let trust_store = Arc::new(PolicyTrustStore::new());
     let comms = Arc::new(CommsSubsystem::new(
         &cfg.comms,
@@ -344,8 +362,17 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
         desired_tunnels_rx,
     ));
 
-    // 8. Endpoint DLP — opt-in; `None` unless `[dlp] enabled`.
-    let dlp = build_dlp_subsystem(&cfg.dlp, telemetry.pipeline_handle())?;
+    // 8. Endpoint DLP — opt-in; `None` unless `[dlp] enabled`. Shares
+    //    the engine built above so the bundle publisher and the
+    //    channel interceptors operate on the same live policy.
+    let dlp = match &dlp_engine {
+        Some(engine) => Some(build_dlp_subsystem(
+            &cfg.dlp,
+            telemetry.pipeline_handle(),
+            Arc::clone(engine),
+        )?),
+        None => None,
+    };
 
     // Register subsystems onto the builder we created above.
     // Boot order matters: telemetry + comms first so producer
@@ -397,26 +424,17 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
 /// empty the set is empty: the subsystem still registers (so health
 /// reports it) but observes nothing.
 ///
-/// Returns `None` (and builds nothing) unless `[dlp] enabled` is
-/// set, so a deployment that hasn't authored endpoint DLP rules
-/// pays no monitoring cost.
+/// The `engine` is built by [`build_agent`] and shared with the
+/// bundle publisher, which hot-swaps the live policy on every fresh
+/// endpoint bundle via [`DlpEngine::install`] +
+/// [`DlpEngine::set_ai_app_policy`]. The caller only invokes this when
+/// `[dlp] enabled` is set, so a deployment that hasn't authored
+/// endpoint DLP rules pays no monitoring cost.
 fn build_dlp_subsystem(
     cfg: &crate::config::DlpConfig,
     telemetry: sng_telemetry::PipelineHandle,
-) -> Result<Option<Arc<DlpSubsystem>>, AgentBuildError> {
-    if !cfg.enabled {
-        return Ok(None);
-    }
-
-    // `with_limit` over the default policy is infallible today
-    // (an empty rule set always validates); propagate the error
-    // anyway so a future default that can fail surfaces as a clean
-    // boot error rather than a panic.
-    let engine = Arc::new(DlpEngine::with_limit(
-        DlpPolicy::default(),
-        cfg.max_file_bytes,
-    )?);
-
+    engine: Arc<DlpEngine>,
+) -> Result<Arc<DlpSubsystem>, AgentBuildError> {
     let mut interceptors: Vec<Arc<dyn ChannelInterceptor>> = Vec::new();
     // File-write channel: native edge-triggered watcher over the
     // configured sensitive directories (each per-OS backend falls back
@@ -429,13 +447,13 @@ fn build_dlp_subsystem(
     // own config flag so an operator can pare the channel set down.
     push_native_interceptors(cfg, &mut interceptors);
 
-    Ok(Some(Arc::new(DlpSubsystem::new(
+    Ok(Arc::new(DlpSubsystem::new(
         engine,
         interceptors,
         Arc::new(TracingDlpSink),
         telemetry,
         cfg.idle_sleep,
-    ))))
+    )))
 }
 
 /// Build the file-write interceptor for the host OS. On the three
@@ -865,7 +883,10 @@ fn pipeline_handle_to_telemetry_sender(
 /// regression rather than a hot-path concern, but we
 /// surface it as an error instead of silently swapping the
 /// wrong target.
-fn make_bundle_publisher(policy_eval: Arc<PolicyEvalSubsystem>) -> BundlePublisher {
+fn make_bundle_publisher(
+    policy_eval: Arc<PolicyEvalSubsystem>,
+    dlp_engine: Option<Arc<DlpEngine>>,
+) -> BundlePublisher {
     Arc::new(move |target, body| match target {
         BundleTarget::Endpoint => {
             policy_eval
@@ -876,12 +897,60 @@ fn make_bundle_publisher(policy_eval: Arc<PolicyEvalSubsystem>) -> BundlePublish
                 body_bytes = body.len(),
                 "policy_eval bundle swap accepted"
             );
+            // Apply the bundle's DLP domain document to the live engine
+            // when this agent runs endpoint DLP. The swap above already
+            // decoded the bundle, so we read the `dl` section straight
+            // off the now-current `LoadedBundle` rather than re-decoding
+            // the body.
+            if let Some(engine) = &dlp_engine {
+                let loaded = policy_eval.engine().current_bundle();
+                apply_dlp_document(engine, loaded.dlp.as_deref())?;
+            }
             Ok(())
         }
         other => Err(format!(
             "endpoint bundle publisher rejected non-Endpoint bundle target {other:?}"
         )),
     })
+}
+
+/// Install the bundle-carried endpoint DLP document into the live
+/// engine, treating the bundle as the source of truth.
+///
+/// `dlp` is the verbatim `dl` section from the just-applied bundle
+/// (`None` when the bundle carried none). The three DLP dimensions are
+/// orthogonal, so we drive them with distinct calls:
+/// [`DlpEngine::install`] rotates the rule set + channel config and
+/// [`DlpEngine::set_ai_app_policy`] (re)arms the AI-app exfiltration
+/// detector. Absence of a `dl` section resets both to the inert
+/// default, so removing all endpoint DLP policy in the control plane
+/// disarms the edge rather than leaving a stale policy live.
+///
+/// On a decode error the engine keeps its previous (valid) policy
+/// because `install` is only reached after a successful decode; we
+/// surface the error so the puller logs it and counts a publish
+/// failure.
+fn apply_dlp_document(engine: &Arc<DlpEngine>, dlp: Option<&[u8]>) -> Result<(), String> {
+    let policy = match dlp {
+        Some(bytes) => DlpPolicy::from_bundle_json(bytes)
+            .map_err(|e| format!("decode endpoint DLP policy: {e}"))?,
+        None => DlpPolicy::default(),
+    };
+    let ai_app = policy.ai_app.clone();
+    let rule_count = policy.rules().len();
+    engine
+        .install(policy)
+        .map_err(|e| format!("install endpoint DLP policy: {e}"))?;
+    engine
+        .set_ai_app_policy(ai_app.clone())
+        .map_err(|e| format!("apply endpoint AI-app policy: {e}"))?;
+    tracing::info!(
+        target: "sng_agent::bundle_publisher",
+        rules = rule_count,
+        ai_app_enabled = ai_app.is_some(),
+        "endpoint DLP policy applied from bundle"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -894,5 +963,85 @@ mod tests {
         // exact variant depends on the build host, which CI
         // varies by job matrix.
         let _ = host_platform();
+    }
+
+    #[test]
+    fn apply_dlp_document_installs_rules_and_arms_detector() {
+        // A bundle carrying a `dl` document must install its rules and,
+        // when the document carries an `ai_app` block, arm the AI-app
+        // detector — the wiring that makes operator-authored endpoint
+        // DLP policy (and the #185 producer) actually live at the edge.
+        let engine = Arc::new(DlpEngine::with_limit(DlpPolicy::default(), 1 << 20).unwrap());
+        assert_eq!(engine.current_policy().rules().len(), 0);
+        assert!(engine.ai_app_policy().is_none());
+
+        let doc = serde_json::json!({
+            "schema_version": 1,
+            "target": "endpoint",
+            "domain": "dlp",
+            "rules": [{
+                "id": "ssn",
+                "name": "US SSN",
+                "pattern_type": "regex",
+                "pattern_data": "ssn_us",
+                "severity": "high",
+                "action": "warn"
+            }],
+            "ai_app": {"enabled": true, "block_opt_in": false, "block_confidence": 0.9, "min_report_confidence": 0.5, "coach_severity_floor": "high"}
+        });
+        let bytes = serde_json::to_vec(&doc).unwrap();
+
+        apply_dlp_document(&engine, Some(bytes.as_slice())).unwrap();
+        assert_eq!(engine.current_policy().rules().len(), 1);
+        assert!(
+            engine.ai_app_policy().is_some(),
+            "ai_app block in the bundle must arm the detector"
+        );
+    }
+
+    #[test]
+    fn apply_dlp_document_without_section_disarms_engine() {
+        // Removing all endpoint DLP policy in the control plane yields a
+        // bundle with no `dl` section. The edge must reset to the inert
+        // default rather than keep a stale policy live.
+        let engine = Arc::new(DlpEngine::with_limit(DlpPolicy::default(), 1 << 20).unwrap());
+        let doc = serde_json::json!({
+            "schema_version": 1, "target": "endpoint", "domain": "dlp",
+            "rules": [{
+                "id": "ssn", "name": "US SSN", "pattern_type": "regex",
+                "pattern_data": "ssn_us", "severity": "high", "action": "warn"
+            }],
+            "ai_app": {"enabled": true, "block_opt_in": false, "block_confidence": 0.9, "min_report_confidence": 0.5, "coach_severity_floor": "high"}
+        });
+        apply_dlp_document(&engine, Some(serde_json::to_vec(&doc).unwrap().as_slice())).unwrap();
+        assert_eq!(engine.current_policy().rules().len(), 1);
+        assert!(engine.ai_app_policy().is_some());
+
+        // No `dl` section → disarm.
+        apply_dlp_document(&engine, None).unwrap();
+        assert_eq!(engine.current_policy().rules().len(), 0);
+        assert!(engine.ai_app_policy().is_none());
+    }
+
+    #[test]
+    fn apply_dlp_document_rejects_malformed_json_and_keeps_prior_policy() {
+        // A malformed `dl` section is a compiler bug; surface it as an
+        // error. Crucially, the engine must keep its previous valid
+        // policy (fail-safe) rather than wipe it.
+        let engine = Arc::new(DlpEngine::with_limit(DlpPolicy::default(), 1 << 20).unwrap());
+        let doc = serde_json::json!({
+            "schema_version": 1, "target": "endpoint", "domain": "dlp",
+            "rules": [{
+                "id": "ssn", "name": "US SSN", "pattern_type": "regex",
+                "pattern_data": "ssn_us", "severity": "high", "action": "warn"
+            }]
+        });
+        apply_dlp_document(&engine, Some(serde_json::to_vec(&doc).unwrap().as_slice())).unwrap();
+        assert_eq!(engine.current_policy().rules().len(), 1);
+
+        let err = apply_dlp_document(&engine, Some(b"{not valid json")).unwrap_err();
+        assert!(err.contains("decode endpoint DLP policy"), "got: {err}");
+        // Prior policy survived the failed apply.
+        assert_eq!(engine.current_policy().rules().len(), 1);
     }
 }

@@ -10,6 +10,7 @@
 //! `sng-policy-eval`; by the time bytes reach [`DlpPolicy::from_bundle_json`]
 //! they are authenticated.
 
+use crate::ai_app::AiAppPolicy;
 use crate::channels::{ChannelConfig, DlpChannel};
 use crate::error::{DlpError, DlpResult};
 use crate::rules::DlpRule;
@@ -24,7 +25,11 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
 /// The active endpoint DLP policy.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Eq`: the optional [`AiAppPolicy`] carries `f64` confidence
+/// thresholds, so the struct is only `PartialEq` (sufficient for the
+/// round-trip tests and the engine's snapshot comparisons).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DlpPolicy {
     /// Schema version of this policy document.
     #[serde(default = "default_schema_version")]
@@ -43,6 +48,14 @@ pub struct DlpPolicy {
     /// [`ChannelConfig::default`] (enabled, no action floor).
     #[serde(default)]
     pub channels: BTreeMap<DlpChannel, ChannelConfig>,
+    /// Operator policy for the AI-app exfiltration detector. `None`
+    /// (the default, and the shape older control planes emit) leaves
+    /// the detector disabled — the false-positive-averse posture. When
+    /// present, the agent enables the detector with this policy on
+    /// bundle apply, so the coach-first AI-app signal becomes live
+    /// without a separate distribution channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_app: Option<AiAppPolicy>,
 }
 
 const fn default_schema_version() -> u32 {
@@ -65,6 +78,7 @@ impl Default for DlpPolicy {
             domain: default_domain(),
             rules: Vec::new(),
             channels: BTreeMap::new(),
+            ai_app: None,
         }
     }
 }
@@ -134,6 +148,18 @@ impl DlpPolicy {
                 )));
             }
         }
+        if let Some(ai) = &self.ai_app {
+            for (name, v) in [
+                ("block_confidence", ai.block_confidence),
+                ("min_report_confidence", ai.min_report_confidence),
+            ] {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(DlpError::PolicyInvalid(format!(
+                        "ai_app {name} {v} out of [0,1]"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -198,6 +224,7 @@ mod tests {
             domain: EnforcementDomain::Dlp,
             rules: vec![sample_rule("r1"), sample_rule("r2")],
             channels,
+            ai_app: Some(AiAppPolicy::default()),
         };
         let bytes = policy.to_bundle_json().expect("encode");
         let back = DlpPolicy::from_bundle_json(&bytes).expect("decode");

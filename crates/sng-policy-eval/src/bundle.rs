@@ -92,6 +92,21 @@ struct RawBundle {
         skip_serializing_if = "Vec::is_empty"
     )]
     malware_json: Vec<u8>,
+    /// JSON-encoded endpoint DLP policy document (rules, channel
+    /// config, and the optional AI-app detector policy) the agent's
+    /// `sng-dlp` engine installs on bundle apply. Optional: the Go
+    /// side emits it (`omitempty`) only for the endpoint target and
+    /// only when a DLP compiler is wired. This crate carries it as
+    /// opaque bytes — decoding belongs to `sng-dlp`
+    /// (`DlpPolicy::from_bundle_json`), which this crate cannot depend
+    /// on without a cycle.
+    #[serde(
+        rename = "dl",
+        with = "serde_bytes",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    dlp_json: Vec<u8>,
     #[serde(rename = "ts")]
     compiled_at: DateTime<Utc>,
 }
@@ -150,6 +165,14 @@ pub struct LoadedBundle {
     /// malware-hash compiler wired). The SWG subsystem installs
     /// these into its `StaticMalwareList` on bundle apply.
     pub malware: Arc<[MalwareEntry]>,
+    /// Endpoint DLP policy document, verbatim JSON bytes from the
+    /// bundle's `dl` section. `None` when the bundle carried no DLP
+    /// section (every non-endpoint target, or an endpoint bundle
+    /// compiled before a DLP compiler was wired). The agent decodes
+    /// it with `sng_dlp::DlpPolicy::from_bundle_json` and installs it
+    /// into the live DLP engine on bundle apply; this crate keeps it
+    /// opaque to avoid a dependency cycle with `sng-dlp`.
+    pub dlp: Option<Arc<[u8]>>,
     /// Wall-clock compile time.
     pub compiled_at: DateTime<Utc>,
     /// Pre-built lookup map for named subjects referenced via
@@ -223,6 +246,15 @@ impl LoadedBundle {
             serde_json::from_slice(&raw.malware_json)
                 .map_err(|e| PolicyEvalError::MalwareDecode(format!("decode malware table: {e}")))?
         };
+        // The DLP document stays opaque here (see the field docs): we
+        // only carry the bytes through to the agent, which owns the
+        // `sng-dlp` decoder. An empty section means "no DLP policy in
+        // this bundle" and maps to `None`.
+        let dlp: Option<Arc<[u8]>> = if raw.dlp_json.is_empty() {
+            None
+        } else {
+            Some(Arc::from(raw.dlp_json.into_boxed_slice()))
+        };
         let default_verb = parse_default_verb(&raw.default_action);
         // Every `suggest_only` rule must carry a `suggested_verb`
         // (the would-be enforcement verb the operator UI surfaces).
@@ -256,6 +288,7 @@ impl LoadedBundle {
             steering: Arc::new(steering_table),
             steering_raw,
             malware: Arc::from(malware.into_boxed_slice()),
+            dlp,
             compiled_at: raw.compiled_at,
             named_subjects,
             named_predicates,
@@ -360,6 +393,7 @@ pub fn deny_all_skeleton_body(target: BundleTarget) -> Vec<u8> {
         rules_json: b"[]".to_vec(),
         steering_json: Vec::new(),
         malware_json: Vec::new(),
+        dlp_json: Vec::new(),
         compiled_at: Utc::now(),
     };
     // Infallible for the fully-populated RawBundle above.
@@ -408,6 +442,7 @@ mod tests {
             rules_json: b"[]".to_vec(),
             steering_json: vec![],
             malware_json: vec![],
+            dlp_json: vec![],
             compiled_at: Utc::now(),
         };
         encode_msgpack_named(&raw)
@@ -476,6 +511,7 @@ mod tests {
             rules_json: b"[]".to_vec(),
             steering_json: vec![],
             malware_json: vec![],
+            dlp_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -504,6 +540,7 @@ mod tests {
             rules_json: b"{not valid json".to_vec(),
             steering_json: vec![],
             malware_json: vec![],
+            dlp_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -537,6 +574,7 @@ mod tests {
             rules_json: b"[]".to_vec(),
             steering_json: vec![],
             malware_json,
+            dlp_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -546,6 +584,54 @@ mod tests {
         assert_eq!(bundle.malware[0].verdict, "malicious");
         assert_eq!(bundle.malware[1].hash, "cafebabe");
         assert_eq!(bundle.malware[1].verdict, "suspicious");
+    }
+
+    #[test]
+    fn dlp_section_round_trips_as_opaque_bytes() {
+        // The endpoint bundle carries the DLP policy document under
+        // `dl`. This crate keeps it opaque (no `sng-dlp` dependency),
+        // so the contract is simply: whatever bytes the compiler put
+        // in `dl` come back verbatim on `LoadedBundle.dlp`.
+        let doc = br#"{"v":1,"t":"endpoint","domain":"dlp","rules":[]}"#.to_vec();
+        let raw = RawBundle {
+            schema_version: 1,
+            target: BundleTarget::Endpoint,
+            graph_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            graph_version: 1,
+            compiler: "test".into(),
+            default_action: "deny".into(),
+            rules_json: b"[]".to_vec(),
+            steering_json: vec![],
+            malware_json: vec![],
+            dlp_json: doc.clone(),
+            compiled_at: Utc::now(),
+        };
+        let body = encode_msgpack_named(&raw);
+        let bundle = LoadedBundle::from_body(&body, BundleTarget::Endpoint).unwrap();
+        assert_eq!(bundle.dlp.as_deref(), Some(doc.as_slice()));
+    }
+
+    #[test]
+    fn absent_dlp_section_decodes_to_none() {
+        // Non-endpoint targets (and endpoint bundles compiled before a
+        // DLP compiler was wired) omit `dl`; the decoder must treat
+        // that as "no DLP policy", not an error.
+        let raw = RawBundle {
+            schema_version: 1,
+            target: BundleTarget::Edge,
+            graph_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            graph_version: 1,
+            compiler: "test".into(),
+            default_action: "deny".into(),
+            rules_json: b"[]".to_vec(),
+            steering_json: vec![],
+            malware_json: vec![],
+            dlp_json: vec![],
+            compiled_at: Utc::now(),
+        };
+        let body = encode_msgpack_named(&raw);
+        let bundle = LoadedBundle::from_body(&body, BundleTarget::Edge).unwrap();
+        assert!(bundle.dlp.is_none());
     }
 
     #[test]
@@ -563,6 +649,7 @@ mod tests {
             rules_json: b"[]".to_vec(),
             steering_json: vec![],
             malware_json: vec![],
+            dlp_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -582,6 +669,7 @@ mod tests {
             rules_json: b"[]".to_vec(),
             steering_json: vec![],
             malware_json: b"{not valid json".to_vec(),
+            dlp_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -601,6 +689,7 @@ mod tests {
             rules_json: b"[]".to_vec(),
             steering_json: b"{not valid json".to_vec(),
             malware_json: vec![],
+            dlp_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -638,6 +727,7 @@ mod tests {
             rules_json,
             steering_json: vec![],
             malware_json: vec![],
+            dlp_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -694,6 +784,7 @@ mod tests {
             rules_json,
             steering_json: vec![],
             malware_json: vec![],
+            dlp_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -729,6 +820,7 @@ mod tests {
             rules_json,
             steering_json: vec![],
             malware_json: vec![],
+            dlp_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -751,6 +843,7 @@ mod tests {
             rules_json: vec![],
             steering_json: vec![],
             malware_json: vec![],
+            dlp_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
@@ -787,6 +880,7 @@ mod tests {
             rules_json,
             steering_json: vec![],
             malware_json: vec![],
+            dlp_json: vec![],
             compiled_at: Utc::now(),
         };
         let body = encode_msgpack_named(&raw);
