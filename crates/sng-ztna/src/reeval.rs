@@ -223,12 +223,46 @@ impl ReevalLoop {
     /// promptly when `stop` is set to `true` or when every
     /// [`tokio::sync::watch::Sender`] for `stop` is dropped (the
     /// controlling owner went away).
-    pub async fn run(&self, mut stop: tokio::sync::watch::Receiver<bool>) {
+    pub async fn run(&self, stop: tokio::sync::watch::Receiver<bool>) {
+        self.run_inner(stop, || self.current_interval()).await;
+    }
+
+    /// Like [`Self::run`], but sweeps at a fixed `interval` instead
+    /// of re-reading the cadence from the policy snapshot each
+    /// cycle. Used by a deployment-layer driver (e.g. the edge
+    /// supervisor) that wants the operator's edge config — not the
+    /// control-plane bundle — to own the sweep cadence.
+    ///
+    /// A zero `interval` is clamped to 1 ms: a zero cadence would
+    /// busy-spin the sweep with no delay between iterations, the
+    /// same hazard [`ZtnaPolicy::validate`](crate::policy::ZtnaPolicy::validate)
+    /// rejects for the policy-driven path. Callers that want to
+    /// *disable* re-evaluation must simply not run the loop.
+    pub async fn run_with_interval(
+        &self,
+        stop: tokio::sync::watch::Receiver<bool>,
+        interval: Duration,
+    ) {
+        let interval = interval.max(Duration::from_millis(1));
+        self.run_inner(stop, || interval).await;
+    }
+
+    /// Shared driver for [`Self::run`] and [`Self::run_with_interval`].
+    /// `interval_for_tick` supplies the sleep budget for the next
+    /// sweep, evaluated once per cycle — the policy-driven path
+    /// re-reads the live snapshot here so a bundle reload retunes
+    /// the cadence without a restart, while the fixed-interval path
+    /// returns the same `Duration` every cycle.
+    async fn run_inner(
+        &self,
+        mut stop: tokio::sync::watch::Receiver<bool>,
+        interval_for_tick: impl Fn() -> Duration,
+    ) {
         if *stop.borrow() {
             return;
         }
         loop {
-            let interval = self.current_interval();
+            let interval = interval_for_tick();
             // Wait for either the interval to elapse (-> sweep) or
             // the stop signal to change (-> re-check / exit). Using
             // a timeout around `changed()` keeps the loop on the
@@ -1074,5 +1108,106 @@ mod tests {
         let (_stop_tx, stop_rx) = tokio::sync::watch::channel(true);
         // Should return without hanging.
         lp.run(stop_rx).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_with_interval_uses_fixed_cadence_not_policy() {
+        // The policy cadence is set absurdly large so the
+        // policy-driven `run` path would never sweep within the test
+        // window. `run_with_interval` must sweep on its own fixed
+        // cadence regardless, proving the deployment-layer override
+        // owns the timing rather than the bundle.
+        let now = 1_000_000;
+        let h = harness(
+            vec![app("wiki", PostureRequirement::BASIC, &[])],
+            vec![device("dev-1", TENANT, DevicePosture::pristine(now))],
+            vec![user("alice", TENANT, &[], now)],
+        );
+        h.service
+            .reload_policy(ZtnaPolicy {
+                tenant_id: TENANT.into(),
+                reeval_interval_ms: 3_600_000, // 1h — never fires in-test
+                ..ZtnaPolicy::default()
+            })
+            .expect("valid policy");
+        let (lp, tracker, mut rx) = loop_with(&h);
+        grant_session(&h, &tracker, "s1", "dev-1", "alice", "wiki", now);
+
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let lp_run = lp.clone();
+        let handle = tokio::spawn(async move {
+            lp_run
+                .run_with_interval(stop_rx, Duration::from_millis(500))
+                .await;
+        });
+
+        h.devices.record(device(
+            "dev-1",
+            TENANT,
+            DevicePosture {
+                disk_encrypted: false,
+                os_patched: false,
+                attested_at_ms: now,
+                ..DevicePosture::pristine(now)
+            },
+        ));
+        // Advance past the fixed 500 ms cadence but far short of the
+        // 1 h policy cadence — only the fixed driver can have swept.
+        tokio::time::advance(Duration::from_millis(600)).await;
+        tokio::task::yield_now().await;
+
+        let ev = rx
+            .recv()
+            .await
+            .expect("revocation event from the fixed-interval loop");
+        assert_eq!(ev.session_id, "s1");
+        assert!(!tracker.contains("s1"));
+
+        stop_tx.send(true).expect("signal stop");
+        handle.await.expect("loop task joins after stop");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_with_interval_clamps_zero_to_nonzero() {
+        // A zero interval must be clamped (to 1 ms) rather than
+        // busy-spinning: the loop still makes progress and stops
+        // cleanly. We advance a few ms and confirm a sweep ran.
+        let now = 1_000_000;
+        let h = harness(
+            vec![app("wiki", PostureRequirement::BASIC, &[])],
+            vec![device("dev-1", TENANT, DevicePosture::pristine(now))],
+            vec![user("alice", TENANT, &[], now)],
+        );
+        let (lp, tracker, mut rx) = loop_with(&h);
+        grant_session(&h, &tracker, "s1", "dev-1", "alice", "wiki", now);
+
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let lp_run = lp.clone();
+        let handle = tokio::spawn(async move {
+            lp_run.run_with_interval(stop_rx, Duration::ZERO).await;
+        });
+
+        h.devices.record(device(
+            "dev-1",
+            TENANT,
+            DevicePosture {
+                disk_encrypted: false,
+                os_patched: false,
+                attested_at_ms: now,
+                ..DevicePosture::pristine(now)
+            },
+        ));
+        tokio::time::advance(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
+
+        let ev = rx
+            .recv()
+            .await
+            .expect("revocation event from the clamped-interval loop");
+        assert_eq!(ev.session_id, "s1");
+        assert!(!tracker.contains("s1"));
+
+        stop_tx.send(true).expect("signal stop");
+        handle.await.expect("loop task joins after stop");
     }
 }

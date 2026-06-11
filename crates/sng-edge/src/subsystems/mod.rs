@@ -34,6 +34,7 @@ pub mod swg;
 pub mod telemetry;
 pub mod updater;
 pub mod ztna;
+pub mod ztna_reeval;
 
 pub use comms::CommsSubsystem;
 pub use dns::DnsSubsystem;
@@ -47,3 +48,4 @@ pub use swg::SwgSubsystem;
 pub use telemetry::TelemetrySubsystem;
 pub use updater::UpdaterSubsystem;
 pub use ztna::ZtnaSubsystem;
+pub use ztna_reeval::ZtnaReevalSubsystem;

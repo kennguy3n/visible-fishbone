@@ -710,6 +710,7 @@ async fn full_stack_boots_pulls_bundle_then_drains_cleanly() {
         swg,
         ext_authz,
         ztna,
+        ztna_reeval,
         sdwan,
         ha,
         updater,
@@ -724,6 +725,7 @@ async fn full_stack_boots_pulls_bundle_then_drains_cleanly() {
     drop(swg);
     drop(ext_authz);
     drop(ztna);
+    drop(ztna_reeval);
     drop(sdwan);
     drop(ha);
     drop(updater);
@@ -878,6 +880,7 @@ async fn supervisor_drain_under_continuous_load_within_budget() {
         swg,
         ext_authz,
         ztna,
+        ztna_reeval,
         sdwan,
         ha,
         updater,
@@ -892,6 +895,7 @@ async fn supervisor_drain_under_continuous_load_within_budget() {
     drop(swg);
     drop(ext_authz);
     drop(ztna);
+    drop(ztna_reeval);
     drop(sdwan);
     drop(ha);
     drop(updater);
@@ -993,6 +997,7 @@ async fn comms_reconnects_after_control_plane_transient_outage() {
         swg,
         ext_authz,
         ztna,
+        ztna_reeval,
         sdwan,
         ha,
         updater,
@@ -1007,6 +1012,7 @@ async fn comms_reconnects_after_control_plane_transient_outage() {
     drop(swg);
     drop(ext_authz);
     drop(ztna);
+    drop(ztna_reeval);
     drop(sdwan);
     drop(ha);
     drop(updater);
