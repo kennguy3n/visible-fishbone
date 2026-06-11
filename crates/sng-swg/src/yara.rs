@@ -119,7 +119,7 @@ rule office_macro_enabled {
     meta:
         severity = "suspicious"
         family = "office_macro"
-        description = "Macro-enabled Office document (OLE or OOXML) with an auto-exec hook"
+        description = "Macro-enabled Office document (OLE compound file or OOXML ZIP carrying a VBA project)"
     strings:
         $ole_magic = { D0 CF 11 E0 A1 B1 1A E1 }
         $zip_magic = { 50 4B 03 04 }
@@ -130,13 +130,20 @@ rule office_macro_enabled {
         $workbook_open = "Workbook_Open" nocase
         $document_open = "Document_Open" nocase
     condition:
-        // A legacy OLE compound file or an OOXML ZIP container
-        // carrying a VBA project AND an auto-execution entry
-        // point. Both halves are required so a plain .docx (ZIP,
-        // no macros) never matches.
-        ($ole_magic at 0 or $zip_magic at 0) and
-        (($vba_project or $macros_dir) and
-         ($auto_open or $autoopen or $workbook_open or $document_open))
+        // OOXML container: the `vbaProject.bin` / `_VBA_PROJECT` member
+        // name is stored in the ZIP's plaintext local-file header even
+        // when the macro bytecode itself is deflated, so its presence
+        // alone is the reliable macro-enabled signal. The Auto_* hook
+        // lives *inside* the compressed VBA stream and is invisible to a
+        // flat byte scan — requiring it would miss every real .docm whose
+        // project member is compressed (the common case). A plain .docx
+        // carries no vbaProject.bin, so it still never matches.
+        ($zip_magic at 0 and ($vba_project or $macros_dir)) or
+        // Legacy OLE compound file carrying a VBA project storage or an
+        // auto-execution entry point.
+        ($ole_magic at 0 and
+         ($vba_project or $macros_dir or
+          $auto_open or $autoopen or $workbook_open or $document_open))
 }
 
 rule ransomware_note {
@@ -172,6 +179,172 @@ rule ransomware_high_entropy_payload {
         // decrypt-instructions filename marker. math.entropy is
         // provided by the pure-Rust `math` module.
         any of them and math.entropy(0, filesize) >= 7.5
+}
+
+rule upx_packed_executable {
+    meta:
+        severity = "suspicious"
+        family = "packer"
+        description = "UPX-packed PE/ELF executable (runtime-unpacking dropper)"
+    strings:
+        // UPX writes its section names ("UPX0"/"UPX1") and a "UPX!"
+        // signature block into the packed image; any of them next to
+        // an executable header is a strong packer signal.
+        $upx_bang = "UPX!"
+        $upx0 = "UPX0"
+        $upx1 = "UPX1"
+    condition:
+        // Pair the packer marker with a real executable header so a
+        // document that merely mentions "UPX" can never fire.
+        (uint16(0) == 0x5A4D or uint32(0) == 0x464C457F) and
+        ($upx_bang or $upx0 or $upx1)
+}
+
+rule javascript_indirect_eval_decode {
+    meta:
+        severity = "suspicious"
+        family = "js_obfuscation"
+        description = "Eval-equivalent runtime decode (Function/setTimeout/indirect eval over atob/unescape)"
+    strings:
+        // Eval-equivalents that the `javascript_obfuscation` rule's
+        // literal `eval(atob(` / `eval(unescape(` patterns miss:
+        // attackers route the decoded payload through Function(),
+        // setTimeout/setInterval, or an indirect `window["eval"]`.
+        $func_decode = /Function\s*\(\s*(atob|unescape|decodeURIComponent)\s*\(/ nocase
+        $timer_decode = /set(Timeout|Interval)\s*\(\s*(atob|unescape)\s*\(/ nocase
+        $indirect_eval = /(window|self|globalThis|top|this)\s*\[\s*["']eval["']\s*\]\s*\(/ nocase
+        $split_eval = /\[\s*["']ev["']\s*\+\s*["']al["']\s*\]/ nocase
+    condition:
+        any of them
+}
+
+rule html_smuggling_base64_blob {
+    meta:
+        severity = "suspicious"
+        family = "html_smuggling"
+        description = "HTML smuggling: in-page base64 decode reconstructed into a Blob / forced download"
+    strings:
+        $script = "<script" nocase
+        // A long base64 run is the smuggled payload.
+        $b64blob = /[A-Za-z0-9+\/]{120,}={0,2}/
+        // Decode primitive...
+        $atob = "atob(" nocase
+        $b64decode = "base64,"  // data: URI inside script-built href
+        // ...reconstituted into a downloadable artifact.
+        $blob = "Blob(" nocase
+        $createurl = "createObjectURL" nocase
+        $mssave = "msSaveOrOpenBlob" nocase
+        $mssave2 = "msSaveBlob" nocase
+        $download_attr = /\.download\s*=/ nocase
+        $click = ".click()" nocase
+    condition:
+        // Script + a long base64 blob + a decode step + a
+        // file-reconstruction/forced-download step. A page that merely
+        // embeds a base64 data-URI image (long blob, no decode-to-Blob)
+        // never satisfies the third clause.
+        $script and $b64blob and
+        ($atob or $b64decode) and
+        ($blob or $createurl or $mssave or $mssave2 or $download_attr or $click)
+}
+
+rule pdf_active_javascript {
+    meta:
+        severity = "suspicious"
+        family = "pdf_js"
+        description = "PDF carrying auto-executing JavaScript (OpenAction/AA or document API)"
+    strings:
+        $pdf = "%PDF-"
+        $js1 = "/JavaScript" nocase
+        $js2 = "/JS" nocase
+        $open1 = "/OpenAction" nocase
+        $open2 = "/AA" nocase
+        $api1 = "app.alert" nocase
+        $api2 = "this.exportDataObject" nocase
+        $api3 = "util.printf" nocase
+        $api4 = "unescape(" nocase
+        $api5 = "eval(" nocase
+    condition:
+        // %PDF header within the first 1 KiB (per the PDF spec, and
+        // tolerant of a polyglot prefix), an embedded JavaScript action
+        // dictionary, and an auto-execution trigger or a scripting API
+        // call. A static PDF (catalog only) has no /JavaScript and
+        // cannot match.
+        $pdf in (0..1024) and
+        ($js1 or $js2) and
+        ($open1 or $open2 or $api1 or $api2 or $api3 or $api4 or $api5)
+}
+
+rule vba_macro_obfuscation {
+    meta:
+        severity = "suspicious"
+        family = "vba_macro"
+        description = "VBA macro source: auto-exec hook paired with process spawn / heavy obfuscation"
+    strings:
+        $sub_auto = /Sub\s+(Auto_Open|AutoOpen|Auto_Close|AutoClose|Auto_Exec|Workbook_Open|Workbook_Activate|Workbook_BeforeClose|Document_Open|Document_Close)\b/ nocase
+        $shell = /\bShell\s*\(/ nocase
+        $createobj = "CreateObject" nocase
+        $wscript = "WScript.Shell" nocase
+        $winmgmts = "winmgmts:" nocase
+        $powershell = "powershell" nocase
+        $strreverse = "StrReverse" nocase
+        $chr = /Chr[BW$]?\s*\(/ nocase
+    condition:
+        // An auto-execution entry point AND either a process-spawn /
+        // scripting-host primitive or a heavy character-building
+        // obfuscation pattern (>8 Chr() calls). A benign macro with no
+        // auto-exec hook, or an auto-exec hook that only formats cells,
+        // never satisfies the second clause.
+        $sub_auto and
+        ($shell or $createobj or $wscript or $winmgmts or $powershell or
+         $strreverse or #chr > 8)
+}
+
+rule powershell_encoded_or_download_cradle {
+    meta:
+        severity = "suspicious"
+        family = "powershell"
+        description = "Encoded / fileless / download-cradle PowerShell invocation"
+    strings:
+        $ps = "powershell" nocase
+        $pwsh = "pwsh" nocase
+        $enc_flag = "-EncodedCommand" nocase
+        $enc_short = /-e(c|nc|ncodedcommand)?\s+[A-Za-z0-9+\/]{40,}={0,2}/ nocase
+        $frombase64 = "FromBase64String" nocase
+        $iex = /\b(IEX|Invoke-Expression)\b/ nocase
+        $downloadstring = "DownloadString" nocase
+        $downloadfile = "DownloadFile" nocase
+        $webclient = "Net.WebClient" nocase
+        $hidden = /-w(indowstyle)?\s+hidden/ nocase
+    condition:
+        // A PowerShell launch paired with an encoding / download
+        // primitive, OR a fileless decode-and-execute (FromBase64String
+        // piped into IEX), OR an IEX download cradle. A plain admin
+        // script (Get-ChildItem | Sort-Object) carries none of these.
+        (($ps or $pwsh) and
+         ($enc_flag or $enc_short or $frombase64 or $downloadstring or
+          $downloadfile or $webclient or $hidden)) or
+        ($frombase64 and $iex) or
+        ($iex and ($downloadstring or $downloadfile or $webclient))
+}
+
+rule archive_smuggled_executable {
+    meta:
+        severity = "suspicious"
+        family = "archive_smuggling"
+        description = "ZIP whose member filename is a double-extension or dangerous executable"
+    strings:
+        // ZIP local-file-header filenames are stored in plaintext even
+        // when the member's *content* is deflated, so the dropped
+        // payload's name is visible to a byte scanner without unpacking.
+        //
+        // Document-then-executable double extension (invoice.pdf.exe):
+        // never legitimate, so no trailing boundary is needed.
+        $double = /\.(pdf|docx?|xlsx?|pptx?|rtf|jpe?g|png|gif|txt|csv|html?|zip)\.(exe|scr|pif|com|bat|cmd|vbs|vbe|js|jse|wsf|wsh|hta|ps1|jar|lnk|msi|dll)/ nocase
+        // A bare highly-dangerous extension whose name is essentially
+        // never a legitimate substring prefix (so no lookahead needed).
+        $bare = /\.(exe|scr|pif|vbe|jse|wsf|hta|lnk|msi)/ nocase
+    condition:
+        uint32(0) == 0x04034B50 and ($double or $bare)
 }
 "#;
 

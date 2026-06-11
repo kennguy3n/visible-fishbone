@@ -5,6 +5,7 @@
 //! the Go `business-report` consolidator (Section 7), plus a
 //! human-readable summary to stdout.
 
+mod adversarial;
 mod dlp;
 mod dns;
 mod firewall;
@@ -55,6 +56,9 @@ struct Cli {
     /// Run only the DNS threat-intel driver.
     #[arg(long)]
     dns: bool,
+    /// Run only the adversarial corpus drivers (malware + IPS evasion).
+    #[arg(long)]
+    adversarial: bool,
 }
 
 impl Cli {
@@ -67,6 +71,7 @@ impl Cli {
             || self.dlp
             || self.malware
             || self.dns
+            || self.adversarial
         {
             Selected {
                 firewall: self.firewall,
@@ -76,6 +81,7 @@ impl Cli {
                 dlp: self.dlp,
                 malware: self.malware,
                 dns: self.dns,
+                adversarial: self.adversarial,
             }
         } else {
             Selected {
@@ -86,6 +92,7 @@ impl Cli {
                 dlp: true,
                 malware: true,
                 dns: true,
+                adversarial: true,
             }
         }
     }
@@ -109,6 +116,7 @@ struct Selected {
     dlp: bool,
     malware: bool,
     dns: bool,
+    adversarial: bool,
 }
 
 #[tokio::main]
@@ -146,6 +154,12 @@ async fn main() {
     if sel.ips {
         eprintln!("running IPS efficacy (sng-ips + suricata)...");
         functions.push(ips::run().await);
+    }
+    if sel.adversarial {
+        eprintln!("running adversarial malware efficacy (sng-swg YARA, evasion corpus)...");
+        functions.push(adversarial::run_malware().await);
+        eprintln!("running adversarial IPS efficacy (sng-ips + suricata, evasion corpus)...");
+        functions.push(adversarial::run_ips().await);
     }
 
     let report = EfficacyReport::new(cli.git_sha.clone(), host(), functions);

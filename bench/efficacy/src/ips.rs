@@ -25,7 +25,7 @@ fn fixtures_dir() -> PathBuf {
 /// Best-effort cleanup of the per-run work dir on every exit path (the happy
 /// path and the early UNTESTED returns alike), so repeated runs on a
 /// long-lived CI runner don't accumulate stale `sng-efficacy-ips-*` dirs.
-struct WorkDirGuard(PathBuf);
+pub(crate) struct WorkDirGuard(pub(crate) PathBuf);
 
 impl Drop for WorkDirGuard {
     fn drop(&mut self) {
@@ -33,7 +33,7 @@ impl Drop for WorkDirGuard {
     }
 }
 
-async fn suricata_available() -> Option<String> {
+pub(crate) async fn suricata_available() -> Option<String> {
     let out = tokio::process::Command::new("suricata")
         .arg("-V")
         .stdout(Stdio::piped())
@@ -59,7 +59,7 @@ async fn suricata_available() -> Option<String> {
 
 /// Render SNG's suricata.yaml pointing at our corpus rule file and a
 /// per-run EVE log path.
-fn render_config(rules: &Path, eve: &Path, stats_sock: &Path) -> Result<String, String> {
+pub(crate) fn render_config(rules: &Path, eve: &Path, stats_sock: &Path) -> Result<String, String> {
     let mut input = IpsConfigInput::defaults(IpsRuntime::Ids);
     input.rule_file_path = rules.to_path_buf();
     input.eve_log_path = eve.to_path_buf();
@@ -74,7 +74,7 @@ fn render_config(rules: &Path, eve: &Path, stats_sock: &Path) -> Result<String, 
 
 /// Run Suricata offline over a single PCAP and return the number of
 /// EVE `alert` records, normalised through SNG's `EveAlert`.
-async fn alerts_for_pcap(
+pub(crate) async fn alerts_for_pcap(
     yaml: &Path,
     pcap: &Path,
     work: &Path,
