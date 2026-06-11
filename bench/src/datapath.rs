@@ -781,6 +781,31 @@ impl ForwardingHarness {
         }
     }
 
+    /// Measure a single `(mode, backend)` forwarding loop over a freshly
+    /// built mixed flow pool — the one-stream unit the multi-queue harness
+    /// fans out across worker threads.
+    ///
+    /// This is exactly one `(mode, backend)` cell of [`Self::sweep`],
+    /// exposed so a caller can drive it on its own thread/core to model an
+    /// independent NIC receive (RSS) queue. Each caller owns a distinct
+    /// `ForwardingHarness` (its own engine, conntrack, and flow pool), so N
+    /// of them running concurrently model N queues with no shared mutable
+    /// state — the aggregate is then bounded only by the host's real core
+    /// count and memory bandwidth, which is the line-rate ceiling the
+    /// single-stream floor cannot see.
+    #[must_use]
+    pub fn measure_stream(
+        &self,
+        mix: &TrafficMix,
+        sample_packets: usize,
+        mode: ForwardingMode,
+        backend: Backend,
+    ) -> ForwardingResult {
+        let sample_packets = sample_packets.max(1);
+        let pool = self.build_flow_pool(mix, sample_packets.min(FLOW_POOL));
+        self.measure(&pool, sample_packets, mode, backend)
+    }
+
     /// Measure one `(mode, backend)` loop over `sample_packets` packets
     /// cycled from `pool`, then a second batched pass for the latency
     /// distribution.

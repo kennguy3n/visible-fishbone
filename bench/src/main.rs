@@ -88,6 +88,48 @@ enum Command {
     /// Merge a dry-run and a wire `business-report` JSON into one
     /// dual-column datasheet (markdown + combined JSON).
     Datasheet(DatasheetArgs),
+    /// Drive the forwarding fast path across N concurrent streams (one per
+    /// NIC RSS queue) and report the aggregate multi-queue throughput
+    /// ceiling and per-stream scaling, versus the single-stream floor.
+    MultiQueue(MultiQueueArgs),
+}
+
+/// Forwarding inspection-depth selector for the multi-queue sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliForwardingMode {
+    RawL3,
+    NgfwVerdict,
+    FullStack,
+    FullStackTls,
+}
+
+impl CliForwardingMode {
+    fn to_mode(self) -> sng_bench::datapath::ForwardingMode {
+        use sng_bench::datapath::ForwardingMode;
+        match self {
+            CliForwardingMode::RawL3 => ForwardingMode::RawL3,
+            CliForwardingMode::NgfwVerdict => ForwardingMode::NgfwVerdict,
+            CliForwardingMode::FullStack => ForwardingMode::FullStack,
+            CliForwardingMode::FullStackTls => ForwardingMode::FullStackTlsDecrypt,
+        }
+    }
+}
+
+/// Forwarding-substrate selector for the multi-queue sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliBackend {
+    Nftables,
+    Xdp,
+}
+
+impl CliBackend {
+    fn to_backend(self) -> sng_bench::datapath::Backend {
+        use sng_bench::datapath::Backend;
+        match self {
+            CliBackend::Nftables => Backend::Nftables,
+            CliBackend::Xdp => Backend::Xdp,
+        }
+    }
 }
 
 /// IP version selector for the CLI.
@@ -389,6 +431,49 @@ struct ForwardingCompareArgs {
     sigma: f64,
 }
 
+#[derive(Debug, Args)]
+struct MultiQueueArgs {
+    /// Path to the edge-SKU profile TOML (sets the rule count, frame size,
+    /// per-stream sample size, and published target for context).
+    #[arg(long, env = "SNG_BENCH_PROFILE")]
+    profile: PathBuf,
+
+    /// Queue-fanout widths to measure (comma-separated). A single-stream
+    /// (`1`) floor is always measured regardless. Empty (the default)
+    /// derives a curve of `1, 2, 4, …` up to the SKU's queue fan-out, the
+    /// host's available parallelism, and the next power of two above it, so
+    /// the curve always spans from the floor through (and a little past)
+    /// the host's real core budget.
+    #[arg(long, value_delimiter = ',')]
+    queues: Vec<usize>,
+
+    /// Packets each stream pushes per measurement. `0` uses the profile's
+    /// `[datapath] sample_packets`.
+    #[arg(long, default_value_t = 0)]
+    packets_per_queue: usize,
+
+    /// Synthetic L3/L4 rule count each stream walks. `0` uses the profile's
+    /// `[datapath] rule_count`.
+    #[arg(long, default_value_t = 0)]
+    rule_count: usize,
+
+    /// Inspection depth measured on every stream.
+    #[arg(long, value_enum, default_value_t = CliForwardingMode::RawL3)]
+    mode: CliForwardingMode,
+
+    /// Forwarding substrate measured on every stream.
+    #[arg(long, value_enum, default_value_t = CliBackend::Xdp)]
+    backend: CliBackend,
+
+    /// Where to write the JSON artifact. Omitted prints to stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+
+    /// Git commit recorded in the artifact.
+    #[arg(long, env = "SNG_BENCH_GIT_SHA")]
+    git_sha: Option<String>,
+}
+
 /// Clap parser that accepts only finite, non-negative `f64` values. Used to
 /// reject footgun inputs (negative `--threshold`/`--sigma`, `NaN`, `inf`)
 /// that would quietly weaken or invert the regression gate.
@@ -427,7 +512,93 @@ fn run(cli: Cli) -> Result<std::process::ExitCode, BenchError> {
         Command::ForwardingDoc(args) => run_forwarding_doc(&args),
         Command::ForwardingCompare(args) => run_forwarding_compare(&args),
         Command::Datasheet(args) => run_datasheet(&args),
+        Command::MultiQueue(args) => run_multi_queue(&args),
     }
+}
+
+/// Derive the default queue-fanout curve when `--queues` is not given:
+/// `1, 2, 4, …` doubling up to the larger of the SKU's queue fan-out and
+/// the host's available parallelism, plus that bound itself and the next
+/// power of two above it — so the curve always spans the single-stream
+/// floor, the host's real core budget, and one oversubscribed step past it
+/// (where the contended ceiling shows). De-duplication and ordering are
+/// handled downstream by `MultiQueueConfig::normalized_queue_counts`.
+fn default_queue_curve(sku_queues: u32, parallelism: usize) -> Vec<usize> {
+    let bound = (sku_queues as usize).max(parallelism).max(1);
+    let mut curve = Vec::new();
+    let mut q = 1usize;
+    while q < bound {
+        curve.push(q);
+        q *= 2;
+    }
+    // The host/SKU bound itself, then one power-of-two step past it.
+    curve.push(bound);
+    curve.push(q.max(bound).saturating_mul(2).max(bound + 1));
+    curve
+}
+
+fn run_multi_queue(args: &MultiQueueArgs) -> Result<std::process::ExitCode, BenchError> {
+    use sng_bench::multiqueue::{self, MultiQueueConfig};
+    use sng_bench::report::{MULTIQUEUE_SCHEMA_VERSION, MultiQueueReport};
+
+    let profile = load_profile(&args.profile)?;
+    let parallelism = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+
+    let rule_count = if args.rule_count > 0 {
+        args.rule_count
+    } else {
+        profile.datapath.rule_count
+    };
+    let packets_per_queue = if args.packets_per_queue > 0 {
+        args.packets_per_queue
+    } else {
+        profile.datapath.sample_packets
+    };
+    let queue_counts = if args.queues.is_empty() {
+        default_queue_curve(profile.effective_nic_queues(), parallelism)
+    } else {
+        args.queues.clone()
+    };
+
+    let config = MultiQueueConfig {
+        queue_counts,
+        packets_per_queue,
+        rule_count,
+        mode: args.mode.to_mode(),
+        backend: args.backend.to_backend(),
+    };
+
+    let packet_bytes = profile.datapath.packet_bytes;
+    let points = multiqueue::measure_scaling(&profile.traffic_mix, &config, packet_bytes);
+
+    let report = MultiQueueReport {
+        schema_version: MULTIQUEUE_SCHEMA_VERSION,
+        profile: profile.name.clone(),
+        unix_time_secs: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        git_sha: args.git_sha.clone(),
+        mode: args.mode.to_mode().label().to_string(),
+        backend: args.backend.to_backend().label().to_string(),
+        rule_count,
+        packet_bytes,
+        packets_per_queue,
+        available_parallelism: parallelism,
+        target_gbps: profile.target_gbps,
+        points,
+    };
+
+    // Always print the human-readable summary so a live run is legible on
+    // the console; write the machine-readable JSON when an `--out` is given.
+    eprintln!("{}", report.to_markdown());
+    let json = report.to_json()?;
+    if let Some(out) = &args.out {
+        write_file(out, &json)?;
+        eprintln!("wrote {}", out.display());
+    } else {
+        println!("{json}");
+    }
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
 /// Effective packets-per-measurement: an explicit `--sample-packets`

@@ -720,6 +720,210 @@ impl ForwardingReport {
     }
 }
 
+/// Schema version for the multi-queue throughput artifact
+/// (`bench/results/multiqueue-*.json`). Independent of [`SCHEMA_VERSION`]
+/// and [`FORWARDING_SCHEMA_VERSION`] so the three report families version
+/// separately.
+pub const MULTIQUEUE_SCHEMA_VERSION: u32 = 1;
+
+/// One measured stream — a single NIC receive (RSS) queue pinned to a
+/// worker thread for the duration of a fanout point.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiQueueStreamMeasurement {
+    /// Stream / queue index, `0..queues`.
+    pub queue_index: usize,
+    /// Packets this stream pushed through the pipeline.
+    pub packets: u64,
+    /// This stream's throughput in packets per second, measured while all
+    /// queues at this fanout width were running concurrently.
+    pub pps: f64,
+    /// This stream's throughput in Gbps at the representative frame size.
+    pub gbps: f64,
+    /// Median per-packet service time (ns) for this stream.
+    pub p50_ns: u64,
+    /// 99th-percentile per-packet service time (ns) for this stream.
+    pub p99_ns: u64,
+}
+
+/// Aggregate result at one queue-fanout width (`queues` parallel streams
+/// running concurrently). The `queues == 1` point is the single-stream
+/// *floor*; the widest point is the multi-queue *ceiling*.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiQueueScalePoint {
+    /// Number of concurrent streams (NIC RSS queues) at this point.
+    pub queues: usize,
+    /// Sum of every stream's throughput — the aggregate the box sustains
+    /// at this fanout width.
+    pub aggregate_pps: f64,
+    /// Aggregate throughput in Gbps at the representative frame size.
+    pub aggregate_gbps: f64,
+    /// Mean per-stream throughput (`aggregate_pps / queues`). Falls as the
+    /// fanout exceeds the host's physical cores — the contention the
+    /// single-stream number cannot show.
+    pub mean_pps_per_queue: f64,
+    /// Scaling efficiency: `aggregate_pps / (queues × single_stream_pps)`,
+    /// where the single-stream rate is the `queues == 1` aggregate. `1.0`
+    /// is ideal linear scaling; below `1.0` is the real, contended ceiling.
+    pub scaling_efficiency: f64,
+    /// Mean across streams of the per-stream median service time (ns).
+    pub p50_ns_mean: u64,
+    /// Worst (max) across streams of the per-stream p99 service time (ns).
+    pub p99_ns_max: u64,
+    /// Per-stream detail for this fanout width.
+    pub streams: Vec<MultiQueueStreamMeasurement>,
+}
+
+/// A multi-queue / multi-stream wire-throughput report for one SKU: a
+/// scaling curve from a single stream up to the widest fanout, recording
+/// aggregate throughput and per-stream scaling at each width.
+///
+/// The point of the artifact is to publish a realistic *line-rate
+/// ceiling* (many queues, the way a multi-queue physical NIC and the
+/// per-queue XDP fast path actually run) alongside the honestly-caveated
+/// single-stream *floor* the blog already quotes. It is still
+/// software-on-a-VM, not an ASIC — see [`Self::to_markdown`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiQueueReport {
+    /// Artifact schema version.
+    pub schema_version: u32,
+    /// SKU profile name the sweep ran against.
+    pub profile: String,
+    /// Wall-clock time the report was produced (Unix seconds).
+    pub unix_time_secs: u64,
+    /// Source revision, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    /// Forwarding mode (inspection depth) measured (`raw-l3`, ...).
+    pub mode: String,
+    /// Forwarding substrate measured (`xdp`, `nftables`).
+    pub backend: String,
+    /// Rule count of the synthetic policy each stream walked.
+    pub rule_count: usize,
+    /// Representative frame size used for the Gbps figures.
+    pub packet_bytes: u32,
+    /// Packets each stream pushed per measurement.
+    pub packets_per_queue: usize,
+    /// `std::thread::available_parallelism()` on the measuring host — the
+    /// physical/logical core budget the scaling curve is bounded by.
+    pub available_parallelism: usize,
+    /// The SKU's published acceptance target in Gbps, for context.
+    pub target_gbps: f64,
+    /// The scaling curve, in ascending queue-count order.
+    pub points: Vec<MultiQueueScalePoint>,
+}
+
+impl MultiQueueReport {
+    /// Serialize to pretty JSON.
+    ///
+    /// # Errors
+    /// Propagates a `serde_json` failure (never expected for this plain
+    /// struct).
+    pub fn to_json(&self) -> Result<String, ReportError> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Parse from JSON.
+    ///
+    /// # Errors
+    /// Returns [`ReportError::Json`] on malformed input.
+    pub fn from_json(s: &str) -> Result<Self, ReportError> {
+        Ok(serde_json::from_str(s)?)
+    }
+
+    /// The single-stream floor (`queues == 1`), if measured.
+    #[must_use]
+    pub fn single_stream(&self) -> Option<&MultiQueueScalePoint> {
+        self.points.iter().find(|p| p.queues == 1)
+    }
+
+    /// The widest-fanout multi-queue ceiling, if any point was measured.
+    #[must_use]
+    pub fn ceiling(&self) -> Option<&MultiQueueScalePoint> {
+        self.points.iter().max_by_key(|p| p.queues)
+    }
+
+    /// Render the markdown summary: the scaling table, the floor→ceiling
+    /// headline, and the standing honesty caveat.
+    #[must_use]
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "### Multi-queue throughput: `{}`", self.profile);
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "Mode `{}` · backend `{}` · {} rules · representative frame {} B · \
+             {} packets/stream · host parallelism {}.",
+            self.mode,
+            self.backend,
+            self.rule_count,
+            self.packet_bytes,
+            self.packets_per_queue,
+            self.available_parallelism
+        );
+        let _ = writeln!(out);
+
+        let _ = writeln!(
+            out,
+            "| Queues | Aggregate Mpps | Aggregate Gbps | Per-queue Mpps | Scaling eff. | p50 | p99 (max) |"
+        );
+        let _ = writeln!(out, "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+        for p in &self.points {
+            let _ = writeln!(
+                out,
+                "| {} | {:.2} | {:.3} | {:.2} | {:.0}% | {} | {} |",
+                p.queues,
+                p.aggregate_pps / 1e6,
+                p.aggregate_gbps,
+                p.mean_pps_per_queue / 1e6,
+                p.scaling_efficiency * 100.0,
+                fmt_ns(p.p50_ns_mean),
+                fmt_ns(p.p99_ns_max)
+            );
+        }
+        let _ = writeln!(out);
+
+        if let (Some(floor), Some(ceil)) = (self.single_stream(), self.ceiling())
+            && ceil.queues > floor.queues
+        {
+            let lift = if floor.aggregate_gbps > 0.0 {
+                ceil.aggregate_gbps / floor.aggregate_gbps
+            } else {
+                0.0
+            };
+            let _ = writeln!(
+                out,
+                "Single-stream floor: **{:.3} Gbps** ({} queue). \
+                 Multi-queue ceiling: **{:.3} Gbps** ({} queues) — a **{:.2}×** lift.",
+                floor.aggregate_gbps, floor.queues, ceil.aggregate_gbps, ceil.queues, lift
+            );
+            let _ = writeln!(out);
+        }
+
+        if self.target_gbps > 0.0 {
+            let _ = writeln!(
+                out,
+                "SKU published acceptance target: **{:.3} Gbps**.",
+                self.target_gbps
+            );
+            let _ = writeln!(out);
+        }
+
+        let _ = writeln!(
+            out,
+            "> **Read this honestly.** This is the in-process forwarding fast path fanned \
+             out across {} worker threads on a generic x86 VM — a *software* multi-queue \
+             model, not a multi-queue physical NIC and not an ASIC. The single-stream row \
+             is the same conservative floor the blog quotes; the wider rows show how the \
+             per-queue XDP fast path scales when the box is allowed to use all its cores. \
+             Treat the ceiling as an apples-*closer* figure to a vendor's multi-queue \
+             line-rate number, still not apples-to-apples.",
+            self.available_parallelism
+        );
+
+        out
+    }
+}
+
 /// Direction in which a forwarding metric regresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegressDir {

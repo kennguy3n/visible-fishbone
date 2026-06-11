@@ -13,6 +13,9 @@
 //!     inspection-depth → vendor-feature mapping.
 //!   * [`datapath`] — in-process decision-throughput comparison of the
 //!     nftables slow path vs the eBPF/XDP fast path (STREAM B).
+//!   * [`multiqueue`] — fans the [`datapath`] fast path across N
+//!     concurrent worker threads (one per NIC RSS queue) to measure the
+//!     aggregate multi-queue line-rate ceiling and per-stream scaling.
 //!   * [`business_report`] — aggregation of per-run reports into a single
 //!     RFP-datasheet document (per-SKU matrices, competitor comparison,
 //!     cost analysis).
@@ -25,5 +28,6 @@ pub mod business_report;
 pub mod competitor;
 pub mod datapath;
 pub mod measurement;
+pub mod multiqueue;
 pub mod report;
 pub mod traffic_gen;

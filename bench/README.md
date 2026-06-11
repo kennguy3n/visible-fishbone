@@ -23,16 +23,28 @@ cargo test
 
 ## What it measures
 
-Three measurement modes, each a subcommand of the `sng-bench` binary:
+Four measurement modes, each a subcommand of the `sng-bench` binary:
 
 | Mode | Question it answers | Headline metric |
 | --- | --- | --- |
-| `throughput` | How much inspected traffic can the edge sustain? | max Gbps / pps |
+| `throughput` | How much inspected traffic can the edge sustain (single stream)? | max Gbps / pps |
 | `latency` | What per-packet latency does the edge add? | p50 / p95 / p99 (ns) |
 | `concurrent-flows` | How many active flows before degradation? | max flows |
+| `multi-queue` | What is the aggregate ceiling across N parallel queues/streams? | aggregate Gbps + scaling efficiency |
 
-A fourth subcommand, `compare`, diffs two JSON reports and exits non-zero
-on regression (see [Regression detection](#regression-detection)). A fifth,
+The `multi-queue` mode exists because `throughput` measures a deliberately
+conservative **single-stream floor** (one flow, one core). A real edge box
+— like the ASIC appliances competitors benchmark — fans traffic across
+many NIC receive (RSS) queues, one per core. `multi-queue` drives the
+forwarding fast path across N concurrent streams and reports the aggregate
+**line-rate ceiling** and per-stream scaling, so the floor and the ceiling
+can be read side by side. See
+[`docs/multi-queue-throughput.md`](./docs/multi-queue-throughput.md) for
+the full methodology and how to read it honestly (it is a *software*
+multi-queue model on a VM, not an ASIC).
+
+A further subcommand, `compare`, diffs two JSON reports and exits non-zero
+on regression (see [Regression detection](#regression-detection)). Another,
 `business-report`, sweeps every profile across all three modes, packet
 sizes, and inspection depths and renders one consolidated RFP-response
 datasheet (see [Business report](#business-report)).
