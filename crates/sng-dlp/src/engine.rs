@@ -379,10 +379,10 @@ impl DlpEngine {
     /// Evaluate `content` observed on `channel` against the active
     /// policy and return the verdict.
     ///
-    /// A disabled channel or an empty match set yields
-    /// [`DlpVerdict::Allow`]. Otherwise the strictest action across
-    /// all matching rules is taken, escalated to at least the
-    /// channel's configured action floor (if any), and mapped to a
+    /// A disabled channel skips the channel classifier; with no other
+    /// signal that yields [`DlpVerdict::Allow`]. Otherwise the strictest
+    /// action across all matching rules is taken, escalated to at least
+    /// the channel's configured action floor (if any), and mapped to a
     /// verdict variant.
     ///
     /// When an AI-app exfil policy is configured (see
@@ -393,7 +393,10 @@ impl DlpEngine {
     /// the channel rules and the AI-app signal win, and the two match
     /// sets are concatenated. The AI-app signal is deliberately *not*
     /// subject to the channel action floor — it applies its own
-    /// (false-positive-averse) escalation policy.
+    /// (false-positive-averse) escalation policy — and, because it is a
+    /// separately opted-in control, it is *not* gated by the channel's
+    /// `enabled` flag either: disabling the generic upload channel does
+    /// not disarm AI-app detection an operator explicitly enabled.
     #[must_use]
     pub fn evaluate(
         &self,
@@ -403,20 +406,31 @@ impl DlpEngine {
     ) -> DlpVerdict {
         let state = self.state.load();
         let config = state.policy.channel_config(channel);
-        if !config.enabled {
-            return DlpVerdict::Allow;
-        }
 
-        let result: ClassificationResult = state.classifier.classify(channel, content, metadata);
-
-        // Channel-rule action, escalated to the channel floor when a
-        // rule actually fired (an unmatched channel never floors).
-        let channel_action = result
-            .strictest_action()
-            .map(|a| match config.action_override {
-                Some(floor) => a.max(floor),
-                None => a,
-            });
+        // Generic channel DLP runs only when the channel is enabled. The
+        // AI-app exfil detector is a *separately* opted-in control
+        // (`set_ai_app_policy`) with its own destination gating, so it is
+        // deliberately NOT gated by the channel `enabled` flag: an
+        // operator who turns down noisy generic browser-upload DLP must
+        // not silently disarm the AI-app detection they explicitly
+        // enabled. A disabled channel simply skips the channel classifier
+        // (its rules, severity, and action floor) while the AI-app signal
+        // is still evaluated below.
+        let (channel_action, channel_severity, mut matches) = if config.enabled {
+            let result: ClassificationResult =
+                state.classifier.classify(channel, content, metadata);
+            // Channel-rule action, escalated to the channel floor when a
+            // rule actually fired (an unmatched channel never floors).
+            let channel_action = result
+                .strictest_action()
+                .map(|a| match config.action_override {
+                    Some(floor) => a.max(floor),
+                    None => a,
+                });
+            (channel_action, result.max_severity(), result.matches)
+        } else {
+            (None, None, Vec::new())
+        };
 
         // AI-app exfil signal: consulted only on the upload channel,
         // only when a destination is recorded, and only when a detector
@@ -435,8 +449,7 @@ impl DlpEngine {
 
         // Fold the (optional) channel and AI-app contributions together.
         let mut action = channel_action;
-        let mut severity = result.max_severity();
-        let mut matches = result.matches;
+        let mut severity = channel_severity;
         if let Some(details) = ai_verdict.as_ref().and_then(DlpVerdict::details) {
             action = Some(action.map_or(details.action, |a| a.max(details.action)));
             severity = Some(severity.map_or(details.severity, |s| s.max(details.severity)));
@@ -895,6 +908,83 @@ mod tests {
         // detector must not run, so there is nothing to flag.
         assert_eq!(
             e.evaluate(DlpChannel::Clipboard, SECRET_BODY, &ai_upload_meta()),
+            DlpVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn ai_app_runs_even_when_the_upload_channel_is_disabled() {
+        // An operator who silences noisy generic browser-upload DLP (by
+        // disabling the channel) must not thereby disarm the AI-app exfil
+        // control they explicitly opted into. The channel classifier is
+        // skipped, but the AI-app detector still coaches on a secret bound
+        // for a known AI app.
+        let mut channels = BTreeMap::new();
+        channels.insert(
+            AiAppExfilDetector::channel(),
+            ChannelConfig {
+                enabled: false,
+                action_override: None,
+            },
+        );
+        let e = DlpEngine::new(DlpPolicy {
+            // A channel rule that would fire if the (disabled) channel
+            // classifier ran — its absence from the verdict proves the
+            // classifier was skipped.
+            rules: vec![rule("kw", "deploy", RuleAction::Block, Severity::Critical)],
+            channels,
+            ..DlpPolicy::default()
+        })
+        .expect("engine");
+        e.set_ai_app_policy(Some(AiAppPolicy::default()))
+            .expect("enable ai-app");
+
+        let v = e.evaluate(
+            AiAppExfilDetector::channel(),
+            SECRET_BODY,
+            &ai_upload_meta(),
+        );
+        assert!(
+            matches!(v, DlpVerdict::WarnUser(_)),
+            "AI-app detection must survive a disabled channel, got {v:?}"
+        );
+        let d = v.details().expect("details");
+        assert!(
+            d.matches.iter().any(|m| m.rule_id.starts_with("ai_app.")),
+            "expected an ai-app match, got {:?}",
+            d.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>()
+        );
+        // The disabled channel's own keyword rule must NOT contribute.
+        assert!(
+            !d.matches.iter().any(|m| m.rule_id == "kw"),
+            "disabled channel classifier must be skipped"
+        );
+    }
+
+    #[test]
+    fn disabled_channel_without_ai_app_still_allows() {
+        // The decoupling must not change the no-AI-app case: a disabled
+        // channel with a would-be-matching rule is still a pure Allow.
+        let mut channels = BTreeMap::new();
+        channels.insert(
+            DlpChannel::Clipboard,
+            ChannelConfig {
+                enabled: false,
+                action_override: None,
+            },
+        );
+        let e = DlpEngine::new(DlpPolicy {
+            rules: vec![rule("kw", "secret", RuleAction::Block, Severity::High)],
+            channels,
+            ..DlpPolicy::default()
+        })
+        .expect("engine");
+        assert_eq!(
+            e.evaluate(
+                DlpChannel::Clipboard,
+                b"this is secret",
+                &ContentMetadata::default()
+            ),
             DlpVerdict::Allow
         );
     }
