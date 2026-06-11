@@ -40,6 +40,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod posture_map;
 pub mod subsystems;
 pub mod supervisor;
 pub mod tracing_init;
@@ -48,6 +49,7 @@ use std::ffi::OsString;
 
 pub use cli::{Cli, PalBackend};
 pub use config::{AgentConfig, ConfigError};
+pub use posture_map::merge_posture_snapshot;
 pub use supervisor::{AgentBuildError, BuiltAgent, build_agent, run_agent};
 
 /// Run the agent binary from a command-line argument vector.

@@ -154,6 +154,7 @@ pub enum CertificateHealth {
 /// without them — they deserialise to the fail-closed
 /// `Unknown` / `None` values rather than erroring.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PostureSnapshot {
     /// Snapshot time.
     pub collected_at: DateTime<Utc>,

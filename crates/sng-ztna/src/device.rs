@@ -84,6 +84,7 @@ pub enum CertificateHealth {
 /// signal can never silently satisfy a posture floor.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DevicePosture {
     /// Disk encryption is on (FileVault / BitLocker / LUKS).
     pub disk_encrypted: bool,
@@ -239,6 +240,97 @@ impl DevicePosture {
             antivirus_definitions_age_hours: u32::MAX,
             attested_at_ms: 0,
         }
+    }
+
+    // Consuming builder setters. `DevicePosture` is
+    // `#[non_exhaustive]`, so code outside this crate cannot
+    // construct or update it with a struct literal; these let a
+    // caller start from [`Self::pristine`] / [`Self::unmanaged`]
+    // and override individual signals (used by the efficacy
+    // bench and any out-of-crate test harness).
+
+    /// Override [`Self::disk_encrypted`].
+    #[must_use]
+    pub const fn with_disk_encrypted(mut self, v: bool) -> Self {
+        self.disk_encrypted = v;
+        self
+    }
+
+    /// Override [`Self::os_patched`].
+    #[must_use]
+    pub const fn with_os_patched(mut self, v: bool) -> Self {
+        self.os_patched = v;
+        self
+    }
+
+    /// Override [`Self::antimalware_running`].
+    #[must_use]
+    pub const fn with_antimalware_running(mut self, v: bool) -> Self {
+        self.antimalware_running = v;
+        self
+    }
+
+    /// Override [`Self::firewall_enabled`].
+    #[must_use]
+    pub const fn with_firewall_enabled(mut self, v: bool) -> Self {
+        self.firewall_enabled = v;
+        self
+    }
+
+    /// Override [`Self::screen_lock_configured`].
+    #[must_use]
+    pub const fn with_screen_lock_configured(mut self, v: bool) -> Self {
+        self.screen_lock_configured = v;
+        self
+    }
+
+    /// Override [`Self::edr_healthy`].
+    #[must_use]
+    pub const fn with_edr_healthy(mut self, v: bool) -> Self {
+        self.edr_healthy = v;
+        self
+    }
+
+    /// Override [`Self::os_patch_level`].
+    #[must_use]
+    pub fn with_os_patch_level(mut self, v: impl Into<String>) -> Self {
+        self.os_patch_level = v.into();
+        self
+    }
+
+    /// Override [`Self::os_patch_days_since`].
+    #[must_use]
+    pub const fn with_os_patch_days_since(mut self, v: u32) -> Self {
+        self.os_patch_days_since = v;
+        self
+    }
+
+    /// Override [`Self::certificate_health`].
+    #[must_use]
+    pub const fn with_certificate_health(mut self, v: CertificateHealth) -> Self {
+        self.certificate_health = v;
+        self
+    }
+
+    /// Override [`Self::antivirus_enabled`].
+    #[must_use]
+    pub const fn with_antivirus_enabled(mut self, v: bool) -> Self {
+        self.antivirus_enabled = v;
+        self
+    }
+
+    /// Override [`Self::antivirus_definitions_age_hours`].
+    #[must_use]
+    pub const fn with_antivirus_definitions_age_hours(mut self, v: u32) -> Self {
+        self.antivirus_definitions_age_hours = v;
+        self
+    }
+
+    /// Override [`Self::attested_at_ms`].
+    #[must_use]
+    pub const fn with_attested_at_ms(mut self, v: u64) -> Self {
+        self.attested_at_ms = v;
+        self
     }
 }
 
