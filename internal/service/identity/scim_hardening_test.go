@@ -147,6 +147,30 @@ func TestStringActiveDeactivationRevokesSessions(t *testing.T) {
 	}
 }
 
+// TestQualifiedActivePathDeactivationRevokesSessions covers a PATCH that
+// targets `active` via its fully-qualified core-schema URN path. The
+// status change (applyUserReplace) and the revocation decision
+// (patchActiveIntent) must agree on the canonicalised path, so the user
+// is both suspended and revoked.
+func TestQualifiedActivePathDeactivationRevokesSessions(t *testing.T) {
+	t.Parallel()
+	svc, tid, pub := newSCIMServiceWithRevoker(t)
+	uid := mustCreateActiveUser(t, svc, tid, "qualified@example.com")
+
+	out, err := svc.PatchUser(context.Background(), tid, uid, []SCIMPatchOp{
+		{Op: "replace", Path: SCIMSchemaUser + ":active", Value: false},
+	})
+	if err != nil {
+		t.Fatalf("PatchUser: %v", err)
+	}
+	if out.Active == nil || *out.Active {
+		t.Fatalf("user still active after qualified active=false patch: %+v", out.Active)
+	}
+	if pub.count(uid) != 1 {
+		t.Fatalf("revocations = %d, want 1 on qualified active=false", pub.count(uid))
+	}
+}
+
 // TestRepeatedDeactivationIsRetrySafe verifies that re-sending
 // active=false against an already-inactive user STILL publishes a
 // revocation. This is the retry-safety property: an IdP that retries a

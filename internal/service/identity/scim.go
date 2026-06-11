@@ -78,10 +78,13 @@ func (s *SCIMService) revokeOnDeactivation(ctx context.Context, tenantID, userID
 // patchActiveIntent reports the active state a PATCH asserts, if any. It
 // returns (value, true) when an op sets the `active` attribute and
 // (_, false) when no op touches it, mirroring applyUserReplace's parsing
-// (a JSON bool, a string compared case-insensitively to "true", and
-// Azure AD's path-less {"value":{"active":...}} shape). Basing the
-// revoke decision on what the request asserts — rather than on the prior
-// persisted status — is what makes deactivation revocation retry-safe.
+// (a JSON bool, a string compared case-insensitively to "true", Azure
+// AD's path-less {"value":{"active":...}} shape, and core-schema
+// URN-qualified paths via canonicalAttr). Basing the revoke decision on
+// what the request asserts — rather than on the prior persisted status —
+// is what makes deactivation revocation retry-safe, and routing the path
+// through canonicalAttr keeps it in lockstep with applyUserReplace so the
+// status change and the revocation never disagree.
 func patchActiveIntent(ops []SCIMPatchOp) (active bool, set bool) {
 	var apply func(op SCIMPatchOp)
 	apply = func(op SCIMPatchOp) {
@@ -90,7 +93,7 @@ func patchActiveIntent(ops []SCIMPatchOp) (active bool, set bool) {
 		default:
 			return
 		}
-		switch strings.ToLower(op.Path) {
+		switch canonicalAttr(op.Path) {
 		case "":
 			if m, ok := op.Value.(map[string]any); ok {
 				for k, v := range m {
@@ -793,7 +796,7 @@ func roleToSCIMGroup(r repository.Role) SCIMGroup {
 // a repository User. Supports path-less operations (Azure AD pattern)
 // where op.Value is a map of attribute-value pairs.
 func applyUserReplace(u *repository.User, op SCIMPatchOp) {
-	path := strings.ToLower(op.Path)
+	path := canonicalAttr(op.Path)
 
 	// Path-less patch: Azure AD sends {"op":"replace","value":{"active":false}}
 	if path == "" {
@@ -847,7 +850,7 @@ func applyUserReplace(u *repository.User, op SCIMPatchOp) {
 }
 
 func applyUserRemove(u *repository.User, op SCIMPatchOp) {
-	if strings.ToLower(op.Path) == "externalid" {
+	if canonicalAttr(op.Path) == "externalid" {
 		u.ExternalID = ""
 	}
 }
