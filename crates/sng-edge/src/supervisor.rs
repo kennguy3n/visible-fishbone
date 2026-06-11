@@ -159,7 +159,7 @@ impl std::fmt::Debug for BuiltEdge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuiltEdge")
             .field("supervisor", &"Supervisor { .. }")
-            .field("subsystems", &11_usize)
+            .field("subsystems", &12_usize)
             .finish_non_exhaustive()
     }
 }
