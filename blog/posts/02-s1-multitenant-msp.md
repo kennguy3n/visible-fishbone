@@ -68,13 +68,55 @@ code that "remembers" to filter by tenant:
   integration test that runs as the **non-superuser** role to prove tenant
   isolation still holds. We fixed the audit gap *without* weakening isolation.
 
+## Onboarding gets smart defaults + a dormancy dividend
+
+Two additions this cycle target Maya's actual day: standing up *many* SME tenants
+fast, and not paying for the ones that go quiet.
+
+**Smart-default policy templates ([#157](https://github.com/kennguy3n/visible-fishbone/pull/157)).**
+Onboarding no longer starts from an empty policy graph. An SME picks an *industry*
+and a *country / compliance regime* and gets a deny-by-default `policy.Graph`
+baseline — safe-browsing DNS+SWG, per-regime DLP detectors, an NGFW posture — as a
+starting point. The catalog is **14 templates**
+(`internal/service/policytemplates`, migration 062), captured verbatim from the
+API at
+[`policy-templates-catalog.json`](../artifacts/payloads/policy-templates-catalog.json):
+
+- **1 baseline** — `baseline/global`, the universal security baseline
+- **8 industries** — retail, healthcare, finance, technology, education, legal,
+  professional-services, general
+- **5 compliance regimes** — EU GDPR, UK DPA, US baseline, Canada PIPEDA,
+  Australia Privacy Act
+
+The buyer-facing walk-through is [business Post B4](business/11-compliance-templates.md).
+
+**Activity-tiered dormancy ([#154](https://github.com/kennguy3n/visible-fishbone/pull/154)).**
+An MSP managing dozens of trials carries a long tail of tenants that are
+provisioned but idle. The new `SweepPlanner`
+(`internal/service/tenancy/planner.go`) tiers every periodic sweep by a tenant's
+dormancy: **active** tenants are processed every cycle, **idle** every 10th
+(`DefaultIdleEvery = 10`), **dormant** every 100th (`DefaultDormantEvery = 100`).
+The signal is the new `last_active_at` column (migration 063), bumped via
+`GREATEST(last_active_at, now)` on tenant writes so it only ever moves forward. A
+quiet trial therefore costs on the order of 1/100th of an active tenant's periodic
+work — without turning the tenant off. The cost angle is
+[business Post B1](business/08-noops-dormant-trials.md).
+
+*Integration status: the planner is wired into the IdP `SyncService` and covered
+by `tenancy` + `identity` unit tests (green on `main`), but that sync loop isn't
+started in `cmd/sng-control` yet — so the tiering is proven by tests, not yet
+shaping a live production sweep. Flagged, not hidden.*
+
 ## Where we fall short
 
 - **RBAC / SCIM / IdP breadth.** The scaffolding (roles, SCIM provisioning, IdP
-  federation, branding, policy templates, bulk ops) is present in the console,
-  but the depth of, say, Okta/Entra SCIM edge-case handling is not at the level
-  of a dedicated IGA product. This is honest scaffolding, not a finished IAM
-  suite.
+  federation, branding, bulk ops) is present in the console, but the depth of,
+  say, Okta/Entra SCIM edge-case handling is not at the level of a dedicated IGA
+  product. This is honest scaffolding, not a finished IAM suite.
+- **Templates are a catalog, not yet a roll-out UI.** The 14-template catalog and
+  its render path are real and tested, but the cross-tenant "apply this baseline
+  to these 12 tenants" console flow is still thin — today it's an API capability
+  more than a guided operator surface.
 - **Onboarding is API-fast, not wizard-polished.** Our seed harness stands up a
   full tenant in seconds via the API, which is great for MSP automation. The
   *guided* click-through onboarding wizard is thinner than the API path.

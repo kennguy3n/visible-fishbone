@@ -5,6 +5,15 @@ seven executive scenarios, with live screenshots, verbatim API payloads, and an
 in-repo efficacy/performance harness. Every figure traces to an evidence source;
 every post ends with an honest "where we fall short."
 
+**Refreshed this cycle:** six new capabilities are folded into the relevant posts
+— activity-tiered dormancy (#154, Posts 2/7), ClamAV + safe-browsing (#156, Post
+5), shadow-IT NoOps (#159/#172, Post 5), coach-first AI-app DLP + HITL queue
+(#158, Posts 5/6), smart-default policy templates (#157, Posts 2/7), and the
+self-hosted Bonsai-8B Q2_0 bake (#155, Posts 6/7). Most are code-complete and
+tested on `main` but not yet wired into the running control plane, so they're
+backed by real engine output and tests rather than live-enforcement screenshots —
+Post 0 has the per-capability "what's actually wired" table.
+
 ## The posts
 
 | # | Post | Scenario | Persona |
@@ -43,9 +52,15 @@ classifier's output, and an honest competitive assessment for the SME/MSP buyer.
 
 - **Screenshots:** [`../artifacts/screenshots/`](../artifacts/screenshots/) — 16
   live console captures, audited error-free across all 31 routes / 4 tenants.
-- **Payloads:** [`../artifacts/payloads/`](../artifacts/payloads/) — 27 captured
-  files: 25 verbatim control-plane responses across the seven scenarios, plus the
-  S5 DLP-classify and S6 NL-query request payloads that pair with their responses.
+- **Payloads:** [`../artifacts/payloads/`](../artifacts/payloads/) — verbatim
+  control-plane responses across the seven scenarios, plus the S5 DLP-classify and
+  S6 NL-query request payloads. This cycle adds the **real CASB NoOps engine
+  output** ([`casb-noops-actions-acme.json`](../artifacts/payloads/casb-noops-actions-acme.json),
+  [`casb-classifications-acme.json`](../artifacts/payloads/casb-classifications-acme.json)
+  — produced by running the production `Reconcile()`/`RunDigests()` via
+  `blog/harness/casb`, not fixtures) and the 14-template
+  [`policy-templates-catalog.json`](../artifacts/payloads/policy-templates-catalog.json)
+  captured verbatim from the templates API.
 - **Efficacy matrix:** [`../artifacts/efficacy-report.json`](../artifacts/efficacy-report.json)
   — 8 functions, real crate APIs, curated corpora, suite verdict PASS.
 - **Performance datasheet:** [`../artifacts/edge-performance-datasheet.md`](../artifacts/edge-performance-datasheet.md)
@@ -72,7 +87,11 @@ on `:5173`) and `AUTH_JWT_SECRET` exported:
 # 4. Capture the API payloads (GET set + the S5 DLP-classify and S6 NL-query POST pairs).
 (cd blog/harness/capture && go run . -base http://localhost:8080 -out ../../artifacts/payloads)
 
-# 5. Efficacy + performance (Rust).
+# 5. Real CASB NoOps engine output (seeds inventory, clears prior NoOps rows for
+#    the demo tenants, then runs the production Reconcile()/RunDigests() — rerun-safe).
+(cd blog/harness/casb && go run .)
+
+# 6. Efficacy + performance (Rust).
 (cd bench/efficacy && cargo run --release)   # -> efficacy-report.json
 (cd bench && cargo run --release -- ... )    # see bench/README.md (uses --dry-run unprivileged)
 ```
