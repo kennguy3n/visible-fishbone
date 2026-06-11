@@ -128,6 +128,18 @@ func (s *SCIMService) runBulkOp(ctx context.Context, tenantID uuid.UUID, op SCIM
 
 	method := strings.ToUpper(op.Method)
 
+	// A bulkId MUST be unique within a request (RFC 7644 §3.7.2): a
+	// later reference to a duplicated bulkId would otherwise silently
+	// resolve to whichever creation ran last. Reject the collision so
+	// the dependent operations fail loudly instead of binding to the
+	// wrong resource. Only POST assigns a bulkId; the check runs before
+	// the resource is created so no duplicate row is written.
+	if method == "POST" && op.BulkID != "" {
+		if _, dup := bulkIDs[op.BulkID]; dup {
+			return bulkError(res, repository.ErrInvalidArgument, fmt.Sprintf("duplicate bulkId %q within bulk request", op.BulkID))
+		}
+	}
+
 	// Enforce the optional If-Match precondition the operation carries
 	// (RFC 7644 §3.7.1 maps an operation's "version" to If-Match) for
 	// mutating-by-id methods, mirroring the standalone handlers'

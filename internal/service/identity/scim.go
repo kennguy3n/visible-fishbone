@@ -46,6 +46,50 @@ func WithRevocationPublisher(r RevocationPublisher) SCIMOption {
 	return func(s *SCIMService) { s.revoker = r }
 }
 
+// priorActive reports whether the user is currently active. It backs the
+// active->inactive transition check used to revoke a de-provisioned
+// user's sessions exactly once. The lookup is skipped (and false
+// returned) when no revoker is wired, since the result is then unused,
+// and a failed lookup degrades to false so the surrounding mutation
+// still proceeds.
+func (s *SCIMService) priorActive(ctx context.Context, tenantID, userID uuid.UUID) bool {
+	if s.revoker == nil {
+		return false
+	}
+	prev, err := s.users.Get(ctx, tenantID, userID)
+	if err != nil {
+		return false
+	}
+	return prev.Status == repository.UserStatusActive
+}
+
+// revokeIfDeactivated publishes a ZTNA revocation when a SCIM mutation
+// transitions a user from active to inactive (suspended or deleted), so
+// the enforcement plane drops the user's live sessions immediately
+// rather than waiting for token expiry. This is the PATCH/PUT
+// counterpart to the revocation DeleteUser already emits: Okta and
+// Microsoft Entra de-provision by setting active=false (a PATCH or PUT),
+// not by issuing a SCIM DELETE, so without this a deactivated user
+// keeps every live session and grant until its tokens expire.
+//
+// It is a no-op when no revoker is wired, when the user remains active,
+// or when the user was already inactive. That last case makes repeated
+// deactivations idempotent — an IdP that re-sends active=false, or two
+// concurrent deactivations, will not emit duplicate revocations beyond
+// the single active->inactive edge. The suspend/soft-delete is already
+// durable by the time this runs, so a publish failure is surfaced as an
+// error (mirroring DeleteUser) to let the IdP retry, and never undoes
+// the persisted state.
+func (s *SCIMService) revokeIfDeactivated(ctx context.Context, tenantID, userID uuid.UUID, wasActive, isActive bool, reason string) error {
+	if s.revoker == nil || !wasActive || isActive {
+		return nil
+	}
+	if err := s.revoker.PublishRevocation(ctx, tenantID, userID, reason); err != nil {
+		return fmt.Errorf("revocation publish failed: %w", err)
+	}
+	return nil
+}
+
 // SCIMOption configures optional SCIMService behaviour without
 // breaking the base constructor signature used across the codebase.
 type SCIMOption func(*SCIMService)
@@ -168,6 +212,10 @@ func (s *SCIMService) UpdateUser(ctx context.Context, tenantID uuid.UUID, userID
 		ExternalID: su.ExternalID,
 		Status:     status,
 	}
+	// Capture the pre-update active state so a PUT that flips the user
+	// to active=false (the way Okta/Entra de-provision) cuts live ZTNA
+	// sessions, not just the SCIM DELETE path.
+	wasActive := s.priorActive(ctx, tenantID, userID)
 	var updated repository.User
 	var err error
 	if su.ExternalID == "" {
@@ -183,6 +231,9 @@ func (s *SCIMService) UpdateUser(ctx context.Context, tenantID uuid.UUID, userID
 			return SCIMUser{}, fmt.Errorf("iam-core sync failed: %w", serr)
 		}
 	}
+	if rerr := s.revokeIfDeactivated(ctx, tenantID, userID, wasActive, active, "scim_user_deactivated"); rerr != nil {
+		return SCIMUser{}, rerr
+	}
 	return userToSCIM(updated), nil
 }
 
@@ -192,6 +243,10 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 	if err != nil {
 		return SCIMUser{}, err
 	}
+	// Record the active state before applying the ops so a PATCH that
+	// sets active=false (the canonical Okta/Entra de-provision) emits a
+	// ZTNA revocation, just like a SCIM DELETE.
+	wasActive := u.Status == repository.UserStatusActive
 	clearExternalID := false
 	for _, op := range ops {
 		switch strings.ToLower(op.Op) {
@@ -218,11 +273,14 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 	if err != nil {
 		return SCIMUser{}, err
 	}
+	nowActive := updated.Status == repository.UserStatusActive
 	if s.bridge != nil {
-		active := updated.Status == repository.UserStatusActive
-		if serr := s.bridge.syncProfile(ctx, tenantID, updated.IDPSubject, userToSCIM(updated), active); serr != nil {
+		if serr := s.bridge.syncProfile(ctx, tenantID, updated.IDPSubject, userToSCIM(updated), nowActive); serr != nil {
 			return SCIMUser{}, fmt.Errorf("iam-core sync failed: %w", serr)
 		}
+	}
+	if rerr := s.revokeIfDeactivated(ctx, tenantID, userID, wasActive, nowActive, "scim_user_deactivated"); rerr != nil {
+		return SCIMUser{}, rerr
 	}
 	return userToSCIM(updated), nil
 }
@@ -322,7 +380,7 @@ func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter 
 // clause by delegating to the repository's indexed SearchUsers (and the
 // GetByEmail shortcut for the userName-eq dedup lookup).
 func (s *SCIMService) listUsersPushdown(ctx context.Context, tenantID uuid.UUID, parsed *SCIMFilter, startIndex, count int) (SCIMListResponse, error) {
-	if parsed != nil && parsed.Op == SCIMFilterEq && strings.EqualFold(parsed.Attribute, "username") {
+	if parsed != nil && parsed.Op == SCIMFilterEq && canonicalAttr(parsed.Attribute) == "username" {
 		u, err := s.users.GetByEmail(ctx, tenantID, parsed.Value)
 		if err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
@@ -415,7 +473,7 @@ func scimUserSearchFilter(parsed *SCIMFilter) (repository.UserSearchFilter, bool
 // e-mail is its userName), displayName to name, externalId to
 // external_id. The bool is false for any other attribute.
 func scimAttrToUserField(attr string) (repository.UserSearchField, bool) {
-	switch strings.ToLower(attr) {
+	switch canonicalAttr(attr) {
 	case "username", "email", "emails.value":
 		return repository.UserSearchFieldEmail, true
 	case "displayname":

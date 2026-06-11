@@ -154,11 +154,23 @@ func evalCompare(op scimCompareOp, field string, present bool, value string) boo
 	}
 }
 
+// canonicalAttr normalises a SCIM filter attribute path for lookup: it
+// strips a leading core-schema URN prefix (User or Group) and lowercases
+// the result. Microsoft Entra ID emits fully-qualified attribute names
+// (e.g. "urn:ietf:params:scim:schemas:core:2.0:User:userName"), so this
+// keeps the qualified and short forms resolving to the same field across
+// both the in-memory matcher and the repository pushdown path.
+func canonicalAttr(attr string) string {
+	a := strings.TrimPrefix(attr, SCIMSchemaUser+":")
+	a = strings.TrimPrefix(a, SCIMSchemaGroup+":")
+	return strings.ToLower(a)
+}
+
 // userAttr resolves a SCIM filter attribute path to a user's field
 // value and whether it is present (non-empty). It mirrors the resource
 // shape userToSCIM emits so a filter can target any returned attribute.
 func userAttr(u SCIMUser, attr string) (string, bool) {
-	switch strings.ToLower(strings.TrimPrefix(attr, SCIMSchemaUser+":")) {
+	switch canonicalAttr(attr) {
 	case "id":
 		return u.ID, u.ID != ""
 	case "username":
@@ -187,7 +199,7 @@ func userAttr(u SCIMUser, attr string) (string, bool) {
 
 // groupAttr resolves a SCIM filter attribute path to a group's field.
 func groupAttr(g SCIMGroup, attr string) (string, bool) {
-	switch strings.ToLower(strings.TrimPrefix(attr, SCIMSchemaGroup+":")) {
+	switch canonicalAttr(attr) {
 	case "id":
 		return g.ID, g.ID != ""
 	case "displayname":
