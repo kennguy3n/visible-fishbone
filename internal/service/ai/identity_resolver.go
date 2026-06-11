@@ -108,6 +108,12 @@ func (r *DirectoryIdentityResolver) ResolveUser(ctx context.Context, tenantID uu
 	if display == "" {
 		display = user.Name
 	}
+	if display == "" {
+		// A user with neither email nor name is pathological, but the
+		// explanation must still carry an auditable identifier rather
+		// than rendering a blank with a doubled space.
+		display = user.ID.String()
+	}
 	return &ResolvedIdentity{
 		Principal: &policy.Principal{UserID: user.ID, RoleIDs: roleIDs},
 		Display:   display,
@@ -134,12 +140,18 @@ func (r *DirectoryIdentityResolver) lookup(ctx context.Context, tenantID uuid.UU
 	// Exact, case-insensitive match against the identifier columns, most
 	// specific first. total counts all matches independent of the page
 	// window, so total == 1 is a unique hit; total > 1 is ambiguous and
-	// we decline to guess.
-	for _, field := range []repository.UserSearchField{
+	// we decline to guess. An email-shaped ref was already tried via
+	// GetByEmail above (same lower(email)=lower(ref) match), so the email
+	// column is skipped here to avoid a redundant identical query.
+	fields := []repository.UserSearchField{
 		repository.UserSearchFieldEmail,
 		repository.UserSearchFieldName,
 		repository.UserSearchFieldExternalID,
-	} {
+	}
+	if strings.Contains(ref, "@") {
+		fields = fields[1:]
+	}
+	for _, field := range fields {
 		items, total, err := r.users.SearchUsers(ctx, tenantID, repository.UserSearchFilter{
 			Field: field,
 			Op:    repository.TextMatchEquals,
