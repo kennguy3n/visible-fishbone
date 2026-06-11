@@ -345,7 +345,7 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
     ));
 
     // 8. Endpoint DLP — opt-in; `None` unless `[dlp] enabled`.
-    let dlp = build_dlp_subsystem(&cfg.dlp)?;
+    let dlp = build_dlp_subsystem(&cfg.dlp, telemetry.pipeline_handle())?;
 
     // Register subsystems onto the builder we created above.
     // Boot order matters: telemetry + comms first so producer
@@ -402,6 +402,7 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
 /// pays no monitoring cost.
 fn build_dlp_subsystem(
     cfg: &crate::config::DlpConfig,
+    telemetry: sng_telemetry::PipelineHandle,
 ) -> Result<Option<Arc<DlpSubsystem>>, AgentBuildError> {
     if !cfg.enabled {
         return Ok(None);
@@ -432,6 +433,7 @@ fn build_dlp_subsystem(
         engine,
         interceptors,
         Arc::new(TracingDlpSink),
+        telemetry,
         cfg.idle_sleep,
     ))))
 }

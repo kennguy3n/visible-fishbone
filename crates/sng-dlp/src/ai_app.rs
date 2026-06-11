@@ -1178,6 +1178,80 @@ impl AiAppSignal {
     pub const fn is_blocking(&self) -> bool {
         matches!(self.action, AiAppAction::Block)
     }
+
+    /// Project this signal onto the redacted [`sng_core::DlpEvent`] wire
+    /// type the control plane consumes (its human-in-the-loop review
+    /// queue producer half). The projection is metadata-only by
+    /// construction — it copies the destination app id, severity,
+    /// confidence, and per-class finding *summaries*, never any matched
+    /// bytes — so it preserves the same redaction invariant the signal
+    /// itself enforces.
+    ///
+    /// A heuristic (`Suspected`) destination with no catalog id maps to
+    /// the [`SUSPECTED_AI_APP`] sentinel, matching the Go side's
+    /// `dlpreview.SuspectedAppSentinel`.
+    #[must_use]
+    pub fn to_wire_event(&self) -> sng_core::DlpEvent {
+        sng_core::DlpEvent {
+            destination_app: self
+                .destination
+                .app
+                .unwrap_or(SUSPECTED_AI_APP)
+                .to_string(),
+            action: self.action.to_wire(),
+            severity: self.severity.as_str().to_string(),
+            confidence: self.confidence,
+            findings: self.findings.iter().map(FindingSummary::to_wire).collect(),
+            scanned_bytes: self.scanned_bytes as u64,
+            truncated: self.truncated,
+        }
+    }
+}
+
+/// The `destination_app` value emitted for a heuristic (`Suspected`)
+/// AI-app match that carries no catalog id. Must stay in sync with the
+/// Go `internal/service/dlpreview.SuspectedAppSentinel`.
+pub const SUSPECTED_AI_APP: &str = "suspected_ai_app";
+
+impl AiAppAction {
+    /// Project onto the [`sng_core::DlpAction`] wire enum.
+    #[must_use]
+    pub const fn to_wire(self) -> sng_core::DlpAction {
+        match self {
+            Self::Monitor => sng_core::DlpAction::Monitor,
+            Self::Coach => sng_core::DlpAction::Coach,
+            Self::Block => sng_core::DlpAction::Block,
+        }
+    }
+}
+
+impl FindingKind {
+    /// Project onto the [`sng_core::DlpFindingKind`] wire enum.
+    #[must_use]
+    pub const fn to_wire(self) -> sng_core::DlpFindingKind {
+        match self {
+            Self::Pii => sng_core::DlpFindingKind::Pii,
+            Self::Secret => sng_core::DlpFindingKind::Secret,
+            Self::Confidential => sng_core::DlpFindingKind::Confidential,
+        }
+    }
+}
+
+impl FindingSummary {
+    /// Project onto the redacted [`sng_core::DlpFinding`] wire row.
+    #[must_use]
+    pub fn to_wire(&self) -> sng_core::DlpFinding {
+        sng_core::DlpFinding {
+            kind: self.kind.to_wire(),
+            label: self.label.clone(),
+            // Match counts are tiny in practice; saturate rather than
+            // wrap on the (impossible) overflow so the wire value is
+            // never silently truncated to a small number.
+            count: u32::try_from(self.count).unwrap_or(u32::MAX),
+            max_confidence: self.max_confidence,
+            severity: self.severity.as_str().to_string(),
+        }
+    }
 }
 
 /// Per-class accumulator used while aggregating raw matches into
@@ -1399,15 +1473,33 @@ impl AiAppExfilDetector {
         body: &[u8],
         metadata: &ContentMetadata,
     ) -> DlpVerdict {
+        self.inspect_with_verdict(destination, body, metadata).1
+    }
+
+    /// Inspect once and return both the redacted [`AiAppSignal`] and its
+    /// projected [`DlpVerdict`]. The two views share a single inspection
+    /// pass (no double scan): the verdict drives edge enforcement while
+    /// the signal is the redacted record the control plane's review
+    /// queue ingests. Callers that only need one view use [`Self::verdict`]
+    /// or [`Self::inspect`]; callers wiring both enforcement *and*
+    /// telemetry (the agent DLP subsystem) use this.
+    #[must_use]
+    pub fn inspect_with_verdict(
+        &self,
+        destination: &str,
+        body: &[u8],
+        metadata: &ContentMetadata,
+    ) -> (AiAppSignal, DlpVerdict) {
         let signal = self.inspect(destination, body, metadata);
-        signal_to_verdict(
+        let verdict = signal_to_verdict(
             &signal,
             body,
             metadata,
             &self.classifier,
             &self.secrets,
             &self.confidential,
-        )
+        );
+        (signal, verdict)
     }
 }
 

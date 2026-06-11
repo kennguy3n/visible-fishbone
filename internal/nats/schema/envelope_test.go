@@ -364,3 +364,99 @@ func TestZTNAEvent_PostureDetailRoundTrip(t *testing.T) {
 		t.Errorf("empty posture_detail must be omitted (omitempty); got map %v", rawEmpty)
 	}
 }
+
+func TestDLPEvent_Validate(t *testing.T) {
+	t.Parallel()
+	good := schema.DLPEvent{
+		DestinationApp: "chatgpt",
+		Action:         schema.DLPActionCoach,
+		Severity:       "high",
+		Confidence:     0.92,
+		Findings: []schema.DLPFinding{
+			{Kind: schema.DLPFindingSecret, Label: "github_token", Count: 2, MaxConfidence: 0.99, Severity: "high"},
+		},
+	}
+	if err := good.Validate(); err != nil {
+		t.Fatalf("good event rejected: %v", err)
+	}
+	bad := []schema.DLPEvent{
+		{DestinationApp: "", Action: schema.DLPActionCoach, Severity: "high"},
+		{DestinationApp: "chatgpt", Action: "nope", Severity: "high"},
+		{DestinationApp: "chatgpt", Action: schema.DLPActionCoach, Severity: "extreme"},
+		{DestinationApp: "chatgpt", Action: schema.DLPActionCoach, Severity: "high", Confidence: 1.5},
+		{DestinationApp: "chatgpt", Action: schema.DLPActionCoach, Severity: "high", Findings: []schema.DLPFinding{
+			{Kind: "bogus", Label: "x", Severity: "high"},
+		}},
+		{DestinationApp: "chatgpt", Action: schema.DLPActionCoach, Severity: "high", Findings: []schema.DLPFinding{
+			{Kind: schema.DLPFindingPII, Label: "", Severity: "high"},
+		}},
+	}
+	for i, c := range bad {
+		if err := c.Validate(); !errors.Is(err, schema.ErrInvalid) {
+			t.Errorf("bad case %d: err = %v", i, err)
+		}
+	}
+}
+
+// TestDLPEvent_RoundTrip locks the redacted DLP signal's wire contract:
+// it packs through PackPayload (producer-side Validate), rides the
+// short msgpack tags the Rust producer
+// (crates/sng-core/src/events.rs::DlpEvent) emits, and the per-class
+// finding summaries survive the round-trip with no raw content fields.
+func TestDLPEvent_RoundTrip(t *testing.T) {
+	t.Parallel()
+	ev := schema.DLPEvent{
+		DestinationApp: "suspected_ai_app",
+		Action:         schema.DLPActionCoach,
+		Severity:       "critical",
+		Confidence:     0.81,
+		Findings: []schema.DLPFinding{
+			{Kind: schema.DLPFindingPII, Label: "ssn_us", Count: 3, MaxConfidence: 0.95, Severity: "high"},
+			{Kind: schema.DLPFindingConfidential, Label: "confidential", Count: 1, MaxConfidence: 1.0, Severity: "critical"},
+		},
+		ScannedBytes: 4096,
+		Truncated:    true,
+	}
+	b, err := schema.PackPayload(ev)
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	var raw map[string]any
+	if err := msgpack.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+	for _, k := range []string{"dst", "act", "sev", "cf", "fnd", "sb", "tr"} {
+		if _, ok := raw[k]; !ok {
+			t.Errorf("expected wire tag %q present; got map keys %v", k, raw)
+		}
+	}
+	var back schema.DLPEvent
+	if err := schema.UnpackPayload(b, &back); err != nil {
+		t.Fatalf("unpack: %v", err)
+	}
+	if back.DestinationApp != ev.DestinationApp || back.Action != ev.Action ||
+		back.Severity != ev.Severity || back.Confidence != ev.Confidence ||
+		len(back.Findings) != 2 || back.ScannedBytes != 4096 || !back.Truncated {
+		t.Errorf("round trip mismatch: %+v", back)
+	}
+	if back.Findings[0].Label != "ssn_us" || back.Findings[1].Kind != schema.DLPFindingConfidential {
+		t.Errorf("findings round trip mismatch: %+v", back.Findings)
+	}
+
+	// Empty-findings / zero-diagnostic event omits the optional tags so
+	// a destination-only signal stays compact on the wire.
+	bare := schema.DLPEvent{DestinationApp: "claude", Action: schema.DLPActionMonitor, Severity: "low", Confidence: 0.2}
+	bb, err := schema.PackPayload(bare)
+	if err != nil {
+		t.Fatalf("pack bare: %v", err)
+	}
+	var rawBare map[string]any
+	if err := msgpack.Unmarshal(bb, &rawBare); err != nil {
+		t.Fatalf("unmarshal bare: %v", err)
+	}
+	for _, k := range []string{"fnd", "sb", "tr"} {
+		if _, ok := rawBare[k]; ok {
+			t.Errorf("optional tag %q must be omitted when empty; got %v", k, rawBare)
+		}
+	}
+}

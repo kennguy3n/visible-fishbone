@@ -528,7 +528,16 @@ func run() error {
 			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
 	}
 
-	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, rc.SampleRateResolver)
+	// Producer half of the human-in-the-loop DLP review queue: an async,
+	// bounded adapter that turns coach-action DLP events off the
+	// telemetry hot path into review-queue enqueues. Drained on shutdown
+	// after the telemetry consumer (same window discipline as the
+	// shadow-IT discoverer below) so events observed during shutdown are
+	// not lost.
+	dlpReviewIngest := newDLPReviewIngest(rc.DLPReviewService, logger, dlpReviewIngestConfig{})
+	defer dlpReviewIngest.Stop()
+
+	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, dlpReviewIngest, rc.SampleRateResolver)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
@@ -710,6 +719,13 @@ func run() error {
 	// (registered at line 134) so the upserts complete against a live
 	// pool, and makes the deferred Stop a no-op (idempotent).
 	shadowDiscoverer.Stop()
+	// Drain the DLP review-queue ingest worker after the telemetry
+	// consumer, for the same reason as the discoverer above: the
+	// consumer feeds ObserveDLP on its own background context, so
+	// stopping the ingest earlier would drop coach-action events
+	// observed during this shutdown window. Idempotent with the
+	// deferred Stop above.
+	dlpReviewIngest.Stop()
 
 	logger.Info("sng-control: stopped")
 	return nil
@@ -759,6 +775,12 @@ type routerComponents struct {
 	// unless cfg.MobileAuth.DirectorySyncEnabled, in which case main()
 	// runs it via elector.RunIfLeader on cfg.MobileAuth.DirectorySyncInterval.
 	IDPSyncService *identity.SyncService
+	// DLPReviewService is the human-in-the-loop DLP review queue. Built
+	// here (where its repository is constructed and the operator REST
+	// handler is wired) and handed to startTelemetry so the telemetry
+	// consumer can enqueue coach-action DLP events into the same queue.
+	// Never nil.
+	DLPReviewService *dlpreview.Service
 }
 
 // buildRouter wires every repository / service / handler against
@@ -1803,6 +1825,7 @@ func buildRouter(
 		Recompiler:         recompiler,
 		SampleRateResolver: sampleRateResolver,
 		IDPSyncService:     idpSyncSvc,
+		DLPReviewService:   dlpReviewSvc,
 	}, nil
 }
 
@@ -2351,6 +2374,7 @@ func startTelemetry(
 	js jetstream.JetStream,
 	pub *sngnats.Publisher,
 	shadowObserver telemetry.ShadowITObserver,
+	dlpObserver telemetry.DLPReviewObserver,
 	sampleResolver *telemetry.MapSampleRateResolver,
 ) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), error) {
 	var hot telemetry.HotWriter
@@ -2546,6 +2570,9 @@ func startTelemetry(
 	}
 	if shadowObserver != nil {
 		svc.WithShadowITObserver(shadowObserver)
+	}
+	if dlpObserver != nil {
+		svc.WithDLPReviewObserver(dlpObserver)
 	}
 	if err := svc.Start(ctx); err != nil {
 		if hotStop != nil {

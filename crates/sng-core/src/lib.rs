@@ -105,7 +105,8 @@ pub use envelope::{
 };
 pub use error::{ErrorCode, SngError, SngResult};
 pub use events::{
-    AgentEvent, DnsEvent, FlowEvent, HttpEvent, IpsEvent, SdwanEvent, SubsystemRestart,
+    AgentEvent, DlpAction, DlpEvent, DlpFinding, DlpFindingKind, DnsEvent, FlowEvent, HttpEvent,
+    IpsEvent, SdwanEvent, SubsystemRestart,
     SubsystemRestartOutcome, SubsystemRestartReason, ZtnaEvent,
 };
 pub use ids::{

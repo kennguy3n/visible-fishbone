@@ -9,7 +9,7 @@
 //! swap — the same lock-free hot-swap discipline
 //! `sng_policy_eval::PolicyEngine` uses for bundle rotation.
 
-use crate::ai_app::{AiAppExfilDetector, AiAppPolicy, default_pii_rules};
+use crate::ai_app::{AiAppExfilDetector, AiAppPolicy, AiAppSignal, default_pii_rules};
 use crate::channels::{ContentEvent, DlpChannel};
 use crate::classifier::{ClassificationResult, ContentClassifier, ContentMetadata, RuleMatch};
 use crate::error::DlpResult;
@@ -404,6 +404,27 @@ impl DlpEngine {
         content: &[u8],
         metadata: &ContentMetadata,
     ) -> DlpVerdict {
+        self.evaluate_with_signal(channel, content, metadata).0
+    }
+
+    /// Like [`Self::evaluate`] but also returns the redacted
+    /// [`AiAppSignal`] when the AI-app exfil detector fired on this
+    /// event (the upload channel, a recorded destination, a configured
+    /// detector) and the result was *flagged* (coach-first: an action
+    /// above `Monitor`, or any finding). The signal is the record the
+    /// control plane's human-in-the-loop review queue ingests; it is
+    /// `None` for every event that is not a flagged AI-app upload, so a
+    /// caller can wire telemetry without re-inspecting.
+    ///
+    /// The verdict and the signal come from a single inspection pass —
+    /// no double scan.
+    #[must_use]
+    pub fn evaluate_with_signal(
+        &self,
+        channel: DlpChannel,
+        content: &[u8],
+        metadata: &ContentMetadata,
+    ) -> (DlpVerdict, Option<AiAppSignal>) {
         let state = self.state.load();
         let config = state.policy.channel_config(channel);
 
@@ -435,7 +456,9 @@ impl DlpEngine {
         // AI-app exfil signal: consulted only on the upload channel,
         // only when a destination is recorded, and only when a detector
         // is configured. Kept off the hot path for all other traffic.
-        let ai_verdict = state
+        // One inspection pass yields both the enforcement verdict and
+        // the redacted signal the review queue ingests.
+        let ai = state
             .ai_app
             .as_ref()
             .filter(|_| channel == AiAppExfilDetector::channel())
@@ -443,8 +466,21 @@ impl DlpEngine {
                 metadata
                     .source
                     .as_deref()
-                    .map(|dest| detector.verdict(dest, content, metadata))
-            })
+                    .map(|dest| detector.inspect_with_verdict(dest, content, metadata))
+            });
+
+        // Surface the signal only when the upload was actually flagged
+        // (coach-first: an action above Monitor, or any finding). A
+        // bare destination-only Monitor signal is not a review
+        // candidate, so it never leaves the edge as telemetry.
+        let signal = ai
+            .as_ref()
+            .map(|(signal, _)| signal)
+            .filter(|signal| signal.is_flagged())
+            .cloned();
+
+        let ai_verdict = ai
+            .map(|(_, verdict)| verdict)
             .filter(|verdict| !matches!(verdict, DlpVerdict::Allow));
 
         // Fold the (optional) channel and AI-app contributions together.
@@ -456,12 +492,13 @@ impl DlpEngine {
             matches.extend(details.matches.iter().cloned());
         }
 
-        match action {
+        let verdict = match action {
             Some(action) => {
                 DlpVerdict::from_action(action, channel, severity.unwrap_or(Severity::Low), matches)
             }
             None => DlpVerdict::Allow,
-        }
+        };
+        (verdict, signal)
     }
 
     /// Convenience wrapper that evaluates a [`ContentEvent`]
@@ -469,6 +506,19 @@ impl DlpEngine {
     #[must_use]
     pub fn evaluate_event(&self, event: &ContentEvent) -> DlpVerdict {
         self.evaluate(event.channel, &event.content, &event.metadata)
+    }
+
+    /// Like [`Self::evaluate_event`] but also returns the redacted
+    /// [`AiAppSignal`] for a flagged AI-app upload (see
+    /// [`Self::evaluate_with_signal`]). Used by the agent DLP subsystem
+    /// to wire both edge enforcement and the control-plane review queue
+    /// from a single inspection.
+    #[must_use]
+    pub fn evaluate_event_with_signal(
+        &self,
+        event: &ContentEvent,
+    ) -> (DlpVerdict, Option<AiAppSignal>) {
+        self.evaluate_with_signal(event.channel, &event.content, &event.metadata)
     }
 }
 
@@ -897,6 +947,54 @@ mod tests {
             "expected a secret match, got {:?}",
             d.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn evaluate_with_signal_surfaces_a_flagged_signal() {
+        let e = engine_with(vec![]);
+        e.set_ai_app_policy(Some(AiAppPolicy::default()))
+            .expect("enable ai-app");
+
+        // A flagged secret upload to a known app surfaces both the
+        // coaching verdict AND the redacted signal in one pass.
+        let (verdict, signal) =
+            e.evaluate_with_signal(AiAppExfilDetector::channel(), SECRET_BODY, &ai_upload_meta());
+        assert!(matches!(verdict, DlpVerdict::WarnUser(_)), "got {verdict:?}");
+        let signal = signal.expect("a flagged upload must surface a signal");
+        assert!(signal.is_flagged());
+        assert_eq!(signal.action, crate::ai_app::AiAppAction::Coach);
+        assert!(
+            !signal.findings.is_empty(),
+            "a coached secret upload carries at least one finding"
+        );
+        // The projected wire event preserves the redaction invariant:
+        // it carries label/count summaries, never the matched bytes.
+        let wire = signal.to_wire_event();
+        assert_eq!(wire.action, sng_core::DlpAction::Coach);
+        assert!(wire.findings.iter().all(|f| !f.label.is_empty()));
+    }
+
+    #[test]
+    fn evaluate_with_signal_is_none_when_not_flagged() {
+        let e = engine_with(vec![]);
+        e.set_ai_app_policy(Some(AiAppPolicy::default()))
+            .expect("enable ai-app");
+
+        // Benign content to a known AI app: no findings, monitor-only —
+        // not a review candidate, so no signal escapes.
+        let (verdict, signal) = e.evaluate_with_signal(
+            AiAppExfilDetector::channel(),
+            b"hello, how are you today?",
+            &ai_upload_meta(),
+        );
+        assert_eq!(verdict, DlpVerdict::Allow);
+        assert!(signal.is_none(), "a non-flagged upload must not surface a signal");
+
+        // Off the upload channel the detector never runs, so even a
+        // secret yields no signal.
+        let (_, off_channel) =
+            e.evaluate_with_signal(DlpChannel::Clipboard, SECRET_BODY, &ai_upload_meta());
+        assert!(off_channel.is_none());
     }
 
     #[test]
