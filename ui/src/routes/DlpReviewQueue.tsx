@@ -64,7 +64,11 @@ const DIGEST_WINDOWS: { label: string; value: string }[] = [
 ];
 
 // Severity has its own ladder (low → critical); statusTone only knows
-// "critical", so map the rest explicitly for the severity badge.
+// "critical", so map the rest explicitly for the severity badge. The default
+// guards the one untyped entry point — CountBreakdown casts digest `by_severity`
+// keys (which originate from the backend) with `as DlpSeverity`, so a severity
+// level added server-side later resolves to a neutral badge instead of an
+// undefined tone.
 function severityTone(sev: DlpSeverity): Tone {
   switch (sev) {
     case "critical":
@@ -74,6 +78,8 @@ function severityTone(sev: DlpSeverity): Tone {
     case "medium":
       return "info";
     case "low":
+      return "neutral";
+    default:
       return "neutral";
   }
 }
