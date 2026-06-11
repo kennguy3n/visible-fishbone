@@ -173,12 +173,13 @@ func entryC(app shadowApp, suffixes ...string) catalogEntry {
 // shadowAppByName indexes the catalog by app name so the NoOps action
 // engine can recover an app's domains + connector flag during a
 // reconcile sweep (which works from persisted rows that carry only the
-// name). Built alongside shadowCatalog; immutable after init.
-var shadowAppByName map[string]shadowApp
+// name). Derived from shadowCatalog by indexShadowAppsByName rather than
+// mutated as a side-effect of buildShadowCatalog, so the dependency is
+// explicit and the builder stays a pure function. Immutable after init.
+var shadowAppByName = indexShadowAppsByName(shadowCatalog)
 
 func buildShadowCatalog(entries ...catalogEntry) map[string]shadowApp {
 	m := make(map[string]shadowApp, len(entries)*2)
-	shadowAppByName = make(map[string]shadowApp, len(entries))
 	for _, e := range entries {
 		app := e.app
 		app.Suffixes = e.suffixes
@@ -186,9 +187,20 @@ func buildShadowCatalog(entries ...catalogEntry) map[string]shadowApp {
 		for _, s := range e.suffixes {
 			m[s] = app
 		}
-		shadowAppByName[app.Name] = app
 	}
 	return m
+}
+
+// indexShadowAppsByName builds the name->app index from the
+// suffix-keyed catalog. Every suffix entry for an app carries that
+// app's full Suffixes slice (buildShadowCatalog sets it before
+// inserting), so collapsing by name loses nothing.
+func indexShadowAppsByName(catalog map[string]shadowApp) map[string]shadowApp {
+	byName := make(map[string]shadowApp, len(catalog))
+	for _, app := range catalog {
+		byName[app.Name] = app
+	}
+	return byName
 }
 
 // catalogMetaFor returns the host suffixes and connector flag for a

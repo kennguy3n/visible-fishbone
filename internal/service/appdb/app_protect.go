@@ -22,11 +22,26 @@ import (
 // `probe` is a representative concrete host for the app (e.g.
 // "console.aws.amazon.com") used to resolve the current effective
 // class; `domains` are the override match patterns (e.g.
-// "*.console.aws.amazon.com"). When the app is already at least as
-// protected as `target` — whether from the global catalog, a stricter
-// operator override, or a prior call — nothing is written and
-// created=false is returned, which makes repeated reconciles a no-op
-// (no duplicate overrides accrue).
+// "*.console.aws.amazon.com").
+//
+// An override is written in two cases:
+//
+//  1. target is strictly stricter than the current effective class —
+//     the classic "add inspection" tighten.
+//  2. the app currently sits only on the default safe baseline (no
+//     explicit rule resolved it) and target is at least that baseline.
+//     A shadow-IT app the global catalog has never heard of resolves to
+//     the inspect_full default; without this case an auto-protect
+//     decision for it would be a silent no-op that depends on the
+//     baseline never changing and leaves no override to audit or lift.
+//     Persisting an explicit override makes the protection durable
+//     (survives a baseline change or a later catalog row at a *lower*
+//     class) and attributable.
+//
+// When an explicit rule already provides at least `target` protection —
+// the global catalog, a stricter operator override, or a prior call —
+// nothing is written and created=false is returned, so repeated
+// reconciles are a no-op (no duplicate overrides accrue).
 //
 // The override is permanent (no TTL): it represents a durable posture
 // decision the operator reviews via the NoOps digest and can lift with
@@ -56,14 +71,23 @@ func (s *Service) EnsureProtection(
 		return false, fmt.Errorf("appdb: at least one domain required: %w", repository.ErrInvalidArgument)
 	}
 
-	current, err := s.ResolveTrafficClass(ctx, tenantID, probe)
+	current, matched, err := s.resolveTrafficClass(ctx, tenantID, probe)
 	if err != nil {
 		return false, fmt.Errorf("appdb: resolve current class: %w", err)
 	}
-	// Never loosen: only install when target is strictly stricter than
-	// the current effective class. Equal ranks (already protected) and
-	// stricter-current (operator already tightened further) are no-ops.
-	if protectionRank(target) <= protectionRank(current) {
+	// Never loosen. Decide whether to persist an override:
+	//   - target strictly stricter than current  -> tighten (write).
+	//   - app on the default baseline only (no explicit rule) and target
+	//     at least the baseline                  -> persist a durable
+	//     override so the protection is explicit and survives baseline
+	//     or catalog drift (write).
+	//   - an explicit rule already provides >= target protection, or
+	//     target would loosen the baseline       -> no-op.
+	targetRank, curRank := protectionRank(target), protectionRank(current)
+	switch {
+	case targetRank > curRank:
+	case !matched && targetRank == curRank:
+	default:
 		return false, nil
 	}
 

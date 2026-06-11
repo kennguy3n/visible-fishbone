@@ -315,7 +315,12 @@ func (e *AppNoOpsEngine) enforce(ctx context.Context, tenantID uuid.UUID, view D
 	if created {
 		return true, reason + " [auto-applied " + string(target) + " override]"
 	}
-	return true, reason + " [already at least " + string(target) + "; no change]"
+	// No override was written because an explicit rule already provides
+	// at least `target` protection. Report applied=false: the engine
+	// took no enforcement action this cycle, so the audit row records a
+	// recommendation-equivalent rather than an auto-applied change (see
+	// the Applied contract in repository.CASBAppAction).
+	return false, reason + " [already at least " + string(target) + "; no change]"
 }
 
 // decideAction is the pure decision function: given a classification

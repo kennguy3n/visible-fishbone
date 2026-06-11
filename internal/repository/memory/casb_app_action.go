@@ -208,6 +208,13 @@ func (r *CASBNoOpsStore) ListActions(ctx context.Context, tenantID uuid.UUID, li
 	if tenantID == uuid.Nil {
 		return nil, repository.ErrInvalidArgument
 	}
+	// Match the postgres store: limit<=0 means "use the default page
+	// size" (100), not "unbounded". Keeping the two backends identical
+	// here means a caller that relies on the default page never sees a
+	// different result set depending on which store is wired.
+	if limit <= 0 {
+		limit = 100
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []repository.CASBAppAction
@@ -223,7 +230,7 @@ func (r *CASBNoOpsStore) ListActions(ctx context.Context, tenantID uuid.UUID, li
 		}
 		return out[i].CreatedAt.After(out[j].CreatedAt)
 	})
-	if limit > 0 && len(out) > limit {
+	if len(out) > limit {
 		out = out[:limit]
 	}
 	return out, nil

@@ -18,12 +18,19 @@ import (
 // did since the previous digest so an operator can review automation
 // at a glance without trawling the audit trail.
 type AppDigest struct {
-	TenantID       uuid.UUID                 `json:"tenant_id"`
-	Since          time.Time                 `json:"since"`
-	GeneratedAt    time.Time                 `json:"generated_at"`
-	DiscoveredApps int                       `json:"discovered_apps"`
-	Actions        int                       `json:"actions"`
-	AutoApplied    int                       `json:"auto_applied"`
+	TenantID       uuid.UUID `json:"tenant_id"`
+	Since          time.Time `json:"since"`
+	GeneratedAt    time.Time `json:"generated_at"`
+	DiscoveredApps int       `json:"discovered_apps"`
+	Actions        int       `json:"actions"`
+	AutoApplied    int       `json:"auto_applied"`
+	// AutoNotApplied counts auto-mode actions that did NOT write an
+	// override this window — the app was already at least as protected
+	// (a no-op) or the enforcement call failed. Tracking it apart from
+	// Recommended keeps that bucket meaning exactly "operator action
+	// suggested" rather than silently absorbing auto no-ops/failures,
+	// so AutoApplied + AutoNotApplied + Recommended == Actions.
+	AutoNotApplied int                       `json:"auto_not_applied"`
 	Recommended    int                       `json:"recommended"`
 	ByEnforcement  map[ActionEnforcement]int `json:"by_enforcement"`
 	HighRiskApps   []string                  `json:"high_risk_apps"`
@@ -71,9 +78,15 @@ func (e *AppNoOpsEngine) BuildDigest(ctx context.Context, tenantID uuid.UUID) (A
 	for _, a := range actions {
 		digest.Actions++
 		digest.ByEnforcement[a.Enforcement]++
-		if a.Mode == ActionModeAuto && a.Applied {
+		switch {
+		case a.Mode == ActionModeAuto && a.Applied:
 			digest.AutoApplied++
-		} else {
+		case a.Mode == ActionModeAuto:
+			// Auto action that wrote nothing this window (already
+			// protected, or enforcement failed) — not an operator
+			// recommendation.
+			digest.AutoNotApplied++
+		default:
 			digest.Recommended++
 		}
 		if a.CreatedAt.After(digest.LastActionAt) {
@@ -120,6 +133,7 @@ func (e *AppNoOpsEngine) BuildDigest(ctx context.Context, tenantID uuid.UUID) (A
 		slog.Int("discovered_apps", digest.DiscoveredApps),
 		slog.Int("actions", digest.Actions),
 		slog.Int("auto_applied", digest.AutoApplied),
+		slog.Int("auto_not_applied", digest.AutoNotApplied),
 		slog.Int("recommended", digest.Recommended),
 		slog.Int("high_risk_apps", len(digest.HighRiskApps)))
 	return digest, nil

@@ -147,6 +147,51 @@ func TestOnAppDiscovered_AutoProtectsHighRiskUnsanctioned(t *testing.T) {
 	}
 }
 
+// When the enforcer is wired but EnsureProtection writes nothing
+// (created=false, e.g. the app is already at least as protected), the
+// auto action is recorded as auto+!applied — NOT applied=true — and the
+// digest counts it under AutoNotApplied rather than AutoApplied or
+// Recommended. Locks in the Applied contract and the digest buckets.
+func TestOnAppDiscovered_AutoNoOpWhenAlreadyProtected(t *testing.T) {
+	fx := newEngineFixture(t)
+	fx.enforcer.created = false // EnsureProtection no-ops: already protected.
+	fx.engine.SetEnforcer(fx.enforcer)
+	fx.engine.SetAuditLog(fx.audit)
+	tid := fx.newTenant(t)
+	ctx := context.Background()
+
+	devices := 12
+	app := repository.CASBDiscoveredApp{Name: "Telegram", Category: "messaging", ActiveDeviceCount: &devices}
+	meta := casb.AppDiscoveryMeta{Domains: []string{"telegram.org"}}
+	fx.engine.OnAppDiscovered(ctx, tid, app, meta)
+
+	actions, err := fx.store.ListActions(ctx, tid, 10)
+	if err != nil {
+		t.Fatalf("ListActions: %v", err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("got %d actions, want 1", len(actions))
+	}
+	a := actions[0]
+	// Still an auto decision (enforcer wired), but nothing was applied.
+	if a.Mode != casb.ActionModeAuto || a.Applied {
+		t.Fatalf("action mode=%s applied=%v, want auto+!applied (no-op)", a.Mode, a.Applied)
+	}
+	if fx.enforcer.callCount() != 1 {
+		t.Fatalf("enforcer calls = %d, want 1", fx.enforcer.callCount())
+	}
+
+	fx.clock = fx.clock.Add(time.Minute)
+	d, err := fx.engine.BuildDigest(ctx, tid)
+	if err != nil {
+		t.Fatalf("BuildDigest: %v", err)
+	}
+	if d.Actions != 1 || d.AutoNotApplied != 1 || d.AutoApplied != 0 || d.Recommended != 0 {
+		t.Fatalf("digest actions=%d auto_applied=%d auto_not_applied=%d recommended=%d, want 1/0/1/0",
+			d.Actions, d.AutoApplied, d.AutoNotApplied, d.Recommended)
+	}
+}
+
 func TestOnAppDiscovered_ConnectorSanctionedNoAction(t *testing.T) {
 	fx := newEngineFixture(t)
 	fx.engine.SetEnforcer(fx.enforcer)
