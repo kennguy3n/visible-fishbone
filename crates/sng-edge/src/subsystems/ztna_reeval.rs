@@ -193,7 +193,16 @@ impl Subsystem for ZtnaReevalSubsystem {
         let enabled = self.enabled;
         let interval = self.interval;
         let reeval_loop = self.reeval_loop.clone();
-        let revoked_rx = self.revoked_rx.lock().take();
+        // Only consume the receiver when we are actually going to drain it.
+        // A disabled subsystem must not take it: doing so would drop the
+        // receiver and permanently close the channel, so a later
+        // `reeval_loop().reevaluate_device(..)` could never emit its
+        // `SessionRevoked` event. Leaving it in place keeps the loop's
+        // revocation channel intact even though the sweep never runs.
+        let revoked_rx = self
+            .enabled
+            .then(|| self.revoked_rx.lock().take())
+            .flatten();
         Ok(task::spawn(async move {
             // Disabled: idle until shutdown so the supervisor sees a
             // well-behaved subsystem and behaviour is unchanged.
@@ -400,6 +409,29 @@ mod tests {
         let health = sub.check().await;
         assert_eq!(health.status, HealthStatus::Up);
         assert!(health.detail.unwrap().contains("enabled=false"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabled_start_leaves_revocation_channel_open() {
+        // A disabled `start` must NOT consume the revocation receiver:
+        // taking it would drop the receiver and permanently close the
+        // channel, so a later out-of-cycle
+        // `reeval_loop().reevaluate_device(..)` could never emit its
+        // `SessionRevoked` event. The receiver must still be parked in
+        // the subsystem after a full disabled start/stop cycle.
+        let sub = ZtnaReevalSubsystem::new(empty_service(), &ZtnaConfig::default());
+        assert!(!sub.is_enabled());
+        assert!(sub.revoked_rx.lock().is_some());
+
+        let (trigger, signal) = ShutdownTrigger::new();
+        let handle = sub.start(signal).await.expect("start");
+        trigger.fire();
+        handle.await.expect("join").expect("clean exit");
+
+        assert!(
+            sub.revoked_rx.lock().is_some(),
+            "disabled start must not consume/close the revocation channel"
+        );
     }
 
     #[tokio::test(start_paused = true)]
