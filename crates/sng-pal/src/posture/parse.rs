@@ -86,17 +86,17 @@ pub(crate) fn certificate_health(
 /// versioned binary (`falcon-sensor`, `com.crowdstrike.falcon.Agent`)
 /// is recognised regardless of the exact suffix.
 pub(crate) const KNOWN_EDR_MARKERS: &[&str] = &[
-    "falcon",        // CrowdStrike Falcon
-    "crowdstrike",   //
-    "sentinel",      // SentinelOne (sentineld / s1-agent / sentinelone)
-    "cbagent",       // VMware Carbon Black
-    "carbonblack",   //
-    "cylance",       // BlackBerry Cylance
-    "wdavdaemon",    // Microsoft Defender for Endpoint (macOS/Linux)
-    "mdatp",         // Microsoft Defender ATP daemon
-    "cortex",        // Palo Alto Cortex XDR
-    "traps",         // Palo Alto Traps (legacy)
-    "sophos",        // Sophos Intercept X
+    "falcon",           // CrowdStrike Falcon
+    "crowdstrike",      //
+    "sentinel",         // SentinelOne (sentineld / s1-agent / sentinelone)
+    "cbagent",          // VMware Carbon Black
+    "carbonblack",      //
+    "cylance",          // BlackBerry Cylance
+    "wdavdaemon",       // Microsoft Defender for Endpoint (macOS/Linux)
+    "mdatp",            // Microsoft Defender ATP daemon
+    "cortex",           // Palo Alto Cortex XDR
+    "traps",            // Palo Alto Traps (legacy)
+    "sophos",           // Sophos Intercept X
     "elastic-endpoint", // Elastic Defend
 ];
 
@@ -165,7 +165,10 @@ pub(crate) fn classify_security_center_av(product_state: u32) -> (AntivirusStatu
 /// is [`EdrState::Unhealthy`] rather than `NotInstalled`.
 #[cfg(any(target_os = "windows", test))]
 #[must_use]
-pub(crate) fn edr_state_from_security_center(found_edr_product: bool, realtime_on: bool) -> EdrState {
+pub(crate) fn edr_state_from_security_center(
+    found_edr_product: bool,
+    realtime_on: bool,
+) -> EdrState {
     match (found_edr_product, realtime_on) {
         (true, true) => EdrState::Healthy,
         (true, false) => EdrState::Unhealthy,
@@ -459,8 +462,7 @@ mod tests {
     fn systemextensions_edr_states() {
         let healthy = "enabled\tactive\tteamID\tcom.crowdstrike.falcon.Agent (1.0/1)\tFalcon\t[activated enabled]";
         assert_eq!(edr_state_from_systemextensions(healthy), EdrState::Healthy);
-        let unhealthy =
-            "enabled\tactive\tteamID\tcom.sentinelone.agent (1.0/1)\tS1\t[activated waiting for user]";
+        let unhealthy = "enabled\tactive\tteamID\tcom.sentinelone.agent (1.0/1)\tS1\t[activated waiting for user]";
         assert_eq!(
             edr_state_from_systemextensions(unhealthy),
             EdrState::Unhealthy

@@ -66,13 +66,21 @@ use crate::request::NetworkType;
 /// `Option` (and `false` for the bool) so an app that does
 /// not opt in keeps the pre-expansion behaviour.
 ///
-/// `Ord` is derived field-by-field starting with
-/// `min_score`, so requirements still order
-/// least-to-most-strict by score first (matching the old
-/// enum's ordering contract), with the additional gates as
-/// deterministic tie-breakers (`None` / `false` — the
-/// looser setting — orders first).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// `Ord` orders requirements **least-to-most strict**,
+/// matching the old enum's ordering contract. Because the
+/// hard gates are independent, strictness is genuinely a
+/// *partial* order (e.g. "require EDR" and "patch within 7
+/// days" are incomparable); the [`Ord`] impl is a fixed
+/// *linear extension* of it — primary key `min_score`, then
+/// `require_edr` (`false` < `true`), then the two
+/// `Option<u32>` caps where **no gain (`None`) is loosest
+/// and a smaller cap is stricter** (so `None` <
+/// `Some(30)` < `Some(7)`). Whenever one requirement
+/// strictly dominates another on every axis it compares
+/// greater, and the order is total and consistent with
+/// `Eq`, so it is safe as a `BTreeMap`/`BTreeSet` key or
+/// for picking the strictest of a set via `max`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PostureRequirement {
     /// Minimum [`DevicePosture::risk_score`] (0–100) the
     /// device must reach to satisfy this requirement.
@@ -105,6 +113,32 @@ pub struct PostureRequirement {
 }
 
 impl PostureRequirement {
+    /// Total-order key that linearises the (partial)
+    /// strictness order, ascending = looser → stricter, and
+    /// is injective over the field set so the resulting
+    /// [`Ord`] stays consistent with the derived [`Eq`].
+    ///
+    /// For an `Option<u32>` cap a *smaller* value is stricter
+    /// and `None` (no gate) is the loosest of all, so each
+    /// maps to a `(has_gate, descending-cap)` pair: `None` →
+    /// `(0, 0)` sorts below every `Some`, and `Some(c)` →
+    /// `(1, u32::MAX - c)` sorts larger caps (looser) before
+    /// smaller caps (stricter).
+    fn strictness_key(self) -> (u8, bool, (u8, u32), (u8, u32)) {
+        const fn cap_key(cap: Option<u32>) -> (u8, u32) {
+            match cap {
+                None => (0, 0),
+                Some(c) => (1, u32::MAX - c),
+            }
+        }
+        (
+            self.min_score,
+            self.require_edr,
+            cap_key(self.min_patch_days),
+            cap_key(self.max_av_definition_age_hours),
+        )
+    }
+
     /// No posture floor (score 0) and no hard gates. Every
     /// device — even a fully un-attested one — satisfies it.
     /// The spelling the catalog uses for low-risk apps open
@@ -181,6 +215,25 @@ impl PostureRequirement {
             return false;
         }
         true
+    }
+}
+
+/// Orders requirements least-to-most strict via
+/// [`PostureRequirement::strictness_key`] (a linear
+/// extension of the partial strictness order). Manual rather
+/// than derived so the `Option<u32>` gate caps order by
+/// *strictness* (smaller cap = stricter) instead of by raw
+/// numeric value, while staying consistent with the derived
+/// `Eq`.
+impl Ord for PostureRequirement {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.strictness_key().cmp(&other.strictness_key())
+    }
+}
+
+impl PartialOrd for PostureRequirement {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -1218,9 +1271,29 @@ mod tests {
     #[test]
     fn posture_requirement_ord_matches_satisfied_by_strictness() {
         // None is least strict (always passes), Strict is
-        // most strict — derived Ord agrees.
+        // most strict — the score axis orders first.
         assert!(PostureRequirement::NONE < PostureRequirement::BASIC);
         assert!(PostureRequirement::BASIC < PostureRequirement::STRICT);
+
+        // Hard gates linearise least-to-most strict too:
+        // declaring a gate is stricter than not, and a
+        // smaller cap (tighter window) is stricter than a
+        // larger one — never inverted.
+        let base = PostureRequirement::BASIC;
+        assert!(base < base.with_require_edr(true));
+        assert!(base < base.with_min_patch_days(30));
+        assert!(base.with_min_patch_days(30) < base.with_min_patch_days(7));
+        assert!(base < base.with_max_av_definition_age_hours(72));
+        assert!(
+            base.with_max_av_definition_age_hours(72) < base.with_max_av_definition_age_hours(24)
+        );
+
+        // A requirement that dominates another on every axis
+        // is strictly greater; the order is a linear
+        // extension of the (partial) strictness order.
+        let looser = base.with_min_patch_days(30);
+        let stricter = base.with_require_edr(true).with_min_patch_days(7);
+        assert!(looser < stricter);
     }
 
     #[test]

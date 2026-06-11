@@ -460,10 +460,8 @@ mod tests {
         let sys = dir.path().join("sys");
         fs::create_dir_all(&sys)?;
         // Expired leaf.
-        let collector = LinuxPostureCollector::with_roots(proc, sys).with_certificate_window(
-            None,
-            Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap(),
-        );
+        let collector = LinuxPostureCollector::with_roots(proc, sys)
+            .with_certificate_window(None, Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
         let snap = collector.collect().await?;
         assert_eq!(snap.certificate_health, CertificateHealth::Expired);
         Ok(())
@@ -479,8 +477,7 @@ mod tests {
         // Freshly-created package-manager state dir (mtime ~now).
         let apt = dir.path().join("apt-lists");
         fs::create_dir_all(&apt)?;
-        let collector =
-            LinuxPostureCollector::with_roots(proc, sys).with_update_paths(vec![apt]);
+        let collector = LinuxPostureCollector::with_roots(proc, sys).with_update_paths(vec![apt]);
         let snap = collector.collect().await?;
         assert!(snap.last_os_update.is_some());
         assert_eq!(snap.os_patch_age_days, Some(0));

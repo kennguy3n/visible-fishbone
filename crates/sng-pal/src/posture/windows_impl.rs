@@ -89,10 +89,8 @@ impl WindowsPostureCollector {
                 } else {
                     None
                 };
-                let edr = parse::edr_state_from_security_center(
-                    av.found_edr_product,
-                    av.edr_realtime_on,
-                );
+                let edr =
+                    parse::edr_state_from_security_center(av.found_edr_product, av.edr_realtime_on);
                 (av.status, def_age, edr)
             }
         }

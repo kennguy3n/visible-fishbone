@@ -695,7 +695,10 @@ mod tests {
         assert_eq!(stats.revoked, 0);
         assert_eq!(stats.retained, 1);
         assert!(tracker.contains("s1"), "compliant device must be retained");
-        assert!(rx.try_recv().is_err(), "no revocation for a compliant device");
+        assert!(
+            rx.try_recv().is_err(),
+            "no revocation for a compliant device"
+        );
     }
 
     #[test]
