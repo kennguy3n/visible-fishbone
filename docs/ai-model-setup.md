@@ -90,25 +90,30 @@ llama-server -m ./models/Ternary-Bonsai-8B-Q2_0.gguf \
   --alias Ternary-Bonsai-8B --host 0.0.0.0 --port 8081 -c 4096 -ngl 0
 ```
 
-**2c. Offline image-bake (no network during build):** for a build host with
-no egress to HuggingFace, pre-fetch the GGUF on a connected machine, stage it
-under `deploy/ollama/models/`, then build with `SNG_LLM_OFFLINE=1`. The build
-skips the download and only re-verifies the staged file's SHA-256 — it fails
-fast (exit 2) if the file is missing, or (exit 3) if it fails verification, so
-an absent or tampered artifact never reaches the image:
+**2c. Offline image-bake (no HuggingFace egress during build):** for a build
+host with no egress to HuggingFace, pre-fetch the GGUF on a connected machine,
+stage it under `deploy/ollama/models/`, then build with `SNG_LLM_OFFLINE=1`. The
+build skips the model download and only re-verifies the staged file's SHA-256 —
+it fails fast (exit 2) if the file is missing, or (exit 3) if it fails
+verification, so an absent or tampered artifact never reaches the image:
 
 ```bash
 # On a connected host (or copy the verified GGUF in by any trusted channel):
 scripts/fetch-bonsai-gguf.sh --out-dir deploy/ollama/models
 
-# On the (possibly air-gapped) build host — no network reach-out:
+# On the build host — the model is no longer fetched from HuggingFace:
 docker build -f deploy/ollama/Dockerfile.llamacpp \
   --build-arg SNG_LLM_OFFLINE=1 -t sng-bonsai-q2:local .
 # or via compose: SNG_LLM_OFFLINE=1 docker compose -f deploy/ollama/docker-compose.yml build bonsai-q2
 ```
 
-The staged `*.gguf` are gitignored (a tracked `.keep` keeps the directory so
-the `COPY` works on a clean checkout) — never commit multi-GB weights.
+`SNG_LLM_OFFLINE=1` removes only the multi-GB model download. Stage 1 still
+compiles `llama-server` from the pinned prism fork (a `git fetch`) and pulls the
+debian base image + apt packages, so a *fully* air-gapped build also needs those
+layers cached (a prior build on the host), pre-built, or served from an internal
+mirror. The staged `*.gguf` are gitignored (a tracked `.keep` keeps the
+directory so the `COPY` works on a clean checkout) — never commit multi-GB
+weights.
 
 Either way the served model name is `Ternary-Bonsai-8B` (the `--alias`),
 matching `ai.DefaultModel`, so:

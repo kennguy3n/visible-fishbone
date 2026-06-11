@@ -10,12 +10,16 @@
 # Build (context = repo root, so the verify script is in scope):
 #   docker build -f deploy/ollama/Dockerfile.llamacpp -t sng-bonsai-q2:local .
 #
-# Offline bake (no network reach-out during build): pre-fetch the GGUF on a
+# Offline bake (no HuggingFace egress during build): pre-fetch the GGUF on a
 # connected host, stage it under deploy/ollama/models/, then build with
 # SNG_LLM_OFFLINE=1 (the build only verifies the staged file's SHA-256):
 #   ./scripts/fetch-bonsai-gguf.sh --variant Q2_0 --out-dir deploy/ollama/models
 #   docker build -f deploy/ollama/Dockerfile.llamacpp \
 #     --build-arg SNG_LLM_OFFLINE=1 -t sng-bonsai-q2:local .
+# This removes the multi-GB model download from the build. Stage 1 still
+# compiles llama-server from the pinned prism fork (a git fetch) and pulls the
+# debian base + apt packages, so a fully air-gapped build also needs those
+# layers cached/pre-built or sourced from an internal mirror.
 #
 # Run:
 #   docker run --rm -p 127.0.0.1:8081:8081 sng-bonsai-q2:local
