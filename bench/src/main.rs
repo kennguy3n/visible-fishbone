@@ -552,8 +552,11 @@ fn run(cli: Cli) -> Result<std::process::ExitCode, BenchError> {
 /// the host's available parallelism, plus that bound itself and the next
 /// power of two above it — so the curve always spans the single-stream
 /// floor, the host's real core budget, and one oversubscribed step past it
-/// (where the contended ceiling shows). De-duplication and ordering are
-/// handled downstream by `MultiQueueConfig::normalized_queue_counts`.
+/// (where the contended ceiling shows). The output is already strictly
+/// increasing for every realistic input; `MultiQueueConfig::normalized_queue_counts`
+/// remains the single authoritative sort/dedup point (idempotent here, and
+/// the only thing that would collapse the lone `bound == usize::MAX`
+/// degenerate duplicate), so this function need not re-implement it.
 fn default_queue_curve(sku_queues: u32, parallelism: usize) -> Vec<usize> {
     let bound = (sku_queues as usize).max(parallelism).max(1);
     let mut curve = Vec::new();
