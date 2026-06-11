@@ -92,6 +92,35 @@ type Config struct {
 	Sandbox            Sandbox
 	RBI                RBI
 	TenantMigration    TenantMigration
+	Activity           Activity
+}
+
+// Activity carries the runtime knobs for per-tenant activity tracking
+// (internal/service/activity): the data-plane + control-plane signal
+// that advances tenants.last_active_at so the dormancy planner
+// (internal/service/tenancy) can bucket tenants into activity tiers and
+// skip sweeps on idle/dormant ones.
+//
+// Enabled defaults to ON: the recorder is the writer that makes the
+// dormancy story real (without it last_active_at is never populated and
+// the planner sees every tenant as dormant). It is debounced and writes
+// asynchronously, so the hot-path cost is negligible; the knobs exist to
+// tune the debounce window and the drain queue under extreme fleets, or
+// to disable the writer entirely for diagnostics.
+type Activity struct {
+	// Enabled wires the activity recorder onto the telemetry consumer
+	// and the authenticated API chain. Default true. When false the
+	// recorder is not constructed and last_active_at is not written.
+	Enabled bool
+	// MinInterval is the per-tenant debounce window: at most one
+	// last_active_at write per tenant per interval. Must be well under
+	// the planner's IdleAfter (24h). Defaults to 5m. Anything <= 0 is
+	// treated as the recorder default by the constructor.
+	MinInterval time.Duration
+	// QueueSize bounds the in-flight touches buffered for the async
+	// drain worker; beyond it, touches are dropped (forward-only, so
+	// the next activity re-establishes the signal). Defaults to 4096.
+	QueueSize int
 }
 
 // TenantMigration carries the runtime knobs for the WS11 cross-region
@@ -1593,6 +1622,9 @@ func Load() (Config, error) {
 		{"NATS_FETCH_BATCH_SIZE", 50, &cfg.NATS.FetchBatchSize},
 		{"NATS_PUBLISH_RETRY_ATTEMPTS", 3, &cfg.NATS.PublishRetryAttempts},
 		{"RATE_LIMIT_BURST", 60, &cfg.RateLimit.Burst},
+		// Activity-recorder drain-queue depth. Sized for a burst of
+		// distinct tenants crossing their debounce window at once.
+		{"ACTIVITY_TRACKING_QUEUE_SIZE", 4096, &cfg.Activity.QueueSize},
 		// Per-tenant API rate-limit budgets (requests/minute). Parsed
 		// strictly because a typo silently reverting to the default
 		// would weaken a load-bearing fairness/availability control.
@@ -1682,6 +1714,10 @@ func Load() (Config, error) {
 		{"S3_TELEMETRY_FLUSH_INTERVAL", 30 * time.Second, &cfg.TelemetryAnalytics.S3FlushInterval},
 		{"APP_REGISTRY_SYNC_INTERVAL", 24 * time.Hour, &cfg.AppRegistry.SyncInterval},
 		{"CASB_NOOPS_RECONCILE_INTERVAL", time.Hour, &cfg.CASB.NoOpsReconcileInterval},
+		// Per-tenant activity debounce window. Must stay well under the
+		// dormancy planner's 24h IdleAfter so steady traffic keeps a
+		// tenant in the active tier between writes.
+		{"ACTIVITY_TRACKING_MIN_INTERVAL", 5 * time.Minute, &cfg.Activity.MinInterval},
 		// 15s default: local quantized (Ternary-Bonsai-8B) inference is
 		// slower than a hosted API call. Matches ai.defaultTimeout.
 		{"AI_LLM_TIMEOUT", 15 * time.Second, &cfg.AI.Timeout},
@@ -1762,6 +1798,11 @@ func Load() (Config, error) {
 		{"IDP_DIRECTORY_SYNC_ENABLED", false, &cfg.MobileAuth.DirectorySyncEnabled},
 		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},
 		{"POP_REBALANCE_ENABLED", true, &cfg.PoP.RebalanceEnabled},
+		// Per-tenant activity tracking. Default ON: it is the writer
+		// that populates last_active_at, without which the dormancy
+		// planner sees every tenant as dormant. Cheap (debounced, async)
+		// so there is no reason to ship it off by default.
+		{"ACTIVITY_TRACKING_ENABLED", true, &cfg.Activity.Enabled},
 	}
 
 	var strictErrs []error

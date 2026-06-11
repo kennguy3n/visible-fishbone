@@ -76,9 +76,15 @@ type RouterDeps struct {
 	// of failures one IP is locked out for a cooldown. Nil disables the
 	// lockout (failed attempts are still logged when Logger is set).
 	AuthBruteForce *middleware.AttemptLimiter
-	Health         *Health
-	OpsHealth      *OpsHealthHandler
-	BulkDevice     *BulkDeviceHandler
+	// ActivityRecorder, when set, records the resolved tenant of every
+	// authenticated API request as active so the dormancy planner has a
+	// control-plane activity signal alongside the data-plane one fed by
+	// the telemetry consumer. Nil degrades the middleware to a
+	// transparent pass-through.
+	ActivityRecorder middleware.ActivityObserver
+	Health           *Health
+	OpsHealth        *OpsHealthHandler
+	BulkDevice       *BulkDeviceHandler
 	// Metrics, when non-nil, installs the Prometheus HTTP
 	// instrumentation middleware (request count / duration /
 	// in-flight) at the top of the chain. Nil disables it (the
@@ -255,6 +261,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.TenantRateLimiter != nil {
 		apiMWs = append(apiMWs, deps.TenantRateLimiter.Middleware())
+	}
+	// Record per-tenant activity after auth + rate limiting so the
+	// resolved tenant is in context and a flooding tenant shed by the
+	// limiter never reaches the recorder. Nil recorder is a
+	// pass-through.
+	if deps.ActivityRecorder != nil {
+		apiMWs = append(apiMWs, middleware.RecordActivity(deps.ActivityRecorder))
 	}
 	apiChain := middleware.Chain(apiMWs...)
 	authedAPI := apiChain(apiMux)

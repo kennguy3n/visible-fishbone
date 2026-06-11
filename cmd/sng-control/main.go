@@ -41,6 +41,7 @@ import (
 	sngotel "github.com/kennguy3n/visible-fishbone/internal/otel"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
+	"github.com/kennguy3n/visible-fishbone/internal/service/activity"
 	aisvc "github.com/kennguy3n/visible-fishbone/internal/service/ai"
 	"github.com/kennguy3n/visible-fishbone/internal/service/alert"
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
@@ -528,7 +529,16 @@ func run() error {
 			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
 	}
 
-	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, rc.SampleRateResolver)
+	// Start the per-tenant activity recorder's async drain loop before
+	// telemetry comes up, so the data-plane observer wired below has a
+	// running worker behind it. Bound to rootCtx; returns on shutdown.
+	if rc.ActivityRecorder != nil {
+		go rc.ActivityRecorder.Run(rootCtx)
+		logger.Info("sng-control: per-tenant activity tracking enabled",
+			slog.Duration("min_interval", cfg.Activity.MinInterval))
+	}
+
+	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, rc.SampleRateResolver, rc.ActivityRecorder)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
@@ -759,6 +769,13 @@ type routerComponents struct {
 	// unless cfg.MobileAuth.DirectorySyncEnabled, in which case main()
 	// runs it via elector.RunIfLeader on cfg.MobileAuth.DirectorySyncInterval.
 	IDPSyncService *identity.SyncService
+	// ActivityRecorder is the per-tenant activity writer feeding
+	// tenants.last_active_at for the dormancy planner. Nil when
+	// ACTIVITY_TRACKING_ENABLED=false. main() starts its async drain
+	// loop (Run) and hands it to startTelemetry as the data-plane
+	// activity observer; the control-plane signal is wired into the
+	// router here in buildRouter.
+	ActivityRecorder *activity.Recorder
 }
 
 // buildRouter wires every repository / service / handler against
@@ -785,6 +802,27 @@ func buildRouter(
 	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
+
+	// Per-tenant activity recorder. This is the writer that makes the
+	// dormancy story real: it advances tenants.last_active_at from the
+	// data-plane telemetry hot path (WithActivityObserver, wired in
+	// startTelemetry) and the authenticated API chain (the RecordActivity
+	// middleware), so the dormancy planner has an accurate activity
+	// signal to tier on instead of treating every tenant as dormant.
+	// Debounced + async, so the hot-path cost is negligible. nil when
+	// ACTIVITY_TRACKING_ENABLED=false. The Run drain loop is started by
+	// main() (it must outlive buildRouter).
+	var activityRecorder *activity.Recorder
+	var activityObs middleware.ActivityObserver
+	if cfg.Activity.Enabled {
+		activityRecorder = activity.NewRecorder(tenantRepo,
+			activity.WithLogger(logger),
+			activity.WithMinInterval(cfg.Activity.MinInterval),
+			activity.WithQueueSize(cfg.Activity.QueueSize),
+		)
+		activityObs = activityRecorder
+	}
+
 	tenantMigrationRepo := store.NewTenantMigrationRepository()
 	siteRepo := store.NewSiteRepository()
 	// Short-TTL cache for the auth-middleware mobile device kill-switch.
@@ -1754,6 +1792,7 @@ func buildRouter(
 		IAMCoreTenant:     iamCoreTenantResolver,
 		TenantRateLimiter: tenantRateLimiter,
 		AuthBruteForce:    authBruteForce,
+		ActivityRecorder:  activityObs,
 		Mobile:            handler.NewMobileHandler(identitySvc),
 		Metering:          meteringHandler,
 		PoP:               popHandler,
@@ -1803,6 +1842,7 @@ func buildRouter(
 		Recompiler:         recompiler,
 		SampleRateResolver: sampleRateResolver,
 		IDPSyncService:     idpSyncSvc,
+		ActivityRecorder:   activityRecorder,
 	}, nil
 }
 
@@ -2352,6 +2392,7 @@ func startTelemetry(
 	pub *sngnats.Publisher,
 	shadowObserver telemetry.ShadowITObserver,
 	sampleResolver *telemetry.MapSampleRateResolver,
+	activityObserver *activity.Recorder,
 ) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), error) {
 	var hot telemetry.HotWriter
 	var cold telemetry.ColdWriter
@@ -2546,6 +2587,12 @@ func startTelemetry(
 	}
 	if shadowObserver != nil {
 		svc.WithShadowITObserver(shadowObserver)
+	}
+	// Feed the dormancy planner's activity signal from the data-plane
+	// hot path. nil-checked on the concrete pointer (not the interface)
+	// so a disabled recorder does not install a typed-nil observer.
+	if activityObserver != nil {
+		svc.WithActivityObserver(activityObserver)
 	}
 	if err := svc.Start(ctx); err != nil {
 		if hotStop != nil {
