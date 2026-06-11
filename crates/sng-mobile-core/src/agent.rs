@@ -1033,6 +1033,17 @@ impl MobileAgent {
             }
             ScheduledTask::CollectPosture => {
                 let snapshot = self.collect_posture().await?;
+                // Publish the freshly-collected posture *before* the sweep
+                // so it is the posture a concurrent `check_access` reads
+                // via `last_posture()` while the sweep runs. Were it
+                // published after, that window would let a racing explicit
+                // access re-grant an app off the *stale* (still-good)
+                // posture the sweep is about to revoke against — the
+                // `revoke_if_unchanged` CAS keeps that correct but defers
+                // the revocation a whole sweep interval. Publishing first
+                // closes the window; the cost is one snapshot clone per
+                // posture tick (cadence, not per-request), which is cheap.
+                *self.last_posture.lock() = Some(snapshot.clone());
                 // Adaptive trust: drive a re-evaluation sweep on the
                 // freshly-collected posture so an app whose access no
                 // longer holds (posture decayed since the grant, or a
@@ -1054,10 +1065,6 @@ impl MobileAgent {
                         );
                     }
                 }
-                // Publish the freshly-collected posture after the sweep so
-                // the sweep can borrow it by reference and we move (not
-                // clone) it into the cache.
-                *self.last_posture.lock() = Some(snapshot);
             }
         }
         Ok(())
