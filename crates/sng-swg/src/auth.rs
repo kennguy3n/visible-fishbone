@@ -36,7 +36,7 @@ use crate::error::SwgError;
 use crate::malware::{MalwareVerdict, MalwareVerdictProvider};
 use crate::rate_limit::RateLimiter;
 use crate::telemetry::{TelemetryEmitter, VerdictEvent};
-use crate::verdict::{Action, CategoryDenyPolicy, RequestContext, Verdict};
+use crate::verdict::{Action, CategoryDenyConfig, CategoryDenyPolicy, RequestContext, Verdict};
 use crate::yara::{YaraEngine, YaraRuleBundle, YaraRuleVerifier, YaraSeverity};
 
 use base64::Engine as _;
@@ -483,6 +483,21 @@ impl ExtAuthzHandlerBuilder {
     pub fn with_deny_policy(mut self, policy: CategoryDenyPolicy) -> Self {
         self.deny_policy = policy;
         self
+    }
+
+    /// Wire an operator's [`CategoryDenyConfig`] (the serde-stable
+    /// config-plane shape a policy bundle carries) into the handler by
+    /// compiling it into a [`CategoryDenyPolicy`]. This is the
+    /// intended entry point for config-driven deployments: the
+    /// deployment layer deserialises the bundle's deny config and
+    /// passes it straight here, rather than translating into the
+    /// individual `with_deny_*` calls by hand. Like
+    /// [`Self::with_deny_policy`], this replaces the accumulated
+    /// policy wholesale (the config already expresses the full intent,
+    /// including the opt-in safe-browsing baseline).
+    #[must_use]
+    pub fn with_deny_config(self, config: CategoryDenyConfig) -> Self {
+        self.with_deny_policy(config.into_policy())
     }
 
     /// Opt in to elevated-risk posture: promote
@@ -1698,6 +1713,76 @@ mod tests {
             "deny",
         );
         let (allow_other, _c3) = make_handler_with_policy("business.saas", policy);
+        assert_eq!(
+            allow_other
+                .handle_request(req("ok.example", "/", None, None))
+                .await
+                .unwrap()
+                .action,
+            "allow",
+        );
+    }
+
+    /// Build a handler whose deny policy comes from an operator
+    /// [`CategoryDenyConfig`] via [`ExtAuthzHandlerBuilder::with_deny_config`],
+    /// exercising the config-plane path end-to-end.
+    fn make_handler_with_config(
+        category: &str,
+        config: CategoryDenyConfig,
+    ) -> (ExtAuthzHandler, Arc<CapturingEmitter>) {
+        let cap = Arc::new(CapturingEmitter::default());
+        let mal: Arc<dyn MalwareVerdictProvider> = Arc::new(NullMalwareProvider);
+        let clock = Arc::new(TestClock::new());
+        let cats = Arc::new(MixedCaseRemoteCategorizer {
+            category: Some(Category(category.into())),
+        });
+        let h = ExtAuthzHandlerBuilder::new()
+            .with_categorizer(cats)
+            .with_malware(mal)
+            .with_bypass(Arc::new(BypassList::new(Vec::new())))
+            .with_rate_limiter(RateLimiter::new(100.0, 50.0, clock))
+            .with_telemetry(cap.clone() as Arc<dyn TelemetryEmitter>)
+            .with_deny_config(config)
+            .build()
+            .unwrap();
+        (h, cap)
+    }
+
+    #[tokio::test]
+    async fn deny_config_drives_handler_deny_end_to_end() {
+        // The config-plane entry point: an operator bundle enables the
+        // safe-browsing baseline and adds a `gambling` exact rule. Both
+        // the baseline subtree and the operator rule must deny through
+        // the live handler, while an unrelated category is allowed —
+        // proving with_deny_config compiles the config into the policy
+        // the evaluate path consults.
+        let config = CategoryDenyConfig {
+            exact: vec!["gambling".into()],
+            groups: Vec::new(),
+            safe_browsing_defaults: true,
+        };
+
+        let (deny_baseline, _c1) = make_handler_with_config("security.phishing", config.clone());
+        assert_eq!(
+            deny_baseline
+                .handle_request(req("phish.example", "/", None, None))
+                .await
+                .unwrap()
+                .action,
+            "deny",
+        );
+
+        let (deny_exact, _c2) = make_handler_with_config("gambling", config.clone());
+        assert_eq!(
+            deny_exact
+                .handle_request(req("bet.example", "/", None, None))
+                .await
+                .unwrap()
+                .action,
+            "deny",
+        );
+
+        let (allow_other, _c3) = make_handler_with_config("business.saas", config);
         assert_eq!(
             allow_other
                 .handle_request(req("ok.example", "/", None, None))

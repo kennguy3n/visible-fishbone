@@ -468,6 +468,92 @@ fn category_in_group(category: &str, group: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('.'))
 }
 
+/// Operator-facing, (de)serializable configuration for the category
+/// deny policy — the config-plane surface that a policy bundle / SWG
+/// config carries and [`Self::into_policy`] compiles into the runtime
+/// [`CategoryDenyPolicy`] the handler enforces (via
+/// [`crate::auth::ExtAuthzHandlerBuilder::with_deny_config`]).
+///
+/// The split mirrors the rest of the crate: the *config* type is the
+/// serde-stable wire shape an operator edits (plain `Vec<String>`
+/// fields a human can author and a bundle can round-trip), while
+/// [`CategoryDenyPolicy`] is the normalised, lookup-optimised runtime
+/// form. Keeping them distinct means the operator never hand-maintains
+/// the sorted/deduped invariant and the bundle schema never leaks the
+/// internal representation.
+///
+/// # Forward compatibility
+///
+/// The struct is `#[serde(default)]` so an older or partial bundle —
+/// one written before `groups` / `safe_browsing_defaults` existed, or
+/// one that omits a field — deserialises cleanly to the conservative
+/// default (deny nothing) rather than failing the whole bundle parse.
+/// This matches the field-level `#[serde(default)]` discipline the
+/// Envoy [`crate::config`] structs already use for bundle evolution.
+///
+/// # Example
+///
+/// ```
+/// use sng_swg::CategoryDenyConfig;
+/// // An SME enables the smart safe-browsing baseline and adds two
+/// // acceptable-use rules: deny the whole `adult.*` subtree and the
+/// // exact `gambling` category.
+/// let cfg = CategoryDenyConfig {
+///     exact: vec!["gambling".into()],
+///     groups: vec!["adult".into()],
+///     safe_browsing_defaults: true,
+/// };
+/// let policy = cfg.into_policy();
+/// assert!(policy.is_denied("security.phishing")); // safe-browsing default
+/// assert!(policy.is_denied("adult.content"));     // operator group
+/// assert!(policy.is_denied("gambling"));          // operator exact
+/// assert!(!policy.is_denied("business.saas"));    // untouched
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CategoryDenyConfig {
+    /// Exact-match categories. Each denies *only* the named
+    /// category — not a parent and not a child — preserving the
+    /// operator deny-list semantics the handler has always had.
+    pub exact: Vec<String>,
+    /// Group (dotted-subtree) rules. A group `"security"` denies the
+    /// whole `security.*` subtree plus the bare `security` node, with
+    /// segment-boundary safety (`"mal"` does not match `malware`).
+    pub groups: Vec<String>,
+    /// Opt in to the smart safe-browsing baseline: deny the entire
+    /// `security.*` subtree (malware, phishing, botnet, …) out of the
+    /// box, with zero per-leaf configuration. Composes with `exact`
+    /// and `groups`. Defaults to `false` so enabling it is an explicit
+    /// operator choice.
+    pub safe_browsing_defaults: bool,
+}
+
+impl CategoryDenyConfig {
+    /// Compile the config into the runtime [`CategoryDenyPolicy`]. The
+    /// safe-browsing baseline (when enabled) is the starting set; the
+    /// operator's `exact` and `groups` rules are layered on top. All
+    /// rules are lowercased, sorted, and deduped by the policy
+    /// builder, so the result is canonical regardless of authoring
+    /// order or casing.
+    #[must_use]
+    pub fn into_policy(self) -> CategoryDenyPolicy {
+        let base = if self.safe_browsing_defaults {
+            CategoryDenyPolicy::safe_browsing_defaults()
+        } else {
+            CategoryDenyPolicy::empty()
+        };
+        base.with_exact(self.exact).with_groups(self.groups)
+    }
+
+    /// Whether this config would produce a policy that denies
+    /// nothing — no safe-browsing baseline and no operator rules.
+    /// Lets a caller skip wiring an empty policy.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        !self.safe_browsing_defaults && self.exact.is_empty() && self.groups.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,5 +851,77 @@ mod tests {
         assert_eq!(p.exact_len(), 1);
         assert_eq!(p.group_len(), 0);
         assert!(p.is_denied("real"));
+    }
+
+    #[test]
+    fn deny_config_compiles_safe_browsing_plus_operator_rules() {
+        // The config-plane intent: enable the smart baseline and layer
+        // operator acceptable-use rules on top. All three sources must
+        // contribute to the compiled policy.
+        let cfg = CategoryDenyConfig {
+            exact: vec!["gambling".to_string()],
+            groups: vec!["adult".to_string()],
+            safe_browsing_defaults: true,
+        };
+        let p = cfg.into_policy();
+        assert!(p.is_denied("security.phishing"), "safe-browsing baseline");
+        assert!(p.is_denied("adult.content"), "operator group");
+        assert!(p.is_denied("gambling"), "operator exact");
+        assert!(!p.is_denied("business.saas"), "unrelated category allowed");
+    }
+
+    #[test]
+    fn deny_config_without_safe_browsing_denies_only_operator_rules() {
+        // With the baseline off, the security subtree must NOT be
+        // denied unless the operator names it — the flag is the only
+        // thing that pulls in the smart defaults.
+        let cfg = CategoryDenyConfig {
+            exact: vec!["gambling".to_string()],
+            groups: Vec::new(),
+            safe_browsing_defaults: false,
+        };
+        let p = cfg.into_policy();
+        assert!(p.is_denied("gambling"));
+        assert!(!p.is_denied("security.malware"), "baseline not opted in");
+    }
+
+    #[test]
+    fn deny_config_default_is_empty_and_denies_nothing() {
+        let cfg = CategoryDenyConfig::default();
+        assert!(cfg.is_empty());
+        let p = cfg.into_policy();
+        assert_eq!(p.exact_len(), 0);
+        assert_eq!(p.group_len(), 0);
+        assert!(!p.is_denied("security.malware"));
+        assert!(!p.is_denied("anything"));
+    }
+
+    #[test]
+    fn deny_config_round_trips_through_json() {
+        let cfg = CategoryDenyConfig {
+            exact: vec!["gambling".to_string()],
+            groups: vec!["adult".to_string(), "security".to_string()],
+            safe_browsing_defaults: true,
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: CategoryDenyConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn deny_config_deserializes_from_partial_bundle_via_serde_default() {
+        // A bundle authored before `groups` / `safe_browsing_defaults`
+        // existed (or one that simply omits them) must deserialise to
+        // the conservative default rather than failing the parse — the
+        // forward-compatibility contract of `#[serde(default)]`.
+        let legacy = r#"{"exact":["gambling"]}"#;
+        let cfg: CategoryDenyConfig = serde_json::from_str(legacy).expect("deserialize legacy");
+        assert_eq!(cfg.exact, vec!["gambling".to_string()]);
+        assert!(cfg.groups.is_empty());
+        assert!(!cfg.safe_browsing_defaults);
+
+        // An entirely empty object is valid too — every field defaults.
+        let empty: CategoryDenyConfig = serde_json::from_str("{}").expect("deserialize empty");
+        assert!(empty.is_empty());
     }
 }
