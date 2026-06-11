@@ -406,14 +406,27 @@ func (s *Service) ListEffective(ctx context.Context, tenantID uuid.UUID) ([]Effe
 // embedded steering table cannot be used (rare — typically only
 // during a partial bundle roll-out).
 func (s *Service) ResolveTrafficClass(ctx context.Context, tenantID uuid.UUID, domain string) (repository.TrafficClass, error) {
+	class, _, err := s.resolveTrafficClass(ctx, tenantID, domain)
+	return class, err
+}
+
+// resolveTrafficClass is ResolveTrafficClass plus a `matched` flag that
+// reports whether an explicit rule (tenant override or global catalog
+// entry) decided the class. matched=false means the returned class is
+// the safe default baseline (inspect_full) with no rule behind it —
+// EnsureProtection uses this to distinguish "already explicitly
+// protected" from "merely sitting on the baseline", so it can persist a
+// durable override for a shadow-IT app the catalog has never heard of
+// instead of silently relying on the baseline never changing.
+func (s *Service) resolveTrafficClass(ctx context.Context, tenantID uuid.UUID, domain string) (repository.TrafficClass, bool, error) {
 	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
 	if domain == "" {
-		return "", fmt.Errorf("appdb: empty domain: %w", repository.ErrInvalidArgument)
+		return "", false, fmt.Errorf("appdb: empty domain: %w", repository.ErrInvalidArgument)
 	}
 
 	ovs, err := s.overrides.ListAll(ctx, tenantID)
 	if err != nil {
-		return "", fmt.Errorf("appdb: list overrides: %w", err)
+		return "", false, fmt.Errorf("appdb: list overrides: %w", err)
 	}
 	// Resolve the global catalog up front and index by ID. Both
 	// the override pass (app-id-bound overrides need the app's
@@ -424,7 +437,7 @@ func (s *Service) ResolveTrafficClass(ctx context.Context, tenantID uuid.UUID, d
 	// CompileSteeringRules already uses.
 	apps, err := s.apps.ListAll(ctx)
 	if err != nil {
-		return "", fmt.Errorf("appdb: list apps: %w", err)
+		return "", false, fmt.Errorf("appdb: list apps: %w", err)
 	}
 	// Index the FULL catalog by ID for the override pass. An
 	// app-id-bound override is explicit operator intent and is NOT
@@ -450,7 +463,7 @@ func (s *Service) ResolveTrafficClass(ctx context.Context, tenantID uuid.UUID, d
 		// Custom-domain override: match domain directly.
 		if ov.AppID == nil {
 			if matchAny(domain, ov.CustomDomains) {
-				return ov.TrafficClassOverride, nil
+				return ov.TrafficClassOverride, true, nil
 			}
 			continue
 		}
@@ -464,7 +477,7 @@ func (s *Service) ResolveTrafficClass(ctx context.Context, tenantID uuid.UUID, d
 			continue
 		}
 		if matchAny(domain, app.Domains) {
-			return ov.TrafficClassOverride, nil
+			return ov.TrafficClassOverride, true, nil
 		}
 	}
 
@@ -491,9 +504,9 @@ func (s *Service) ResolveTrafficClass(ctx context.Context, tenantID uuid.UUID, d
 		}
 	}
 	if best != nil {
-		return best.class, nil
+		return best.class, true, nil
 	}
-	return repository.TrafficClassInspectFull, nil
+	return repository.TrafficClassInspectFull, false, nil
 }
 
 // SteeringRuleSet is the per-target output of CompileSteeringRules.
