@@ -60,6 +60,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 
 use crate::malware::{ContentScanVerdict, ContentScanner, ContentVerdictCache, ScanSkip};
+use crate::rate_limit::{Clock, SystemClock};
 
 /// Where the `clamd` daemon is reachable.
 #[derive(Clone, Debug)]
@@ -374,6 +375,17 @@ impl ClamdScanner {
     /// constructor error, keeping the verdict pipeline's wiring infallible.
     #[must_use]
     pub fn new(config: ClamdConfig) -> Self {
+        Self::with_clock(config, Arc::new(SystemClock))
+    }
+
+    /// Build a scanner whose verdict-cache TTL is driven by a caller-supplied
+    /// [`Clock`]. Production wiring uses [`Self::new`] (a [`SystemClock`]);
+    /// injecting a [`crate::rate_limit::TestClock`] lets tests cross the cache
+    /// TTL boundary deterministically by advancing the clock instead of
+    /// sleeping. The clock governs only cache freshness — the per-scan timeout
+    /// and pool idle TTL remain on the runtime/OS timers they bound.
+    #[must_use]
+    pub fn with_clock(config: ClamdConfig, clock: Arc<dyn Clock>) -> Self {
         Self {
             inner: Arc::new(ClamdInner {
                 pool: Pool::new(
@@ -381,7 +393,11 @@ impl ClamdScanner {
                     config.pool_max_connections,
                     config.pool_idle_ttl,
                 ),
-                cache: ContentVerdictCache::with_ttl(config.cache_capacity, config.cache_ttl),
+                cache: ContentVerdictCache::with_ttl_and_clock(
+                    config.cache_capacity,
+                    config.cache_ttl,
+                    clock,
+                ),
                 max_scan_bytes: config.max_scan_bytes,
                 chunk_size: config.chunk_size.max(1),
                 scan_timeout: config.scan_timeout,
@@ -676,6 +692,7 @@ fn parse_reply(reply: &[u8]) -> std::io::Result<ScanOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rate_limit::TestClock;
     use pretty_assertions::assert_eq;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -929,7 +946,10 @@ mod tests {
         let mock = MockClamd::start(MockBehavior::Normal).await;
         let mut c = cfg(&mock.addr);
         c.cache_ttl = Duration::from_millis(40);
-        let scanner = ClamdScanner::new(c);
+        // Inject a deterministic clock so the TTL boundary is crossed by
+        // advancing time rather than sleeping for real wall-clock.
+        let clock = TestClock::new();
+        let scanner = ClamdScanner::with_clock(c, Arc::new(clock.clone()));
         let hash = "d".repeat(64);
         let body = b"a file that was clean yesterday";
 
@@ -945,7 +965,7 @@ mod tests {
         );
         assert_eq!(mock.scans(), 1, "fresh entry must be served from cache");
 
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        clock.advance(Duration::from_millis(41));
 
         // Past the TTL: the stale entry is a miss and a fresh scan runs.
         assert_eq!(
