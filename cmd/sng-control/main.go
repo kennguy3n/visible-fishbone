@@ -1041,7 +1041,8 @@ func buildRouter(
 	// a tenant's traffic class. main() sets it as the discoverer's
 	// discovery hook and drives the leader-only Reconcile/digest sweep
 	// when cfg.CASB.NoOpsEnabled.
-	appNoOpsEngine := casb.NewAppNoOpsEngine(postgres.NewCASBNoOpsStore(store), casbAppRepo, tenantRepo, logger)
+	casbNoOpsStore := postgres.NewCASBNoOpsStore(store)
+	appNoOpsEngine := casb.NewAppNoOpsEngine(casbNoOpsStore, casbAppRepo, tenantRepo, logger)
 	appNoOpsEngine.SetAuditLog(auditRepo)
 	// Activity-tiered reconcile cadence so the periodic sweep does not
 	// re-classify thousands of dormant trial tenants' inventories every
@@ -1869,6 +1870,19 @@ func buildRouter(
 		CASB: func() *handler.CASBHandler {
 			h := handler.NewCASBHandler(casbSvc)
 			h.SetInlineService(inlineCASBSvc)
+			h.SetLogger(logger)
+			// Surface the shadow-IT NoOps verdict (classification +
+			// decided action) inline on the discovered-apps listing and
+			// expose the action timeline. The store is read-only here;
+			// the engine remains the sole writer. Gated on NoOpsEnabled
+			// to match the engine's discovery-hook / reconcile / enforcer
+			// wiring above: when the pipeline is off the engine writes
+			// nothing, so attaching the reader would only add two empty
+			// per-request store reads to every GET /casb/apps and mount a
+			// timeline route that returns nothing.
+			if cfg.CASB.NoOpsEnabled {
+				h.SetNoOpsReader(casbNoOpsStore)
+			}
 			return h
 		}(),
 		PolicyTemplates:   handler.NewPolicyTemplateHandler(policyTemplateSvc),
