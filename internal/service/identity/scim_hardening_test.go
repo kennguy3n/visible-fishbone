@@ -147,13 +147,17 @@ func TestStringActiveDeactivationRevokesSessions(t *testing.T) {
 	}
 }
 
-// TestRepeatedDeactivationIsIdempotent verifies that re-sending
-// active=false against an already-inactive user does NOT publish a
-// second revocation: only the active->inactive edge revokes.
-func TestRepeatedDeactivationIsIdempotent(t *testing.T) {
+// TestRepeatedDeactivationIsRetrySafe verifies that re-sending
+// active=false against an already-inactive user STILL publishes a
+// revocation. This is the retry-safety property: an IdP that retries a
+// deactivation after a transient downstream failure (e.g. the bridge
+// sync failed on the first attempt, leaving the user already suspended)
+// must not have its revocation silently dropped. The downstream
+// revocation is idempotent, so the extra publish is harmless.
+func TestRepeatedDeactivationIsRetrySafe(t *testing.T) {
 	t.Parallel()
 	svc, tid, pub := newSCIMServiceWithRevoker(t)
-	uid := mustCreateActiveUser(t, svc, tid, "idem@example.com")
+	uid := mustCreateActiveUser(t, svc, tid, "retry@example.com")
 
 	for i := 0; i < 3; i++ {
 		if _, err := svc.PatchUser(context.Background(), tid, uid, []SCIMPatchOp{
@@ -162,8 +166,32 @@ func TestRepeatedDeactivationIsIdempotent(t *testing.T) {
 			t.Fatalf("PatchUser #%d: %v", i, err)
 		}
 	}
+	if pub.count(uid) != 3 {
+		t.Fatalf("revocations = %d, want 3 (each explicit deactivation re-publishes for retry-safety)", pub.count(uid))
+	}
+}
+
+// TestProfilePatchOnInactiveUserDoesNotRevoke verifies that a
+// profile-only PATCH against an already-suspended user does NOT revoke:
+// the revocation fires only when the request asserts active=false, not
+// on every mutation of an inactive user.
+func TestProfilePatchOnInactiveUserDoesNotRevoke(t *testing.T) {
+	t.Parallel()
+	svc, tid, pub := newSCIMServiceWithRevoker(t)
+	uid := mustCreateActiveUser(t, svc, tid, "inactive-profile@example.com")
+
+	if _, err := svc.PatchUser(context.Background(), tid, uid, []SCIMPatchOp{
+		{Op: "replace", Path: "active", Value: false},
+	}); err != nil {
+		t.Fatalf("PatchUser deactivate: %v", err)
+	}
+	if _, err := svc.PatchUser(context.Background(), tid, uid, []SCIMPatchOp{
+		{Op: "replace", Path: "displayName", Value: "Renamed While Suspended"},
+	}); err != nil {
+		t.Fatalf("PatchUser profile: %v", err)
+	}
 	if pub.count(uid) != 1 {
-		t.Fatalf("revocations = %d, want exactly 1 (idempotent)", pub.count(uid))
+		t.Fatalf("revocations = %d, want 1 (profile PATCH on inactive user must not revoke)", pub.count(uid))
 	}
 }
 

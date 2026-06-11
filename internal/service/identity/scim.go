@@ -46,48 +46,70 @@ func WithRevocationPublisher(r RevocationPublisher) SCIMOption {
 	return func(s *SCIMService) { s.revoker = r }
 }
 
-// priorActive reports whether the user is currently active. It backs the
-// active->inactive transition check used to revoke a de-provisioned
-// user's sessions exactly once. The lookup is skipped (and false
-// returned) when no revoker is wired, since the result is then unused,
-// and a failed lookup degrades to false so the surrounding mutation
-// still proceeds.
-func (s *SCIMService) priorActive(ctx context.Context, tenantID, userID uuid.UUID) bool {
-	if s.revoker == nil {
-		return false
-	}
-	prev, err := s.users.Get(ctx, tenantID, userID)
-	if err != nil {
-		return false
-	}
-	return prev.Status == repository.UserStatusActive
-}
-
-// revokeIfDeactivated publishes a ZTNA revocation when a SCIM mutation
-// transitions a user from active to inactive (suspended or deleted), so
-// the enforcement plane drops the user's live sessions immediately
-// rather than waiting for token expiry. This is the PATCH/PUT
-// counterpart to the revocation DeleteUser already emits: Okta and
-// Microsoft Entra de-provision by setting active=false (a PATCH or PUT),
-// not by issuing a SCIM DELETE, so without this a deactivated user
-// keeps every live session and grant until its tokens expire.
+// revokeOnDeactivation publishes a ZTNA revocation when a SCIM mutation
+// de-provisions a user (sets active=false), so the enforcement plane
+// drops the user's live sessions immediately rather than waiting for
+// token expiry. This is the PATCH/PUT counterpart to the revocation
+// DeleteUser already emits: Okta and Microsoft Entra de-provision by
+// setting active=false (a PATCH or PUT), not by issuing a SCIM DELETE,
+// so without this a deactivated user keeps every live session and grant
+// until its tokens expire.
 //
-// It is a no-op when no revoker is wired, when the user remains active,
-// or when the user was already inactive. That last case makes repeated
-// deactivations idempotent — an IdP that re-sends active=false, or two
-// concurrent deactivations, will not emit duplicate revocations beyond
-// the single active->inactive edge. The suspend/soft-delete is already
-// durable by the time this runs, so a publish failure is surfaced as an
-// error (mirroring DeleteUser) to let the IdP retry, and never undoes
-// the persisted state.
-func (s *SCIMService) revokeIfDeactivated(ctx context.Context, tenantID, userID uuid.UUID, wasActive, isActive bool, reason string) error {
-	if s.revoker == nil || !wasActive || isActive {
+// The decision is driven by the operation's *requested* state, never by
+// the prior persisted state. That keeps it retry-safe: if a later step
+// (the iam-core bridge sync, or the publish itself) fails and the IdP
+// retries, the retried request still asserts active=false and
+// re-publishes. The downstream revocation is idempotent, so a duplicate
+// is harmless — the property that matters for de-provisioning is that a
+// deactivated user can never be stranded with live sessions by a
+// transient failure. A reactivation or a profile-only change passes
+// deactivating=false and is a no-op, as is the case when no revoker is
+// wired.
+func (s *SCIMService) revokeOnDeactivation(ctx context.Context, tenantID, userID uuid.UUID, deactivating bool, reason string) error {
+	if s.revoker == nil || !deactivating {
 		return nil
 	}
 	if err := s.revoker.PublishRevocation(ctx, tenantID, userID, reason); err != nil {
 		return fmt.Errorf("revocation publish failed: %w", err)
 	}
 	return nil
+}
+
+// patchActiveIntent reports the active state a PATCH asserts, if any. It
+// returns (value, true) when an op sets the `active` attribute and
+// (_, false) when no op touches it, mirroring applyUserReplace's parsing
+// (a JSON bool, a string compared case-insensitively to "true", and
+// Azure AD's path-less {"value":{"active":...}} shape). Basing the
+// revoke decision on what the request asserts — rather than on the prior
+// persisted status — is what makes deactivation revocation retry-safe.
+func patchActiveIntent(ops []SCIMPatchOp) (active bool, set bool) {
+	var apply func(op SCIMPatchOp)
+	apply = func(op SCIMPatchOp) {
+		switch strings.ToLower(op.Op) {
+		case "replace", "add":
+		default:
+			return
+		}
+		switch strings.ToLower(op.Path) {
+		case "":
+			if m, ok := op.Value.(map[string]any); ok {
+				for k, v := range m {
+					apply(SCIMPatchOp{Op: op.Op, Path: k, Value: v})
+				}
+			}
+		case "active":
+			switch v := op.Value.(type) {
+			case bool:
+				active, set = v, true
+			case string:
+				active, set = strings.EqualFold(v, "true"), true
+			}
+		}
+	}
+	for _, op := range ops {
+		apply(op)
+	}
+	return active, set
 }
 
 // SCIMOption configures optional SCIMService behaviour without
@@ -212,10 +234,6 @@ func (s *SCIMService) UpdateUser(ctx context.Context, tenantID uuid.UUID, userID
 		ExternalID: su.ExternalID,
 		Status:     status,
 	}
-	// Capture the pre-update active state so a PUT that flips the user
-	// to active=false (the way Okta/Entra de-provision) cuts live ZTNA
-	// sessions, not just the SCIM DELETE path.
-	wasActive := s.priorActive(ctx, tenantID, userID)
 	var updated repository.User
 	var err error
 	if su.ExternalID == "" {
@@ -226,13 +244,18 @@ func (s *SCIMService) UpdateUser(ctx context.Context, tenantID uuid.UUID, userID
 	if err != nil {
 		return SCIMUser{}, err
 	}
+	// A PUT carries the full desired state, so active=false is an
+	// explicit de-provision request: cut the user's live ZTNA sessions
+	// before the (optional, failable) bridge sync so a bridge failure
+	// can't strand them. Driving this off the requested state keeps it
+	// retry-safe.
+	if rerr := s.revokeOnDeactivation(ctx, tenantID, userID, !active, "scim_user_deactivated"); rerr != nil {
+		return SCIMUser{}, rerr
+	}
 	if s.bridge != nil {
 		if serr := s.bridge.syncProfile(ctx, tenantID, updated.IDPSubject, su, active); serr != nil {
 			return SCIMUser{}, fmt.Errorf("iam-core sync failed: %w", serr)
 		}
-	}
-	if rerr := s.revokeIfDeactivated(ctx, tenantID, userID, wasActive, active, "scim_user_deactivated"); rerr != nil {
-		return SCIMUser{}, rerr
 	}
 	return userToSCIM(updated), nil
 }
@@ -243,10 +266,10 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 	if err != nil {
 		return SCIMUser{}, err
 	}
-	// Record the active state before applying the ops so a PATCH that
-	// sets active=false (the canonical Okta/Entra de-provision) emits a
-	// ZTNA revocation, just like a SCIM DELETE.
-	wasActive := u.Status == repository.UserStatusActive
+	// A PATCH that asserts active=false is the canonical Okta/Entra
+	// de-provision; detecting it from the ops (not the prior persisted
+	// status) keeps the resulting revocation retry-safe.
+	reqActive, activeSet := patchActiveIntent(ops)
 	clearExternalID := false
 	for _, op := range ops {
 		switch strings.ToLower(op.Op) {
@@ -273,14 +296,18 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 	if err != nil {
 		return SCIMUser{}, err
 	}
+	// Cut live ZTNA sessions before the (optional, failable) bridge sync
+	// so a bridge failure can't leave a de-provisioned user with active
+	// sessions; revoking on the asserted state makes a retried PATCH
+	// re-publish rather than silently skip.
+	if rerr := s.revokeOnDeactivation(ctx, tenantID, userID, activeSet && !reqActive, "scim_user_deactivated"); rerr != nil {
+		return SCIMUser{}, rerr
+	}
 	nowActive := updated.Status == repository.UserStatusActive
 	if s.bridge != nil {
 		if serr := s.bridge.syncProfile(ctx, tenantID, updated.IDPSubject, userToSCIM(updated), nowActive); serr != nil {
 			return SCIMUser{}, fmt.Errorf("iam-core sync failed: %w", serr)
 		}
-	}
-	if rerr := s.revokeIfDeactivated(ctx, tenantID, userID, wasActive, nowActive, "scim_user_deactivated"); rerr != nil {
-		return SCIMUser{}, rerr
 	}
 	return userToSCIM(updated), nil
 }
