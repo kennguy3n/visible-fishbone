@@ -137,9 +137,13 @@ config:
   METERING_FLUSH_INTERVAL: 60s
 
   # AI assistant (LLM). Empty endpoint => deterministic template-only
-  # mode (no LLM calls). Recommended: self-host Ternary-Bonsai-8B via
-  # Ollama/llama.cpp and point AI_LLM_ENDPOINT at it. See
-  # docs/ai-model-setup.md and deploy/ollama/.
+  # mode (no LLM calls); security enforcement never depends on the LLM, so
+  # empty is the safe default. Recommended: self-host the pinned 2-bit
+  # Q2_0 Ternary-Bonsai-8B and point AI_LLM_ENDPOINT at it, e.g. the
+  # bundled llama-server (deploy/ollama/Dockerfile.llamacpp) run in-cluster:
+  #   AI_LLM_ENDPOINT: "http://bonsai-q2:8081/v1/chat/completions"
+  # The default AI_LLM_MODEL below already matches that server's --alias.
+  # See docs/ai-model-setup.md and deploy/ollama/.
   AI_LLM_ENDPOINT: ""
   AI_LLM_MODEL: Ternary-Bonsai-8B
   # Prompt-tuning family: "ternary-bonsai", "openai-compat", or "auto".

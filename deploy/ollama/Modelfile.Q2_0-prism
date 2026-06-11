@@ -1,0 +1,54 @@
+# Ollama Modelfile pinning the SPECIFIC 2-bit (Q2_0) Ternary-Bonsai-8B GGUF.
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ THIS FILE DOES NOT WORK WITH STOCK OLLAMA.                                │
+# │ The Q2_0 (ternary) format is NOT in mainline llama.cpp / `ollama/ollama` │
+# │ yet, so `ollama create -f` against a stock binary will fail to load the  │
+# │ GGUF. It is named `Modelfile.Q2_0-prism` (not `Modelfile`) precisely so  │
+# │ it is not mistaken for a default, stock-Ollama recipe.                   │
+# │                                                                          │
+# │ The supported, turnkey Q2_0 server is llama.cpp llama-server — see       │
+# │ deploy/ollama/Dockerfile.llamacpp and docs/ai-model-setup.md. Use this   │
+# │ file ONLY with an Ollama built against the prism Q2_0 kernels            │
+# │ (PrismML-Eng/llama.cpp, `prism` branch). It is kept as a reference for   │
+# │ when those kernels land upstream.                                        │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# Build the served model from a *local, checksum-verified* GGUF rather than
+# pulling a floating registry tag, so the served weights are reproducible
+# and air-gap friendly (only on a prism-kernel Ollama, per the box above):
+#
+#   scripts/fetch-bonsai-gguf.sh --out-dir deploy/ollama/models   # verifies SHA-256
+#   cd deploy/ollama && ollama create Ternary-Bonsai-8B -f Modelfile.Q2_0-prism
+#
+# The created model name (`Ternary-Bonsai-8B`) matches ai.DefaultModel in
+# internal/service/ai/provider.go, so the control-plane default
+# AI_LLM_MODEL works unchanged.
+FROM ./models/Ternary-Bonsai-8B-Q2_0.gguf
+
+# Base model is Qwen3-8B, which uses the ChatML conversation format.
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ .Response }}<|im_end|>
+"""
+
+# ChatML turn delimiters. Stopping on these prevents the model from
+# hallucinating the next turn.
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"
+
+# Context window. 4096 keeps the KV-cache small (~commodity-CPU friendly);
+# the base model supports up to 65536 if you have the RAM. Keep this in
+# sync with the llama-server `-c` flag in Dockerfile.llamacpp.
+PARAMETER num_ctx 4096
+
+# Factual, low-variance decoding for a security analyst assistant. The AI
+# client caps completions at 512 tokens by default (provider.go).
+PARAMETER temperature 0.3
+PARAMETER top_p 0.9
+PARAMETER top_k 20
+PARAMETER repeat_penalty 1.05
+PARAMETER num_predict 512

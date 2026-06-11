@@ -9,6 +9,11 @@
 #
 # The built image already contains the model layer, so a fresh
 # container serves it immediately with no egress.
+#
+# NOTE: this path serves whatever quantization the Ollama tag resolves to.
+# To serve the SPECIFIC 2-bit Q2_0 (ternary) GGUF — that format is not in
+# mainline llama.cpp/Ollama, so use deploy/ollama/Dockerfile.llamacpp
+# (llama.cpp built from the prism fork) instead.
 FROM ollama/ollama:0.6.8
 
 ARG SNG_LLM_MODEL=prism-ml/Ternary-Bonsai-8B-gguf
