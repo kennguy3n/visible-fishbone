@@ -171,6 +171,55 @@ func TestQualifiedActivePathDeactivationRevokesSessions(t *testing.T) {
 	}
 }
 
+// TestQualifiedExternalIDRemoveClearsField guards the gating check in
+// PatchUser that selects UpdateAndClearExternalID: a `remove` of a
+// URN-qualified externalId path must take the clearing DB path, not the
+// COALESCE-preserving Update path. Before canonicalAttr was applied to
+// that check, applyUserRemove zeroed the field in memory while the
+// gating check still saw a non-match, so the clear was silently dropped.
+func TestQualifiedExternalIDRemoveClearsField(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	created, err := svc.CreateUser(context.Background(), tid, SCIMUser{
+		UserName:   "extid@example.com",
+		ExternalID: "okta-ext-123",
+		Active:     boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	out, err := svc.PatchUser(context.Background(), tid, uuidFromString(created.ID), []SCIMPatchOp{
+		{Op: "remove", Path: SCIMSchemaUser + ":externalId"},
+	})
+	if err != nil {
+		t.Fatalf("PatchUser: %v", err)
+	}
+	if out.ExternalID != "" {
+		t.Fatalf("externalID = %q, want cleared via qualified remove path", out.ExternalID)
+	}
+}
+
+// TestQualifiedGroupDisplayNamePatch covers the group PATCH path: a
+// replace of a URN-qualified Group displayName path must update the
+// group, matching how user paths are normalised.
+func TestQualifiedGroupDisplayNamePatch(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	created, err := svc.CreateGroup(context.Background(), tid, SCIMGroup{DisplayName: "Engineers"})
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	out, err := svc.PatchGroup(context.Background(), tid, uuidFromString(created.ID), []SCIMPatchOp{
+		{Op: "replace", Path: SCIMSchemaGroup + ":displayName", Value: "Platform"},
+	})
+	if err != nil {
+		t.Fatalf("PatchGroup: %v", err)
+	}
+	if out.DisplayName != "Platform" {
+		t.Fatalf("displayName = %q, want Platform via qualified group path", out.DisplayName)
+	}
+}
+
 // TestRepeatedDeactivationIsRetrySafe verifies that re-sending
 // active=false against an already-inactive user STILL publishes a
 // revocation. This is the retry-safety property: an IdP that retries a

@@ -281,7 +281,7 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 		case "add":
 			applyUserReplace(&u, op) // add semantics = replace for single-valued
 		case "remove":
-			if strings.EqualFold(op.Path, "externalid") {
+			if canonicalAttr(op.Path) == "externalid" {
 				clearExternalID = true
 			} else {
 				applyUserRemove(&u, op)
@@ -597,7 +597,7 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 	for _, op := range ops {
 		switch strings.ToLower(op.Op) {
 		case "add":
-			switch strings.ToLower(op.Path) {
+			switch canonicalAttr(op.Path) {
 			case "members":
 				members := extractMembers(op.Value)
 				for _, m := range members {
@@ -629,7 +629,7 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 				}
 			}
 		case "remove":
-			if strings.EqualFold(op.Path, "members") {
+			if canonicalAttr(op.Path) == "members" {
 				members := extractMembers(op.Value)
 				for _, m := range members {
 					uid := uuidFromString(m.Value)
@@ -642,14 +642,14 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 				}
 			}
 		case "replace":
-			if strings.EqualFold(op.Path, "displayname") {
+			if canonicalAttr(op.Path) == "displayname" {
 				if val, ok := op.Value.(string); ok && val != "" {
 					r, err = s.roles.Update(ctx, groupID, val, r.ExternalID)
 					if err != nil {
 						return SCIMGroup{}, err
 					}
 				}
-			} else if strings.EqualFold(op.Path, "externalid") {
+			} else if canonicalAttr(op.Path) == "externalid" {
 				if val, ok := op.Value.(string); ok {
 					r, err = s.roles.Update(ctx, groupID, r.Name, val)
 					if err != nil {
