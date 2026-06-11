@@ -111,9 +111,13 @@ func classifyApp(tenantID uuid.UUID, v DiscoveredAppView) AppClassification {
 	conf = clampScore(conf)
 
 	return AppClassification{
-		TenantID:   tenantID,
-		AppName:    v.Name,
-		Category:   v.Category,
+		TenantID: tenantID,
+		AppName:  v.Name,
+		// Store the normalized category (lower-cased, trimmed) so the
+		// persisted verdict and every downstream comparison
+		// (isSensitiveCategory, decideAction) speak one canonical
+		// vocabulary regardless of how the catalog/inventory cased it.
+		Category:   cat,
 		RiskScore:  risk,
 		Sanction:   sanction,
 		Confidence: conf,

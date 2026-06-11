@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -390,9 +391,13 @@ func recommendReason(verb ActionEnforcement, c AppClassification) string {
 }
 
 // isSensitiveCategory marks categories whose sanctioned use still
-// warrants a private-overlay routing recommendation.
+// warrants a private-overlay routing recommendation. It normalizes its
+// input so the verdict holds regardless of casing/whitespace — the
+// deterministic classifier already stores a normalized category, but an
+// AI refiner can set an arbitrary one, and this comparison must not
+// silently fall through to ActionNone on a cosmetic mismatch.
 func isSensitiveCategory(category string) bool {
-	switch category {
+	switch strings.TrimSpace(strings.ToLower(category)) {
 	case "identity", "code_repository", "itsm", "hcm", "cloud_iaas":
 		return true
 	}

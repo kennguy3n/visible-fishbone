@@ -63,6 +63,33 @@ func TestClassifyApp_UnknownCategoryLowersConfidence(t *testing.T) {
 	}
 }
 
+// classifyApp must persist the normalized (lower-cased, trimmed)
+// category so the stored verdict and every downstream comparison speak
+// one canonical vocabulary regardless of how the catalog cased it.
+func TestClassifyApp_NormalizesStoredCategory(t *testing.T) {
+	tid := uuid.New()
+	got := classifyApp(tid, DiscoveredAppView{Name: "GitHub", Category: "  Code_Repository  "}).Category
+	if got != "code_repository" {
+		t.Fatalf("stored category = %q, want normalized %q", got, "code_repository")
+	}
+}
+
+// decideAction must reach the sanctioned-sensitive route recommendation
+// even when the category is cased oddly — an AI refiner may emit
+// "Identity"/"Code_Repository" rather than the lower-case canonical form
+// the deterministic classifier produces. A cosmetic mismatch must not
+// silently degrade the verdict to ActionNone.
+func TestDecideAction_SensitiveCategoryCaseInsensitive(t *testing.T) {
+	pol := DefaultActionPolicy(uuid.New())
+	for _, cat := range []string{"Identity", "CODE_REPOSITORY", " Cloud_IaaS "} {
+		c := AppClassification{Category: cat, RiskScore: 65, Confidence: 90, Sanction: SanctionSanctioned}
+		verb, mode, _ := decideAction(c, pol)
+		if verb != ActionRoute || mode != ActionModeRecommend {
+			t.Fatalf("category %q => (%s,%s), want (route,recommend)", cat, verb, mode)
+		}
+	}
+}
+
 func TestActionEnforcement_TrafficClass(t *testing.T) {
 	cases := map[ActionEnforcement]repository.TrafficClass{
 		ActionThrottle: repository.TrafficClassInspectLite,

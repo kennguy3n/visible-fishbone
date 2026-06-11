@@ -78,8 +78,13 @@ CREATE TABLE IF NOT EXISTS casb_app_actions (
     tenant_id     UUID        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     app_name      TEXT        NOT NULL,
     category      TEXT        NOT NULL DEFAULT '',
+    -- 'none' is intentionally absent: the engine early-returns for an
+    -- ActionNone verdict (app_engine.go) and never writes an action
+    -- row, and an ActionNone row would carry traffic_class='' which the
+    -- traffic_class CHECK below rejects anyway. Listing only the verbs
+    -- that can actually be persisted keeps the schema honest.
     enforcement   TEXT        NOT NULL
-                  CHECK (enforcement IN ('none', 'throttle', 'protect', 'route', 'enforce')),
+                  CHECK (enforcement IN ('throttle', 'protect', 'route', 'enforce')),
     traffic_class TEXT        NOT NULL
                   CHECK (traffic_class IN ('trusted_direct', 'trusted_media_bypass',
                                            'inspect_lite', 'inspect_full',
