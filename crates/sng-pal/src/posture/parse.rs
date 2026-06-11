@@ -81,23 +81,50 @@ pub(crate) fn certificate_health(
     }
 }
 
-/// Lower-cased process / extension names recognised as EDR
-/// sensors across vendors. Matching is substring-based so a
-/// versioned binary (`falcon-sensor`, `com.crowdstrike.falcon.Agent`)
-/// is recognised regardless of the exact suffix.
+/// Lower-cased process / extension / bundle-id fragments that
+/// uniquely identify a known EDR sensor across vendors.
+///
+/// Matching is substring-based so a versioned or path-qualified
+/// name (`falcon-sensor`, `com.crowdstrike.falcon.Agent`) is
+/// still recognised regardless of the exact prefix/suffix.
+/// Because a *false positive* marks a device as EDR-healthy when
+/// it is not — a fail-**open** error, the opposite of this
+/// crate's fail-closed contract, and enough to slip a device
+/// past a `require_edr` gate — every entry is a vendor-unique
+/// token rather than a bare product word. Generic words that
+/// collide with common non-EDR software (`sentinel` → Redis
+/// Sentinel, `cortex` → Grafana Cortex, `carbon` → Graphite
+/// carbon, `traps` → `bootstrapped`) are deliberately avoided in
+/// favour of the specific binary / bundle names below; an
+/// unrecognised sensor degrades to `NotInstalled` (deny), which
+/// is the safe direction.
 pub(crate) const KNOWN_EDR_MARKERS: &[&str] = &[
-    "falcon",           // CrowdStrike Falcon
-    "crowdstrike",      //
-    "sentinel",         // SentinelOne (sentineld / s1-agent / sentinelone)
-    "cbagent",          // VMware Carbon Black
-    "carbonblack",      //
-    "cylance",          // BlackBerry Cylance
-    "wdavdaemon",       // Microsoft Defender for Endpoint (macOS/Linux)
-    "mdatp",            // Microsoft Defender ATP daemon
-    "cortex",           // Palo Alto Cortex XDR
-    "traps",            // Palo Alto Traps (legacy)
-    "sophos",           // Sophos Intercept X
-    "elastic-endpoint", // Elastic Defend
+    // CrowdStrike Falcon
+    "falcon-sensor", // Linux daemon
+    "csfalcon",      // Windows CSFalconService / CSFalconContainer
+    "crowdstrike",   // macOS bundle com.crowdstrike.falcon.*
+    // SentinelOne
+    "sentinelone",   // macOS bundle com.sentinelone.*
+    "sentineld",     // Linux daemon
+    "sentinelagent", // SentinelAgent process
+    "s1-agent",      // Linux package alias
+    // VMware Carbon Black
+    "cbagent",     // cbagentd
+    "carbonblack", // macOS bundle com.vmware.carbonblack.*
+    // BlackBerry Cylance
+    "cylance", // CylanceSvc / cylanced
+    // Microsoft Defender for Endpoint
+    "wdavdaemon", // macOS/Linux daemon
+    "mdatp",      // Defender ATP daemon / CLI
+    // Palo Alto Cortex XDR / Traps
+    "cortex-xdr",       // Cortex XDR agent (dashed spelling)
+    "cortexxdr",        // Cortex XDR agent (concatenated spelling)
+    "paloaltonetworks", // macOS bundle com.paloaltonetworks.*
+    "traps_pmd",        // Traps (legacy) process-manager daemon
+    // Sophos Intercept X
+    "sophos", // savd / com.sophos.*
+    // Elastic Defend
+    "elastic-endpoint",
 ];
 
 /// Decide EDR health from the set of currently-running process
@@ -387,6 +414,18 @@ mod tests {
         );
         assert_eq!(
             edr_state_from_processes(&["bash", "sshd"], true),
+            EdrState::NotInstalled
+        );
+        // Fail-open guard: generic words that collide with common
+        // non-EDR software must NOT be mistaken for a sensor, or a
+        // device with no EDR would slip past a `require_edr` gate.
+        // Redis Sentinel, Grafana Cortex, Graphite carbon-cache, and
+        // a process that merely contains "traps".
+        assert_eq!(
+            edr_state_from_processes(
+                &["redis-sentinel", "cortex", "carbon-cache", "bootstrapped"],
+                true
+            ),
             EdrState::NotInstalled
         );
         // Cannot enumerate -> Unknown, never a false NotInstalled.
