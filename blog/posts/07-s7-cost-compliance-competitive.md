@@ -92,6 +92,19 @@ and the audit log (Post 2) is the immutable trail. The global-audit fix from
 tenant-less platform actions are now recorded — audit completeness was a real gap
 we closed.
 
+This cycle adds two pieces of buyer-relevant evidence. **Smart-default policy
+templates** ([#157](https://github.com/kennguy3n/visible-fishbone/pull/157)) give
+an auditor a defensible *starting posture*: a 14-template catalog (5 of them
+compliance regimes — EU GDPR, UK DPA, US baseline, Canada PIPEDA, Australia
+Privacy Act) that renders a deny-by-default policy graph per industry/regime, so
+"we configured nothing" is never the answer. And the **shadow-IT NoOps engine**
+([#159](https://github.com/kennguy3n/visible-fishbone/pull/159) /
+[#172](https://github.com/kennguy3n/visible-fishbone/pull/172)) writes every
+classify/recommend/enforce decision to the same audit trail and rolls it into a
+per-tenant digest — the discovery-to-disposition record an auditor actually wants,
+rather than a raw list of unsanctioned apps. Both are walked in the business
+series (Posts B4 and B2).
+
 ## The cost-efficiency argument (honestly bounded)
 
 From the [edge performance datasheet](../artifacts/edge-performance-datasheet.md),
@@ -111,6 +124,23 @@ a single-stream egress path, so the true price/performance on a multi-queue NIC
 is better than these numbers, not worse. Appliance capex/support TCO is
 vendor-quote territory and we don't invent it. The defensible cost claim is the
 *opex side*: software-only, no appliance refresh cycle, scales with cloud vCPU.
+
+This cycle added two more opex levers that map directly onto meters in the table
+above:
+
+- **Self-hosted AI removes the per-token bill.** The `llm_tokens_used` /
+  `llm_calls` meters are a real line item against a hosted-LLM API. Baking the
+  2-bit **Q2_0 Ternary-Bonsai-8B** ([#155](https://github.com/kennguy3n/visible-fishbone/pull/155))
+  moves inference onto tenant hardware, so those meters become a fixed-compute
+  cost rather than a metered API spend — the whole point of fitting an 8B model
+  into a 2-bit quant is to make that affordable. (The honest caveat from Post 6
+  stands: the Q2_0 build needs prism-branch kernels, not stock Ollama.)
+- **Dormancy shrinks the cost of idle trials.** Activity-tiered sweeps
+  ([#154](https://github.com/kennguy3n/visible-fishbone/pull/154)) process a
+  dormant tenant every 100th cycle instead of every cycle, so the long tail of
+  quiet trials an MSP carries costs ~1/100th of an active tenant's periodic work
+  — without turning the tenant off. (Proven by tests; not yet driving a live
+  production sweep — see Post 2.)
 
 ---
 
@@ -184,6 +214,11 @@ that comparison *is* fair because both are software services, not silicon.
 3. **On-device ML DLP** keeps content on the endpoint (Post 5).
 4. **In-repo, reproducible efficacy harness** that drives the real code and ships
    its corpora (Post 3).
+5. **NoOps shadow-IT for the under-staffed team** — discovery becomes a
+   recommend-first, fully-audited disposition trail rather than a dashboard
+   nobody triages (Post 5; #159/#172).
+6. **Self-hosted AI with no per-token bill** — a 2-bit 8B model baked to run on
+   tenant hardware, so the AI features aren't a metered cloud dependency (#155).
 
 ## Where SNG genuinely falls short
 
@@ -193,6 +228,12 @@ that comparison *is* fair because both are software services, not silicon.
 3. **No global PoP network** — it's software you operate, not a network you rent.
 4. **Threat-intel and DLP-detector breadth** trail the specialist incumbents.
 5. **Curated efficacy corpora**, not wild-traffic catch-rates.
+6. **This cycle's six capabilities aren't all live yet.** Dormancy, ClamAV,
+   safe-browsing, the NoOps engine, AI-app DLP and the review queue are
+   code-complete and tested on `main`, but most are not yet wired into the
+   running control plane (the integration PR is staged). The evidence in this
+   series is real engine output and tests — we don't claim they're enforcing
+   production traffic today.
 
 Next, the closing post: methodology, reproducibility, and how to run all of this
 yourself.

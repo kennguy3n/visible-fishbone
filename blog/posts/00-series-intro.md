@@ -24,9 +24,11 @@ ShieldNet Gateway is a multi-tenant SASE platform with three moving parts:
   operations, metering, compliance, and audit.
 - **Edge** — Rust crates (MSRV 1.91) that enforce the compiled bundle: `sng-fw`
   (firewall), `sng-ips` (Suricata-driven IPS), `sng-swg` (secure web gateway +
-  yara-x malware scanning), `sng-dns` (threat-intel sinkhole + tunneling
-  detection), `sng-ztna` (zero-trust brokering), `sng-dlp` (on-device ML
-  classifier). Beneath the firewall sits an optional **eBPF/XDP fast path**
+  yara-x malware scanning, plus this cycle's **ClamAV INSTREAM** content scan and
+  **safe-browsing/category** filtering — Post 5), `sng-dns` (threat-intel sinkhole
+  + tunneling detection), `sng-ztna` (zero-trust brokering), `sng-dlp` (on-device
+  ML classifier + coach-first **AI-app DLP** — Post 5). Beneath the firewall sits
+  an optional **eBPF/XDP fast path**
   ([PR #129](https://github.com/kennguy3n/visible-fishbone/pull/129)) — a
   tail-call-split in-kernel pipeline with an LRU verdict cache that serves
   repeat flows before they ever reach userspace, failing open to nftables for
@@ -67,6 +69,26 @@ rules govern every figure:
    section, and Post 7 carries a consolidated, evidence-based competitive
    critique against Zscaler, Palo Alto Prisma Access, Cloudflare, Netskope,
    Cato, and Fortinet. This is a critique, not a brochure.
+
+## What shipped this cycle (and what's actually wired)
+
+This refresh folds six new capabilities into the series — and applies rule 3 to
+them honestly. Most are code-complete and tested on `main` but **not yet wired
+into the running control plane** (a single integration PR is staged for that), so
+the evidence for them is real engine output and passing tests, not live console
+screenshots claiming production enforcement:
+
+| Capability | Lands in | PR | Live in console? |
+| --- | --- | --- | --- |
+| Activity-tiered dormancy | Post 2, 7 | #154 | No — tested, planner not started in `main` |
+| ClamAV INSTREAM content scan | Post 5 | #156 | No — OFF by default, constructor-gated |
+| Safe-browsing / category filtering | Post 5 | #156 | No — staged for integration |
+| Shadow-IT NoOps (classify/recommend/audit) | Post 5 | #159, #172 | Real engine output captured; runtime wiring in #172 |
+| Coach-first AI-app DLP + HITL review queue | Post 5, 6 | #158 | No console API for the queue yet |
+| Self-hosted Bonsai-8B Q2_0 bake | Post 6, 7 | #155 | Deploy artifact; needs prism-branch kernels |
+
+A buyer-facing companion series (`business/`) walks the same six as
+persona + jobs-to-be-done journeys.
 
 ## The cast (seeded data)
 

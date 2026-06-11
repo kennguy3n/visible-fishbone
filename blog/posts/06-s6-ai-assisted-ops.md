@@ -108,13 +108,34 @@ action; a human signs off before it executes. Globex's set
 even includes a deliberately *disabled* "Revoke access on impossible travel"
 playbook — staged but not armed — so the enabled/disabled distinction is real.
 
+The same human-in-the-loop principle now has a dedicated data-plane sibling: the
+**DLP review queue** (`internal/service/dlpreview`, migration 060) shipped this
+cycle, where coach-first AI-app DLP events that aren't auto-resolved wait for a
+human verdict (`pending → approved / blocked / dismissed`) instead of being
+silently enforced. It's walked in [Post 5](05-s5-dlp-casb-rbi.md) and
+[business Post B3](business/10-ai-dlp-coaching.md) — and, honestly, it still
+needs an operator console API before it's reachable end-to-end. (#158)
+
 ## The model itself (and the deterministic fallback)
 
 The default model is the self-hosted **Ternary-Bonsai-8B**
 ([PR #102](https://github.com/kennguy3n/visible-fishbone/pull/102) /
 [fishbone-access #35](https://github.com/kennguy3n/fishbone-access/pull/35)), with
-compact-model prompt adaptation and a hardened JSON-extraction path. Critically,
-when `AI_LLM_ENDPOINT` is unset (as on this VM), the assistant runs
+compact-model prompt adaptation and a hardened JSON-extraction path.
+
+This cycle pinned the *exact* artifact rather than "whatever the registry serves."
+[PR #155](https://github.com/kennguy3n/visible-fishbone/pull/155) bakes the
+specific **2-bit Q2_0 (ternary) GGUF** into the AI image with a checksum-verified
+download (`deploy/ollama/`). The turnkey server is llama.cpp's `llama-server`
+(`Dockerfile.llamacpp`, `docs/ai-model-setup.md`); `Modelfile.Q2_0-prism` is kept
+as a reference recipe but is explicitly documented as *not* loadable by stock
+Ollama, because the Q2_0 kernels aren't upstream yet — an honesty note that lives
+in the file's own header, not just the blog. The point of the 2-bit quant is to
+fit an 8B reasoning model on commodity tenant hardware so the self-hosted path is
+actually affordable (the cost angle is Post 7 and
+[business Post B5](business/12-cost-and-competition.md)).
+
+Critically, when `AI_LLM_ENDPOINT` is unset (as on this VM), the assistant runs
 **template-only / deterministic** mode:
 
 - NL policy query → deterministic policy evaluation (shown above), no LLM needed.
@@ -176,6 +197,11 @@ should mean in practice.
   numbers are from a 0.5B model on a CPU runner. The 8B served on tenant
   hardware will differ; the harness is built to re-run against it and publish
   the same report.
+- **The pinned Q2_0 build needs custom kernels.** The 2-bit Q2_0 bake (#155)
+  buys affordability, but the ternary kernels aren't in upstream llama.cpp /
+  Ollama yet, so it runs on a prism-branch `llama-server` — not a stock binary.
+  We document that constraint in the Modelfile header rather than implying a
+  one-line `ollama pull` works today.
 - **Intent parsing is deterministic-first by design.** The NL→query parser is a
   deterministic tokenizer that classifies intent, time windows and policy
   versions; it now spans a wider grammar (blocked-traffic, change-summary,
