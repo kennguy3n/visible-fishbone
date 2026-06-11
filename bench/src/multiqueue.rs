@@ -79,10 +79,10 @@ impl MultiQueueConfig {
     }
 }
 
-/// Run one fanout width: spawn `queues` worker threads, each building its
-/// own [`ForwardingHarness`] and then — released together by a barrier —
-/// running a single measured forwarding stream. Returns the per-stream
-/// results in ascending queue-index order.
+/// Run one fanout width: build a distinct [`ForwardingHarness`] per queue,
+/// then spawn one worker thread per harness that — released together by a
+/// barrier — runs a single measured forwarding stream. Returns the
+/// per-stream results in ascending queue-index order.
 fn run_fanout(
     mix: &TrafficMix,
     queues: usize,
@@ -92,19 +92,29 @@ fn run_fanout(
     backend: Backend,
 ) -> Vec<(usize, ForwardingResult)> {
     let queues = queues.max(1);
-    let barrier = Arc::new(Barrier::new(queues));
 
-    let handles: Vec<_> = (0..queues)
-        .map(|q| {
+    // Build every per-queue harness up front, on this thread. Construction
+    // (engine install, inspector construction, flow-pool build) is untimed
+    // setup, so keeping it out of the worker threads costs the measurement
+    // nothing — and it removes a deadlock: a worker that panicked while
+    // constructing its harness would never reach `barrier.wait()`, leaving
+    // the surviving N−1 workers (and the join below) blocked forever. With
+    // construction here, any such failure aborts cleanly before the
+    // barrier-synchronised region is ever entered.
+    let harnesses: Vec<ForwardingHarness> = (0..queues)
+        .map(|_| ForwardingHarness::new(rule_count))
+        .collect();
+
+    let barrier = Arc::new(Barrier::new(queues));
+    let handles: Vec<_> = harnesses
+        .into_iter()
+        .enumerate()
+        .map(|(q, harness)| {
             let mix = *mix;
             let barrier = Arc::clone(&barrier);
             thread::Builder::new()
                 .name(format!("mq-queue-{q}"))
                 .spawn(move || {
-                    // Per-queue state (engine install, inspector
-                    // construction, flow-pool build) happens before the
-                    // barrier, so it is never inside the timed loop.
-                    let harness = ForwardingHarness::new(rule_count);
                     // Release every queue into its measured loop at once so
                     // they contend for the host's cores for the whole run.
                     barrier.wait();
