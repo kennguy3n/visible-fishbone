@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlp"
 )
@@ -196,6 +198,121 @@ func TestValidateEndpointPolicy_RejectsBadDocuments(t *testing.T) {
 	dup.Rules = append(dup.Rules, dup.Rules[0])
 	if err := dlp.ValidateEndpointPolicy(dup); err == nil {
 		t.Error("expected error for duplicate rule id")
+	}
+}
+
+// TestCompileEndpointBundle_EmitsCoachFirstAiApp locks in the wiring
+// that makes the HITL review-queue producer live: every endpoint
+// bundle arms the AI-app exfiltration detector coach-first (enabled,
+// never blocking). Without this block the agent leaves the detector
+// disarmed and the producer can never fire in prod.
+func TestCompileEndpointBundle_EmitsCoachFirstAiApp(t *testing.T) {
+	svc, tid := setup(t)
+	blob, err := svc.CompileEndpointBundle(context.Background(), tid, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var policy dlp.EndpointDLPPolicy
+	if err := json.Unmarshal(blob, &policy); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if policy.AiApp == nil {
+		t.Fatal("endpoint bundle missing ai_app block; detector would stay disarmed")
+	}
+	if !policy.AiApp.Enabled {
+		t.Error("ai_app.enabled = false; detector disarmed")
+	}
+	if policy.AiApp.BlockOptIn {
+		t.Error("ai_app.block_opt_in = true; default must be coach-first (non-blocking)")
+	}
+	if policy.AiApp.CoachSeverityFloor != dlp.EndpointSeverityHigh {
+		t.Errorf("ai_app.coach_severity_floor = %q, want high", policy.AiApp.CoachSeverityFloor)
+	}
+	// The block must serialise with snake_case keys sng-dlp's
+	// AiAppPolicy decodes.
+	if !bytes.Contains(blob, []byte(`"ai_app"`)) ||
+		!bytes.Contains(blob, []byte(`"block_opt_in"`)) ||
+		!bytes.Contains(blob, []byte(`"min_report_confidence"`)) {
+		t.Errorf("ai_app wire keys missing: %s", blob)
+	}
+}
+
+// fakeBlockedApps is a stub blocked-apps source for endpoint bundle
+// tests.
+type fakeBlockedApps struct {
+	apps []string
+	err  error
+}
+
+func (f fakeBlockedApps) BlockedApps(_ context.Context, _ uuid.UUID) ([]string, error) {
+	return f.apps, f.err
+}
+
+// TestCompileEndpointBundle_FoldsOperatorBlockedApps proves the
+// operator→edge loop: apps an operator blocked in the review queue are
+// folded into the bundle's ai_app.blocked_apps so the edge escalates
+// them from coach to block.
+func TestCompileEndpointBundle_FoldsOperatorBlockedApps(t *testing.T) {
+	svc, tid := setupWithBlockedApps(t, fakeBlockedApps{apps: []string{"chatgpt", "suspected_ai_app"}})
+	blob, err := svc.CompileEndpointBundle(context.Background(), tid, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var policy dlp.EndpointDLPPolicy
+	if err := json.Unmarshal(blob, &policy); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if policy.AiApp == nil {
+		t.Fatal("ai_app missing")
+	}
+	want := []string{"chatgpt", "suspected_ai_app"}
+	if len(policy.AiApp.BlockedApps) != len(want) {
+		t.Fatalf("blocked_apps = %v, want %v", policy.AiApp.BlockedApps, want)
+	}
+	for i, a := range want {
+		if policy.AiApp.BlockedApps[i] != a {
+			t.Errorf("blocked_apps[%d] = %q, want %q", i, policy.AiApp.BlockedApps[i], a)
+		}
+	}
+	// Wire key must be snake_case to match sng-dlp's serde rename.
+	if !bytes.Contains(blob, []byte(`"blocked_apps"`)) {
+		t.Errorf("blocked_apps wire key missing: %s", blob)
+	}
+}
+
+// TestCompileEndpointBundle_NoBlockedAppsOmitsWireKey confirms that with
+// no operator blocks (or no source wired) the bundle omits the
+// blocked_apps key entirely, matching sng-dlp's skip_serializing_if.
+func TestCompileEndpointBundle_NoBlockedAppsOmitsWireKey(t *testing.T) {
+	// No source wired (default coach-first).
+	svc, tid := setup(t)
+	blob, err := svc.CompileEndpointBundle(context.Background(), tid, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if bytes.Contains(blob, []byte(`"blocked_apps"`)) {
+		t.Errorf("blocked_apps key present with no overrides: %s", blob)
+	}
+
+	// Source wired but returns nothing: still omitted.
+	svc2, tid2 := setupWithBlockedApps(t, fakeBlockedApps{apps: nil})
+	blob2, err := svc2.CompileEndpointBundle(context.Background(), tid2, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if bytes.Contains(blob2, []byte(`"blocked_apps"`)) {
+		t.Errorf("blocked_apps key present with empty overrides: %s", blob2)
+	}
+}
+
+// TestCompileEndpointBundle_BlockedAppsSourceErrorFailsCompile proves a
+// genuine source error fails the compile (so no new bundle ships and the
+// edge keeps its last-good overrides) rather than silently dropping
+// them.
+func TestCompileEndpointBundle_BlockedAppsSourceErrorFailsCompile(t *testing.T) {
+	svc, tid := setupWithBlockedApps(t, fakeBlockedApps{err: context.DeadlineExceeded})
+	if _, err := svc.CompileEndpointBundle(context.Background(), tid, nil); err == nil {
+		t.Fatal("expected compile to fail on blocked-apps source error")
 	}
 }
 

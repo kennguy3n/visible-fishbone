@@ -51,6 +51,7 @@ use sng_core::{
     SubsystemHealth,
 };
 use sng_dlp::{ChannelError, ChannelInterceptor, DlpEngine, DlpVerdict};
+use sng_telemetry::{PipelineHandle, TelemetryEvent, TrySubmitError};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -128,6 +129,18 @@ pub struct DlpStats {
     /// Channel workers that exited because their backend reported
     /// an error (unavailable / init failure / closed).
     pub channels_stopped: AtomicU64,
+    /// Flagged AI-app upload signals projected onto the telemetry
+    /// pipeline as a [`TelemetryEvent::Dlp`] for the control-plane
+    /// review queue. A subset of `verdict_warn` + `verdict_block`
+    /// (only the AI-app upload channel produces a signal).
+    pub dlp_signals_emitted: AtomicU64,
+    /// Flagged signals dropped because the telemetry pipeline was
+    /// full (backpressure). The verdict was still enforced at the
+    /// edge; only the review-queue record was shed.
+    pub dlp_signal_drops_full: AtomicU64,
+    /// Flagged signals dropped because the telemetry pipeline had
+    /// shut down.
+    pub dlp_signal_drops_closed: AtomicU64,
 }
 
 /// Endpoint DLP subsystem.
@@ -135,6 +148,12 @@ pub struct DlpSubsystem {
     engine: Arc<DlpEngine>,
     interceptors: Vec<Arc<dyn ChannelInterceptor>>,
     sink: Arc<dyn DlpVerdictSink>,
+    /// Telemetry pipeline handle. A flagged AI-app upload is
+    /// projected onto it as a redacted [`TelemetryEvent::Dlp`] so the
+    /// control plane can route it into the human-in-the-loop review
+    /// queue — the producer half of that queue. Shares the same
+    /// pipeline (dedup / redaction / batch) as every other class.
+    telemetry: PipelineHandle,
     stats: Arc<DlpStats>,
     idle_sleep: Duration,
 }
@@ -157,11 +176,13 @@ impl DlpSubsystem {
         engine: Arc<DlpEngine>,
         interceptors: Vec<Arc<dyn ChannelInterceptor>>,
         sink: Arc<dyn DlpVerdictSink>,
+        telemetry: PipelineHandle,
         idle_sleep: Duration,
     ) -> Self {
         Self {
             engine,
             interceptors,
+            telemetry,
             sink,
             stats: Arc::new(DlpStats::default()),
             idle_sleep,
@@ -189,6 +210,7 @@ async fn run_channel_worker(
     interceptor: Arc<dyn ChannelInterceptor>,
     engine: Arc<DlpEngine>,
     sink: Arc<dyn DlpVerdictSink>,
+    telemetry: PipelineHandle,
     stats: Arc<DlpStats>,
     shutdown: ShutdownSignal,
     idle_sleep: Duration,
@@ -209,7 +231,7 @@ async fn run_channel_worker(
             next = interceptor.next_event() => match next {
                 Ok(Some(event)) => {
                     stats.events_observed.fetch_add(1, Ordering::Relaxed);
-                    let verdict = engine.evaluate_event(&event);
+                    let (verdict, signal) = engine.evaluate_event_with_signal(&event);
                     match &verdict {
                         DlpVerdict::Allow => {
                             stats.verdict_allow.fetch_add(1, Ordering::Relaxed);
@@ -225,6 +247,29 @@ async fn run_channel_worker(
                         }
                     }
                     sink.report(&verdict);
+
+                    // A flagged AI-app upload (coach-first: an action
+                    // above Monitor, or any finding) is the producer
+                    // half of the control-plane review queue. Project
+                    // the redacted signal onto the telemetry pipeline;
+                    // it is metadata-only by construction (label/count
+                    // summaries, never matched bytes). Enforcement
+                    // already happened above via the verdict — a full
+                    // or closed pipeline only sheds the review-queue
+                    // record, never the edge decision.
+                    if let Some(signal) = signal {
+                        match telemetry.try_submit(TelemetryEvent::Dlp(signal.to_wire_event())) {
+                            Ok(()) => {
+                                stats.dlp_signals_emitted.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(TrySubmitError::Full(_)) => {
+                                stats.dlp_signal_drops_full.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(TrySubmitError::Closed(_)) => {
+                                stats.dlp_signal_drops_closed.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
                 }
                 Ok(None) => {
                     // Backend closed its source cleanly. Nothing more
@@ -279,6 +324,7 @@ impl Subsystem for DlpSubsystem {
         let interceptors = self.interceptors.clone();
         let engine = Arc::clone(&self.engine);
         let sink = Arc::clone(&self.sink);
+        let telemetry = self.telemetry.clone();
         let stats = Arc::clone(&self.stats);
         let idle_sleep = self.idle_sleep;
 
@@ -289,6 +335,7 @@ impl Subsystem for DlpSubsystem {
                     interceptor,
                     Arc::clone(&engine),
                     Arc::clone(&sink),
+                    telemetry.clone(),
                     Arc::clone(&stats),
                     shutdown.clone(),
                     idle_sleep,
@@ -319,6 +366,9 @@ impl HealthCheck for DlpSubsystem {
         let warn = self.stats.verdict_warn.load(Ordering::Relaxed);
         let block = self.stats.verdict_block.load(Ordering::Relaxed);
         let stopped = self.stats.channels_stopped.load(Ordering::Relaxed);
+        let signals = self.stats.dlp_signals_emitted.load(Ordering::Relaxed);
+        let signal_drops_full = self.stats.dlp_signal_drops_full.load(Ordering::Relaxed);
+        let signal_drops_closed = self.stats.dlp_signal_drops_closed.load(Ordering::Relaxed);
         let total = self.interceptors.len() as u64;
 
         // Every channel stopping (e.g. all backends unavailable on a
@@ -338,7 +388,9 @@ impl HealthCheck for DlpSubsystem {
             status,
             detail: Some(format!(
                 "channels={total}, observed={observed}, allow={allow}, log={log}, \
-                 warn={warn}, block={block}, stopped={stopped}"
+                 warn={warn}, block={block}, stopped={stopped}, signals={signals}, \
+                 signal_drops_full={signal_drops_full}, \
+                 signal_drops_closed={signal_drops_closed}"
             )),
         }
     }
@@ -348,10 +400,52 @@ impl HealthCheck for DlpSubsystem {
 mod tests {
     use super::*;
     use sng_dlp::{
-        ChannelConfig, ContentEvent, DlpChannel, DlpPolicy, DlpRule, InMemoryInterceptor,
-        PatternType, RuleAction, Severity,
+        AiAppExfilDetector, AiAppPolicy, ChannelConfig, ContentEvent, ContentMetadata, DlpChannel,
+        DlpPolicy, DlpRule, InMemoryInterceptor, PatternType, RuleAction, Severity,
     };
     use std::sync::Mutex;
+
+    /// A live telemetry pipeline + handle for worker tests. Mirrors
+    /// the `pal_posture` fixture: the egress client has no NATS
+    /// connection, so submitted events drain harmlessly, but the
+    /// handle's `try_submit` succeeds — which is all the DLP worker
+    /// observes.
+    fn test_pipeline_handle() -> (
+        sng_telemetry::Pipeline<sng_telemetry::SystemTime>,
+        PipelineHandle,
+    ) {
+        use sng_comms::{TelemetryClient, TelemetryClientConfig};
+        use sng_core::envelope::Platform;
+        use sng_core::ids::{DeviceId, TenantId};
+        use sng_telemetry::{
+            AgentIdentity, Enricher, PcapRing, PcapRingConfig, Pipeline, PipelineConfig,
+            RedactionPolicy, SystemTime,
+        };
+        use uuid::Uuid;
+        let identity = AgentIdentity::new(
+            TenantId::from_uuid(Uuid::from_u128(1)),
+            DeviceId::from_uuid(Uuid::from_u128(2)),
+            None,
+            Platform::Linux,
+        );
+        let enricher = Enricher::new(identity.clone(), SystemTime);
+        let egress = Arc::new(TelemetryClient::new(TelemetryClientConfig::with_defaults(
+            identity.to_comms_enrichment_context(),
+        )));
+        let pcap = Arc::new(PcapRing::new(PcapRingConfig {
+            max_packets: 1,
+            max_total_bytes: 1024,
+            max_packet_bytes: 1024,
+        }));
+        Pipeline::new(
+            PipelineConfig::default(),
+            enricher,
+            RedactionPolicy::strict(),
+            egress,
+            pcap,
+        )
+        .expect("pipeline")
+    }
 
     /// A recording sink for assertions.
     #[derive(Default)]
@@ -442,11 +536,13 @@ mod tests {
 
         // InMemoryInterceptor returns Ok(None) once drained, so the
         // worker classifies both events then exits on clean close.
+        let (_pipeline, handle) = test_pipeline_handle();
         let (_trigger, signal) = sng_core::ShutdownTrigger::new();
         run_channel_worker(
             interceptor,
             engine,
             Arc::clone(&sink) as Arc<dyn DlpVerdictSink>,
+            handle,
             Arc::clone(&stats),
             signal,
             Duration::from_millis(1),
@@ -457,6 +553,60 @@ mod tests {
         assert_eq!(stats.verdict_block.load(Ordering::Relaxed), 1);
         assert_eq!(stats.verdict_allow.load(Ordering::Relaxed), 1);
         assert_eq!(stats.channels_stopped.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_emits_review_signal_for_flagged_ai_upload() {
+        // A secret bound for a known AI app on the upload channel: the
+        // worker enforces (coach) AND projects the redacted signal onto
+        // the telemetry pipeline as the review-queue producer half.
+        let engine = Arc::new(DlpEngine::new(DlpPolicy::default()).expect("engine"));
+        engine
+            .set_ai_app_policy(Some(AiAppPolicy::default()))
+            .expect("enable ai-app");
+        let sink = Arc::new(RecordingSink::default());
+        let stats = Arc::new(DlpStats::default());
+
+        let interceptor = Arc::new(InMemoryInterceptor::new(AiAppExfilDetector::channel()));
+        interceptor.push(
+            ContentEvent::new(
+                AiAppExfilDetector::channel(),
+                b"deploy key ghp_abcdefghijklmnopqrstuvwxyz0123456789 attached".to_vec(),
+            )
+            .with_metadata(ContentMetadata {
+                source: Some("https://chat.openai.com/c/abc".to_owned()),
+                ..ContentMetadata::default()
+            }),
+        );
+        // A benign upload to the same app: enforced as Allow, no signal.
+        interceptor.push(
+            ContentEvent::new(AiAppExfilDetector::channel(), b"hello there".to_vec())
+                .with_metadata(ContentMetadata {
+                    source: Some("https://chat.openai.com/c/abc".to_owned()),
+                    ..ContentMetadata::default()
+                }),
+        );
+
+        let (pipeline, handle) = test_pipeline_handle();
+        let pipeline_task = tokio::spawn(async move { pipeline.run().await });
+        let (_trigger, signal) = sng_core::ShutdownTrigger::new();
+        run_channel_worker(
+            interceptor,
+            engine,
+            Arc::clone(&sink) as Arc<dyn DlpVerdictSink>,
+            handle,
+            Arc::clone(&stats),
+            signal,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert_eq!(stats.events_observed.load(Ordering::Relaxed), 2);
+        // Exactly the flagged upload produced a review-queue signal.
+        assert_eq!(stats.dlp_signals_emitted.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.dlp_signal_drops_full.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.dlp_signal_drops_closed.load(Ordering::Relaxed), 0);
+        pipeline_task.abort();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -474,10 +624,12 @@ mod tests {
         let engine = Arc::new(DlpEngine::new(DlpPolicy::default()).expect("engine"));
         let interceptor: Arc<dyn ChannelInterceptor> =
             Arc::new(InMemoryInterceptor::new(DlpChannel::FileWrite));
+        let (_pipeline, handle) = test_pipeline_handle();
         let sub = DlpSubsystem::new(
             engine,
             vec![interceptor],
             Arc::new(TracingDlpSink),
+            handle,
             Duration::from_millis(1),
         );
         // Simulate the single channel having stopped.

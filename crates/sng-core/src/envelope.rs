@@ -68,6 +68,11 @@ pub enum EventClass {
     /// self-healing supervisor restarts and other appliance
     /// lifecycle events. Carries a [`crate::events::SubsystemRestart`].
     System,
+    /// Redacted endpoint DLP signal for an AI-app upload the edge
+    /// flagged but did not block. Carries a [`crate::events::DlpEvent`];
+    /// the control plane routes coach-first events into the
+    /// human-in-the-loop review queue.
+    Dlp,
 }
 
 impl EventClass {
@@ -85,6 +90,7 @@ impl EventClass {
             Self::Agent => "agent",
             Self::Posture => "posture",
             Self::System => "system",
+            Self::Dlp => "dlp",
         }
     }
 }

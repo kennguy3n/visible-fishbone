@@ -61,6 +61,7 @@ use crate::rules::{DlpRule, PatternType, RuleAction, Severity};
 use aho_corasick::{AhoCorasick, MatchKind};
 use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// The egress channel an AI-app upload is observed on. AI assistants
 /// are reached over the network from the browser or a native client,
@@ -1050,7 +1051,7 @@ impl Default for ConfidentialScanner {
 /// Operator policy for the AI-app exfiltration signal. The default is
 /// deliberately **coach-first and non-blocking**: it monitors and
 /// coaches but never blocks until an operator opts in.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AiAppPolicy {
     /// Master switch. When `false` the detector returns
     /// [`AiAppAction::Monitor`] with no findings (a pure no-op).
@@ -1070,6 +1071,16 @@ pub struct AiAppPolicy {
     /// coaching nudge rather than silently monitored. Secrets always
     /// coach regardless of this floor.
     pub coach_severity_floor: Severity,
+    /// Destination apps an operator has confirmed should be blocked
+    /// (via a `block` decision in the HITL review queue). A sensitive
+    /// upload to any app in this set escalates straight to
+    /// [`AiAppAction::Block`], independent of [`Self::block_opt_in`] and
+    /// the known/critical gate — the operator has already made the call.
+    /// Keyed by the catalog app id, or the [`SUSPECTED_AI_APP`] sentinel
+    /// for heuristic (unknown) destinations. Empty by default and
+    /// omitted from the wire when empty.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub blocked_apps: BTreeSet<String>,
 }
 
 impl Default for AiAppPolicy {
@@ -1080,6 +1091,7 @@ impl Default for AiAppPolicy {
             block_confidence: 0.9,
             min_report_confidence: 0.5,
             coach_severity_floor: Severity::High,
+            blocked_apps: BTreeSet::new(),
         }
     }
 }
@@ -1177,6 +1189,94 @@ impl AiAppSignal {
     #[must_use]
     pub const fn is_blocking(&self) -> bool {
         matches!(self.action, AiAppAction::Block)
+    }
+
+    /// Project this signal onto the redacted [`sng_core::DlpEvent`] wire
+    /// type the control plane consumes (its human-in-the-loop review
+    /// queue producer half). The projection is metadata-only by
+    /// construction — it copies the destination app id, severity,
+    /// confidence, and per-class finding *summaries*, never any matched
+    /// bytes — so it preserves the same redaction invariant the signal
+    /// itself enforces.
+    ///
+    /// A heuristic (`Suspected`) destination with no catalog id maps to
+    /// the [`SUSPECTED_AI_APP`] sentinel, matching the Go side's
+    /// `dlpreview.SuspectedAppSentinel`.
+    ///
+    /// # Precondition
+    /// Only ever projected for *flagged* signals (see [`Self::is_flagged`]).
+    /// A flagged signal always has an AI-app destination, because a
+    /// non-AI destination skips the content scan entirely and short-
+    /// circuits to `Monitor` with no findings (so it is never flagged
+    /// and never reaches the wire). The `SUSPECTED_AI_APP` fallback is
+    /// therefore only applied to a genuinely *suspected* AI app, never
+    /// mislabelling a non-AI destination. The debug assertion encodes
+    /// this invariant so any future caller that projects a non-flagged
+    /// signal is caught in tests rather than emitting a misleading
+    /// destination label.
+    #[must_use]
+    pub fn to_wire_event(&self) -> sng_core::DlpEvent {
+        debug_assert!(
+            self.destination.is_ai_app(),
+            "to_wire_event projected for a non-AI-app destination ({:?}); \
+             only flagged signals (always AI-app) should reach the wire",
+            self.destination.kind,
+        );
+        sng_core::DlpEvent {
+            destination_app: self.destination.app.unwrap_or(SUSPECTED_AI_APP).to_string(),
+            action: self.action.to_wire(),
+            severity: self.severity.as_str().to_string(),
+            confidence: self.confidence,
+            findings: self.findings.iter().map(FindingSummary::to_wire).collect(),
+            scanned_bytes: self.scanned_bytes as u64,
+            truncated: self.truncated,
+        }
+    }
+}
+
+/// The `destination_app` value emitted for a heuristic (`Suspected`)
+/// AI-app match that carries no catalog id. Must stay in sync with the
+/// Go `internal/service/dlpreview.SuspectedAppSentinel`.
+pub const SUSPECTED_AI_APP: &str = "suspected_ai_app";
+
+impl AiAppAction {
+    /// Project onto the [`sng_core::DlpAction`] wire enum.
+    #[must_use]
+    pub const fn to_wire(self) -> sng_core::DlpAction {
+        match self {
+            Self::Monitor => sng_core::DlpAction::Monitor,
+            Self::Coach => sng_core::DlpAction::Coach,
+            Self::Block => sng_core::DlpAction::Block,
+        }
+    }
+}
+
+impl FindingKind {
+    /// Project onto the [`sng_core::DlpFindingKind`] wire enum.
+    #[must_use]
+    pub const fn to_wire(self) -> sng_core::DlpFindingKind {
+        match self {
+            Self::Pii => sng_core::DlpFindingKind::Pii,
+            Self::Secret => sng_core::DlpFindingKind::Secret,
+            Self::Confidential => sng_core::DlpFindingKind::Confidential,
+        }
+    }
+}
+
+impl FindingSummary {
+    /// Project onto the redacted [`sng_core::DlpFinding`] wire row.
+    #[must_use]
+    pub fn to_wire(&self) -> sng_core::DlpFinding {
+        sng_core::DlpFinding {
+            kind: self.kind.to_wire(),
+            label: self.label.clone(),
+            // Match counts are tiny in practice; saturate rather than
+            // wrap on the (impossible) overflow so the wire value is
+            // never silently truncated to a small number.
+            count: u32::try_from(self.count).unwrap_or(u32::MAX),
+            max_confidence: self.max_confidence,
+            severity: self.severity.as_str().to_string(),
+        }
     }
 }
 
@@ -1365,6 +1465,19 @@ impl AiAppExfilDetector {
             return AiAppAction::Monitor;
         }
 
+        // Operator-confirmed block: a reviewer has explicitly blocked
+        // this destination app via the HITL review queue, so sensitive
+        // uploads to it escalate straight to Block — independent of the
+        // block_opt_in / known / critical gate below. The report-
+        // confidence floor above still applies, so a sub-threshold noise
+        // match to a blocked app is not blocked. A suspected (unknown)
+        // destination is keyed by the SUSPECTED_AI_APP sentinel, matching
+        // the wire projection in `to_wire_event`.
+        let effective_app = dest.app.unwrap_or(SUSPECTED_AI_APP);
+        if self.policy.blocked_apps.contains(effective_app) {
+            return AiAppAction::Block;
+        }
+
         // Escalation to block is the exception, not the rule: it
         // requires an explicit operator opt-in, a high-confidence
         // signal, a *known* (not merely suspected) destination, and a
@@ -1399,15 +1512,33 @@ impl AiAppExfilDetector {
         body: &[u8],
         metadata: &ContentMetadata,
     ) -> DlpVerdict {
+        self.inspect_with_verdict(destination, body, metadata).1
+    }
+
+    /// Inspect once and return both the redacted [`AiAppSignal`] and its
+    /// projected [`DlpVerdict`]. The two views share a single inspection
+    /// pass (no double scan): the verdict drives edge enforcement while
+    /// the signal is the redacted record the control plane's review
+    /// queue ingests. Callers that only need one view use [`Self::verdict`]
+    /// or [`Self::inspect`]; callers wiring both enforcement *and*
+    /// telemetry (the agent DLP subsystem) use this.
+    #[must_use]
+    pub fn inspect_with_verdict(
+        &self,
+        destination: &str,
+        body: &[u8],
+        metadata: &ContentMetadata,
+    ) -> (AiAppSignal, DlpVerdict) {
         let signal = self.inspect(destination, body, metadata);
-        signal_to_verdict(
+        let verdict = signal_to_verdict(
             &signal,
             body,
             metadata,
             &self.classifier,
             &self.secrets,
             &self.confidential,
-        )
+        );
+        (signal, verdict)
     }
 }
 
@@ -1878,6 +2009,62 @@ mod tests {
         );
         assert_eq!(sig.action, AiAppAction::Block, "{sig:?}");
         assert!(sig.is_blocking());
+    }
+
+    #[test]
+    fn operator_blocked_app_escalates_coach_to_block_without_opt_in() {
+        // A secret bound for a known app coaches by default (block_opt_in
+        // is false), the coach-first posture.
+        let url = "https://chat.openai.com/c/x";
+        let body = b"key AKIAIOSFODNN7EXAMPLE leaked";
+        let coach = AiAppExfilDetector::new(AiAppPolicy::default()).expect("detector");
+        let coach_sig = coach.inspect(url, body, &ContentMetadata::default());
+        assert_eq!(coach_sig.action, AiAppAction::Coach, "{coach_sig:?}");
+
+        // Once an operator has blocked that destination app via the review
+        // queue, the same upload escalates straight to Block — even though
+        // block_opt_in is still false. The operator already made the call.
+        let policy = AiAppPolicy {
+            blocked_apps: BTreeSet::from(["chatgpt".to_string()]),
+            ..AiAppPolicy::default()
+        };
+        let det = AiAppExfilDetector::new(policy).expect("detector");
+        let sig = det.inspect(url, body, &ContentMetadata::default());
+        assert_eq!(sig.action, AiAppAction::Block, "{sig:?}");
+        assert!(sig.is_blocking());
+    }
+
+    #[test]
+    fn operator_blocked_suspected_sentinel_blocks_heuristic_destination() {
+        // Operators can block the SUSPECTED_AI_APP sentinel to enforce on
+        // heuristic (unknown) destinations, which otherwise can only coach.
+        let url = "https://my-ai-tool.example.com/upload";
+        let body = b"key AKIAIOSFODNN7EXAMPLE leaked";
+        let policy = AiAppPolicy {
+            blocked_apps: BTreeSet::from([SUSPECTED_AI_APP.to_string()]),
+            ..AiAppPolicy::default()
+        };
+        let det = AiAppExfilDetector::new(policy).expect("detector");
+        let sig = det.inspect(url, body, &ContentMetadata::default());
+        assert_eq!(sig.action, AiAppAction::Block, "{sig:?}");
+    }
+
+    #[test]
+    fn operator_block_still_respects_the_report_confidence_floor() {
+        // A blocked app does not turn every upload into a block: an upload
+        // with no finding clearing the report floor is still monitored, so
+        // the override never blocks on noise.
+        let policy = AiAppPolicy {
+            blocked_apps: BTreeSet::from(["chatgpt".to_string()]),
+            ..AiAppPolicy::default()
+        };
+        let det = AiAppExfilDetector::new(policy).expect("detector");
+        let sig = det.inspect(
+            "https://chat.openai.com/c/x",
+            b"just an ordinary sentence with nothing sensitive in it",
+            &ContentMetadata::default(),
+        );
+        assert_eq!(sig.action, AiAppAction::Monitor, "{sig:?}");
     }
 
     #[test]

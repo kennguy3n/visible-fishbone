@@ -383,6 +383,109 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// `skip_serializing_if` predicate matching Go's `omitempty` for a
+/// `u64`: a zero value is omitted from the wire map entirely.
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+/// Coach-first action the endpoint DLP engine recommended for a
+/// flagged AI-app upload.
+///
+/// Mirrors `internal/nats/schema/events.go::DLPAction` and the
+/// existing [`crate::events`] wire convention. Ordered by user impact:
+/// `monitor` < `coach` < `block`. This is the wire-form mirror of
+/// `sng_dlp::ai_app::AiAppAction`; the two are kept distinct so the
+/// shared `sng-core` crate does not depend on `sng-dlp`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DlpAction {
+    /// Recorded for audit; the user was not interrupted.
+    Monitor,
+    /// A non-blocking coaching nudge was surfaced — the canonical
+    /// human-review candidate.
+    Coach,
+    /// The upload was refused at the edge (operator opt-in +
+    /// high-confidence). Already enforced.
+    Block,
+}
+
+/// Redacted finding family. Mirrors
+/// `internal/nats/schema/events.go::DLPFindingKind` and the
+/// `sng_dlp::ai_app::FindingKind` snake_case wire forms.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DlpFindingKind {
+    /// Personally-identifiable information.
+    Pii,
+    /// Credential material.
+    Secret,
+    /// A company-confidential banner.
+    Confidential,
+}
+
+/// One redacted, aggregate finding inside a flagged upload. Carries
+/// NO matched bytes, offsets, or surrounding text — only a stable
+/// detector label and per-class counts — preserving the redaction
+/// invariant the AI-app signal enforces.
+///
+/// Mirrors `internal/nats/schema/events.go::DLPFinding` field-for-field.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DlpFinding {
+    /// Finding family.
+    #[serde(rename = "k")]
+    pub kind: DlpFindingKind,
+    /// Detector/rule id that fired (e.g. `ssn_us`, `github_token`,
+    /// `confidential`). Stable identifier, never user data.
+    #[serde(rename = "l")]
+    pub label: String,
+    /// How many distinct matches of this label were observed.
+    #[serde(rename = "c")]
+    pub count: u32,
+    /// Strongest per-match confidence in `[0,1]`.
+    #[serde(rename = "mc")]
+    pub max_confidence: f64,
+    /// Severity assigned to this finding class (`low` … `critical`).
+    #[serde(rename = "sev")]
+    pub severity: String,
+}
+
+/// Redacted endpoint DLP signal for an AI-app upload the edge flagged
+/// but (by default) did not block — the producer half of the control
+/// plane's human-in-the-loop review queue. Metadata-only by
+/// construction: the destination app id, a severity and confidence,
+/// and per-class finding summaries, never the matched content or the
+/// upload's path/query.
+///
+/// Mirrors `internal/nats/schema/events.go::DLPEvent` field-for-field
+/// with identical msgpack tags.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DlpEvent {
+    /// Classified AI-app id (e.g. `chatgpt`) or the heuristic
+    /// `suspected_ai_app` sentinel.
+    #[serde(rename = "dst")]
+    pub destination_app: String,
+    /// Coach-first action the edge recommended.
+    #[serde(rename = "act")]
+    pub action: DlpAction,
+    /// Overall (max-across-findings) severity (`low` … `critical`).
+    #[serde(rename = "sev")]
+    pub severity: String,
+    /// Overall detector confidence in `[0,1]`.
+    #[serde(rename = "cf")]
+    pub confidence: f64,
+    /// Redacted per-class evidence. May be empty for a
+    /// destination-only signal.
+    #[serde(rename = "fnd", default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<DlpFinding>,
+    /// Body bytes scanned (post scan-ceiling truncation). Diagnostic.
+    #[serde(rename = "sb", default, skip_serializing_if = "is_zero_u64")]
+    pub scanned_bytes: u64,
+    /// True when the body was truncated at the scan ceiling.
+    #[serde(rename = "tr", default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -771,5 +874,103 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&SubsystemRestartOutcome::Exhausted).expect("encode");
         let s: String = rmp_serde::from_slice(&bytes).expect("decode");
         assert_eq!(s, "exhausted");
+    }
+
+    fn sample_dlp() -> DlpEvent {
+        DlpEvent {
+            destination_app: "chatgpt".into(),
+            action: DlpAction::Coach,
+            severity: "high".into(),
+            confidence: 0.92,
+            findings: vec![
+                DlpFinding {
+                    kind: DlpFindingKind::Secret,
+                    label: "github_token".into(),
+                    count: 2,
+                    max_confidence: 0.99,
+                    severity: "high".into(),
+                },
+                DlpFinding {
+                    kind: DlpFindingKind::Pii,
+                    label: "ssn_us".into(),
+                    count: 1,
+                    max_confidence: 0.95,
+                    severity: "medium".into(),
+                },
+            ],
+            scanned_bytes: 4_096,
+            truncated: true,
+        }
+    }
+
+    #[test]
+    fn dlp_event_round_trip_preserves_all_fields() {
+        let ev = sample_dlp();
+        let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
+        let back: DlpEvent = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn dlp_event_uses_short_field_tags() {
+        let ev = sample_dlp();
+        let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
+        let decoded: std::collections::BTreeMap<String, rmpv::Value> =
+            rmp_serde::from_slice(&bytes).expect("decode");
+        let keys: std::collections::BTreeSet<&str> = decoded.keys().map(String::as_str).collect();
+        for required in ["dst", "act", "sev", "cf", "fnd", "sb", "tr"] {
+            assert!(
+                keys.contains(required),
+                "msgpack key {required} missing; got {keys:?}"
+            );
+        }
+        for forbidden in [
+            "destination_app",
+            "action",
+            "confidence",
+            "findings",
+            "scanned_bytes",
+        ] {
+            assert!(
+                !keys.contains(forbidden),
+                "Rust field {forbidden} leaked onto the wire; got {keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dlp_event_omits_empty_optionals() {
+        // A destination-only monitor signal carries no findings and no
+        // diagnostics — all three optional tags must be omitted to
+        // match the Go `omitempty` side.
+        let ev = DlpEvent {
+            destination_app: "claude".into(),
+            action: DlpAction::Monitor,
+            severity: "low".into(),
+            confidence: 0.2,
+            findings: vec![],
+            scanned_bytes: 0,
+            truncated: false,
+        };
+        let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
+        let decoded: std::collections::BTreeMap<String, rmpv::Value> =
+            rmp_serde::from_slice(&bytes).expect("decode");
+        for omitted in ["fnd", "sb", "tr"] {
+            assert!(
+                !decoded.contains_key(omitted),
+                "empty optional {omitted} must be omitted; got {decoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dlp_action_and_kind_wire_strings() {
+        // The snake_case wire forms are the cross-language contract.
+        let b = rmp_serde::to_vec_named(&DlpAction::Coach).expect("encode");
+        let s: String = rmp_serde::from_slice(&b).expect("decode");
+        assert_eq!(s, "coach");
+        let b = rmp_serde::to_vec_named(&DlpFindingKind::Confidential).expect("encode");
+        let s: String = rmp_serde::from_slice(&b).expect("decode");
+        assert_eq!(s, "confidential");
     }
 }

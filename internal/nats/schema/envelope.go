@@ -47,6 +47,11 @@ const (
 	// (self-healing supervisor restarts), not endpoint traffic. Its
 	// payload is a SubsystemRestart.
 	EventClassSystem EventClass = "system"
+	// EventClassDLP carries a redacted endpoint DLP signal for an AI-app
+	// upload the edge flagged but did not block. Its payload is a
+	// DLPEvent; the control plane routes coach-first events into the
+	// human-in-the-loop review queue (internal/service/dlpreview).
+	EventClassDLP EventClass = "dlp"
 )
 
 // IsValid reports whether c is a known event class.
@@ -54,7 +59,8 @@ func (c EventClass) IsValid() bool {
 	switch c {
 	case EventClassFlow, EventClassDNS, EventClassHTTP,
 		EventClassIPS, EventClassZTNA, EventClassSDWAN,
-		EventClassAgent, EventClassPosture, EventClassSystem:
+		EventClassAgent, EventClassPosture, EventClassSystem,
+		EventClassDLP:
 		return true
 	}
 	return false

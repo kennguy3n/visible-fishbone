@@ -177,6 +177,33 @@ func (r *DLPReviewRepository) Summary(ctx context.Context, tenantID uuid.UUID, s
 	return sum, nil
 }
 
+// BlockedApps returns the distinct destination apps with at least one
+// blocked event for the tenant, sorted. Mirrors the Postgres
+// `SELECT DISTINCT destination_app ... WHERE state = 'blocked'` query.
+func (r *DLPReviewRepository) BlockedApps(ctx context.Context, tenantID uuid.UUID) ([]string, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	r.mu.RLock()
+	for _, ev := range r.rows {
+		if ev.TenantID != tenantID {
+			continue
+		}
+		if ev.State == dlpreview.StateBlocked {
+			seen[ev.DestinationApp] = struct{}{}
+		}
+	}
+	r.mu.RUnlock()
+
+	out := make([]string, 0, len(seen))
+	for app := range seen {
+		out = append(out, app)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // sortReviewEventsNewestFirst orders by created_at descending, breaking
 // ties on id so the order is deterministic (mirrors the Postgres
 // `ORDER BY created_at DESC, id`).
@@ -196,6 +223,14 @@ func cloneReviewEvent(ev dlpreview.ReviewEvent) dlpreview.ReviewEvent {
 	if ev.Findings != nil {
 		out.Findings = make([]dlpreview.FindingAggregate, len(ev.Findings))
 		copy(out.Findings, ev.Findings)
+	}
+	if ev.DeviceID != nil {
+		id := *ev.DeviceID
+		out.DeviceID = &id
+	}
+	if ev.OccurredAt != nil {
+		at := *ev.OccurredAt
+		out.OccurredAt = &at
 	}
 	if ev.DecidedAt != nil {
 		at := *ev.DecidedAt

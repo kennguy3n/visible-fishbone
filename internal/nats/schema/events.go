@@ -387,3 +387,150 @@ func (s SubsystemRestart) Validate() error {
 	}
 	return nil
 }
+
+// DLPAction is the coach-first action the endpoint DLP engine recommended
+// for a flagged AI-app upload. Mirrors the Rust
+// `sng_dlp::ai_app::AiAppAction` snake_case wire forms, ordered by user
+// impact: monitor < coach < block.
+type DLPAction string
+
+const (
+	// DLPActionMonitor records the event for audit without interrupting
+	// the user. Monitor-only events with no findings are NOT review
+	// candidates (nothing for a human to judge).
+	DLPActionMonitor DLPAction = "monitor"
+	// DLPActionCoach surfaced a non-blocking nudge the user could
+	// dismiss — the canonical human-review candidate.
+	DLPActionCoach DLPAction = "coach"
+	// DLPActionBlock means the upload was refused at the edge (operator
+	// opt-in + high-confidence). Already enforced, so not a review
+	// candidate either.
+	DLPActionBlock DLPAction = "block"
+)
+
+// IsValid reports whether a is a known DLP action.
+func (a DLPAction) IsValid() bool {
+	switch a {
+	case DLPActionMonitor, DLPActionCoach, DLPActionBlock:
+		return true
+	}
+	return false
+}
+
+// DLPFindingKind classifies a redacted finding aggregate. Mirrors the
+// Rust `sng_dlp::ai_app::FindingKind` snake_case wire forms and the Go
+// dlpreview.FindingKind values so the redacted evidence round-trips
+// edge → wire → review queue.
+type DLPFindingKind string
+
+const (
+	// DLPFindingPII is personally-identifiable information.
+	DLPFindingPII DLPFindingKind = "pii"
+	// DLPFindingSecret is credential material.
+	DLPFindingSecret DLPFindingKind = "secret"
+	// DLPFindingConfidential is a company-confidential banner.
+	DLPFindingConfidential DLPFindingKind = "confidential"
+)
+
+// IsValid reports whether k is a known finding kind.
+func (k DLPFindingKind) IsValid() bool {
+	switch k {
+	case DLPFindingPII, DLPFindingSecret, DLPFindingConfidential:
+		return true
+	}
+	return false
+}
+
+// DLPFinding is one redacted, aggregate finding inside a flagged upload.
+// It carries NO matched bytes, offsets, or surrounding text — only a
+// stable detector label and per-class counts — preserving the redaction
+// invariant the Rust signal enforces (crates/sng-dlp `ai_app`). Mirrors
+// the Rust `sng_core::events::DlpFinding` field-for-field.
+type DLPFinding struct {
+	// Kind is the finding family.
+	Kind DLPFindingKind `msgpack:"k"`
+	// Label is the detector/rule id that fired (e.g. "ssn_us",
+	// "github_token", "confidential"). Stable identifier, never user data.
+	Label string `msgpack:"l"`
+	// Count is how many distinct matches of this label were observed.
+	Count uint32 `msgpack:"c"`
+	// MaxConfidence is the strongest per-match confidence in [0,1].
+	MaxConfidence float64 `msgpack:"mc"`
+	// Severity is the severity assigned to this finding class.
+	Severity string `msgpack:"sev"`
+}
+
+// DLPEvent is the redacted endpoint DLP signal for an AI-app upload that
+// the edge flagged but (by default) did not block — the producer half of
+// the human-in-the-loop review queue (internal/service/dlpreview). It is
+// metadata-only by construction: the destination app id, a severity and
+// confidence, and per-class finding summaries, never the matched content
+// or the upload's path/query.
+//
+// Mirrors the Rust `sng_core::events::DlpEvent` field-for-field with
+// identical msgpack tags so the redacted signal round-trips edge → wire
+// → control plane.
+type DLPEvent struct {
+	// DestinationApp is the classified AI-app id (e.g. "chatgpt") or the
+	// heuristic "suspected_ai_app" sentinel.
+	DestinationApp string `msgpack:"dst"`
+	// Action is the coach-first action the edge recommended.
+	Action DLPAction `msgpack:"act"`
+	// Severity is the overall (max-across-findings) severity.
+	Severity string `msgpack:"sev"`
+	// Confidence is the overall detector confidence in [0,1].
+	Confidence float64 `msgpack:"cf"`
+	// Findings is the redacted per-class evidence. May be empty for a
+	// destination-only signal.
+	Findings []DLPFinding `msgpack:"fnd,omitempty"`
+	// ScannedBytes is how many body bytes were scanned (post scan-ceiling
+	// truncation). Diagnostic only.
+	ScannedBytes uint64 `msgpack:"sb,omitempty"`
+	// Truncated is true when the body was truncated at the scan ceiling.
+	Truncated bool `msgpack:"tr,omitempty"`
+}
+
+// Validate enforces required-field invariants for DLPEvent. The
+// severity ladder is validated against the dlpreview/Rust alphabet
+// (low|medium|high|critical) so a malformed producer is caught at the
+// source rather than silently enqueuing an unrankable event.
+func (d DLPEvent) Validate() error {
+	if d.DestinationApp == "" {
+		return fmt.Errorf("dlp.destination_app is required: %w", ErrInvalid)
+	}
+	if !d.Action.IsValid() {
+		return fmt.Errorf("dlp.action %q invalid: %w", d.Action, ErrInvalid)
+	}
+	if !isValidDLPSeverity(d.Severity) {
+		return fmt.Errorf("dlp.severity %q invalid: %w", d.Severity, ErrInvalid)
+	}
+	if d.Confidence < 0 || d.Confidence > 1 {
+		return fmt.Errorf("dlp.confidence %v out of [0,1]: %w", d.Confidence, ErrInvalid)
+	}
+	for i, f := range d.Findings {
+		if !f.Kind.IsValid() {
+			return fmt.Errorf("dlp.findings[%d].kind %q invalid: %w", i, f.Kind, ErrInvalid)
+		}
+		if f.Label == "" {
+			return fmt.Errorf("dlp.findings[%d].label is required: %w", i, ErrInvalid)
+		}
+		if !isValidDLPSeverity(f.Severity) {
+			return fmt.Errorf("dlp.findings[%d].severity %q invalid: %w", i, f.Severity, ErrInvalid)
+		}
+		if f.MaxConfidence < 0 || f.MaxConfidence > 1 {
+			return fmt.Errorf("dlp.findings[%d].max_confidence %v out of [0,1]: %w", i, f.MaxConfidence, ErrInvalid)
+		}
+	}
+	return nil
+}
+
+// isValidDLPSeverity reports whether s is one of the four severity
+// rungs. Kept local to the schema package so the wire validator does
+// not import the dlpreview service.
+func isValidDLPSeverity(s string) bool {
+	switch s {
+	case "low", "medium", "high", "critical":
+		return true
+	}
+	return false
+}

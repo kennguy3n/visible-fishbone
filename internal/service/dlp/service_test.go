@@ -36,6 +36,32 @@ func setup(t *testing.T) (*dlp.Service, uuid.UUID) {
 	return svc, tenant.ID
 }
 
+// setupWithBlockedApps mirrors setup but wires a blocked-apps source so
+// CompileEndpointBundle folds operator block overrides into the bundle.
+func setupWithBlockedApps(t *testing.T, src dlp.BlockedAppsSource) (*dlp.Service, uuid.UUID) {
+	t.Helper()
+	store := memory.NewStore()
+	store.SetClock(func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) })
+
+	tenantRepo := memory.NewTenantRepository(store)
+	tenant, err := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "Test", Slug: "test-dlp-blocked", Tier: repository.TenantTierStarter,
+		Status: repository.TenantStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	svc := dlp.New(
+		memory.NewDLPPolicyRepository(store),
+		memory.NewDLPFingerprintRepository(store),
+		memory.NewDLPMatchRepository(store),
+		memory.NewDLPModelRepository(store),
+		nil,
+		dlp.WithBlockedApps(src),
+	)
+	return svc, tenant.ID
+}
+
 func TestService_CreateAndListPolicies(t *testing.T) {
 	svc, tid := setup(t)
 	ctx := context.Background()

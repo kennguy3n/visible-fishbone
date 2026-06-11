@@ -8,7 +8,8 @@
 
 use async_trait::async_trait;
 use sng_core::events::{
-    AgentEvent, DnsEvent, FlowEvent, HttpEvent, IpsEvent, SdwanEvent, SubsystemRestart, ZtnaEvent,
+    AgentEvent, DlpEvent, DnsEvent, FlowEvent, HttpEvent, IpsEvent, SdwanEvent, SubsystemRestart,
+    ZtnaEvent,
 };
 
 /// A typed telemetry event produced by one of the agent's
@@ -29,6 +30,13 @@ pub enum TelemetryEvent {
     /// restart surfaces on the control-plane dashboard via the
     /// existing dedup / redaction / batch path.
     System(SubsystemRestart),
+    /// Redacted endpoint DLP signal for an AI-app upload the edge
+    /// flagged but did not block. Already metadata-only by
+    /// construction (the producing [`sng_core::events::DlpEvent`]
+    /// carries no matched bytes), so it rides the same dedup /
+    /// redaction / batch path as the other classes and the control
+    /// plane routes it into the human-in-the-loop review queue.
+    Dlp(DlpEvent),
 }
 
 impl TelemetryEvent {
@@ -46,6 +54,7 @@ impl TelemetryEvent {
             Self::Sdwan(_) => EventClass::Sdwan,
             Self::Agent(_) => EventClass::Agent,
             Self::System(_) => EventClass::System,
+            Self::Dlp(_) => EventClass::Dlp,
         }
     }
 
@@ -61,6 +70,7 @@ impl TelemetryEvent {
             Self::Sdwan(e) => rmp_serde::to_vec_named(e),
             Self::Agent(e) => rmp_serde::to_vec_named(e),
             Self::System(e) => rmp_serde::to_vec_named(e),
+            Self::Dlp(e) => rmp_serde::to_vec_named(e),
         }
     }
 }

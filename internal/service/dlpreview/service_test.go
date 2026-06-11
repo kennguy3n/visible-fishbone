@@ -85,6 +85,80 @@ func sampleInput() dlpreview.EnqueueInput {
 	}
 }
 
+// recordingHook captures block-hook invocations.
+type recordingHook struct {
+	mu      sync.Mutex
+	tenants []uuid.UUID
+	events  []dlpreview.ReviewEvent
+}
+
+func (h *recordingHook) OnBlock(_ context.Context, tenantID uuid.UUID, ev dlpreview.ReviewEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.tenants = append(h.tenants, tenantID)
+	h.events = append(h.events, ev)
+}
+
+func (h *recordingHook) calls() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.tenants)
+}
+
+// TestBlockHook_FiresOnlyForBlock proves the enforcement hook fires for
+// a block decision (carrying the tenant + the blocked event) and not for
+// approve or dismiss, since only a block changes the per-app override
+// set.
+func TestBlockHook_FiresOnlyForBlock(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		decide   func(*dlpreview.Service, context.Context, uuid.UUID, uuid.UUID) error
+		wantCall bool
+	}{
+		{"block", func(s *dlpreview.Service, ctx context.Context, tn, id uuid.UUID) error {
+			_, err := s.Block(ctx, tn, id, "op@x.test")
+			return err
+		}, true},
+		{"approve", func(s *dlpreview.Service, ctx context.Context, tn, id uuid.UUID) error {
+			_, err := s.Approve(ctx, tn, id, "op@x.test")
+			return err
+		}, false},
+		{"dismiss", func(s *dlpreview.Service, ctx context.Context, tn, id uuid.UUID) error {
+			_, err := s.Dismiss(ctx, tn, id, "op@x.test")
+			return err
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hook := &recordingHook{}
+			repo := memory.NewDLPReviewRepository()
+			svc, err := dlpreview.New(repo, dlpreview.WithBlockHook(hook))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			tenant := uuid.New()
+			ev, err := svc.Enqueue(context.Background(), tenant, sampleInput())
+			if err != nil {
+				t.Fatalf("Enqueue: %v", err)
+			}
+			if err := tc.decide(svc, context.Background(), tenant, ev.ID); err != nil {
+				t.Fatalf("decide: %v", err)
+			}
+			if got := hook.calls(); (got > 0) != tc.wantCall {
+				t.Fatalf("hook calls = %d, wantCall = %v", got, tc.wantCall)
+			}
+			if tc.wantCall {
+				if hook.tenants[0] != tenant {
+					t.Errorf("hook tenant = %v, want %v", hook.tenants[0], tenant)
+				}
+				if hook.events[0].ID != ev.ID || hook.events[0].State != dlpreview.StateBlocked {
+					t.Errorf("hook event = %+v, want id %v state blocked", hook.events[0], ev.ID)
+				}
+			}
+		})
+	}
+}
+
 func TestNew_NilRepository(t *testing.T) {
 	t.Parallel()
 	if _, err := dlpreview.New(nil); !errors.Is(err, repository.ErrInvalidArgument) {
@@ -121,6 +195,57 @@ func TestEnqueue_StoresPendingAndAudits(t *testing.T) {
 	}
 	if recs[0].ResultState != dlpreview.StatePending {
 		t.Fatalf("audit result state = %q, want pending", recs[0].ResultState)
+	}
+}
+
+func TestEnqueue_PersistsTriageContext(t *testing.T) {
+	t.Parallel()
+	svc := newService(t, nil, nil)
+	tenant := uuid.New()
+	device := uuid.New()
+	occurred := time.Date(2026, 6, 9, 8, 30, 0, 0, time.UTC)
+
+	in := sampleInput()
+	in.DeviceID = device
+	in.OccurredAt = occurred
+
+	ev, err := svc.Enqueue(context.Background(), tenant, in)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if ev.DeviceID == nil || *ev.DeviceID != device {
+		t.Fatalf("device id = %v, want %v", ev.DeviceID, device)
+	}
+	if ev.OccurredAt == nil || !ev.OccurredAt.Equal(occurred) {
+		t.Fatalf("occurred_at = %v, want %v", ev.OccurredAt, occurred)
+	}
+
+	// Round-trips through the store, separate from created_at.
+	got, err := svc.Get(context.Background(), tenant, ev.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DeviceID == nil || *got.DeviceID != device {
+		t.Fatalf("stored device id = %v, want %v", got.DeviceID, device)
+	}
+	if got.OccurredAt == nil || !got.OccurredAt.Equal(occurred) {
+		t.Fatalf("stored occurred_at = %v, want %v", got.OccurredAt, occurred)
+	}
+}
+
+func TestEnqueue_OmitsZeroTriageContext(t *testing.T) {
+	t.Parallel()
+	svc := newService(t, nil, nil)
+	// sampleInput leaves DeviceID/OccurredAt at their zero values.
+	ev, err := svc.Enqueue(context.Background(), uuid.New(), sampleInput())
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if ev.DeviceID != nil {
+		t.Fatalf("zero device id must store nil, got %v", *ev.DeviceID)
+	}
+	if ev.OccurredAt != nil {
+		t.Fatalf("zero occurred_at must store nil, got %v", *ev.OccurredAt)
 	}
 }
 

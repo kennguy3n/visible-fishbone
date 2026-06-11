@@ -85,6 +85,10 @@ impl Fingerprint {
                 7u8.hash(&mut h);
                 hash_system(e, &mut h);
             }
+            TelemetryEvent::Dlp(e) => {
+                8u8.hash(&mut h);
+                hash_dlp(e, &mut h);
+            }
         }
         Self(h.finish())
     }
@@ -187,6 +191,26 @@ fn hash_agent(e: &AgentEvent, h: &mut DefaultHasher) {
     // dedup on (device, event_type, reason, platform) inside the
     // window. A change in event_type (started → posture →
     // stopped) is what's worth reporting.
+}
+
+fn hash_dlp(e: &sng_core::events::DlpEvent, h: &mut DefaultHasher) {
+    // Key on the operator-meaningful dimensions: where the upload
+    // went, the recommended action, the overall severity, and the
+    // set of finding (kind, label, count) rows. Two flagged uploads
+    // to the same destination with the same finding shape inside the
+    // dedup window collapse to one review event. `confidence` and
+    // the `scanned_bytes` / `truncated` diagnostics are excluded:
+    // they are attributes of an upload already keyed by destination
+    // and findings, not independent dedup dimensions, and `f64` has
+    // no meaningful `Hash`.
+    e.destination_app.hash(h);
+    (e.action as u8).hash(h);
+    e.severity.hash(h);
+    for f in &e.findings {
+        (f.kind as u8).hash(h);
+        f.label.hash(h);
+        f.count.hash(h);
+    }
 }
 
 fn hash_system(e: &SubsystemRestart, h: &mut DefaultHasher) {

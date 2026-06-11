@@ -279,6 +279,13 @@ type Service struct {
 	// via WithShadowITObserver.
 	shadowObserver ShadowITObserver
 
+	// dlpObserver receives the coach-action DLP events extracted from
+	// the processed telemetry exhaust so the control plane can route
+	// them into the human-in-the-loop review queue (the consumer half
+	// of that queue). nil disables routing. Set via
+	// WithDLPReviewObserver.
+	dlpObserver DLPReviewObserver
+
 	// activity receives the tenant + timestamp of each event durably
 	// written to the hot store, so the dormancy planner
 	// (internal/service/tenancy) has a real data-plane activity signal
@@ -310,6 +317,7 @@ type worker struct {
 	sampler           *AdaptiveSampler
 	rowLimiter        RowWriteLimiter
 	shadowObserver    ShadowITObserver
+	dlpObserver       DLPReviewObserver
 	activity          ActivityObserver
 	dedup             *dedupRing
 }
@@ -336,6 +344,24 @@ type RowWriteLimiter interface {
 // non-blocking, and safe for concurrent use.
 type ShadowITObserver interface {
 	ObserveHost(tenantID, deviceID uuid.UUID, host string, ts time.Time)
+}
+
+// DLPReviewObserver receives a coach-action DLP event carried by a
+// processed [schema.EventClassDLP] envelope: the redacted, flagged
+// AI-app upload that the endpoint nudged the user about. Implementations
+// route it into the human-in-the-loop review queue (see
+// dlpreview.Service via the adapter in cmd/sng-control). The decoded
+// event is metadata-only by construction — finding labels and counts,
+// never matched bytes — so it is safe to persist.
+//
+// Like [ShadowITObserver] the hook is called inline on the dispatch
+// hot path, so implementations MUST NOT block: the production adapter
+// hands the event to a bounded async enqueuer (drop-with-counter on a
+// full buffer) so a slow review-queue store can never stall ingestion.
+// The ctx is the dispatch context; an implementation that does its own
+// async work should not retain it past the call.
+type DLPReviewObserver interface {
+	ObserveDLP(ctx context.Context, tenantID, deviceID uuid.UUID, ev schema.DLPEvent, ts time.Time)
 }
 
 // ActivityObserver receives the tenant and timestamp of each event
@@ -433,6 +459,20 @@ func (s *Service) WithShadowITObserver(o ShadowITObserver) *Service {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.shadowObserver = o
+	return s
+}
+
+// WithDLPReviewObserver wires a DLP review-queue observer onto the
+// service. Once set, dispatch decodes every processed
+// [schema.EventClassDLP] envelope and hands its coach-action events to
+// the observer, which routes them into the human-in-the-loop review
+// queue. Pass nil to remove it. Additive and optional — wiring paths
+// that pre-date the review queue keep their prior behaviour. Returns
+// the receiver for fluent wiring.
+func (s *Service) WithDLPReviewObserver(o DLPReviewObserver) *Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dlpObserver = o
 	return s
 }
 
@@ -580,6 +620,7 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			sampler:           s.sampler,
 			rowLimiter:        s.rowLimiter,
 			shadowObserver:    s.shadowObserver,
+			dlpObserver:       s.dlpObserver,
 			activity:          s.activity,
 			dedup:             s.dedup,
 		}}, nil
@@ -625,6 +666,7 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			// observer is likewise shared, not cloned.
 			rowLimiter:     s.rowLimiter,
 			shadowObserver: s.shadowObserver,
+			dlpObserver:    s.dlpObserver,
 			activity:       s.activity,
 			dedup:          newDedupRing(s.cfg.DedupRingSize),
 		})
@@ -964,6 +1006,11 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 	// processed (sampled-out / duplicate events are correctly
 	// excluded from the inventory's volume signal).
 	observeShadowIT(w.shadowObserver, env)
+	// Route coach-action DLP events into the human-in-the-loop review
+	// queue from the same processed exhaust. Like observeShadowIT it
+	// runs once per unique event (after dedup) and must not block the
+	// hot path — the observer hands off to a bounded async enqueuer.
+	observeDLP(ctx, w.dlpObserver, env)
 	// Record the tenant as active from the same durably-written
 	// exhaust. Like shadow-IT it runs after the hot write + dedup so
 	// the dormancy planner's activity signal counts exactly the events
@@ -1013,6 +1060,32 @@ func observeShadowIT(obs ShadowITObserver, env schema.Envelope) {
 			obs.ObserveHost(env.TenantID, env.DeviceID, host, env.Timestamp)
 		}
 	}
+}
+
+// observeDLP decodes a DLP envelope and hands its coach-action events
+// to the review-queue observer. A nil observer or any non-DLP class is
+// a no-op. Only coach-action events are review candidates: monitor is
+// audit-only and a block was already refused at the edge (no pending
+// human decision), so both are skipped here while still being written
+// to the hot store as telemetry. Payload decode errors are swallowed
+// for the same reason as observeShadowIT — the envelope already passed
+// Unmarshal validation and a malformed inner payload must never
+// disturb the dispatch hot path.
+func observeDLP(ctx context.Context, obs DLPReviewObserver, env schema.Envelope) {
+	if obs == nil {
+		return
+	}
+	if env.EventClass != schema.EventClassDLP {
+		return
+	}
+	var d schema.DLPEvent
+	if err := schema.UnpackPayload(env.Payload, &d); err != nil {
+		return
+	}
+	if d.Action != schema.DLPActionCoach {
+		return
+	}
+	obs.ObserveDLP(ctx, env.TenantID, env.DeviceID, d, env.Timestamp)
 }
 
 // observeActivity reports the envelope's tenant + timestamp to the

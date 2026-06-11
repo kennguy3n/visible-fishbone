@@ -263,6 +263,7 @@ func run() error {
 	evidenceScheduler := rc.EvidenceScheduler
 	feedMgr := rc.FeedManager
 	recompiler := rc.Recompiler
+	dlpReviewRecompiler := rc.DLPReviewRecompiler
 
 	// Start the cost-metering flush loop. It batch-upserts the
 	// accumulated per-tenant usage deltas into tenant_usage every
@@ -529,6 +530,15 @@ func run() error {
 			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
 	}
 
+	// Producer half of the human-in-the-loop DLP review queue: an async,
+	// bounded adapter that turns coach-action DLP events off the
+	// telemetry hot path into review-queue enqueues. Drained on shutdown
+	// after the telemetry consumer (same window discipline as the
+	// shadow-IT discoverer below) so events observed during shutdown are
+	// not lost.
+	dlpReviewIngest := newDLPReviewIngest(rc.DLPReviewService, logger, dlpReviewIngestConfig{})
+	defer dlpReviewIngest.Stop()
+
 	// Start the per-tenant activity recorder's async drain loop before
 	// telemetry comes up, so the data-plane observer wired below has a
 	// running worker behind it. Like the shadow-IT discoverer it is
@@ -548,7 +558,7 @@ func run() error {
 			slog.Duration("min_interval", cfg.Activity.MinInterval))
 	}
 
-	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, rc.SampleRateResolver, rc.ActivityRecorder)
+	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, dlpReviewIngest, rc.SampleRateResolver, rc.ActivityRecorder)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
@@ -717,6 +727,14 @@ func run() error {
 		recompiler.Stop()
 	}
 	feedMgr.Stop()
+	// Drain any in-flight operator-block recompiles so a decision made
+	// just before shutdown still lands in the stored bundle. Bounded by
+	// shutdownCtx so it can never hang the shutdown path.
+	if dlpReviewRecompiler != nil {
+		if err := dlpReviewRecompiler.Wait(shutdownCtx); err != nil {
+			logger.Warn("sng-control: dlp review recompiler drain incomplete", slog.Any("error", err))
+		}
+	}
 
 	if err := telShutdown(shutdownCtx); err != nil {
 		logger.Warn("sng-control: telemetry shutdown error", slog.Any("error", err))
@@ -730,6 +748,13 @@ func run() error {
 	// (registered at line 134) so the upserts complete against a live
 	// pool, and makes the deferred Stop a no-op (idempotent).
 	shadowDiscoverer.Stop()
+	// Drain the DLP review-queue ingest worker after the telemetry
+	// consumer, for the same reason as the discoverer above: the
+	// consumer feeds ObserveDLP on its own background context, so
+	// stopping the ingest earlier would drop coach-action events
+	// observed during this shutdown window. Idempotent with the
+	// deferred Stop above.
+	dlpReviewIngest.Stop()
 	// Same ordering rationale for the activity recorder: telShutdown has
 	// now drained the telemetry consumer that feeds Observe, so stopping
 	// the recorder here drains its trailing queue before pool.Close and
@@ -777,6 +802,10 @@ type routerComponents struct {
 	// Recompiler is the feed-driven auto-recompile worker. Nil when
 	// THREATINTEL_AUTO_RECOMPILE=false (the prior pull-only behaviour).
 	Recompiler *aisvc.Recompiler
+	// DLPReviewRecompiler recompiles a tenant's bundle after an operator
+	// blocks an AI-app DLP event, propagating the per-app block override
+	// to the edge. Always non-nil.
+	DLPReviewRecompiler *dlpEnforcementRecompiler
 	// SampleRateResolver carries the policy-graph-driven per-tenant /
 	// per-class telemetry sampling overrides. Built here (where the
 	// policy service that publishes into it is constructed) and handed
@@ -787,6 +816,12 @@ type routerComponents struct {
 	// unless cfg.MobileAuth.DirectorySyncEnabled, in which case main()
 	// runs it via elector.RunIfLeader on cfg.MobileAuth.DirectorySyncInterval.
 	IDPSyncService *identity.SyncService
+	// DLPReviewService is the human-in-the-loop DLP review queue. Built
+	// here (where its repository is constructed and the operator REST
+	// handler is wired) and handed to startTelemetry so the telemetry
+	// consumer can enqueue coach-action DLP events into the same queue.
+	// Never nil.
+	DLPReviewService *dlpreview.Service
 	// ActivityRecorder is the per-tenant activity writer feeding
 	// tenants.last_active_at for the dormancy planner. Nil when
 	// ACTIVITY_TRACKING_ENABLED=false. main() starts its async drain
@@ -882,6 +917,20 @@ func buildRouter(
 	dlpFingerprintRepo := store.NewDLPFingerprintRepository()
 	dlpMatchRepo := store.NewDLPMatchRepository()
 	dlpModelRepo := store.NewDLPModelRepository()
+	// The HITL review-queue repository is the source of truth for the
+	// apps an operator has blocked; it is shared by both the DLP service
+	// (so endpoint bundles carry the per-app block overrides) and the
+	// review service (the operator REST surface) constructed later.
+	dlpReviewRepo := postgres.NewDLPReviewRepository(store)
+	// Constructed here (ahead of policySvc) so the policy compiler can
+	// embed each tenant's endpoint DLP-domain document into the
+	// endpoint bundle (policy.WithDLPEndpointCompiler). The DLP handler
+	// below reuses this same instance. WithBlockedApps closes the
+	// operator→edge loop: a `block` decision in the review queue is
+	// compiled into the bundle's AI-app policy so the edge escalates
+	// sensitive uploads to that app from coach to block.
+	dlpSvc := dlp.New(dlpPolicyRepo, dlpFingerprintRepo, dlpMatchRepo, dlpModelRepo, logger,
+		dlp.WithBlockedApps(dlpReviewRepo))
 	browserPolicyRepo := store.NewBrowserPolicyRepository()
 	dataClassificationRepo := store.NewDataClassificationRepository()
 
@@ -1181,6 +1230,11 @@ func buildRouter(
 		policy.WithInlineCASBCompiler(inlineCASBSvc),
 		policy.WithIOCCompiler(iocCompiler),
 		policy.WithMalwareHashCompiler(iocCompiler),
+		// Embed each tenant's endpoint DLP-domain document (rules +
+		// channels + coach-first AI-app detector) into the endpoint
+		// bundle so the agent's sng-dlp engine enforces it — the wiring
+		// that makes the HITL review-queue producer live in prod.
+		policy.WithDLPEndpointCompiler(dlpEndpointCompiler{svc: dlpSvc}),
 		// WS12: push each tenant's published per-class sampling rates
 		// into the telemetry consumer's resolver on publish / promote.
 		policy.WithSamplingObserver(samplingObserver{resolver: sampleRateResolver}),
@@ -1721,7 +1775,9 @@ func buildRouter(
 	// their routes never registered (the admin UI surfaced a 404 on
 	// /dlp, /browser, and /terraform). Construct them here so the
 	// route-registration guards in buildRouter see non-nil handlers.
-	dlpSvc := dlp.New(dlpPolicyRepo, dlpFingerprintRepo, dlpMatchRepo, dlpModelRepo, logger)
+	// dlpSvc is constructed earlier (alongside its repositories) so the
+	// policy compiler can embed the endpoint DLP document into bundles.
+	//
 	// Human-in-the-loop DLP review queue: the coach-first AI-app
 	// exfiltration signal flags uploads without blocking, so they land
 	// in this per-tenant queue for an operator to approve/block/dismiss.
@@ -1730,7 +1786,18 @@ func buildRouter(
 	// is actually reachable. The in-row decided_by/decided_at columns are
 	// the durable decision trail, so the service runs with its default
 	// no-op audit sink here.
-	dlpReviewSvc, err := dlpreview.New(postgres.NewDLPReviewRepository(store))
+	// Close the operator→edge loop: a block decision recompiles the
+	// tenant's bundle so the per-app override (folded in by
+	// dlp.CompileEndpointBundle) reaches the edge AI-app detector. The
+	// recompile is async + per-tenant coalesced, so the operator's
+	// request never waits on a Compile.
+	dlpReviewRecompiler := newDLPEnforcementRecompiler(
+		func(ctx context.Context, tenantID uuid.UUID) error {
+			_, cErr := policySvc.Compile(ctx, tenantID, nil)
+			return cErr
+		}, logger)
+	dlpReviewSvc, err := dlpreview.New(dlpReviewRepo,
+		dlpreview.WithBlockHook(dlpReviewRecompiler))
 	if err != nil {
 		return routerComponents{}, fmt.Errorf("dlp review queue: %w", err)
 	}
@@ -1851,23 +1918,25 @@ func buildRouter(
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
 	return routerComponents{
-		Router:             router,
-		WebhookWorker:      webhookWorker,
-		IntegrationWorker:  integrationWorker,
-		AppRegistry:        appRegHandler,
-		AppSyncer:          appSyncer,
-		PolicySim:          policySimHandler,
-		AI:                 aiSvc,
-		Metering:           meteringSvc,
-		PoP:                popSvc,
-		RegionMigrator:     tenantMigrator,
-		EvidenceScheduler:  evidenceScheduler,
-		FeedManager:        feedMgr,
-		AppNoOpsEngine:     appNoOpsEngine,
-		Recompiler:         recompiler,
-		SampleRateResolver: sampleRateResolver,
-		IDPSyncService:     idpSyncSvc,
-		ActivityRecorder:   activityRecorder,
+		Router:              router,
+		WebhookWorker:       webhookWorker,
+		IntegrationWorker:   integrationWorker,
+		AppRegistry:         appRegHandler,
+		AppSyncer:           appSyncer,
+		PolicySim:           policySimHandler,
+		AI:                  aiSvc,
+		Metering:            meteringSvc,
+		PoP:                 popSvc,
+		RegionMigrator:      tenantMigrator,
+		EvidenceScheduler:   evidenceScheduler,
+		FeedManager:         feedMgr,
+		AppNoOpsEngine:      appNoOpsEngine,
+		Recompiler:          recompiler,
+		DLPReviewRecompiler: dlpReviewRecompiler,
+		SampleRateResolver:  sampleRateResolver,
+		IDPSyncService:      idpSyncSvc,
+		DLPReviewService:    dlpReviewSvc,
+		ActivityRecorder:    activityRecorder,
 	}, nil
 }
 
@@ -2387,6 +2456,24 @@ func (o samplingObserver) ObserveSampling(tenantID uuid.UUID, classRates map[str
 	o.resolver.SetTenant(tenantID, classRates)
 }
 
+// dlpEndpointCompiler adapts *dlp.Service to the policy package's
+// DLPEndpointCompiler interface, keeping the policy service free of a
+// dlp import (the same decoupling pattern as PolicySteeringAdapter).
+// It compiles with the default channel config (nil) — per-channel
+// overrides are a future operator surface — and returns the JSON
+// document as json.RawMessage for the bundle's dl section.
+type dlpEndpointCompiler struct {
+	svc *dlp.Service
+}
+
+func (c dlpEndpointCompiler) CompileEndpointBundle(ctx context.Context, tenantID uuid.UUID) (json.RawMessage, error) {
+	blob, err := c.svc.CompileEndpointBundle(ctx, tenantID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(blob), nil
+}
+
 // startTelemetry builds the hot-path + cold-path writers and the
 // consumer service, starts the consumer, and returns a shutdown
 // closure that drains the writers + stops the consumer.
@@ -2416,6 +2503,7 @@ func startTelemetry(
 	js jetstream.JetStream,
 	pub *sngnats.Publisher,
 	shadowObserver telemetry.ShadowITObserver,
+	dlpObserver telemetry.DLPReviewObserver,
 	sampleResolver *telemetry.MapSampleRateResolver,
 	activityObserver *activity.Recorder,
 ) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), error) {
@@ -2612,6 +2700,9 @@ func startTelemetry(
 	}
 	if shadowObserver != nil {
 		svc.WithShadowITObserver(shadowObserver)
+	}
+	if dlpObserver != nil {
+		svc.WithDLPReviewObserver(dlpObserver)
 	}
 	// Feed the dormancy planner's activity signal from the data-plane
 	// hot path. nil-checked on the concrete pointer (not the interface)
