@@ -151,7 +151,7 @@ func (s *Service) EndpointRules(ctx context.Context, tenantID uuid.UUID) ([]Endp
 		return nil, err
 	}
 	rules := compileEndpointRules(policies)
-	fpRules, err := s.fingerprintRules(ctx, tenantID)
+	fpRules, err := s.fingerprintRules(ctx, tenantID, rules)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +175,7 @@ func (s *Service) CompileEndpointBundle(
 		channels = DefaultEndpointChannelConfig()
 	}
 	rules := compileEndpointRules(policies)
-	fpRules, err := s.fingerprintRules(ctx, tenantID)
+	fpRules, err := s.fingerprintRules(ctx, tenantID, rules)
 	if err != nil {
 		return nil, err
 	}
@@ -335,12 +335,33 @@ const (
 // hex pattern_data sng-dlp's `scan_fingerprints` expects. The SimHash
 // is byte-identical across the Go control plane
 // (`engine.SimHash`) and the Rust edge (`classifier::simhash`), so a
-// fingerprint registered here matches there. A fingerprint whose stored
-// hash is shorter than 8 bytes (a corrupt row) is skipped rather than
-// emitted as a pattern_data that would fail the agent's whole-bundle
-// decode. A nil fingerprint repository (model-only test wiring) yields
-// no fingerprint rules.
-func (s *Service) fingerprintRules(ctx context.Context, tenantID uuid.UUID) ([]EndpointDLPRule, error) {
+// fingerprint registered here matches there.
+//
+// A stored hash that is not exactly 8 bytes is skipped, fail-closed: a
+// 64-bit SimHash is exactly 8 bytes, so a shorter row is corrupt and a
+// longer one is some *other* digest (e.g. a SHA-256 written by a future
+// algorithm) whose leading 8 bytes are not a SimHash and would not match
+// `simhash(content)` on the edge. Skipping (rather than truncating to
+// `[:8]`) refuses to emit a pattern_data that is either undecodable or
+// silently wrong. Because the surviving hashes are exactly 8 bytes,
+// `hex.EncodeToString` yields exactly the 16 lowercase hex chars
+// `isHex16`/`parse_simhash_hex` accept — the rule is correct by
+// construction without a post-hoc `validEndpointPatternData` pass.
+//
+// `existing` is the already-compiled policy-derived rule set. A
+// registered fingerprint whose pattern_data collides with a
+// policy-derived fingerprint rule (or an earlier registered one) is
+// dropped: the agent matches every fingerprint rule independently, so
+// two rules over the same SimHash would raise two detections / two coach
+// nudges for one upload. The policy-derived rule wins because it carries
+// an explicit operator-chosen severity/action, where the registered rule
+// only carries the coach-first defaults. A nil fingerprint repository
+// (model-only test wiring) yields no fingerprint rules.
+func (s *Service) fingerprintRules(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	existing []EndpointDLPRule,
+) ([]EndpointDLPRule, error) {
 	if s.fingerprints == nil {
 		return nil, nil
 	}
@@ -348,16 +369,27 @@ func (s *Service) fingerprintRules(ctx context.Context, tenantID uuid.UUID) ([]E
 	if err != nil {
 		return nil, err
 	}
+	seen := make(map[string]struct{})
+	for _, r := range existing {
+		if r.PatternType == repository.DLPRuleTypeFingerprint {
+			seen[r.PatternData] = struct{}{}
+		}
+	}
 	rules := make([]EndpointDLPRule, 0, len(fps))
 	for _, fp := range fps {
-		if len(fp.Hash) < 8 {
+		if len(fp.Hash) != 8 {
 			continue
 		}
+		patternData := hex.EncodeToString(fp.Hash)
+		if _, dup := seen[patternData]; dup {
+			continue
+		}
+		seen[patternData] = struct{}{}
 		rules = append(rules, EndpointDLPRule{
 			ID:          endpointFingerprintIDPrefix + fp.ID.String(),
 			Name:        fp.Name,
 			PatternType: repository.DLPRuleTypeFingerprint,
-			PatternData: hex.EncodeToString(fp.Hash[:8]),
+			PatternData: patternData,
 			Severity:    endpointFingerprintSeverity,
 			Action:      endpointFingerprintAction,
 			// Registered fingerprints are not channel-scoped, so the
