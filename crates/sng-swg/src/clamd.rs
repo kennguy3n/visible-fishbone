@@ -190,14 +190,20 @@ struct Pool {
     endpoint: ClamdEndpoint,
     idle: Mutex<Vec<Connection>>,
     sem: Semaphore,
+    /// Permit count the semaphore was built with — the ceiling on *total* live
+    /// connections (idle + in_use). Kept so the idle-list bound below can be
+    /// asserted directly rather than inferred from the semaphore.
+    max: usize,
 }
 
 impl Pool {
     fn new(endpoint: ClamdEndpoint, max: usize) -> Self {
+        let max = max.max(1);
         Self {
             endpoint,
             idle: Mutex::new(Vec::new()),
-            sem: Semaphore::new(max.max(1)),
+            sem: Semaphore::new(max),
+            max,
         }
     }
 
@@ -219,8 +225,26 @@ impl Pool {
     }
 
     /// Return a healthy connection to the idle list for reuse.
+    ///
+    /// The idle list is deliberately uncapped: it is bounded *structurally* by
+    /// the semaphore, not by a length check here. Every live connection was
+    /// opened while holding a permit (max `self.max` outstanding) and only when
+    /// the idle list was empty, and the caller returning this one still holds
+    /// its permit — so at most `max - 1` connections can already be idle and
+    /// the push lands at `<= max`. The `debug_assert` pins that invariant so a
+    /// future refactor that opened a connection outside the permit-guarded
+    /// checkout (breaking the bound) trips in tests rather than silently
+    /// growing the idle list.
     fn put_back(&self, conn: Connection) {
-        self.idle.lock().push(conn);
+        let mut idle = self.idle.lock();
+        debug_assert!(
+            idle.len() < self.max,
+            "idle clamd connections ({}) exceed pool max ({}) — a connection was \
+             opened outside the permit-guarded checkout",
+            idle.len(),
+            self.max,
+        );
+        idle.push(conn);
     }
 }
 
