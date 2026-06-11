@@ -70,42 +70,43 @@ function severityTone(sev: DlpSeverity): Tone {
   }
 }
 
+// Column definitions are static (each `cell` reads only its row argument), so
+// they live at module scope rather than being rebuilt on every render.
+const QUEUE_COLUMNS: Column<DlpReviewEvent>[] = [
+  {
+    header: "Destination app",
+    cell: (e) =>
+      e.destination_app === "suspected_ai_app" ? (
+        <Badge tone="warn">Suspected AI app</Badge>
+      ) : (
+        <span className="mono">{e.destination_app}</span>
+      ),
+  },
+  { header: "Signal", cell: (e) => <Badge tone="info">{e.signal}</Badge> },
+  {
+    header: "Severity",
+    cell: (e) => <Badge tone={severityTone(e.severity)}>{titleCase(e.severity)}</Badge>,
+  },
+  { header: "Confidence", cell: (e) => formatPct(e.confidence) },
+  { header: "Findings", cell: (e) => <FindingKinds event={e} /> },
+  { header: "State", cell: (e) => <StatusBadge status={e.state} /> },
+  { header: "Created", cell: (e) => formatRelative(e.created_at) },
+];
+
 function DlpReviewQueueInner({ tenantId }: { tenantId: string }) {
   const [stateFilter, setStateFilter] = useState<DlpReviewState | "all">(
     "pending",
   );
-  const [window, setWindow] = useState<string>(DIGEST_WINDOWS[0].value);
+  const [digestWindow, setDigestWindow] = useState<string>(
+    DIGEST_WINDOWS[0].value,
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const queue = useDlpReviewQueue(
     tenantId,
     stateFilter === "all" ? undefined : stateFilter,
   );
-  const digest = useDlpReviewDigest(tenantId, window);
-
-  const cols: Column<DlpReviewEvent>[] = [
-    {
-      header: "Destination app",
-      cell: (e) =>
-        e.destination_app === "suspected_ai_app" ? (
-          <Badge tone="warn">Suspected AI app</Badge>
-        ) : (
-          <span className="mono">{e.destination_app}</span>
-        ),
-    },
-    { header: "Signal", cell: (e) => <Badge tone="info">{e.signal}</Badge> },
-    {
-      header: "Severity",
-      cell: (e) => <Badge tone={severityTone(e.severity)}>{titleCase(e.severity)}</Badge>,
-    },
-    { header: "Confidence", cell: (e) => formatPct(e.confidence) },
-    {
-      header: "Findings",
-      cell: (e) => <FindingKinds event={e} />,
-    },
-    { header: "State", cell: (e) => <StatusBadge status={e.state} /> },
-    { header: "Created", cell: (e) => formatRelative(e.created_at) },
-  ];
+  const digest = useDlpReviewDigest(tenantId, digestWindow);
 
   return (
     <>
@@ -127,8 +128,8 @@ function DlpReviewQueueInner({ tenantId }: { tenantId: string }) {
         isLoading={digest.isLoading}
         error={digest.error}
         digest={digest.data}
-        window={window}
-        onWindowChange={setWindow}
+        selectedWindow={digestWindow}
+        onWindowChange={setDigestWindow}
       />
 
       <Card title="Queue">
@@ -170,7 +171,7 @@ function DlpReviewQueueInner({ tenantId }: { tenantId: string }) {
         >
           {(d) => (
             <DataTable
-              columns={cols}
+              columns={QUEUE_COLUMNS}
               rows={d.items ?? []}
               rowKey={(e) => e.id}
               onRowClick={(e) => setSelectedId(e.id)}
@@ -210,13 +211,13 @@ function DigestCard({
   isLoading,
   error,
   digest,
-  window,
+  selectedWindow,
   onWindowChange,
 }: {
   isLoading: boolean;
   error: unknown;
   digest: ReturnType<typeof useDlpReviewDigest>["data"];
-  window: string;
+  selectedWindow: string;
   onWindowChange: (w: string) => void;
 }) {
   return (
@@ -228,7 +229,7 @@ function DigestCard({
           {DIGEST_WINDOWS.map((w) => (
             <button
               key={w.value}
-              className={window === w.value ? "active" : ""}
+              className={selectedWindow === w.value ? "active" : ""}
               onClick={() => onWindowChange(w.value)}
             >
               {w.label}
