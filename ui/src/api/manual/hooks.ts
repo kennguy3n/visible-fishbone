@@ -226,15 +226,15 @@ export function useDlpReviewEvent(
 
 export function useDlpReviewDigest(
   tenantId: string,
-  window?: string,
+  digestWindow?: string,
 ): UseQueryResult<DlpReviewDigest> {
   return useQuery({
-    queryKey: [...reviewQueueKey(tenantId), "digest", window ?? "default"],
+    queryKey: [...reviewQueueKey(tenantId), "digest", digestWindow ?? "default"],
     queryFn: ({ signal }) =>
       sngRequest<DlpReviewDigest>({
         method: "GET",
         url: `${base(tenantId)}/dlp/review-queue/digest`,
-        params: window ? { window } : undefined,
+        params: digestWindow ? { window: digestWindow } : undefined,
         signal,
       }),
     enabled: !!tenantId,
