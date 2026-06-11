@@ -191,6 +191,20 @@ impl Subsystem for ZtnaReevalSubsystem {
                 let _ = stop_tx.send(true);
             });
 
+            // The receiver is taken exactly once. `Supervisor::run`
+            // starts each subsystem a single time, so this is always
+            // `Some` on the live path; guard the hypothetical second
+            // start (e.g. a future restart-in-place) loudly rather
+            // than silently running the sweep with no drain, which
+            // would let revocations back up in the channel.
+            if revoked_rx.is_none() {
+                tracing::warn!(
+                    target: "sng_edge::ztna_reeval",
+                    "revocation receiver already consumed by a prior start; \
+                     revocation events will not be observed this run"
+                );
+            }
+
             // Drain the revocation stream concurrently so the channel
             // stays clear while the loop sweeps. A saturated channel
             // would only drop events (counted in the sweep's stats),
@@ -200,11 +214,16 @@ impl Subsystem for ZtnaReevalSubsystem {
                 task::spawn(async move {
                     loop {
                         tokio::select! {
+                            // Poll shutdown first so a steady stream of
+                            // revocations can never starve the exit
+                            // branch, matching the `biased;` discipline
+                            // of the telemetry bridge in `supervisor`.
+                            biased;
+                            () = shutdown_for_drain.wait() => break,
                             ev = rx.recv() => match ev {
                                 Some(ev) => log_revocation(&ev),
                                 None => break,
                             },
-                            () = shutdown_for_drain.wait() => break,
                         }
                     }
                     // Best-effort flush of anything buffered at the
