@@ -352,6 +352,15 @@ function ReviewDetail({
 
   const deciding = approve.isPending || block.isPending || dismiss.isPending;
 
+  // Hold the modal open while a decision is in flight. All three close paths
+  // (Escape, backdrop, ✕) route through this single handler, so guarding it
+  // here keeps the operator from dismissing mid-write — which would otherwise
+  // swallow the success toast (React Query suppresses the per-call onSuccess
+  // once the component unmounts) and leave them unsure the decision landed.
+  const closeUnlessDeciding = () => {
+    if (!deciding) onClose();
+  };
+
   const decide = (
     mutation: typeof approve,
     label: string,
@@ -368,7 +377,7 @@ function ReviewDetail({
   return (
     <Modal
       title="Review event"
-      onClose={onClose}
+      onClose={closeUnlessDeciding}
       footer={
         event.data && event.data.state === "pending" ? (
           <>
