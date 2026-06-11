@@ -3,12 +3,15 @@ package dlp_test
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlp"
 )
 
@@ -531,5 +534,305 @@ func TestCompileEndpointBundle_InvalidFingerprintRuleIsDropped(t *testing.T) {
 	// poison the bundle.
 	if rx := byID[created.ID.String()+":2"]; rx == nil || rx["pattern_data"] != "ssn_us" {
 		t.Errorf("regex rule :2 should survive with pattern_data ssn_us, got %s", blob)
+	}
+}
+
+// A registered document fingerprint must be projected into the endpoint
+// bundle as a fingerprint rule so the on-device near-duplicate detector
+// sees the same corpus the control plane matches against. Without this
+// the registered fingerprint only matched server-side and endpoints
+// stayed blind to the very document an operator registered to protect.
+func TestCompileEndpointBundle_RegisteredFingerprintBecomesEndpointRule(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	fp, err := svc.RegisterFingerprint(ctx, tid, "Q3 Board Deck", "text/plain",
+		[]byte("strictly confidential board material for the third quarter review"))
+	if err != nil {
+		t.Fatalf("register fingerprint: %v", err)
+	}
+
+	blob, err := svc.CompileEndpointBundle(ctx, tid, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(blob, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	rawRules, ok := doc["rules"].([]any)
+	if !ok || len(rawRules) != 1 {
+		t.Fatalf("expected exactly 1 endpoint rule (the fingerprint), got %s", blob)
+	}
+	r := rawRules[0].(map[string]any)
+
+	if got, want := r["id"], "fingerprint:"+fp.ID.String(); got != want {
+		t.Errorf("id = %v, want %v", got, want)
+	}
+	if r["pattern_type"] != "fingerprint" {
+		t.Errorf("pattern_type = %v, want fingerprint", r["pattern_type"])
+	}
+	// The pattern_data must be the 16-char hex of the stored 64-bit
+	// SimHash — the exact shape sng-dlp's parse_simhash_hex accepts.
+	wantHex := hex.EncodeToString(fp.Hash[:8])
+	if r["pattern_data"] != wantHex {
+		t.Errorf("pattern_data = %v, want %v", r["pattern_data"], wantHex)
+	}
+	if len(wantHex) != 16 {
+		t.Fatalf("expected 16-char hex pattern_data, got %q", wantHex)
+	}
+	// Registered fingerprints default to coach-first warn at high severity.
+	if r["action"] != "warn" {
+		t.Errorf("action = %v, want warn (coach-first)", r["action"])
+	}
+	if r["severity"] != "high" {
+		t.Errorf("severity = %v, want high", r["severity"])
+	}
+	if r["name"] != "Q3 Board Deck" {
+		t.Errorf("name = %v, want Q3 Board Deck", r["name"])
+	}
+	// Empty channel list = all channels on the endpoint.
+	if ch, _ := r["channels"].([]any); len(ch) != 0 {
+		t.Errorf("channels = %v, want all (empty list)", r["channels"])
+	}
+}
+
+// A tenant with no registered fingerprints must contribute no
+// fingerprint rules — the projection is additive, never synthetic.
+func TestCompileEndpointBundle_NoFingerprintsNoFingerprintRules(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	if _, err := svc.CreatePolicy(ctx, tid, repository.DLPPolicy{
+		Name:    "PCI",
+		Rules:   []repository.DLPRule{{Type: repository.DLPRuleTypeRegex, Pattern: `\d{16}`}},
+		Action:  repository.DLPActionBlock,
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	rules, err := svc.EndpointRules(ctx, tid)
+	if err != nil {
+		t.Fatalf("endpoint rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected only the 1 policy rule, got %d", len(rules))
+	}
+	if rules[0].PatternType == repository.DLPRuleTypeFingerprint {
+		t.Errorf("no fingerprint rule expected, got %+v", rules[0])
+	}
+}
+
+// A corrupt fingerprint row (stored hash shorter than the 8 bytes a
+// 64-bit SimHash needs) must be skipped, not emitted as a pattern_data
+// that would fail the agent's whole-bundle decode and strip every rule.
+func TestCompileEndpointBundle_CorruptFingerprintHashSkipped(t *testing.T) {
+	store := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(store)
+	tenant, err := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "Test", Slug: "corrupt-fp", Tier: repository.TenantTierStarter,
+		Status: repository.TenantStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	fpRepo := memory.NewDLPFingerprintRepository(store)
+	svc := dlp.New(
+		memory.NewDLPPolicyRepository(store),
+		fpRepo,
+		memory.NewDLPMatchRepository(store),
+		memory.NewDLPModelRepository(store),
+		nil,
+	)
+	ctx := context.Background()
+
+	// Inject a corrupt row directly: a 2-byte hash can't form a u64.
+	if _, err := fpRepo.Create(ctx, tenant.ID, repository.DLPFingerprint{
+		Name: "truncated", Hash: []byte{0x01, 0x02}, ContentType: "text/plain",
+	}); err != nil {
+		t.Fatalf("inject corrupt fingerprint: %v", err)
+	}
+
+	rules, err := svc.EndpointRules(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("endpoint rules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Fatalf("corrupt fingerprint must be skipped, got %d rules: %+v", len(rules), rules)
+	}
+}
+
+// A stored hash that is *longer* than 8 bytes is not a 64-bit SimHash
+// (e.g. a SHA-256 written by some future digest path). Truncating it to
+// its first 8 bytes would emit a pattern_data that decodes fine but
+// matches the wrong document on the edge, so the projection must skip
+// it fail-closed rather than silently truncate.
+func TestCompileEndpointBundle_OverlongFingerprintHashSkipped(t *testing.T) {
+	store := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(store)
+	tenant, err := tenantRepo.Create(context.Background(), repository.Tenant{
+		Name: "Test", Slug: "overlong-fp", Tier: repository.TenantTierStarter,
+		Status: repository.TenantStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	fpRepo := memory.NewDLPFingerprintRepository(store)
+	svc := dlp.New(
+		memory.NewDLPPolicyRepository(store),
+		fpRepo,
+		memory.NewDLPMatchRepository(store),
+		memory.NewDLPModelRepository(store),
+		nil,
+	)
+	ctx := context.Background()
+
+	// A 16-byte hash: longer than a SimHash, so the first 8 bytes are
+	// not a meaningful SimHash to project.
+	if _, err := fpRepo.Create(ctx, tenant.ID, repository.DLPFingerprint{
+		Name: "sha256-shaped", ContentType: "text/plain",
+		Hash: []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+	}); err != nil {
+		t.Fatalf("inject overlong fingerprint: %v", err)
+	}
+
+	rules, err := svc.EndpointRules(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("endpoint rules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Fatalf("overlong fingerprint must be skipped, got %d rules: %+v", len(rules), rules)
+	}
+}
+
+// When a policy already carries an explicit fingerprint rule over the
+// same SimHash that an operator separately registered, the endpoint
+// bundle must emit exactly one rule for that SimHash — the agent matches
+// each fingerprint rule independently, so two would double-flag one
+// upload. The explicit policy rule (with its operator-chosen action)
+// wins over the registered rule's coach-first default.
+func TestCompileEndpointBundle_FingerprintDedupPolicyWins(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	fp, err := svc.RegisterFingerprint(ctx, tid, "Merger Memo", "text/plain",
+		[]byte("project titan merger memo — material non-public information"))
+	if err != nil {
+		t.Fatalf("register fingerprint: %v", err)
+	}
+	sameHash := hex.EncodeToString(fp.Hash)
+
+	// A policy fingerprint rule over the identical SimHash, hard-block.
+	if _, err := svc.CreatePolicy(ctx, tid, repository.DLPPolicy{
+		Name:    "Merger memo (hard block)",
+		Rules:   []repository.DLPRule{{Type: repository.DLPRuleTypeFingerprint, Pattern: sameHash}},
+		Action:  repository.DLPActionBlock,
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+
+	rules, err := svc.EndpointRules(ctx, tid)
+	if err != nil {
+		t.Fatalf("endpoint rules: %v", err)
+	}
+
+	matched := 0
+	var winner dlp.EndpointDLPRule
+	for _, r := range rules {
+		if r.PatternData == sameHash {
+			matched++
+			winner = r
+		}
+	}
+	if matched != 1 {
+		t.Fatalf("expected exactly 1 rule for the shared SimHash, got %d: %+v", matched, rules)
+	}
+	// The surviving rule is the explicit policy one, not the registered
+	// coach-first duplicate.
+	if winner.Action != dlp.EndpointActionBlock {
+		t.Errorf("action = %v, want block (policy rule wins over registered warn)", winner.Action)
+	}
+	if strings.HasPrefix(winner.ID, "fingerprint:") {
+		t.Errorf("id = %q, want the policy-derived rule, not the registered fingerprint", winner.ID)
+	}
+}
+
+// A policy fingerprint rule may carry its hex pattern_data in
+// uppercase (isHex16 accepts both cases, and the agent's
+// parse_simhash_hex decodes case-insensitively). The registered
+// fingerprint is always lowercase from hex.EncodeToString, so the dedup
+// must normalize case — otherwise the same SimHash is emitted twice and
+// fires twice on one upload.
+func TestCompileEndpointBundle_FingerprintDedupIsCaseInsensitive(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	fp, err := svc.RegisterFingerprint(ctx, tid, "Merger Memo", "text/plain",
+		[]byte("project titan merger memo — material non-public information"))
+	if err != nil {
+		t.Fatalf("register fingerprint: %v", err)
+	}
+	lowerHash := hex.EncodeToString(fp.Hash)
+	upperHash := strings.ToUpper(lowerHash)
+
+	// Policy rule over the identical SimHash but in UPPERCASE hex.
+	if _, err := svc.CreatePolicy(ctx, tid, repository.DLPPolicy{
+		Name:    "Merger memo (hard block, uppercase hex)",
+		Rules:   []repository.DLPRule{{Type: repository.DLPRuleTypeFingerprint, Pattern: upperHash}},
+		Action:  repository.DLPActionBlock,
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+
+	rules, err := svc.EndpointRules(ctx, tid)
+	if err != nil {
+		t.Fatalf("endpoint rules: %v", err)
+	}
+
+	matched := 0
+	var winner dlp.EndpointDLPRule
+	for _, r := range rules {
+		if strings.EqualFold(r.PatternData, lowerHash) {
+			matched++
+			winner = r
+		}
+	}
+	if matched != 1 {
+		t.Fatalf("expected exactly 1 rule for the shared SimHash across case, got %d: %+v", matched, rules)
+	}
+	// The policy rule (uppercase) wins; the registered lowercase
+	// duplicate is dropped despite the case mismatch.
+	if winner.Action != dlp.EndpointActionBlock {
+		t.Errorf("action = %v, want block (policy rule wins)", winner.Action)
+	}
+	if strings.HasPrefix(winner.ID, "fingerprint:") {
+		t.Errorf("id = %q, want the policy-derived rule, not the registered fingerprint", winner.ID)
+	}
+}
+
+// Two registrations of the same content yield the same SimHash; the
+// projection must collapse them to a single endpoint rule so one upload
+// raises one detection, not one per duplicate registration.
+func TestCompileEndpointBundle_DuplicateRegisteredFingerprintsCollapse(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	content := []byte("identical sensitive content registered twice by mistake")
+	if _, err := svc.RegisterFingerprint(ctx, tid, "First", "text/plain", content); err != nil {
+		t.Fatalf("register first: %v", err)
+	}
+	if _, err := svc.RegisterFingerprint(ctx, tid, "Second", "text/plain", content); err != nil {
+		t.Fatalf("register second: %v", err)
+	}
+
+	rules, err := svc.EndpointRules(ctx, tid)
+	if err != nil {
+		t.Fatalf("endpoint rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("duplicate registrations must collapse to 1 rule, got %d: %+v", len(rules), rules)
 	}
 }
