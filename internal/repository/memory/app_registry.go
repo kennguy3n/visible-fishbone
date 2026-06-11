@@ -193,6 +193,12 @@ func (r *AppRegistryRepository) ListAll(ctx context.Context) ([]repository.AppRe
 	// iteration above is non-deterministic; sorting by name keeps the
 	// two backends consistent. Names are unique (Create rejects
 	// case-insensitive duplicates), so this is a total order.
+	//
+	// This is a byte-wise comparison, whereas postgres sorts under its
+	// column collation (often locale-aware, e.g. en_US.UTF-8). The two
+	// agree for the ASCII app names used in practice; they could only
+	// diverge for non-ASCII names, which the memory backend (a test
+	// approximation) does not attempt to replicate.
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].Name < out[j].Name
 	})
