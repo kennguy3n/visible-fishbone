@@ -14,6 +14,12 @@
 //     audit action for every verdict.
 //  3. Call RunDigests() so each tenant gets a per-tenant digest cursor.
 //
+// Rerun-safe: the casb_app_actions / audit_log stores are append-only, so
+// before reconciling the tool clears prior NoOps output for the four
+// canonical demo tenants (resetPriorOutput). A rerun therefore yields exactly
+// one action per actionable app, and an exported payload reflects a single
+// reconcile pass rather than accumulated duplicates.
+//
 // The engine here is recommend-only (no enforcer wired), matching the
 // safe default posture: classify + audit + digest, never mutate traffic.
 //
@@ -119,6 +125,12 @@ func main() {
 	store := postgres.NewStoreWithPool(rw)
 	apps := store.NewCASBDiscoveredAppRepository()
 
+	// Clear prior append-only NoOps output for the demo tenants so this run
+	// is idempotent (one action per actionable app, no accumulated copies).
+	if err := resetPriorOutput(ctx, pool); err != nil {
+		fatal("reset prior output: " + err.Error())
+	}
+
 	now := time.Now().UTC()
 	totalApps := 0
 	for name, list := range perTenantApps {
@@ -169,6 +181,28 @@ func main() {
 
 	fmt.Printf("OK — %d shadow-IT apps across %d tenants classified through the real NoOps engine\n",
 		totalApps, len(perTenantApps))
+}
+
+// resetPriorOutput clears append-only NoOps output for the canonical demo
+// tenants so a rerun is idempotent and an exported payload reflects a single
+// reconcile pass. Scoped strictly by tenant_id; runs as the BYPASSRLS
+// superuser pool connection.
+func resetPriorOutput(ctx context.Context, pool *pgxpool.Pool) error {
+	ids := make([]uuid.UUID, 0, len(canonicalTenantID))
+	for _, s := range canonicalTenantID {
+		ids = append(ids, uuid.MustParse(s))
+	}
+	stmts := []string{
+		"DELETE FROM casb_app_actions WHERE tenant_id = ANY($1)",
+		"DELETE FROM casb_app_classifications WHERE tenant_id = ANY($1)",
+		"DELETE FROM audit_log WHERE tenant_id = ANY($1) AND action LIKE 'casb.app_noops%'",
+	}
+	for _, q := range stmts {
+		if _, err := pool.Exec(ctx, q, ids); err != nil {
+			return fmt.Errorf("%q: %w", q, err)
+		}
+	}
+	return nil
 }
 
 func openPool(ctx context.Context) (*pgxpool.Pool, error) {
