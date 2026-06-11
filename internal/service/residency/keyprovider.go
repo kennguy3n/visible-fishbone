@@ -299,6 +299,18 @@ type TenantKeyProvider interface {
 	// any KMS error returns a non-nil error and a zero DataKey, never
 	// a usable plaintext with an unverified wrap.
 	GenerateDataKey(ctx context.Context, ref TenantKeyRef, ec EncryptionContext) (DataKey, error)
+	// WrapDataKey seals an externally-supplied plaintext DEK under the
+	// KEK named by ref, with ec bound as additional authenticated data.
+	// It is the wrap-half of an envelope RE-WRAP: unlike GenerateDataKey
+	// it does NOT mint a fresh DEK, so the same DEK plaintext can be
+	// re-sealed under a different KEK (e.g. a target-region KEK during a
+	// cross-region tenant migration) WITHOUT re-encrypting the bulk data
+	// the DEK protects. The plaintext must be exactly dekSize bytes and
+	// remains the caller's to zeroize. Fail-closed: any KMS error or a
+	// wrong-length plaintext returns a non-nil error and a zero
+	// WrappedDataKey. Maps to AWS KMS Encrypt / GCP KMS Encrypt / Azure
+	// Key Vault wrapKey — the inverse of UnwrapDataKey.
+	WrapDataKey(ctx context.Context, ref TenantKeyRef, plaintext []byte, ec EncryptionContext) (WrappedDataKey, error)
 	// UnwrapDataKey decrypts wrapped under the KEK named by ref, with
 	// ec bound as additional authenticated data. ec must be identical
 	// to the context used at wrap time or the unwrap fails.

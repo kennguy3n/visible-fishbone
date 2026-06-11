@@ -119,6 +119,11 @@ func (s *Store) NewResidencyAuditRepository() *ResidencyAuditRepository {
 	return &ResidencyAuditRepository{s: s}
 }
 
+// NewTenantMigrationRepository binds the Store to repository.TenantMigrationRepository.
+func (s *Store) NewTenantMigrationRepository() *TenantMigrationRepository {
+	return &TenantMigrationRepository{s: s}
+}
+
 // NewCASBConnectorRepository binds the Store to repository.CASBConnectorRepository.
 func (s *Store) NewCASBConnectorRepository() *CASBConnectorRepository {
 	return &CASBConnectorRepository{s: s}
@@ -293,6 +298,7 @@ var (
 	_ repository.TroubleshootSessionRepository   = (*TroubleshootSessionRepository)(nil)
 	_ repository.IDPConfigRepository             = (*IDPConfigRepository)(nil)
 	_ repository.ResidencyAuditRepository        = (*ResidencyAuditRepository)(nil)
+	_ repository.TenantMigrationRepository       = (*TenantMigrationRepository)(nil)
 	_ repository.ThreatIOCRepository             = (*ThreatIOCRepository)(nil)
 	_ repository.DLPPolicyRepository             = (*DLPPolicyRepository)(nil)
 	_ repository.DLPFingerprintRepository        = (*DLPFingerprintRepository)(nil)

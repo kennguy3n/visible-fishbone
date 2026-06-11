@@ -138,6 +138,37 @@ func (p *LocalKeyProvider) GenerateDataKey(_ context.Context, ref TenantKeyRef, 
 	}, nil
 }
 
+// WrapDataKey implements TenantKeyProvider. It seals an
+// externally-supplied DEK under the ref's key with ec as AAD, minting
+// no new key material — the wrap-half of an envelope re-wrap. The
+// plaintext is left untouched (the caller owns its lifetime and must
+// zeroize it).
+func (p *LocalKeyProvider) WrapDataKey(_ context.Context, ref TenantKeyRef, plaintext []byte, ec EncryptionContext) (WrappedDataKey, error) {
+	if ref.Kind != p.kind {
+		return WrappedDataKey{}, fmt.Errorf("%w: provider %q got ref kind %q", ErrProviderKindMismatch, p.kind, ref.Kind)
+	}
+	if len(plaintext) != dekSize {
+		// Refuse to seal anything that is not a well-formed DEK: a
+		// wrong-length input is a caller bug, not a key the data plane
+		// could ever have produced. Fail closed rather than emit an
+		// envelope that UnwrapDataKey would later reject on length.
+		return WrappedDataKey{}, fmt.Errorf("%w: dek must be %d bytes (got %d)", ErrWrapFailed, dekSize, len(plaintext))
+	}
+	aead, err := p.aeadFor(ref.KeyURI)
+	if err != nil {
+		return WrappedDataKey{}, err
+	}
+	ct, err := seal(aead, plaintext, ec.Canonical())
+	if err != nil {
+		return WrappedDataKey{}, fmt.Errorf("%w: %v", ErrWrapFailed, err)
+	}
+	return WrappedDataKey{
+		Kind:       p.kind,
+		KeyURI:     ref.KeyURI,
+		Ciphertext: ct,
+	}, nil
+}
+
 // UnwrapDataKey implements TenantKeyProvider. It opens the wrapped DEK
 // under the wrapped key's KeyURI (not the ref's — they normally match,
 // but unwrap must follow the KEK that actually produced the envelope,

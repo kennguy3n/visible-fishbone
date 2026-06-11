@@ -300,6 +300,75 @@ type ResidencyAuditEntry struct {
 	CreatedAt        time.Time
 }
 
+// Cross-region tenant-migration states (migration 059). The string
+// values mirror the `tenant_migrations.state` CHECK constraint exactly,
+// so the service-layer state machine and the database share one
+// vocabulary. The first six are the ordered forward pipeline; the last
+// four are outcomes (Completed/RolledBack/Failed are terminal,
+// RollingBack is transient).
+const (
+	MigrationStatePending          = "pending"
+	MigrationStateRewrappingKeys   = "rewrapping_keys"
+	MigrationStateCopyingTelemetry = "copying_telemetry"
+	MigrationStateCopyingObjects   = "copying_objects"
+	MigrationStateReassigningPoP   = "reassigning_pop"
+	MigrationStateUpdatingRegion   = "updating_region"
+	MigrationStateCompleted        = "completed"
+	MigrationStateRollingBack      = "rolling_back"
+	MigrationStateRolledBack       = "rolled_back"
+	MigrationStateFailed           = "failed"
+)
+
+// IsTerminalMigrationState reports whether a tenant_migrations.state is
+// terminal — i.e. excluded from the partial unique/resumable indexes so
+// a new migration may be started. Mirrors the WHERE clause on
+// uq_tenant_migrations_active / idx_tenant_migrations_resumable.
+func IsTerminalMigrationState(state string) bool {
+	switch state {
+	case MigrationStateCompleted, MigrationStateRolledBack, MigrationStateFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// TenantMigration is one row of the cross-region migration state
+// machine (migration 059): the durable, resumable record of moving a
+// tenant's data from SourceRegion to TargetRegion. The orchestration
+// logic (state transitions, per-step rollback, dual-read) lives in
+// internal/service/tenant.RegionMigrator; this struct is the pure
+// persistence projection.
+type TenantMigration struct {
+	ID           uuid.UUID
+	TenantID     uuid.UUID
+	SourceRegion string
+	TargetRegion string
+	// State is one of the MigrationState* constants.
+	State string
+	// DualRead is true for the whole in-flight window so read paths
+	// consult both regions and no tenant traffic is lost.
+	DualRead bool
+	// Checkpoint records per-step status + rollback metadata as JSON.
+	// Owned by RegionMigrator; opaque to the repository. Nil/empty is
+	// persisted as the SQL default '{}'.
+	Checkpoint json.RawMessage
+	// Detail is the human-readable reason for the current state (the
+	// failure message when failing/rolling back), empty otherwise.
+	Detail   string
+	Attempts int
+	// Version is an optimistic-concurrency counter incremented by the
+	// repository on every Update. A caller passes the version it loaded;
+	// if the stored row advanced in between, Update returns
+	// ErrConcurrentUpdate so a stale writer (e.g. the leader resume loop
+	// racing a synchronous Start over the same migration) yields instead
+	// of overwriting the winner's state.
+	Version     int
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+}
+
 // ClaimToken is a short-lived one-time enrollment credential. Only
 // the SHA-256 hash of the plaintext is persisted; callers receive
 // the plaintext exactly once at create-time.

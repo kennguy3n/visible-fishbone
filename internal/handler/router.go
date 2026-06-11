@@ -16,6 +16,7 @@ type RouterDeps struct {
 	Config           *config.Config
 	Logger           *slog.Logger
 	Tenants          *TenantHandler
+	TenantMigration  *TenantMigrationHandler
 	Sites            *SiteHandler
 	Devices          *DeviceHandler
 	RBAC             *RBACHandler
@@ -119,6 +120,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	apiMux := http.NewServeMux()
 	if deps.Tenants != nil {
 		deps.Tenants.Register(apiMux)
+	}
+	if deps.TenantMigration != nil {
+		deps.TenantMigration.Register(apiMux)
 	}
 	if deps.Sites != nil {
 		deps.Sites.Register(apiMux)

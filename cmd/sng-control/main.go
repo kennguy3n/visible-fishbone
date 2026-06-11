@@ -357,6 +357,29 @@ func run() error {
 		}
 	}()
 	go popSvc.Run(rootCtx, cfg.PoP.RegistryRefreshInterval)
+	// WORKSTREAM 11: resume any cross-region migration left in-flight by
+	// a previous control-plane instance (or this one before a leadership
+	// flap), so a crash/restart mid migration is picked up from the
+	// durable checkpoint rather than stranding the tenant in dual-read.
+	// Like the other leader-only singletons (app-registry sync, pop
+	// rebalance, compliance evidence) this is a blocking PERIODIC loop,
+	// not a one-shot: RunIfLeader (re)starts it on every leadership
+	// acquisition, and the loop re-scans on its own cadence until
+	// leadership is lost. The periodic re-scan matters because a
+	// migration is normally driven synchronously in the API handler's
+	// request goroutine — if that request context is cancelled (client
+	// timeout) mid-drive without a process crash, the migration is left
+	// non-terminal and a one-shot boot-time resume on a stable leader
+	// would never pick it up. ResumeAll only drives non-terminal
+	// migrations and every step is idempotent, so re-scanning is safe.
+	// It runs in the background so it never blocks readiness.
+	if rc.RegionMigrator != nil {
+		go elector.RunIfLeader(rootCtx, "ws11-migration-resume", func(ctx context.Context) {
+			runMigrationResume(ctx, rc.RegionMigrator, cfg.TenantMigration.ResumeInterval, logger)
+		})
+		logger.Info("sng-control: ws11 migration resume loop registered (runs on leader only)",
+			slog.Duration("interval", cfg.TenantMigration.ResumeInterval))
+	}
 	// WORKSTREAM 8 threat-intel aggregator: one warm-up refresh per
 	// configured feed on start, then scheduled (default hourly)
 	// re-pulls plus a TTL sweeper, all tied to rootCtx. With no
@@ -646,6 +669,9 @@ type routerComponents struct {
 	AI                *aisvc.Service
 	Metering          *metering.MeteringService
 	PoP               *pop.Service
+	// RegionMigrator drives the WS11 cross-region tenant-migration state
+	// machine; the serve loop resumes any in-flight migration on boot.
+	RegionMigrator    *tenant.RegionMigrator
 	EvidenceScheduler *compliance.Scheduler
 	FeedManager       *aisvc.FeedManager
 	// Recompiler is the feed-driven auto-recompile worker. Nil when
@@ -683,6 +709,7 @@ func buildRouter(
 	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
+	tenantMigrationRepo := store.NewTenantMigrationRepository()
 	siteRepo := store.NewSiteRepository()
 	// Short-TTL cache for the auth-middleware mobile device kill-switch.
 	// Decorating the device repository here means every status mutation
@@ -1387,6 +1414,35 @@ func buildRouter(
 	)
 	popHandler := handler.NewPoPHandler(popSvc, rbacSvc)
 
+	// --- WORKSTREAM 11: cross-region tenant migration -----------------
+	// The RegionMigrator drives the resumable migration state machine
+	// (migration 059). Two planes are wired from real services here:
+	//   * Region   — flips the authoritative tenants.region column, the
+	//                migration's commit point.
+	//   * PoP      — re-pins the tenant onto a Point-of-Presence in the
+	//                target region (and restores the previous pin on
+	//                rollback), adapting *pop.Service + its store to the
+	//                migrator's narrow PoPControl port.
+	// The DEK re-wrap, ClickHouse partition copy, and S3 object copy
+	// planes are left nil: those backends are single-region in this
+	// deployment, so their steps are logged no-ops (mirroring the
+	// opt-in residency Guard above). Wiring a second-region KMS / CH /
+	// S3 client turns each into an active step with no migrator change.
+	tenantMigrator, err := tenant.NewRegionMigrator(
+		tenantMigrationRepo,
+		tenantRepo,
+		auditRepo,
+		tenant.MigrationPlanes{
+			Region: tenant.NewRegionColumnPlane(tenantRepo),
+			PoP:    tenant.NewPoPReassigner(popControlAdapter{svc: popSvc, store: popStore}),
+		},
+		logger,
+	)
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("build region migrator: %w", err)
+	}
+	tenantMigrationHandler := handler.NewTenantMigrationHandler(tenantMigrator)
+
 	// Workstream 10 — per-tenant rate limiter: a fair per-tenant
 	// request budget enforced AFTER auth so one noisy tenant cannot
 	// exhaust shared control-plane capacity for the rest of the fleet.
@@ -1458,10 +1514,11 @@ func buildRouter(
 	}, logger)
 
 	router := handler.NewRouter(handler.RouterDeps{
-		Config:  cfg,
-		Logger:  logger,
-		Tenants: handler.NewTenantHandler(tenantSvc),
-		Sites:   handler.NewSiteHandler(siteSvc),
+		Config:          cfg,
+		Logger:          logger,
+		Tenants:         handler.NewTenantHandler(tenantSvc),
+		TenantMigration: tenantMigrationHandler,
+		Sites:           handler.NewSiteHandler(siteSvc),
 		Devices: func() *handler.DeviceHandler {
 			h := handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL)
 			h.SetEnrollmentService(enrollmentSvc)
@@ -1552,6 +1609,7 @@ func buildRouter(
 		AI:                 aiSvc,
 		Metering:           meteringSvc,
 		PoP:                popSvc,
+		RegionMigrator:     tenantMigrator,
 		EvidenceScheduler:  evidenceScheduler,
 		FeedManager:        feedMgr,
 		Recompiler:         recompiler,
@@ -1617,6 +1675,44 @@ func (r tenantRegionResolver) TenantRegion(ctx context.Context, tenantID uuid.UU
 		return "", fmt.Errorf("resolve tenant region: %w", err)
 	}
 	return t.Region, nil
+}
+
+// popControlAdapter adapts *pop.Service (plus its store) onto the
+// tenant package's narrow PoPControl port so the WS11 migrator can
+// re-pin a tenant onto a Point-of-Presence in the target region
+// without the tenant package depending on the pop package. The pin is
+// written as an operator override so the PoP rebalancer treats it as
+// sticky and does not migrate the tenant back to a source-region PoP.
+type popControlAdapter struct {
+	svc   *pop.Service
+	store pop.Store
+}
+
+func (a popControlAdapter) AvailablePoPs() []tenant.PoPInfo {
+	pops := a.svc.ListAvailable()
+	out := make([]tenant.PoPInfo, 0, len(pops))
+	for _, p := range pops {
+		out = append(out, tenant.PoPInfo{ID: p.ID, Region: p.Region})
+	}
+	return out
+}
+
+func (a popControlAdapter) CurrentAssignment(ctx context.Context, tenantID uuid.UUID) (uuid.UUID, bool, error) {
+	asg, err := a.store.GetAssignment(ctx, tenantID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("get pop assignment: %w", err)
+	}
+	return asg.PoPID, true, nil
+}
+
+func (a popControlAdapter) SetAssignment(ctx context.Context, tenantID, popID uuid.UUID) error {
+	if _, err := a.svc.SetAssignment(ctx, tenantID, popID, true); err != nil {
+		return fmt.Errorf("set pop assignment: %w", err)
+	}
+	return nil
 }
 
 // buildAIHandler constructs the AI handler with an optional LLM
@@ -2735,6 +2831,45 @@ func runPoPRebalance(ctx context.Context, svc *pop.Service, interval time.Durati
 				logger.Info("pop: rebalance moved tenants off overloaded PoPs",
 					slog.Int("moved", moved))
 			}
+		}
+	}
+}
+
+// runMigrationResume drives the leader-only WS11 cross-region migration
+// resume loop until ctx is cancelled. It is invoked through
+// elector.RunIfLeader, so it starts on leadership acquisition and
+// returns (stopping the ticker) when leadership is lost or the process
+// shuts down. It scans once immediately on entry — so a leader that has
+// just taken over a crashed predecessor picks up stranded migrations
+// without waiting a full interval — then re-scans every interval to
+// catch migrations stranded by a cancelled request context on a stable
+// leader. ResumeAll only drives non-terminal migrations and every step
+// is idempotent, so repeated scans are safe.
+func runMigrationResume(ctx context.Context, migrator *tenant.RegionMigrator, interval time.Duration, logger *slog.Logger) {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	resume := func() {
+		n, rerr := migrator.ResumeAll(ctx)
+		if rerr != nil && ctx.Err() == nil {
+			logger.Warn("sng-control: ws11 resume in-flight migrations failed",
+				slog.Int("resumed", n), slog.Any("error", rerr))
+			return
+		}
+		if n > 0 {
+			logger.Info("sng-control: ws11 resumed in-flight migrations",
+				slog.Int("resumed", n))
+		}
+	}
+	resume()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			resume()
 		}
 	}
 }

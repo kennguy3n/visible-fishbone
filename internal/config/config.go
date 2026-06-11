@@ -90,6 +90,24 @@ type Config struct {
 	PoP                PoP
 	Sandbox            Sandbox
 	RBI                RBI
+	TenantMigration    TenantMigration
+}
+
+// TenantMigration carries the runtime knobs for the WS11 cross-region
+// tenant-migration state machine (internal/service/tenant). A migration
+// is normally driven synchronously by the API handler, but a crash or a
+// cancelled request context can strand one in a non-terminal state; the
+// leader-only resume loop re-drives any such migration from its durable
+// checkpoint.
+type TenantMigration struct {
+	// ResumeInterval is the cadence of the leader-only loop that scans
+	// for in-flight (non-terminal) migrations and re-drives them from
+	// their durable checkpoint. It bounds how long a migration stranded
+	// by a crash or a cancelled request context waits before being
+	// picked up, independent of leadership changes. Defaults to 5m: long
+	// enough that the cross-tenant ListResumable scan is cheap, short
+	// enough that a stranded tenant does not sit in dual-read for long.
+	ResumeInterval time.Duration
 }
 
 // RBI carries the runtime knobs for Remote Browser Isolation
@@ -1636,6 +1654,7 @@ func Load() (Config, error) {
 		{"POP_GEODNS_TTL", 30 * time.Second, &cfg.PoP.GeoDNSTTL},
 		{"POP_GEODNS_PUBLISH_INTERVAL", 30 * time.Second, &cfg.PoP.GeoDNSPublishInterval},
 		{"POP_REBALANCE_INTERVAL", 60 * time.Second, &cfg.PoP.RebalanceInterval},
+		{"WS11_MIGRATION_RESUME_INTERVAL", 5 * time.Minute, &cfg.TenantMigration.ResumeInterval},
 	}
 	strictFloats := []struct {
 		key string
@@ -2158,6 +2177,9 @@ func (c Config) validate() error {
 	}
 	if c.PoP.RebalanceInterval <= 0 {
 		return fmt.Errorf("POP_REBALANCE_INTERVAL must be > 0, got %s", c.PoP.RebalanceInterval)
+	}
+	if c.TenantMigration.ResumeInterval <= 0 {
+		return fmt.Errorf("WS11_MIGRATION_RESUME_INTERVAL must be > 0, got %s", c.TenantMigration.ResumeInterval)
 	}
 	return nil
 }
