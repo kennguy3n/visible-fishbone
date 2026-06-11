@@ -228,10 +228,12 @@ impl DlpEngine {
         // `install` rotates only the rule set + channel config. The
         // AI-app detector and the ML-NER model are orthogonal
         // dimensions, each mutated by its own atomic path
-        // (`set_ai_app_policy`, `install_model`), so a rule rotation
-        // must preserve both. The bundle-apply path applies the
-        // document's `ai_app` block via a separate `set_ai_app_policy`
-        // call so all three dimensions stay independently swappable.
+        // (`set_ai_app_policy`, `install_model`), so a rule-only
+        // rotation must preserve both — hence the rebuild from the
+        // *current* `ai_app_policy`. The bundle-apply path does not use
+        // this method: it lands the document's rules + `ai_app` block
+        // together via the atomic `install_with_ai_app`, so there is no
+        // redundant detector rebuild there.
         let ai_app_policy = current.ai_app_policy.clone();
         let ai_app = build_ai_app(ai_app_policy.as_ref(), max_scan_bytes, &model)?;
         self.state.store(Arc::new(EngineState {

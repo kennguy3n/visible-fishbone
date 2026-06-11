@@ -426,10 +426,10 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
 ///
 /// The `engine` is built by [`build_agent`] and shared with the
 /// bundle publisher, which hot-swaps the live policy on every fresh
-/// endpoint bundle via [`DlpEngine::install`] +
-/// [`DlpEngine::set_ai_app_policy`]. The caller only invokes this when
-/// `[dlp] enabled` is set, so a deployment that hasn't authored
-/// endpoint DLP rules pays no monitoring cost.
+/// endpoint bundle via the atomic [`DlpEngine::install_with_ai_app`]
+/// (rules + AI-app detector in one state swap). The caller only invokes
+/// this when `[dlp] enabled` is set, so a deployment that hasn't
+/// authored endpoint DLP rules pays no monitoring cost.
 fn build_dlp_subsystem(
     cfg: &crate::config::DlpConfig,
     telemetry: sng_telemetry::PipelineHandle,
