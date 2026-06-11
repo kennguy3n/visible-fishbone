@@ -149,6 +149,25 @@ type MalwareHashCompiler interface {
 	CompileMalwareHashes(ctx context.Context, tenantID uuid.UUID) ([]MalwareHashEntry, error)
 }
 
+// DLPEndpointCompiler produces the endpoint DLP-domain policy
+// document (rules + channel config + the coach-first AI-app detector
+// policy) as the JSON blob sng-dlp's DlpPolicy::from_bundle_json
+// decodes. It is satisfied by *dlp.Service via a thin adapter at the
+// wiring site (cmd/sng-control) — declared as an interface here so
+// the policy package does not import the dlp service package
+// (avoiding an import cycle and keeping Compile unit-testable with a
+// tiny fake).
+//
+// The document is tenant-scoped and identical regardless of target,
+// so Compile builds it once and embeds it only in the endpoint
+// bundle (the only target that runs the endpoint DLP engine). A nil
+// compiler leaves the dl section out of every bundle, so an endpoint
+// with no wired DLP compiler runs with an empty DLP engine — the
+// pre-wiring behaviour.
+type DLPEndpointCompiler interface {
+	CompileEndpointBundle(ctx context.Context, tenantID uuid.UUID) (json.RawMessage, error)
+}
+
 // IOCSnapshot is a single point-in-time view of the IOC store from
 // which BOTH the threat-intel deny-rule slice and the malware-hash
 // set are derived, so a concurrent feed refresh cannot make the two
@@ -197,6 +216,7 @@ type Service struct {
 	inlineCASB  InlineCASBCompiler
 	ioc         IOCCompiler
 	malwareHash MalwareHashCompiler
+	dlp         DLPEndpointCompiler
 	sampling    SamplingObserver
 }
 
@@ -266,6 +286,18 @@ func WithIOCCompiler(c IOCCompiler) ServiceOption {
 func WithMalwareHashCompiler(c MalwareHashCompiler) ServiceOption {
 	return func(s *Service) {
 		s.malwareHash = c
+	}
+}
+
+// WithDLPEndpointCompiler installs the endpoint DLP compiler. When
+// supplied, Compile embeds the tenant's endpoint DLP-domain policy
+// document (rules + channels + the coach-first AI-app detector) into
+// the endpoint bundle's dl section, which the agent installs into its
+// live sng-dlp engine. When nil, the section is omitted and the
+// endpoint DLP engine stays empty (the pre-wiring behaviour).
+func WithDLPEndpointCompiler(c DLPEndpointCompiler) ServiceOption {
+	return func(s *Service) {
+		s.dlp = c
 	}
 }
 
@@ -715,6 +747,19 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 		}
 		steeringSnap = snap
 	}
+	// Compile the endpoint DLP-domain document once per Compile: it is
+	// tenant-scoped and identical across targets, and only the
+	// endpoint target carries it (the only one that runs the endpoint
+	// DLP engine). A nil compiler leaves it nil and the dl section is
+	// omitted from every bundle.
+	var dlpJSON json.RawMessage
+	if s.dlp != nil {
+		doc, dErr := s.dlp.CompileEndpointBundle(ctx, tenantID)
+		if dErr != nil {
+			return CompileResult{}, fmt.Errorf("compile endpoint dlp policy: %w", dErr)
+		}
+		dlpJSON = doc
+	}
 	for _, target := range allTargets {
 		// Resolve the per-target steering rules from the
 		// snapshot. Determinism comes from the appdb compiler —
@@ -734,7 +779,14 @@ func (s *Service) Compile(ctx context.Context, tenantID uuid.UUID, actorID *uuid
 			}
 			steeringJSON = encoded
 		}
-		payload, err := encodeBundlePayloadFor(target, graph, typed, steeringJSON, malwareForTarget(target, malwareHashes), compiledAt)
+		// Only the endpoint target runs the endpoint DLP engine, so
+		// only its bundle carries the dl section; every other target
+		// gets nil and omits it.
+		var targetDLP json.RawMessage
+		if target == repository.PolicyBundleTargetEndpoint {
+			targetDLP = dlpJSON
+		}
+		payload, err := encodeBundlePayloadFor(target, graph, typed, steeringJSON, malwareForTarget(target, malwareHashes), targetDLP, compiledAt)
 		if err != nil {
 			return CompileResult{}, fmt.Errorf("encode %s bundle: %w", target, err)
 		}
@@ -894,7 +946,14 @@ type bundlePayload struct {
 	// same byte-determinism reason as Rules/Steering. Omitted when
 	// no malware-hash compiler is wired or the target does not run
 	// the SWG malware inspector (only edge + cloud do).
-	Malware    json.RawMessage `msgpack:"mw,omitempty"`
+	Malware json.RawMessage `msgpack:"mw,omitempty"`
+	// Dlp is the endpoint DLP-domain policy document (rules, channel
+	// config, and the coach-first AI-app detector policy) that the
+	// agent's sng-dlp engine installs on bundle apply. JSON-encoded
+	// for the same byte-determinism reason as Rules/Steering. Emitted
+	// only for the endpoint target (the only one that runs the
+	// endpoint DLP engine) and only when a DLP compiler is wired.
+	Dlp        json.RawMessage `msgpack:"dl,omitempty"`
 	CompiledAt string          `msgpack:"ts"`
 }
 
@@ -968,7 +1027,7 @@ func encodeBundlePayload(target repository.PolicyBundleTarget, g repository.Poli
 	if parsed, err := ParseGraph(g.Graph); err == nil {
 		typed = &parsed
 	}
-	return encodeBundlePayloadFor(target, g, typed, nil, nil, compiledAt)
+	return encodeBundlePayloadFor(target, g, typed, nil, nil, nil, compiledAt)
 }
 
 // encodeBundlePayloadFor renders a deterministic, MessagePack-encoded
@@ -986,7 +1045,7 @@ func encodeBundlePayload(target repository.PolicyBundleTarget, g repository.Poli
 // malware is the malicious file-hash set for this target (already
 // filtered to edge/cloud by malwareForTarget). nil/empty omits the
 // malware section.
-func encodeBundlePayloadFor(target repository.PolicyBundleTarget, g repository.PolicyGraph, typed *Graph, steeringJSON json.RawMessage, malware []MalwareHashEntry, compiledAt time.Time) ([]byte, error) {
+func encodeBundlePayloadFor(target repository.PolicyBundleTarget, g repository.PolicyGraph, typed *Graph, steeringJSON json.RawMessage, malware []MalwareHashEntry, dlpJSON json.RawMessage, compiledAt time.Time) ([]byte, error) {
 	rules, defaultAction := perTargetRulesFromParsed(target, g.Graph, typed)
 	malwareJSON, err := encodeMalwareHashes(malware)
 	if err != nil {
@@ -1002,6 +1061,7 @@ func encodeBundlePayloadFor(target repository.PolicyBundleTarget, g repository.P
 		Rules:         rules,
 		Steering:      steeringJSON,
 		Malware:       malwareJSON,
+		Dlp:           dlpJSON,
 		CompiledAt:    compiledAt.Format(time.RFC3339Nano),
 	}
 	enc := msgpack.GetEncoder()

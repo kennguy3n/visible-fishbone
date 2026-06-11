@@ -199,6 +199,42 @@ func TestValidateEndpointPolicy_RejectsBadDocuments(t *testing.T) {
 	}
 }
 
+// TestCompileEndpointBundle_EmitsCoachFirstAiApp locks in the wiring
+// that makes the HITL review-queue producer live: every endpoint
+// bundle arms the AI-app exfiltration detector coach-first (enabled,
+// never blocking). Without this block the agent leaves the detector
+// disarmed and the producer can never fire in prod.
+func TestCompileEndpointBundle_EmitsCoachFirstAiApp(t *testing.T) {
+	svc, tid := setup(t)
+	blob, err := svc.CompileEndpointBundle(context.Background(), tid, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var policy dlp.EndpointDLPPolicy
+	if err := json.Unmarshal(blob, &policy); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if policy.AiApp == nil {
+		t.Fatal("endpoint bundle missing ai_app block; detector would stay disarmed")
+	}
+	if !policy.AiApp.Enabled {
+		t.Error("ai_app.enabled = false; detector disarmed")
+	}
+	if policy.AiApp.BlockOptIn {
+		t.Error("ai_app.block_opt_in = true; default must be coach-first (non-blocking)")
+	}
+	if policy.AiApp.CoachSeverityFloor != dlp.EndpointSeverityHigh {
+		t.Errorf("ai_app.coach_severity_floor = %q, want high", policy.AiApp.CoachSeverityFloor)
+	}
+	// The block must serialise with snake_case keys sng-dlp's
+	// AiAppPolicy decodes.
+	if !bytes.Contains(blob, []byte(`"ai_app"`)) ||
+		!bytes.Contains(blob, []byte(`"block_opt_in"`)) ||
+		!bytes.Contains(blob, []byte(`"min_report_confidence"`)) {
+		t.Errorf("ai_app wire keys missing: %s", blob)
+	}
+}
+
 func TestCompileEndpointBundle_EmptyTenantIsValid(t *testing.T) {
 	svc, tid := setup(t)
 	blob, err := svc.CompileEndpointBundle(context.Background(), tid, nil)

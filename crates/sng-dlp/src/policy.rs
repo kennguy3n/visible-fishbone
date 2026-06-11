@@ -244,6 +244,48 @@ mod tests {
     }
 
     #[test]
+    fn decodes_the_control_plane_endpoint_wire_shape() {
+        // Byte-for-byte the document the Go control plane's
+        // dlp.CompileEndpointBundle emits (schema_version/target/domain
+        // + a regex rule with channels + the coach-first ai_app block).
+        // Locks cross-language wire parity for the ai_app section added
+        // in WS2c: a field-name drift on either side breaks the edge.
+        let blob = br#"{
+            "schema_version": 1,
+            "target": "endpoint",
+            "domain": "dlp",
+            "rules": [{
+                "id": "p:0",
+                "name": "PCI",
+                "pattern_type": "regex",
+                "pattern_data": "credit_card",
+                "severity": "high",
+                "action": "warn",
+                "channels": ["browser_upload", "file_write"]
+            }],
+            "channels": {
+                "clipboard": {"enabled": true},
+                "print": {"enabled": false}
+            },
+            "ai_app": {
+                "enabled": true,
+                "block_opt_in": false,
+                "block_confidence": 0.9,
+                "min_report_confidence": 0.5,
+                "coach_severity_floor": "high"
+            }
+        }"#;
+        let policy = DlpPolicy::from_bundle_json(blob).expect("decode control-plane wire shape");
+        assert_eq!(policy.rules.len(), 1);
+        assert!(!policy.is_channel_enabled(DlpChannel::Print));
+        let ai = policy.ai_app.expect("ai_app block must decode");
+        assert!(ai.enabled);
+        assert!(!ai.block_opt_in);
+        assert!((ai.block_confidence - 0.9).abs() < f64::EPSILON);
+        assert!((ai.min_report_confidence - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn wrong_target_is_rejected() {
         let blob = br#"{"target":"edge","rules":[]}"#;
         let err = DlpPolicy::from_bundle_json(blob).unwrap_err();

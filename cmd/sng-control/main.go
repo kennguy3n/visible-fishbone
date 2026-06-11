@@ -848,6 +848,11 @@ func buildRouter(
 	dlpFingerprintRepo := store.NewDLPFingerprintRepository()
 	dlpMatchRepo := store.NewDLPMatchRepository()
 	dlpModelRepo := store.NewDLPModelRepository()
+	// Constructed here (ahead of policySvc) so the policy compiler can
+	// embed each tenant's endpoint DLP-domain document into the
+	// endpoint bundle (policy.WithDLPEndpointCompiler). The DLP handler
+	// below reuses this same instance.
+	dlpSvc := dlp.New(dlpPolicyRepo, dlpFingerprintRepo, dlpMatchRepo, dlpModelRepo, logger)
 	browserPolicyRepo := store.NewBrowserPolicyRepository()
 	dataClassificationRepo := store.NewDataClassificationRepository()
 
@@ -1140,6 +1145,11 @@ func buildRouter(
 		policy.WithInlineCASBCompiler(inlineCASBSvc),
 		policy.WithIOCCompiler(iocCompiler),
 		policy.WithMalwareHashCompiler(iocCompiler),
+		// Embed each tenant's endpoint DLP-domain document (rules +
+		// channels + coach-first AI-app detector) into the endpoint
+		// bundle so the agent's sng-dlp engine enforces it — the wiring
+		// that makes the HITL review-queue producer live in prod.
+		policy.WithDLPEndpointCompiler(dlpEndpointCompiler{svc: dlpSvc}),
 		// WS12: push each tenant's published per-class sampling rates
 		// into the telemetry consumer's resolver on publish / promote.
 		policy.WithSamplingObserver(samplingObserver{resolver: sampleRateResolver}),
@@ -1680,7 +1690,9 @@ func buildRouter(
 	// their routes never registered (the admin UI surfaced a 404 on
 	// /dlp, /browser, and /terraform). Construct them here so the
 	// route-registration guards in buildRouter see non-nil handlers.
-	dlpSvc := dlp.New(dlpPolicyRepo, dlpFingerprintRepo, dlpMatchRepo, dlpModelRepo, logger)
+	// dlpSvc is constructed earlier (alongside its repositories) so the
+	// policy compiler can embed the endpoint DLP document into bundles.
+	//
 	// Human-in-the-loop DLP review queue: the coach-first AI-app
 	// exfiltration signal flags uploads without blocking, so they land
 	// in this per-tenant queue for an operator to approve/block/dismiss.
@@ -2343,6 +2355,24 @@ type samplingObserver struct {
 
 func (o samplingObserver) ObserveSampling(tenantID uuid.UUID, classRates map[string]float64) {
 	o.resolver.SetTenant(tenantID, classRates)
+}
+
+// dlpEndpointCompiler adapts *dlp.Service to the policy package's
+// DLPEndpointCompiler interface, keeping the policy service free of a
+// dlp import (the same decoupling pattern as PolicySteeringAdapter).
+// It compiles with the default channel config (nil) — per-channel
+// overrides are a future operator surface — and returns the JSON
+// document as json.RawMessage for the bundle's dl section.
+type dlpEndpointCompiler struct {
+	svc *dlp.Service
+}
+
+func (c dlpEndpointCompiler) CompileEndpointBundle(ctx context.Context, tenantID uuid.UUID) (json.RawMessage, error) {
+	blob, err := c.svc.CompileEndpointBundle(ctx, tenantID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(blob), nil
 }
 
 // startTelemetry builds the hot-path + cold-path writers and the

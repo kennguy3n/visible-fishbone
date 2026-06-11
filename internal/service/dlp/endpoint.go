@@ -112,11 +112,47 @@ type EndpointDLPModel struct {
 	Signature     string   `json:"signature"`
 }
 
+// EndpointAiAppPolicy is the operator policy for the endpoint AI-app
+// exfiltration detector. Wire-identical to sng-dlp's `AiAppPolicy`
+// (the field names + JSON tags must match exactly so
+// `DlpPolicy::from_bundle_json` decodes it). The agent arms the
+// detector with this policy on bundle apply.
+//
+// The default ([DefaultEndpointAiAppPolicy]) is deliberately
+// coach-first and non-blocking: it monitors and coaches but never
+// blocks until an operator opts in (BlockOptIn). This is the posture
+// the HITL review-queue producer depends on — arming it is what turns
+// the producer live at the edge.
+type EndpointAiAppPolicy struct {
+	Enabled             bool                `json:"enabled"`
+	BlockOptIn          bool                `json:"block_opt_in"`
+	BlockConfidence     float64             `json:"block_confidence"`
+	MinReportConfidence float64             `json:"min_report_confidence"`
+	CoachSeverityFloor  EndpointDLPSeverity `json:"coach_severity_floor"`
+}
+
+// DefaultEndpointAiAppPolicy returns the coach-first, non-blocking
+// default, byte-identical to sng-dlp's `AiAppPolicy::default`: enabled,
+// never blocking (BlockOptIn false), only surfacing high-severity
+// findings at ≥0.5 confidence as nudges. This caps the false-positive
+// blast radius for the 5000-tenant fleet while still making the
+// detector live.
+func DefaultEndpointAiAppPolicy() EndpointAiAppPolicy {
+	return EndpointAiAppPolicy{
+		Enabled:             true,
+		BlockOptIn:          false,
+		BlockConfidence:     0.9,
+		MinReportConfidence: 0.5,
+		CoachSeverityFloor:  EndpointSeverityHigh,
+	}
+}
+
 // EndpointDLPPolicy is the endpoint-bundle DLP-domain payload. It is
 // the document sng-dlp's `DlpPolicy::from_bundle_json` decodes. The
 // optional `model` field is forward-compatible: sng-dlp's decoder
 // does not set `deny_unknown_fields`, so agents that predate ML NER
-// ignore it.
+// ignore it. The optional `ai_app` field is likewise forward-
+// compatible: agents predating the AI-app detector ignore it.
 type EndpointDLPPolicy struct {
 	SchemaVersion int                                          `json:"schema_version"`
 	Target        repository.PolicyBundleTarget                `json:"target"`
@@ -124,6 +160,7 @@ type EndpointDLPPolicy struct {
 	Rules         []EndpointDLPRule                            `json:"rules"`
 	Channels      map[EndpointDLPChannel]EndpointChannelConfig `json:"channels,omitempty"`
 	Model         *EndpointDLPModel                            `json:"model,omitempty"`
+	AiApp         *EndpointAiAppPolicy                         `json:"ai_app,omitempty"`
 }
 
 // DefaultEndpointChannelConfig returns the default channel map: every
@@ -170,6 +207,12 @@ func (s *Service) CompileEndpointBundle(
 	if err != nil {
 		return nil, err
 	}
+	// Arm the AI-app exfiltration detector coach-first by default.
+	// The agent only applies this when it runs endpoint DLP (its own
+	// `[dlp] enabled` gate), so this is opt-in at deployment and
+	// non-blocking until an operator opts into blocking. This is the
+	// wiring that makes the HITL review-queue producer live.
+	aiApp := DefaultEndpointAiAppPolicy()
 	policy := EndpointDLPPolicy{
 		SchemaVersion: EndpointSchemaVersion,
 		Target:        repository.PolicyBundleTargetEndpoint,
@@ -177,6 +220,7 @@ func (s *Service) CompileEndpointBundle(
 		Rules:         rules,
 		Channels:      channels,
 		Model:         model,
+		AiApp:         &aiApp,
 	}
 	if err := ValidateEndpointPolicy(policy); err != nil {
 		return nil, err
@@ -494,7 +538,36 @@ func ValidateEndpointPolicy(p EndpointDLPPolicy) error {
 				repository.ErrInvalidArgument, ch)
 		}
 	}
+	if p.AiApp != nil {
+		// Mirror sng-dlp's DlpPolicy::validate so a malformed AI-app
+		// policy is caught here rather than fail-closing on the agent.
+		for _, c := range []struct {
+			name string
+			val  float64
+		}{
+			{"block_confidence", p.AiApp.BlockConfidence},
+			{"min_report_confidence", p.AiApp.MinReportConfidence},
+		} {
+			if c.val < 0 || c.val > 1 {
+				return fmt.Errorf("%w: endpoint DLP ai_app %s %g out of [0,1]",
+					repository.ErrInvalidArgument, c.name, c.val)
+			}
+		}
+		if !validEndpointSeverity(p.AiApp.CoachSeverityFloor) {
+			return fmt.Errorf("%w: endpoint DLP ai_app coach_severity_floor %q invalid",
+				repository.ErrInvalidArgument, p.AiApp.CoachSeverityFloor)
+		}
+	}
 	return nil
+}
+
+func validEndpointSeverity(s EndpointDLPSeverity) bool {
+	switch s {
+	case EndpointSeverityLow, EndpointSeverityMedium, EndpointSeverityHigh, EndpointSeverityCritical:
+		return true
+	default:
+		return false
+	}
 }
 
 func validEndpointChannel(ch EndpointDLPChannel) bool {
