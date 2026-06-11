@@ -83,6 +83,7 @@ type Config struct {
 	Metrics            Metrics
 	TelemetryAnalytics TelemetryAnalytics
 	AppRegistry        AppRegistry
+	CASB               CASB
 	AI                 AI
 	ThreatIntel        ThreatIntel
 	MobileAuth         MobileAuth
@@ -340,6 +341,36 @@ type AppRegistry struct {
 	// the Syncer; the strict parser still rejects un-parseable
 	// values so an operator typo doesn't silently revert.
 	SyncInterval time.Duration
+}
+
+// CASB carries the runtime knobs for the per-tenant shadow-IT NoOps
+// pipeline (migration 061): the discovery hook that classifies and
+// acts on each newly discovered app, and the leader-only periodic
+// Reconcile + per-tenant digest sweep.
+//
+// Both gates default to OFF so a fresh deployment keeps the prior
+// discover-and-display-only behaviour until an operator opts in.
+// NoOpsEnabled turns on classification, recommendations, the audit
+// trail and digests (all non-mutating). NoOpsAutoEnforce additionally
+// wires the enforcement primitive so the engine's deliberately narrow
+// auto window (high-confidence, high-risk, unsanctioned apps, acted on
+// only with the non-blocking Protect verb) takes effect — a separate,
+// explicit decision so enabling observation never silently starts
+// mutating tenant traffic classes.
+type CASB struct {
+	// NoOpsEnabled gates the whole pipeline (discovery hook +
+	// leader-only Reconcile/digest loop). Default false.
+	NoOpsEnabled bool
+	// NoOpsAutoEnforce wires the appdb enforcer into the engine so
+	// the narrow auto window enforces; when false the engine is
+	// recommend-only (classify + audit + digest, never mutate).
+	// Default false. Ignored unless NoOpsEnabled is true.
+	NoOpsAutoEnforce bool
+	// NoOpsReconcileInterval is the cadence of the leader-only sweep
+	// that reconciles inventory drift and builds per-tenant digests.
+	// Defaults to 1h. Anything <= 0 is treated as the default by the
+	// loop; the strict parser still rejects un-parseable values.
+	NoOpsReconcileInterval time.Duration
 }
 
 // AI carries runtime knobs for the AI assistant service
@@ -1635,6 +1666,7 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_FLUSH_INTERVAL", 2 * time.Second, &cfg.TelemetryAnalytics.ClickHouseFlushInterval},
 		{"S3_TELEMETRY_FLUSH_INTERVAL", 30 * time.Second, &cfg.TelemetryAnalytics.S3FlushInterval},
 		{"APP_REGISTRY_SYNC_INTERVAL", 24 * time.Hour, &cfg.AppRegistry.SyncInterval},
+		{"CASB_NOOPS_RECONCILE_INTERVAL", time.Hour, &cfg.CASB.NoOpsReconcileInterval},
 		// 15s default: local quantized (Ternary-Bonsai-8B) inference is
 		// slower than a hosted API call. Matches ai.defaultTimeout.
 		{"AI_LLM_TIMEOUT", 15 * time.Second, &cfg.AI.Timeout},
@@ -1706,6 +1738,8 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_AUTOTUNE_ENABLED", true, &cfg.TelemetryAnalytics.ClickHouseAutoTuneEnabled},
 		{"S3_TELEMETRY_MANAGE_LIFECYCLE", true, &cfg.TelemetryAnalytics.S3ManageLifecycle},
 		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
+		{"CASB_NOOPS_ENABLED", false, &cfg.CASB.NoOpsEnabled},
+		{"CASB_NOOPS_AUTO_ENFORCE", false, &cfg.CASB.NoOpsAutoEnforce},
 		{"MOBILE_AUTH_AUTO_PROVISION_USERS", true, &cfg.MobileAuth.AutoProvisionUsers},
 		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},
 		{"POP_REBALANCE_ENABLED", true, &cfg.PoP.RebalanceEnabled},

@@ -469,8 +469,43 @@ func run() error {
 	// matching the feedMgr/recompiler shutdown pattern above.
 	shadowDiscoverer := casb.NewShadowITDiscoverer(
 		postgres.NewStoreWithPool(pool).NewCASBDiscoveredAppRepository(), logger)
+	if cfg.CASB.NoOpsEnabled {
+		// Act promptly on each newly discovered app: the engine
+		// classifies, audits and recommends/enforces as soon as the
+		// windowed flush upserts it. Must be set before Start.
+		//
+		// Leader-gated: every replica runs a discoverer, so an
+		// ungated hook would let each replica classify and append an
+		// action for the same app, producing duplicate audit rows and
+		// inflated digest counts in a multi-replica deployment. The
+		// gate restricts discovery-time classification to the leader;
+		// apps a non-leader observes are still caught by the
+		// leader-only Reconcile sweep below (which reconstructs the
+		// same connector/domain signal via catalogMetaFor), so nothing
+		// is missed — it is just classified on the reconcile cadence
+		// instead of at flush time.
+		shadowDiscoverer.SetDiscoveryHook(leaderGatedDiscoveryHook{
+			leader: elector,
+			hook:   rc.AppNoOpsEngine,
+		})
+	}
 	shadowDiscoverer.Start(0)
 	defer shadowDiscoverer.Stop()
+
+	// Leader-only NoOps maintenance sweep. The discovery hook above acts
+	// on freshly discovered apps; this loop catches drift (apps that
+	// became newly risky, a changed action policy) and builds the
+	// periodic per-tenant digest. Leader-gated so a multi-replica
+	// deployment runs exactly one sweep per interval; it runs in its own
+	// goroutine because RunIfLeader blocks until rootCtx is cancelled.
+	if cfg.CASB.NoOpsEnabled {
+		go elector.RunIfLeader(rootCtx, "casb-noops-reconcile", func(ctx context.Context) {
+			runCASBNoOps(ctx, rc.AppNoOpsEngine, cfg.CASB.NoOpsReconcileInterval, logger)
+		})
+		logger.Info("sng-control: CASB shadow-IT NoOps pipeline enabled",
+			slog.Bool("auto_enforce", cfg.CASB.NoOpsAutoEnforce),
+			slog.Duration("reconcile_interval", cfg.CASB.NoOpsReconcileInterval))
+	}
 
 	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, rc.SampleRateResolver)
 	if err != nil {
@@ -684,6 +719,12 @@ type routerComponents struct {
 	RegionMigrator    *tenant.RegionMigrator
 	EvidenceScheduler *compliance.Scheduler
 	FeedManager       *aisvc.FeedManager
+	// AppNoOpsEngine is the per-tenant shadow-IT NoOps pipeline. main()
+	// sets it as the shadow-IT discoverer's discovery hook and runs its
+	// leader-only Reconcile/digest sweep when cfg.CASB.NoOpsEnabled.
+	// Always non-nil; the enforcer inside is wired only under
+	// cfg.CASB.NoOpsAutoEnforce.
+	AppNoOpsEngine *casb.AppNoOpsEngine
 	// Recompiler is the feed-driven auto-recompile worker. Nil when
 	// THREATINTEL_AUTO_RECOMPILE=false (the prior pull-only behaviour).
 	Recompiler *aisvc.Recompiler
@@ -860,6 +901,27 @@ func buildRouter(
 	appSvc.SetTenantRegionResolver(tenantRegionResolver{tenants: tenantRepo})
 	appSyncer := appdb.NewSyncer(appSvc, nil)
 	appRegHandler := handler.NewAppRegistryHandler(appSvc, nil, appSyncer)
+	// Per-tenant shadow-IT NoOps engine (migration 061). It classifies
+	// each discovered app, records an immutable audit row and recommends
+	// (or, when NoOpsAutoEnforce is set, auto-applies only the narrow
+	// high-confidence/high-risk/unsanctioned window via the non-blocking
+	// Protect verb). The audit log is always wired; the enforcer is
+	// wired only when the operator opts into auto-enforcement, so the
+	// default posture is observe/recommend and can never silently mutate
+	// a tenant's traffic class. main() sets it as the discoverer's
+	// discovery hook and drives the leader-only Reconcile/digest sweep
+	// when cfg.CASB.NoOpsEnabled.
+	appNoOpsEngine := casb.NewAppNoOpsEngine(postgres.NewCASBNoOpsStore(store), casbAppRepo, tenantRepo, logger)
+	appNoOpsEngine.SetAuditLog(auditRepo)
+	// Both gates, not just NoOpsAutoEnforce: the engine only acts at all
+	// when NoOpsEnabled (the discovery hook and reconcile loop in main()
+	// are both gated on it), so wiring the enforcer also requires
+	// NoOpsEnabled. Stating both here keeps the "never enforce unless
+	// explicitly enabled" intent self-documenting at the wiring site
+	// rather than relying on the distant main() guards.
+	if cfg.CASB.NoOpsEnabled && cfg.CASB.NoOpsAutoEnforce {
+		appNoOpsEngine.SetEnforcer(appSvc)
+	}
 	// Inline-CASB service is constructed before the policy service
 	// so the latter can fold its rules into the SWG bundle slice at
 	// compile time (WithInlineCASBCompiler). It is backed by the
@@ -1649,6 +1711,7 @@ func buildRouter(
 		RegionMigrator:     tenantMigrator,
 		EvidenceScheduler:  evidenceScheduler,
 		FeedManager:        feedMgr,
+		AppNoOpsEngine:     appNoOpsEngine,
 		Recompiler:         recompiler,
 		SampleRateResolver: sampleRateResolver,
 	}, nil
@@ -2842,6 +2905,63 @@ func subscribePoPHealth(nc *nats.Conn, svc *pop.Service, logger *slog.Logger) (*
 				slog.String("pop_id", popID.String()), slog.Any("error", err))
 		}
 	})
+}
+
+// leaderGatedDiscoveryHook forwards shadow-IT discovery notifications to
+// the wrapped NoOps hook only while this replica holds leadership. Each
+// replica runs its own ShadowITDiscoverer, so without this gate every
+// replica's flush would classify and append an action for the same app —
+// duplicate audit rows and inflated digest counts. The leader-only
+// Reconcile sweep reclassifies all apps on its cadence (reconstructing the
+// connector/domain signal from the catalog), so gating the prompt path
+// loses no coverage, only flush-time immediacy for non-leader replicas.
+type leaderGatedDiscoveryHook struct {
+	leader interface{ IsLeader() bool }
+	hook   casb.AppDiscoveryHook
+}
+
+func (h leaderGatedDiscoveryHook) OnAppDiscovered(ctx context.Context, tenantID uuid.UUID, app repository.CASBDiscoveredApp, meta casb.AppDiscoveryMeta) {
+	if h.hook == nil || h.leader == nil || !h.leader.IsLeader() {
+		return
+	}
+	h.hook.OnAppDiscovered(ctx, tenantID, app, meta)
+}
+
+// runCASBNoOps drives the leader-only shadow-IT NoOps maintenance sweep:
+// each tick it reconciles every active tenant's discovered-app inventory
+// (catching drift the per-discovery hook missed — e.g. an app that became
+// newly risky, or a changed action policy) and rebuilds the per-tenant
+// digest. Both passes are best-effort: a failure is logged and the loop
+// continues so one tenant's error never stalls the fleet.
+//
+// Like runMigrationResume it sweeps once immediately on entry — invoked
+// through elector.RunIfLeader, so a leader that has just taken over a
+// crashed predecessor reconciles drift and rebuilds digests without
+// waiting a full interval — then re-sweeps every interval. Reconcile and
+// RunDigests are both idempotent, so the immediate pass is safe.
+func runCASBNoOps(ctx context.Context, engine *casb.AppNoOpsEngine, interval time.Duration, logger *slog.Logger) {
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	sweep := func() {
+		if err := engine.Reconcile(ctx); err != nil && ctx.Err() == nil {
+			logger.Warn("casb: NoOps reconcile pass failed", slog.Any("error", err))
+		}
+		if err := engine.RunDigests(ctx); err != nil && ctx.Err() == nil {
+			logger.Warn("casb: NoOps digest pass failed", slog.Any("error", err))
+		}
+	}
+	sweep()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			sweep()
+		}
+	}
 }
 
 // runPoPRebalance drives the leader-only capacity rebalancer until ctx
