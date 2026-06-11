@@ -88,6 +88,17 @@ CREATE TABLE IF NOT EXISTS tenant_migrations (
     -- the forward pipeline. Lets an operator see a migration that is
     -- thrashing on a transient error.
     attempts        INTEGER     NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    -- Optimistic-concurrency counter, incremented by the repository on
+    -- every UPDATE. The migration runner loads a row, runs a step, then
+    -- writes back WHERE version = <loaded>. A mismatch means another
+    -- driver — a concurrent Start, Resume, or the leader resume loop
+    -- working from a stale ListResumable snapshot — advanced the same
+    -- migration first; the losing writer is rejected (zero rows) and
+    -- YIELDS rather than clobbering the winner's state (which could
+    -- otherwise stamp a completed migration back to a non-terminal
+    -- state and briefly re-arm dual_read). Mirrors the baseline_models
+    -- optimistic-lock pattern (migration 012).
+    version         INTEGER     NOT NULL DEFAULT 0 CHECK (version >= 0),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- When the forward pipeline first started, and when it reached a

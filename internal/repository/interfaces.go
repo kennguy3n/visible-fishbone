@@ -43,6 +43,16 @@ var (
 	// can map it to 429 Too Many Requests; the same caller may
 	// succeed later after revoking an existing resource.
 	ErrResourceExhausted = errors.New("repository: resource exhausted")
+
+	// ErrConcurrentUpdate is returned by an optimistic-locked Update
+	// when the row's version moved between the caller's read and write
+	// — another writer committed first. Distinct from ErrConflict
+	// (uniqueness) so a caller can tell "someone else advanced this row,
+	// yield to them" apart from "a duplicate already exists, reject".
+	// The cross-region tenant-migration state machine uses it so a
+	// resume loop racing a synchronous Start over the same migration
+	// stands down instead of clobbering the winner's state.
+	ErrConcurrentUpdate = errors.New("repository: concurrent update")
 )
 
 // SortOrder controls cursor pagination direction.
@@ -326,7 +336,12 @@ type TenantMigrationRepository interface {
 	// Update persists a state transition for an existing migration:
 	// state, dual_read, checkpoint, detail, attempts, started_at and
 	// completed_at are written; updated_at is bumped by the store.
-	// ErrNotFound if the migration does not exist for the tenant.
+	// The write is optimistically locked on m.Version (the version the
+	// caller loaded): it succeeds only while the stored row is still at
+	// that version, then bumps it. ErrConcurrentUpdate if the row
+	// advanced under the caller (another driver committed first), so a
+	// stale writer yields rather than clobbering. ErrNotFound if the
+	// migration does not exist for the tenant.
 	Update(ctx context.Context, tenantID uuid.UUID, m TenantMigration) (TenantMigration, error)
 	// ListResumable returns every non-terminal migration across all
 	// tenants, oldest-updated first, for the resumable runner to pick

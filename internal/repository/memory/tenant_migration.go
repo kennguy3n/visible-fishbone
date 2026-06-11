@@ -71,6 +71,10 @@ func (r *TenantMigrationRepository) Create(ctx context.Context, tenantID uuid.UU
 	if len(m.Checkpoint) == 0 {
 		m.Checkpoint = json.RawMessage(`{}`)
 	}
+	// A fresh row always starts at version 0, matching the Postgres
+	// column default; the optimistic-lock counter is store-owned, never
+	// caller-supplied at insert time.
+	m.Version = 0
 	now := r.s.clock()
 	m.CreatedAt = now
 	m.UpdatedAt = now
@@ -142,6 +146,14 @@ func (r *TenantMigrationRepository) Update(ctx context.Context, tenantID uuid.UU
 	if !ok || cur.TenantID != tenantID {
 		return repository.TenantMigration{}, repository.ErrNotFound
 	}
+	// Optimistic concurrency: the caller passes the version it loaded.
+	// If the stored row has advanced since (another driver committed
+	// first), reject so the stale writer yields — mirrors the Postgres
+	// `WHERE version = $old` guard. Checked before any field is applied
+	// so a losing write is a pure no-op.
+	if m.Version != cur.Version {
+		return repository.TenantMigration{}, repository.ErrConcurrentUpdate
+	}
 	// Re-activating a terminal row would violate the single-in-flight
 	// invariant if another in-flight migration already exists. Mirror
 	// the partial unique index rather than silently allowing two.
@@ -165,6 +177,9 @@ func (r *TenantMigrationRepository) Update(ctx context.Context, tenantID uuid.UU
 	} else {
 		cur.Checkpoint = m.Checkpoint
 	}
+	// Bump the optimistic-lock counter so the next write must present
+	// this new version (mirrors `version = version + 1` in Postgres).
+	cur.Version = cur.Version + 1
 	cur.UpdatedAt = r.s.clock()
 	r.s.tenantMigrations[cur.ID] = cloneTenantMigration(cur)
 	return cloneTenantMigration(cur), nil

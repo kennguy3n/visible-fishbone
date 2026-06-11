@@ -467,12 +467,39 @@ func (m *RegionMigrator) DualRead(ctx context.Context, tenantID uuid.UUID) (sour
 	return mig.SourceRegion, mig.TargetRegion, true, nil
 }
 
-// drive runs the forward pipeline from the migration's current
+// drive runs driveOnce and absorbs the optimistic-concurrency race: if
+// another driver (a concurrent Start/Resume or the leader resume loop
+// working from a stale ListResumable snapshot) advanced this same
+// migration first, our version-locked write is rejected before it can
+// clobber the winner's state, surfacing as ErrConcurrentUpdate. There
+// is nothing to undo — every forward/undo step is idempotent and the
+// rejected write committed nothing — so we simply YIELD: log, re-read
+// the latest persisted record, and report it without error. The winner
+// drives the migration to its terminal state. This eliminates the
+// re-drive / transient dual_read re-arm the resume loop could otherwise
+// cause on an already-completed migration.
+func (m *RegionMigrator) drive(ctx context.Context, mig repository.TenantMigration) (repository.TenantMigration, error) {
+	final, err := m.driveOnce(ctx, mig)
+	if err == nil || !errors.Is(err, repository.ErrConcurrentUpdate) {
+		return final, err
+	}
+	m.logger.InfoContext(ctx, "tenant: migration concurrently driven by another worker; yielding",
+		"tenant_id", mig.TenantID, "migration_id", mig.ID)
+	if latest, gerr := m.migrations.Get(ctx, mig.TenantID, mig.ID); gerr == nil {
+		return latest, nil
+	}
+	// Could not re-read the winner's record (e.g. transient store
+	// error); fall back to the last in-memory copy. Still no error —
+	// the migration is owned by the winning driver.
+	return final, nil
+}
+
+// driveOnce runs the forward pipeline from the migration's current
 // checkpoint. On the first forward-step error it transitions to
 // rolling_back and unwinds the completed steps in reverse; the
 // migration ends rolled_back (clean revert) or failed (rollback itself
 // errored — needs operator intervention).
-func (m *RegionMigrator) drive(ctx context.Context, mig repository.TenantMigration) (repository.TenantMigration, error) {
+func (m *RegionMigrator) driveOnce(ctx context.Context, mig repository.TenantMigration) (repository.TenantMigration, error) {
 	// A terminal migration is never re-driven (ResumeAll only ever
 	// hands us non-terminal rows, but Resume/Start callers and tests
 	// may not).

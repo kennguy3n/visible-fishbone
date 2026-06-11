@@ -16,7 +16,7 @@ import (
 // kept in one place so every query and the single scan helper stay in
 // lock-step.
 const tenantMigrationColumns = `id, tenant_id, source_region, target_region,
-	state, dual_read, checkpoint, detail, attempts,
+	state, dual_read, checkpoint, detail, attempts, version,
 	created_at, updated_at, started_at, completed_at`
 
 // TenantMigrationRepository owns the tenant_migrations table (migration
@@ -139,7 +139,13 @@ func (r *TenantMigrationRepository) Update(ctx context.Context, tenantID uuid.UU
 	var out repository.TenantMigration
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		// updated_at is bumped by the tenant_migrations_set_updated_at
-		// trigger, so it is deliberately not in the SET list.
+		// trigger, so it is deliberately not in the SET list. The write
+		// is optimistically locked on version: it matches only while the
+		// row is still at the version the caller loaded ($9), then bumps
+		// it. A concurrent driver that committed first leaves the row at
+		// a higher version, so this UPDATE matches zero rows and the
+		// caller yields (see the ErrNoRows branch) rather than stamping
+		// stale state over the winner's.
 		const q = `
 			UPDATE tenant_migrations SET
 				state = $2,
@@ -148,16 +154,39 @@ func (r *TenantMigrationRepository) Update(ctx context.Context, tenantID uuid.UU
 				detail = $5,
 				attempts = $6,
 				started_at = $7,
-				completed_at = $8
-			WHERE id = $1::uuid
+				completed_at = $8,
+				version = version + 1
+			WHERE id = $1::uuid AND version = $9
 			RETURNING ` + tenantMigrationColumns
 		row := tx.QueryRow(ctx, q,
 			m.ID, m.State, m.DualRead, []byte(checkpoint),
-			m.Detail, m.Attempts, m.StartedAt, m.CompletedAt)
-		return scanTenantMigration(row, &out)
+			m.Detail, m.Attempts, m.StartedAt, m.CompletedAt, m.Version)
+		if err := scanTenantMigration(row, &out); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Zero rows updated: either the row no longer exists, or
+				// its version advanced under us. Probe to tell the two
+				// apart so a genuine missing row stays ErrNotFound while
+				// a concurrency race surfaces as ErrConcurrentUpdate.
+				var exists bool
+				if perr := tx.QueryRow(ctx,
+					`SELECT EXISTS(SELECT 1 FROM tenant_migrations WHERE id = $1::uuid)`,
+					m.ID).Scan(&exists); perr != nil {
+					return perr
+				}
+				if exists {
+					return repository.ErrConcurrentUpdate
+				}
+				return repository.ErrNotFound
+			}
+			return err
+		}
+		return nil
 	})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, repository.ErrConcurrentUpdate) {
+			return repository.TenantMigration{}, repository.ErrConcurrentUpdate
+		}
+		if errors.Is(err, repository.ErrNotFound) {
 			return repository.TenantMigration{}, repository.ErrNotFound
 		}
 		if isUniqueViolation(err) {
@@ -208,7 +237,7 @@ func scanTenantMigration(row pgx.Row, m *repository.TenantMigration) error {
 	)
 	if err := row.Scan(
 		&m.ID, &m.TenantID, &m.SourceRegion, &m.TargetRegion,
-		&m.State, &m.DualRead, &checkpoint, &m.Detail, &m.Attempts,
+		&m.State, &m.DualRead, &checkpoint, &m.Detail, &m.Attempts, &m.Version,
 		&m.CreatedAt, &m.UpdatedAt, &startedAt, &completedAt,
 	); err != nil {
 		return err

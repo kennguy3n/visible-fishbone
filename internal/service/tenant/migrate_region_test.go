@@ -588,6 +588,99 @@ func TestRegionMigration_ResumeAll(t *testing.T) {
 	}
 }
 
+// staleResumeRepo wraps a real migration repository but hands ResumeAll
+// a frozen, stale snapshot from ListResumable — reproducing the race
+// where the leader resume loop picks up a migration that a concurrent
+// Start/Resume has since driven to completion. Every other call
+// delegates to the real store, so the migrator drives against live,
+// version-current rows and the optimistic lock can fire.
+type staleResumeRepo struct {
+	*memory.TenantMigrationRepository
+	stale []repository.TenantMigration
+}
+
+func (r *staleResumeRepo) ListResumable(context.Context) ([]repository.TenantMigration, error) {
+	return append([]repository.TenantMigration(nil), r.stale...), nil
+}
+
+// TestRegionMigration_ResumeYieldsToConcurrentCompletion proves the
+// optimistic-concurrency guard: when the resume loop drives a STALE
+// snapshot of a migration a concurrent driver has already completed,
+// the stale driver's first version-locked write is rejected, so it
+// yields without re-running any step or re-arming dual_read — the
+// completed terminal state is preserved intact.
+func TestRegionMigration_ResumeYieldsToConcurrentCompletion(t *testing.T) {
+	t.Parallel()
+	rec := newRecordingPlane()
+	gp := &regionPlane{r: rec}
+	s := memory.NewStore()
+	tenants := memory.NewTenantRepository(s)
+	migs := memory.NewTenantMigrationRepository(s)
+	audit := memory.NewAuditLogRepository(s)
+	planes := tenant.MigrationPlanes{
+		Keys: rec, Telemetry: rec, Objects: objectPlane{rec}, PoP: popPlane{rec}, Region: gp,
+	}
+	m, err := tenant.NewRegionMigrator(migs, tenants, audit, planes, nil)
+	if err != nil {
+		t.Fatalf("NewRegionMigrator: %v", err)
+	}
+	ctx := context.Background()
+	tnt := seedTenant(t, tenants, "us-east-1")
+
+	// A stale, pre-drive snapshot (version 0, non-terminal) like the one
+	// ListResumable would have returned just before a concurrent driver
+	// completed the migration.
+	created, err := migs.Create(ctx, tnt.ID, repository.TenantMigration{
+		SourceRegion: "us-east-1", TargetRegion: "eu-central-1",
+		State: repository.MigrationStatePending, DualRead: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	stale := created // version 0, pending
+
+	// The concurrent winner drives it to completion (advancing version).
+	done, err := m.Resume(ctx, tnt.ID)
+	if err != nil {
+		t.Fatalf("Resume(winner): %v", err)
+	}
+	if done.State != repository.MigrationStateCompleted {
+		t.Fatalf("winner state = %q, want completed", done.State)
+	}
+	seqAfterWinner := rec.sequence()
+
+	// Now the resume loop runs against the STALE snapshot.
+	staleM, err := tenant.NewRegionMigrator(
+		&staleResumeRepo{TenantMigrationRepository: migs, stale: []repository.TenantMigration{stale}},
+		tenants, audit, planes, nil)
+	if err != nil {
+		t.Fatalf("NewRegionMigrator(stale): %v", err)
+	}
+	n, err := staleM.ResumeAll(ctx)
+	if err != nil {
+		t.Fatalf("ResumeAll(stale): %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("ResumeAll drove %d, want 1", n)
+	}
+
+	// The stale driver must NOT have re-run any step (idempotent yield).
+	if got := rec.sequence(); !equalSeq(got, seqAfterWinner) {
+		t.Errorf("stale resume re-ran steps: before=%v after=%v", seqAfterWinner, got)
+	}
+	// The completed terminal state is intact: dual_read stays cleared.
+	after, err := migs.Latest(ctx, tnt.ID)
+	if err != nil {
+		t.Fatalf("Latest: %v", err)
+	}
+	if after.State != repository.MigrationStateCompleted {
+		t.Errorf("state after stale resume = %q, want completed", after.State)
+	}
+	if after.DualRead {
+		t.Errorf("dual_read re-armed by stale resume; want cleared")
+	}
+}
+
 // --- PoP reassigner adapter ------------------------------------------------
 
 type fakePoPControl struct {

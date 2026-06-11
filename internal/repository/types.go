@@ -354,8 +354,15 @@ type TenantMigration struct {
 	Checkpoint json.RawMessage
 	// Detail is the human-readable reason for the current state (the
 	// failure message when failing/rolling back), empty otherwise.
-	Detail      string
-	Attempts    int
+	Detail   string
+	Attempts int
+	// Version is an optimistic-concurrency counter incremented by the
+	// repository on every Update. A caller passes the version it loaded;
+	// if the stored row advanced in between, Update returns
+	// ErrConcurrentUpdate so a stale writer (e.g. the leader resume loop
+	// racing a synchronous Start over the same migration) yields instead
+	// of overwriting the winner's state.
+	Version     int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	StartedAt   *time.Time

@@ -248,3 +248,57 @@ func TestTenantMigration_CheckpointDefaultsToEmptyObject(t *testing.T) {
 		t.Errorf("checkpoint default = %q, want {}", created.Checkpoint)
 	}
 }
+
+// TestTenantMigration_OptimisticConcurrency pins the version-based
+// optimistic lock: a fresh row starts at version 0, every Update bumps
+// it, and a write that presents a stale version is rejected with
+// ErrConcurrentUpdate without mutating the stored row (so a resume loop
+// racing a Start over the same migration yields instead of clobbering).
+func TestTenantMigration_OptimisticConcurrency(t *testing.T) {
+	t.Parallel()
+	repo, _ := newMigRepo(t)
+	ctx := context.Background()
+	tid := uuid.New()
+
+	created, err := repo.Create(ctx, tid, mkMig(tid, repository.MigrationStatePending))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if created.Version != 0 {
+		t.Fatalf("fresh version = %d, want 0", created.Version)
+	}
+
+	// First writer (loaded version 0) wins and the counter advances.
+	winner := created
+	winner.State = repository.MigrationStateRewrappingKeys
+	saved, err := repo.Update(ctx, tid, winner)
+	if err != nil {
+		t.Fatalf("winner update: %v", err)
+	}
+	if saved.Version != 1 {
+		t.Fatalf("version after update = %d, want 1", saved.Version)
+	}
+
+	// A stale writer still holding version 0 is rejected and changes
+	// nothing — it must yield to the winner.
+	stale := created // still version 0
+	stale.State = repository.MigrationStateCopyingObjects
+	stale.Detail = "stale write"
+	if _, err := repo.Update(ctx, tid, stale); !errors.Is(err, repository.ErrConcurrentUpdate) {
+		t.Fatalf("stale update: err = %v, want ErrConcurrentUpdate", err)
+	}
+	got, err := repo.Get(ctx, tid, created.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.State != repository.MigrationStateRewrappingKeys || got.Version != 1 || got.Detail != "" {
+		t.Fatalf("stale write leaked: state=%q version=%d detail=%q", got.State, got.Version, got.Detail)
+	}
+
+	// The winner, presenting the current version, continues to succeed.
+	next := saved
+	next.State = repository.MigrationStateCopyingTelemetry
+	if _, err := repo.Update(ctx, tid, next); err != nil {
+		t.Fatalf("winner second update: %v", err)
+	}
+}
