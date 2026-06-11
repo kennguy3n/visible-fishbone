@@ -393,6 +393,69 @@ func TestRegionMigration_ResumeIdempotent(t *testing.T) {
 	}
 }
 
+// TestRegionMigration_ResumeMidRollbackContinuesRollback guards the
+// crash-during-rollback window. The rolling_back state is non-terminal
+// and therefore resumable, so a control plane that crashes mid unwind
+// hands drive() a migration whose checkpoint mixes done and rolled_back
+// step records. drive() must CONTINUE the rollback (undoing only the
+// steps still marked done) rather than restart the forward pipeline —
+// re-running a forward step on an already-rolled-back state would
+// re-apply data changes and could spin in a forward/rollback cycle.
+func TestRegionMigration_ResumeMidRollbackContinuesRollback(t *testing.T) {
+	t.Parallel()
+	rec := newRecordingPlane()
+	gp := &regionPlane{r: rec}
+	m, s, tenants := newMigrator(t, tenant.MigrationPlanes{
+		Keys:      rec,
+		Telemetry: rec,
+		Objects:   objectPlane{rec},
+		PoP:       popPlane{rec},
+		Region:    gp,
+	})
+	tnt := seedTenant(t, tenants, "us-east-1")
+	ctx := context.Background()
+
+	// Crash-mid-rollback checkpoint: rewrap_keys + copy_telemetry both
+	// ran forward (done); copy_telemetry was then undone (rolled_back)
+	// before the instance crashed, leaving rewrap_keys still to undo.
+	// State is rolling_back and Detail carries the original cause.
+	migs := memory.NewTenantMigrationRepository(s)
+	cp := `{"steps":{"rewrap_keys":{"status":"done"},"copy_telemetry":{"status":"rolled_back"}}}`
+	if _, err := migs.Create(ctx, tnt.ID, repository.TenantMigration{
+		SourceRegion: "us-east-1", TargetRegion: "eu-central-1",
+		State: repository.MigrationStateRollingBack, DualRead: true,
+		Detail:     "boom: s3 copy failed",
+		Checkpoint: json.RawMessage(cp),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got, err := m.Resume(ctx, tnt.ID)
+	// The original forward cause is preserved across the resume and
+	// surfaced to the caller.
+	if err == nil || err.Error() != "boom: s3 copy failed" {
+		t.Fatalf("Resume err = %v, want original cause 'boom: s3 copy failed'", err)
+	}
+	if got.State != repository.MigrationStateRolledBack {
+		t.Fatalf("final state = %q, want rolled_back", got.State)
+	}
+	if got.DualRead {
+		t.Errorf("dual_read should be cleared on terminal state")
+	}
+	// Crucial: NO forward step is re-run. Only the one step still marked
+	// done (rewrap_keys) is undone; the already rolled_back step is not
+	// touched again.
+	seq := rec.sequence()
+	if !equalSeq(seq, []string{"rollback:rewrap_keys"}) {
+		t.Errorf("resume-mid-rollback sequence = %v, want [rollback:rewrap_keys] (no forward re-run)", seq)
+	}
+	for _, c := range seq {
+		if len(c) >= 8 && c[:8] == "forward:" {
+			t.Errorf("forward step %q re-ran during rollback resume; forward pipeline must not restart", c)
+		}
+	}
+}
+
 func TestRegionMigration_DualReadReporting(t *testing.T) {
 	t.Parallel()
 	rec := newRecordingPlane()

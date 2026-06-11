@@ -176,16 +176,30 @@ func (p *PoPReassigner) Restore(ctx context.Context, tenantID uuid.UUID, raw jso
 	return nil
 }
 
-// pickPoPInRegion returns the first enabled PoP whose region matches
-// targetRegion. Deterministic selection (first by the order the control
-// plane returns) keeps resume idempotent.
+// pickPoPInRegion returns a stable, enabled PoP in targetRegion: the one
+// with the lexicographically-smallest id among all enabled PoPs in that
+// region. Selecting by id rather than trusting the iteration order of
+// AvailablePoPs() (which is ultimately a map-backed registry, so its
+// order is not guaranteed stable across calls) is what actually makes
+// resume idempotent — a replay picks the same PoP as the original run as
+// long as that PoP is still enabled. If it was disabled between runs the
+// already-pinned-to-target guard in Reassign still keeps the rollback
+// metadata correct.
 func pickPoPInRegion(pops []PoPInfo, targetRegion string) (uuid.UUID, bool) {
+	var (
+		best  uuid.UUID
+		found bool
+	)
 	for _, p := range pops {
-		if p.Region == targetRegion {
-			return p.ID, true
+		if p.Region != targetRegion {
+			continue
+		}
+		if !found || p.ID.String() < best.String() {
+			best = p.ID
+			found = true
 		}
 	}
-	return uuid.Nil, false
+	return best, found
 }
 
 func marshalMeta(meta popReassignMeta) (json.RawMessage, error) {

@@ -29,6 +29,13 @@ var ErrNoMigration = errors.New("tenant: no migration found")
 // (the operator should simply set the tenant's region instead).
 var ErrSourceRegionUnset = errors.New("tenant: tenant has no source region (residency) to migrate from")
 
+// errResumedMidRollback is the synthetic cause used when a migration is
+// resumed while already in the rolling_back state but its persisted
+// Detail (which carries the original forward-step cause) is empty. It
+// only ever surfaces in logs/audit for a migration whose original cause
+// was somehow lost, never to an API caller.
+var errResumedMidRollback = errors.New("tenant: migration resumed while rolling back")
+
 // stepStatusDone marks a forward step that completed; stepStatusRolledBack
 // marks one that was subsequently undone. Persisted inside the
 // migration checkpoint so a resumed run skips completed steps and a
@@ -469,6 +476,25 @@ func (m *RegionMigrator) drive(ctx context.Context, mig repository.TenantMigrati
 	cp, err := decodeCheckpoint(mig.Checkpoint)
 	if err != nil {
 		return mig, err
+	}
+	// A migration already in rolling_back was stranded by a crash mid
+	// unwind (the state is non-terminal and therefore resumable). It
+	// must CONTINUE the rollback, not restart the forward pipeline:
+	// forward steps marked rolled_back are not "done", so the forward
+	// loop below would re-execute them and re-apply changes onto an
+	// already-reverted state (re-wrapping keys, re-copying data),
+	// risking a forward/rollback cycle that never terminates. Route
+	// straight to rollback, which only undoes steps still marked done
+	// and is therefore idempotent across resumes. The original
+	// forward-step cause was persisted to Detail when the rollback
+	// began; reconstruct it so the terminal record still explains why
+	// the migration is unwinding.
+	if mig.State == repository.MigrationStateRollingBack {
+		cause := errResumedMidRollback
+		if mig.Detail != "" {
+			cause = errors.New(mig.Detail)
+		}
+		return m.rollback(ctx, mig, cp, cause)
 	}
 	// Count this as a fresh attempt of the forward pipeline.
 	mig.Attempts++
