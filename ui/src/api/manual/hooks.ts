@@ -179,6 +179,17 @@ export function useClassifyText(tenantId: string) {
 const reviewQueueKey = (tenantId: string) =>
   ["dlp", "review-queue", tenantId] as const;
 
+// The backlog is a live, multi-operator surface: one reviewer's decision should
+// surface for the others without a manual reload. The app disables
+// refetch-on-focus globally (main.tsx), so the list and digest poll instead.
+// React Query pauses interval refetches while the tab is hidden
+// (refetchIntervalInBackground defaults to false), so idle operators add no
+// backend load — important at 5k-tenant scale. 30s matches the global
+// staleTime, so polling never refetches more eagerly than data is considered
+// fresh. The single-event detail isn't polled: it's a short-lived modal and is
+// refetched on demand after a decision.
+const REVIEW_QUEUE_POLL_MS = 30_000;
+
 export function useDlpReviewQueue(
   tenantId: string,
   state?: DlpReviewState,
@@ -193,6 +204,7 @@ export function useDlpReviewQueue(
         signal,
       }),
     enabled: !!tenantId,
+    refetchInterval: REVIEW_QUEUE_POLL_MS,
   });
 }
 
@@ -226,6 +238,7 @@ export function useDlpReviewDigest(
         signal,
       }),
     enabled: !!tenantId,
+    refetchInterval: REVIEW_QUEUE_POLL_MS,
   });
 }
 
