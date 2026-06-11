@@ -107,10 +107,9 @@ impl ZtnaReevalSubsystem {
         // The producer stamps wall-clock millis on its access
         // requests, so the loop measures freshness against the same
         // base via the system clock.
-        let reeval_loop =
-            ReevalLoop::with_system_clock(service, Arc::clone(&tracker), revoked_tx);
-        let interval = (cfg.reeval_interval_ms > 0)
-            .then(|| Duration::from_millis(cfg.reeval_interval_ms));
+        let reeval_loop = ReevalLoop::with_system_clock(service, Arc::clone(&tracker), revoked_tx);
+        let interval =
+            (cfg.reeval_interval_ms > 0).then(|| Duration::from_millis(cfg.reeval_interval_ms));
         Self {
             enabled: cfg.reeval_enabled,
             interval,
