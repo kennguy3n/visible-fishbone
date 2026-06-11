@@ -87,10 +87,14 @@ func (s *SCIMService) Bulk(ctx context.Context, tenantID uuid.UUID, req SCIMBulk
 	// bulkIDs maps a client bulkId to the server resource id created in
 	// this batch, so later operations can reference earlier creations.
 	bulkIDs := make(map[string]string)
+	// seenBulkIDs records every POST bulkId declared in the request,
+	// independent of whether the creation succeeded, so the uniqueness
+	// check is unconditional (see runBulkOp).
+	seenBulkIDs := make(map[string]struct{})
 	failures := 0
 
 	for _, op := range req.Operations {
-		res := s.runBulkOp(ctx, tenantID, op, bulkIDs)
+		res := s.runBulkOp(ctx, tenantID, op, bulkIDs, seenBulkIDs)
 		resp.Operations = append(resp.Operations, res)
 		if !bulkStatusOK(res.Status) {
 			failures++
@@ -104,8 +108,25 @@ func (s *SCIMService) Bulk(ctx context.Context, tenantID uuid.UUID, req SCIMBulk
 
 // runBulkOp executes a single bulk operation and maps its outcome to a
 // result entry, recording any new bulkId mapping on success.
-func (s *SCIMService) runBulkOp(ctx context.Context, tenantID uuid.UUID, op SCIMBulkOperation, bulkIDs map[string]string) SCIMBulkOperationResult {
+func (s *SCIMService) runBulkOp(ctx context.Context, tenantID uuid.UUID, op SCIMBulkOperation, bulkIDs map[string]string, seenBulkIDs map[string]struct{}) SCIMBulkOperationResult {
 	res := SCIMBulkOperationResult{Method: strings.ToUpper(op.Method), BulkID: op.BulkID}
+
+	method := strings.ToUpper(op.Method)
+
+	// A bulkId MUST be unique within a request (RFC 7644 §3.7.2), and
+	// the constraint is unconditional: a reused bulkId is a client error
+	// regardless of whether the earlier operation succeeded, since a
+	// later reference to it would otherwise bind to whichever creation
+	// happened to run (or re-run) last. Track every declared POST
+	// bulkId — not just the ones that produced a resource — and reject
+	// the collision up front, before any work that could create a
+	// duplicate row. Only POST assigns a bulkId.
+	if method == "POST" && op.BulkID != "" {
+		if _, dup := seenBulkIDs[op.BulkID]; dup {
+			return bulkError(res, repository.ErrInvalidArgument, fmt.Sprintf("duplicate bulkId %q within bulk request", op.BulkID))
+		}
+		seenBulkIDs[op.BulkID] = struct{}{}
+	}
 
 	resourceType, rawID, err := parseBulkPath(op.Path)
 	if err != nil {
@@ -125,8 +146,6 @@ func (s *SCIMService) runBulkOp(ctx context.Context, tenantID uuid.UUID, op SCIM
 	if err != nil {
 		return bulkError(res, repository.ErrInvalidArgument, err.Error())
 	}
-
-	method := strings.ToUpper(op.Method)
 
 	// Enforce the optional If-Match precondition the operation carries
 	// (RFC 7644 §3.7.1 maps an operation's "version" to If-Match) for

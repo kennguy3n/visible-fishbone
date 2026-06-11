@@ -46,6 +46,75 @@ func WithRevocationPublisher(r RevocationPublisher) SCIMOption {
 	return func(s *SCIMService) { s.revoker = r }
 }
 
+// revokeOnDeactivation publishes a ZTNA revocation when a SCIM mutation
+// de-provisions a user, so the enforcement plane drops the user's live
+// sessions immediately rather than waiting for token expiry. It backs
+// all three de-provisioning paths — the active=false PATCH/PUT that Okta
+// and Microsoft Entra actually send (they de-provision this way, not by
+// issuing a SCIM DELETE) and DeleteUser — each calling it before its
+// optional iam-core bridge step. Without it a de-provisioned user keeps
+// every live session and grant until its tokens expire.
+//
+// The decision is driven by the operation's *requested* state, never by
+// the prior persisted state. That keeps it retry-safe: if a later step
+// (the iam-core bridge sync, or the publish itself) fails and the IdP
+// retries, the retried request still asserts active=false and
+// re-publishes. The downstream revocation is idempotent, so a duplicate
+// is harmless — the property that matters for de-provisioning is that a
+// deactivated user can never be stranded with live sessions by a
+// transient failure. A reactivation or a profile-only change passes
+// deactivating=false and is a no-op, as is the case when no revoker is
+// wired.
+func (s *SCIMService) revokeOnDeactivation(ctx context.Context, tenantID, userID uuid.UUID, deactivating bool, reason string) error {
+	if s.revoker == nil || !deactivating {
+		return nil
+	}
+	if err := s.revoker.PublishRevocation(ctx, tenantID, userID, reason); err != nil {
+		return fmt.Errorf("revocation publish failed: %w", err)
+	}
+	return nil
+}
+
+// patchActiveIntent reports the active state a PATCH asserts, if any. It
+// returns (value, true) when an op sets the `active` attribute and
+// (_, false) when no op touches it, mirroring applyUserReplace's parsing
+// (a JSON bool, a string compared case-insensitively to "true", Azure
+// AD's path-less {"value":{"active":...}} shape, and core-schema
+// URN-qualified paths via canonicalAttr). Basing the revoke decision on
+// what the request asserts — rather than on the prior persisted status —
+// is what makes deactivation revocation retry-safe, and routing the path
+// through canonicalAttr keeps it in lockstep with applyUserReplace so the
+// status change and the revocation never disagree.
+func patchActiveIntent(ops []SCIMPatchOp) (active bool, set bool) {
+	var apply func(op SCIMPatchOp)
+	apply = func(op SCIMPatchOp) {
+		switch strings.ToLower(op.Op) {
+		case "replace", "add":
+		default:
+			return
+		}
+		switch canonicalAttr(op.Path) {
+		case "":
+			if m, ok := op.Value.(map[string]any); ok {
+				for k, v := range m {
+					apply(SCIMPatchOp{Op: op.Op, Path: k, Value: v})
+				}
+			}
+		case "active":
+			switch v := op.Value.(type) {
+			case bool:
+				active, set = v, true
+			case string:
+				active, set = strings.EqualFold(v, "true"), true
+			}
+		}
+	}
+	for _, op := range ops {
+		apply(op)
+	}
+	return active, set
+}
+
 // SCIMOption configures optional SCIMService behaviour without
 // breaking the base constructor signature used across the codebase.
 type SCIMOption func(*SCIMService)
@@ -178,6 +247,14 @@ func (s *SCIMService) UpdateUser(ctx context.Context, tenantID uuid.UUID, userID
 	if err != nil {
 		return SCIMUser{}, err
 	}
+	// A PUT carries the full desired state, so active=false is an
+	// explicit de-provision request: cut the user's live ZTNA sessions
+	// before the (optional, failable) bridge sync so a bridge failure
+	// can't strand them. Driving this off the requested state keeps it
+	// retry-safe.
+	if rerr := s.revokeOnDeactivation(ctx, tenantID, userID, !active, "scim_user_deactivated"); rerr != nil {
+		return SCIMUser{}, rerr
+	}
 	if s.bridge != nil {
 		if serr := s.bridge.syncProfile(ctx, tenantID, updated.IDPSubject, su, active); serr != nil {
 			return SCIMUser{}, fmt.Errorf("iam-core sync failed: %w", serr)
@@ -192,6 +269,10 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 	if err != nil {
 		return SCIMUser{}, err
 	}
+	// A PATCH that asserts active=false is the canonical Okta/Entra
+	// de-provision; detecting it from the ops (not the prior persisted
+	// status) keeps the resulting revocation retry-safe.
+	reqActive, activeSet := patchActiveIntent(ops)
 	clearExternalID := false
 	for _, op := range ops {
 		switch strings.ToLower(op.Op) {
@@ -200,7 +281,7 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 		case "add":
 			applyUserReplace(&u, op) // add semantics = replace for single-valued
 		case "remove":
-			if strings.EqualFold(op.Path, "externalid") {
+			if canonicalAttr(op.Path) == "externalid" {
 				clearExternalID = true
 			} else {
 				applyUserRemove(&u, op)
@@ -218,9 +299,16 @@ func (s *SCIMService) PatchUser(ctx context.Context, tenantID uuid.UUID, userID 
 	if err != nil {
 		return SCIMUser{}, err
 	}
+	// Cut live ZTNA sessions before the (optional, failable) bridge sync
+	// so a bridge failure can't leave a de-provisioned user with active
+	// sessions; revoking on the asserted state makes a retried PATCH
+	// re-publish rather than silently skip.
+	if rerr := s.revokeOnDeactivation(ctx, tenantID, userID, activeSet && !reqActive, "scim_user_deactivated"); rerr != nil {
+		return SCIMUser{}, rerr
+	}
+	nowActive := updated.Status == repository.UserStatusActive
 	if s.bridge != nil {
-		active := updated.Status == repository.UserStatusActive
-		if serr := s.bridge.syncProfile(ctx, tenantID, updated.IDPSubject, userToSCIM(updated), active); serr != nil {
+		if serr := s.bridge.syncProfile(ctx, tenantID, updated.IDPSubject, userToSCIM(updated), nowActive); serr != nil {
 			return SCIMUser{}, fmt.Errorf("iam-core sync failed: %w", serr)
 		}
 	}
@@ -243,18 +331,17 @@ func (s *SCIMService) DeleteUser(ctx context.Context, tenantID uuid.UUID, userID
 	}); err != nil {
 		return err
 	}
+	// Cut the de-provisioned user's live ZTNA sessions before the
+	// optional, failable iam-core bridge delete, mirroring UpdateUser /
+	// PatchUser: a bridge failure must not strand a deleted user with
+	// active sessions. Retry-safe — a retried DELETE re-publishes and the
+	// downstream revocation is idempotent, so a duplicate is harmless.
+	if rerr := s.revokeOnDeactivation(ctx, tenantID, userID, true, "scim_user_deleted"); rerr != nil {
+		return rerr
+	}
 	if s.bridge != nil {
 		if derr := s.bridge.deleteUpstream(ctx, tenantID, iamUserID); derr != nil {
 			return fmt.Errorf("iam-core delete failed: %w", derr)
-		}
-	}
-	// Cut the de-provisioned user's live ZTNA sessions immediately
-	// instead of waiting for token expiry. Best-effort: a publish
-	// failure must not undo the (already durable) soft-delete, so it is
-	// surfaced as an error only when no other failure occurred.
-	if s.revoker != nil {
-		if rerr := s.revoker.PublishRevocation(ctx, tenantID, userID, "scim_user_deleted"); rerr != nil {
-			return fmt.Errorf("revocation publish failed: %w", rerr)
 		}
 	}
 	return nil
@@ -322,7 +409,7 @@ func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter 
 // clause by delegating to the repository's indexed SearchUsers (and the
 // GetByEmail shortcut for the userName-eq dedup lookup).
 func (s *SCIMService) listUsersPushdown(ctx context.Context, tenantID uuid.UUID, parsed *SCIMFilter, startIndex, count int) (SCIMListResponse, error) {
-	if parsed != nil && parsed.Op == SCIMFilterEq && strings.EqualFold(parsed.Attribute, "username") {
+	if parsed != nil && parsed.Op == SCIMFilterEq && canonicalAttr(parsed.Attribute) == "username" {
 		u, err := s.users.GetByEmail(ctx, tenantID, parsed.Value)
 		if err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
@@ -415,7 +502,7 @@ func scimUserSearchFilter(parsed *SCIMFilter) (repository.UserSearchFilter, bool
 // e-mail is its userName), displayName to name, externalId to
 // external_id. The bool is false for any other attribute.
 func scimAttrToUserField(attr string) (repository.UserSearchField, bool) {
-	switch strings.ToLower(attr) {
+	switch canonicalAttr(attr) {
 	case "username", "email", "emails.value":
 		return repository.UserSearchFieldEmail, true
 	case "displayname":
@@ -509,7 +596,7 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 	for _, op := range ops {
 		switch strings.ToLower(op.Op) {
 		case "add":
-			switch strings.ToLower(op.Path) {
+			switch canonicalAttr(op.Path) {
 			case "members":
 				members := extractMembers(op.Value)
 				for _, m := range members {
@@ -541,7 +628,7 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 				}
 			}
 		case "remove":
-			if strings.EqualFold(op.Path, "members") {
+			if canonicalAttr(op.Path) == "members" {
 				members := extractMembers(op.Value)
 				for _, m := range members {
 					uid := uuidFromString(m.Value)
@@ -554,14 +641,14 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 				}
 			}
 		case "replace":
-			if strings.EqualFold(op.Path, "displayname") {
+			if canonicalAttr(op.Path) == "displayname" {
 				if val, ok := op.Value.(string); ok && val != "" {
 					r, err = s.roles.Update(ctx, groupID, val, r.ExternalID)
 					if err != nil {
 						return SCIMGroup{}, err
 					}
 				}
-			} else if strings.EqualFold(op.Path, "externalid") {
+			} else if canonicalAttr(op.Path) == "externalid" {
 				if val, ok := op.Value.(string); ok {
 					r, err = s.roles.Update(ctx, groupID, r.Name, val)
 					if err != nil {
@@ -708,7 +795,7 @@ func roleToSCIMGroup(r repository.Role) SCIMGroup {
 // a repository User. Supports path-less operations (Azure AD pattern)
 // where op.Value is a map of attribute-value pairs.
 func applyUserReplace(u *repository.User, op SCIMPatchOp) {
-	path := strings.ToLower(op.Path)
+	path := canonicalAttr(op.Path)
 
 	// Path-less patch: Azure AD sends {"op":"replace","value":{"active":false}}
 	if path == "" {
@@ -761,11 +848,15 @@ func applyUserReplace(u *repository.User, op SCIMPatchOp) {
 	}
 }
 
-func applyUserRemove(u *repository.User, op SCIMPatchOp) {
-	if strings.ToLower(op.Path) == "externalid" {
-		u.ExternalID = ""
-	}
-}
+// applyUserRemove applies a "remove" patch op on a single-valued user
+// attribute. externalId is deliberately NOT handled here: clearing it
+// requires the dedicated UpdateAndClearExternalID DB path (a plain
+// Update preserves the column via COALESCE/NULLIF, so zeroing it only
+// in memory would be silently dropped), so PatchUser gates externalId
+// removal separately and never routes it here. No other single-valued
+// user attribute is removable today; this remains the extension point
+// for ones that are clearable through a plain Update.
+func applyUserRemove(_ *repository.User, _ SCIMPatchOp) {}
 
 func extractMembers(val any) []SCIMGroupMember {
 	v, ok := val.([]any)

@@ -975,6 +975,15 @@ func buildRouter(
 		logger.Info("sng-control: iam-core integration enabled", slog.String("issuer", cfg.IAMCore.Issuer))
 	}
 
+	// Wire ZTNA session revocation so SCIM de-provisioning (a DELETE, or
+	// the active=false PATCH/PUT that Okta and Entra actually send) cuts
+	// the user's live sessions immediately rather than waiting for token
+	// expiry. Uses the same NATS revoke subject as the leader-gated IdP
+	// directory sync below, so a single enforcement-plane consumer handles
+	// both sources.
+	scimOpts = append(scimOpts, identity.WithRevocationPublisher(
+		identity.NewNATSRevocationPublisher(natsAlertAdapter{p: telPub})))
+
 	identitySvc := identity.New(deviceRepo, claimRepo, auditRepo, logger, identityOpts...)
 	enrollmentSvc := identity.NewEnrollmentService(enrollmentRepo, claimRepo, auditRepo, logger)
 	scimSvc := identity.NewSCIMService(userRepo, roleRepo, auditRepo, scimOpts...)
