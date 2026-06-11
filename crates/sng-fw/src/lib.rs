@@ -48,7 +48,7 @@ pub use backend::{
     DataPathBackend, DataPathCapabilities, DataPathStats, DpdkDataPath, EbpfDataPath,
     HardwareOffloadDataPath, NftablesDataPath, compile_hot_path,
 };
-pub use compile::{CompiledRuleSet, RuleCompiler};
+pub use compile::{CompiledRuleSet, RuleCompiler, render_nftables};
 pub use conntrack::{ConntrackState, ConntrackTracker, FlowDirection};
 pub use engine::{EvaluationContext, FirewallEngine, FirewallVerdict, FlowKey};
 pub use error::FirewallError;
