@@ -187,73 +187,317 @@ struct KnownAiApp {
 /// volume vendors are cheap to add here for a confidence/category bump.
 const KNOWN_AI_APPS: &[KnownAiApp] = &[
     // --- General-purpose chatbots ---
-    KnownAiApp { domain: "openai.com", app: "chatgpt", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "chatgpt.com", app: "chatgpt", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "claude.ai", app: "claude", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "anthropic.com", app: "claude", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "gemini.google.com", app: "gemini", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "bard.google.com", app: "gemini", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "copilot.microsoft.com", app: "copilot", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "poe.com", app: "poe", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "pi.ai", app: "pi", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "chat.mistral.ai", app: "le_chat", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "mistral.ai", app: "mistral", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "chat.deepseek.com", app: "deepseek", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "deepseek.com", app: "deepseek", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "x.ai", app: "grok", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "grok.com", app: "grok", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "character.ai", app: "character_ai", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "chatglm.cn", app: "chatglm", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "moonshot.cn", app: "kimi", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "tongyi.aliyun.com", app: "tongyi", category: AiAppCategory::Chatbot },
-    KnownAiApp { domain: "doubao.com", app: "doubao", category: AiAppCategory::Chatbot },
+    KnownAiApp {
+        domain: "openai.com",
+        app: "chatgpt",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "chatgpt.com",
+        app: "chatgpt",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "claude.ai",
+        app: "claude",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "anthropic.com",
+        app: "claude",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "gemini.google.com",
+        app: "gemini",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "bard.google.com",
+        app: "gemini",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "copilot.microsoft.com",
+        app: "copilot",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "poe.com",
+        app: "poe",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "pi.ai",
+        app: "pi",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "chat.mistral.ai",
+        app: "le_chat",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "mistral.ai",
+        app: "mistral",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "chat.deepseek.com",
+        app: "deepseek",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "deepseek.com",
+        app: "deepseek",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "x.ai",
+        app: "grok",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "grok.com",
+        app: "grok",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "character.ai",
+        app: "character_ai",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "chatglm.cn",
+        app: "chatglm",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "moonshot.cn",
+        app: "kimi",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "tongyi.aliyun.com",
+        app: "tongyi",
+        category: AiAppCategory::Chatbot,
+    },
+    KnownAiApp {
+        domain: "doubao.com",
+        app: "doubao",
+        category: AiAppCategory::Chatbot,
+    },
     // --- Code assistants ---
-    KnownAiApp { domain: "github.com", app: "github_copilot", category: AiAppCategory::CodeAssistant },
-    KnownAiApp { domain: "githubcopilot.com", app: "github_copilot", category: AiAppCategory::CodeAssistant },
-    KnownAiApp { domain: "cursor.com", app: "cursor", category: AiAppCategory::CodeAssistant },
-    KnownAiApp { domain: "cursor.sh", app: "cursor", category: AiAppCategory::CodeAssistant },
-    KnownAiApp { domain: "codeium.com", app: "codeium", category: AiAppCategory::CodeAssistant },
-    KnownAiApp { domain: "tabnine.com", app: "tabnine", category: AiAppCategory::CodeAssistant },
-    KnownAiApp { domain: "phind.com", app: "phind", category: AiAppCategory::CodeAssistant },
-    KnownAiApp { domain: "codium.ai", app: "qodo", category: AiAppCategory::CodeAssistant },
-    KnownAiApp { domain: "sourcegraph.com", app: "cody", category: AiAppCategory::CodeAssistant },
-    KnownAiApp { domain: "replit.com", app: "replit_ai", category: AiAppCategory::CodeAssistant },
+    KnownAiApp {
+        domain: "github.com",
+        app: "github_copilot",
+        category: AiAppCategory::CodeAssistant,
+    },
+    KnownAiApp {
+        domain: "githubcopilot.com",
+        app: "github_copilot",
+        category: AiAppCategory::CodeAssistant,
+    },
+    KnownAiApp {
+        domain: "cursor.com",
+        app: "cursor",
+        category: AiAppCategory::CodeAssistant,
+    },
+    KnownAiApp {
+        domain: "cursor.sh",
+        app: "cursor",
+        category: AiAppCategory::CodeAssistant,
+    },
+    KnownAiApp {
+        domain: "codeium.com",
+        app: "codeium",
+        category: AiAppCategory::CodeAssistant,
+    },
+    KnownAiApp {
+        domain: "tabnine.com",
+        app: "tabnine",
+        category: AiAppCategory::CodeAssistant,
+    },
+    KnownAiApp {
+        domain: "phind.com",
+        app: "phind",
+        category: AiAppCategory::CodeAssistant,
+    },
+    KnownAiApp {
+        domain: "codium.ai",
+        app: "qodo",
+        category: AiAppCategory::CodeAssistant,
+    },
+    KnownAiApp {
+        domain: "sourcegraph.com",
+        app: "cody",
+        category: AiAppCategory::CodeAssistant,
+    },
+    KnownAiApp {
+        domain: "replit.com",
+        app: "replit_ai",
+        category: AiAppCategory::CodeAssistant,
+    },
     // --- Writing assistants ---
-    KnownAiApp { domain: "jasper.ai", app: "jasper", category: AiAppCategory::WritingAssistant },
-    KnownAiApp { domain: "writesonic.com", app: "writesonic", category: AiAppCategory::WritingAssistant },
-    KnownAiApp { domain: "copy.ai", app: "copy_ai", category: AiAppCategory::WritingAssistant },
-    KnownAiApp { domain: "rytr.me", app: "rytr", category: AiAppCategory::WritingAssistant },
-    KnownAiApp { domain: "quillbot.com", app: "quillbot", category: AiAppCategory::WritingAssistant },
-    KnownAiApp { domain: "grammarly.com", app: "grammarly", category: AiAppCategory::WritingAssistant },
-    KnownAiApp { domain: "notion.so", app: "notion_ai", category: AiAppCategory::WritingAssistant },
+    KnownAiApp {
+        domain: "jasper.ai",
+        app: "jasper",
+        category: AiAppCategory::WritingAssistant,
+    },
+    KnownAiApp {
+        domain: "writesonic.com",
+        app: "writesonic",
+        category: AiAppCategory::WritingAssistant,
+    },
+    KnownAiApp {
+        domain: "copy.ai",
+        app: "copy_ai",
+        category: AiAppCategory::WritingAssistant,
+    },
+    KnownAiApp {
+        domain: "rytr.me",
+        app: "rytr",
+        category: AiAppCategory::WritingAssistant,
+    },
+    KnownAiApp {
+        domain: "quillbot.com",
+        app: "quillbot",
+        category: AiAppCategory::WritingAssistant,
+    },
+    KnownAiApp {
+        domain: "grammarly.com",
+        app: "grammarly",
+        category: AiAppCategory::WritingAssistant,
+    },
+    KnownAiApp {
+        domain: "notion.so",
+        app: "notion_ai",
+        category: AiAppCategory::WritingAssistant,
+    },
     // --- Image / media generators ---
-    KnownAiApp { domain: "midjourney.com", app: "midjourney", category: AiAppCategory::ImageGenerator },
-    KnownAiApp { domain: "leonardo.ai", app: "leonardo", category: AiAppCategory::ImageGenerator },
-    KnownAiApp { domain: "stability.ai", app: "stability", category: AiAppCategory::ImageGenerator },
-    KnownAiApp { domain: "runwayml.com", app: "runway", category: AiAppCategory::ImageGenerator },
-    KnownAiApp { domain: "elevenlabs.io", app: "elevenlabs", category: AiAppCategory::ImageGenerator },
+    KnownAiApp {
+        domain: "midjourney.com",
+        app: "midjourney",
+        category: AiAppCategory::ImageGenerator,
+    },
+    KnownAiApp {
+        domain: "leonardo.ai",
+        app: "leonardo",
+        category: AiAppCategory::ImageGenerator,
+    },
+    KnownAiApp {
+        domain: "stability.ai",
+        app: "stability",
+        category: AiAppCategory::ImageGenerator,
+    },
+    KnownAiApp {
+        domain: "runwayml.com",
+        app: "runway",
+        category: AiAppCategory::ImageGenerator,
+    },
+    KnownAiApp {
+        domain: "elevenlabs.io",
+        app: "elevenlabs",
+        category: AiAppCategory::ImageGenerator,
+    },
     // --- Search / answer engines ---
-    KnownAiApp { domain: "perplexity.ai", app: "perplexity", category: AiAppCategory::SearchAssistant },
-    KnownAiApp { domain: "you.com", app: "you", category: AiAppCategory::SearchAssistant },
-    KnownAiApp { domain: "phind.ai", app: "phind", category: AiAppCategory::SearchAssistant },
+    KnownAiApp {
+        domain: "perplexity.ai",
+        app: "perplexity",
+        category: AiAppCategory::SearchAssistant,
+    },
+    KnownAiApp {
+        domain: "you.com",
+        app: "you",
+        category: AiAppCategory::SearchAssistant,
+    },
+    KnownAiApp {
+        domain: "phind.ai",
+        app: "phind",
+        category: AiAppCategory::SearchAssistant,
+    },
     // --- Model platforms / API gateways ---
-    KnownAiApp { domain: "api.openai.com", app: "openai_api", category: AiAppCategory::ModelPlatform },
-    KnownAiApp { domain: "api.anthropic.com", app: "anthropic_api", category: AiAppCategory::ModelPlatform },
-    KnownAiApp { domain: "huggingface.co", app: "huggingface", category: AiAppCategory::ModelPlatform },
-    KnownAiApp { domain: "replicate.com", app: "replicate", category: AiAppCategory::ModelPlatform },
-    KnownAiApp { domain: "cohere.com", app: "cohere", category: AiAppCategory::ModelPlatform },
-    KnownAiApp { domain: "cohere.ai", app: "cohere", category: AiAppCategory::ModelPlatform },
-    KnownAiApp { domain: "together.ai", app: "together", category: AiAppCategory::ModelPlatform },
-    KnownAiApp { domain: "fireworks.ai", app: "fireworks", category: AiAppCategory::ModelPlatform },
-    KnownAiApp { domain: "groq.com", app: "groq", category: AiAppCategory::ModelPlatform },
-    KnownAiApp { domain: "openrouter.ai", app: "openrouter", category: AiAppCategory::ModelPlatform },
-    KnownAiApp { domain: "anyscale.com", app: "anyscale", category: AiAppCategory::ModelPlatform },
-    KnownAiApp { domain: "azure.com", app: "azure_openai", category: AiAppCategory::ModelPlatform },
+    KnownAiApp {
+        domain: "api.openai.com",
+        app: "openai_api",
+        category: AiAppCategory::ModelPlatform,
+    },
+    KnownAiApp {
+        domain: "api.anthropic.com",
+        app: "anthropic_api",
+        category: AiAppCategory::ModelPlatform,
+    },
+    KnownAiApp {
+        domain: "huggingface.co",
+        app: "huggingface",
+        category: AiAppCategory::ModelPlatform,
+    },
+    KnownAiApp {
+        domain: "replicate.com",
+        app: "replicate",
+        category: AiAppCategory::ModelPlatform,
+    },
+    KnownAiApp {
+        domain: "cohere.com",
+        app: "cohere",
+        category: AiAppCategory::ModelPlatform,
+    },
+    KnownAiApp {
+        domain: "cohere.ai",
+        app: "cohere",
+        category: AiAppCategory::ModelPlatform,
+    },
+    KnownAiApp {
+        domain: "together.ai",
+        app: "together",
+        category: AiAppCategory::ModelPlatform,
+    },
+    KnownAiApp {
+        domain: "fireworks.ai",
+        app: "fireworks",
+        category: AiAppCategory::ModelPlatform,
+    },
+    KnownAiApp {
+        domain: "groq.com",
+        app: "groq",
+        category: AiAppCategory::ModelPlatform,
+    },
+    KnownAiApp {
+        domain: "openrouter.ai",
+        app: "openrouter",
+        category: AiAppCategory::ModelPlatform,
+    },
+    KnownAiApp {
+        domain: "anyscale.com",
+        app: "anyscale",
+        category: AiAppCategory::ModelPlatform,
+    },
+    KnownAiApp {
+        domain: "azure.com",
+        app: "azure_openai",
+        category: AiAppCategory::ModelPlatform,
+    },
     // --- Meeting / transcription assistants ---
-    KnownAiApp { domain: "otter.ai", app: "otter", category: AiAppCategory::MeetingAssistant },
-    KnownAiApp { domain: "fireflies.ai", app: "fireflies", category: AiAppCategory::MeetingAssistant },
-    KnownAiApp { domain: "fathom.video", app: "fathom", category: AiAppCategory::MeetingAssistant },
-    KnownAiApp { domain: "tldv.io", app: "tldv", category: AiAppCategory::MeetingAssistant },
+    KnownAiApp {
+        domain: "otter.ai",
+        app: "otter",
+        category: AiAppCategory::MeetingAssistant,
+    },
+    KnownAiApp {
+        domain: "fireflies.ai",
+        app: "fireflies",
+        category: AiAppCategory::MeetingAssistant,
+    },
+    KnownAiApp {
+        domain: "fathom.video",
+        app: "fathom",
+        category: AiAppCategory::MeetingAssistant,
+    },
+    KnownAiApp {
+        domain: "tldv.io",
+        app: "tldv",
+        category: AiAppCategory::MeetingAssistant,
+    },
 ];
 
 /// Strong AI-app tokens. A host label equal to (or, for the
@@ -262,16 +506,32 @@ const KNOWN_AI_APPS: &[KnownAiApp] = &[
 /// an exact-label / hyphen-token match to avoid firing on every host
 /// that merely contains the bigram (e.g. `email`, `retail`).
 const AI_HOST_TOKENS: &[&str] = &[
-    "chatgpt", "gpt", "claude", "gemini", "copilot", "perplexity", "llm", "genai",
-    "chatbot", "deepseek", "mistral", "huggingface", "assistant",
+    "chatgpt",
+    "gpt",
+    "claude",
+    "gemini",
+    "copilot",
+    "perplexity",
+    "llm",
+    "genai",
+    "chatbot",
+    "deepseek",
+    "mistral",
+    "huggingface",
+    "assistant",
 ];
 
 /// Path fragments that signal a programmatic AI/LLM API call. Combined
 /// with an `ai`-ish host they raise the heuristic's confidence; on
 /// their own (generic host) they are not enough.
 const AI_PATH_TOKENS: &[&str] = &[
-    "/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/embeddings",
-    "/api/generate", "/api/chat", "/chat/completions",
+    "/v1/chat/completions",
+    "/v1/completions",
+    "/v1/messages",
+    "/v1/embeddings",
+    "/api/generate",
+    "/api/chat",
+    "/chat/completions",
 ];
 
 /// Split a raw destination (a URL or a bare host) into its lowercased
@@ -282,7 +542,9 @@ fn split_destination(dest: &str) -> (String, String) {
     // Strip an optional scheme.
     let after_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
     // Authority ends at the first '/', '?' or '#'.
-    let auth_end = after_scheme.find(['/', '?', '#']).unwrap_or(after_scheme.len());
+    let auth_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
     let authority = &after_scheme[..auth_end];
     // Path is everything from the slash up to a '?' or '#'.
     let rest = &after_scheme[auth_end..];
@@ -519,18 +781,58 @@ impl SecretScanner {
         // a real-world tuned floor, but we keep AWS's floor modest so
         // genuine keys are never missed — the prefix alone is strong).
         let specs: &[(SecretKind, &str, f64)] = &[
-            (SecretKind::AwsAccessKeyId, r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b", 2.5),
+            (
+                SecretKind::AwsAccessKeyId,
+                r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b",
+                2.5,
+            ),
             (SecretKind::GoogleApiKey, r"\bAIza[0-9A-Za-z_\-]{35}\b", 3.0),
-            (SecretKind::GitHubToken, r"\b(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{36}\b", 3.0),
-            (SecretKind::GitHubToken, r"\bgithub_pat_[0-9A-Za-z_]{22,}\b", 3.0),
-            (SecretKind::GitLabToken, r"\bglpat-[0-9A-Za-z_\-]{20,}\b", 3.0),
-            (SecretKind::SlackToken, r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b", 2.5),
-            (SecretKind::StripeSecretKey, r"\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b", 3.0),
-            (SecretKind::OpenAiKey, r"\bsk-(?:proj-)?[0-9A-Za-z_\-]{20,}\b", 3.5),
-            (SecretKind::SendGridKey, r"\bSG\.[0-9A-Za-z_\-]{22}\.[0-9A-Za-z_\-]{43}\b", 3.5),
+            (
+                SecretKind::GitHubToken,
+                r"\b(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{36}\b",
+                3.0,
+            ),
+            (
+                SecretKind::GitHubToken,
+                r"\bgithub_pat_[0-9A-Za-z_]{22,}\b",
+                3.0,
+            ),
+            (
+                SecretKind::GitLabToken,
+                r"\bglpat-[0-9A-Za-z_\-]{20,}\b",
+                3.0,
+            ),
+            (
+                SecretKind::SlackToken,
+                r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b",
+                2.5,
+            ),
+            (
+                SecretKind::StripeSecretKey,
+                r"\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b",
+                3.0,
+            ),
+            (
+                SecretKind::OpenAiKey,
+                r"\bsk-(?:proj-)?[0-9A-Za-z_\-]{20,}\b",
+                3.5,
+            ),
+            (
+                SecretKind::SendGridKey,
+                r"\bSG\.[0-9A-Za-z_\-]{22}\.[0-9A-Za-z_\-]{43}\b",
+                3.5,
+            ),
             (SecretKind::NpmToken, r"\bnpm_[0-9A-Za-z]{36}\b", 3.0),
-            (SecretKind::PrivateKey, r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----", 0.0),
-            (SecretKind::JsonWebToken, r"\beyJ[0-9A-Za-z_\-]+\.eyJ[0-9A-Za-z_\-]+\.[0-9A-Za-z_\-]+\b", 3.5),
+            (
+                SecretKind::PrivateKey,
+                r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----",
+                0.0,
+            ),
+            (
+                SecretKind::JsonWebToken,
+                r"\beyJ[0-9A-Za-z_\-]+\.eyJ[0-9A-Za-z_\-]+\.[0-9A-Za-z_\-]+\b",
+                3.5,
+            ),
         ];
         let mut patterns = Vec::with_capacity(specs.len());
         let mut raw = Vec::with_capacity(specs.len());
@@ -542,7 +844,11 @@ impl SecretScanner {
             // together only on success.
             if let Ok(regex) = Regex::new(pat) {
                 raw.push(pat.to_string());
-                patterns.push(SecretPattern { kind, regex, min_entropy });
+                patterns.push(SecretPattern {
+                    kind,
+                    regex,
+                    min_entropy,
+                });
             }
         }
         let set = RegexSet::new(&raw).ok();
@@ -614,20 +920,76 @@ struct ConfidentialMarker {
 /// matched leftmost-longest and case-insensitively. Multiple phrases
 /// can map to the same `label` so synonyms aggregate together.
 const CONFIDENTIAL_MARKERS: &[ConfidentialMarker] = &[
-    ConfidentialMarker { phrase: "company confidential", label: "confidential", severity: Severity::High },
-    ConfidentialMarker { phrase: "strictly confidential", label: "confidential", severity: Severity::High },
-    ConfidentialMarker { phrase: "confidential", label: "confidential", severity: Severity::Medium },
-    ConfidentialMarker { phrase: "internal use only", label: "internal_only", severity: Severity::Medium },
-    ConfidentialMarker { phrase: "internal only", label: "internal_only", severity: Severity::Medium },
-    ConfidentialMarker { phrase: "for internal use", label: "internal_only", severity: Severity::Medium },
-    ConfidentialMarker { phrase: "proprietary and confidential", label: "proprietary", severity: Severity::High },
-    ConfidentialMarker { phrase: "proprietary", label: "proprietary", severity: Severity::Medium },
-    ConfidentialMarker { phrase: "trade secret", label: "trade_secret", severity: Severity::High },
-    ConfidentialMarker { phrase: "do not distribute", label: "do_not_distribute", severity: Severity::High },
-    ConfidentialMarker { phrase: "do not share", label: "do_not_distribute", severity: Severity::Medium },
-    ConfidentialMarker { phrase: "attorney-client privileged", label: "privileged", severity: Severity::High },
-    ConfidentialMarker { phrase: "attorney client privileged", label: "privileged", severity: Severity::High },
-    ConfidentialMarker { phrase: "privileged and confidential", label: "privileged", severity: Severity::High },
+    ConfidentialMarker {
+        phrase: "company confidential",
+        label: "confidential",
+        severity: Severity::High,
+    },
+    ConfidentialMarker {
+        phrase: "strictly confidential",
+        label: "confidential",
+        severity: Severity::High,
+    },
+    ConfidentialMarker {
+        phrase: "confidential",
+        label: "confidential",
+        severity: Severity::Medium,
+    },
+    ConfidentialMarker {
+        phrase: "internal use only",
+        label: "internal_only",
+        severity: Severity::Medium,
+    },
+    ConfidentialMarker {
+        phrase: "internal only",
+        label: "internal_only",
+        severity: Severity::Medium,
+    },
+    ConfidentialMarker {
+        phrase: "for internal use",
+        label: "internal_only",
+        severity: Severity::Medium,
+    },
+    ConfidentialMarker {
+        phrase: "proprietary and confidential",
+        label: "proprietary",
+        severity: Severity::High,
+    },
+    ConfidentialMarker {
+        phrase: "proprietary",
+        label: "proprietary",
+        severity: Severity::Medium,
+    },
+    ConfidentialMarker {
+        phrase: "trade secret",
+        label: "trade_secret",
+        severity: Severity::High,
+    },
+    ConfidentialMarker {
+        phrase: "do not distribute",
+        label: "do_not_distribute",
+        severity: Severity::High,
+    },
+    ConfidentialMarker {
+        phrase: "do not share",
+        label: "do_not_distribute",
+        severity: Severity::Medium,
+    },
+    ConfidentialMarker {
+        phrase: "attorney-client privileged",
+        label: "privileged",
+        severity: Severity::High,
+    },
+    ConfidentialMarker {
+        phrase: "attorney client privileged",
+        label: "privileged",
+        severity: Severity::High,
+    },
+    ConfidentialMarker {
+        phrase: "privileged and confidential",
+        label: "privileged",
+        severity: Severity::High,
+    },
 ];
 
 /// Compiled scanner for company-confidential banners. Folds every
@@ -980,7 +1342,9 @@ impl AiAppExfilDetector {
         // Not an AI app, nothing sensitive, or below the report bar:
         // silently monitor. This is where the long-tail heuristic's
         // false positives are absorbed without bothering the user.
-        if !dest.is_ai_app() || findings.is_empty() || confidence < self.policy.min_report_confidence
+        if !dest.is_ai_app()
+            || findings.is_empty()
+            || confidence < self.policy.min_report_confidence
         {
             return AiAppAction::Monitor;
         }
@@ -1020,7 +1384,14 @@ impl AiAppExfilDetector {
         metadata: &ContentMetadata,
     ) -> DlpVerdict {
         let signal = self.inspect(destination, body, metadata);
-        signal_to_verdict(&signal, body, metadata, &self.classifier, &self.secrets, &self.confidential)
+        signal_to_verdict(
+            &signal,
+            body,
+            metadata,
+            &self.classifier,
+            &self.secrets,
+            &self.confidential,
+        )
     }
 }
 
@@ -1094,10 +1465,7 @@ fn aggregate_findings(
     let mut accs: Vec<FindingAcc> = Vec::new();
 
     let mut bump = |kind: FindingKind, label: &str, confidence: f64, severity: Severity| {
-        if let Some(a) = accs
-            .iter_mut()
-            .find(|a| a.kind == kind && a.label == label)
-        {
+        if let Some(a) = accs.iter_mut().find(|a| a.kind == kind && a.label == label) {
             a.count += 1;
             a.max_confidence = a.max_confidence.max(confidence);
             a.severity = a.severity.max(severity);
@@ -1117,10 +1485,20 @@ fn aggregate_findings(
         bump(FindingKind::Pii, label, m.confidence, m.severity);
     }
     for s in secrets {
-        bump(FindingKind::Secret, s.kind.as_str(), SECRET_CONFIDENCE, s.kind.severity());
+        bump(
+            FindingKind::Secret,
+            s.kind.as_str(),
+            SECRET_CONFIDENCE,
+            s.kind.severity(),
+        );
     }
     for m in markers {
-        bump(FindingKind::Confidential, m.marker, CONFIDENTIAL_CONFIDENCE, m.severity);
+        bump(
+            FindingKind::Confidential,
+            m.marker,
+            CONFIDENTIAL_CONFIDENCE,
+            m.severity,
+        );
     }
 
     let mut out: Vec<FindingSummary> = accs
@@ -1180,11 +1558,30 @@ fn pii_severity(name: &str) -> Severity {
 pub fn default_pii_rules() -> Vec<DlpRule> {
     // Generic builtins (not in the jurisdiction registry).
     const GENERIC: &[&str] = &[
-        "credit_card", "ssn_us", "passport_us", "drivers_license", "email", "phone",
-        "iban", "swift", "routing_number", "icd10", "mrn",
-        "china_resident_id", "japan_my_number", "korea_rrn", "singapore_nric",
-        "malaysia_mykad", "thailand_id", "india_aadhaar", "india_pan",
-        "uae_emirates_id", "saudi_id", "qatar_qid", "kuwait_civil_id", "bahrain_cpr",
+        "credit_card",
+        "ssn_us",
+        "passport_us",
+        "drivers_license",
+        "email",
+        "phone",
+        "iban",
+        "swift",
+        "routing_number",
+        "icd10",
+        "mrn",
+        "china_resident_id",
+        "japan_my_number",
+        "korea_rrn",
+        "singapore_nric",
+        "malaysia_mykad",
+        "thailand_id",
+        "india_aadhaar",
+        "india_pan",
+        "uae_emirates_id",
+        "saudi_id",
+        "qatar_qid",
+        "kuwait_civil_id",
+        "bahrain_cpr",
     ];
 
     let mut names: Vec<&str> = Vec::new();
@@ -1342,7 +1739,10 @@ mod tests {
         let s = SecretScanner::new();
         // Shaped like an OpenAI key but trivially low entropy: gated out.
         let hits = s.scan("sk-aaaaaaaaaaaaaaaaaaaaaaaa");
-        assert!(hits.is_empty(), "low-entropy placeholder should be rejected: {hits:?}");
+        assert!(
+            hits.is_empty(),
+            "low-entropy placeholder should be rejected: {hits:?}"
+        );
     }
 
     #[test]
@@ -1408,7 +1808,10 @@ mod tests {
 
     #[test]
     fn block_requires_opt_in_and_known_high_confidence() {
-        let policy = AiAppPolicy { block_opt_in: true, ..AiAppPolicy::default() };
+        let policy = AiAppPolicy {
+            block_opt_in: true,
+            ..AiAppPolicy::default()
+        };
         let det = AiAppExfilDetector::new(policy).expect("detector");
         let sig = det.inspect(
             "https://chat.openai.com/c/x",
@@ -1421,7 +1824,10 @@ mod tests {
 
     #[test]
     fn suspected_destination_never_blocks_even_with_secret_and_opt_in() {
-        let policy = AiAppPolicy { block_opt_in: true, ..AiAppPolicy::default() };
+        let policy = AiAppPolicy {
+            block_opt_in: true,
+            ..AiAppPolicy::default()
+        };
         let det = AiAppExfilDetector::new(policy).expect("detector");
         let sig = det.inspect(
             "https://my-ai-tool.example.com/upload",
@@ -1460,7 +1866,10 @@ mod tests {
 
     #[test]
     fn disabled_policy_is_noop() {
-        let policy = AiAppPolicy { enabled: false, ..AiAppPolicy::default() };
+        let policy = AiAppPolicy {
+            enabled: false,
+            ..AiAppPolicy::default()
+        };
         let det = AiAppExfilDetector::new(policy).expect("detector");
         let sig = det.inspect(
             "https://chat.openai.com/c/x",
