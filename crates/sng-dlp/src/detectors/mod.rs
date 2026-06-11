@@ -36,13 +36,18 @@
 //! [`crate::classifier`] redaction invariant).
 
 pub mod australia;
+pub mod belgium;
 pub mod brazil;
 pub mod canada;
 pub mod europe;
 pub mod france;
 pub mod germany;
 pub mod indonesia;
+pub mod italy;
+pub mod netherlands;
 pub mod philippines;
+pub mod poland;
+pub mod spain;
 pub mod uk;
 
 use crate::validators;
@@ -80,24 +85,29 @@ pub struct JurisdictionDetector {
 /// (in addition to the generic builtins in
 /// [`crate::classifier::builtin_pattern`]).
 ///
-/// The list is intentionally exhaustive across the 20 supported
+/// The list is intentionally exhaustive across the 26 supported
 /// national / regional identifiers so a single lookup answers
 /// "pattern, validator, and context for `name`".
 // The body is one flat `JurisdictionDetector` literal per supported
 // identifier; it is a declarative data table, not branching logic, so
-// keeping all 20 entries in a single function is more readable and
+// keeping all entries in a single function is more readable and
 // auditable than splitting it across helpers.
 #[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn registry() -> &'static [JurisdictionDetector] {
     use australia::{australia_medicare, australia_tfn};
+    use belgium::belgium_national_number;
     use brazil::{brazil_cnpj, brazil_cpf};
     use canada::canada_sin;
     use europe::{eu_iban, eu_vat};
     use france::france_insee;
     use germany::germany_personalausweis;
     use indonesia::indonesia_nik;
+    use italy::italy_codice_fiscale;
+    use netherlands::netherlands_bsn;
     use philippines::philippines_umid;
+    use poland::poland_pesel;
+    use spain::{spain_dni, spain_nie};
     use uk::{uk_nhs, uk_nino};
 
     &[
@@ -255,6 +265,80 @@ pub fn registry() -> &'static [JurisdictionDetector] {
                 "iva",
             ],
         },
+        // --- Spain ---
+        JurisdictionDetector {
+            name: "spain_dni",
+            jurisdiction: "ES",
+            title: "Spain DNI (Documento Nacional de Identidad)",
+            pattern: r"\b\d{8}[\s-]?[A-Za-z]\b",
+            validator: Some(spain_dni),
+            context: &[
+                "dni",
+                "documento nacional",
+                "número de identidad",
+                "numero de identidad",
+            ],
+        },
+        JurisdictionDetector {
+            name: "spain_nie",
+            jurisdiction: "ES",
+            title: "Spain NIE (Número de Identidad de Extranjero)",
+            pattern: r"\b[XYZxyz][\s-]?\d{7}[\s-]?[A-Za-z]\b",
+            validator: Some(spain_nie),
+            context: &[
+                "nie",
+                "número de identidad de extranjero",
+                "numero de identidad de extranjero",
+                "foreigner id",
+            ],
+        },
+        // --- Italy ---
+        JurisdictionDetector {
+            name: "italy_codice_fiscale",
+            jurisdiction: "IT",
+            title: "Italy Codice Fiscale",
+            pattern: r"\b[A-Za-z]{6}\d{2}[A-Za-z]\d{2}[A-Za-z]\d{3}[A-Za-z]\b",
+            validator: Some(italy_codice_fiscale),
+            context: &["codice fiscale", "cod. fisc", "agenzia delle entrate"],
+        },
+        // --- Netherlands ---
+        JurisdictionDetector {
+            name: "netherlands_bsn",
+            jurisdiction: "NL",
+            title: "Netherlands BSN (Burgerservicenummer)",
+            pattern: r"\b\d{9}\b",
+            validator: Some(netherlands_bsn),
+            context: &[
+                "bsn",
+                "burgerservicenummer",
+                "sofinummer",
+                "citizen service number",
+            ],
+        },
+        // --- Poland ---
+        JurisdictionDetector {
+            name: "poland_pesel",
+            jurisdiction: "PL",
+            title: "Poland PESEL",
+            pattern: r"\b\d{11}\b",
+            validator: Some(poland_pesel),
+            context: &["pesel", "numer pesel"],
+        },
+        // --- Belgium ---
+        JurisdictionDetector {
+            name: "belgium_national_number",
+            jurisdiction: "BE",
+            title: "Belgium National Register Number (Rijksregisternummer)",
+            pattern: r"\b\d{2}[.\s-]?\d{2}[.\s-]?\d{2}[.\s-]?\d{3}[.\s-]?\d{2}\b",
+            validator: Some(belgium_national_number),
+            context: &[
+                "rijksregisternummer",
+                "numéro de registre national",
+                "numero de registre national",
+                "national register",
+                "rrn",
+            ],
+        },
         // --- Philippines ---
         JurisdictionDetector {
             name: "philippines_umid",
@@ -340,8 +424,8 @@ mod tests {
     use crate::classifier::builtin_pattern;
     use regex::Regex;
 
-    /// The full set of 20 jurisdiction identifiers WS5 must support.
-    const EXPECTED_NAMES: [&str; 20] = [
+    /// The full set of jurisdiction identifiers the catalog must support.
+    const EXPECTED_NAMES: [&str; 26] = [
         "ni_uk",
         "uk_nhs",
         "canada_sin",
@@ -357,6 +441,12 @@ mod tests {
         "brazil_cnpj",
         "iban",
         "eu_vat",
+        "spain_dni",
+        "spain_nie",
+        "italy_codice_fiscale",
+        "netherlands_bsn",
+        "poland_pesel",
+        "belgium_national_number",
         "philippines_umid",
         "thailand_id",
         "indonesia_nik",
@@ -365,8 +455,12 @@ mod tests {
     ];
 
     #[test]
-    fn registry_covers_all_twenty_detectors() {
-        assert_eq!(registry().len(), 20, "expected exactly 20 detectors");
+    fn registry_covers_all_detectors() {
+        assert_eq!(
+            registry().len(),
+            EXPECTED_NAMES.len(),
+            "registry size must match the expected catalog"
+        );
         for name in EXPECTED_NAMES {
             assert!(detector(name).is_some(), "missing detector {name}");
         }
@@ -374,7 +468,11 @@ mod tests {
         let mut names: Vec<&str> = registry().iter().map(|d| d.name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 20, "detector names must be unique");
+        assert_eq!(
+            names.len(),
+            EXPECTED_NAMES.len(),
+            "detector names must be unique"
+        );
     }
 
     #[test]
