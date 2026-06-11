@@ -45,9 +45,10 @@
 //! -> zEND\0                               (closes the session)
 //! ```
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -107,6 +108,15 @@ pub struct ClamdConfig {
     pub pool_max_connections: usize,
     /// Capacity of the content-hash verdict cache.
     pub cache_capacity: usize,
+    /// How long a connection may sit idle in the pool before it is discarded
+    /// instead of reused. clamd reaps a session after its own `IdleTimeout`
+    /// (commonly 30 s), after which a pooled connection is dead; handing it out
+    /// costs a guaranteed transport-death + reconnect. Keeping this *below*
+    /// clamd's `IdleTimeout` means `take_idle` drops such a connection up front
+    /// and opens a fresh one directly, and bounds how many dead sockets the
+    /// idle list can hold during a low-load lull. Reuse is unaffected under
+    /// steady traffic (connections are re-checked-out within milliseconds).
+    pub pool_idle_ttl: Duration,
     /// Freshness window for a cached verdict. A verdict older than this is
     /// treated as a miss and re-scanned, so a `Clean` produced against an
     /// older signature database cannot outlive a `freshclam` update by more
@@ -156,6 +166,13 @@ impl ClamdConfig {
             // 8192 hot files cached; at multi-tenant scale the repeat-download
             // hit rate on shared content is high and each entry is tiny.
             cache_capacity: 8192,
+            // 20 s: comfortably below clamd's default `IdleTimeout` (30 s) so a
+            // pooled connection is dropped before clamd has reaped its session,
+            // turning a would-be transport-death + reconnect into a clean fresh
+            // connect. Generous enough that steady traffic never loses warm
+            // connections (those are reused in milliseconds). Operators who
+            // raise clamd's `IdleTimeout` can raise this in step.
+            pool_idle_ttl: Duration::from_secs(20),
             // 1 h: clamd's freshclam typically updates the signature database
             // hourly, so a one-hour ceiling keeps a cached verdict from
             // outliving a database update by more than one refresh cycle
@@ -224,22 +241,31 @@ impl ScanOutcome {
 /// `idle + in_use <= pool_max_connections` always holds.
 struct Pool {
     endpoint: ClamdEndpoint,
-    idle: Mutex<Vec<Connection>>,
+    /// Warm connections available for reuse, ordered oldest-return (front) to
+    /// newest-return (back) — each entry is stamped with the [`Instant`] it was
+    /// returned. The ordering is preserved by only ever pushing to the back
+    /// ([`Pool::put_back`]) and popping from either end ([`Pool::take_idle`]),
+    /// so a front-to-back scan sees non-decreasing idle ages.
+    idle: Mutex<VecDeque<(Instant, Connection)>>,
     sem: Semaphore,
     /// Permit count the semaphore was built with — the ceiling on *total* live
     /// connections (idle + in_use). Kept so the idle-list bound below can be
     /// asserted directly rather than inferred from the semaphore.
     max: usize,
+    /// Idle connections older than this are dropped on checkout rather than
+    /// reused (see [`ClamdConfig::pool_idle_ttl`]).
+    idle_ttl: Duration,
 }
 
 impl Pool {
-    fn new(endpoint: ClamdEndpoint, max: usize) -> Self {
+    fn new(endpoint: ClamdEndpoint, max: usize, idle_ttl: Duration) -> Self {
         let max = max.max(1);
         Self {
             endpoint,
-            idle: Mutex::new(Vec::new()),
+            idle: Mutex::new(VecDeque::new()),
             sem: Semaphore::new(max),
             max,
+            idle_ttl,
         }
     }
 
@@ -255,9 +281,30 @@ impl Pool {
         })
     }
 
-    /// Pop a warm connection if one is idle.
+    /// Pop a warm connection if one is idle, first pruning any that have sat
+    /// idle past [`Pool::idle_ttl`].
+    ///
+    /// Stale connections accumulate at the *front* (oldest return time), so the
+    /// loop drains them from there and stops at the first still-fresh entry —
+    /// since ages are non-decreasing front-to-back, everything behind it is
+    /// fresh too. The connection actually returned is the *newest* (back),
+    /// keeping the hottest socket in play. This turns a guaranteed
+    /// transport-death + reconnect (handing out a clamd-reaped connection) into
+    /// a clean fresh connect, and bounds how many dead sockets the idle list
+    /// holds through a low-load lull. The self-heal retry in [`Self`]'s
+    /// `scan_once` remains the safety net for the sub-TTL race where clamd
+    /// reaps a connection we are about to reuse.
     fn take_idle(&self) -> Option<Connection> {
-        self.idle.lock().pop()
+        let now = Instant::now();
+        let mut idle = self.idle.lock();
+        while let Some((since, _)) = idle.front() {
+            if now.duration_since(*since) >= self.idle_ttl {
+                idle.pop_front();
+            } else {
+                break;
+            }
+        }
+        idle.pop_back().map(|(_, conn)| conn)
     }
 
     /// Return a healthy connection to the idle list for reuse.
@@ -280,7 +327,7 @@ impl Pool {
             idle.len(),
             self.max,
         );
-        idle.push(conn);
+        idle.push_back((Instant::now(), conn));
     }
 }
 
@@ -323,7 +370,11 @@ impl ClamdScanner {
     pub fn new(config: ClamdConfig) -> Self {
         Self {
             inner: Arc::new(ClamdInner {
-                pool: Pool::new(config.endpoint, config.pool_max_connections),
+                pool: Pool::new(
+                    config.endpoint,
+                    config.pool_max_connections,
+                    config.pool_idle_ttl,
+                ),
                 cache: ContentVerdictCache::with_ttl(config.cache_capacity, config.cache_ttl),
                 max_scan_bytes: config.max_scan_bytes,
                 chunk_size: config.chunk_size.max(1),
@@ -1030,6 +1081,79 @@ mod tests {
         assert_eq!(mock.scans(), 2);
         // Exactly one connection should be sitting idle in the pool.
         assert_eq!(scanner.inner.pool.idle.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn idle_connection_past_ttl_is_pruned_before_reuse() {
+        // A connection that has sat idle past `pool_idle_ttl` is almost
+        // certainly reaped by clamd; `take_idle` must drop it (and any older
+        // siblings) rather than hand it out, so a low-load lull does not turn
+        // every first scan into a guaranteed transport-death + reconnect.
+        let pool = Pool::new(
+            ClamdEndpoint::Tcp("127.0.0.1:1".into()),
+            4,
+            Duration::from_millis(20),
+        );
+        let (stream, _peer) = tokio::io::duplex(64);
+        pool.put_back(Connection {
+            stream: Box::new(stream),
+            session_started: true,
+        });
+        // Freshly returned → reusable immediately.
+        assert!(
+            pool.take_idle().is_some(),
+            "a fresh idle connection must be reused"
+        );
+
+        let (stream, _peer) = tokio::io::duplex(64);
+        pool.put_back(Connection {
+            stream: Box::new(stream),
+            session_started: true,
+        });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(
+            pool.take_idle().is_none(),
+            "an idle connection older than the TTL must be pruned, not reused"
+        );
+        assert_eq!(
+            pool.idle.lock().len(),
+            0,
+            "pruning must clear the stale connection from the idle list"
+        );
+    }
+
+    #[tokio::test]
+    async fn take_idle_prunes_stale_front_but_keeps_fresh_back() {
+        // The idle deque is ordered oldest-front -> newest-back. A stale entry
+        // at the front must be pruned while a still-fresh entry behind it is
+        // returned for reuse (the hottest socket stays in play).
+        let pool = Pool::new(
+            ClamdEndpoint::Tcp("127.0.0.1:1".into()),
+            4,
+            Duration::from_millis(30),
+        );
+        let (stale, _p1) = tokio::io::duplex(64);
+        pool.put_back(Connection {
+            stream: Box::new(stale),
+            session_started: true,
+        });
+        // Let the first connection age past the TTL, then return a fresh one.
+        tokio::time::sleep(Duration::from_millis(45)).await;
+        let (fresh, _p2) = tokio::io::duplex(64);
+        pool.put_back(Connection {
+            stream: Box::new(fresh),
+            session_started: true,
+        });
+
+        assert!(
+            pool.take_idle().is_some(),
+            "the fresh (newest) connection must be returned for reuse"
+        );
+        assert_eq!(
+            pool.idle.lock().len(),
+            0,
+            "the stale front connection must have been pruned, not left behind"
+        );
     }
 
     #[tokio::test]
