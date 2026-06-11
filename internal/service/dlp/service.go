@@ -20,10 +20,33 @@ type Service struct {
 	fingerprints repository.DLPFingerprintRepository
 	matches      repository.DLPMatchRepository
 	models       repository.DLPModelRepository
+	blockedApps  BlockedAppsSource
 	regex        *engine.RegexEngine
 	mip          *engine.MIPReader
 	fp           *engine.FingerprintEngine
 	logger       *slog.Logger
+}
+
+// BlockedAppsSource yields the destination app ids an operator has
+// confirmed should be blocked for a tenant (via a `block` decision in
+// the HITL review queue). [Service.CompileEndpointBundle] embeds these
+// into the endpoint AI-app detector policy so the edge escalates
+// sensitive uploads to those apps from coach to block. The HITL review
+// queue (internal/service/dlpreview) and its repository both satisfy
+// this single-method contract.
+type BlockedAppsSource interface {
+	BlockedApps(ctx context.Context, tenantID uuid.UUID) ([]string, error)
+}
+
+// Option configures optional [Service] dependencies.
+type Option func(*Service)
+
+// WithBlockedApps wires the source of operator-confirmed blocked
+// destination apps. When unset, compiled bundles carry no per-app block
+// overrides (the coach-first default), so the feature degrades safely
+// to monitoring-only.
+func WithBlockedApps(src BlockedAppsSource) Option {
+	return func(s *Service) { s.blockedApps = src }
 }
 
 // New constructs a DLP service. A nil models repository disables ML
@@ -37,11 +60,12 @@ func New(
 	matches repository.DLPMatchRepository,
 	models repository.DLPModelRepository,
 	logger *slog.Logger,
+	opts ...Option,
 ) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{
+	s := &Service{
 		policies:     policies,
 		fingerprints: fingerprints,
 		matches:      matches,
@@ -51,6 +75,10 @@ func New(
 		fp:           engine.NewFingerprintEngine(fingerprints),
 		logger:       logger,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Classify runs content through every enabled policy for the tenant

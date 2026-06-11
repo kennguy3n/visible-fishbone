@@ -28,13 +28,43 @@ const systemActor = "system"
 // concurrent use as long as the injected [Repository] and [AuditSink]
 // are (the bundled implementations are).
 type Service struct {
-	repo  Repository
-	audit AuditSink
-	now   func() time.Time
+	repo    Repository
+	audit   AuditSink
+	now     func() time.Time
+	onBlock BlockHook
+}
+
+// BlockHook is notified after an operator block decision has been
+// durably recorded. It is the seam that propagates an operator's
+// decision back to enforcement: the wired implementation recompiles the
+// tenant's endpoint bundle so the edge AI-app detector escalates the
+// blocked destination from coach to block.
+//
+// It is best-effort and advisory. It runs only after the state
+// transition AND its audit record have already committed, so a hook
+// failure never rolls back or fails the operator's decision — at worst
+// the override reaches the edge at the next compile. Implementations
+// MUST return promptly (do the recompile asynchronously) so the
+// operator's request is not blocked, and MUST NOT retain the passed
+// context past their own return (it is the request context and may be
+// cancelled once the handler responds).
+type BlockHook interface {
+	OnBlock(ctx context.Context, tenantID uuid.UUID, ev ReviewEvent)
 }
 
 // Option configures a [Service].
 type Option func(*Service)
+
+// WithBlockHook injects the post-block enforcement hook. Defaults to
+// none, in which case a block decision is recorded but not actively
+// pushed to the edge (it still takes effect at the next compile).
+func WithBlockHook(hook BlockHook) Option {
+	return func(s *Service) {
+		if hook != nil {
+			s.onBlock = hook
+		}
+	}
+}
 
 // WithAuditSink injects the audit sink. Defaults to [NoopAuditSink].
 func WithAuditSink(sink AuditSink) Option {
@@ -195,7 +225,27 @@ func (s *Service) decide(ctx context.Context, tenantID, id uuid.UUID, to ReviewS
 	}); err != nil {
 		return ReviewEvent{}, fmt.Errorf("dlpreview: record %s audit: %w", action, err)
 	}
+	// Push the operator's decision back to enforcement. Only a block
+	// changes the per-app override set, so the hook fires for that
+	// transition alone. It runs after the durable commit and is
+	// best-effort by contract, so it can never fail the decision the
+	// operator just made.
+	if to == StateBlocked && s.onBlock != nil {
+		s.onBlock.OnBlock(ctx, tenantID, updated)
+	}
 	return updated, nil
+}
+
+// BlockedApps returns the destination apps an operator has blocked (at
+// least one event transitioned to [StateBlocked]) for the tenant. The
+// endpoint-bundle compiler embeds these into the edge AI-app detector
+// policy so sensitive uploads to a blocked app escalate from coach to
+// block — the operator's decision flowing back to enforcement.
+func (s *Service) BlockedApps(ctx context.Context, tenantID uuid.UUID) ([]string, error) {
+	if tenantID == uuid.Nil {
+		return nil, fmt.Errorf("dlpreview: %w: nil tenant", repository.ErrInvalidArgument)
+	}
+	return s.repo.BlockedApps(ctx, tenantID)
 }
 
 // Digest is the non-blocking summary (NoOps): it reads aggregate counts

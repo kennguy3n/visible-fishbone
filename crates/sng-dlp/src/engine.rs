@@ -135,7 +135,7 @@ struct EngineState {
 /// AI-upload path benefits from the same on-device model as the channel
 /// classifier. Returns `None` when no AI-app policy is configured.
 fn build_ai_app(
-    ai_app_policy: Option<AiAppPolicy>,
+    ai_app_policy: Option<&AiAppPolicy>,
     max_scan_bytes: usize,
     model: &MlNerDetector,
 ) -> DlpResult<Option<AiAppExfilDetector>> {
@@ -147,7 +147,8 @@ fn build_ai_app(
                 model.clone(),
             )?;
             Ok(Some(AiAppExfilDetector::with_classifier(
-                classifier, policy,
+                classifier,
+                policy.clone(),
             )))
         }
         None => Ok(None),
@@ -231,8 +232,8 @@ impl DlpEngine {
         // must preserve both. The bundle-apply path applies the
         // document's `ai_app` block via a separate `set_ai_app_policy`
         // call so all three dimensions stay independently swappable.
-        let ai_app_policy = current.ai_app_policy;
-        let ai_app = build_ai_app(ai_app_policy, max_scan_bytes, &model)?;
+        let ai_app_policy = current.ai_app_policy.clone();
+        let ai_app = build_ai_app(ai_app_policy.as_ref(), max_scan_bytes, &model)?;
         self.state.store(Arc::new(EngineState {
             policy,
             classifier,
@@ -275,7 +276,7 @@ impl DlpEngine {
         let model = current.model.clone();
         let classifier =
             ContentClassifier::compile_with_model(policy.rules(), max_scan_bytes, model.clone())?;
-        let ai_app = build_ai_app(ai_app_policy, max_scan_bytes, &model)?;
+        let ai_app = build_ai_app(ai_app_policy.as_ref(), max_scan_bytes, &model)?;
         self.state.store(Arc::new(EngineState {
             policy,
             classifier,
@@ -352,7 +353,7 @@ impl DlpEngine {
         let current = self.state.load();
         let max_scan_bytes = current.max_scan_bytes;
         let model = current.model.clone();
-        let ai_app = build_ai_app(policy, max_scan_bytes, &model)?;
+        let ai_app = build_ai_app(policy.as_ref(), max_scan_bytes, &model)?;
         // The channel classifier is immutable and not `Clone`, so the
         // snapshot is rebuilt by recompiling the active policy against
         // the same model — only the AI-app detector actually changes.
@@ -376,7 +377,7 @@ impl DlpEngine {
     /// not configured for this engine.
     #[must_use]
     pub fn ai_app_policy(&self) -> Option<AiAppPolicy> {
-        self.state.load().ai_app_policy
+        self.state.load().ai_app_policy.clone()
     }
 
     /// Recompile the active policy with `detector` and publish the new
@@ -395,8 +396,8 @@ impl DlpEngine {
         )?;
         let policy = current.policy.clone();
         let max_scan_bytes = current.max_scan_bytes;
-        let ai_app_policy = current.ai_app_policy;
-        let ai_app = build_ai_app(ai_app_policy, max_scan_bytes, &detector)?;
+        let ai_app_policy = current.ai_app_policy.clone();
+        let ai_app = build_ai_app(ai_app_policy.as_ref(), max_scan_bytes, &detector)?;
         self.state.store(Arc::new(EngineState {
             policy,
             classifier,

@@ -262,6 +262,7 @@ func run() error {
 	evidenceScheduler := rc.EvidenceScheduler
 	feedMgr := rc.FeedManager
 	recompiler := rc.Recompiler
+	dlpReviewRecompiler := rc.DLPReviewRecompiler
 
 	// Start the cost-metering flush loop. It batch-upserts the
 	// accumulated per-tenant usage deltas into tenant_usage every
@@ -706,6 +707,14 @@ func run() error {
 		recompiler.Stop()
 	}
 	feedMgr.Stop()
+	// Drain any in-flight operator-block recompiles so a decision made
+	// just before shutdown still lands in the stored bundle. Bounded by
+	// shutdownCtx so it can never hang the shutdown path.
+	if dlpReviewRecompiler != nil {
+		if err := dlpReviewRecompiler.Wait(shutdownCtx); err != nil {
+			logger.Warn("sng-control: dlp review recompiler drain incomplete", slog.Any("error", err))
+		}
+	}
 
 	if err := telShutdown(shutdownCtx); err != nil {
 		logger.Warn("sng-control: telemetry shutdown error", slog.Any("error", err))
@@ -765,6 +774,10 @@ type routerComponents struct {
 	// Recompiler is the feed-driven auto-recompile worker. Nil when
 	// THREATINTEL_AUTO_RECOMPILE=false (the prior pull-only behaviour).
 	Recompiler *aisvc.Recompiler
+	// DLPReviewRecompiler recompiles a tenant's bundle after an operator
+	// blocks an AI-app DLP event, propagating the per-app block override
+	// to the edge. Always non-nil.
+	DLPReviewRecompiler *dlpEnforcementRecompiler
 	// SampleRateResolver carries the policy-graph-driven per-tenant /
 	// per-class telemetry sampling overrides. Built here (where the
 	// policy service that publishes into it is constructed) and handed
@@ -848,11 +861,20 @@ func buildRouter(
 	dlpFingerprintRepo := store.NewDLPFingerprintRepository()
 	dlpMatchRepo := store.NewDLPMatchRepository()
 	dlpModelRepo := store.NewDLPModelRepository()
+	// The HITL review-queue repository is the source of truth for the
+	// apps an operator has blocked; it is shared by both the DLP service
+	// (so endpoint bundles carry the per-app block overrides) and the
+	// review service (the operator REST surface) constructed later.
+	dlpReviewRepo := postgres.NewDLPReviewRepository(store)
 	// Constructed here (ahead of policySvc) so the policy compiler can
 	// embed each tenant's endpoint DLP-domain document into the
 	// endpoint bundle (policy.WithDLPEndpointCompiler). The DLP handler
-	// below reuses this same instance.
-	dlpSvc := dlp.New(dlpPolicyRepo, dlpFingerprintRepo, dlpMatchRepo, dlpModelRepo, logger)
+	// below reuses this same instance. WithBlockedApps closes the
+	// operator→edge loop: a `block` decision in the review queue is
+	// compiled into the bundle's AI-app policy so the edge escalates
+	// sensitive uploads to that app from coach to block.
+	dlpSvc := dlp.New(dlpPolicyRepo, dlpFingerprintRepo, dlpMatchRepo, dlpModelRepo, logger,
+		dlp.WithBlockedApps(dlpReviewRepo))
 	browserPolicyRepo := store.NewBrowserPolicyRepository()
 	dataClassificationRepo := store.NewDataClassificationRepository()
 
@@ -1701,7 +1723,18 @@ func buildRouter(
 	// is actually reachable. The in-row decided_by/decided_at columns are
 	// the durable decision trail, so the service runs with its default
 	// no-op audit sink here.
-	dlpReviewSvc, err := dlpreview.New(postgres.NewDLPReviewRepository(store))
+	// Close the operator→edge loop: a block decision recompiles the
+	// tenant's bundle so the per-app override (folded in by
+	// dlp.CompileEndpointBundle) reaches the edge AI-app detector. The
+	// recompile is async + per-tenant coalesced, so the operator's
+	// request never waits on a Compile.
+	dlpReviewRecompiler := newDLPEnforcementRecompiler(
+		func(ctx context.Context, tenantID uuid.UUID) error {
+			_, cErr := policySvc.Compile(ctx, tenantID, nil)
+			return cErr
+		}, logger)
+	dlpReviewSvc, err := dlpreview.New(dlpReviewRepo,
+		dlpreview.WithBlockHook(dlpReviewRecompiler))
 	if err != nil {
 		return routerComponents{}, fmt.Errorf("dlp review queue: %w", err)
 	}
@@ -1821,23 +1854,24 @@ func buildRouter(
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
 	return routerComponents{
-		Router:             router,
-		WebhookWorker:      webhookWorker,
-		IntegrationWorker:  integrationWorker,
-		AppRegistry:        appRegHandler,
-		AppSyncer:          appSyncer,
-		PolicySim:          policySimHandler,
-		AI:                 aiSvc,
-		Metering:           meteringSvc,
-		PoP:                popSvc,
-		RegionMigrator:     tenantMigrator,
-		EvidenceScheduler:  evidenceScheduler,
-		FeedManager:        feedMgr,
-		AppNoOpsEngine:     appNoOpsEngine,
-		Recompiler:         recompiler,
-		SampleRateResolver: sampleRateResolver,
-		IDPSyncService:     idpSyncSvc,
-		DLPReviewService:   dlpReviewSvc,
+		Router:              router,
+		WebhookWorker:       webhookWorker,
+		IntegrationWorker:   integrationWorker,
+		AppRegistry:         appRegHandler,
+		AppSyncer:           appSyncer,
+		PolicySim:           policySimHandler,
+		AI:                  aiSvc,
+		Metering:            meteringSvc,
+		PoP:                 popSvc,
+		RegionMigrator:      tenantMigrator,
+		EvidenceScheduler:   evidenceScheduler,
+		FeedManager:         feedMgr,
+		AppNoOpsEngine:      appNoOpsEngine,
+		Recompiler:          recompiler,
+		DLPReviewRecompiler: dlpReviewRecompiler,
+		SampleRateResolver:  sampleRateResolver,
+		IDPSyncService:      idpSyncSvc,
+		DLPReviewService:    dlpReviewSvc,
 	}, nil
 }
 

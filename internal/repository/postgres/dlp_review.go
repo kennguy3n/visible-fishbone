@@ -245,6 +245,37 @@ func (r *DLPReviewRepository) Summary(ctx context.Context, tenantID uuid.UUID, s
 	return sum, nil
 }
 
+// BlockedApps returns the distinct destination apps the tenant has
+// blocked (at least one row in the blocked state), sorted for a
+// deterministic bundle. RLS scopes the rows to the tenant.
+func (r *DLPReviewRepository) BlockedApps(ctx context.Context, tenantID uuid.UUID) ([]string, error) {
+	out := make([]string, 0)
+	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		const q = `
+			SELECT DISTINCT destination_app
+			FROM dlp_review_queue
+			WHERE state = $1
+			ORDER BY destination_app`
+		rows, err := tx.Query(ctx, q, string(dlpreview.StateBlocked))
+		if err != nil {
+			return fmt.Errorf("query blocked dlp apps: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var app string
+			if err := rows.Scan(&app); err != nil {
+				return fmt.Errorf("scan blocked dlp app: %w", err)
+			}
+			out = append(out, app)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // marshalFindings serialises the redacted findings to a JSON array for
 // the jsonb column, defaulting to `[]` so the column is never NULL.
 func marshalFindings(findings []dlpreview.FindingAggregate) ([]byte, error) {

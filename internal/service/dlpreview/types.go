@@ -230,6 +230,14 @@ type Repository interface {
 
 	// Summary aggregates the tenant's events created at/after `since`.
 	Summary(ctx context.Context, tenantID uuid.UUID, since time.Time) (Summary, error)
+
+	// BlockedApps returns the distinct destination apps for which the
+	// tenant has at least one event in [StateBlocked] — the apps an
+	// operator has confirmed should be blocked. The result is sorted for
+	// a deterministic bundle and is an empty (non-nil) slice when none
+	// are blocked. Implementations MUST scope to tenantID like every
+	// other method.
+	BlockedApps(ctx context.Context, tenantID uuid.UUID) ([]string, error)
 }
 
 // AuditSink records an immutable audit trail of queue activity. It is a

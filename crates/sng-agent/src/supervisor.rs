@@ -938,7 +938,8 @@ fn apply_dlp_document(engine: &Arc<DlpEngine>, dlp: Option<&[u8]>) -> Result<(),
             .map_err(|e| format!("decode endpoint DLP policy: {e}"))?,
         None => DlpPolicy::default(),
     };
-    let ai_app = policy.ai_app;
+    let ai_app = policy.ai_app.clone();
+    let ai_app_enabled = ai_app.is_some();
     let rule_count = policy.rules().len();
     engine
         .install_with_ai_app(policy, ai_app)
@@ -946,7 +947,7 @@ fn apply_dlp_document(engine: &Arc<DlpEngine>, dlp: Option<&[u8]>) -> Result<(),
     tracing::info!(
         target: "sng_agent::bundle_publisher",
         rules = rule_count,
-        ai_app_enabled = ai_app.is_some(),
+        ai_app_enabled,
         "endpoint DLP policy applied from bundle"
     );
     Ok(())

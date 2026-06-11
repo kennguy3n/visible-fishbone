@@ -129,6 +129,14 @@ type EndpointAiAppPolicy struct {
 	BlockConfidence     float64             `json:"block_confidence"`
 	MinReportConfidence float64             `json:"min_report_confidence"`
 	CoachSeverityFloor  EndpointDLPSeverity `json:"coach_severity_floor"`
+	// BlockedApps are the destination app ids (or the
+	// "suspected_ai_app" sentinel) an operator has confirmed should be
+	// blocked via the HITL review queue. A sensitive upload to any app
+	// in this set escalates straight to block at the edge, independent
+	// of BlockOptIn. Wire-identical to sng-dlp's
+	// `AiAppPolicy::blocked_apps` (a `BTreeSet<String>` serialised as a
+	// sorted JSON array, omitted when empty).
+	BlockedApps []string `json:"blocked_apps,omitempty"`
 }
 
 // DefaultEndpointAiAppPolicy returns the coach-first, non-blocking
@@ -213,6 +221,20 @@ func (s *Service) CompileEndpointBundle(
 	// non-blocking until an operator opts into blocking. This is the
 	// wiring that makes the HITL review-queue producer live.
 	aiApp := DefaultEndpointAiAppPolicy()
+	// Fold in the operator-confirmed block overrides: any destination
+	// app a reviewer has blocked in the HITL queue is enforced at the
+	// edge (coach → block for that app). A genuine source error fails the
+	// compile rather than silently dropping overrides — because no new
+	// bundle then ships, the edge keeps its last-good policy (which
+	// already carried the overrides), so this is fail-safe toward
+	// *keeping* enforcement rather than downgrading it.
+	if s.blockedApps != nil {
+		blocked, bErr := s.blockedApps.BlockedApps(ctx, tenantID)
+		if bErr != nil {
+			return nil, fmt.Errorf("load blocked apps: %w", bErr)
+		}
+		aiApp.BlockedApps = blocked
+	}
 	policy := EndpointDLPPolicy{
 		SchemaVersion: EndpointSchemaVersion,
 		Target:        repository.PolicyBundleTargetEndpoint,

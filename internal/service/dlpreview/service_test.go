@@ -85,6 +85,80 @@ func sampleInput() dlpreview.EnqueueInput {
 	}
 }
 
+// recordingHook captures block-hook invocations.
+type recordingHook struct {
+	mu      sync.Mutex
+	tenants []uuid.UUID
+	events  []dlpreview.ReviewEvent
+}
+
+func (h *recordingHook) OnBlock(_ context.Context, tenantID uuid.UUID, ev dlpreview.ReviewEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.tenants = append(h.tenants, tenantID)
+	h.events = append(h.events, ev)
+}
+
+func (h *recordingHook) calls() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.tenants)
+}
+
+// TestBlockHook_FiresOnlyForBlock proves the enforcement hook fires for
+// a block decision (carrying the tenant + the blocked event) and not for
+// approve or dismiss, since only a block changes the per-app override
+// set.
+func TestBlockHook_FiresOnlyForBlock(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		decide   func(*dlpreview.Service, context.Context, uuid.UUID, uuid.UUID) error
+		wantCall bool
+	}{
+		{"block", func(s *dlpreview.Service, ctx context.Context, tn, id uuid.UUID) error {
+			_, err := s.Block(ctx, tn, id, "op@x.test")
+			return err
+		}, true},
+		{"approve", func(s *dlpreview.Service, ctx context.Context, tn, id uuid.UUID) error {
+			_, err := s.Approve(ctx, tn, id, "op@x.test")
+			return err
+		}, false},
+		{"dismiss", func(s *dlpreview.Service, ctx context.Context, tn, id uuid.UUID) error {
+			_, err := s.Dismiss(ctx, tn, id, "op@x.test")
+			return err
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hook := &recordingHook{}
+			repo := memory.NewDLPReviewRepository()
+			svc, err := dlpreview.New(repo, dlpreview.WithBlockHook(hook))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			tenant := uuid.New()
+			ev, err := svc.Enqueue(context.Background(), tenant, sampleInput())
+			if err != nil {
+				t.Fatalf("Enqueue: %v", err)
+			}
+			if err := tc.decide(svc, context.Background(), tenant, ev.ID); err != nil {
+				t.Fatalf("decide: %v", err)
+			}
+			if got := hook.calls(); (got > 0) != tc.wantCall {
+				t.Fatalf("hook calls = %d, wantCall = %v", got, tc.wantCall)
+			}
+			if tc.wantCall {
+				if hook.tenants[0] != tenant {
+					t.Errorf("hook tenant = %v, want %v", hook.tenants[0], tenant)
+				}
+				if hook.events[0].ID != ev.ID || hook.events[0].State != dlpreview.StateBlocked {
+					t.Errorf("hook event = %+v, want id %v state blocked", hook.events[0], ev.ID)
+				}
+			}
+		})
+	}
+}
+
 func TestNew_NilRepository(t *testing.T) {
 	t.Parallel()
 	if _, err := dlpreview.New(nil); !errors.Is(err, repository.ErrInvalidArgument) {
