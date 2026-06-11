@@ -1193,11 +1193,7 @@ impl AiAppSignal {
     #[must_use]
     pub fn to_wire_event(&self) -> sng_core::DlpEvent {
         sng_core::DlpEvent {
-            destination_app: self
-                .destination
-                .app
-                .unwrap_or(SUSPECTED_AI_APP)
-                .to_string(),
+            destination_app: self.destination.app.unwrap_or(SUSPECTED_AI_APP).to_string(),
             action: self.action.to_wire(),
             severity: self.severity.as_str().to_string(),
             confidence: self.confidence,

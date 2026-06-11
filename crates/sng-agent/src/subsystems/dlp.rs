@@ -575,12 +575,11 @@ mod tests {
         );
         // A benign upload to the same app: enforced as Allow, no signal.
         interceptor.push(
-            ContentEvent::new(AiAppExfilDetector::channel(), b"hello there".to_vec()).with_metadata(
-                ContentMetadata {
+            ContentEvent::new(AiAppExfilDetector::channel(), b"hello there".to_vec())
+                .with_metadata(ContentMetadata {
                     source: Some("https://chat.openai.com/c/abc".to_owned()),
                     ..ContentMetadata::default()
-                },
-            ),
+                }),
         );
 
         let (pipeline, handle) = test_pipeline_handle();

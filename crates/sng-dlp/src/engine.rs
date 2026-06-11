@@ -957,9 +957,15 @@ mod tests {
 
         // A flagged secret upload to a known app surfaces both the
         // coaching verdict AND the redacted signal in one pass.
-        let (verdict, signal) =
-            e.evaluate_with_signal(AiAppExfilDetector::channel(), SECRET_BODY, &ai_upload_meta());
-        assert!(matches!(verdict, DlpVerdict::WarnUser(_)), "got {verdict:?}");
+        let (verdict, signal) = e.evaluate_with_signal(
+            AiAppExfilDetector::channel(),
+            SECRET_BODY,
+            &ai_upload_meta(),
+        );
+        assert!(
+            matches!(verdict, DlpVerdict::WarnUser(_)),
+            "got {verdict:?}"
+        );
         let signal = signal.expect("a flagged upload must surface a signal");
         assert!(signal.is_flagged());
         assert_eq!(signal.action, crate::ai_app::AiAppAction::Coach);
@@ -988,7 +994,10 @@ mod tests {
             &ai_upload_meta(),
         );
         assert_eq!(verdict, DlpVerdict::Allow);
-        assert!(signal.is_none(), "a non-flagged upload must not surface a signal");
+        assert!(
+            signal.is_none(),
+            "a non-flagged upload must not surface a signal"
+        );
 
         // Off the upload channel the detector never runs, so even a
         // secret yields no signal.

@@ -924,7 +924,13 @@ mod tests {
                 "msgpack key {required} missing; got {keys:?}"
             );
         }
-        for forbidden in ["destination_app", "action", "confidence", "findings", "scanned_bytes"] {
+        for forbidden in [
+            "destination_app",
+            "action",
+            "confidence",
+            "findings",
+            "scanned_bytes",
+        ] {
             assert!(
                 !keys.contains(forbidden),
                 "Rust field {forbidden} leaked onto the wire; got {keys:?}"
