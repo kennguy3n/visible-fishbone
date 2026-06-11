@@ -88,13 +88,69 @@ type GraphEvaluator struct {
 // simulation report.
 func (e *GraphEvaluator) Graph() Graph { return e.graph }
 
+// Principal is a resolved subject identity threaded into
+// evaluation by callers that know who the actor is even though
+// the envelope can't carry it (the NL policy-query path resolves
+// the named user from the tenant directory). It carries the
+// user's own ID plus the IDs of the roles/groups it belongs to,
+// so a user Subject matches when its id/ids name either the user
+// or any of its groups — standard membership semantics.
+//
+// The data-plane (edge-telemetry) path supplies no Principal:
+// user identity genuinely isn't on those envelopes, so user
+// Subjects fall back to under-match-on-unknown there, unchanged.
+type Principal struct {
+	UserID  uuid.UUID
+	RoleIDs []uuid.UUID
+}
+
+// has reports whether id names the principal itself or one of
+// its roles/groups.
+func (p *Principal) has(id uuid.UUID) bool {
+	if id == p.UserID {
+		return true
+	}
+	for _, r := range p.RoleIDs {
+		if r == id {
+			return true
+		}
+	}
+	return false
+}
+
+// PrincipalEvaluator is the optional extension an Evaluator
+// implements when it can evaluate user-subject rules against a
+// caller-resolved identity. GraphEvaluator implements it; the NL
+// policy-query path type-asserts for it so resolving a user makes
+// user-subject rules actually evaluate instead of being skipped.
+type PrincipalEvaluator interface {
+	EvaluateWithPrincipal(ctx context.Context, env schema.Envelope, principal *Principal) (schema.Verdict, error)
+}
+
 // Evaluate implements Evaluator. Walks the rules in order and
 // returns the verb of the first matching rule as a Verdict; if
 // no rule matches, returns the graph's DefaultAction. The
 // returned error is non-nil only when the envelope itself is
 // malformed (a real-edge-side validation failure that the
 // simulator surfaces via report.PrevErrors / NextErrors).
-func (e *GraphEvaluator) Evaluate(_ context.Context, env schema.Envelope) (schema.Verdict, error) {
+//
+// No principal is supplied on this path, so user Subjects fall
+// back to under-match-on-unknown — preserving the data-plane
+// simulator's behaviour for edge telemetry, which carries no
+// user identity.
+func (e *GraphEvaluator) Evaluate(ctx context.Context, env schema.Envelope) (schema.Verdict, error) {
+	return e.evaluate(ctx, env, nil)
+}
+
+// EvaluateWithPrincipal implements PrincipalEvaluator: same as
+// Evaluate, but user Subjects are tested against the resolved
+// principal (its own user ID + role/group IDs) rather than being
+// skipped. A nil principal is identical to Evaluate.
+func (e *GraphEvaluator) EvaluateWithPrincipal(ctx context.Context, env schema.Envelope, principal *Principal) (schema.Verdict, error) {
+	return e.evaluate(ctx, env, principal)
+}
+
+func (e *GraphEvaluator) evaluate(_ context.Context, env schema.Envelope, principal *Principal) (schema.Verdict, error) {
 	// Decode the per-class payload once so per-rule predicate
 	// matching can consult it. A failure to decode is a
 	// per-envelope error, NOT a per-rule error — the same
@@ -106,7 +162,7 @@ func (e *GraphEvaluator) Evaluate(_ context.Context, env schema.Envelope) (schem
 
 	for i := range e.graph.Rules {
 		r := e.graph.Rules[i]
-		if !ruleMatchesEvent(r, env, payload, e.graph.Subjects, e.graph.Predicates) {
+		if !ruleMatchesEvent(r, env, payload, e.graph.Subjects, e.graph.Predicates, principal) {
 			continue
 		}
 		v := verbToVerdict(r.Verb)
@@ -175,12 +231,13 @@ func ruleMatchesEvent(
 	payload any,
 	subjectDefs []Subject,
 	predicateDefs []Predicate,
+	principal *Principal,
 ) bool {
 	if !domainMatchesEventClass(r.Domain, env.EventClass) {
 		return false
 	}
 
-	if !matchSubjects(r, env, subjectDefs) {
+	if !matchSubjects(r, env, subjectDefs, principal) {
 		return false
 	}
 	if !matchPredicates(r, payload, predicateDefs) {
@@ -226,7 +283,7 @@ func domainMatchesEventClass(d Domain, cls schema.EventClass) bool {
 // every inline subject on the rule matches the envelope. A rule
 // with no subject constraints matches every envelope (matching
 // the data-plane semantics of "scope-less rules").
-func matchSubjects(r Rule, env schema.Envelope, defs []Subject) bool {
+func matchSubjects(r Rule, env schema.Envelope, defs []Subject, principal *Principal) bool {
 	if len(r.SubjectRefs) == 0 && len(r.Subjects) == 0 {
 		return true
 	}
@@ -235,14 +292,14 @@ func matchSubjects(r Rule, env schema.Envelope, defs []Subject) bool {
 			if s.Name != ref {
 				continue
 			}
-			if !subjectMatchesEnvelope(s, env) {
+			if !subjectMatchesEnvelope(s, env, principal) {
 				return false
 			}
 			break
 		}
 	}
 	for _, s := range r.Subjects {
-		if !subjectMatchesEnvelope(s, env) {
+		if !subjectMatchesEnvelope(s, env, principal) {
 			return false
 		}
 	}
@@ -280,7 +337,7 @@ func matchPredicates(r Rule, payload any, defs []Predicate) bool {
 // and tests it against the envelope. The supported dialects are
 // intentionally small (id, ids) — see the package header for
 // the matcher-language scope.
-func subjectMatchesEnvelope(s Subject, env schema.Envelope) bool {
+func subjectMatchesEnvelope(s Subject, env schema.Envelope, principal *Principal) bool {
 	if len(s.Match) == 0 {
 		// A subject with no Match document is a free-floating
 		// label (the operator named the subject but didn't
@@ -292,6 +349,19 @@ func subjectMatchesEnvelope(s Subject, env schema.Envelope) bool {
 	if err := json.Unmarshal(s.Match, &m); err != nil {
 		return false
 	}
+	if s.Kind == SubjectKindUser {
+		// User identity isn't on the envelope. When a caller has
+		// resolved the actor (the NL policy-query path), test the
+		// matcher's id/ids against the principal's identity set
+		// (its own user ID + its role/group IDs) so per-user and
+		// per-group user rules actually evaluate. Without a
+		// principal (the data-plane simulator over edge telemetry)
+		// fall back to under-match-on-unknown, unchanged.
+		if principal == nil {
+			return true
+		}
+		return matchDocAgainst(m, principal.has)
+	}
 	var target uuid.UUID
 	switch s.Kind {
 	case SubjectKindDevice:
@@ -301,20 +371,27 @@ func subjectMatchesEnvelope(s Subject, env schema.Envelope) bool {
 			return false
 		}
 		target = *env.SiteID
-	case SubjectKindUser, SubjectKindApp, SubjectKindNetwork:
-		// User / app / network identity isn't on the
-		// envelope. Leave to the under-match-on-unknown
-		// fallback so the simulator doesn't over-report.
+	case SubjectKindApp, SubjectKindNetwork:
+		// App / network identity isn't on the envelope. Leave to
+		// the under-match-on-unknown fallback so the simulator
+		// doesn't over-report.
 		return true
 	default:
 		return true
 	}
+	return matchDocAgainst(m, func(id uuid.UUID) bool { return id == target })
+}
+
+// matchDocAgainst evaluates a subjectMatchDoc's id/ids constraints
+// using the supplied membership test: an `id` constraint must be
+// satisfied by it, and an `ids` constraint must be satisfied by at
+// least one entry. Unparseable UUIDs in the doc fail the single-id
+// constraint and are skipped in the ids set (matching the prior
+// device/site semantics). Both constraints, when present, must hold.
+func matchDocAgainst(m subjectMatchDoc, matches func(uuid.UUID) bool) bool {
 	if m.ID != "" {
 		parsed, err := uuid.Parse(m.ID)
-		if err != nil {
-			return false
-		}
-		if parsed != target {
+		if err != nil || !matches(parsed) {
 			return false
 		}
 	}
@@ -325,7 +402,7 @@ func subjectMatchesEnvelope(s Subject, env schema.Envelope) bool {
 			if err != nil {
 				continue
 			}
-			if parsed == target {
+			if matches(parsed) {
 				hit = true
 				break
 			}
