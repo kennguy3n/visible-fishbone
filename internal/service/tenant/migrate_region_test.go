@@ -534,6 +534,51 @@ func TestPoPReassigner_NoTargetRegionPoPIsNoOp(t *testing.T) {
 	}
 }
 
+// TestPoPReassigner_ReplayDoesNotRestoreToTargetPoP guards the
+// idempotent-resume window: if the forward reassignment ran (the tenant
+// is already pinned to the target-region PoP) but its checkpoint was not
+// durably written before a crash, the replayed Reassign must NOT record
+// the target PoP as the "previous" pin — otherwise a later rollback
+// would re-pin the tenant to a target-region PoP while the region column
+// reverts to the source. The replay must instead yield rollback metadata
+// whose Restore is a safe no-op, leaving the tenant for lazy
+// reassignment back into the source region.
+func TestPoPReassigner_ReplayDoesNotRestoreToTargetPoP(t *testing.T) {
+	t.Parallel()
+	srcPoP := uuid.New()
+	tgtPoP := uuid.New()
+	tnt := uuid.New()
+	ctrl := &fakePoPControl{
+		pops: []tenant.PoPInfo{
+			{ID: srcPoP, Region: "us-east-1"},
+			{ID: tgtPoP, Region: "eu-central-1"},
+		},
+		// Simulate the crash-after-SetAssignment state: the tenant is
+		// already pinned to the target-region PoP (as the forward step
+		// left it) but no checkpoint meta survived.
+		assignment: map[uuid.UUID]uuid.UUID{tnt: tgtPoP},
+	}
+	p := tenant.NewPoPReassigner(ctrl)
+	ctx := context.Background()
+
+	meta, err := p.Reassign(ctx, tnt, "eu-central-1")
+	if err != nil {
+		t.Fatalf("Reassign (replay): %v", err)
+	}
+	// Rollback after the replay must leave the tenant on the target PoP
+	// untouched (no-op) rather than "restoring" it to the target PoP via
+	// an explicit SetAssignment; crucially it must never set it to a PoP
+	// the rollback would otherwise treat as the source.
+	before := len(ctrl.setCalls)
+	if err := p.Restore(ctx, tnt, meta); err != nil {
+		t.Fatalf("Restore (replay): %v", err)
+	}
+	if len(ctrl.setCalls) != before {
+		t.Errorf("Restore made %d SetAssignment call(s) on replay; want 0 (no-op so lazy reassignment re-pins to source region)",
+			len(ctrl.setCalls)-before)
+	}
+}
+
 // --- region column plane adapter -------------------------------------------
 
 func TestRegionColumnPlane_SetsRegion(t *testing.T) {

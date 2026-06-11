@@ -45,8 +45,8 @@ func TestTenantMigration_CreateValidates(t *testing.T) {
 		t.Fatalf("nil tenant: err = %v, want ErrInvalidArgument", err)
 	}
 	bad := []repository.TenantMigration{
-		{TenantID: tid, SourceRegion: "", TargetRegion: "eu-central-1"},      // empty source
-		{TenantID: tid, SourceRegion: "us-east-1", TargetRegion: ""},         // empty target
+		{TenantID: tid, SourceRegion: "", TargetRegion: "eu-central-1"},       // empty source
+		{TenantID: tid, SourceRegion: "us-east-1", TargetRegion: ""},          // empty target
 		{TenantID: tid, SourceRegion: "us-east-1", TargetRegion: "us-east-1"}, // identical
 	}
 	for i, m := range bad {
@@ -202,14 +202,11 @@ func TestTenantMigration_ListResumableOrdering(t *testing.T) {
 	s.SetClock(func() time.Time { return clk })
 
 	// Three tenants with in-flight migrations created at increasing times.
-	var ids []uuid.UUID
 	for i := 0; i < 3; i++ {
 		tid := uuid.New()
-		m, err := repo.Create(ctx, tid, mkMig(tid, repository.MigrationStatePending))
-		if err != nil {
+		if _, err := repo.Create(ctx, tid, mkMig(tid, repository.MigrationStatePending)); err != nil {
 			t.Fatalf("create %d: %v", i, err)
 		}
-		ids = append(ids, m.ID)
 		clk = clk.Add(time.Minute)
 	}
 	// One terminal migration must be excluded.

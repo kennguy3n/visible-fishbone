@@ -101,10 +101,12 @@ func (h *TenantMigrationHandler) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Start drives the migration synchronously to a terminal state and
-	// returns the final record. A rollback returns the original failure
-	// cause alongside the (rolled_back) record; we surface that as a 500
-	// while still returning the record so the operator sees the terminal
-	// state and detail.
+	// returns the final record. If the migration rolled back, it returns
+	// the original failure cause alongside the (rolled_back/failed)
+	// record; that is a defined terminal outcome, not a server error, so
+	// it is surfaced below as a 200 with the record (see the err branch)
+	// rather than a 5xx. Only pre-flight errors (validation, conflict,
+	// not-found) and infrastructure errors map to non-2xx.
 	mig, err := h.migrator.Start(r.Context(), id, req.TargetRegion)
 	if err != nil {
 		// A migration that ran but rolled back is reported through the

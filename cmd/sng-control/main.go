@@ -357,18 +357,21 @@ func run() error {
 		}
 	}()
 	go popSvc.Run(rootCtx, cfg.PoP.RegistryRefreshInterval)
-	// WORKSTREAM 11: resume any cross-region migration that a previous
-	// control-plane instance left in-flight, so a crash/restart mid
-	// migration is picked up from the durable checkpoint rather than
-	// stranding the tenant in dual-read. Only the elected leader drives
-	// resume so two instances never race the same state machine. Runs
-	// once on boot in the background so it never blocks readiness.
+	// WORKSTREAM 11: resume any cross-region migration left in-flight by
+	// a previous control-plane instance (or this one before a leadership
+	// flap), so a crash/restart mid migration is picked up from the
+	// durable checkpoint rather than stranding the tenant in dual-read.
+	// RunIfLeader gates this to the elected leader and — crucially —
+	// (re)invokes it every time leadership is acquired, so an instance
+	// that becomes leader *after* the previous leader crashed mid
+	// migration still resumes the stranded work (a one-shot IsLeader()
+	// check would miss that transition). ResumeAll only drives
+	// non-terminal migrations and each step is idempotent, so running it
+	// once per leadership term is safe. It runs in the background so it
+	// never blocks readiness.
 	if rc.RegionMigrator != nil {
-		go func() {
-			if !elector.IsLeader() {
-				return
-			}
-			n, rerr := rc.RegionMigrator.ResumeAll(rootCtx)
+		go elector.RunIfLeader(rootCtx, "ws11-migration-resume", func(ctx context.Context) {
+			n, rerr := rc.RegionMigrator.ResumeAll(ctx)
 			if rerr != nil {
 				logger.Warn("sng-control: ws11 resume in-flight migrations failed",
 					slog.Int("resumed", n), slog.Any("error", rerr))
@@ -378,7 +381,7 @@ func run() error {
 				logger.Info("sng-control: ws11 resumed in-flight migrations",
 					slog.Int("resumed", n))
 			}
-		}()
+		})
 	}
 	// WORKSTREAM 8 threat-intel aggregator: one warm-up refresh per
 	// configured feed on start, then scheduled (default hourly)

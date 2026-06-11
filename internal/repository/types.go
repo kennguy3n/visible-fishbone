@@ -354,8 +354,8 @@ type TenantMigration struct {
 	Checkpoint json.RawMessage
 	// Detail is the human-readable reason for the current state (the
 	// failure message when failing/rolling back), empty otherwise.
-	Detail   string
-	Attempts int
+	Detail      string
+	Attempts    int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	StartedAt   *time.Time

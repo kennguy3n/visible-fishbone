@@ -211,15 +211,6 @@ func NewRegionMigrator(
 	return m, nil
 }
 
-// withClock overrides the wall clock (tests use it for deterministic
-// timestamps).
-func (m *RegionMigrator) withClock(fn func() time.Time) *RegionMigrator {
-	if fn != nil {
-		m.clock = fn
-	}
-	return m
-}
-
 // migrationStep is one node of the forward pipeline. state is the
 // tenant_migrations.state the migration occupies while the step runs;
 // forward executes it (idempotently) and returns metadata to
@@ -395,15 +386,40 @@ func (m *RegionMigrator) ResumeAll(ctx context.Context) (int, error) {
 	}
 	var firstErr error
 	for _, mig := range pending {
-		if _, derr := m.drive(ctx, mig); derr != nil {
-			m.logger.ErrorContext(ctx, "tenant: resume migration failed",
-				"tenant_id", mig.TenantID, "migration_id", mig.ID, "error", derr)
-			if firstErr == nil {
-				firstErr = derr
-			}
+		if _, derr := m.resumeOne(ctx, mig); derr != nil && firstErr == nil {
+			firstErr = derr
 		}
 	}
 	return len(pending), firstErr
+}
+
+// resumeOne drives a single in-flight migration to a terminal state and
+// logs the outcome at the appropriate level. It returns a non-nil error
+// ONLY when the migration did not reach a safe terminal state — i.e. the
+// rollback itself failed (state=failed) or the state machine could not
+// be driven (a persist/store error). A clean rollback (state=rolled_back)
+// is an expected, safe outcome: the original forward-step cause is
+// surfaced by drive for the synchronous Start caller, but here it is
+// logged at warn and reported as success, so ResumeAll does not mislead
+// operators into thinking the rollback failed.
+func (m *RegionMigrator) resumeOne(ctx context.Context, mig repository.TenantMigration) (repository.TenantMigration, error) {
+	final, derr := m.drive(ctx, mig)
+	switch {
+	case derr == nil:
+		return final, nil
+	case final.State == repository.MigrationStateRolledBack:
+		m.logger.WarnContext(ctx, "tenant: in-flight migration rolled back during resume",
+			"tenant_id", mig.TenantID, "migration_id", mig.ID, "detail", final.Detail)
+		return final, nil
+	case final.State == repository.MigrationStateFailed:
+		m.logger.ErrorContext(ctx, "tenant: in-flight migration failed during resume (rollback incomplete; needs operator intervention)",
+			"tenant_id", mig.TenantID, "migration_id", mig.ID, "detail", final.Detail, "error", derr)
+		return final, derr
+	default:
+		m.logger.ErrorContext(ctx, "tenant: could not drive in-flight migration during resume",
+			"tenant_id", mig.TenantID, "migration_id", mig.ID, "state", final.State, "error", derr)
+		return final, derr
+	}
 }
 
 // MigrationStatus returns the tenant's most recent migration in any

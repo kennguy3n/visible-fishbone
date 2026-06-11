@@ -111,20 +111,37 @@ func (p *PoPReassigner) Reassign(ctx context.Context, tenantID uuid.UUID, target
 	if err != nil {
 		return nil, fmt.Errorf("tenant: read current PoP assignment: %w", err)
 	}
-	meta := popReassignMeta{HadAssignment: had}
-	if had {
-		meta.PreviousPoPID = prevID.String()
-	}
 	target, ok := pickPoPInRegion(p.ctrl.AvailablePoPs(), targetRegion)
 	if !ok {
 		// No PoP in the target region — leave the tenant on its current
-		// PoP. Idempotent and non-fatal; recorded in the checkpoint.
+		// PoP. Idempotent and non-fatal; recorded in the checkpoint so
+		// rollback can restore the (unchanged) original pin.
+		meta := popReassignMeta{HadAssignment: had}
+		if had {
+			meta.PreviousPoPID = prevID.String()
+		}
 		return marshalMeta(meta)
 	}
 	if had && prevID == target {
-		// Already on a target-region PoP (idempotent resume).
-		meta.NewPoPID = target.String()
-		return marshalMeta(meta)
+		// The tenant is already pinned to the deterministically-chosen
+		// target-region PoP. This is the idempotent-resume case: the
+		// forward step already ran SetAssignment but crashed before its
+		// checkpoint was durably written, so on replay we can no longer
+		// observe the *original* pre-migration PoP. Recording the target
+		// PoP as the "previous" one would make a later rollback re-pin
+		// the tenant to a TARGET-region PoP while the region column
+		// reverts to the source — a routing inconsistency. Instead we
+		// record no restorable previous (HadAssignment=false): on
+		// rollback the reassignment step becomes a no-op and the tenant
+		// is left for lazy reassignment, which re-pins it to a
+		// source-region PoP once the region flips back. (This also
+		// covers the benign case where an operator had manually pinned
+		// the tenant to the target PoP before the migration.)
+		return marshalMeta(popReassignMeta{HadAssignment: false, NewPoPID: target.String()})
+	}
+	meta := popReassignMeta{HadAssignment: had}
+	if had {
+		meta.PreviousPoPID = prevID.String()
 	}
 	if err := p.ctrl.SetAssignment(ctx, tenantID, target); err != nil {
 		return nil, fmt.Errorf("tenant: pin tenant to target-region PoP: %w", err)
